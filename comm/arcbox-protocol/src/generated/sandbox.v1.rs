@@ -12,15 +12,6 @@ pub struct NetworkSpec {
     /// Network mode: "tap" (default, TAP + IP pool) or "none" (no network).
     #[prost(string, tag = "1")]
     pub mode: ::prost::alloc::string::String,
-    /// Static IP address. Empty = allocate from pool.
-    #[prost(string, optional, tag = "2")]
-    pub ip: ::core::option::Option<::prost::alloc::string::String>,
-    /// Egress bandwidth cap in bytes/s (0 = unlimited).
-    #[prost(uint64, tag = "3")]
-    pub egress_bps: u64,
-    /// Ingress bandwidth cap in bytes/s (0 = unlimited).
-    #[prost(uint64, tag = "4")]
-    pub ingress_bps: u64,
 }
 /// A single bind mount into the sandbox.
 #[derive(serde::Serialize, serde::Deserialize)]

@@ -116,6 +116,7 @@ dependencies = [
  "anyhow",
  "arcbox-constants",
  "arcbox-protocol",
+ "arcbox-vm",
  "async-trait",
  "bytes",
  "chrono",
