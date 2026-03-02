@@ -460,8 +460,7 @@ impl AgentClient {
                 let raw = match self.transport.recv().await {
                     Ok(r) => r,
                     Err(e) => {
-                        let _ = tx
-                            .send(Err(CoreError::Machine(format!("recv error: {}", e))));
+                        let _ = tx.send(Err(CoreError::Machine(format!("recv error: {}", e))));
                         break;
                     }
                 };
@@ -498,10 +497,7 @@ impl AgentClient {
                         }
                     }
                     Err(e) => {
-                        let _ = tx.send(Err(CoreError::Machine(format!(
-                            "decode error: {}",
-                            e
-                        ))));
+                        let _ = tx.send(Err(CoreError::Machine(format!("decode error: {}", e))));
                         break;
                     }
                 }
@@ -539,8 +535,7 @@ impl AgentClient {
                 let raw = match self.transport.recv().await {
                     Ok(r) => r,
                     Err(e) => {
-                        let _ = tx
-                            .send(Err(CoreError::Machine(format!("recv error: {}", e))));
+                        let _ = tx.send(Err(CoreError::Machine(format!("recv error: {}", e))));
                         break;
                     }
                 };
@@ -573,10 +568,7 @@ impl AgentClient {
                         let _ = tx.send(Ok(event));
                     }
                     Err(e) => {
-                        let _ = tx.send(Err(CoreError::Machine(format!(
-                            "decode error: {}",
-                            e
-                        ))));
+                        let _ = tx.send(Err(CoreError::Machine(format!("decode error: {}", e))));
                         break;
                     }
                 }
