@@ -27,6 +27,8 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::Instant;
 
+use std::sync::Arc;
+
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -303,6 +305,7 @@ impl InboundListenerManager {
     /// Returns an error if the listener cannot bind.
     pub async fn add_rule(
         &mut self,
+        host_ip: Ipv4Addr,
         host_port: u16,
         container_port: u16,
         protocol: InboundProtocol,
@@ -318,12 +321,12 @@ impl InboundListenerManager {
         let handle = match protocol {
             InboundProtocol::Tcp => {
                 let listener = TcpListener::bind(SocketAddr::V4(SocketAddrV4::new(
-                    Ipv4Addr::UNSPECIFIED,
-                    host_port,
+                    host_ip, host_port,
                 )))
                 .await?;
                 tracing::info!(
-                    "Inbound listener: TCP :{} → container :{}",
+                    "Inbound listener: TCP {}:{} → container :{}",
+                    host_ip,
                     host_port,
                     container_port,
                 );
@@ -334,12 +337,12 @@ impl InboundListenerManager {
             }
             InboundProtocol::Udp => {
                 let socket = UdpSocket::bind(SocketAddr::V4(SocketAddrV4::new(
-                    Ipv4Addr::UNSPECIFIED,
-                    host_port,
+                    host_ip, host_port,
                 )))
                 .await?;
                 tracing::info!(
-                    "Inbound listener: UDP :{} → container :{}",
+                    "Inbound listener: UDP {}:{} → container :{}",
+                    host_ip,
                     host_port,
                     container_port,
                 );
@@ -423,6 +426,7 @@ async fn udp_listener_task(
     cancel: CancellationToken,
 ) {
     let host_port = socket.local_addr().map(|a| a.port()).unwrap_or(0);
+    let socket = Arc::new(socket);
     let mut buf = vec![0u8; 65535];
 
     loop {
@@ -435,18 +439,14 @@ async fn udp_listener_task(
                         // Create a reply channel for this client.
                         let (reply_tx, mut reply_rx) = mpsc::channel::<Vec<u8>>(16);
 
-                        // Spawn a task that relays reply datagrams back to the client.
-                        let socket_clone = socket.local_addr().ok();
+                        // Spawn a task that relays reply datagrams back to the
+                        // client using the same listener socket so the source
+                        // port matches what the client expects.
+                        let reply_sock = Arc::clone(&socket);
                         tokio::spawn(async move {
                             while let Some(data) = reply_rx.recv().await {
-                                // Send the reply back to the original client.
-                                // We need a new socket since the listener owns the original.
-                                let Ok(reply_sock) = UdpSocket::bind("0.0.0.0:0").await else {
-                                    break;
-                                };
                                 let _ = reply_sock.send_to(&data, client_addr).await;
                             }
-                            let _ = socket_clone; // Keep variable alive for tracing.
                         });
 
                         let cmd = InboundCommand::UdpReceived {
@@ -587,7 +587,7 @@ mod tests {
 
         // Add a TCP rule on an ephemeral port.
         manager
-            .add_rule(0, 80, InboundProtocol::Tcp)
+            .add_rule(Ipv4Addr::LOCALHOST, 0, 80, InboundProtocol::Tcp)
             .await
             .expect("should bind to port 0 (OS-assigned)");
 
@@ -603,13 +603,13 @@ mod tests {
         let (cmd_tx, _cmd_rx) = mpsc::channel(16);
         let mut manager = InboundListenerManager::new(cmd_tx);
 
-        manager.add_rule(0, 80, InboundProtocol::Tcp).await.unwrap();
-        manager.add_rule(0, 53, InboundProtocol::Udp).await.unwrap();
+        manager.add_rule(Ipv4Addr::LOCALHOST, 0, 80, InboundProtocol::Tcp).await.unwrap();
+        manager.add_rule(Ipv4Addr::LOCALHOST, 0, 53, InboundProtocol::Udp).await.unwrap();
 
         manager.stop_all();
         // After stop_all, the internal map should be empty. Since we can't
         // inspect it directly, adding the same rule again should succeed (no
         // duplicate key).
-        manager.add_rule(0, 80, InboundProtocol::Tcp).await.unwrap();
+        manager.add_rule(Ipv4Addr::LOCALHOST, 0, 80, InboundProtocol::Tcp).await.unwrap();
     }
 }

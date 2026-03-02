@@ -121,7 +121,8 @@ struct BridgedConn {
     /// Receives data from the host TcpStream read task.
     host_to_guest_rx: mpsc::Receiver<Vec<u8>>,
     /// Sends data consumed from smoltcp socket to the host TcpStream write task.
-    guest_to_host_tx: mpsc::Sender<Vec<u8>>,
+    /// `None` after guest EOF has been signalled (sender dropped to close channel).
+    guest_to_host_tx: Option<mpsc::Sender<Vec<u8>>>,
     /// Set to true when the host read task has sent all data (EOF).
     host_eof: bool,
     /// Set to true when the host channel has disconnected (connect failed or
@@ -129,8 +130,6 @@ struct BridgedConn {
     host_disconnected: bool,
     /// Leftover bytes from a partial `send_slice` that need to be retried.
     pending_send: Option<Vec<u8>>,
-    /// Set to true when the guest→host sender has been closed to signal EOF.
-    guest_eof_sent: bool,
 }
 
 /// Manages TCP connections bridged between the smoltcp socket pool and host
@@ -140,8 +139,6 @@ pub struct TcpBridge {
     connections: HashMap<SocketHandle, BridgedConn>,
     /// Ports that have at least one listen socket in the socket set.
     listening_ports: HashSet<u16>,
-    /// Free listen socket handles (Closed/TimeWait) available for re-listen.
-    free_handles: Vec<SocketHandle>,
     /// Maps a port to the socket handles listening on it, so we can track
     /// which ports are covered.
     port_handles: HashMap<u16, Vec<SocketHandle>>,
@@ -165,7 +162,6 @@ impl TcpBridge {
         Self {
             connections: HashMap::new(),
             listening_ports: HashSet::new(),
-            free_handles: Vec::new(),
             port_handles: HashMap::new(),
             next_ephemeral: INBOUND_EPHEMERAL_START,
             pending_syns: HashMap::new(),
@@ -188,28 +184,17 @@ impl TcpBridge {
                 continue;
             }
 
-            // Try to reuse a free handle first.
-            let handle = if let Some(h) = self.free_handles.pop() {
-                let sock = sockets.get_mut::<tcp::Socket>(h);
-                if let Err(e) = sock.listen(port) {
-                    tracing::warn!("TCP bridge: failed to re-listen on port {port}: {e:?}");
-                    continue;
-                }
-                sock.set_nagle_enabled(false);
-                h
-            } else {
-                // Create a new socket.
-                let rx_buf = tcp::SocketBuffer::new(vec![0u8; SOCKET_BUF_SIZE]);
-                let tx_buf = tcp::SocketBuffer::new(vec![0u8; SOCKET_BUF_SIZE]);
-                let mut sock = tcp::Socket::new(rx_buf, tx_buf);
-                if let Err(e) = sock.listen(port) {
-                    tracing::warn!("TCP bridge: failed to listen on port {port}: {e:?}");
-                    continue;
-                }
-                sock.set_nagle_enabled(false);
-                sock.set_ack_delay(None);
-                sockets.add(sock)
-            };
+            // Create a new listen socket for this port.
+            let rx_buf = tcp::SocketBuffer::new(vec![0u8; SOCKET_BUF_SIZE]);
+            let tx_buf = tcp::SocketBuffer::new(vec![0u8; SOCKET_BUF_SIZE]);
+            let mut sock = tcp::Socket::new(rx_buf, tx_buf);
+            if let Err(e) = sock.listen(port) {
+                tracing::warn!("TCP bridge: failed to listen on port {port}: {e:?}");
+                continue;
+            }
+            sock.set_nagle_enabled(false);
+            sock.set_ack_delay(None);
+            let handle = sockets.add(sock);
 
             self.listening_ports.insert(port);
             self.port_handles.entry(port).or_default().push(handle);
@@ -427,26 +412,16 @@ impl TcpBridge {
             return true;
         }
 
-        let handle = if let Some(h) = self.free_handles.pop() {
-            let sock = sockets.get_mut::<tcp::Socket>(h);
-            if let Err(e) = sock.listen(port) {
-                tracing::warn!("TCP bridge: failed to re-listen on port {port}: {e:?}");
-                return false;
-            }
-            sock.set_nagle_enabled(false);
-            h
-        } else {
-            let rx_buf = tcp::SocketBuffer::new(vec![0u8; SOCKET_BUF_SIZE]);
-            let tx_buf = tcp::SocketBuffer::new(vec![0u8; SOCKET_BUF_SIZE]);
-            let mut sock = tcp::Socket::new(rx_buf, tx_buf);
-            if let Err(e) = sock.listen(port) {
-                tracing::warn!("TCP bridge: failed to listen on port {port}: {e:?}");
-                return false;
-            }
-            sock.set_nagle_enabled(false);
-            sock.set_ack_delay(None);
-            sockets.add(sock)
-        };
+        let rx_buf = tcp::SocketBuffer::new(vec![0u8; SOCKET_BUF_SIZE]);
+        let tx_buf = tcp::SocketBuffer::new(vec![0u8; SOCKET_BUF_SIZE]);
+        let mut sock = tcp::Socket::new(rx_buf, tx_buf);
+        if let Err(e) = sock.listen(port) {
+            tracing::warn!("TCP bridge: failed to listen on port {port}: {e:?}");
+            return false;
+        }
+        sock.set_nagle_enabled(false);
+        sock.set_ack_delay(None);
+        let handle = sockets.add(sock);
 
         self.listening_ports.insert(port);
         self.port_handles.entry(port).or_default().push(handle);
@@ -502,11 +477,10 @@ impl TcpBridge {
                 handle,
                 remote: guest_addr,
                 host_to_guest_rx: h2g_rx,
-                guest_to_host_tx: g2h_tx,
+                guest_to_host_tx: Some(g2h_tx),
                 host_eof: false,
                 host_disconnected: false,
                 pending_send: None,
-                guest_eof_sent: false,
             },
         );
 
@@ -612,11 +586,10 @@ impl TcpBridge {
                         handle,
                         remote: dest_addr,
                         host_to_guest_rx: h2g_rx,
-                        guest_to_host_tx: g2h_tx,
+                        guest_to_host_tx: Some(g2h_tx),
                         host_eof: false,
                         host_disconnected: false,
                         pending_send: None,
-                        guest_eof_sent: false,
                     },
                 );
 
@@ -641,26 +614,16 @@ impl TcpBridge {
             return;
         }
 
-        let handle = if let Some(h) = self.free_handles.pop() {
-            let sock = sockets.get_mut::<tcp::Socket>(h);
-            if let Err(e) = sock.listen(port) {
-                tracing::warn!("TCP bridge: failed to re-listen on port {port}: {e:?}");
-                return;
-            }
-            sock.set_nagle_enabled(false);
-            h
-        } else {
-            let rx_buf = tcp::SocketBuffer::new(vec![0u8; SOCKET_BUF_SIZE]);
-            let tx_buf = tcp::SocketBuffer::new(vec![0u8; SOCKET_BUF_SIZE]);
-            let mut sock = tcp::Socket::new(rx_buf, tx_buf);
-            if let Err(e) = sock.listen(port) {
-                tracing::warn!("TCP bridge: failed to listen on port {port}: {e:?}");
-                return;
-            }
-            sock.set_nagle_enabled(false);
-            sock.set_ack_delay(None);
-            sockets.add(sock)
-        };
+        let rx_buf = tcp::SocketBuffer::new(vec![0u8; SOCKET_BUF_SIZE]);
+        let tx_buf = tcp::SocketBuffer::new(vec![0u8; SOCKET_BUF_SIZE]);
+        let mut sock = tcp::Socket::new(rx_buf, tx_buf);
+        if let Err(e) = sock.listen(port) {
+            tracing::warn!("TCP bridge: failed to listen on port {port}: {e:?}");
+            return;
+        }
+        sock.set_nagle_enabled(false);
+        sock.set_ack_delay(None);
+        let handle = sockets.add(sock);
 
         self.listening_ports.insert(port);
         self.port_handles.entry(port).or_default().push(handle);
@@ -777,15 +740,21 @@ impl TcpBridge {
                         buf.len(),
                         conn.remote
                     );
-                    match conn.guest_to_host_tx.try_send(buf.to_vec()) {
-                        Ok(()) => (buf.len(), ()),
-                        Err(mpsc::error::TrySendError::Full(_)) => {
-                            // Backpressure: don't dequeue from smoltcp.
-                            // smoltcp will shrink the window automatically.
-                            (0, ())
-                        }
-                        Err(mpsc::error::TrySendError::Closed(_)) => {
-                            // Host write task gone, consume and drop.
+                    match conn.guest_to_host_tx.as_ref() {
+                        Some(tx) => match tx.try_send(buf.to_vec()) {
+                            Ok(()) => (buf.len(), ()),
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                // Backpressure: don't dequeue from smoltcp.
+                                // smoltcp will shrink the window automatically.
+                                (0, ())
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                // Host write task gone, consume and drop.
+                                (buf.len(), ())
+                            }
+                        },
+                        None => {
+                            // EOF already sent, consume and drop.
                             (buf.len(), ())
                         }
                     }
@@ -796,7 +765,7 @@ impl TcpBridge {
             // actually closed the receive half (FIN received). Check for
             // specific states where the remote FIN has been processed, NOT
             // just `!may_recv()` which is also false during handshake states.
-            if !conn.guest_eof_sent {
+            if conn.guest_to_host_tx.is_some() {
                 let guest_fin_received = matches!(
                     sock.state(),
                     tcp::State::CloseWait
@@ -806,8 +775,7 @@ impl TcpBridge {
                         | tcp::State::Closed
                 );
                 if guest_fin_received {
-                    conn.guest_to_host_tx = mpsc::channel(1).0;
-                    conn.guest_eof_sent = true;
+                    conn.guest_to_host_tx.take();
                 }
             }
         }
@@ -1328,11 +1296,10 @@ mod tests {
                 handle,
                 remote,
                 host_to_guest_rx: h2g_rx,
-                guest_to_host_tx: g2h_tx,
+                guest_to_host_tx: Some(g2h_tx),
                 host_eof: false,
                 host_disconnected: false,
                 pending_send: Some(vec![0xAA; 32]),
-                guest_eof_sent: false,
             },
         );
 
@@ -1371,11 +1338,10 @@ mod tests {
                 handle,
                 remote,
                 host_to_guest_rx: h2g_rx,
-                guest_to_host_tx: g2h_tx,
+                guest_to_host_tx: Some(g2h_tx),
                 host_eof: true,
                 host_disconnected: false,
                 pending_send: Some(vec![0xBB; 10]),
-                guest_eof_sent: false,
             },
         );
 
@@ -1423,11 +1389,10 @@ mod tests {
                 handle,
                 remote: "1.1.1.1:443".parse().unwrap(),
                 host_to_guest_rx: h2g_rx,
-                guest_to_host_tx: g2h_tx,
+                guest_to_host_tx: Some(g2h_tx),
                 host_eof: false,
                 host_disconnected: false,
                 pending_send: None,
-                guest_eof_sent: false,
             },
         );
 
@@ -1462,11 +1427,10 @@ mod tests {
                 handle,
                 remote,
                 host_to_guest_rx: h2g_rx,
-                guest_to_host_tx: g2h_tx,
+                guest_to_host_tx: Some(g2h_tx),
                 host_eof: false,
                 host_disconnected: false,
                 pending_send: None,
-                guest_eof_sent: false,
             },
         );
 
@@ -1475,7 +1439,10 @@ mod tests {
         bridge.relay_all(&mut sockets);
 
         let conn = bridge.connections.get(&handle).unwrap();
-        assert!(conn.guest_eof_sent, "guest_eof_sent should be set");
+        assert!(
+            conn.guest_to_host_tx.is_none(),
+            "guest_to_host_tx should be taken after EOF"
+        );
 
         // The original sender was replaced, so the receiver should detect
         // disconnection once the replacement is dropped.

@@ -557,17 +557,25 @@ impl Runtime {
 
         let mut added_rules = Vec::new();
 
-        for (_host_ip_str, host_port, container_port, protocol) in bindings {
+        for (host_ip_str, host_port, container_port, protocol) in bindings {
             let proto = match protocol.to_lowercase().as_str() {
                 "udp" => InboundProtocol::Udp,
                 _ => InboundProtocol::Tcp,
             };
 
+            let host_ip: std::net::Ipv4Addr = host_ip_str
+                .parse()
+                .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
+
             let mut guard = self.inbound_listener.write().await;
             let manager = guard.as_mut().expect("checked above");
-            if let Err(e) = manager.add_rule(*host_port, *container_port, proto).await {
+            if let Err(e) = manager
+                .add_rule(host_ip, *host_port, *container_port, proto)
+                .await
+            {
                 tracing::warn!(
-                    "Failed to bind inbound port {}:{}: {}",
+                    "Failed to bind inbound port {}:{}:{}: {}",
+                    host_ip_str,
                     host_port,
                     protocol,
                     e,
