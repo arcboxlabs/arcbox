@@ -115,6 +115,17 @@ jobs:
       - name: Enable KVM access
         run: sudo chmod 666 /dev/kvm
 
+      - name: Check nested KVM support
+        run: |
+          echo "=== CPU virt flags ==="
+          grep -m1 -oE 'vmx|svm' /proc/cpuinfo || echo "no vmx/svm"
+          echo "=== Nested KVM param ==="
+          cat /sys/module/kvm_intel/parameters/nested 2>/dev/null \
+            || cat /sys/module/kvm_amd/parameters/nested 2>/dev/null \
+            || echo "nested param not found"
+          echo "=== Hypervisor type ==="
+          systemd-detect-virt || true
+
       - name: Download Firecracker assets from S3
         run: |
           mkdir -p /tmp/fc-assets
