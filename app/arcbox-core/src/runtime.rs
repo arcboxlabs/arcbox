@@ -662,7 +662,9 @@ impl Runtime {
         #[cfg(target_os = "macos")]
         {
             let mut guard = self.inbound_listener.write().await;
-            if let Some(manager) = guard.as_mut() {
+            // Use take() so that the next start_port_forwarding_macos() call
+            // fetches a fresh manager from the VMM (with a live cmd_tx).
+            if let Some(mut manager) = guard.take() {
                 manager.stop_all();
             }
             self.inbound_rules.write().await.clear();
