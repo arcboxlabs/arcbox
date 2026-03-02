@@ -137,8 +137,7 @@ async fn setup_port_forwarding(state: &AppState, container_id: &str) {
 
     // Use the canonical full container ID from inspect (not the URI token which
     // may be a name or short ID) so that stop/remove can reliably match the key.
-    let canonical_id = extract_canonical_id_from_inspect(&body_bytes)
-        .unwrap_or_else(|| container_id.to_string());
+    let canonical_id = canonical_id_or_fallback(container_id, &body_bytes);
 
     let bindings = parse_port_bindings(&body_bytes);
     if bindings.is_empty() {
@@ -204,6 +203,12 @@ pub async fn attach_container(
 fn extract_canonical_id_from_inspect(inspect_json: &[u8]) -> Option<String> {
     let value: serde_json::Value = serde_json::from_slice(inspect_json).ok()?;
     value.get("Id")?.as_str().map(String::from)
+}
+
+/// Returns the canonical container ID from inspect JSON, falling back to the
+/// original request token when the inspect payload does not contain a usable ID.
+fn canonical_id_or_fallback(container_id: &str, inspect_json: &[u8]) -> String {
+    extract_canonical_id_from_inspect(inspect_json).unwrap_or_else(|| container_id.to_string())
 }
 
 /// Resolves a container name, short ID, or full ID to the canonical full ID
@@ -288,5 +293,28 @@ mod tests {
     #[test]
     fn extract_canonical_id_invalid_json() {
         assert_eq!(extract_canonical_id_from_inspect(b"not json"), None);
+    }
+
+    #[test]
+    fn canonical_id_or_fallback_uses_canonical() {
+        let json = br#"{"Id":"canonical-abcdef","Name":"/my-nginx"}"#;
+        assert_eq!(
+            canonical_id_or_fallback("web", json),
+            "canonical-abcdef".to_string()
+        );
+    }
+
+    #[test]
+    fn canonical_id_or_fallback_falls_back_when_missing() {
+        let json = br#"{"Name":"/my-nginx"}"#;
+        assert_eq!(canonical_id_or_fallback("web", json), "web".to_string());
+    }
+
+    #[test]
+    fn canonical_id_or_fallback_falls_back_on_invalid_json() {
+        assert_eq!(
+            canonical_id_or_fallback("web", b"not json"),
+            "web".to_string()
+        );
     }
 }
