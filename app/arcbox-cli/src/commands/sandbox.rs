@@ -1,13 +1,10 @@
 //! Sandbox management commands.
 //!
-//! Sandboxes are short-lived, strongly-isolated microVMs bound to a single
-//! workload. All sandbox commands take `<machine>` as the first argument,
-//! which identifies the guest VM that hosts the sandbox manager.
-//!
-//! The machine name is forwarded to the daemon via the `x-machine` gRPC
-//! metadata header for routing to the correct arcbox-agent instance.
+//! Sandboxes are short-lived, strongly-isolated microVMs. The underlying guest
+//! VM is managed transparently by the daemon and is not visible to the user.
 
 use anyhow::{Context, Result};
+use arcbox_core::vm_lifecycle::DEFAULT_MACHINE_NAME;
 use arcbox_grpc::{SandboxServiceClient, SandboxSnapshotServiceClient};
 use arcbox_protocol::sandbox_v1::{
     CheckpointRequest, CreateSandboxRequest, DeleteSnapshotRequest, InspectSandboxRequest,
@@ -62,25 +59,26 @@ async fn sandbox_channel() -> Result<Channel> {
         })
 }
 
-/// Attaches `x-machine: <name>` metadata to a tonic request.
-fn with_machine<T>(mut request: tonic::Request<T>, machine: &str) -> Result<tonic::Request<T>> {
-    let val = MetadataValue::try_from(machine)
-        .with_context(|| format!("invalid machine name: {machine}"))?;
+/// Attaches the default `x-machine` metadata header to a tonic request for
+/// daemon-side routing to the guest VM agent.
+fn attach_machine<T>(mut request: tonic::Request<T>) -> tonic::Request<T> {
+    // SAFETY: DEFAULT_MACHINE_NAME is a valid ASCII string.
+    let val = MetadataValue::from_static(DEFAULT_MACHINE_NAME);
     request.metadata_mut().insert("x-machine", val);
-    Ok(request)
+    request
 }
 
 /// Sandbox subcommands.
 #[derive(Subcommand)]
 pub enum SandboxCommands {
-    /// Create a new sandbox in a machine
+    /// Create a new sandbox
     Create(CreateArgs),
     /// Stop a sandbox gracefully
     Stop(StopArgs),
     /// Remove a sandbox
     #[command(alias = "rm")]
     Remove(RemoveArgs),
-    /// List sandboxes in a machine
+    /// List sandboxes
     #[command(name = "ls", alias = "list")]
     List(ListArgs),
     /// Inspect sandbox details
@@ -103,15 +101,13 @@ pub enum SandboxCommands {
 
 #[derive(Args)]
 pub struct CreateArgs {
-    /// Guest machine that hosts the sandbox manager
-    pub machine: String,
     /// Caller-supplied sandbox ID (empty = auto-generated)
     #[arg(long)]
     pub id: Option<String>,
-    /// Kernel image path (empty = machine default)
+    /// Kernel image path (empty = daemon default)
     #[arg(long)]
     pub kernel: Option<String>,
-    /// Root filesystem image path (empty = machine default)
+    /// Root filesystem image path (empty = daemon default)
     #[arg(long)]
     pub rootfs: Option<String>,
     /// Number of vCPUs (0 = daemon default)
@@ -130,8 +126,6 @@ pub struct CreateArgs {
 
 #[derive(Args)]
 pub struct StopArgs {
-    /// Guest machine that hosts the sandbox manager
-    pub machine: String,
     /// Sandbox ID
     pub id: String,
     /// Seconds to wait before force-killing (0 = daemon default)
@@ -141,8 +135,6 @@ pub struct StopArgs {
 
 #[derive(Args)]
 pub struct RemoveArgs {
-    /// Guest machine that hosts the sandbox manager
-    pub machine: String,
     /// Sandbox ID
     pub id: String,
     /// Force removal even if running
@@ -152,8 +144,6 @@ pub struct RemoveArgs {
 
 #[derive(Args)]
 pub struct ListArgs {
-    /// Guest machine that hosts the sandbox manager
-    pub machine: String,
     /// Filter by state (starting/ready/running/stopped/failed)
     #[arg(long)]
     pub state: Option<String>,
@@ -164,16 +154,12 @@ pub struct ListArgs {
 
 #[derive(Args)]
 pub struct InspectArgs {
-    /// Guest machine that hosts the sandbox manager
-    pub machine: String,
     /// Sandbox ID
     pub id: String,
 }
 
 #[derive(Args)]
 pub struct RunArgs {
-    /// Guest machine that hosts the sandbox manager
-    pub machine: String,
     /// Sandbox ID
     pub id: String,
     /// Command and arguments
@@ -189,8 +175,6 @@ pub struct RunArgs {
 
 #[derive(Args)]
 pub struct EventsArgs {
-    /// Guest machine that hosts the sandbox manager
-    pub machine: String,
     /// Filter by sandbox ID (empty = all sandboxes)
     #[arg(long)]
     pub id: Option<String>,
@@ -201,8 +185,6 @@ pub struct EventsArgs {
 
 #[derive(Args)]
 pub struct CheckpointArgs {
-    /// Guest machine that hosts the sandbox manager
-    pub machine: String,
     /// Sandbox ID to checkpoint
     pub id: String,
     /// Human-readable snapshot name
@@ -212,8 +194,6 @@ pub struct CheckpointArgs {
 
 #[derive(Args)]
 pub struct RestoreArgs {
-    /// Guest machine that hosts the sandbox manager
-    pub machine: String,
     /// Snapshot ID to restore from
     pub snapshot_id: String,
     /// Assign a new sandbox ID (empty = auto-generated)
@@ -226,8 +206,6 @@ pub struct RestoreArgs {
 
 #[derive(Args)]
 pub struct ListSnapshotsArgs {
-    /// Guest machine that hosts the sandbox manager
-    pub machine: String,
     /// Filter by origin sandbox ID (empty = all)
     #[arg(long)]
     pub sandbox_id: Option<String>,
@@ -235,8 +213,6 @@ pub struct ListSnapshotsArgs {
 
 #[derive(Args)]
 pub struct DeleteSnapshotArgs {
-    /// Guest machine that hosts the sandbox manager
-    pub machine: String,
     /// Snapshot ID
     pub snapshot_id: String,
 }
@@ -291,7 +267,7 @@ async fn execute_create(args: CreateArgs) -> Result<()> {
     };
 
     let resp = client
-        .create(with_machine(tonic::Request::new(req), &args.machine)?)
+        .create(attach_machine(tonic::Request::new(req)))
         .await
         .context("Failed to create sandbox")?
         .into_inner();
@@ -312,7 +288,7 @@ async fn execute_stop(args: StopArgs) -> Result<()> {
         timeout_seconds: args.timeout,
     };
     client
-        .stop(with_machine(tonic::Request::new(req), &args.machine)?)
+        .stop(attach_machine(tonic::Request::new(req)))
         .await
         .context("Failed to stop sandbox")?;
 
@@ -329,7 +305,7 @@ async fn execute_remove(args: RemoveArgs) -> Result<()> {
         force: args.force,
     };
     client
-        .remove(with_machine(tonic::Request::new(req), &args.machine)?)
+        .remove(attach_machine(tonic::Request::new(req)))
         .await
         .context("Failed to remove sandbox")?;
 
@@ -346,7 +322,7 @@ async fn execute_list(args: ListArgs) -> Result<()> {
         labels: HashMap::new(),
     };
     let sandboxes = client
-        .list(with_machine(tonic::Request::new(req), &args.machine)?)
+        .list(attach_machine(tonic::Request::new(req)))
         .await
         .context("Failed to list sandboxes")?
         .into_inner()
@@ -360,7 +336,7 @@ async fn execute_list(args: ListArgs) -> Result<()> {
     }
 
     if sandboxes.is_empty() {
-        println!("No sandboxes found in machine '{}'.", args.machine);
+        println!("No sandboxes found.");
         return Ok(());
     }
 
@@ -368,10 +344,7 @@ async fn execute_list(args: ListArgs) -> Result<()> {
     for sb in &sandboxes {
         println!(
             "{:<36} {:<12} {:<18} {}",
-            sb.id,
-            sb.state,
-            sb.ip_address,
-            sb.created_at,
+            sb.id, sb.state, sb.ip_address, sb.created_at,
         );
     }
     Ok(())
@@ -381,9 +354,9 @@ async fn execute_inspect(args: InspectArgs) -> Result<()> {
     let channel = sandbox_channel().await?;
     let mut client = SandboxServiceClient::new(channel);
 
-    let req = InspectSandboxRequest { id: args.id.clone() };
+    let req = InspectSandboxRequest { id: args.id };
     let info = client
-        .inspect(with_machine(tonic::Request::new(req), &args.machine)?)
+        .inspect(attach_machine(tonic::Request::new(req)))
         .await
         .context("Failed to inspect sandbox")?
         .into_inner();
@@ -420,7 +393,7 @@ async fn execute_run(args: RunArgs) -> Result<()> {
     let mut client = SandboxServiceClient::new(channel);
 
     let req = RunRequest {
-        id: args.id.clone(),
+        id: args.id,
         cmd: args.cmd,
         tty: args.tty,
         timeout_seconds: args.timeout,
@@ -428,7 +401,7 @@ async fn execute_run(args: RunArgs) -> Result<()> {
     };
 
     let mut stream = client
-        .run(with_machine(tonic::Request::new(req), &args.machine)?)
+        .run(attach_machine(tonic::Request::new(req)))
         .await
         .context("Failed to run command in sandbox")?
         .into_inner();
@@ -474,7 +447,7 @@ async fn execute_events(args: EventsArgs) -> Result<()> {
     };
 
     let mut stream = client
-        .events(with_machine(tonic::Request::new(req), &args.machine)?)
+        .events(attach_machine(tonic::Request::new(req)))
         .await
         .context("Failed to subscribe to sandbox events")?
         .into_inner();
@@ -503,12 +476,12 @@ async fn execute_checkpoint(args: CheckpointArgs) -> Result<()> {
     let mut client = SandboxSnapshotServiceClient::new(channel);
 
     let req = CheckpointRequest {
-        sandbox_id: args.id.clone(),
-        name: args.name.clone(),
+        sandbox_id: args.id,
+        name: args.name,
         labels: HashMap::new(),
     };
     let resp = client
-        .checkpoint(with_machine(tonic::Request::new(req), &args.machine)?)
+        .checkpoint(attach_machine(tonic::Request::new(req)))
         .await
         .context("Failed to checkpoint sandbox")?
         .into_inner();
@@ -526,12 +499,12 @@ async fn execute_restore(args: RestoreArgs) -> Result<()> {
 
     let req = RestoreRequest {
         id: args.sandbox_id.unwrap_or_default(),
-        snapshot_id: args.snapshot_id.clone(),
+        snapshot_id: args.snapshot_id,
         ttl_seconds: args.ttl,
         ..Default::default()
     };
     let resp = client
-        .restore(with_machine(tonic::Request::new(req), &args.machine)?)
+        .restore(attach_machine(tonic::Request::new(req)))
         .await
         .context("Failed to restore sandbox")?
         .into_inner();
@@ -551,7 +524,7 @@ async fn execute_list_snapshots(args: ListSnapshotsArgs) -> Result<()> {
         labels: HashMap::new(),
     };
     let snapshots = client
-        .list_snapshots(with_machine(tonic::Request::new(req), &args.machine)?)
+        .list_snapshots(attach_machine(tonic::Request::new(req)))
         .await
         .context("Failed to list snapshots")?
         .into_inner()
@@ -583,7 +556,7 @@ async fn execute_delete_snapshot(args: DeleteSnapshotArgs) -> Result<()> {
         snapshot_id: args.snapshot_id.clone(),
     };
     client
-        .delete_snapshot(with_machine(tonic::Request::new(req), &args.machine)?)
+        .delete_snapshot(attach_machine(tonic::Request::new(req)))
         .await
         .context("Failed to delete snapshot")?;
 
