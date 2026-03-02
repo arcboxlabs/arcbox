@@ -221,6 +221,9 @@ mod linux {
         BOOT_ASSET_VERSION as BOOT_ASSET_VERSION_ENV,
         GUEST_DOCKER_VSOCK_PORT as GUEST_DOCKER_VSOCK_PORT_ENV,
     };
+    use arcbox_constants::paths::{
+        ARCBOX_RUNTIME_BIN_DIR, CONTAINERD_SOCKET, DOCKER_API_UNIX_SOCKET, DOCKER_DATA_MOUNT_POINT,
+    };
     use arcbox_constants::ports::DOCKER_API_VSOCK_PORT;
     use arcbox_constants::status::{SERVICE_ERROR, SERVICE_NOT_READY, SERVICE_READY};
 
@@ -229,15 +232,9 @@ mod linux {
         RuntimeStatusResponse, SystemInfo,
     };
 
-    /// Docker Unix socket path in guest.
-    const DOCKER_API_UNIX_SOCKET: &str = "/var/run/docker.sock";
-    /// Containerd socket candidates.
-    const CONTAINERD_SOCKET_CANDIDATES: [&str; 2] = [
-        "/run/containerd/containerd.sock",
-        "/var/run/containerd/containerd.sock",
-    ];
-    /// Mount point for dockerd persistent state.
-    const DOCKER_DATA_MOUNT_POINT: &str = "/var/lib/docker";
+    /// Containerd socket candidates (primary + legacy fallback).
+    const CONTAINERD_SOCKET_CANDIDATES: [&str; 2] =
+        [CONTAINERD_SOCKET, "/var/run/containerd/containerd.sock"];
 
     fn cmdline_value(key: &str) -> Option<String> {
         let cmdline = std::fs::read_to_string("/proc/cmdline").ok()?;
@@ -849,7 +846,7 @@ mod linux {
             )));
         }
 
-        candidates.push(PathBuf::from("/arcbox/runtime/bin"));
+        candidates.push(PathBuf::from(ARCBOX_RUNTIME_BIN_DIR));
         candidates.push(PathBuf::from("/arcbox/boot/current/runtime/bin"));
         candidates
     }
@@ -1063,7 +1060,7 @@ mod linux {
             "/run/containerd",
             "/var/run/docker",
             "/var/lib/containerd",
-            "/var/lib/docker",
+            DOCKER_DATA_MOUNT_POINT,
             "/etc/docker",
             "/var/log",
         ] {
@@ -1104,7 +1101,7 @@ mod linux {
                 "--config",
                 containerd_config,
                 "--address",
-                "/run/containerd/containerd.sock",
+                CONTAINERD_SOCKET,
                 "--root",
                 "/var/lib/containerd",
                 "--state",
@@ -1155,10 +1152,10 @@ mod linux {
 
         if !probe_unix_socket(DOCKER_API_UNIX_SOCKET).await {
             let mut cmd = Command::new(&dockerd_bin);
-            cmd.arg("--host=unix:///var/run/docker.sock")
-                .arg("--containerd=/run/containerd/containerd.sock")
+            cmd.arg(format!("--host=unix://{DOCKER_API_UNIX_SOCKET}"))
+                .arg(format!("--containerd={CONTAINERD_SOCKET}"))
                 .arg("--exec-root=/var/run/docker")
-                .arg("--data-root=/var/lib/docker")
+                .arg(format!("--data-root={DOCKER_DATA_MOUNT_POINT}"))
                 .env("PATH", &path_env)
                 .stdin(Stdio::null())
                 .stdout(daemon_log_file("dockerd"))
