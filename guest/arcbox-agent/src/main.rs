@@ -12,6 +12,13 @@
 #![allow(clippy::all)]
 #![allow(clippy::pedantic)]
 
+#[cfg(not(target_os = "linux"))]
+compile_error!(
+    "arcbox-agent is designed to run inside a Linux guest VM and cannot be compiled for \
+     non-Linux targets. Cross-compile with: \
+     cargo build -p arcbox-agent --target aarch64-unknown-linux-musl --release"
+);
+
 use anyhow::Result;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -21,7 +28,6 @@ mod machine_init;
 mod rpc;
 
 // Mount module uses Linux-specific syscalls (mount/umount).
-#[cfg(target_os = "linux")]
 mod mount;
 
 // DNS module manages /etc/hosts for container name resolution.

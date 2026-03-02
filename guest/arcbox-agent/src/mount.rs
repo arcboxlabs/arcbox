@@ -5,7 +5,6 @@
 use anyhow::Result;
 
 /// Mount a filesystem.
-#[cfg(target_os = "linux")]
 pub fn mount_fs(source: &str, target: &str, fstype: &str, _options: &[String]) -> Result<()> {
     use nix::mount::{MsFlags, mount};
     use std::path::Path;
@@ -26,31 +25,11 @@ pub fn mount_fs(source: &str, target: &str, fstype: &str, _options: &[String]) -
     Ok(())
 }
 
-/// Mount a filesystem (stub for non-Linux platforms).
-#[cfg(not(target_os = "linux"))]
-pub fn mount_fs(source: &str, target: &str, fstype: &str, _options: &[String]) -> Result<()> {
-    tracing::warn!(
-        "mount_fs is only supported on Linux (called with source={}, target={}, fstype={})",
-        source,
-        target,
-        fstype
-    );
-    anyhow::bail!("mount_fs is only supported on Linux")
-}
-
 /// Unmount a filesystem.
-#[cfg(target_os = "linux")]
 pub fn unmount_fs(target: &str) -> Result<()> {
     tracing::info!("Unmounting {}", target);
     nix::mount::umount(target)?;
     Ok(())
-}
-
-/// Unmount a filesystem (stub for non-Linux platforms).
-#[cfg(not(target_os = "linux"))]
-pub fn unmount_fs(target: &str) -> Result<()> {
-    tracing::warn!("unmount_fs is only supported on Linux (target={})", target);
-    anyhow::bail!("unmount_fs is only supported on Linux")
 }
 
 /// Mount virtiofs share.
@@ -59,7 +38,6 @@ pub fn mount_virtiofs(tag: &str, mountpoint: &str) -> Result<()> {
 }
 
 /// Checks if a path is already mounted.
-#[cfg(target_os = "linux")]
 pub fn is_mounted(path: &str) -> bool {
     use std::fs;
     if let Ok(content) = fs::read_to_string("/proc/mounts") {
@@ -70,11 +48,6 @@ pub fn is_mounted(path: &str) -> bool {
     } else {
         false
     }
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn is_mounted(_path: &str) -> bool {
-    false
 }
 
 /// Mount all standard VirtioFS shares if not already mounted.
