@@ -77,7 +77,8 @@ pub async fn stop_container(
     req: Request<Body>,
 ) -> Result<Response> {
     if let Some(id) = extract_container_id(&uri) {
-        state.runtime.stop_port_forwarding_by_id(&id).await;
+        let canonical = resolve_canonical_id(&state, &id).await.unwrap_or(id);
+        state.runtime.stop_port_forwarding_by_id(&canonical).await;
     }
     proxy(&state, &uri, req).await
 }
@@ -93,7 +94,8 @@ pub async fn remove_container(
     req: Request<Body>,
 ) -> Result<Response> {
     if let Some(id) = extract_container_id(&uri) {
-        state.runtime.stop_port_forwarding_by_id(&id).await;
+        let canonical = resolve_canonical_id(&state, &id).await.unwrap_or(id);
+        state.runtime.stop_port_forwarding_by_id(&canonical).await;
     }
     proxy(&state, &uri, req).await
 }
@@ -133,16 +135,21 @@ async fn setup_port_forwarding(state: &AppState, container_id: &str) {
         }
     };
 
+    // Use the canonical full container ID from inspect (not the URI token which
+    // may be a name or short ID) so that stop/remove can reliably match the key.
+    let canonical_id = extract_canonical_id_from_inspect(&body_bytes)
+        .unwrap_or_else(|| container_id.to_string());
+
     let bindings = parse_port_bindings(&body_bytes);
     if bindings.is_empty() {
-        tracing::debug!("No port bindings found for container {}", container_id,);
+        tracing::debug!("No port bindings found for container {}", canonical_id);
         return;
     }
 
     tracing::info!(
         "Port forwarding: {} bindings for container {}",
         bindings.len(),
-        container_id,
+        canonical_id,
     );
     for b in &bindings {
         tracing::info!(
@@ -169,12 +176,12 @@ async fn setup_port_forwarding(state: &AppState, container_id: &str) {
     let machine_name = state.runtime.default_machine_name();
     if let Err(e) = state
         .runtime
-        .start_port_forwarding_for(machine_name, container_id, &rules)
+        .start_port_forwarding_for(machine_name, &canonical_id, &rules)
         .await
     {
         tracing::warn!(
             "Failed to start port forwarding for {}: {}",
-            container_id,
+            canonical_id,
             e
         );
     }
@@ -191,6 +198,38 @@ pub async fn attach_container(
     req: Request<Body>,
 ) -> Result<Response> {
     proxy_upgrade(&state, &uri, req).await
+}
+
+/// Extracts the canonical full container ID from a Docker inspect JSON response.
+fn extract_canonical_id_from_inspect(inspect_json: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(inspect_json).ok()?;
+    value.get("Id")?.as_str().map(String::from)
+}
+
+/// Resolves a container name, short ID, or full ID to the canonical full ID
+/// by inspecting the container on the guest.
+async fn resolve_canonical_id(state: &AppState, id: &str) -> Option<String> {
+    let inspect_path = format!("/containers/{id}/json");
+    let resp = proxy_to_guest(
+        &state.runtime,
+        Method::GET,
+        &inspect_path,
+        &HeaderMap::new(),
+        Bytes::new(),
+    )
+    .await
+    .ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    let body_bytes = http_body_util::BodyExt::collect(resp.into_body())
+        .await
+        .ok()?
+        .to_bytes();
+
+    extract_canonical_id_from_inspect(&body_bytes)
 }
 
 #[cfg(test)]
@@ -229,5 +268,25 @@ mod tests {
     #[test]
     fn extract_id_no_containers_segment() {
         assert_eq!(extract_container_id(&uri("/images/abc/json")), None);
+    }
+
+    #[test]
+    fn extract_canonical_id_from_inspect_json() {
+        let json = br#"{"Id":"abc123def456789","Name":"/my-nginx","State":{}}"#;
+        assert_eq!(
+            extract_canonical_id_from_inspect(json).as_deref(),
+            Some("abc123def456789")
+        );
+    }
+
+    #[test]
+    fn extract_canonical_id_missing_field() {
+        let json = br#"{"Name":"/my-nginx"}"#;
+        assert_eq!(extract_canonical_id_from_inspect(json), None);
+    }
+
+    #[test]
+    fn extract_canonical_id_invalid_json() {
+        assert_eq!(extract_canonical_id_from_inspect(b"not json"), None);
     }
 }
