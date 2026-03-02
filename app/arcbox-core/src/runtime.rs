@@ -15,8 +15,9 @@ use arcbox_net::darwin::inbound_relay::{InboundListenerManager, InboundProtocol}
 use arcbox_net::port_forward::{PortForwardRule, PortForwarder};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
 #[cfg(not(target_os = "macos"))]
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{SocketAddr, SocketAddrV4};
 use std::path::{Component, Path};
 use std::sync::Arc;
 use std::time::Duration;
@@ -128,7 +129,7 @@ pub struct Runtime {
     inbound_listener: Arc<TokioRwLock<Option<InboundListenerManager>>>,
     /// Tracks which inbound rules belong to each container for cleanup (macOS).
     #[cfg(target_os = "macos")]
-    inbound_rules: Arc<TokioRwLock<HashMap<String, Vec<(u16, InboundProtocol)>>>>,
+    inbound_rules: Arc<TokioRwLock<HashMap<String, Vec<(Ipv4Addr, u16, InboundProtocol)>>>>,
     /// Port forwarders for each container (non-macOS fallback).
     #[cfg(not(target_os = "macos"))]
     port_forwarders: Arc<TokioRwLock<HashMap<String, PortForwarder>>>,
@@ -563,9 +564,22 @@ impl Runtime {
                 _ => InboundProtocol::Tcp,
             };
 
-            let host_ip: std::net::Ipv4Addr = host_ip_str
-                .parse()
-                .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
+            let host_ip: Ipv4Addr = if host_ip_str.is_empty() || host_ip_str == "0.0.0.0" {
+                Ipv4Addr::UNSPECIFIED
+            } else {
+                match host_ip_str.parse() {
+                    Ok(ip) => ip,
+                    Err(_) => {
+                        tracing::warn!(
+                            "Skipping inbound rule: invalid HostIp '{}' for port {}:{}",
+                            host_ip_str,
+                            host_port,
+                            protocol,
+                        );
+                        continue;
+                    }
+                }
+            };
 
             let mut guard = self.inbound_listener.write().await;
             let manager = guard.as_mut().expect("checked above");
@@ -582,7 +596,7 @@ impl Runtime {
                 );
                 continue;
             }
-            added_rules.push((*host_port, proto));
+            added_rules.push((host_ip, *host_port, proto));
         }
 
         if !added_rules.is_empty() {
@@ -608,7 +622,18 @@ impl Runtime {
             let host_ip: Ipv4Addr = if host_ip_str.is_empty() || host_ip_str == "0.0.0.0" {
                 Ipv4Addr::UNSPECIFIED
             } else {
-                host_ip_str.parse().unwrap_or(Ipv4Addr::UNSPECIFIED)
+                match host_ip_str.parse() {
+                    Ok(ip) => ip,
+                    Err(_) => {
+                        tracing::warn!(
+                            "Skipping port forward rule: invalid HostIp '{}' for port {}:{}",
+                            host_ip_str,
+                            host_port,
+                            protocol,
+                        );
+                        continue;
+                    }
+                }
             };
 
             let host_addr = SocketAddr::V4(SocketAddrV4::new(host_ip, *host_port));
@@ -647,8 +672,8 @@ impl Runtime {
             if let Some(rules) = rules {
                 let mut guard = self.inbound_listener.write().await;
                 if let Some(manager) = guard.as_mut() {
-                    for (host_port, proto) in rules {
-                        manager.remove_rule(host_port, proto);
+                    for (host_ip, host_port, proto) in rules {
+                        manager.remove_rule(host_ip, host_port, proto);
                     }
                 }
                 tracing::debug!("Stopped port forwarding for container {}", container_id);

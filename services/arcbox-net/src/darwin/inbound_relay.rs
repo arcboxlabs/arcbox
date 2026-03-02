@@ -285,7 +285,7 @@ pub enum InboundProtocol {
 /// and send `InboundCommand` messages to the datapath.
 pub struct InboundListenerManager {
     cmd_tx: mpsc::Sender<InboundCommand>,
-    listeners: HashMap<(u16, InboundProtocol), (JoinHandle<()>, CancellationToken)>,
+    listeners: HashMap<(Ipv4Addr, u16, InboundProtocol), (JoinHandle<()>, CancellationToken)>,
 }
 
 impl InboundListenerManager {
@@ -310,7 +310,7 @@ impl InboundListenerManager {
         container_port: u16,
         protocol: InboundProtocol,
     ) -> std::io::Result<()> {
-        let key = (host_port, protocol);
+        let key = (host_ip, host_port, protocol);
         if self.listeners.contains_key(&key) {
             return Ok(()); // Already listening.
         }
@@ -358,21 +358,21 @@ impl InboundListenerManager {
     }
 
     /// Removes a forwarding rule and stops its listener.
-    pub fn remove_rule(&mut self, host_port: u16, protocol: InboundProtocol) {
-        let key = (host_port, protocol);
+    pub fn remove_rule(&mut self, host_ip: Ipv4Addr, host_port: u16, protocol: InboundProtocol) {
+        let key = (host_ip, host_port, protocol);
         if let Some((handle, cancel)) = self.listeners.remove(&key) {
             cancel.cancel();
             handle.abort();
-            tracing::debug!("Inbound listener removed: {:?} :{}", protocol, host_port,);
+            tracing::debug!("Inbound listener removed: {:?} {}:{}", protocol, host_ip, host_port);
         }
     }
 
     /// Stops all listeners.
     pub fn stop_all(&mut self) {
-        for ((port, proto), (handle, cancel)) in self.listeners.drain() {
+        for ((ip, port, proto), (handle, cancel)) in self.listeners.drain() {
             cancel.cancel();
             handle.abort();
-            tracing::debug!("Inbound listener stopped: {:?} :{}", proto, port);
+            tracing::debug!("Inbound listener stopped: {:?} {}:{}", proto, ip, port);
         }
     }
 }
@@ -592,7 +592,7 @@ mod tests {
             .expect("should bind to port 0 (OS-assigned)");
 
         // Remove it.
-        manager.remove_rule(0, InboundProtocol::Tcp);
+        manager.remove_rule(Ipv4Addr::LOCALHOST, 0, InboundProtocol::Tcp);
 
         // The cmd_rx channel should still be valid (no panic).
         assert!(cmd_rx.try_recv().is_err(), "no commands expected yet");
