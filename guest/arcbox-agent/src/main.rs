@@ -18,6 +18,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod agent;
 mod init;
 mod machine_init;
+mod supervisor;
 
 mod rpc;
 
@@ -30,14 +31,14 @@ mod dns;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Machine provisioning should only run in initramfs as PID 1.
-    // After switch_root, distro service managers also start arcbox-agent but
-    // those processes must run the RPC server directly.
+    // Legacy: machine provisioning in initramfs as PID 1 (deleted in S7).
     if machine_init::is_machine_mode() && std::process::id() == 1 {
         machine_init::run(); // Never returns.
     }
 
-    // Initialize logging
+    let is_pid1 = std::process::id() == 1;
+
+    // Initialize logging early so init_system() has tracing output.
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -46,8 +47,20 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    // PID 1 path: agent was exec'd by busybox trampoline on EROFS rootfs.
+    // No arcbox.mode=machine cmdline token in this flow.
+    if is_pid1 {
+        tracing::info!("Running as PID 1, initializing system");
+        init::init_system();
+
+        // Install SIGCHLD handler so orphaned grandchildren (containerd shims,
+        // etc.) don't accumulate as zombies.
+        let sv = std::sync::Arc::new(tokio::sync::Mutex::new(supervisor::Supervisor::new()));
+        supervisor::spawn_reaper(sv);
+    }
+
     tracing::info!("ArcBox agent starting...");
 
-    // Run the agent
+    // Run the agent (vsock listener + RPC handler).
     agent::run().await
 }
