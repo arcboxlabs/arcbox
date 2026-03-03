@@ -59,17 +59,22 @@ jobs:
       - name: Enable KVM access
         run: sudo chmod 666 /dev/kvm
 
-      - name: Download Firecracker assets from S3
+      - name: Install Firecracker and jailer via firecracker.sh
         run: |
           mkdir -p /tmp/fc-assets
-          BASE="${FC_S3_BASE}/${FC_S3_DIR}/x86_64"
-          curl -sL "$BASE/firecracker-${FC_VERSION}"   -o /tmp/fc-assets/firecracker
-          curl -sL "$BASE/jailer-${FC_VERSION}"         -o /tmp/fc-assets/jailer
-          curl -sL "$BASE/vmlinux-5.10.223"             -o /tmp/fc-assets/vmlinux
-          curl -sL "$BASE/ubuntu-22.04.ext4"            -o /tmp/fc-assets/rootfs-base.ext4
-          chmod +x /tmp/fc-assets/firecracker /tmp/fc-assets/jailer
+          if ! curl -fsSL https://arcbox.sh/firecracker.sh | bash -s -- install --version "${FC_VERSION}" --prefix /tmp/fc-assets; then
+            echo "Version ${FC_VERSION} unavailable, falling back to latest"
+            curl -fsSL https://arcbox.sh/firecracker.sh | bash -s -- install --prefix /tmp/fc-assets
+          fi
+
           file /tmp/fc-assets/firecracker
           /tmp/fc-assets/firecracker --version
+
+      - name: Download kernel/rootfs assets from S3
+        run: |
+          BASE="${FC_S3_BASE}/${FC_S3_DIR}/x86_64"
+          curl -sL "$BASE/vmlinux-5.10.223"             -o /tmp/fc-assets/vmlinux
+          curl -sL "$BASE/ubuntu-22.04.ext4"            -o /tmp/fc-assets/rootfs-base.ext4
 
       - name: Build binaries
         run: |

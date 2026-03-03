@@ -151,15 +151,22 @@ jobs:
               print(f"AF_VSOCK socket() failed: {e}")
           PY
 
-      - name: Download Firecracker assets from S3
+      - name: Install Firecracker and jailer via firecracker.sh
         run: |
           mkdir -p /tmp/fc-assets
+          if ! curl -fsSL https://arcbox.sh/firecracker.sh | bash -s -- install --version "${FC_VERSION}" --prefix /tmp/fc-assets; then
+            echo "Version ${FC_VERSION} unavailable, falling back to latest"
+            curl -fsSL https://arcbox.sh/firecracker.sh | bash -s -- install --prefix /tmp/fc-assets
+          fi
+
+          file /tmp/fc-assets/firecracker
+          /tmp/fc-assets/firecracker --version
+
+      - name: Download kernel/rootfs assets from S3
+        run: |
           BASE="${FC_S3_BASE}/${FC_S3_DIR}/x86_64"
-          curl -sL "$BASE/firecracker-${FC_VERSION}"   -o /tmp/fc-assets/firecracker
-          curl -sL "$BASE/jailer-${FC_VERSION}"         -o /tmp/fc-assets/jailer
           curl -sL "$BASE/vmlinux-5.10.223"             -o /tmp/fc-assets/vmlinux
           curl -sL "$BASE/ubuntu-22.04.ext4"            -o /tmp/fc-assets/rootfs-base.ext4
-          chmod +x /tmp/fc-assets/firecracker /tmp/fc-assets/jailer
 
       - name: Build vm-agent (Linux x86_64)
         run: cargo build -p arcbox-vm --bin vm-agent --release
@@ -181,5 +188,7 @@ jobs:
           FC_KERNEL: /tmp/fc-assets/vmlinux
           FC_ROOTFS: /tmp/fc-assets/rootfs.ext4
         run: |
-          sudo env PATH="$PATH" HOME="$HOME" cargo test --test e2e -p arcbox-vm \
+          sudo env PATH="$PATH" HOME="$HOME" \
+            FC_BINARY="$FC_BINARY" FC_KERNEL="$FC_KERNEL" FC_ROOTFS="$FC_ROOTFS" \
+            cargo test --test e2e -p arcbox-vm \
             -- --include-ignored --test-threads=1
