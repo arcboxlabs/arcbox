@@ -126,6 +126,31 @@ jobs:
           echo "=== Hypervisor type ==="
           systemd-detect-virt || true
 
+      - name: Check vsock support
+        run: |
+          echo "=== /dev/vsock ==="
+          ls -l /dev/vsock 2>/dev/null || echo "/dev/vsock missing"
+          echo "=== vsock modules ==="
+          lsmod | grep -E '(^vsock|vhost_vsock|vmw_vsock_virtio_transport)' || echo "no vsock-related modules loaded"
+          sudo modprobe vsock || true
+          sudo modprobe vhost_vsock || true
+          sudo modprobe vmw_vsock_virtio_transport || true
+          echo "=== vsock modules after modprobe ==="
+          lsmod | grep -E '(^vsock|vhost_vsock|vmw_vsock_virtio_transport)' || echo "still no vsock-related modules"
+          echo "=== Python AF_VSOCK probe ==="
+          python3 - <<'PY'
+          import socket
+          if not hasattr(socket, "AF_VSOCK"):
+              print("AF_VSOCK not exposed by Python socket module")
+              raise SystemExit(0)
+          try:
+              s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+              s.close()
+              print("AF_VSOCK socket() succeeded")
+          except OSError as e:
+              print(f"AF_VSOCK socket() failed: {e}")
+          PY
+
       - name: Download Firecracker assets from S3
         run: |
           mkdir -p /tmp/fc-assets
