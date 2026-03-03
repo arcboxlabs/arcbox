@@ -1287,6 +1287,17 @@ async fn do_boot(
 
     let fc_cfg = &config.firecracker;
 
+    // Some Firecracker builds expect log/metrics targets to pre-exist when
+    // --log-path/--metrics-path are provided. Pre-create both files to avoid
+    // startup failures with ENOENT across version variants.
+    if fc_cfg.jailer.is_none() {
+        if let Some(parent) = log_path.parent() {
+            std::fs::create_dir_all(parent).map_err(VmmError::Io)?;
+        }
+        std::fs::File::create(&log_path).map_err(VmmError::Io)?;
+        std::fs::File::create(&metrics_path).map_err(VmmError::Io)?;
+    }
+
     // Spawn the Firecracker process (direct or via Jailer).
     let process = if let Some(ref jc) = fc_cfg.jailer {
         let mut jb = JailerProcessBuilder::new(&jc.binary, &fc_cfg.binary, id, jc.uid, jc.gid);
