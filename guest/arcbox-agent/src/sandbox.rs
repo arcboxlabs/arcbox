@@ -4,7 +4,6 @@
 //! `sandbox_v1` protobuf types (from `arcbox-protocol`) and the native Rust
 //! types used by `arcbox-vm`.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use arcbox_protocol::sandbox_v1;

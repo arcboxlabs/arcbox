@@ -88,6 +88,8 @@ jobs:
       - name: Run integration test (as root)
         run: |
           sudo env \
+            PATH="$PATH" \
+            HOME="$HOME" \
             FC_BINARY=/tmp/fc-assets/firecracker \
             FC_KERNEL=/tmp/fc-assets/vmlinux \
             FC_ROOTFS=/tmp/fc-assets/rootfs.ext4 \
