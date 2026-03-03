@@ -63,7 +63,7 @@ jobs:
         run: |
           mkdir -p /tmp/fc-assets
           curl -fsSL \
-            https://raw.githubusercontent.com/arcbox-labs/scripts/main/public/firecracker.sh \
+            https://raw.githubusercontent.com/arcbox-labs/scripts/master/public/firecracker.sh \
             -o /tmp/fc-assets/firecracker.sh
           chmod +x /tmp/fc-assets/firecracker.sh
 
