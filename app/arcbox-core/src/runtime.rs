@@ -148,7 +148,7 @@ impl Runtime {
             event_bus.clone(),
             config.data_dir.clone(),
             vm_lifecycle_config,
-        ));
+        )?);
         let container_backend = create_backend(
             &config.container,
             Arc::clone(&vm_lifecycle),
@@ -285,7 +285,15 @@ impl Runtime {
         tokio::fs::create_dir_all(self.config.data_dir.join("vms")).await?;
         tokio::fs::create_dir_all(self.config.data_dir.join("machines")).await?;
 
-        // Validate guest binaries before VM start (boot-blocking).
+        // Download runtime binaries (dockerd, containerd, youki) if not cached.
+        let runtime_bin_dir = self.config.data_dir.join("runtime/bin");
+        tokio::fs::create_dir_all(&runtime_bin_dir).await?;
+        self.vm_lifecycle
+            .boot_assets()
+            .prepare_binaries(&runtime_bin_dir, None)
+            .await?;
+
+        // Validate all guest binaries are present and executable (boot-blocking).
         ensure_guest_binaries(&self.config.data_dir)?;
 
         self.ensure_vm_ready().await?;
