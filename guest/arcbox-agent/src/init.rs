@@ -174,7 +174,10 @@ mod platform {
     }
 
     fn write_etc_resolv_conf() {
-        let content = "nameserver 8.8.8.8\nnameserver 8.8.4.4\n";
+        // Point to the gateway (192.168.64.1) where ArcBox's DNS forwarder runs.
+        // The forwarder resolves using the host's real DNS servers, which handles
+        // corporate/intranet environments correctly (unlike hardcoded 8.8.8.8).
+        let content = "nameserver 192.168.64.1\n";
         if let Err(e) = std::fs::write("/etc/resolv.conf", content) {
             tracing::warn!(error = %e, "failed to write /etc/resolv.conf");
         }
