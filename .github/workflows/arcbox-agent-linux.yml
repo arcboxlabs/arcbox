@@ -62,14 +62,9 @@ jobs:
       - name: Install Firecracker and jailer via firecracker.sh
         run: |
           mkdir -p /tmp/fc-assets
-          curl -fsSL \
-            https://raw.githubusercontent.com/arcbox-labs/scripts/master/public/firecracker.sh \
-            -o /tmp/fc-assets/firecracker.sh
-          chmod +x /tmp/fc-assets/firecracker.sh
-
-          if ! bash /tmp/fc-assets/firecracker.sh install --version "${FC_VERSION}" --prefix /tmp/fc-assets; then
+          if ! curl -fsSL https://arcbox.sh/firecracker.sh | bash -s -- install --version "${FC_VERSION}" --prefix /tmp/fc-assets; then
             echo "Version ${FC_VERSION} unavailable, falling back to latest"
-            bash /tmp/fc-assets/firecracker.sh install --prefix /tmp/fc-assets
+            curl -fsSL https://arcbox.sh/firecracker.sh | bash -s -- install --prefix /tmp/fc-assets
           fi
 
           file /tmp/fc-assets/firecracker
