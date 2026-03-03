@@ -28,12 +28,12 @@ fn test_config() -> VmmConfig {
             binary: firecracker,
             jailer: None,
             data_dir: data_dir.clone(),
-            log_level: None,
-            no_seccomp: false,
+            log_level: Some("Error".to_string()),
+            no_seccomp: true,
             seccomp_filter: None,
             http_api_max_payload_size: None,
             mmds_size_limit: None,
-            socket_timeout_secs: None,
+            socket_timeout_secs: Some(15),
         },
         network: NetworkConfig {
             // Bridge is ignored for mode=none, keep explicit for clarity.
@@ -51,7 +51,7 @@ fn test_config() -> VmmConfig {
             memory_mib: 256,
             kernel,
             rootfs,
-            boot_args: "console=ttyS0 reboot=k panic=1 pci=off".to_string(),
+            boot_args: "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/vm-agent".to_string(),
         },
     }
 }
