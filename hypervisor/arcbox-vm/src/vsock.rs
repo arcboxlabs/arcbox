@@ -30,6 +30,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -96,8 +97,40 @@ pub struct StartCommand {
 // Internal helpers
 // =============================================================================
 
+/// How long to wait for the guest agent to start accepting vsock connections.
+const AGENT_READY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Interval between vsock connection attempts while the guest is still booting.
+const AGENT_READY_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
 /// Open a host-initiated vsock connection to the guest agent.
+///
+/// Retries the `CONNECT` handshake until the guest agent accepts or
+/// [`AGENT_READY_TIMEOUT`] elapses.  Firecracker responds with "connection
+/// closed" when no listener is active on the guest vsock port yet (kernel
+/// still booting / vm-agent not started), so that response is treated as a
+/// transient error and retried.
 async fn connect_to_agent(uds_path: &Path) -> Result<UnixStream> {
+    let deadline = tokio::time::Instant::now() + AGENT_READY_TIMEOUT;
+    loop {
+        match try_vsock_handshake(uds_path).await {
+            Ok(stream) => return Ok(stream),
+            Err(VmmError::Vsock(ref msg)) if msg.contains("connection closed") => {}
+            Err(e) => return Err(e),
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(VmmError::Vsock(format!(
+                "guest agent on {} did not become ready within {}s",
+                uds_path.display(),
+                AGENT_READY_TIMEOUT.as_secs(),
+            )));
+        }
+        tokio::time::sleep(AGENT_READY_POLL_INTERVAL).await;
+    }
+}
+
+/// Single attempt: connect to the Firecracker vsock UDS and complete the
+/// `CONNECT {port}` / `OK` handshake.
+async fn try_vsock_handshake(uds_path: &Path) -> Result<UnixStream> {
     let mut stream = UnixStream::connect(uds_path)
         .await
         .map_err(|e| VmmError::Vsock(format!("connect to {:?}: {e}", uds_path)))?;

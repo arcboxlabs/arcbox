@@ -165,7 +165,7 @@ jobs:
       - name: Download kernel/rootfs assets from S3
         run: |
           BASE="${FC_S3_BASE}/${FC_S3_DIR}/x86_64"
-          curl -sL "$BASE/vmlinux-5.10.223"             -o /tmp/fc-assets/vmlinux
+          curl -sL "$BASE/vmlinux-6.1.102"              -o /tmp/fc-assets/vmlinux
           curl -sL "$BASE/ubuntu-22.04.ext4"            -o /tmp/fc-assets/rootfs-base.ext4
 
       - name: Build vm-agent (Linux x86_64)
