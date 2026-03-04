@@ -24,12 +24,8 @@ use tokio::sync::RwLock as TokioRwLock;
 /// Default guest VM IP address in NAT network (used by PortForwarder fallback).
 #[cfg(not(target_os = "macos"))]
 const DEFAULT_GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 64, 2);
-const REQUIRED_RUNTIME_ASSETS: [&str; 4] = [
-    "dockerd",
-    "containerd",
-    "containerd-shim-runc-v2",
-    "runc",
-];
+const REQUIRED_RUNTIME_ASSETS: [&str; 4] =
+    ["dockerd", "containerd", "containerd-shim-runc-v2", "runc"];
 
 /// Checks that a file exists and has at least one executable permission bit set.
 fn check_executable(path: &Path, context: &str) -> Result<()> {
