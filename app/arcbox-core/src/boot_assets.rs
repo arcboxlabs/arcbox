@@ -33,9 +33,8 @@ struct BootAssetsLock {
     manifest_sha256: Option<String>,
 }
 
-static LOCK: LazyLock<BootAssetsLock> = LazyLock::new(|| {
-    toml::from_str(LOCK_TOML).expect("invalid boot-assets.lock")
-});
+static LOCK: LazyLock<BootAssetsLock> =
+    LazyLock::new(|| toml::from_str(LOCK_TOML).expect("invalid boot-assets.lock"));
 
 /// Default CDN base URL (fallback when lockfile omits `cdn`).
 const DEFAULT_CDN_BASE_URL: &str = "https://boot.arcboxcdn.com";
