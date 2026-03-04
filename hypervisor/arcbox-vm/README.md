@@ -47,7 +47,7 @@ Exposes a `SandboxManager` API and optional gRPC service implementations
 
 | Crate | Type | Purpose |
 |-------|------|---------|
-| `arcbox-vm` | lib + bin | Sandbox orchestration, state, networking, snapshots; gRPC service implementations; ships the `vmm-guest-agent` binary |
+| `arcbox-vm` | lib + bin | Sandbox orchestration, state, networking, snapshots; gRPC service implementations; ships the `vm-agent` binary |
 
 There is no standalone daemon or CLI binary. The gRPC server and direct API usage are demonstrated via the examples described below.
 
@@ -70,7 +70,7 @@ There is no standalone daemon or CLI binary. The gRPC server and direct API usag
 ### Workload Execution (via vsock guest agent)
 - **Run** — execute a command and stream stdout/stderr; sandbox returns to `Ready` on exit
 - **Exec** — interactive session with stdin, stdout/stderr, and TTY resize support
-- Both use the vsock binary frame protocol; the in-guest `vmm-guest-agent` binary (built from `arcbox-vm`) must be present inside the rootfs
+- Both use the vsock binary frame protocol; the in-guest `vm-agent` binary (built from `arcbox-vm`) must be present inside the rootfs
 
 ### Process Options
 - **Direct mode** — Firecracker runs as a normal process; socket and files live under `data_dir/sandboxes/{id}/`
@@ -87,7 +87,7 @@ There is no standalone daemon or CLI binary. The gRPC server and direct API usag
 | RPC | Description |
 |-----|-------------|
 | `Create` | Boot a new sandbox (returns immediately; VM boots async) |
-| `Run` | Execute a command and stream output (requires `vmm-guest-agent` in rootfs) |
+| `Run` | Execute a command and stream output (requires `vm-agent` in rootfs) |
 | `Exec` | Interactive session with stdin/stdout/stderr and TTY support |
 | `Stop` | Stop a running sandbox gracefully |
 | `Remove` | Delete sandbox and release all resources |
@@ -428,9 +428,9 @@ boot_args  = "console=ttyS0 reboot=k panic=1 pci=off"
 cargo build -p arcbox-vm
 ```
 
-### Cross-compile `vmm-guest-agent` to Linux (static)
+### Cross-compile `vm-agent` to Linux (static)
 
-`vmm-guest-agent` targets x86_64 Linux only — Firecracker requires KVM, which
+`vm-agent` targets x86_64 Linux only — Firecracker requires KVM, which
 is not available on ARM64 guests.
 
 The workspace `.cargo/config.toml` sets the musl linker. Install the target
@@ -440,8 +440,8 @@ and toolchain, then build:
 rustup target add x86_64-unknown-linux-musl
 brew install FiloSottile/musl-cross/musl-cross   # macOS
 
-cargo build -p arcbox-vm --bin vmm-guest-agent --target x86_64-unknown-linux-musl --release
-# output: target/x86_64-unknown-linux-musl/release/vmm-guest-agent
+cargo build -p arcbox-vm --bin vm-agent --target x86_64-unknown-linux-musl --release
+# output: target/x86_64-unknown-linux-musl/release/vm-agent
 ```
 
 ### Test
