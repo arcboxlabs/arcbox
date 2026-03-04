@@ -18,8 +18,3 @@ pub const CONTAINERD_SOCKET: &str = "/run/containerd/containerd.sock";
 /// Directory where runtime binaries (containerd, dockerd, runc, …) are
 /// accessed via VirtioFS live execution.
 pub const ARCBOX_RUNTIME_BIN_DIR: &str = "/arcbox/runtime/bin";
-
-/// ArcBox log directory in guest.
-///
-/// Backed by the Btrfs `@logs` subvolume on `/dev/vdb`.
-pub const ARCBOX_LOG_DIR: &str = "/var/log/arcbox";
