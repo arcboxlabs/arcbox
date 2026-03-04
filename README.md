@@ -95,7 +95,7 @@ Other things to be aware of:
 - Cold boot takes a few seconds on first launch. Subsequent container starts are faster.
 - Some advanced Docker API features (swarm, secrets, configs) are not implemented.
 - Error messages may be less polished than Docker Desktop.
-- If you hit a bug, please [open an issue](https://github.com/arcboxd/arcbox/issues).
+- If you hit a bug, please [open an issue](https://github.com/arcboxlabs/arcbox/issues).
 
 ## Performance
 
@@ -131,7 +131,7 @@ If you prefer to build ArcBox yourself:
 
 ```bash
 # Clone
-git clone https://github.com/arcboxd/arcbox.git
+git clone https://github.com/arcboxlabs/arcbox.git
 cd arcbox
 
 # Build
