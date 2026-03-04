@@ -35,14 +35,17 @@ Agent and runtime binaries are distributed via VirtioFS from the host.
 ## CDN Layout
 
 ```
-https://dl.arcbox.dev/boot-assets/
+https://boot.arcboxcdn.com/
 ├── latest.json                     # {"version":"x.y.z"}
-└── v0.2.3/
-    ├── manifest.json               # unified manifest
-    ├── arm64/kernel
-    ├── arm64/rootfs.erofs
-    ├── x86_64/kernel
-    └── x86_64/rootfs.erofs
+├── asset/
+│   └── v0.2.3/
+│       ├── manifest.json           # unified manifest
+│       ├── arm64/kernel
+│       ├── arm64/rootfs.erofs
+│       ├── x86_64/kernel
+│       └── x86_64/rootfs.erofs
+└── bin/
+    └── {name}/{version}/{arch}/{name}
 ```
 
 ## Version Pinning

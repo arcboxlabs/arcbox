@@ -24,7 +24,7 @@ pub use arcbox_boot::manifest::Manifest as BootAssetManifest;
 pub const BOOT_ASSET_VERSION: &str = "0.2.3";
 
 /// Default CDN base URL.
-const DEFAULT_CDN_BASE_URL: &str = "https://dl.arcbox.dev/boot-assets";
+const DEFAULT_CDN_BASE_URL: &str = "https://boot.arcboxcdn.com";
 
 // =============================================================================
 // Configuration
