@@ -6,12 +6,6 @@ pub const DOCKER_DATA_MOUNT_POINT: &str = "/var/lib/docker";
 /// Docker Engine API Unix socket path in guest.
 pub const DOCKER_API_UNIX_SOCKET: &str = "/var/run/docker.sock";
 
-/// containerd persistent root directory.
-///
-/// Colocated under the Docker data mount so it lives on the Btrfs `@docker`
-/// subvolume alongside dockerd state.
-pub const CONTAINERD_ROOT_DIR: &str = "/var/lib/docker/containerd";
-
 /// containerd gRPC socket path in guest.
 pub const CONTAINERD_SOCKET: &str = "/run/containerd/containerd.sock";
 

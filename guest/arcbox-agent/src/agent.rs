@@ -218,8 +218,7 @@ mod linux {
     use arcbox_constants::devices::DOCKER_DATA_BLOCK_DEVICE as DOCKER_DATA_DEVICE_DEFAULT;
     use arcbox_constants::env::GUEST_DOCKER_VSOCK_PORT as GUEST_DOCKER_VSOCK_PORT_ENV;
     use arcbox_constants::paths::{
-        ARCBOX_RUNTIME_BIN_DIR, CONTAINERD_ROOT_DIR, CONTAINERD_SOCKET, DOCKER_API_UNIX_SOCKET,
-        DOCKER_DATA_MOUNT_POINT,
+        ARCBOX_RUNTIME_BIN_DIR, CONTAINERD_SOCKET, DOCKER_API_UNIX_SOCKET, DOCKER_DATA_MOUNT_POINT,
     };
     use arcbox_constants::ports::DOCKER_API_VSOCK_PORT;
     use arcbox_constants::status::{SERVICE_ERROR, SERVICE_NOT_READY, SERVICE_READY};
@@ -280,6 +279,7 @@ mod linux {
     /// Must live on a writable filesystem. `/run` is tmpfs (set up in PID1 init),
     /// while EROFS root is read-only and cannot host dynamic mountpoints.
     const BTRFS_TEMP_MOUNT: &str = "/run/arcbox/data";
+    const CONTAINERD_DATA_MOUNT_POINT: &str = "/var/lib/containerd";
 
     fn has_btrfs_superblock(device: &str) -> bool {
         let mut file = match std::fs::File::open(device) {
@@ -328,13 +328,16 @@ mod linux {
     /// Layout after this function returns:
     /// - `/run/arcbox/data` — raw Btrfs mount (internal, not used by daemons)
     /// - `/var/lib/docker` — bind mount of `@docker` subvolume
+    /// - `/var/lib/containerd` — bind mount of `@containerd` subvolume
     ///
     /// Returns `Ok(notes)` on success or `Err(reason)` if the data volume
     /// could not be set up. Callers must abort runtime startup on error —
     /// running containerd/dockerd without persistent storage is unsafe.
     fn ensure_data_mount() -> Result<String, String> {
         // Already fully set up?
-        if crate::mount::is_mounted(DOCKER_DATA_MOUNT_POINT) {
+        if crate::mount::is_mounted(DOCKER_DATA_MOUNT_POINT)
+            && crate::mount::is_mounted(CONTAINERD_DATA_MOUNT_POINT)
+        {
             return Ok("data subvolumes already mounted".to_string());
         }
 
@@ -380,7 +383,7 @@ mod linux {
         }
 
         // Step 3: Create subvolumes if missing.
-        for subvol in ["@docker"] {
+        for subvol in ["@docker", "@containerd"] {
             let subvol_path = format!("{}/{}", BTRFS_TEMP_MOUNT, subvol);
             if Path::new(&subvol_path).exists() {
                 continue;
@@ -395,7 +398,10 @@ mod linux {
         let mut notes = Vec::new();
 
         // Step 4: Bind mount subvolumes to final paths.
-        for (subvol, target) in [("@docker", DOCKER_DATA_MOUNT_POINT)] {
+        for (subvol, target) in [
+            ("@docker", DOCKER_DATA_MOUNT_POINT),
+            ("@containerd", CONTAINERD_DATA_MOUNT_POINT),
+        ] {
             if crate::mount::is_mounted(target) {
                 continue;
             }
@@ -1098,12 +1104,7 @@ mod linux {
             Err(e) => return format!("data volume setup failed: {}", e),
         }
 
-        for dir in [
-            "/run/containerd",
-            "/var/run/docker",
-            CONTAINERD_ROOT_DIR,
-            "/etc/docker",
-        ] {
+        for dir in ["/run/containerd", "/var/run/docker", "/etc/docker"] {
             if let Err(e) = std::fs::create_dir_all(dir) {
                 notes.push(format!("mkdir {} failed({})", dir, e));
             }
@@ -1142,8 +1143,6 @@ mod linux {
                 containerd_config,
                 "--address",
                 CONTAINERD_SOCKET,
-                "--root",
-                CONTAINERD_ROOT_DIR,
                 "--state",
                 "/run/containerd",
             ])
