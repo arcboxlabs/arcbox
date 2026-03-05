@@ -33,6 +33,3 @@ tempfile.workspace = true
 
 [lints]
 workspace = true
-
-[lints.clippy]
-result_large_err = "allow"

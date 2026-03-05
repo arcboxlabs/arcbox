@@ -947,7 +947,8 @@ impl SandboxManager {
 
             let log_path = vm_dir.join("firecracker.log");
             let metrics_path = vm_dir.join("firecracker.metrics");
-            let proc = spawn_direct(fc_cfg, &new_id, &socket_path, &log_path, &metrics_path).await?;
+            let proc =
+                spawn_direct(fc_cfg, &new_id, &socket_path, &log_path, &metrics_path).await?;
             (proc, original_vsock_path)
         };
 

@@ -478,7 +478,14 @@ impl VmmManager {
 
         let log_path = vm_dir.join("firecracker.log");
         let metrics_path = vm_dir.join("firecracker.metrics");
-        let process = spawn_direct(&self.config.firecracker, &id, &socket_path, &log_path, &metrics_path).await?;
+        let process = spawn_direct(
+            &self.config.firecracker,
+            &id,
+            &socket_path,
+            &log_path,
+            &metrics_path,
+        )
+        .await?;
 
         let snap_dir = PathBuf::from(&spec.snapshot_dir);
         let vmstate_path = snap_dir.join("vmstate").to_str().unwrap().to_owned();
