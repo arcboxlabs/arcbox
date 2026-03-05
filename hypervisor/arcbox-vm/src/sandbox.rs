@@ -376,6 +376,14 @@ impl SandboxManager {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| Uuid::new_v4().to_string());
 
+        // Sanitize caller-supplied IDs: reject path separators and other
+        // dangerous characters to prevent directory traversal.
+        if id.contains('/') || id.contains('\\') || id.contains('\0') || id == "." || id == ".." {
+            return Err(VmmError::Config(format!(
+                "invalid sandbox ID: {id:?} (must not contain path separators)"
+            )));
+        }
+
         // Uniqueness check.
         {
             let instances = self.instances.read().unwrap();
@@ -888,6 +896,17 @@ impl SandboxManager {
             .clone()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+        if new_id.contains('/')
+            || new_id.contains('\\')
+            || new_id.contains('\0')
+            || new_id == "."
+            || new_id == ".."
+        {
+            return Err(VmmError::Config(format!(
+                "invalid sandbox ID: {new_id:?} (must not contain path separators)"
+            )));
+        }
 
         // Uniqueness check.
         {
