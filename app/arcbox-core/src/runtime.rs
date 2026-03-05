@@ -138,9 +138,9 @@ impl Runtime {
 
         let event_bus = EventBus::new();
         let snapshot_dir = config.data_dir.join("snapshots");
-        let vm_manager = Arc::new(VmManager::new(snapshot_dir.clone()));
+        let vm_manager = Arc::new(VmManager::new(snapshot_dir));
         let machine_manager = Arc::new(MachineManager::new(
-            VmManager::new(snapshot_dir),
+            Arc::clone(&vm_manager),
             config.data_dir.clone(),
         ));
 

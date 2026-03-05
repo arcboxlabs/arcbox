@@ -1236,11 +1236,14 @@ impl Vmm {
                         restore_data.memory(),
                     )?;
 
-                    if !restore_data.vcpu_snapshots().is_empty() {
-                        tracing::warn!(
-                            "vCPU register restore is not wired in VcpuManager yet; skipping {} vCPU snapshots",
-                            restore_data.vcpu_snapshots().len()
-                        );
+                    if restore_data
+                        .vcpu_snapshots()
+                        .iter()
+                        .any(|s| !s.is_placeholder())
+                    {
+                        return Err(VmmError::invalid_state(
+                            "vCPU register restore is not yet supported; snapshot contains non-placeholder vCPU state".to_string(),
+                        ));
                     }
 
                     return Ok(());
@@ -1261,11 +1264,14 @@ impl Vmm {
                         restore_data.memory(),
                     )?;
 
-                    if !restore_data.vcpu_snapshots().is_empty() {
-                        tracing::warn!(
-                            "vCPU register restore is not wired in managed execution mode; skipping {} vCPU snapshots",
-                            restore_data.vcpu_snapshots().len()
-                        );
+                    if restore_data
+                        .vcpu_snapshots()
+                        .iter()
+                        .any(|s| !s.is_placeholder())
+                    {
+                        return Err(VmmError::invalid_state(
+                            "vCPU register restore is not yet supported; snapshot contains non-placeholder vCPU state".to_string(),
+                        ));
                     }
 
                     return Ok(());

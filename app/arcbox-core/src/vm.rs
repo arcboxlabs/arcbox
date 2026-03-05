@@ -602,6 +602,8 @@ impl VmManager {
 
     /// Restores a VM from snapshot data.
     ///
+    /// The VM is paused before applying snapshot state and resumed afterwards.
+    ///
     /// # Errors
     ///
     /// Returns an error if snapshot loading fails or VM restore application fails.
@@ -659,7 +661,22 @@ impl VmManager {
             .as_mut()
             .ok_or_else(|| CoreError::Vm("VMM not initialized".to_string()))?;
 
-        vmm.restore_from_snapshot_data(&restore_data)
+        // Pause the VM before applying snapshot state so guest CPUs don't
+        // execute while memory and device state are being overwritten.
+        let was_running = vmm.state() == VmmState::Running;
+        if was_running {
+            vmm.pause()
+                .map_err(|e| CoreError::Vm(format!("failed to pause VM for restore: {e}")))?;
+        }
+
+        let apply_result = vmm.restore_from_snapshot_data(&restore_data);
+
+        if was_running {
+            vmm.resume()
+                .map_err(|e| CoreError::Vm(format!("failed to resume VM after restore: {e}")))?;
+        }
+
+        apply_result
             .map_err(|e| CoreError::Vm(format!("failed to apply snapshot {snapshot_id}: {e}")))
     }
 
@@ -906,16 +923,17 @@ impl VmManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use tempfile::TempDir;
 
-    fn test_vm_manager() -> VmManager {
-        let temp_dir = tempdir().unwrap();
-        VmManager::new(temp_dir.path().join("snapshots"))
+    fn test_vm_manager() -> (VmManager, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = VmManager::new(temp_dir.path().join("snapshots"));
+        (manager, temp_dir)
     }
 
     #[test]
     fn test_set_guest_cid_updates_vm_config() {
-        let manager = test_vm_manager();
+        let (manager, _dir) = test_vm_manager();
         let mut config = VmConfig::default();
         config.guest_cid = None;
 
@@ -927,7 +945,7 @@ mod tests {
 
     #[test]
     fn test_build_vmm_config_includes_guest_cid() {
-        let manager = test_vm_manager();
+        let (manager, _dir) = test_vm_manager();
         let mut config = VmConfig::default();
         config.guest_cid = Some(9);
 
@@ -938,7 +956,7 @@ mod tests {
 
     #[test]
     fn test_start_failure_rolls_back_to_created() {
-        let manager = test_vm_manager();
+        let (manager, _dir) = test_vm_manager();
         let vm_id = manager.create(VmConfig::default()).unwrap();
 
         let _ = manager.start(&vm_id);
