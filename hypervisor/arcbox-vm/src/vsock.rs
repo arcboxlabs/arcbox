@@ -179,6 +179,15 @@ async fn write_frame<W: AsyncWriteExt + Unpin>(
     msg_type: u8,
     payload: &[u8],
 ) -> std::io::Result<()> {
+    if payload.len() > MAX_FRAME_SIZE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "frame payload too large: {} bytes (max {MAX_FRAME_SIZE})",
+                payload.len()
+            ),
+        ));
+    }
     w.write_u8(msg_type).await?;
     w.write_u32_le(payload.len() as u32).await?;
     if !payload.is_empty() {
