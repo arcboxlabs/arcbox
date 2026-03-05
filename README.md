@@ -95,7 +95,7 @@ Other things to be aware of:
 - Cold boot takes a few seconds on first launch. Subsequent container starts are faster.
 - Some advanced Docker API features (swarm, secrets, configs) are not implemented.
 - Error messages may be less polished than Docker Desktop.
-- If you hit a bug, please [open an issue](https://github.com/arcboxd/arcbox/issues).
+- If you hit a bug, please [open an issue](https://github.com/arcboxlabs/arcbox/issues).
 
 ## Performance
 
@@ -121,7 +121,6 @@ hypervisor/      Virtualization.framework bindings, VMM, VirtIO devices
 services/        VirtioFS, networking (NAT/DHCP/DNS), container state, OCI
 comm/            Protobuf definitions, gRPC services, vsock/unix transport
 app/             Core orchestration, API server, Docker Engine API, CLI, daemon
-pro/             Enhanced filesystem, advanced networking, snapshots (BSL-1.1)
 guest/           In-VM agent (cross-compiled for Linux)
 ```
 
@@ -131,7 +130,7 @@ If you prefer to build ArcBox yourself:
 
 ```bash
 # Clone
-git clone https://github.com/arcboxd/arcbox.git
+git clone https://github.com/arcboxlabs/arcbox.git
 cd arcbox
 
 # Build
@@ -186,7 +185,6 @@ We welcome contributions. See [CLAUDE.md](CLAUDE.md) for current contribution an
 ## License
 
 - **Core + Guest** (`common/`, `hypervisor/`, `services/`, `comm/`, `app/`, `guest/`) -- [MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE)
-- **Pro** (`pro/`) -- [BSL-1.1](LICENSE-BSL-1.1) (converts to MIT after 4 years)
 
 See [LICENSE](LICENSE) for the full text.
 

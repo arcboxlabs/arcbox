@@ -1,41 +1,4 @@
-//! # arcbox-snapshot
-//!
-//! Snapshot and restore functionality for ArcBox Pro.
-//!
-//! Features:
-//!
-//! - **VM snapshots**: Full VM state capture
-//! - **Container checkpoints**: CRIU-based container snapshots
-//! - **Incremental snapshots**: Efficient storage
-//! - **Scheduled backups**: Automatic snapshot creation
-//!
-//! ## License
-//!
-//! This crate is licensed under BSL-1.1, which converts to MIT after 2 years.
-
-#![warn(clippy::all, clippy::pedantic, clippy::nursery)]
-#![allow(clippy::module_name_repetitions)]
-// TODO: Remove these allows once the module is complete.
-#![allow(dead_code)]
-#![allow(clippy::doc_markdown)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::must_use_candidate)]
-#![allow(clippy::missing_const_for_fn)]
-#![allow(clippy::uninlined_format_args)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::redundant_else)]
-#![allow(clippy::option_if_let_else)]
-#![allow(clippy::significant_drop_tightening)]
-#![allow(clippy::items_after_statements)]
-#![allow(clippy::unused_async)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::default_trait_access)]
-#![allow(clippy::type_complexity)]
-#![allow(clippy::clone_on_copy)]
-#![allow(clippy::or_fun_call)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::map_unwrap_or)]
+//! Snapshot and restore support for virtual machines and containers.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -148,7 +111,7 @@ impl VmRestoreData {
 
     /// Returns the total memory size.
     #[must_use]
-    pub fn memory_size(&self) -> u64 {
+    pub const fn memory_size(&self) -> u64 {
         self.vm_snapshot.total_memory
     }
 
@@ -160,7 +123,7 @@ impl VmRestoreData {
 
     /// Whether the snapshot was compressed.
     #[must_use]
-    pub fn was_compressed(&self) -> bool {
+    pub const fn was_compressed(&self) -> bool {
         self.vm_snapshot.compressed
     }
 }
@@ -327,6 +290,69 @@ impl SnapshotManager {
         Ok(info)
     }
 
+    /// Creates a VM snapshot using explicit VM state context.
+    ///
+    /// Unlike [`SnapshotManager::create`], this path never falls back to
+    /// placeholder VM state and always writes real snapshot metadata + memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if snapshot creation fails.
+    pub async fn create_vm_with_context(
+        &self,
+        target_id: &str,
+        options: SnapshotCreateOptions,
+        context: VmSnapshotContext,
+    ) -> Result<SnapshotInfo, SnapshotError> {
+        let snapshot_id = generate_snapshot_id();
+        let name = options
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("snapshot-{}", &snapshot_id[..8]));
+
+        tracing::info!(
+            "Creating VM snapshot '{}' ({}) for {} with explicit context",
+            name,
+            snapshot_id,
+            target_id
+        );
+
+        let snapshot_dir = self.base_dir.join(&snapshot_id);
+        fs::create_dir_all(&snapshot_dir)?;
+
+        let mut info = SnapshotInfo {
+            id: snapshot_id.clone(),
+            name: name.clone(),
+            target_id: target_id.to_string(),
+            target_type: SnapshotTargetType::Vm,
+            created: Utc::now(),
+            size: 0,
+            parent: options.parent.clone(),
+            description: options.description.clone(),
+            labels: options.labels.clone(),
+            state: SnapshotState::Creating,
+        };
+
+        self.save_metadata(&info)?;
+        self.capture_vm_snapshot_with_context(&snapshot_dir, target_id, &options, context)
+            .await?;
+
+        info.size = calculate_dir_size(&snapshot_dir);
+        info.state = SnapshotState::Ready;
+        self.save_metadata(&info)?;
+
+        {
+            let mut snapshots = self
+                .snapshots
+                .write()
+                .map_err(|_| SnapshotError::Internal("lock poisoned".to_string()))?;
+            snapshots.insert(snapshot_id, info.clone());
+        }
+
+        tracing::info!("Created VM snapshot '{}' (size: {} bytes)", name, info.size);
+        Ok(info)
+    }
+
     /// Captures VM snapshot data using provided context.
     ///
     /// This is the main entry point for VM snapshots. The caller is responsible
@@ -359,7 +385,7 @@ impl SnapshotManager {
                 .device_snapshots
                 .iter()
                 .map(|d| arcbox_hypervisor::DeviceSnapshot {
-                    device_type: d.device_type.clone(),
+                    device_type: d.device_type,
                     name: d.name.clone(),
                     state: d.state.clone(),
                 })
@@ -1069,7 +1095,7 @@ fn format_size(bytes: u64) -> String {
     } else if bytes >= KB {
         format!("{:.2} KB", bytes as f64 / KB as f64)
     } else {
-        format!("{} bytes", bytes)
+        format!("{bytes} bytes")
     }
 }
 
