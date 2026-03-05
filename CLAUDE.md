@@ -30,7 +30,6 @@ The project is in **alpha**. Breaking changes (internal or user-facing) are acce
 - `services/` — filesystem (VirtioFS), networking (NAT/DHCP/DNS), container state, OCI image/runtime
 - `comm/` — protobuf definitions, gRPC services, vsock/unix transport
 - `app/` — core orchestration, API server, Docker Engine API compat, thin CLI (`arcbox`), daemon binary (`arcbox-daemon`), facade crate
-- `pro/arcbox-snapshot/` — snapshot and restore (BSL-1.1, migrating to core)
 - `guest/` — in-VM agent (cross-compiled for Linux)
 - `tests/` — test resources and fixture build scripts
 
@@ -67,8 +66,7 @@ When asked to plan, the plan must be fully resolved before implementation begins
 
 ## Licensing
 
-- Core + Guest crates: MIT OR Apache-2.0
-- `pro/arcbox-snapshot`: BSL-1.1 (converts to MIT after 4 years; migrating to core)
+- All crates: MIT OR Apache-2.0
 
 ## macOS Development
 
