@@ -228,7 +228,7 @@ impl VmmManager {
             }
         }
 
-        let vm = Arc::new(builder.start().await.map_err(VmmError::Sdk)?);
+        let vm = Arc::new(builder.start().await.map_err(VmmError::from)?);
 
         // Update instance to Running.
         {
@@ -273,7 +273,7 @@ impl VmmManager {
         };
 
         if let Some(vm) = vm_handle {
-            vm.resume().await.map_err(VmmError::Sdk)?;
+            vm.resume().await.map_err(VmmError::from)?;
         }
 
         let instance = self.get_instance(id)?;
@@ -316,7 +316,7 @@ impl VmmManager {
                 unsafe { libc::kill(pid as i32, libc::SIGKILL) };
             }
         } else if let Some(vm) = vm_handle {
-            vm.send_ctrl_alt_del().await.map_err(VmmError::Sdk)?;
+            vm.send_ctrl_alt_del().await.map_err(VmmError::from)?;
         }
 
         let instance = self.get_instance(id)?;
@@ -398,7 +398,7 @@ impl VmmManager {
     /// Pause a running VM.
     pub async fn pause_vm(&self, id: &VmId) -> Result<()> {
         let vm = self.get_vm_handle(id)?;
-        vm.pause().await.map_err(VmmError::Sdk)?;
+        vm.pause().await.map_err(VmmError::from)?;
         self.set_state(id, VmState::Paused)?;
         info!(vm_id = %id, "VM paused");
         Ok(())
@@ -407,7 +407,7 @@ impl VmmManager {
     /// Resume a paused VM.
     pub async fn resume_vm(&self, id: &VmId) -> Result<()> {
         let vm = self.get_vm_handle(id)?;
-        vm.resume().await.map_err(VmmError::Sdk)?;
+        vm.resume().await.map_err(VmmError::from)?;
         self.set_state(id, VmState::Running)?;
         info!(vm_id = %id, "VM resumed");
         Ok(())
@@ -435,12 +435,12 @@ impl VmmManager {
             SnapshotType::Full => {
                 vm.create_snapshot(vmstate_path.to_str().unwrap(), mem_path.to_str().unwrap())
                     .await
-                    .map_err(VmmError::Sdk)?;
+                    .map_err(VmmError::from)?;
             }
             SnapshotType::Diff => {
                 vm.create_diff_snapshot(vmstate_path.to_str().unwrap(), mem_path.to_str().unwrap())
                     .await
-                    .map_err(VmmError::Sdk)?;
+                    .map_err(VmmError::from)?;
             }
         }
 
@@ -516,7 +516,7 @@ impl VmmManager {
         let vm = Arc::new(
             fc_sdk::restore(socket_path.to_str().unwrap(), load_params)
                 .await
-                .map_err(VmmError::Sdk)?,
+                .map_err(VmmError::from)?,
         );
 
         let mut instance = VmInstance::new(
@@ -578,7 +578,9 @@ impl VmmManager {
     /// Adjust the memory balloon target.
     pub async fn update_balloon(&self, id: &VmId, amount_mib: i64) -> Result<()> {
         let vm = self.get_vm_handle(id)?;
-        vm.update_balloon(amount_mib).await.map_err(VmmError::Sdk)?;
+        vm.update_balloon(amount_mib)
+            .await
+            .map_err(VmmError::from)?;
         Ok(())
     }
 
@@ -587,7 +589,7 @@ impl VmmManager {
         let vm = self.get_vm_handle(id)?;
         vm.update_balloon_stats_interval(interval_s)
             .await
-            .map_err(VmmError::Sdk)?;
+            .map_err(VmmError::from)?;
         Ok(())
     }
 
@@ -596,7 +598,7 @@ impl VmmManager {
         let vm = self.get_vm_handle(id)?;
         vm.update_memory_hotplug(Some(size_mib))
             .await
-            .map_err(VmmError::Sdk)?;
+            .map_err(VmmError::from)?;
         Ok(())
     }
 
@@ -618,7 +620,7 @@ impl VmmManager {
             },
         )
         .await
-        .map_err(VmmError::Sdk)?;
+        .map_err(VmmError::from)?;
         Ok(())
     }
 
@@ -640,14 +642,14 @@ impl VmmManager {
             },
         )
         .await
-        .map_err(VmmError::Sdk)?;
+        .map_err(VmmError::from)?;
         Ok(())
     }
 
     /// Flush Firecracker metrics to disk immediately.
     pub async fn flush_metrics(&self, id: &VmId) -> Result<()> {
         let vm = self.get_vm_handle(id)?;
-        vm.flush_metrics().await.map_err(VmmError::Sdk)?;
+        vm.flush_metrics().await.map_err(VmmError::from)?;
         Ok(())
     }
 

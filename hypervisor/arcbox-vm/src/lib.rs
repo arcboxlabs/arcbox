@@ -1,7 +1,4 @@
 //! `arcbox-vm` — sandbox orchestration, state, networking, and checkpoints.
-// fc_sdk::Error is 144 bytes; boxing every call site would add noise without
-// runtime benefit since these are never in hot paths.
-#![allow(clippy::result_large_err)]
 //!
 //! This crate is the heart of the Firecracker VMM daemon.  It exposes:
 //!

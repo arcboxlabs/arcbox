@@ -767,7 +767,7 @@ impl SandboxManager {
         let vm = self.get_vm_handle(sandbox_id)?;
 
         // Pause before snapshotting.
-        vm.pause().await.map_err(VmmError::Sdk)?;
+        vm.pause().await.map_err(VmmError::from)?;
 
         let snapshot_id = Uuid::new_v4().to_string();
 
@@ -805,7 +805,7 @@ impl SandboxManager {
         // Always resume regardless of snapshot success.
         let _ = vm.resume().await;
 
-        snap_result.map_err(VmmError::Sdk)?;
+        snap_result.map_err(VmmError::from)?;
 
         // If jailer mode, move snapshot files from chroot to the catalog dir.
         let (vmstate_path, mem_path) = if let Some(chroot_snap) = chroot_snap_dir_opt {
@@ -1025,7 +1025,7 @@ impl SandboxManager {
         let vm = Arc::new(
             fc_sdk::restore(effective_socket.to_str().unwrap(), load_params)
                 .await
-                .map_err(VmmError::Sdk)?,
+                .map_err(VmmError::from)?,
         );
 
         // Build and register the new sandbox instance.
@@ -1354,7 +1354,7 @@ async fn do_boot(
         vsock_id: None,
     });
 
-    let vm = Arc::new(builder.start().await.map_err(VmmError::Sdk)?);
+    let vm = Arc::new(builder.start().await.map_err(VmmError::from)?);
     Ok((process, vm, vsock_host_path))
 }
 
