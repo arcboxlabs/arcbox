@@ -165,9 +165,9 @@ dependencies = [
 
 [[package]]
 name = "arcbox-boot"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ed93ea8949bfdda7057ace79344c9f900f4b4839322c5cc002da2aa5fa85e1d"
+checksum = "d2f7190d277f647ab40bd9696dfbf75ba6576d2ac7610bd1b78e5d6f4ee5ebab"
 dependencies = [
  "dirs",
  "futures-util",
@@ -1502,7 +1502,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.2",
  "tokio",
  "tower-service",
  "tracing",
@@ -2387,7 +2387,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.2",
  "thiserror",
  "tokio",
  "tracing",
@@ -2424,7 +2424,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.2",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -3785,7 +3785,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
