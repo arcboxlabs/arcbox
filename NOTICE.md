@@ -904,9 +904,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ### Business Source License 1.1
 
 Used by:
-- [arcbox-fs-enhanced 0.0.1-alpha.1](https://github.com/AprilNEA/arcbox)
-- [arcbox-net-advanced 0.0.1-alpha.1](https://github.com/AprilNEA/arcbox)
-- [arcbox-perf 0.0.1-alpha.1](https://github.com/AprilNEA/arcbox)
 - [arcbox-snapshot 0.0.1-alpha.1](https://github.com/AprilNEA/arcbox)
 
 <details>
