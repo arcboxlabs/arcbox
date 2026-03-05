@@ -54,6 +54,9 @@ const MSG_STDOUT: u8 = 0x10;
 const MSG_STDERR: u8 = 0x11;
 const MSG_EXIT: u8 = 0x12;
 
+/// Maximum allowed frame payload size (16 MiB).
+const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
+
 // =============================================================================
 // Public types
 // =============================================================================
@@ -188,6 +191,12 @@ async fn write_frame<W: AsyncWriteExt + Unpin>(
 async fn read_frame<R: AsyncReadExt + Unpin>(r: &mut R) -> std::io::Result<(u8, Vec<u8>)> {
     let msg_type = r.read_u8().await?;
     let len = r.read_u32_le().await? as usize;
+    if len > MAX_FRAME_SIZE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("frame too large: {len} bytes (max {MAX_FRAME_SIZE})"),
+        ));
+    }
     let mut payload = vec![0u8; len];
     if len > 0 {
         r.read_exact(&mut payload).await?;

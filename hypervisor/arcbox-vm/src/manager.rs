@@ -2,10 +2,8 @@ use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
 
 use fc_sdk::VmBuilder;
-use fc_sdk::process::{FirecrackerProcessBuilder, JailerProcessBuilder};
 use fc_sdk::types::{
     Balloon, BootSource, Drive, EntropyDevice, MemoryHotplugConfig, MmdsConfig, NetworkInterface,
     NetworkOverride, PartialDrive, PartialNetworkInterface, SerialDevice, Vsock,
@@ -18,6 +16,7 @@ use crate::error::{Result, VmmError};
 use crate::instance::{VmId, VmInfo, VmInstance, VmMetrics, VmState, VmSummary};
 use crate::network::NetworkManager;
 use crate::snapshot::{SnapshotCatalog, SnapshotInfo};
+use crate::spawn::{spawn_direct, spawn_jailer};
 use crate::store::VmStore;
 
 /// Top-level orchestrator that manages the full lifecycle of multiple VMs.
@@ -113,61 +112,13 @@ impl VmmManager {
         let fc_cfg = &self.config.firecracker;
         let (process, socket_path) = if let Some(ref jc) = fc_cfg.jailer {
             // --- Jailer mode ---
-            let mut jb = JailerProcessBuilder::new(&jc.binary, &fc_cfg.binary, &id, jc.uid, jc.gid);
-            if let Some(ref base) = jc.chroot_base_dir {
-                jb = jb.chroot_base_dir(base);
-            }
-            if let Some(ref ns) = jc.netns {
-                jb = jb.netns(ns);
-            }
-            if jc.new_pid_ns {
-                jb = jb.new_pid_ns(true);
-            }
-            if let Some(ref ver) = jc.cgroup_version {
-                jb = jb.cgroup_version(ver);
-            }
-            if let Some(ref parent) = jc.parent_cgroup {
-                jb = jb.parent_cgroup(parent);
-            }
-            for limit in &jc.resource_limits {
-                jb = jb.resource_limit(limit);
-            }
-            if let Some(secs) = fc_cfg.socket_timeout_secs {
-                jb = jb.socket_timeout(Duration::from_secs(secs));
-            }
-            let sock = jb.socket_path();
-            let proc = jb
-                .spawn()
-                .await
-                .map_err(|e| VmmError::Process(e.to_string()))?;
+            let proc = spawn_jailer(jc, fc_cfg, &id).await?;
+            let sock = proc.socket_path().to_owned();
             (proc, sock)
         } else {
             // --- Direct mode ---
             let sock = vm_dir.join("firecracker.sock");
-            let mut fb = FirecrackerProcessBuilder::new(&fc_cfg.binary, &sock).id(&id);
-            fb = fb.log_path(&log_path).metrics_path(&metrics_path);
-            if let Some(ref level) = fc_cfg.log_level {
-                fb = fb.log_level(level);
-            }
-            if fc_cfg.no_seccomp {
-                fb = fb.no_seccomp(true);
-            }
-            if let Some(ref filter) = fc_cfg.seccomp_filter {
-                fb = fb.seccomp_filter(filter);
-            }
-            if let Some(size) = fc_cfg.http_api_max_payload_size {
-                fb = fb.http_api_max_payload_size(size);
-            }
-            if let Some(size) = fc_cfg.mmds_size_limit {
-                fb = fb.mmds_size_limit(size);
-            }
-            if let Some(secs) = fc_cfg.socket_timeout_secs {
-                fb = fb.socket_timeout(Duration::from_secs(secs));
-            }
-            let proc = fb
-                .spawn()
-                .await
-                .map_err(|e| VmmError::Process(e.to_string()))?;
+            let proc = spawn_direct(fc_cfg, &id, &sock, &log_path, &metrics_path).await?;
             (proc, sock)
         };
 
@@ -525,11 +476,9 @@ impl VmmManager {
             None
         };
 
-        let process = FirecrackerProcessBuilder::new(&self.config.firecracker.binary, &socket_path)
-            .id(&id)
-            .spawn()
-            .await
-            .map_err(|e| VmmError::Process(e.to_string()))?;
+        let log_path = vm_dir.join("firecracker.log");
+        let metrics_path = vm_dir.join("firecracker.metrics");
+        let process = spawn_direct(&self.config.firecracker, &id, &socket_path, &log_path, &metrics_path).await?;
 
         let snap_dir = PathBuf::from(&spec.snapshot_dir);
         let vmstate_path = snap_dir.join("vmstate").to_str().unwrap().to_owned();

@@ -16,7 +16,6 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use fc_sdk::VmBuilder;
-use fc_sdk::process::{FirecrackerProcessBuilder, JailerProcessBuilder};
 use fc_sdk::types::{BootSource, Drive, NetworkInterface, Vsock};
 use nix::unistd::{Gid, Uid, chown};
 use tokio::sync::broadcast;
@@ -27,6 +26,7 @@ use crate::config::VmmConfig;
 use crate::error::{Result, VmmError};
 use crate::network::{NetworkAllocation, NetworkManager};
 use crate::snapshot::SnapshotCatalog;
+use crate::spawn::{spawn_direct, spawn_jailer};
 use crate::vsock::{self, ExecInputMsg, OutputChunk, StartCommand};
 
 /// Unique sandbox identifier (UUID string).
@@ -930,33 +930,7 @@ impl SandboxManager {
             let vsock_path = cr.join("run/firecracker.vsock");
             let _ = std::fs::remove_file(&vsock_path);
 
-            let mut jb =
-                JailerProcessBuilder::new(&jc.binary, &fc_cfg.binary, &new_id, jc.uid, jc.gid);
-            if let Some(ref base_dir) = jc.chroot_base_dir {
-                jb = jb.chroot_base_dir(base_dir);
-            }
-            if let Some(ref ns) = jc.netns {
-                jb = jb.netns(ns);
-            }
-            if jc.new_pid_ns {
-                jb = jb.new_pid_ns(true);
-            }
-            if let Some(ref ver) = jc.cgroup_version {
-                jb = jb.cgroup_version(ver);
-            }
-            if let Some(ref parent) = jc.parent_cgroup {
-                jb = jb.parent_cgroup(parent);
-            }
-            for limit in &jc.resource_limits {
-                jb = jb.resource_limit(limit);
-            }
-            if let Some(secs) = fc_cfg.socket_timeout_secs {
-                jb = jb.socket_timeout(Duration::from_secs(secs));
-            }
-            let proc = jb
-                .spawn()
-                .await
-                .map_err(|e| VmmError::Process(e.to_string()))?;
+            let proc = spawn_jailer(jc, fc_cfg, &new_id).await?;
             (proc, vsock_path)
         } else {
             // Direct mode: the vmstate embeds the original sandbox's full vsock path.
@@ -971,11 +945,9 @@ impl SandboxManager {
             }
             let _ = std::fs::remove_file(&original_vsock_path);
 
-            let proc = FirecrackerProcessBuilder::new(&fc_cfg.binary, &socket_path)
-                .id(&new_id)
-                .spawn()
-                .await
-                .map_err(|e| VmmError::Process(e.to_string()))?;
+            let log_path = vm_dir.join("firecracker.log");
+            let metrics_path = vm_dir.join("firecracker.metrics");
+            let proc = spawn_direct(fc_cfg, &new_id, &socket_path, &log_path, &metrics_path).await?;
             (proc, original_vsock_path)
         };
 
@@ -1300,55 +1272,9 @@ async fn do_boot(
 
     // Spawn the Firecracker process (direct or via Jailer).
     let process = if let Some(ref jc) = fc_cfg.jailer {
-        let mut jb = JailerProcessBuilder::new(&jc.binary, &fc_cfg.binary, id, jc.uid, jc.gid);
-        if let Some(ref base) = jc.chroot_base_dir {
-            jb = jb.chroot_base_dir(base);
-        }
-        if let Some(ref ns) = jc.netns {
-            jb = jb.netns(ns);
-        }
-        if jc.new_pid_ns {
-            jb = jb.new_pid_ns(true);
-        }
-        if let Some(ref ver) = jc.cgroup_version {
-            jb = jb.cgroup_version(ver);
-        }
-        if let Some(ref parent) = jc.parent_cgroup {
-            jb = jb.parent_cgroup(parent);
-        }
-        for limit in &jc.resource_limits {
-            jb = jb.resource_limit(limit);
-        }
-        if let Some(secs) = fc_cfg.socket_timeout_secs {
-            jb = jb.socket_timeout(Duration::from_secs(secs));
-        }
-        jb.spawn()
-            .await
-            .map_err(|e| VmmError::Process(e.to_string()))?
+        spawn_jailer(jc, fc_cfg, id).await?
     } else {
-        let mut fb = FirecrackerProcessBuilder::new(&fc_cfg.binary, &socket_path).id(id);
-        fb = fb.log_path(&log_path).metrics_path(&metrics_path);
-        if let Some(ref level) = fc_cfg.log_level {
-            fb = fb.log_level(level);
-        }
-        if fc_cfg.no_seccomp {
-            fb = fb.no_seccomp(true);
-        }
-        if let Some(ref filter) = fc_cfg.seccomp_filter {
-            fb = fb.seccomp_filter(filter);
-        }
-        if let Some(size) = fc_cfg.http_api_max_payload_size {
-            fb = fb.http_api_max_payload_size(size);
-        }
-        if let Some(size) = fc_cfg.mmds_size_limit {
-            fb = fb.mmds_size_limit(size);
-        }
-        if let Some(secs) = fc_cfg.socket_timeout_secs {
-            fb = fb.socket_timeout(Duration::from_secs(secs));
-        }
-        fb.spawn()
-            .await
-            .map_err(|e| VmmError::Process(e.to_string()))?
+        spawn_direct(fc_cfg, id, &socket_path, &log_path, &metrics_path).await?
     };
 
     // Determine kernel, rootfs, and vsock paths.
@@ -1455,9 +1381,12 @@ async fn remove_sandbox_impl(
         // Kill the Firecracker process.
         if let Some(ref mut proc) = inst.process
             && let Some(pid) = proc.pid()
+            && pid > 0
         {
-            // SAFETY: pid is a valid process ID obtained from the spawned child.
-            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
         }
         // Release network resources.
         if let Some(ref net) = inst.network {

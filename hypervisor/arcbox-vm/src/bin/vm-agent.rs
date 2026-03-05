@@ -56,6 +56,7 @@ mod agent {
     const MSG_STDOUT: u8 = 0x10;
     const MSG_STDERR: u8 = 0x11;
     const MSG_EXIT: u8 = 0x12;
+    const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 
     // -------------------------------------------------------------------------
     // Protocol types
@@ -148,6 +149,12 @@ mod agent {
         let mut len_buf = [0u8; 4];
         r.read_exact(&mut len_buf)?;
         let len = u32::from_le_bytes(len_buf) as usize;
+        if len > MAX_FRAME_SIZE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("frame too large: {len} bytes (max {MAX_FRAME_SIZE})"),
+            ));
+        }
         let mut payload = vec![0u8; len];
         if len > 0 {
             r.read_exact(&mut payload)?;

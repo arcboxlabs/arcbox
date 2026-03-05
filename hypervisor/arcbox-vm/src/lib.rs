@@ -1,8 +1,4 @@
 //! `arcbox-vm` — sandbox orchestration, state, networking, and checkpoints.
-// fc_sdk::Error is 144 bytes due to external library constraints; boxing every
-// call site would add noise without runtime benefit since these are never in
-// hot paths.
-#![allow(clippy::result_large_err)]
 //!
 //! This crate is the heart of the Firecracker VMM daemon.  It exposes:
 //!
@@ -17,6 +13,7 @@ pub mod error;
 pub mod network;
 pub mod sandbox;
 pub mod snapshot;
+pub mod spawn;
 pub mod store;
 pub mod vsock;
 
