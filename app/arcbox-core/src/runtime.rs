@@ -137,9 +137,10 @@ impl Runtime {
             Some(config.container.guest_docker_vsock_port);
 
         let event_bus = EventBus::new();
-        let vm_manager = Arc::new(VmManager::new());
+        let snapshot_dir = config.data_dir.join("snapshots");
+        let vm_manager = Arc::new(VmManager::new(snapshot_dir.clone()));
         let machine_manager = Arc::new(MachineManager::new(
-            VmManager::new(),
+            VmManager::new(snapshot_dir),
             config.data_dir.clone(),
         ));
 

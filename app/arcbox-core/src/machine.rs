@@ -37,7 +37,7 @@ mod tests {
 
     /// Creates a test MachineManager.
     fn test_machine_manager(data_dir: &std::path::Path) -> MachineManager {
-        let vm_manager = VmManager::new();
+        let vm_manager = VmManager::new(data_dir.join("snapshots"));
         MachineManager::new(vm_manager, data_dir.to_path_buf())
     }
 

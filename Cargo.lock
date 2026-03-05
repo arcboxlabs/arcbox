@@ -413,22 +413,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arcbox-snapshot"
-version = "0.0.1-alpha.1"
-dependencies = [
- "arcbox-hypervisor",
- "chrono",
- "lz4_flex",
- "nix 0.29.0",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "arcbox-transport"
 version = "0.0.1-alpha.1"
 dependencies = [
@@ -468,13 +452,18 @@ dependencies = [
  "arcbox-net",
  "arcbox-virtio",
  "bytes",
+ "chrono",
  "futures",
  "libc",
+ "lz4_flex",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

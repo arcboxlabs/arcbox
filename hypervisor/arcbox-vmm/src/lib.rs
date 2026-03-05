@@ -61,6 +61,7 @@ pub mod event;
 pub mod fdt;
 pub mod irq;
 pub mod memory;
+pub mod snapshot;
 pub mod vcpu;
 pub mod vmm;
 
@@ -69,5 +70,9 @@ pub use builder::{VmBuilder, VmInstance};
 pub use device::{DeviceId, DeviceInfo, DeviceManager, DeviceTreeEntry, DeviceType};
 pub use error::{Result, VmmError};
 pub use fdt::{FdtBuilder, FdtConfig};
+pub use snapshot::{
+    SnapshotCreateOptions, SnapshotError, SnapshotInfo, SnapshotManager, SnapshotState,
+    SnapshotTargetType, VmRestoreData, VmSnapshotContext,
+};
 pub use vcpu::{DeviceManagerExitHandler, ExitHandler, VcpuManager};
 pub use vmm::{SharedDirConfig, Vmm, VmmConfig, VmmState};

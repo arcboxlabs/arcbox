@@ -44,11 +44,6 @@ members = [
     # Guest Components (MIT OR Apache-2.0)
     # ============================================
     "guest/arcbox-agent",
-
-    # ============================================
-    # Snapshot (migrating from Pro)
-    # ============================================
-    "pro/arcbox-snapshot",
 ]
 
 # ============================================
@@ -172,8 +167,6 @@ arcbox-api = { version = "0.0.1-alpha.1", path = "app/arcbox-api" }
 arcbox-cli = { version = "0.0.1-alpha.1", path = "app/arcbox-cli" }
 arcbox-agent = { version = "0.0.1-alpha.1", path = "guest/arcbox-agent" }
 arcbox = { version = "0.0.1-alpha.1", path = "app/arcbox" }
-
-arcbox-snapshot = { version = "0.0.1-alpha.1", path = "pro/arcbox-snapshot" }
 
 # Test infrastructure
 tempfile = "3"
