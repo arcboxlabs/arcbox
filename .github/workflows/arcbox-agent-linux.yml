@@ -81,17 +81,17 @@ jobs:
 
       - name: Build binaries
         run: |
-          cargo build -p arcbox-vm --bin vm-agent --release
+          cargo build -p arcbox-vm --bin vmm-guest-agent --release
           cargo test -p arcbox-agent --test sandbox_service_manager --no-run
 
-      - name: Inject vm-agent into rootfs
+      - name: Inject vmm-guest-agent into rootfs
         run: |
           cp /tmp/fc-assets/rootfs-base.ext4 /tmp/fc-assets/rootfs.ext4
           sudo e2fsck -f -y /tmp/fc-assets/rootfs.ext4 || true
           sudo resize2fs /tmp/fc-assets/rootfs.ext4 512M
           mkdir -p /tmp/fc-mnt
           sudo mount -o loop /tmp/fc-assets/rootfs.ext4 /tmp/fc-mnt
-          sudo cp target/release/vm-agent /tmp/fc-mnt/sbin/vm-agent
+          sudo cp target/release/vmm-guest-agent /tmp/fc-mnt/sbin/vm-agent
           sudo chmod +x /tmp/fc-mnt/sbin/vm-agent
           sudo umount /tmp/fc-mnt
 
