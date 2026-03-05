@@ -136,7 +136,7 @@ async fn connect_to_agent(uds_path: &Path) -> Result<UnixStream> {
 async fn try_vsock_handshake(uds_path: &Path) -> Result<UnixStream> {
     let mut stream = UnixStream::connect(uds_path)
         .await
-        .map_err(|e| VmmError::Vsock(format!("connect to {:?}: {e}", uds_path)))?;
+        .map_err(|e| VmmError::Vsock(format!("connect to {}: {e}", uds_path.display())))?;
 
     // Firecracker vsock host-initiated handshake.
     stream
@@ -149,7 +149,7 @@ async fn try_vsock_handshake(uds_path: &Path) -> Result<UnixStream> {
     let mut i = 0usize;
     loop {
         let n = stream
-            .read(&mut buf[i..i + 1])
+            .read(&mut buf[i..=i])
             .await
             .map_err(|e| VmmError::Vsock(format!("vsock handshake read: {e}")))?;
         if n == 0 {

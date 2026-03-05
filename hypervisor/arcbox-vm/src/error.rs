@@ -59,7 +59,6 @@ pub enum VmmError {
 /// Convenience alias.
 pub type Result<T> = std::result::Result<T, VmmError>;
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

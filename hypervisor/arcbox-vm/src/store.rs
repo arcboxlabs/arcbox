@@ -57,7 +57,8 @@ impl VmStore {
             network_json: instance
                 .network
                 .as_ref()
-                .and_then(|n| serde_json::to_string(n).ok()),
+                .map(serde_json::to_string)
+                .transpose()?,
             created_at: instance.created_at.to_rfc3339(),
             started_at: instance.started_at.map(|t| t.to_rfc3339()),
         };
@@ -80,7 +81,7 @@ impl VmStore {
                 match self.load_record_from_dir(&entry.path()) {
                     Ok(r) => records.push(r),
                     Err(e) => {
-                        tracing::warn!(path = %entry.path().display(), error = %e, "skipping corrupt VM record")
+                        tracing::warn!(path = %entry.path().display(), error = %e, "skipping corrupt VM record");
                     }
                 }
             }

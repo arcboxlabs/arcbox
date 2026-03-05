@@ -62,13 +62,13 @@ impl VmmManager {
     pub async fn create_vm(&self, mut spec: VmSpec) -> Result<VmId> {
         // Apply config defaults for fields not supplied by the caller.
         if spec.kernel.is_empty() {
-            spec.kernel = self.config.defaults.kernel.clone();
+            spec.kernel.clone_from(&self.config.defaults.kernel);
         }
         if spec.rootfs.is_empty() {
-            spec.rootfs = self.config.defaults.rootfs.clone();
+            spec.rootfs.clone_from(&self.config.defaults.rootfs);
         }
         if spec.boot_args.is_empty() {
-            spec.boot_args = self.config.defaults.boot_args.clone();
+            spec.boot_args.clone_from(&self.config.defaults.boot_args);
         }
         if spec.vcpus == 0 {
             spec.vcpus = self.config.defaults.vcpus;
@@ -136,7 +136,7 @@ impl VmmManager {
             })
             .machine_config(fc_sdk::types::MachineConfiguration {
                 vcpu_count,
-                mem_size_mib: spec.memory_mib as i64,
+                mem_size_mib: spec.memory_mib.cast_signed(),
                 smt: spec.smt,
                 track_dirty_pages: spec.track_dirty_pages,
                 cpu_template: spec.cpu_template.map(Into::into),
@@ -312,8 +312,11 @@ impl VmmManager {
             if let Some(ref mut process) = inst.process
                 && let Some(pid) = process.pid()
             {
-                // SAFETY: pid is a valid process ID obtained from the spawned child.
-                unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                #[allow(clippy::cast_possible_wrap)]
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid as i32),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
             }
         } else if let Some(vm) = vm_handle {
             vm.send_ctrl_alt_del().await.map_err(VmmError::from)?;

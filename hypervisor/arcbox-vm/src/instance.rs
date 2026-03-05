@@ -29,11 +29,11 @@ pub enum VmState {
 impl std::fmt::Display for VmState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            VmState::Created => write!(f, "created"),
-            VmState::Running => write!(f, "running"),
-            VmState::Paused => write!(f, "paused"),
-            VmState::Stopped => write!(f, "stopped"),
-            VmState::Failed => write!(f, "failed"),
+            Self::Created => write!(f, "created"),
+            Self::Running => write!(f, "running"),
+            Self::Paused => write!(f, "paused"),
+            Self::Stopped => write!(f, "stopped"),
+            Self::Failed => write!(f, "failed"),
         }
     }
 }

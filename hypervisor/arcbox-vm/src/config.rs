@@ -26,7 +26,7 @@ pub struct RateLimitSpec {
 
 impl From<TokenBucketSpec> for fc_sdk::types::TokenBucket {
     fn from(s: TokenBucketSpec) -> Self {
-        fc_sdk::types::TokenBucket {
+        Self {
             size: s.size,
             refill_time: s.refill_time_ms,
             one_time_burst: s.one_time_burst,
@@ -36,7 +36,7 @@ impl From<TokenBucketSpec> for fc_sdk::types::TokenBucket {
 
 impl From<RateLimitSpec> for fc_sdk::types::RateLimiter {
     fn from(s: RateLimitSpec) -> Self {
-        fc_sdk::types::RateLimiter {
+        Self {
             bandwidth: s.bandwidth.map(Into::into),
             ops: s.ops.map(Into::into),
         }
@@ -68,8 +68,8 @@ pub enum CacheType {
 impl From<IoEngine> for fc_sdk::types::DriveIoEngine {
     fn from(e: IoEngine) -> Self {
         match e {
-            IoEngine::Sync => fc_sdk::types::DriveIoEngine::Sync,
-            IoEngine::Async => fc_sdk::types::DriveIoEngine::Async,
+            IoEngine::Sync => Self::Sync,
+            IoEngine::Async => Self::Async,
         }
     }
 }
@@ -77,8 +77,8 @@ impl From<IoEngine> for fc_sdk::types::DriveIoEngine {
 impl From<CacheType> for fc_sdk::types::DriveCacheType {
     fn from(c: CacheType) -> Self {
         match c {
-            CacheType::Unsafe => fc_sdk::types::DriveCacheType::Unsafe,
-            CacheType::Writeback => fc_sdk::types::DriveCacheType::Writeback,
+            CacheType::Unsafe => Self::Unsafe,
+            CacheType::Writeback => Self::Writeback,
         }
     }
 }
@@ -101,12 +101,12 @@ pub enum CpuTemplateSpec {
 impl From<CpuTemplateSpec> for fc_sdk::types::CpuTemplate {
     fn from(t: CpuTemplateSpec) -> Self {
         match t {
-            CpuTemplateSpec::C3 => fc_sdk::types::CpuTemplate::C3,
-            CpuTemplateSpec::T2 => fc_sdk::types::CpuTemplate::T2,
-            CpuTemplateSpec::T2S => fc_sdk::types::CpuTemplate::T2s,
-            CpuTemplateSpec::T2CL => fc_sdk::types::CpuTemplate::T2cl,
-            CpuTemplateSpec::T2A => fc_sdk::types::CpuTemplate::T2a,
-            CpuTemplateSpec::V1N1 => fc_sdk::types::CpuTemplate::V1n1,
+            CpuTemplateSpec::C3 => Self::C3,
+            CpuTemplateSpec::T2 => Self::T2,
+            CpuTemplateSpec::T2S => Self::T2s,
+            CpuTemplateSpec::T2CL => Self::T2cl,
+            CpuTemplateSpec::T2A => Self::T2a,
+            CpuTemplateSpec::V1N1 => Self::V1n1,
         }
     }
 }
@@ -126,7 +126,7 @@ pub enum HugePagesSpec {
 impl From<HugePagesSpec> for fc_sdk::types::MachineConfigurationHugePages {
     fn from(h: HugePagesSpec) -> Self {
         match h {
-            HugePagesSpec::TwoMB => fc_sdk::types::MachineConfigurationHugePages::X2m,
+            HugePagesSpec::TwoMB => Self::X2m,
         }
     }
 }
@@ -218,8 +218,8 @@ pub enum MmdsVersionSpec {
 impl From<MmdsVersionSpec> for fc_sdk::types::MmdsConfigVersion {
     fn from(v: MmdsVersionSpec) -> Self {
         match v {
-            MmdsVersionSpec::V1 => fc_sdk::types::MmdsConfigVersion::V1,
-            MmdsVersionSpec::V2 => fc_sdk::types::MmdsConfigVersion::V2,
+            MmdsVersionSpec::V1 => Self::V1,
+            MmdsVersionSpec::V2 => Self::V2,
         }
     }
 }
