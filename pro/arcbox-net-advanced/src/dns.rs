@@ -616,7 +616,8 @@ fn parse_resource_record(data: &[u8], offset: usize) -> io::Result<(DnsRecord, u
         }
         Some(RecordType::TXT) if !rdata.is_empty() => {
             let txt_len = rdata[0] as usize;
-            let txt = String::from_utf8_lossy(&rdata[1..=txt_len.min(rdata.len() - 1)]).to_string();
+            let end = (1 + txt_len).min(rdata.len());
+            let txt = String::from_utf8_lossy(&rdata[1..end]).to_string();
             DnsRecordData::TXT(txt)
         }
         Some(RecordType::SRV) if rdlength >= 6 => {
@@ -698,5 +699,29 @@ mod tests {
         assert_eq!(RecordType::from_u16(28), Some(RecordType::AAAA));
         assert_eq!(RecordType::from_u16(5), Some(RecordType::CNAME));
         assert_eq!(RecordType::from_u16(999), None);
+    }
+
+    #[test]
+    fn test_txt_record_zero_length() {
+        // A TXT record with a zero-length string (txt_len byte = 0) is valid in DNS
+        // and must not panic. RDATA is just the single length byte [0x00].
+        //
+        // Packet layout:
+        //   0x00              — name: root (1 byte)
+        //   0x00, 0x10        — type: TXT (16)
+        //   0x00, 0x01        — class: IN
+        //   0x00, 0x00, 0x00, 0x00 — TTL: 0
+        //   0x00, 0x01        — RDLENGTH: 1
+        //   0x00              — RDATA: txt_len = 0
+        let packet: Vec<u8> = vec![
+            0x00, 0x00, 0x10, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+        ];
+        let (record, _) =
+            parse_resource_record(&packet, 0).expect("zero-length TXT must parse without panic");
+        assert!(
+            matches!(record.data, DnsRecordData::TXT(ref s) if s.is_empty()),
+            "expected empty TXT string, got {:?}",
+            record.data,
+        );
     }
 }
