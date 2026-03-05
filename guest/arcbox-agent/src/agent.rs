@@ -15,6 +15,7 @@ pub mod ensure_runtime {
 
     pub use arcbox_constants::status::{
         RUNTIME_FAILED as STATUS_FAILED, RUNTIME_REUSED as STATUS_REUSED,
+        RUNTIME_STARTED as STATUS_STARTED,
     };
     use arcbox_protocol::agent::RuntimeEnsureResponse;
     use tokio::sync::{Mutex, Notify};
@@ -204,7 +205,7 @@ mod linux {
     use std::time::Duration;
 
     use anyhow::{Context, Result};
-    use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+    use tokio::io::{AsyncRead, AsyncWrite};
     use tokio::net::UnixStream;
     use tokio::process::Command;
     use tokio::sync::Mutex;
@@ -223,7 +224,8 @@ mod linux {
     use arcbox_constants::devices::DOCKER_DATA_BLOCK_DEVICE as DOCKER_DATA_DEVICE_DEFAULT;
     use arcbox_constants::env::GUEST_DOCKER_VSOCK_PORT as GUEST_DOCKER_VSOCK_PORT_ENV;
     use arcbox_constants::paths::{
-        ARCBOX_RUNTIME_BIN_DIR, CONTAINERD_SOCKET, DOCKER_API_UNIX_SOCKET, DOCKER_DATA_MOUNT_POINT,
+        ARCBOX_RUNTIME_BIN_DIR, CONTAINERD_DATA_MOUNT_POINT, CONTAINERD_SOCKET,
+        DOCKER_API_UNIX_SOCKET, DOCKER_DATA_MOUNT_POINT,
     };
     use arcbox_constants::ports::DOCKER_API_VSOCK_PORT;
     use arcbox_constants::status::{SERVICE_ERROR, SERVICE_NOT_READY, SERVICE_READY};
