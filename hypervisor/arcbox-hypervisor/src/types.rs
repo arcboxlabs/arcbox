@@ -380,6 +380,18 @@ impl VcpuSnapshot {
             extra_state: Vec::new(),
         }
     }
+
+    /// Returns `true` if this snapshot contains only default (zeroed) register
+    /// state, i.e. it was created as a placeholder and does not represent real
+    /// captured vCPU registers.
+    #[must_use]
+    pub fn is_placeholder(&self) -> bool {
+        match (&self.x86_regs, &self.arm64_regs) {
+            (Some(regs), _) => regs.rip == 0 && regs.rsp == 0 && regs.rflags == 0,
+            (_, Some(regs)) => regs.pc == 0 && regs.sp == 0 && regs.pstate == 0,
+            (None, None) => true,
+        }
+    }
 }
 
 /// Device snapshot state.

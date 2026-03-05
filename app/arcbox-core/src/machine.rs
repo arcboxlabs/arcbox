@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 /// Machine state.
@@ -37,7 +37,7 @@ mod tests {
 
     /// Creates a test MachineManager.
     fn test_machine_manager(data_dir: &std::path::Path) -> MachineManager {
-        let vm_manager = VmManager::new();
+        let vm_manager = Arc::new(VmManager::new(data_dir.join("snapshots")));
         MachineManager::new(vm_manager, data_dir.to_path_buf())
     }
 
@@ -200,7 +200,7 @@ impl Default for MachineConfig {
 /// Machine manager.
 pub struct MachineManager {
     machines: RwLock<HashMap<String, MachineInfo>>,
-    vm_manager: VmManager,
+    vm_manager: Arc<VmManager>,
     persistence: MachinePersistence,
     /// Data directory for `VirtioFS` sharing.
     data_dir: PathBuf,
@@ -211,7 +211,7 @@ pub struct MachineManager {
 impl MachineManager {
     /// Creates a new machine manager.
     #[must_use]
-    pub fn new(vm_manager: VmManager, data_dir: PathBuf) -> Self {
+    pub fn new(vm_manager: Arc<VmManager>, data_dir: PathBuf) -> Self {
         let machines_dir = data_dir.join("machines");
         let persistence = MachinePersistence::new(&machines_dir);
 
@@ -543,7 +543,7 @@ impl MachineManager {
 
     /// Returns a reference to the underlying VM manager.
     #[must_use]
-    pub const fn vm_manager(&self) -> &VmManager {
+    pub fn vm_manager(&self) -> &VmManager {
         &self.vm_manager
     }
 

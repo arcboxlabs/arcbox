@@ -329,16 +329,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arcbox-fs-enhanced"
-version = "0.0.1-alpha.1"
-dependencies = [
- "arcbox-fs",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "arcbox-grpc"
 version = "0.0.1-alpha.1"
 dependencies = [
@@ -395,16 +385,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arcbox-net-advanced"
-version = "0.0.1-alpha.1"
-dependencies = [
- "arcbox-net",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "arcbox-oci"
 version = "0.0.1-alpha.1"
 dependencies = [
@@ -420,18 +400,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arcbox-perf"
-version = "0.0.1-alpha.1"
-dependencies = [
- "chrono",
- "libc",
- "serde",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "arcbox-protocol"
 version = "0.0.1-alpha.1"
 dependencies = [
@@ -442,22 +410,6 @@ dependencies = [
  "thiserror",
  "tonic",
  "tonic-build",
-]
-
-[[package]]
-name = "arcbox-snapshot"
-version = "0.0.1-alpha.1"
-dependencies = [
- "arcbox-hypervisor",
- "chrono",
- "lz4_flex",
- "nix 0.29.0",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -500,13 +452,18 @@ dependencies = [
  "arcbox-net",
  "arcbox-virtio",
  "bytes",
+ "chrono",
  "futures",
  "libc",
+ "lz4_flex",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -44,14 +44,6 @@ members = [
     # Guest Components (MIT OR Apache-2.0)
     # ============================================
     "guest/arcbox-agent",
-
-    # ============================================
-    # Pro Layer (BSL-1.1)
-    # ============================================
-    "pro/arcbox-fs-enhanced",
-    "pro/arcbox-net-advanced",
-    "pro/arcbox-snapshot",
-    "pro/arcbox-perf",
 ]
 
 # ============================================
@@ -175,12 +167,6 @@ arcbox-api = { version = "0.0.1-alpha.1", path = "app/arcbox-api" }
 arcbox-cli = { version = "0.0.1-alpha.1", path = "app/arcbox-cli" }
 arcbox-agent = { version = "0.0.1-alpha.1", path = "guest/arcbox-agent" }
 arcbox = { version = "0.0.1-alpha.1", path = "app/arcbox" }
-
-# Internal crates (Pro layer)
-arcbox-fs-enhanced = { version = "0.0.1-alpha.1", path = "pro/arcbox-fs-enhanced" }
-arcbox-net-advanced = { version = "0.0.1-alpha.1", path = "pro/arcbox-net-advanced" }
-arcbox-snapshot = { version = "0.0.1-alpha.1", path = "pro/arcbox-snapshot" }
-arcbox-perf = { version = "0.0.1-alpha.1", path = "pro/arcbox-perf" }
 
 # Test infrastructure
 tempfile = "3"

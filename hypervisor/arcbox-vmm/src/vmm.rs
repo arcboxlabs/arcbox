@@ -1078,6 +1078,212 @@ impl Vmm {
         }
     }
 
+    /// Captures a VM snapshot context from the running hypervisor VM.
+    ///
+    /// The returned context contains device state and full guest memory.
+    /// vCPU register snapshots are currently placeholder values based on
+    /// configured vCPU count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if VM state is not snapshotable or VM handles are missing.
+    pub fn capture_snapshot_context(&self) -> Result<crate::snapshot::VmSnapshotContext> {
+        if self.state != VmmState::Running && self.state != VmmState::Paused {
+            return Err(VmmError::invalid_state(format!(
+                "cannot capture snapshot from state {:?}",
+                self.state
+            )));
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            use arcbox_hypervisor::linux::KvmVm;
+            use arcbox_hypervisor::traits::{GuestMemory, VirtualMachine};
+
+            if let Some(managed_vm) = self.managed_vm.as_ref() {
+                if let Some(vm_arc) = managed_vm.downcast_ref::<Arc<std::sync::Mutex<KvmVm>>>() {
+                    let vm = vm_arc.lock().map_err(|_| {
+                        VmmError::Device("failed to lock Linux VM for snapshot".to_string())
+                    })?;
+
+                    let device_snapshots = vm.snapshot_devices()?;
+                    let memory_size = vm.memory().size();
+                    let memory_len = usize::try_from(memory_size).map_err(|_| {
+                        VmmError::Memory(format!(
+                            "guest memory size {} does not fit in usize",
+                            memory_size
+                        ))
+                    })?;
+
+                    let mut memory = vec![0u8; memory_len];
+                    vm.memory().dump_all(&mut memory)?;
+
+                    let memory_len = memory.len();
+                    let memory_reader = Box::new(move |buf: &mut [u8]| {
+                        if buf.len() != memory_len {
+                            return Err(crate::snapshot::SnapshotError::Internal(format!(
+                                "snapshot buffer size mismatch: expected {}, got {}",
+                                memory_len,
+                                buf.len()
+                            )));
+                        }
+                        buf.copy_from_slice(&memory);
+                        Ok(())
+                    });
+
+                    return Ok(crate::snapshot::VmSnapshotContext {
+                        vcpu_snapshots: placeholder_vcpu_snapshots(self.config.vcpu_count),
+                        device_snapshots,
+                        memory_size,
+                        memory_reader,
+                    });
+                }
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            use arcbox_hypervisor::darwin::DarwinVm;
+            use arcbox_hypervisor::traits::{GuestMemory, VirtualMachine};
+
+            if let Some(managed_vm) = self.managed_vm.as_ref() {
+                if let Some(vm) = managed_vm.downcast_ref::<DarwinVm>() {
+                    let device_snapshots = vm.snapshot_devices()?;
+                    let memory_size = vm.memory().size();
+                    let memory_len = usize::try_from(memory_size).map_err(|_| {
+                        VmmError::Memory(format!(
+                            "guest memory size {} does not fit in usize",
+                            memory_size
+                        ))
+                    })?;
+
+                    let mut memory = vec![0u8; memory_len];
+                    vm.memory().dump_all(&mut memory)?;
+
+                    let memory_len = memory.len();
+                    let memory_reader = Box::new(move |buf: &mut [u8]| {
+                        if buf.len() != memory_len {
+                            return Err(crate::snapshot::SnapshotError::Internal(format!(
+                                "snapshot buffer size mismatch: expected {}, got {}",
+                                memory_len,
+                                buf.len()
+                            )));
+                        }
+                        buf.copy_from_slice(&memory);
+                        Ok(())
+                    });
+
+                    return Ok(crate::snapshot::VmSnapshotContext {
+                        vcpu_snapshots: placeholder_vcpu_snapshots(self.config.vcpu_count),
+                        device_snapshots,
+                        memory_size,
+                        memory_reader,
+                    });
+                }
+            }
+        }
+
+        Err(VmmError::invalid_state(
+            "hypervisor VM handle is unavailable for snapshot".to_string(),
+        ))
+    }
+
+    /// Applies restored device + memory state to the running VM.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if restore cannot be applied.
+    pub fn restore_from_snapshot_data(
+        &mut self,
+        restore_data: &crate::snapshot::VmRestoreData,
+    ) -> Result<()> {
+        if self.state != VmmState::Running && self.state != VmmState::Paused {
+            return Err(VmmError::invalid_state(format!(
+                "cannot restore snapshot from state {:?}",
+                self.state
+            )));
+        }
+
+        let expected_memory_len = usize::try_from(restore_data.memory_size()).map_err(|_| {
+            VmmError::Memory(format!(
+                "snapshot memory size {} does not fit in usize",
+                restore_data.memory_size()
+            ))
+        })?;
+
+        if restore_data.memory().len() != expected_memory_len {
+            return Err(VmmError::Memory(format!(
+                "snapshot memory length mismatch: expected {}, got {}",
+                expected_memory_len,
+                restore_data.memory().len()
+            )));
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            use arcbox_hypervisor::linux::KvmVm;
+            use arcbox_hypervisor::traits::{GuestMemory, VirtualMachine};
+
+            if let Some(managed_vm) = self.managed_vm.as_ref() {
+                if let Some(vm_arc) = managed_vm.downcast_ref::<Arc<std::sync::Mutex<KvmVm>>>() {
+                    let mut vm = vm_arc.lock().map_err(|_| {
+                        VmmError::Device("failed to lock Linux VM for restore".to_string())
+                    })?;
+
+                    vm.restore_devices(restore_data.device_snapshots())?;
+                    vm.memory().write(
+                        arcbox_hypervisor::GuestAddress::new(0),
+                        restore_data.memory(),
+                    )?;
+
+                    if restore_data
+                        .vcpu_snapshots()
+                        .iter()
+                        .any(|s| !s.is_placeholder())
+                    {
+                        return Err(VmmError::invalid_state(
+                            "vCPU register restore is not yet supported; snapshot contains non-placeholder vCPU state".to_string(),
+                        ));
+                    }
+
+                    return Ok(());
+                }
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            use arcbox_hypervisor::darwin::DarwinVm;
+            use arcbox_hypervisor::traits::{GuestMemory, VirtualMachine};
+
+            if let Some(managed_vm) = self.managed_vm.as_mut() {
+                if let Some(vm) = managed_vm.downcast_mut::<DarwinVm>() {
+                    vm.restore_devices(restore_data.device_snapshots())?;
+                    vm.memory().write(
+                        arcbox_hypervisor::GuestAddress::new(0),
+                        restore_data.memory(),
+                    )?;
+
+                    if restore_data
+                        .vcpu_snapshots()
+                        .iter()
+                        .any(|s| !s.is_placeholder())
+                    {
+                        return Err(VmmError::invalid_state(
+                            "vCPU register restore is not yet supported; snapshot contains non-placeholder vCPU state".to_string(),
+                        ));
+                    }
+
+                    return Ok(());
+                }
+            }
+        }
+
+        Err(VmmError::invalid_state(
+            "hypervisor VM handle is unavailable for restore".to_string(),
+        ))
+    }
+
     /// Connects to a vsock port on the guest VM.
     ///
     /// On Linux, this creates a direct AF_VSOCK connection to the guest CID.
@@ -1547,6 +1753,32 @@ fn write_fdt_to_guest(
     );
 
     Ok(())
+}
+
+fn placeholder_vcpu_snapshots(vcpu_count: u32) -> Vec<arcbox_hypervisor::VcpuSnapshot> {
+    #[cfg(target_arch = "aarch64")]
+    {
+        (0..vcpu_count)
+            .map(|id| {
+                arcbox_hypervisor::VcpuSnapshot::new_arm64(
+                    id,
+                    arcbox_hypervisor::Arm64Registers::default(),
+                )
+            })
+            .collect()
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        (0..vcpu_count)
+            .map(|id| {
+                arcbox_hypervisor::VcpuSnapshot::new_x86(
+                    id,
+                    arcbox_hypervisor::Registers::default(),
+                )
+            })
+            .collect()
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
