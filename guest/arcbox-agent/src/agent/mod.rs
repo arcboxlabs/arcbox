@@ -226,8 +226,21 @@ mod linux {
         }
 
         let device = docker_data_device();
-        if !Path::new(&device).exists() {
-            return Err(format!("data device missing: {}", device));
+
+        // Wait for the VirtIO block device to appear. The kernel may need a
+        // moment to probe and register the device after boot.
+        {
+            let mut attempts = 0;
+            while !Path::new(&device).exists() {
+                attempts += 1;
+                if attempts > 50 {
+                    return Err(format!("data device {} not available after 5 s", device));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            if attempts > 0 {
+                tracing::info!(device, attempts, "waited for data device");
+            }
         }
 
         // Step 1: Format if not Btrfs.
@@ -265,6 +278,13 @@ mod linux {
                 Err(e) => return Err(format!("mount exec failed: {}", e)),
             }
         }
+
+        // Step 2.5: Grow the Btrfs filesystem to fill the (possibly resized)
+        // block device. The host sparse image may have grown since the last
+        // boot (e.g. 64 GiB → 8 TiB upgrade). `BTRFS_IOC_RESIZE` with "max"
+        // is a no-op when the FS already fills the device, so this is safe to
+        // run unconditionally.
+        btrfs_resize_max(BTRFS_TEMP_MOUNT);
 
         // Step 3: Create subvolumes if missing.
         for subvol in ["@docker", "@containerd", "@k3s", "@kubelet", "@cni"] {
@@ -401,6 +421,39 @@ mod linux {
     #[cfg(target_os = "linux")]
     nix::ioctl_write_ptr!(btrfs_ioc_subvol_create, 0x94, 14, [u8; 4096]);
 
+    // BTRFS_IOC_RESIZE = _IOW(0x94, 3, struct btrfs_ioctl_vol_args)
+    #[cfg(target_os = "linux")]
+    nix::ioctl_write_ptr!(btrfs_ioc_resize, 0x94, 3, [u8; 4096]);
+
+    /// Grows the Btrfs filesystem on `mount_point` to fill the underlying
+    /// block device. Uses `BTRFS_IOC_RESIZE` with `"max"` — this is a no-op
+    /// when the FS already occupies the full device.
+    #[cfg(target_os = "linux")]
+    fn btrfs_resize_max(mount_point: &str) {
+        use std::os::unix::io::AsRawFd;
+
+        let dir = match std::fs::File::open(mount_point) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!(mount_point, error = %e, "cannot open for btrfs resize");
+                return;
+            }
+        };
+
+        // struct btrfs_ioctl_vol_args: 8 bytes fd (devid, 1 = default) + 4088 bytes name.
+        // For resize, fd=1 (device id), name="max\0".
+        let mut args = [0u8; 4096];
+        args[0] = 1; // devid = 1 (little-endian i64)
+        let resize_str = b"max";
+        args[8..8 + resize_str.len()].copy_from_slice(resize_str);
+
+        // SAFETY: valid fd from File::open, args buffer matches kernel struct layout.
+        match unsafe { btrfs_ioc_resize(dir.as_raw_fd(), &args) } {
+            Ok(_) => tracing::info!(mount_point, "btrfs resize max succeeded"),
+            Err(e) => tracing::warn!(mount_point, error = %e, "btrfs resize max failed"),
+        }
+    }
+
     /// Creates a Btrfs subvolume using the `BTRFS_IOC_SUBVOL_CREATE` ioctl.
     ///
     /// This avoids needing the full `btrfs-progs` CLI in the EROFS rootfs.
@@ -442,6 +495,9 @@ mod linux {
     fn btrfs_create_subvolume(_path: &str) -> Result<(), String> {
         Err("Btrfs subvolume creation is only supported on Linux".to_string())
     }
+
+    #[cfg(not(target_os = "linux"))]
+    fn btrfs_resize_max(_mount_point: &str) {}
 
     /// Result from handling a request.
     enum RequestResult {
