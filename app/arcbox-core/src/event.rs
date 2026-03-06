@@ -11,7 +11,7 @@ pub enum Event {
     VmStopped { id: String },
     /// Machine created.
     MachineCreated { name: String },
-    /// Machine started.
+    /// Machine boot completed and the guest is ready.
     MachineStarted { name: String },
     /// Machine stopped.
     MachineStopped { name: String },

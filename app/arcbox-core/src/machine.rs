@@ -6,6 +6,7 @@
 use crate::error::{CoreError, Result};
 use crate::persistence::MachinePersistence;
 use crate::vm::{SharedDirConfig, VmConfig, VmId, VmManager};
+use crate::vm_lifecycle::DEFAULT_MACHINE_NAME;
 use arcbox_constants::ports::AGENT_PORT;
 use arcbox_constants::virtiofs::{MOUNT_USERS, TAG_ARCBOX, TAG_USERS};
 use chrono::{DateTime, Utc};
@@ -118,6 +119,29 @@ mod tests {
             "2001:db8::42".to_string(),
         ];
         assert_eq!(select_routable_ip(&ips), Some("2001:db8::42".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_start_failure_restores_created_state() {
+        let temp_dir = tempdir().unwrap();
+        let machine_manager = test_machine_manager(temp_dir.path());
+
+        let name = machine_manager
+            .create(MachineConfig {
+                name: "broken-start".to_string(),
+                kernel: Some("/definitely/missing/kernel".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let err = machine_manager.start(&name).await.unwrap_err();
+        assert!(err.to_string().contains("kernel not found"));
+
+        let machine = machine_manager.get(&name).unwrap();
+        assert_eq!(machine.state, MachineState::Created);
+        assert_eq!(machine.cid, None);
+        assert_eq!(machine.ip_address, None);
     }
 }
 
@@ -358,54 +382,73 @@ impl MachineManager {
     /// Starts a machine.
     ///
     /// For machine VMs with a distro, this also waits for the guest agent to
-    /// become ready and discovers the guest IP address via vsock.
+    /// become ready and discovers the guest IP address via vsock. The internal
+    /// default machine remains in `Starting` until `VmLifecycleManager`
+    /// completes its separate guest-readiness check.
     ///
     /// # Errors
     ///
     /// Returns an error if the machine cannot be started.
     pub async fn start(&self, name: &str) -> Result<()> {
-        let (vm_id, cid) = self.assign_cid_for_start(name)?;
-
-        // Check if this is a distro-based machine VM.
-        let is_machine_vm = self
-            .machines
-            .read()
-            .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?
-            .get(name)
-            .and_then(|m| m.distro.as_ref())
-            .is_some();
-
-        // Start underlying VM
-        self.vm_manager.start(&vm_id)?;
-
-        // Update machine state
-        {
-            let mut machines = self
+        let (vm_id, cid, previous_state, wait_for_guest_ready) = {
+            let machines = self
                 .machines
-                .write()
+                .read()
                 .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
 
-            if let Some(machine) = machines.get_mut(name) {
-                machine.state = MachineState::Running;
-                machine.cid = Some(cid);
-                machine.ip_address = None;
+            let machine = machines
+                .get(name)
+                .ok_or_else(|| CoreError::not_found(name.to_string()))?;
 
-                tracing::info!("Machine '{}' started with CID {}", name, cid);
-            }
+            (
+                machine.vm_id.clone(),
+                self.assign_cid_for_start_locked(&machines, name)?,
+                machine.state,
+                machine.distro.is_some() || machine.name == DEFAULT_MACHINE_NAME,
+            )
+        };
+
+        self.update_machine_runtime_state(name, MachineState::Starting, Some(cid), None)?;
+
+        // Start underlying VM
+        if let Err(e) = self.vm_manager.start(&vm_id) {
+            let _ = self.update_machine_runtime_state(name, previous_state, None, None);
+            return Err(e);
         }
 
-        // Update persisted state
-        let _ = self.persistence.update_state(name, MachineState::Running);
-        let _ = self.persistence.update_ip(name, None);
+        if !wait_for_guest_ready {
+            self.mark_running(name, None)?;
+            tracing::info!("Machine '{}' started with CID {}", name, cid);
+            return Ok(());
+        }
 
-        // For machine VMs, wait for agent readiness and discover IP.
-        if is_machine_vm {
-            self.wait_for_machine_ready(name).await.map_err(|e| {
-                CoreError::Machine(format!(
+        if name == DEFAULT_MACHINE_NAME {
+            tracing::info!(
+                "Machine '{}' hypervisor booted with CID {}, waiting for guest readiness",
+                name,
+                cid
+            );
+            return Ok(());
+        }
+
+        let ip = match self.wait_for_machine_ready(name).await {
+            Ok(ip) => ip,
+            Err(e) => {
+                if let Err(stop_err) = self.stop(name) {
+                    tracing::warn!(
+                        machine = name,
+                        error = %stop_err,
+                        "failed to stop machine after readiness failure"
+                    );
+                }
+                return Err(CoreError::Machine(format!(
                     "Machine '{name}' started but readiness check failed: {e}"
-                ))
-            })?;
-        }
+                )));
+            }
+        };
+
+        self.mark_running(name, Some(ip.clone()))?;
+        tracing::info!("Machine '{}' ready with CID {} and IP {}", name, cid, ip);
 
         Ok(())
     }
@@ -414,7 +457,7 @@ impl MachineManager {
     ///
     /// Polls the agent via vsock with exponential backoff. Once the agent
     /// responds, queries `SystemInfo` to get the guest IP.
-    async fn wait_for_machine_ready(&self, name: &str) -> Result<()> {
+    async fn wait_for_machine_ready(&self, name: &str) -> Result<String> {
         const MAX_ATTEMPTS: u32 = 20;
         const INITIAL_DELAY_MS: u64 = 500;
         const MAX_DELAY_MS: u64 = 3000;
@@ -427,7 +470,7 @@ impl MachineManager {
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
 
             // Try to connect and ping.
-            match self.connect_agent(name) {
+            match self.connect_agent_boot(name) {
                 Ok(mut agent) => match agent.ping().await {
                     Ok(resp) => {
                         tracing::debug!(
@@ -440,23 +483,13 @@ impl MachineManager {
                         match agent.get_system_info().await {
                             Ok(info) => {
                                 if let Some(ip) = select_routable_ip(&info.ip_addresses) {
-                                    {
-                                        let mut machines = self.machines.write().map_err(|_| {
-                                            CoreError::Machine("lock poisoned".to_string())
-                                        })?;
-                                        if let Some(machine) = machines.get_mut(name) {
-                                            machine.ip_address = Some(ip.clone());
-                                        }
-                                    }
-                                    let _ = self.persistence.update_ip(name, Some(&ip));
-
                                     tracing::info!(
                                         "Machine '{}' ready with IP {} (attempt {})",
                                         name,
                                         ip,
                                         attempt
                                     );
-                                    return Ok(());
+                                    return Ok(ip);
                                 }
 
                                 tracing::trace!(
@@ -503,42 +536,118 @@ impl MachineManager {
         )))
     }
 
+    #[cfg(test)]
     fn assign_cid_for_start(&self, name: &str) -> Result<(VmId, u32)> {
-        let (vm_id, running_count) = {
-            let machines = self
+        let machines = self
+            .machines
+            .read()
+            .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
+        let vm_id = machines
+            .get(name)
+            .ok_or_else(|| CoreError::not_found(name.to_string()))?
+            .vm_id
+            .clone();
+        let cid = self.assign_cid_for_start_locked(&machines, name)?;
+        Ok((vm_id, cid))
+    }
+
+    fn assign_cid_for_start_locked(
+        &self,
+        machines: &HashMap<String, MachineInfo>,
+        name: &str,
+    ) -> Result<u32> {
+        let machine = machines
+            .get(name)
+            .ok_or_else(|| CoreError::not_found(name.to_string()))?;
+
+        if machine.state == MachineState::Running {
+            return Err(CoreError::invalid_state(format!(
+                "machine '{name}' is already running"
+            )));
+        }
+
+        if machine.state == MachineState::Starting || machine.state == MachineState::Stopping {
+            return Err(CoreError::invalid_state(format!(
+                "machine '{name}' is in transition state"
+            )));
+        }
+
+        // Count machines with an assigned CID that are either actively running
+        // or in the middle of a boot sequence to avoid CID reuse races.
+        let active_count = machines
+            .values()
+            .filter(|m| {
+                matches!(m.state, MachineState::Starting | MachineState::Running) && m.cid.is_some()
+            })
+            .count() as u32;
+
+        let cid = 3 + active_count;
+        self.vm_manager.set_guest_cid(&machine.vm_id, cid)?;
+        Ok(cid)
+    }
+
+    fn update_machine_runtime_state(
+        &self,
+        name: &str,
+        state: MachineState,
+        cid: Option<u32>,
+        ip_address: Option<String>,
+    ) -> Result<()> {
+        {
+            let mut machines = self
                 .machines
-                .read()
+                .write()
                 .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
 
             let machine = machines
-                .get(name)
+                .get_mut(name)
                 .ok_or_else(|| CoreError::not_found(name.to_string()))?;
+            machine.state = state;
+            machine.cid = cid;
+            machine.ip_address = ip_address.clone();
+        }
 
-            if machine.state == MachineState::Running {
-                return Err(CoreError::invalid_state(format!(
-                    "machine '{name}' is already running"
-                )));
-            }
+        if let Err(e) = self.persistence.update_state(name, state) {
+            tracing::warn!(machine = name, error = %e, "failed to persist machine state");
+        }
+        if let Err(e) = self.persistence.update_ip(name, ip_address.as_deref()) {
+            tracing::warn!(machine = name, error = %e, "failed to persist machine IP");
+        }
 
-            if machine.state == MachineState::Starting || machine.state == MachineState::Stopping {
-                return Err(CoreError::invalid_state(format!(
-                    "machine '{name}' is in transition state"
-                )));
-            }
+        Ok(())
+    }
 
-            // Count running machines. CIDs 0, 1 are reserved, 2 is the host. We start from 3.
-            let running_count = machines
-                .values()
-                .filter(|m| m.state == MachineState::Running && m.cid.is_some())
-                .count() as u32;
+    pub(crate) fn mark_running(&self, name: &str, ip_address: Option<String>) -> Result<()> {
+        let cid = self
+            .machines
+            .read()
+            .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?
+            .get(name)
+            .ok_or_else(|| CoreError::not_found(name.to_string()))?
+            .cid
+            .ok_or_else(|| CoreError::Machine("CID not assigned".to_string()))?;
 
-            (machine.vm_id.clone(), running_count)
-        };
+        self.update_machine_runtime_state(name, MachineState::Running, Some(cid), ip_address)
+    }
 
-        let cid = 3 + running_count;
-        self.vm_manager.set_guest_cid(&vm_id, cid)?;
+    fn machine_for_access(&self, name: &str, allow_starting: bool) -> Result<MachineInfo> {
+        let machine = self
+            .machines
+            .read()
+            .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?
+            .get(name)
+            .cloned()
+            .ok_or_else(|| CoreError::not_found(name.to_string()))?;
 
-        Ok((vm_id, cid))
+        let state_ok = machine.state == MachineState::Running
+            || (allow_starting && machine.state == MachineState::Starting);
+        if !state_ok {
+            return Err(CoreError::invalid_state(format!(
+                "machine '{name}' is not running"
+            )));
+        }
+
+        Ok(machine)
     }
 
     /// Returns a reference to the underlying VM manager.
@@ -562,11 +671,29 @@ impl MachineManager {
     /// Returns an error if the machine is not found, not running, or connection fails.
     #[cfg(target_os = "macos")]
     pub fn connect_agent(&self, name: &str) -> Result<crate::agent_client::AgentClient> {
+        self.connect_agent_with_state(name, false)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn connect_agent_boot(
+        &self,
+        name: &str,
+    ) -> Result<crate::agent_client::AgentClient> {
+        self.connect_agent_with_state(name, true)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn connect_agent_with_state(
+        &self,
+        name: &str,
+        allow_starting: bool,
+    ) -> Result<crate::agent_client::AgentClient> {
         use crate::agent_client::AgentClient;
-        let cid = self
-            .get_cid(name)
+        let machine = self.machine_for_access(name, allow_starting)?;
+        let cid = machine
+            .cid
             .ok_or_else(|| CoreError::Machine("CID not assigned".to_string()))?;
-        let fd = self.connect_vsock_port(name, AGENT_PORT)?;
+        let fd = self.connect_vsock_port_inner(name, AGENT_PORT, allow_starting)?;
 
         AgentClient::from_fd(cid, fd)
     }
@@ -576,45 +703,43 @@ impl MachineManager {
     /// This is a generic helper used by agent and guest runtime proxy paths.
     #[cfg(target_os = "macos")]
     pub fn connect_vsock_port(&self, name: &str, port: u32) -> Result<std::os::unix::io::RawFd> {
-        let machines = self
-            .machines
-            .read()
-            .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
+        self.connect_vsock_port_inner(name, port, false)
+    }
 
-        let machine = machines
-            .get(name)
-            .ok_or_else(|| CoreError::not_found(name.to_string()))?;
-
-        if machine.state != MachineState::Running {
-            return Err(CoreError::invalid_state(format!(
-                "machine '{name}' is not running"
-            )));
-        }
-
+    #[cfg(target_os = "macos")]
+    fn connect_vsock_port_inner(
+        &self,
+        name: &str,
+        port: u32,
+        allow_starting: bool,
+    ) -> Result<std::os::unix::io::RawFd> {
+        let machine = self.machine_for_access(name, allow_starting)?;
         self.vm_manager.connect_vsock(&machine.vm_id, port)
     }
 
     /// Connects to the agent on a running machine (Linux).
     #[cfg(target_os = "linux")]
     pub fn connect_agent(&self, name: &str) -> Result<crate::agent_client::AgentClient> {
+        self.connect_agent_with_state(name, false)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn connect_agent_boot(
+        &self,
+        name: &str,
+    ) -> Result<crate::agent_client::AgentClient> {
+        self.connect_agent_with_state(name, true)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn connect_agent_with_state(
+        &self,
+        name: &str,
+        allow_starting: bool,
+    ) -> Result<crate::agent_client::AgentClient> {
         use crate::agent_client::AgentClient;
 
-        let machines = self
-            .machines
-            .read()
-            .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
-
-        let machine = machines
-            .get(name)
-            .ok_or_else(|| CoreError::not_found(name.to_string()))?;
-
-        if machine.state != MachineState::Running {
-            return Err(CoreError::invalid_state(format!(
-                "machine '{}' is not running",
-                name
-            )));
-        }
-
+        let machine = self.machine_for_access(name, allow_starting)?;
         let cid = machine
             .cid
             .ok_or_else(|| CoreError::Machine("CID not assigned".to_string()))?;
@@ -626,79 +751,62 @@ impl MachineManager {
     /// Connects to a vsock port on a running machine (Linux).
     #[cfg(target_os = "linux")]
     pub fn connect_vsock_port(&self, name: &str, port: u32) -> Result<std::os::unix::io::RawFd> {
-        let machines = self
-            .machines
-            .read()
-            .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
-
-        let machine = machines
-            .get(name)
-            .ok_or_else(|| CoreError::not_found(name.to_string()))?;
-
-        if machine.state != MachineState::Running {
-            return Err(CoreError::invalid_state(format!(
-                "machine '{}' is not running",
-                name
-            )));
-        }
-
+        let machine = self.machine_for_access(name, false)?;
         self.vm_manager.connect_vsock(&machine.vm_id, port)
     }
 
     /// Reads serial console output for a running machine (macOS only).
     #[cfg(target_os = "macos")]
     pub fn read_console_output(&self, name: &str) -> Result<String> {
-        let machines = self
-            .machines
-            .read()
-            .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
+        self.read_console_output_with_state(name, false)
+    }
 
-        let machine = machines
-            .get(name)
-            .ok_or_else(|| CoreError::not_found(name.to_string()))?;
+    #[cfg(target_os = "macos")]
+    pub(crate) fn read_console_output_boot(&self, name: &str) -> Result<String> {
+        self.read_console_output_with_state(name, true)
+    }
 
-        if machine.state != MachineState::Running {
-            return Err(CoreError::invalid_state(format!(
-                "machine '{name}' is not running"
-            )));
-        }
-
+    #[cfg(target_os = "macos")]
+    fn read_console_output_with_state(&self, name: &str, allow_starting: bool) -> Result<String> {
+        let machine = self.machine_for_access(name, allow_starting)?;
         self.vm_manager.read_console_output(&machine.vm_id)
     }
 
-    /// Stops a machine.
+    /// Stops a running or booting machine.
     ///
     /// # Errors
     ///
     /// Returns an error if the machine cannot be stopped.
     pub fn stop(&self, name: &str) -> Result<()> {
-        let mut machines = self
-            .machines
-            .write()
-            .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
+        let vm_id = {
+            let machines = self
+                .machines
+                .read()
+                .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
 
-        let machine = machines
-            .get_mut(name)
-            .ok_or_else(|| CoreError::not_found(name.to_string()))?;
+            let machine = machines
+                .get(name)
+                .ok_or_else(|| CoreError::not_found(name.to_string()))?;
 
-        if machine.state != MachineState::Running {
-            return Err(CoreError::invalid_state(format!(
-                "machine '{name}' is not running"
-            )));
-        }
+            if !matches!(
+                machine.state,
+                MachineState::Starting | MachineState::Running
+            ) {
+                return Err(CoreError::invalid_state(format!(
+                    "machine '{name}' is not running"
+                )));
+            }
+
+            machine.vm_id.clone()
+        };
 
         // Stop underlying VM
         #[cfg(target_os = "macos")]
-        self.vm_manager
-            .force_stop_without_hypervisor(&machine.vm_id)?;
+        self.vm_manager.force_stop_without_hypervisor(&vm_id)?;
         #[cfg(not(target_os = "macos"))]
-        self.vm_manager.stop(&machine.vm_id)?;
+        self.vm_manager.stop(&vm_id)?;
 
-        machine.state = MachineState::Stopped;
-        machine.cid = None;
-
-        // Update persisted state
-        let _ = self.persistence.update_state(name, MachineState::Stopped);
+        self.update_machine_runtime_state(name, MachineState::Stopped, None, None)?;
 
         Ok(())
     }

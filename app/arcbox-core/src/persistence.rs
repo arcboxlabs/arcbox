@@ -59,7 +59,7 @@ fn default_created_at() -> DateTime<Utc> {
 }
 
 /// Persisted machine state.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum PersistedState {
     #[default]
@@ -71,8 +71,8 @@ pub enum PersistedState {
 impl From<MachineState> for PersistedState {
     fn from(state: MachineState) -> Self {
         match state {
-            MachineState::Created => Self::Created,
-            MachineState::Starting | MachineState::Running => Self::Running,
+            MachineState::Created | MachineState::Starting => Self::Created,
+            MachineState::Running => Self::Running,
             MachineState::Stopping | MachineState::Stopped => Self::Stopped,
         }
     }
@@ -353,5 +353,17 @@ mod tests {
 
         persistence.remove("test-vm").unwrap();
         assert!(persistence.load("test-vm").is_err());
+    }
+
+    #[test]
+    fn test_starting_state_persists_as_created() {
+        assert_eq!(
+            PersistedState::from(MachineState::Starting),
+            PersistedState::Created
+        );
+        assert_eq!(
+            MachineState::from(PersistedState::Created),
+            MachineState::Created
+        );
     }
 }

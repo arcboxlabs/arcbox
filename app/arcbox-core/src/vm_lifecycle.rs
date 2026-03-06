@@ -632,8 +632,27 @@ impl VmLifecycleManager {
             self.start_default_vm(timeout).await?;
         }
 
-        // Wait for agent to be ready
-        self.wait_for_agent(timeout).await?;
+        let boot_in_progress = *self.state.read().await == VmLifecycleState::Starting;
+
+        // Wait for agent to be ready.
+        if let Err(e) = self.wait_for_agent(timeout).await {
+            if boot_in_progress {
+                if let Err(stop_err) = self.machine_manager.stop(DEFAULT_MACHINE_NAME) {
+                    tracing::warn!(
+                        machine = DEFAULT_MACHINE_NAME,
+                        error = %stop_err,
+                        "failed to stop default machine after boot failure"
+                    );
+                }
+            }
+            *self.state.write().await = VmLifecycleState::Failed;
+            return Err(e);
+        }
+
+        *self.state.write().await = VmLifecycleState::Running;
+        self.event_bus.publish(Event::MachineStarted {
+            name: DEFAULT_MACHINE_NAME.to_string(),
+        });
 
         // Reset recovery counter on success
         self.recovery.reset();
@@ -713,11 +732,7 @@ impl VmLifecycleManager {
         loop {
             match self.machine_manager.start(DEFAULT_MACHINE_NAME).await {
                 Ok(()) => {
-                    tracing::info!("Default VM started successfully");
-                    *self.state.write().await = VmLifecycleState::Running;
-                    self.event_bus.publish(Event::MachineStarted {
-                        name: DEFAULT_MACHINE_NAME.to_string(),
-                    });
+                    tracing::info!("Default VM hypervisor started; waiting for guest agent");
                     return Ok(());
                 }
                 Err(e) => {
@@ -873,7 +888,7 @@ impl VmLifecycleManager {
             #[cfg(target_os = "macos")]
             match self
                 .machine_manager
-                .read_console_output(DEFAULT_MACHINE_NAME)
+                .read_console_output_boot(DEFAULT_MACHINE_NAME)
             {
                 Ok(output) => {
                     let trimmed = output.trim_matches('\0');
@@ -887,11 +902,16 @@ impl VmLifecycleManager {
             }
 
             // Try to connect to agent
-            match self.machine_manager.connect_agent(DEFAULT_MACHINE_NAME) {
+            match self
+                .machine_manager
+                .connect_agent_boot(DEFAULT_MACHINE_NAME)
+            {
                 Ok(mut agent) => {
                     // Try to ping agent
                     match agent.ping().await {
                         Ok(_response) => {
+                            self.machine_manager
+                                .mark_running(DEFAULT_MACHINE_NAME, None)?;
                             tracing::info!("Agent is ready");
                             self.health_monitor.record_success();
                             #[cfg(target_os = "macos")]
@@ -900,7 +920,7 @@ impl VmLifecycleManager {
                                 tokio::spawn(async move {
                                     loop {
                                         match machine_manager
-                                            .read_console_output(DEFAULT_MACHINE_NAME)
+                                            .read_console_output_boot(DEFAULT_MACHINE_NAME)
                                         {
                                             Ok(output) => {
                                                 let trimmed = output.trim_matches('\0');
@@ -1049,9 +1069,6 @@ impl VmLifecycleManager {
                     *this.state.write().await = VmLifecycleState::Idle;
                     this.shrink_balloon();
                     tracing::info!("VM entered idle state after {}s of inactivity", idle_secs);
-                    this.event_bus.publish(Event::MachineStopped {
-                        name: DEFAULT_MACHINE_NAME.to_string(),
-                    });
                 }
             }
         });
@@ -1174,6 +1191,11 @@ const fn is_not_found_error(err: &CoreError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::machine::MachineManager;
+    use crate::vm::VmManager;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use tokio::sync::broadcast::error::TryRecvError;
 
     #[test]
     fn test_lifecycle_state_is_ready() {
@@ -1344,5 +1366,42 @@ mod tests {
         assert!(!monitor.record_failure());
         assert!(!monitor.record_failure());
         assert!(monitor.record_failure());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_idle_transition_does_not_publish_machine_stopped() {
+        let temp_dir = tempdir().unwrap();
+        let vm_manager = Arc::new(VmManager::new(temp_dir.path().join("snapshots")));
+        let machine_manager = Arc::new(MachineManager::new(
+            Arc::clone(&vm_manager),
+            temp_dir.path().to_path_buf(),
+        ));
+        let event_bus = EventBus::new();
+        let config = VmLifecycleConfig {
+            idle_timeout: Duration::from_secs(1),
+            ..Default::default()
+        };
+        let manager = Arc::new(
+            VmLifecycleManager::new(
+                machine_manager,
+                event_bus.clone(),
+                temp_dir.path().to_path_buf(),
+                config,
+            )
+            .unwrap(),
+        );
+
+        *manager.state.write().await = VmLifecycleState::Running;
+        manager.last_activity_ms.store(0, Ordering::Relaxed);
+
+        let mut rx = event_bus.subscribe();
+        manager.start_idle_monitor();
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(BALLOON_SHRINK_DELAY_SECS + 1)).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(*manager.state.read().await, VmLifecycleState::Idle);
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
     }
 }
