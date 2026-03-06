@@ -36,6 +36,9 @@ dirs = { workspace = true }
 toml = { workspace = true }
 sha2 = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+arcbox-vm = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
