@@ -39,6 +39,7 @@ use tokio::sync::{mpsc, oneshot};
 // FFI Declarations
 // ============================================================================
 
+// SAFETY: dispatch_async_f is a GCD function from libdispatch, always available on macOS.
 unsafe extern "C" {
     fn dispatch_async_f(
         queue: *mut AnyObject,
@@ -61,11 +62,13 @@ struct ConnectContext {
     block: *const c_void,
 }
 
-// Safety: The pointers are only used on the VM's dispatch queue
+// SAFETY: The pointers are only used on the VM's dispatch queue
 unsafe impl Send for ConnectContext {}
 
 /// Work function executed on VM's dispatch queue.
 unsafe extern "C" fn connect_work(ctx: *mut c_void) {
+    // SAFETY: ctx is a valid pointer to a Box<ConnectContext> leaked via Box::into_raw in connect().
+    // We reclaim ownership here. objc_msgSend is called with a valid device pointer and selector.
     unsafe {
         let context = Box::from_raw(ctx as *mut ConnectContext);
 
@@ -113,7 +116,10 @@ pub struct VirtioSocketDevice {
     queue: *mut AnyObject,
 }
 
+// SAFETY: The inner ObjC pointer is only accessed via Virtualization.framework's dispatch queue.
+// queue is a thread-safe GCD queue pointer.
 unsafe impl Send for VirtioSocketDevice {}
+// SAFETY: See above — all access goes through the VM's dispatch queue.
 unsafe impl Sync for VirtioSocketDevice {}
 
 impl VirtioSocketDevice {
@@ -178,6 +184,8 @@ impl VirtioSocketDevice {
         // Dispatch connection to VM queue
         // CRITICAL: Must use dispatch_async, not dispatch_sync
         // The completion handler will be called on the same queue
+        // SAFETY: context_ptr is a leaked Box. self.queue is a valid dispatch queue.
+        // connect_work will reclaim the Box.
         unsafe {
             tracing::debug!("Dispatching connect to VM queue {:?}", self.queue);
             dispatch_async_f(self.queue, context_ptr as *mut c_void, connect_work);
@@ -189,6 +197,7 @@ impl VirtioSocketDevice {
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(result)) => {
                 // Release the block now that we're done
+                // SAFETY: block was heap-allocated by create_vsock_context_block via _Block_copy.
                 unsafe {
                     _Block_release(block);
                 }
@@ -227,6 +236,7 @@ impl VirtioSocketDevice {
             }
             Ok(Err(_)) => {
                 // Channel was closed without sending (shouldn't happen)
+                // SAFETY: block was heap-allocated by create_vsock_context_block via _Block_copy.
                 unsafe {
                     _Block_release(block);
                 }
@@ -277,6 +287,9 @@ impl VirtioSocketDevice {
     pub fn listen(&self, port: u32) -> VZResult<VirtioSocketListener> {
         tracing::debug!("VirtioSocketDevice::listen(port={})", port);
 
+        // SAFETY: All ObjC objects are obtained from valid classes via get_class. ObjC messages
+        // use correct selectors and argument types. dispatch_sync_f blocks until completion, so
+        // stack references remain valid.
         unsafe {
             // Create VZVirtioSocketListener object
             let listener_cls =
@@ -339,9 +352,12 @@ impl VirtioSocketDevice {
                 listener: *mut AnyObject,
                 port: u32,
             }
+            // SAFETY: The ObjC pointers are only used inside set_listener_work on the VM's dispatch queue.
             unsafe impl Send for SetListenerContext {}
 
             unsafe extern "C" fn set_listener_work(ctx: *mut c_void) {
+                // SAFETY: ctx is a valid Box<SetListenerContext> pointer.
+                // Sending setSocketListener:forPort: to a valid VZVirtioSocketDevice.
                 unsafe {
                     let context = Box::from_raw(ctx as *mut SetListenerContext);
                     tracing::debug!(
@@ -375,7 +391,7 @@ impl VirtioSocketDevice {
             });
             let context_ptr = Box::into_raw(context);
 
-            // Use dispatch_sync_f to wait for completion
+            // SAFETY: dispatch_sync_f is a GCD function from libdispatch.
             unsafe extern "C" {
                 fn dispatch_sync_f(
                     queue: *mut AnyObject,
@@ -407,8 +423,8 @@ impl VirtioSocketDevice {
     pub fn remove_listener(&self, port: u32) {
         tracing::debug!("VirtioSocketDevice::remove_listener(port={})", port);
 
+        // SAFETY: Sending setSocketListener:forPort: to a valid VZVirtioSocketDevice with nil listener.
         unsafe {
-            // [device setSocketListener:nil forPort:port]
             let set_listener_sel = objc2::sel!(setSocketListener:forPort:);
             let set_listener_fn: unsafe extern "C" fn(
                 *mut AnyObject,
@@ -499,6 +515,7 @@ impl VirtioSocketConnection {
     ///
     /// The number of bytes read, or an error.
     pub fn read(&self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // SAFETY: self.fd is a valid file descriptor. buf.as_mut_ptr() and buf.len() provide a valid write target.
         let n = unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut c_void, buf.len()) };
         if n < 0 {
             Err(std::io::Error::last_os_error())
@@ -519,6 +536,7 @@ impl VirtioSocketConnection {
     ///
     /// The number of bytes written, or an error.
     pub fn write(&self, buf: &[u8]) -> std::io::Result<usize> {
+        // SAFETY: self.fd is a valid file descriptor. buf.as_ptr() and buf.len() provide valid read source.
         let n = unsafe { libc::write(self.fd, buf.as_ptr() as *const c_void, buf.len()) };
         if n < 0 {
             Err(std::io::Error::last_os_error())
@@ -541,6 +559,7 @@ impl VirtioSocketConnection {
 impl Drop for VirtioSocketConnection {
     fn drop(&mut self) {
         if self.fd >= 0 {
+            // SAFETY: self.fd is a valid file descriptor obtained via dup() during connection setup.
             unsafe {
                 libc::close(self.fd);
             }
@@ -590,7 +609,7 @@ pub struct VirtioSocketListener {
     delegate: *mut AnyObject,
 }
 
-// Safety: The Objective-C objects are only accessed from the main thread
+// SAFETY: The Objective-C objects are only accessed from the main thread
 // through Virtualization.framework's internal dispatch queue.
 unsafe impl Send for VirtioSocketListener {}
 

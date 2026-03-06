@@ -12,11 +12,13 @@ pub struct EntropyDeviceConfiguration {
     inner: *mut AnyObject,
 }
 
+// SAFETY: Inner ObjC pointer is only used via msg_send! which dispatches to the ObjC runtime.
 unsafe impl Send for EntropyDeviceConfiguration {}
 
 impl EntropyDeviceConfiguration {
     /// Creates a new entropy device configuration.
     pub fn new() -> VZResult<Self> {
+        // SAFETY: ObjC new on valid VZVirtioEntropyDeviceConfiguration class. Result is checked non-null. retain prevents autorelease.
         unsafe {
             let cls = get_class("VZVirtioEntropyDeviceConfiguration").ok_or_else(|| {
                 VZError::Internal {

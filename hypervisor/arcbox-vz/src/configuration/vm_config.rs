@@ -33,11 +33,13 @@ pub struct VirtualMachineConfiguration {
     memory_balloon_devices: Vec<*mut AnyObject>,
 }
 
+// SAFETY: Inner ObjC pointer is only used via msg_send! which dispatches to the ObjC runtime.
 unsafe impl Send for VirtualMachineConfiguration {}
 
 impl VirtualMachineConfiguration {
     /// Creates a new VM configuration with default settings.
     pub fn new() -> VZResult<Self> {
+        // SAFETY: ObjC alloc/init pattern on valid VZVirtualMachineConfiguration class. Result is checked non-null.
         unsafe {
             let cls =
                 get_class("VZVirtualMachineConfiguration").ok_or_else(|| VZError::Internal {
@@ -75,6 +77,7 @@ impl VirtualMachineConfiguration {
     /// Use `arcbox_vz::min_cpu_count()` and `arcbox_vz::max_cpu_count()`
     /// to get the valid range.
     pub fn set_cpu_count(&mut self, count: usize) -> &mut Self {
+        // SAFETY: self.inner is a valid VZVirtualMachineConfiguration. The selector matches the expected argument type.
         unsafe {
             msg_send_void_u64!(self.inner, setCPUCount: count as u64);
         }
@@ -83,6 +86,7 @@ impl VirtualMachineConfiguration {
 
     /// Gets the configured CPU count.
     pub fn cpu_count(&self) -> u64 {
+        // SAFETY: self.inner is a valid VZVirtualMachineConfiguration. The selector matches the expected argument type.
         unsafe { msg_send_u64!(self.inner, CPUCount) }
     }
 
@@ -94,6 +98,7 @@ impl VirtualMachineConfiguration {
     /// Use `arcbox_vz::min_memory_size()` and `arcbox_vz::max_memory_size()`
     /// to get the valid range.
     pub fn set_memory_size(&mut self, bytes: u64) -> &mut Self {
+        // SAFETY: self.inner is a valid VZVirtualMachineConfiguration. The selector matches the expected argument type.
         unsafe {
             msg_send_void_u64!(self.inner, setMemorySize: bytes);
         }
@@ -102,11 +107,13 @@ impl VirtualMachineConfiguration {
 
     /// Gets the configured memory size in bytes.
     pub fn memory_size(&self) -> u64 {
+        // SAFETY: self.inner is a valid VZVirtualMachineConfiguration. The selector matches the expected argument type.
         unsafe { msg_send_u64!(self.inner, memorySize) }
     }
 
     /// Sets the boot loader for the VM.
     pub fn set_boot_loader(&mut self, boot_loader: impl BootLoader) -> &mut Self {
+        // SAFETY: self.inner is a valid VZVirtualMachineConfiguration. The selector matches the expected argument type.
         unsafe {
             msg_send_void!(self.inner, setBootLoader: boot_loader.as_ptr());
         }
@@ -115,6 +122,7 @@ impl VirtualMachineConfiguration {
 
     /// Sets the platform configuration.
     pub fn set_platform(&mut self, platform: impl Platform) -> &mut Self {
+        // SAFETY: self.inner is a valid VZVirtualMachineConfiguration. The selector matches the expected argument type.
         unsafe {
             msg_send_void!(self.inner, setPlatform: platform.as_ptr());
         }
@@ -182,6 +190,7 @@ impl VirtualMachineConfiguration {
     /// This is called automatically by `build()`, but can be called
     /// manually to check for configuration errors early.
     pub fn validate(&self) -> VZResult<()> {
+        // SAFETY: self.inner is a valid VZVirtualMachineConfiguration. validateWithError: writes to the error out-parameter only on failure.
         unsafe {
             let mut error: *mut AnyObject = ptr::null_mut();
             let valid = msg_send_bool!(self.inner, validateWithError: &mut error);
@@ -208,6 +217,7 @@ impl VirtualMachineConfiguration {
         let queue = DispatchQueue::new("com.arcbox.vz.vm");
 
         // Create VM with queue
+        // SAFETY: ObjC alloc/init pattern on VZVirtualMachine with a validated configuration and a valid dispatch queue.
         let vm_ptr = unsafe {
             let cls = get_class("VZVirtualMachine").ok_or_else(|| VZError::Internal {
                 code: -1,
@@ -230,6 +240,7 @@ impl VirtualMachineConfiguration {
 
     /// Applies all device configurations to the VZ configuration.
     fn apply_devices(&mut self) {
+        // SAFETY: self.inner is a valid VZVirtualMachineConfiguration. Each device pointer was obtained from a valid VZ configuration object's into_ptr().
         unsafe {
             if !self.storage_devices.is_empty() {
                 let array = nsarray(&self.storage_devices);
