@@ -109,12 +109,7 @@ impl NatEngine {
     }
 
     /// Translates a packet.
-    ///
-    /// # Safety
-    ///
-    /// The packet buffer must be valid and large enough for the IP header
-    /// and transport header to be modified in place.
-    pub unsafe fn translate(
+    pub fn translate(
         &mut self,
         packet: &mut [u8],
         direction: NatDirection,
@@ -172,24 +167,19 @@ impl NatEngine {
         let src_port = u16::from_be_bytes([packet[l4_offset], packet[l4_offset + 1]]);
         let dst_port = u16::from_be_bytes([packet[l4_offset + 2], packet[l4_offset + 3]]);
 
-        // Safety: packet bounds have been validated above
         match direction {
-            NatDirection::Outbound => unsafe {
-                self.translate_outbound(
-                    packet, ip_offset, l4_offset, src_ip, dst_ip, src_port, dst_port, protocol,
-                )
-            },
-            NatDirection::Inbound => unsafe {
-                self.translate_inbound(
-                    packet, ip_offset, l4_offset, src_ip, dst_ip, src_port, dst_port, protocol,
-                )
-            },
+            NatDirection::Outbound => self.translate_outbound(
+                packet, ip_offset, l4_offset, src_ip, dst_ip, src_port, dst_port, protocol,
+            ),
+            NatDirection::Inbound => self.translate_inbound(
+                packet, ip_offset, l4_offset, src_ip, dst_ip, src_port, dst_port, protocol,
+            ),
         }
     }
 
     /// Translates an outbound packet (SNAT).
     #[allow(clippy::too_many_arguments)]
-    unsafe fn translate_outbound(
+    fn translate_outbound(
         &mut self,
         packet: &mut [u8],
         ip_offset: usize,
@@ -260,7 +250,7 @@ impl NatEngine {
 
     /// Translates an inbound packet (reverse NAT).
     #[allow(clippy::too_many_arguments)]
-    unsafe fn translate_inbound(
+    fn translate_inbound(
         &mut self,
         packet: &mut [u8],
         ip_offset: usize,
@@ -411,7 +401,7 @@ mod tests {
             6, // TCP
         );
 
-        let result = unsafe { engine.translate(&mut packet, NatDirection::Outbound) };
+        let result = engine.translate(&mut packet, NatDirection::Outbound);
         assert_eq!(result.unwrap(), NatResult::Translated);
 
         // Check source IP was changed to external IP
@@ -429,7 +419,7 @@ mod tests {
         // Source is not in internal network
         let mut packet = create_test_packet([8, 8, 4, 4], [8, 8, 8, 8], 12345, 80, 6);
 
-        let result = unsafe { engine.translate(&mut packet, NatDirection::Outbound) };
+        let result = engine.translate(&mut packet, NatDirection::Outbound);
         assert_eq!(result.unwrap(), NatResult::PassThrough);
 
         // Source IP should be unchanged
@@ -443,11 +433,9 @@ mod tests {
 
         // First create outbound connection
         let mut outbound = create_test_packet([192, 168, 64, 100], [8, 8, 8, 8], 12345, 80, 6);
-        unsafe {
-            engine
-                .translate(&mut outbound, NatDirection::Outbound)
-                .unwrap()
-        };
+        engine
+            .translate(&mut outbound, NatDirection::Outbound)
+            .unwrap();
 
         // Get the NAT port
         let nat_port = u16::from_be_bytes([outbound[34], outbound[35]]);
@@ -455,7 +443,7 @@ mod tests {
         // Create inbound response
         let mut inbound = create_test_packet([8, 8, 8, 8], [10, 0, 0, 1], 80, nat_port, 6);
 
-        let result = unsafe { engine.translate(&mut inbound, NatDirection::Inbound) };
+        let result = engine.translate(&mut inbound, NatDirection::Inbound);
         assert_eq!(result.unwrap(), NatResult::Translated);
 
         // Destination should be restored to original
@@ -469,7 +457,7 @@ mod tests {
         // Inbound packet without existing connection
         let mut packet = create_test_packet([8, 8, 8, 8], [10, 0, 0, 1], 80, 54321, 6);
 
-        let result = unsafe { engine.translate(&mut packet, NatDirection::Inbound) };
+        let result = engine.translate(&mut packet, NatDirection::Inbound);
         assert_eq!(result.unwrap(), NatResult::Dropped);
     }
 
