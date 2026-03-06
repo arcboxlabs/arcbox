@@ -279,8 +279,7 @@ impl machine_service_server::MachineService for MachineServiceImpl {
         Err(Status::unimplemented("ssh_info not implemented"))
     }
 
-    type EventsStream =
-        Pin<Box<dyn Stream<Item = Result<MachineEvent, Status>> + Send + 'static>>;
+    type EventsStream = Pin<Box<dyn Stream<Item = Result<MachineEvent, Status>> + Send + 'static>>;
 
     async fn events(
         &self,

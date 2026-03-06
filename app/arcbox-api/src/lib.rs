@@ -30,7 +30,7 @@ pub use error::{ApiError, Result};
 pub use grpc::MachineServiceImpl;
 
 // Re-export the platform-appropriate sandbox service implementations.
-#[cfg(target_os = "linux")]
-pub use sandbox_linux::{SandboxServiceImpl, SandboxSnapshotServiceImpl};
 #[cfg(not(target_os = "linux"))]
 pub use grpc::{SandboxServiceImpl, SandboxSnapshotServiceImpl};
+#[cfg(target_os = "linux")]
+pub use sandbox_linux::{SandboxServiceImpl, SandboxSnapshotServiceImpl};

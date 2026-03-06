@@ -16,6 +16,5 @@ use std::sync::Arc;
 
 /// Builds the complete REST API router.
 pub fn router(runtime: Arc<Runtime>) -> Router {
-    Router::new()
-        .nest("/v1", handlers::v1_routes(runtime))
+    Router::new().nest("/v1", handlers::v1_routes(runtime))
 }

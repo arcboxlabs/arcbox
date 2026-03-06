@@ -12,9 +12,11 @@ use arcbox_vm::{
 
 /// Converts a proto `CreateSandboxRequest` to an `arcbox-vm` `SandboxSpec`.
 pub fn proto_to_sandbox_spec(req: CreateSandboxRequest) -> SandboxSpec {
-    let network = req.network.map_or_else(SandboxNetworkSpec::default, |n| {
-        SandboxNetworkSpec { mode: n.mode }
-    });
+    let network = req
+        .network
+        .map_or_else(SandboxNetworkSpec::default, |n| SandboxNetworkSpec {
+            mode: n.mode,
+        });
 
     let limits = req.limits.as_ref();
 
@@ -111,7 +113,10 @@ fn sandbox_summary_to_proto(s: SandboxSummary) -> ProtoSandboxSummary {
 /// Converts sandbox list results to a proto response.
 pub fn sandbox_list_to_proto(sandboxes: Vec<SandboxSummary>) -> ListSandboxesResponse {
     ListSandboxesResponse {
-        sandboxes: sandboxes.into_iter().map(sandbox_summary_to_proto).collect(),
+        sandboxes: sandboxes
+            .into_iter()
+            .map(sandbox_summary_to_proto)
+            .collect(),
     }
 }
 

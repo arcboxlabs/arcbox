@@ -23,9 +23,7 @@ use tonic::codec::Streaming;
 use tonic::{Request, Response, Status};
 
 /// Returns a reference to the sandbox manager or a gRPC error.
-fn get_sandbox_manager(
-    runtime: &Runtime,
-) -> Result<&Arc<arcbox_vm::SandboxManager>, Status> {
+fn get_sandbox_manager(runtime: &Runtime) -> Result<&Arc<arcbox_vm::SandboxManager>, Status> {
     runtime
         .sandbox_manager()
         .ok_or_else(|| Status::unavailable("sandbox subsystem is not enabled"))
@@ -153,7 +151,9 @@ impl SandboxService for SandboxServiceImpl {
             Some(req.state.as_str())
         };
         let sandboxes = mgr.list_sandboxes(state_filter, &req.labels);
-        Ok(Response::new(sandbox_conv::sandbox_list_to_proto(sandboxes)))
+        Ok(Response::new(sandbox_conv::sandbox_list_to_proto(
+            sandboxes,
+        )))
     }
 
     type EventsStream = Pin<Box<dyn Stream<Item = Result<SandboxEvent, Status>> + Send + 'static>>;
@@ -177,31 +177,30 @@ impl SandboxService for SandboxServiceImpl {
             Some(req.action)
         };
 
-        let stream =
-            tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(move |result| {
-                match result {
-                    Ok(event) => {
-                        // Apply filters.
-                        if let Some(ref id) = filter_id {
-                            if event.sandbox_id != *id {
-                                return None;
-                            }
+        let stream = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(move |result| {
+            match result {
+                Ok(event) => {
+                    // Apply filters.
+                    if let Some(ref id) = filter_id {
+                        if event.sandbox_id != *id {
+                            return None;
                         }
-                        if let Some(ref action) = filter_action {
-                            if event.action != *action {
-                                return None;
-                            }
-                        }
-                        Some(Ok(SandboxEvent {
-                            sandbox_id: event.sandbox_id,
-                            action: event.action,
-                            timestamp: event.timestamp_ns,
-                            attributes: event.attributes,
-                        }))
                     }
-                    Err(_) => None,
+                    if let Some(ref action) = filter_action {
+                        if event.action != *action {
+                            return None;
+                        }
+                    }
+                    Some(Ok(SandboxEvent {
+                        sandbox_id: event.sandbox_id,
+                        action: event.action,
+                        timestamp: event.timestamp_ns,
+                        attributes: event.attributes,
+                    }))
                 }
-            });
+                Err(_) => None,
+            }
+        });
 
         Ok(Response::new(Box::pin(stream)))
     }
@@ -245,10 +244,7 @@ impl SandboxSnapshotService for SandboxSnapshotServiceImpl {
             .restore_sandbox(spec)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
-        Ok(Response::new(RestoreResponse {
-            id,
-            ip_address: ip,
-        }))
+        Ok(Response::new(RestoreResponse { id, ip_address: ip }))
     }
 
     async fn list_snapshots(

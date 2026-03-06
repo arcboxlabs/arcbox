@@ -3,13 +3,16 @@
 use crate::rest::sse;
 use crate::rest::types::{ApiError, ApiResult};
 use arcbox_core::Runtime;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::response::Response;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+#[cfg(not(target_os = "linux"))]
+use arcbox_protocol::sandbox_v1 as proto;
 
 /// Builds all v1 routes.
 pub fn v1_routes(runtime: Arc<Runtime>) -> Router {
@@ -227,6 +230,14 @@ async fn remove_machine(
 // Sandboxes
 // =============================================================================
 
+/// Query parameters for sandbox endpoints.
+#[derive(Deserialize)]
+struct MachineQuery {
+    /// Target VM name (defaults to "default").
+    #[serde(default)]
+    machine: Option<String>,
+}
+
 #[derive(Serialize)]
 struct SandboxSummaryJson {
     id: String,
@@ -243,9 +254,8 @@ struct ListSandboxesResponse {
 
 async fn list_sandboxes(
     State(_runtime): State<Arc<Runtime>>,
+    Query(_query): Query<MachineQuery>,
 ) -> ApiResult<ListSandboxesResponse> {
-    // On macOS, sandboxes live inside the guest VM — the REST API returns empty.
-    // On Linux, this would call sandbox_manager().list_sandboxes().
     #[cfg(target_os = "linux")]
     {
         if let Some(mgr) = _runtime.sandbox_manager() {
@@ -262,10 +272,37 @@ async fn list_sandboxes(
                 .collect();
             return Ok(Json(ListSandboxesResponse { sandboxes }));
         }
+        return Ok(Json(ListSandboxesResponse {
+            sandboxes: Vec::new(),
+        }));
     }
-    Ok(Json(ListSandboxesResponse {
-        sandboxes: Vec::new(),
-    }))
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let machine = _query
+            .machine
+            .as_deref()
+            .unwrap_or_else(|| _runtime.default_machine_name());
+        let mut agent = _runtime
+            .get_agent(machine)
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        let resp = agent
+            .sandbox_list(proto::ListSandboxesRequest::default())
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        let sandboxes = resp
+            .sandboxes
+            .into_iter()
+            .map(|s| SandboxSummaryJson {
+                id: s.id,
+                state: s.state,
+                ip_address: s.ip_address,
+                labels: s.labels,
+                created_at: s.created_at.to_string(),
+            })
+            .collect();
+        Ok(Json(ListSandboxesResponse { sandboxes }))
+    }
 }
 
 #[derive(Deserialize)]
@@ -288,6 +325,8 @@ struct CreateSandboxRequest {
     labels: HashMap<String, String>,
     #[serde(default)]
     ttl_seconds: Option<u32>,
+    #[serde(default)]
+    machine: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -299,6 +338,7 @@ struct CreateSandboxResponse {
 
 async fn create_sandbox(
     State(_runtime): State<Arc<Runtime>>,
+    Query(_query): Query<MachineQuery>,
     Json(_req): Json<CreateSandboxRequest>,
 ) -> Result<Json<CreateSandboxResponse>, ApiError> {
     #[cfg(target_os = "linux")]
@@ -336,14 +376,48 @@ async fn create_sandbox(
     }
 
     #[cfg(not(target_os = "linux"))]
-    Err(ApiError::unavailable(
-        "sandbox API requires Linux (Firecracker)",
-    ))
+    {
+        let machine = _req
+            .machine
+            .as_deref()
+            .or(_query.machine.as_deref())
+            .unwrap_or_else(|| _runtime.default_machine_name());
+        let mut agent = _runtime
+            .get_agent(machine)
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+
+        let proto_req = proto::CreateSandboxRequest {
+            id: _req.id.unwrap_or_default(),
+            labels: _req.labels,
+            kernel: _req.kernel.unwrap_or_default(),
+            rootfs: _req.rootfs.unwrap_or_default(),
+            limits: Some(proto::ResourceLimits {
+                vcpus: _req.vcpus.unwrap_or(0),
+                memory_mib: _req.memory_mib.unwrap_or(0),
+            }),
+            cmd: _req.cmd,
+            env: _req.env,
+            ttl_seconds: _req.ttl_seconds.unwrap_or(0),
+            ..proto::CreateSandboxRequest::default()
+        };
+
+        let resp = agent
+            .sandbox_create(proto_req)
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+
+        Ok(Json(CreateSandboxResponse {
+            id: resp.id,
+            ip_address: resp.ip_address,
+            state: resp.state,
+        }))
+    }
 }
 
 async fn inspect_sandbox(
     State(_runtime): State<Arc<Runtime>>,
     Path(_id): Path<String>,
+    Query(_query): Query<MachineQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     #[cfg(target_os = "linux")]
     {
@@ -363,14 +437,28 @@ async fn inspect_sandbox(
     }
 
     #[cfg(not(target_os = "linux"))]
-    Err(ApiError::unavailable(
-        "sandbox API requires Linux (Firecracker)",
-    ))
+    {
+        let machine = _query
+            .machine
+            .as_deref()
+            .unwrap_or_else(|| _runtime.default_machine_name());
+        let mut agent = _runtime
+            .get_agent(machine)
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        let info = agent
+            .sandbox_inspect(proto::InspectSandboxRequest { id: _id })
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        Ok(Json(
+            serde_json::to_value(info).map_err(|e| ApiError::internal(e.to_string()))?,
+        ))
+    }
 }
 
 async fn stop_sandbox(
     State(_runtime): State<Arc<Runtime>>,
     Path(_id): Path<String>,
+    Query(_query): Query<MachineQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     #[cfg(target_os = "linux")]
     {
@@ -384,14 +472,29 @@ async fn stop_sandbox(
     }
 
     #[cfg(not(target_os = "linux"))]
-    Err(ApiError::unavailable(
-        "sandbox API requires Linux (Firecracker)",
-    ))
+    {
+        let machine = _query
+            .machine
+            .as_deref()
+            .unwrap_or_else(|| _runtime.default_machine_name());
+        let mut agent = _runtime
+            .get_agent(machine)
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        agent
+            .sandbox_stop(proto::StopSandboxRequest {
+                id: _id,
+                timeout_seconds: 30,
+            })
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        Ok(Json(serde_json::json!({"status": "stopped"})))
+    }
 }
 
 async fn remove_sandbox(
     State(_runtime): State<Arc<Runtime>>,
     Path(_id): Path<String>,
+    Query(_query): Query<MachineQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     #[cfg(target_os = "linux")]
     {
@@ -405,9 +508,23 @@ async fn remove_sandbox(
     }
 
     #[cfg(not(target_os = "linux"))]
-    Err(ApiError::unavailable(
-        "sandbox API requires Linux (Firecracker)",
-    ))
+    {
+        let machine = _query
+            .machine
+            .as_deref()
+            .unwrap_or_else(|| _runtime.default_machine_name());
+        let mut agent = _runtime
+            .get_agent(machine)
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        agent
+            .sandbox_remove(proto::RemoveSandboxRequest {
+                id: _id,
+                force: true,
+            })
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        Ok(Json(serde_json::json!({"status": "removed"})))
+    }
 }
 
 #[derive(Deserialize)]
@@ -428,6 +545,7 @@ struct RunSandboxRequest {
 async fn run_sandbox(
     State(_runtime): State<Arc<Runtime>>,
     Path(_id): Path<String>,
+    Query(_query): Query<MachineQuery>,
     Json(_req): Json<RunSandboxRequest>,
 ) -> Result<Response, ApiError> {
     #[cfg(target_os = "linux")]
@@ -469,9 +587,52 @@ async fn run_sandbox(
     }
 
     #[cfg(not(target_os = "linux"))]
-    Err(ApiError::unavailable(
-        "sandbox API requires Linux (Firecracker)",
-    ))
+    {
+        let machine = _query
+            .machine
+            .as_deref()
+            .unwrap_or_else(|| _runtime.default_machine_name());
+        let agent = _runtime
+            .get_agent(machine)
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+
+        let proto_req = proto::RunRequest {
+            id: _id,
+            cmd: _req.cmd,
+            env: _req.env,
+            working_dir: _req.working_dir.unwrap_or_default(),
+            user: _req.user.unwrap_or_default(),
+            tty: _req.tty,
+            timeout_seconds: _req.timeout_seconds.unwrap_or(0),
+        };
+
+        let rx = agent
+            .sandbox_run(proto_req)
+            .await
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+
+        use axum::response::sse::Event;
+        use std::convert::Infallible;
+        use tokio_stream::StreamExt as _;
+
+        let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(rx).map(|result| {
+            let chunk = result.unwrap_or_else(|e| proto::RunOutput {
+                stream: "stderr".to_string(),
+                data: e.to_string().into_bytes(),
+                exit_code: -1,
+                done: true,
+            });
+            let data = serde_json::json!({
+                "stream": chunk.stream,
+                "data": String::from_utf8_lossy(&chunk.data),
+                "exit_code": chunk.exit_code,
+                "done": chunk.done,
+            });
+            Ok::<_, Infallible>(Event::default().data(data.to_string()))
+        });
+
+        Ok(sse::sse_response(stream))
+    }
 }
 
 // =============================================================================
