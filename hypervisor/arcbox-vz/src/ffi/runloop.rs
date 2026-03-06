@@ -166,7 +166,7 @@ where
         }
 
         // Run the run loop for a short interval (10ms)
-        cf_run_loop_run_in_mode(0.01, true);
+        let _ = cf_run_loop_run_in_mode(0.01, true);
     }
 
     true

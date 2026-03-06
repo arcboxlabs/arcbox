@@ -13,10 +13,10 @@ use arcbox_constants::ports::AGENT_PORT;
 pub mod ensure_runtime {
     use std::sync::OnceLock;
 
-    pub use arcbox_constants::status::{
-        RUNTIME_FAILED as STATUS_FAILED, RUNTIME_REUSED as STATUS_REUSED,
-        RUNTIME_STARTED as STATUS_STARTED,
-    };
+    pub const STATUS_FAILED: &str = arcbox_constants::status::RUNTIME_FAILED;
+    pub const STATUS_REUSED: &str = arcbox_constants::status::RUNTIME_REUSED;
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub const STATUS_STARTED: &str = arcbox_constants::status::RUNTIME_STARTED;
     use arcbox_protocol::agent::RuntimeEnsureResponse;
     use tokio::sync::{Mutex, Notify};
 
