@@ -21,6 +21,7 @@ use std::ptr;
 ///
 /// Returns an error if mmap fails.
 pub fn allocate_memory(size: u64) -> VZResult<*mut u8> {
+    // SAFETY: mmap with MAP_PRIVATE | MAP_ANONYMOUS allocates a new anonymous mapping. Arguments are valid: null addr lets the kernel choose, size is caller-provided, fd=-1 is correct for anonymous mappings. The returned pointer is checked against MAP_FAILED.
     unsafe {
         let ptr = libc::mmap(
             ptr::null_mut(),
@@ -60,6 +61,7 @@ pub fn allocate_memory(size: u64) -> VZResult<*mut u8> {
 /// and `size` must match the size used during allocation.
 pub fn free_memory(ptr: *mut u8, size: u64) {
     if !ptr.is_null() {
+        // SAFETY: Caller guarantees ptr was returned by allocate_memory (i.e., mmap) and size matches the original allocation.
         unsafe {
             libc::munmap(ptr.cast(), size as usize);
         }
@@ -82,6 +84,7 @@ mod tests {
         assert!(!ptr.is_null());
 
         // Test we can write to it
+        // SAFETY: ptr is a valid allocation from allocate_memory, writing a single byte is within the 16MB allocation.
         unsafe {
             *ptr = 42;
             assert_eq!(*ptr, 42);
@@ -96,6 +99,7 @@ mod tests {
         let ptr = allocate_memory(size).expect("allocation failed");
 
         // Verify memory is zeroed
+        // SAFETY: ptr is a valid allocation from allocate_memory, reads are within the 4096-byte allocation.
         unsafe {
             for i in 0..size as usize {
                 assert_eq!(*ptr.add(i), 0);

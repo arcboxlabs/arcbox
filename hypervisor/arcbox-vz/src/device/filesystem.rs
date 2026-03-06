@@ -62,6 +62,7 @@ pub struct SharedDirectory {
     inner: *mut AnyObject,
 }
 
+// SAFETY: Inner ObjC pointer is only used via msg_send! which dispatches to the ObjC runtime.
 unsafe impl Send for SharedDirectory {}
 
 impl SharedDirectory {
@@ -94,6 +95,7 @@ impl SharedDirectory {
             )));
         }
 
+        // SAFETY: ObjC alloc/init on valid VZSharedDirectory class. NSURL from validated path. readOnly is a Bool value.
         unsafe {
             let cls = get_class("VZSharedDirectory").ok_or_else(|| VZError::Internal {
                 code: -1,
@@ -209,6 +211,7 @@ pub struct SingleDirectoryShare {
     inner: *mut AnyObject,
 }
 
+// SAFETY: Inner ObjC pointer is only used via msg_send! which dispatches to the ObjC runtime.
 unsafe impl Send for SingleDirectoryShare {}
 
 impl SingleDirectoryShare {
@@ -218,6 +221,7 @@ impl SingleDirectoryShare {
     ///
     /// * `directory` - The shared directory to expose
     pub fn new(directory: SharedDirectory) -> VZResult<Self> {
+        // SAFETY: ObjC alloc/init on valid VZSingleDirectoryShare class with a valid SharedDirectory pointer.
         unsafe {
             let cls = get_class("VZSingleDirectoryShare").ok_or_else(|| VZError::Internal {
                 code: -1,
@@ -309,11 +313,13 @@ pub struct MultipleDirectoryShare {
     directories: HashMap<String, *mut AnyObject>,
 }
 
+// SAFETY: Inner ObjC pointer is only used via msg_send! which dispatches to the ObjC runtime.
 unsafe impl Send for MultipleDirectoryShare {}
 
 impl MultipleDirectoryShare {
     /// Creates a new multiple directory share.
     pub fn new() -> VZResult<Self> {
+        // SAFETY: ObjC new on valid VZMultipleDirectoryShare class. retain prevents autorelease.
         unsafe {
             let cls = get_class("VZMultipleDirectoryShare").ok_or_else(|| VZError::Internal {
                 code: -1,
@@ -347,6 +353,7 @@ impl MultipleDirectoryShare {
     /// * `name` - The name the directory will appear as in the guest
     /// * `directory` - The shared directory to add
     pub fn add(&mut self, name: &str, directory: SharedDirectory) -> &mut Self {
+        // SAFETY: self.inner is a valid VZMultipleDirectoryShare. Sending setObject:forKey: to its directories NSMutableDictionary.
         unsafe {
             // Get the directories dictionary
             let dirs: *mut AnyObject = msg_send!(self.inner, directories);
@@ -443,6 +450,7 @@ pub struct VirtioFileSystemDeviceConfiguration {
     tag: String,
 }
 
+// SAFETY: Inner ObjC pointer is only used via msg_send! which dispatches to the ObjC runtime.
 unsafe impl Send for VirtioFileSystemDeviceConfiguration {}
 
 impl VirtioFileSystemDeviceConfiguration {
@@ -465,6 +473,7 @@ impl VirtioFileSystemDeviceConfiguration {
             ));
         }
 
+        // SAFETY: ObjC alloc/init on valid VZVirtioFileSystemDeviceConfiguration class. Tag is validated via validateTag:error: before use.
         unsafe {
             let cls = get_class("VZVirtioFileSystemDeviceConfiguration").ok_or_else(|| {
                 VZError::Internal {
@@ -546,6 +555,7 @@ impl VirtioFileSystemDeviceConfiguration {
     ///
     /// * `share` - The directory share configuration
     pub fn set_share<S: DirectoryShare>(&mut self, share: S) -> &mut Self {
+        // SAFETY: self.inner is a valid VZVirtioFileSystemDeviceConfiguration. share.into_ptr() provides a valid directory share object.
         unsafe {
             let set_sel = objc2::sel!(setShare:);
             let set_fn: unsafe extern "C" fn(*mut AnyObject, objc2::runtime::Sel, *mut AnyObject) =
@@ -629,11 +639,13 @@ pub struct LinuxRosettaDirectoryShare {
     inner: *mut AnyObject,
 }
 
+// SAFETY: Inner ObjC pointer is only used via msg_send! which dispatches to the ObjC runtime.
 unsafe impl Send for LinuxRosettaDirectoryShare {}
 
 impl LinuxRosettaDirectoryShare {
     /// Checks the availability of Rosetta on this system.
     pub fn availability() -> RosettaAvailability {
+        // SAFETY: cls is a valid VZLinuxRosettaDirectoryShare class pointer from get_class. Sending availability to it.
         unsafe {
             let cls = match get_class("VZLinuxRosettaDirectoryShare") {
                 Some(c) => c,
@@ -672,6 +684,7 @@ impl LinuxRosettaDirectoryShare {
             )));
         }
 
+        // SAFETY: ObjC new on valid VZLinuxRosettaDirectoryShare class. Availability is checked above. retain prevents autorelease.
         unsafe {
             let cls =
                 get_class("VZLinuxRosettaDirectoryShare").ok_or_else(|| VZError::Internal {

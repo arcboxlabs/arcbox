@@ -12,6 +12,7 @@ use crate::msg_send;
 
 /// Creates an `NSString` from a Rust string.
 pub fn nsstring(s: &str) -> *mut AnyObject {
+    // SAFETY: NSString class is always available in the ObjC runtime. initWithBytes:length:encoding: is called with valid UTF-8 pointer/length from the Rust str, and encoding 4 (NSUTF8StringEncoding).
     unsafe {
         let cls = get_class("NSString").expect("NSString class not found");
         let alloc = msg_send!(cls, alloc);
@@ -33,6 +34,7 @@ pub fn nsstring_to_string(obj: *mut AnyObject) -> String {
     if obj.is_null() {
         return String::new();
     }
+    // SAFETY: obj is checked non-null above. UTF8String returns a null-terminated C string valid for the lifetime of the NSString.
     unsafe {
         let sel_utf8 = objc2::sel!(UTF8String);
         let func: unsafe extern "C" fn(*const AnyObject, objc2::runtime::Sel) -> *const i8 =
@@ -65,6 +67,7 @@ pub fn nsurl_file_path(path: &str) -> *mut AnyObject {
             .unwrap_or_else(|_| path.to_string())
     };
 
+    // SAFETY: NSURL and NSString classes are always available. fileURLWithPath: receives a valid NSString. retain prevents premature autorelease.
     unsafe {
         let cls = get_class("NSURL").expect("NSURL class not found");
         let path_str = nsstring(&abs_path);
@@ -81,6 +84,7 @@ pub fn nsurl_file_path(path: &str) -> *mut AnyObject {
 
 /// Creates an `NSArray` from raw pointers.
 pub fn nsarray(objects: &[*mut AnyObject]) -> *mut AnyObject {
+    // SAFETY: NSArray class is always available. arrayWithObjects:count: receives a valid pointer to the objects slice and its length.
     unsafe {
         let cls = get_class("NSArray").expect("NSArray class not found");
         let sel = objc2::sel!(arrayWithObjects:count:);
@@ -99,6 +103,7 @@ pub fn nsarray_count(array: *mut AnyObject) -> usize {
     if array.is_null() {
         return 0;
     }
+    // SAFETY: array is checked non-null above. Sending count to a valid NSArray object.
     unsafe {
         let sel = objc2::sel!(count);
         let func: unsafe extern "C" fn(*const AnyObject, objc2::runtime::Sel) -> usize =
@@ -112,6 +117,7 @@ pub fn nsarray_object_at_index(array: *mut AnyObject, index: usize) -> *mut AnyO
     if array.is_null() {
         return std::ptr::null_mut();
     }
+    // SAFETY: array is checked non-null above. Caller must ensure index is within bounds.
     unsafe {
         let sel = objc2::sel!(objectAtIndex:);
         let func: unsafe extern "C" fn(
@@ -132,6 +138,7 @@ pub fn nsarray_object_at_index(array: *mut AnyObject, index: usize) -> *mut AnyO
 /// Uses `initWithFileDescriptor:closeOnDealloc:NO` to prevent `NSFileHandle`
 /// from closing the fd when deallocated.
 pub fn file_handle_for_fd(fd: i32) -> *mut AnyObject {
+    // SAFETY: NSFileHandle class is always available. initWithFileDescriptor:closeOnDealloc: is called with a caller-provided fd; closeOnDealloc:false prevents NSFileHandle from closing the fd.
     unsafe {
         let cls = get_class("NSFileHandle").expect("NSFileHandle class not found");
         let obj = msg_send!(cls, alloc);
@@ -156,12 +163,14 @@ pub fn retain(obj: *mut AnyObject) -> *mut AnyObject {
     if obj.is_null() {
         return obj;
     }
+    // SAFETY: obj is checked non-null above. Sending retain to a valid ObjC object.
     unsafe { msg_send!(obj, retain) }
 }
 
 /// Releases an Objective-C object.
 pub fn release(obj: *mut AnyObject) {
     if !obj.is_null() {
+        // SAFETY: obj is checked non-null above. Sending release to a valid ObjC object.
         unsafe {
             let _: *mut AnyObject = msg_send!(obj, release);
         }

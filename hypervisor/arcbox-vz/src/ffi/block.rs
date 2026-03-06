@@ -164,6 +164,7 @@ unsafe extern "C" fn vsock_block_copy(_dst: *mut c_void, _src: *const c_void) {
 /// When a block is released, this function is called.
 /// We need to drop the sender if it hasn't been used.
 unsafe extern "C" fn vsock_block_dispose(block: *mut c_void) {
+    // SAFETY: block is a valid VsockContextBlock pointer provided by the block runtime. sender_ptr is either null (already consumed) or a valid Box pointer from create_vsock_context_block.
     unsafe {
         let block = block as *mut VsockContextBlock;
         let sender_ptr = (*block).sender_ptr;
@@ -182,6 +183,7 @@ unsafe extern "C" fn vsock_block_invoke(
     connection: *mut AnyObject,
     error: *mut AnyObject,
 ) {
+    // SAFETY: block is a valid VsockContextBlock pointer invoked by Virtualization.framework. sender_ptr was set by create_vsock_context_block. We take ownership via Box::from_raw and null out the pointer to prevent double-free in dispose.
     unsafe {
         let sender_ptr = (*block).sender_ptr;
         if sender_ptr.is_null() {
@@ -270,6 +272,7 @@ pub fn create_vsock_context_block(sender: oneshot::Sender<VsockResult>) -> *cons
     let sender_box = Box::new(sender);
     let sender_ptr = Box::into_raw(sender_box) as *mut c_void;
 
+    // SAFETY: Constructing a stack block with the correct ABI layout (isa, flags, invoke, descriptor). _NSConcreteStackBlock is the correct ISA for stack-allocated blocks. _Block_copy copies it to the heap, making the returned pointer valid for the block's lifetime.
     unsafe {
         // Create block on stack
         let stack_block = VsockContextBlock {
@@ -290,6 +293,7 @@ pub fn create_vsock_context_block(sender: oneshot::Sender<VsockResult>) -> *cons
 // Block Runtime FFI
 // ============================================================================
 
+// SAFETY: These are well-known block runtime symbols provided by the system.
 unsafe extern "C" {
     /// Global block ISA for stack blocks.
     pub static _NSConcreteStackBlock: *const c_void;
@@ -308,7 +312,9 @@ unsafe extern "C" {
 /// Wrapper for block pointers that are Send + Sync.
 pub struct BlockPtr(pub *const c_void);
 
+// SAFETY: BlockPtr wraps a heap-copied block pointer that is only used as an opaque handle passed to ObjC APIs. The block is created once and never mutated.
 unsafe impl Send for BlockPtr {}
+// SAFETY: See above — the block pointer is immutable after creation.
 unsafe impl Sync for BlockPtr {}
 
 /// Standard block descriptor for simple blocks.
@@ -326,6 +332,7 @@ pub static SIMPLE_BLOCK_DESCRIPTOR: BlockDescriptor = BlockDescriptor {
 pub unsafe fn create_completion_block(
     invoke: unsafe extern "C" fn(*const c_void, *mut AnyObject),
 ) -> *const c_void {
+    // SAFETY: Constructing a stack block with correct ABI layout. _Block_copy copies to heap. Caller ensures the returned pointer is eventually released.
     unsafe {
         let stack_block = CompletionBlock {
             isa: _NSConcreteStackBlock,
@@ -348,6 +355,7 @@ pub unsafe fn create_completion_block(
 pub unsafe fn create_vsock_completion_block(
     invoke: unsafe extern "C" fn(*const c_void, *mut AnyObject, *mut AnyObject),
 ) -> *const c_void {
+    // SAFETY: Same as create_completion_block — stack block with correct ABI layout, copied to heap via _Block_copy.
     unsafe {
         let stack_block = VsockCompletionBlock {
             isa: _NSConcreteStackBlock,
