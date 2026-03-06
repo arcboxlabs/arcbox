@@ -6,6 +6,8 @@
 #
 # Environment:
 #   DESKTOP_REPO       Path to arcbox-desktop-swift repo (default: ../arcbox-desktop-swift)
+#   BUNDLE_ID          Override app bundle identifier (default: from Xcode project)
+#   TEAM_ID            Override development team (default: from Xcode project)
 #   BOOT_ASSET_DIR     Pre-downloaded boot-assets directory (optional)
 #   BOOT_ASSET_VERSION Override boot-asset version (default: from boot-assets.lock)
 
@@ -72,16 +74,24 @@ echo "==> Building Swift app..."
 XCODE_BUILD_DIR="$BUILD_DIR/xcode-build"
 
 # Build without code signing — we'll sign everything together at the end
+XCODE_OVERRIDES=(
+    CODE_SIGN_IDENTITY=-
+    CODE_SIGNING_REQUIRED=NO
+    CODE_SIGNING_ALLOWED=NO
+    ARCBOX_SKIP_RUST_BUILD=1
+    ENABLE_USER_SCRIPT_SANDBOXING=NO
+)
+
+# Override bundle ID and team if provided via environment
+[[ -n "${BUNDLE_ID:-}" ]] && XCODE_OVERRIDES+=("PRODUCT_BUNDLE_IDENTIFIER=$BUNDLE_ID")
+[[ -n "${TEAM_ID:-}" ]]   && XCODE_OVERRIDES+=("DEVELOPMENT_TEAM=$TEAM_ID")
+
 xcodebuild build \
     -project "$DESKTOP_REPO/arcbox-desktop-swift.xcodeproj" \
     -scheme "arcbox-desktop-swift" \
     -configuration Release \
     -derivedDataPath "$XCODE_BUILD_DIR" \
-    CODE_SIGN_IDENTITY=- \
-    CODE_SIGNING_REQUIRED=NO \
-    CODE_SIGNING_ALLOWED=NO \
-    ARCBOX_SKIP_RUST_BUILD=1 \
-    ENABLE_USER_SCRIPT_SANDBOXING=NO \
+    "${XCODE_OVERRIDES[@]}" \
     2>&1 | tail -5
 
 # Find the .app
