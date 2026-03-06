@@ -42,7 +42,10 @@ pub async fn execute(cmd: DockerCommands) -> Result<()> {
     match cmd {
         DockerCommands::Enable => execute_enable(&manager),
         DockerCommands::Disable => execute_disable(&manager),
-        DockerCommands::Status => execute_status(&manager),
+        DockerCommands::Status => {
+            execute_status(&manager);
+            Ok(())
+        }
     }
 }
 
@@ -97,7 +100,7 @@ fn execute_disable(manager: &DockerContextManager) -> Result<()> {
 }
 
 /// Shows Docker integration status.
-fn execute_status(manager: &DockerContextManager) -> Result<()> {
+fn execute_status(manager: &DockerContextManager) {
     let status = manager.status();
 
     println!("Docker Integration Status");
@@ -130,8 +133,6 @@ fn execute_status(manager: &DockerContextManager) -> Result<()> {
         println!("Status: Not configured");
         println!("        Run 'arcbox docker enable' to set up");
     }
-
-    Ok(())
 }
 
 /// Returns the default socket path for the Docker-compatible API.
