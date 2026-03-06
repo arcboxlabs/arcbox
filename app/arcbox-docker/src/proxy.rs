@@ -17,8 +17,15 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
+use std::time::Duration;
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+/// Timeout for the HTTP/1.1 handshake with guest dockerd.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Timeout for sending a request and receiving the response headers from guest dockerd.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 // =============================================================================
 // RawFdStream — async I/O wrapper around a raw vsock file descriptor
@@ -187,10 +194,13 @@ pub async fn proxy_to_guest(
 ) -> Result<Response<Body>> {
     let io = connect_guest(runtime)?;
 
-    let (mut sender, conn) = http1::Builder::new()
-        .handshake(io)
-        .await
-        .map_err(|e| DockerError::Server(format!("guest docker handshake failed: {e}")))?;
+    let (mut sender, conn) = tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        http1::Builder::new().handshake(io),
+    )
+    .await
+    .map_err(|_| DockerError::Server("guest docker handshake timed out".into()))?
+    .map_err(|e| DockerError::Server(format!("guest docker handshake failed: {e}")))?;
 
     tokio::spawn(async move {
         if let Err(e) = conn.await {
@@ -216,9 +226,9 @@ pub async fn proxy_to_guest(
     req.headers_mut()
         .insert(header::CONNECTION, HeaderValue::from_static("close"));
 
-    let response = sender
-        .send_request(req)
+    let response = tokio::time::timeout(REQUEST_TIMEOUT, sender.send_request(req))
         .await
+        .map_err(|_| DockerError::Server("guest docker request timed out".into()))?
         .map_err(|e| DockerError::Server(format!("guest docker request failed: {e}")))?;
 
     let (parts, incoming) = response.into_parts();
@@ -241,10 +251,13 @@ pub async fn proxy_to_guest_stream(
 ) -> Result<Response<Body>> {
     let io = connect_guest(runtime)?;
 
-    let (mut sender, conn) = http1::Builder::new()
-        .handshake(io)
-        .await
-        .map_err(|e| DockerError::Server(format!("guest docker handshake failed: {e}")))?;
+    let (mut sender, conn) = tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        http1::Builder::new().handshake(io),
+    )
+    .await
+    .map_err(|_| DockerError::Server("guest docker handshake timed out".into()))?
+    .map_err(|e| DockerError::Server(format!("guest docker handshake failed: {e}")))?;
 
     tokio::spawn(async move {
         if let Err(e) = conn.await {
@@ -278,9 +291,9 @@ pub async fn proxy_to_guest_stream(
         .headers_mut()
         .insert(header::CONNECTION, HeaderValue::from_static("close"));
 
-    let response = sender
-        .send_request(guest_req)
+    let response = tokio::time::timeout(REQUEST_TIMEOUT, sender.send_request(guest_req))
         .await
+        .map_err(|_| DockerError::Server("guest docker request timed out".into()))?
         .map_err(|e| DockerError::Server(format!("guest docker request failed: {e}")))?;
 
     let (parts, incoming) = response.into_parts();
@@ -304,10 +317,13 @@ pub async fn proxy_with_upgrade(
 ) -> Result<Response<Body>> {
     let io = connect_guest(runtime)?;
 
-    let (mut sender, conn) = http1::Builder::new()
-        .handshake(io)
-        .await
-        .map_err(|e| DockerError::Server(format!("guest docker handshake failed: {e}")))?;
+    let (mut sender, conn) = tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        http1::Builder::new().handshake(io),
+    )
+    .await
+    .map_err(|_| DockerError::Server("guest docker handshake timed out".into()))?
+    .map_err(|e| DockerError::Server(format!("guest docker handshake failed: {e}")))?;
 
     // The connection task must keep running for the upgrade to work.
     // `.with_upgrades()` is required so hyper::upgrade::on(response) works.
@@ -341,9 +357,9 @@ pub async fn proxy_with_upgrade(
         .headers_mut()
         .insert(header::HOST, HeaderValue::from_static("localhost"));
 
-    let guest_response = sender
-        .send_request(guest_req)
+    let guest_response = tokio::time::timeout(REQUEST_TIMEOUT, sender.send_request(guest_req))
         .await
+        .map_err(|_| DockerError::Server("guest docker request timed out".into()))?
         .map_err(|e| DockerError::Server(format!("guest docker request failed: {e}")))?;
 
     if guest_response.status() != StatusCode::SWITCHING_PROTOCOLS {
