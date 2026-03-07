@@ -53,6 +53,7 @@ mod agent {
     const MSG_STDIN: u8 = 0x02;
     const MSG_RESIZE: u8 = 0x03;
     const MSG_EOF: u8 = 0x04;
+    const MSG_CLOCK_SYNC: u8 = 0x05;
     const MSG_STDOUT: u8 = 0x10;
     const MSG_STDERR: u8 = 0x11;
     const MSG_EXIT: u8 = 0x12;
@@ -182,27 +183,54 @@ mod agent {
         let (msg_type, payload) = match read_frame(&mut conn) {
             Ok(f) => f,
             Err(e) => {
-                eprintln!("agent: read MSG_START: {e}");
-                return;
-            }
-        };
-        if msg_type != MSG_START {
-            eprintln!("agent: expected MSG_START (0x01), got 0x{msg_type:02x}");
-            return;
-        }
-        let start: StartCommand = match serde_json::from_slice(&payload) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("agent: parse StartCommand: {e}");
+                eprintln!("agent: read first frame: {e}");
                 return;
             }
         };
 
-        if start.tty {
-            handle_tty(conn, start);
-        } else {
-            handle_piped(conn, start);
+        match msg_type {
+            MSG_CLOCK_SYNC => handle_clock_sync(conn, &payload),
+            MSG_START => {
+                let start: StartCommand = match serde_json::from_slice(&payload) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("agent: parse StartCommand: {e}");
+                        return;
+                    }
+                };
+                if start.tty {
+                    handle_tty(conn, start);
+                } else {
+                    handle_piped(conn, start);
+                }
+            }
+            other => {
+                eprintln!("agent: unexpected frame type 0x{other:02x} on exec port");
+            }
         }
+    }
+
+    fn handle_clock_sync(mut conn: VsockStream, payload: &[u8]) {
+        if payload.len() < 12 {
+            eprintln!(
+                "agent: MSG_CLOCK_SYNC: payload too short ({} bytes)",
+                payload.len()
+            );
+            let _ = write_frame(&mut conn, MSG_EXIT, &(-1i32).to_le_bytes());
+            return;
+        }
+        let secs = i64::from_le_bytes(payload[..8].try_into().unwrap());
+        let nanos = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+
+        // SAFETY: clock_settime requires CAP_SYS_TIME; vm-agent runs as root inside guest.
+        unsafe {
+            let ts = libc::timespec {
+                tv_sec: secs,
+                tv_nsec: nanos as libc::c_long,
+            };
+            libc::clock_settime(libc::CLOCK_REALTIME, &raw const ts);
+        }
+        let _ = write_frame(&mut conn, MSG_EXIT, &0i32.to_le_bytes());
     }
 
     // -------------------------------------------------------------------------
