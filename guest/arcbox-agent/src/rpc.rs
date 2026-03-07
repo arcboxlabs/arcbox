@@ -14,8 +14,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub use arcbox_constants::wire::MessageType;
 use arcbox_protocol::Empty;
 use arcbox_protocol::agent::{
-    PingRequest, PingResponse, PortBindingsChanged, PortBindingsRemoved, RuntimeEnsureRequest,
-    RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse, SystemInfo,
+    NfsEnsureRequest, NfsEnsureResponse, PingRequest, PingResponse, PortBindingsChanged,
+    PortBindingsRemoved, RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest,
+    RuntimeStatusResponse, SystemInfo,
 };
 
 /// Agent version string.
@@ -67,6 +68,7 @@ pub enum RpcRequest {
     GetSystemInfo,
     EnsureRuntime(RuntimeEnsureRequest),
     RuntimeStatus(RuntimeStatusRequest),
+    EnsureNfs(NfsEnsureRequest),
 }
 
 /// RPC response envelope.
@@ -76,6 +78,7 @@ pub enum RpcResponse {
     SystemInfo(SystemInfo),
     RuntimeEnsure(RuntimeEnsureResponse),
     RuntimeStatus(RuntimeStatusResponse),
+    NfsEnsure(NfsEnsureResponse),
     Empty,
     PortBindingsChanged(PortBindingsChanged),
     PortBindingsRemoved(PortBindingsRemoved),
@@ -90,6 +93,7 @@ impl RpcResponse {
             Self::SystemInfo(_) => MessageType::GetSystemInfoResponse,
             Self::RuntimeEnsure(_) => MessageType::EnsureRuntimeResponse,
             Self::RuntimeStatus(_) => MessageType::RuntimeStatusResponse,
+            Self::NfsEnsure(_) => MessageType::EnsureNfsResponse,
             Self::Empty => MessageType::Empty,
             Self::PortBindingsChanged(_) => MessageType::PortBindingsChanged,
             Self::PortBindingsRemoved(_) => MessageType::PortBindingsRemoved,
@@ -104,6 +108,7 @@ impl RpcResponse {
             Self::SystemInfo(msg) => msg.encode_to_vec(),
             Self::RuntimeEnsure(msg) => msg.encode_to_vec(),
             Self::RuntimeStatus(msg) => msg.encode_to_vec(),
+            Self::NfsEnsure(msg) => msg.encode_to_vec(),
             Self::Empty => Empty::default().encode_to_vec(),
             Self::PortBindingsChanged(msg) => msg.encode_to_vec(),
             Self::PortBindingsRemoved(msg) => msg.encode_to_vec(),
@@ -247,6 +252,10 @@ pub fn parse_request(msg_type: MessageType, payload: &[u8]) -> Result<RpcRequest
             let req = RuntimeStatusRequest::decode(payload)?;
             Ok(RpcRequest::RuntimeStatus(req))
         }
+        MessageType::EnsureNfsRequest => {
+            let req = NfsEnsureRequest::decode(payload)?;
+            Ok(RpcRequest::EnsureNfs(req))
+        }
         _ => anyhow::bail!("unexpected message type: {:?}", msg_type),
     }
 }
@@ -273,6 +282,10 @@ mod tests {
             MessageType::from_u32(0x0004),
             Some(MessageType::RuntimeStatusRequest)
         );
+        assert_eq!(
+            MessageType::from_u32(0x0005),
+            Some(MessageType::EnsureNfsRequest)
+        );
     }
 
     #[test]
@@ -292,6 +305,10 @@ mod tests {
         assert_eq!(
             MessageType::from_u32(0x1004),
             Some(MessageType::RuntimeStatusResponse)
+        );
+        assert_eq!(
+            MessageType::from_u32(0x1005),
+            Some(MessageType::EnsureNfsResponse)
         );
     }
 
@@ -322,6 +339,7 @@ mod tests {
     fn test_parse_request_ping() {
         let req = PingRequest {
             message: "ping".to_string(),
+            ..Default::default()
         };
         let payload = req.encode_to_vec();
 
@@ -329,6 +347,20 @@ mod tests {
         match parsed {
             RpcRequest::Ping(p) => assert_eq!(p.message, "ping"),
             _ => panic!("Expected Ping request"),
+        }
+    }
+
+    #[test]
+    fn test_parse_request_ensure_nfs() {
+        let req = NfsEnsureRequest {
+            start_if_needed: true,
+        };
+        let payload = req.encode_to_vec();
+
+        let parsed = parse_request(MessageType::EnsureNfsRequest, &payload).unwrap();
+        match parsed {
+            RpcRequest::EnsureNfs(r) => assert!(r.start_if_needed),
+            _ => panic!("Expected EnsureNfs request"),
         }
     }
 }

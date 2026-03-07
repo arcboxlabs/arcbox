@@ -27,6 +27,10 @@ mod sandbox;
 // DNS module manages /etc/hosts for container name resolution.
 mod dns;
 
+// NFS in-kernel server management (Linux guest only).
+#[cfg(target_os = "linux")]
+mod nfs;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let is_pid1 = std::process::id() == 1;
