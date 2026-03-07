@@ -1,3 +1,5 @@
+mod dns_service;
+
 use anyhow::{Context, Result};
 use arcbox_api::{
     MachineServiceImpl, SandboxServiceImpl, SandboxServiceServer, SandboxSnapshotServiceImpl,

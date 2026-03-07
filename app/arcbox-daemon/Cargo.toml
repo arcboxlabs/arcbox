@@ -26,6 +26,8 @@ anyhow = { workspace = true }
 sentry = { workspace = true }
 dirs = { workspace = true }
 libc = { workspace = true }
+arcbox-net = { version = "0.1.2", path = "../../services/arcbox-net" }
+serde_json.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 macos-resolver = { workspace = true }
