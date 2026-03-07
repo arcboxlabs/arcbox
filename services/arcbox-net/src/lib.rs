@@ -103,6 +103,7 @@ impl Default for NetConfig {
     }
 }
 
+use std::net::IpAddr;
 use std::sync::RwLock;
 
 /// Network manager state.
@@ -131,6 +132,8 @@ pub struct NetworkManager {
     state: RwLock<NetworkState>,
     /// IP allocator for NAT.
     ip_allocator: RwLock<Option<nat::IpAllocator>>,
+    /// DNS forwarder with local hostname resolution.
+    dns_forwarder: RwLock<dns::DnsForwarder>,
 }
 
 impl NetworkManager {
@@ -141,6 +144,7 @@ impl NetworkManager {
             config,
             state: RwLock::new(NetworkState::Stopped),
             ip_allocator: RwLock::new(None),
+            dns_forwarder: RwLock::new(dns::DnsForwarder::new(dns::DnsConfig::default())),
         }
     }
 
@@ -320,6 +324,38 @@ impl NetworkManager {
             .ok()
             .and_then(|guard| guard.as_ref().map(nat::IpAllocator::available_count))
             .unwrap_or(0)
+    }
+
+    /// Registers a local DNS hostname → IP mapping.
+    pub fn register_dns(&self, hostname: &str, ip: IpAddr) {
+        if let Ok(mut forwarder) = self.dns_forwarder.write() {
+            forwarder.add_local_host(hostname, ip);
+        }
+    }
+
+    /// Removes a local DNS hostname mapping.
+    pub fn deregister_dns(&self, hostname: &str) {
+        if let Ok(mut forwarder) = self.dns_forwarder.write() {
+            forwarder.remove_local_host(hostname);
+        }
+    }
+
+    /// Tries to resolve a DNS query locally, returning NXDOMAIN for unresolved
+    /// `*.arcbox.local` queries. Returns `None` only when the query should be
+    /// forwarded to upstream DNS.
+    pub fn try_resolve_dns_or_nxdomain(&self, query: &[u8]) -> Option<Vec<u8>> {
+        let forwarder = self.dns_forwarder.read().ok()?;
+        forwarder.try_resolve_locally_or_nxdomain(query)
+    }
+
+    /// Handles a full DNS query: local resolution first, then upstream forwarding.
+    /// This blocks on network I/O for upstream queries.
+    pub fn handle_dns_query(&self, query: &[u8]) -> Result<Vec<u8>> {
+        let mut forwarder = self
+            .dns_forwarder
+            .write()
+            .map_err(|_| NetError::config("dns forwarder lock poisoned".to_string()))?;
+        forwarder.handle_query(query)
     }
 }
 

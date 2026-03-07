@@ -306,14 +306,57 @@ impl DnsForwarder {
 
     /// Attempts to resolve a DNS query locally without any network I/O.
     ///
-    /// Returns `Ok(Some(response))` if the query was resolved from local host
-    /// mappings, or `Ok(None)` if upstream forwarding is needed. Unsupported
+    /// Returns `Some(response)` if the query was resolved from local host
+    /// mappings, or `None` if upstream forwarding is needed. Unsupported
     /// query types (e.g. HTTPS/SVCB) gracefully return `None` instead of
     /// failing, so the caller can forward the raw query.
     pub fn try_resolve_locally(&self, data: &[u8]) -> Option<Vec<u8>> {
         let query = DnsQuery::parse(data).ok()?;
         let ip = self.resolve_local(&query.name)?;
         self.build_local_response(&query, ip).ok()
+    }
+
+    /// Attempts local resolution, returning NXDOMAIN for unresolved local-domain queries.
+    ///
+    /// - Registered local host → `Some(A/AAAA response)`
+    /// - Unregistered `*.arcbox.local` (or `*.<local_domain>`) → `Some(NXDOMAIN)`
+    /// - Other domains → `None` (caller should forward to upstream)
+    pub fn try_resolve_locally_or_nxdomain(&self, data: &[u8]) -> Option<Vec<u8>> {
+        let query = DnsQuery::parse(data).ok()?;
+
+        // Check local hosts first.
+        if let Some(ip) = self.resolve_local(&query.name) {
+            return self.build_local_response(&query, ip).ok();
+        }
+
+        // If the query is for our local domain, return NXDOMAIN instead of
+        // forwarding to upstream (prevents leaking internal names).
+        if let Some(ref domain) = self.config.local_domain {
+            let name_lower = query.name.to_lowercase();
+            if name_lower == *domain || name_lower.ends_with(&format!(".{domain}")) {
+                return Some(Self::build_nxdomain_response(&query));
+            }
+        }
+
+        // Not a local domain — caller should forward upstream.
+        None
+    }
+
+    /// Builds an NXDOMAIN response for a query.
+    fn build_nxdomain_response(query: &DnsQuery) -> Vec<u8> {
+        let mut response = Vec::with_capacity(query.raw_header.len() + query.raw_question.len());
+        response.extend_from_slice(&query.raw_header);
+
+        // QR=1, Opcode=0, AA=1, TC=0, RD=1
+        response[2] = 0x85;
+        // RA=1, Z=0, RCODE=3 (NXDOMAIN)
+        response[3] = 0x83;
+        // ANCOUNT = 0
+        response[6] = 0x00;
+        response[7] = 0x00;
+
+        response.extend_from_slice(&query.raw_question);
+        response
     }
 
     /// Returns the upstream DNS server addresses.
