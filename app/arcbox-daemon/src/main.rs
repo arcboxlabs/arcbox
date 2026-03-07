@@ -58,10 +58,14 @@ fn main() -> Result<()> {
             .ok()
             .and_then(|s| s.parse().ok()),
         release: Some(env!("CARGO_PKG_VERSION").into()),
-        environment: std::env::var("ARCBOX_DAEMON_SENTRY_ENVIRONMENT")
-            .or_else(|_| std::env::var("SENTRY_ENVIRONMENT"))
-            .ok()
-            .map(Into::into),
+        environment: Some(
+            std::env::var("ARCBOX_DAEMON_SENTRY_ENVIRONMENT")
+                .or_else(|_| std::env::var("SENTRY_ENVIRONMENT"))
+                .unwrap_or_else(|_| {
+                    if cfg!(debug_assertions) { "development" } else { "production" }.into()
+                })
+                .into(),
+        ),
         traces_sample_rate: 0.2,
         sample_rate: 1.0,
         attach_stacktrace: true,
