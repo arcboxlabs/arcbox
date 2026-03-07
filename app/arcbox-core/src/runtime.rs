@@ -281,7 +281,7 @@ impl Runtime {
     /// # Errors
     ///
     /// Returns an error if initialization fails or guest binaries are missing.
-    pub async fn init(&self) -> Result<()> {
+    pub async fn init(self: &Arc<Self>) -> Result<()> {
         // Create data directories.
         tokio::fs::create_dir_all(&self.config.data_dir).await?;
         tokio::fs::create_dir_all(self.config.data_dir.join("vms")).await?;
@@ -300,11 +300,56 @@ impl Runtime {
 
         self.ensure_vm_ready().await?;
 
+        // Spawn k3s background task (non-blocking, failures are logged).
+        self.spawn_k3s_service();
+
         tracing::info!(
             backend = self.container_backend.name(),
             "ArcBox runtime initialized"
         );
         Ok(())
+    }
+
+    /// Spawns a background task that starts k3s in the guest VM and sets up
+    /// host-side port forwarding once it is ready.
+    ///
+    /// k3s is optional — failures are logged but never block Docker startup
+    /// or the daemon lifecycle.
+    fn spawn_k3s_service(self: &Arc<Self>) {
+        use arcbox_constants::ports::K3S_API_PORT;
+
+        let rt = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut agent = match rt.get_agent(DEFAULT_MACHINE_NAME) {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::warn!("k3s: failed to connect agent: {e}");
+                    return;
+                }
+            };
+            match agent.ensure_k3s(true).await {
+                Ok(resp) if resp.ready => {
+                    tracing::info!("k3s server ready in guest");
+                    if let Err(e) = rt
+                        .start_port_forwarding_for(
+                            DEFAULT_MACHINE_NAME,
+                            "__system_k3s",
+                            &[(
+                                "0.0.0.0".to_string(),
+                                K3S_API_PORT,
+                                K3S_API_PORT,
+                                "tcp".to_string(),
+                            )],
+                        )
+                        .await
+                    {
+                        tracing::warn!("k3s: port forwarding failed: {e}");
+                    }
+                }
+                Ok(resp) => tracing::warn!("k3s: {}", resp.message),
+                Err(e) => tracing::warn!("k3s: ensure_k3s failed: {e}"),
+            }
+        });
     }
 
     /// Shuts down the runtime gracefully.

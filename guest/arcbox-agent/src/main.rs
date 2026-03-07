@@ -27,6 +27,10 @@ mod sandbox;
 // DNS module manages /etc/hosts for container name resolution.
 mod dns;
 
+// k3s lightweight Kubernetes management (Linux guest only).
+#[cfg(target_os = "linux")]
+mod k3s;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let is_pid1 = std::process::id() == 1;
