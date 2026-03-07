@@ -1,3 +1,5 @@
+mod dns_service;
+
 use anyhow::{Context, Result};
 use arcbox_api::{
     MachineServiceImpl, SandboxServiceImpl, SandboxServiceServer, SandboxSnapshotServiceImpl,
@@ -6,7 +8,9 @@ use arcbox_api::{
 use arcbox_core::{Config, Runtime, VmLifecycleConfig};
 use arcbox_docker::{DockerApiServer, DockerContextManager, ServerConfig};
 use clap::Parser;
+use dns_service::DnsService;
 use macos_resolver::{FileResolver, to_env_prefix};
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::UnixListener;
@@ -53,11 +57,15 @@ fn main() -> Result<()> {
     // threads inherit the Hub from the main thread.
     // When SENTRY_DSN is unset, this is a no-op with zero overhead.
     let _sentry_guard = sentry::init(sentry::ClientOptions {
-        dsn: std::env::var("SENTRY_DSN")
+        dsn: std::env::var("ARCBOX_DAEMON_SENTRY_DSN")
+            .or_else(|_| std::env::var("SENTRY_DSN"))
             .ok()
             .and_then(|s| s.parse().ok()),
         release: Some(env!("CARGO_PKG_VERSION").into()),
-        environment: std::env::var("SENTRY_ENVIRONMENT").ok().map(Into::into),
+        environment: std::env::var("ARCBOX_DAEMON_SENTRY_ENVIRONMENT")
+            .or_else(|_| std::env::var("SENTRY_ENVIRONMENT"))
+            .ok()
+            .map(Into::into),
         traces_sample_rate: 0.2,
         sample_rate: 1.0,
         attach_stacktrace: true,
@@ -128,6 +136,40 @@ async fn run(args: DaemonArgs) -> Result<()> {
         "Runtime initialized"
     );
 
+    // Apply custom DNS domain if configured via ARCBOX_DNS_DOMAIN.
+    let dns_local_domain = dns_domain();
+    if dns_local_domain != DEFAULT_DNS_DOMAIN {
+        runtime.network_manager().set_dns_domain(&dns_local_domain);
+    }
+
+    // Bind DNS socket eagerly — failure aborts the daemon.
+    let dns_listen_port = dns_port();
+    let dns_service = DnsService::bind(Arc::clone(runtime.network_manager()), dns_listen_port)
+        .await
+        .context("Failed to start DNS service")?;
+
+    // Register host.arcbox.local → gateway IP.
+    let network_cfg = &runtime.config().network;
+    let gateway_ip = network_cfg
+        .gateway
+        .as_ref()
+        .and_then(|s| s.parse::<Ipv4Addr>().ok())
+        .or_else(|| first_address_in_subnet(&network_cfg.subnet))
+        .unwrap_or(Ipv4Addr::new(192, 168, 64, 1));
+    runtime
+        .network_manager()
+        .register_dns("host", IpAddr::V4(gateway_ip));
+
+    let dns_handle = tokio::spawn(async move {
+        if let Err(e) = dns_service.run().await {
+            tracing::error!("DNS service error: {}", e);
+        }
+    });
+
+    // Recover DNS entries for containers already running in the guest VM
+    // (handles daemon restart without VM restart).
+    recover_dns_entries(&runtime).await;
+
     let docker_server = DockerApiServer::new(
         ServerConfig {
             socket_path: socket_path.clone(),
@@ -163,6 +205,7 @@ async fn run(args: DaemonArgs) -> Result<()> {
     println!("ArcBox daemon started");
     println!("  Docker API: {}", socket_path.display());
     println!("  gRPC API:   {}", grpc_socket.display());
+    println!("  DNS:        127.0.0.1:{}", dns_listen_port);
     println!("  Data:       {}", data_dir.display());
     println!();
     println!("Use 'arcbox docker enable' to configure Docker CLI integration.");
@@ -172,6 +215,7 @@ async fn run(args: DaemonArgs) -> Result<()> {
     info!("Shutdown signal received");
 
     info!("Shutting down...");
+    dns_handle.abort();
     docker_handle.abort();
     grpc_handle.abort();
 
@@ -273,6 +317,133 @@ async fn shutdown_signal() {
         () = ctrl_c => {},
         () = terminate => {},
     }
+}
+
+/// Re-registers DNS entries for all running containers in the guest VM.
+///
+/// Called after daemon startup to handle the case where the daemon restarts
+/// but the VM (and its containers) are still running.
+async fn recover_dns_entries(runtime: &Arc<Runtime>) {
+    use axum::http::{HeaderMap, Method};
+    use bytes::Bytes;
+
+    let resp = match arcbox_docker::proxy::proxy_to_guest(
+        runtime,
+        Method::GET,
+        "/containers/json",
+        &HeaderMap::new(),
+        Bytes::new(),
+    )
+    .await
+    {
+        Ok(resp) if resp.status().is_success() => resp,
+        Ok(resp) => {
+            tracing::debug!("Container list returned status {}", resp.status());
+            return;
+        }
+        Err(e) => {
+            tracing::debug!("Failed to list containers for DNS recovery: {}", e);
+            return;
+        }
+    };
+
+    let body_bytes = match http_body_util::BodyExt::collect(resp.into_body()).await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => {
+            tracing::debug!("Failed to read container list body: {}", e);
+            return;
+        }
+    };
+
+    let containers: Vec<serde_json::Value> = match serde_json::from_slice(&body_bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!("Failed to parse container list JSON: {}", e);
+            return;
+        }
+    };
+
+    let mut recovered = 0u32;
+    for container in &containers {
+        let Some(id) = container.get("Id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+
+        // Inspect each running container to get name + IP.
+        let inspect_path = format!("/containers/{id}/json");
+        let inspect_resp = match arcbox_docker::proxy::proxy_to_guest(
+            runtime,
+            Method::GET,
+            &inspect_path,
+            &HeaderMap::new(),
+            Bytes::new(),
+        )
+        .await
+        {
+            Ok(resp) if resp.status().is_success() => resp,
+            _ => continue,
+        };
+
+        let inspect_body = match http_body_util::BodyExt::collect(inspect_resp.into_body()).await {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => continue,
+        };
+
+        // Extract name and IP using the same logic as container start.
+        let v: serde_json::Value = match serde_json::from_slice(&inspect_body) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let Some(name) = v.get("Name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let name = name.trim_start_matches('/');
+        if name.is_empty() {
+            continue;
+        }
+
+        // IP extraction with fallback chain.
+        let ip_str = v
+            .pointer("/NetworkSettings/IPAddress")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                v.pointer("/NetworkSettings/Networks")?
+                    .as_object()?
+                    .values()
+                    .find_map(|net| net.get("IPAddress")?.as_str().filter(|s| !s.is_empty()))
+            });
+
+        let Some(ip) = ip_str.and_then(|s| s.parse::<IpAddr>().ok()) else {
+            continue;
+        };
+
+        runtime.register_dns(id, name, ip).await;
+        recovered += 1;
+    }
+
+    if recovered > 0 {
+        info!(
+            count = recovered,
+            "Recovered DNS entries for running containers"
+        );
+    }
+}
+
+fn dns_port() -> u16 {
+    let key = format!("{}_DNS_PORT", to_env_prefix(DNS_PREFIX));
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5553)
+}
+
+/// Computes the first usable address in a CIDR subnet (e.g. "192.168.64.0/24" → 192.168.64.1).
+fn first_address_in_subnet(subnet: &str) -> Option<Ipv4Addr> {
+    let (ip_str, _) = subnet.split_once('/')?;
+    let base: Ipv4Addr = ip_str.parse().ok()?;
+    Some(Ipv4Addr::from(u32::from(base) + 1))
 }
 
 fn dns_domain() -> String {
