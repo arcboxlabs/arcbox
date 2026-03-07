@@ -8,5 +8,5 @@ pub mod lockfile;
 pub mod manager;
 pub mod registry;
 
-pub use lockfile::{parse_tools, ToolEntry};
+pub use lockfile::{ToolEntry, parse_tools};
 pub use manager::{DockerToolError, DockerToolManager};

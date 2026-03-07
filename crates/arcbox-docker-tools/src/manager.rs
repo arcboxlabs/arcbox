@@ -56,12 +56,12 @@ impl DockerToolManager {
         total: usize,
         progress: Option<&ProgressCallback>,
     ) -> Result<(), DockerToolError> {
-        let expected_sha = tool
-            .sha256_for_arch(&self.arch)
-            .ok_or_else(|| DockerToolError::UnsupportedArch {
-                tool: tool.name.clone(),
-                arch: self.arch.clone(),
-            })?;
+        let expected_sha =
+            tool.sha256_for_arch(&self.arch)
+                .ok_or_else(|| DockerToolError::UnsupportedArch {
+                    tool: tool.name.clone(),
+                    arch: self.arch.clone(),
+                })?;
 
         let dest = self.install_dir.join(&tool.name);
 
@@ -144,12 +144,12 @@ impl DockerToolManager {
     /// Validate that all tools are installed and checksums match.
     pub async fn validate_all(&self) -> Result<(), DockerToolError> {
         for tool in &self.tools {
-            let expected_sha =
-                tool.sha256_for_arch(&self.arch)
-                    .ok_or_else(|| DockerToolError::UnsupportedArch {
-                        tool: tool.name.clone(),
-                        arch: self.arch.clone(),
-                    })?;
+            let expected_sha = tool.sha256_for_arch(&self.arch).ok_or_else(|| {
+                DockerToolError::UnsupportedArch {
+                    tool: tool.name.clone(),
+                    arch: self.arch.clone(),
+                }
+            })?;
 
             let path = self.install_dir.join(&tool.name);
             if !path.exists() {
@@ -189,8 +189,7 @@ fn extract_from_tgz(
     inner_path: &str,
     dest: &Path,
 ) -> Result<(), DockerToolError> {
-    let file =
-        std::fs::File::open(archive_path).map_err(DockerToolError::Io)?;
+    let file = std::fs::File::open(archive_path).map_err(DockerToolError::Io)?;
     let gz = flate2::read::GzDecoder::new(file);
     let mut archive = tar::Archive::new(gz);
 

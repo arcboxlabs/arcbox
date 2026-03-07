@@ -220,7 +220,12 @@ impl BootAssetProvider {
             .map_err(|e| CoreError::config(format!("boot asset error: {e}")))?;
 
         // Verify manifest SHA256 if the lockfile specifies one.
-        if let Some(expected) = LOCK.boot.manifest_sha256.as_deref().filter(|s| !s.is_empty()) {
+        if let Some(expected) = LOCK
+            .boot
+            .manifest_sha256
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        {
             let manifest_path = self.config.version_cache_dir().join("manifest.json");
             let bytes = std::fs::read(&manifest_path)
                 .map_err(|e| CoreError::config(format!("read manifest: {e}")))?;

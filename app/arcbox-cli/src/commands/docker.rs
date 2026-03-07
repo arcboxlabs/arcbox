@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use arcbox_docker::DockerContextManager;
-use arcbox_docker_tools::{parse_tools, DockerToolManager};
+use arcbox_docker_tools::{DockerToolManager, parse_tools};
 use clap::Subcommand;
 
 /// Embedded `assets.lock` (same copy used by boot_assets).
@@ -87,26 +87,36 @@ async fn execute_setup() -> Result<()> {
 
     // Progress callback.
     let progress_cb: arcbox_asset::ProgressCallback =
-        Box::new(|p: arcbox_asset::PrepareProgress| {
-            match &p.phase {
-                arcbox_asset::PreparePhase::Checking => {
-                    eprint!("  [{}/{}] {} checking...", p.current, p.total, p.name);
-                }
-                arcbox_asset::PreparePhase::Downloading { downloaded, total } => {
-                    let pct = total
-                        .map(|t| if t > 0 { downloaded * 100 / t } else { 0 })
-                        .unwrap_or(0);
-                    eprint!("\r  [{}/{}] {} downloading... {}%", p.current, p.total, p.name, pct);
-                }
-                arcbox_asset::PreparePhase::Verifying => {
-                    eprint!("\r  [{}/{}] {} verifying...       ", p.current, p.total, p.name);
-                }
-                arcbox_asset::PreparePhase::Ready => {
-                    eprintln!("\r  [{}/{}] {} installed          ", p.current, p.total, p.name);
-                }
-                arcbox_asset::PreparePhase::Cached => {
-                    eprintln!("\r  [{}/{}] {} up to date         ", p.current, p.total, p.name);
-                }
+        Box::new(|p: arcbox_asset::PrepareProgress| match &p.phase {
+            arcbox_asset::PreparePhase::Checking => {
+                eprint!("  [{}/{}] {} checking...", p.current, p.total, p.name);
+            }
+            arcbox_asset::PreparePhase::Downloading { downloaded, total } => {
+                let pct = total
+                    .map(|t| if t > 0 { downloaded * 100 / t } else { 0 })
+                    .unwrap_or(0);
+                eprint!(
+                    "\r  [{}/{}] {} downloading... {}%",
+                    p.current, p.total, p.name, pct
+                );
+            }
+            arcbox_asset::PreparePhase::Verifying => {
+                eprint!(
+                    "\r  [{}/{}] {} verifying...       ",
+                    p.current, p.total, p.name
+                );
+            }
+            arcbox_asset::PreparePhase::Ready => {
+                eprintln!(
+                    "\r  [{}/{}] {} installed          ",
+                    p.current, p.total, p.name
+                );
+            }
+            arcbox_asset::PreparePhase::Cached => {
+                eprintln!(
+                    "\r  [{}/{}] {} up to date         ",
+                    p.current, p.total, p.name
+                );
             }
         });
 

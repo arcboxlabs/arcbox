@@ -61,8 +61,7 @@ pub async fn download_and_verify(
     let mut hasher = Sha256::new();
 
     while let Some(chunk) = stream.next().await {
-        let chunk =
-            chunk.map_err(|e| AssetError::Download(format!("stream error: {e}")))?;
+        let chunk = chunk.map_err(|e| AssetError::Download(format!("stream error: {e}")))?;
         hasher.update(&chunk);
         file.write_all(&chunk).await?;
         downloaded += chunk.len() as u64;
@@ -115,8 +114,7 @@ pub async fn download_raw(url: &str, dest: &Path) -> Result<()> {
     let mut stream = response.bytes_stream();
 
     while let Some(chunk) = stream.next().await {
-        let chunk =
-            chunk.map_err(|e| AssetError::Download(format!("stream error: {e}")))?;
+        let chunk = chunk.map_err(|e| AssetError::Download(format!("stream error: {e}")))?;
         file.write_all(&chunk).await?;
     }
 
