@@ -411,6 +411,56 @@ mod tests {
     }
 
     #[test]
+    fn test_set_dns_domain_switches_nxdomain_scope() {
+        let manager = NetworkManager::new(NetConfig::default());
+        let ip = IpAddr::V4(std::net::Ipv4Addr::new(172, 17, 0, 2));
+        manager.register_dns("web", ip);
+
+        // Helper to build a minimal A-record query.
+        let build_query = |name: &str| -> Vec<u8> {
+            let mut pkt = vec![0xAB, 0xCD, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00];
+            pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+            for label in name.split('.') {
+                pkt.push(label.len() as u8);
+                pkt.extend_from_slice(label.as_bytes());
+            }
+            pkt.push(0x00);
+            pkt.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
+            pkt
+        };
+
+        // Default domain: web.arcbox.local resolves.
+        let q = build_query("web.arcbox.local");
+        let resp = manager.try_resolve_dns_or_nxdomain(&q).unwrap();
+        assert_eq!(resp[3] & 0x0F, 0, "should resolve under default domain");
+
+        // Switch to custom domain — old registrations are gone (forwarder rebuilt).
+        manager.set_dns_domain("custom.test");
+
+        // Re-register under new domain.
+        manager.register_dns("web", ip);
+        let q = build_query("web.custom.test");
+        let resp = manager.try_resolve_dns_or_nxdomain(&q).unwrap();
+        assert_eq!(resp[3] & 0x0F, 0, "should resolve under custom domain");
+
+        // Unknown under custom domain → NXDOMAIN.
+        let q = build_query("nope.custom.test");
+        let resp = manager.try_resolve_dns_or_nxdomain(&q).unwrap();
+        assert_eq!(
+            resp[3] & 0x0F,
+            3,
+            "NXDOMAIN for unregistered custom-domain host"
+        );
+
+        // Old default domain → forwarded (None), not NXDOMAIN.
+        let q = build_query("web.arcbox.local");
+        assert!(
+            manager.try_resolve_dns_or_nxdomain(&q).is_none(),
+            "old domain queries should not match after set_dns_domain"
+        );
+    }
+
+    #[test]
     fn test_network_manager_no_network_mode() {
         let config = NetConfig {
             mode: NetworkMode::None,

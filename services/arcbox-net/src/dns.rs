@@ -813,6 +813,37 @@ mod tests {
     }
 
     #[test]
+    fn test_custom_domain_nxdomain() {
+        let config = DnsConfig::default().with_local_domain("myorg.test");
+        let mut forwarder = DnsForwarder::new(config);
+
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+        forwarder.add_local_host("web", ip);
+
+        // Registered host under custom domain resolves.
+        let query = build_test_query("web.myorg.test");
+        let response = forwarder
+            .try_resolve_locally_or_nxdomain(&query)
+            .expect("should resolve registered host under custom domain");
+        assert_eq!(response[3] & 0x0F, 0, "RCODE=NoError");
+        assert_eq!(response[7], 1, "ANCOUNT=1");
+
+        // Unregistered host under custom domain → NXDOMAIN.
+        let query = build_test_query("unknown.myorg.test");
+        let response = forwarder
+            .try_resolve_locally_or_nxdomain(&query)
+            .expect("should NXDOMAIN for unregistered custom-domain host");
+        assert_eq!(response[3] & 0x0F, 3, "RCODE=NXDOMAIN");
+
+        // Query under default arcbox.local → None (forwarded), not NXDOMAIN.
+        let query = build_test_query("something.arcbox.local");
+        assert!(
+            forwarder.try_resolve_locally_or_nxdomain(&query).is_none(),
+            "old default domain should not be handled after domain change"
+        );
+    }
+
+    #[test]
     fn test_parse_resolv_conf_nameservers() {
         let conf = r#"
 # comment
