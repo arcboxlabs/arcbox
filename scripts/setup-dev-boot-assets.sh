@@ -57,7 +57,7 @@ setup_from_kernel_repo() {
         log_info "Copied manifest.json from arcbox-kernel output"
     else
         log_warn "manifest.json not found in arcbox-kernel output — downstream checks may fail"
-        log_warn "Generate one with: arcbox boot manifest or copy from a release"
+        log_warn "Generate one with: abctl boot manifest or copy from a release"
         return 1
     fi
 
@@ -82,7 +82,7 @@ setup_from_user_cache() {
 
     if [[ ! -d "$USER_BOOT_DIR" ]]; then
         log_error "User boot cache not found: $USER_BOOT_DIR"
-        log_error "Please run 'arcbox daemon start' first to download boot assets"
+        log_error "Please run 'abctl daemon start' first to download boot assets"
         return 1
     fi
 
@@ -111,7 +111,7 @@ setup_from_user_cache() {
         log_info "Copied manifest.json"
     else
         log_error "manifest.json not found in user cache"
-        log_error "Run: arcbox boot prefetch --force"
+        log_error "Run: abctl boot prefetch --force"
         return 1
     fi
 
