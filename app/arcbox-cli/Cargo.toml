@@ -13,8 +13,12 @@ name = "arcbox_cli"
 path = "src/lib.rs"
 
 [[bin]]
-name = "arcbox"
+name = "abctl"
 path = "src/main.rs"
+
+[[bin]]
+name = "arcbox"
+path = "src/bin/arcbox_placeholder.rs"
 
 [dependencies]
 arcbox-core = { workspace = true }

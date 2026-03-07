@@ -25,7 +25,7 @@ pub mod version;
 
 /// ArcBox - High-performance container and VM runtime
 #[derive(Parser)]
-#[command(name = "arcbox")]
+#[command(name = "abctl")]
 #[command(author, version, about, long_about = None)]
 #[command(propagate_version = true)]
 pub struct Cli {
