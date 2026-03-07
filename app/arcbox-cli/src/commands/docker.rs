@@ -83,7 +83,11 @@ async fn execute_setup() -> Result<()> {
     println!("Installing Docker CLI tools...");
     println!();
 
-    let manager = DockerToolManager::new(tools, &arch, runtime_bin.clone());
+    let mut manager = DockerToolManager::new(tools, &arch, runtime_bin.clone());
+    if let Some(xbin) = detect_bundle_xbin() {
+        println!("Using Docker tools from app bundle: {}", xbin.display());
+        manager = manager.with_bundle_dir(xbin);
+    }
 
     // Progress callback.
     let progress_cb: arcbox_asset::ProgressCallback =
@@ -322,6 +326,19 @@ fn execute_status(manager: &DockerContextManager) {
         println!("Status: Not configured");
         println!("        Run 'arcbox docker enable' to set up");
     }
+}
+
+/// Detect the `xbin/` directory inside an app bundle.
+///
+/// When `abctl` is running from `Contents/MacOS/bin/abctl`, the xbin directory
+/// is at `Contents/MacOS/xbin/`. Returns `Some(path)` if the directory exists.
+fn detect_bundle_xbin() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    // exe = …/Contents/MacOS/bin/abctl
+    // parent = …/Contents/MacOS/bin/
+    // parent.parent = …/Contents/MacOS/
+    let xbin = exe.parent()?.parent()?.join("xbin");
+    xbin.is_dir().then_some(xbin)
 }
 
 /// Returns the default socket path for the Docker-compatible API.
