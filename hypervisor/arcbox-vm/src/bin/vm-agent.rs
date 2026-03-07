@@ -49,7 +49,6 @@ mod agent {
 
     pub const AGENT_PORT: u32 = 52;
     const FILE_PORT: u32 = 53;
-    const FWD_PORT: u32 = 54;
 
     // Exec channel (vsock:52) frame types.
     const MSG_START: u8 = 0x01;
@@ -68,12 +67,6 @@ mod agent {
     const FILE_READ_REQ: u8 = 0x23;
     const FILE_ACK: u8 = 0x30;
     const FILE_ERR: u8 = 0x31;
-
-    // Port-forward control channel (vsock:54) frame types.
-    const FWD_START: u8 = 0x40;
-    const FWD_STOP: u8 = 0x41;
-    const FWD_ACK: u8 = 0x50;
-    const FWD_ERR: u8 = 0x51;
 
     const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 
@@ -381,165 +374,6 @@ mod agent {
     }
 
     // -------------------------------------------------------------------------
-    // Port-forward handler (vsock:54)
-    // -------------------------------------------------------------------------
-
-    /// Active per-port vsock listener fds.  The listener fd is stored so
-    /// `FWD_STOP` can close it, causing the accept loop to exit.
-    fn fwd_listeners() -> &'static Mutex<std::collections::HashMap<u16, RawFd>> {
-        static LISTENERS: std::sync::OnceLock<Mutex<std::collections::HashMap<u16, RawFd>>> =
-            std::sync::OnceLock::new();
-        LISTENERS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
-    }
-
-    fn handle_fwd_connection(conn_fd: RawFd) {
-        // SAFETY: conn_fd is a freshly accepted socket fd.
-        let mut conn = unsafe { VsockStream::from_raw_fd(conn_fd) };
-
-        let (msg_type, payload) = match read_frame(&mut conn) {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("agent: fwd: read frame: {e}");
-                return;
-            }
-        };
-
-        #[derive(serde::Deserialize)]
-        struct FwdReq {
-            port: u16,
-        }
-
-        let req: FwdReq = match serde_json::from_slice(&payload) {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = write_frame(&mut conn, FWD_ERR, format!("parse FwdReq: {e}").as_bytes());
-                return;
-            }
-        };
-
-        match msg_type {
-            FWD_START => {
-                if req.port < 1024 {
-                    let _ = write_frame(&mut conn, FWD_ERR, b"port must be >= 1024");
-                    return;
-                }
-                let server_fd = create_vsock_listener(u32::from(req.port));
-                {
-                    let mut listeners = fwd_listeners().lock().unwrap();
-                    if let Some(old_fd) = listeners.insert(req.port, server_fd) {
-                        // SAFETY: old_fd is a valid fd being replaced.
-                        unsafe { libc::close(old_fd) };
-                    }
-                }
-                let _ = write_frame(&mut conn, FWD_ACK, &[]);
-                let port = req.port;
-                thread::spawn(move || {
-                    accept_fwd_loop(server_fd, port);
-                    fwd_listeners().lock().unwrap().remove(&port);
-                });
-            }
-            FWD_STOP => {
-                let fd = fwd_listeners().lock().unwrap().remove(&req.port);
-                match fd {
-                    Some(fd) => {
-                        // SAFETY: fd is a valid listening socket owned by fwd_listeners.
-                        unsafe { libc::close(fd) };
-                        let _ = write_frame(&mut conn, FWD_ACK, &[]);
-                    }
-                    None => {
-                        let _ = write_frame(
-                            &mut conn,
-                            FWD_ERR,
-                            format!("port {} is not forwarded", req.port).as_bytes(),
-                        );
-                    }
-                }
-            }
-            other => {
-                let _ = write_frame(
-                    &mut conn,
-                    FWD_ERR,
-                    format!("unexpected frame type 0x{other:02x}").as_bytes(),
-                );
-            }
-        }
-    }
-
-    /// Accept loop for a forwarded port.  Runs until the vsock listener fd is
-    /// closed (triggered by `FWD_STOP`).
-    fn accept_fwd_loop(server_fd: RawFd, tcp_port: u16) {
-        loop {
-            // SAFETY: server_fd is a listening vsock socket.
-            let conn_fd =
-                unsafe { libc::accept(server_fd, std::ptr::null_mut(), std::ptr::null_mut()) };
-            if conn_fd < 0 {
-                // EBADF / EINVAL — listener was closed by FWD_STOP.
-                break;
-            }
-            thread::spawn(move || bridge_fwd_connection(conn_fd, tcp_port));
-        }
-    }
-
-    /// Bidirectional pipe between a vsock connection (from the host) and a TCP
-    /// connection to the in-sandbox service on `tcp_port`.
-    fn bridge_fwd_connection(vsock_fd: RawFd, tcp_port: u16) {
-        use std::io;
-        use std::net::TcpStream;
-
-        let tcp = match TcpStream::connect(format!("127.0.0.1:{tcp_port}")) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("agent: fwd: connect to TCP {tcp_port}: {e}");
-                // SAFETY: vsock_fd is valid and we own it.
-                unsafe { libc::close(vsock_fd) };
-                return;
-            }
-        };
-
-        // SAFETY: dup creates a second fd referencing the same socket.
-        let vsock_read_fd = unsafe { libc::dup(vsock_fd) };
-        if vsock_read_fd < 0 {
-            eprintln!(
-                "agent: fwd: dup vsock_fd: {}",
-                std::io::Error::last_os_error()
-            );
-            unsafe { libc::close(vsock_fd) };
-            return;
-        }
-
-        let tcp_write = match tcp.try_clone() {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("agent: fwd: clone tcp: {e}");
-                unsafe {
-                    libc::close(vsock_fd);
-                    libc::close(vsock_read_fd);
-                }
-                return;
-            }
-        };
-
-        // vsock → tcp
-        let t1 = thread::spawn(move || {
-            // SAFETY: vsock_read_fd is a valid dup'd fd.
-            let mut src = unsafe { VsockStream::from_raw_fd(vsock_read_fd) };
-            let mut dst = tcp_write;
-            let _ = io::copy(&mut src, &mut dst);
-        });
-
-        // tcp → vsock
-        let t2 = thread::spawn(move || {
-            let mut src = tcp;
-            // SAFETY: vsock_fd is valid and uniquely owned by this closure.
-            let mut dst = unsafe { VsockStream::from_raw_fd(vsock_fd) };
-            let _ = io::copy(&mut src, &mut dst);
-        });
-
-        let _ = t1.join();
-        let _ = t2.join();
-    }
-
-    // -------------------------------------------------------------------------
     // Non-interactive execution (piped stdio)
     // -------------------------------------------------------------------------
 
@@ -799,26 +633,16 @@ mod agent {
 
     pub fn run() {
         eprintln!(
-            "vmm-guest-agent: listening on vsock ports \
-             {AGENT_PORT} (exec), {FILE_PORT} (file I/O), {FWD_PORT} (port-forward)"
+            "vmm-guest-agent: listening on vsock ports {AGENT_PORT} (exec), {FILE_PORT} (file I/O)"
         );
         let exec_fd = create_vsock_listener(AGENT_PORT);
         let file_fd = create_vsock_listener(FILE_PORT);
-        let fwd_fd = create_vsock_listener(FWD_PORT);
 
         // File I/O listener thread.
         thread::spawn(move || {
             loop {
                 let conn_fd = accept_connection(file_fd);
                 thread::spawn(move || handle_file_connection(conn_fd));
-            }
-        });
-
-        // Port-forward control listener thread.
-        thread::spawn(move || {
-            loop {
-                let conn_fd = accept_connection(fwd_fd);
-                thread::spawn(move || handle_fwd_connection(conn_fd));
             }
         });
 
