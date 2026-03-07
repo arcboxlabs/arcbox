@@ -6,16 +6,29 @@
 //! # Architecture
 //!
 //! ```text
-//! Guest VM
-//!   │  (virtio-net)
-//!   ▼
-//! NAT Engine (SNAT/DNAT)
-//!   │
-//!   ▼
-//! DarwinTun (utun device)
-//!   │  (IP packets)
-//!   ▼
-//! macOS network stack → Internet
+//! ┌─────────────────────┐
+//! │       Guest VM      │
+//! │                     │
+//! │      virtio-net     │
+//! └──────────┬──────────┘
+//!            │
+//! ┌──────────▼──────────┐
+//! │      NAT Engine     │
+//! │                     │
+//! │     SNAT / DNAT     │
+//! └──────────┬──────────┘
+//!            │
+//! ┌──────────▼──────────┐
+//! │      DarwinTun      │
+//! │                     │
+//! │     utun device     │
+//! └──────────┬──────────┘
+//!            │
+//! ┌──────────▼──────────┐
+//! │ macOS network stack │
+//! │                     │
+//! │       Internet      │
+//! └─────────────────────┘
 //! ```
 //!
 //! # Protocol

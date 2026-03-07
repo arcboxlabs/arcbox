@@ -64,10 +64,15 @@ impl From<&SnapshotMeta> for SnapshotInfo {
 ///
 /// Layout:
 /// ```text
-/// {data_dir}/snapshots/{vm_id}/{snapshot_id}/
-///     vmstate
-///     mem          (full only)
-///     meta.json
+/// ┌─────────────────────────────────────────────┐
+/// │ {data_dir}/snapshots/{vm_id}/{snapshot_id}/ ├───┬─────┐
+/// └──────────────────────┬──────────────────────┘   └─────┼───────────────┐
+///                        │                                │               │
+/// ┌──────────────────────▼──────────────────────┐   ┌─────▼─────┐   ┌─────▼─────┐
+/// │                                             │   │    mem    │   │           │
+/// │                   vmstate                   │   │           │   │ meta.json │
+/// │                                             │   │ full only │   │           │
+/// └─────────────────────────────────────────────┘   └───────────┘   └───────────┘
 /// ```
 pub struct SnapshotCatalog {
     root: PathBuf,

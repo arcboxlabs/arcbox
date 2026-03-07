@@ -16,27 +16,37 @@ This crate implements VirtioFS-based file sharing between host and guest, provid
 
 ## Architecture
 
-```
-Guest: mount -t virtiofs arcbox /mnt/arcbox
-                   |
-                   v
-+------------------------------------------+
-|               arcbox-fs                   |
-|  +------------------------------------+  |
-|  |          FuseDispatcher            |  |
-|  |  - Request parsing                 |  |
-|  |  - Reply handling                  |  |
-|  +------------------------------------+  |
-|  +------------------------------------+  |
-|  |         PassthroughFs              |  |
-|  |  - Direct host filesystem access   |  |
-|  |  - File handle management          |  |
-|  +------------------------------------+  |
-|  +------------------------------------+  |
-|  |         NegativeCache              |  |
-|  |  - Caches non-existent paths       |  |
-|  +------------------------------------+  |
-+------------------------------------------+
+```text
+ ┌──────────────────────────────────────┐
+ │             Guest mount              │
+ │                                      │
+ │ mount -t virtiofs arcbox /mnt/arcbox │
+ └───────────────────┬──────────────────┘
+                     │
+┌────────────────────┼───────────────────┐
+│               arcbox-fs                │
+│┌───────────────────▼──────────────────┐│
+││            FuseDispatcher            ││
+││                                      ││
+││          - Request parsing           ││
+││                                      ││
+││           - Reply handling           ││
+│└───────────────────┬──────────────────┘│
+│                    │                   │
+│┌───────────────────▼──────────────────┐│
+││            PassthroughFs             ││
+││                                      ││
+││   - Direct host filesystem access    ││
+││                                      ││
+││       - File handle management       ││
+│└───────────────────┬──────────────────┘│
+│                    │                   │
+│┌───────────────────▼──────────────────┐│
+││            NegativeCache             ││
+││                                      ││
+││     - Caches non-existent paths      ││
+│└──────────────────────────────────────┘│
+└────────────────────────────────────────┘
 ```
 
 ## Usage

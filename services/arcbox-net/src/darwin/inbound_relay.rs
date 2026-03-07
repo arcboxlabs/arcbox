@@ -7,21 +7,52 @@
 //! # Architecture
 //!
 //! ```text
-//! External client (host:8080)
-//!     │
-//!     ▼
-//! InboundListenerManager (TcpListener / UdpSocket per rule)
-//!     │ accept / recv
-//!     ▼
-//! InboundCommand channel  ──►  NetworkDatapath select! arm
-//!     │
-//!     ▼
-//! InboundRelay
-//!     └─ UDP: inject datagram → guest reply → forward to client
-//!     │
-//!     ▼
-//! reply_tx ──► datapath ──► guest_fd (socketpair) ──► Guest VM
+//! ┌──────────────────────────────────┐
+//! │         External client          │
+//! │                                  │
+//! │            host:8080             │
+//! └─────────────────┬────────────────┘
+//!                   │
+//! ┌─────────────────▼────────────────┐
+//! │      InboundListenerManager      │
+//! │                                  │
+//! │ TcpListener / UdpSocket per rule │
+//! └─────────────────┬────────────────┘
+//!                   │
+//! ┌─────────────────▼────────────────┐
+//! │      InboundCommand channel      │
+//! └─────────────────┬────────────────┘
+//!                   │
+//! ┌─────────────────▼────────────────┐
+//! │         NetworkDatapath          │
+//! │                                  │
+//! │           select! arm            │
+//! └─────────────────┬────────────────┘
+//!                   │
+//! ┌─────────────────▼────────────────┐
+//! │           InboundRelay           │
+//! │                                  │
+//! │       UDP inject datagram        │
+//! │                                  │
+//! │           guest reply            │
+//! │                                  │
+//! │        forward to client         │
+//! └─────────────────┬────────────────┘
+//!                   │
+//! ┌─────────────────▼────────────────┐
+//! │             reply_tx             │
+//! └─────────────────┬────────────────┘
+//!                   │
+//! ┌─────────────────▼────────────────┐
+//! │       datapath -> guest_fd       │
+//! │                                  │
+//! │      socketpair -> Guest VM      │
+//! └──────────────────────────────────┘
 //! ```
+//!
+//! Flow details:
+//! - `InboundListenerManager` accepts or receives host traffic before publishing
+//!   commands into the datapath.
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};

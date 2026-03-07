@@ -312,11 +312,19 @@ message InspectSandboxRequest {
 //
 // State machine:
 //
-//   starting ──► ready ──► running ──► ready   (cmd/Run exited, sandbox alive)
-//                  │          │
-//                  └──────────┴──► stopping ──► stopped
-//                                       │
-//                                    failed
+//   ┌──────────┐   ┌────────┐   ┌──────────┐   ┌─────────┐
+//   │ starting ├───► ready  ├───► running  ├─┬─┤  ready  │
+//   └─────┬────┘   └────┬───┘   └──────────┘ │ └─────────┘
+//         │             └─────┐       ┌──────┘
+//         │        ┌────────┐ │ ┌─────▼────┐   ┌─────────┐
+//         └────────► failed │ └─► stopping ├───► stopped │
+//                  └────────┘   └──────────┘   └─────────┘
+//
+//   starting -> ready  : boot success
+//   starting -> failed : boot failure
+//   ready -> running   : run()
+//   running -> ready   : cmd/Run exited, sandbox alive
+//   ready -> stopping  : stop()
 //
 // "idle" is an alias for "ready" used in event payloads to signal that a
 // previously running workload has just finished.

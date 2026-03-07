@@ -116,9 +116,11 @@ impl RpcResponse {
 ///
 /// Wire format V2:
 /// ```text
-/// +----------------+----------------+------------------+----------------+
-/// | Length (4B BE) | Type (4B BE)   | TraceLen (2B BE) | TraceID bytes  | Payload
-/// +----------------+----------------+------------------+----------------+
+/// ┌────────┐   ┌───────┐   ┌──────────┐   ┌───────────────┐   ┌─────────┐
+/// │ Length │   │  Type │   │ TraceLen │   │               │   │         │
+/// │        ├───►       ├───►          ├───► TraceID bytes ├───► Payload │
+/// │ 4B BE  │   │ 4B BE │   │  2B BE   │   │               │   │         │
+/// └────────┘   └───────┘   └──────────┘   └───────────────┘   └─────────┘
 /// ```
 /// Length = sizeof(Type) + sizeof(TraceLen) + TraceLen + PayloadLen
 ///        = 4 + 2 + TraceLen + PayloadLen

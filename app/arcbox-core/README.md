@@ -35,15 +35,13 @@ println!("default machine CID: {cid}");
 ## Architecture
 
 ```text
-arcbox-api / arcbox-cli
-          |
-          v
-      arcbox-core::Runtime
-          |
-          +-- MachineManager
-          +-- VmLifecycleManager
-          +-- NetworkManager
-          +-- AgentClient accessors
+┌──────────────────────┐   ┌─────────────────────────┐
+│ arcbox-core::Runtime ├─┬─┤ arcbox-api / arcbox-cli │
+└───────────┬──────────┘ │ └─────────────────────────┘
+            │            └──────────────┬─────────────────────────┬───────────────────────┐
+┌───────────▼──────────┐   ┌────────────▼────────────┐   ┌────────▼───────┐   ┌───────────▼───────────┐
+│    MachineManager    │   │    VmLifecycleManager   │   │ NetworkManager │   │ AgentClient accessors │
+└──────────────────────┘   └─────────────────────────┘   └────────────────┘   └───────────────────────┘
 ```
 
 ## License

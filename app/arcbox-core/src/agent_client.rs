@@ -113,9 +113,11 @@ impl AgentClient {
     ///
     /// Wire format V2:
     /// ```text
-    /// +----------------+----------------+------------------+----------------+
-    /// | Length (4B BE) | Type (4B BE)   | TraceLen (2B BE) | TraceID bytes  | Payload
-    /// +----------------+----------------+------------------+----------------+
+    /// ┌────────┐   ┌───────┐   ┌──────────┐   ┌───────────────┐   ┌─────────┐
+    /// │ Length │   │  Type │   │ TraceLen │   │               │   │         │
+    /// │        ├───►       ├───►          ├───► TraceID bytes ├───► Payload │
+    /// │ 4B BE  │   │ 4B BE │   │  2B BE   │   │               │   │         │
+    /// └────────┘   └───────┘   └──────────┘   └───────────────┘   └─────────┘
     /// ```
     fn build_message(msg_type: MessageType, trace_id: &str, payload: &[u8]) -> Bytes {
         let trace_bytes = trace_id.as_bytes();

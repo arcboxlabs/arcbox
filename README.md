@@ -31,17 +31,30 @@ ArcBox solves this with Firecracker-style microVMs that boot their own Linux ker
 | **Sandbox** | microVM (own kernel) | <200ms | ~10-30 MB | Untrusted code, CI/CD, AI agents |
 | **Machine** | Independent VM | ~1.5s | ~200 MB | Full Linux dev environment |
 
-```
-Host
-├── arcbox daemon (Docker API + gRPC)
-│
-├── System VM (Container + Sandbox tiers, shared kernel)
-│   └── arcbox-agent
-│       ├── Container Runtime ── namespace + chroot
-│       └── Sandbox Runtime ─── KVM microVM (<200ms boot)
-│
-├── Machine VM "ubuntu-dev" (independent kernel + rootfs)
-└── Machine VM "alpine-test"
+```text
+┌────────────────────┐
+│        Host        ├───┬─────────────┐
+└──────────┬─────────┘   └─────────────┼────────────────────────────────┬───────────────────────────────┐
+           │                           │                                │                               │
+┌──────────▼─────────┐   ┌─────────────▼─────────────┐   ┌──────────────▼──────────────┐   ┌────────────▼───────────┐
+│                    │   │         System VM         │   │                             │   │                        │
+│   arcbox daemon    │   │                           │   │    Machine VM ubuntu-dev    │   │                        │
+│                    │   │ Container + Sandbox tiers │   │                             │   │ Machine VM alpine-test │
+│ Docker API + gRPC  │   │                           │   │ independent kernel + rootfs │   │                        │
+│                    │   │       shared kernel       │   │                             │   │                        │
+└────────────────────┘   └─────────────┬─────────────┘   └─────────────────────────────┘   └────────────────────────┘
+                                       │
+┌────────────────────┐                 │
+│    arcbox-agent    ├─────────────────┤
+└──────────┬─────────┘                 │
+           │                           │
+┌──────────▼─────────┐   ┌─────────────▼─────────────┐
+│                    │   │      Sandbox Runtime      │
+│ Container Runtime  │   │                           │
+│                    │   │        KVM microVM        │
+│ namespace + chroot │   │                           │
+│                    │   │      under 200ms boot     │
+└────────────────────┘   └───────────────────────────┘
 ```
 
 ### Sandbox — Computer Use Runtime

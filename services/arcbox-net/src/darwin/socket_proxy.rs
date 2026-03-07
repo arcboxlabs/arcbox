@@ -7,11 +7,21 @@
 //! # Architecture
 //!
 //! ```text
-//! Guest frame → SocketProxy::handle_outbound()
-//!   ├─ ICMP → IcmpProxy (ICMP datagram socket sendto/recv)
-//!   └─ UDP  → UdpProxy  (per-flow host UdpSocket)
-//!         ↓
-//!   reply_tx → mpsc → datapath select! → guest FD
+//! ┌──────────────────────────────────────────────────┐
+//! │                   Guest frame                    │
+//! │                                                  ├────────────────┐
+//! │          SocketProxy::handle_outbound()          │                │
+//! └─────────────────────────┬────────────────────────┘                │
+//!                           │                                         │
+//! ┌─────────────────────────▼────────────────────────┐   ┌────────────▼────────────┐
+//! │                ICMP -> IcmpProxy                 │   │     UDP -> UdpProxy     │
+//! │                                                  │   │                         │
+//! │         ICMP datagram socket sendto/recv         │   │ per-flow host UdpSocket │
+//! └─────────────────────────┬────────────────────────┘   └────────────┬────────────┘
+//!                           │                                         │
+//! ┌─────────────────────────▼────────────────────────┐                │
+//! │ reply_tx -> mpsc -> datapath select! -> guest FD ◄────────────────┘
+//! └──────────────────────────────────────────────────┘
 //! ```
 
 use std::collections::HashMap;

@@ -3,18 +3,37 @@
 //! # Datapath
 //!
 //! ```text
-//! Guest VM
-//!     ↕ VirtIO (VZ framework)
-//! VZFileHandleNetworkDeviceAttachment
-//!     ↕ socketpair FD (L2 Ethernet frames)
-//! SmoltcpDevice (frame classification)
-//!     ├─ ARP           → smoltcp Interface (automatic handling)
-//!     ├─ TCP           → smoltcp Interface → tcp::Socket pool (Phase 2)
-//!     ├─ UDP:67 (DHCP) → DhcpServer → reply to guest
-//!     ├─ UDP:53 to gw  → DnsForwarder → reply to guest
-//!     ├─ UDP (other)   → UdpProxy → reply to guest
-//!     └─ ICMP          → IcmpProxy → reply to guest
+//! ┌─────────────────────────────────────┐
+//! │               Guest VM              │
+//! └──────────────────┬──────────────────┘
+//!                    │
+//! ┌──────────────────▼──────────────────┐
+//! │         VirtIO VZ framework         │
+//! └──────────────────┬──────────────────┘
+//!                    │
+//! ┌──────────────────▼──────────────────┐
+//! │ VZFileHandleNetworkDeviceAttachment │
+//! └──────────────────┬──────────────────┘
+//!                    │
+//! ┌──────────────────▼──────────────────┐
+//! │            SmoltcpDevice            ├───┬─────────┐
+//! └──────────────────┬──────────────────┘   └─────────┼────────────────────┬───────────────────┬───────────────────┬───────────────┐
+//!                    │                                │                    │                   │                   │               │
+//! ┌──────────────────▼──────────────────┐   ┌─────────▼─────────┐   ┌──────▼─────┐   ┌─────────▼─────────┐   ┌─────▼─────┐   ┌─────▼─────┐
+//! │                                     │   │        TCP        │   │            │   │                   │   │           │   │           │
+//! │                 ARP                 │   │                   │   │   UDP 67   │   │ UDP 53 to gateway │   │ UDP other │   │    ICMP   │
+//! │                                     │   │ smoltcp Interface │   │            │   │                   │   │           │   │           │
+//! │          smoltcp Interface          │   │                   │   │ DhcpServer │   │    DnsForwarder   │   │  UdpProxy │   │ IcmpProxy │
+//! │                                     │   │  tcp::Socket pool │   │            │   │                   │   │           │   │           │
+//! │              automatic              │   │                   │   │            │   │                   │   │           │   │           │
+//! │                                     │   │      Phase 2      │   │            │   │                   │   │           │   │           │
+//! └─────────────────────────────────────┘   └───────────────────┘   └────────────┘   └───────────────────┘   └───────────┘   └───────────┘
 //! ```
+//!
+//! Flow details:
+//! - `VZFileHandleNetworkDeviceAttachment` and `SmoltcpDevice` communicate over
+//!   the socketpair FD carrying L2 Ethernet frames.
+//! - DHCP, DNS, UDP, and ICMP handlers each generate replies back to the guest.
 //!
 //! The smoltcp `Interface` handles ARP automatically and will manage TCP
 //! connections via its socket pool (Phase 2). DHCP, DNS, UDP, and ICMP are

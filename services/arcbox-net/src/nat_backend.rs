@@ -7,15 +7,21 @@
 //! # Packet Flow
 //!
 //! ```text
-//! TX (guest -> host):
-//!   NetBackend::send(NetPacket)
-//!     -> NatEngine::translate(Outbound)
-//!       -> HostNetIO::send_packet()
-//!
-//! RX (host -> guest):
-//!   HostNetIO::recv_packet()
-//!     -> NatEngine::translate(Inbound)
-//!       -> NetBackend::recv() returns data
+//! ┌────────────────────────────────┐   ┌─────────────────────────────────┐
+//! │        TX guest -> host        │   │         RX host -> guest        │
+//! └────────────────┬───────────────┘   └────────────────┬────────────────┘
+//!                  │                                    │
+//! ┌────────────────▼───────────────┐   ┌────────────────▼────────────────┐
+//! │  NetBackend::send(NetPacket)   │   │     HostNetIO::recv_packet()    │
+//! └────────────────┬───────────────┘   └────────────────┬────────────────┘
+//!                  │                                    │
+//! ┌────────────────▼───────────────┐   ┌────────────────▼────────────────┐
+//! │ NatEngine::translate(Outbound) │   │  NatEngine::translate(Inbound)  │
+//! └────────────────┬───────────────┘   └────────────────┬────────────────┘
+//!                  │                                    │
+//! ┌────────────────▼───────────────┐   ┌────────────────▼────────────────┐
+//! │    HostNetIO::send_packet()    │   │ NetBackend::recv() returns data │
+//! └────────────────────────────────┘   └─────────────────────────────────┘
 //! ```
 
 use std::collections::VecDeque;

@@ -11,36 +11,38 @@ Exposes a `SandboxManager` API and optional gRPC service implementations
 
 ## Architecture
 
-```
-            ┌─────────────────────────────┐
-            │  your daemon / arcbox-vmm   │
-            │  (owns runtime + transport) │
-            └──────────────┬──────────────┘
-                           │
-            ┌──────────────▼──────────────┐
-            │          arcbox-vm          │
-            │  SandboxServiceImpl         │  ◄── sandbox.v1 proto (arcbox-protocol)
-            │  SandboxSnapshotServiceImpl │
-            │  ──────────────────────     │
-            │  SandboxManager             │
-            │  ┌─────────────────────┐   │
-            │  │  SandboxInstance    │   │
-            │  │  registry           │   │
-            │  │  (Arc<RwLock<...>>) │   │
-            │  └─────────────────────┘   │
-            │  NetworkManager (TAP / IP) │
-            │  SnapshotCatalog           │
-            └──────────────┬──────────────┘
-                           │
-            ┌──────────────▼──────────────┐
-            │           fc-sdk            │
-            │  VmBuilder / VmProcess / Vm │
-            └──────────────┬──────────────┘
-                           │
-            ┌──────────────▼──────────────┐
-            │  Firecracker process        │
-            │  (unix socket per VM)       │
-            └─────────────────────────────┘
+```text
+┌────────────────────────────┐   ┌────────────────────────────┐
+│  your daemon / arcbox-vmm  │   │      sandbox.v1 proto      │
+│                            │   │                            │
+│  owns runtime + transport  │   │      arcbox-protocol       │
+└──────────────┬─────────────┘   └──────────────┬─────────────┘
+               │                                │
+┌──────────────▼─────────────┐                  │
+│         arcbox-vm          │                  │
+│                            │                  │
+│     SandboxServiceImpl     │                  │
+│                            │                  │
+│ SandboxSnapshotServiceImpl │                  │
+│                            ├──────────────────┤
+│       SandboxManager       │                  │
+│                            │                  │
+│  NetworkManager TAP / IP   │                  │
+│                            │                  │
+│      SnapshotCatalog       │                  │
+└──────────────┬─────────────┘                  │
+               │                                │
+┌──────────────▼─────────────┐   ┌──────────────▼─────────────┐
+│  SandboxInstance registry  │   │           fc-sdk           │
+│                            │   │                            │
+│      Arc<RwLock<...>>      │   │ VmBuilder / VmProcess / Vm │
+└────────────────────────────┘   └──────────────┬─────────────┘
+                                                │
+┌────────────────────────────┐                  │
+│    Firecracker process     │                  │
+│                            ◄──────────────────┘
+│     unix socket per VM     │
+└────────────────────────────┘
 ```
 
 ### Crates
@@ -108,41 +110,28 @@ There is no standalone daemon or CLI binary. The gRPC server and direct API usag
 
 ## Sandbox State Machine
 
+```text
+┌──────────┐   ┌────────┐   ┌──────────┐   ┌─────────┐
+│ starting ├───► ready  ├───► running  ├─┬─┤  ready  │
+└─────┬────┘   └────┬───┘   └──────────┘ │ └─────────┘
+      │             └─────┐       ┌──────┘
+      │        ┌────────┐ │ ┌─────▼────┐   ┌─────────┐
+      └────────► failed │ └─► stopping ├───► stopped │
+               └────────┘   └──────────┘   └─────────┘
 ```
-            create()
-               │
-               ▼
-          ┌─────────┐
-          │ starting│ (VM booting in background)
-          └────┬────┘
-               │  boot success
-               ▼
-          ┌─────────┐
-          │  ready  │ (VM running, awaiting workload)
-          └────┬────┘
-               │  run()
-               ▼
-          ┌─────────┐
-          │ running │ (workload executing)
-          └────┬────┘
-               │  workload exits
-               ▼
-          ┌─────────┐ ◄── workload exits (returns to ready)
-          │  ready  │
-          └────┬────┘
-               │  stop()
-               ▼
-         ┌──────────┐
-         │ stopping │
-         └────┬─────┘
-              │
-              ▼
-         ┌─────────┐
-         │ stopped │
-         └─────────┘
 
-  boot failure → failed
-```
+Transitions:
+
+- `create() -> starting`
+- `starting`: VM booting in background
+- `starting -> ready`: boot success
+- `starting -> failed`: boot failure
+- `ready`: VM running, awaiting workload
+- `ready -> running`: `run()`
+- `running`: workload executing
+- `running -> ready`: workload exits and the sandbox stays alive
+- `ready -> stopping`: `stop()`
+- `stopping -> stopped`
 
 ---
 
@@ -234,24 +223,36 @@ cargo run -p arcbox-vm --example serve -- --unix-socket /tmp/vmm-test.sock
 
 ### Direct mode
 
-```
-/var/lib/firecracker-vmm/
-├── kernels/
-│   └── vmlinux               # default kernel
-├── images/
-│   └── ubuntu-22.04.ext4     # default rootfs
-├── sandboxes/
-│   └── {sandbox-id}/
-│       ├── firecracker.sock  # Firecracker API socket (while running)
-│       ├── firecracker.vsock # vsock UDS (while running)
-│       ├── firecracker.log
-│       └── firecracker.metrics
-└── snapshots/
-    └── {sandbox-id}/
-        └── {snapshot-id}/
-            ├── vmstate       # Firecracker VM state file
-            ├── mem           # memory file (full snapshots)
-            └── meta.json     # snapshot metadata
+```text
+┌───────────────────────────┐
+│ /var/lib/firecracker-vmm/ ├───┬─────────┐
+└─────────────┬─────────────┘   └─────────┼───────────────────────┬────────────────────────┐
+              │                           │                       │                        │
+┌─────────────▼─────────────┐   ┌─────────▼─────────┐   ┌─────────▼─────────┐   ┌──────────▼──────────┐
+│          kernels/         │   │      images/      │   │     sandboxes/    │   │      snapshots/     │
+└─────────────┬─────────────┘   └─────────┬─────────┘   └─────────┬─────────┘   └──────────┬──────────┘
+              │                           │                       │                        │
+┌─────────────▼─────────────┐   ┌─────────▼─────────┐   ┌─────────▼─────────┐   ┌──────────▼──────────┐
+│          vmlinux          │   │ ubuntu-22.04.ext4 │   │                   │   │                     │
+│                           │   │                   │ ┌─┤   {sandbox-id}/   ├─┐ │    {sandbox-id}/    ├────────────┐
+│       default kernel      │   │   default rootfs  │ │ │                   │ │ │                     │            │
+└───────────────────────────┘   └───────────────────┘ │ └─────────┬─────────┘ │ └─────────────────────┘            │
+              ┌───────────────────────────┬───────────┘           │           └────────────┐                       │
+┌─────────────▼─────────────┐   ┌─────────▼─────────┐   ┌─────────▼─────────┐   ┌──────────▼──────────┐   ┌────────▼───────┐
+│      firecracker.sock     │   │ firecracker.vsock │   │                   │   │                     │   │                │
+│                           │   │                   │   │                   │   │                     │   │                │
+│   Firecracker API socket  │   │     vsock UDS     │   │  firecracker.log  │   │ firecracker.metrics │ ┌─┤ {snapshot-id}/ │
+│                           │   │                   │   │                   │   │                     │ │ │                │
+│       while running       │   │   while running   │   │                   │   │                     │ │ │                │
+└───────────────────────────┘   └───────────────────┘   └───────────────────┘   └─────────────────────┘ │ └────────┬───────┘
+              ┌───────────────────────────┬─────────────────────────────────────────────────────────────┘          │
+┌─────────────▼─────────────┐   ┌─────────▼─────────┐   ┌───────────────────┐                                      │
+│                           │   │        mem        │   │                   │                                      │
+│          vmstate          │   │                   │   │     meta.json     │                                      │
+│                           │   │    memory file    │   │                   ◄──────────────────────────────────────┘
+│ Firecracker VM state file │   │                   │   │ snapshot metadata │
+│                           │   │   full snapshots  │   │                   │
+└───────────────────────────┘   └───────────────────┘   └───────────────────┘
 ```
 
 ### Jailer mode
@@ -259,17 +260,42 @@ cargo run -p arcbox-vm --example serve -- --unix-socket /tmp/vmm-test.sock
 Firecracker runs inside a chroot created by the jailer. Files are staged
 into the chroot before boot and removed on sandbox removal.
 
-```
-{chroot_base_dir}/             # default: /srv/jailer
-└── firecracker/               # fc binary filename
-    └── {sandbox-id}/
-        └── root/              # chroot root (pivot_root target)
-            ├── vmlinux        # staged kernel (copied from spec path)
-            ├── rootfs.ext4    # staged rootfs (copied from spec path)
-            ├── snapshots/     # temp dir used during checkpoint (moved out after)
-            └── run/
-                ├── firecracker.socket  # Firecracker API socket
-                └── firecracker.vsock   # vsock UDS
+```text
+┌────────────────────────┐
+│   {chroot_base_dir}/   │
+└────────────┬───────────┘
+             │
+┌────────────▼───────────┐
+│      firecracker/      │
+│                        │
+│   fc binary filename   │
+└────────────┬───────────┘
+             │
+┌────────────▼───────────┐
+│     {sandbox-id}/      │
+└────────────┬───────────┘
+             │
+┌────────────▼───────────┐
+│         root/          │
+│                        │
+│      chroot root       ├───┬───────────┐
+│                        │   │           │
+│   pivot_root target    │   │           │
+└────────────┬───────────┘   └───────────┼────────────────────────────────┬────────────────────────┐
+             │                           │                                │                        │
+┌────────────▼───────────┐   ┌───────────▼───────────┐   ┌────────────────▼────────────────┐   ┌───▼──┐
+│        vmlinux         │   │      rootfs.ext4      │   │            snapshots/           │   │      │
+│                        │   │                       │   │                                 │   │      │
+│     staged kernel      │   │     staged rootfs     │   │ temp dir used during checkpoint │ ┌─┤ run/ │
+│                        │   │                       │   │                                 │ │ │      │
+│ copied from spec path  │   │ copied from spec path │   │         moved out after         │ │ │      │
+└────────────────────────┘   └───────────────────────┘   └─────────────────────────────────┘ │ └───┬──┘
+             ┌───────────────────────────────────────────────────────────────────────────────┘     │
+┌────────────▼───────────┐   ┌───────────────────────┐                                             │
+│   firecracker.socket   │   │   firecracker.vsock   │                                             │
+│                        │   │                       ◄─────────────────────────────────────────────┘
+│ Firecracker API socket │   │       vsock UDS       │
+└────────────────────────┘   └───────────────────────┘
 ```
 
 ---
@@ -278,81 +304,162 @@ into the chroot before boot and removed on sandbox removal.
 
 ### Create flow
 
-```
-SandboxManager::create_sandbox()
-    │
-    ├─ 1. NetworkManager.allocate()
-    │      create TAP, assign IP, attach to bridge
-    │
-    ├─ 2. JailerProcessBuilder.spawn()
-    │      jailer forks, sets up cgroups, calls pivot_root
-    │      waits until Firecracker API socket is ready
-    │
-    ├─ 3. stage_files_for_jailer()
-    │      copy kernel  →  {chroot}/vmlinux        (chown uid:gid)
-    │      copy rootfs  →  {chroot}/rootfs.ext4    (chown uid:gid)
-    │
-    ├─ 4. fc-sdk VmBuilder (via Firecracker API)
-    │      PUT /boot-source   path="/vmlinux"      (chroot-relative)
-    │      PUT /drives/rootfs path="/rootfs.ext4"  (chroot-relative)
-    │      PUT /network-interfaces/eth0  tap=vmtapXX
-    │      PUT /vsock          uds_path="/run/firecracker.vsock"
-    │      PUT /actions        {"action_type":"InstanceStart"}
-    │
-    └─ 5. background task polls boot; sets state=Ready
-          on failure → remove_sandbox_impl() cleans chroot + TAP
+```text
+┌───────────────────────────────────────────────────────┐
+│            SandboxManager::create_sandbox()           │
+└───────────────────────────┬───────────────────────────┘
+                            │
+┌───────────────────────────▼───────────────────────────┐
+│              1. NetworkManager.allocate()             │
+│                                                       │
+│        create TAP, assign IP, attach to bridge        │
+└───────────────────────────┬───────────────────────────┘
+                            │
+┌───────────────────────────▼───────────────────────────┐
+│            2. JailerProcessBuilder.spawn()            │
+│                                                       │
+│    jailer forks, sets up cgroups, calls pivot_root    │
+│                                                       │
+│      waits until Firecracker API socket is ready      │
+└───────────────────────────┬───────────────────────────┘
+                            │
+┌───────────────────────────▼───────────────────────────┐
+│              3. stage_files_for_jailer()              │
+│                                                       │
+│            copy kernel -> {chroot}/vmlinux            │
+│                                                       │
+│          copy rootfs -> {chroot}/rootfs.ext4          │
+│                                                       │
+│                     chown uid:gid                     │
+└───────────────────────────┬───────────────────────────┘
+                            │
+┌───────────────────────────▼───────────────────────────┐
+│        4. fc-sdk VmBuilder via Firecracker API        │
+│                                                       │
+│             PUT /boot-source path=/vmlinux            │
+│                                                       │
+│          PUT /drives/rootfs path=/rootfs.ext4         │
+│                                                       │
+│        PUT /network-interfaces/eth0 tap=vmtapXX       │
+│                                                       │
+│       PUT /vsock uds_path=/run/firecracker.vsock      │
+│                                                       │
+│    PUT /actions {\"action_type\":\"InstanceStart\"}   │
+└───────────────────────────┬───────────────────────────┘
+                            │
+┌───────────────────────────▼───────────────────────────┐
+│             5. Background task polls boot             │
+│                                                       │
+│                    sets state=Ready                   │
+│                                                       │
+│ on failure: remove_sandbox_impl() cleans chroot + TAP │
+└───────────────────────────────────────────────────────┘
 ```
 
 ### Checkpoint flow
 
-```
-SandboxManager::checkpoint_sandbox()
-    │
-    ├─ 1. fc-sdk Vm.pause()
-    │
-    ├─ 2. mkdir {chroot}/snapshots/{snapshot-id}/   (chown uid:gid)
-    │
-    ├─ 3. PUT /snapshot/create
-    │      snapshot_path="/snapshots/{snapshot-id}/vmstate"  (chroot-relative)
-    │      mem_file_path="/snapshots/{snapshot-id}/mem"
-    │
-    ├─ 4. fc-sdk Vm.resume()
-    │
-    ├─ 5. Move files out of chroot to catalog:
-    │      {chroot}/snapshots/{snapshot-id}/vmstate  →  {data_dir}/snapshots/{sandbox-id}/{snapshot-id}/vmstate
-    │      {chroot}/snapshots/{snapshot-id}/mem      →  {data_dir}/snapshots/{sandbox-id}/{snapshot-id}/mem
-    │
-    └─ 6. SnapshotCatalog.register()
-           writes meta.json including kernel_path + rootfs_path
-           (required for re-staging on restore)
+```text
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                 SandboxManager::checkpoint_sandbox()                                │
+└──────────────────────────────────────────────────┬──────────────────────────────────────────────────┘
+                                                   │
+┌──────────────────────────────────────────────────▼──────────────────────────────────────────────────┐
+│                                         1. fc-sdk Vm.pause()                                        │
+└──────────────────────────────────────────────────┬──────────────────────────────────────────────────┘
+                                                   │
+┌──────────────────────────────────────────────────▼──────────────────────────────────────────────────┐
+│                              2. mkdir {chroot}/snapshots/{snapshot-id}/                             │
+│                                                                                                     │
+│                                            chown uid:gid                                            │
+└──────────────────────────────────────────────────┬──────────────────────────────────────────────────┘
+                                                   │
+┌──────────────────────────────────────────────────▼──────────────────────────────────────────────────┐
+│                                       3. PUT /snapshot/create                                       │
+│                                                                                                     │
+│                            snapshot_path=/snapshots/{snapshot-id}/vmstate                           │
+│                                                                                                     │
+│                              mem_file_path=/snapshots/{snapshot-id}/mem                             │
+│                                                                                                     │
+│                                           chroot-relative                                           │
+└──────────────────────────────────────────────────┬──────────────────────────────────────────────────┘
+                                                   │
+┌──────────────────────────────────────────────────▼──────────────────────────────────────────────────┐
+│                                        4. fc-sdk Vm.resume()                                        │
+└──────────────────────────────────────────────────┬──────────────────────────────────────────────────┘
+                                                   │
+┌──────────────────────────────────────────────────▼──────────────────────────────────────────────────┐
+│                                5. Move files out of chroot to catalog                               │
+│                                                                                                     │
+│ {chroot}/snapshots/{snapshot-id}/vmstate -> {data_dir}/snapshots/{sandbox-id}/{snapshot-id}/vmstate │
+│                                                                                                     │
+│     {chroot}/snapshots/{snapshot-id}/mem -> {data_dir}/snapshots/{sandbox-id}/{snapshot-id}/mem     │
+└──────────────────────────────────────────────────┬──────────────────────────────────────────────────┘
+                                                   │
+┌──────────────────────────────────────────────────▼──────────────────────────────────────────────────┐
+│                                    6. SnapshotCatalog.register()                                    │
+│                                                                                                     │
+│                         writes meta.json including kernel_path + rootfs_path                        │
+│                                                                                                     │
+│                                  required for re-staging on restore                                 │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Restore flow
 
-```
-SandboxManager::restore_sandbox()
-    │
-    ├─ 1. NetworkManager.allocate()  (new TAP + IP for restored sandbox)
-    │
-    ├─ 2. JailerProcessBuilder.spawn()  (new sandbox-id, own chroot)
-    │      mkdir {new-chroot}/run/   (for vsock bind)
-    │
-    ├─ 3. stage_files_for_jailer()
-    │      re-copy kernel + rootfs from snapshot metadata paths
-    │      {new-chroot}/vmlinux / {new-chroot}/rootfs.ext4
-    │
-    ├─ 4. Copy snapshot files into new chroot:
-    │      {data_dir}/snapshots/.../vmstate  →  {new-chroot}/snapshots/{snapshot-id}/vmstate
-    │      {data_dir}/snapshots/.../mem      →  {new-chroot}/snapshots/{snapshot-id}/mem
-    │      (chown uid:gid)
-    │
-    ├─ 5. PUT /snapshot/load
-    │      snapshot_path="/snapshots/{snapshot-id}/vmstate"  (chroot-relative)
-    │      mem_file_path="/snapshots/{snapshot-id}/mem"
-    │      network_overrides=[{iface_id:"eth0", host_dev_name:"vmtapXX"}]
-    │      resume_vm=true
-    │
-    └─ 6. Register sandbox as state=Ready immediately
+```text
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                        SandboxManager::restore_sandbox()                         │
+└─────────────────────────────────────────┬────────────────────────────────────────┘
+                                          │
+┌─────────────────────────────────────────▼────────────────────────────────────────┐
+│                           1. NetworkManager.allocate()                           │
+│                                                                                  │
+│                        new TAP + IP for restored sandbox                         │
+└─────────────────────────────────────────┬────────────────────────────────────────┘
+                                          │
+┌─────────────────────────────────────────▼────────────────────────────────────────┐
+│                         2. JailerProcessBuilder.spawn()                          │
+│                                                                                  │
+│                            new sandbox-id own chroot                             │
+│                                                                                  │
+│                      mkdir {new-chroot}/run/ for vsock bind                      │
+└─────────────────────────────────────────┬────────────────────────────────────────┘
+                                          │
+┌─────────────────────────────────────────▼────────────────────────────────────────┐
+│                           3. stage_files_for_jailer()                            │
+│                                                                                  │
+│               re-copy kernel + rootfs from snapshot metadata paths               │
+│                                                                                  │
+│                {new-chroot}/vmlinux and {new-chroot}/rootfs.ext4                 │
+└─────────────────────────────────────────┬────────────────────────────────────────┘
+                                          │
+┌─────────────────────────────────────────▼────────────────────────────────────────┐
+│                      4. Copy snapshot files into new chroot                      │
+│                                                                                  │
+│ {data_dir}/snapshots/.../vmstate -> {new-chroot}/snapshots/{snapshot-id}/vmstate │
+│                                                                                  │
+│     {data_dir}/snapshots/.../mem -> {new-chroot}/snapshots/{snapshot-id}/mem     │
+│                                                                                  │
+│                                  chown uid:gid                                   │
+└─────────────────────────────────────────┬────────────────────────────────────────┘
+                                          │
+┌─────────────────────────────────────────▼────────────────────────────────────────┐
+│                              5. PUT /snapshot/load                               │
+│                                                                                  │
+│                  snapshot_path=/snapshots/{snapshot-id}/vmstate                  │
+│                                                                                  │
+│                    mem_file_path=/snapshots/{snapshot-id}/mem                    │
+│                                                                                  │
+│            network_overrides=[{iface_id:eth0, host_dev_name:vmtapXX}]            │
+│                                                                                  │
+│                                  resume_vm=true                                  │
+│                                                                                  │
+│                                 chroot-relative                                  │
+└─────────────────────────────────────────┬────────────────────────────────────────┘
+                                          │
+┌─────────────────────────────────────────▼────────────────────────────────────────┐
+│                  6. Register sandbox as state=Ready immediately                  │
+└──────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 > **Why files must be inside the chroot:** Firecracker executes `pivot_root`

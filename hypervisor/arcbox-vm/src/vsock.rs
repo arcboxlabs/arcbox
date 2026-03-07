@@ -15,7 +15,11 @@
 //! Every message (in both directions) is:
 //!
 //! ```text
-//! [u8: msg_type][u32 LE: payload_len][payload_len bytes: payload]
+//! ┌──────────┐   ┌─────────────┐   ┌───────────────────┐
+//! │ msg_type │   │ payload_len │   │      payload      │
+//! │          ├───►             ├───►                   │
+//! │    u8    │   │    u32 LE   │   │ payload_len bytes │
+//! └──────────┘   └─────────────┘   └───────────────────┘
 //! ```
 //!
 //! | Type | Direction   | Payload                          |
