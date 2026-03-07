@@ -80,6 +80,18 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Error reporting
+sentry = { version = "0.46", default-features = false, features = [
+    "backtrace",
+    "contexts",
+    "panic",
+    "tracing",
+    "anyhow",
+    "reqwest",
+    "rustls",
+    "tokio",
+] }
+
 # CLI
 clap = { version = "4", features = ["derive"] }
 
