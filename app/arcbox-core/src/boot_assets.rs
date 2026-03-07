@@ -315,6 +315,25 @@ impl BootAssetProvider {
         Ok(versions)
     }
 
+    /// Fetch the latest boot-asset version string from the CDN.
+    ///
+    /// Returns `Ok(Some(version))` on success, `Ok(None)` if the CDN response
+    /// is malformed, or `Err` on network/parse failure.
+    pub async fn fetch_latest_version(&self) -> Result<Option<String>> {
+        let url = format!("{}/latest.json", self.config.cdn_base_url);
+        let resp = reqwest::get(&url)
+            .await
+            .map_err(|e| CoreError::config(format!("failed to fetch latest version: {e}")))?;
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| CoreError::config(format!("failed to parse latest.json: {e}")))?;
+        Ok(body
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .map(String::from))
+    }
+
     // =========================================================================
     // Internal helpers
     // =========================================================================

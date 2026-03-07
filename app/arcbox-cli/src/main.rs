@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
         Commands::Machine(cmd) => commands::machine::execute(cmd).await,
         Commands::Sandbox(cmd) => commands::sandbox::execute(cmd).await,
         Commands::Docker(cmd) => commands::docker::execute(cmd).await,
-        Commands::Boot(cmd) => commands::boot::execute(cmd).await,
+        Commands::Boot(cmd) => commands::boot::execute(cmd, cli.format).await,
         #[cfg(target_os = "macos")]
         Commands::Dns(cmd) => commands::dns::execute(cmd).await,
         Commands::Daemon(args) => commands::daemon::execute(args).await,
