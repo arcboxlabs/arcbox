@@ -367,7 +367,7 @@ mod linux {
     /// Returns `Ok(notes)` on success or `Err(reason)` if the data volume
     /// could not be set up. Callers must abort runtime startup on error —
     /// running containerd/dockerd without persistent storage is unsafe.
-    fn ensure_data_mount() -> Result<String, String> {
+    pub(crate) fn ensure_data_mount() -> Result<String, String> {
         // Already fully set up?
         if crate::mount::is_mounted(DOCKER_DATA_MOUNT_POINT)
             && crate::mount::is_mounted(CONTAINERD_DATA_MOUNT_POINT)
@@ -961,6 +961,16 @@ mod linux {
             RpcRequest::RuntimeStatus(req) => {
                 RequestResult::Single(handle_runtime_status(req).await)
             }
+            RpcRequest::EnsureNfs(req) => {
+                RequestResult::Single(crate::nfs::handle_ensure_nfs(req).await)
+            }
+            RpcRequest::EnsureK3s(_) => {
+                // k3s handler will be wired in a subsequent commit.
+                RequestResult::Single(RpcResponse::Error(ErrorResponse::new(
+                    501,
+                    "k3s not yet implemented",
+                )))
+            }
         }
     }
 
@@ -1136,6 +1146,22 @@ mod linux {
             detail: docker_detail,
         });
 
+        // nfsd status — TCP probe on port 2049
+        let nfsd_ready = probe_tcp_port(arcbox_constants::ports::NFS_PORT).await;
+        services.push(ServiceStatus {
+            name: "nfsd".to_string(),
+            status: if nfsd_ready {
+                SERVICE_READY.to_string()
+            } else {
+                SERVICE_NOT_READY.to_string()
+            },
+            detail: if nfsd_ready {
+                format!("tcp:{} reachable", arcbox_constants::ports::NFS_PORT)
+            } else {
+                format!("tcp:{} not reachable", arcbox_constants::ports::NFS_PORT)
+            },
+        });
+
         // Build the summary detail string.
         let detail = if docker_ready {
             "docker socket ready".to_string()
@@ -1170,6 +1196,15 @@ mod linux {
             }
         }
         false
+    }
+
+    async fn probe_tcp_port(port: u16) -> bool {
+        tokio::time::timeout(
+            Duration::from_millis(300),
+            tokio::net::TcpStream::connect(("127.0.0.1", port)),
+        )
+        .await
+        .is_ok_and(|r| r.is_ok())
     }
 
     async fn probe_unix_socket(path: &str) -> bool {
