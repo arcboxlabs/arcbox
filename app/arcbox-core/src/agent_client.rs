@@ -8,7 +8,8 @@ use arcbox_constants::wire::{
     ERROR_HEADER_SIZE, FRAME_HEADER_SIZE, MessageType, TRACE_LEN_FIELD_SIZE, TYPE_FIELD_SIZE,
 };
 use arcbox_protocol::agent::{
-    PingRequest, PingResponse, RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest,
+    K3sEnsureRequest, K3sEnsureResponse, NfsEnsureRequest, NfsEnsureResponse, PingRequest,
+    PingResponse, RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest,
     RuntimeStatusResponse, SystemInfo,
 };
 use arcbox_protocol::sandbox_v1::{
@@ -308,6 +309,50 @@ impl AgentClient {
 
         RuntimeStatusResponse::decode(&resp_payload[..])
             .map_err(|e| CoreError::Machine(format!("failed to decode response: {e}")))
+    }
+
+    /// Ensures guest NFS server is ready.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails.
+    pub async fn ensure_nfs(&mut self, start_if_needed: bool) -> Result<NfsEnsureResponse> {
+        let req = NfsEnsureRequest { start_if_needed };
+        let payload = req.encode_to_vec();
+        let (resp_type, resp_payload) = self
+            .rpc_call(MessageType::EnsureNfsRequest, &payload)
+            .await?;
+
+        if resp_type != MessageType::EnsureNfsResponse as u32 {
+            return Err(CoreError::Machine(format!(
+                "unexpected response type: {resp_type}"
+            )));
+        }
+
+        NfsEnsureResponse::decode(&resp_payload[..])
+            .map_err(|e| CoreError::Machine(format!("failed to decode NFS response: {e}")))
+    }
+
+    /// Ensures guest k3s server is ready.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails.
+    pub async fn ensure_k3s(&mut self, start_if_needed: bool) -> Result<K3sEnsureResponse> {
+        let req = K3sEnsureRequest { start_if_needed };
+        let payload = req.encode_to_vec();
+        let (resp_type, resp_payload) = self
+            .rpc_call(MessageType::EnsureK3sRequest, &payload)
+            .await?;
+
+        if resp_type != MessageType::EnsureK3sResponse as u32 {
+            return Err(CoreError::Machine(format!(
+                "unexpected response type: {resp_type}"
+            )));
+        }
+
+        K3sEnsureResponse::decode(&resp_payload[..])
+            .map_err(|e| CoreError::Machine(format!("failed to decode k3s response: {e}")))
     }
 
     // =========================================================================

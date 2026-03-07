@@ -281,7 +281,7 @@ impl Runtime {
     /// # Errors
     ///
     /// Returns an error if initialization fails or guest binaries are missing.
-    pub async fn init(&self) -> Result<()> {
+    pub async fn init(self: &Arc<Self>) -> Result<()> {
         // Create data directories.
         tokio::fs::create_dir_all(&self.config.data_dir).await?;
         tokio::fs::create_dir_all(self.config.data_dir.join("vms")).await?;
@@ -300,11 +300,86 @@ impl Runtime {
 
         self.ensure_vm_ready().await?;
 
+        // Spawn NFS and k3s background tasks (non-blocking, failures are logged).
+        self.spawn_system_services();
+
         tracing::info!(
             backend = self.container_backend.name(),
             "ArcBox runtime initialized"
         );
         Ok(())
+    }
+
+    /// Spawns background tasks that start NFS and k3s in the guest VM and
+    /// set up host-side port forwarding once they are ready.
+    ///
+    /// These services are optional — failures are logged but never block
+    /// Docker startup or the daemon lifecycle.
+    fn spawn_system_services(self: &Arc<Self>) {
+        use arcbox_constants::ports::{K3S_API_PORT, NFS_PORT};
+
+        // NFS background task
+        let rt = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut agent = match rt.get_agent(DEFAULT_MACHINE_NAME) {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::warn!("NFS: failed to connect agent: {e}");
+                    return;
+                }
+            };
+            match agent.ensure_nfs(true).await {
+                Ok(resp) if resp.ready => {
+                    tracing::info!("NFS server ready in guest");
+                    if let Err(e) = rt
+                        .start_port_forwarding_for(
+                            DEFAULT_MACHINE_NAME,
+                            "__system_nfs",
+                            &[("0.0.0.0".to_string(), NFS_PORT, NFS_PORT, "tcp".to_string())],
+                        )
+                        .await
+                    {
+                        tracing::warn!("NFS: port forwarding failed: {e}");
+                    }
+                }
+                Ok(resp) => tracing::warn!("NFS: {}", resp.message),
+                Err(e) => tracing::warn!("NFS: ensure_nfs failed: {e}"),
+            }
+        });
+
+        // k3s background task
+        let rt = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut agent = match rt.get_agent(DEFAULT_MACHINE_NAME) {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::warn!("k3s: failed to connect agent: {e}");
+                    return;
+                }
+            };
+            match agent.ensure_k3s(true).await {
+                Ok(resp) if resp.ready => {
+                    tracing::info!("k3s server ready in guest");
+                    if let Err(e) = rt
+                        .start_port_forwarding_for(
+                            DEFAULT_MACHINE_NAME,
+                            "__system_k3s",
+                            &[(
+                                "0.0.0.0".to_string(),
+                                K3S_API_PORT,
+                                K3S_API_PORT,
+                                "tcp".to_string(),
+                            )],
+                        )
+                        .await
+                    {
+                        tracing::warn!("k3s: port forwarding failed: {e}");
+                    }
+                }
+                Ok(resp) => tracing::warn!("k3s: {}", resp.message),
+                Err(e) => tracing::warn!("k3s: ensure_k3s failed: {e}"),
+            }
+        });
     }
 
     /// Shuts down the runtime gracefully.
