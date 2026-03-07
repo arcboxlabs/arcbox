@@ -48,6 +48,7 @@ mod agent {
     // -------------------------------------------------------------------------
 
     pub const AGENT_PORT: u32 = 52;
+    const FILE_PORT: u32 = 53;
 
     // Exec channel (vsock:52) frame types.
     const MSG_START: u8 = 0x01;
