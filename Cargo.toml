@@ -94,6 +94,7 @@ sentry = { version = "0.46", default-features = false, features = [
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 
 # gRPC
 tonic = "0.12"

@@ -24,6 +24,7 @@ arcbox-protocol = { workspace = true }
 tonic = { workspace = true }
 hyper-util = "0.1"
 clap = { workspace = true }
+clap_complete = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

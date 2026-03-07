@@ -20,6 +20,7 @@ pub mod dns;
 pub mod docker;
 pub mod machine;
 pub mod sandbox;
+pub mod setup;
 pub mod version;
 
 /// ArcBox - High-performance container and VM runtime
@@ -85,6 +86,10 @@ pub enum Commands {
 
     /// Manage the ArcBox daemon
     Daemon(daemon::DaemonArgs),
+
+    /// Manage CLI shell integration (PATH, completions)
+    #[command(subcommand)]
+    Setup(setup::SetupCommands),
 
     /// Display system-wide information
     Info,
