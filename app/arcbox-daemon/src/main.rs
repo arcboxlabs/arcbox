@@ -137,17 +137,18 @@ async fn run(args: DaemonArgs) -> Result<()> {
     );
 
     // Bind DNS socket eagerly — failure aborts the daemon.
-    let dns_service = DnsService::bind(Arc::clone(runtime.network_manager()))
+    let dns_listen_port = dns_port();
+    let dns_service = DnsService::bind(Arc::clone(runtime.network_manager()), dns_listen_port)
         .await
         .context("Failed to start DNS service")?;
 
     // Register host.arcbox.local → gateway IP.
-    let gateway_ip = runtime
-        .config()
-        .network
+    let network_cfg = &runtime.config().network;
+    let gateway_ip = network_cfg
         .gateway
         .as_ref()
         .and_then(|s| s.parse::<Ipv4Addr>().ok())
+        .or_else(|| first_address_in_subnet(&network_cfg.subnet))
         .unwrap_or(Ipv4Addr::new(192, 168, 64, 1));
     runtime
         .network_manager()
@@ -198,7 +199,7 @@ async fn run(args: DaemonArgs) -> Result<()> {
     println!("ArcBox daemon started");
     println!("  Docker API: {}", socket_path.display());
     println!("  gRPC API:   {}", grpc_socket.display());
-    println!("  DNS:        127.0.0.1:5553");
+    println!("  DNS:        127.0.0.1:{}", dns_listen_port);
     println!("  Data:       {}", data_dir.display());
     println!();
     println!("Use 'arcbox docker enable' to configure Docker CLI integration.");
@@ -422,6 +423,21 @@ async fn recover_dns_entries(runtime: &Arc<Runtime>) {
             "Recovered DNS entries for running containers"
         );
     }
+}
+
+fn dns_port() -> u16 {
+    let key = format!("{}_DNS_PORT", to_env_prefix(DNS_PREFIX));
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5553)
+}
+
+/// Computes the first usable address in a CIDR subnet (e.g. "192.168.64.0/24" → 192.168.64.1).
+fn first_address_in_subnet(subnet: &str) -> Option<Ipv4Addr> {
+    let (ip_str, _) = subnet.split_once('/')?;
+    let base: Ipv4Addr = ip_str.parse().ok()?;
+    Some(Ipv4Addr::from(u32::from(base) + 1))
 }
 
 fn dns_domain() -> String {

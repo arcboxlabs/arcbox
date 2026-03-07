@@ -9,10 +9,6 @@ use arcbox_net::NetworkManager;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 
-/// DNS listen port on loopback. Chosen to avoid requiring root (port > 1024)
-/// while staying memorable. The macOS resolver file points here.
-const DNS_LISTEN_PORT: u16 = 5553;
-
 /// Async UDP DNS server backed by [`NetworkManager`]'s DNS forwarder.
 pub struct DnsService {
     network_manager: Arc<NetworkManager>,
@@ -20,12 +16,12 @@ pub struct DnsService {
 }
 
 impl DnsService {
-    /// Binds the UDP socket on `127.0.0.1:5553`.
+    /// Binds the UDP socket on `127.0.0.1:{port}`.
     ///
     /// Called eagerly at daemon startup so that a bind failure (port already in
     /// use) propagates up and aborts the daemon before it enters the main loop.
-    pub async fn bind(network_manager: Arc<NetworkManager>) -> Result<Self> {
-        let addr = format!("127.0.0.1:{DNS_LISTEN_PORT}");
+    pub async fn bind(network_manager: Arc<NetworkManager>, port: u16) -> Result<Self> {
+        let addr = format!("127.0.0.1:{port}");
         let socket = UdpSocket::bind(&addr)
             .await
             .with_context(|| format!("DNS service failed to bind {addr}"))?;

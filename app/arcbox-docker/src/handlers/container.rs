@@ -76,12 +76,22 @@ pub async fn stop_container(
     OriginalUri(uri): OriginalUri,
     req: Request<Body>,
 ) -> Result<Response> {
-    if let Some(id) = extract_container_id(&uri) {
-        let canonical = resolve_canonical_id(&state, &id).await.unwrap_or(id);
-        state.runtime.stop_port_forwarding_by_id(&canonical).await;
-        state.runtime.deregister_dns_by_id(&canonical).await;
+    // Resolve canonical ID before proxy — the name/short-id is still valid now.
+    let canonical = extract_container_id(&uri)
+        .map(|id| async { resolve_canonical_id(&state, &id).await.unwrap_or(id) });
+
+    let response = proxy(&state, &uri, req).await?;
+
+    // Only tear down networking after a successful stop.
+    if response.status().is_success() {
+        if let Some(canonical) = canonical {
+            let canonical = canonical.await;
+            state.runtime.stop_port_forwarding_by_id(&canonical).await;
+            state.runtime.deregister_dns_by_id(&canonical).await;
+        }
     }
-    proxy(&state, &uri, req).await
+
+    Ok(response)
 }
 
 /// Remove a container and tear down its port forwarding + DNS.
@@ -94,12 +104,24 @@ pub async fn remove_container(
     OriginalUri(uri): OriginalUri,
     req: Request<Body>,
 ) -> Result<Response> {
-    if let Some(id) = extract_container_id(&uri) {
-        let canonical = resolve_canonical_id(&state, &id).await.unwrap_or(id);
-        state.runtime.stop_port_forwarding_by_id(&canonical).await;
-        state.runtime.deregister_dns_by_id(&canonical).await;
+    // Resolve canonical ID before proxy — the name/short-id is still valid now.
+    let canonical = if let Some(id) = extract_container_id(&uri) {
+        Some(resolve_canonical_id(&state, &id).await.unwrap_or(id))
+    } else {
+        None
+    };
+
+    let response = proxy(&state, &uri, req).await?;
+
+    // Only tear down networking after a successful remove.
+    if response.status().is_success() {
+        if let Some(canonical) = canonical {
+            state.runtime.stop_port_forwarding_by_id(&canonical).await;
+            state.runtime.deregister_dns_by_id(&canonical).await;
+        }
     }
-    proxy(&state, &uri, req).await
+
+    Ok(response)
 }
 
 /// Inspect a started container and configure port forwarding + DNS registration.
@@ -250,24 +272,27 @@ pub async fn rename_container(
     OriginalUri(uri): OriginalUri,
     req: Request<Body>,
 ) -> Result<Response> {
-    let container_id = extract_container_id(&uri);
+    // Resolve canonical ID BEFORE proxy — the old name/short-id is still valid
+    // now but will be invalid after a successful rename.
+    let canonical = if let Some(id) = extract_container_id(&uri) {
+        Some(resolve_canonical_id(&state, &id).await.unwrap_or(id))
+    } else {
+        None
+    };
 
     // Proxy rename to guest.
     let response = proxy(&state, &uri, req).await?;
 
     if response.status().is_success() {
-        if let Some(ref id) = container_id {
-            let canonical = resolve_canonical_id(&state, id)
-                .await
-                .unwrap_or_else(|| id.clone());
+        if let Some(ref canonical) = canonical {
+            // 1. Remove old DNS entry.
+            state.runtime.deregister_dns_by_id(canonical).await;
 
-            // 1. Remove old DNS entry (returns old hostname atomically).
-            state.runtime.deregister_dns_by_id(&canonical).await;
-
-            // 2. Inspect to get new name + IP, then register.
-            if let Some(body_bytes) = inspect_container_body(&state, &canonical).await {
+            // 2. Inspect (using canonical ID which survives rename) to get
+            //    new name + IP, then register.
+            if let Some(body_bytes) = inspect_container_body(&state, canonical).await {
                 if let Some((new_name, ip)) = extract_container_dns_info(&body_bytes) {
-                    state.runtime.register_dns(&canonical, &new_name, ip).await;
+                    state.runtime.register_dns(canonical, &new_name, ip).await;
                 }
             }
         }
