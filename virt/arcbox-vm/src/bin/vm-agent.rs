@@ -407,9 +407,8 @@ mod agent {
     /// Active per-port vsock listener fds.  The listener fd is stored so
     /// `FWD_STOP` can close it, causing the accept loop to exit.
     fn fwd_listeners() -> &'static Mutex<std::collections::HashMap<u16, RawFd>> {
-        static LISTENERS: std::sync::OnceLock<
-            Mutex<std::collections::HashMap<u16, RawFd>>,
-        > = std::sync::OnceLock::new();
+        static LISTENERS: std::sync::OnceLock<Mutex<std::collections::HashMap<u16, RawFd>>> =
+            std::sync::OnceLock::new();
         LISTENERS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
     }
 
@@ -433,11 +432,7 @@ mod agent {
         let req: FwdReq = match serde_json::from_slice(&payload) {
             Ok(r) => r,
             Err(e) => {
-                let _ = write_frame(
-                    &mut conn,
-                    FWD_ERR,
-                    format!("parse FwdReq: {e}").as_bytes(),
-                );
+                let _ = write_frame(&mut conn, FWD_ERR, format!("parse FwdReq: {e}").as_bytes());
                 return;
             }
         };
@@ -495,9 +490,8 @@ mod agent {
     fn accept_fwd_loop(server_fd: RawFd, tcp_port: u16) {
         loop {
             // SAFETY: server_fd is a listening vsock socket.
-            let conn_fd = unsafe {
-                libc::accept(server_fd, std::ptr::null_mut(), std::ptr::null_mut())
-            };
+            let conn_fd =
+                unsafe { libc::accept(server_fd, std::ptr::null_mut(), std::ptr::null_mut()) };
             if conn_fd < 0 {
                 // EBADF / EINVAL — listener was closed by FWD_STOP.
                 break;
@@ -525,7 +519,10 @@ mod agent {
         // SAFETY: dup creates a second fd referencing the same socket.
         let vsock_read_fd = unsafe { libc::dup(vsock_fd) };
         if vsock_read_fd < 0 {
-            eprintln!("agent: fwd: dup vsock_fd: {}", std::io::Error::last_os_error());
+            eprintln!(
+                "agent: fwd: dup vsock_fd: {}",
+                std::io::Error::last_os_error()
+            );
             unsafe { libc::close(vsock_fd) };
             return;
         }
@@ -837,9 +834,11 @@ mod agent {
         });
 
         // Port-forward control listener thread.
-        thread::spawn(move || loop {
-            let conn_fd = accept_connection(fwd_fd);
-            thread::spawn(move || handle_fwd_connection(conn_fd));
+        thread::spawn(move || {
+            loop {
+                let conn_fd = accept_connection(fwd_fd);
+                thread::spawn(move || handle_fwd_connection(conn_fd));
+            }
         });
 
         // Exec listener (main thread).
