@@ -9,6 +9,7 @@ use hyper_util::rt::TokioIo;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::UnixListener;
+use tokio_util::sync::CancellationToken;
 use tower::{Layer, Service};
 use tower_http::trace::TraceLayer;
 
@@ -58,7 +59,7 @@ impl DockerApiServer {
     /// # Errors
     ///
     /// Returns an error if the server fails to start.
-    pub async fn run(&self) -> Result<()> {
+    pub async fn run(&self, shutdown: CancellationToken) -> Result<()> {
         // Remove existing socket
         let _ = std::fs::remove_file(&self.config.socket_path);
 
@@ -76,12 +77,16 @@ impl DockerApiServer {
         );
         tracing::info!("Docker API backend: smart proxy to guest dockerd");
 
-        self.run_native_http(listener).await
+        self.run_native_http(listener, shutdown).await
     }
 }
 
 impl DockerApiServer {
-    async fn run_native_http(&self, listener: UnixListener) -> Result<()> {
+    async fn run_native_http(
+        &self,
+        listener: UnixListener,
+        shutdown: CancellationToken,
+    ) -> Result<()> {
         // Wrap the Axum Router with a MapRequestLayer that strips API version
         // prefixes *before* route matching. `Router::layer` runs after routing
         // and cannot be used for URI rewriting.
@@ -90,10 +95,16 @@ impl DockerApiServer {
             .layer(create_router(Arc::clone(&self.runtime)).layer(TraceLayer::new_for_http()));
 
         loop {
-            let (stream, _) = listener
-                .accept()
-                .await
-                .map_err(|e| DockerError::Server(e.to_string()))?;
+            let stream = tokio::select! {
+                result = listener.accept() => {
+                    let (stream, _) = result.map_err(|e| DockerError::Server(e.to_string()))?;
+                    stream
+                }
+                () = shutdown.cancelled() => {
+                    tracing::info!("Docker API server shutting down");
+                    break;
+                }
+            };
 
             let tower_service = app.clone();
             tokio::spawn(async move {
@@ -119,5 +130,7 @@ impl DockerApiServer {
                 }
             });
         }
+
+        Ok(())
     }
 }
