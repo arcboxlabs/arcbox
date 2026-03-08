@@ -166,7 +166,8 @@ async fn execute_setup_json(
             });
         });
 
-    if let Err(e) = manager.install_all(Some(&Arc::new(progress_cb))).await {
+    let progress = Arc::new(progress_cb);
+    if let Err(e) = manager.install_all(Some(&progress)).await {
         emit_ndjson(SetupProgress {
             phase: "error".to_string(),
             error: Some(e.to_string()),
@@ -235,8 +236,9 @@ async fn execute_setup_table(
             }
         });
 
+    let progress = Arc::new(progress_cb);
     manager
-        .install_all(Some(&Arc::new(progress_cb)))
+        .install_all(Some(&progress))
         .await
         .context("failed to install Docker tools")?;
 

@@ -93,7 +93,7 @@ impl DockerToolManager {
 
         pg(PreparePhase::Checking);
 
-        // Check cache: if binary exists and version matches, skip.
+        // Check cache: if the binary exists and the checksum/sidecar matches, skip.
         if dest.exists() && self.is_cached(&tool.name, expected_sha, format).await {
             pg(PreparePhase::Cached);
             info!(tool = %tool.name, "already installed, checksum matches");
@@ -180,7 +180,8 @@ impl DockerToolManager {
     /// Try to install a tool from the app bundle directory.
     ///
     /// Returns `true` if the tool was successfully installed from the bundle.
-    /// Writes to a temporary file first, then atomically renames to `dest`.
+    /// Uses a randomized temp file to prevent symlink attacks, then atomically
+    /// renames into `dest`.
     async fn try_install_from_bundle(
         &self,
         tool: &ToolEntry,
@@ -198,36 +199,62 @@ impl DockerToolManager {
             return Ok(false);
         }
 
-        // Write to a temp file to avoid following symlinks at dest.
-        let tmp = dest.with_extension("bundle.tmp");
-        if let Err(e) = tokio::fs::copy(&src, &tmp).await {
-            let _ = tokio::fs::remove_file(&tmp).await;
+        // Create a secure temp file in the install dir (randomized name,
+        // no symlink following).
+        let tmp =
+            tempfile::NamedTempFile::new_in(&self.install_dir).map_err(DockerToolError::Io)?;
+        let tmp_path = tmp.path().to_path_buf();
+        // Keep the file open for its lifetime; we'll persist via rename.
+        let _tmp = tmp.into_temp_path();
+
+        if let Err(e) = tokio::fs::copy(&src, &tmp_path).await {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
             info!(tool = %tool.name, error = %e, "bundle copy failed, will download");
             return Ok(false);
         }
 
-        // For Binary format, verify the SHA-256 against assets.lock.
-        // For Tgz format, expected_sha is for the archive — trust code-signed
-        // app bundle instead.
-        if format == ArtifactFormat::Binary {
-            match sha256_file(&tmp).await {
-                Ok(actual) if actual == expected_sha => {}
-                Ok(_) => {
-                    let _ = tokio::fs::remove_file(&tmp).await;
-                    info!(tool = %tool.name, "bundle checksum mismatch, will download");
-                    return Ok(false);
+        // Verify the bundled binary.
+        match format {
+            ArtifactFormat::Binary => {
+                // SHA-256 in assets.lock is for the binary itself.
+                match sha256_file(&tmp_path).await {
+                    Ok(actual) if actual == expected_sha => {}
+                    Ok(_) => {
+                        let _ = tokio::fs::remove_file(&tmp_path).await;
+                        info!(tool = %tool.name, "bundle checksum mismatch, will download");
+                        return Ok(false);
+                    }
+                    Err(_) => {
+                        let _ = tokio::fs::remove_file(&tmp_path).await;
+                        info!(tool = %tool.name, "bundle checksum read failed, will download");
+                        return Ok(false);
+                    }
                 }
-                Err(_) => {
-                    let _ = tokio::fs::remove_file(&tmp).await;
-                    info!(tool = %tool.name, "bundle checksum read failed, will download");
-                    return Ok(false);
+            }
+            ArtifactFormat::Tgz => {
+                // SHA-256 in assets.lock is for the archive, not the extracted
+                // binary. Require a bundle-provided `{name}.sha256` file whose
+                // contents match `expected_sha` to confirm the binary version.
+                let checksum_path = bundle_dir.join(format!("{}.sha256", tool.name));
+                match tokio::fs::read_to_string(&checksum_path).await {
+                    Ok(contents) if contents.trim() == expected_sha => {}
+                    Ok(_) => {
+                        let _ = tokio::fs::remove_file(&tmp_path).await;
+                        info!(tool = %tool.name, "bundle archive checksum mismatch, will download");
+                        return Ok(false);
+                    }
+                    Err(_) => {
+                        let _ = tokio::fs::remove_file(&tmp_path).await;
+                        info!(tool = %tool.name, "bundle checksum file missing, will download");
+                        return Ok(false);
+                    }
                 }
             }
         }
 
         // Atomic rename into place.
-        if let Err(e) = tokio::fs::rename(&tmp, dest).await {
-            let _ = tokio::fs::remove_file(&tmp).await;
+        if let Err(e) = tokio::fs::rename(&tmp_path, dest).await {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
             info!(tool = %tool.name, error = %e, "bundle rename failed, will download");
             return Ok(false);
         }
@@ -378,4 +405,213 @@ pub enum DockerToolError {
 
     #[error("failed to extract '{inner}' from archive '{archive}'")]
     ExtractFailed { archive: String, inner: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_tool(name: &str, sha: &str) -> ToolEntry {
+        ToolEntry {
+            name: name.to_string(),
+            version: "1.0.0".to_string(),
+            sha256_arm64: Some(sha.to_string()),
+            sha256_x86_64: None,
+        }
+    }
+
+    // -- is_cached tests --
+
+    #[tokio::test]
+    async fn is_cached_binary_hit() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = b"hello binary";
+        let sha = sha256_bytes(content);
+        tokio::fs::write(dir.path().join("my-tool"), content)
+            .await
+            .unwrap();
+
+        let mgr = DockerToolManager::new(vec![], "arm64", dir.path().to_path_buf());
+        assert!(mgr.is_cached("my-tool", &sha, ArtifactFormat::Binary).await);
+    }
+
+    #[tokio::test]
+    async fn is_cached_binary_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("my-tool"), b"old version")
+            .await
+            .unwrap();
+
+        let mgr = DockerToolManager::new(vec![], "arm64", dir.path().to_path_buf());
+        assert!(
+            !mgr.is_cached("my-tool", "wrong-sha", ArtifactFormat::Binary)
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn is_cached_tgz_sidecar_hit() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("docker"), b"binary")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("docker.sha256"), "abc123")
+            .await
+            .unwrap();
+
+        let mgr = DockerToolManager::new(vec![], "arm64", dir.path().to_path_buf());
+        assert!(mgr.is_cached("docker", "abc123", ArtifactFormat::Tgz).await);
+    }
+
+    #[tokio::test]
+    async fn is_cached_tgz_sidecar_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("docker"), b"binary")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("docker.sha256"), "old-sha")
+            .await
+            .unwrap();
+
+        let mgr = DockerToolManager::new(vec![], "arm64", dir.path().to_path_buf());
+        assert!(
+            !mgr.is_cached("docker", "new-sha", ArtifactFormat::Tgz)
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn is_cached_tgz_no_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("docker"), b"binary")
+            .await
+            .unwrap();
+
+        let mgr = DockerToolManager::new(vec![], "arm64", dir.path().to_path_buf());
+        assert!(
+            !mgr.is_cached("docker", "any-sha", ArtifactFormat::Tgz)
+                .await
+        );
+    }
+
+    // -- try_install_from_bundle tests --
+
+    #[tokio::test]
+    async fn bundle_install_binary_ok() {
+        let install_dir = tempfile::tempdir().unwrap();
+        let bundle_dir = tempfile::tempdir().unwrap();
+        let content = b"good binary";
+        let sha = sha256_bytes(content);
+
+        tokio::fs::write(bundle_dir.path().join("my-tool"), content)
+            .await
+            .unwrap();
+
+        let tool = make_tool("my-tool", &sha);
+        let dest = install_dir.path().join("my-tool");
+
+        let mgr = DockerToolManager::new(vec![], "arm64", install_dir.path().to_path_buf())
+            .with_bundle_dir(bundle_dir.path().to_path_buf());
+
+        let ok = mgr
+            .try_install_from_bundle(&tool, &dest, &sha, ArtifactFormat::Binary)
+            .await
+            .unwrap();
+        assert!(ok);
+        assert!(dest.exists());
+    }
+
+    #[tokio::test]
+    async fn bundle_install_binary_checksum_mismatch() {
+        let install_dir = tempfile::tempdir().unwrap();
+        let bundle_dir = tempfile::tempdir().unwrap();
+
+        tokio::fs::write(bundle_dir.path().join("my-tool"), b"bad binary")
+            .await
+            .unwrap();
+
+        let tool = make_tool("my-tool", "wrong-sha");
+        let dest = install_dir.path().join("my-tool");
+
+        let mgr = DockerToolManager::new(vec![], "arm64", install_dir.path().to_path_buf())
+            .with_bundle_dir(bundle_dir.path().to_path_buf());
+
+        let ok = mgr
+            .try_install_from_bundle(&tool, &dest, "wrong-sha", ArtifactFormat::Binary)
+            .await
+            .unwrap();
+        assert!(!ok);
+        assert!(!dest.exists());
+    }
+
+    #[tokio::test]
+    async fn bundle_install_tgz_requires_checksum_file() {
+        let install_dir = tempfile::tempdir().unwrap();
+        let bundle_dir = tempfile::tempdir().unwrap();
+
+        tokio::fs::write(bundle_dir.path().join("docker"), b"docker binary")
+            .await
+            .unwrap();
+        // No docker.sha256 in bundle → should fail.
+
+        let tool = make_tool("docker", "archive-sha");
+        let dest = install_dir.path().join("docker");
+
+        let mgr = DockerToolManager::new(vec![], "arm64", install_dir.path().to_path_buf())
+            .with_bundle_dir(bundle_dir.path().to_path_buf());
+
+        let ok = mgr
+            .try_install_from_bundle(&tool, &dest, "archive-sha", ArtifactFormat::Tgz)
+            .await
+            .unwrap();
+        assert!(!ok);
+    }
+
+    #[tokio::test]
+    async fn bundle_install_tgz_with_checksum_file() {
+        let install_dir = tempfile::tempdir().unwrap();
+        let bundle_dir = tempfile::tempdir().unwrap();
+
+        tokio::fs::write(bundle_dir.path().join("docker"), b"docker binary")
+            .await
+            .unwrap();
+        tokio::fs::write(bundle_dir.path().join("docker.sha256"), "archive-sha")
+            .await
+            .unwrap();
+
+        let tool = make_tool("docker", "archive-sha");
+        let dest = install_dir.path().join("docker");
+
+        let mgr = DockerToolManager::new(vec![], "arm64", install_dir.path().to_path_buf())
+            .with_bundle_dir(bundle_dir.path().to_path_buf());
+
+        let ok = mgr
+            .try_install_from_bundle(&tool, &dest, "archive-sha", ArtifactFormat::Tgz)
+            .await
+            .unwrap();
+        assert!(ok);
+        assert!(dest.exists());
+    }
+
+    #[tokio::test]
+    async fn bundle_install_no_bundle_dir() {
+        let install_dir = tempfile::tempdir().unwrap();
+        let tool = make_tool("my-tool", "sha");
+        let dest = install_dir.path().join("my-tool");
+
+        let mgr = DockerToolManager::new(vec![], "arm64", install_dir.path().to_path_buf());
+        let ok = mgr
+            .try_install_from_bundle(&tool, &dest, "sha", ArtifactFormat::Binary)
+            .await
+            .unwrap();
+        assert!(!ok);
+    }
+
+    /// Compute SHA-256 hex of in-memory bytes (test helper).
+    fn sha256_bytes(data: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        format!("{:x}", hasher.finalize())
+    }
 }
