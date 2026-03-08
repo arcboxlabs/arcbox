@@ -225,22 +225,34 @@ impl PortForwardManager {
         run_cmd(
             "iptables",
             &[
-                "-t", "nat", "-A", "PREROUTING",
-                "-p", protocol,
-                "--dport", &host_port.to_string(),
-                "-j", "DNAT",
-                "--to-destination", &dest,
+                "-t",
+                "nat",
+                "-A",
+                "PREROUTING",
+                "-p",
+                protocol,
+                "--dport",
+                &host_port.to_string(),
+                "-j",
+                "DNAT",
+                "--to-destination",
+                &dest,
             ],
             "add PREROUTING DNAT",
         )?;
         run_cmd(
             "iptables",
             &[
-                "-A", "FORWARD",
-                "-p", protocol,
-                "-d", &sandbox_ip.to_string(),
-                "--dport", &sandbox_port.to_string(),
-                "-j", "ACCEPT",
+                "-A",
+                "FORWARD",
+                "-p",
+                protocol,
+                "-d",
+                &sandbox_ip.to_string(),
+                "--dport",
+                &sandbox_port.to_string(),
+                "-j",
+                "ACCEPT",
             ],
             "add FORWARD ACCEPT",
         )
@@ -258,22 +270,34 @@ impl PortForwardManager {
         run_cmd(
             "iptables",
             &[
-                "-t", "nat", "-D", "PREROUTING",
-                "-p", protocol,
-                "--dport", &host_port.to_string(),
-                "-j", "DNAT",
-                "--to-destination", &dest,
+                "-t",
+                "nat",
+                "-D",
+                "PREROUTING",
+                "-p",
+                protocol,
+                "--dport",
+                &host_port.to_string(),
+                "-j",
+                "DNAT",
+                "--to-destination",
+                &dest,
             ],
             "remove PREROUTING DNAT",
         )?;
         run_cmd(
             "iptables",
             &[
-                "-D", "FORWARD",
-                "-p", protocol,
-                "-d", &sandbox_ip.to_string(),
-                "--dport", &sandbox_port.to_string(),
-                "-j", "ACCEPT",
+                "-D",
+                "FORWARD",
+                "-p",
+                protocol,
+                "-d",
+                &sandbox_ip.to_string(),
+                "--dport",
+                &sandbox_port.to_string(),
+                "-j",
+                "ACCEPT",
             ],
             "remove FORWARD ACCEPT",
         )
@@ -364,20 +388,44 @@ mod tests {
         let ip = Ipv4Addr::new(172, 16, 0, 2);
         mgr.allocations.insert(
             ("sandbox-1".into(), 80, "tcp".into()),
-            ForwardEntry { sandbox_ip: ip, sandbox_port: 80, host_port: 40000, protocol: "tcp".into() },
+            ForwardEntry {
+                sandbox_ip: ip,
+                sandbox_port: 80,
+                host_port: 40000,
+                protocol: "tcp".into(),
+            },
         );
         mgr.allocations.insert(
             ("sandbox-1".into(), 443, "tcp".into()),
-            ForwardEntry { sandbox_ip: ip, sandbox_port: 443, host_port: 40001, protocol: "tcp".into() },
+            ForwardEntry {
+                sandbox_ip: ip,
+                sandbox_port: 443,
+                host_port: 40001,
+                protocol: "tcp".into(),
+            },
         );
         mgr.allocations.insert(
             ("sandbox-2".into(), 8080, "tcp".into()),
-            ForwardEntry { sandbox_ip: ip, sandbox_port: 8080, host_port: 40002, protocol: "tcp".into() },
+            ForwardEntry {
+                sandbox_ip: ip,
+                sandbox_port: 8080,
+                host_port: 40002,
+                protocol: "tcp".into(),
+            },
         );
         // remove_dnat will fail (no iptables in test), but entries are cleared first.
         mgr.remove_all_for_sandbox("sandbox-1");
-        assert!(!mgr.allocations.contains_key(&("sandbox-1".into(), 80, "tcp".into())));
-        assert!(!mgr.allocations.contains_key(&("sandbox-1".into(), 443, "tcp".into())));
-        assert!(mgr.allocations.contains_key(&("sandbox-2".into(), 8080, "tcp".into())));
+        assert!(
+            !mgr.allocations
+                .contains_key(&("sandbox-1".into(), 80, "tcp".into()))
+        );
+        assert!(
+            !mgr.allocations
+                .contains_key(&("sandbox-1".into(), 443, "tcp".into()))
+        );
+        assert!(
+            mgr.allocations
+                .contains_key(&("sandbox-2".into(), 8080, "tcp".into()))
+        );
     }
 }
