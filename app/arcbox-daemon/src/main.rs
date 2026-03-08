@@ -13,9 +13,11 @@ use macos_resolver::{FileResolver, to_env_prefix};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::UnixListener;
 use tokio::signal;
 use tokio_stream::wrappers::UnixListenerStream;
+use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 use tracing::{info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -160,8 +162,11 @@ async fn run(args: DaemonArgs) -> Result<()> {
         .network_manager()
         .register_dns("host", IpAddr::V4(gateway_ip));
 
-    let dns_handle = tokio::spawn(async move {
-        if let Err(e) = dns_service.run().await {
+    let shutdown = CancellationToken::new();
+
+    let dns_shutdown = shutdown.clone();
+    let mut dns_handle = tokio::spawn(async move {
+        if let Err(e) = dns_service.run(dns_shutdown).await {
             tracing::error!("DNS service error: {}", e);
         }
     });
@@ -177,13 +182,15 @@ async fn run(args: DaemonArgs) -> Result<()> {
         Arc::clone(&runtime),
     );
 
-    let docker_handle = tokio::spawn(async move {
-        if let Err(e) = docker_server.run().await {
+    let docker_shutdown = shutdown.clone();
+    let mut docker_handle = tokio::spawn(async move {
+        if let Err(e) = docker_server.run(docker_shutdown).await {
             tracing::error!("Docker API server error: {}", e);
         }
     });
 
-    let grpc_handle = start_grpc_server(Arc::clone(&runtime), grpc_socket.clone()).await?;
+    let mut grpc_handle =
+        start_grpc_server(Arc::clone(&runtime), grpc_socket.clone(), shutdown.clone()).await?;
 
     if args.docker_integration {
         match DockerContextManager::new(socket_path.clone()) {
@@ -211,13 +218,26 @@ async fn run(args: DaemonArgs) -> Result<()> {
     println!("Use 'arcbox docker enable' to configure Docker CLI integration.");
     println!("Press Ctrl+C to stop.");
 
-    shutdown_signal().await;
-    info!("Shutdown signal received");
+    const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
-    info!("Shutting down...");
-    dns_handle.abort();
-    docker_handle.abort();
-    grpc_handle.abort();
+    shutdown_signal().await;
+    info!("Shutdown signal received, draining connections...");
+    shutdown.cancel();
+
+    if tokio::time::timeout(DRAIN_TIMEOUT, async {
+        let _ = tokio::join!(&mut dns_handle, &mut docker_handle, &mut grpc_handle);
+    })
+    .await
+    .is_err()
+    {
+        warn!(
+            "Server drain timed out after {}s, aborting remaining tasks",
+            DRAIN_TIMEOUT.as_secs()
+        );
+        dns_handle.abort();
+        docker_handle.abort();
+        grpc_handle.abort();
+    }
 
     runtime
         .shutdown()
@@ -260,6 +280,7 @@ fn resolve_data_dir(data_dir: Option<&PathBuf>) -> PathBuf {
 async fn start_grpc_server(
     runtime: Arc<Runtime>,
     socket_path: PathBuf,
+    shutdown: CancellationToken,
 ) -> Result<tokio::task::JoinHandle<()>> {
     let _ = std::fs::remove_file(&socket_path);
 
@@ -284,7 +305,7 @@ async fn start_grpc_server(
             .add_service(MachineServiceServer::new(machine_service))
             .add_service(SandboxServiceServer::new(sandbox_service))
             .add_service(SandboxSnapshotServiceServer::new(sandbox_snapshot_service))
-            .serve_with_incoming(incoming)
+            .serve_with_incoming_shutdown(incoming, shutdown.cancelled())
             .await;
 
         if let Err(e) = result {

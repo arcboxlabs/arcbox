@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use arcbox_net::NetworkManager;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
+use tokio_util::sync::CancellationToken;
 
 /// Async UDP DNS server backed by [`NetworkManager`]'s DNS forwarder.
 pub struct DnsService {
@@ -38,12 +39,18 @@ impl DnsService {
     /// This method never returns under normal operation. Each incoming UDP
     /// packet is handled inline for local queries (fast path) or dispatched
     /// to a blocking task for upstream forwarding (slow path).
-    pub async fn run(self) -> Result<()> {
+    pub async fn run(self, shutdown: CancellationToken) -> Result<()> {
         let mut buf = [0u8; 512];
         let socket = Arc::new(self.socket);
 
         loop {
-            let (len, src) = socket.recv_from(&mut buf).await?;
+            let (len, src) = tokio::select! {
+                result = socket.recv_from(&mut buf) => result?,
+                () = shutdown.cancelled() => {
+                    tracing::info!("DNS service shutting down");
+                    return Ok(());
+                }
+            };
 
             // Fast path: local resolution or NXDOMAIN for *.arcbox.local.
             // Operates on a borrowed slice to avoid allocation.
@@ -157,7 +164,8 @@ mod tests {
         let service = DnsService::bind(Arc::clone(&nm), 0).await.unwrap();
         let server_addr = service.socket.local_addr().unwrap();
 
-        let server_handle = tokio::spawn(async move { service.run().await });
+        let server_handle =
+            tokio::spawn(async move { service.run(CancellationToken::new()).await });
 
         // Send query from client.
         let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -196,7 +204,8 @@ mod tests {
         let service = DnsService::bind(Arc::clone(&nm), 0).await.unwrap();
         let server_addr = service.socket.local_addr().unwrap();
 
-        let server_handle = tokio::spawn(async move { service.run().await });
+        let server_handle =
+            tokio::spawn(async move { service.run(CancellationToken::new()).await });
 
         let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let query = build_dns_query("nonexistent.arcbox.local");
