@@ -275,6 +275,17 @@ impl SandboxService {
         })
     }
 
+    /// Return the IP address of a sandbox, or an error if not found.
+    pub fn sandbox_ip(&self, sandbox_id: &str) -> Result<std::net::Ipv4Addr, String> {
+        let info = self
+            .manager
+            .inspect_sandbox(sandbox_id)
+            .map_err(|e| e.to_string())?;
+        info.network
+            .and_then(|n| n.ip_address.parse().ok())
+            .ok_or_else(|| format!("sandbox '{sandbox_id}' has no network allocation"))
+    }
+
     /// Delete a snapshot.
     pub fn delete_snapshot(&self, payload: &[u8]) -> Result<(), String> {
         let req = sandbox_v1::DeleteSnapshotRequest::decode(payload)

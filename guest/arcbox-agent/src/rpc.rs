@@ -322,6 +322,7 @@ mod tests {
     fn test_parse_request_ping() {
         let req = PingRequest {
             message: "ping".to_string(),
+            timestamp_secs: 0,
         };
         let payload = req.encode_to_vec();
 
