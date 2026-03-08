@@ -78,16 +78,14 @@ pub async fn stop_container(
 ) -> Result<Response> {
     // Resolve canonical ID before proxy — the name/short-id is still valid now
     // but may become stale after stop (e.g. --rm containers).
-    let canonical = if let Some(id) = extract_container_id(&uri) {
-        Some(resolve_canonical_id(&state, &id).await.unwrap_or(id))
-    } else {
-        None
-    };
+    let canonical = resolve_canonical_from_uri(&state, &uri).await;
 
     let response = proxy(&state, &uri, req).await?;
 
-    // Only tear down networking after a successful stop.
-    if response.status().is_success() {
+    // Tear down networking after a terminal stop response.
+    // Docker returns 204 on success and 304 when already stopped.
+    let status = response.status().as_u16();
+    if status == 204 || status == 304 {
         if let Some(canonical) = canonical {
             state.runtime.stop_port_forwarding_by_id(&canonical).await;
             state.runtime.deregister_dns_by_id(&canonical).await;
@@ -108,11 +106,7 @@ pub async fn remove_container(
     req: Request<Body>,
 ) -> Result<Response> {
     // Resolve canonical ID before proxy — the name/short-id is still valid now.
-    let canonical = if let Some(id) = extract_container_id(&uri) {
-        Some(resolve_canonical_id(&state, &id).await.unwrap_or(id))
-    } else {
-        None
-    };
+    let canonical = resolve_canonical_from_uri(&state, &uri).await;
 
     let response = proxy(&state, &uri, req).await?;
 
@@ -241,7 +235,7 @@ async fn setup_port_forwarding_from_inspect(
 ///
 /// Returns `(name, ip)` where `name` is the container name without leading `/`.
 /// Falls back through `/NetworkSettings/IPAddress` → per-network IPs.
-fn extract_container_dns_info(inspect_json: &[u8]) -> Option<(String, IpAddr)> {
+pub fn extract_container_dns_info(inspect_json: &[u8]) -> Option<(String, IpAddr)> {
     let v: serde_json::Value = serde_json::from_slice(inspect_json).ok()?;
     let name = v.get("Name")?.as_str()?.trim_start_matches('/').to_string();
 
@@ -277,11 +271,7 @@ pub async fn rename_container(
 ) -> Result<Response> {
     // Resolve canonical ID BEFORE proxy — the old name/short-id is still valid
     // now but will be invalid after a successful rename.
-    let canonical = if let Some(id) = extract_container_id(&uri) {
-        Some(resolve_canonical_id(&state, &id).await.unwrap_or(id))
-    } else {
-        None
-    };
+    let canonical = resolve_canonical_from_uri(&state, &uri).await;
 
     // Proxy rename to guest.
     let response = proxy(&state, &uri, req).await?;
@@ -327,6 +317,24 @@ fn extract_canonical_id_from_inspect(inspect_json: &[u8]) -> Option<String> {
 /// original request token when the inspect payload does not contain a usable ID.
 fn canonical_id_or_fallback(container_id: &str, inspect_json: &[u8]) -> String {
     extract_canonical_id_from_inspect(inspect_json).unwrap_or_else(|| container_id.to_string())
+}
+
+/// Extracts a container identifier from the URI and resolves it to the
+/// canonical full ID. Returns `None` (with a warning) when canonical
+/// resolution fails, so callers skip teardown rather than using a
+/// potentially wrong key (name/short-id).
+async fn resolve_canonical_from_uri(state: &AppState, uri: &Uri) -> Option<String> {
+    let id = extract_container_id(uri)?;
+    match resolve_canonical_id(state, &id).await {
+        Some(canonical) => Some(canonical),
+        None => {
+            tracing::warn!(
+                container_id = %id,
+                "Failed to resolve canonical container ID; skipping networking teardown"
+            );
+            None
+        }
+    }
 }
 
 /// Resolves a container name, short ID, or full ID to the canonical full ID

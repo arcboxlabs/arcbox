@@ -343,6 +343,10 @@ impl DnsForwarder {
     }
 
     /// Builds an NXDOMAIN response for a query.
+    ///
+    /// Zeroes all section counts (ANCOUNT, NSCOUNT, ARCOUNT) so that EDNS(0)
+    /// queries (which set ARCOUNT=1 in the header) don't produce malformed
+    /// responses with advertised-but-missing additional records.
     fn build_nxdomain_response(query: &DnsQuery) -> Vec<u8> {
         let mut response = Vec::with_capacity(query.raw_header.len() + query.raw_question.len());
         response.extend_from_slice(&query.raw_header);
@@ -354,6 +358,12 @@ impl DnsForwarder {
         // ANCOUNT = 0
         response[6] = 0x00;
         response[7] = 0x00;
+        // NSCOUNT = 0
+        response[8] = 0x00;
+        response[9] = 0x00;
+        // ARCOUNT = 0 (clears EDNS OPT record count from query)
+        response[10] = 0x00;
+        response[11] = 0x00;
 
         response.extend_from_slice(&query.raw_question);
         response

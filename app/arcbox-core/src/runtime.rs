@@ -635,8 +635,9 @@ impl Runtime {
 
     /// Registers a DNS entry for a container.
     ///
-    /// Maps `hostname.arcbox.local` → `ip` so the host can reach the container
-    /// by name. Also tracks the `container_id → hostname` mapping for cleanup.
+    /// Maps `hostname.<local_dns_domain>` → `ip` so the host can reach the
+    /// container by name. Also tracks the `container_id → hostname` mapping
+    /// for cleanup.
     pub async fn register_dns(&self, container_id: &str, hostname: &str, ip: IpAddr) {
         self.network_manager.register_dns(hostname, ip);
         self.dns_entries

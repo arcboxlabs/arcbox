@@ -389,37 +389,13 @@ async fn recover_dns_entries(runtime: &Arc<Runtime>) {
             Err(_) => continue,
         };
 
-        // Extract name and IP using the same logic as container start.
-        let v: serde_json::Value = match serde_json::from_slice(&inspect_body) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        let Some(name) = v.get("Name").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let name = name.trim_start_matches('/');
-        if name.is_empty() {
-            continue;
-        }
-
-        // IP extraction with fallback chain.
-        let ip_str = v
-            .pointer("/NetworkSettings/IPAddress")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                v.pointer("/NetworkSettings/Networks")?
-                    .as_object()?
-                    .values()
-                    .find_map(|net| net.get("IPAddress")?.as_str().filter(|s| !s.is_empty()))
-            });
-
-        let Some(ip) = ip_str.and_then(|s| s.parse::<IpAddr>().ok()) else {
+        // Reuse the same parsing logic as the container start handler.
+        let Some((name, ip)) = arcbox_docker::handlers::extract_container_dns_info(&inspect_body)
+        else {
             continue;
         };
 
-        runtime.register_dns(id, name, ip).await;
+        runtime.register_dns(id, &name, ip).await;
         recovered += 1;
     }
 
@@ -439,11 +415,26 @@ fn dns_port() -> u16 {
         .unwrap_or(5553)
 }
 
-/// Computes the first usable address in a CIDR subnet (e.g. "192.168.64.0/24" → 192.168.64.1).
+/// Computes the first usable host address in a CIDR subnet.
+///
+/// E.g. `"192.168.64.0/24"` → `192.168.64.1`. Returns `None` for /32
+/// (no host addresses) or unparseable input.
 fn first_address_in_subnet(subnet: &str) -> Option<Ipv4Addr> {
-    let (ip_str, _) = subnet.split_once('/')?;
+    let (ip_str, prefix_str) = subnet.split_once('/')?;
     let base: Ipv4Addr = ip_str.parse().ok()?;
-    Some(Ipv4Addr::from(u32::from(base) + 1))
+    let prefix: u8 = prefix_str.parse().ok()?;
+    if prefix >= 32 {
+        return None;
+    }
+    let mask: u32 = (!0u32) << (32 - prefix);
+    let network = u32::from(base) & mask;
+    let first = network.checked_add(1)?;
+    let broadcast = network | !mask;
+    if first > broadcast {
+        None
+    } else {
+        Some(Ipv4Addr::from(first))
+    }
 }
 
 fn dns_domain() -> String {
