@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use arcbox_docker::DockerContextManager;
-use arcbox_docker_tools::{DockerToolManager, parse_tools};
+use arcbox_docker_tools::{HostToolManager, ToolGroup, parse_tools_for_group};
 use clap::Subcommand;
 
 /// Embedded `assets.lock` (same copy used by boot_assets).
@@ -72,7 +72,8 @@ async fn execute_setup() -> Result<()> {
     let user_bin = home.join(".arcbox/bin");
 
     // Parse tool entries from lockfile.
-    let tools = parse_tools(LOCK_TOML).context("failed to parse assets.lock")?;
+    let tools = parse_tools_for_group(LOCK_TOML, ToolGroup::Docker)
+        .context("failed to parse assets.lock")?;
     if tools.is_empty() {
         println!("No Docker tools configured in assets.lock.");
         return Ok(());
@@ -83,7 +84,7 @@ async fn execute_setup() -> Result<()> {
     println!("Installing Docker CLI tools...");
     println!();
 
-    let manager = DockerToolManager::new(tools, &arch, runtime_bin.clone());
+    let manager = HostToolManager::new(tools, &arch, runtime_bin.clone());
 
     // Progress callback.
     let progress_cb: arcbox_asset::ProgressCallback =

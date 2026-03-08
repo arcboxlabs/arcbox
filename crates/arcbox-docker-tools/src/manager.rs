@@ -1,5 +1,5 @@
-//! Docker tool manager — download, extract, install, and validate Docker CLI
-//! binaries from the versions pinned in `assets.lock`.
+//! Host tool manager — download, extract, install, and validate ArcBox-managed
+//! host binaries from the versions pinned in `assets.lock`.
 
 use crate::lockfile::ToolEntry;
 use crate::registry::{self, ArtifactFormat};
@@ -8,8 +8,8 @@ use arcbox_asset::{PreparePhase, PrepareProgress, ProgressCallback};
 use std::path::{Path, PathBuf};
 use tracing::info;
 
-/// Manages Docker CLI tool installation.
-pub struct DockerToolManager {
+/// Manages ArcBox host tool installation.
+pub struct HostToolManager {
     /// Architecture string (e.g. "arm64", "x86_64").
     arch: String,
     /// Directory for downloaded artifacts (e.g. `~/.arcbox/runtime/bin/`).
@@ -18,7 +18,7 @@ pub struct DockerToolManager {
     tools: Vec<ToolEntry>,
 }
 
-impl DockerToolManager {
+impl HostToolManager {
     /// Create a new manager from parsed tool entries.
     #[must_use]
     pub fn new(tools: Vec<ToolEntry>, arch: impl Into<String>, install_dir: PathBuf) -> Self {
@@ -35,10 +35,10 @@ impl DockerToolManager {
     pub async fn install_all(
         &self,
         progress: Option<&ProgressCallback>,
-    ) -> Result<(), DockerToolError> {
+    ) -> Result<(), HostToolError> {
         tokio::fs::create_dir_all(&self.install_dir)
             .await
-            .map_err(DockerToolError::Io)?;
+            .map_err(HostToolError::Io)?;
 
         let total = self.tools.len();
         for (idx, tool) in self.tools.iter().enumerate() {
@@ -55,10 +55,10 @@ impl DockerToolManager {
         current: usize,
         total: usize,
         progress: Option<&ProgressCallback>,
-    ) -> Result<(), DockerToolError> {
+    ) -> Result<(), HostToolError> {
         let expected_sha =
             tool.sha256_for_arch(&self.arch)
-                .ok_or_else(|| DockerToolError::UnsupportedArch {
+                .ok_or_else(|| HostToolError::UnsupportedArch {
                     tool: tool.name.clone(),
                     arch: self.arch.clone(),
                 })?;
@@ -102,7 +102,7 @@ impl DockerToolManager {
                     });
                 })
                 .await
-                .map_err(DockerToolError::Asset)?;
+                .map_err(HostToolError::Asset)?;
             }
             ArtifactFormat::Tgz => {
                 // Download tgz to temp, verify checksum, then extract the binary.
@@ -114,7 +114,7 @@ impl DockerToolManager {
                     });
                 })
                 .await
-                .map_err(DockerToolError::Asset)?;
+                .map_err(HostToolError::Asset)?;
 
                 pg(PreparePhase::Verifying);
                 extract_from_tgz(&tgz_path, registry::tgz_inner_path(&tool.name), &dest)?;
@@ -128,12 +128,12 @@ impl DockerToolManager {
             use std::os::unix::fs::PermissionsExt;
             let mut perms = tokio::fs::metadata(&dest)
                 .await
-                .map_err(DockerToolError::Io)?
+                .map_err(HostToolError::Io)?
                 .permissions();
             perms.set_mode(0o755);
             tokio::fs::set_permissions(&dest, perms)
                 .await
-                .map_err(DockerToolError::Io)?;
+                .map_err(HostToolError::Io)?;
         }
 
         pg(PreparePhase::Ready);
@@ -142,23 +142,23 @@ impl DockerToolManager {
     }
 
     /// Validate that all tools are installed and checksums match.
-    pub async fn validate_all(&self) -> Result<(), DockerToolError> {
+    pub async fn validate_all(&self) -> Result<(), HostToolError> {
         for tool in &self.tools {
-            let expected_sha = tool.sha256_for_arch(&self.arch).ok_or_else(|| {
-                DockerToolError::UnsupportedArch {
-                    tool: tool.name.clone(),
-                    arch: self.arch.clone(),
-                }
-            })?;
+            let expected_sha =
+                tool.sha256_for_arch(&self.arch)
+                    .ok_or_else(|| HostToolError::UnsupportedArch {
+                        tool: tool.name.clone(),
+                        arch: self.arch.clone(),
+                    })?;
 
             let path = self.install_dir.join(&tool.name);
             if !path.exists() {
-                return Err(DockerToolError::NotInstalled(tool.name.clone()));
+                return Err(HostToolError::NotInstalled(tool.name.clone()));
             }
 
-            let actual = sha256_file(&path).await.map_err(DockerToolError::Asset)?;
+            let actual = sha256_file(&path).await.map_err(HostToolError::Asset)?;
             if actual != expected_sha {
-                return Err(DockerToolError::Asset(
+                return Err(HostToolError::Asset(
                     arcbox_asset::AssetError::ChecksumMismatch {
                         name: tool.name.clone(),
                         expected: expected_sha.to_string(),
@@ -188,29 +188,29 @@ fn extract_from_tgz(
     archive_path: &Path,
     inner_path: &str,
     dest: &Path,
-) -> Result<(), DockerToolError> {
-    let file = std::fs::File::open(archive_path).map_err(DockerToolError::Io)?;
+) -> Result<(), HostToolError> {
+    let file = std::fs::File::open(archive_path).map_err(HostToolError::Io)?;
     let gz = flate2::read::GzDecoder::new(file);
     let mut archive = tar::Archive::new(gz);
 
-    for entry in archive.entries().map_err(DockerToolError::Io)? {
-        let mut entry = entry.map_err(DockerToolError::Io)?;
-        let path = entry.path().map_err(DockerToolError::Io)?;
+    for entry in archive.entries().map_err(HostToolError::Io)? {
+        let mut entry = entry.map_err(HostToolError::Io)?;
+        let path = entry.path().map_err(HostToolError::Io)?;
         if path.to_string_lossy() == inner_path {
-            entry.unpack(dest).map_err(DockerToolError::Io)?;
+            entry.unpack(dest).map_err(HostToolError::Io)?;
             return Ok(());
         }
     }
 
-    Err(DockerToolError::ExtractFailed {
+    Err(HostToolError::ExtractFailed {
         archive: archive_path.display().to_string(),
         inner: inner_path.to_string(),
     })
 }
 
-/// Errors from Docker tool operations.
+/// Errors from host tool operations.
 #[derive(Debug, thiserror::Error)]
-pub enum DockerToolError {
+pub enum HostToolError {
     #[error("asset error: {0}")]
     Asset(#[from] arcbox_asset::AssetError),
 

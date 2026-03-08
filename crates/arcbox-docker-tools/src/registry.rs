@@ -1,4 +1,4 @@
-//! Download URL construction and extraction logic for each Docker tool.
+//! Download URL construction and extraction logic for each ArcBox-managed host tool.
 
 /// Format of the downloaded artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,7 +55,14 @@ pub fn download_url(name: &str, version: &str, arch: &str) -> String {
                 "https://github.com/docker/docker-credential-helpers/releases/download/v{version}/docker-credential-osxkeychain-v{version}.darwin-{gh_arch}"
             )
         }
-        _ => panic!("unknown docker tool: {name}"),
+        "kubectl" => {
+            let kubectl_arch = match arch {
+                "arm64" => "arm64",
+                _ => "amd64",
+            };
+            format!("https://dl.k8s.io/release/v{version}/bin/darwin/{kubectl_arch}/kubectl")
+        }
+        _ => panic!("unknown host tool: {name}"),
     }
 }
 
@@ -122,5 +129,15 @@ mod tests {
     fn artifact_formats() {
         assert_eq!(artifact_format("docker"), ArtifactFormat::Tgz);
         assert_eq!(artifact_format("docker-buildx"), ArtifactFormat::Binary);
+        assert_eq!(artifact_format("kubectl"), ArtifactFormat::Binary);
+    }
+
+    #[test]
+    fn kubectl_url_arm64() {
+        let url = download_url("kubectl", "1.34.3", "arm64");
+        assert_eq!(
+            url,
+            "https://dl.k8s.io/release/v1.34.3/bin/darwin/arm64/kubectl"
+        );
     }
 }
