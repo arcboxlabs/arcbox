@@ -8,8 +8,11 @@ use arcbox_constants::wire::{
     ERROR_HEADER_SIZE, FRAME_HEADER_SIZE, MessageType, TRACE_LEN_FIELD_SIZE, TYPE_FIELD_SIZE,
 };
 use arcbox_protocol::agent::{
-    PingRequest, PingResponse, RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest,
-    RuntimeStatusResponse, SystemInfo,
+    KubernetesDeleteRequest, KubernetesDeleteResponse, KubernetesKubeconfigRequest,
+    KubernetesKubeconfigResponse, KubernetesStartRequest, KubernetesStartResponse,
+    KubernetesStatusRequest, KubernetesStatusResponse, KubernetesStopRequest,
+    KubernetesStopResponse, PingRequest, PingResponse, RuntimeEnsureRequest, RuntimeEnsureResponse,
+    RuntimeStatusRequest, RuntimeStatusResponse, SystemInfo,
 };
 use arcbox_protocol::sandbox_v1::{
     CheckpointRequest, CheckpointResponse, CreateSandboxRequest, CreateSandboxResponse,
@@ -307,6 +310,111 @@ impl AgentClient {
         }
 
         RuntimeStatusResponse::decode(&resp_payload[..])
+            .map_err(|e| CoreError::Machine(format!("failed to decode response: {e}")))
+    }
+
+    /// Starts the native Kubernetes cluster in the guest VM.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails.
+    pub async fn start_kubernetes(&mut self) -> Result<KubernetesStartResponse> {
+        let payload = KubernetesStartRequest {}.encode_to_vec();
+        let (resp_type, resp_payload) = self
+            .rpc_call(MessageType::KubernetesStartRequest, &payload)
+            .await?;
+
+        if resp_type != MessageType::KubernetesStartResponse as u32 {
+            return Err(CoreError::Machine(format!(
+                "unexpected response type: {resp_type}"
+            )));
+        }
+
+        KubernetesStartResponse::decode(&resp_payload[..])
+            .map_err(|e| CoreError::Machine(format!("failed to decode response: {e}")))
+    }
+
+    /// Stops the native Kubernetes cluster in the guest VM.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails.
+    pub async fn stop_kubernetes(&mut self) -> Result<KubernetesStopResponse> {
+        let payload = KubernetesStopRequest {}.encode_to_vec();
+        let (resp_type, resp_payload) = self
+            .rpc_call(MessageType::KubernetesStopRequest, &payload)
+            .await?;
+
+        if resp_type != MessageType::KubernetesStopResponse as u32 {
+            return Err(CoreError::Machine(format!(
+                "unexpected response type: {resp_type}"
+            )));
+        }
+
+        KubernetesStopResponse::decode(&resp_payload[..])
+            .map_err(|e| CoreError::Machine(format!("failed to decode response: {e}")))
+    }
+
+    /// Deletes the native Kubernetes cluster state in the guest VM.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails.
+    pub async fn delete_kubernetes(&mut self) -> Result<KubernetesDeleteResponse> {
+        let payload = KubernetesDeleteRequest {}.encode_to_vec();
+        let (resp_type, resp_payload) = self
+            .rpc_call(MessageType::KubernetesDeleteRequest, &payload)
+            .await?;
+
+        if resp_type != MessageType::KubernetesDeleteResponse as u32 {
+            return Err(CoreError::Machine(format!(
+                "unexpected response type: {resp_type}"
+            )));
+        }
+
+        KubernetesDeleteResponse::decode(&resp_payload[..])
+            .map_err(|e| CoreError::Machine(format!("failed to decode response: {e}")))
+    }
+
+    /// Gets native Kubernetes cluster status from the guest VM.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails.
+    pub async fn get_kubernetes_status(&mut self) -> Result<KubernetesStatusResponse> {
+        let payload = KubernetesStatusRequest {}.encode_to_vec();
+        let (resp_type, resp_payload) = self
+            .rpc_call(MessageType::KubernetesStatusRequest, &payload)
+            .await?;
+
+        if resp_type != MessageType::KubernetesStatusResponse as u32 {
+            return Err(CoreError::Machine(format!(
+                "unexpected response type: {resp_type}"
+            )));
+        }
+
+        KubernetesStatusResponse::decode(&resp_payload[..])
+            .map_err(|e| CoreError::Machine(format!("failed to decode response: {e}")))
+    }
+
+    /// Gets the guest-exported kubeconfig payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails.
+    pub async fn get_kubeconfig(&mut self) -> Result<KubernetesKubeconfigResponse> {
+        let payload = KubernetesKubeconfigRequest {}.encode_to_vec();
+        let (resp_type, resp_payload) = self
+            .rpc_call(MessageType::KubernetesKubeconfigRequest, &payload)
+            .await?;
+
+        if resp_type != MessageType::KubernetesKubeconfigResponse as u32 {
+            return Err(CoreError::Machine(format!(
+                "unexpected response type: {resp_type}"
+            )));
+        }
+
+        KubernetesKubeconfigResponse::decode(&resp_payload[..])
             .map_err(|e| CoreError::Machine(format!("failed to decode response: {e}")))
     }
 

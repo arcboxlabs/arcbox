@@ -12,6 +12,10 @@ use arcbox_net::NetworkManager;
 use arcbox_net::darwin::inbound_relay::{InboundListenerManager, InboundProtocol};
 #[cfg(not(target_os = "macos"))]
 use arcbox_net::port_forward::{PortForwardRule, PortForwarder};
+use arcbox_protocol::agent::{
+    KubernetesDeleteResponse, KubernetesKubeconfigResponse, KubernetesStartResponse,
+    KubernetesStatusResponse, KubernetesStopResponse, ServiceStatus,
+};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 #[cfg(not(target_os = "macos"))]
@@ -24,8 +28,14 @@ use tokio::sync::RwLock as TokioRwLock;
 /// Default guest VM IP address in NAT network (used by PortForwarder fallback).
 #[cfg(not(target_os = "macos"))]
 const DEFAULT_GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 64, 2);
-const REQUIRED_RUNTIME_ASSETS: [&str; 4] =
-    ["dockerd", "containerd", "containerd-shim-runc-v2", "runc"];
+const REQUIRED_RUNTIME_ASSETS: [&str; 5] = [
+    "dockerd",
+    "containerd",
+    "containerd-shim-runc-v2",
+    "runc",
+    "k3s",
+];
+const KUBERNETES_HOST_ENDPOINT: &str = "https://127.0.0.1:16443";
 
 /// Checks that a file exists and has at least one executable permission bit set.
 fn check_executable(path: &Path, context: &str) -> Result<()> {
@@ -76,6 +86,25 @@ fn ensure_guest_binaries(data_dir: &Path) -> Result<()> {
         REQUIRED_RUNTIME_ASSETS.len()
     );
     Ok(())
+}
+
+fn rewrite_kubeconfig_server(kubeconfig: &str) -> String {
+    let rewritten = kubeconfig
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("server:") {
+                let indent = line.len() - line.trim_start().len();
+                format!("{}server: {}", " ".repeat(indent), KUBERNETES_HOST_ENDPOINT)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    rewritten
+        .replace("current-context: default", "current-context: arcbox")
+        .replace("name: default", "name: arcbox")
 }
 
 pub struct Runtime {
@@ -276,6 +305,97 @@ impl Runtime {
         self.machine_manager.connect_vsock_port(machine_name, port)
     }
 
+    /// Starts the native Kubernetes cluster in the default VM.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the VM cannot be started or the guest request fails.
+    pub async fn start_kubernetes(&self) -> Result<KubernetesStartResponse> {
+        self.vm_lifecycle.ensure_ready().await?;
+        let mut agent = self.get_agent(DEFAULT_MACHINE_NAME)?;
+        let response = agent.start_kubernetes().await?;
+        self.vm_lifecycle
+            .set_kubernetes_hold(response.running)
+            .await;
+        Ok(response)
+    }
+
+    /// Stops the native Kubernetes cluster in the default VM.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the guest request fails.
+    pub async fn stop_kubernetes(&self) -> Result<KubernetesStopResponse> {
+        if !self.vm_lifecycle.is_running().await {
+            self.vm_lifecycle.set_kubernetes_hold(false).await;
+            return Ok(KubernetesStopResponse {
+                stopped: true,
+                detail: "k3s already stopped".to_string(),
+            });
+        }
+
+        let mut agent = self.get_agent(DEFAULT_MACHINE_NAME)?;
+        let response = agent.stop_kubernetes().await?;
+        self.vm_lifecycle.set_kubernetes_hold(false).await;
+        Ok(response)
+    }
+
+    /// Deletes the native Kubernetes cluster state in the default VM.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the guest request fails.
+    pub async fn delete_kubernetes(&self) -> Result<KubernetesDeleteResponse> {
+        self.vm_lifecycle.ensure_ready().await?;
+        let mut agent = self.get_agent(DEFAULT_MACHINE_NAME)?;
+        let response = agent.delete_kubernetes().await?;
+        self.vm_lifecycle.set_kubernetes_hold(false).await;
+        Ok(response)
+    }
+
+    /// Returns Kubernetes cluster status for the default VM.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the guest request fails while the VM is running.
+    pub async fn kubernetes_status(&self) -> Result<KubernetesStatusResponse> {
+        if !self.vm_lifecycle.is_running().await {
+            return Ok(KubernetesStatusResponse {
+                running: false,
+                api_ready: false,
+                endpoint: KUBERNETES_HOST_ENDPOINT.to_string(),
+                detail: "default vm not running".to_string(),
+                services: vec![ServiceStatus {
+                    name: "k3s".to_string(),
+                    status: "not_ready".to_string(),
+                    detail: "default vm not running".to_string(),
+                }],
+            });
+        }
+
+        let mut agent = self.get_agent(DEFAULT_MACHINE_NAME)?;
+        let response = agent.get_kubernetes_status().await?;
+        self.vm_lifecycle
+            .set_kubernetes_hold(response.running)
+            .await;
+        Ok(response)
+    }
+
+    /// Returns the ArcBox-managed kubeconfig payload for the default VM.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the guest request fails.
+    pub async fn kubernetes_kubeconfig(&self) -> Result<KubernetesKubeconfigResponse> {
+        self.vm_lifecycle.ensure_ready().await?;
+        let mut agent = self.get_agent(DEFAULT_MACHINE_NAME)?;
+        let mut response = agent.get_kubeconfig().await?;
+        response.kubeconfig = rewrite_kubeconfig_server(&response.kubeconfig);
+        response.context_name = "arcbox".to_string();
+        response.endpoint = KUBERNETES_HOST_ENDPOINT.to_string();
+        Ok(response)
+    }
+
     /// Initializes the runtime and eagerly starts the default VM.
     ///
     /// Validates that all guest binaries (agent + runtime) are present and
@@ -290,7 +410,7 @@ impl Runtime {
         tokio::fs::create_dir_all(self.config.data_dir.join("vms")).await?;
         tokio::fs::create_dir_all(self.config.data_dir.join("machines")).await?;
 
-        // Download runtime binaries (dockerd, containerd, shim, runc) if not cached.
+        // Download runtime binaries (dockerd, containerd, shim, runc, k3s) if not cached.
         let runtime_bin_dir = self.config.data_dir.join("runtime/bin");
         tokio::fs::create_dir_all(&runtime_bin_dir).await?;
         self.vm_lifecycle
@@ -710,6 +830,7 @@ mod tests {
             "runtime/bin/containerd",
             "runtime/bin/containerd-shim-runc-v2",
             "runtime/bin/runc",
+            "runtime/bin/k3s",
         ] {
             let path = data_dir.join(name);
             std::fs::write(&path, b"binary").unwrap();

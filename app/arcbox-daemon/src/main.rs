@@ -2,18 +2,26 @@ mod dns_service;
 
 use anyhow::{Context, Result};
 use arcbox_api::{
-    MachineServiceImpl, SandboxServiceImpl, SandboxServiceServer, SandboxSnapshotServiceImpl,
-    SandboxSnapshotServiceServer, machine_service_server::MachineServiceServer,
+    KubernetesServiceImpl, MachineServiceImpl, SandboxServiceImpl, SandboxServiceServer,
+    SandboxSnapshotServiceImpl, SandboxSnapshotServiceServer,
+    kubernetes_service_server::KubernetesServiceServer,
+    machine_service_server::MachineServiceServer,
 };
+use arcbox_constants::ports::{KUBERNETES_API_HOST_PORT, KUBERNETES_API_VSOCK_PORT};
 use arcbox_core::{Config, Runtime, VmLifecycleConfig};
 use arcbox_docker::{DockerApiServer, DockerContextManager, ServerConfig};
 use clap::Parser;
 use dns_service::DnsService;
 use macos_resolver::{FileResolver, to_env_prefix};
 use std::net::{IpAddr, Ipv4Addr};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
-use tokio::net::UnixListener;
+use std::task::{Context as TaskContext, Poll};
+use tokio::io::unix::AsyncFd;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::{TcpListener, UnixListener};
 use tokio::signal;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
@@ -183,6 +191,8 @@ async fn run(args: DaemonArgs) -> Result<()> {
         }
     });
 
+    let kubernetes_proxy_handle = start_kubernetes_api_proxy(Arc::clone(&runtime)).await?;
+
     let grpc_handle = start_grpc_server(Arc::clone(&runtime), grpc_socket.clone()).await?;
 
     if args.docker_integration {
@@ -217,6 +227,7 @@ async fn run(args: DaemonArgs) -> Result<()> {
     info!("Shutting down...");
     dns_handle.abort();
     docker_handle.abort();
+    kubernetes_proxy_handle.abort();
     grpc_handle.abort();
 
     runtime
@@ -257,6 +268,174 @@ fn resolve_data_dir(data_dir: Option<&PathBuf>) -> PathBuf {
     })
 }
 
+struct RawFdWrapper(OwnedFd);
+
+impl AsRawFd for RawFdWrapper {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
+    }
+}
+
+struct RawFdStream {
+    inner: AsyncFd<RawFdWrapper>,
+}
+
+impl RawFdStream {
+    fn from_raw_fd(fd: RawFd) -> std::io::Result<Self> {
+        if fd < 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid file descriptor",
+            ));
+        }
+
+        Self::set_nonblocking(fd)?;
+        // SAFETY: fd is a valid, newly-opened socket file descriptor owned by us.
+        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+        let inner = AsyncFd::new(RawFdWrapper(owned))?;
+        Ok(Self { inner })
+    }
+
+    fn set_nonblocking(fd: RawFd) -> std::io::Result<()> {
+        // SAFETY: F_GETFL/F_SETFL are safe on valid fds.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let result = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+        if result < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+impl AsyncRead for RawFdStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        loop {
+            let mut guard = std::task::ready!(self.inner.poll_read_ready(cx))?;
+            match guard.try_io(|inner| {
+                let fd = inner.get_ref().as_raw_fd();
+                let slice = buf.initialize_unfilled();
+                // SAFETY: reading into our buffer from a valid fd.
+                let n = unsafe { libc::read(fd, slice.as_mut_ptr().cast(), slice.len()) };
+                if n < 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    #[allow(clippy::cast_sign_loss)]
+                    Ok(n as usize)
+                }
+            }) {
+                Ok(Ok(n)) => {
+                    buf.advance(n);
+                    return Poll::Ready(Ok(()));
+                }
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Ok(Err(e)) => return Poll::Ready(Err(e)),
+                Err(_would_block) => {}
+            }
+        }
+    }
+}
+
+impl AsyncWrite for RawFdStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        loop {
+            let mut guard = std::task::ready!(self.inner.poll_write_ready(cx))?;
+            match guard.try_io(|inner| {
+                let fd = inner.get_ref().as_raw_fd();
+                // SAFETY: writing from our buffer to a valid fd.
+                let n = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
+                if n < 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    #[allow(clippy::cast_sign_loss)]
+                    Ok(n as usize)
+                }
+            }) {
+                Ok(Ok(n)) => return Poll::Ready(Ok(n)),
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Ok(Err(e)) => return Poll::Ready(Err(e)),
+                Err(_would_block) => {}
+            }
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        let fd = self.inner.get_ref().as_raw_fd();
+        // SAFETY: shutdown on a valid fd.
+        let result = unsafe { libc::shutdown(fd, libc::SHUT_WR) };
+        if result == 0 {
+            return Poll::Ready(Ok(()));
+        }
+
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ENOTCONN) {
+            return Poll::Ready(Ok(()));
+        }
+        Poll::Ready(Err(err))
+    }
+}
+
+async fn start_kubernetes_api_proxy(runtime: Arc<Runtime>) -> Result<tokio::task::JoinHandle<()>> {
+    let listener = TcpListener::bind(("127.0.0.1", KUBERNETES_API_HOST_PORT))
+        .await
+        .context("Failed to bind Kubernetes API proxy")?;
+
+    info!(
+        "Kubernetes API proxy listening on 127.0.0.1:{}",
+        KUBERNETES_API_HOST_PORT
+    );
+
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut host_stream, _)) = listener.accept().await else {
+                continue;
+            };
+            let runtime = Arc::clone(&runtime);
+            tokio::spawn(async move {
+                let fd = match runtime
+                    .connect_vsock_port(runtime.default_machine_name(), KUBERNETES_API_VSOCK_PORT)
+                {
+                    Ok(fd) => fd,
+                    Err(e) => {
+                        tracing::debug!("failed to connect Kubernetes API vsock: {}", e);
+                        return;
+                    }
+                };
+
+                let mut guest_stream = match RawFdStream::from_raw_fd(fd) {
+                    Ok(stream) => stream,
+                    Err(e) => {
+                        tracing::debug!("failed to wrap Kubernetes API fd: {}", e);
+                        return;
+                    }
+                };
+
+                if let Err(e) =
+                    tokio::io::copy_bidirectional(&mut host_stream, &mut guest_stream).await
+                {
+                    tracing::debug!("Kubernetes API proxy connection ended: {}", e);
+                }
+            });
+        }
+    });
+
+    Ok(handle)
+}
+
 async fn start_grpc_server(
     runtime: Arc<Runtime>,
     socket_path: PathBuf,
@@ -276,12 +455,14 @@ async fn start_grpc_server(
     info!(socket = %socket_path.display(), "gRPC server listening");
 
     let machine_service = MachineServiceImpl::new(Arc::clone(&runtime));
+    let kubernetes_service = KubernetesServiceImpl::new(Arc::clone(&runtime));
     let sandbox_service = SandboxServiceImpl::new(Arc::clone(&runtime));
     let sandbox_snapshot_service = SandboxSnapshotServiceImpl::new(Arc::clone(&runtime));
 
     let handle = tokio::spawn(async move {
         let result = Server::builder()
             .add_service(MachineServiceServer::new(machine_service))
+            .add_service(KubernetesServiceServer::new(kubernetes_service))
             .add_service(SandboxServiceServer::new(sandbox_service))
             .add_service(SandboxSnapshotServiceServer::new(sandbox_snapshot_service))
             .serve_with_incoming(incoming)

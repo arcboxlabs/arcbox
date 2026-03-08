@@ -5,6 +5,7 @@
 //! are from `arcbox_grpc::v1`.
 
 use arcbox_core::Runtime;
+use arcbox_grpc::v1::kubernetes_service_server;
 use arcbox_grpc::v1::machine_service_server;
 use arcbox_grpc::{SandboxService, SandboxSnapshotService};
 use arcbox_protocol::sandbox_v1::Empty as SandboxEmpty;
@@ -16,10 +17,14 @@ use arcbox_protocol::sandbox_v1::{
     SandboxInfo, StopSandboxRequest,
 };
 use arcbox_protocol::v1::{
-    CreateMachineRequest, CreateMachineResponse, Empty, InspectMachineRequest, ListMachinesRequest,
-    ListMachinesResponse, MachineAgentRequest, MachineExecOutput, MachineExecRequest, MachineInfo,
-    MachineNetwork, MachinePingResponse, MachineSummary, MachineSystemInfo, RemoveMachineRequest,
-    StartMachineRequest, StopMachineRequest,
+    CreateMachineRequest, CreateMachineResponse, Empty, InspectMachineRequest,
+    KubernetesDeleteRequest, KubernetesDeleteResponse, KubernetesKubeconfigRequest,
+    KubernetesKubeconfigResponse, KubernetesStartRequest, KubernetesStartResponse,
+    KubernetesStatusRequest, KubernetesStatusResponse, KubernetesStopRequest,
+    KubernetesStopResponse, ListMachinesRequest, ListMachinesResponse, MachineAgentRequest,
+    MachineExecOutput, MachineExecRequest, MachineInfo, MachineNetwork, MachinePingResponse,
+    MachineSummary, MachineSystemInfo, RemoveMachineRequest, StartMachineRequest,
+    StopMachineRequest,
 };
 use std::pin::Pin;
 use std::sync::Arc;
@@ -36,6 +41,86 @@ use tonic::{Request, Response, Status};
 /// Machine service implementation.
 pub struct MachineServiceImpl {
     runtime: Arc<Runtime>,
+}
+
+// =============================================================================
+// Kubernetes Service
+// =============================================================================
+
+/// Kubernetes service implementation.
+pub struct KubernetesServiceImpl {
+    runtime: Arc<Runtime>,
+}
+
+impl KubernetesServiceImpl {
+    /// Creates a new Kubernetes service.
+    #[must_use]
+    pub const fn new(runtime: Arc<Runtime>) -> Self {
+        Self { runtime }
+    }
+}
+
+#[tonic::async_trait]
+impl kubernetes_service_server::KubernetesService for KubernetesServiceImpl {
+    async fn start(
+        &self,
+        _request: Request<KubernetesStartRequest>,
+    ) -> Result<Response<KubernetesStartResponse>, Status> {
+        let response = self
+            .runtime
+            .start_kubernetes()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(response))
+    }
+
+    async fn stop(
+        &self,
+        _request: Request<KubernetesStopRequest>,
+    ) -> Result<Response<KubernetesStopResponse>, Status> {
+        let response = self
+            .runtime
+            .stop_kubernetes()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(response))
+    }
+
+    async fn delete(
+        &self,
+        _request: Request<KubernetesDeleteRequest>,
+    ) -> Result<Response<KubernetesDeleteResponse>, Status> {
+        let response = self
+            .runtime
+            .delete_kubernetes()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(response))
+    }
+
+    async fn status(
+        &self,
+        _request: Request<KubernetesStatusRequest>,
+    ) -> Result<Response<KubernetesStatusResponse>, Status> {
+        let response = self
+            .runtime
+            .kubernetes_status()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(response))
+    }
+
+    async fn get_kubeconfig(
+        &self,
+        _request: Request<KubernetesKubeconfigRequest>,
+    ) -> Result<Response<KubernetesKubeconfigResponse>, Status> {
+        let response = self
+            .runtime
+            .kubernetes_kubeconfig()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(response))
+    }
 }
 
 impl MachineServiceImpl {
