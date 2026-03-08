@@ -1,0 +1,29 @@
+// Kubernetes service protocol definitions.
+//
+// This service manages the native ArcBox Kubernetes cluster that runs inside
+// the default VM.
+
+syntax = "proto3";
+
+package arcbox.v1;
+
+import "common.proto";
+import "agent.proto";
+
+// KubernetesService manages the native ArcBox Kubernetes cluster.
+service KubernetesService {
+    // Starts the cluster and waits for the API endpoint.
+    rpc Start(KubernetesStartRequest) returns (KubernetesStartResponse);
+
+    // Stops the cluster.
+    rpc Stop(KubernetesStopRequest) returns (KubernetesStopResponse);
+
+    // Deletes all cluster state while keeping Docker state intact.
+    rpc Delete(KubernetesDeleteRequest) returns (KubernetesDeleteResponse);
+
+    // Returns current cluster status.
+    rpc Status(KubernetesStatusRequest) returns (KubernetesStatusResponse);
+
+    // Returns an ArcBox-managed kubeconfig payload.
+    rpc GetKubeconfig(KubernetesKubeconfigRequest) returns (KubernetesKubeconfigResponse);
+}

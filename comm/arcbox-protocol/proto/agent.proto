@@ -21,6 +21,21 @@ service AgentService {
 
     // Gets guest runtime stack status.
     rpc GetRuntimeStatus(RuntimeStatusRequest) returns (RuntimeStatusResponse);
+
+    // Starts the native Kubernetes cluster inside the guest.
+    rpc StartKubernetes(KubernetesStartRequest) returns (KubernetesStartResponse);
+
+    // Stops the native Kubernetes cluster inside the guest.
+    rpc StopKubernetes(KubernetesStopRequest) returns (KubernetesStopResponse);
+
+    // Deletes the native Kubernetes cluster state inside the guest.
+    rpc DeleteKubernetes(KubernetesDeleteRequest) returns (KubernetesDeleteResponse);
+
+    // Returns native Kubernetes cluster status from the guest.
+    rpc GetKubernetesStatus(KubernetesStatusRequest) returns (KubernetesStatusResponse);
+
+    // Returns kubeconfig content exported from the guest cluster.
+    rpc GetKubeconfig(KubernetesKubeconfigRequest) returns (KubernetesKubeconfigResponse);
 }
 
 // Ping request.
@@ -122,4 +137,69 @@ message ServiceStatus {
     string status = 2;
     // Human-readable detail for diagnostics (error message, socket path, etc.).
     string detail = 3;
+}
+
+// Request to start the native Kubernetes cluster.
+message KubernetesStartRequest {}
+
+// Response from starting the native Kubernetes cluster.
+message KubernetesStartResponse {
+    // Whether the cluster process is running.
+    bool running = 1;
+    // Whether the Kubernetes API endpoint is reachable.
+    bool api_ready = 2;
+    // API endpoint exposed to the host.
+    string endpoint = 3;
+    // Human-readable detail for diagnostics.
+    string detail = 4;
+}
+
+// Request to stop the native Kubernetes cluster.
+message KubernetesStopRequest {}
+
+// Response from stopping the native Kubernetes cluster.
+message KubernetesStopResponse {
+    // Whether the cluster is fully stopped.
+    bool stopped = 1;
+    // Human-readable detail for diagnostics.
+    string detail = 2;
+}
+
+// Request to delete the native Kubernetes cluster state.
+message KubernetesDeleteRequest {}
+
+// Response from deleting the native Kubernetes cluster state.
+message KubernetesDeleteResponse {
+    // Human-readable detail for diagnostics.
+    string detail = 1;
+}
+
+// Request for Kubernetes cluster status.
+message KubernetesStatusRequest {}
+
+// Runtime status report for the native Kubernetes cluster.
+message KubernetesStatusResponse {
+    // Whether the cluster process is running.
+    bool running = 1;
+    // Whether the Kubernetes API endpoint is reachable.
+    bool api_ready = 2;
+    // API endpoint exposed to the host.
+    string endpoint = 3;
+    // Human-readable detail for diagnostics.
+    string detail = 4;
+    // Per-service status entries for fine-grained observability.
+    repeated ServiceStatus services = 5;
+}
+
+// Request for managed kubeconfig content.
+message KubernetesKubeconfigRequest {}
+
+// Managed kubeconfig payload exported from the guest cluster.
+message KubernetesKubeconfigResponse {
+    // Raw kubeconfig YAML.
+    string kubeconfig = 1;
+    // ArcBox-managed context name.
+    string context_name = 2;
+    // API endpoint embedded in the exported kubeconfig.
+    string endpoint = 3;
 }

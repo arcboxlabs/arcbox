@@ -26,6 +26,7 @@ fn main() {
         "proto/image.proto",
         "proto/agent.proto",
         "proto/api.proto",
+        "proto/kubernetes.proto",
         "proto/sandbox.proto",
     ];
 
