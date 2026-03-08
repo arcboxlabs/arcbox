@@ -16,6 +16,7 @@ use arcbox_protocol::sandbox_v1::{
     DeleteSnapshotRequest, InspectSandboxRequest, ListSandboxesRequest, ListSandboxesResponse,
     ListSnapshotsRequest, ListSnapshotsResponse, RemoveSandboxRequest, RestoreRequest,
     RestoreResponse, RunOutput, RunRequest, SandboxEvent, SandboxEventsRequest, SandboxInfo,
+    SandboxPortForwardRemoveRequest, SandboxPortForwardRequest, SandboxPortForwardResponse,
     StopSandboxRequest,
 };
 use arcbox_transport::Transport;
@@ -648,6 +649,75 @@ impl AgentClient {
 
         ListSnapshotsResponse::decode(&resp_payload[..])
             .map_err(|e| CoreError::Machine(format!("failed to decode response: {}", e)))
+    }
+
+    /// Sets up a port forward from the guest VM to a sandbox port.
+    ///
+    /// Returns the guest VM socket address (e.g. `"192.168.64.2:40001"`)
+    /// that is directly reachable from macOS.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails.
+    pub async fn sandbox_port_forward(
+        &mut self,
+        sandbox_id: impl Into<String>,
+        port: u16,
+        protocol: impl Into<String>,
+    ) -> Result<String> {
+        let req = SandboxPortForwardRequest {
+            sandbox_id: sandbox_id.into(),
+            port: u32::from(port),
+            protocol: protocol.into(),
+        };
+        let payload = req.encode_to_vec();
+        let (resp_type, resp_payload) = self
+            .rpc_call(MessageType::SandboxPortForwardRequest, &payload)
+            .await?;
+
+        if resp_type != MessageType::SandboxPortForwardResponse as u32 {
+            return Err(CoreError::Machine(format!(
+                "unexpected response type: 0x{:04x}",
+                resp_type
+            )));
+        }
+
+        SandboxPortForwardResponse::decode(&resp_payload[..])
+            .map(|r| r.host_addr)
+            .map_err(|e| CoreError::Machine(format!("failed to decode response: {e}")))
+    }
+
+    /// Removes a port forward rule for a sandbox port.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails.
+    pub async fn sandbox_port_forward_remove(
+        &mut self,
+        sandbox_id: impl Into<String>,
+        port: u16,
+        protocol: impl Into<String>,
+    ) -> Result<()> {
+        let req = SandboxPortForwardRemoveRequest {
+            sandbox_id: sandbox_id.into(),
+            port: u32::from(port),
+            protocol: protocol.into(),
+        };
+        let payload = req.encode_to_vec();
+        let (resp_type, _) = self
+            .rpc_call(MessageType::SandboxPortForwardRemoveRequest, &payload)
+            .await?;
+
+        if resp_type != MessageType::SandboxPortForwardRemoveResponse as u32
+            && resp_type != MessageType::Empty as u32
+        {
+            return Err(CoreError::Machine(format!(
+                "unexpected response type: 0x{:04x}",
+                resp_type
+            )));
+        }
+
+        Ok(())
     }
 
     /// Deletes a snapshot.
