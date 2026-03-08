@@ -165,7 +165,7 @@ async fn run(args: DaemonArgs) -> Result<()> {
     let shutdown = CancellationToken::new();
 
     let dns_shutdown = shutdown.clone();
-    let dns_handle = tokio::spawn(async move {
+    let mut dns_handle = tokio::spawn(async move {
         if let Err(e) = dns_service.run(dns_shutdown).await {
             tracing::error!("DNS service error: {}", e);
         }
@@ -183,13 +183,13 @@ async fn run(args: DaemonArgs) -> Result<()> {
     );
 
     let docker_shutdown = shutdown.clone();
-    let docker_handle = tokio::spawn(async move {
+    let mut docker_handle = tokio::spawn(async move {
         if let Err(e) = docker_server.run(docker_shutdown).await {
             tracing::error!("Docker API server error: {}", e);
         }
     });
 
-    let grpc_handle =
+    let mut grpc_handle =
         start_grpc_server(Arc::clone(&runtime), grpc_socket.clone(), shutdown.clone()).await?;
 
     if args.docker_integration {
@@ -218,35 +218,31 @@ async fn run(args: DaemonArgs) -> Result<()> {
     println!("Use 'arcbox docker enable' to configure Docker CLI integration.");
     println!("Press Ctrl+C to stop.");
 
-    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+    const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
     shutdown_signal().await;
     info!("Shutdown signal received, draining connections...");
     shutdown.cancel();
 
-    if tokio::time::timeout(SHUTDOWN_TIMEOUT, async {
-        let _ = tokio::join!(dns_handle, docker_handle, grpc_handle);
+    if tokio::time::timeout(DRAIN_TIMEOUT, async {
+        let _ = tokio::join!(&mut dns_handle, &mut docker_handle, &mut grpc_handle);
     })
     .await
     .is_err()
     {
         warn!(
-            "Server drain timed out after {}s, forcing shutdown",
-            SHUTDOWN_TIMEOUT.as_secs()
+            "Server drain timed out after {}s, aborting remaining tasks",
+            DRAIN_TIMEOUT.as_secs()
         );
+        dns_handle.abort();
+        docker_handle.abort();
+        grpc_handle.abort();
     }
 
-    match tokio::time::timeout(SHUTDOWN_TIMEOUT, runtime.shutdown()).await {
-        Err(_elapsed) => {
-            warn!(
-                "Runtime shutdown timed out after {}s",
-                SHUTDOWN_TIMEOUT.as_secs()
-            );
-        }
-        Ok(result) => {
-            result.context("Failed to shutdown runtime")?;
-        }
-    }
+    runtime
+        .shutdown()
+        .await
+        .context("Failed to shutdown runtime")?;
 
     if args.docker_integration {
         if let Ok(ctx_manager) = DockerContextManager::new(socket_path.clone()) {

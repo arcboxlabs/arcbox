@@ -9,6 +9,7 @@ use hyper_util::rt::TokioIo;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::UnixListener;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tower::{Layer, Service};
 use tower_http::trace::TraceLayer;
@@ -94,6 +95,8 @@ impl DockerApiServer {
         let app = version_layer
             .layer(create_router(Arc::clone(&self.runtime)).layer(TraceLayer::new_for_http()));
 
+        let mut connections = JoinSet::new();
+
         loop {
             let stream = tokio::select! {
                 result = listener.accept() => {
@@ -101,13 +104,13 @@ impl DockerApiServer {
                     stream
                 }
                 () = shutdown.cancelled() => {
-                    tracing::info!("Docker API server shutting down");
+                    tracing::info!("Docker API server shutting down, waiting for {} in-flight connection(s)", connections.len());
                     break;
                 }
             };
 
             let tower_service = app.clone();
-            tokio::spawn(async move {
+            connections.spawn(async move {
                 let hyper_service =
                     hyper::service::service_fn(move |request: hyper::Request<Incoming>| {
                         tower_service.clone().call(request)
@@ -130,6 +133,9 @@ impl DockerApiServer {
                 }
             });
         }
+
+        // Drain in-flight connections before returning.
+        while connections.join_next().await.is_some() {}
 
         Ok(())
     }
