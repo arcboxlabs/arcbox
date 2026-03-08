@@ -20,12 +20,14 @@ pub enum MessageType {
     EnsureRuntimeRequest = 0x0003,
     RuntimeStatusRequest = 0x0004,
 
-    // Sandbox CRUD request types (0x0020 - 0x0024).
+    // Sandbox CRUD request types (0x0020 - 0x0026).
     SandboxCreateRequest = 0x0020,
     SandboxStopRequest = 0x0021,
     SandboxRemoveRequest = 0x0022,
     SandboxInspectRequest = 0x0023,
     SandboxListRequest = 0x0024,
+    SandboxPortForwardRequest = 0x0025,
+    SandboxPortForwardRemoveRequest = 0x0026,
 
     // Sandbox workload request types (0x0030 - 0x0033).
     SandboxRunRequest = 0x0030,
@@ -46,12 +48,14 @@ pub enum MessageType {
     PortBindingsChanged = 0x1030,
     PortBindingsRemoved = 0x1031,
 
-    // Sandbox CRUD response types (0x1020 - 0x1024).
+    // Sandbox CRUD response types (0x1020 - 0x1026).
     SandboxCreateResponse = 0x1020,
     SandboxStopResponse = 0x1021,
     SandboxRemoveResponse = 0x1022,
     SandboxInspectResponse = 0x1023,
     SandboxListResponse = 0x1024,
+    SandboxPortForwardResponse = 0x1025,
+    SandboxPortForwardRemoveResponse = 0x1026,
 
     // Sandbox workload response types (streaming).
     SandboxRunOutput = 0x1035,
@@ -84,6 +88,8 @@ impl MessageType {
             0x0022 => Some(Self::SandboxRemoveRequest),
             0x0023 => Some(Self::SandboxInspectRequest),
             0x0024 => Some(Self::SandboxListRequest),
+            0x0025 => Some(Self::SandboxPortForwardRequest),
+            0x0026 => Some(Self::SandboxPortForwardRemoveRequest),
             // Sandbox workload requests.
             0x0030 => Some(Self::SandboxRunRequest),
             0x0031 => Some(Self::SandboxExecRequest),
@@ -106,6 +112,8 @@ impl MessageType {
             0x1022 => Some(Self::SandboxRemoveResponse),
             0x1023 => Some(Self::SandboxInspectResponse),
             0x1024 => Some(Self::SandboxListResponse),
+            0x1025 => Some(Self::SandboxPortForwardResponse),
+            0x1026 => Some(Self::SandboxPortForwardRemoveResponse),
             // Sandbox workload responses (streaming).
             0x1035 => Some(Self::SandboxRunOutput),
             0x1036 => Some(Self::SandboxExecOutput),
@@ -132,6 +140,8 @@ impl MessageType {
                 | Self::SandboxRemoveRequest
                 | Self::SandboxInspectRequest
                 | Self::SandboxListRequest
+                | Self::SandboxPortForwardRequest
+                | Self::SandboxPortForwardRemoveRequest
                 | Self::SandboxRunRequest
                 | Self::SandboxExecRequest
                 | Self::SandboxEventsRequest
@@ -173,6 +183,10 @@ mod tests {
             (0x1022, MessageType::SandboxRemoveResponse),
             (0x1023, MessageType::SandboxInspectResponse),
             (0x1024, MessageType::SandboxListResponse),
+            (0x0025, MessageType::SandboxPortForwardRequest),
+            (0x0026, MessageType::SandboxPortForwardRemoveRequest),
+            (0x1025, MessageType::SandboxPortForwardResponse),
+            (0x1026, MessageType::SandboxPortForwardRemoveResponse),
             // Sandbox workload.
             (0x0030, MessageType::SandboxRunRequest),
             (0x0031, MessageType::SandboxExecRequest),
@@ -207,6 +221,8 @@ mod tests {
         assert!(MessageType::SandboxCreateRequest.is_sandbox_request());
         assert!(MessageType::SandboxRunRequest.is_sandbox_request());
         assert!(MessageType::SandboxCheckpointRequest.is_sandbox_request());
+        assert!(MessageType::SandboxPortForwardRequest.is_sandbox_request());
+        assert!(MessageType::SandboxPortForwardRemoveRequest.is_sandbox_request());
         assert!(!MessageType::PingRequest.is_sandbox_request());
         assert!(!MessageType::SandboxCreateResponse.is_sandbox_request());
     }
