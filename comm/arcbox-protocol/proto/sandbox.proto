@@ -415,6 +415,39 @@ message SandboxEvent {
 }
 
 // =============================================================================
+// PortForward
+// =============================================================================
+
+// Request to set up an iptables DNAT rule forwarding a port on the guest VM
+// to the specified port inside a sandbox.
+message SandboxPortForwardRequest {
+    // Sandbox ID.
+    string sandbox_id = 1;
+    // Port number inside the sandbox to forward to.
+    uint32 port = 2;
+    // Protocol: "tcp" (default) or "udp".
+    string protocol = 3;
+}
+
+// Response to SandboxPortForward.
+// host_addr is a "ip:port" string on the guest VM that is directly reachable
+// from macOS via the vmnet interface.
+message SandboxPortForwardResponse {
+    // Guest VM address to connect to, e.g. "192.168.64.2:40000".
+    string host_addr = 1;
+}
+
+// Request to remove an existing port forward rule.
+message SandboxPortForwardRemoveRequest {
+    // Sandbox ID.
+    string sandbox_id = 1;
+    // Sandbox port that was previously forwarded.
+    uint32 port = 2;
+    // Protocol: "tcp" (default) or "udp".
+    string protocol = 3;
+}
+
+// =============================================================================
 // Checkpoint / Restore
 // =============================================================================
 
