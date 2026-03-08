@@ -22,9 +22,9 @@ mod mount;
 #[cfg(target_os = "linux")]
 mod config;
 #[cfg(target_os = "linux")]
-mod sandbox;
-#[cfg(target_os = "linux")]
 mod port_forward;
+#[cfg(target_os = "linux")]
+mod sandbox;
 
 // DNS module manages /etc/hosts for container name resolution.
 mod dns;
