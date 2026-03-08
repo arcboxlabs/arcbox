@@ -1,3 +1,5 @@
+mod dns_service;
+
 use anyhow::{Context, Result};
 use arcbox_api::{
     MachineServiceImpl, SandboxServiceImpl, SandboxServiceServer, SandboxSnapshotServiceImpl,
@@ -6,7 +8,9 @@ use arcbox_api::{
 use arcbox_core::{Config, Runtime, VmLifecycleConfig};
 use arcbox_docker::{DockerApiServer, DockerContextManager, ServerConfig};
 use clap::Parser;
+use dns_service::DnsService;
 use macos_resolver::{FileResolver, to_env_prefix};
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::UnixListener;
@@ -132,6 +136,40 @@ async fn run(args: DaemonArgs) -> Result<()> {
         "Runtime initialized"
     );
 
+    // Apply custom DNS domain if configured via ARCBOX_DNS_DOMAIN.
+    let dns_local_domain = dns_domain();
+    if dns_local_domain != DEFAULT_DNS_DOMAIN {
+        runtime.network_manager().set_dns_domain(&dns_local_domain);
+    }
+
+    // Bind DNS socket eagerly — failure aborts the daemon.
+    let dns_listen_port = dns_port();
+    let dns_service = DnsService::bind(Arc::clone(runtime.network_manager()), dns_listen_port)
+        .await
+        .context("Failed to start DNS service")?;
+
+    // Register host.arcbox.local → gateway IP.
+    let network_cfg = &runtime.config().network;
+    let gateway_ip = network_cfg
+        .gateway
+        .as_ref()
+        .and_then(|s| s.parse::<Ipv4Addr>().ok())
+        .or_else(|| first_address_in_subnet(&network_cfg.subnet))
+        .unwrap_or(Ipv4Addr::new(192, 168, 64, 1));
+    runtime
+        .network_manager()
+        .register_dns("host", IpAddr::V4(gateway_ip));
+
+    let dns_handle = tokio::spawn(async move {
+        if let Err(e) = dns_service.run().await {
+            tracing::error!("DNS service error: {}", e);
+        }
+    });
+
+    // Recover DNS entries for containers already running in the guest VM
+    // (handles daemon restart without VM restart).
+    recover_dns_entries(&runtime).await;
+
     let docker_server = DockerApiServer::new(
         ServerConfig {
             socket_path: socket_path.clone(),
@@ -167,6 +205,7 @@ async fn run(args: DaemonArgs) -> Result<()> {
     println!("ArcBox daemon started");
     println!("  Docker API: {}", socket_path.display());
     println!("  gRPC API:   {}", grpc_socket.display());
+    println!("  DNS:        127.0.0.1:{}", dns_listen_port);
     println!("  Data:       {}", data_dir.display());
     println!();
     println!("Use 'arcbox docker enable' to configure Docker CLI integration.");
@@ -176,6 +215,7 @@ async fn run(args: DaemonArgs) -> Result<()> {
     info!("Shutdown signal received");
 
     info!("Shutting down...");
+    dns_handle.abort();
     docker_handle.abort();
     grpc_handle.abort();
 
@@ -276,6 +316,124 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => {},
         () = terminate => {},
+    }
+}
+
+/// Re-registers DNS entries for all running containers in the guest VM.
+///
+/// Called after daemon startup to handle the case where the daemon restarts
+/// but the VM (and its containers) are still running.
+async fn recover_dns_entries(runtime: &Arc<Runtime>) {
+    use axum::http::{HeaderMap, Method};
+    use bytes::Bytes;
+
+    let resp = match arcbox_docker::proxy::proxy_to_guest(
+        runtime,
+        Method::GET,
+        "/containers/json",
+        &HeaderMap::new(),
+        Bytes::new(),
+    )
+    .await
+    {
+        Ok(resp) if resp.status().is_success() => resp,
+        Ok(resp) => {
+            tracing::debug!("Container list returned status {}", resp.status());
+            return;
+        }
+        Err(e) => {
+            tracing::debug!("Failed to list containers for DNS recovery: {}", e);
+            return;
+        }
+    };
+
+    let body_bytes = match http_body_util::BodyExt::collect(resp.into_body()).await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => {
+            tracing::debug!("Failed to read container list body: {}", e);
+            return;
+        }
+    };
+
+    let containers: Vec<serde_json::Value> = match serde_json::from_slice(&body_bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!("Failed to parse container list JSON: {}", e);
+            return;
+        }
+    };
+
+    let mut recovered = 0u32;
+    for container in &containers {
+        let Some(id) = container.get("Id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+
+        // Inspect each running container to get name + IP.
+        let inspect_path = format!("/containers/{id}/json");
+        let inspect_resp = match arcbox_docker::proxy::proxy_to_guest(
+            runtime,
+            Method::GET,
+            &inspect_path,
+            &HeaderMap::new(),
+            Bytes::new(),
+        )
+        .await
+        {
+            Ok(resp) if resp.status().is_success() => resp,
+            _ => continue,
+        };
+
+        let inspect_body = match http_body_util::BodyExt::collect(inspect_resp.into_body()).await {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => continue,
+        };
+
+        // Reuse the same parsing logic as the container start handler.
+        let Some((name, ip)) = arcbox_docker::handlers::extract_container_dns_info(&inspect_body)
+        else {
+            continue;
+        };
+
+        runtime.register_dns(id, &name, ip).await;
+        recovered += 1;
+    }
+
+    if recovered > 0 {
+        info!(
+            count = recovered,
+            "Recovered DNS entries for running containers"
+        );
+    }
+}
+
+fn dns_port() -> u16 {
+    let key = format!("{}_DNS_PORT", to_env_prefix(DNS_PREFIX));
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5553)
+}
+
+/// Computes the first usable host address in a CIDR subnet.
+///
+/// E.g. `"192.168.64.0/24"` → `192.168.64.1`. Returns `None` for /32
+/// (no host addresses) or unparseable input.
+fn first_address_in_subnet(subnet: &str) -> Option<Ipv4Addr> {
+    let (ip_str, prefix_str) = subnet.split_once('/')?;
+    let base: Ipv4Addr = ip_str.parse().ok()?;
+    let prefix: u8 = prefix_str.parse().ok()?;
+    if prefix >= 32 {
+        return None;
+    }
+    let mask: u32 = (!0u32) << (32 - prefix);
+    let network = u32::from(base) & mask;
+    let first = network.checked_add(1)?;
+    let broadcast = network | !mask;
+    if first > broadcast {
+        None
+    } else {
+        Some(Ipv4Addr::from(first))
     }
 }
 
