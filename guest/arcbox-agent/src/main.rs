@@ -18,11 +18,13 @@ mod rpc;
 #[cfg(target_os = "linux")]
 mod mount;
 
-// VMM config loading and sandbox service are Linux-only (arcbox-vm dep).
+// VMM config loading, sandbox service, and port forwarding are Linux-only.
 #[cfg(target_os = "linux")]
 mod config;
 #[cfg(target_os = "linux")]
 mod sandbox;
+#[cfg(target_os = "linux")]
+mod port_forward;
 
 // DNS module manages /etc/hosts for container name resolution.
 mod dns;
