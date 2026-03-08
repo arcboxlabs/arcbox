@@ -61,7 +61,7 @@ fn main() -> Result<()> {
             match cli.command {
                 Commands::Machine(cmd) => commands::machine::execute(cmd).await,
                 Commands::Sandbox(cmd) => commands::sandbox::execute(cmd).await,
-                Commands::Docker(cmd) => commands::docker::execute(cmd).await,
+                Commands::Docker(cmd) => commands::docker::execute(cmd, cli.format).await,
                 Commands::Boot(cmd) => commands::boot::execute(cmd, cli.format).await,
                 #[cfg(target_os = "macos")]
                 Commands::Dns(cmd) => commands::dns::execute(cmd).await,
