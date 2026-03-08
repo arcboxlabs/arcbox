@@ -412,11 +412,16 @@ mod tests {
     use super::*;
 
     fn make_tool(name: &str, sha: &str) -> ToolEntry {
+        use crate::lockfile::ArchEntry;
         ToolEntry {
             name: name.to_string(),
             version: "1.0.0".to_string(),
-            sha256_arm64: Some(sha.to_string()),
-            sha256_x86_64: None,
+            arch: std::collections::HashMap::from([(
+                "arm64".to_string(),
+                ArchEntry {
+                    sha256: sha.to_string(),
+                },
+            )]),
         }
     }
 
