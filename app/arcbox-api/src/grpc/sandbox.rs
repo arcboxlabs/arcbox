@@ -7,7 +7,7 @@ use arcbox_protocol::sandbox_v1::Empty as SandboxEmpty;
 use arcbox_protocol::sandbox_v1::{
     CreateSandboxRequest, CreateSandboxResponse, ExecInput, ExecOutput, InspectSandboxRequest,
     ListSandboxesRequest, ListSandboxesResponse, RemoveSandboxRequest, RunOutput, RunRequest,
-    SandboxEvent, SandboxEventsRequest, SandboxInfo, StopSandboxRequest,
+    SandboxEvent, SandboxEventsRequest, SandboxInfo, StopSandboxRequest, exec_input,
 };
 use tokio_stream::Stream;
 use tokio_stream::StreamExt as _;
@@ -86,11 +86,52 @@ impl SandboxService for SandboxServiceImpl {
 
     async fn exec(
         &self,
-        _request: Request<Streaming<ExecInput>>,
+        request: Request<Streaming<ExecInput>>,
     ) -> Result<Response<Self::ExecStream>, Status> {
-        Err(Status::unimplemented(
-            "sandbox exec bidirectional stream not yet implemented",
-        ))
+        let machine = request.machine_id()?;
+        let agent = self
+            .runtime
+            .ready()?
+            .get_agent(&machine)
+            .map_err(ApiError::from)?;
+
+        let mut stream = request.into_inner();
+
+        // The first message in the stream must carry the Init payload.
+        let first = stream
+            .next()
+            .await
+            .ok_or_else(|| Status::invalid_argument("exec: stream closed before Init message"))??;
+
+        let exec_req = match first.payload {
+            Some(exec_input::Payload::Init(req)) => req,
+            _ => return Err(Status::invalid_argument("exec: first message must be Init")),
+        };
+
+        // Feed remaining gRPC input into a channel for the core layer.
+        let (in_tx, in_rx) = tokio::sync::mpsc::channel(16);
+        tokio::spawn(async move {
+            while let Some(Ok(input)) = stream.next().await {
+                match input.payload {
+                    Some(exec_input::Payload::Stdin(data)) => {
+                        if in_tx.send(data).await.is_err() {
+                            return;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let _ = in_tx.send(Vec::new()).await;
+        });
+
+        let out_rx = agent
+            .sandbox_exec(exec_req, in_rx)
+            .await
+            .map_err(ApiError::from)?;
+
+        let out_stream = UnboundedReceiverStream::new(out_rx)
+            .map(|r| r.map_err(|e| Status::internal(e.to_string())));
+        Ok(Response::new(Box::pin(out_stream)))
     }
 
     async fn stop(
