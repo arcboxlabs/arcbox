@@ -1,4 +1,6 @@
 [workspace]
+# Not publishing to crates.io yet — facade crate dependencies aren't all published.
+publish = false
 # macOS-only codebase; CI publishes from ubuntu — skip build verification.
 publish_no_verify = true
 # Pre-1.0: no semver checking.
