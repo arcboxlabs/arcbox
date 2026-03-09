@@ -29,10 +29,6 @@ pub enum NetError {
     #[error("DNS error: {0}")]
     Dns(String),
 
-    /// DHCP error.
-    #[error("DHCP error: {0}")]
-    Dhcp(String),
-
     /// Backend error.
     #[error("backend error: {0}")]
     Backend(String),

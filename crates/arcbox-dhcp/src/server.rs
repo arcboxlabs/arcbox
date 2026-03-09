@@ -124,11 +124,11 @@ impl DhcpServer {
             Some(DhcpMessageType::Discover) => Some(self.handle_discover(&packet)?),
             Some(DhcpMessageType::Request) => Some(self.handle_request(&packet)?),
             Some(DhcpMessageType::Release) => {
-                self.handle_release(&packet)?;
+                self.handle_release(&packet);
                 None
             }
             Some(DhcpMessageType::Decline) => {
-                self.handle_decline(&packet)?;
+                self.handle_decline(&packet);
                 None
             }
             _ => None,
@@ -286,7 +286,7 @@ impl DhcpServer {
     }
 
     /// Handles DHCPRELEASE.
-    fn handle_release(&mut self, packet: &DhcpPacket) -> Result<()> {
+    fn handle_release(&mut self, packet: &DhcpPacket) {
         let mac = packet.client_mac();
 
         if let Some(lease) = self.leases.remove(&mac) {
@@ -306,12 +306,10 @@ impl DhcpServer {
                 mac[5]
             );
         }
-
-        Ok(())
     }
 
     /// Handles DHCPDECLINE.
-    fn handle_decline(&mut self, packet: &DhcpPacket) -> Result<()> {
+    fn handle_decline(&mut self, packet: &DhcpPacket) {
         // Client is saying the IP is already in use
         // We should mark it as unavailable
         if let Some(ip) = packet.requested_ip {
@@ -319,8 +317,6 @@ impl DhcpServer {
 
             tracing::warn!("DHCPDECLINE: {} reported as in use", ip);
         }
-
-        Ok(())
     }
 
     /// Cleans up expired leases.

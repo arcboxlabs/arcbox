@@ -145,7 +145,7 @@ impl DhcpPacket {
         if data.len() > options_start + 4 {
             // Check magic cookie
             if data[options_start..options_start + 4] == Self::MAGIC_COOKIE {
-                Self::parse_options(&mut packet, &data[options_start + 4..])?;
+                Self::parse_options(&mut packet, &data[options_start + 4..]);
             }
         }
 
@@ -153,7 +153,7 @@ impl DhcpPacket {
     }
 
     /// Parses DHCP options.
-    fn parse_options(packet: &mut Self, data: &[u8]) -> Result<()> {
+    fn parse_options(packet: &mut Self, data: &[u8]) {
         let mut i = 0;
         while i < data.len() {
             let option_code = data[i];
@@ -207,8 +207,6 @@ impl DhcpPacket {
 
             i += 2 + option_len;
         }
-
-        Ok(())
     }
 
     /// Serializes the DHCP packet to bytes.
