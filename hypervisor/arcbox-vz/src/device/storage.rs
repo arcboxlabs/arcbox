@@ -13,6 +13,7 @@ pub struct StorageDeviceConfiguration {
     inner: *mut AnyObject,
 }
 
+// SAFETY: Inner ObjC pointer is only used via msg_send! which dispatches to the ObjC runtime.
 unsafe impl Send for StorageDeviceConfiguration {}
 
 impl StorageDeviceConfiguration {
@@ -34,6 +35,7 @@ impl StorageDeviceConfiguration {
 
     /// Creates a storage device with the given attachment.
     fn with_attachment(attachment: *mut AnyObject) -> VZResult<Self> {
+        // SAFETY: ObjC alloc/init on valid VZVirtioBlockDeviceConfiguration class with a valid attachment pointer.
         unsafe {
             let cls =
                 get_class("VZVirtioBlockDeviceConfiguration").ok_or_else(|| VZError::Internal {
@@ -76,6 +78,7 @@ impl Drop for StorageDeviceConfiguration {
 // ============================================================================
 
 fn create_disk_attachment(path: &str, read_only: bool) -> VZResult<*mut AnyObject> {
+    // SAFETY: ObjC alloc/init on valid VZDiskImageStorageDeviceAttachment class. NSURL from validated path. Error out-parameter is checked.
     unsafe {
         let cls =
             get_class("VZDiskImageStorageDeviceAttachment").ok_or_else(|| VZError::Internal {

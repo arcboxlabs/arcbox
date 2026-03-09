@@ -14,6 +14,7 @@ use super::ensure_framework_loaded;
 pub fn get_class(name: &str) -> Option<&'static AnyClass> {
     ensure_framework_loaded();
     let name_cstr = std::ffi::CString::new(name).ok()?;
+    // SAFETY: objc_getClass returns null for unknown classes (checked below) or a valid class pointer that lives for the program's lifetime.
     unsafe {
         let cls = objc_getClass(name_cstr.as_ptr());
         if cls.is_null() {
@@ -31,6 +32,7 @@ pub fn get_class(name: &str) -> Option<&'static AnyClass> {
 // FFI function pointer for objc_msgSend.
 #[allow(improper_ctypes)]
 #[allow(missing_docs)]
+// SAFETY: objc_msgSend is the ObjC message dispatch function, always available in the ObjC runtime.
 unsafe extern "C" {
     pub fn objc_msgSend();
 }

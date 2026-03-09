@@ -28,6 +28,7 @@ pub struct LinuxBootLoader {
     inner: *mut AnyObject,
 }
 
+// SAFETY: Inner ObjC pointer is only used via msg_send! which dispatches to the ObjC runtime. Not shared across threads without external synchronization.
 unsafe impl Send for LinuxBootLoader {}
 
 impl LinuxBootLoader {
@@ -49,6 +50,7 @@ impl LinuxBootLoader {
 
         let path_str = path.to_string_lossy();
 
+        // SAFETY: ObjC alloc/init pattern on valid VZLinuxBootLoader class. Result is checked non-null.
         unsafe {
             let cls = get_class("VZLinuxBootLoader").ok_or_else(|| VZError::Internal {
                 code: -1,
@@ -77,6 +79,7 @@ impl LinuxBootLoader {
         let path = path.as_ref();
         if path.exists() {
             let path_str = path.to_string_lossy();
+            // SAFETY: self.inner is a valid VZLinuxBootLoader. NSURL is created from a validated path.
             unsafe {
                 let url = nsurl_file_path(&path_str);
                 msg_send_void!(self.inner, setInitialRamdiskURL: url);
@@ -91,6 +94,7 @@ impl LinuxBootLoader {
     ///
     /// * `cmdline` - Kernel command line string (e.g., "console=hvc0 root=/dev/vda")
     pub fn set_command_line(&mut self, cmdline: &str) -> &mut Self {
+        // SAFETY: self.inner is a valid VZLinuxBootLoader. NSString is created from a valid Rust str.
         unsafe {
             let s = crate::ffi::nsstring(cmdline);
             msg_send_void!(self.inner, setCommandLine: s);

@@ -35,6 +35,7 @@ pub enum DelegateError {
 // FFI Declarations
 // ============================================================================
 
+// SAFETY: ObjC runtime FFI declarations — these are well-known C functions with stable ABI.
 unsafe extern "C" {
     fn class_addMethod(
         cls: *const AnyClass,
@@ -134,10 +135,11 @@ fn send_connection(handle: ListenerHandle, conn: IncomingConnection) -> bool {
 /// Wrapper for optional class pointer that implements Send + Sync.
 struct ClassResult(Result<*const AnyClass, DelegateError>);
 
-// Safety: The class is registered once and never modified.
+// SAFETY: The class is registered once and never modified.
 // Objective-C classes are thread-safe for reading.
 // The error variant contains no pointers.
 unsafe impl Send for ClassResult {}
+// SAFETY: See above — the class pointer is immutable after registration.
 unsafe impl Sync for ClassResult {}
 
 /// Class pointer for our delegate implementation.
@@ -152,6 +154,7 @@ const HANDLE_IVAR: &[u8] = b"_listenerHandle\0";
 ///
 /// Returns an error if the delegate class cannot be created.
 pub fn get_delegate_class() -> Result<*const AnyClass, DelegateError> {
+    // SAFETY: Class creation is done once via OnceLock; `create_delegate_class` is unsafe fn.
     let result = DELEGATE_CLASS.get_or_init(|| ClassResult(unsafe { create_delegate_class() }));
     // Clone the result since we can't move out of OnceLock
     match &result.0 {
@@ -167,6 +170,9 @@ pub fn get_delegate_class() -> Result<*const AnyClass, DelegateError> {
 
 /// Creates the `VZSocketListenerDelegate` Objective-C class dynamically.
 unsafe fn create_delegate_class() -> Result<*const AnyClass, DelegateError> {
+    // SAFETY: All ObjC runtime calls (objc_getClass, objc_allocateClassPair, class_addIvar,
+    // class_addMethod, objc_registerClassPair) use valid class/selector names and are called
+    // in the correct sequence. The resulting class is registered once and stored globally.
     unsafe {
         // Get NSObject as superclass
         let nsobj_name = CString::new("NSObject").unwrap();
@@ -241,6 +247,9 @@ unsafe extern "C" fn should_accept_connection(
     connection: *mut AnyObject,
     _device: *mut AnyObject,
 ) -> Bool {
+    // SAFETY: ObjC delegate callback invoked by Virtualization.framework. `this` is a valid
+    // delegate instance created by `create_delegate_instance`. `connection` is validated
+    // non-null before use. `libc::dup` is safe to call on a valid fd.
     unsafe {
         tracing::debug!("should_accept_connection called");
 
@@ -318,6 +327,9 @@ unsafe extern "C" fn should_accept_connection(
 /// Returns an error if the delegate class cannot be created or if
 /// instance allocation fails.
 pub fn create_delegate_instance(handle: ListenerHandle) -> Result<*mut AnyObject, DelegateError> {
+    // SAFETY: `cls` is a valid registered ObjC class from `get_delegate_class`. alloc/init
+    // follow standard ObjC two-phase initialization. `object_setInstanceVariable` stores a
+    // u64 handle value in the ivar added during class creation.
     unsafe {
         let cls = get_delegate_class()?;
 

@@ -857,13 +857,6 @@ impl VmLifecycleManager {
             assets.rootfs_image.display(),
         );
 
-        // Write host wall-clock time to the VirtioFS share so the guest can
-        // set its system clock before TLS-dependent services start.
-        if let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-            let ts_path = self.data_dir.join(".host_time");
-            let _ = tokio::fs::write(&ts_path, now.as_secs().to_string()).await;
-        }
-
         self.machine_manager.create(config).await?;
 
         Ok(())

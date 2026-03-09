@@ -29,6 +29,7 @@ static FRAMEWORK_INIT: Once = Once::new();
 
 /// Ensures Virtualization.framework is loaded.
 fn ensure_framework_loaded() {
+    // SAFETY: dlopen loads the system Virtualization.framework. Called once via Once. dlerror is checked only when handle is null.
     FRAMEWORK_INIT.call_once(|| unsafe {
         let path = std::ffi::CString::new(
             "/System/Library/Frameworks/Virtualization.framework/Virtualization",
@@ -54,6 +55,7 @@ fn ensure_framework_loaded() {
 /// Checks if virtualization is supported on this system.
 pub fn is_supported() -> bool {
     ensure_framework_loaded();
+    // SAFETY: Sending isSupported to a valid VZVirtualMachine class pointer obtained from get_class.
     unsafe {
         let cls = match get_class("VZVirtualMachine") {
             Some(c) => c,
@@ -66,6 +68,7 @@ pub fn is_supported() -> bool {
 /// Gets the maximum supported CPU count.
 pub fn max_cpu_count() -> u64 {
     ensure_framework_loaded();
+    // SAFETY: Sending maximumAllowedCPUCount to a valid VZVirtualMachineConfiguration class pointer.
     unsafe {
         let cls = get_class("VZVirtualMachineConfiguration").unwrap();
         msg_send_u64!(cls, maximumAllowedCPUCount)
@@ -75,6 +78,7 @@ pub fn max_cpu_count() -> u64 {
 /// Gets the minimum supported CPU count.
 pub fn min_cpu_count() -> u64 {
     ensure_framework_loaded();
+    // SAFETY: Sending minimumAllowedCPUCount to a valid VZVirtualMachineConfiguration class pointer.
     unsafe {
         let cls = get_class("VZVirtualMachineConfiguration").unwrap();
         msg_send_u64!(cls, minimumAllowedCPUCount)
@@ -84,6 +88,7 @@ pub fn min_cpu_count() -> u64 {
 /// Gets the maximum supported memory size.
 pub fn max_memory_size() -> u64 {
     ensure_framework_loaded();
+    // SAFETY: Sending maximumAllowedMemorySize to a valid VZVirtualMachineConfiguration class pointer.
     unsafe {
         let cls = get_class("VZVirtualMachineConfiguration").unwrap();
         msg_send_u64!(cls, maximumAllowedMemorySize)
@@ -93,6 +98,7 @@ pub fn max_memory_size() -> u64 {
 /// Gets the minimum supported memory size.
 pub fn min_memory_size() -> u64 {
     ensure_framework_loaded();
+    // SAFETY: Sending minimumAllowedMemorySize to a valid VZVirtualMachineConfiguration class pointer.
     unsafe {
         let cls = get_class("VZVirtualMachineConfiguration").unwrap();
         msg_send_u64!(cls, minimumAllowedMemorySize)
@@ -111,6 +117,7 @@ pub fn extract_nserror(error: *mut AnyObject) -> VZError {
             message: "Unknown error".to_string(),
         };
     }
+    // SAFETY: error is checked non-null above. Sending localizedDescription and code to a valid NSError object.
     unsafe {
         let desc = msg_send!(error, localizedDescription);
         let code: i64 = msg_send_i64!(error, code);
