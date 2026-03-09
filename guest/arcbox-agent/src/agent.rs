@@ -759,10 +759,16 @@ mod linux {
             MessageType::SandboxStopRequest => {
                 use arcbox_protocol::sandbox_v1::StopSandboxRequest;
                 use prost::Message as _;
-                let sandbox_id = StopSandboxRequest::decode(payload)
-                    .map(|r| r.id)
-                    .unwrap_or_default();
-                match svc.stop(payload).await {
+                let req = match StopSandboxRequest::decode(payload) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        send_sandbox_error(stream, trace_id, 400, &format!("decode error: {e}"))
+                            .await?;
+                        return Ok(());
+                    }
+                };
+                let sandbox_id = req.id.clone();
+                match svc.stop(req).await {
                     Ok(()) => {
                         port_forward_manager()
                             .lock()
@@ -779,10 +785,16 @@ mod linux {
             MessageType::SandboxRemoveRequest => {
                 use arcbox_protocol::sandbox_v1::RemoveSandboxRequest;
                 use prost::Message as _;
-                let sandbox_id = RemoveSandboxRequest::decode(payload)
-                    .map(|r| r.id)
-                    .unwrap_or_default();
-                match svc.remove(payload).await {
+                let req = match RemoveSandboxRequest::decode(payload) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        send_sandbox_error(stream, trace_id, 400, &format!("decode error: {e}"))
+                            .await?;
+                        return Ok(());
+                    }
+                };
+                let sandbox_id = req.id.clone();
+                match svc.remove(req).await {
                     Ok(()) => {
                         port_forward_manager()
                             .lock()
