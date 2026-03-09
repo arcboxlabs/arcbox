@@ -58,9 +58,7 @@ impl SandboxService {
     }
 
     /// Stop a sandbox.
-    pub async fn stop(&self, payload: &[u8]) -> Result<(), String> {
-        let req = sandbox_v1::StopSandboxRequest::decode(payload)
-            .map_err(|e| format!("decode error: {e}"))?;
+    pub async fn stop(&self, req: sandbox_v1::StopSandboxRequest) -> Result<(), String> {
         self.manager
             .stop_sandbox(&req.id, req.timeout_seconds)
             .await
@@ -68,9 +66,7 @@ impl SandboxService {
     }
 
     /// Remove a sandbox.
-    pub async fn remove(&self, payload: &[u8]) -> Result<(), String> {
-        let req = sandbox_v1::RemoveSandboxRequest::decode(payload)
-            .map_err(|e| format!("decode error: {e}"))?;
+    pub async fn remove(&self, req: sandbox_v1::RemoveSandboxRequest) -> Result<(), String> {
         self.manager
             .remove_sandbox(&req.id, req.force)
             .await
