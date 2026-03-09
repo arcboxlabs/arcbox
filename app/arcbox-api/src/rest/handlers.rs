@@ -9,7 +9,7 @@ use crate::sandbox::{
     AppState, CreateSandboxParams, RunSandboxParams, SandboxInfoResult, SandboxSummaryResult,
 };
 use axum::extract::{Path, Query, State};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -155,6 +155,10 @@ async fn create_machine(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateMachineRequest>,
 ) -> Result<Json<CreateMachineResponse>, ApiError> {
+    if req.name.is_empty() {
+        return Err(ApiError::bad_request("machine name must not be empty"));
+    }
+
     let config = arcbox_core::machine::MachineConfig {
         name: req.name.clone(),
         cpus: req.cpus,
@@ -172,7 +176,7 @@ async fn create_machine(
         .machine_manager()
         .create(config)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(ApiError::from)?;
 
     Ok(Json(CreateMachineResponse { id: req.name }))
 }
@@ -207,7 +211,7 @@ async fn start_machine(
         .machine_manager()
         .start(&id)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(ApiError::from)?;
     Ok(Json(serde_json::json!({"status": "started"})))
 }
 
@@ -219,7 +223,7 @@ async fn stop_machine(
         .runtime
         .machine_manager()
         .stop(&id)
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(ApiError::from)?;
     Ok(Json(serde_json::json!({"status": "stopped"})))
 }
 
@@ -231,7 +235,7 @@ async fn remove_machine(
         .runtime
         .machine_manager()
         .remove(&id, false)
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+        .map_err(ApiError::from)?;
     Ok(Json(serde_json::json!({"status": "removed"})))
 }
 
@@ -342,26 +346,48 @@ async fn inspect_sandbox(
     Ok(Json(info))
 }
 
+/// Optional body for stop requests.
+#[derive(Default, Deserialize)]
+struct StopSandboxRequest {
+    #[serde(default = "default_stop_timeout")]
+    timeout_seconds: u32,
+}
+
+fn default_stop_timeout() -> u32 {
+    30
+}
+
 async fn stop_sandbox(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(query): Query<MachineQuery>,
+    body: Option<Json<StopSandboxRequest>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let timeout = body.map_or(30, |Json(b)| b.timeout_seconds);
     state
         .dispatcher
-        .stop(&id, 30, query.machine.as_deref())
+        .stop(&id, timeout, query.machine.as_deref())
         .await?;
     Ok(Json(serde_json::json!({"status": "stopped"})))
+}
+
+/// Query parameters for sandbox removal.
+#[derive(Deserialize)]
+struct RemoveSandboxQuery {
+    #[serde(default)]
+    machine: Option<String>,
+    #[serde(default)]
+    force: bool,
 }
 
 async fn remove_sandbox(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Query(query): Query<MachineQuery>,
+    Query(query): Query<RemoveSandboxQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     state
         .dispatcher
-        .remove(&id, true, query.machine.as_deref())
+        .remove(&id, query.force, query.machine.as_deref())
         .await?;
     Ok(Json(serde_json::json!({"status": "removed"})))
 }
@@ -425,18 +451,9 @@ async fn run_sandbox(
 // Containers (proxy to guest docker)
 // =============================================================================
 
-#[derive(Serialize)]
-struct ListContainersResponse {
-    containers: Vec<serde_json::Value>,
-}
-
-async fn list_containers(
-    State(_state): State<Arc<AppState>>,
-) -> ApiResult<ListContainersResponse> {
-    // Container listing is handled by the Docker-compatible API.
-    // This endpoint returns an empty list as a placeholder; clients
-    // should use the Docker socket for full container management.
-    Ok(Json(ListContainersResponse {
-        containers: Vec::new(),
-    }))
+async fn list_containers() -> Response {
+    // Container management is handled by the Docker-compatible API socket.
+    // Clients should use the Docker socket for full container operations.
+    ApiError::not_implemented("use the Docker-compatible API socket for container management")
+        .into_response()
 }

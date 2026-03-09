@@ -62,9 +62,43 @@ impl IntoResponse for ApiError {
     }
 }
 
+impl ApiError {
+    pub fn not_implemented(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_IMPLEMENTED,
+            message: msg.into(),
+        }
+    }
+
+    pub fn conflict(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: msg.into(),
+        }
+    }
+}
+
 impl From<arcbox_core::CoreError> for ApiError {
     fn from(err: arcbox_core::CoreError) -> Self {
-        Self::internal(err.to_string())
+        use arcbox_error::CommonError;
+        match err {
+            arcbox_core::CoreError::Common(ref common) => match common {
+                CommonError::NotFound(_) => Self::not_found(err.to_string()),
+                CommonError::AlreadyExists(_) => Self::conflict(err.to_string()),
+                CommonError::InvalidState(_) => Self::conflict(err.to_string()),
+                CommonError::Config(_) => Self::bad_request(err.to_string()),
+                CommonError::PermissionDenied(_) => Self {
+                    status: StatusCode::FORBIDDEN,
+                    message: err.to_string(),
+                },
+                CommonError::Timeout(_) => Self {
+                    status: StatusCode::GATEWAY_TIMEOUT,
+                    message: err.to_string(),
+                },
+                _ => Self::internal(err.to_string()),
+            },
+            _ => Self::internal(err.to_string()),
+        }
     }
 }
 
