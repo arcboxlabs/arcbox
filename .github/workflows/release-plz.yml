@@ -1,0 +1,77 @@
+name: Release-plz
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  # Publish unpublished packages to crates.io and create GitHub release.
+  # Uses GitHub App token so that the created tag triggers release.yml.
+  release-plz-release:
+    name: Release
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == 'arcboxlabs' }}
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Generate GitHub App token
+        uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz release
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Create/update a release PR with version bumps and changelog.
+  # Skipped when the push is a release commit (merged release PR).
+  release-plz-pr:
+    name: Release PR
+    runs-on: ubuntu-latest
+    if: |-
+      ${{
+        github.repository_owner == 'arcboxlabs'
+        && !startsWith(github.event.head_commit.message, 'chore: release')
+        && !contains(github.event.head_commit.message, 'release-plz/')
+      }}
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Generate GitHub App token
+        uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz release-pr
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

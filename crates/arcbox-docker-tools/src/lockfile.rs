@@ -1,5 +1,7 @@
 //! Parser for the `[[tools]]` section of `assets.lock`.
 
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
 /// Top-level lockfile structure (only the parts we care about).
@@ -17,6 +19,12 @@ pub enum ToolGroup {
     Kubernetes,
 }
 
+/// Per-architecture metadata for a tool.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ArchEntry {
+    pub sha256: String,
+}
+
 /// A single `[[tools]]` entry.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ToolEntry {
@@ -24,20 +32,20 @@ pub struct ToolEntry {
     pub group: ToolGroup,
     pub version: String,
     #[serde(default)]
-    pub sha256_arm64: Option<String>,
-    #[serde(default)]
-    pub sha256_x86_64: Option<String>,
+    pub arch: HashMap<String, ArchEntry>,
 }
 
 impl ToolEntry {
     /// Returns the SHA-256 checksum for the given architecture, if present.
     #[must_use]
     pub fn sha256_for_arch(&self, arch: &str) -> Option<&str> {
-        match arch {
-            "arm64" | "aarch64" => self.sha256_arm64.as_deref(),
-            "x86_64" | "amd64" => self.sha256_x86_64.as_deref(),
-            _ => None,
-        }
+        // Accept common aliases.
+        let key = match arch {
+            "aarch64" => "arm64",
+            "amd64" => "x86_64",
+            _ => arch,
+        };
+        self.arch.get(key).map(|e| e.sha256.as_str())
     }
 }
 
@@ -71,20 +79,20 @@ cdn = "https://boot.arcboxcdn.com"
 name = "docker"
 group = "docker"
 version = "27.5.1"
-sha256_arm64 = "aaa"
-sha256_x86_64 = "bbb"
+arch.arm64.sha256 = "aaa"
+arch.x86_64.sha256 = "bbb"
 
 [[tools]]
 name = "docker-buildx"
 group = "docker"
 version = "0.21.1"
-sha256_arm64 = "ccc"
+arch.arm64.sha256 = "ccc"
 
 [[tools]]
 name = "kubectl"
 group = "kubernetes"
 version = "1.34.3"
-sha256_arm64 = "ddd"
+arch.arm64.sha256 = "ddd"
 "#;
 
     #[test]
@@ -112,5 +120,14 @@ sha256_arm64 = "ddd"
         let kubernetes_tools = parse_tools_for_group(SAMPLE, ToolGroup::Kubernetes).unwrap();
         assert_eq!(kubernetes_tools.len(), 1);
         assert_eq!(kubernetes_tools[0].name, "kubectl");
+    }
+
+    #[test]
+    fn arch_aliases() {
+        let tools = parse_tools(SAMPLE).unwrap();
+        // "aarch64" should resolve to "arm64"
+        assert_eq!(tools[0].sha256_for_arch("aarch64"), Some("aaa"));
+        // "amd64" should resolve to "x86_64"
+        assert_eq!(tools[0].sha256_for_arch("amd64"), Some("bbb"));
     }
 }

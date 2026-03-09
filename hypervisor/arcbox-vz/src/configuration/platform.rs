@@ -26,11 +26,13 @@ pub struct GenericPlatform {
     inner: *mut AnyObject,
 }
 
+// SAFETY: Inner ObjC pointer is only used via msg_send! which dispatches to the ObjC runtime.
 unsafe impl Send for GenericPlatform {}
 
 impl GenericPlatform {
     /// Creates a new generic platform configuration.
     pub fn new() -> VZResult<Self> {
+        // SAFETY: ObjC alloc/init pattern on valid VZGenericPlatformConfiguration class. Result is checked non-null. retain prevents autorelease.
         unsafe {
             let cls =
                 get_class("VZGenericPlatformConfiguration").ok_or_else(|| VZError::Internal {
@@ -68,6 +70,7 @@ impl GenericPlatform {
         if cls.class_method(sel).is_none() {
             return false;
         }
+        // SAFETY: Selector existence is checked above via class_method. Sending to a valid class pointer.
         unsafe { msg_send_bool!(cls, isNestedVirtualizationSupported).as_bool() }
     }
 
@@ -77,12 +80,14 @@ impl GenericPlatform {
     pub fn set_nested_virt_enabled(&self, enabled: bool) {
         // Guard: the setter selector only exists on macOS 15+.
         let sel = objc2::sel!(setNestedVirtualizationEnabled:);
+        // SAFETY: self.inner is a valid ObjC object pointer; casting to &AnyObject to query its class.
         if !unsafe { &*(self.inner as *const AnyObject) }
             .class()
             .responds_to(sel)
         {
             return;
         }
+        // SAFETY: Selector existence is checked above via responds_to. self.inner is a valid VZGenericPlatformConfiguration.
         unsafe {
             msg_send_void_bool!(self.inner, setNestedVirtualizationEnabled: Bool::new(enabled));
         }

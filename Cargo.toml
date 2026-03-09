@@ -59,7 +59,7 @@ members = [
 #   - arcboxd/arcbox-k8s       (Kubernetes integration)
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -162,8 +162,8 @@ nix = { version = "0.29", features = [
 # libc
 libc = "0.2"
 
-arcbox-asset = { version = "0.1.2", path = "crates/arcbox-asset", features = ["download"] }
-arcbox-docker-tools = { version = "0.1.2", path = "crates/arcbox-docker-tools" }
+arcbox-asset = { version = "0.1.4", path = "crates/arcbox-asset", features = ["download"] }
+arcbox-docker-tools = { version = "0.1.4", path = "crates/arcbox-docker-tools" }
 
 # External crates
 arcbox-boot = { version = "0.3", features = ["download"] }
@@ -172,26 +172,26 @@ macos-resolver = "0.2.0"
 fc-sdk = "0.2.3"
 
 # Internal crates (Core layer)
-arcbox-constants = { version = "0.1.2", path = "common/arcbox-constants" }
-arcbox-error = { version = "0.1.2", path = "common/arcbox-error" }
-arcbox-vz = { version = "0.1.2", path = "hypervisor/arcbox-vz" }
-arcbox-hypervisor = { version = "0.1.2", path = "hypervisor/arcbox-hypervisor" }
-arcbox-vmm = { version = "0.1.2", path = "hypervisor/arcbox-vmm" }
-arcbox-virtio = { version = "0.1.2", path = "hypervisor/arcbox-virtio" }
-arcbox-vm = { version = "0.1.2", path = "hypervisor/arcbox-vm" }
-arcbox-fs = { version = "0.1.2", path = "services/arcbox-fs" }
-arcbox-net = { version = "0.1.2", path = "services/arcbox-net" }
-arcbox-container = { version = "0.1.2", path = "services/arcbox-container" }
-arcbox-oci = { version = "0.1.2", path = "services/arcbox-oci" }
-arcbox-protocol = { version = "0.1.2", path = "comm/arcbox-protocol" }
-arcbox-grpc = { version = "0.1.2", path = "comm/arcbox-grpc" }
-arcbox-transport = { version = "0.1.2", path = "comm/arcbox-transport" }
-arcbox-docker = { version = "0.1.2", path = "app/arcbox-docker" }
-arcbox-core = { version = "0.1.2", path = "app/arcbox-core" }
-arcbox-api = { version = "0.1.2", path = "app/arcbox-api" }
-arcbox-cli = { version = "0.1.2", path = "app/arcbox-cli" }
-arcbox-agent = { version = "0.1.2", path = "guest/arcbox-agent" }
-arcbox = { version = "0.1.2", path = "app/arcbox" }
+arcbox-constants = { version = "0.1.4", path = "common/arcbox-constants" }
+arcbox-error = { version = "0.1.4", path = "common/arcbox-error" }
+arcbox-vz = { version = "0.1.4", path = "hypervisor/arcbox-vz" }
+arcbox-hypervisor = { version = "0.1.4", path = "hypervisor/arcbox-hypervisor" }
+arcbox-vmm = { version = "0.1.4", path = "hypervisor/arcbox-vmm" }
+arcbox-virtio = { version = "0.1.4", path = "hypervisor/arcbox-virtio" }
+arcbox-vm = { version = "0.1.4", path = "hypervisor/arcbox-vm" }
+arcbox-fs = { version = "0.1.4", path = "services/arcbox-fs" }
+arcbox-net = { version = "0.1.4", path = "services/arcbox-net" }
+arcbox-container = { version = "0.1.4", path = "services/arcbox-container" }
+arcbox-oci = { version = "0.1.4", path = "services/arcbox-oci" }
+arcbox-protocol = { version = "0.1.4", path = "comm/arcbox-protocol" }
+arcbox-grpc = { version = "0.1.4", path = "comm/arcbox-grpc" }
+arcbox-transport = { version = "0.1.4", path = "comm/arcbox-transport" }
+arcbox-docker = { version = "0.1.4", path = "app/arcbox-docker" }
+arcbox-core = { version = "0.1.4", path = "app/arcbox-core" }
+arcbox-api = { version = "0.1.4", path = "app/arcbox-api" }
+arcbox-cli = { version = "0.1.4", path = "app/arcbox-cli" }
+arcbox-agent = { version = "0.1.4", path = "guest/arcbox-agent" }
+arcbox = { version = "0.1.4", path = "app/arcbox" }
 
 # Test infrastructure
 tempfile = "3"
