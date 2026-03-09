@@ -18,6 +18,7 @@ pub mod daemon;
 #[cfg(target_os = "macos")]
 pub mod dns;
 pub mod docker;
+pub mod kubernetes;
 pub mod machine;
 pub mod sandbox;
 pub mod setup;
@@ -74,6 +75,10 @@ pub enum Commands {
     /// Manage Docker CLI integration
     #[command(subcommand)]
     Docker(docker::DockerCommands),
+
+    /// Manage native Kubernetes integration
+    #[command(subcommand, alias = "k8s")]
+    Kubernetes(kubernetes::KubernetesCommands),
 
     /// Manage boot assets (kernel/rootfs)
     #[command(subcommand)]

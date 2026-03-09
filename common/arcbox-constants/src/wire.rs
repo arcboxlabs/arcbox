@@ -19,6 +19,11 @@ pub enum MessageType {
     GetSystemInfoRequest = 0x0002,
     EnsureRuntimeRequest = 0x0003,
     RuntimeStatusRequest = 0x0004,
+    KubernetesStartRequest = 0x0005,
+    KubernetesStopRequest = 0x0006,
+    KubernetesDeleteRequest = 0x0007,
+    KubernetesStatusRequest = 0x0008,
+    KubernetesKubeconfigRequest = 0x0009,
 
     // Sandbox CRUD request types (0x0020 - 0x0024).
     SandboxCreateRequest = 0x0020,
@@ -43,6 +48,11 @@ pub enum MessageType {
     GetSystemInfoResponse = 0x1002,
     EnsureRuntimeResponse = 0x1003,
     RuntimeStatusResponse = 0x1004,
+    KubernetesStartResponse = 0x1005,
+    KubernetesStopResponse = 0x1006,
+    KubernetesDeleteResponse = 0x1007,
+    KubernetesStatusResponse = 0x1008,
+    KubernetesKubeconfigResponse = 0x1009,
     PortBindingsChanged = 0x1030,
     PortBindingsRemoved = 0x1031,
 
@@ -78,6 +88,11 @@ impl MessageType {
             0x0002 => Some(Self::GetSystemInfoRequest),
             0x0003 => Some(Self::EnsureRuntimeRequest),
             0x0004 => Some(Self::RuntimeStatusRequest),
+            0x0005 => Some(Self::KubernetesStartRequest),
+            0x0006 => Some(Self::KubernetesStopRequest),
+            0x0007 => Some(Self::KubernetesDeleteRequest),
+            0x0008 => Some(Self::KubernetesStatusRequest),
+            0x0009 => Some(Self::KubernetesKubeconfigRequest),
             // Sandbox CRUD requests.
             0x0020 => Some(Self::SandboxCreateRequest),
             0x0021 => Some(Self::SandboxStopRequest),
@@ -98,6 +113,11 @@ impl MessageType {
             0x1002 => Some(Self::GetSystemInfoResponse),
             0x1003 => Some(Self::EnsureRuntimeResponse),
             0x1004 => Some(Self::RuntimeStatusResponse),
+            0x1005 => Some(Self::KubernetesStartResponse),
+            0x1006 => Some(Self::KubernetesStopResponse),
+            0x1007 => Some(Self::KubernetesDeleteResponse),
+            0x1008 => Some(Self::KubernetesStatusResponse),
+            0x1009 => Some(Self::KubernetesKubeconfigResponse),
             0x1030 => Some(Self::PortBindingsChanged),
             0x1031 => Some(Self::PortBindingsRemoved),
             // Sandbox CRUD responses.
@@ -141,6 +161,19 @@ impl MessageType {
                 | Self::SandboxDeleteSnapshotRequest
         )
     }
+
+    /// Returns true if this message type is a Kubernetes management request.
+    #[must_use]
+    pub const fn is_kubernetes_request(self) -> bool {
+        matches!(
+            self,
+            Self::KubernetesStartRequest
+                | Self::KubernetesStopRequest
+                | Self::KubernetesDeleteRequest
+                | Self::KubernetesStatusRequest
+                | Self::KubernetesKubeconfigRequest
+        )
+    }
 }
 
 #[cfg(test)]
@@ -154,10 +187,20 @@ mod tests {
             (0x0002, MessageType::GetSystemInfoRequest),
             (0x0003, MessageType::EnsureRuntimeRequest),
             (0x0004, MessageType::RuntimeStatusRequest),
+            (0x0005, MessageType::KubernetesStartRequest),
+            (0x0006, MessageType::KubernetesStopRequest),
+            (0x0007, MessageType::KubernetesDeleteRequest),
+            (0x0008, MessageType::KubernetesStatusRequest),
+            (0x0009, MessageType::KubernetesKubeconfigRequest),
             (0x1001, MessageType::PingResponse),
             (0x1002, MessageType::GetSystemInfoResponse),
             (0x1003, MessageType::EnsureRuntimeResponse),
             (0x1004, MessageType::RuntimeStatusResponse),
+            (0x1005, MessageType::KubernetesStartResponse),
+            (0x1006, MessageType::KubernetesStopResponse),
+            (0x1007, MessageType::KubernetesDeleteResponse),
+            (0x1008, MessageType::KubernetesStatusResponse),
+            (0x1009, MessageType::KubernetesKubeconfigResponse),
             (0x1030, MessageType::PortBindingsChanged),
             (0x1031, MessageType::PortBindingsRemoved),
             (0x0000, MessageType::Empty),
@@ -209,5 +252,13 @@ mod tests {
         assert!(MessageType::SandboxCheckpointRequest.is_sandbox_request());
         assert!(!MessageType::PingRequest.is_sandbox_request());
         assert!(!MessageType::SandboxCreateResponse.is_sandbox_request());
+    }
+
+    #[test]
+    fn is_kubernetes_request_classifies_correctly() {
+        assert!(MessageType::KubernetesStartRequest.is_kubernetes_request());
+        assert!(MessageType::KubernetesKubeconfigRequest.is_kubernetes_request());
+        assert!(!MessageType::PingRequest.is_kubernetes_request());
+        assert!(!MessageType::KubernetesStatusResponse.is_kubernetes_request());
     }
 }

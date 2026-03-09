@@ -16,6 +16,7 @@ fn main() {
         "../arcbox-protocol/proto/image.proto",
         "../arcbox-protocol/proto/agent.proto",
         "../arcbox-protocol/proto/api.proto",
+        "../arcbox-protocol/proto/kubernetes.proto",
         "../arcbox-protocol/proto/sandbox.proto",
     ];
 

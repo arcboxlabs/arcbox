@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use arcbox_docker::DockerContextManager;
-use arcbox_docker_tools::{DockerToolManager, parse_tools};
+use arcbox_docker_tools::{HostToolManager, ToolGroup, parse_tools_for_group};
 use clap::Subcommand;
 use serde::Serialize;
 
@@ -109,7 +109,9 @@ async fn execute_setup(format: OutputFormat) -> Result<()> {
     let runtime_bin = home.join(".arcbox/runtime/bin");
     let user_bin = home.join(".arcbox/bin");
 
-    let tools = parse_tools(LOCK_TOML).context("failed to parse assets.lock")?;
+    // Parse tool entries from lockfile.
+    let tools = parse_tools_for_group(LOCK_TOML, ToolGroup::Docker)
+        .context("failed to parse assets.lock")?;
     if tools.is_empty() {
         if matches!(format, OutputFormat::Table | OutputFormat::Quiet) {
             println!("No Docker tools configured in assets.lock.");
@@ -118,7 +120,7 @@ async fn execute_setup(format: OutputFormat) -> Result<()> {
     }
 
     let arch = arcbox_asset::current_arch().to_string();
-    let mut manager = DockerToolManager::new(tools, &arch, runtime_bin.clone());
+    let mut manager = HostToolManager::new(tools, &arch, runtime_bin.clone());
 
     if let Some(xbin) = detect_bundle_xbin() {
         if matches!(format, OutputFormat::Table | OutputFormat::Quiet) {
@@ -137,7 +139,7 @@ async fn execute_setup(format: OutputFormat) -> Result<()> {
 
 /// Install Docker tools with NDJSON progress output.
 async fn execute_setup_json(
-    manager: &DockerToolManager,
+    manager: &HostToolManager,
     runtime_bin: &Path,
     user_bin: &Path,
 ) -> Result<()> {
@@ -194,7 +196,7 @@ async fn execute_setup_json(
 
 /// Install Docker tools with human-readable table output.
 async fn execute_setup_table(
-    manager: &DockerToolManager,
+    manager: &HostToolManager,
     home: &Path,
     runtime_bin: &Path,
     user_bin: &Path,

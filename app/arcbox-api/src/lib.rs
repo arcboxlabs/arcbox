@@ -9,10 +9,15 @@ pub mod error;
 pub mod grpc;
 
 // Re-export gRPC service types from arcbox-grpc for convenience.
-pub use arcbox_grpc::v1::{machine_service_client, machine_service_server};
+pub use arcbox_grpc::v1::{
+    kubernetes_service_client, kubernetes_service_server, machine_service_client,
+    machine_service_server,
+};
 pub use arcbox_grpc::{
     SandboxService, SandboxServiceServer, SandboxSnapshotService, SandboxSnapshotServiceServer,
 };
 
 pub use error::{ApiError, Result};
-pub use grpc::{MachineServiceImpl, SandboxServiceImpl, SandboxSnapshotServiceImpl};
+pub use grpc::{
+    KubernetesServiceImpl, MachineServiceImpl, SandboxServiceImpl, SandboxSnapshotServiceImpl,
+};

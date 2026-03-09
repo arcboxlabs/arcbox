@@ -287,6 +287,7 @@ version = "0.1.4"
 dependencies = [
  "anyhow",
  "arcbox-api",
+ "arcbox-constants",
  "arcbox-core",
  "arcbox-docker",
  "arcbox-net",
@@ -354,7 +355,9 @@ dependencies = [
  "arcbox-asset",
  "flate2",
  "serde",
+ "sha2",
  "tar",
+ "tempfile",
  "thiserror",
  "tokio",
  "toml 0.8.23",

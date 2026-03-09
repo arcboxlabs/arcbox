@@ -1568,6 +1568,106 @@ pub struct ServiceStatus {
     #[prost(string, tag = "3")]
     pub detail: ::prost::alloc::string::String,
 }
+/// Request to start the native Kubernetes cluster.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct KubernetesStartRequest {}
+/// Response from starting the native Kubernetes cluster.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KubernetesStartResponse {
+    /// Whether the cluster process is running.
+    #[prost(bool, tag = "1")]
+    pub running: bool,
+    /// Whether the Kubernetes API endpoint is reachable.
+    #[prost(bool, tag = "2")]
+    pub api_ready: bool,
+    /// API endpoint exposed to the host.
+    #[prost(string, tag = "3")]
+    pub endpoint: ::prost::alloc::string::String,
+    /// Human-readable detail for diagnostics.
+    #[prost(string, tag = "4")]
+    pub detail: ::prost::alloc::string::String,
+}
+/// Request to stop the native Kubernetes cluster.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct KubernetesStopRequest {}
+/// Response from stopping the native Kubernetes cluster.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KubernetesStopResponse {
+    /// Whether the cluster is fully stopped.
+    #[prost(bool, tag = "1")]
+    pub stopped: bool,
+    /// Human-readable detail for diagnostics.
+    #[prost(string, tag = "2")]
+    pub detail: ::prost::alloc::string::String,
+}
+/// Request to delete the native Kubernetes cluster state.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct KubernetesDeleteRequest {}
+/// Response from deleting the native Kubernetes cluster state.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KubernetesDeleteResponse {
+    /// Human-readable detail for diagnostics.
+    #[prost(string, tag = "1")]
+    pub detail: ::prost::alloc::string::String,
+}
+/// Request for Kubernetes cluster status.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct KubernetesStatusRequest {}
+/// Runtime status report for the native Kubernetes cluster.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KubernetesStatusResponse {
+    /// Whether the cluster process is running.
+    #[prost(bool, tag = "1")]
+    pub running: bool,
+    /// Whether the Kubernetes API endpoint is reachable.
+    #[prost(bool, tag = "2")]
+    pub api_ready: bool,
+    /// API endpoint exposed to the host.
+    #[prost(string, tag = "3")]
+    pub endpoint: ::prost::alloc::string::String,
+    /// Human-readable detail for diagnostics.
+    #[prost(string, tag = "4")]
+    pub detail: ::prost::alloc::string::String,
+    /// Per-service status entries for fine-grained observability.
+    #[prost(message, repeated, tag = "5")]
+    pub services: ::prost::alloc::vec::Vec<ServiceStatus>,
+}
+/// Request for managed kubeconfig content.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct KubernetesKubeconfigRequest {}
+/// Managed kubeconfig payload exported from the guest cluster.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KubernetesKubeconfigResponse {
+    /// Raw kubeconfig YAML.
+    #[prost(string, tag = "1")]
+    pub kubeconfig: ::prost::alloc::string::String,
+    /// ArcBox-managed context name.
+    #[prost(string, tag = "2")]
+    pub context_name: ::prost::alloc::string::String,
+    /// API endpoint embedded in the exported kubeconfig.
+    #[prost(string, tag = "3")]
+    pub endpoint: ::prost::alloc::string::String,
+}
 /// Request to create a network.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
