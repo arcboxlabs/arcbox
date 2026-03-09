@@ -206,13 +206,11 @@ pub async fn proxy_to_guest(
 ) -> Result<Response<Body>> {
     let io = connect_guest(runtime).await?;
 
-    let (mut sender, conn) = tokio::time::timeout(
-        HANDSHAKE_TIMEOUT,
-        http1::Builder::new().handshake(io),
-    )
-    .await
-    .map_err(|_| DockerError::Server("guest docker handshake timed out".into()))?
-    .map_err(|e| DockerError::Server(format!("guest docker handshake failed: {e}")))?;
+    let (mut sender, conn) =
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, http1::Builder::new().handshake(io))
+            .await
+            .map_err(|_| DockerError::Server("guest docker handshake timed out".into()))?
+            .map_err(|e| DockerError::Server(format!("guest docker handshake failed: {e}")))?;
 
     tokio::spawn(async move {
         if let Err(e) = conn.await {
@@ -263,13 +261,11 @@ pub async fn proxy_to_guest_stream(
 ) -> Result<Response<Body>> {
     let io = connect_guest(runtime).await?;
 
-    let (mut sender, conn) = tokio::time::timeout(
-        HANDSHAKE_TIMEOUT,
-        http1::Builder::new().handshake(io),
-    )
-    .await
-    .map_err(|_| DockerError::Server("guest docker handshake timed out".into()))?
-    .map_err(|e| DockerError::Server(format!("guest docker handshake failed: {e}")))?;
+    let (mut sender, conn) =
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, http1::Builder::new().handshake(io))
+            .await
+            .map_err(|_| DockerError::Server("guest docker handshake timed out".into()))?
+            .map_err(|e| DockerError::Server(format!("guest docker handshake failed: {e}")))?;
 
     tokio::spawn(async move {
         if let Err(e) = conn.await {
@@ -329,13 +325,11 @@ pub async fn proxy_with_upgrade(
 ) -> Result<Response<Body>> {
     let io = connect_guest(runtime).await?;
 
-    let (mut sender, conn) = tokio::time::timeout(
-        HANDSHAKE_TIMEOUT,
-        http1::Builder::new().handshake(io),
-    )
-    .await
-    .map_err(|_| DockerError::Server("guest docker handshake timed out".into()))?
-    .map_err(|e| DockerError::Server(format!("guest docker handshake failed: {e}")))?;
+    let (mut sender, conn) =
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, http1::Builder::new().handshake(io))
+            .await
+            .map_err(|_| DockerError::Server("guest docker handshake timed out".into()))?
+            .map_err(|e| DockerError::Server(format!("guest docker handshake failed: {e}")))?;
 
     // The connection task must keep running for the upgrade to work.
     // `.with_upgrades()` is required so hyper::upgrade::on(response) works.
