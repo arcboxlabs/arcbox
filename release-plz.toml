@@ -9,7 +9,9 @@ semver_check = false
 # Only the facade crate (arcbox) creates a tag and release.
 git_release_enable = false
 git_tag_enable = false
-changelog_update = true
+# Disable per-crate release and changelog — only the facade crate is released.
+release = false
+changelog_update = false
 pr_name = "chore: release v{{ version }}"
 release_commits = "^(feat|fix|perf|refactor|docs|chore)"
 pr_branch_prefix = "release-plz/"
@@ -38,6 +40,8 @@ commit_parsers = [
 # ── Facade crate: single tag + GitHub release ────────────────────────
 [[package]]
 name = "arcbox"
+release = true
+changelog_update = true
 git_tag_enable = true
 git_tag_name = "v{{ version }}"
 git_release_enable = true
