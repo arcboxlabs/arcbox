@@ -20,8 +20,6 @@ crate::handlers::proxy_handler!(container_stats);
 crate::handlers::proxy_handler!(container_changes);
 crate::handlers::proxy_handler!(prune_containers);
 crate::handlers::proxy_handler!(create_container);
-crate::handlers::proxy_handler!(kill_container);
-crate::handlers::proxy_handler!(restart_container);
 
 /// Extract container ID from URI path.
 ///
@@ -95,6 +93,65 @@ pub async fn stop_container(
     Ok(response)
 }
 
+/// Kill a container and tear down its port forwarding + DNS.
+///
+/// # Errors
+///
+/// Returns an error if VM readiness fails or proxying to guest dockerd fails.
+pub async fn kill_container(
+    State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
+    req: Request<Body>,
+) -> Result<Response> {
+    // Ensure VM is ready before resolving — resolve_canonical_from_uri uses
+    // proxy_to_guest directly (no ensure_vm_ready), so without this the
+    // canonical lookup could fail and silently skip networking teardown.
+    let _ = state.runtime.ensure_vm_ready().await;
+
+    // Resolve canonical ID before proxy — kill with --rm triggers auto-remove.
+    let canonical = resolve_canonical_from_uri(&state, &uri).await;
+
+    let response = proxy(&state, &uri, req).await?;
+
+    // Docker kill returns 204 on success.
+    if response.status().as_u16() == 204 {
+        if let Some(canonical) = canonical {
+            state.runtime.stop_port_forwarding_by_id(&canonical).await;
+            state.runtime.deregister_dns_by_id(&canonical).await;
+        }
+    }
+
+    Ok(response)
+}
+
+/// Restart a container, refreshing its port forwarding + DNS.
+///
+/// # Errors
+///
+/// Returns an error if VM readiness fails or proxying to guest dockerd fails.
+pub async fn restart_container(
+    State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
+    req: Request<Body>,
+) -> Result<Response> {
+    let response = proxy(&state, &uri, req).await?;
+
+    // Docker restart returns 204 on success.
+    // Resolve canonical ID after proxy — restart doesn't have --rm auto-remove,
+    // and resolving after ensures the VM is ready (proxy calls ensure_vm_ready).
+    if response.status().as_u16() == 204 {
+        if let Some(canonical) = resolve_canonical_from_uri(&state, &uri).await {
+            // Tear down stale networking.
+            state.runtime.stop_port_forwarding_by_id(&canonical).await;
+            state.runtime.deregister_dns_by_id(&canonical).await;
+            // Re-inspect for fresh IP/ports and set up new networking.
+            setup_container_networking(&state, &canonical).await;
+        }
+    }
+
+    Ok(response)
+}
+
 /// Remove a container and tear down its port forwarding + DNS.
 ///
 /// # Errors
@@ -126,6 +183,11 @@ pub async fn remove_container(
 /// Shares a single inspect call for both port forwarding and DNS setup.
 async fn setup_container_networking(state: &AppState, container_id: &str) {
     let Some(body_bytes) = inspect_container_body(state, container_id).await else {
+        tracing::warn!(
+            container_id,
+            "Failed to inspect container for networking setup; \
+             port forwarding and DNS will not be configured"
+        );
         return;
     };
 
