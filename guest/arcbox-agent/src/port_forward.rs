@@ -110,7 +110,7 @@ impl PortForwardManager {
         protocol: &str,
     ) -> Result<(), String> {
         let key = (sandbox_id.to_string(), sandbox_port, protocol.to_string());
-        let entry = match self.allocations.remove(&key) {
+        let entry = match self.allocations.get(&key) {
             Some(e) => e,
             None => return Ok(()),
         };
@@ -122,6 +122,7 @@ impl PortForwardManager {
             entry.sandbox_port,
         )?;
 
+        let entry = self.allocations.remove(&key).expect("entry was just get");
         tracing::info!(
             sandbox_id,
             sandbox_port,
@@ -145,7 +146,7 @@ impl PortForwardManager {
             .collect();
 
         for key in keys {
-            if let Some(entry) = self.allocations.remove(&key) {
+            if let Some(entry) = self.allocations.get(&key) {
                 if let Err(e) = self.remove_dnat(
                     &entry.protocol,
                     entry.host_port,
@@ -158,6 +159,8 @@ impl PortForwardManager {
                         error = %e,
                         "failed to remove port forward on sandbox cleanup"
                     );
+                } else {
+                    self.allocations.remove(&key);
                 }
             }
         }
