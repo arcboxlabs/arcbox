@@ -464,6 +464,7 @@ async fn execute_enable() -> Result<()> {
 
     let previous_context = current_context(&home).await?;
     refresh_managed_kubeconfig(&home).await?;
+    delete_context_entries(&home).await?;
     merge_managed_kubeconfig(&home).await?;
     set_current_context(&home, MANAGED_CONTEXT_NAME).await?;
 

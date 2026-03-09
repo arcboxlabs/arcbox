@@ -89,22 +89,26 @@ fn ensure_guest_binaries(data_dir: &Path) -> Result<()> {
 }
 
 fn rewrite_kubeconfig_server(kubeconfig: &str) -> String {
-    let rewritten = kubeconfig
+    kubeconfig
         .lines()
         .map(|line| {
-            if line.trim_start().starts_with("server:") {
-                let indent = line.len() - line.trim_start().len();
-                format!("{}server: {}", " ".repeat(indent), KUBERNETES_HOST_ENDPOINT)
-            } else {
-                line.to_string()
+            let trimmed = line.trim_start();
+            let indent = " ".repeat(line.len() - trimmed.len());
+
+            match trimmed {
+                _ if trimmed.starts_with("server:") => {
+                    format!("{indent}server: {KUBERNETES_HOST_ENDPOINT}")
+                }
+                "name: default" => format!("{indent}name: arcbox"),
+                "- name: default" => format!("{indent}- name: arcbox"),
+                "cluster: default" => format!("{indent}cluster: arcbox"),
+                "user: default" => format!("{indent}user: arcbox"),
+                "current-context: default" => format!("{indent}current-context: arcbox"),
+                _ => line.to_string(),
             }
         })
         .collect::<Vec<_>>()
-        .join("\n");
-
-    rewritten
-        .replace("current-context: default", "current-context: arcbox")
-        .replace("name: default", "name: arcbox")
+        .join("\n")
 }
 
 pub struct Runtime {
@@ -876,6 +880,33 @@ mod tests {
         let err = ensure_guest_binaries(data_dir).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("runtime binary"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_rewrite_kubeconfig_server_updates_arcbox_refs() {
+        let kubeconfig = r#"apiVersion: v1
+clusters:
+- cluster:
+    server: https://127.0.0.1:6443
+  name: default
+contexts:
+- context:
+    cluster: default
+    user: default
+  name: default
+current-context: default
+users:
+- name: default
+  user: {}
+"#;
+
+        let rewritten = super::rewrite_kubeconfig_server(kubeconfig);
+        assert!(rewritten.contains("server: https://127.0.0.1:16443"));
+        assert!(rewritten.contains("name: arcbox"));
+        assert!(rewritten.contains("- name: arcbox"));
+        assert!(rewritten.contains("cluster: arcbox"));
+        assert!(rewritten.contains("user: arcbox"));
+        assert!(rewritten.contains("current-context: arcbox"));
     }
 
     #[cfg(unix)]
