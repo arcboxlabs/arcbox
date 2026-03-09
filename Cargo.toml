@@ -6,6 +6,7 @@ members = [
     # ============================================
     "common/arcbox-constants",
     "common/arcbox-error",
+    "crates/arcbox-dhcp",
     "crates/arcbox-asset",
     "crates/arcbox-docker-tools",
 
@@ -172,6 +173,7 @@ macos-resolver = "0.2.0"
 fc-sdk = "0.2.3"
 
 # Internal crates (Core layer)
+arcbox-dhcp = { version = "0.1.4", path = "crates/arcbox-dhcp" }
 arcbox-constants = { version = "0.1.4", path = "common/arcbox-constants" }
 arcbox-error = { version = "0.1.4", path = "common/arcbox-error" }
 arcbox-vz = { version = "0.1.4", path = "hypervisor/arcbox-vz" }

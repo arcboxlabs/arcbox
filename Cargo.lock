@@ -308,6 +308,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "arcbox-dhcp"
+version = "0.0.1-alpha.1"
+dependencies = [
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "arcbox-docker"
 version = "0.1.4"
 dependencies = [
@@ -414,6 +422,7 @@ dependencies = [
 name = "arcbox-net"
 version = "0.1.4"
 dependencies = [
+ "arcbox-dhcp",
  "arcbox-error",
  "arcbox-virtio",
  "bytes",
