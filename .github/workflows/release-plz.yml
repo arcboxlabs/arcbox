@@ -1,4 +1,4 @@
-name: Release-plz
+name: Release Please
 
 on:
   push:
