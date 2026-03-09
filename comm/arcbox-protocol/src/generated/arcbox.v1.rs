@@ -474,6 +474,37 @@ pub struct SshInfoResponse {
     #[prost(string, tag = "5")]
     pub command: ::prost::alloc::string::String,
 }
+/// Request to subscribe to machine lifecycle events.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MachineEventsRequest {
+    /// Filter by machine ID (empty = all machines).
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
+    /// Filter by event action (empty = all actions).
+    #[prost(string, tag = "2")]
+    pub action: ::prost::alloc::string::String,
+}
+/// A machine lifecycle event.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MachineEvent {
+    /// Machine ID or name.
+    #[prost(string, tag = "1")]
+    pub machine_id: ::prost::alloc::string::String,
+    /// Action: "created" | "started" | "stopped" | "removed" | "error"
+    #[prost(string, tag = "2")]
+    pub action: ::prost::alloc::string::String,
+    /// Unix timestamp in nanoseconds.
+    #[prost(int64, tag = "3")]
+    pub timestamp: i64,
+    /// Additional context (e.g. "error" on failures).
+    #[prost(map = "string, string", tag = "4")]
+    pub attributes:
+        ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+}
 /// Request to create a container.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

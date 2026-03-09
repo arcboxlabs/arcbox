@@ -26,10 +26,14 @@ anyhow = { workspace = true }
 sentry = { workspace = true }
 dirs = { workspace = true }
 libc = { workspace = true }
+arcbox-constants = { workspace = true }
 arcbox-net = { workspace = true }
-serde_json.workspace = true
-axum.workspace = true
-bytes.workspace = true
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+tower = { workspace = true }
+serde_json = { workspace = true }
+axum = { workspace = true }
+bytes = { workspace = true }
 http-body-util = "0.1"
 tokio-util = "0.7"
 

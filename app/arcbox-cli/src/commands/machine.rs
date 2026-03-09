@@ -96,7 +96,9 @@ impl Service<Uri> for UnixConnector {
 pub async fn machine_count() -> Result<usize> {
     let mut client = machine_client().await?;
     let response = client
-        .list(tonic::Request::new(ListMachinesRequest { all: true }))
+        .list(tonic::Request::new(ListMachinesRequest {
+            all: true,
+        }))
         .await
         .context("Failed to list machines")?;
 
@@ -406,7 +408,9 @@ async fn execute_remove(args: RemoveArgs) -> Result<()> {
 async fn execute_list(args: ListArgs) -> Result<()> {
     let mut client = machine_client().await?;
     let machines = client
-        .list(tonic::Request::new(ListMachinesRequest { all: args.all }))
+        .list(tonic::Request::new(ListMachinesRequest {
+            all: args.all,
+        }))
         .await
         .context("Failed to list machines")?
         .into_inner()

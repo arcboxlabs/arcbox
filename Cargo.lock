@@ -161,13 +161,20 @@ dependencies = [
  "arcbox-error",
  "arcbox-grpc",
  "arcbox-protocol",
+ "arcbox-vm",
  "async-stream",
+ "axum 0.8.8",
+ "chrono",
+ "hyper",
  "libc",
  "prost",
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tokio-stream",
  "tonic",
+ "tower 0.5.3",
  "tracing",
  "uuid",
 ]
@@ -260,6 +267,7 @@ dependencies = [
  "arcbox-protocol",
  "arcbox-transport",
  "arcbox-virtio",
+ "arcbox-vm",
  "arcbox-vmm",
  "async-trait",
  "bytes",
@@ -287,6 +295,7 @@ version = "0.1.4"
 dependencies = [
  "anyhow",
  "arcbox-api",
+ "arcbox-constants",
  "arcbox-core",
  "arcbox-docker",
  "arcbox-net",
@@ -295,6 +304,8 @@ dependencies = [
  "clap",
  "dirs",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "libc",
  "macos-resolver",
  "sentry",
@@ -303,13 +314,14 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tonic",
+ "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
 name = "arcbox-dhcp"
-version = "0.0.1-alpha.1"
+version = "0.1.4"
 dependencies = [
  "thiserror",
  "tracing",
@@ -354,7 +366,9 @@ dependencies = [
  "arcbox-asset",
  "flate2",
  "serde",
+ "sha2",
  "tar",
+ "tempfile",
  "thiserror",
  "tokio",
  "toml 0.8.23",
