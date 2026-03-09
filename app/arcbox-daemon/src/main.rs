@@ -178,9 +178,9 @@ async fn run(args: DaemonArgs) -> Result<()> {
         }
     });
 
-    // Recover DNS entries for containers already running in the guest VM
-    // (handles daemon restart without VM restart).
-    recover_dns_entries(&runtime).await;
+    // Recover networking (DNS + port forwarding) for containers already running
+    // in the guest VM (handles daemon restart without VM restart).
+    recover_container_networking(&runtime).await;
 
     let docker_server = DockerApiServer::new(
         ServerConfig {
@@ -347,11 +347,11 @@ async fn shutdown_signal() {
     }
 }
 
-/// Re-registers DNS entries for all running containers in the guest VM.
+/// Re-registers DNS entries and port forwarding for all running containers.
 ///
 /// Called after daemon startup to handle the case where the daemon restarts
 /// but the VM (and its containers) are still running.
-async fn recover_dns_entries(runtime: &Arc<Runtime>) {
+async fn recover_container_networking(runtime: &Arc<Runtime>) {
     use axum::http::{HeaderMap, Method};
     use bytes::Bytes;
 
@@ -370,7 +370,7 @@ async fn recover_dns_entries(runtime: &Arc<Runtime>) {
             return;
         }
         Err(e) => {
-            tracing::debug!("Failed to list containers for DNS recovery: {}", e);
+            tracing::debug!("Failed to list containers for networking recovery: {}", e);
             return;
         }
     };
@@ -391,13 +391,14 @@ async fn recover_dns_entries(runtime: &Arc<Runtime>) {
         }
     };
 
-    let mut recovered = 0u32;
+    let mut recovered_dns = 0u32;
+    let mut recovered_ports = 0u32;
     for container in &containers {
         let Some(id) = container.get("Id").and_then(|v| v.as_str()) else {
             continue;
         };
 
-        // Inspect each running container to get name + IP.
+        // Inspect each running container to get name + IP + port bindings.
         let inspect_path = format!("/containers/{id}/json");
         let inspect_resp = match arcbox_docker::proxy::proxy_to_guest(
             runtime,
@@ -417,20 +418,42 @@ async fn recover_dns_entries(runtime: &Arc<Runtime>) {
             Err(_) => continue,
         };
 
-        // Reuse the same parsing logic as the container start handler.
-        let Some((name, ip)) = arcbox_docker::handlers::extract_container_dns_info(&inspect_body)
-        else {
-            continue;
-        };
+        // DNS recovery.
+        if let Some((name, ip)) = arcbox_docker::handlers::extract_container_dns_info(&inspect_body)
+        {
+            runtime.register_dns(id, &name, ip).await;
+            recovered_dns += 1;
+        }
 
-        runtime.register_dns(id, &name, ip).await;
-        recovered += 1;
+        // Port forwarding recovery.
+        let bindings = arcbox_docker::proxy::parse_port_bindings(&inspect_body);
+        if !bindings.is_empty() {
+            let rules: Vec<_> = bindings
+                .iter()
+                .map(|b| {
+                    (
+                        b.host_ip.clone(),
+                        b.host_port,
+                        b.container_port,
+                        b.protocol.clone(),
+                    )
+                })
+                .collect();
+            match runtime
+                .start_port_forwarding_for(runtime.default_machine_name(), id, &rules)
+                .await
+            {
+                Ok(()) => recovered_ports += 1,
+                Err(e) => tracing::warn!("Failed to recover port forwarding for {id}: {e}"),
+            }
+        }
     }
 
-    if recovered > 0 {
+    if recovered_dns > 0 || recovered_ports > 0 {
         info!(
-            count = recovered,
-            "Recovered DNS entries for running containers"
+            dns = recovered_dns,
+            ports = recovered_ports,
+            "Recovered networking for running containers"
         );
     }
 }
