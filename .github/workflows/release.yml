@@ -1,4 +1,4 @@
-name: Release
+name: Release Build
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to build (e.g. v0.0.1-alpha.3)'
+        description: 'Tag to build (e.g. v0.1.5)'
         required: true
         type: string
 
@@ -25,7 +25,6 @@ jobs:
     timeout-minutes: 30
     outputs:
       version: ${{ steps.version.outputs.version }}
-      prerelease: ${{ steps.version.outputs.prerelease }}
       tarball: ${{ steps.tarball.outputs.tarball }}
 
     steps:
@@ -41,14 +40,6 @@ jobs:
             VERSION="${GITHUB_REF#refs/tags/}"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-          # Detect pre-release (alpha, beta, rc)
-          if echo "$VERSION" | grep -qE '(alpha|beta|rc)'; then
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          fi
-
           echo "Building version: $VERSION"
 
       - name: Setup Rust
@@ -58,8 +49,7 @@ jobs:
 
       - name: Install Protobuf compiler
         timeout-minutes: 5
-        run: |
-          brew install protobuf
+        run: brew install protobuf
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -77,8 +67,7 @@ jobs:
 
       - name: Build arcbox binaries (release)
         timeout-minutes: 15
-        run: |
-          cargo build --release --locked -p arcbox-cli -p arcbox-daemon
+        run: cargo build --release --locked -p arcbox-cli -p arcbox-daemon
 
       - name: Codesign arcbox-daemon with virtualization entitlement
         run: |
@@ -88,9 +77,9 @@ jobs:
       - name: Verify artifacts
         run: |
           echo "=== Build artifacts ==="
-          ls -lh target/release/arcbox
+          ls -lh target/release/abctl
           ls -lh target/release/arcbox-daemon
-          file target/release/arcbox
+          file target/release/abctl
           file target/release/arcbox-daemon
 
       - name: Create tarball
@@ -101,12 +90,8 @@ jobs:
           STAGING="arcbox-darwin-arm64-${VERSION}"
 
           mkdir -p "$STAGING"
-
-          # CLI + daemon binaries
-          cp target/release/arcbox "$STAGING/"
+          cp target/release/abctl "$STAGING/"
           cp target/release/arcbox-daemon "$STAGING/"
-
-          # Entitlements (needed for codesigning after install)
           cp tests/resources/entitlements.plist "$STAGING/"
 
           tar czf "$TARBALL_NAME" "$STAGING"
@@ -117,12 +102,10 @@ jobs:
           ls -lh "$TARBALL_NAME"
 
       - name: Generate SHA256 checksum
-        id: checksum
         run: |
           TARBALL="${{ steps.tarball.outputs.tarball }}"
           shasum -a 256 "$TARBALL" > "${TARBALL}.sha256"
           cat "${TARBALL}.sha256"
-          echo "checksum_file=${TARBALL}.sha256" >> "$GITHUB_OUTPUT"
 
       - name: Upload tarball artifact
         uses: actions/upload-artifact@v4
@@ -134,10 +117,10 @@ jobs:
           retention-days: 30
 
   # ==========================================================================
-  # Create GitHub Release
+  # Attach binaries to the existing GitHub Release (created by release-plz)
   # ==========================================================================
-  create-release:
-    name: Create Release
+  upload-release-assets:
+    name: Upload Release Assets
     needs: [build-macos-arm64]
     runs-on: ubuntu-latest
     permissions:
@@ -149,72 +132,21 @@ jobs:
         with:
           path: artifacts/
 
-      - name: List artifacts
-        run: |
-          echo "=== Downloaded artifacts ==="
-          find artifacts/ -type f -ls
-
       - name: Collect release assets
         run: |
           mkdir -p release-assets
           find artifacts/ -type f \( -name '*.tar.gz' -o -name '*.sha256' \) \
             -exec cp {} release-assets/ \;
-          echo "=== Release assets ==="
-          ls -lh release-assets/
-
-      - name: Generate combined checksums
-        run: |
           cd release-assets
           cat *.sha256 > checksums.txt
-          echo "=== checksums.txt ==="
-          cat checksums.txt
+          echo "=== Release assets ==="
+          ls -lh .
 
-      - name: Create GitHub Release
+      - name: Upload assets to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.build-macos-arm64.outputs.version }}
-          name: ArcBox ${{ needs.build-macos-arm64.outputs.version }}
-          prerelease: ${{ needs.build-macos-arm64.outputs.prerelease == 'true' }}
-          generate_release_notes: true
           files: |
             release-assets/*.tar.gz
             release-assets/*.sha256
             release-assets/checksums.txt
-          body: |
-            ## Installation
-
-            ### Recommended (install script)
-
-            ```bash
-            curl -fsSL https://get.arcbox.dev | bash
-            ```
-
-            ### Homebrew
-
-            ```bash
-            brew install --formula https://raw.githubusercontent.com/${{ github.repository }}/${{ needs.build-macos-arm64.outputs.version }}/Formula/arcbox.rb
-            ```
-
-            ### Manual tarball install (macOS Apple Silicon)
-
-            ```bash
-            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ needs.build-macos-arm64.outputs.version }}/${{ needs.build-macos-arm64.outputs.tarball }}
-            tar xzf ${{ needs.build-macos-arm64.outputs.tarball }}
-            cd arcbox-darwin-arm64-${{ needs.build-macos-arm64.outputs.version }}
-
-            # Re-sign daemon with virtualization entitlement
-            codesign --entitlements entitlements.plist --force -s - arcbox-daemon
-
-            # Install binaries
-            sudo cp arcbox /usr/local/bin/
-            sudo cp arcbox-daemon /usr/local/bin/
-
-            # Download runtime boot assets
-            arcbox boot prefetch
-            ```
-
-            ### Verify checksums
-
-            ```bash
-            shasum -a 256 -c checksums.txt
-            ```

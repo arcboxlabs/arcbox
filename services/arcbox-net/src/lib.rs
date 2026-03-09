@@ -103,6 +103,7 @@ impl Default for NetConfig {
     }
 }
 
+use std::net::IpAddr;
 use std::sync::RwLock;
 
 /// Network manager state.
@@ -131,6 +132,8 @@ pub struct NetworkManager {
     state: RwLock<NetworkState>,
     /// IP allocator for NAT.
     ip_allocator: RwLock<Option<nat::IpAllocator>>,
+    /// DNS forwarder with local hostname resolution.
+    dns_forwarder: RwLock<dns::DnsForwarder>,
 }
 
 impl NetworkManager {
@@ -141,6 +144,19 @@ impl NetworkManager {
             config,
             state: RwLock::new(NetworkState::Stopped),
             ip_allocator: RwLock::new(None),
+            dns_forwarder: RwLock::new(dns::DnsForwarder::new(dns::DnsConfig::default())),
+        }
+    }
+
+    /// Replaces the DNS forwarder's local domain.
+    ///
+    /// Call this before registering any hostnames to ensure the domain suffix
+    /// is consistent across all entries.
+    pub fn set_dns_domain(&self, domain: &str) {
+        if let Ok(mut forwarder) = self.dns_forwarder.write() {
+            let mut cfg = forwarder.config().clone();
+            cfg.local_domain = Some(domain.to_string());
+            *forwarder = dns::DnsForwarder::new(cfg);
         }
     }
 
@@ -321,6 +337,38 @@ impl NetworkManager {
             .and_then(|guard| guard.as_ref().map(nat::IpAllocator::available_count))
             .unwrap_or(0)
     }
+
+    /// Registers a local DNS hostname → IP mapping.
+    pub fn register_dns(&self, hostname: &str, ip: IpAddr) {
+        if let Ok(mut forwarder) = self.dns_forwarder.write() {
+            forwarder.add_local_host(hostname, ip);
+        }
+    }
+
+    /// Removes a local DNS hostname mapping.
+    pub fn deregister_dns(&self, hostname: &str) {
+        if let Ok(mut forwarder) = self.dns_forwarder.write() {
+            forwarder.remove_local_host(hostname);
+        }
+    }
+
+    /// Tries to resolve a DNS query locally, returning NXDOMAIN for unresolved
+    /// `*.arcbox.local` queries. Returns `None` only when the query should be
+    /// forwarded to upstream DNS.
+    pub fn try_resolve_dns_or_nxdomain(&self, query: &[u8]) -> Option<Vec<u8>> {
+        let forwarder = self.dns_forwarder.read().ok()?;
+        forwarder.try_resolve_locally_or_nxdomain(query)
+    }
+
+    /// Handles a full DNS query: local resolution first, then upstream forwarding.
+    /// This blocks on network I/O for upstream queries.
+    pub fn handle_dns_query(&self, query: &[u8]) -> Result<Vec<u8>> {
+        let mut forwarder = self
+            .dns_forwarder
+            .write()
+            .map_err(|_| NetError::config("dns forwarder lock poisoned".to_string()))?;
+        forwarder.handle_query(query)
+    }
 }
 
 #[cfg(test)]
@@ -360,6 +408,56 @@ mod tests {
         let _ip3 = manager.allocate_ip().unwrap();
         // Available count should decrease after allocation.
         assert!(manager.available_ips() < initial_available || initial_available == 253);
+    }
+
+    #[test]
+    fn test_set_dns_domain_switches_nxdomain_scope() {
+        let manager = NetworkManager::new(NetConfig::default());
+        let ip = IpAddr::V4(std::net::Ipv4Addr::new(172, 17, 0, 2));
+        manager.register_dns("web", ip);
+
+        // Helper to build a minimal A-record query.
+        let build_query = |name: &str| -> Vec<u8> {
+            let mut pkt = vec![0xAB, 0xCD, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00];
+            pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+            for label in name.split('.') {
+                pkt.push(label.len() as u8);
+                pkt.extend_from_slice(label.as_bytes());
+            }
+            pkt.push(0x00);
+            pkt.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
+            pkt
+        };
+
+        // Default domain: web.arcbox.local resolves.
+        let q = build_query("web.arcbox.local");
+        let resp = manager.try_resolve_dns_or_nxdomain(&q).unwrap();
+        assert_eq!(resp[3] & 0x0F, 0, "should resolve under default domain");
+
+        // Switch to custom domain — old registrations are gone (forwarder rebuilt).
+        manager.set_dns_domain("custom.test");
+
+        // Re-register under new domain.
+        manager.register_dns("web", ip);
+        let q = build_query("web.custom.test");
+        let resp = manager.try_resolve_dns_or_nxdomain(&q).unwrap();
+        assert_eq!(resp[3] & 0x0F, 0, "should resolve under custom domain");
+
+        // Unknown under custom domain → NXDOMAIN.
+        let q = build_query("nope.custom.test");
+        let resp = manager.try_resolve_dns_or_nxdomain(&q).unwrap();
+        assert_eq!(
+            resp[3] & 0x0F,
+            3,
+            "NXDOMAIN for unregistered custom-domain host"
+        );
+
+        // Old default domain → forwarded (None), not NXDOMAIN.
+        let q = build_query("web.arcbox.local");
+        assert!(
+            manager.try_resolve_dns_or_nxdomain(&q).is_none(),
+            "old domain queries should not match after set_dns_domain"
+        );
     }
 
     #[test]

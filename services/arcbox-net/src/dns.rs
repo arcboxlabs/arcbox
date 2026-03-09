@@ -306,14 +306,67 @@ impl DnsForwarder {
 
     /// Attempts to resolve a DNS query locally without any network I/O.
     ///
-    /// Returns `Ok(Some(response))` if the query was resolved from local host
-    /// mappings, or `Ok(None)` if upstream forwarding is needed. Unsupported
+    /// Returns `Some(response)` if the query was resolved from local host
+    /// mappings, or `None` if upstream forwarding is needed. Unsupported
     /// query types (e.g. HTTPS/SVCB) gracefully return `None` instead of
     /// failing, so the caller can forward the raw query.
     pub fn try_resolve_locally(&self, data: &[u8]) -> Option<Vec<u8>> {
         let query = DnsQuery::parse(data).ok()?;
         let ip = self.resolve_local(&query.name)?;
         self.build_local_response(&query, ip).ok()
+    }
+
+    /// Attempts local resolution, returning NXDOMAIN for unresolved local-domain queries.
+    ///
+    /// - Registered local host → `Some(A/AAAA response)`
+    /// - Unregistered `*.arcbox.local` (or `*.<local_domain>`) → `Some(NXDOMAIN)`
+    /// - Other domains → `None` (caller should forward to upstream)
+    pub fn try_resolve_locally_or_nxdomain(&self, data: &[u8]) -> Option<Vec<u8>> {
+        let query = DnsQuery::parse(data).ok()?;
+
+        // Check local hosts first.
+        if let Some(ip) = self.resolve_local(&query.name) {
+            return self.build_local_response(&query, ip).ok();
+        }
+
+        // If the query is for our local domain, return NXDOMAIN instead of
+        // forwarding to upstream (prevents leaking internal names).
+        if let Some(ref domain) = self.config.local_domain {
+            let name_lower = query.name.to_lowercase();
+            if name_lower == *domain || name_lower.ends_with(&format!(".{domain}")) {
+                return Some(Self::build_nxdomain_response(&query));
+            }
+        }
+
+        // Not a local domain — caller should forward upstream.
+        None
+    }
+
+    /// Builds an NXDOMAIN response for a query.
+    ///
+    /// Zeroes all section counts (ANCOUNT, NSCOUNT, ARCOUNT) so that EDNS(0)
+    /// queries (which set ARCOUNT=1 in the header) don't produce malformed
+    /// responses with advertised-but-missing additional records.
+    fn build_nxdomain_response(query: &DnsQuery) -> Vec<u8> {
+        let mut response = Vec::with_capacity(query.raw_header.len() + query.raw_question.len());
+        response.extend_from_slice(&query.raw_header);
+
+        // QR=1, Opcode=0, AA=1, TC=0, RD=1
+        response[2] = 0x85;
+        // RA=1, Z=0, RCODE=3 (NXDOMAIN)
+        response[3] = 0x83;
+        // ANCOUNT = 0
+        response[6] = 0x00;
+        response[7] = 0x00;
+        // NSCOUNT = 0
+        response[8] = 0x00;
+        response[9] = 0x00;
+        // ARCOUNT = 0 (clears EDNS OPT record count from query)
+        response[10] = 0x00;
+        response[11] = 0x00;
+
+        response.extend_from_slice(&query.raw_question);
+        response
     }
 
     /// Returns the upstream DNS server addresses.
@@ -690,6 +743,114 @@ mod tests {
         );
 
         assert_eq!(server.listen_addr(), Ipv4Addr::new(192, 168, 64, 1));
+    }
+
+    /// Builds a minimal DNS query packet for testing.
+    fn build_test_query(name: &str) -> Vec<u8> {
+        let mut packet = Vec::with_capacity(64);
+        // Header: ID=0xABCD, flags=0x0100 (RD=1), QDCOUNT=1
+        packet.extend_from_slice(&[0xAB, 0xCD, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00]);
+        packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        // Question section: encode name labels
+        for label in name.split('.') {
+            packet.push(label.len() as u8);
+            packet.extend_from_slice(label.as_bytes());
+        }
+        packet.push(0x00); // root label
+        packet.extend_from_slice(&[0x00, 0x01]); // QTYPE = A
+        packet.extend_from_slice(&[0x00, 0x01]); // QCLASS = IN
+        packet
+    }
+
+    #[test]
+    fn test_try_resolve_locally_or_nxdomain_returns_response_for_registered() {
+        let config = DnsConfig::default();
+        let mut forwarder = DnsForwarder::new(config);
+        let ip = IpAddr::V4(Ipv4Addr::new(172, 17, 0, 2));
+        forwarder.add_local_host("my-nginx", ip);
+
+        let query = build_test_query("my-nginx.arcbox.local");
+        let response = forwarder
+            .try_resolve_locally_or_nxdomain(&query)
+            .expect("should resolve registered host");
+
+        // Verify QR=1, RCODE=0, ANCOUNT=1.
+        assert_eq!(response[2] & 0x80, 0x80, "QR bit");
+        assert_eq!(response[3] & 0x0F, 0, "RCODE=NoError");
+        assert_eq!(response[7], 1, "ANCOUNT=1");
+    }
+
+    #[test]
+    fn test_try_resolve_locally_or_nxdomain_returns_nxdomain() {
+        let config = DnsConfig::default();
+        let forwarder = DnsForwarder::new(config);
+
+        let query = build_test_query("nonexistent.arcbox.local");
+        let response = forwarder
+            .try_resolve_locally_or_nxdomain(&query)
+            .expect("should return NXDOMAIN for unregistered local host");
+
+        // Verify QR=1, RCODE=3 (NXDOMAIN), ANCOUNT=0.
+        assert_eq!(response[2] & 0x80, 0x80, "QR bit");
+        assert_eq!(response[3] & 0x0F, 3, "RCODE=NXDOMAIN");
+        assert_eq!(response[7], 0, "ANCOUNT=0");
+    }
+
+    #[test]
+    fn test_try_resolve_locally_or_nxdomain_returns_none_for_external() {
+        let config = DnsConfig::default();
+        let forwarder = DnsForwarder::new(config);
+
+        let query = build_test_query("google.com");
+        let result = forwarder.try_resolve_locally_or_nxdomain(&query);
+
+        assert!(result.is_none(), "should return None for non-local domains");
+    }
+
+    #[test]
+    fn test_try_resolve_locally_or_nxdomain_bare_domain() {
+        // Query for "arcbox.local" itself (no subdomain) should also NXDOMAIN
+        // if not registered.
+        let config = DnsConfig::default();
+        let forwarder = DnsForwarder::new(config);
+
+        let query = build_test_query("arcbox.local");
+        let response = forwarder
+            .try_resolve_locally_or_nxdomain(&query)
+            .expect("bare domain should return NXDOMAIN");
+
+        assert_eq!(response[3] & 0x0F, 3, "RCODE=NXDOMAIN");
+    }
+
+    #[test]
+    fn test_custom_domain_nxdomain() {
+        let config = DnsConfig::default().with_local_domain("myorg.test");
+        let mut forwarder = DnsForwarder::new(config);
+
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+        forwarder.add_local_host("web", ip);
+
+        // Registered host under custom domain resolves.
+        let query = build_test_query("web.myorg.test");
+        let response = forwarder
+            .try_resolve_locally_or_nxdomain(&query)
+            .expect("should resolve registered host under custom domain");
+        assert_eq!(response[3] & 0x0F, 0, "RCODE=NoError");
+        assert_eq!(response[7], 1, "ANCOUNT=1");
+
+        // Unregistered host under custom domain → NXDOMAIN.
+        let query = build_test_query("unknown.myorg.test");
+        let response = forwarder
+            .try_resolve_locally_or_nxdomain(&query)
+            .expect("should NXDOMAIN for unregistered custom-domain host");
+        assert_eq!(response[3] & 0x0F, 3, "RCODE=NXDOMAIN");
+
+        // Query under default arcbox.local → None (forwarded), not NXDOMAIN.
+        let query = build_test_query("something.arcbox.local");
+        assert!(
+            forwarder.try_resolve_locally_or_nxdomain(&query).is_none(),
+            "old default domain should not be handled after domain change"
+        );
     }
 
     #[test]

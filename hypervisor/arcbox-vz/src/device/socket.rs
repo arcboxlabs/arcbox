@@ -12,11 +12,13 @@ pub struct SocketDeviceConfiguration {
     inner: *mut AnyObject,
 }
 
+// SAFETY: Inner ObjC pointer is only used via msg_send! which dispatches to the ObjC runtime.
 unsafe impl Send for SocketDeviceConfiguration {}
 
 impl SocketDeviceConfiguration {
     /// Creates a new socket device configuration.
     pub fn new() -> VZResult<Self> {
+        // SAFETY: ObjC new on valid VZVirtioSocketDeviceConfiguration class. Result is checked non-null.
         unsafe {
             let cls = get_class("VZVirtioSocketDeviceConfiguration").ok_or_else(|| {
                 VZError::Internal {

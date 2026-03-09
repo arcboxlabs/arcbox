@@ -131,11 +131,9 @@ impl NatNetBackend {
 
             let mut packet_data = self.rx_scratch[..n].to_vec();
 
-            // Safety: packet_data is a valid Ethernet frame received from host.
-            let result = unsafe {
-                self.nat_engine
-                    .translate(&mut packet_data, NatDirection::Inbound)
-            };
+            let result = self
+                .nat_engine
+                .translate(&mut packet_data, NatDirection::Inbound);
 
             match result {
                 Ok(NatResult::Translated | NatResult::PassThrough) => {
@@ -169,11 +167,9 @@ impl NetBackend for NatNetBackend {
         // packet.data is the Ethernet frame from the guest.
         let mut frame = packet.data.clone();
 
-        // Safety: frame is a valid Ethernet frame from the guest VM.
-        let result = unsafe {
-            self.nat_engine
-                .translate(&mut frame, NatDirection::Outbound)
-        };
+        let result = self
+            .nat_engine
+            .translate(&mut frame, NatDirection::Outbound);
 
         match result {
             Ok(NatResult::Translated | NatResult::PassThrough) => self.host_io.send_packet(&frame),

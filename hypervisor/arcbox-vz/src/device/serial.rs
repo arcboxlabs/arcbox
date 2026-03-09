@@ -13,6 +13,7 @@ pub struct SerialPortConfiguration {
     fds: Option<(RawFd, RawFd)>,
 }
 
+// SAFETY: Inner ObjC pointer is only used via msg_send! which dispatches to the ObjC runtime.
 unsafe impl Send for SerialPortConfiguration {}
 
 impl SerialPortConfiguration {
@@ -25,6 +26,7 @@ impl SerialPortConfiguration {
         let mut input_pipe: [libc::c_int; 2] = [0, 0];
         let mut output_pipe: [libc::c_int; 2] = [0, 0];
 
+        // SAFETY: libc::pipe creates valid fd pairs. File handles are created from valid fds. ObjC objects follow alloc/init pattern with null checks.
         unsafe {
             if libc::pipe(input_pipe.as_mut_ptr()) != 0 {
                 return Err(VZError::OperationFailed(
@@ -132,6 +134,7 @@ fn create_serial_port_attachment(
     read_handle: *mut AnyObject,
     write_handle: *mut AnyObject,
 ) -> VZResult<*mut AnyObject> {
+    // SAFETY: ObjC alloc/init on valid VZFileHandleSerialPortAttachment class with valid NSFileHandle objects.
     unsafe {
         let cls =
             get_class("VZFileHandleSerialPortAttachment").ok_or_else(|| VZError::Internal {

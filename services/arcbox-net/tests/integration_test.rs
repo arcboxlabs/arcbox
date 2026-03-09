@@ -240,7 +240,7 @@ mod nat_engine {
         // Outbound packet
         let mut outbound = create_tcp_packet(guest_ip, server_ip, guest_port, server_port);
 
-        let result = unsafe { engine.translate(&mut outbound, NatDirection::Outbound) };
+        let result = engine.translate(&mut outbound, NatDirection::Outbound);
         assert_eq!(result.unwrap(), NatResult::Translated);
 
         // Verify SNAT: source IP changed to external
@@ -253,7 +253,7 @@ mod nat_engine {
         // Server responds
         let mut inbound = create_tcp_packet(server_ip, [203, 0, 113, 1], server_port, nat_port);
 
-        let result = unsafe { engine.translate(&mut inbound, NatDirection::Inbound) };
+        let result = engine.translate(&mut inbound, NatDirection::Inbound);
         assert_eq!(result.unwrap(), NatResult::Translated);
 
         // Verify reverse NAT: destination restored to guest
@@ -283,7 +283,7 @@ mod nat_engine {
             let src_port = (40000 + i) as u16;
 
             let mut packet = create_tcp_packet(src_ip, *dst_ip, src_port, *dst_port);
-            let result = unsafe { engine.translate(&mut packet, NatDirection::Outbound) };
+            let result = engine.translate(&mut packet, NatDirection::Outbound);
             assert_eq!(result.unwrap(), NatResult::Translated);
 
             let nat_port = u16::from_be_bytes([packet[34], packet[35]]);
@@ -308,11 +308,9 @@ mod nat_engine {
 
         // Create a connection
         let mut packet = create_tcp_packet([10, 10, 1, 1], [8, 8, 8, 8], 12345, 53);
-        unsafe {
-            engine
-                .translate(&mut packet, NatDirection::Outbound)
-                .unwrap()
-        };
+        engine
+            .translate(&mut packet, NatDirection::Outbound)
+            .unwrap();
 
         assert_eq!(engine.connection_count(), 1);
 
@@ -376,7 +374,7 @@ mod nat_engine {
         packet[34..36].copy_from_slice(&54321u16.to_be_bytes()); // src port
         packet[36..38].copy_from_slice(&53u16.to_be_bytes()); // dst port (DNS)
 
-        let result = unsafe { engine.translate(&mut packet, NatDirection::Outbound) };
+        let result = engine.translate(&mut packet, NatDirection::Outbound);
         assert_eq!(result.unwrap(), NatResult::Translated);
 
         // Source should be NATed
@@ -397,7 +395,7 @@ mod nat_engine {
             80,
         );
 
-        let result = unsafe { engine.translate(&mut packet, NatDirection::Outbound) };
+        let result = engine.translate(&mut packet, NatDirection::Outbound);
         assert_eq!(result.unwrap(), NatResult::PassThrough);
 
         // Source should be unchanged
@@ -419,7 +417,7 @@ mod nat_engine {
         packet[26..30].copy_from_slice(&[192, 168, 0, 10]);
         packet[30..34].copy_from_slice(&[8, 8, 8, 8]);
 
-        let result = unsafe { engine.translate(&mut packet, NatDirection::Outbound) };
+        let result = engine.translate(&mut packet, NatDirection::Outbound);
         assert_eq!(result.unwrap(), NatResult::PassThrough);
     }
 }
@@ -605,7 +603,7 @@ mod error_handling {
         // Packet way too short
         let mut short_packet = vec![0u8; 10];
 
-        let result = unsafe { engine.translate(&mut short_packet, NatDirection::Outbound) };
+        let result = engine.translate(&mut short_packet, NatDirection::Outbound);
 
         assert!(matches!(result, Err(TranslateError::PacketTooShort)));
     }
@@ -620,7 +618,7 @@ mod error_handling {
         packet[13] = 0x00;
         packet[14] = 0x65; // IPv6 version in IPv4 packet (invalid)
 
-        let result = unsafe { engine.translate(&mut packet, NatDirection::Outbound) };
+        let result = engine.translate(&mut packet, NatDirection::Outbound);
 
         assert!(matches!(result, Err(TranslateError::InvalidIpHeader)));
     }
@@ -635,7 +633,7 @@ mod error_handling {
         packet[13] = 0x00;
         packet[14] = 0x41; // IHL = 1 (invalid, must be >= 5)
 
-        let result = unsafe { engine.translate(&mut packet, NatDirection::Outbound) };
+        let result = engine.translate(&mut packet, NatDirection::Outbound);
 
         assert!(matches!(result, Err(TranslateError::InvalidIpHeader)));
     }
@@ -650,7 +648,7 @@ mod error_handling {
         packet[12] = 0x08;
         packet[13] = 0x06; // EtherType: ARP
 
-        let result = unsafe { engine.translate(&mut packet, NatDirection::Outbound) };
+        let result = engine.translate(&mut packet, NatDirection::Outbound);
 
         assert!(result.is_ok());
     }
