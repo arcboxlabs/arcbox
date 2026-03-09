@@ -6,6 +6,7 @@ members = [
     # ============================================
     "common/arcbox-constants",
     "common/arcbox-error",
+    "crates/arcbox-dhcp",
 
     # ============================================
     # L1-2: Hypervisor (MIT OR Apache-2.0)
@@ -154,6 +155,7 @@ macos-resolver = "0.2.0"
 fc-sdk = "0.2.3"
 
 # Internal crates (Core layer)
+arcbox-dhcp = { version = "0.0.1-alpha.1", path = "crates/arcbox-dhcp" }
 arcbox-constants = { version = "0.0.1-alpha.1", path = "common/arcbox-constants" }
 arcbox-error = { version = "0.0.1-alpha.1", path = "common/arcbox-error" }
 arcbox-vz = { version = "0.0.1-alpha.1", path = "hypervisor/arcbox-vz" }
