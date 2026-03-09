@@ -17,6 +17,10 @@ serde = { workspace = true }
 toml = { workspace = true }
 flate2 = "1"
 tar = "0.4"
+tempfile.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+sha2.workspace = true
