@@ -20,7 +20,6 @@ crate::handlers::proxy_handler!(container_stats);
 crate::handlers::proxy_handler!(container_changes);
 crate::handlers::proxy_handler!(prune_containers);
 crate::handlers::proxy_handler!(create_container);
-crate::handlers::proxy_handler!(restart_container);
 
 /// Extract container ID from URI path.
 ///
@@ -114,6 +113,35 @@ pub async fn kill_container(
         if let Some(canonical) = canonical {
             state.runtime.stop_port_forwarding_by_id(&canonical).await;
             state.runtime.deregister_dns_by_id(&canonical).await;
+        }
+    }
+
+    Ok(response)
+}
+
+/// Restart a container, refreshing its port forwarding + DNS.
+///
+/// # Errors
+///
+/// Returns an error if VM readiness fails or proxying to guest dockerd fails.
+pub async fn restart_container(
+    State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
+    req: Request<Body>,
+) -> Result<Response> {
+    // Resolve canonical ID before proxy (name may be briefly invalid during restart).
+    let canonical = resolve_canonical_from_uri(&state, &uri).await;
+
+    let response = proxy(&state, &uri, req).await?;
+
+    // Docker restart returns 204 on success.
+    if response.status().as_u16() == 204 {
+        if let Some(ref canonical) = canonical {
+            // Tear down stale networking.
+            state.runtime.stop_port_forwarding_by_id(canonical).await;
+            state.runtime.deregister_dns_by_id(canonical).await;
+            // Re-inspect for fresh IP/ports and set up new networking.
+            setup_container_networking(&state, canonical).await;
         }
     }
 
