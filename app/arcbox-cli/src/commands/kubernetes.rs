@@ -167,6 +167,21 @@ async fn load_state(home: &Path) -> Result<KubernetesIntegrationState> {
     serde_json::from_slice(&bytes).context("failed to parse Kubernetes integration state")
 }
 
+#[cfg(unix)]
+async fn write_private_file(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    tokio::fs::write(path, contents.as_ref()).await?;
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn write_private_file(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    tokio::fs::write(path, contents.as_ref()).await?;
+    Ok(())
+}
+
 async fn save_state(home: &Path, state: &KubernetesIntegrationState) -> Result<()> {
     let path = integration_state_path(home);
     if let Some(parent) = path.parent() {
@@ -249,7 +264,8 @@ async fn merge_managed_kubeconfig(home: &Path) -> Result<()> {
     }
 
     if !user.exists() {
-        tokio::fs::copy(&managed, &user).await?;
+        let bytes = tokio::fs::read(&managed).await?;
+        write_private_file(&user, bytes).await?;
         return Ok(());
     }
 
@@ -272,7 +288,7 @@ async fn merge_managed_kubeconfig(home: &Path) -> Result<()> {
         );
     }
 
-    tokio::fs::write(&user, output.stdout).await?;
+    write_private_file(&user, &output.stdout).await?;
     Ok(())
 }
 
@@ -334,7 +350,7 @@ async fn refresh_managed_kubeconfig(home: &Path) -> Result<()> {
     if let Some(parent) = managed.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    tokio::fs::write(&managed, response.kubeconfig).await?;
+    write_private_file(&managed, response.kubeconfig).await?;
     Ok(())
 }
 

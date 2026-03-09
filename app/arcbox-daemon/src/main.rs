@@ -199,7 +199,7 @@ async fn run(args: DaemonArgs) -> Result<()> {
 
     let mut grpc_handle =
         start_grpc_server(Arc::clone(&runtime), grpc_socket.clone(), shutdown.clone()).await?;
-    let mut kubernetes_proxy_handle = start_kubernetes_api_proxy(Arc::clone(&runtime)).await?;
+    let mut kubernetes_proxy_handle = start_kubernetes_api_proxy(Arc::clone(&runtime)).await;
 
     if args.docker_integration {
         match DockerContextManager::new(socket_path.clone()) {
@@ -234,12 +234,10 @@ async fn run(args: DaemonArgs) -> Result<()> {
     shutdown.cancel();
 
     if tokio::time::timeout(DRAIN_TIMEOUT, async {
-        let _ = tokio::join!(
-            &mut dns_handle,
-            &mut docker_handle,
-            &mut grpc_handle,
-            &mut kubernetes_proxy_handle,
-        );
+        let _ = tokio::join!(&mut dns_handle, &mut docker_handle, &mut grpc_handle,);
+        if let Some(handle) = kubernetes_proxy_handle.as_mut() {
+            let _ = handle.await;
+        }
     })
     .await
     .is_err()
@@ -251,7 +249,9 @@ async fn run(args: DaemonArgs) -> Result<()> {
         dns_handle.abort();
         docker_handle.abort();
         grpc_handle.abort();
-        kubernetes_proxy_handle.abort();
+        if let Some(handle) = kubernetes_proxy_handle.as_mut() {
+            handle.abort();
+        }
     }
 
     runtime
@@ -413,10 +413,17 @@ impl AsyncWrite for RawFdStream {
     }
 }
 
-async fn start_kubernetes_api_proxy(runtime: Arc<Runtime>) -> Result<tokio::task::JoinHandle<()>> {
-    let listener = TcpListener::bind(("127.0.0.1", KUBERNETES_API_HOST_PORT))
-        .await
-        .context("Failed to bind Kubernetes API proxy")?;
+async fn start_kubernetes_api_proxy(runtime: Arc<Runtime>) -> Option<tokio::task::JoinHandle<()>> {
+    let listener = match TcpListener::bind(("127.0.0.1", KUBERNETES_API_HOST_PORT)).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            warn!(
+                "Failed to bind Kubernetes API proxy on 127.0.0.1:{}: {}",
+                KUBERNETES_API_HOST_PORT, e
+            );
+            return None;
+        }
+    };
 
     info!(
         "Kubernetes API proxy listening on 127.0.0.1:{}",
@@ -457,7 +464,7 @@ async fn start_kubernetes_api_proxy(runtime: Arc<Runtime>) -> Result<tokio::task
         }
     });
 
-    Ok(handle)
+    Some(handle)
 }
 
 async fn start_grpc_server(

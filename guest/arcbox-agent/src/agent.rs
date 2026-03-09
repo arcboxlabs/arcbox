@@ -1426,6 +1426,7 @@ mod linux {
     }
 
     async fn handle_kubernetes_status(_req: KubernetesStatusRequest) -> RpcResponse {
+        let _guard = kubernetes_control_lock().lock().await;
         RpcResponse::KubernetesStatus(collect_kubernetes_status().await)
     }
 
@@ -1490,7 +1491,7 @@ mod linux {
                 .arg(format!("--container-runtime-endpoint={CONTAINERD_SOCKET}"))
                 .arg(format!("--data-dir={K3S_DATA_MOUNT_POINT}"))
                 .arg(format!("--write-kubeconfig={K3S_KUBECONFIG_PATH}"))
-                .arg("--write-kubeconfig-mode=0644")
+                .arg("--write-kubeconfig-mode=0600")
                 .arg("--disable=traefik")
                 .arg("--disable=servicelb")
                 .env("PATH", runtime_path_env(&runtime_bin_dir))
@@ -1536,7 +1537,10 @@ mod linux {
 
     async fn do_stop_kubernetes() -> KubernetesStopResponse {
         let _guard = kubernetes_control_lock().lock().await;
+        do_stop_kubernetes_locked().await
+    }
 
+    async fn do_stop_kubernetes_locked() -> KubernetesStopResponse {
         let Some(pid) = k3s_pid() else {
             return KubernetesStopResponse {
                 stopped: true,
@@ -1566,7 +1570,8 @@ mod linux {
     }
 
     async fn do_delete_kubernetes() -> KubernetesDeleteResponse {
-        let stop = do_stop_kubernetes().await;
+        let _guard = kubernetes_control_lock().lock().await;
+        let stop = do_stop_kubernetes_locked().await;
         let mut notes = vec![stop.detail];
         clear_kubernetes_namespace(&mut notes).await;
 
