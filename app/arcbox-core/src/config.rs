@@ -328,6 +328,10 @@ pub struct SandboxConfig {
     pub default_kernel: String,
     /// Default root filesystem image path.
     pub default_rootfs: String,
+    /// DNS servers advertised to sandbox guests.
+    pub dns: Vec<String>,
+    /// Kernel boot arguments.
+    pub boot_args: String,
 }
 
 impl Default for SandboxConfig {
@@ -343,6 +347,8 @@ impl Default for SandboxConfig {
             default_memory_mib: 512,
             default_kernel: "/var/lib/arcbox/sandboxes/kernels/vmlinux".to_string(),
             default_rootfs: "/var/lib/arcbox/sandboxes/images/rootfs.ext4".to_string(),
+            dns: vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()],
+            boot_args: "console=ttyS0 reboot=k panic=1 pci=off".to_string(),
         }
     }
 }
@@ -368,8 +374,10 @@ impl SandboxConfig {
                 bridge: self.bridge.clone(),
                 cidr: self.cidr.clone(),
                 gateway: self.gateway.clone(),
-                dns: vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()],
+                dns: self.dns.clone(),
             },
+            // The gRPC listener is unused; the sandbox manager communicates via
+            // vsock rather than a separate gRPC endpoint.
             grpc: arcbox_vm::GrpcConfig {
                 unix_socket: String::new(),
                 tcp_addr: String::new(),
@@ -379,7 +387,7 @@ impl SandboxConfig {
                 memory_mib: self.default_memory_mib,
                 kernel: self.default_kernel.clone(),
                 rootfs: self.default_rootfs.clone(),
-                boot_args: "console=ttyS0 reboot=k panic=1 pci=off".to_string(),
+                boot_args: self.boot_args.clone(),
             },
         }
     }

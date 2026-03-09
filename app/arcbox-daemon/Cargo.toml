@@ -26,7 +26,7 @@ anyhow = { workspace = true }
 dirs = { workspace = true }
 libc = { workspace = true }
 hyper = { workspace = true }
-hyper-util = "0.1"
+hyper-util = { workspace = true }
 tower = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

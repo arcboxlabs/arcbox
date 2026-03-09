@@ -23,7 +23,7 @@ tower-http = { workspace = true }
 hyper = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-hyper-util = { version = "0.1", features = ["tokio"] }
+hyper-util = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 sha2 = "0.10"
