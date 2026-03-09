@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use arcbox_protocol::sandbox_v1;
 use arcbox_vm::{
-    CheckpointInfo, CheckpointSummary, RestoreSandboxSpec, SandboxEvent as VmSandboxEvent,
-    SandboxInfo, SandboxManager, SandboxMountSpec, SandboxNetworkSpec, SandboxSpec, SandboxSummary,
-    VmmConfig,
+    CheckpointInfo, CheckpointSummary, ExecInputMsg, RestoreSandboxSpec,
+    SandboxEvent as VmSandboxEvent, SandboxInfo, SandboxManager, SandboxMountSpec,
+    SandboxNetworkSpec, SandboxSpec, SandboxSummary, VmmConfig,
 };
 use prost::Message;
 use tokio::sync::mpsc;
@@ -175,7 +175,74 @@ impl SandboxService {
         Ok(out_rx)
     }
 
-    /// Subscribe to sandbox lifecycle events.  Returns a channel of encoded
+    /// Start an interactive exec session.
+    ///
+    /// Returns `(input_sender, output_receiver)`:
+    /// - Send [`ExecInputMsg`]s into `input_sender` to forward stdin / EOF to
+    ///   the running process.
+    /// - Read pre-encoded [`sandbox_v1::ExecOutput`] payloads from
+    ///   `output_receiver`.  The final payload has `done == true`.
+    pub async fn exec(
+        &self,
+        payload: &[u8],
+    ) -> Result<(mpsc::Sender<ExecInputMsg>, mpsc::UnboundedReceiver<Vec<u8>>), String> {
+        let req = sandbox_v1::ExecRequest::decode(payload)
+            .map_err(|e| format!("decode error: {e}"))?;
+
+        let tty_size = req.tty_size.map(|s| (s.width as u16, s.height as u16));
+
+        let (in_tx, mut out_rx) = self
+            .manager
+            .exec_in_sandbox(
+                &req.id,
+                req.cmd,
+                req.env,
+                req.working_dir,
+                req.user,
+                req.tty,
+                tty_size,
+                req.timeout_seconds,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let (tx, out_stream_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        tokio::spawn(async move {
+            while let Some(result) = out_rx.recv().await {
+                let chunk = match result {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let done_msg = sandbox_v1::ExecOutput {
+                            stream: "exit".into(),
+                            data: Vec::new(),
+                            exit_code: 1,
+                            done: true,
+                        };
+                        tracing::warn!(error = %e, "exec_in_sandbox stream error");
+                        let _ = tx.send(done_msg.encode_to_vec());
+                        break;
+                    }
+                };
+                let is_done = chunk.stream == "exit";
+                let msg = sandbox_v1::ExecOutput {
+                    stream: chunk.stream,
+                    data: chunk.data,
+                    exit_code: chunk.exit_code,
+                    done: is_done,
+                };
+                if tx.send(msg.encode_to_vec()).is_err() {
+                    break;
+                }
+                if is_done {
+                    break;
+                }
+            }
+        });
+
+        Ok((in_tx, out_stream_rx))
+    }
+
+/// Subscribe to sandbox lifecycle events.  Returns a channel of encoded
     /// [`SandboxEvent`] payloads.
     pub fn subscribe_events(
         &self,
