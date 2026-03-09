@@ -22,11 +22,13 @@ pub struct MemoryBalloonDeviceConfiguration {
     inner: *mut AnyObject,
 }
 
+// SAFETY: Inner ObjC pointer is only used via msg_send! which dispatches to the ObjC runtime.
 unsafe impl Send for MemoryBalloonDeviceConfiguration {}
 
 impl MemoryBalloonDeviceConfiguration {
     /// Creates a new memory balloon device configuration.
     pub fn new() -> VZResult<Self> {
+        // SAFETY: ObjC new on valid VZVirtioTraditionalMemoryBalloonDeviceConfiguration class. retain prevents autorelease.
         unsafe {
             let cls = get_class("VZVirtioTraditionalMemoryBalloonDeviceConfiguration").ok_or_else(
                 || VZError::Internal {
@@ -85,7 +87,9 @@ pub struct MemoryBalloonDevice {
     inner: *mut AnyObject,
 }
 
+// SAFETY: The inner pointer refers to a VZ framework-managed object. Access is synchronized by the framework's internal dispatch queue.
 unsafe impl Send for MemoryBalloonDevice {}
+// SAFETY: See above — access is synchronized by the framework's dispatch queue.
 unsafe impl Sync for MemoryBalloonDevice {}
 
 impl MemoryBalloonDevice {
@@ -112,6 +116,7 @@ impl MemoryBalloonDevice {
             tracing::warn!("set_target_memory_size called on null device");
             return;
         }
+        // SAFETY: self.inner is checked non-null above. Sending setTargetVirtualMachineMemorySize: with a u64 value.
         unsafe {
             msg_send_void_u64!(self.inner, setTargetVirtualMachineMemorySize: bytes);
         }
@@ -130,6 +135,7 @@ impl MemoryBalloonDevice {
             tracing::warn!("target_memory_size called on null device");
             return 0;
         }
+        // SAFETY: self.inner is checked non-null above. Sending targetVirtualMachineMemorySize to a valid balloon device.
         unsafe { msg_send_u64!(self.inner, targetVirtualMachineMemorySize) }
     }
 
@@ -158,6 +164,7 @@ pub fn vm_memory_balloon_devices(vm_ptr: *mut AnyObject) -> Vec<MemoryBalloonDev
         return Vec::new();
     }
 
+    // SAFETY: vm_ptr is checked non-null above. Sending memoryBalloonDevices returns a valid NSArray. Elements are valid balloon device pointers.
     unsafe {
         let devices: *mut AnyObject = msg_send!(vm_ptr, memoryBalloonDevices);
         if devices.is_null() {

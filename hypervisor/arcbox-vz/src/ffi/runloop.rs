@@ -43,6 +43,7 @@ impl From<i32> for CFRunLoopRunResult {
 // FFI Declarations
 // ============================================================================
 
+// SAFETY: Core Foundation run loop FFI declarations. These functions and the kCFRunLoopDefaultMode constant are always available on macOS.
 unsafe extern "C" {
     fn CFRunLoopGetMain() -> CFRunLoopRef;
     fn CFRunLoopGetCurrent() -> CFRunLoopRef;
@@ -64,6 +65,7 @@ unsafe extern "C" {
 /// The main run loop is the run loop of the main thread.
 #[must_use]
 pub fn cf_run_loop_get_main() -> CFRunLoopRef {
+    // SAFETY: CFRunLoopGetMain always returns the valid main run loop reference.
     unsafe { CFRunLoopGetMain() }
 }
 
@@ -72,6 +74,7 @@ pub fn cf_run_loop_get_main() -> CFRunLoopRef {
 /// Each thread has its own run loop.
 #[must_use]
 pub fn cf_run_loop_get_current() -> CFRunLoopRef {
+    // SAFETY: CFRunLoopGetCurrent always returns a valid run loop for the current thread.
     unsafe { CFRunLoopGetCurrent() }
 }
 
@@ -81,6 +84,7 @@ pub fn cf_run_loop_get_current() -> CFRunLoopRef {
 /// It should not normally be used directly; prefer `run_loop_until` for
 /// most use cases.
 pub fn cf_run_loop_run() {
+    // SAFETY: CFRunLoopRun runs the current thread's run loop, no preconditions.
     unsafe { CFRunLoopRun() }
 }
 
@@ -96,6 +100,7 @@ pub fn cf_run_loop_run() {
 ///
 /// The caller must ensure `rl` is a valid `CFRunLoopRef`.
 pub unsafe fn cf_run_loop_stop(rl: CFRunLoopRef) {
+    // SAFETY: Caller guarantees rl is a valid CFRunLoopRef.
     unsafe { CFRunLoopStop(rl) }
 }
 
@@ -114,6 +119,7 @@ pub fn cf_run_loop_run_in_mode(
     seconds: f64,
     return_after_source_handled: bool,
 ) -> CFRunLoopRunResult {
+    // SAFETY: kCFRunLoopDefaultMode is a valid global CFStringRef constant. seconds and returnAfterSourceHandled are plain values.
     unsafe {
         let result =
             CFRunLoopRunInMode(kCFRunLoopDefaultMode, seconds, return_after_source_handled);
