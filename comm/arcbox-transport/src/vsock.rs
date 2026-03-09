@@ -67,6 +67,13 @@
 use crate::error::{Result, TransportError};
 use crate::{Transport, TransportListener};
 use async_trait::async_trait;
+
+/// Maximum allowed frame payload size (16 MiB).
+///
+/// Frames larger than this are rejected before allocation to prevent a
+/// misbehaving or compromised guest from triggering unbounded memory growth on
+/// the host.
+const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 use bytes::Bytes;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -528,6 +535,11 @@ impl VsockReceiver {
             .await
             .map_err(TransportError::io)?;
         let len = u32::from_be_bytes(len_buf) as usize;
+        if len > MAX_FRAME_SIZE {
+            return Err(TransportError::Protocol(format!(
+                "frame too large: {len} bytes (max {MAX_FRAME_SIZE})"
+            )));
+        }
         tracing::debug!("VsockReceiver::recv: message length={}", len);
 
         let mut buf = Vec::with_capacity(4 + len);
@@ -659,6 +671,11 @@ impl Transport for VsockTransport {
             .await
             .map_err(TransportError::io)?;
         let len = u32::from_be_bytes(len_buf) as usize;
+        if len > MAX_FRAME_SIZE {
+            return Err(TransportError::Protocol(format!(
+                "frame too large: {len} bytes (max {MAX_FRAME_SIZE})"
+            )));
+        }
         tracing::debug!("VsockTransport::recv: message length={}", len);
 
         // Return the complete framed message (length prefix + payload) so the
