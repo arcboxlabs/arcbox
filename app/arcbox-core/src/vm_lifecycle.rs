@@ -819,7 +819,10 @@ impl VmLifecycleManager {
         }];
 
         // Attach persistent Docker data disk.
-        let docker_data_image = self.data_dir.join(DOCKER_DATA_IMAGE_NAME);
+        let docker_data_image = self
+            .data_dir
+            .join(arcbox_constants::paths::host::DATA)
+            .join(DOCKER_DATA_IMAGE_NAME);
         Self::ensure_sparse_block_image(&docker_data_image, DOCKER_DATA_IMAGE_SIZE_BYTES)?;
 
         let docker_data_guest_device = Self::virtio_block_device_path(block_devices.len())?;

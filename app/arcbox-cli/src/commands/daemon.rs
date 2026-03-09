@@ -28,11 +28,11 @@ pub struct DaemonArgs {
     #[arg(value_name = "ACTION")]
     pub action: DaemonAction,
 
-    /// Unix socket path for Docker API (default: ~/.arcbox/docker.sock).
+    /// Unix socket path for Docker API (default: ~/.arcbox/run/docker.sock).
     #[arg(long)]
     pub socket: Option<PathBuf>,
 
-    /// Unix socket path for gRPC API (desktop/GUI clients).
+    /// Unix socket path for gRPC API (default: ~/.arcbox/run/arcbox.sock).
     #[arg(long)]
     pub grpc_socket: Option<PathBuf>,
 
@@ -108,11 +108,12 @@ fn exec_foreground(args: &DaemonArgs) -> Result<()> {
 
 async fn execute_stop(args: &DaemonArgs) -> Result<()> {
     let data_dir = resolve_data_dir(args.data_dir.as_ref());
-    let pid_file = data_dir.join("daemon.pid");
+    let run_dir = data_dir.join(arcbox_constants::paths::host::RUN);
+    let pid_file = run_dir.join("daemon.pid");
     let grpc_socket = args
         .grpc_socket
         .clone()
-        .unwrap_or_else(|| data_dir.join("arcbox.sock"));
+        .unwrap_or_else(|| run_dir.join("arcbox.sock"));
 
     let Some(pid) = read_pid_file(&pid_file)? else {
         println!("Daemon is not running");
@@ -154,15 +155,16 @@ async fn execute_stop(args: &DaemonArgs) -> Result<()> {
 
 async fn execute_status(args: &DaemonArgs) -> Result<()> {
     let data_dir = resolve_data_dir(args.data_dir.as_ref());
-    let pid_file = data_dir.join("daemon.pid");
+    let run_dir = data_dir.join(arcbox_constants::paths::host::RUN);
+    let pid_file = run_dir.join("daemon.pid");
     let docker_socket = args
         .socket
         .clone()
-        .unwrap_or_else(|| data_dir.join("docker.sock"));
+        .unwrap_or_else(|| run_dir.join("docker.sock"));
     let grpc_socket = args
         .grpc_socket
         .clone()
-        .unwrap_or_else(|| data_dir.join("arcbox.sock"));
+        .unwrap_or_else(|| run_dir.join("arcbox.sock"));
 
     let mut pid = read_pid_file(&pid_file)?;
     if let Some(value) = pid {
@@ -225,12 +227,14 @@ fn pid_file_uptime(pid_file: &Path) -> Option<Duration> {
 
 fn spawn_background(args: &DaemonArgs) -> Result<()> {
     let data_dir = resolve_data_dir(args.data_dir.as_ref());
-    let logs_dir = data_dir.join("logs");
-    let pid_file = data_dir.join("daemon.pid");
-    let stdout_path = logs_dir.join("daemon.stdout.log");
-    let stderr_path = logs_dir.join("daemon.stderr.log");
+    let run_dir = data_dir.join(arcbox_constants::paths::host::RUN);
+    let log_dir = data_dir.join(arcbox_constants::paths::host::LOG);
+    let pid_file = run_dir.join("daemon.pid");
+    let stdout_path = log_dir.join("daemon.stdout.log");
+    let stderr_path = log_dir.join("daemon.stderr.log");
 
-    std::fs::create_dir_all(&logs_dir).context("Failed to create daemon log directory")?;
+    std::fs::create_dir_all(&run_dir).context("Failed to create daemon run directory")?;
+    std::fs::create_dir_all(&log_dir).context("Failed to create daemon log directory")?;
 
     if let Some(pid) = read_pid_file(&pid_file)? {
         if process_is_running(pid) {
