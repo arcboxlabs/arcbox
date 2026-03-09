@@ -198,7 +198,14 @@ async fn connect_guest(runtime: &Runtime) -> Result<TokioIo<RawFdStream>> {
 
     let owned_fd = match tokio::time::timeout(CONNECT_TIMEOUT, handle).await {
         Ok(join_result) => join_result
-            .map_err(|e| DockerError::Server(format!("connect task panicked: {e}")))?
+            .map_err(|e| {
+                let reason = if e.is_cancelled() {
+                    "cancelled"
+                } else {
+                    "panicked"
+                };
+                DockerError::Server(format!("connect task {reason}: {e}"))
+            })?
             .map_err(|e| DockerError::Server(format!("failed to connect to guest docker: {e}")))?,
         Err(_elapsed) => {
             // Abort the join handle. The blocking task may still complete,
