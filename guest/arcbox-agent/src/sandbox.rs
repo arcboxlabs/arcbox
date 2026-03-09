@@ -279,7 +279,7 @@ impl SandboxService {
     pub fn sandbox_ip(&self, sandbox_id: &str) -> Result<std::net::Ipv4Addr, String> {
         let info = self
             .manager
-            .inspect_sandbox(sandbox_id)
+            .inspect_sandbox(&sandbox_id.to_string())
             .map_err(|e| e.to_string())?;
         info.network
             .and_then(|n| n.ip_address.parse().ok())
