@@ -819,7 +819,10 @@ impl VmLifecycleManager {
         }];
 
         // Attach persistent Docker data disk.
-        let docker_data_image = self.data_dir.join(DOCKER_DATA_IMAGE_NAME);
+        let docker_data_image = self
+            .data_dir
+            .join(arcbox_constants::paths::host::DATA)
+            .join(DOCKER_DATA_IMAGE_NAME);
         Self::ensure_sparse_block_image(&docker_data_image, DOCKER_DATA_IMAGE_SIZE_BYTES)?;
 
         let docker_data_guest_device = Self::virtio_block_device_path(block_devices.len())?;
@@ -856,6 +859,17 @@ impl VmLifecycleManager {
             config.kernel.as_deref().unwrap_or("default"),
             assets.rootfs_image.display(),
         );
+
+        // Write host wall-clock time to the VirtioFS share so the guest can
+        // set its system clock before TLS-dependent services start.
+        if let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            let run_dir = self
+                .data_dir
+                .join(arcbox_constants::paths::host::RUN);
+            let _ = tokio::fs::create_dir_all(&run_dir).await;
+            let ts_path = run_dir.join(".host_time");
+            let _ = tokio::fs::write(&ts_path, now.as_secs().to_string()).await;
+        }
 
         self.machine_manager.create(config).await?;
 

@@ -471,5 +471,6 @@ fn default_socket_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".arcbox")
+        .join(arcbox_constants::paths::host::RUN)
         .join("docker.sock")
 }

@@ -29,11 +29,11 @@ const DEFAULT_DNS_DOMAIN: &str = "arcbox.local";
 #[command(name = "arcbox-daemon")]
 #[command(author, version, about, long_about = None)]
 pub struct DaemonArgs {
-    /// Unix socket path for Docker API (default: ~/.arcbox/docker.sock).
+    /// Unix socket path for Docker API (default: ~/.arcbox/run/docker.sock).
     #[arg(long)]
     pub socket: Option<PathBuf>,
 
-    /// Unix socket path for gRPC API (desktop/GUI clients).
+    /// Unix socket path for gRPC API (default: ~/.arcbox/run/arcbox.sock).
     #[arg(long)]
     pub grpc_socket: Option<PathBuf>,
 
@@ -94,15 +94,24 @@ async fn run(args: DaemonArgs) -> Result<()> {
     info!("Starting ArcBox daemon...");
 
     let data_dir = resolve_data_dir(args.data_dir.as_ref());
-    let pid_file = data_dir.join("daemon.pid");
+    let run_dir = data_dir.join(arcbox_constants::paths::host::RUN);
+    let log_dir = data_dir.join(arcbox_constants::paths::host::LOG);
+    let data_subdir = data_dir.join(arcbox_constants::paths::host::DATA);
     std::fs::create_dir_all(&data_dir).context("Failed to create data directory")?;
+    std::fs::create_dir_all(&run_dir).context("Failed to create run directory")?;
+    std::fs::create_dir_all(&log_dir).context("Failed to create log directory")?;
+    std::fs::create_dir_all(&data_subdir).context("Failed to create persistent data directory")?;
+
+    let pid_file = run_dir.join("daemon.pid");
     std::fs::write(&pid_file, format!("{}\n", std::process::id()))
         .context("Failed to write daemon PID file")?;
 
-    let socket_path = args.socket.unwrap_or_else(|| data_dir.join("docker.sock"));
+    let socket_path = args
+        .socket
+        .unwrap_or_else(|| run_dir.join("docker.sock"));
     let grpc_socket = args
         .grpc_socket
-        .unwrap_or_else(|| data_dir.join("arcbox.sock"));
+        .unwrap_or_else(|| run_dir.join("arcbox.sock"));
 
     let mut config = Config {
         data_dir: data_dir.clone(),

@@ -1350,12 +1350,21 @@ mod linux {
 
     /// Redirects daemon stdout/stderr to a log file so crashes are diagnosable.
     ///
-    /// Prefers `/arcbox/` (VirtioFS mount, visible from host as `~/.arcbox/`)
+    /// Prefers `/arcbox/log/` (VirtioFS mount, visible from host as `~/.arcbox/log/`)
     /// so that logs survive guest restarts and are accessible without exec.
     /// Falls back to `/tmp/` (guest tmpfs) if VirtioFS is not mounted.
     fn daemon_log_file(name: &str) -> Stdio {
-        let arcbox_path = format!("/arcbox/{}.log", name);
+        let log_dir = format!(
+            "/arcbox/{}",
+            arcbox_constants::paths::guest::LOG
+        );
+        let arcbox_path = format!("{}/{}.log", log_dir, name);
         let tmp_log_path = format!("/tmp/{}.log", name);
+
+        // Ensure the log directory exists inside the VirtioFS share.
+        if Path::new("/arcbox").exists() {
+            let _ = std::fs::create_dir_all(&log_dir);
+        }
 
         let log_path = if Path::new("/arcbox").exists() {
             &arcbox_path
@@ -1370,7 +1379,7 @@ mod linux {
         {
             Ok(f) => f.into(),
             Err(_) => {
-                // Fallback to /tmp/ if /arcbox/ write fails.
+                // Fallback to /tmp/ if /arcbox/log/ write fails.
                 match std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)

@@ -17,3 +17,19 @@ pub const CONTAINERD_SOCKET: &str = "/run/containerd/containerd.sock";
 /// Directory where runtime binaries (containerd, dockerd, runc, …) are
 /// accessed via VirtioFS live execution.
 pub const ARCBOX_RUNTIME_BIN_DIR: &str = "/arcbox/runtime/bin";
+
+/// Host-side subdirectory names within `~/.arcbox/`.
+pub mod host {
+    /// Runtime state (sockets, PID files, ephemeral markers).
+    pub const RUN: &str = "run";
+    /// Centralized log directory.
+    pub const LOG: &str = "log";
+    /// Persistent data aggregation (images, containers, volumes, …).
+    pub const DATA: &str = "data";
+}
+
+/// Guest-side subdirectory names within `/arcbox/`.
+pub mod guest {
+    /// Log directory inside the VirtioFS mount.
+    pub const LOG: &str = "log";
+}
