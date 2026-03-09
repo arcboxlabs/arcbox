@@ -227,12 +227,11 @@ mod linux {
     use arcbox_constants::env::GUEST_DOCKER_VSOCK_PORT as GUEST_DOCKER_VSOCK_PORT_ENV;
     use arcbox_constants::paths::{
         ARCBOX_RUNTIME_BIN_DIR, CNI_DATA_MOUNT_POINT, CONTAINERD_DATA_MOUNT_POINT,
-        CONTAINERD_SOCKET, DOCKER_API_UNIX_SOCKET, DOCKER_DATA_MOUNT_POINT, K3S_DATA_MOUNT_POINT,
-        K3S_KUBECONFIG_PATH, KUBELET_DATA_MOUNT_POINT,
+        CONTAINERD_SOCKET, DOCKER_API_UNIX_SOCKET, DOCKER_DATA_MOUNT_POINT, K3S_CNI_BIN_DIR,
+        K3S_CNI_CONF_DIR, K3S_DATA_MOUNT_POINT, K3S_KUBECONFIG_PATH, KUBELET_DATA_MOUNT_POINT,
     };
     use arcbox_constants::ports::{
-        DOCKER_API_VSOCK_PORT, KUBERNETES_API_GUEST_PORT, KUBERNETES_API_HOST_PORT,
-        KUBERNETES_API_VSOCK_PORT,
+        DOCKER_API_VSOCK_PORT, KUBERNETES_API_GUEST_PORT, KUBERNETES_API_VSOCK_PORT,
     };
     use arcbox_constants::status::{SERVICE_ERROR, SERVICE_NOT_READY, SERVICE_READY};
 
@@ -1230,11 +1229,19 @@ mod linux {
             "/etc/docker",
             "/etc/containerd",
             "/run/arcbox",
+            K3S_CNI_CONF_DIR,
+            K3S_CNI_BIN_DIR,
         ] {
             if let Err(e) = std::fs::create_dir_all(dir) {
                 notes.push(format!("mkdir {} failed({})", dir, e));
             }
         }
+    }
+
+    fn shared_containerd_config() -> String {
+        format!(
+            "version = 2\n[plugins.\"io.containerd.grpc.v1.cri\".cni]\n  bin_dir = \"{K3S_CNI_BIN_DIR}\"\n  conf_dir = \"{K3S_CNI_CONF_DIR}\"\n  max_conf_num = 1\n"
+        )
     }
 
     async fn ensure_containerd_ready(runtime_bin_dir: &Path, notes: &mut Vec<String>) -> bool {
@@ -1243,7 +1250,7 @@ mod linux {
         }
 
         let containerd_config = "/etc/containerd/config.toml";
-        let config_toml = "version = 2\n";
+        let config_toml = shared_containerd_config();
         if let Err(e) = std::fs::write(containerd_config, config_toml) {
             notes.push(format!("write containerd config failed({})", e));
         }
@@ -2223,6 +2230,15 @@ mod tests {
         assert!(result.is_some());
         // The escaped newline should be preserved
         assert!(result.unwrap().contains("\\n"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_shared_containerd_config_uses_k3s_cni_paths() {
+        let config = super::linux::shared_containerd_config();
+        assert!(config.contains("bin_dir = \"/var/lib/rancher/k3s/data/cni\""));
+        assert!(config.contains("conf_dir = \"/var/lib/rancher/k3s/agent/etc/cni/net.d\""));
+        assert!(config.contains("max_conf_num = 1"));
     }
 
     // =========================================================================

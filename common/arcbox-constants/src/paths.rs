@@ -26,6 +26,12 @@ pub const CONTAINERD_SOCKET: &str = "/run/containerd/containerd.sock";
 /// K3s-generated kubeconfig path inside the guest.
 pub const K3S_KUBECONFIG_PATH: &str = "/var/lib/rancher/k3s/k3s.yaml";
 
+/// K3s-managed CNI config directory for the kubelet/containerd stack.
+pub const K3S_CNI_CONF_DIR: &str = "/var/lib/rancher/k3s/agent/etc/cni/net.d";
+
+/// K3s-managed CNI plugin directory used by current releases.
+pub const K3S_CNI_BIN_DIR: &str = "/var/lib/rancher/k3s/data/cni";
+
 /// Directory where runtime binaries (containerd, dockerd, runc, …) are
 /// accessed via VirtioFS live execution.
 pub const ARCBOX_RUNTIME_BIN_DIR: &str = "/arcbox/runtime/bin";
