@@ -3,7 +3,7 @@
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// Standard error response body.
 #[derive(Debug, Serialize)]
@@ -68,11 +68,3 @@ impl From<arcbox_core::CoreError> for ApiError {
     }
 }
 
-/// Pagination query parameters.
-#[derive(Debug, Deserialize)]
-pub struct PaginationParams {
-    #[serde(default)]
-    pub page_size: Option<usize>,
-    #[serde(default)]
-    pub page_token: Option<String>,
-}

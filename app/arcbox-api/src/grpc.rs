@@ -158,7 +158,6 @@ impl machine_service_server::MachineService for MachineServiceImpl {
 
         Ok(Response::new(ListMachinesResponse {
             machines: summaries,
-            next_page_token: String::new(),
         }))
     }
 

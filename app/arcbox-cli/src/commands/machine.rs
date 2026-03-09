@@ -98,8 +98,6 @@ pub async fn machine_count() -> Result<usize> {
     let response = client
         .list(tonic::Request::new(ListMachinesRequest {
             all: true,
-            page_size: 0,
-            page_token: String::new(),
         }))
         .await
         .context("Failed to list machines")?;
@@ -412,8 +410,6 @@ async fn execute_list(args: ListArgs) -> Result<()> {
     let machines = client
         .list(tonic::Request::new(ListMachinesRequest {
             all: args.all,
-            page_size: 0,
-            page_token: String::new(),
         }))
         .await
         .context("Failed to list machines")?

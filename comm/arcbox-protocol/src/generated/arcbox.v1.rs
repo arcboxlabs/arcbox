@@ -248,17 +248,11 @@ pub struct RemoveMachineRequest {
 /// Request to list machines.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[derive(Clone, PartialEq, ::prost::Message)]
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct ListMachinesRequest {
     /// Show all machines (including stopped).
     #[prost(bool, tag = "1")]
     pub all: bool,
-    /// Maximum number of results to return (0 = no limit).
-    #[prost(int32, tag = "2")]
-    pub page_size: i32,
-    /// Opaque pagination token from a previous response.
-    #[prost(string, tag = "3")]
-    pub page_token: ::prost::alloc::string::String,
 }
 /// Response to list machines.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -268,9 +262,6 @@ pub struct ListMachinesResponse {
     /// List of machines.
     #[prost(message, repeated, tag = "1")]
     pub machines: ::prost::alloc::vec::Vec<MachineSummary>,
-    /// Token for the next page (empty when no more results).
-    #[prost(string, tag = "2")]
-    pub next_page_token: ::prost::alloc::string::String,
 }
 /// Summary information about a machine.
 #[derive(serde::Serialize, serde::Deserialize)]

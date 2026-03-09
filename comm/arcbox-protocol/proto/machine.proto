@@ -162,18 +162,12 @@ message RemoveMachineRequest {
 message ListMachinesRequest {
     // Show all machines (including stopped).
     bool all = 1;
-    // Maximum number of results to return (0 = no limit).
-    int32 page_size = 2;
-    // Opaque pagination token from a previous response.
-    string page_token = 3;
 }
 
 // Response to list machines.
 message ListMachinesResponse {
     // List of machines.
     repeated MachineSummary machines = 1;
-    // Token for the next page (empty when no more results).
-    string next_page_token = 2;
 }
 
 // Summary information about a machine.
