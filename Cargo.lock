@@ -185,6 +185,7 @@ name = "arcbox-cli"
 version = "0.0.1-alpha.1"
 dependencies = [
  "anyhow",
+ "arcbox-constants",
  "arcbox-core",
  "arcbox-docker",
  "arcbox-grpc",
@@ -262,6 +263,7 @@ version = "0.0.1-alpha.1"
 dependencies = [
  "anyhow",
  "arcbox-api",
+ "arcbox-constants",
  "arcbox-core",
  "arcbox-docker",
  "clap",
