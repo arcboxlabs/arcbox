@@ -103,6 +103,11 @@ pub async fn kill_container(
     OriginalUri(uri): OriginalUri,
     req: Request<Body>,
 ) -> Result<Response> {
+    // Ensure VM is ready before resolving — resolve_canonical_from_uri uses
+    // proxy_to_guest directly (no ensure_vm_ready), so without this the
+    // canonical lookup could fail and silently skip networking teardown.
+    let _ = state.runtime.ensure_vm_ready().await;
+
     // Resolve canonical ID before proxy — kill with --rm triggers auto-remove.
     let canonical = resolve_canonical_from_uri(&state, &uri).await;
 
@@ -129,19 +134,18 @@ pub async fn restart_container(
     OriginalUri(uri): OriginalUri,
     req: Request<Body>,
 ) -> Result<Response> {
-    // Resolve canonical ID before proxy (name may be briefly invalid during restart).
-    let canonical = resolve_canonical_from_uri(&state, &uri).await;
-
     let response = proxy(&state, &uri, req).await?;
 
     // Docker restart returns 204 on success.
+    // Resolve canonical ID after proxy — restart doesn't have --rm auto-remove,
+    // and resolving after ensures the VM is ready (proxy calls ensure_vm_ready).
     if response.status().as_u16() == 204 {
-        if let Some(ref canonical) = canonical {
+        if let Some(canonical) = resolve_canonical_from_uri(&state, &uri).await {
             // Tear down stale networking.
-            state.runtime.stop_port_forwarding_by_id(canonical).await;
-            state.runtime.deregister_dns_by_id(canonical).await;
+            state.runtime.stop_port_forwarding_by_id(&canonical).await;
+            state.runtime.deregister_dns_by_id(&canonical).await;
             // Re-inspect for fresh IP/ports and set up new networking.
-            setup_container_networking(&state, canonical).await;
+            setup_container_networking(&state, &canonical).await;
         }
     }
 
