@@ -432,8 +432,8 @@ mod darwin {
                 Some(conn) => {
                     // SAFETY: conn.fd comes from VZVirtioSocketDevice and is a
                     // valid connected vsock file descriptor.
-                    let stream = unsafe { VsockStream::from_raw_fd(conn.fd) }
-                        .map_err(TransportError::io)?;
+                    let stream =
+                        unsafe { VsockStream::from_raw_fd(conn.fd) }.map_err(TransportError::io)?;
                     let addr = VsockAddr::new(VsockAddr::CID_ANY, conn.source_port);
                     Ok((stream, addr))
                 }
@@ -447,8 +447,8 @@ mod darwin {
                 Ok(conn) => {
                     // SAFETY: conn.fd comes from VZVirtioSocketDevice and is a
                     // valid connected vsock file descriptor.
-                    let stream = unsafe { VsockStream::from_raw_fd(conn.fd) }
-                        .map_err(TransportError::io);
+                    let stream =
+                        unsafe { VsockStream::from_raw_fd(conn.fd) }.map_err(TransportError::io);
                     match stream {
                         Ok(s) => {
                             let addr = VsockAddr::new(VsockAddr::CID_ANY, conn.source_port);
