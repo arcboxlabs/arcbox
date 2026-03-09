@@ -1354,10 +1354,7 @@ mod linux {
     /// so that logs survive guest restarts and are accessible without exec.
     /// Falls back to `/tmp/` (guest tmpfs) if VirtioFS is not mounted.
     fn daemon_log_file(name: &str) -> Stdio {
-        let log_dir = format!(
-            "/arcbox/{}",
-            arcbox_constants::paths::guest::LOG
-        );
+        let log_dir = format!("/arcbox/{}", arcbox_constants::paths::guest::LOG);
         let arcbox_path = format!("{}/{}.log", log_dir, name);
         let tmp_log_path = format!("/tmp/{}.log", name);
 

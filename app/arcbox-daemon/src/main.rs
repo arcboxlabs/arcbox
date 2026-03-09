@@ -106,9 +106,7 @@ async fn run(args: DaemonArgs) -> Result<()> {
     std::fs::write(&pid_file, format!("{}\n", std::process::id()))
         .context("Failed to write daemon PID file")?;
 
-    let socket_path = args
-        .socket
-        .unwrap_or_else(|| run_dir.join("docker.sock"));
+    let socket_path = args.socket.unwrap_or_else(|| run_dir.join("docker.sock"));
     let grpc_socket = args
         .grpc_socket
         .unwrap_or_else(|| run_dir.join("arcbox.sock"));
