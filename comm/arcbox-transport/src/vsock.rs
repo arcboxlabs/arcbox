@@ -242,8 +242,23 @@ impl AsyncWrite for VsockStream {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        loop {
+            let mut guard = ready!(self.inner.poll_write_ready(cx))?;
+            match guard.try_io(|inner| {
+                // SAFETY: fd is valid; SHUT_WR is a safe shutdown direction that
+                // sends FIN to the peer without closing the read side.
+                let ret = unsafe { libc::shutdown(inner.as_raw_fd(), libc::SHUT_WR) };
+                if ret < 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            }) {
+                Ok(result) => return Poll::Ready(result),
+                Err(_would_block) => {}
+            }
+        }
     }
 }
 
