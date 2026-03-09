@@ -146,3 +146,44 @@ pub struct RunOutputChunk {
     pub exit_code: i32,
     pub done: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_error_status_codes() {
+        assert_eq!(
+            SandboxError::NotFound("x".into()).status_code(),
+            StatusCode::NOT_FOUND,
+        );
+        assert_eq!(
+            SandboxError::AlreadyExists("x".into()).status_code(),
+            StatusCode::CONFLICT,
+        );
+        assert_eq!(
+            SandboxError::InvalidState("x".into()).status_code(),
+            StatusCode::CONFLICT,
+        );
+        assert_eq!(
+            SandboxError::InvalidArgument("x".into()).status_code(),
+            StatusCode::BAD_REQUEST,
+        );
+        assert_eq!(
+            SandboxError::Unavailable("x".into()).status_code(),
+            StatusCode::SERVICE_UNAVAILABLE,
+        );
+        assert_eq!(
+            SandboxError::Internal("x".into()).status_code(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        );
+    }
+
+    #[test]
+    fn sandbox_error_converts_to_api_error() {
+        let err = SandboxError::NotFound("sandbox 'abc' not found".into());
+        let api_err: crate::rest::types::ApiError = err.into();
+        assert_eq!(api_err.status, StatusCode::NOT_FOUND);
+        assert_eq!(api_err.message, "sandbox 'abc' not found");
+    }
+}

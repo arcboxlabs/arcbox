@@ -102,3 +102,51 @@ impl From<arcbox_core::CoreError> for ApiError {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arcbox_core::CoreError;
+
+    #[test]
+    fn core_error_not_found_maps_to_404() {
+        let err = CoreError::not_found("machine 'foo'");
+        let api: ApiError = err.into();
+        assert_eq!(api.status, StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn core_error_already_exists_maps_to_409() {
+        let err = CoreError::already_exists("machine 'foo'");
+        let api: ApiError = err.into();
+        assert_eq!(api.status, StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn core_error_invalid_state_maps_to_409() {
+        let err = CoreError::invalid_state("already running");
+        let api: ApiError = err.into();
+        assert_eq!(api.status, StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn core_error_config_maps_to_400() {
+        let err = CoreError::config("invalid port");
+        let api: ApiError = err.into();
+        assert_eq!(api.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn core_error_vm_maps_to_500() {
+        let err = CoreError::Vm("crash".into());
+        let api: ApiError = err.into();
+        assert_eq!(api.status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn api_error_into_response_has_correct_status() {
+        let err = ApiError::not_implemented("not yet");
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+}
+
