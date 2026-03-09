@@ -28,7 +28,7 @@ pub mod packet;
 pub mod server;
 
 pub use allocator::IpAllocator;
-pub use config::{DhcpConfig, DHCP_CLIENT_PORT, DHCP_SERVER_PORT, DEFAULT_LEASE_DURATION};
+pub use config::{DEFAULT_LEASE_DURATION, DHCP_CLIENT_PORT, DHCP_SERVER_PORT, DhcpConfig};
 pub use error::{DhcpError, Result};
 pub use packet::{DhcpMessageType, DhcpPacket};
 pub use server::{DhcpLease, DhcpServer};

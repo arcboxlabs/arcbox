@@ -165,15 +165,11 @@ impl DhcpServer {
                 self.allocator.allocate_specific(requested);
                 requested
             } else {
-                self.allocator
-                    .allocate()
-                    .ok_or(DhcpError::PoolExhausted)?
+                self.allocator.allocate().ok_or(DhcpError::PoolExhausted)?
             }
         } else {
             // Allocate new IP
-            self.allocator
-                .allocate()
-                .ok_or(DhcpError::PoolExhausted)?
+            self.allocator.allocate().ok_or(DhcpError::PoolExhausted)?
         };
 
         // Record a pending lease so handle_request() can validate.
