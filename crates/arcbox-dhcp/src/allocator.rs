@@ -47,8 +47,7 @@ impl IpAllocator {
     ///
     /// Returns `None` if no addresses are available.
     pub fn allocate(&mut self) -> Option<Ipv4Addr> {
-        // Try sequential allocation first (faster for sparse usage)
-        let range_size = self.end - self.start + 1;
+        let range_size = u64::from(self.end) - u64::from(self.start) + 1;
 
         for _ in 0..range_size {
             if !self.allocated.contains(&self.next) {
@@ -113,7 +112,7 @@ impl IpAllocator {
     /// Returns the number of available addresses.
     #[must_use]
     pub fn available_count(&self) -> usize {
-        let total = (self.end - self.start + 1) as usize;
+        let total = (u64::from(self.end) - u64::from(self.start) + 1) as usize;
         total - self.allocated.len()
     }
 }

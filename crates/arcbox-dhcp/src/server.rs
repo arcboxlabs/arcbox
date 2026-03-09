@@ -93,9 +93,18 @@ impl DhcpServer {
     }
 
     /// Reserves an IP address for a specific MAC.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ip` is outside the configured pool range or already
+    /// allocated/reserved.
     pub fn reserve_ip(&mut self, mac: [u8; 6], ip: Ipv4Addr) {
-        self.reservations.insert(mac, ip);
+        assert!(
+            self.allocator.is_available(ip),
+            "cannot reserve {ip}: not available in pool (out of range or already allocated)"
+        );
         self.allocator.allocate_specific(ip);
+        self.reservations.insert(mac, ip);
     }
 
     /// Removes an IP reservation.
@@ -221,10 +230,8 @@ impl DhcpServer {
         } else if let Some(&reserved) = self.reservations.get(&mac) {
             reserved == requested_ip
         } else {
-            self.allocator.is_available(requested_ip) || {
-                // Check if we can allocate it
-                self.allocator.allocate_specific(requested_ip)
-            }
+            // For new leases, always allocate via the allocator so the IP is tracked
+            self.allocator.allocate_specific(requested_ip)
         };
 
         if !valid {

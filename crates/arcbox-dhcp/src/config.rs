@@ -37,10 +37,26 @@ impl DhcpConfig {
     /// Creates a new DHCP configuration.
     #[must_use]
     pub fn new(server_ip: Ipv4Addr, netmask: Ipv4Addr) -> Self {
-        // Calculate default pool range (server_ip + 1 to server_ip + 253)
+        // Derive default pool range from the subnet.
+        let netmask_u32 = u32::from(netmask);
+        let network = u32::from(server_ip) & netmask_u32;
+        let broadcast = network | !netmask_u32;
+
+        // Host range: [network+1, broadcast-1], skipping server_ip, capped to 253.
         let server_u32 = u32::from(server_ip);
-        let pool_start = Ipv4Addr::from(server_u32 + 1);
-        let pool_end = Ipv4Addr::from(server_u32 + 253);
+        let host_min = network.saturating_add(1);
+        let host_max = broadcast.saturating_sub(1);
+
+        // Start the pool after server_ip if it sits at host_min.
+        let pool_start_u32 = if host_min == server_u32 {
+            host_min.saturating_add(1)
+        } else {
+            host_min
+        };
+        let pool_end_u32 = pool_start_u32.saturating_add(252).min(host_max);
+
+        let pool_start = Ipv4Addr::from(pool_start_u32);
+        let pool_end = Ipv4Addr::from(pool_end_u32);
 
         Self {
             server_ip,

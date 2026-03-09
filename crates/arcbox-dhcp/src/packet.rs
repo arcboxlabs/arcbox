@@ -266,12 +266,17 @@ impl DhcpPacket {
         data[offset + 2..offset + 6].copy_from_slice(&config.server_ip.octets());
         offset += 6;
 
-        // DNS servers
+        // DNS servers (cap at 63 to fit in single-byte option length)
         if !config.dns_servers.is_empty() {
+            let count = config.dns_servers.len().min(63);
+            let needed = offset + 2 + count * 4 + 1; // +1 for end option
+            if needed > data.len() {
+                data.resize(needed, 0);
+            }
             data[offset] = 6;
-            data[offset + 1] = (config.dns_servers.len() * 4) as u8;
+            data[offset + 1] = (count * 4) as u8;
             offset += 2;
-            for dns in &config.dns_servers {
+            for dns in config.dns_servers.iter().take(count) {
                 data[offset..offset + 4].copy_from_slice(&dns.octets());
                 offset += 4;
             }
