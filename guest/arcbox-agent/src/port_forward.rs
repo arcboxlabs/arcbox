@@ -67,9 +67,9 @@ impl PortForwardManager {
         protocol: &str,
     ) -> Result<String, String> {
         let key = (sandbox_id.to_string(), sandbox_port, protocol.to_string());
-        if let Some(entry) = self.allocations.get(&key) {
+        if let Some(host_port) = self.allocations.get(&key).map(|e| e.host_port) {
             let guest_ip = self.guest_ip()?;
-            return Ok(format!("{}:{}", guest_ip, entry.host_port));
+            return Ok(format!("{}:{}", guest_ip, host_port));
         }
 
         let host_port = self.alloc_port()?;
