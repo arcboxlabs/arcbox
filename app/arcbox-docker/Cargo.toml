@@ -33,6 +33,7 @@ tokio-stream = "0.1"
 futures = { workspace = true }
 libc = { workspace = true }
 http-body-util = "0.1"
+tokio-util = "0.7"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }

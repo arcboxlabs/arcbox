@@ -6,6 +6,7 @@
 use crate::api::AppState;
 use crate::error::{DockerError, Result};
 use arcbox_core::Runtime;
+use arcbox_error::CommonError;
 use axum::body::Body;
 use axum::extract::{OriginalUri, State};
 use axum::http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri, header};
@@ -14,11 +15,29 @@ use http_body_util::Full;
 use hyper::client::conn::http1;
 use hyper_util::rt::TokioIo;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::pin::Pin;
+use std::sync::LazyLock;
 use std::task::{Context, Poll, ready};
+use std::time::Duration;
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::sync::Semaphore;
+
+/// Timeout for establishing a vsock connection to guest dockerd.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Timeout for the HTTP/1.1 handshake with guest dockerd.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Maximum number of concurrent vsock connection attempts.
+///
+/// Prevents blocking thread pool exhaustion when the guest is unresponsive
+/// and Docker clients retry aggressively.
+const MAX_CONCURRENT_CONNECTS: usize = 8;
+
+static CONNECT_SEMAPHORE: LazyLock<Semaphore> =
+    LazyLock::new(|| Semaphore::new(MAX_CONCURRENT_CONNECTS));
 
 // =============================================================================
 // RawFdStream — async I/O wrapper around a raw vsock file descriptor
@@ -151,15 +170,53 @@ impl AsyncWrite for RawFdStream {
 // Guest connection
 // =============================================================================
 
-/// Opens a vsock connection to guest dockerd.
-fn connect_guest(runtime: &Runtime) -> Result<TokioIo<RawFdStream>> {
+/// Opens a vsock connection to guest dockerd with a timeout.
+///
+/// A semaphore limits concurrent connection attempts to prevent blocking
+/// thread pool exhaustion when the guest is unresponsive. If the timeout
+/// fires, the spawned blocking task may still complete — we close the
+/// leaked fd in that case to avoid resource leaks.
+async fn connect_guest(runtime: &Runtime) -> Result<TokioIo<RawFdStream>> {
+    let _permit = CONNECT_SEMAPHORE
+        .acquire()
+        .await
+        .map_err(|_| DockerError::Server("connect semaphore closed".into()))?;
+
     let port = runtime.guest_docker_vsock_port();
     let machine_name = runtime.default_machine_name();
-    let fd = runtime
-        .machine_manager()
-        .connect_vsock_port(machine_name, port)
-        .map_err(|e| DockerError::Server(format!("failed to connect to guest docker: {e}")))?;
-    let stream = RawFdStream::from_raw_fd(fd)
+    let manager = runtime.machine_manager().clone();
+    let name = machine_name.to_string();
+
+    let handle = tokio::task::spawn_blocking(move || {
+        let fd = manager.connect_vsock_port(&name, port)?;
+        // Wrap in OwnedFd so the fd is closed on drop if the result is
+        // discarded (e.g. after a timeout abort).
+        // SAFETY: fd is a valid, newly-opened vsock file descriptor.
+        Ok::<_, arcbox_core::CoreError>(unsafe { OwnedFd::from_raw_fd(fd) })
+    });
+    let abort_handle = handle.abort_handle();
+
+    let owned_fd = match tokio::time::timeout(CONNECT_TIMEOUT, handle).await {
+        Ok(join_result) => join_result
+            .map_err(|e| {
+                let reason = if e.is_cancelled() {
+                    "cancelled"
+                } else {
+                    "panicked"
+                };
+                DockerError::Server(format!("connect task {reason}: {e}"))
+            })?
+            .map_err(|e| DockerError::Server(format!("failed to connect to guest docker: {e}")))?,
+        Err(_elapsed) => {
+            // Abort the join handle. The blocking task may still complete,
+            // but the OwnedFd in its return value will be dropped (closed)
+            // when tokio discards the aborted task's output.
+            abort_handle.abort();
+            return Err(CommonError::timeout("guest docker connect timed out").into());
+        }
+    };
+
+    let stream = RawFdStream::from_raw_fd(owned_fd.into_raw_fd())
         .map_err(|e| DockerError::Server(format!("failed to create guest stream: {e}")))?;
     Ok(TokioIo::new(stream))
 }
@@ -185,12 +242,15 @@ pub async fn proxy_to_guest(
     headers: &HeaderMap,
     body: Bytes,
 ) -> Result<Response<Body>> {
-    let io = connect_guest(runtime)?;
+    let io = connect_guest(runtime).await?;
 
-    let (mut sender, conn) = http1::Builder::new()
-        .handshake(io)
-        .await
-        .map_err(|e| DockerError::Server(format!("guest docker handshake failed: {e}")))?;
+    let (mut sender, conn) =
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, http1::Builder::new().handshake(io))
+            .await
+            .map_err(|_| {
+                DockerError::from(CommonError::timeout("guest docker handshake timed out"))
+            })?
+            .map_err(|e| DockerError::Server(format!("guest docker handshake failed: {e}")))?;
 
     tokio::spawn(async move {
         if let Err(e) = conn.await {
@@ -239,12 +299,15 @@ pub async fn proxy_to_guest_stream(
     original_uri: &Uri,
     req: Request<Body>,
 ) -> Result<Response<Body>> {
-    let io = connect_guest(runtime)?;
+    let io = connect_guest(runtime).await?;
 
-    let (mut sender, conn) = http1::Builder::new()
-        .handshake(io)
-        .await
-        .map_err(|e| DockerError::Server(format!("guest docker handshake failed: {e}")))?;
+    let (mut sender, conn) =
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, http1::Builder::new().handshake(io))
+            .await
+            .map_err(|_| {
+                DockerError::from(CommonError::timeout("guest docker handshake timed out"))
+            })?
+            .map_err(|e| DockerError::Server(format!("guest docker handshake failed: {e}")))?;
 
     tokio::spawn(async move {
         if let Err(e) = conn.await {
@@ -302,12 +365,15 @@ pub async fn proxy_with_upgrade(
     mut client_req: axum::http::Request<Body>,
     original_uri: &Uri,
 ) -> Result<Response<Body>> {
-    let io = connect_guest(runtime)?;
+    let io = connect_guest(runtime).await?;
 
-    let (mut sender, conn) = http1::Builder::new()
-        .handshake(io)
-        .await
-        .map_err(|e| DockerError::Server(format!("guest docker handshake failed: {e}")))?;
+    let (mut sender, conn) =
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, http1::Builder::new().handshake(io))
+            .await
+            .map_err(|_| {
+                DockerError::from(CommonError::timeout("guest docker handshake timed out"))
+            })?
+            .map_err(|e| DockerError::Server(format!("guest docker handshake failed: {e}")))?;
 
     // The connection task must keep running for the upgrade to work.
     // `.with_upgrades()` is required so hyper::upgrade::on(response) works.

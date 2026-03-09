@@ -1,0 +1,52 @@
+[workspace]
+# Not publishing to crates.io yet — facade crate dependencies aren't all published.
+publish = false
+# macOS-only codebase; CI publishes from ubuntu — skip build verification.
+publish_no_verify = true
+# Pre-1.0: no semver checking.
+semver_check = false
+# Per-crate tags and GitHub releases are noisy for a 20-crate workspace.
+# Only the facade crate (arcbox) creates a tag and release.
+git_release_enable = false
+git_tag_enable = false
+changelog_update = true
+pr_name = "chore: release v{{ version }}"
+release_commits = "^(feat|fix|perf|refactor|docs|chore)"
+pr_branch_prefix = "release-plz/"
+
+[changelog]
+body = """
+{% for group, commits in commits | group_by(attribute="group") -%}
+### {{ group | upper_first }}
+{%- for commit in commits %}
+- {{ commit.message | upper_first }} ({%- if commit.remote.pr_number -%}[#{{ commit.remote.pr_number }}](https://github.com/arcboxlabs/arcbox/pull/{{ commit.remote.pr_number }}){%- else -%}{{ commit.id | truncate(length=7, end="") }}{%- endif -%})
+{%- endfor %}
+
+{%- endfor %}
+"""
+commit_parsers = [
+    { message = "^feat", group = "Features" },
+    { message = "^fix", group = "Bug Fixes" },
+    { message = "^perf", group = "Performance" },
+    { message = "^refactor", group = "Refactor" },
+    { message = "^docs", group = "Documentation" },
+    { message = "^chore\\(release\\)", skip = true },
+    { message = "^chore: release", skip = true },
+    { message = "^chore", group = "Miscellaneous" },
+]
+
+# ── Facade crate: single tag + GitHub release ────────────────────────
+[[package]]
+name = "arcbox"
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+git_release_enable = true
+git_release_name = "v{{ version }}"
+changelog_path = "CHANGELOG.md"
+
+# ── Guest agent: Linux cross-compile target, not published ───────────
+[[package]]
+name = "arcbox-agent"
+publish = false
+release = false
+changelog_update = false

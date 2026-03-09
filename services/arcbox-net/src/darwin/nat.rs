@@ -190,18 +190,13 @@ impl DarwinNatNetwork {
 
     /// Processes a packet from a guest (TX direction).
     ///
-    /// # Safety
-    ///
-    /// The packet data must be valid.
-    ///
     /// # Errors
     ///
     /// Returns an error if translation fails.
-    pub unsafe fn process_tx_packet(&mut self, packet: &mut [u8]) -> Result<NatResult> {
+    pub fn process_tx_packet(&mut self, packet: &mut [u8]) -> Result<NatResult> {
         self.stats.record_tx(1, packet.len() as u64);
 
-        // Safety: packet data is valid per function contract
-        match unsafe { self.nat_engine.translate(packet, NatDirection::Outbound) } {
+        match self.nat_engine.translate(packet, NatDirection::Outbound) {
             Ok(result) => {
                 if result == NatResult::Translated {
                     self.stats.record_nat_translation(true);
@@ -217,18 +212,13 @@ impl DarwinNatNetwork {
 
     /// Processes a packet to a guest (RX direction).
     ///
-    /// # Safety
-    ///
-    /// The packet data must be valid.
-    ///
     /// # Errors
     ///
     /// Returns an error if translation fails.
-    pub unsafe fn process_rx_packet(&mut self, packet: &mut [u8]) -> Result<NatResult> {
+    pub fn process_rx_packet(&mut self, packet: &mut [u8]) -> Result<NatResult> {
         self.stats.record_rx(1, packet.len() as u64);
 
-        // Safety: packet data is valid per function contract
-        match unsafe { self.nat_engine.translate(packet, NatDirection::Inbound) } {
+        match self.nat_engine.translate(packet, NatDirection::Inbound) {
             Ok(result) => {
                 if result == NatResult::Translated {
                     self.stats.record_nat_translation(false);
