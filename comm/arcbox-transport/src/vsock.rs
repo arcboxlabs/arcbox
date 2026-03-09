@@ -68,9 +68,13 @@ use crate::error::{Result, TransportError};
 use crate::{Transport, TransportListener};
 use async_trait::async_trait;
 use bytes::Bytes;
-
-#[cfg(target_os = "linux")]
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::io;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::pin::Pin;
+use std::task::{Context, Poll, ready};
+use tokio::io::unix::AsyncFd;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::io::{ReadHalf, WriteHalf};
 
 /// Default port for `ArcBox` agent communication.
 pub use arcbox_constants::ports::AGENT_PORT as DEFAULT_AGENT_PORT;
@@ -113,16 +117,147 @@ impl VsockAddr {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// VsockStream
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Async vsock stream.
+///
+/// Wraps a connected vsock file descriptor and implements [`AsyncRead`] +
+/// [`AsyncWrite`] via [`AsyncFd`] (epoll on Linux, kqueue on macOS).
+/// This replaces the previous per-platform busy-polling approach and enables
+/// `tokio::io::split()` for full-duplex use.
+pub struct VsockStream {
+    inner: AsyncFd<OwnedFd>,
+}
+
+impl VsockStream {
+    /// Sets a file descriptor to non-blocking mode.
+    fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+        // SAFETY: fd is valid for the duration of the fcntl calls.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: fd is valid; O_NONBLOCK is a safe flag to set.
+        let ret = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Creates a vsock stream from an [`OwnedFd`].
+    ///
+    /// Sets `O_NONBLOCK` and registers the fd with the tokio reactor.
+    pub fn from_fd(fd: OwnedFd) -> io::Result<Self> {
+        Self::set_nonblocking(fd.as_raw_fd())?;
+        Ok(Self {
+            inner: AsyncFd::new(fd)?,
+        })
+    }
+
+    /// Creates a vsock stream from a raw file descriptor, taking ownership.
+    ///
+    /// # Safety
+    /// The caller must ensure `fd` is a valid connected vsock file descriptor.
+    pub unsafe fn from_raw_fd(fd: RawFd) -> io::Result<Self> {
+        // SAFETY: caller guarantees fd is valid.
+        Self::from_fd(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    /// Returns the raw file descriptor.
+    pub fn as_raw_fd(&self) -> RawFd {
+        self.inner.as_raw_fd()
+    }
+}
+
+impl AsyncRead for VsockStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        loop {
+            let mut guard = ready!(self.inner.poll_read_ready(cx))?;
+            let unfilled = buf.initialize_unfilled();
+            match guard.try_io(|inner| {
+                // SAFETY: fd is valid and owned by AsyncFd for the duration of
+                // this call; `unfilled` is a valid writable buffer slice.
+                let n = unsafe {
+                    libc::read(
+                        inner.as_raw_fd(),
+                        unfilled.as_mut_ptr().cast::<libc::c_void>(),
+                        unfilled.len(),
+                    )
+                };
+                if n < 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(n as usize)
+                }
+            }) {
+                Ok(Ok(n)) => {
+                    buf.advance(n);
+                    return Poll::Ready(Ok(()));
+                }
+                Ok(Err(e)) => return Poll::Ready(Err(e)),
+                Err(_would_block) => {}
+            }
+        }
+    }
+}
+
+impl AsyncWrite for VsockStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        loop {
+            let mut guard = ready!(self.inner.poll_write_ready(cx))?;
+            match guard.try_io(|inner| {
+                // SAFETY: fd is valid and owned by AsyncFd for the duration of
+                // this call; `buf` is a valid readable buffer slice.
+                let n = unsafe {
+                    libc::write(
+                        inner.as_raw_fd(),
+                        buf.as_ptr().cast::<libc::c_void>(),
+                        buf.len(),
+                    )
+                };
+                if n < 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(n as usize)
+                }
+            }) {
+                Ok(result) => return Poll::Ready(result),
+                Err(_would_block) => {}
+            }
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Platform-specific connection setup
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
-    use nix::sys::socket::{
-        AddressFamily, Backlog, SockFlag, SockType, SockaddrLike, accept, bind, connect, listen,
-        socket,
-    };
+    use nix::sys::socket::{AddressFamily, SockFlag, SockType, socket};
     use std::mem;
 
-    /// Raw sockaddr_vm structure for vsock.
+    /// Raw `sockaddr_vm` structure for vsock.
     #[repr(C)]
     struct SockaddrVm {
         svm_family: libc::sa_family_t,
@@ -146,89 +281,6 @@ mod linux {
         }
     }
 
-    /// Vsock stream wrapper.
-    pub struct VsockStream {
-        fd: OwnedFd,
-        async_fd: Option<tokio::io::unix::AsyncFd<std::os::fd::BorrowedFd<'static>>>,
-    }
-
-    impl VsockStream {
-        pub fn from_fd(fd: OwnedFd) -> Result<Self> {
-            Ok(Self { fd, async_fd: None })
-        }
-
-        pub fn as_raw_fd(&self) -> i32 {
-            self.fd.as_raw_fd()
-        }
-
-        /// Sets the socket to non-blocking mode.
-        fn set_nonblocking(&self) -> Result<()> {
-            let flags = unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_GETFL) };
-            if flags < 0 {
-                return Err(TransportError::io(std::io::Error::last_os_error()));
-            }
-            let result = unsafe {
-                libc::fcntl(self.fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK)
-            };
-            if result < 0 {
-                return Err(TransportError::io(std::io::Error::last_os_error()));
-            }
-            Ok(())
-        }
-
-        /// Reads data from the socket.
-        pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-            self.set_nonblocking()?;
-
-            loop {
-                let result = unsafe {
-                    libc::read(
-                        self.fd.as_raw_fd(),
-                        buf.as_mut_ptr().cast::<libc::c_void>(),
-                        buf.len(),
-                    )
-                };
-
-                if result >= 0 {
-                    return Ok(result as usize);
-                }
-
-                let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::WouldBlock {
-                    tokio::task::yield_now().await;
-                    continue;
-                }
-                return Err(TransportError::io(err));
-            }
-        }
-
-        /// Writes data to the socket.
-        pub async fn write(&mut self, buf: &[u8]) -> Result<usize> {
-            self.set_nonblocking()?;
-
-            loop {
-                let result = unsafe {
-                    libc::write(
-                        self.fd.as_raw_fd(),
-                        buf.as_ptr().cast::<libc::c_void>(),
-                        buf.len(),
-                    )
-                };
-
-                if result >= 0 {
-                    return Ok(result as usize);
-                }
-
-                let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::WouldBlock {
-                    tokio::task::yield_now().await;
-                    continue;
-                }
-                return Err(TransportError::io(err));
-            }
-        }
-    }
-
     /// Creates a vsock socket.
     pub fn create_socket() -> Result<OwnedFd> {
         let fd = socket(
@@ -241,13 +293,14 @@ mod linux {
         Ok(fd)
     }
 
-    /// Connects to a vsock address.
+    /// Connects to a vsock address and returns a ready [`VsockStream`].
     pub fn connect_vsock(addr: VsockAddr) -> Result<VsockStream> {
         let fd = create_socket()?;
 
         let sockaddr = SockaddrVm::new(addr.cid, addr.port);
         let sockaddr_ptr = &sockaddr as *const SockaddrVm as *const libc::sockaddr;
 
+        // SAFETY: sockaddr_ptr points to a correctly initialised SockaddrVm.
         let result = unsafe {
             libc::connect(
                 fd.as_raw_fd(),
@@ -257,20 +310,21 @@ mod linux {
         };
 
         if result < 0 {
-            let err = std::io::Error::last_os_error();
+            let err = io::Error::last_os_error();
             return Err(TransportError::ConnectionRefused(err.to_string()));
         }
 
-        VsockStream::from_fd(fd)
+        VsockStream::from_fd(fd).map_err(TransportError::io)
     }
 
-    /// Binds to a vsock port.
+    /// Binds to a vsock port and returns the listening socket fd.
     pub fn bind_vsock(port: u32) -> Result<OwnedFd> {
         let fd = create_socket()?;
 
         let sockaddr = SockaddrVm::new(VsockAddr::CID_ANY, port);
         let sockaddr_ptr = &sockaddr as *const SockaddrVm as *const libc::sockaddr;
 
+        // SAFETY: sockaddr_ptr points to a correctly initialised SockaddrVm.
         let result = unsafe {
             libc::bind(
                 fd.as_raw_fd(),
@@ -278,16 +332,14 @@ mod linux {
                 mem::size_of::<SockaddrVm>() as libc::socklen_t,
             )
         };
-
         if result < 0 {
-            let err = std::io::Error::last_os_error();
-            return Err(TransportError::io(err));
+            return Err(TransportError::io(io::Error::last_os_error()));
         }
 
+        // SAFETY: fd is a valid bound socket.
         let result = unsafe { libc::listen(fd.as_raw_fd(), 128) };
         if result < 0 {
-            let err = std::io::Error::last_os_error();
-            return Err(TransportError::io(err));
+            return Err(TransportError::io(io::Error::last_os_error()));
         }
 
         Ok(fd)
@@ -298,6 +350,7 @@ mod linux {
         let mut sockaddr = SockaddrVm::new(0, 0);
         let mut len = mem::size_of::<SockaddrVm>() as libc::socklen_t;
 
+        // SAFETY: listener_fd is a valid socket; sockaddr is correctly sized.
         let fd = unsafe {
             libc::accept(
                 listener_fd.as_raw_fd(),
@@ -307,21 +360,23 @@ mod linux {
         };
 
         if fd < 0 {
-            let err = std::io::Error::last_os_error();
-            return Err(TransportError::io(err));
+            return Err(TransportError::io(io::Error::last_os_error()));
         }
 
+        // SAFETY: fd was just returned from accept() and is valid.
         let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
         let addr = VsockAddr::new(sockaddr.svm_cid, sockaddr.svm_port);
 
-        Ok((VsockStream::from_fd(owned_fd)?, addr))
+        Ok((
+            VsockStream::from_fd(owned_fd).map_err(TransportError::io)?,
+            addr,
+        ))
     }
 }
 
 #[cfg(target_os = "macos")]
 mod darwin {
     use super::*;
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd as StdOwnedFd, RawFd};
     use tokio::sync::mpsc;
 
     /// Information about an incoming vsock connection.
@@ -335,132 +390,11 @@ mod darwin {
         pub destination_port: u32,
     }
 
-    /// Vsock stream for macOS.
-    ///
-    /// On macOS, vsock connections are obtained through the Virtualization.framework
-    /// via the hypervisor layer. This struct wraps a file descriptor returned from
-    /// `VZVirtioSocketDevice`'s connection.
-    pub struct VsockStream {
-        fd: StdOwnedFd,
-    }
-
-    impl VsockStream {
-        /// Creates a new vsock stream from an existing file descriptor.
-        ///
-        /// On macOS, this fd comes from `DarwinVm::connect_vsock()` which uses
-        /// `VZVirtioSocketDevice` internally.
-        ///
-        /// # Safety
-        /// The caller must ensure the fd is a valid connected vsock fd.
-        pub fn from_raw_fd(fd: RawFd) -> Result<Self> {
-            if fd < 0 {
-                return Err(TransportError::ConnectionRefused(
-                    "Invalid file descriptor".to_string(),
-                ));
-            }
-            Ok(Self {
-                fd: unsafe { StdOwnedFd::from_raw_fd(fd) },
-            })
-        }
-
-        /// Returns the raw file descriptor.
-        pub fn as_raw_fd(&self) -> RawFd {
-            self.fd.as_raw_fd()
-        }
-
-        /// Sets the socket to non-blocking mode.
-        fn set_nonblocking(&self) -> Result<()> {
-            let flags = unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_GETFL) };
-            if flags < 0 {
-                return Err(TransportError::io(std::io::Error::last_os_error()));
-            }
-            let result = unsafe {
-                libc::fcntl(self.fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK)
-            };
-            if result < 0 {
-                return Err(TransportError::io(std::io::Error::last_os_error()));
-            }
-            Ok(())
-        }
-
-        /// Reads data from the socket.
-        pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-            self.set_nonblocking()?;
-
-            loop {
-                let result = unsafe {
-                    libc::read(
-                        self.fd.as_raw_fd(),
-                        buf.as_mut_ptr().cast::<libc::c_void>(),
-                        buf.len(),
-                    )
-                };
-
-                if result >= 0 {
-                    return Ok(result as usize);
-                }
-
-                let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::WouldBlock {
-                    // Yield to allow other tasks to run
-                    tokio::task::yield_now().await;
-                    continue;
-                }
-                return Err(TransportError::io(err));
-            }
-        }
-
-        /// Writes data to the socket.
-        pub async fn write(&mut self, buf: &[u8]) -> Result<usize> {
-            self.set_nonblocking()?;
-
-            loop {
-                let result = unsafe {
-                    libc::write(
-                        self.fd.as_raw_fd(),
-                        buf.as_ptr().cast::<libc::c_void>(),
-                        buf.len(),
-                    )
-                };
-
-                if result >= 0 {
-                    return Ok(result as usize);
-                }
-
-                let err = std::io::Error::last_os_error();
-                if err.kind() == std::io::ErrorKind::WouldBlock {
-                    tokio::task::yield_now().await;
-                    continue;
-                }
-                return Err(TransportError::io(err));
-            }
-        }
-    }
-
     /// On macOS, direct vsock connection is not supported.
-    /// Use `VsockStream::from_raw_fd()` with a fd obtained from the hypervisor layer.
+    /// Use `VsockTransport::from_raw_fd()` with a fd obtained from the hypervisor layer.
     pub fn connect_vsock(_addr: VsockAddr) -> Result<VsockStream> {
-        // On macOS, vsock connections must go through the hypervisor's VZVirtioSocketDevice.
-        // The connection fd should be obtained from DarwinVm::connect_vsock() and then
-        // wrapped using VsockStream::from_raw_fd().
         Err(TransportError::Protocol(
             "macOS vsock requires connection through hypervisor".to_string(),
-        ))
-    }
-
-    /// On macOS, vsock binding is not supported from the host side.
-    /// The guest uses vsock listeners; the host connects to them.
-    #[allow(dead_code)]
-    pub fn bind_vsock(_port: u32) -> Result<StdOwnedFd> {
-        Err(TransportError::Protocol(
-            "vsock bind not supported on macOS host".to_string(),
-        ))
-    }
-
-    #[allow(dead_code)]
-    pub fn accept_vsock(_listener_fd: &StdOwnedFd) -> Result<(VsockStream, VsockAddr)> {
-        Err(TransportError::Protocol(
-            "vsock accept not supported on macOS host".to_string(),
         ))
     }
 
@@ -469,37 +403,6 @@ mod darwin {
     /// On macOS, vsock listening is done through `VZVirtioSocketDevice`.
     /// This handle wraps a channel that receives incoming connections
     /// from the Virtualization.framework layer.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use arcbox_vz::VirtioSocketDevice;
-    /// use arcbox_transport::vsock::{VsockListener, IncomingVsockConnection};
-    /// use tokio::sync::mpsc;
-    ///
-    /// // In arcbox-core or higher layer:
-    /// let device: &VirtioSocketDevice = /* from VM */;
-    /// let vz_listener = device.listen(port)?;
-    ///
-    /// // Create channel for bridging
-    /// let (tx, rx) = mpsc::unbounded_channel();
-    ///
-    /// // Spawn task to forward connections
-    /// tokio::spawn(async move {
-    ///     loop {
-    ///         if let Ok(conn) = vz_listener.accept().await {
-    ///             let _ = tx.send(IncomingVsockConnection {
-    ///                 fd: conn.as_raw_fd(),
-    ///                 source_port: conn.source_port(),
-    ///                 destination_port: conn.destination_port(),
-    ///             });
-    ///         }
-    ///     }
-    /// });
-    ///
-    /// // Create transport listener
-    /// let listener = VsockListener::from_channel(port, rx);
-    /// ```
     #[allow(dead_code)]
     pub struct VsockListenerHandle {
         /// Port number being listened on.
@@ -511,11 +414,6 @@ mod darwin {
     #[allow(dead_code)]
     impl VsockListenerHandle {
         /// Creates a new listener handle from a channel.
-        ///
-        /// # Arguments
-        ///
-        /// * `port` - The port number being listened on
-        /// * `receiver` - Channel receiver for incoming connections from VZ layer
         pub const fn new(
             port: u32,
             receiver: mpsc::UnboundedReceiver<IncomingVsockConnection>,
@@ -529,12 +427,13 @@ mod darwin {
         }
 
         /// Accepts an incoming connection.
-        ///
-        /// Waits for a connection to arrive on the channel.
         pub async fn accept(&mut self) -> Result<(VsockStream, VsockAddr)> {
             match self.receiver.recv().await {
                 Some(conn) => {
-                    let stream = VsockStream::from_raw_fd(conn.fd)?;
+                    // SAFETY: conn.fd comes from VZVirtioSocketDevice and is a
+                    // valid connected vsock file descriptor.
+                    let stream = unsafe { VsockStream::from_raw_fd(conn.fd) }
+                        .map_err(TransportError::io)?;
                     let addr = VsockAddr::new(VsockAddr::CID_ANY, conn.source_port);
                     Ok((stream, addr))
                 }
@@ -546,7 +445,10 @@ mod darwin {
         pub fn try_accept(&mut self) -> Option<Result<(VsockStream, VsockAddr)>> {
             match self.receiver.try_recv() {
                 Ok(conn) => {
-                    let stream = VsockStream::from_raw_fd(conn.fd);
+                    // SAFETY: conn.fd comes from VZVirtioSocketDevice and is a
+                    // valid connected vsock file descriptor.
+                    let stream = unsafe { VsockStream::from_raw_fd(conn.fd) }
+                        .map_err(TransportError::io);
                     match stream {
                         Ok(s) => {
                             let addr = VsockAddr::new(VsockAddr::CID_ANY, conn.source_port);
@@ -564,11 +466,70 @@ mod darwin {
     }
 }
 
-#[cfg(target_os = "linux")]
-use linux::VsockStream;
+// ─────────────────────────────────────────────────────────────────────────────
+// VsockSender / VsockReceiver — full-duplex split types
+// ─────────────────────────────────────────────────────────────────────────────
 
-#[cfg(target_os = "macos")]
-use darwin::VsockStream;
+/// Write half of a split [`VsockTransport`].
+///
+/// Obtained via [`VsockTransport::into_split`]. Owns the write side of the
+/// underlying stream and applies the same length-prefixed framing as
+/// [`VsockTransport::send`].
+pub struct VsockSender {
+    writer: WriteHalf<VsockStream>,
+}
+
+impl VsockSender {
+    /// Sends a framed message.
+    ///
+    /// `data` must already include the wire framing produced by the upper
+    /// layer (e.g. `AgentClient::build_message`).
+    pub async fn send(&mut self, data: Bytes) -> Result<()> {
+        self.writer
+            .write_all(&data)
+            .await
+            .map_err(TransportError::io)
+    }
+}
+
+/// Read half of a split [`VsockTransport`].
+///
+/// Obtained via [`VsockTransport::into_split`]. Owns the read side of the
+/// underlying stream and reads one length-prefixed frame per call, matching
+/// the framing of [`VsockTransport::recv`].
+pub struct VsockReceiver {
+    reader: ReadHalf<VsockStream>,
+}
+
+impl VsockReceiver {
+    /// Receives one framed message.
+    ///
+    /// Returns the complete framed bytes (4-byte BE length prefix + payload),
+    /// matching the format returned by [`VsockTransport::recv`].
+    pub async fn recv(&mut self) -> Result<Bytes> {
+        let mut len_buf = [0u8; 4];
+        self.reader
+            .read_exact(&mut len_buf)
+            .await
+            .map_err(TransportError::io)?;
+        let len = u32::from_be_bytes(len_buf) as usize;
+        tracing::debug!("VsockReceiver::recv: message length={}", len);
+
+        let mut buf = Vec::with_capacity(4 + len);
+        buf.extend_from_slice(&len_buf);
+        let mut payload = vec![0u8; len];
+        self.reader
+            .read_exact(&mut payload)
+            .await
+            .map_err(TransportError::io)?;
+        buf.extend_from_slice(&payload);
+        Ok(Bytes::from(buf))
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VsockTransport
+// ─────────────────────────────────────────────────────────────────────────────
 
 /// Vsock transport for host-guest communication.
 pub struct VsockTransport {
@@ -596,18 +557,8 @@ impl VsockTransport {
     }
 
     /// Creates a transport from an existing stream.
-    #[cfg(target_os = "linux")]
-    pub fn from_stream(stream: VsockStream, addr: VsockAddr) -> Self {
-        Self {
-            addr,
-            stream: Some(stream),
-        }
-    }
-
-    /// Creates a transport from an existing stream (macOS).
-    #[cfg(target_os = "macos")]
     #[must_use]
-    pub const fn from_stream(stream: VsockStream, addr: VsockAddr) -> Self {
+    pub fn from_stream(stream: VsockStream, addr: VsockAddr) -> Self {
         Self {
             addr,
             stream: Some(stream),
@@ -623,19 +574,30 @@ impl VsockTransport {
     /// # Arguments
     /// * `fd` - A connected vsock file descriptor from the hypervisor
     /// * `addr` - The vsock address (for tracking purposes)
-    ///
-    /// # Example
-    /// ```ignore
-    /// let fd = vm.connect_vsock(1024)?;
-    /// let transport = VsockTransport::from_raw_fd(fd, VsockAddr::new(cid, 1024))?;
-    /// ```
     #[cfg(target_os = "macos")]
-    pub fn from_raw_fd(fd: std::os::unix::io::RawFd, addr: VsockAddr) -> Result<Self> {
-        let stream = darwin::VsockStream::from_raw_fd(fd)?;
+    pub fn from_raw_fd(fd: RawFd, addr: VsockAddr) -> Result<Self> {
+        // SAFETY: fd comes from VZVirtioSocketDevice and is a valid connected
+        // vsock file descriptor.
+        let stream = unsafe { VsockStream::from_raw_fd(fd) }.map_err(TransportError::io)?;
         Ok(Self {
             addr,
             stream: Some(stream),
         })
+    }
+
+    /// Splits the transport into independent send and receive halves.
+    ///
+    /// Consumes `self`. The returned [`VsockSender`] and [`VsockReceiver`] can
+    /// be moved into separate tasks for true full-duplex communication without
+    /// locking.
+    ///
+    /// # Errors
+    /// Returns [`TransportError::NotConnected`] if the transport is not
+    /// connected.
+    pub fn into_split(self) -> Result<(VsockSender, VsockReceiver)> {
+        let stream = self.stream.ok_or(TransportError::NotConnected)?;
+        let (reader, writer) = tokio::io::split(stream);
+        Ok((VsockSender { writer }, VsockReceiver { reader }))
     }
 }
 
@@ -668,57 +630,31 @@ impl Transport for VsockTransport {
 
     async fn send(&mut self, data: Bytes) -> Result<()> {
         let stream = self.stream.as_mut().ok_or(TransportError::NotConnected)?;
-
-        // Write data as-is (RPC framing includes length + type + payload).
-        let mut written = 0;
-        while written < data.len() {
-            written += stream.write(&data[written..]).await?;
-        }
-
-        Ok(())
+        // Data already carries the wire framing (length prefix + type + payload).
+        stream.write_all(&data).await.map_err(TransportError::io)
     }
 
     async fn recv(&mut self) -> Result<Bytes> {
         let stream = self.stream.as_mut().ok_or(TransportError::NotConnected)?;
 
-        // Read length prefix (4 bytes, big-endian).
+        // Read 4-byte big-endian length prefix.
         let mut len_buf = [0u8; 4];
-        let mut read = 0;
-        while read < 4 {
-            let n = stream.read(&mut len_buf[read..]).await?;
-            if n == 0 {
-                tracing::debug!("VsockTransport::recv: EOF while reading length prefix");
-                return Err(TransportError::io(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "EOF while reading length prefix",
-                )));
-            }
-            read += n;
-        }
+        stream
+            .read_exact(&mut len_buf)
+            .await
+            .map_err(TransportError::io)?;
         let len = u32::from_be_bytes(len_buf) as usize;
         tracing::debug!("VsockTransport::recv: message length={}", len);
 
-        // Read data and return the full framed message (length + payload).
+        // Return the complete framed message (length prefix + payload) so the
+        // caller can parse the message type without additional allocation.
         let mut buf = Vec::with_capacity(4 + len);
         buf.extend_from_slice(&len_buf);
         let mut payload = vec![0u8; len];
-        read = 0;
-        while read < len {
-            let n = stream.read(&mut payload[read..]).await?;
-            if n == 0 {
-                tracing::debug!(
-                    "VsockTransport::recv: EOF while reading payload, read={}/{}",
-                    read,
-                    len
-                );
-                return Err(TransportError::io(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "EOF while reading payload",
-                )));
-            }
-            read += n;
-        }
-
+        stream
+            .read_exact(&mut payload)
+            .await
+            .map_err(TransportError::io)?;
         buf.extend_from_slice(&payload);
         Ok(Bytes::from(buf))
     }
@@ -727,6 +663,10 @@ impl Transport for VsockTransport {
         self.stream.is_some()
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VsockListener
+// ─────────────────────────────────────────────────────────────────────────────
 
 /// Vsock listener for accepting connections.
 ///
@@ -764,51 +704,6 @@ impl VsockListener {
     /// On macOS, vsock listening is done through `VZVirtioSocketDevice`.
     /// This method creates a listener that receives connections from a channel
     /// bridged to the Virtualization.framework layer.
-    ///
-    /// # Arguments
-    ///
-    /// * `port` - The port number being listened on
-    /// * `receiver` - Channel receiver for incoming connections
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use arcbox_vz::VirtioSocketDevice;
-    /// use arcbox_transport::vsock::{VsockListener, IncomingVsockConnection};
-    /// use tokio::sync::mpsc;
-    ///
-    /// // Get socket device from running VM
-    /// let device: &VirtioSocketDevice = &vm.socket_devices()[0];
-    ///
-    /// // Create VZ listener
-    /// let mut vz_listener = device.listen(port)?;
-    ///
-    /// // Create channel for bridging
-    /// let (tx, rx) = mpsc::unbounded_channel();
-    ///
-    /// // Spawn task to forward connections
-    /// tokio::spawn(async move {
-    ///     loop {
-    ///         match vz_listener.accept().await {
-    ///             Ok(conn) => {
-    ///                 let incoming = IncomingVsockConnection {
-    ///                     fd: conn.into_raw_fd(),
-    ///                     source_port: conn.source_port(),
-    ///                     destination_port: conn.destination_port(),
-    ///                 };
-    ///                 if tx.send(incoming).is_err() {
-    ///                     break;
-    ///                 }
-    ///             }
-    ///             Err(_) => break,
-    ///         }
-    ///     }
-    /// });
-    ///
-    /// // Create transport listener
-    /// let mut listener = VsockListener::from_channel(port, rx);
-    /// let transport = listener.accept().await?;
-    /// ```
     #[cfg(target_os = "macos")]
     #[must_use]
     pub const fn from_channel(
@@ -847,9 +742,6 @@ impl TransportListener for VsockListener {
 
         #[cfg(target_os = "macos")]
         {
-            // On macOS, binding is done through VZVirtioSocketDevice.
-            // If a handle was provided via from_channel(), we're already "bound".
-            // Otherwise, return an error explaining the correct usage.
             if self.handle.is_none() {
                 return Err(TransportError::Protocol(
                     "macOS vsock requires VZVirtioSocketDevice. Use VsockListener::from_channel() \
@@ -928,6 +820,12 @@ mod tests {
         assert!(!transport.is_connected());
     }
 
+    #[test]
+    fn test_into_split_not_connected() {
+        let transport = VsockTransport::new(VsockAddr::host(1234));
+        assert!(transport.into_split().is_err());
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn test_vsock_listener_from_channel() {
@@ -937,7 +835,6 @@ mod tests {
         let listener = VsockListener::from_channel(1024, rx);
         assert_eq!(listener.port(), 1024);
 
-        // Channel can send connections
         let conn = IncomingVsockConnection {
             fd: 42,
             source_port: 2000,
