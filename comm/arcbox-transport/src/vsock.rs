@@ -191,17 +191,22 @@ impl AsyncRead for VsockStream {
             match guard.try_io(|inner| {
                 // SAFETY: fd is valid and owned by AsyncFd for the duration of
                 // this call; `unfilled` is a valid writable buffer slice.
-                let n = unsafe {
-                    libc::read(
-                        inner.as_raw_fd(),
-                        unfilled.as_mut_ptr().cast::<libc::c_void>(),
-                        unfilled.len(),
-                    )
-                };
-                if n < 0 {
-                    Err(io::Error::last_os_error())
-                } else {
-                    Ok(n as usize)
+                loop {
+                    let n = unsafe {
+                        libc::read(
+                            inner.as_raw_fd(),
+                            unfilled.as_mut_ptr().cast::<libc::c_void>(),
+                            unfilled.len(),
+                        )
+                    };
+                    if n >= 0 {
+                        return Ok(n as usize);
+                    }
+                    let err = io::Error::last_os_error();
+                    if err.kind() != io::ErrorKind::Interrupted {
+                        return Err(err);
+                    }
+                    // EINTR: retry the syscall immediately.
                 }
             }) {
                 Ok(Ok(n)) => {
@@ -226,17 +231,22 @@ impl AsyncWrite for VsockStream {
             match guard.try_io(|inner| {
                 // SAFETY: fd is valid and owned by AsyncFd for the duration of
                 // this call; `buf` is a valid readable buffer slice.
-                let n = unsafe {
-                    libc::write(
-                        inner.as_raw_fd(),
-                        buf.as_ptr().cast::<libc::c_void>(),
-                        buf.len(),
-                    )
-                };
-                if n < 0 {
-                    Err(io::Error::last_os_error())
-                } else {
-                    Ok(n as usize)
+                loop {
+                    let n = unsafe {
+                        libc::write(
+                            inner.as_raw_fd(),
+                            buf.as_ptr().cast::<libc::c_void>(),
+                            buf.len(),
+                        )
+                    };
+                    if n >= 0 {
+                        return Ok(n as usize);
+                    }
+                    let err = io::Error::last_os_error();
+                    if err.kind() != io::ErrorKind::Interrupted {
+                        return Err(err);
+                    }
+                    // EINTR: retry the syscall immediately.
                 }
             }) {
                 Ok(result) => return Poll::Ready(result),
@@ -257,7 +267,14 @@ impl AsyncWrite for VsockStream {
                 // sends FIN to the peer without closing the read side.
                 let ret = unsafe { libc::shutdown(inner.as_raw_fd(), libc::SHUT_WR) };
                 if ret < 0 {
-                    Err(io::Error::last_os_error())
+                    let err = io::Error::last_os_error();
+                    // Treat already-shutdown or not-connected sockets as
+                    // successfully shut down to make the operation idempotent.
+                    if matches!(err.raw_os_error(), Some(libc::ENOTCONN | libc::EINVAL)) {
+                        Ok(())
+                    } else {
+                        Err(err)
+                    }
                 } else {
                     Ok(())
                 }
@@ -373,11 +390,13 @@ mod linux {
         let mut len = mem::size_of::<SockaddrVm>() as libc::socklen_t;
 
         // SAFETY: listener_fd is a valid socket; sockaddr is correctly sized.
+        // Use accept4 with SOCK_CLOEXEC to prevent fd leaks into child processes.
         let fd = unsafe {
-            libc::accept(
+            libc::accept4(
                 listener_fd.as_raw_fd(),
                 &mut sockaddr as *mut SockaddrVm as *mut libc::sockaddr,
                 &mut len,
+                libc::SOCK_CLOEXEC,
             )
         };
 
@@ -385,7 +404,7 @@ mod linux {
             return Err(TransportError::io(io::Error::last_os_error()));
         }
 
-        // SAFETY: fd was just returned from accept() and is valid.
+        // SAFETY: fd was just returned from accept4() and is valid.
         let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
         let addr = VsockAddr::new(sockaddr.svm_cid, sockaddr.svm_port);
 
@@ -489,14 +508,47 @@ mod darwin {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Shared framing helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Reads one length-prefixed frame from `reader`.
+///
+/// Returns the complete framed bytes (4-byte BE length prefix + payload).
+/// Rejects frames larger than [`MAX_FRAME_SIZE`] before allocating.
+async fn read_framed<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Bytes> {
+    // Read 4-byte big-endian length prefix.
+    let mut len_buf = [0u8; 4];
+    reader
+        .read_exact(&mut len_buf)
+        .await
+        .map_err(TransportError::io)?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_FRAME_SIZE {
+        return Err(TransportError::Protocol(format!(
+            "frame too large: {len} bytes (max {MAX_FRAME_SIZE})"
+        )));
+    }
+    tracing::debug!("vsock read_framed: message length={}", len);
+
+    // Single allocation: length prefix + payload.
+    let mut buf = vec![0u8; 4 + len];
+    buf[..4].copy_from_slice(&len_buf);
+    reader
+        .read_exact(&mut buf[4..])
+        .await
+        .map_err(TransportError::io)?;
+    Ok(Bytes::from(buf))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // VsockSender / VsockReceiver — full-duplex split types
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Write half of a split [`VsockTransport`].
 ///
 /// Obtained via [`VsockTransport::into_split`]. Owns the write side of the
-/// underlying stream and applies the same length-prefixed framing as
-/// [`VsockTransport::send`].
+/// underlying stream. The caller is responsible for providing already-framed
+/// data (e.g. from `AgentClient::build_message`).
 pub struct VsockSender {
     writer: WriteHalf<VsockStream>,
 }
@@ -529,28 +581,7 @@ impl VsockReceiver {
     /// Returns the complete framed bytes (4-byte BE length prefix + payload),
     /// matching the format returned by [`VsockTransport::recv`].
     pub async fn recv(&mut self) -> Result<Bytes> {
-        let mut len_buf = [0u8; 4];
-        self.reader
-            .read_exact(&mut len_buf)
-            .await
-            .map_err(TransportError::io)?;
-        let len = u32::from_be_bytes(len_buf) as usize;
-        if len > MAX_FRAME_SIZE {
-            return Err(TransportError::Protocol(format!(
-                "frame too large: {len} bytes (max {MAX_FRAME_SIZE})"
-            )));
-        }
-        tracing::debug!("VsockReceiver::recv: message length={}", len);
-
-        let mut buf = Vec::with_capacity(4 + len);
-        buf.extend_from_slice(&len_buf);
-        let mut payload = vec![0u8; len];
-        self.reader
-            .read_exact(&mut payload)
-            .await
-            .map_err(TransportError::io)?;
-        buf.extend_from_slice(&payload);
-        Ok(Bytes::from(buf))
+        read_framed(&mut self.reader).await
     }
 }
 
@@ -603,8 +634,14 @@ impl VsockTransport {
     /// * `addr` - The vsock address (for tracking purposes)
     #[cfg(target_os = "macos")]
     pub fn from_raw_fd(fd: RawFd, addr: VsockAddr) -> Result<Self> {
-        // SAFETY: fd comes from VZVirtioSocketDevice and is a valid connected
-        // vsock file descriptor.
+        if fd < 0 {
+            return Err(TransportError::io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid raw vsock file descriptor",
+            )));
+        }
+        // SAFETY: fd has been validated to be non-negative and is expected to
+        // be a valid connected vsock file descriptor from VZVirtioSocketDevice.
         let stream = unsafe { VsockStream::from_raw_fd(fd) }.map_err(TransportError::io)?;
         Ok(Self {
             addr,
@@ -615,8 +652,9 @@ impl VsockTransport {
     /// Splits the transport into independent send and receive halves.
     ///
     /// Consumes `self`. The returned [`VsockSender`] and [`VsockReceiver`] can
-    /// be moved into separate tasks for true full-duplex communication without
-    /// locking.
+    /// be moved into separate tasks for full-duplex communication. Tokio may
+    /// use internal synchronization to coordinate access to the underlying
+    /// stream.
     ///
     /// # Errors
     /// Returns [`TransportError::NotConnected`] if the transport is not
@@ -663,32 +701,7 @@ impl Transport for VsockTransport {
 
     async fn recv(&mut self) -> Result<Bytes> {
         let stream = self.stream.as_mut().ok_or(TransportError::NotConnected)?;
-
-        // Read 4-byte big-endian length prefix.
-        let mut len_buf = [0u8; 4];
-        stream
-            .read_exact(&mut len_buf)
-            .await
-            .map_err(TransportError::io)?;
-        let len = u32::from_be_bytes(len_buf) as usize;
-        if len > MAX_FRAME_SIZE {
-            return Err(TransportError::Protocol(format!(
-                "frame too large: {len} bytes (max {MAX_FRAME_SIZE})"
-            )));
-        }
-        tracing::debug!("VsockTransport::recv: message length={}", len);
-
-        // Return the complete framed message (length prefix + payload) so the
-        // caller can parse the message type without additional allocation.
-        let mut buf = Vec::with_capacity(4 + len);
-        buf.extend_from_slice(&len_buf);
-        let mut payload = vec![0u8; len];
-        stream
-            .read_exact(&mut payload)
-            .await
-            .map_err(TransportError::io)?;
-        buf.extend_from_slice(&payload);
-        Ok(Bytes::from(buf))
+        read_framed(stream).await
     }
 
     fn is_connected(&self) -> bool {
