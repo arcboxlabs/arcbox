@@ -719,7 +719,7 @@ mod linux {
         payload: &[u8],
     ) -> anyhow::Result<()>
     where
-        S: tokio::io::AsyncWrite + Unpin,
+        S: AsyncRead + AsyncWrite + Unpin,
     {
         let svc = match sandbox_service() {
             Some(s) => Arc::clone(s),
@@ -809,11 +809,10 @@ mod linux {
                 handle_sandbox_events(stream, &svc, trace_id, payload).await?;
             }
             // -----------------------------------------------------------------
-            // Exec: not yet implemented
+            // Streaming: Exec
             // -----------------------------------------------------------------
             MessageType::SandboxExecRequest => {
-                send_sandbox_error(stream, trace_id, 501, "SandboxExec not yet implemented")
-                    .await?;
+                handle_sandbox_exec(stream, &svc, trace_id, payload).await?;
             }
             // -----------------------------------------------------------------
             // Snapshots
@@ -931,6 +930,87 @@ mod linux {
 
         while let Some(encoded) = rx.recv().await {
             write_message(stream, MessageType::SandboxEvent, trace_id, &encoded).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Bridge a `SandboxExecRequest` between the host vsock stream and the
+    /// vm-agent.
+    ///
+    /// The host sends [`MessageType::SandboxExecInput`] frames carrying raw
+    /// stdin bytes; an empty payload signals EOF on stdin.  The agent forwards
+    /// [`MessageType::SandboxExecOutput`] frames (stdout / stderr / exit) back
+    /// to the host until the process terminates.
+    async fn handle_sandbox_exec<S>(
+        stream: &mut S,
+        svc: &SandboxService,
+        trace_id: &str,
+        payload: &[u8],
+    ) -> anyhow::Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        use arcbox_vm::ExecInputMsg;
+
+        let (in_tx, mut out_rx) = match svc.exec(payload).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                send_sandbox_error(stream, trace_id, 500, &e).await?;
+                return Ok(());
+            }
+        };
+
+        loop {
+            tokio::select! {
+                // Output from vm-agent → host.
+                encoded_opt = out_rx.recv() => {
+                    match encoded_opt {
+                        None => break, // output channel closed
+                        Some(encoded) => {
+                            // The last frame has done==true; check before writing
+                            // so we can break after sending it.
+                            use prost::Message as _;
+                            let done = arcbox_protocol::sandbox_v1::ExecOutput::decode(
+                                encoded.as_slice(),
+                            )
+                            .map(|m| m.done)
+                            .unwrap_or(false);
+                            write_message(
+                                stream,
+                                MessageType::SandboxExecOutput,
+                                trace_id,
+                                &encoded,
+                            )
+                            .await?;
+                            if done {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Input from host → vm-agent.
+                read_result = read_message(stream) => {
+                    match read_result {
+                        Err(_) => {
+                            // Host stream closed; signal EOF to the process.
+                            let _ = in_tx.send(ExecInputMsg::Eof).await;
+                            break;
+                        }
+                        Ok((MessageType::SandboxExecInput, _, data)) => {
+                            if data.is_empty() {
+                                let _ = in_tx.send(ExecInputMsg::Eof).await;
+                            } else {
+                                let _ = in_tx.send(ExecInputMsg::Stdin(data)).await;
+                            }
+                        }
+                        Ok(_) => {
+                            // Unexpected message type during exec; ignore.
+                        }
+                    }
+                }
+            }
         }
 
         Ok(())
