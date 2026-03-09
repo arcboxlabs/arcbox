@@ -200,18 +200,32 @@ impl DockerToolManager {
         }
 
         // Create a secure temp file in the install dir (randomized name,
-        // no symlink following).
+        // O_CREAT|O_EXCL). Copy into the already-open handle to avoid TOCTOU
+        // symlink races on the temp path.
         let tmp =
             tempfile::NamedTempFile::new_in(&self.install_dir).map_err(DockerToolError::Io)?;
-        let tmp_path = tmp.path().to_path_buf();
-        // Keep the file open for its lifetime; we'll persist via rename.
-        let _tmp = tmp.into_temp_path();
-
-        if let Err(e) = tokio::fs::copy(&src, &tmp_path).await {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            info!(tool = %tool.name, error = %e, "bundle copy failed, will download");
-            return Ok(false);
+        {
+            use tokio::io::AsyncWriteExt;
+            let src_bytes = tokio::fs::read(&src).await;
+            match src_bytes {
+                Ok(bytes) => {
+                    let std_file = tmp.as_file().try_clone().map_err(DockerToolError::Io)?;
+                    let mut async_file = tokio::fs::File::from_std(std_file);
+                    if let Err(e) = async_file.write_all(&bytes).await {
+                        let _ = tmp.close();
+                        info!(tool = %tool.name, error = %e, "bundle copy failed, will download");
+                        return Ok(false);
+                    }
+                    async_file.flush().await.map_err(DockerToolError::Io)?;
+                }
+                Err(e) => {
+                    let _ = tmp.close();
+                    info!(tool = %tool.name, error = %e, "bundle read failed, will download");
+                    return Ok(false);
+                }
+            }
         }
+        let tmp_path = tmp.into_temp_path();
 
         // Verify the bundled binary.
         match format {
@@ -220,12 +234,12 @@ impl DockerToolManager {
                 match sha256_file(&tmp_path).await {
                     Ok(actual) if actual == expected_sha => {}
                     Ok(_) => {
-                        let _ = tokio::fs::remove_file(&tmp_path).await;
+                        let _ = tmp_path.close();
                         info!(tool = %tool.name, "bundle checksum mismatch, will download");
                         return Ok(false);
                     }
                     Err(_) => {
-                        let _ = tokio::fs::remove_file(&tmp_path).await;
+                        let _ = tmp_path.close();
                         info!(tool = %tool.name, "bundle checksum read failed, will download");
                         return Ok(false);
                     }
@@ -239,12 +253,12 @@ impl DockerToolManager {
                 match tokio::fs::read_to_string(&checksum_path).await {
                     Ok(contents) if contents.trim() == expected_sha => {}
                     Ok(_) => {
-                        let _ = tokio::fs::remove_file(&tmp_path).await;
+                        let _ = tmp_path.close();
                         info!(tool = %tool.name, "bundle archive checksum mismatch, will download");
                         return Ok(false);
                     }
                     Err(_) => {
-                        let _ = tokio::fs::remove_file(&tmp_path).await;
+                        let _ = tmp_path.close();
                         info!(tool = %tool.name, "bundle checksum file missing, will download");
                         return Ok(false);
                     }
@@ -252,10 +266,9 @@ impl DockerToolManager {
             }
         }
 
-        // Atomic rename into place.
-        if let Err(e) = tokio::fs::rename(&tmp_path, dest).await {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            info!(tool = %tool.name, error = %e, "bundle rename failed, will download");
+        // Atomic persist into final destination.
+        if let Err(e) = tmp_path.persist(dest) {
+            info!(tool = %tool.name, error = %e, "bundle persist failed, will download");
             return Ok(false);
         }
 
@@ -293,9 +306,16 @@ impl DockerToolManager {
                 }
                 ArtifactFormat::Tgz => {
                     let sidecar = self.install_dir.join(format!("{}.sha256", tool.name));
-                    let content = tokio::fs::read_to_string(&sidecar)
-                        .await
-                        .map_err(DockerToolError::Io)?;
+                    let content = match tokio::fs::read_to_string(&sidecar).await {
+                        Ok(content) => content,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            // Missing sidecar means an older install that didn't
+                            // create one — treat as not installed so callers can
+                            // trigger a reinstall.
+                            return Err(DockerToolError::NotInstalled(tool.name.clone()));
+                        }
+                        Err(e) => return Err(DockerToolError::Io(e)),
+                    };
                     if content.trim() != expected_sha {
                         return Err(DockerToolError::Asset(
                             arcbox_asset::AssetError::ChecksumMismatch {
