@@ -13,6 +13,7 @@
 pub mod error;
 pub mod grpc;
 pub mod rest;
+pub mod sandbox;
 
 // Sandbox service: platform-split implementations.
 #[cfg(target_os = "linux")]

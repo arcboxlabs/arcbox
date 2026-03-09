@@ -260,7 +260,12 @@ async fn start_rest_server(
 
     info!(socket = %socket_path.display(), "REST API server listening");
 
-    let router = arcbox_api::rest::router(runtime);
+    let dispatcher = arcbox_api::sandbox::SandboxDispatcher::new(Arc::clone(&runtime));
+    let app_state = Arc::new(arcbox_api::sandbox::AppState {
+        runtime,
+        dispatcher,
+    });
+    let router = arcbox_api::rest::router(app_state);
 
     let handle = tokio::spawn(async move {
         loop {

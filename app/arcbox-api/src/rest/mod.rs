@@ -8,13 +8,13 @@
 
 mod handlers;
 mod sse;
-mod types;
+pub(crate) mod types;
 
-use arcbox_core::Runtime;
+use crate::sandbox::AppState;
 use axum::Router;
 use std::sync::Arc;
 
 /// Builds the complete REST API router.
-pub fn router(runtime: Arc<Runtime>) -> Router {
-    Router::new().nest("/v1", handlers::v1_routes(runtime))
+pub fn router(state: Arc<AppState>) -> Router {
+    Router::new().nest("/v1", handlers::v1_routes(state))
 }
