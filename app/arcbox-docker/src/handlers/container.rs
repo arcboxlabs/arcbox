@@ -136,20 +136,16 @@ pub async fn restart_container(
     // and resolving after ensures the VM is ready (proxy calls ensure_vm_ready).
     if response.status().as_u16() == 204 {
         if let Some(canonical) = resolve_canonical_from_uri(&state, &uri).await {
-            // Inspect first to get fresh config. Only tear down old networking
-            // after a successful inspect — avoids leaving the container
-            // unreachable when a transient inspect failure follows a restart.
+            // Port forwarding targets the guest VM (not the container IP) and
+            // `docker restart` never changes port bindings, so forwarding
+            // rules survive a restart and do not need to be rebuilt.
+            //
+            // Only refresh DNS — the container may get a new IP after restart.
             if let Some(body_bytes) = inspect_container_body(&state, &canonical).await {
-                let cid = canonical_id_or_fallback(&canonical, &body_bytes);
-                // Stop old port forwarding (must precede re-bind to free ports).
-                state.runtime.stop_port_forwarding_by_id(&cid).await;
-                // Set up fresh port forwarding + DNS (register_dns overwrites).
-                setup_port_forwarding_from_inspect(&state, &cid, &body_bytes).await;
                 if let Some((name, ip)) = extract_container_dns_info(&body_bytes) {
-                    state.runtime.register_dns(&cid, &name, ip).await;
+                    state.runtime.register_dns(&canonical, &name, ip).await;
                 }
             }
-            // If inspect failed, keep old networking intact.
         }
     }
 
