@@ -131,17 +131,14 @@ pub async fn restart_container(
 ) -> Result<Response> {
     let response = proxy(&state, &uri, req).await?;
 
-    // Docker restart returns 204 on success.
-    // Resolve canonical ID after proxy — restart doesn't have --rm auto-remove,
-    // and resolving after ensures the VM is ready (proxy calls ensure_vm_ready).
+    // Docker restart returns 204 on success. Refresh DNS (container may get
+    // a new IP) with a single inspect call for both canonical ID and DNS info.
+    // Port forwarding targets the guest VM and survives container restarts.
     if response.status().as_u16() == 204 {
-        if let Some(canonical) = resolve_canonical_from_uri(&state, &uri).await {
-            // Port forwarding targets the guest VM (not the container IP) and
-            // `docker restart` never changes port bindings, so forwarding
-            // rules survive a restart and do not need to be rebuilt.
-            //
-            // Only refresh DNS — the container may get a new IP after restart.
-            if let Some(body_bytes) = inspect_container_body(&state, &canonical).await {
+        if let Some(id) = extract_container_id(&uri) {
+            let _ = state.runtime.ensure_vm_ready().await;
+            if let Some(body_bytes) = inspect_container_body(&state, &id).await {
+                let canonical = canonical_id_or_fallback(&id, &body_bytes);
                 if let Some((name, ip)) = extract_container_dns_info(&body_bytes) {
                     state.runtime.register_dns(&canonical, &name, ip).await;
                 }
