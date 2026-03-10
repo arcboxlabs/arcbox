@@ -119,7 +119,7 @@ pub async fn kill_container(
     Ok(response)
 }
 
-/// Restart a container, refreshing its port forwarding + DNS.
+/// Restart a container and refresh its DNS entry.
 ///
 /// # Errors
 ///
