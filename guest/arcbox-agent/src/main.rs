@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "arcbox_agent=info".into()),
         )
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_ansi(false))
         .init();
 
     // PID 1 path: agent was exec'd by busybox trampoline on EROFS rootfs.
