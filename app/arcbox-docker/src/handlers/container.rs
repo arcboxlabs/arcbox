@@ -103,11 +103,6 @@ pub async fn kill_container(
     OriginalUri(uri): OriginalUri,
     req: Request<Body>,
 ) -> Result<Response> {
-    // Ensure VM is ready before resolving — resolve_canonical_from_uri uses
-    // proxy_to_guest directly (no ensure_vm_ready), so without this the
-    // canonical lookup could fail and silently skip networking teardown.
-    let _ = state.runtime.ensure_vm_ready().await;
-
     // Resolve canonical ID before proxy — kill with --rm triggers auto-remove.
     let canonical = resolve_canonical_from_uri(&state, &uri).await;
 
@@ -124,7 +119,7 @@ pub async fn kill_container(
     Ok(response)
 }
 
-/// Restart a container, refreshing its port forwarding + DNS.
+/// Restart a container and refresh its DNS entry.
 ///
 /// # Errors
 ///
@@ -136,16 +131,18 @@ pub async fn restart_container(
 ) -> Result<Response> {
     let response = proxy(&state, &uri, req).await?;
 
-    // Docker restart returns 204 on success.
-    // Resolve canonical ID after proxy — restart doesn't have --rm auto-remove,
-    // and resolving after ensures the VM is ready (proxy calls ensure_vm_ready).
+    // Docker restart returns 204 on success. Refresh DNS (container may get
+    // a new IP) with a single inspect call for both canonical ID and DNS info.
+    // Port forwarding targets the guest VM and survives container restarts.
     if response.status().as_u16() == 204 {
-        if let Some(canonical) = resolve_canonical_from_uri(&state, &uri).await {
-            // Tear down stale networking.
-            state.runtime.stop_port_forwarding_by_id(&canonical).await;
-            state.runtime.deregister_dns_by_id(&canonical).await;
-            // Re-inspect for fresh IP/ports and set up new networking.
-            setup_container_networking(&state, &canonical).await;
+        if let Some(id) = extract_container_id(&uri) {
+            let _ = state.runtime.ensure_vm_ready().await;
+            if let Some(body_bytes) = inspect_container_body(&state, &id).await {
+                let canonical = canonical_id_or_fallback(&id, &body_bytes);
+                if let Some((name, ip)) = extract_container_dns_info(&body_bytes) {
+                    state.runtime.register_dns(&canonical, &name, ip).await;
+                }
+            }
         }
     }
 
@@ -385,8 +382,13 @@ fn canonical_id_or_fallback(container_id: &str, inspect_json: &[u8]) -> String {
 /// canonical full ID. Returns `None` (with a warning) when canonical
 /// resolution fails, so callers skip teardown rather than using a
 /// potentially wrong key (name/short-id).
+///
+/// Ensures VM readiness first, since [`resolve_canonical_id`] uses
+/// `proxy_to_guest` directly (which does not call `ensure_vm_ready`).
 async fn resolve_canonical_from_uri(state: &AppState, uri: &Uri) -> Option<String> {
     let id = extract_container_id(uri)?;
+    // Ensure the VM is reachable before attempting the inspect call.
+    let _ = state.runtime.ensure_vm_ready().await;
     match resolve_canonical_id(state, &id).await {
         Some(canonical) => Some(canonical),
         None => {
