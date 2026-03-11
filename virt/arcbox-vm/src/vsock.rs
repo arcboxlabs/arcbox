@@ -24,6 +24,7 @@
 //! | 0x02 | Host→Agent  | raw stdin bytes                  |
 //! | 0x03 | Host→Agent  | `[u16 LE width][u16 LE height]`  |
 //! | 0x04 | Host→Agent  | empty — signals stdin EOF        |
+//! | 0x05 | Host→Agent  | `[i64 LE secs][u32 LE nanos]`    |
 //! | 0x10 | Agent→Host  | raw stdout bytes                 |
 //! | 0x11 | Agent→Host  | raw stderr bytes                 |
 //! | 0x12 | Agent→Host  | `[i32 LE exit_code]`             |
@@ -40,22 +41,25 @@ use tracing::warn;
 
 use crate::error::{Result, VmmError};
 
-/// Guest-side vsock port the agent listens on.
+/// Guest-side vsock port the agent listens on (exec channel).
 pub const AGENT_PORT: u32 = 52;
 
-// Frame type constants — Host → Agent.
+// Frame type constants — Host → Agent (exec channel).
 const MSG_START: u8 = 0x01;
 const MSG_STDIN: u8 = 0x02;
 const MSG_RESIZE: u8 = 0x03;
 const MSG_EOF: u8 = 0x04;
+/// Synchronise the guest clock to the host after snapshot restore.
+/// Payload: `[i64 LE unix_seconds][u32 LE nanos]` (12 bytes).
+pub(crate) const MSG_CLOCK_SYNC: u8 = 0x05;
 
-// Frame type constants — Agent → Host.
+// Frame type constants — Agent → Host (exec channel).
 const MSG_STDOUT: u8 = 0x10;
 const MSG_STDERR: u8 = 0x11;
 const MSG_EXIT: u8 = 0x12;
 
 /// Maximum allowed frame payload size (16 MiB).
-const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 
 // =============================================================================
 // Public types
@@ -105,7 +109,7 @@ const AGENT_READY_TIMEOUT: Duration = Duration::from_secs(30);
 /// Interval between vsock connection attempts while the guest is still booting.
 const AGENT_READY_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
-/// Open a host-initiated vsock connection to the guest agent.
+/// Open a host-initiated vsock connection to the guest agent (port 52).
 ///
 /// Retries the `CONNECT` handshake until the guest agent accepts or
 /// [`AGENT_READY_TIMEOUT`] elapses.  Firecracker responds with "connection
@@ -113,16 +117,24 @@ const AGENT_READY_POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// still booting / vm-agent not started), so that response is treated as a
 /// transient error and retried.
 async fn connect_to_agent(uds_path: &Path) -> Result<UnixStream> {
+    connect_to_port(uds_path, AGENT_PORT).await
+}
+
+/// Open a host-initiated vsock connection to an arbitrary guest port.
+///
+/// Same retry semantics as [`connect_to_agent`].  Used by the file I/O and
+/// port-forward modules which operate on different vsock ports.
+pub(crate) async fn connect_to_port(uds_path: &Path, port: u32) -> Result<UnixStream> {
     let deadline = tokio::time::Instant::now() + AGENT_READY_TIMEOUT;
     loop {
-        match try_vsock_handshake(uds_path).await {
+        match try_vsock_handshake(uds_path, port).await {
             Ok(stream) => return Ok(stream),
             Err(VmmError::Vsock(ref msg)) if msg.contains("connection closed") => {}
             Err(e) => return Err(e),
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(VmmError::Vsock(format!(
-                "guest agent on {} did not become ready within {}s",
+                "vsock port {port} on {} did not become ready within {}s",
                 uds_path.display(),
                 AGENT_READY_TIMEOUT.as_secs(),
             )));
@@ -133,14 +145,14 @@ async fn connect_to_agent(uds_path: &Path) -> Result<UnixStream> {
 
 /// Single attempt: connect to the Firecracker vsock UDS and complete the
 /// `CONNECT {port}` / `OK` handshake.
-async fn try_vsock_handshake(uds_path: &Path) -> Result<UnixStream> {
+async fn try_vsock_handshake(uds_path: &Path, port: u32) -> Result<UnixStream> {
     let mut stream = UnixStream::connect(uds_path)
         .await
         .map_err(|e| VmmError::Vsock(format!("connect to {}: {e}", uds_path.display())))?;
 
     // Firecracker vsock host-initiated handshake.
     stream
-        .write_all(format!("CONNECT {AGENT_PORT}\n").as_bytes())
+        .write_all(format!("CONNECT {port}\n").as_bytes())
         .await
         .map_err(|e| VmmError::Vsock(format!("vsock CONNECT write: {e}")))?;
 
@@ -174,7 +186,7 @@ async fn try_vsock_handshake(uds_path: &Path) -> Result<UnixStream> {
 }
 
 /// Write a single frame to any `AsyncWrite`.
-async fn write_frame<W: AsyncWriteExt + Unpin>(
+pub(crate) async fn write_frame<W: AsyncWriteExt + Unpin>(
     w: &mut W,
     msg_type: u8,
     payload: &[u8],
@@ -197,7 +209,9 @@ async fn write_frame<W: AsyncWriteExt + Unpin>(
 }
 
 /// Read a single frame from any `AsyncRead`.
-async fn read_frame<R: AsyncReadExt + Unpin>(r: &mut R) -> std::io::Result<(u8, Vec<u8>)> {
+pub(crate) async fn read_frame<R: AsyncReadExt + Unpin>(
+    r: &mut R,
+) -> std::io::Result<(u8, Vec<u8>)> {
     let msg_type = r.read_u8().await?;
     let len = r.read_u32_le().await? as usize;
     if len > MAX_FRAME_SIZE {
@@ -360,6 +374,72 @@ pub async fn exec(
     Ok((in_tx, out_rx))
 }
 
+// =============================================================================
+// sync_clock() — synchronise guest clock after snapshot restore
+// =============================================================================
+
+/// Synchronise the guest clock to the current host time.
+///
+/// Sends [`MSG_CLOCK_SYNC`] to the exec channel (vsock port 52) and waits for
+/// `MSG_EXIT(0)`.  Should be called immediately after `restore_sandbox()`
+/// completes so the guest does not run with a stale timestamp from snapshot
+/// creation time.
+pub async fn sync_clock(uds_path: &Path) -> Result<()> {
+    let mut stream = connect_to_agent(uds_path).await?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| VmmError::Vsock(format!("system time error: {e}")))?;
+
+    let secs = i64::try_from(now.as_secs())
+        .map_err(|e| VmmError::Vsock(format!("unix timestamp overflow: {e}")))?;
+    let nanos = now.subsec_nanos();
+
+    sync_clock_on_stream(&mut stream, secs, nanos).await
+}
+
+/// Send a clock-sync frame and validate the agent response.
+///
+/// Extracted from [`sync_clock`] so the wire protocol can be tested with
+/// `tokio::io::duplex` without needing a real vsock connection.
+async fn sync_clock_on_stream<S: tokio::io::AsyncReadExt + tokio::io::AsyncWriteExt + Unpin>(
+    stream: &mut S,
+    secs: i64,
+    nanos: u32,
+) -> Result<()> {
+    let mut payload = [0u8; 12];
+    payload[..8].copy_from_slice(&secs.to_le_bytes());
+    payload[8..].copy_from_slice(&nanos.to_le_bytes());
+
+    write_frame(stream, MSG_CLOCK_SYNC, &payload)
+        .await
+        .map_err(|e| VmmError::Vsock(format!("write MSG_CLOCK_SYNC: {e}")))?;
+
+    let (msg_type, payload) = tokio::time::timeout(Duration::from_secs(5), read_frame(stream))
+        .await
+        .map_err(|_| VmmError::Vsock("clock sync: timed out waiting for response".into()))?
+        .map_err(|e| VmmError::Vsock(format!("read clock sync response: {e}")))?;
+
+    if msg_type != MSG_EXIT {
+        return Err(VmmError::Vsock(format!(
+            "clock sync: unexpected response type 0x{msg_type:02x}"
+        )));
+    }
+    if payload.len() < 4 {
+        return Err(VmmError::Vsock(format!(
+            "clock sync: payload too short ({} bytes, expected 4)",
+            payload.len()
+        )));
+    }
+    let code = i32::from_le_bytes(payload[..4].try_into().unwrap());
+    if code != 0 {
+        return Err(VmmError::Vsock(format!(
+            "clock sync: agent returned exit code {code}"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,5 +534,93 @@ mod tests {
         assert_eq!(decoded.working_dir, "/tmp");
         assert_eq!(decoded.timeout_seconds, 30);
         assert!(!decoded.tty);
+    }
+
+    // -----------------------------------------------------------------
+    // sync_clock protocol tests
+    // -----------------------------------------------------------------
+
+    /// Simulate a successful clock sync exchange.
+    #[tokio::test]
+    async fn test_sync_clock_success() {
+        let (mut agent, mut host) = tokio::io::duplex(256);
+
+        let agent_handle = tokio::spawn(async move {
+            // Read MSG_CLOCK_SYNC frame.
+            let (ty, payload) = read_frame(&mut agent).await.unwrap();
+            assert_eq!(ty, MSG_CLOCK_SYNC);
+            assert_eq!(payload.len(), 12);
+
+            // Verify payload encodes the expected timestamp.
+            let secs = i64::from_le_bytes(payload[..8].try_into().unwrap());
+            let nanos = u32::from_le_bytes(payload[8..12].try_into().unwrap());
+            assert_eq!(secs, 1_700_000_000);
+            assert_eq!(nanos, 123_456_789);
+
+            // Respond with MSG_EXIT(0).
+            write_frame(&mut agent, MSG_EXIT, &0i32.to_le_bytes())
+                .await
+                .unwrap();
+        });
+
+        let result = sync_clock_on_stream(&mut host, 1_700_000_000, 123_456_789).await;
+        assert!(result.is_ok());
+        agent_handle.await.unwrap();
+    }
+
+    /// Agent returns a non-zero exit code.
+    #[tokio::test]
+    async fn test_sync_clock_agent_error() {
+        let (mut agent, mut host) = tokio::io::duplex(256);
+
+        let agent_handle = tokio::spawn(async move {
+            let _ = read_frame(&mut agent).await.unwrap();
+            write_frame(&mut agent, MSG_EXIT, &(-1i32).to_le_bytes())
+                .await
+                .unwrap();
+        });
+
+        let result = sync_clock_on_stream(&mut host, 1_700_000_000, 0).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("exit code -1"), "unexpected error: {msg}");
+        agent_handle.await.unwrap();
+    }
+
+    /// Agent returns a short payload (< 4 bytes).
+    #[tokio::test]
+    async fn test_sync_clock_short_payload() {
+        let (mut agent, mut host) = tokio::io::duplex(256);
+
+        let agent_handle = tokio::spawn(async move {
+            let _ = read_frame(&mut agent).await.unwrap();
+            write_frame(&mut agent, MSG_EXIT, &[0u8; 2]).await.unwrap();
+        });
+
+        let result = sync_clock_on_stream(&mut host, 1_700_000_000, 0).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("too short"), "unexpected error: {msg}");
+        agent_handle.await.unwrap();
+    }
+
+    /// Agent responds with an unexpected frame type.
+    #[tokio::test]
+    async fn test_sync_clock_unexpected_frame() {
+        let (mut agent, mut host) = tokio::io::duplex(256);
+
+        let agent_handle = tokio::spawn(async move {
+            let _ = read_frame(&mut agent).await.unwrap();
+            write_frame(&mut agent, MSG_STDOUT, b"oops").await.unwrap();
+        });
+
+        let result = sync_clock_on_stream(&mut host, 1_700_000_000, 0).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("unexpected response type"),
+            "unexpected error: {msg}"
+        );
+        agent_handle.await.unwrap();
     }
 }
