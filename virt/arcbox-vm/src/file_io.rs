@@ -42,20 +42,29 @@ use crate::vsock::{MAX_FRAME_SIZE, connect_to_port, read_frame, write_frame};
 /// Per-operation timeout for file I/O over vsock.
 const FILE_IO_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Guest-side vsock port for file I/O.
-pub const FILE_PORT: u32 = 53;
+/// File I/O protocol constants shared between the host-side client and the
+/// guest vm-agent binary.  The vm-agent should import these from
+/// `arcbox_vm::file_io::proto` instead of duplicating numeric values.
+pub mod proto {
+    /// Guest-side vsock port for file I/O.
+    pub const FILE_PORT: u32 = 53;
 
-// Frame type constants.
-// Mirror of constants in vm-agent.rs — keep in sync.
-const FILE_WRITE_REQ: u8 = 0x20;
-const FILE_DATA: u8 = 0x21;
-const FILE_DONE: u8 = 0x22;
-const FILE_READ_REQ: u8 = 0x23;
-const FILE_ACK: u8 = 0x30;
-const FILE_ERR: u8 = 0x31;
+    // Frame type constants.
+    pub const FILE_WRITE_REQ: u8 = 0x20;
+    pub const FILE_DATA: u8 = 0x21;
+    pub const FILE_DONE: u8 = 0x22;
+    pub const FILE_READ_REQ: u8 = 0x23;
+    pub const FILE_ACK: u8 = 0x30;
+    pub const FILE_ERR: u8 = 0x31;
 
-/// Maximum total file size for file I/O operations (256 MiB).
-const MAX_FILE_SIZE: usize = 256 * 1024 * 1024;
+    /// Maximum total file size for file I/O operations (256 MiB).
+    pub const MAX_FILE_SIZE: usize = 256 * 1024 * 1024;
+}
+
+pub use proto::FILE_PORT;
+use proto::{
+    FILE_ACK, FILE_DATA, FILE_DONE, FILE_ERR, FILE_READ_REQ, FILE_WRITE_REQ, MAX_FILE_SIZE,
+};
 
 #[derive(Serialize)]
 struct WriteReq<'a> {

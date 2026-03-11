@@ -48,7 +48,6 @@ mod agent {
     // -------------------------------------------------------------------------
 
     pub const AGENT_PORT: u32 = 52;
-    const FILE_PORT: u32 = 53;
 
     // Exec channel (vsock:52) frame types.
     const MSG_START: u8 = 0x01;
@@ -60,19 +59,13 @@ mod agent {
     const MSG_STDERR: u8 = 0x11;
     const MSG_EXIT: u8 = 0x12;
 
-    // File I/O channel (vsock:53) frame types.
-    // Mirror of constants in file_io.rs — keep in sync.
-    const FILE_WRITE_REQ: u8 = 0x20;
-    const FILE_DATA: u8 = 0x21;
-    const FILE_DONE: u8 = 0x22;
-    const FILE_READ_REQ: u8 = 0x23;
-    const FILE_ACK: u8 = 0x30;
-    const FILE_ERR: u8 = 0x31;
+    // File I/O channel (vsock:53) — imported from the shared proto module.
+    use arcbox_vm::file_io::proto::{
+        FILE_ACK, FILE_DATA, FILE_DONE, FILE_ERR, FILE_PORT, FILE_READ_REQ, FILE_WRITE_REQ,
+        MAX_FILE_SIZE,
+    };
 
     const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
-
-    /// Maximum total file size for file I/O operations (256 MiB).
-    const MAX_FILE_SIZE: usize = 256 * 1024 * 1024;
 
     // -------------------------------------------------------------------------
     // Protocol types
