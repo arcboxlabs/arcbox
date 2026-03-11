@@ -1089,8 +1089,19 @@ impl SandboxManager {
         // clock is frozen at snapshot creation time; correct it before any
         // workload runs.  A failure here is non-fatal — the sandbox is still
         // usable, just with a potentially stale clock.
-        if let Err(e) = vsock::sync_clock(&actual_vsock_path).await {
-            warn!(sandbox_id = %new_id, "clock sync after restore failed: {e}");
+        //
+        // Use a short timeout so clock sync never dominates restore latency.
+        // sync_clock itself has a 5s read timeout, but connect_to_agent can
+        // retry for up to AGENT_READY_TIMEOUT (30s).  Cap the whole operation.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            vsock::sync_clock(&actual_vsock_path),
+        )
+        .await
+        {
+            Ok(Err(e)) => warn!(sandbox_id = %new_id, "clock sync after restore failed: {e}"),
+            Err(_) => warn!(sandbox_id = %new_id, "clock sync after restore timed out"),
+            Ok(Ok(())) => {}
         }
 
         // Build and register the new sandbox instance.

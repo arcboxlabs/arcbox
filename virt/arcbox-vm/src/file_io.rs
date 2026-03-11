@@ -32,11 +32,15 @@
 //! ```
 
 use std::path::Path;
+use std::time::Duration;
 
 use serde::Serialize;
 
 use crate::error::{Result, VmmError};
 use crate::vsock::{MAX_FRAME_SIZE, connect_to_port, read_frame, write_frame};
+
+/// Per-operation timeout for file I/O over vsock.
+const FILE_IO_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Guest-side vsock port for file I/O.
 pub const FILE_PORT: u32 = 53;
@@ -70,6 +74,22 @@ struct ReadReq<'a> {
 /// file permission bits (e.g. `0o644`); `0` defaults to `0o644` on the agent
 /// side.
 pub async fn write_file(uds_path: &Path, path: &str, mode: u32, data: &[u8]) -> Result<()> {
+    if data.len() > MAX_FILE_SIZE {
+        return Err(VmmError::Vsock(format!(
+            "file too large ({} bytes, max {MAX_FILE_SIZE})",
+            data.len()
+        )));
+    }
+
+    tokio::time::timeout(
+        FILE_IO_TIMEOUT,
+        write_file_inner(uds_path, path, mode, data),
+    )
+    .await
+    .map_err(|_| VmmError::Vsock("file write: timed out".into()))?
+}
+
+async fn write_file_inner(uds_path: &Path, path: &str, mode: u32, data: &[u8]) -> Result<()> {
     let mut stream = connect_to_port(uds_path, FILE_PORT).await?;
 
     let req = serde_json::to_vec(&WriteReq { path, mode })
@@ -106,6 +126,12 @@ pub async fn write_file(uds_path: &Path, path: &str, mode: u32, data: &[u8]) -> 
 
 /// Read the file at `path` inside the sandbox and return its contents.
 pub async fn read_file(uds_path: &Path, path: &str) -> Result<Vec<u8>> {
+    tokio::time::timeout(FILE_IO_TIMEOUT, read_file_inner(uds_path, path))
+        .await
+        .map_err(|_| VmmError::Vsock("file read: timed out".into()))?
+}
+
+async fn read_file_inner(uds_path: &Path, path: &str) -> Result<Vec<u8>> {
     let mut stream = connect_to_port(uds_path, FILE_PORT).await?;
 
     let req = serde_json::to_vec(&ReadReq { path })
