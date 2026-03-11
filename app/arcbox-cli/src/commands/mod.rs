@@ -5,6 +5,7 @@
 //!
 //! - Daemon lifecycle management
 //! - Machine management
+//! - Runtime migration
 //! - Boot asset management
 //! - Docker CLI integration
 //! - DNS resolver management
@@ -23,6 +24,7 @@ pub mod doctor;
 pub mod install;
 pub mod logs;
 pub mod machine;
+pub mod migrate;
 pub mod sandbox;
 pub mod setup;
 #[cfg(target_os = "macos")]
@@ -72,6 +74,10 @@ pub enum Commands {
     /// Manage Linux machines
     #[command(subcommand)]
     Machine(machine::MachineCommands),
+
+    /// Import workloads from Docker Desktop or OrbStack
+    #[command(subcommand)]
+    Migrate(migrate::MigrateCommands),
 
     /// Manage sandboxes inside a machine
     #[command(subcommand)]
