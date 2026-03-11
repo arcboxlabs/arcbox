@@ -8,6 +8,7 @@ mod fallback;
 mod forward;
 mod port_bindings;
 mod stream;
+mod upload;
 mod upgrade;
 
 pub use connector::VsockConnector;
@@ -15,6 +16,7 @@ pub use fallback::proxy_fallback;
 pub use forward::{proxy_to_guest, proxy_to_guest_stream};
 pub use port_bindings::{PortBindingInfo, parse_port_bindings};
 pub use stream::RawFdStream;
+pub use upload::proxy_streaming_upload;
 pub use upgrade::proxy_with_upgrade;
 
 use crate::error::Result;

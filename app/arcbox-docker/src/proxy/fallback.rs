@@ -1,6 +1,6 @@
 //! Catch-all proxy handler for unmatched Docker API routes.
 
-use super::{forward, upgrade};
+use super::{forward, upgrade, upload};
 use crate::api::AppState;
 use crate::error::{DockerError, Result};
 use axum::body::Body;
@@ -37,6 +37,10 @@ pub async fn proxy_fallback(
 
     if wants_upgrade {
         return upgrade::proxy_with_upgrade(state.connector.as_ref(), req, &uri).await;
+    }
+
+    if upload::is_streaming_upload_request(req.method(), &uri) {
+        return upload::proxy_streaming_upload(state.connector.as_ref(), &uri, req).await;
     }
 
     forward::proxy_to_guest_stream(state.connector.as_ref(), &uri, req).await

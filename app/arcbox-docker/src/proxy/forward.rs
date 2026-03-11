@@ -109,8 +109,6 @@ pub async fn proxy_to_guest(
     forward_client_headers(headers, req.headers_mut());
     req.headers_mut()
         .insert(header::HOST, HeaderValue::from_static("localhost"));
-    req.headers_mut()
-        .insert(header::CONNECTION, HeaderValue::from_static("close"));
 
     let response = sender
         .send_request(req)
@@ -172,9 +170,6 @@ pub async fn proxy_to_guest_stream(
     guest_req
         .headers_mut()
         .insert(header::HOST, HeaderValue::from_static("localhost"));
-    guest_req
-        .headers_mut()
-        .insert(header::CONNECTION, HeaderValue::from_static("close"));
 
     let response = sender
         .send_request(guest_req)
@@ -183,4 +178,47 @@ pub async fn proxy_to_guest_stream(
 
     let (parts, incoming) = response.into_parts();
     Ok(Response::from_parts(parts, Body::new(incoming)))
+}
+
+/// Builds a forwarded header map suitable for proxying to guest dockerd.
+///
+/// Strips hop-by-hop headers, the `Host` header, the `Connection` header and
+/// any headers listed in `Connection`. When `strip_expect` is true, also strips
+/// `Expect` (used by the upload proxy so we own `100-continue` handling).
+pub(super) fn forwarded_request_headers(headers: &HeaderMap, strip_expect: bool) -> HeaderMap {
+    let connection_tokens = headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .filter_map(|token| token.trim().parse::<HeaderName>().ok())
+        .collect::<Vec<_>>();
+
+    let mut forwarded = HeaderMap::new();
+    for (name, value) in headers {
+        if name == header::HOST
+            || name == header::CONNECTION
+            || (strip_expect && name == header::EXPECT)
+            || is_hop_by_hop_header(name)
+            || connection_tokens.iter().any(|token| token == name)
+        {
+            continue;
+        }
+        forwarded.append(name.clone(), value.clone());
+    }
+    forwarded
+}
+
+fn is_hop_by_hop_header(name: &HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "proxy-connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
 }
