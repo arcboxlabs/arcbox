@@ -934,8 +934,10 @@ mod tests {
     #[test]
     fn test_set_guest_cid_updates_vm_config() {
         let (manager, _dir) = test_vm_manager();
-        let mut config = VmConfig::default();
-        config.guest_cid = None;
+        let config = VmConfig {
+            guest_cid: None,
+            ..Default::default()
+        };
 
         let vm_id = manager.create(config).unwrap();
 
@@ -946,8 +948,10 @@ mod tests {
     #[test]
     fn test_build_vmm_config_includes_guest_cid() {
         let (manager, _dir) = test_vm_manager();
-        let mut config = VmConfig::default();
-        config.guest_cid = Some(9);
+        let config = VmConfig {
+            guest_cid: Some(9),
+            ..Default::default()
+        };
 
         let vm_id = manager.create(config).unwrap();
         let vmm_config = manager.build_vmm_config_for_test(&vm_id).unwrap();

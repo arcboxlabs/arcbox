@@ -36,6 +36,7 @@ dirs = { workspace = true }
 toml = { workspace = true }
 sha2 = { workspace = true }
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "json"] }
+arcbox-migration = { version = "0.1.5", path = "../arcbox-migration" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
