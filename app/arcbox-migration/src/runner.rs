@@ -4,7 +4,6 @@ use crate::docker_types::{
     ContainerInspect, DockerInfo, ImageInspect, NetworkInspect, VolumeInspect,
 };
 use crate::error::{MigrationError, Result};
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -234,7 +233,8 @@ impl DockerCliRunner {
     /// Ensures the helper image exists by importing an empty tar archive when needed.
     pub async fn ensure_helper_image(&self) -> Result<()> {
         let status = Command::new(&self.binary)
-            .args(self.base_args())
+            .arg("--host")
+            .arg(self.host_arg())
             .args(["image", "inspect", HELPER_IMAGE_REFERENCE])
             .env("DOCKER_CONFIG", self.isolated_config.path())
             .env("DOCKER_CLI_HINTS", "false")
@@ -464,7 +464,8 @@ impl DockerCliRunner {
     fn command(&self) -> Command {
         let mut command = Command::new(&self.binary);
         command
-            .args(self.base_args())
+            .arg("--host")
+            .arg(self.host_arg())
             .env("DOCKER_CONFIG", self.isolated_config.path())
             .env("DOCKER_CLI_HINTS", "false")
             .env("NO_COLOR", "1")
@@ -472,8 +473,8 @@ impl DockerCliRunner {
         command
     }
 
-    fn base_args(&self) -> [&OsStr; 2] {
-        [OsStr::new("--host"), self.socket_path.as_os_str()]
+    fn host_arg(&self) -> String {
+        format!("unix://{}", self.socket_path.display())
     }
 }
 

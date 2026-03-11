@@ -159,7 +159,7 @@ arcbox-asset = { version = "0.1.5", path = "common/arcbox-asset", features = ["d
 arcbox-docker-tools = { version = "0.1.5", path = "app/arcbox-docker-tools" }
 
 # External crates
-arcbox-boot = { version = "0.3", features = ["download"] }
+arcbox-boot = { version = "0.5.1", features = ["download"] }
 macos-resolver = "0.2.0"
 
 fc-sdk = "0.2.3"

@@ -1,7 +1,7 @@
 # ArcBox asset lock — pins versions and checksums for reproducible builds.
 
 [boot]
-version = "0.3.0"
+version = "0.5.1"
 cdn = "https://boot.arcboxcdn.com"
 manifest_sha256 = ""
 
