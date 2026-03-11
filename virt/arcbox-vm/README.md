@@ -418,7 +418,7 @@ boot_args  = "console=ttyS0 reboot=k panic=1 pci=off"
 - `firecracker` binary (set `[firecracker].binary` in config or add to PATH)
 - Linux with `CAP_NET_ADMIN` for TAP interface creation
 - `protoc` for proto codegen
-- `sandbox.proto` lives in `comm/arcbox-protocol/proto/sandbox.proto` (shared with the arcbox workspace)
+- `sandbox.proto` lives in `rpc/arcbox-protocol/proto/sandbox.proto` (shared with the arcbox workspace)
 - Jailer mode additionally requires: `jailer` binary, and running as root (or with `CAP_SYS_ADMIN`) to `pivot_root`
 
 ### Build

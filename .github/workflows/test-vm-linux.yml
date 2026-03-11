@@ -5,9 +5,9 @@ on:
     branches: [master, develop]
     paths:
       - "guest/arcbox-agent/**"
-      - "hypervisor/arcbox-vm/**"
+      - "virt/arcbox-vm/**"
       - "common/arcbox-constants/**"
-      - "comm/arcbox-protocol/**"
+      - "rpc/arcbox-protocol/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/test-vm-linux.yml"
@@ -15,9 +15,9 @@ on:
     branches: [master, develop]
     paths:
       - "guest/arcbox-agent/**"
-      - "hypervisor/arcbox-vm/**"
+      - "virt/arcbox-vm/**"
       - "common/arcbox-constants/**"
-      - "comm/arcbox-protocol/**"
+      - "rpc/arcbox-protocol/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/test-vm-linux.yml"

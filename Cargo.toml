@@ -6,40 +6,40 @@ members = [
     # ============================================
     "common/arcbox-constants",
     "common/arcbox-error",
-    "crates/arcbox-dhcp",
-    "crates/arcbox-asset",
-    "crates/arcbox-docker-tools",
+    "common/arcbox-asset",
 
     # ============================================
-    # L1-2: Hypervisor (MIT OR Apache-2.0)
+    # L1-3: Virtualization (MIT OR Apache-2.0)
     # ============================================
-    "hypervisor/arcbox-vz",
-    "hypervisor/arcbox-hypervisor",
-    "hypervisor/arcbox-vmm",
-    "hypervisor/arcbox-virtio",
-    "hypervisor/arcbox-vm",
+    "virt/arcbox-vz",
+    "virt/arcbox-hypervisor",
+    "virt/arcbox-vmm",
+    "virt/arcbox-virtio",
+    "virt/arcbox-vm",
+    "virt/arcbox-fs",
+    "virt/arcbox-net",
+    "virt/arcbox-dhcp",
 
     # ============================================
-    # L3: Services (MIT OR Apache-2.0)
+    # L4: RPC (MIT OR Apache-2.0)
     # ============================================
-    "services/arcbox-fs",
-    "services/arcbox-net",
-    "services/arcbox-container",
-    "services/arcbox-oci",
+    "rpc/arcbox-protocol",
+    "rpc/arcbox-grpc",
+    "rpc/arcbox-transport",
 
     # ============================================
-    # L4: Communication (MIT OR Apache-2.0)
+    # L5: Runtime (MIT OR Apache-2.0)
     # ============================================
-    "comm/arcbox-protocol",
-    "comm/arcbox-grpc",
-    "comm/arcbox-transport",
+    "runtime/arcbox-container",
+    "runtime/arcbox-oci",
 
     # ============================================
-    # L5-6: Application (MIT OR Apache-2.0)
+    # L6-7: Application (MIT OR Apache-2.0)
     # ============================================
     "app/arcbox-core",
     "app/arcbox-api",
     "app/arcbox-docker",
+    "app/arcbox-docker-tools",
     "app/arcbox-cli",
     "app/arcbox-daemon",
     "app/arcbox",
@@ -163,8 +163,8 @@ nix = { version = "0.29", features = [
 # libc
 libc = "0.2"
 
-arcbox-asset = { version = "0.1.5", path = "crates/arcbox-asset", features = ["download"] }
-arcbox-docker-tools = { version = "0.1.5", path = "crates/arcbox-docker-tools" }
+arcbox-asset = { version = "0.1.5", path = "common/arcbox-asset", features = ["download"] }
+arcbox-docker-tools = { version = "0.1.5", path = "app/arcbox-docker-tools" }
 
 # External crates
 arcbox-boot = { version = "0.3", features = ["download"] }
@@ -172,22 +172,22 @@ macos-resolver = "0.2.0"
 
 fc-sdk = "0.2.3"
 
-# Internal crates (Core layer)
-arcbox-dhcp = { version = "0.1.5", path = "crates/arcbox-dhcp" }
+# Internal crates
 arcbox-constants = { version = "0.1.5", path = "common/arcbox-constants" }
 arcbox-error = { version = "0.1.5", path = "common/arcbox-error" }
-arcbox-vz = { version = "0.1.5", path = "hypervisor/arcbox-vz" }
-arcbox-hypervisor = { version = "0.1.5", path = "hypervisor/arcbox-hypervisor" }
-arcbox-vmm = { version = "0.1.5", path = "hypervisor/arcbox-vmm" }
-arcbox-virtio = { version = "0.1.5", path = "hypervisor/arcbox-virtio" }
-arcbox-vm = { version = "0.1.5", path = "hypervisor/arcbox-vm" }
-arcbox-fs = { version = "0.1.5", path = "services/arcbox-fs" }
-arcbox-net = { version = "0.1.5", path = "services/arcbox-net" }
-arcbox-container = { version = "0.1.5", path = "services/arcbox-container" }
-arcbox-oci = { version = "0.1.5", path = "services/arcbox-oci" }
-arcbox-protocol = { version = "0.1.5", path = "comm/arcbox-protocol" }
-arcbox-grpc = { version = "0.1.5", path = "comm/arcbox-grpc" }
-arcbox-transport = { version = "0.1.5", path = "comm/arcbox-transport" }
+arcbox-vz = { version = "0.1.5", path = "virt/arcbox-vz" }
+arcbox-hypervisor = { version = "0.1.5", path = "virt/arcbox-hypervisor" }
+arcbox-vmm = { version = "0.1.5", path = "virt/arcbox-vmm" }
+arcbox-virtio = { version = "0.1.5", path = "virt/arcbox-virtio" }
+arcbox-vm = { version = "0.1.5", path = "virt/arcbox-vm" }
+arcbox-fs = { version = "0.1.5", path = "virt/arcbox-fs" }
+arcbox-net = { version = "0.1.5", path = "virt/arcbox-net" }
+arcbox-dhcp = { version = "0.1.5", path = "virt/arcbox-dhcp" }
+arcbox-container = { version = "0.1.5", path = "runtime/arcbox-container" }
+arcbox-oci = { version = "0.1.5", path = "runtime/arcbox-oci" }
+arcbox-protocol = { version = "0.1.5", path = "rpc/arcbox-protocol" }
+arcbox-grpc = { version = "0.1.5", path = "rpc/arcbox-grpc" }
+arcbox-transport = { version = "0.1.5", path = "rpc/arcbox-transport" }
 arcbox-docker = { version = "0.1.5", path = "app/arcbox-docker" }
 arcbox-core = { version = "0.1.5", path = "app/arcbox-core" }
 arcbox-api = { version = "0.1.5", path = "app/arcbox-api" }
