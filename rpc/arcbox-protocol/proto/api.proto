@@ -445,6 +445,79 @@ message VolumeUsage {
 }
 
 // =============================================================================
+// Migration Service
+// =============================================================================
+
+// MigrationService plans and runs host-side runtime migrations.
+service MigrationService {
+    // Prepares a migration plan for a supported external runtime.
+    rpc PrepareMigration(PrepareMigrationRequest) returns (PrepareMigrationResponse);
+
+    // Runs a prepared migration plan and streams execution progress.
+    rpc RunMigration(RunMigrationRequest) returns (stream RunMigrationEvent);
+}
+
+// Request to prepare a migration.
+message PrepareMigrationRequest {
+    // Stable source runtime identifier (for example, "docker-desktop" or "orbstack").
+    string source_kind = 1;
+    // Optional override for the source Docker-compatible socket path.
+    string source_socket_path = 2;
+    // Allow prepare to include replace actions in the plan.
+    bool allow_replacements = 3;
+}
+
+// Prepared migration summary.
+message PrepareMigrationResponse {
+    // Opaque identifier for the prepared plan.
+    string plan_id = 1;
+    // Source runtime identifier used for the plan.
+    string source_kind = 2;
+    // Resolved source socket path used for the plan.
+    string source_socket_path = 3;
+    // Number of images included in the plan.
+    uint32 image_count = 4;
+    // Number of volumes included in the plan.
+    uint32 volume_count = 5;
+    // Number of networks included in the plan.
+    uint32 network_count = 6;
+    // Number of containers included in the plan.
+    uint32 container_count = 7;
+    // Whether the plan requires replacing existing ArcBox resources.
+    bool replacements_required = 8;
+    // Non-fatal warnings discovered during preparation.
+    repeated string warnings = 9;
+}
+
+// Request to run a prepared migration.
+message RunMigrationRequest {
+    // Opaque identifier returned by PrepareMigration.
+    string plan_id = 1;
+    // Confirms that the caller accepts any replace actions in the plan.
+    bool allow_replacements = 2;
+}
+
+// Streaming migration progress event.
+message RunMigrationEvent {
+    // Opaque identifier of the plan being executed.
+    string plan_id = 1;
+    // High-level execution phase (for example, "prepare", "images", or "containers").
+    string phase = 2;
+    // Optional resource name currently being processed.
+    string resource = 3;
+    // Human-readable progress detail.
+    string message = 4;
+    // Number of completed work items in the current phase.
+    uint32 completed = 5;
+    // Total work items expected in the current phase.
+    uint32 total = 6;
+    // Indicates that no more events will follow for this run.
+    bool done = 7;
+    // Indicates whether the run completed successfully.
+    bool success = 8;
+}
+
+// =============================================================================
 // Shell/Interactive Session Types
 // =============================================================================
 

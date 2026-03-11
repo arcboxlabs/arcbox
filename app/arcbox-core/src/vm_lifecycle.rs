@@ -35,6 +35,7 @@ use arcbox_constants::cmdline::{
     DOCKER_DATA_DEVICE_KEY as DOCKER_DATA_DEVICE_CMDLINE_KEY, GUEST_DOCKER_VSOCK_PORT_KEY,
 };
 use arcbox_error::CommonError;
+use std::fmt::Write as _;
 use std::fs::OpenOptions;
 use std::io::Seek;
 use std::io::SeekFrom;
@@ -1360,25 +1361,25 @@ mod tests {
         // First failure: retry
         match policy.handle_failure("test error") {
             RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_millis(100)),
-            _ => panic!("expected RetryAfter"),
+            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
         }
 
         // Second failure: retry
         match policy.handle_failure("test error") {
             RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_millis(100)),
-            _ => panic!("expected RetryAfter"),
+            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
         }
 
         // Third failure: retry
         match policy.handle_failure("test error") {
             RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_millis(100)),
-            _ => panic!("expected RetryAfter"),
+            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
         }
 
         // Fourth failure: give up
         match policy.handle_failure("test error") {
             RecoveryAction::GiveUp(_) => {}
-            _ => panic!("expected GiveUp"),
+            RecoveryAction::RetryAfter(_) => panic!("expected GiveUp"),
         }
     }
 
@@ -1395,37 +1396,37 @@ mod tests {
         // First failure: 100ms
         match policy.handle_failure("test") {
             RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_millis(100)),
-            _ => panic!("expected RetryAfter"),
+            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
         }
 
         // Second failure: 200ms
         match policy.handle_failure("test") {
             RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_millis(200)),
-            _ => panic!("expected RetryAfter"),
+            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
         }
 
         // Third failure: 400ms
         match policy.handle_failure("test") {
             RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_millis(400)),
-            _ => panic!("expected RetryAfter"),
+            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
         }
 
         // Fourth failure: 800ms
         match policy.handle_failure("test") {
             RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_millis(800)),
-            _ => panic!("expected RetryAfter"),
+            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
         }
 
         // Fifth failure: capped at 1000ms
         match policy.handle_failure("test") {
             RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_secs(1)),
-            _ => panic!("expected RetryAfter"),
+            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
         }
 
         // Sixth failure: give up
         match policy.handle_failure("test") {
             RecoveryAction::GiveUp(_) => {}
-            _ => panic!("expected GiveUp"),
+            RecoveryAction::RetryAfter(_) => panic!("expected GiveUp"),
         }
     }
 

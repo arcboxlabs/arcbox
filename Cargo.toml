@@ -50,7 +50,7 @@ members = [
     # ============================================
     # Guest Components (MIT OR Apache-2.0)
     # ============================================
-    "guest/arcbox-agent",
+    "guest/arcbox-agent", "app/arcbox-migration",
 ]
 
 [workspace.package]
