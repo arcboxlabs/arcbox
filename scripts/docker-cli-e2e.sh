@@ -28,7 +28,7 @@ NC='\033[0m' # No Color
 # Paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DOCKER_CLI_PATH="${DOCKER_CLI_PATH:-/Users/Shiro/Developer/arcboxd/docker-cli}"
+DOCKER_CLI_PATH="${DOCKER_CLI_PATH:-/Users/Shiro/Developer/arcboxlabs/docker-cli}"
 ARCBOX_BINARY="${PROJECT_ROOT}/target/debug/abctl"
 
 # Test configuration
