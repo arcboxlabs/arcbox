@@ -50,22 +50,13 @@ members = [
     "guest/arcbox-agent",
 ]
 
-# ============================================
-# Enterprise Layer (Proprietary, separate repos)
-# ============================================
-# Located in arcboxd org private repositories:
-#   - arcboxd/arcbox-desktop   (GPUI desktop app)
-#   - arcboxd/arcbox-sso       (SSO/LDAP integration)
-#   - arcboxd/arcbox-audit     (Audit logging)
-#   - arcboxd/arcbox-k8s       (Kubernetes integration)
-
 [workspace.package]
 version = "0.1.5"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/AprilNEA/arcbox"
-authors = ["AprilNEA <dev@aprilnea.me> (https://aprilnea.me)"]
+repository = "https://github.com/arcboxlabs/arcbox"
+authors = ["ArcBox Labs <team@arcbox.dev>", "AprilNEA <dev@aprilnea.me> (https://aprilnea.me)"]
 
 [workspace.dependencies]
 # Async runtime
