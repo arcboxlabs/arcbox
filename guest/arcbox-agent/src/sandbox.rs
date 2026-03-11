@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use arcbox_constants::wire::MessageType;
 use arcbox_protocol::sandbox_v1;
 use arcbox_vm::{
     CheckpointInfo, CheckpointSummary, ExecInputMsg, RestoreSandboxSpec,
@@ -13,6 +14,7 @@ use arcbox_vm::{
     SandboxNetworkSpec, SandboxSpec, SandboxSummary, VmmConfig,
 };
 use prost::Message;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 
 use crate::error::SandboxError;
@@ -240,6 +242,83 @@ impl SandboxService {
         });
 
         Ok((in_tx, out_stream_rx))
+    }
+
+    /// Bridge a `SandboxExecRequest` between the host vsock stream and the
+    /// vm-agent.
+    ///
+    /// The host sends [`MessageType::SandboxExecInput`] frames carrying raw
+    /// stdin bytes; an empty payload signals EOF on stdin.  The agent forwards
+    /// [`MessageType::SandboxExecOutput`] frames (stdout / stderr / exit) back
+    /// to the host until the process terminates.
+    pub async fn handle_exec<S>(
+        &self,
+        stream: &mut S,
+        trace_id: &str,
+        payload: &[u8],
+    ) -> anyhow::Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let (in_tx, mut out_rx) = match self.exec(payload).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                let err = ErrorResponse::new(500, &e);
+                write_message(stream, MessageType::Error, trace_id, &err.encode()).await?;
+                return Ok(());
+            }
+        };
+
+        loop {
+            tokio::select! {
+                // Output from vm-agent → host.
+                encoded_opt = out_rx.recv() => {
+                    match encoded_opt {
+                        None => break, // output channel closed
+                        Some(encoded) => {
+                            // The last frame has done==true; check before writing
+                            // so we can break after sending it.
+                            let done = sandbox_v1::ExecOutput::decode(encoded.as_slice())
+                                .map(|m| m.done)
+                                .unwrap_or(false);
+                            write_message(
+                                stream,
+                                MessageType::SandboxExecOutput,
+                                trace_id,
+                                &encoded,
+                            )
+                            .await?;
+                            if done {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Input from host → vm-agent.
+                read_result = read_message(stream) => {
+                    match read_result {
+                        Err(_) => {
+                            // Host stream closed; signal EOF to the process.
+                            let _ = in_tx.send(ExecInputMsg::Eof).await;
+                            break;
+                        }
+                        Ok((MessageType::SandboxExecInput, _, data)) => {
+                            if data.is_empty() {
+                                let _ = in_tx.send(ExecInputMsg::Eof).await;
+                            } else {
+                                let _ = in_tx.send(ExecInputMsg::Stdin(data)).await;
+                            }
+                        }
+                        Ok(_) => {
+                            // Unexpected message type during exec; ignore.
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
 /// Subscribe to sandbox lifecycle events.  Returns a channel of encoded
