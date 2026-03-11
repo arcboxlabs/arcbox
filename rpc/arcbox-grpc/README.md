@@ -17,7 +17,7 @@ For convenience, crate root currently re-exports:
 - Servers: `MachineService`, `MachineServiceServer`, `AgentService`,
   `AgentServiceServer`, `VolumeService`, `VolumeServiceServer`
 
-Other generated clients/servers (for example container/image/network/system)
+Other generated clients/servers (for example container/image/network/system/migration)
 are available via `arcbox_grpc::v1::<service_module>::...`.
 
 ## Usage

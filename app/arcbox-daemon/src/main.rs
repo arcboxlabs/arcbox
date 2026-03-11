@@ -2,8 +2,9 @@ mod dns_service;
 
 use anyhow::{Context, Result};
 use arcbox_api::{
-    MachineServiceImpl, SandboxServiceImpl, SandboxServiceServer, SandboxSnapshotServiceImpl,
-    SandboxSnapshotServiceServer, machine_service_server::MachineServiceServer,
+    MachineServiceImpl, MigrationServiceImpl, MigrationServiceServer, SandboxServiceImpl,
+    SandboxServiceServer, SandboxSnapshotServiceImpl, SandboxSnapshotServiceServer,
+    machine_service_server::MachineServiceServer,
 };
 use arcbox_core::{Config, Runtime, VmLifecycleConfig};
 use arcbox_docker::{DockerApiServer, DockerContextManager, ServerConfig};
@@ -115,6 +116,7 @@ async fn run(args: DaemonArgs) -> Result<()> {
         data_dir: data_dir.clone(),
         ..Default::default()
     };
+    config.docker.socket_path = socket_path.clone();
     if let Some(port) = args.guest_docker_vsock_port {
         config.container.guest_docker_vsock_port = port;
     }
@@ -304,12 +306,14 @@ async fn start_grpc_server(
     info!(socket = %socket_path.display(), "gRPC server listening");
 
     let machine_service = MachineServiceImpl::new(Arc::clone(&runtime));
+    let migration_service = MigrationServiceImpl::new(Arc::clone(&runtime));
     let sandbox_service = SandboxServiceImpl::new(Arc::clone(&runtime));
     let sandbox_snapshot_service = SandboxSnapshotServiceImpl::new(Arc::clone(&runtime));
 
     let handle = tokio::spawn(async move {
         let result = Server::builder()
             .add_service(MachineServiceServer::new(machine_service))
+            .add_service(MigrationServiceServer::new(migration_service))
             .add_service(SandboxServiceServer::new(sandbox_service))
             .add_service(SandboxSnapshotServiceServer::new(sandbox_snapshot_service))
             .serve_with_incoming_shutdown(incoming, shutdown.cancelled())
