@@ -25,10 +25,10 @@ The project is in **alpha**. Breaking changes (internal or user-facing) are acce
 
 ## Project Structure
 
-- `common/` — shared error types
-- `hypervisor/` — Virtualization.framework bindings, cross-platform hypervisor traits, VMM, VirtIO devices
-- `services/` — filesystem (VirtioFS), networking (NAT/DHCP/DNS), container state, OCI image/runtime
-- `comm/` — protobuf definitions, gRPC services, vsock/unix transport
+- `common/` — shared error types, constants, asset utilities
+- `virt/` — Virtualization.framework bindings, cross-platform hypervisor traits, VMM, VirtIO devices, VirtioFS, networking (NAT/DHCP/DNS)
+- `rpc/` — protobuf definitions, gRPC services, vsock/unix transport
+- `runtime/` — container state, OCI image/runtime
 - `app/` — core orchestration, API server, Docker Engine API compat, thin CLI (`arcbox`), daemon binary (`arcbox-daemon`), facade crate
 - `guest/` — in-VM agent (cross-compiled for Linux)
 - `tests/` — test resources and fixture build scripts

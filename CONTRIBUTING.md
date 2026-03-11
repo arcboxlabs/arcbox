@@ -40,10 +40,10 @@ cargo build -p arcbox-agent --target aarch64-unknown-linux-musl --release
 ## Project Structure
 
 ```
-common/          Shared error types and constants
-hypervisor/      Virtualization.framework bindings, VMM, VirtIO devices
-services/        VirtioFS, networking (NAT/DHCP/DNS), container state, OCI
-comm/            Protobuf definitions, gRPC services, vsock/unix transport
+common/          Shared error types, constants, asset utilities
+virt/            Virtualization.framework bindings, VMM, VirtIO devices, VirtioFS, networking
+rpc/             Protobuf definitions, gRPC services, vsock/unix transport
+runtime/         Container state, OCI image/runtime
 app/             Core orchestration, API server, Docker Engine API, CLI, daemon
 guest/           In-VM agent (cross-compiled for Linux)
 ```
