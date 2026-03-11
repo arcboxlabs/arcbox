@@ -1,6 +1,4 @@
 [workspace]
-# Not publishing to crates.io yet — facade crate dependencies aren't all published.
-publish = false
 # macOS-only codebase; CI publishes from ubuntu — skip build verification.
 publish_no_verify = true
 # Pre-1.0: no semver checking.
@@ -37,9 +35,10 @@ commit_parsers = [
     { message = "^chore", group = "Miscellaneous" },
 ]
 
-# ── Facade crate: single tag + GitHub release ────────────────────────
+# ── Facade crate: single tag + GitHub release, not published to crates.io ─
 [[package]]
 name = "arcbox"
+publish = false
 release = true
 changelog_update = true
 git_tag_enable = true
@@ -72,10 +71,3 @@ changelog_include = [
     "arcbox-vmm",
     "arcbox-vz",
 ]
-
-# ── Guest agent: Linux cross-compile target, not published ───────────
-[[package]]
-name = "arcbox-agent"
-publish = false
-release = false
-changelog_update = false

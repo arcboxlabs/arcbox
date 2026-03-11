@@ -113,9 +113,14 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 name = "arcbox"
 version = "0.1.5"
 dependencies = [
+ "arcbox-container",
+ "arcbox-core",
+ "arcbox-fs",
  "arcbox-hypervisor",
+ "arcbox-net",
  "arcbox-protocol",
  "arcbox-virtio",
+ "arcbox-vmm",
 ]
 
 [[package]]
@@ -185,9 +190,9 @@ dependencies = [
 
 [[package]]
 name = "arcbox-boot"
-version = "0.3.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2f7190d277f647ab40bd9696dfbf75ba6576d2ac7610bd1b78e5d6f4ee5ebab"
+checksum = "73e728afead5d82392eb81911a43ef556e32a3df2a0d4e6bc3e74c5def33f8ce"
 dependencies = [
  "dirs",
  "futures-util",
