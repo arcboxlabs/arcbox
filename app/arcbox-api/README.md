@@ -5,13 +5,13 @@ API server layer for ArcBox.
 ## Overview
 
 This crate provides ArcBox gRPC service implementations over `arcbox-core`
-runtime state. It is currently machine-focused (`MachineServiceImpl`).
-Other service definitions may exist in shared protocol crates but are not all
-implemented here.
+runtime state. It currently exposes machine, sandbox, and host-side migration
+service implementations.
 
 ## Features
 
 - gRPC `MachineService` with machine lifecycle + guest-agent pass-through calls
+- gRPC `MigrationService` with host-side migration planning/execution entrypoints
 
 ## Usage
 
