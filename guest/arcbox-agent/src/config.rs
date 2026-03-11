@@ -8,7 +8,7 @@
 //! 3. Built-in guest defaults
 
 use arcbox_vm::VmmConfig;
-use arcbox_vm::config::{DefaultVmConfig, FirecrackerConfig, GrpcConfig, NetworkConfig};
+use arcbox_vm::config::{DefaultVmConfig, FirecrackerConfig, GrpcConfig, JailerConfig, NetworkConfig};
 
 /// Guest-specific VMM configuration defaults.
 ///
@@ -16,8 +16,18 @@ use arcbox_vm::config::{DefaultVmConfig, FirecrackerConfig, GrpcConfig, NetworkC
 fn guest_defaults() -> VmmConfig {
     VmmConfig {
         firecracker: FirecrackerConfig {
-            binary: "/usr/local/bin/firecracker".into(),
-            jailer: None,
+            binary: "/arcbox/bin/firecracker".into(),
+            jailer: Some(JailerConfig {
+                binary: "/arcbox/bin/jailer".into(),
+                uid: 0,
+                gid: 0,
+                chroot_base_dir: None,
+                netns: None,
+                new_pid_ns: false,
+                cgroup_version: None,
+                parent_cgroup: None,
+                resource_limits: vec![],
+            }),
             data_dir: "/var/lib/arcbox/sandboxes".into(),
             log_level: None,
             no_seccomp: false,
