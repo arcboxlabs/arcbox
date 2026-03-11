@@ -61,6 +61,7 @@ mod agent {
     const MSG_EXIT: u8 = 0x12;
 
     // File I/O channel (vsock:53) frame types.
+    // Mirror of constants in file_io.rs — keep in sync.
     const FILE_WRITE_REQ: u8 = 0x20;
     const FILE_DATA: u8 = 0x21;
     const FILE_DONE: u8 = 0x22;
@@ -69,6 +70,9 @@ mod agent {
     const FILE_ERR: u8 = 0x31;
 
     const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
+
+    /// Maximum total file size for file I/O operations (256 MiB).
+    const MAX_FILE_SIZE: usize = 256 * 1024 * 1024;
 
     // -------------------------------------------------------------------------
     // Protocol types
@@ -234,18 +238,30 @@ mod agent {
         let nanos = u32::from_le_bytes(payload[8..12].try_into().unwrap());
 
         // SAFETY: clock_settime requires CAP_SYS_TIME; vm-agent runs as root inside guest.
-        unsafe {
+        let ret = unsafe {
             let ts = libc::timespec {
                 tv_sec: secs,
-                tv_nsec: nanos as libc::c_long,
+                tv_nsec: libc::c_long::from(nanos),
             };
-            libc::clock_settime(libc::CLOCK_REALTIME, &raw const ts);
+            libc::clock_settime(libc::CLOCK_REALTIME, &raw const ts)
+        };
+        if ret != 0 {
+            eprintln!(
+                "agent: clock_settime failed: {}",
+                std::io::Error::last_os_error()
+            );
+            let _ = write_frame(&mut conn, MSG_EXIT, &(-1i32).to_le_bytes());
+            return;
         }
         let _ = write_frame(&mut conn, MSG_EXIT, &0i32.to_le_bytes());
     }
 
     // -------------------------------------------------------------------------
     // File I/O handler (vsock:53)
+    //
+    // Trust model: the host is fully trusted — it owns and controls the VM.
+    // The guest agent intentionally allows arbitrary file paths because only
+    // the host can initiate vsock connections.
     // -------------------------------------------------------------------------
 
     fn handle_file_connection(conn_fd: RawFd) {
@@ -297,7 +313,17 @@ mod agent {
         let mut data: Vec<u8> = Vec::new();
         loop {
             match read_frame(&mut conn) {
-                Ok((FILE_DATA, chunk)) => data.extend_from_slice(&chunk),
+                Ok((FILE_DATA, chunk)) => {
+                    data.extend_from_slice(&chunk);
+                    if data.len() > MAX_FILE_SIZE {
+                        let _ = write_frame(
+                            &mut conn,
+                            FILE_ERR,
+                            format!("file too large (>{} bytes)", MAX_FILE_SIZE).as_bytes(),
+                        );
+                        return;
+                    }
+                }
                 Ok((FILE_DONE, _)) => break,
                 Ok((other, _)) => {
                     let _ = write_frame(

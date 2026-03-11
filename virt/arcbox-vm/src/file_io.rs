@@ -42,12 +42,16 @@ use crate::vsock::{MAX_FRAME_SIZE, connect_to_port, read_frame, write_frame};
 pub const FILE_PORT: u32 = 53;
 
 // Frame type constants.
+// Mirror of constants in vm-agent.rs — keep in sync.
 const FILE_WRITE_REQ: u8 = 0x20;
 const FILE_DATA: u8 = 0x21;
 const FILE_DONE: u8 = 0x22;
 const FILE_READ_REQ: u8 = 0x23;
 const FILE_ACK: u8 = 0x30;
 const FILE_ERR: u8 = 0x31;
+
+/// Maximum total file size for file I/O operations (256 MiB).
+const MAX_FILE_SIZE: usize = 256 * 1024 * 1024;
 
 #[derive(Serialize)]
 struct WriteReq<'a> {
@@ -75,16 +79,10 @@ pub async fn write_file(uds_path: &Path, path: &str, mode: u32, data: &[u8]) -> 
         .map_err(|e| VmmError::Vsock(format!("write FILE_WRITE_REQ: {e}")))?;
 
     // Stream data in MAX_FRAME_SIZE chunks.
-    if data.is_empty() {
-        write_frame(&mut stream, FILE_DATA, &[])
+    for chunk in data.chunks(MAX_FRAME_SIZE) {
+        write_frame(&mut stream, FILE_DATA, chunk)
             .await
             .map_err(|e| VmmError::Vsock(format!("write FILE_DATA: {e}")))?;
-    } else {
-        for chunk in data.chunks(MAX_FRAME_SIZE) {
-            write_frame(&mut stream, FILE_DATA, chunk)
-                .await
-                .map_err(|e| VmmError::Vsock(format!("write FILE_DATA: {e}")))?;
-        }
     }
     write_frame(&mut stream, FILE_DONE, &[])
         .await
@@ -123,7 +121,14 @@ pub async fn read_file(uds_path: &Path, path: &str) -> Result<Vec<u8>> {
             .await
             .map_err(|e| VmmError::Vsock(format!("read file data: {e}")))?;
         match frame_type {
-            FILE_DATA => buf.extend_from_slice(&payload),
+            FILE_DATA => {
+                buf.extend_from_slice(&payload);
+                if buf.len() > MAX_FILE_SIZE {
+                    return Err(VmmError::Vsock(format!(
+                        "file too large (>{MAX_FILE_SIZE} bytes)"
+                    )));
+                }
+            }
             FILE_DONE => return Ok(buf),
             FILE_ERR => {
                 return Err(VmmError::Vsock(

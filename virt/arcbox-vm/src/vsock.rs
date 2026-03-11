@@ -399,8 +399,9 @@ pub async fn sync_clock(uds_path: &Path) -> Result<()> {
         .await
         .map_err(|e| VmmError::Vsock(format!("write MSG_CLOCK_SYNC: {e}")))?;
 
-    let (msg_type, payload) = read_frame(&mut stream)
+    let (msg_type, payload) = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut stream))
         .await
+        .map_err(|_| VmmError::Vsock("clock sync: timed out waiting for response".into()))?
         .map_err(|e| VmmError::Vsock(format!("read clock sync response: {e}")))?;
 
     if msg_type != MSG_EXIT {
@@ -408,11 +409,13 @@ pub async fn sync_clock(uds_path: &Path) -> Result<()> {
             "clock sync: unexpected response type 0x{msg_type:02x}"
         )));
     }
-    let code = if payload.len() >= 4 {
-        i32::from_le_bytes(payload[..4].try_into().unwrap())
-    } else {
-        0
-    };
+    if payload.len() < 4 {
+        return Err(VmmError::Vsock(format!(
+            "clock sync: payload too short ({} bytes, expected 4)",
+            payload.len()
+        )));
+    }
+    let code = i32::from_le_bytes(payload[..4].try_into().unwrap());
     if code != 0 {
         return Err(VmmError::Vsock(format!(
             "clock sync: agent returned exit code {code}"
