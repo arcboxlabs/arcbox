@@ -5,6 +5,7 @@
 //!
 //! - Daemon lifecycle management
 //! - Machine management
+//! - Runtime migration
 //! - Boot asset management
 //! - Docker CLI integration
 //! - DNS resolver management
@@ -19,6 +20,7 @@ pub mod daemon;
 pub mod dns;
 pub mod docker;
 pub mod machine;
+pub mod migrate;
 pub mod sandbox;
 pub mod setup;
 pub mod version;
@@ -66,6 +68,10 @@ pub enum Commands {
     /// Manage Linux machines
     #[command(subcommand)]
     Machine(machine::MachineCommands),
+
+    /// Import workloads from Docker Desktop or OrbStack
+    #[command(subcommand)]
+    Migrate(migrate::MigrateCommands),
 
     /// Manage sandboxes inside a machine
     #[command(subcommand)]

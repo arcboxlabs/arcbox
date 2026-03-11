@@ -9,6 +9,7 @@ This crate provides a thin command-line interface for ArcBox machine management 
 ## Features
 
 - **Machine Management**: Create and manage Linux VMs
+- **Runtime Migration**: Import local workloads from Docker Desktop or OrbStack
 - **Daemon Lifecycle**: Start/stop daemon process
 - **Docker Context Integration**: Seamless switching between Docker and ArcBox
 - **Boot Asset & DNS Helpers**: Manage boot cache and resolver setup
@@ -21,6 +22,10 @@ arcbox machine create myvm
 arcbox machine start myvm
 arcbox machine list
 arcbox machine stop myvm
+
+# Runtime migration
+arcbox migrate from docker-desktop
+arcbox migrate from orbstack --source-socket ~/.orbstack/run/docker.sock --yes
 
 # Daemon management
 arcbox daemon start              # Start daemon in background
