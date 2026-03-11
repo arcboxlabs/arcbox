@@ -52,7 +52,7 @@ mod tests {
 
     const SAMPLE: &str = r#"
 [boot]
-version = "0.3.0"
+version = "0.5.1"
 cdn = "https://boot.arcboxcdn.com"
 
 [[tools]]
