@@ -334,11 +334,7 @@ mod agent {
                     return;
                 }
                 Err(e) => {
-                    let _ = write_frame(
-                        &mut conn,
-                        FILE_ERR,
-                        format!("read data: {e}").as_bytes(),
-                    );
+                    let _ = write_frame(&mut conn, FILE_ERR, format!("read data: {e}").as_bytes());
                     return;
                 }
             }
@@ -348,11 +344,7 @@ mod agent {
         if let Some(parent) = path.parent()
             && let Err(e) = std::fs::create_dir_all(parent)
         {
-            let _ = write_frame(
-                &mut conn,
-                FILE_ERR,
-                format!("create dirs: {e}").as_bytes(),
-            );
+            let _ = write_frame(&mut conn, FILE_ERR, format!("create dirs: {e}").as_bytes());
             return;
         }
 
@@ -373,11 +365,7 @@ mod agent {
                 let _ = write_frame(&mut conn, FILE_ACK, &[]);
             }
             Err(e) => {
-                let _ = write_frame(
-                    &mut conn,
-                    FILE_ERR,
-                    format!("write file: {e}").as_bytes(),
-                );
+                let _ = write_frame(&mut conn, FILE_ERR, format!("write file: {e}").as_bytes());
             }
         }
     }
@@ -398,11 +386,7 @@ mod agent {
         let data = match std::fs::read(&req.path) {
             Ok(d) => d,
             Err(e) => {
-                let _ = write_frame(
-                    &mut conn,
-                    FILE_ERR,
-                    format!("read file: {e}").as_bytes(),
-                );
+                let _ = write_frame(&mut conn, FILE_ERR, format!("read file: {e}").as_bytes());
                 return;
             }
         };
@@ -674,14 +658,18 @@ mod agent {
     // -------------------------------------------------------------------------
 
     pub fn run() {
-        eprintln!("vmm-guest-agent: listening on vsock ports {AGENT_PORT} (exec), {FILE_PORT} (file I/O)");
+        eprintln!(
+            "vmm-guest-agent: listening on vsock ports {AGENT_PORT} (exec), {FILE_PORT} (file I/O)"
+        );
         let exec_fd = create_vsock_listener(AGENT_PORT);
         let file_fd = create_vsock_listener(FILE_PORT);
 
         // File I/O listener thread.
-        thread::spawn(move || loop {
-            let conn_fd = accept_connection(file_fd);
-            thread::spawn(move || handle_file_connection(conn_fd));
+        thread::spawn(move || {
+            loop {
+                let conn_fd = accept_connection(file_fd);
+                thread::spawn(move || handle_file_connection(conn_fd));
+            }
         });
 
         // Exec listener (main thread).

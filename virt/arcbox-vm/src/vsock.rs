@@ -24,6 +24,7 @@
 //! | 0x02 | Host→Agent  | raw stdin bytes                  |
 //! | 0x03 | Host→Agent  | `[u16 LE width][u16 LE height]`  |
 //! | 0x04 | Host→Agent  | empty — signals stdin EOF        |
+//! | 0x05 | Host→Agent  | `[i64 LE secs][u32 LE nanos]`    |
 //! | 0x10 | Agent→Host  | raw stdout bytes                 |
 //! | 0x11 | Agent→Host  | raw stderr bytes                 |
 //! | 0x12 | Agent→Host  | `[i32 LE exit_code]`             |
@@ -208,7 +209,9 @@ pub(crate) async fn write_frame<W: AsyncWriteExt + Unpin>(
 }
 
 /// Read a single frame from any `AsyncRead`.
-pub(crate) async fn read_frame<R: AsyncReadExt + Unpin>(r: &mut R) -> std::io::Result<(u8, Vec<u8>)> {
+pub(crate) async fn read_frame<R: AsyncReadExt + Unpin>(
+    r: &mut R,
+) -> std::io::Result<(u8, Vec<u8>)> {
     let msg_type = r.read_u8().await?;
     let len = r.read_u32_le().await? as usize;
     if len > MAX_FRAME_SIZE {

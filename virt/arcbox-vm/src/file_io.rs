@@ -133,12 +133,12 @@ pub async fn read_file(uds_path: &Path, path: &str) -> Result<Vec<u8>> {
             FILE_ERR => {
                 return Err(VmmError::Vsock(
                     String::from_utf8_lossy(&payload).into_owned(),
-                ))
+                ));
             }
             other => {
                 return Err(VmmError::Vsock(format!(
                     "file read: unexpected frame type 0x{other:02x}"
-                )))
+                )));
             }
         }
     }
@@ -147,6 +147,7 @@ pub async fn read_file(uds_path: &Path, path: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vsock::{read_frame as async_read_frame, write_frame as async_write_frame};
 
     #[test]
     fn test_write_req_serializes() {
@@ -164,5 +165,167 @@ mod tests {
         let req = ReadReq { path: "/etc/hosts" };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("/etc/hosts"));
+    }
+
+    /// Simulate a successful write: host sends WRITE_REQ + DATA + DONE,
+    /// agent replies FILE_ACK.
+    #[tokio::test]
+    async fn test_write_file_protocol_success() {
+        let (mut agent, host) = tokio::io::duplex(8192);
+
+        // Spawn a mock agent that reads the write protocol and responds.
+        let agent_handle = tokio::spawn(async move {
+            // Read FILE_WRITE_REQ header.
+            let (ty, payload) = async_read_frame(&mut agent).await.unwrap();
+            assert_eq!(ty, FILE_WRITE_REQ);
+            let parsed: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            assert_eq!(parsed["path"], "/tmp/hello.txt");
+
+            // Read FILE_DATA chunks.
+            let mut data = Vec::new();
+            loop {
+                let (ty, chunk) = async_read_frame(&mut agent).await.unwrap();
+                match ty {
+                    FILE_DATA => data.extend_from_slice(&chunk),
+                    FILE_DONE => break,
+                    _ => panic!("unexpected frame type 0x{ty:02x}"),
+                }
+            }
+            assert_eq!(data, b"hello world");
+
+            // Send FILE_ACK.
+            async_write_frame(&mut agent, FILE_ACK, &[]).await.unwrap();
+        });
+
+        // Drive the host side directly on the duplex stream.
+        let mut stream = host;
+        let req = serde_json::to_vec(&WriteReq {
+            path: "/tmp/hello.txt",
+            mode: 0o644,
+        })
+        .unwrap();
+        async_write_frame(&mut stream, FILE_WRITE_REQ, &req)
+            .await
+            .unwrap();
+        for chunk in b"hello world".chunks(MAX_FRAME_SIZE) {
+            async_write_frame(&mut stream, FILE_DATA, chunk)
+                .await
+                .unwrap();
+        }
+        async_write_frame(&mut stream, FILE_DONE, &[])
+            .await
+            .unwrap();
+        let (resp_type, _) = async_read_frame(&mut stream).await.unwrap();
+        assert_eq!(resp_type, FILE_ACK);
+
+        agent_handle.await.unwrap();
+    }
+
+    /// Simulate a write error: agent replies FILE_ERR.
+    #[tokio::test]
+    async fn test_write_file_protocol_error() {
+        let (mut agent, host) = tokio::io::duplex(8192);
+
+        let agent_handle = tokio::spawn(async move {
+            // Consume WRITE_REQ + DATA + DONE.
+            let _ = async_read_frame(&mut agent).await.unwrap();
+            loop {
+                let (ty, _) = async_read_frame(&mut agent).await.unwrap();
+                if ty == FILE_DONE {
+                    break;
+                }
+            }
+            async_write_frame(&mut agent, FILE_ERR, b"permission denied")
+                .await
+                .unwrap();
+        });
+
+        let mut stream = host;
+        let req = serde_json::to_vec(&WriteReq {
+            path: "/root/secret",
+            mode: 0o600,
+        })
+        .unwrap();
+        async_write_frame(&mut stream, FILE_WRITE_REQ, &req)
+            .await
+            .unwrap();
+        async_write_frame(&mut stream, FILE_DONE, &[])
+            .await
+            .unwrap();
+        let (resp_type, payload) = async_read_frame(&mut stream).await.unwrap();
+        assert_eq!(resp_type, FILE_ERR);
+        assert_eq!(std::str::from_utf8(&payload).unwrap(), "permission denied");
+
+        agent_handle.await.unwrap();
+    }
+
+    /// Simulate a successful read: agent sends DATA chunks then DONE.
+    #[tokio::test]
+    async fn test_read_file_protocol_success() {
+        let (mut agent, host) = tokio::io::duplex(8192);
+
+        let agent_handle = tokio::spawn(async move {
+            let (ty, _payload) = async_read_frame(&mut agent).await.unwrap();
+            assert_eq!(ty, FILE_READ_REQ);
+
+            // Send file content in two chunks.
+            async_write_frame(&mut agent, FILE_DATA, b"part1")
+                .await
+                .unwrap();
+            async_write_frame(&mut agent, FILE_DATA, b"part2")
+                .await
+                .unwrap();
+            async_write_frame(&mut agent, FILE_DONE, &[]).await.unwrap();
+        });
+
+        let mut stream = host;
+        let req = serde_json::to_vec(&ReadReq {
+            path: "/tmp/test.txt",
+        })
+        .unwrap();
+        async_write_frame(&mut stream, FILE_READ_REQ, &req)
+            .await
+            .unwrap();
+
+        // Collect chunks.
+        let mut buf = Vec::new();
+        loop {
+            let (ty, payload) = async_read_frame(&mut stream).await.unwrap();
+            match ty {
+                FILE_DATA => buf.extend_from_slice(&payload),
+                FILE_DONE => break,
+                _ => panic!("unexpected frame type 0x{ty:02x}"),
+            }
+        }
+        assert_eq!(buf, b"part1part2");
+
+        agent_handle.await.unwrap();
+    }
+
+    /// Simulate a read error: agent replies FILE_ERR.
+    #[tokio::test]
+    async fn test_read_file_protocol_error() {
+        let (mut agent, host) = tokio::io::duplex(8192);
+
+        let agent_handle = tokio::spawn(async move {
+            let _ = async_read_frame(&mut agent).await.unwrap();
+            async_write_frame(&mut agent, FILE_ERR, b"no such file")
+                .await
+                .unwrap();
+        });
+
+        let mut stream = host;
+        let req = serde_json::to_vec(&ReadReq {
+            path: "/nonexistent",
+        })
+        .unwrap();
+        async_write_frame(&mut stream, FILE_READ_REQ, &req)
+            .await
+            .unwrap();
+        let (ty, payload) = async_read_frame(&mut stream).await.unwrap();
+        assert_eq!(ty, FILE_ERR);
+        assert_eq!(std::str::from_utf8(&payload).unwrap(), "no such file");
+
+        agent_handle.await.unwrap();
     }
 }
