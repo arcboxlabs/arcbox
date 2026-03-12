@@ -1,5 +1,6 @@
 [package]
 name = "arcbox-daemon"
+publish = false
 description = "ArcBox daemon process"
 version.workspace = true
 edition.workspace = true
@@ -10,6 +11,7 @@ authors.workspace = true
 
 [[bin]]
 name = "arcbox-daemon"
+publish = false
 path = "src/main.rs"
 
 [dependencies]
