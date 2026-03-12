@@ -8,7 +8,10 @@
 //! 3. Built-in guest defaults
 
 use arcbox_vm::VmmConfig;
-use arcbox_vm::config::{DefaultVmConfig, FirecrackerConfig, GrpcConfig, JailerConfig, NetworkConfig};
+use arcbox_vm::config::{DefaultVmConfig, FirecrackerConfig, GrpcConfig, NetworkConfig};
+// JailerConfig will be needed once jailer is re-enabled.
+#[allow(unused_imports)]
+use arcbox_vm::config::JailerConfig;
 
 /// Guest-specific VMM configuration defaults.
 ///
@@ -17,18 +20,20 @@ fn guest_defaults() -> VmmConfig {
     VmmConfig {
         firecracker: FirecrackerConfig {
             binary: "/arcbox/bin/firecracker".into(),
-            jailer: Some(JailerConfig {
-                binary: "/arcbox/bin/jailer".into(),
-                uid: 0,
-                gid: 0,
-                chroot_base_dir: None,
-                netns: None,
-                new_pid_ns: false,
-                cgroup_version: None,
-                parent_cgroup: None,
-                resource_limits: vec![],
-            }),
-            data_dir: "/var/lib/arcbox/sandboxes".into(),
+            // TODO: re-enable jailer once /srv/jailer exists in EROFS rootfs.
+            // jailer: Some(JailerConfig {
+            //     binary: "/arcbox/bin/jailer".into(),
+            //     uid: 0,
+            //     gid: 0,
+            //     chroot_base_dir: None,
+            //     netns: None,
+            //     new_pid_ns: false,
+            //     cgroup_version: None,
+            //     parent_cgroup: None,
+            //     resource_limits: vec![],
+            // }),
+            jailer: None,
+            data_dir: "/var/lib/arcbox".into(),
             log_level: None,
             no_seccomp: false,
             seccomp_filter: None,
@@ -49,9 +54,9 @@ fn guest_defaults() -> VmmConfig {
         defaults: DefaultVmConfig {
             vcpus: 1,
             memory_mib: 512,
-            kernel: "/var/lib/arcbox/kernel/vmlinux".into(),
-            rootfs: "/var/lib/arcbox/images/sandbox.ext4".into(),
-            boot_args: "console=ttyS0 reboot=k panic=1 pci=off".into(),
+            kernel: "/arcbox/bin/vmlinux".into(),
+            rootfs: "/arcbox/bin/sandbox.ext4".into(),
+            boot_args: "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/vm-agent".into(),
         },
     }
 }
