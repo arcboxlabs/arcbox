@@ -231,6 +231,10 @@ fn map_migration_error(error: MigrationError) -> CoreError {
 mod tests {
     use super::*;
     use arcbox_migration::{MigrationPlan, ReplacementSummary, SourceInfo};
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn sample_plan() -> MigrationPlan {
         MigrationPlan {
@@ -284,6 +288,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_migration_removes_plan_after_starting() {
+        let _env_lock = ENV_LOCK.lock().unwrap();
         let manager = MigrationManager::new(PathBuf::from("/tmp/arcbox-docker.sock"));
         let plan_id = "test-plan".to_string();
         manager.prepared.write().await.insert(
@@ -300,6 +305,18 @@ mod tests {
             },
         );
 
+        let temp_dir = tempfile::tempdir().unwrap();
+        let docker_path = temp_dir.path().join("docker");
+        std::fs::write(&docker_path, "#!/bin/sh\nexit 1\n").unwrap();
+        let mut permissions = std::fs::metadata(&docker_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&docker_path, permissions).unwrap();
+
+        let old_path = std::env::var_os("PATH");
+        // SAFETY: tests serialize environment mutation with ENV_LOCK.
+        unsafe {
+            std::env::set_var("PATH", temp_dir.path());
+        }
         let _ = manager
             .run_migration(RunMigrationRequest {
                 plan_id: plan_id.clone(),
@@ -307,6 +324,16 @@ mod tests {
             })
             .await
             .unwrap();
+        match old_path {
+            Some(path) => {
+                // SAFETY: tests serialize environment mutation with ENV_LOCK.
+                unsafe { std::env::set_var("PATH", path) };
+            }
+            None => {
+                // SAFETY: tests serialize environment mutation with ENV_LOCK.
+                unsafe { std::env::remove_var("PATH") };
+            }
+        }
         assert!(!manager.prepared.read().await.contains_key(&plan_id));
     }
 }
