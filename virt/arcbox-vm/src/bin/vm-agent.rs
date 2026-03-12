@@ -651,7 +651,47 @@ mod agent {
     // vsock listener
     // -------------------------------------------------------------------------
 
+    /// Mount essential virtual filesystems for an init process.
+    fn mount_filesystems() {
+        use std::ffi::CString;
+
+        let mounts: &[(&str, &str, &str, libc::c_ulong, &str)] = &[
+            ("/proc", "proc", "proc", libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC, ""),
+            ("/sys", "sysfs", "sysfs", libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC, ""),
+            ("/dev", "devtmpfs", "devtmpfs", libc::MS_NOSUID, "mode=0755"),
+            ("/dev/pts", "devpts", "devpts", libc::MS_NOSUID | libc::MS_NOEXEC, "newinstance,ptmxmode=0666"),
+        ];
+
+        for (target, source, fstype, flags, data) in mounts {
+            let _ = std::fs::create_dir_all(target);
+            let c_source = CString::new(*source).unwrap();
+            let c_target = CString::new(*target).unwrap();
+            let c_fstype = CString::new(*fstype).unwrap();
+            let c_data = CString::new(*data).unwrap();
+            // SAFETY: all pointers are valid C strings.
+            let ret = unsafe {
+                libc::mount(
+                    c_source.as_ptr(),
+                    c_target.as_ptr(),
+                    c_fstype.as_ptr(),
+                    *flags,
+                    c_data.as_ptr().cast(),
+                )
+            };
+            if ret != 0 {
+                eprintln!(
+                    "mount {target}: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+
+        // Symlink /dev/ptmx → /dev/pts/ptmx so openpty() works.
+        let _ = std::os::unix::fs::symlink("/dev/pts/ptmx", "/dev/ptmx");
+    }
+
     pub fn run() {
+        mount_filesystems();
         eprintln!(
             "vmm-guest-agent: listening on vsock ports {AGENT_PORT} (exec), {FILE_PORT} (file I/O)"
         );
