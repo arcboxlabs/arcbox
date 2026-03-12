@@ -6,12 +6,15 @@ on:
       - master
 
 jobs:
-  # Publish unpublished packages to crates.io and create GitHub release.
-  # Uses GitHub App token so that the created tag triggers release.yml.
+  # Publish unpublished packages to crates.io.
   release-plz-release:
     name: Release
     runs-on: ubuntu-latest
-    if: ${{ github.repository_owner == 'arcboxlabs' }}
+    if: |-
+      ${{
+        github.repository_owner == 'arcboxlabs'
+        && startsWith(github.event.head_commit.message, 'chore: release')
+      }}
     permissions:
       contents: write
       pull-requests: read
@@ -36,6 +39,52 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Create git tag + GitHub release for the facade version.
+  # Runs in parallel with crates.io publishing.
+  # Uses GitHub App token so the tag triggers release.yml (binary builds).
+  create-release:
+    name: Tag & GitHub Release
+    runs-on: ubuntu-latest
+    if: |-
+      ${{
+        github.repository_owner == 'arcboxlabs'
+        && startsWith(github.event.head_commit.message, 'chore: release')
+      }}
+    permissions:
+      contents: write
+    steps:
+      - name: Generate GitHub App token
+        uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+      - name: Extract version and create release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          TAG="v${VERSION}"
+
+          if gh release view "$TAG" &>/dev/null; then
+            echo "Release $TAG already exists, skipping."
+            exit 0
+          fi
+
+          # Extract the latest version section from CHANGELOG.md for release notes.
+          NOTES=$(awk '/^## \['"$VERSION"'\]/{found=1; next} /^## \[/{if(found) exit} found' CHANGELOG.md)
+
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --notes "$NOTES"
+
+          echo "Created release $TAG"
 
   # Create/update a release PR with version bumps and changelog.
   # Skipped when the push is a release commit (merged release PR).

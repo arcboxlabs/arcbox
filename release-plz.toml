@@ -33,16 +33,15 @@ commit_parsers = [
     { message = "^chore", group = "Miscellaneous" },
 ]
 
-# ── Facade crate: single tag + GitHub release, not published to crates.io ─
+# ── Facade crate: version bump + changelog only ─────────────────────
+# Tag and GitHub release are created by CI (create-release job), not release-plz,
+# because Cargo.toml `publish = false` causes release-plz to skip tag creation.
 [[package]]
 name = "arcbox"
-publish = false
 release = true
 changelog_update = true
-git_tag_enable = true
-git_tag_name = "v{{ version }}"
-git_release_enable = true
-git_release_name = "v{{ version }}"
+git_tag_enable = false
+git_release_enable = false
 changelog_path = "CHANGELOG.md"
 # Include commits from ALL workspace crates so any change triggers a release.
 changelog_include = [
