@@ -72,6 +72,14 @@ pub async fn spawn_direct(
     if let Some(secs) = fc_cfg.socket_timeout_secs {
         fb = fb.socket_timeout(Duration::from_secs(secs));
     }
+    tracing::debug!(
+        id,
+        socket = %socket_path.display(),
+        log = %log_path.display(),
+        metrics = %metrics_path.display(),
+        binary = %fc_cfg.binary,
+        "spawning firecracker (direct mode)"
+    );
     fb.spawn()
         .await
         .map_err(|e| VmmError::Process(e.to_string()))
