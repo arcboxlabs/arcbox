@@ -918,17 +918,32 @@ impl VmLifecycleManager {
                             {
                                 let machine_manager = Arc::clone(&self.machine_manager);
                                 tokio::spawn(async move {
+                                    let mut line_buf = String::new();
                                     loop {
                                         match machine_manager
                                             .read_console_output(DEFAULT_MACHINE_NAME)
                                         {
                                             Ok(output) => {
                                                 let trimmed = output.trim_matches('\0');
-                                                if !trimmed.is_empty() {
-                                                    tracing::info!(
-                                                        "Guest console (runtime): {}",
-                                                        trimmed.trim_end()
-                                                    );
+                                                if trimmed.is_empty() {
+                                                    tokio::time::sleep(Duration::from_millis(200)).await;
+                                                    continue;
+                                                }
+                                                line_buf.push_str(trimmed);
+                                                while let Some(pos) = line_buf.find('\n') {
+                                                    let line = line_buf[..pos].trim_end().to_owned();
+                                                    line_buf.drain(..=pos);
+                                                    if line.is_empty() {
+                                                        continue;
+                                                    }
+                                                    // Agent tracing lines already have
+                                                    // timestamps — log at debug to avoid
+                                                    // double-wrapping.
+                                                    if line.contains("arcbox_agent::") {
+                                                        tracing::debug!("Guest: {}", line);
+                                                    } else {
+                                                        tracing::info!("Guest: {}", line);
+                                                    }
                                                 }
                                             }
                                             Err(e) => {
