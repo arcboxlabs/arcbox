@@ -19,6 +19,26 @@ use tokio::sync::mpsc;
 
 use crate::error::SandboxError;
 
+/// Drain any trailing input frames after exec completes.
+///
+/// The client may send a final `SandboxExecInput` (EOF) after the command
+/// exits.  We consume it here so it doesn't leak into the next dispatch loop
+/// iteration in `agent.rs`.
+async fn drain_trailing_input<S: AsyncRead + Unpin>(stream: &mut S) {
+    use tokio::time::{Duration, timeout};
+    // Give the client a short window to send trailing frames.
+    let _ = timeout(Duration::from_millis(100), async {
+        let mut buf = [0u8; 4096];
+        loop {
+            match tokio::io::AsyncReadExt::read(stream, &mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => continue, // discard
+            }
+        }
+    })
+    .await;
+}
+
 // =============================================================================
 // SandboxService
 // =============================================================================
@@ -289,7 +309,11 @@ impl SandboxService {
                             )
                             .await?;
                             if done {
-                                break;
+                                // Drain any trailing input frames (e.g. EOF) the
+                                // client may send after the command exits, so they
+                                // don't leak into the next dispatch iteration.
+                                drain_trailing_input(stream).await;
+                                return Ok(());
                             }
                         }
                     }
