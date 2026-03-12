@@ -94,9 +94,10 @@ impl MigrationManager {
     ) -> Result<UnboundedReceiver<Result<RunMigrationEvent>>> {
         let prepared = self
             .prepared
-            .write()
+            .read()
             .await
-            .remove(&request.plan_id)
+            .get(&request.plan_id)
+            .cloned()
             .ok_or_else(|| CoreError::not_found(format!("migration plan {}", request.plan_id)))?;
 
         if !prepared.plan.unsupported_resources.is_empty() {
@@ -122,6 +123,12 @@ impl MigrationManager {
             confirm_stop_source_containers: request.allow_replacements,
         };
         let plan_id = request.plan_id.clone();
+        let prepared = self
+            .prepared
+            .write()
+            .await
+            .remove(&request.plan_id)
+            .ok_or_else(|| CoreError::not_found(format!("migration plan {}", request.plan_id)))?;
         let source = prepared.source;
         let plan = prepared.plan;
         let (tx, rx) = unbounded_channel();
@@ -217,5 +224,89 @@ fn map_migration_error(error: MigrationError) -> CoreError {
         MigrationError::Docker(_) => CoreError::Machine(error.to_string()),
         MigrationError::Io(io_error) => io_error.into(),
         MigrationError::SerdeJson(error) => CoreError::Machine(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arcbox_migration::{MigrationPlan, ReplacementSummary, SourceInfo};
+
+    fn sample_plan() -> MigrationPlan {
+        MigrationPlan {
+            source: SourceInfo {
+                kind: SourceKind::DockerDesktop,
+                socket_path: PathBuf::from("/tmp/docker.sock"),
+                daemon_name: "docker-desktop".to_string(),
+                server_version: "29.0".to_string(),
+                operating_system: "Docker Desktop".to_string(),
+                architecture: "aarch64".to_string(),
+            },
+            helper_image: "arcbox-migration-helper:latest".to_string(),
+            images: Vec::new(),
+            volumes: Vec::new(),
+            networks: Vec::new(),
+            containers: Vec::new(),
+            unsupported_resources: Vec::new(),
+            replacements: ReplacementSummary {
+                containers: vec!["conflict".to_string()],
+                ..Default::default()
+            },
+            blockers: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_migration_keeps_plan_when_confirmation_is_missing() {
+        let manager = MigrationManager::new(PathBuf::from("/tmp/arcbox-docker.sock"));
+        let plan_id = "test-plan".to_string();
+        manager.prepared.write().await.insert(
+            plan_id.clone(),
+            PreparedMigration {
+                source: SourceConfig {
+                    kind: SourceKind::DockerDesktop,
+                    socket_path: PathBuf::from("/tmp/docker.sock"),
+                },
+                plan: sample_plan(),
+            },
+        );
+
+        let error = manager
+            .run_migration(RunMigrationRequest {
+                plan_id: plan_id.clone(),
+                allow_replacements: false,
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("requires confirmation"));
+        assert!(manager.prepared.read().await.contains_key(&plan_id));
+    }
+
+    #[tokio::test]
+    async fn run_migration_removes_plan_after_starting() {
+        let manager = MigrationManager::new(PathBuf::from("/tmp/arcbox-docker.sock"));
+        let plan_id = "test-plan".to_string();
+        manager.prepared.write().await.insert(
+            plan_id.clone(),
+            PreparedMigration {
+                source: SourceConfig {
+                    kind: SourceKind::DockerDesktop,
+                    socket_path: PathBuf::from("/tmp/docker.sock"),
+                },
+                plan: MigrationPlan {
+                    replacements: ReplacementSummary::default(),
+                    ..sample_plan()
+                },
+            },
+        );
+
+        let _ = manager
+            .run_migration(RunMigrationRequest {
+                plan_id: plan_id.clone(),
+                allow_replacements: true,
+            })
+            .await
+            .unwrap();
+        assert!(!manager.prepared.read().await.contains_key(&plan_id));
     }
 }
