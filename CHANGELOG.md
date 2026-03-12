@@ -6,7 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-
+### Bug Fixes
+- Move facade publish=false to release-plz.toml only (12682da)
+- Remove blanket clippy suppression, add workspace lint config ([#20](https://github.com/arcboxlabs/arcbox/pull/20)) (e0a9db4)### Documentation
+- Fix comment drift and docker API wording (caeb19e)### Miscellaneous
+- Audit and consolidate CLAUDE.md files (4aca433)### Refactor
+- Remove dead arcbox-image crate (2bf755b)
+- Decouple from arcbox-image types (1a3b041)
+- Reorganize crates into layered directory structure (592692a)
 ## [0.1.5] - 2026-03-09
 
 ### Features

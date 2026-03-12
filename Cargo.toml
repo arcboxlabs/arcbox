@@ -184,7 +184,7 @@ arcbox-core = { version = "0.1.6", path = "app/arcbox-core" }
 arcbox-api = { version = "0.1.6", path = "app/arcbox-api" }
 arcbox-cli = { version = "0.1.6", path = "app/arcbox-cli" }
 arcbox-agent = { version = "0.1.6", path = "guest/arcbox-agent" }
-arcbox = { version = "0.1.5", path = "app/arcbox" }
+arcbox = { version = "0.1.6", path = "app/arcbox" }
 
 # Test infrastructure
 tempfile = "3"
