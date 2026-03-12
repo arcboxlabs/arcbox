@@ -65,11 +65,14 @@ jobs:
         with:
           token: ${{ steps.app-token.outputs.token }}
       - name: Extract version and create release
+        id: release
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           TAG="v${VERSION}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
           if gh release view "$TAG" &>/dev/null; then
             echo "Release $TAG already exists, skipping."
@@ -85,6 +88,36 @@ jobs:
             --notes "$NOTES"
 
           echo "Created release $TAG"
+
+      - name: Update arcbox-desktop version
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          TAG="${{ steps.release.outputs.tag }}"
+          BRANCH="chore/bump-arcbox-${TAG}"
+
+          # Clone arcbox-desktop, create branch, update version file, push, and open PR.
+          gh repo clone arcboxlabs/arcbox-desktop /tmp/arcbox-desktop -- --depth 1
+          cd /tmp/arcbox-desktop
+
+          CURRENT=$(cat arcbox.version | tr -d '[:space:]')
+          if [ "$CURRENT" = "$TAG" ]; then
+            echo "arcbox-desktop already at $TAG, skipping."
+            exit 0
+          fi
+
+          git checkout -b "$BRANCH"
+          echo "$TAG" > arcbox.version
+          git add arcbox.version
+          git commit -m "chore: bump arcbox version to ${TAG}"
+          git push origin "$BRANCH"
+
+          gh pr create \
+            --repo arcboxlabs/arcbox-desktop \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore: bump arcbox version to ${TAG}" \
+            --body "Automated update from [arcbox ${TAG}](https://github.com/arcboxlabs/arcbox/releases/tag/${TAG})."
 
   # Create/update a release PR with version bumps and changelog.
   # Skipped when the push is a release commit (merged release PR).
