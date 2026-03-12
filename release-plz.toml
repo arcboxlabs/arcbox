@@ -3,12 +3,10 @@
 publish_no_verify = true
 # Pre-1.0: no semver checking.
 semver_check = false
-# Per-crate tags and GitHub releases are noisy for a 20-crate workspace.
-# Only the facade crate (arcbox) creates a tag and release.
+# Per-crate tags, GitHub releases, and changelogs are noisy for a 20+ crate workspace.
+# Only the facade crate (arcbox) creates a tag, release, and changelog.
 git_release_enable = false
 git_tag_enable = false
-# Disable per-crate release and changelog — only the facade crate is released.
-release = false
 changelog_update = false
 pr_name = "chore: release v{{ version }}"
 release_commits = "^(feat|fix|perf|refactor|docs|chore)"
