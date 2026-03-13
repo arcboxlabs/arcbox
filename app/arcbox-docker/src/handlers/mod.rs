@@ -64,9 +64,9 @@ mod volume;
 
 pub use container::{
     attach_container, container_changes, container_logs, container_stats, container_top,
-    create_container, inspect_container, kill_container, list_containers, pause_container,
-    prune_containers, remove_container, rename_container, restart_container, start_container,
-    stop_container, unpause_container, wait_container,
+    create_container, extract_container_dns_info, inspect_container, kill_container,
+    list_containers, pause_container, prune_containers, remove_container, rename_container,
+    restart_container, start_container, stop_container, unpause_container, wait_container,
 };
 pub use events::events;
 pub use exec::{exec_create, exec_inspect, exec_resize, exec_start};

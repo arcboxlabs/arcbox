@@ -1,5 +1,6 @@
 [package]
 name = "arcbox-docker"
+publish = false
 description = "Docker REST API compatibility layer for ArcBox"
 version.workspace = true
 edition.workspace = true
@@ -33,6 +34,7 @@ tokio-stream = "0.1"
 futures = { workspace = true }
 libc = { workspace = true }
 http-body-util = "0.1"
+tokio-util = "0.7"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }

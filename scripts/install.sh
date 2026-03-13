@@ -12,7 +12,7 @@ set -euo pipefail
 
 # --- Constants ---
 
-GITHUB_REPO="arcboxd/arcbox"
+GITHUB_REPO="arcboxlabs/arcbox"
 INSTALL_DIR="${ARCBOX_INSTALL_DIR:-/usr/local/bin}"
 DATA_DIR="$HOME/.arcbox"
 LOG_DIR="$HOME/Library/Logs/arcbox"

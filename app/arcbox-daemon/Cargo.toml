@@ -1,5 +1,6 @@
 [package]
 name = "arcbox-daemon"
+publish = false
 description = "ArcBox daemon process"
 version.workspace = true
 edition.workspace = true
@@ -10,6 +11,7 @@ authors.workspace = true
 
 [[bin]]
 name = "arcbox-daemon"
+publish = false
 path = "src/main.rs"
 
 [dependencies]
@@ -26,6 +28,13 @@ anyhow = { workspace = true }
 sentry = { workspace = true }
 dirs = { workspace = true }
 libc = { workspace = true }
+arcbox-constants = { workspace = true }
+arcbox-net = { workspace = true }
+serde_json.workspace = true
+axum.workspace = true
+bytes.workspace = true
+http-body-util = "0.1"
+tokio-util = "0.7"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 macos-resolver = { workspace = true }

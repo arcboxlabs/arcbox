@@ -1,5 +1,6 @@
 [package]
 name = "arcbox-agent"
+publish = false
 description = "Guest agent for ArcBox VMs"
 version.workspace = true
 edition.workspace = true
@@ -10,6 +11,7 @@ authors.workspace = true
 
 [[bin]]
 name = "arcbox-agent"
+publish = false
 path = "src/main.rs"
 
 [dependencies]
