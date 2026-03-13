@@ -436,48 +436,6 @@ pub struct SandboxEvent {
     pub attributes:
         ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
 }
-/// Request to set up an iptables DNAT rule forwarding a port on the guest VM
-/// to the specified port inside a sandbox.
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct SandboxPortForwardRequest {
-    /// Sandbox ID.
-    #[prost(string, tag = "1")]
-    pub sandbox_id: ::prost::alloc::string::String,
-    /// Port number inside the sandbox to forward to.
-    #[prost(uint32, tag = "2")]
-    pub port: u32,
-    /// Protocol: "tcp" (default) or "udp".
-    #[prost(string, tag = "3")]
-    pub protocol: ::prost::alloc::string::String,
-}
-/// Response to SandboxPortForward.
-/// host_addr is a "ip:port" string on the guest VM that is directly reachable
-/// from macOS via the vmnet interface.
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct SandboxPortForwardResponse {
-    /// Guest VM address to connect to, e.g. "192.168.64.2:40000".
-    #[prost(string, tag = "1")]
-    pub host_addr: ::prost::alloc::string::String,
-}
-/// Request to remove an existing port forward rule.
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct SandboxPortForwardRemoveRequest {
-    /// Sandbox ID.
-    #[prost(string, tag = "1")]
-    pub sandbox_id: ::prost::alloc::string::String,
-    /// Sandbox port that was previously forwarded.
-    #[prost(uint32, tag = "2")]
-    pub port: u32,
-    /// Protocol: "tcp" (default) or "udp".
-    #[prost(string, tag = "3")]
-    pub protocol: ::prost::alloc::string::String,
-}
 /// Request to checkpoint a sandbox.
 /// The sandbox must be in "ready" or "idle" state (no active workload).
 #[derive(serde::Serialize, serde::Deserialize)]
