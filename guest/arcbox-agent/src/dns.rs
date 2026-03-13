@@ -1,9 +1,7 @@
-//! Container name DNS resolution via /etc/hosts.
+//! Name resolution via /etc/hosts for containers and sandboxes.
 //!
-//! When containers start, their names are added to /etc/hosts pointing to
-//! the guest VM's IP (127.0.0.1 for loopback, since all containers share
-//! the guest's network namespace). This enables docker-compose style
-//! inter-container name resolution.
+//! Containers use 127.0.0.1 (shared guest network namespace).
+//! Sandboxes use their actual TAP IP (e.g. `10.88.0.2`).
 //!
 //! For compose compatibility, both the full container name and the service
 //! name (extracted from the compose naming pattern `project-service-N`) are
@@ -21,62 +19,23 @@ const HOSTS_MARKER: &str = "# arcbox";
 /// Path to the hosts file.
 const HOSTS_PATH: &str = "/etc/hosts";
 
-/// Adds a DNS entry for a container to /etc/hosts.
+/// Adds a DNS entry for a container to /etc/hosts (using 127.0.0.1).
 ///
 /// Registers the container name (and an extracted compose service alias, if
 /// applicable) so that other containers can resolve it by name.
 pub fn add_container_dns(container_name: &str) {
-    if container_name.is_empty() {
-        return;
-    }
-
     let aliases = collect_aliases(container_name);
-    if aliases.is_empty() {
-        return;
-    }
-
-    let names = aliases.join(" ");
-    let new_line = format!("{HOSTS_IP}\t{names} {HOSTS_MARKER}:{container_name}");
-
-    let content = std::fs::read_to_string(HOSTS_PATH).unwrap_or_default();
-
-    // Check if an entry for this container already exists.
-    let marker_tag = format!("{HOSTS_MARKER}:{container_name}");
-    if content.lines().any(|l| l.contains(&marker_tag)) {
-        tracing::debug!(
-            "DNS entry for container '{}' already exists in {}",
-            container_name,
-            HOSTS_PATH
-        );
-        return;
-    }
-
-    let updated = if content.ends_with('\n') || content.is_empty() {
-        format!("{content}{new_line}\n")
-    } else {
-        format!("{content}\n{new_line}\n")
-    };
-
-    if let Err(e) = std::fs::write(HOSTS_PATH, &updated) {
-        tracing::warn!(
-            "Failed to add DNS entry for '{}' to {}: {}",
-            container_name,
-            HOSTS_PATH,
-            e
-        );
-    } else {
-        tracing::info!(
-            "Added DNS entry for container '{}': {} -> {}",
-            container_name,
-            names,
-            HOSTS_IP
-        );
-    }
+    add_dns_entry(container_name, HOSTS_IP, &aliases);
 }
 
-/// Removes the DNS entry for a container from /etc/hosts.
-pub fn remove_container_dns(container_name: &str) {
-    if container_name.is_empty() {
+/// Adds a DNS entry for a sandbox to /etc/hosts with the given IP.
+pub fn add_sandbox_dns(sandbox_id: &str, ip: &str) {
+    add_dns_entry(sandbox_id, ip, &[sandbox_id.to_string()]);
+}
+
+/// Removes the DNS entry for a name from /etc/hosts.
+pub fn remove_dns(name: &str) {
+    if name.is_empty() {
         return;
     }
 
@@ -85,7 +44,7 @@ pub fn remove_container_dns(container_name: &str) {
         Err(_) => return,
     };
 
-    let marker_tag = format!("{HOSTS_MARKER}:{container_name}");
+    let marker_tag = format!("{HOSTS_MARKER}:{name}");
     let filtered: Vec<&str> = content
         .lines()
         .filter(|line| !line.contains(&marker_tag))
@@ -102,14 +61,48 @@ pub fn remove_container_dns(container_name: &str) {
     }
 
     if let Err(e) = std::fs::write(HOSTS_PATH, &updated) {
-        tracing::warn!(
-            "Failed to remove DNS entry for '{}' from {}: {}",
-            container_name,
-            HOSTS_PATH,
-            e
-        );
+        tracing::warn!("Failed to remove DNS entry for '{}' from {}: {}", name, HOSTS_PATH, e);
     } else {
-        tracing::debug!("Removed DNS entry for container '{}'", container_name);
+        tracing::debug!("Removed DNS entry for '{}'", name);
+    }
+}
+
+/// Removes the DNS entry for a container from /etc/hosts.
+pub fn remove_container_dns(container_name: &str) {
+    remove_dns(container_name);
+}
+
+// -------------------------------------------------------------------------
+// Internal
+// -------------------------------------------------------------------------
+
+/// Shared implementation: append an entry to /etc/hosts.
+fn add_dns_entry(name: &str, ip: &str, aliases: &[String]) {
+    if name.is_empty() || aliases.is_empty() {
+        return;
+    }
+
+    let names = aliases.join(" ");
+    let new_line = format!("{ip}\t{names} {HOSTS_MARKER}:{name}");
+
+    let content = std::fs::read_to_string(HOSTS_PATH).unwrap_or_default();
+
+    let marker_tag = format!("{HOSTS_MARKER}:{name}");
+    if content.lines().any(|l| l.contains(&marker_tag)) {
+        tracing::debug!("DNS entry for '{}' already exists in {}", name, HOSTS_PATH);
+        return;
+    }
+
+    let updated = if content.ends_with('\n') || content.is_empty() {
+        format!("{content}{new_line}\n")
+    } else {
+        format!("{content}\n{new_line}\n")
+    };
+
+    if let Err(e) = std::fs::write(HOSTS_PATH, &updated) {
+        tracing::warn!("Failed to add DNS entry for '{}' to {}: {}", name, HOSTS_PATH, e);
+    } else {
+        tracing::info!("Added DNS entry: {} -> {}", names, ip);
     }
 }
 
