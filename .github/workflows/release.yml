@@ -73,7 +73,7 @@ jobs:
 
       - name: Build arcbox binaries (release)
         timeout-minutes: 15
-        run: cargo build --release --locked -p arcbox-cli -p arcbox-daemon
+        run: cargo build --release -p arcbox-cli -p arcbox-daemon
 
       - name: Codesign arcbox-daemon with virtualization entitlement
         run: |
@@ -134,7 +134,7 @@ jobs:
 
       - name: Build arcbox-agent
         timeout-minutes: 10
-        run: cargo build --release --locked -p arcbox-agent --target aarch64-unknown-linux-musl
+        run: cargo build --release -p arcbox-agent --target aarch64-unknown-linux-musl
 
       - name: Verify artifact
         run: |
