@@ -73,6 +73,8 @@ jobs:
 
           gh repo clone arcboxlabs/arcbox-desktop /tmp/arcbox-desktop -- --depth 1
           cd /tmp/arcbox-desktop
+          git config user.name "arcbox-labs[bot]"
+          git config user.email "254083426+arcbox-labs[bot]@users.noreply.github.com"
 
           CURRENT=$(cat arcbox.version | tr -d '[:space:]')
           if [ "$CURRENT" = "$TAG" ]; then
