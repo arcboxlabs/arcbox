@@ -61,7 +61,12 @@ pub fn remove_dns(name: &str) {
     }
 
     if let Err(e) = std::fs::write(HOSTS_PATH, &updated) {
-        tracing::warn!("Failed to remove DNS entry for '{}' from {}: {}", name, HOSTS_PATH, e);
+        tracing::warn!(
+            "Failed to remove DNS entry for '{}' from {}: {}",
+            name,
+            HOSTS_PATH,
+            e
+        );
     } else {
         tracing::debug!("Removed DNS entry for '{}'", name);
     }
@@ -100,7 +105,12 @@ fn add_dns_entry(name: &str, ip: &str, aliases: &[String]) {
     };
 
     if let Err(e) = std::fs::write(HOSTS_PATH, &updated) {
-        tracing::warn!("Failed to add DNS entry for '{}' to {}: {}", name, HOSTS_PATH, e);
+        tracing::warn!(
+            "Failed to add DNS entry for '{}' to {}: {}",
+            name,
+            HOSTS_PATH,
+            e
+        );
     } else {
         tracing::info!("Added DNS entry: {} -> {}", names, ip);
     }
