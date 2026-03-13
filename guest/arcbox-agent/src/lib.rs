@@ -5,5 +5,6 @@
 
 #[cfg(target_os = "linux")]
 pub mod config;
+pub mod dns;
 #[cfg(target_os = "linux")]
 pub mod sandbox;
