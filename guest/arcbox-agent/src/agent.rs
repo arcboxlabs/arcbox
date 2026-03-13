@@ -746,51 +746,26 @@ mod linux {
                     .await?;
                 }
                 Err(e) => {
-                    send_sandbox_error(stream, trace_id, 500, &e).await?;
+                    send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
                 }
             },
-            MessageType::SandboxStopRequest => {
-                use arcbox_protocol::sandbox_v1::StopSandboxRequest;
-                use prost::Message as _;
-                let req = match StopSandboxRequest::decode(payload) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        send_sandbox_error(stream, trace_id, 400, &format!("decode error: {e}"))
-                            .await?;
-                        return Ok(());
-                    }
-                };
-                match svc.stop(req).await {
-                    Ok(()) => {
-                        write_message(stream, MessageType::SandboxStopResponse, trace_id, &[])
-                            .await?;
-                    }
-                    Err(e) => {
-                        send_sandbox_error(stream, trace_id, 500, &e).await?;
-                    }
+            MessageType::SandboxStopRequest => match svc.stop(payload).await {
+                Ok(()) => {
+                    write_message(stream, MessageType::SandboxStopResponse, trace_id, &[]).await?;
                 }
-            }
-            MessageType::SandboxRemoveRequest => {
-                use arcbox_protocol::sandbox_v1::RemoveSandboxRequest;
-                use prost::Message as _;
-                let req = match RemoveSandboxRequest::decode(payload) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        send_sandbox_error(stream, trace_id, 400, &format!("decode error: {e}"))
-                            .await?;
-                        return Ok(());
-                    }
-                };
-                match svc.remove(req).await {
-                    Ok(()) => {
-                        write_message(stream, MessageType::SandboxRemoveResponse, trace_id, &[])
-                            .await?;
-                    }
-                    Err(e) => {
-                        send_sandbox_error(stream, trace_id, 500, &e).await?;
-                    }
+                Err(e) => {
+                    send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
                 }
-            }
+            },
+            MessageType::SandboxRemoveRequest => match svc.remove(payload).await {
+                Ok(()) => {
+                    write_message(stream, MessageType::SandboxRemoveResponse, trace_id, &[])
+                        .await?;
+                }
+                Err(e) => {
+                    send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
+                }
+            },
             MessageType::SandboxInspectRequest => match svc.inspect(payload) {
                 Ok(resp) => {
                     use prost::Message as _;
@@ -803,7 +778,7 @@ mod linux {
                     .await?;
                 }
                 Err(e) => {
-                    send_sandbox_error(stream, trace_id, 500, &e).await?;
+                    send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
                 }
             },
             MessageType::SandboxListRequest => match svc.list(payload) {
@@ -818,7 +793,7 @@ mod linux {
                     .await?;
                 }
                 Err(e) => {
-                    send_sandbox_error(stream, trace_id, 500, &e).await?;
+                    send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
                 }
             },
             // -----------------------------------------------------------------
@@ -855,7 +830,7 @@ mod linux {
                     .await?;
                 }
                 Err(e) => {
-                    send_sandbox_error(stream, trace_id, 500, &e).await?;
+                    send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
                 }
             },
             MessageType::SandboxRestoreRequest => match svc.restore(payload).await {
@@ -870,7 +845,7 @@ mod linux {
                     .await?;
                 }
                 Err(e) => {
-                    send_sandbox_error(stream, trace_id, 500, &e).await?;
+                    send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
                 }
             },
             MessageType::SandboxListSnapshotsRequest => match svc.list_snapshots(payload) {
@@ -885,7 +860,7 @@ mod linux {
                     .await?;
                 }
                 Err(e) => {
-                    send_sandbox_error(stream, trace_id, 500, &e).await?;
+                    send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
                 }
             },
             MessageType::SandboxDeleteSnapshotRequest => match svc.delete_snapshot(payload) {
@@ -899,7 +874,7 @@ mod linux {
                     .await?;
                 }
                 Err(e) => {
-                    send_sandbox_error(stream, trace_id, 500, &e).await?;
+                    send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
                 }
             },
             _ => {
@@ -924,7 +899,7 @@ mod linux {
         let mut rx = match svc.run(payload).await {
             Ok(r) => r,
             Err(e) => {
-                send_sandbox_error(stream, trace_id, 500, &e).await?;
+                send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
                 return Ok(());
             }
         };
@@ -949,7 +924,7 @@ mod linux {
         let mut rx = match svc.subscribe_events(payload) {
             Ok(r) => r,
             Err(e) => {
-                send_sandbox_error(stream, trace_id, 500, &e).await?;
+                send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
                 return Ok(());
             }
         };

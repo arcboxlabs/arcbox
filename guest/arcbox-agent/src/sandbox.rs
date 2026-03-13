@@ -15,6 +15,8 @@ use arcbox_vm::{
 use prost::Message;
 use tokio::sync::mpsc;
 
+use crate::error::SandboxError;
+
 // =============================================================================
 // SandboxService
 // =============================================================================
@@ -41,15 +43,15 @@ impl SandboxService {
     pub async fn create(
         &self,
         payload: &[u8],
-    ) -> Result<sandbox_v1::CreateSandboxResponse, String> {
+    ) -> Result<sandbox_v1::CreateSandboxResponse, SandboxError> {
         let req = sandbox_v1::CreateSandboxRequest::decode(payload)
-            .map_err(|e| format!("decode error: {e}"))?;
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
         let spec = proto_to_spec(req);
         let (id, ip_address) = self
             .manager
             .create_sandbox(spec)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| SandboxError::Internal(e.to_string()))?;
         crate::dns::add_sandbox_dns(&id, &ip_address);
         Ok(sandbox_v1::CreateSandboxResponse {
             id,
@@ -59,40 +61,44 @@ impl SandboxService {
     }
 
     /// Stop a sandbox.
-    pub async fn stop(&self, req: sandbox_v1::StopSandboxRequest) -> Result<(), String> {
+    pub async fn stop(&self, payload: &[u8]) -> Result<(), SandboxError> {
+        let req = sandbox_v1::StopSandboxRequest::decode(payload)
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
         self.manager
             .stop_sandbox(&req.id, req.timeout_seconds)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| SandboxError::Internal(e.to_string()))?;
         crate::dns::remove_dns(&req.id);
         Ok(())
     }
 
     /// Remove a sandbox.
-    pub async fn remove(&self, req: sandbox_v1::RemoveSandboxRequest) -> Result<(), String> {
+    pub async fn remove(&self, payload: &[u8]) -> Result<(), SandboxError> {
+        let req = sandbox_v1::RemoveSandboxRequest::decode(payload)
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
         self.manager
             .remove_sandbox(&req.id, req.force)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| SandboxError::Internal(e.to_string()))?;
         crate::dns::remove_dns(&req.id);
         Ok(())
     }
 
     /// Inspect a sandbox.
-    pub fn inspect(&self, payload: &[u8]) -> Result<sandbox_v1::SandboxInfo, String> {
+    pub fn inspect(&self, payload: &[u8]) -> Result<sandbox_v1::SandboxInfo, SandboxError> {
         let req = sandbox_v1::InspectSandboxRequest::decode(payload)
-            .map_err(|e| format!("decode error: {e}"))?;
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
         let info = self
             .manager
             .inspect_sandbox(&req.id)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| SandboxError::Internal(e.to_string()))?;
         Ok(vm_info_to_proto(info))
     }
 
     /// List sandboxes.
-    pub fn list(&self, payload: &[u8]) -> Result<sandbox_v1::ListSandboxesResponse, String> {
+    pub fn list(&self, payload: &[u8]) -> Result<sandbox_v1::ListSandboxesResponse, SandboxError> {
         let req = sandbox_v1::ListSandboxesRequest::decode(payload)
-            .map_err(|e| format!("decode error: {e}"))?;
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
         let state_filter = if req.state.is_empty() {
             None
         } else {
@@ -109,10 +115,12 @@ impl SandboxService {
     // =========================================================================
 
     /// Run a command in a sandbox.  Returns a channel of encoded [`RunOutput`] payloads.
-    pub async fn run(&self, payload: &[u8]) -> Result<mpsc::UnboundedReceiver<Vec<u8>>, String> {
-        let req =
-            sandbox_v1::RunRequest::decode(payload).map_err(|e| format!("decode error: {e}"))?;
-
+    pub async fn run(
+        &self,
+        payload: &[u8],
+    ) -> Result<mpsc::UnboundedReceiver<Vec<u8>>, SandboxError> {
+        let req = sandbox_v1::RunRequest::decode(payload)
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
         let tty_size = None; // RunRequest has no tty_size field; use default.
 
         let mut rx = self
@@ -128,7 +136,7 @@ impl SandboxService {
                 req.timeout_seconds,
             )
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| SandboxError::Internal(e.to_string()))?;
 
         let (tx, out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         tokio::spawn(async move {
@@ -172,9 +180,9 @@ impl SandboxService {
     pub fn subscribe_events(
         &self,
         payload: &[u8],
-    ) -> Result<mpsc::UnboundedReceiver<Vec<u8>>, String> {
+    ) -> Result<mpsc::UnboundedReceiver<Vec<u8>>, SandboxError> {
         let req = sandbox_v1::SandboxEventsRequest::decode(payload)
-            .map_err(|e| format!("decode error: {e}"))?;
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
         let filter_id = req.id.clone();
         let filter_action = req.action.clone();
 
@@ -218,21 +226,24 @@ impl SandboxService {
     pub async fn checkpoint(
         &self,
         payload: &[u8],
-    ) -> Result<sandbox_v1::CheckpointResponse, String> {
+    ) -> Result<sandbox_v1::CheckpointResponse, SandboxError> {
         let req = sandbox_v1::CheckpointRequest::decode(payload)
-            .map_err(|e| format!("decode error: {e}"))?;
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
         let info = self
             .manager
             .checkpoint_sandbox(&req.sandbox_id, req.name)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| SandboxError::Internal(e.to_string()))?;
         Ok(checkpoint_to_proto(info))
     }
 
     /// Restore a sandbox from a snapshot.
-    pub async fn restore(&self, payload: &[u8]) -> Result<sandbox_v1::RestoreResponse, String> {
+    pub async fn restore(
+        &self,
+        payload: &[u8],
+    ) -> Result<sandbox_v1::RestoreResponse, SandboxError> {
         let req = sandbox_v1::RestoreRequest::decode(payload)
-            .map_err(|e| format!("decode error: {e}"))?;
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
         let spec = RestoreSandboxSpec {
             id: if req.id.is_empty() {
                 None
@@ -248,7 +259,7 @@ impl SandboxService {
             .manager
             .restore_sandbox(spec)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| SandboxError::Internal(e.to_string()))?;
         crate::dns::add_sandbox_dns(&id, &ip_address);
         Ok(sandbox_v1::RestoreResponse { id, ip_address })
     }
@@ -257,9 +268,9 @@ impl SandboxService {
     pub fn list_snapshots(
         &self,
         payload: &[u8],
-    ) -> Result<sandbox_v1::ListSnapshotsResponse, String> {
+    ) -> Result<sandbox_v1::ListSnapshotsResponse, SandboxError> {
         let req = sandbox_v1::ListSnapshotsRequest::decode(payload)
-            .map_err(|e| format!("decode error: {e}"))?;
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
         let filter = if req.sandbox_id.is_empty() {
             None
         } else {
@@ -268,7 +279,7 @@ impl SandboxService {
         let summaries = self
             .manager
             .list_checkpoints(filter)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| SandboxError::Internal(e.to_string()))?;
         Ok(sandbox_v1::ListSnapshotsResponse {
             snapshots: summaries
                 .into_iter()
@@ -278,23 +289,25 @@ impl SandboxService {
     }
 
     /// Return the IP address of a sandbox, or an error if not found.
-    pub fn sandbox_ip(&self, sandbox_id: &str) -> Result<std::net::Ipv4Addr, String> {
+    pub fn sandbox_ip(&self, sandbox_id: &str) -> Result<std::net::Ipv4Addr, SandboxError> {
         let info = self
             .manager
             .inspect_sandbox(&sandbox_id.to_string())
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| SandboxError::Internal(e.to_string()))?;
         info.network
             .and_then(|n| n.ip_address.parse().ok())
-            .ok_or_else(|| format!("sandbox '{sandbox_id}' has no network allocation"))
+            .ok_or_else(|| {
+                SandboxError::Internal(format!("sandbox '{sandbox_id}' has no network allocation"))
+            })
     }
 
     /// Delete a snapshot.
-    pub fn delete_snapshot(&self, payload: &[u8]) -> Result<(), String> {
+    pub fn delete_snapshot(&self, payload: &[u8]) -> Result<(), SandboxError> {
         let req = sandbox_v1::DeleteSnapshotRequest::decode(payload)
-            .map_err(|e| format!("decode error: {e}"))?;
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
         self.manager
             .delete_checkpoint(&req.snapshot_id)
-            .map_err(|e| e.to_string())
+            .map_err(|e| SandboxError::Internal(e.to_string()))
     }
 }
 

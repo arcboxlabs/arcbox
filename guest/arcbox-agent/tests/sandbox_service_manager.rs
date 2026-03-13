@@ -57,12 +57,12 @@ fn test_config() -> VmmConfig {
 }
 
 async fn cleanup_sandbox(service: &SandboxService, sandbox_id: &str) {
-    let _ = service
-        .remove(RemoveSandboxRequest {
-            id: sandbox_id.to_string(),
-            force: true,
-        })
-        .await;
+    let payload = RemoveSandboxRequest {
+        id: sandbox_id.to_string(),
+        force: true,
+    }
+    .encode_to_vec();
+    let _ = service.remove(&payload).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -161,19 +161,20 @@ async fn sandbox_service_calls_sandbox_manager() {
     }
     assert!(got_done, "run stream ended without done=true frame");
 
-    service
-        .stop(StopSandboxRequest {
-            id: sandbox_id.clone(),
-            timeout_seconds: 20,
-        })
-        .await
-        .expect("stop failed");
+    let stop_payload = StopSandboxRequest {
+        id: sandbox_id.clone(),
+        timeout_seconds: 20,
+    }
+    .encode_to_vec();
+    service.stop(&stop_payload).await.expect("stop failed");
 
+    let remove_payload = RemoveSandboxRequest {
+        id: sandbox_id,
+        force: true,
+    }
+    .encode_to_vec();
     service
-        .remove(RemoveSandboxRequest {
-            id: sandbox_id,
-            force: true,
-        })
+        .remove(&remove_payload)
         .await
         .expect("remove failed");
 }

@@ -12,6 +12,9 @@ mod agent;
 mod init;
 mod supervisor;
 
+#[cfg(target_os = "linux")]
+mod error;
+
 mod rpc;
 
 // Mount module uses Linux-specific syscalls (mount/umount).
