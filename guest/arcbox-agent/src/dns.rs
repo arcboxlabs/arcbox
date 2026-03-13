@@ -44,10 +44,10 @@ pub fn remove_dns(name: &str) {
         Err(_) => return,
     };
 
-    let marker_tag = format!("{HOSTS_MARKER}:{name}");
+    let marker_suffix = format!(" {HOSTS_MARKER}:{name}");
     let filtered: Vec<&str> = content
         .lines()
-        .filter(|line| !line.contains(&marker_tag))
+        .filter(|line| !line.ends_with(&marker_suffix))
         .collect();
 
     // Nothing changed.
@@ -81,7 +81,11 @@ pub fn remove_container_dns(container_name: &str) {
 // Internal
 // -------------------------------------------------------------------------
 
-/// Shared implementation: append an entry to /etc/hosts.
+/// Shared implementation: upsert an entry in /etc/hosts.
+///
+/// If an entry with the same marker already exists it is replaced (handles IP
+/// changes on sandbox recreate). Matching uses `ends_with` on the marker
+/// suffix to avoid false positives with prefix names (e.g. `web` vs `web-api`).
 fn add_dns_entry(name: &str, ip: &str, aliases: &[String]) {
     if name.is_empty() || aliases.is_empty() {
         return;
@@ -92,16 +96,20 @@ fn add_dns_entry(name: &str, ip: &str, aliases: &[String]) {
 
     let content = std::fs::read_to_string(HOSTS_PATH).unwrap_or_default();
 
-    let marker_tag = format!("{HOSTS_MARKER}:{name}");
-    if content.lines().any(|l| l.contains(&marker_tag)) {
-        tracing::debug!("DNS entry for '{}' already exists in {}", name, HOSTS_PATH);
-        return;
-    }
+    // Remove any existing entry for the same name (upsert).
+    let marker_suffix = format!(" {HOSTS_MARKER}:{name}");
+    let filtered: String = content
+        .lines()
+        .filter(|line| !line.ends_with(&marker_suffix))
+        .collect::<Vec<_>>()
+        .join("\n");
 
-    let updated = if content.ends_with('\n') || content.is_empty() {
-        format!("{content}{new_line}\n")
+    let updated = if filtered.is_empty() {
+        format!("{new_line}\n")
+    } else if filtered.ends_with('\n') {
+        format!("{filtered}{new_line}\n")
     } else {
-        format!("{content}\n{new_line}\n")
+        format!("{filtered}\n{new_line}\n")
     };
 
     if let Err(e) = std::fs::write(HOSTS_PATH, &updated) {
@@ -233,5 +241,50 @@ mod tests {
     fn test_collect_aliases_empty() {
         let aliases = collect_aliases("");
         assert!(aliases.is_empty());
+    }
+
+    /// Helper: build a hosts line with the arcbox marker.
+    fn hosts_line(ip: &str, names: &str, marker_name: &str) -> String {
+        format!("{ip}\t{names} {HOSTS_MARKER}:{marker_name}")
+    }
+
+    /// `remove_dns` must not remove entries whose marker is a prefix match.
+    /// e.g. removing "web" must not remove "web-api".
+    #[test]
+    fn test_remove_dns_no_prefix_false_positive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hosts");
+        let web_line = hosts_line("10.88.0.2", "web", "web");
+        let web_api_line = hosts_line("10.88.0.3", "web-api", "web-api");
+        std::fs::write(&path, format!("{web_line}\n{web_api_line}\n")).unwrap();
+
+        // Operate on the temp file by temporarily overriding HOSTS_PATH.
+        // Since HOSTS_PATH is a const we test the filter logic directly.
+        let content = std::fs::read_to_string(&path).unwrap();
+        let marker_suffix = format!(" {HOSTS_MARKER}:web");
+        let filtered: Vec<&str> = content
+            .lines()
+            .filter(|line| !line.ends_with(&marker_suffix))
+            .collect();
+
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered[0].contains("web-api"));
+    }
+
+    /// `add_dns_entry` filter logic must replace an existing entry (upsert).
+    #[test]
+    fn test_add_dns_upsert_replaces_existing() {
+        let old_line = hosts_line("10.88.0.2", "web", "web");
+        let content = format!("127.0.0.1\tlocalhost\n{old_line}\n");
+
+        let marker_suffix = format!(" {HOSTS_MARKER}:web");
+        let filtered: Vec<&str> = content
+            .lines()
+            .filter(|line| !line.ends_with(&marker_suffix))
+            .collect();
+
+        // Old entry removed, localhost preserved.
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered[0].contains("localhost"));
     }
 }
