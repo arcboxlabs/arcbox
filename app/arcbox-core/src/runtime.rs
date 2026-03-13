@@ -58,7 +58,10 @@ fn ensure_guest_binaries(data_dir: &Path) -> Result<()> {
     let agent_path = data_dir.join("bin/arcbox-agent");
     check_executable(
         &agent_path,
-        "agent binary not found; run 'arcbox boot prefetch' or build with: cargo build -p arcbox-agent --target <triple>",
+        &format!(
+            "agent binary not found at {}; run 'abctl boot prefetch' to download it",
+            agent_path.display()
+        ),
     )?;
 
     let runtime_dir = data_dir.join("runtime/bin");
@@ -66,7 +69,8 @@ fn ensure_guest_binaries(data_dir: &Path) -> Result<()> {
         check_executable(
             &runtime_dir.join(name),
             &format!(
-                "runtime binary '{name}' not found; run 'arcbox boot prefetch' to download runtime assets"
+                "runtime binary '{name}' not found at {}; run 'abctl boot prefetch' to download runtime assets",
+                runtime_dir.join(name).display()
             ),
         )?;
     }
