@@ -213,7 +213,6 @@ mod linux {
 
     use super::AGENT_PORT;
     use super::ensure_runtime;
-    use crate::port_forward::PortForwardManager;
     use crate::rpc::{
         AGENT_VERSION, ErrorResponse, MessageType, RpcRequest, RpcResponse, parse_request,
         read_message, write_message, write_response,
@@ -262,12 +261,6 @@ mod linux {
                 }
             })
             .as_ref()
-    }
-
-    /// Returns the global [`PortForwardManager`] singleton.
-    fn port_forward_manager() -> &'static Mutex<PortForwardManager> {
-        static MGR: OnceLock<Mutex<PortForwardManager>> = OnceLock::new();
-        MGR.get_or_init(|| Mutex::new(PortForwardManager::new()))
     }
 
     /// Containerd socket candidates (primary + legacy fallback).
@@ -767,13 +760,8 @@ mod linux {
                         return Ok(());
                     }
                 };
-                let sandbox_id = req.id.clone();
                 match svc.stop(req).await {
                     Ok(()) => {
-                        port_forward_manager()
-                            .lock()
-                            .await
-                            .remove_all_for_sandbox(&sandbox_id);
                         write_message(stream, MessageType::SandboxStopResponse, trace_id, &[])
                             .await?;
                     }
@@ -793,13 +781,8 @@ mod linux {
                         return Ok(());
                     }
                 };
-                let sandbox_id = req.id.clone();
                 match svc.remove(req).await {
                     Ok(()) => {
-                        port_forward_manager()
-                            .lock()
-                            .await
-                            .remove_all_for_sandbox(&sandbox_id);
                         write_message(stream, MessageType::SandboxRemoveResponse, trace_id, &[])
                             .await?;
                     }
@@ -838,96 +821,6 @@ mod linux {
                     send_sandbox_error(stream, trace_id, 500, &e).await?;
                 }
             },
-            // -----------------------------------------------------------------
-            // Port forwarding
-            // -----------------------------------------------------------------
-            MessageType::SandboxPortForwardRequest => {
-                use arcbox_protocol::sandbox_v1::{
-                    SandboxPortForwardRequest, SandboxPortForwardResponse,
-                };
-                use prost::Message as _;
-
-                let req = match SandboxPortForwardRequest::decode(payload) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        send_sandbox_error(stream, trace_id, 400, &e.to_string()).await?;
-                        return Ok(());
-                    }
-                };
-
-                let protocol = if req.protocol.is_empty() {
-                    "tcp".to_string()
-                } else {
-                    req.protocol.clone()
-                };
-
-                let sandbox_ip = match svc.sandbox_ip(&req.sandbox_id) {
-                    Ok(ip) => ip,
-                    Err(e) => {
-                        send_sandbox_error(stream, trace_id, 404, &e).await?;
-                        return Ok(());
-                    }
-                };
-
-                let host_addr = {
-                    let mut mgr = port_forward_manager().lock().await;
-                    mgr.add(&req.sandbox_id, sandbox_ip, req.port as u16, &protocol)
-                };
-
-                match host_addr {
-                    Ok(addr) => {
-                        let resp = SandboxPortForwardResponse { host_addr: addr };
-                        write_message(
-                            stream,
-                            MessageType::SandboxPortForwardResponse,
-                            trace_id,
-                            &resp.encode_to_vec(),
-                        )
-                        .await?;
-                    }
-                    Err(e) => {
-                        send_sandbox_error(stream, trace_id, 500, &e).await?;
-                    }
-                }
-            }
-            MessageType::SandboxPortForwardRemoveRequest => {
-                use arcbox_protocol::sandbox_v1::SandboxPortForwardRemoveRequest;
-                use prost::Message as _;
-
-                let req = match SandboxPortForwardRemoveRequest::decode(payload) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        send_sandbox_error(stream, trace_id, 400, &e.to_string()).await?;
-                        return Ok(());
-                    }
-                };
-
-                let protocol = if req.protocol.is_empty() {
-                    "tcp".to_string()
-                } else {
-                    req.protocol.clone()
-                };
-
-                let result = {
-                    let mut mgr = port_forward_manager().lock().await;
-                    mgr.remove(&req.sandbox_id, req.port as u16, &protocol)
-                };
-
-                match result {
-                    Ok(()) => {
-                        write_message(
-                            stream,
-                            MessageType::SandboxPortForwardRemoveResponse,
-                            trace_id,
-                            &[],
-                        )
-                        .await?;
-                    }
-                    Err(e) => {
-                        send_sandbox_error(stream, trace_id, 500, &e).await?;
-                    }
-                }
-            }
             // -----------------------------------------------------------------
             // Streaming: Run
             // -----------------------------------------------------------------

@@ -18,11 +18,9 @@ mod rpc;
 #[cfg(target_os = "linux")]
 mod mount;
 
-// VMM config loading, sandbox service, and port forwarding are Linux-only.
+// VMM config loading and sandbox service are Linux-only.
 #[cfg(target_os = "linux")]
 mod config;
-#[cfg(target_os = "linux")]
-mod port_forward;
 #[cfg(target_os = "linux")]
 mod sandbox;
 
