@@ -50,6 +50,7 @@ impl SandboxService {
             .create_sandbox(spec)
             .await
             .map_err(|e| e.to_string())?;
+        crate::dns::add_sandbox_dns(&id, &ip_address);
         Ok(sandbox_v1::CreateSandboxResponse {
             id,
             ip_address,
@@ -62,7 +63,9 @@ impl SandboxService {
         self.manager
             .stop_sandbox(&req.id, req.timeout_seconds)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        crate::dns::remove_dns(&req.id);
+        Ok(())
     }
 
     /// Remove a sandbox.
@@ -70,7 +73,9 @@ impl SandboxService {
         self.manager
             .remove_sandbox(&req.id, req.force)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        crate::dns::remove_dns(&req.id);
+        Ok(())
     }
 
     /// Inspect a sandbox.
@@ -244,6 +249,7 @@ impl SandboxService {
             .restore_sandbox(spec)
             .await
             .map_err(|e| e.to_string())?;
+        crate::dns::add_sandbox_dns(&id, &ip_address);
         Ok(sandbox_v1::RestoreResponse { id, ip_address })
     }
 
