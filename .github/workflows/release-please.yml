@@ -44,8 +44,8 @@ jobs:
             echo "Cargo.lock already up to date"
             exit 0
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "arcbox-labs[bot]"
+          git config user.email "254083426+arcbox-labs[bot]@users.noreply.github.com"
           git add Cargo.lock
           git commit -m "chore: update Cargo.lock for release"
           git push
