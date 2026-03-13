@@ -28,6 +28,28 @@ jobs:
           manifest-file: .release-please-manifest.json
           token: ${{ steps.app-token.outputs.token }}
 
+      # After release-please creates/updates the PR, regenerate Cargo.lock
+      # so the release tag can build with --locked.
+      - name: Update Cargo.lock on release PR
+        if: steps.release.outputs.pr
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          PR_BRANCH=$(echo '${{ steps.release.outputs.pr }}' | jq -r '.headBranchName')
+          git clone --depth 1 --branch "$PR_BRANCH" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" /tmp/release-pr
+          cd /tmp/release-pr
+          cargo update --workspace
+          if git diff --quiet Cargo.lock; then
+            echo "Cargo.lock already up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "chore: update Cargo.lock for release"
+          git push
+
   # Update arcbox-desktop version file when a new release is created.
   update-desktop:
     name: Update arcbox-desktop
