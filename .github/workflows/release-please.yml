@@ -71,7 +71,9 @@ jobs:
           TAG="${{ needs.release-please.outputs.tag_name }}"
           BRANCH="chore/bump-arcbox-${TAG}"
 
-          gh repo clone arcboxlabs/arcbox-desktop /tmp/arcbox-desktop -- --depth 1
+          git clone --depth 1 \
+            "https://x-access-token:${GH_TOKEN}@github.com/arcboxlabs/arcbox-desktop.git" \
+            /tmp/arcbox-desktop
           cd /tmp/arcbox-desktop
           git config user.name "arcbox-labs[bot]"
           git config user.email "254083426+arcbox-labs[bot]@users.noreply.github.com"
