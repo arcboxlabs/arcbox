@@ -165,6 +165,11 @@ mod platform {
         // Configure the primary interface via DHCP so the guest can reach
         // gateway services (DNS/NAT at 192.168.64.1).
         configure_primary_interface_dhcp();
+
+        // Allow forwarding between the primary interface and sandbox TAP
+        // interfaces. Docker/containerd sets the default FORWARD policy to
+        // DROP, so blanket ACCEPT rules are required for sandbox traffic.
+        setup_sandbox_forwarding();
     }
 
     fn configure_primary_interface_dhcp() {
@@ -249,6 +254,40 @@ exit 0
             Err(e) => {
                 tracing::warn!(interface, error = %e, "failed to run udhcpc");
             }
+        }
+    }
+
+    /// Install blanket iptables FORWARD ACCEPT rules for the sandbox subnet.
+    ///
+    /// The subnet is read from the VMM config (default `10.88.0.0/16`).
+    /// Uses `-I` (insert at chain top) so rules take effect even when
+    /// Docker sets the default FORWARD policy to DROP.
+    fn setup_sandbox_forwarding() {
+        let config = crate::config::load();
+        let subnet = &config.network.cidr;
+
+        run_iptables(
+            &["-I", "FORWARD", "-d", subnet, "-j", "ACCEPT"],
+            "FORWARD accept to sandbox subnet",
+        );
+        run_iptables(
+            &["-I", "FORWARD", "-s", subnet, "-j", "ACCEPT"],
+            "FORWARD accept from sandbox subnet",
+        );
+
+        tracing::info!(subnet, "sandbox forwarding rules installed");
+    }
+
+    /// Run an iptables command, logging on failure.
+    fn run_iptables(args: &[&str], desc: &str) {
+        match std::process::Command::new("iptables").args(args).status() {
+            Ok(s) if s.success() => {}
+            Ok(s) => tracing::warn!(
+                desc,
+                exit_code = s.code().unwrap_or(-1),
+                "iptables rule failed"
+            ),
+            Err(e) => tracing::warn!(desc, error = %e, "failed to run iptables"),
         }
     }
 
