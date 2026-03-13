@@ -116,8 +116,8 @@ jobs:
           toolchain: stable
           targets: aarch64-unknown-linux-musl
 
-      - name: Install musl cross-compiler
-        run: brew install FiloSottile/musl-cross/musl-cross
+      - name: Install musl cross-compiler and protobuf
+        run: brew install FiloSottile/musl-cross/musl-cross protobuf
 
       - name: Cache cargo
         uses: actions/cache@v4
