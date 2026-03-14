@@ -131,7 +131,7 @@ fn add_dns_entry(name: &str, ip: &str, aliases: &[String]) {
 ///
 /// For a plain container named `mycontainer`, this returns:
 /// `["mycontainer"]`
-fn collect_aliases(container_name: &str) -> Vec<String> {
+pub fn collect_aliases(container_name: &str) -> Vec<String> {
     if container_name.is_empty() {
         return vec![];
     }
