@@ -51,7 +51,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.11" # x-release-please-version
+version = "0.1.12" # x-release-please-version
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -154,8 +154,8 @@ nix = { version = "0.29", features = [
 # libc
 libc = "0.2"
 
-arcbox-asset = { version = "0.1.11", path = "common/arcbox-asset", features = ["download"] } # x-release-please-version
-arcbox-docker-tools = { version = "0.1.11", path = "app/arcbox-docker-tools" } # x-release-please-version
+arcbox-asset = { version = "0.1.12", path = "common/arcbox-asset", features = ["download"] } # x-release-please-version
+arcbox-docker-tools = { version = "0.1.12", path = "app/arcbox-docker-tools" } # x-release-please-version
 
 # External crates
 arcbox-boot = { version = "0.5.1", features = ["download"] }
@@ -164,27 +164,27 @@ macos-resolver = "0.2.0"
 fc-sdk = "0.2.3"
 
 # Internal crates
-arcbox-constants = { version = "0.1.11", path = "common/arcbox-constants" } # x-release-please-version
-arcbox-error = { version = "0.1.11", path = "common/arcbox-error" } # x-release-please-version
-arcbox-vz = { version = "0.1.11", path = "virt/arcbox-vz" } # x-release-please-version
-arcbox-hypervisor = { version = "0.1.11", path = "virt/arcbox-hypervisor" } # x-release-please-version
-arcbox-vmm = { version = "0.1.11", path = "virt/arcbox-vmm" } # x-release-please-version
-arcbox-virtio = { version = "0.1.11", path = "virt/arcbox-virtio" } # x-release-please-version
-arcbox-vm = { version = "0.1.11", path = "virt/arcbox-vm" } # x-release-please-version
-arcbox-fs = { version = "0.1.11", path = "virt/arcbox-fs" } # x-release-please-version
-arcbox-net = { version = "0.1.11", path = "virt/arcbox-net" } # x-release-please-version
-arcbox-dhcp = { version = "0.1.11", path = "virt/arcbox-dhcp" } # x-release-please-version
-arcbox-container = { version = "0.1.11", path = "runtime/arcbox-container" } # x-release-please-version
-arcbox-oci = { version = "0.1.11", path = "runtime/arcbox-oci" } # x-release-please-version
-arcbox-protocol = { version = "0.1.11", path = "rpc/arcbox-protocol" } # x-release-please-version
-arcbox-grpc = { version = "0.1.11", path = "rpc/arcbox-grpc" } # x-release-please-version
-arcbox-transport = { version = "0.1.11", path = "rpc/arcbox-transport" } # x-release-please-version
-arcbox-docker = { version = "0.1.11", path = "app/arcbox-docker" } # x-release-please-version
-arcbox-core = { version = "0.1.11", path = "app/arcbox-core" } # x-release-please-version
-arcbox-api = { version = "0.1.11", path = "app/arcbox-api" } # x-release-please-version
-arcbox-cli = { version = "0.1.11", path = "app/arcbox-cli" } # x-release-please-version
-arcbox-agent = { version = "0.1.11", path = "guest/arcbox-agent" } # x-release-please-version
-arcbox = { version = "0.1.11", path = "app/arcbox" } # x-release-please-version
+arcbox-constants = { version = "0.1.12", path = "common/arcbox-constants" } # x-release-please-version
+arcbox-error = { version = "0.1.12", path = "common/arcbox-error" } # x-release-please-version
+arcbox-vz = { version = "0.1.12", path = "virt/arcbox-vz" } # x-release-please-version
+arcbox-hypervisor = { version = "0.1.12", path = "virt/arcbox-hypervisor" } # x-release-please-version
+arcbox-vmm = { version = "0.1.12", path = "virt/arcbox-vmm" } # x-release-please-version
+arcbox-virtio = { version = "0.1.12", path = "virt/arcbox-virtio" } # x-release-please-version
+arcbox-vm = { version = "0.1.12", path = "virt/arcbox-vm" } # x-release-please-version
+arcbox-fs = { version = "0.1.12", path = "virt/arcbox-fs" } # x-release-please-version
+arcbox-net = { version = "0.1.12", path = "virt/arcbox-net" } # x-release-please-version
+arcbox-dhcp = { version = "0.1.12", path = "virt/arcbox-dhcp" } # x-release-please-version
+arcbox-container = { version = "0.1.12", path = "runtime/arcbox-container" } # x-release-please-version
+arcbox-oci = { version = "0.1.12", path = "runtime/arcbox-oci" } # x-release-please-version
+arcbox-protocol = { version = "0.1.12", path = "rpc/arcbox-protocol" } # x-release-please-version
+arcbox-grpc = { version = "0.1.12", path = "rpc/arcbox-grpc" } # x-release-please-version
+arcbox-transport = { version = "0.1.12", path = "rpc/arcbox-transport" } # x-release-please-version
+arcbox-docker = { version = "0.1.12", path = "app/arcbox-docker" } # x-release-please-version
+arcbox-core = { version = "0.1.12", path = "app/arcbox-core" } # x-release-please-version
+arcbox-api = { version = "0.1.12", path = "app/arcbox-api" } # x-release-please-version
+arcbox-cli = { version = "0.1.12", path = "app/arcbox-cli" } # x-release-please-version
+arcbox-agent = { version = "0.1.12", path = "guest/arcbox-agent" } # x-release-please-version
+arcbox = { version = "0.1.12", path = "app/arcbox" } # x-release-please-version
 
 # Test infrastructure
 tempfile = "3"
