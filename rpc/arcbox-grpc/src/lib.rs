@@ -57,19 +57,11 @@ pub mod sandbox_v1 {
     tonic::include_proto!("sandbox.v1");
 }
 
-// =============================================================================
-// Client re-exports
-// =============================================================================
-
 pub use sandbox_v1::sandbox_service_client::SandboxServiceClient;
 pub use sandbox_v1::sandbox_snapshot_service_client::SandboxSnapshotServiceClient;
 pub use v1::agent_service_client::AgentServiceClient;
 pub use v1::machine_service_client::MachineServiceClient;
 pub use v1::volume_service_client::VolumeServiceClient;
-
-// =============================================================================
-// Server re-exports
-// =============================================================================
 
 pub use sandbox_v1::sandbox_service_server::{SandboxService, SandboxServiceServer};
 pub use sandbox_v1::sandbox_snapshot_service_server::{

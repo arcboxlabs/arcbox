@@ -50,6 +50,7 @@ pub fn connect_vsock(addr: VsockAddr) -> Result<VsockStream> {
     let sockaddr_ptr = &sockaddr as *const SockaddrVm as *const libc::sockaddr;
 
     // SAFETY: sockaddr_ptr points to a correctly initialised SockaddrVm.
+    // SAFETY: fd is a valid socket; addr and addrlen are correct for the address family.
     let result = unsafe {
         libc::connect(
             fd.as_raw_fd(),
@@ -74,6 +75,7 @@ pub fn bind_vsock(port: u32) -> Result<OwnedFd> {
     let sockaddr_ptr = &sockaddr as *const SockaddrVm as *const libc::sockaddr;
 
     // SAFETY: sockaddr_ptr points to a correctly initialised SockaddrVm.
+    // SAFETY: fd is a valid socket; addr and addrlen match the address family.
     let result = unsafe {
         libc::bind(
             fd.as_raw_fd(),
@@ -86,6 +88,7 @@ pub fn bind_vsock(port: u32) -> Result<OwnedFd> {
     }
 
     // SAFETY: fd is a valid bound socket.
+    // SAFETY: fd is a valid bound socket; backlog is non-negative.
     let result = unsafe { libc::listen(fd.as_raw_fd(), 128) };
     if result < 0 {
         return Err(TransportError::io(io::Error::last_os_error()));
@@ -115,6 +118,7 @@ pub fn accept_vsock(listener_fd: &OwnedFd) -> Result<(VsockStream, VsockAddr)> {
     }
 
     // SAFETY: fd was just returned from accept4() and is valid.
+    // SAFETY: fd is a valid open file descriptor with exclusive ownership.
     let owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
     let addr = VsockAddr::new(sockaddr.svm_cid, sockaddr.svm_port);
 
