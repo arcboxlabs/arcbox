@@ -10,7 +10,10 @@
 use std::collections::HashMap;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use arcbox_dns::LocalHostsTable;
 
 use crate::error::{NetError, Result};
 
@@ -245,25 +248,46 @@ impl CacheEntry {
 /// DNS forwarder.
 ///
 /// Forwards DNS queries to upstream servers and provides local hostname
-/// resolution for VMs.
+/// resolution for VMs. The local hosts table is behind an `Arc<RwLock<...>>`
+/// so it can be shared between the host-side DnsService and the VMM-side
+/// datapath forwarder.
 pub struct DnsForwarder {
     /// Configuration.
     config: DnsConfig,
-    /// Local hostname mappings (hostname -> IP).
-    local_hosts: HashMap<String, IpAddr>,
+    /// Shared local hostname mappings (hostname -> IP).
+    local_hosts: Arc<LocalHostsTable>,
     /// DNS cache (query -> response).
     cache: HashMap<(String, DnsRecordType), CacheEntry>,
 }
 
 impl DnsForwarder {
-    /// Creates a new DNS forwarder.
+    /// Creates a new DNS forwarder with a fresh (empty) hosts table.
     #[must_use]
     pub fn new(config: DnsConfig) -> Self {
         Self {
             config,
-            local_hosts: HashMap::new(),
+            local_hosts: Arc::new(LocalHostsTable::new(HashMap::new())),
             cache: HashMap::new(),
         }
+    }
+
+    /// Creates a DNS forwarder sharing an existing hosts table.
+    ///
+    /// Used to connect the VMM-side forwarder to the same table as the
+    /// host-side `NetworkManager` forwarder, so `runtime.register_dns()`
+    /// updates both simultaneously.
+    #[must_use]
+    pub fn with_shared_hosts(config: DnsConfig, local_hosts: Arc<LocalHostsTable>) -> Self {
+        Self {
+            config,
+            local_hosts,
+            cache: HashMap::new(),
+        }
+    }
+
+    /// Returns a clone of the shared hosts table handle.
+    pub fn local_hosts_table(&self) -> Arc<LocalHostsTable> {
+        Arc::clone(&self.local_hosts)
     }
 
     /// Returns the configuration.
@@ -273,27 +297,27 @@ impl DnsForwarder {
     }
 
     /// Adds a local hostname mapping.
-    pub fn add_local_host(&mut self, hostname: &str, ip: IpAddr) {
+    pub fn add_local_host(&self, hostname: &str, ip: IpAddr) {
         let hostname = hostname.to_lowercase();
-        self.local_hosts.insert(hostname.clone(), ip);
-
-        // Also add with local domain suffix
-        if let Some(ref domain) = self.config.local_domain {
-            let fqdn = format!("{}.{}", hostname, domain);
-            self.local_hosts.insert(fqdn, ip);
+        if let Ok(mut hosts) = self.local_hosts.write() {
+            hosts.insert(hostname.clone(), ip);
+            if let Some(ref domain) = self.config.local_domain {
+                let fqdn = format!("{}.{}", hostname, domain);
+                hosts.insert(fqdn, ip);
+            }
         }
-
         tracing::debug!("Added local host: {} -> {}", hostname, ip);
     }
 
     /// Removes a local hostname mapping.
-    pub fn remove_local_host(&mut self, hostname: &str) {
+    pub fn remove_local_host(&self, hostname: &str) {
         let hostname = hostname.to_lowercase();
-        self.local_hosts.remove(&hostname);
-
-        if let Some(ref domain) = self.config.local_domain {
-            let fqdn = format!("{}.{}", hostname, domain);
-            self.local_hosts.remove(&fqdn);
+        if let Ok(mut hosts) = self.local_hosts.write() {
+            hosts.remove(&hostname);
+            if let Some(ref domain) = self.config.local_domain {
+                let fqdn = format!("{}.{}", hostname, domain);
+                hosts.remove(&fqdn);
+            }
         }
     }
 
@@ -301,7 +325,7 @@ impl DnsForwarder {
     #[must_use]
     pub fn resolve_local(&self, hostname: &str) -> Option<IpAddr> {
         let hostname = hostname.to_lowercase();
-        self.local_hosts.get(&hostname).copied()
+        self.local_hosts.read().ok()?.get(&hostname).copied()
     }
 
     /// Attempts to resolve a DNS query locally without any network I/O.

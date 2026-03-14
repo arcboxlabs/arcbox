@@ -223,7 +223,11 @@ impl Vmm {
         let dhcp_server = DhcpServer::new(dhcp_config);
 
         let dns_config = DnsConfig::new(gateway_ip);
-        let dns_forwarder = DnsForwarder::new(dns_config);
+        let dns_forwarder = if let Some(ref shared_table) = self.shared_dns_hosts {
+            DnsForwarder::with_shared_hosts(dns_config, std::sync::Arc::clone(shared_table))
+        } else {
+            DnsForwarder::new(dns_config)
+        };
 
         // 4. Build the datapath and spawn it on the tokio runtime.
         let cancel = CancellationToken::new();
