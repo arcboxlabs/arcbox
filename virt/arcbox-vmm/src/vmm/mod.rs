@@ -203,10 +203,17 @@ pub struct Vmm {
     #[cfg(target_os = "macos")]
     inbound_listener_manager: Option<arcbox_net::darwin::inbound_relay::InboundListenerManager>,
     /// Shared DNS hosts table from NetworkManager.
-    /// When set, the VMM-side DnsForwarder shares this table so that
-    /// `runtime.register_dns()` updates are visible to in-VM DNS queries.
     #[cfg(target_os = "macos")]
     shared_dns_hosts: Option<std::sync::Arc<arcbox_dns::LocalHostsTable>>,
+    /// Clone of the inbound command sender for L3 tunnel routing.
+    #[cfg(target_os = "macos")]
+    inbound_cmd_tx: Option<tokio::sync::mpsc::Sender<arcbox_net::darwin::inbound_relay::InboundCommand>>,
+    /// Container subnets to route via the L3 tunnel (e.g. ["172.17.0.0/16"]).
+    #[cfg(target_os = "macos")]
+    l3_tunnel_subnets: Vec<String>,
+    /// Running L3 tunnel service (kept alive for VM lifetime).
+    #[cfg(target_os = "macos")]
+    l3_tunnel: Option<arcbox_net::darwin::l3_tunnel::L3TunnelService>,
 }
 
 impl Vmm {
@@ -262,6 +269,12 @@ impl Vmm {
             inbound_listener_manager: None,
             #[cfg(target_os = "macos")]
             shared_dns_hosts: None,
+            #[cfg(target_os = "macos")]
+            inbound_cmd_tx: None,
+            #[cfg(target_os = "macos")]
+            l3_tunnel_subnets: Vec::new(),
+            #[cfg(target_os = "macos")]
+            l3_tunnel: None,
         })
     }
 
@@ -294,6 +307,27 @@ impl Vmm {
         table: std::sync::Arc<arcbox_dns::LocalHostsTable>,
     ) {
         self.shared_dns_hosts = Some(table);
+    }
+
+    /// Sets container subnets for L3 tunnel routing (e.g. `["172.17.0.0/16"]`).
+    ///
+    /// Must be called before `start()`. When set and the L3 tunnel is started,
+    /// these subnets get host routes pointing to the utun interface.
+    #[cfg(target_os = "macos")]
+    pub fn set_l3_tunnel_subnets(&mut self, subnets: Vec<String>) {
+        self.l3_tunnel_subnets = subnets;
+    }
+
+    /// Returns a clone of the inbound command sender, if available.
+    ///
+    /// Available after `initialize()` (which creates the network device).
+    /// Used by the runtime to create an `L3TunnelService` that sends
+    /// `RoutePacket` commands to the datapath.
+    #[cfg(target_os = "macos")]
+    pub fn inbound_cmd_tx(
+        &self,
+    ) -> Option<tokio::sync::mpsc::Sender<arcbox_net::darwin::inbound_relay::InboundCommand>> {
+        self.inbound_cmd_tx.clone()
     }
 
     /// Initializes the VMM components.

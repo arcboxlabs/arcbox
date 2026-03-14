@@ -322,6 +322,13 @@ impl VmManager {
         #[cfg(not(target_os = "macos"))]
         let _ = shared_dns_hosts;
 
+        // Configure L3 tunnel subnets for host → container direct routing.
+        #[cfg(target_os = "macos")]
+        vmm.set_l3_tunnel_subnets(vec![
+            "172.17.0.0/16".to_string(),
+            "10.88.0.0/16".to_string(),
+        ]);
+
         if let Err(e) = vmm.start() {
             entry.info.state = VmState::Created;
             return Err(CoreError::Vm(e.to_string()));
