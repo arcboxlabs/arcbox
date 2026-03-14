@@ -256,12 +256,15 @@ impl Vmm {
         })?;
 
         // Start L3 tunnel if subnets are configured.
+        // Uses block_in_place to allow block_on inside the tokio runtime context.
         if !self.l3_tunnel_subnets.is_empty() {
             let subnets = self.l3_tunnel_subnets.clone();
             let tunnel_cmd_tx = self.inbound_cmd_tx.clone().unwrap();
-            match runtime.block_on(
-                arcbox_net::darwin::l3_tunnel::L3TunnelService::start(subnets, tunnel_cmd_tx),
-            ) {
+            match tokio::task::block_in_place(|| {
+                runtime.block_on(
+                    arcbox_net::darwin::l3_tunnel::L3TunnelService::start(subnets, tunnel_cmd_tx),
+                )
+            }) {
                 Ok((tunnel_svc, tun_writer)) => {
                     datapath.tun_writer = Some(tun_writer);
                     self.l3_tunnel = Some(tunnel_svc);
