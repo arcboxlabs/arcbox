@@ -330,6 +330,14 @@ impl SandboxService for SandboxServiceImpl {
             .sandbox_create(request.into_inner())
             .await
             .map_err(|e| core_to_status(&e))?;
+
+        // Register sandbox DNS so the host can resolve sandbox-id.arcbox.local.
+        if let Ok(ip) = resp.ip_address.parse() {
+            self.runtime
+                .register_dns(&resp.id, &resp.id, ip)
+                .await;
+        }
+
         Ok(Response::new(resp))
     }
 
@@ -366,6 +374,7 @@ impl SandboxService for SandboxServiceImpl {
         request: Request<StopSandboxRequest>,
     ) -> Result<Response<SandboxEmpty>, Status> {
         let machine = extract_machine_id(&request)?;
+        let sandbox_id = request.get_ref().id.clone();
         let mut agent = self
             .runtime
             .get_agent(&machine)
@@ -374,6 +383,9 @@ impl SandboxService for SandboxServiceImpl {
             .sandbox_stop(request.into_inner())
             .await
             .map_err(|e| core_to_status(&e))?;
+
+        self.runtime.deregister_dns_by_id(&sandbox_id).await;
+
         Ok(Response::new(SandboxEmpty {}))
     }
 
@@ -382,6 +394,7 @@ impl SandboxService for SandboxServiceImpl {
         request: Request<RemoveSandboxRequest>,
     ) -> Result<Response<SandboxEmpty>, Status> {
         let machine = extract_machine_id(&request)?;
+        let sandbox_id = request.get_ref().id.clone();
         let mut agent = self
             .runtime
             .get_agent(&machine)
@@ -390,6 +403,9 @@ impl SandboxService for SandboxServiceImpl {
             .sandbox_remove(request.into_inner())
             .await
             .map_err(|e| core_to_status(&e))?;
+
+        self.runtime.deregister_dns_by_id(&sandbox_id).await;
+
         Ok(Response::new(SandboxEmpty {}))
     }
 
@@ -494,6 +510,14 @@ impl SandboxSnapshotService for SandboxSnapshotServiceImpl {
             .sandbox_restore(request.into_inner())
             .await
             .map_err(|e| core_to_status(&e))?;
+
+        // Register restored sandbox DNS.
+        if let Ok(ip) = resp.ip_address.parse() {
+            self.runtime
+                .register_dns(&resp.id, &resp.id, ip)
+                .await;
+        }
+
         Ok(Response::new(resp))
     }
 
