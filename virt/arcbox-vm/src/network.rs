@@ -77,7 +77,7 @@ impl NetworkManager {
 
         #[cfg(target_os = "linux")]
         if let Err(e) = self.create_tap(&tap_name) {
-            self.allocated.lock().unwrap().remove(&u32::from(ip));
+            self.allocated.lock().expect("allocated lock poisoned").remove(&u32::from(ip));
             return Err(e);
         }
 
@@ -93,7 +93,7 @@ impl NetworkManager {
     /// Release the TAP interface and guest IP associated with `vm_id`.
     pub fn release(&self, alloc: &NetworkAllocation) {
         let ip_int = u32::from(alloc.ip_address);
-        self.allocated.lock().unwrap().remove(&ip_int);
+        self.allocated.lock().expect("allocated lock poisoned").remove(&ip_int);
 
         debug!(tap = %alloc.tap_name, ip = %alloc.ip_address, "releasing network");
 
@@ -114,7 +114,7 @@ impl NetworkManager {
         // Mask away any host bits so arithmetic stays within the subnet.
         let network_base = u32::from(self.base) & mask;
 
-        let mut allocated = self.allocated.lock().unwrap();
+        let mut allocated = self.allocated.lock().expect("allocated lock poisoned");
         // offset 0 = network address, 1 = gateway; start at 2.
         for offset in 2..=host_max {
             let candidate = network_base + offset;

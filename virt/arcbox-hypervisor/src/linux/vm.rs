@@ -255,7 +255,7 @@ impl KvmVm {
 
     /// Returns the current VM state.
     pub fn state(&self) -> VmState {
-        *self.state.read().unwrap()
+        *self.state.read().expect("VM state lock poisoned")
     }
 
     /// Returns whether the VM is running.
@@ -266,7 +266,7 @@ impl KvmVm {
 
     /// Sets the VM state.
     fn set_state(&self, new_state: VmState) {
-        let mut state = self.state.write().unwrap();
+        let mut state = self.state.write().expect("VM state lock poisoned");
         tracing::debug!("VM {} state: {:?} -> {:?}", self.id, *state, new_state);
         *state = new_state;
     }

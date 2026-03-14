@@ -434,7 +434,7 @@ mod agent {
                 match out.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        let _ = write_frame(&mut *w1.lock().unwrap(), MSG_STDOUT, &buf[..n]);
+                        let _ = write_frame(&mut *w1.lock().expect("w1 lock poisoned"), MSG_STDOUT, &buf[..n]);
                     }
                 }
             }
@@ -448,7 +448,7 @@ mod agent {
                 match err.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        let _ = write_frame(&mut *w2.lock().unwrap(), MSG_STDERR, &buf[..n]);
+                        let _ = write_frame(&mut *w2.lock().expect("w2 lock poisoned"), MSG_STDERR, &buf[..n]);
                     }
                 }
             }
@@ -477,7 +477,7 @@ mod agent {
 
         // Read stdin frames from the host and forward to the child.
         // SAFETY: dup gives us a second fd for reading while the Arc owns the write fd.
-        let read_fd = unsafe { libc::dup(writer.lock().unwrap().fd) };
+        let read_fd = unsafe { libc::dup(writer.lock().expect("libc::dup(writer lock poisoned").fd) };
         let mut reader = unsafe { VsockStream::from_raw_fd(read_fd) };
         loop {
             match read_frame(&mut reader) {
@@ -498,7 +498,7 @@ mod agent {
         let _ = t_stderr.join();
         let exit_code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
         let _ = write_frame(
-            &mut *writer.lock().unwrap(),
+            &mut *writer.lock().expect("writer lock poisoned"),
             MSG_EXIT,
             &exit_code.to_le_bytes(),
         );
@@ -603,7 +603,7 @@ mod agent {
                             Ok(0) | Err(_) => break,
                             Ok(n) => {
                                 let _ = write_frame(
-                                    &mut *w_read.lock().unwrap(),
+                                    &mut *w_read.lock().expect("w_read lock poisoned"),
                                     MSG_STDOUT,
                                     &buf[..n],
                                 );
@@ -613,7 +613,7 @@ mod agent {
                 });
 
                 // SAFETY: fd is a valid open file descriptor.
-                let read_fd = unsafe { libc::dup(writer.lock().unwrap().fd) };
+                let read_fd = unsafe { libc::dup(writer.lock().expect("libc::dup(writer lock poisoned").fd) };
                 // SAFETY: fd is a valid open vsock file descriptor.
                 let mut reader = unsafe { VsockStream::from_raw_fd(read_fd) };
                 // SAFETY: master_fd is valid; File takes ownership for writes.
@@ -653,7 +653,7 @@ mod agent {
                     -1
                 };
                 let _ = write_frame(
-                    &mut *writer.lock().unwrap(),
+                    &mut *writer.lock().expect("writer lock poisoned"),
                     MSG_EXIT,
                     &exit_code.to_le_bytes(),
                 );

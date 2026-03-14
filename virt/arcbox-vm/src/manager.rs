@@ -75,10 +75,10 @@ impl VmmManager {
 
         // Ensure name uniqueness.
         {
-            let instances = self.instances.read().unwrap();
+            let instances = self.instances.read().expect("instances lock poisoned");
             if instances
                 .values()
-                .any(|i| i.lock().unwrap().name == spec.name)
+                .any(|i| i.lock().expect("i lock poisoned").name == spec.name)
             {
                 return Err(VmmError::AlreadyExists(spec.name.clone()));
             }
@@ -228,7 +228,7 @@ impl VmmManager {
 
         // Update instance to Running.
         {
-            let mut instances = self.instances.write().unwrap();
+            let mut instances = self.instances.write().expect("instances lock poisoned");
             let entry = instances.entry(id.clone()).or_insert_with(|| {
                 Arc::new(Mutex::new(VmInstance::new(
                     id.clone(),
@@ -237,7 +237,7 @@ impl VmmManager {
                     socket_path.clone(),
                 )))
             });
-            let mut inst = entry.lock().unwrap();
+            let mut inst = entry.lock().expect("entry lock poisoned");
             inst.process = Some(process);
             inst.vm = Some(vm);
             inst.state = VmState::Running;
@@ -254,7 +254,7 @@ impl VmmManager {
     pub async fn start_vm(&self, id: &VmId) -> Result<()> {
         let vm_handle = {
             let instance = self.get_instance(id)?;
-            let inst = instance.lock().unwrap();
+            let inst = instance.lock().expect("instance lock poisoned");
             match inst.state {
                 VmState::Stopped => {}
                 s => {
@@ -273,7 +273,7 @@ impl VmmManager {
         }
 
         let instance = self.get_instance(id)?;
-        let mut inst = instance.lock().unwrap();
+        let mut inst = instance.lock().expect("instance lock poisoned");
         inst.state = VmState::Running;
         inst.started_at = Some(chrono::Utc::now());
         self.store.save(&inst)?;
@@ -288,7 +288,7 @@ impl VmmManager {
     pub async fn stop_vm(&self, id: &VmId, force: bool) -> Result<()> {
         let (vm_handle, has_process) = {
             let instance = self.get_instance(id)?;
-            let inst = instance.lock().unwrap();
+            let inst = instance.lock().expect("instance lock poisoned");
             match inst.state {
                 VmState::Running | VmState::Paused => {}
                 s => {
@@ -304,7 +304,7 @@ impl VmmManager {
 
         if force && has_process {
             let instance = self.get_instance(id)?;
-            let mut inst = instance.lock().unwrap();
+            let mut inst = instance.lock().expect("instance lock poisoned");
             if let Some(ref mut process) = inst.process
                 && let Some(pid) = process.pid()
             {
@@ -319,7 +319,7 @@ impl VmmManager {
         }
 
         let instance = self.get_instance(id)?;
-        let mut inst = instance.lock().unwrap();
+        let mut inst = instance.lock().expect("instance lock poisoned");
         inst.state = VmState::Stopped;
         self.store.save(&inst)?;
         info!(vm_id = %id, force, "VM stopped");
@@ -331,12 +331,12 @@ impl VmmManager {
         let _ = self.stop_vm(id, force).await;
 
         let instance = {
-            let mut instances = self.instances.write().unwrap();
+            let mut instances = self.instances.write().expect("instances lock poisoned");
             instances.remove(id)
         };
 
         if let Some(instance) = instance {
-            let inst = instance.lock().unwrap();
+            let inst = instance.lock().expect("instance lock poisoned");
             if let Some(net) = &inst.network {
                 self.network.release(net);
             }
@@ -352,11 +352,11 @@ impl VmmManager {
 
     /// List VMs.  `all = false` returns only running VMs.
     pub fn list_vms(&self, all: bool) -> Result<Vec<VmSummary>> {
-        let instances = self.instances.read().unwrap();
+        let instances = self.instances.read().expect("instances lock poisoned");
         let summaries = instances
             .values()
             .filter_map(|arc| {
-                let inst = arc.lock().unwrap();
+                let inst = arc.lock().expect("arc lock poisoned");
                 if !all && inst.state != VmState::Running {
                     return None;
                 }
@@ -377,7 +377,7 @@ impl VmmManager {
     /// Full detail for a single VM.
     pub fn inspect_vm(&self, id: &VmId) -> Result<VmInfo> {
         let instance = self.get_instance(id)?;
-        let inst = instance.lock().unwrap();
+        let inst = instance.lock().expect("instance lock poisoned");
         Ok(VmInfo {
             id: inst.id.clone(),
             name: inst.name.clone(),
@@ -412,7 +412,7 @@ impl VmmManager {
     pub async fn snapshot_vm(&self, id: &VmId, req: SnapshotRequest) -> Result<SnapshotInfo> {
         let was_running = {
             let instance = self.get_instance(id)?;
-            let inst = instance.lock().unwrap();
+            let inst = instance.lock().expect("instance lock poisoned");
             inst.state == VmState::Running
         };
 
@@ -428,12 +428,12 @@ impl VmmManager {
         let vm = self.get_vm_handle(id)?;
         match req.snapshot_type {
             SnapshotType::Full => {
-                vm.create_snapshot(vmstate_path.to_str().unwrap(), mem_path.to_str().unwrap())
+                vm.create_snapshot(vmstate_path.to_str().expect("path is not valid UTF-8"), mem_path.to_str().expect("path is not valid UTF-8"))
                     .await
                     .map_err(VmmError::from)?;
             }
             SnapshotType::Diff => {
-                vm.create_diff_snapshot(vmstate_path.to_str().unwrap(), mem_path.to_str().unwrap())
+                vm.create_diff_snapshot(vmstate_path.to_str().expect("path is not valid UTF-8"), mem_path.to_str().expect("path is not valid UTF-8"))
                     .await
                     .map_err(VmmError::from)?;
             }
@@ -483,10 +483,10 @@ impl VmmManager {
         .await?;
 
         let snap_dir = PathBuf::from(&spec.snapshot_dir);
-        let vmstate_path = snap_dir.join("vmstate").to_str().unwrap().to_owned();
+        let vmstate_path = snap_dir.join("vmstate").to_str().expect("path is not valid UTF-8").to_owned();
         let mem_path = snap_dir.join("mem");
         let mem_file_path = if mem_path.exists() {
-            Some(mem_path.to_str().unwrap().to_owned())
+            Some(mem_path.to_str().expect("path is not valid UTF-8").to_owned())
         } else {
             None
         };
@@ -509,7 +509,7 @@ impl VmmManager {
         }
 
         let vm = Arc::new(
-            fc_sdk::restore(socket_path.to_str().unwrap(), load_params)
+            fc_sdk::restore(socket_path.to_str().expect("path is not valid UTF-8"), load_params)
                 .await
                 .map_err(VmmError::from)?,
         );
@@ -531,7 +531,7 @@ impl VmmManager {
         self.store.save(&instance)?;
 
         {
-            let mut instances = self.instances.write().unwrap();
+            let mut instances = self.instances.write().expect("instances lock poisoned");
             instances.insert(id.clone(), Arc::new(Mutex::new(instance)));
         }
 
@@ -656,7 +656,7 @@ impl VmmManager {
     /// Return a shared `fc_sdk::Vm` handle for the given VM.
     fn get_vm_handle(&self, id: &VmId) -> Result<Arc<fc_sdk::Vm>> {
         let instance = self.get_instance(id)?;
-        let inst = instance.lock().unwrap();
+        let inst = instance.lock().expect("instance lock poisoned");
         inst.vm
             .as_ref()
             .map(Arc::clone)
@@ -669,7 +669,7 @@ impl VmmManager {
 
     fn set_state(&self, id: &VmId, state: VmState) -> Result<()> {
         let instance = self.get_instance(id)?;
-        let mut inst = instance.lock().unwrap();
+        let mut inst = instance.lock().expect("instance lock poisoned");
         inst.state = state;
         self.store.save(&inst)?;
         Ok(())

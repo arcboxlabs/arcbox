@@ -232,18 +232,6 @@ impl<T> LockFreeRing<T> {
         count
     }
 
-    /// Tries to enqueue an item, returning immediately if full.
-    #[inline]
-    pub fn try_enqueue(&self, item: T) -> Result<(), T> {
-        self.enqueue(item)
-    }
-
-    /// Tries to dequeue an item, returning immediately if empty.
-    #[inline]
-    pub fn try_dequeue(&self) -> Option<T> {
-        self.dequeue()
-    }
-
     /// Peeks at the next item to be dequeued without removing it.
     ///
     /// # Safety
@@ -296,7 +284,12 @@ impl<T> std::fmt::Debug for LockFreeRing<T> {
 ///
 /// Uses compare-and-swap operations for thread-safe access from multiple
 /// producers and consumers. Slower than SPSC but more flexible.
-pub struct MpmcRing<T> {
+///
+/// `T` must be `Copy` because the CAS-based dequeue reads the slot value
+/// *before* claiming ownership via `compare_exchange`. On CAS failure the
+/// value is simply discarded and the loop retries, which is only sound when
+/// `T` is trivially copyable (no destructor, no move semantics).
+pub struct MpmcRing<T: Copy> {
     /// Ring buffer storage.
     buffer: Box<[UnsafeCell<MaybeUninit<T>>]>,
     /// Capacity (always power of 2).
@@ -309,10 +302,12 @@ pub struct MpmcRing<T> {
     tail: CachePadded<AtomicUsize>,
 }
 
-unsafe impl<T: Send> Send for MpmcRing<T> {}
-unsafe impl<T: Send> Sync for MpmcRing<T> {}
+// SAFETY: Buffer slots are accessed via atomic index coordination; T: Copy
+// eliminates double-drop concerns.
+unsafe impl<T: Copy + Send> Send for MpmcRing<T> {}
+unsafe impl<T: Copy + Send> Sync for MpmcRing<T> {}
 
-impl<T> MpmcRing<T> {
+impl<T: Copy> MpmcRing<T> {
     /// Creates a new MPMC ring buffer.
     #[must_use]
     pub fn new(capacity: usize) -> Self {
@@ -391,6 +386,10 @@ impl<T> MpmcRing<T> {
     }
 
     /// Dequeues an item using CAS.
+    ///
+    /// The slot is read *before* the CAS claims it. On CAS failure the read
+    /// value is harmlessly discarded because `T: Copy` guarantees no
+    /// destructor runs and the original slot remains valid for other consumers.
     pub fn dequeue(&self) -> Option<T> {
         let mut tail = self.tail.0.load(Ordering::Relaxed);
 
@@ -402,7 +401,9 @@ impl<T> MpmcRing<T> {
             }
 
             let idx = tail & self.mask;
-            // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
+            // SAFETY: T: Copy, so reading the slot speculatively is sound even
+            // if the CAS below fails — no destructor runs on the discarded copy,
+            // and the original slot remains valid for the winning consumer.
             let item = unsafe { (*self.buffer[idx].get()).assume_init_read() };
 
             match self.tail.0.compare_exchange_weak(
@@ -421,7 +422,7 @@ impl<T> MpmcRing<T> {
     }
 }
 
-impl<T> Drop for MpmcRing<T> {
+impl<T: Copy> Drop for MpmcRing<T> {
     fn drop(&mut self) {
         while self.dequeue().is_some() {}
     }

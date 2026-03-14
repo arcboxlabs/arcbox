@@ -823,7 +823,7 @@ mod tests {
 
         console.handle_tx(b"Hello, World!").unwrap();
 
-        let output = buffer.lock().unwrap().take_output();
+        let output = buffer.lock().expect("buffer lock poisoned").take_output();
         assert_eq!(&output, b"Hello, World!");
     }
 

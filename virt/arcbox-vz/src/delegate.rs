@@ -89,7 +89,7 @@ fn get_registry() -> &'static Mutex<HashMap<ListenerHandle, ListenerEntry>> {
 }
 
 fn get_next_handle() -> ListenerHandle {
-    let mut handle = NEXT_HANDLE.get_or_init(|| Mutex::new(1)).lock().unwrap();
+    let mut handle = NEXT_HANDLE.get_or_init(|| Mutex::new(1)).lock().expect("Mutex::new(1)) lock poisoned");
     let h = *handle;
     *handle += 1;
     h
@@ -98,20 +98,20 @@ fn get_next_handle() -> ListenerHandle {
 /// Registers a listener and returns a handle.
 pub fn register_listener(sender: mpsc::UnboundedSender<IncomingConnection>) -> ListenerHandle {
     let handle = get_next_handle();
-    let mut registry = get_registry().lock().unwrap();
+    let mut registry = get_registry().lock().expect("get_registry() lock poisoned");
     registry.insert(handle, ListenerEntry { sender });
     handle
 }
 
 /// Unregisters a listener.
 pub fn unregister_listener(handle: ListenerHandle) {
-    let mut registry = get_registry().lock().unwrap();
+    let mut registry = get_registry().lock().expect("get_registry() lock poisoned");
     registry.remove(&handle);
 }
 
 /// Sends a connection to the registered listener.
 fn send_connection(handle: ListenerHandle, conn: IncomingConnection) -> bool {
-    let registry = get_registry().lock().unwrap();
+    let registry = get_registry().lock().expect("get_registry() lock poisoned");
     if let Some(entry) = registry.get(&handle) {
         entry.sender.send(conn).is_ok()
     } else {

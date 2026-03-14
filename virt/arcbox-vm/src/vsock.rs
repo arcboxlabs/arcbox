@@ -240,7 +240,7 @@ async fn drain_output<R: AsyncReadExt + Unpin>(
                     },
                     MSG_EXIT => {
                         let code = if payload.len() >= 4 {
-                            i32::from_le_bytes(payload[..4].try_into().unwrap())
+                            i32::from_le_bytes(payload[..4].try_into().expect("slice length mismatch"))
                         } else {
                             0
                         };
@@ -411,7 +411,7 @@ async fn sync_clock_on_stream<S: tokio::io::AsyncReadExt + tokio::io::AsyncWrite
             payload.len()
         )));
     }
-    let code = i32::from_le_bytes(payload[..4].try_into().unwrap());
+    let code = i32::from_le_bytes(payload[..4].try_into().expect("slice length mismatch"));
     if code != 0 {
         return Err(VmmError::Vsock(format!(
             "clock sync: agent returned exit code {code}"
