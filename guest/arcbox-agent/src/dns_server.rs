@@ -29,13 +29,17 @@ const LOCAL_DOMAIN: &str = "arcbox.local";
 /// Maximum DNS UDP packet size.
 const MAX_PACKET: usize = 512;
 
+/// Shared sandbox registry using std::sync::RwLock so it can be written
+/// from synchronous code (sandbox.rs) and read from async code (dns_server).
+pub type SandboxRegistry = Arc<std::sync::RwLock<HashMap<String, Ipv4Addr>>>;
+
 // Global sandbox registry so sandbox.rs can register without needing
 // an async handle. The GuestDnsServer reads from these same Arcs.
 static SANDBOX_REGISTRY: std::sync::OnceLock<SandboxRegistry> = std::sync::OnceLock::new();
 
-/// Returns the global sandbox registry. Initialized on first GuestDnsServer creation.
+/// Returns the global sandbox registry. Initialized on first access.
 pub fn sandbox_registry() -> &'static SandboxRegistry {
-    SANDBOX_REGISTRY.get_or_init(|| Arc::new(RwLock::new(HashMap::new())))
+    SANDBOX_REGISTRY.get_or_init(|| Arc::new(std::sync::RwLock::new(HashMap::new())))
 }
 
 /// Upstream forwarding timeout.
@@ -43,9 +47,6 @@ const FORWARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Shared container registry: container name → IPv4 address.
 pub type ContainerRegistry = Arc<RwLock<HashMap<String, Ipv4Addr>>>;
-
-/// Shared sandbox registry: sandbox ID → IPv4 address.
-pub type SandboxRegistry = Arc<RwLock<HashMap<String, Ipv4Addr>>>;
 
 /// Guest DNS server.
 pub struct GuestDnsServer {
@@ -95,18 +96,22 @@ impl GuestDnsServer {
 
     /// Registers a sandbox ID → IP mapping.
     #[allow(dead_code)]
-    pub async fn register_sandbox(&self, id: &str, ip: Ipv4Addr) {
+    pub fn register_sandbox(&self, id: &str, ip: Ipv4Addr) {
         let key = id.to_lowercase();
         tracing::debug!(id = %key, %ip, "dns: register sandbox");
-        self.sandboxes.write().await.insert(key, ip);
+        if let Ok(mut map) = self.sandboxes.write() {
+            map.insert(key, ip);
+        }
     }
 
     /// Deregisters a sandbox by ID.
     #[allow(dead_code)]
-    pub async fn deregister_sandbox(&self, id: &str) {
+    pub fn deregister_sandbox(&self, id: &str) {
         let key = id.to_lowercase();
         tracing::debug!(id = %key, "dns: deregister sandbox");
-        self.sandboxes.write().await.remove(&key);
+        if let Ok(mut map) = self.sandboxes.write() {
+            map.remove(&key);
+        }
     }
 
     /// Runs the DNS server. Blocks until cancellation.
@@ -164,12 +169,12 @@ impl GuestDnsServer {
             }
         }
 
-        // 3. Sandbox registry lookup.
-        if let Some(&ip) = self.sandboxes.read().await.get(&name_lower) {
+        // 3. Sandbox registry lookup (std::sync::RwLock, not async).
+        if let Some(ip) = self.sandboxes.read().ok().and_then(|g| g.get(&name_lower).copied()) {
             return Ok(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?);
         }
         if bare_name != name_lower {
-            if let Some(&ip) = self.sandboxes.read().await.get(bare_name) {
+            if let Some(ip) = self.sandboxes.read().ok().and_then(|g| g.get(bare_name).copied()) {
                 return Ok(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?);
             }
         }
