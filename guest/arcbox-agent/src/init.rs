@@ -34,6 +34,7 @@ mod platform {
         write_etc_hosts();
         write_etc_passwd();
         write_etc_group();
+        write_docker_daemon_dns();
 
         // TLS CA certificates: EROFS has /cacerts/ca-certificates.crt.
         // Symlink into tmpfs /etc so programs find it at the standard path.
@@ -314,12 +315,27 @@ exit 0
     }
 
     fn write_etc_resolv_conf() {
-        // Point to the gateway (192.168.64.1) where ArcBox's DNS forwarder runs.
-        // The forwarder resolves using the host's real DNS servers, which handles
-        // corporate/intranet environments correctly (unlike hardcoded 8.8.8.8).
-        let content = "nameserver 192.168.64.1\n";
+        // Point to the local guest DNS server (dns_server.rs) which handles:
+        // - Container/sandbox name resolution from its registries
+        // - *.arcbox.local → authoritative NXDOMAIN if not registered
+        // - Everything else → forward to gateway (192.168.64.1)
+        let content = "nameserver 127.0.0.1\n";
         if let Err(e) = std::fs::write("/etc/resolv.conf", content) {
             tracing::warn!(error = %e, "failed to write /etc/resolv.conf");
+        }
+    }
+
+    /// Configures Docker daemon to use the gateway as its DNS server.
+    ///
+    /// Containers get their DNS from the Docker daemon config, NOT from the
+    /// guest's /etc/resolv.conf. We point them to 192.168.64.1 (the gateway)
+    /// so container DNS queries go through the host-side forwarder which can
+    /// resolve *.arcbox.local names registered from the host.
+    pub fn write_docker_daemon_dns() {
+        mkdir_p("/etc/docker");
+        let content = r#"{"dns": ["192.168.64.1"]}"#;
+        if let Err(e) = std::fs::write("/etc/docker/daemon.json", content) {
+            tracing::warn!(error = %e, "failed to write /etc/docker/daemon.json");
         }
     }
 
