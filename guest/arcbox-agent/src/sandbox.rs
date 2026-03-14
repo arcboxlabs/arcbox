@@ -315,28 +315,24 @@ impl SandboxService {
 // DNS registration helpers
 // =============================================================================
 
-/// Register a sandbox in both the DNS server registry and /etc/hosts (legacy fallback).
+/// Register a sandbox in the guest DNS server registry.
 fn register_sandbox_dns(id: &str, ip: &str) {
     let Ok(ipv4) = ip.parse::<std::net::Ipv4Addr>() else {
         tracing::warn!(id, ip, "invalid sandbox IP for DNS registration");
         return;
     };
-    // Write to the shared registry that GuestDnsServer reads.
     let registry = crate::dns_server::sandbox_registry();
     if let Ok(mut map) = registry.write() {
         map.insert(id.to_lowercase(), ipv4);
     }
-    // Legacy /etc/hosts fallback (kept until Phase 6 cleanup).
-    crate::dns::add_sandbox_dns(id, ip);
 }
 
-/// Deregister a sandbox from both DNS server and /etc/hosts.
+/// Deregister a sandbox from the guest DNS server registry.
 fn deregister_sandbox_dns(id: &str) {
     let registry = crate::dns_server::sandbox_registry();
     if let Ok(mut map) = registry.write() {
         map.remove(&id.to_lowercase());
     }
-    crate::dns::remove_dns(id);
 }
 
 // =============================================================================
