@@ -6,6 +6,7 @@
 #[cfg(target_os = "linux")]
 pub mod config;
 pub mod dns;
+pub mod dns_server;
 #[cfg(target_os = "linux")]
 pub mod error;
 #[cfg(target_os = "linux")]

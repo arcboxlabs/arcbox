@@ -98,19 +98,15 @@ impl L3TunnelService {
         subnets: Vec<String>,
         inbound_cmd_tx: mpsc::Sender<InboundCommand>,
     ) -> io::Result<(Self, TunWriter)> {
-        // Create the utun device (no root needed).
+        // Create the utun device (no root needed on macOS 10.10+).
         let tun = DarwinTun::new()?;
         let tun_name = tun.name().to_string();
 
-        // Configure the utun with a link-local point-to-point address.
-        // 198.18.0.1 → 198.18.0.2 (from the "benchmarking" range, RFC 2544).
-        // These IPs are never routed externally and serve only as the utun
-        // endpoint addresses.
-        tun.configure(
-            std::net::Ipv4Addr::new(198, 18, 0, 1),
-            std::net::Ipv4Addr::new(198, 18, 0, 2),
-            std::net::Ipv4Addr::new(255, 255, 255, 252),
-        )?;
+        // Bring the interface UP. No IP addresses are needed because we use
+        // `-interface` routing (route add -net X -interface utunN), not
+        // gateway-based routing. This avoids conflicts with VPN tools that
+        // claim specific IP ranges (e.g. Surge uses 198.18.0.0/15).
+        tun.bring_up()?;
         tun.set_nonblocking(true)?;
 
         // Install routes for container subnets via this utun interface.

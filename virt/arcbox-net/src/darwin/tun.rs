@@ -178,6 +178,35 @@ impl DarwinTun {
         self.fd.as_raw_fd()
     }
 
+    /// Brings the interface UP without assigning IP addresses.
+    ///
+    /// Sufficient for `-interface` based routing where no gateway IP is needed.
+    /// Requires appropriate permissions (root or privileged helper).
+    pub fn bring_up(&self) -> io::Result<()> {
+        // SAFETY: socket() with AF_INET/SOCK_DGRAM is always safe.
+        let ctl_fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+        if ctl_fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: ctl_fd is valid from socket() above.
+        let ctl_fd = unsafe { OwnedFd::from_raw_fd(ctl_fd) };
+
+        let mut ifr_name = [0u8; libc::IFNAMSIZ];
+        let name_bytes = self.name.as_bytes();
+        if name_bytes.len() >= libc::IFNAMSIZ {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "interface name too long",
+            ));
+        }
+        ifr_name[..name_bytes.len()].copy_from_slice(name_bytes);
+
+        Self::set_if_up(ctl_fd.as_raw_fd(), &ifr_name)?;
+
+        tracing::info!(interface = %self.name, "utun interface brought UP");
+        Ok(())
+    }
+
     /// Configures the utun interface with IP addresses and brings it up.
     ///
     /// This runs the equivalent of:
