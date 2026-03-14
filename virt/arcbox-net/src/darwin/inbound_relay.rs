@@ -96,6 +96,12 @@ pub enum InboundCommand {
         reply_tx: mpsc::Sender<Vec<u8>>,
         client_addr: SocketAddr,
     },
+    /// Raw IPv4 packet from the L3 tunnel (utun) to inject into the guest.
+    ///
+    /// The datapath wraps this in an L2 Ethernet frame and writes it to the
+    /// guest socketpair FD. The reverse flow is registered in TunnelConnTrack
+    /// so that return packets are routed back through the utun.
+    RoutePacket(Vec<u8>),
 }
 
 // ---------------------------------------------------------------------------

@@ -41,11 +41,14 @@
 
 pub mod datapath_loop;
 pub mod inbound_relay;
+pub mod l3_tunnel;
 pub mod nat;
+pub mod route_manager;
 pub mod smoltcp_device;
 pub mod socket_proxy;
 pub mod tcp_bridge;
 pub mod tun;
+pub mod tunnel_conntrack;
 pub mod vmnet;
 pub mod vmnet_ffi;
 
