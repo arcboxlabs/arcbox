@@ -150,10 +150,6 @@ impl ConsoleIo for BufferConsole {
     }
 }
 
-// ============================================================================
-// PTY Console Backend
-// ============================================================================
-
 /// PTY (pseudo-terminal) console backend.
 ///
 /// Provides a real terminal interface that can be connected to
@@ -183,6 +179,7 @@ impl PtyConsole {
         let mut slave_fd: libc::c_int = -1;
 
         // Use openpty if available
+        // SAFETY: Output pointers are valid; termp and winp are null (use defaults).
         let ret = unsafe {
             libc::openpty(
                 &mut master_fd,
@@ -198,6 +195,7 @@ impl PtyConsole {
         }
 
         // Get the slave path
+        // SAFETY: fd is a valid open file descriptor owned by this context.
         let slave_path = unsafe {
             let path_ptr = libc::ttyname(slave_fd);
             if path_ptr.is_null() {
@@ -242,6 +240,7 @@ impl PtyConsole {
 
     /// Sets non-blocking mode on the master.
     pub fn set_nonblocking(&mut self, nonblocking: bool) -> std::io::Result<()> {
+        // SAFETY: fd is a valid open file descriptor; command and arguments are valid.
         let flags = unsafe { libc::fcntl(self.master_fd, libc::F_GETFL) };
         if flags < 0 {
             return Err(std::io::Error::last_os_error());
@@ -253,6 +252,7 @@ impl PtyConsole {
             flags & !libc::O_NONBLOCK
         };
 
+        // SAFETY: fd is a valid open file descriptor; command and arguments are valid.
         let ret = unsafe { libc::fcntl(self.master_fd, libc::F_SETFL, new_flags) };
         if ret < 0 {
             return Err(std::io::Error::last_os_error());
@@ -271,6 +271,7 @@ impl PtyConsole {
             ws_ypixel: 0,
         };
 
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe { libc::ioctl(self.master_fd, libc::TIOCSWINSZ, &ws) };
         if ret < 0 {
             Err(std::io::Error::last_os_error())
@@ -288,6 +289,7 @@ impl PtyConsole {
             revents: 0,
         };
 
+        // SAFETY: pollfd is properly initialized; nfds and timeout are valid.
         let ret = unsafe { libc::poll(&mut pollfd, 1, 0) };
         ret > 0 && (pollfd.revents & libc::POLLIN) != 0
     }
@@ -297,9 +299,11 @@ impl PtyConsole {
 impl Drop for PtyConsole {
     fn drop(&mut self) {
         if self.master_fd >= 0 {
+            // SAFETY: fd is a valid open file descriptor owned by this context.
             unsafe { libc::close(self.master_fd) };
         }
         if self.slave_fd >= 0 {
+            // SAFETY: fd is a valid open file descriptor owned by this context.
             unsafe { libc::close(self.slave_fd) };
         }
     }
@@ -308,6 +312,7 @@ impl Drop for PtyConsole {
 #[cfg(unix)]
 impl ConsoleIo for PtyConsole {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // SAFETY: fd is valid; buffer pointer and length are within the allocated slice bounds.
         let ret = unsafe {
             libc::read(
                 self.master_fd,
@@ -329,6 +334,7 @@ impl ConsoleIo for PtyConsole {
     }
 
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // SAFETY: fd is valid; buffer pointer and length are within the slice bounds.
         let ret = unsafe {
             libc::write(
                 self.master_fd,
@@ -349,10 +355,6 @@ impl ConsoleIo for PtyConsole {
         Ok(())
     }
 }
-
-// ============================================================================
-// Socket Console Backend
-// ============================================================================
 
 /// Unix socket-based console backend.
 ///
@@ -759,10 +761,6 @@ impl VirtioDevice for VirtioConsole {
 mod tests {
     use super::*;
 
-    // ========================================================================
-    // Basic VirtioConsole Tests
-    // ========================================================================
-
     #[test]
     fn test_console_creation() {
         let console = VirtioConsole::new(ConsoleConfig::default());
@@ -829,10 +827,6 @@ mod tests {
         assert_eq!(&output, b"Hello, World!");
     }
 
-    // ========================================================================
-    // BufferConsole Tests
-    // ========================================================================
-
     #[test]
     fn test_buffer_console_empty_read() {
         let mut buffer = BufferConsole::new();
@@ -884,10 +878,6 @@ mod tests {
         assert!(buffer.input.is_empty());
         assert!(buffer.output.is_empty());
     }
-
-    // ========================================================================
-    // PTY Console Tests
-    // ========================================================================
 
     #[cfg(unix)]
     #[test]
@@ -951,10 +941,6 @@ mod tests {
         let mut pty = PtyConsole::new().unwrap();
         assert!(pty.flush().is_ok());
     }
-
-    // ========================================================================
-    // Socket Console Tests
-    // ========================================================================
 
     #[cfg(unix)]
     #[test]
@@ -1086,10 +1072,6 @@ mod tests {
         // Socket should be removed on drop
         assert!(!socket_path.exists());
     }
-
-    // ========================================================================
-    // VirtioConsole Edge Cases
-    // ========================================================================
 
     #[test]
     fn test_console_multiport_feature() {

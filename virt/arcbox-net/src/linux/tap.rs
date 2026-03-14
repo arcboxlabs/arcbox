@@ -143,6 +143,7 @@ impl LinuxTap {
     /// Returns an error if the TAP device cannot be created.
     pub fn new(config: TapConfig) -> Result<Self> {
         // Open /dev/net/tun
+        // SAFETY: path is a valid null-terminated C string; flags are valid open(2) arguments.
         let fd = unsafe {
             libc::open(
                 b"/dev/net/tun\0".as_ptr().cast::<libc::c_char>(),
@@ -179,8 +180,10 @@ impl LinuxTap {
         }
 
         // Create TAP device
+        // SAFETY: fd is a valid open file descriptor owned by this context.
         let ret = unsafe { libc::ioctl(fd, TUNSETIFF, &ifr) };
         if ret < 0 {
+            // SAFETY: fd is a valid open file descriptor owned by this context.
             unsafe { libc::close(fd) };
             return Err(NetError::Tap(format!(
                 "TUNSETIFF failed: {}",
@@ -199,11 +202,13 @@ impl LinuxTap {
             String::from_utf8_lossy(&bytes).into_owned()
         };
 
+        // SAFETY: fd is a valid open file descriptor with exclusive ownership.
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
 
         // Set vnet header size if enabled
         if config.vnet_hdr {
             let hdr_sz: i32 = 12; // sizeof(virtio_net_hdr_v1)
+            // SAFETY: fd is valid; request code and argument type match the expected ioctl.
             let ret = unsafe { libc::ioctl(fd.as_raw_fd(), TUNSETVNETHDRSZ, &hdr_sz) };
             if ret < 0 {
                 return Err(NetError::Tap(format!(
@@ -214,6 +219,7 @@ impl LinuxTap {
 
             // Enable offload features
             let offload = TUN_F_CSUM | TUN_F_TSO4 | TUN_F_TSO6;
+            // SAFETY: fd is valid; request code and argument type match the expected ioctl.
             let ret = unsafe { libc::ioctl(fd.as_raw_fd(), TUNSETOFFLOAD, offload) };
             if ret < 0 {
                 tracing::warn!(
@@ -266,6 +272,7 @@ impl LinuxTap {
     ///
     /// Returns an error if the mode cannot be changed.
     pub fn set_nonblocking(&mut self, nonblocking: bool) -> Result<()> {
+        // SAFETY: fd is a valid open file descriptor; command and arguments are valid.
         let flags = unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_GETFL) };
         if flags < 0 {
             return Err(NetError::Tap(format!(
@@ -280,6 +287,7 @@ impl LinuxTap {
             flags & !libc::O_NONBLOCK
         };
 
+        // SAFETY: fd is a valid open file descriptor; command and arguments are valid.
         let ret = unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_SETFL, new_flags) };
         if ret < 0 {
             return Err(NetError::Tap(format!(
@@ -372,6 +380,7 @@ impl LinuxTap {
     ///
     /// Returns an error if the write fails.
     pub fn send_packet(&mut self, data: &[u8]) -> Result<usize> {
+        // SAFETY: fd is valid; buffer pointer and length are within the slice bounds.
         let ret = unsafe { libc::write(self.fd.as_raw_fd(), data.as_ptr().cast(), data.len()) };
 
         if ret < 0 {
@@ -393,6 +402,7 @@ impl LinuxTap {
     ///
     /// Returns an error if the read fails.
     pub fn recv_packet(&mut self, buf: &mut [u8]) -> Result<usize> {
+        // SAFETY: fd is valid; buffer pointer and length are within the allocated slice bounds.
         let ret = unsafe { libc::read(self.fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
 
         if ret < 0 {
@@ -417,6 +427,7 @@ impl LinuxTap {
             revents: 0,
         };
 
+        // SAFETY: pollfd is properly initialized; nfds and timeout are valid.
         let ret = unsafe { libc::poll(&mut pollfd, 1, 0) };
         ret > 0 && (pollfd.revents & libc::POLLIN) != 0
     }
@@ -424,6 +435,7 @@ impl LinuxTap {
 
 impl NetworkBackend for LinuxTap {
     fn send(&self, data: &[u8]) -> Result<usize> {
+        // SAFETY: fd is valid; buffer pointer and length are within the slice bounds.
         let ret = unsafe { libc::write(self.fd.as_raw_fd(), data.as_ptr().cast(), data.len()) };
 
         if ret < 0 {
@@ -438,6 +450,7 @@ impl NetworkBackend for LinuxTap {
     }
 
     fn recv(&self, buf: &mut [u8]) -> Result<usize> {
+        // SAFETY: fd is valid; buffer pointer and length are within the allocated slice bounds.
         let ret = unsafe { libc::read(self.fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
 
         if ret < 0 {
@@ -526,6 +539,7 @@ mod tests {
     #[test]
     fn test_tap_creation_requires_root() {
         // This test requires root privileges
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         if unsafe { libc::geteuid() } != 0 {
             eprintln!("Skipping test: requires root privileges");
             return;

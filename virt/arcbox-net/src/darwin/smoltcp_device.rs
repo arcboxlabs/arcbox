@@ -338,6 +338,7 @@ impl TxToken for SmoltcpTxToken<'_> {
 /// Reads from a file descriptor into `buf`, returning number of bytes read.
 fn fd_read(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
     // SAFETY: reading into our buffer from a valid fd.
+    // SAFETY: fd is valid; buffer pointer and length are within the allocated slice bounds.
     let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
     if n < 0 {
         Err(io::Error::last_os_error())
@@ -376,14 +377,17 @@ mod tests {
         use std::os::fd::OwnedFd;
         let mut fds: [i32; 2] = [0; 2];
         // SAFETY: valid pointer to 2-element array.
+        // SAFETY: fd is a valid open file descriptor with exclusive ownership.
         let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
         assert_eq!(ret, 0, "socketpair() failed");
         // SAFETY: fds are valid file descriptors from socketpair.
+        // SAFETY: fd is a valid open file descriptor with exclusive ownership.
         unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
     }
 
     fn set_nonblocking(fd: RawFd) {
         // SAFETY: fcntl on a valid fd.
+        // SAFETY: fd is a valid open file descriptor; command and arguments are valid.
         unsafe {
             let flags = libc::fcntl(fd, libc::F_GETFL);
             libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
@@ -393,6 +397,7 @@ mod tests {
     /// Writes raw bytes to an FD.
     fn fd_write_raw(fd: RawFd, data: &[u8]) {
         // SAFETY: writing from valid buffer to valid fd.
+        // SAFETY: fd is valid; buffer pointer and length are within the slice bounds.
         unsafe { libc::write(fd, data.as_ptr().cast(), data.len()) };
     }
 

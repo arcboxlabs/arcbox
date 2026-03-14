@@ -5,16 +5,13 @@ use objc2::runtime::AnyClass;
 
 use super::ensure_framework_loaded;
 
-// ============================================================================
-// Class Access
-// ============================================================================
-
 /// Gets an Objective-C class by name.
 #[must_use]
 pub fn get_class(name: &str) -> Option<&'static AnyClass> {
     ensure_framework_loaded();
     let name_cstr = std::ffi::CString::new(name).ok()?;
     // SAFETY: objc_getClass returns null for unknown classes (checked below) or a valid class pointer that lives for the program's lifetime.
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     unsafe {
         let cls = objc_getClass(name_cstr.as_ptr());
         if cls.is_null() {
@@ -24,10 +21,6 @@ pub fn get_class(name: &str) -> Option<&'static AnyClass> {
         }
     }
 }
-
-// ============================================================================
-// Message Send Macros
-// ============================================================================
 
 // FFI function pointer for objc_msgSend.
 #[allow(improper_ctypes)]

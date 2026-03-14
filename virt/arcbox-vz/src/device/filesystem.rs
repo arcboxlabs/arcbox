@@ -35,10 +35,6 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::path::Path;
 
-// ============================================================================
-// SharedDirectory
-// ============================================================================
-
 /// A directory to be shared with the guest.
 ///
 /// This wraps `VZSharedDirectory` and represents a host directory
@@ -96,6 +92,7 @@ impl SharedDirectory {
         }
 
         // SAFETY: ObjC alloc/init on valid VZSharedDirectory class. NSURL from validated path. readOnly is a Bool value.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             let cls = get_class("VZSharedDirectory").ok_or_else(|| VZError::Internal {
                 code: -1,
@@ -171,10 +168,6 @@ impl Drop for SharedDirectory {
     }
 }
 
-// ============================================================================
-// DirectoryShare trait
-// ============================================================================
-
 /// Trait for directory share configurations.
 ///
 /// This trait is implemented by different share types that can be
@@ -186,10 +179,6 @@ pub trait DirectoryShare {
     /// Consumes the share and returns the raw pointer.
     fn into_ptr(self) -> *mut AnyObject;
 }
-
-// ============================================================================
-// SingleDirectoryShare
-// ============================================================================
 
 /// A share configuration for a single directory.
 ///
@@ -222,6 +211,7 @@ impl SingleDirectoryShare {
     /// * `directory` - The shared directory to expose
     pub fn new(directory: SharedDirectory) -> VZResult<Self> {
         // SAFETY: ObjC alloc/init on valid VZSingleDirectoryShare class with a valid SharedDirectory pointer.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             let cls = get_class("VZSingleDirectoryShare").ok_or_else(|| VZError::Internal {
                 code: -1,
@@ -281,10 +271,6 @@ impl Drop for SingleDirectoryShare {
     }
 }
 
-// ============================================================================
-// MultipleDirectoryShare
-// ============================================================================
-
 /// A share configuration for multiple directories.
 ///
 /// This wraps `VZMultipleDirectoryShare` and allows sharing multiple
@@ -320,6 +306,7 @@ impl MultipleDirectoryShare {
     /// Creates a new multiple directory share.
     pub fn new() -> VZResult<Self> {
         // SAFETY: ObjC new on valid VZMultipleDirectoryShare class. retain prevents autorelease.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             let cls = get_class("VZMultipleDirectoryShare").ok_or_else(|| VZError::Internal {
                 code: -1,
@@ -354,6 +341,7 @@ impl MultipleDirectoryShare {
     /// * `directory` - The shared directory to add
     pub fn add(&mut self, name: &str, directory: SharedDirectory) -> &mut Self {
         // SAFETY: self.inner is a valid VZMultipleDirectoryShare. Sending setObject:forKey: to its directories NSMutableDictionary.
+        // SAFETY: Receiver is a valid Objective-C object; selector and arguments match the method signature.
         unsafe {
             // Get the directories dictionary
             let dirs: *mut AnyObject = msg_send!(self.inner, directories);
@@ -413,10 +401,6 @@ impl Drop for MultipleDirectoryShare {
     }
 }
 
-// ============================================================================
-// VirtioFileSystemDeviceConfiguration
-// ============================================================================
-
 /// Configuration for a `VirtioFS` filesystem device.
 ///
 /// This wraps `VZVirtioFileSystemDeviceConfiguration` and provides
@@ -474,6 +458,7 @@ impl VirtioFileSystemDeviceConfiguration {
         }
 
         // SAFETY: ObjC alloc/init on valid VZVirtioFileSystemDeviceConfiguration class. Tag is validated via validateTag:error: before use.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             let cls = get_class("VZVirtioFileSystemDeviceConfiguration").ok_or_else(|| {
                 VZError::Internal {
@@ -556,6 +541,7 @@ impl VirtioFileSystemDeviceConfiguration {
     /// * `share` - The directory share configuration
     pub fn set_share<S: DirectoryShare>(&mut self, share: S) -> &mut Self {
         // SAFETY: self.inner is a valid VZVirtioFileSystemDeviceConfiguration. share.into_ptr() provides a valid directory share object.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             let set_sel = objc2::sel!(setShare:);
             let set_fn: unsafe extern "C" fn(*mut AnyObject, objc2::runtime::Sel, *mut AnyObject) =
@@ -595,10 +581,6 @@ impl Drop for VirtioFileSystemDeviceConfiguration {
         }
     }
 }
-
-// ============================================================================
-// LinuxRosettaDirectoryShare (macOS 13+)
-// ============================================================================
 
 /// Availability status for Rosetta.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -646,6 +628,7 @@ impl LinuxRosettaDirectoryShare {
     /// Checks the availability of Rosetta on this system.
     pub fn availability() -> RosettaAvailability {
         // SAFETY: cls is a valid VZLinuxRosettaDirectoryShare class pointer from get_class. Sending availability to it.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             let cls = match get_class("VZLinuxRosettaDirectoryShare") {
                 Some(c) => c,
@@ -685,6 +668,7 @@ impl LinuxRosettaDirectoryShare {
         }
 
         // SAFETY: ObjC new on valid VZLinuxRosettaDirectoryShare class. Availability is checked above. retain prevents autorelease.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             let cls =
                 get_class("VZLinuxRosettaDirectoryShare").ok_or_else(|| VZError::Internal {

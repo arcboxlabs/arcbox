@@ -343,10 +343,6 @@ impl NetworkDatapath {
     }
 }
 
-// ============================================================================
-// Intercepted frame handling
-// ============================================================================
-
 /// Dispatches an intercepted frame to the appropriate handler.
 #[allow(clippy::too_many_arguments)]
 fn handle_intercepted_frame(
@@ -626,10 +622,6 @@ fn build_dns_servfail_response(query: &[u8]) -> Option<Vec<u8>> {
     Some(response)
 }
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
 /// Maximum number of reply frames to drain per call, preventing a single
 /// drain from starving other `select!` branches under high traffic.
 const DRAIN_REPLY_BATCH: usize = 64;
@@ -721,6 +713,7 @@ fn enqueue_or_write(
 /// Writes data to a raw file descriptor, returning bytes written or an error.
 fn fd_write(fd: RawFd, data: &[u8]) -> io::Result<usize> {
     // SAFETY: writing from our buffer to a valid socketpair fd.
+    // SAFETY: fd is valid; buffer pointer and length are within the slice bounds.
     let n = unsafe { libc::write(fd, data.as_ptr().cast(), data.len()) };
     if n < 0 {
         Err(io::Error::last_os_error())
@@ -737,6 +730,7 @@ fn fd_write(fd: RawFd, data: &[u8]) -> io::Result<usize> {
 fn write_to_guest(guest_async: &AsyncFd<FdWrapper>, data: &[u8]) {
     let fd = guest_async.get_ref().as_raw_fd();
     // SAFETY: writing from our buffer to a valid socketpair fd.
+    // SAFETY: fd is valid; buffer pointer and length are within the slice bounds.
     let n = unsafe { libc::write(fd, data.as_ptr().cast(), data.len()) };
     if n < 0 {
         let err = io::Error::last_os_error();
@@ -754,6 +748,7 @@ fn write_to_guest(guest_async: &AsyncFd<FdWrapper>, data: &[u8]) {
 #[allow(dead_code)]
 fn fd_read(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
     // SAFETY: reading into our buffer from a valid fd.
+    // SAFETY: fd is valid; buffer pointer and length are within the allocated slice bounds.
     let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
     if n < 0 {
         Err(io::Error::last_os_error())
@@ -766,10 +761,12 @@ fn fd_read(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
 /// Sets a file descriptor to non-blocking mode.
 fn set_nonblocking(fd: RawFd) -> io::Result<()> {
     // SAFETY: fcntl on a valid fd.
+    // SAFETY: fd is a valid open file descriptor; command and arguments are valid.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: fd is a valid open file descriptor; command and arguments are valid.
     let ret = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
     if ret < 0 {
         return Err(io::Error::last_os_error());
@@ -786,9 +783,11 @@ mod tests {
     fn socketpair() -> (OwnedFd, OwnedFd) {
         let mut fds: [i32; 2] = [0; 2];
         // SAFETY: valid pointer to 2-element array.
+        // SAFETY: fd is a valid open file descriptor with exclusive ownership.
         let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
         assert_eq!(ret, 0, "socketpair() failed");
         // SAFETY: fds are valid file descriptors from socketpair.
+        // SAFETY: fd is a valid open file descriptor with exclusive ownership.
         unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
     }
 
@@ -798,6 +797,7 @@ mod tests {
         set_nonblocking(a.as_raw_fd()).unwrap();
 
         // SAFETY: fcntl on a valid fd.
+        // SAFETY: fd is a valid open file descriptor; command and arguments are valid.
         let flags = unsafe { libc::fcntl(a.as_raw_fd(), libc::F_GETFL) };
         assert!(flags >= 0);
         assert_ne!(flags & libc::O_NONBLOCK, 0, "O_NONBLOCK should be set");
@@ -809,6 +809,7 @@ mod tests {
         let data = b"hello network";
 
         // SAFETY: writing from valid buffer to valid fd.
+        // SAFETY: fd is valid; buffer pointer and length are within the slice bounds.
         let n = unsafe { libc::write(b.as_raw_fd(), data.as_ptr().cast(), data.len()) };
         assert_eq!(n as usize, data.len());
 

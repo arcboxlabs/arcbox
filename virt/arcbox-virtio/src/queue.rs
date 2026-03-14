@@ -279,10 +279,6 @@ impl<'a> Iterator for DescriptorChain<'a> {
 mod tests {
     use super::*;
 
-    // ==========================================================================
-    // Descriptor Tests
-    // ==========================================================================
-
     #[test]
     fn test_descriptor_default() {
         let desc = Descriptor::default();
@@ -349,20 +345,12 @@ mod tests {
         assert_eq!(copied.addr, 0xDEADBEEF);
     }
 
-    // ==========================================================================
-    // Flag Constants Tests
-    // ==========================================================================
-
     #[test]
     fn test_flag_constants() {
         assert_eq!(flags::NEXT, 1);
         assert_eq!(flags::WRITE, 2);
         assert_eq!(flags::INDIRECT, 4);
     }
-
-    // ==========================================================================
-    // AvailRing Tests
-    // ==========================================================================
 
     #[test]
     fn test_avail_ring_new() {
@@ -378,10 +366,6 @@ mod tests {
         let ring = AvailRing::new(1);
         assert_eq!(ring.ring.len(), 1);
     }
-
-    // ==========================================================================
-    // UsedElement Tests
-    // ==========================================================================
 
     #[test]
     fn test_used_element_default() {
@@ -400,10 +384,6 @@ mod tests {
         assert_eq!(copied.len, 1024);
     }
 
-    // ==========================================================================
-    // UsedRing Tests
-    // ==========================================================================
-
     #[test]
     fn test_used_ring_new() {
         let ring = UsedRing::new(128);
@@ -412,10 +392,6 @@ mod tests {
         assert_eq!(ring.ring.len(), 128);
         assert_eq!(ring.avail_event, 0);
     }
-
-    // ==========================================================================
-    // VirtQueue Tests
-    // ==========================================================================
 
     #[test]
     fn test_virtqueue_new() {
@@ -568,10 +544,6 @@ mod tests {
         assert!(!queue.has_available());
     }
 
-    // ==========================================================================
-    // DescriptorChain Tests
-    // ==========================================================================
-
     #[test]
     fn test_descriptor_chain_single() {
         let mut queue = VirtQueue::new(16).unwrap();
@@ -660,10 +632,6 @@ mod tests {
         assert!(!descs[0].is_write_only());
         assert!(descs[1].is_write_only());
     }
-
-    // ==========================================================================
-    // Edge Case Tests
-    // ==========================================================================
 
     #[test]
     fn test_avail_idx_wrap() {

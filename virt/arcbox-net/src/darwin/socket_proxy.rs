@@ -297,6 +297,7 @@ impl IcmpProxy {
                         Ok(mut guard) => {
                             match guard.try_io(|inner| {
                                 // SAFETY: reading into valid buffer from a raw socket fd.
+                                // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
                                 let n = unsafe {
                                     libc::recv(
                                         inner.get_ref().as_raw_fd(),

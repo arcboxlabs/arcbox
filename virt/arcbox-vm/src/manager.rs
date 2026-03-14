@@ -54,10 +54,6 @@ impl VmmManager {
         })
     }
 
-    // =========================================================================
-    // VM lifecycle
-    // =========================================================================
-
     /// Allocate resources, spawn Firecracker, configure, and boot the VM.
     pub async fn create_vm(&self, mut spec: VmSpec) -> Result<VmId> {
         // Apply config defaults for fields not supplied by the caller.
@@ -394,10 +390,6 @@ impl VmmManager {
         })
     }
 
-    // =========================================================================
-    // Pause / Resume / Snapshot
-    // =========================================================================
-
     /// Pause a running VM.
     pub async fn pause_vm(&self, id: &VmId) -> Result<()> {
         let vm = self.get_vm_handle(id)?;
@@ -557,10 +549,6 @@ impl VmmManager {
         self.snapshots.delete(vm_id, snapshot_id)
     }
 
-    // =========================================================================
-    // Metrics / Live Updates
-    // =========================================================================
-
     /// Retrieve balloon metrics for a VM.
     pub async fn get_metrics(&self, id: &VmId) -> Result<VmMetrics> {
         let vm = self.get_vm_handle(id)?;
@@ -655,10 +643,6 @@ impl VmmManager {
         vm.flush_metrics().await.map_err(VmmError::from)?;
         Ok(())
     }
-
-    // =========================================================================
-    // Helpers
-    // =========================================================================
 
     fn get_instance(&self, id: &VmId) -> Result<Arc<Mutex<VmInstance>>> {
         self.instances

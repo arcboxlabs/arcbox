@@ -9,10 +9,6 @@ use crate::ffi::get_class;
 use crate::{msg_send, msg_send_u64, msg_send_void_u64};
 use objc2::runtime::AnyObject;
 
-// ============================================================================
-// Balloon Device Configuration
-// ============================================================================
-
 /// Configuration for a `VirtIO` traditional memory balloon device.
 ///
 /// This device allows dynamic memory management between the host and guest.
@@ -29,6 +25,7 @@ impl MemoryBalloonDeviceConfiguration {
     /// Creates a new memory balloon device configuration.
     pub fn new() -> VZResult<Self> {
         // SAFETY: ObjC new on valid VZVirtioTraditionalMemoryBalloonDeviceConfiguration class. retain prevents autorelease.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             let cls = get_class("VZVirtioTraditionalMemoryBalloonDeviceConfiguration").ok_or_else(
                 || VZError::Internal {
@@ -75,10 +72,6 @@ impl Drop for MemoryBalloonDeviceConfiguration {
     }
 }
 
-// ============================================================================
-// Memory Balloon Device (Runtime)
-// ============================================================================
-
 /// A running `VirtIO` memory balloon device.
 ///
 /// This represents an active balloon device on a running VM.
@@ -117,6 +110,7 @@ impl MemoryBalloonDevice {
             return;
         }
         // SAFETY: self.inner is checked non-null above. Sending setTargetVirtualMachineMemorySize: with a u64 value.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             msg_send_void_u64!(self.inner, setTargetVirtualMachineMemorySize: bytes);
         }
@@ -136,6 +130,7 @@ impl MemoryBalloonDevice {
             return 0;
         }
         // SAFETY: self.inner is checked non-null above. Sending targetVirtualMachineMemorySize to a valid balloon device.
+        // SAFETY: Receiver is a valid Objective-C object; selector returns a u64-compatible value.
         unsafe { msg_send_u64!(self.inner, targetVirtualMachineMemorySize) }
     }
 
@@ -145,10 +140,6 @@ impl MemoryBalloonDevice {
         self.inner
     }
 }
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
 
 /// Gets the memory balloon devices from a running VM.
 ///
@@ -165,6 +156,7 @@ pub fn vm_memory_balloon_devices(vm_ptr: *mut AnyObject) -> Vec<MemoryBalloonDev
     }
 
     // SAFETY: vm_ptr is checked non-null above. Sending memoryBalloonDevices returns a valid NSArray. Elements are valid balloon device pointers.
+    // SAFETY: Receiver is a valid Objective-C object; selector and arguments match the method signature.
     unsafe {
         let devices: *mut AnyObject = msg_send!(vm_ptr, memoryBalloonDevices);
         if devices.is_null() {

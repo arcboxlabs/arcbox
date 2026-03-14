@@ -87,6 +87,7 @@ impl DarwinVcpu {
             return None;
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             // VZVirtualMachine.state is thread-safe to read
             let sel = objc2::sel!(state);
@@ -451,10 +452,6 @@ mod tests {
     use super::*;
     use std::thread;
 
-    // ========================================================================
-    // Basic Creation Tests
-    // ========================================================================
-
     #[test]
     fn test_vcpu_creation() {
         let vcpu = DarwinVcpu::new(0);
@@ -480,10 +477,6 @@ mod tests {
             assert_eq!(vcpu.id(), id);
         }
     }
-
-    // ========================================================================
-    // Register Tests
-    // ========================================================================
 
     #[test]
     fn test_vcpu_registers_cached() {
@@ -570,10 +563,6 @@ mod tests {
         }
     }
 
-    // ========================================================================
-    // Run Behavior Tests
-    // ========================================================================
-
     #[test]
     fn test_vcpu_run_without_vm() {
         // When run() is called without a VZ VM pointer, it should return Halt immediately
@@ -623,10 +612,6 @@ mod tests {
         assert!(!running_flag.load(std::sync::atomic::Ordering::SeqCst));
     }
 
-    // ========================================================================
-    // VM State Query Tests
-    // ========================================================================
-
     #[test]
     fn test_vcpu_query_vm_state_without_vm() {
         let vcpu = DarwinVcpu::new(0);
@@ -639,10 +624,6 @@ mod tests {
         let vcpu = DarwinVcpu::new_managed(0, std::ptr::null_mut());
         assert!(vcpu.query_vm_state().is_none());
     }
-
-    // ========================================================================
-    // Linux Boot Setup Tests
-    // ========================================================================
 
     #[test]
     fn test_vcpu_linux_setup() {
@@ -697,10 +678,6 @@ mod tests {
         }
     }
 
-    // ========================================================================
-    // Helper Method Tests
-    // ========================================================================
-
     #[test]
     fn test_vcpu_set_instruction_pointer() {
         let mut vcpu = DarwinVcpu::new(0);
@@ -720,10 +697,6 @@ mod tests {
         let regs = vcpu.get_regs().unwrap();
         assert_eq!(regs.rsp, 0x7FFF_FFFF_FFFF_FF00);
     }
-
-    // ========================================================================
-    // I/O Result Tests (No-op on Darwin)
-    // ========================================================================
 
     #[test]
     fn test_vcpu_set_io_result_noop() {
@@ -753,10 +726,6 @@ mod tests {
         }
     }
 
-    // ========================================================================
-    // Thread Safety Tests
-    // ========================================================================
-
     #[test]
     fn test_vcpu_running_flag_is_shared() {
         // Test that running_flag() returns a shared reference
@@ -785,10 +754,6 @@ mod tests {
 
         handle.join().unwrap();
     }
-
-    // ========================================================================
-    // VZ State Mapping Tests (Unit tests for state conversion)
-    // ========================================================================
 
     #[test]
     fn test_vz_state_from_i64() {

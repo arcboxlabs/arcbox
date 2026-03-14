@@ -254,6 +254,7 @@ impl ZeroCopyPacket {
             &[]
         } else {
             // Safety: caller guarantees memory validity per function contract.
+            // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
             unsafe { std::slice::from_raw_parts(self.data, self.len as usize) }
         }
     }
@@ -481,6 +482,7 @@ impl ZeroCopyPacket {
         hash = hash.wrapping_mul(0x0100_0000_01b3);
 
         // Include IP addresses if we have them
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             let data = self.as_slice();
             if self.metadata.ip_version == IpVersion::V4 {
@@ -528,6 +530,7 @@ impl ZeroCopyPacket {
             return None;
         }
         // Safety: caller guarantees data validity per function contract.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let data = unsafe { self.as_slice() };
         let l3 = self.metadata.l3_offset as usize;
         if data.len() >= l3 + 20 {
@@ -553,6 +556,7 @@ impl ZeroCopyPacket {
             return None;
         }
         // Safety: caller guarantees data validity per function contract.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let data = unsafe { self.as_slice() };
         let l3 = self.metadata.l3_offset as usize;
         if data.len() >= l3 + 20 {
@@ -578,6 +582,7 @@ impl ZeroCopyPacket {
             return None;
         }
         // Safety: caller guarantees data validity per function contract.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let data = unsafe { self.as_slice() };
         let l3 = self.metadata.l3_offset as usize;
         if data.len() >= l3 + 40 {
@@ -600,6 +605,7 @@ impl ZeroCopyPacket {
             return None;
         }
         // Safety: caller guarantees data validity per function contract.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let data = unsafe { self.as_slice() };
         let l3 = self.metadata.l3_offset as usize;
         if data.len() >= l3 + 40 {
@@ -670,6 +676,7 @@ mod tests {
     #[test]
     fn test_packet_from_slice() {
         let data = [0u8; 64];
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let pkt = unsafe { ZeroCopyPacket::from_slice(&data, 42) };
 
         assert!(!pkt.is_empty());
@@ -681,6 +688,7 @@ mod tests {
     #[test]
     fn test_refcount() {
         let data = [0u8; 64];
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let pkt = unsafe { ZeroCopyPacket::from_slice(&data, 0) };
 
         assert_eq!(pkt.refcount(), 1);

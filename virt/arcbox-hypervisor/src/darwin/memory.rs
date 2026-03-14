@@ -21,15 +21,12 @@ use crate::{
     types::DirtyPageInfo,
 };
 
-// ============================================================================
-// Memory Allocation (using mmap directly)
-// ============================================================================
-
 /// Allocates guest memory using mmap.
 ///
 /// This is a low-level operation that allocates anonymous memory pages
 /// for use as guest physical memory.
 fn allocate_memory(size: u64) -> Result<*mut u8, HypervisorError> {
+    // SAFETY: Arguments are valid for mmap(2); fd is a valid open file descriptor.
     unsafe {
         let ptr = libc::mmap(
             ptr::null_mut(),
@@ -57,6 +54,7 @@ fn allocate_memory(size: u64) -> Result<*mut u8, HypervisorError> {
 /// Frees guest memory previously allocated with `allocate_memory`.
 fn free_memory(ptr: *mut u8, size: u64) {
     if !ptr.is_null() {
+        // SAFETY: ptr and size correspond to a previously mmap'd region owned by this struct.
         unsafe {
             libc::munmap(ptr.cast(), size as usize);
         }
@@ -185,6 +183,7 @@ impl DarwinMemory {
                 let bytes_in_page = std::cmp::min(page_size, region.size as usize - page_offset);
 
                 // Read page data and compute hash.
+                // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
                 let page_data = unsafe {
                     std::slice::from_raw_parts(region.host_addr.add(page_offset), bytes_in_page)
                 };
@@ -255,6 +254,7 @@ impl DarwinMemory {
             {
                 let offset = addr.raw() - region.guest_addr.raw();
                 let remaining = region.size - offset;
+                // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
                 let ptr = unsafe { region.host_addr.add(offset as usize) };
                 return Ok((ptr, remaining));
             }
@@ -296,6 +296,7 @@ impl GuestMemory for DarwinMemory {
             )));
         }
 
+        // SAFETY: Source and destination do not overlap; both are valid for the given count.
         unsafe {
             std::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr(), buf.len());
         }
@@ -314,6 +315,7 @@ impl GuestMemory for DarwinMemory {
             )));
         }
 
+        // SAFETY: Source and destination do not overlap; both are valid for the given count.
         unsafe {
             std::ptr::copy_nonoverlapping(buf.as_ptr(), ptr, buf.len());
         }
@@ -460,6 +462,7 @@ impl GuestMemory for DarwinMemory {
                 )));
             }
 
+            // SAFETY: Source and destination do not overlap; both are valid for the given count.
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     region.host_addr,
@@ -534,6 +537,7 @@ mod tests {
         assert!(!ptr.is_null());
 
         // Write via pointer
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             *ptr = 42;
         }

@@ -32,10 +32,6 @@ use crate::vsock::{self, ExecInputMsg, OutputChunk, StartCommand};
 /// Unique sandbox identifier (UUID string).
 pub type SandboxId = String;
 
-// =============================================================================
-// State
-// =============================================================================
-
 /// Lifecycle state of a sandbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxState {
@@ -65,10 +61,6 @@ impl std::fmt::Display for SandboxState {
         }
     }
 }
-
-// =============================================================================
-// Spec types (input to SandboxManager methods)
-// =============================================================================
 
 /// Network configuration supplied at sandbox creation time.
 #[derive(Debug, Clone, Default)]
@@ -142,10 +134,6 @@ pub struct RestoreSandboxSpec {
     pub ttl_seconds: u32,
 }
 
-// =============================================================================
-// Runtime instance
-// =============================================================================
-
 /// Per-sandbox runtime state.
 pub struct SandboxInstance {
     /// Unique identifier.
@@ -210,10 +198,6 @@ impl SandboxInstance {
     }
 }
 
-// =============================================================================
-// Public output types (returned to callers / gRPC layer)
-// =============================================================================
-
 /// Lightweight summary for `List` operations.
 pub struct SandboxSummary {
     pub id: SandboxId,
@@ -246,10 +230,6 @@ pub struct SandboxNetworkInfo {
     pub tap_name: String,
 }
 
-// =============================================================================
-// Events
-// =============================================================================
-
 /// A sandbox lifecycle event broadcast to subscribers.
 #[derive(Debug, Clone)]
 pub struct SandboxEvent {
@@ -279,10 +259,6 @@ impl SandboxEvent {
     }
 }
 
-// =============================================================================
-// Checkpoint / Restore output types
-// =============================================================================
-
 /// Info returned after a successful checkpoint.
 pub struct CheckpointInfo {
     pub snapshot_id: String,
@@ -300,10 +276,6 @@ pub struct CheckpointSummary {
     pub snapshot_dir: String,
     pub created_at: String,
 }
-
-// =============================================================================
-// SandboxManager
-// =============================================================================
 
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 
@@ -336,10 +308,6 @@ impl SandboxManager {
             events_tx,
         })
     }
-
-    // =========================================================================
-    // Core lifecycle
-    // =========================================================================
 
     /// Create a sandbox and return immediately (state = `"starting"`).
     ///
@@ -602,10 +570,6 @@ impl SandboxManager {
         self.events_tx.subscribe()
     }
 
-    // =========================================================================
-    // Workload execution (requires guest agent via vsock)
-    // =========================================================================
-
     /// Run a command inside a ready sandbox and stream its output.
     ///
     /// The sandbox must be in `Ready` state.  It transitions to `Running`
@@ -762,10 +726,6 @@ impl SandboxManager {
 
         Ok((in_tx, wrapped_rx))
     }
-
-    // =========================================================================
-    // Checkpoint / Restore
-    // =========================================================================
 
     /// Pause, checkpoint, and resume a sandbox.
     ///
@@ -1176,10 +1136,6 @@ impl SandboxManager {
         self.snapshots.delete_by_id(snapshot_id)
     }
 
-    // =========================================================================
-    // Private helpers
-    // =========================================================================
-
     fn get_instance(&self, id: &SandboxId) -> Result<Arc<Mutex<SandboxInstance>>> {
         self.instances
             .read()
@@ -1221,10 +1177,6 @@ impl SandboxManager {
             })
     }
 }
-
-// =============================================================================
-// Background task: boot a sandbox VM
-// =============================================================================
 
 /// Spawned by `create_sandbox`; boots the Firecracker VM and updates state.
 #[allow(clippy::too_many_arguments)]
@@ -1442,10 +1394,6 @@ async fn do_boot(
     Ok((process, vm, vsock_host_path))
 }
 
-// =============================================================================
-// Background task: remove a sandbox
-// =============================================================================
-
 /// Shared implementation for `remove_sandbox` and TTL expiry tasks.
 #[allow(clippy::type_complexity)]
 async fn remove_sandbox_impl(
@@ -1505,10 +1453,6 @@ async fn remove_sandbox_impl(
     instances.write().unwrap().remove(id);
     let _ = events_tx.send(SandboxEvent::new(id, "removed"));
 }
-
-// =============================================================================
-// Conversion helpers
-// =============================================================================
 
 fn inst_to_info(inst: &SandboxInstance) -> SandboxInfo {
     SandboxInfo {

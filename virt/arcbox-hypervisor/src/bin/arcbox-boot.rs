@@ -281,6 +281,7 @@ fn run_interactive_console(vm: &mut arcbox_hypervisor::darwin::DarwinVm) {
             revents: 0,
         };
 
+        // SAFETY: pollfd is properly initialized; nfds and timeout are valid.
         let poll_result = unsafe { libc::poll(&raw mut pollfd, 1, 10) }; // 10ms timeout
 
         if poll_result > 0 && (pollfd.revents & libc::POLLIN) != 0 {
@@ -373,6 +374,7 @@ fn run_demo_mode(vm: &mut arcbox_hypervisor::darwin::DarwinVm, test_vsock: bool)
             match vm.connect_vsock(port) {
                 Ok(fd) => {
                     println!("  Vsock port {} connected! fd={}", port, fd);
+                    // SAFETY: fd is a valid open file descriptor owned by this context.
                     unsafe { libc::close(fd) };
                     break;
                 }
@@ -397,6 +399,7 @@ fn setup_raw_mode() -> libc::termios {
 
     let mut original: MaybeUninit<libc::termios> = MaybeUninit::uninit();
 
+    // SAFETY: The value has been fully initialized by preceding operations.
     unsafe {
         libc::tcgetattr(0, original.as_mut_ptr());
         let original = original.assume_init();
@@ -418,6 +421,7 @@ fn setup_raw_mode() -> libc::termios {
 
 #[cfg(target_os = "macos")]
 fn restore_terminal(original: libc::termios) {
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     unsafe {
         libc::tcsetattr(0, libc::TCSANOW, &raw const original);
     }

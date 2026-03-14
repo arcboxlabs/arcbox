@@ -5,19 +5,11 @@ use crate::ffi::{get_class, release};
 use crate::{msg_send, msg_send_bool, msg_send_void_bool};
 use objc2::runtime::{AnyObject, Bool};
 
-// ============================================================================
-// Platform Trait
-// ============================================================================
-
 /// Trait for platform configurations.
 pub trait Platform {
     /// Returns the underlying Objective-C object pointer.
     fn as_ptr(&self) -> *mut AnyObject;
 }
-
-// ============================================================================
-// Generic Platform
-// ============================================================================
 
 /// A generic platform configuration for Linux VMs.
 ///
@@ -33,6 +25,7 @@ impl GenericPlatform {
     /// Creates a new generic platform configuration.
     pub fn new() -> VZResult<Self> {
         // SAFETY: ObjC alloc/init pattern on valid VZGenericPlatformConfiguration class. Result is checked non-null. retain prevents autorelease.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             let cls =
                 get_class("VZGenericPlatformConfiguration").ok_or_else(|| VZError::Internal {
@@ -71,6 +64,7 @@ impl GenericPlatform {
             return false;
         }
         // SAFETY: Selector existence is checked above via class_method. Sending to a valid class pointer.
+        // SAFETY: Receiver is a valid Objective-C object; selector returns BOOL.
         unsafe { msg_send_bool!(cls, isNestedVirtualizationSupported).as_bool() }
     }
 
@@ -81,6 +75,7 @@ impl GenericPlatform {
         // Guard: the setter selector only exists on macOS 15+.
         let sel = objc2::sel!(setNestedVirtualizationEnabled:);
         // SAFETY: self.inner is a valid ObjC object pointer; casting to &AnyObject to query its class.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         if !unsafe { &*(self.inner as *const AnyObject) }
             .class()
             .responds_to(sel)
@@ -88,6 +83,7 @@ impl GenericPlatform {
             return;
         }
         // SAFETY: Selector existence is checked above via responds_to. self.inner is a valid VZGenericPlatformConfiguration.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             msg_send_void_bool!(self.inner, setNestedVirtualizationEnabled: Bool::new(enabled));
         }

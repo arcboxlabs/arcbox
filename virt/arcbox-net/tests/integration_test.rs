@@ -8,10 +8,6 @@
 #![allow(unused_mut)]
 #![allow(clippy::all)]
 
-// ============================================================================
-// Datapath Integration Tests
-// ============================================================================
-
 mod datapath {
     use arcbox_net::datapath::ring::MpmcRing;
     use arcbox_net::datapath::{DatapathStats, LockFreeRing, PacketPool, ZeroCopyPacket};
@@ -30,6 +26,7 @@ mod datapath {
         for i in 0..10 {
             if let Some(idx) = pool.alloc_index() {
                 // Write test data to buffer
+                // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
                 let buffer = unsafe { pool.get_mut(idx) };
                 buffer.as_full_mut_slice()[0..4].copy_from_slice(&[i as u8, 0, 0, 0]);
                 buffer.set_len(4);
@@ -45,10 +42,12 @@ mod datapath {
         // Consumer side: dequeue and verify
         for expected_i in 0..10 {
             let idx = ring.dequeue().unwrap();
+            // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
             let buffer = unsafe { pool.get(idx) };
             assert_eq!(buffer.as_full_slice()[0], expected_i as u8);
 
             // Free buffer back to pool
+            // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
             unsafe { pool.free_by_index(idx) };
         }
 
@@ -98,12 +97,15 @@ mod datapath {
         packet_data[36..38].copy_from_slice(&80u16.to_be_bytes()); // dst port
 
         // Create zero-copy packet
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let packet = unsafe {
             ZeroCopyPacket::from_raw_parts(packet_data.as_ptr(), packet_data.len() as u32, 0)
         };
 
         assert_eq!(packet.len(), 64);
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         assert_eq!(unsafe { packet.as_slice()[12] }, 0x08);
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         assert_eq!(unsafe { packet.as_slice()[13] }, 0x00);
     }
 
@@ -154,6 +156,7 @@ mod datapath {
 
         // Free half the buffers
         for idx in indices.drain(..4) {
+            // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
             unsafe { pool.free_by_index(idx) };
         }
 
@@ -163,9 +166,11 @@ mod datapath {
 
         // Cleanup
         if let Some(idx) = new_idx {
+            // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
             unsafe { pool.free_by_index(idx) };
         }
         for idx in indices {
+            // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
             unsafe { pool.free_by_index(idx) };
         }
     }
@@ -185,10 +190,6 @@ mod datapath {
         assert_eq!(ring.dequeue(), None);
     }
 }
-
-// ============================================================================
-// NAT Engine Integration Tests
-// ============================================================================
 
 mod nat_engine {
     use arcbox_net::nat_engine::checksum::incremental_checksum_update_32;
@@ -422,10 +423,6 @@ mod nat_engine {
     }
 }
 
-// ============================================================================
-// Concurrent Stress Tests
-// ============================================================================
-
 mod stress {
     use arcbox_net::datapath::ring::MpmcRing;
     use arcbox_net::datapath::{LockFreeRing, PacketPool};
@@ -567,12 +564,14 @@ mod stress {
                     // Free some
                     while allocated.len() > 2 {
                         let idx = allocated.pop().unwrap();
+                        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
                         unsafe { pool.free_by_index(idx) };
                     }
                 }
 
                 // Cleanup remaining
                 for idx in allocated {
+                    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
                     unsafe { pool.free_by_index(idx) };
                 }
             }));
@@ -586,10 +585,6 @@ mod stress {
         // Note: can't easily verify this without internal access
     }
 }
-
-// ============================================================================
-// Error Handling Tests
-// ============================================================================
 
 mod error_handling {
     use arcbox_net::nat_engine::{NatDirection, NatEngine, TranslateError};
@@ -653,10 +648,6 @@ mod error_handling {
         assert!(result.is_ok());
     }
 }
-
-// ============================================================================
-// NetworkManager Tests
-// ============================================================================
 
 mod network_manager {
     use arcbox_net::{NetConfig, NetworkManager, NetworkMode};

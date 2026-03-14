@@ -23,10 +23,6 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-// ============================================================================
-// Inode Management
-// ============================================================================
-
 /// Inode data stored for each known file/directory.
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -113,10 +109,6 @@ impl FileType {
     }
 }
 
-// ============================================================================
-// File Handle Management
-// ============================================================================
-
 /// Handle data for an open file.
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -149,10 +141,6 @@ pub struct DirEntry {
     pub file_type: FileType,
 }
 
-// ============================================================================
-// Configuration
-// ============================================================================
-
 /// Configuration for the passthrough filesystem.
 #[derive(Debug, Clone)]
 pub struct PassthroughConfig {
@@ -181,10 +169,6 @@ impl PassthroughConfig {
         }
     }
 }
-
-// ============================================================================
-// Passthrough Filesystem
-// ============================================================================
 
 /// Passthrough filesystem.
 ///
@@ -278,10 +262,6 @@ impl PassthroughFs {
         self.negative_cache.as_ref()
     }
 
-    // ========================================================================
-    // Internal Helpers
-    // ========================================================================
-
     /// Allocates a new inode number.
     fn alloc_inode(&self) -> u64 {
         self.next_inode.fetch_add(1, Ordering::Relaxed)
@@ -359,10 +339,6 @@ impl PassthroughFs {
             cache.invalidate(path);
         }
     }
-
-    // ========================================================================
-    // Inode Operations
-    // ========================================================================
 
     /// Looks up a name in a directory.
     ///
@@ -501,6 +477,7 @@ impl PassthroughFs {
             let gid = gid.map_or(-1_i32 as libc::gid_t, |g| g);
             let path_cstr = std::ffi::CString::new(path.as_os_str().as_bytes())
                 .map_err(|_| FsError::InvalidPath("invalid path".to_string()))?;
+            // SAFETY: path is a valid null-terminated C string.
             let ret = unsafe { libc::chown(path_cstr.as_ptr(), uid, gid) };
             if ret != 0 {
                 return Err(FsError::io(std::io::Error::last_os_error()));
@@ -542,6 +519,7 @@ impl PassthroughFs {
             let path_cstr = std::ffi::CString::new(path.as_os_str().as_bytes())
                 .map_err(|_| FsError::InvalidPath("invalid path".to_string()))?;
             let ret =
+                // SAFETY: dirfd and path are valid; timespec array is properly initialized.
                 unsafe { libc::utimensat(libc::AT_FDCWD, path_cstr.as_ptr(), times.as_ptr(), 0) };
             if ret != 0 {
                 return Err(FsError::io(std::io::Error::last_os_error()));
@@ -561,10 +539,6 @@ impl PassthroughFs {
         let path = self.inode_path(inode)?;
         std::fs::read_link(&path).map_err(FsError::io)
     }
-
-    // ========================================================================
-    // File Creation Operations
-    // ========================================================================
 
     /// Creates a file.
     ///
@@ -739,6 +713,7 @@ impl PassthroughFs {
         let path_cstr = std::ffi::CString::new(path.as_os_str().as_bytes())
             .map_err(|_| FsError::InvalidPath("invalid path".to_string()))?;
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let ret = unsafe {
             libc::mknod(
                 path_cstr.as_ptr(),
@@ -767,10 +742,6 @@ impl PassthroughFs {
 
         Ok((inode, Self::metadata_to_attr(inode, &metadata)))
     }
-
-    // ========================================================================
-    // File Deletion Operations
-    // ========================================================================
 
     /// Removes a file.
     ///
@@ -841,10 +812,6 @@ impl PassthroughFs {
 
         Ok(())
     }
-
-    // ========================================================================
-    // File Handle Operations
-    // ========================================================================
 
     /// Applies POSIX open flags to `OpenOptions`.
     fn apply_flags(opts: &mut OpenOptions, flags: u32) {
@@ -1044,6 +1011,7 @@ impl PassthroughFs {
         let fd = data.file.as_raw_fd();
 
         #[allow(clippy::cast_possible_wrap)]
+        // SAFETY: fd is a valid open file descriptor; offset and length are valid.
         let ret = unsafe { libc::fallocate(fd, mode as i32, offset as i64, length as i64) };
 
         if ret != 0 {
@@ -1067,10 +1035,6 @@ impl PassthroughFs {
         let new_size = offset + length;
         data.file.set_len(new_size).map_err(FsError::io)
     }
-
-    // ========================================================================
-    // Directory Operations
-    // ========================================================================
 
     /// Opens a directory for reading.
     ///
@@ -1215,10 +1179,6 @@ impl PassthroughFs {
         dir.sync_all().map_err(FsError::io)
     }
 
-    // ========================================================================
-    // Extended Attributes (xattr)
-    // ========================================================================
-
     /// Gets an extended attribute.
     ///
     /// # Errors
@@ -1237,6 +1197,7 @@ impl PassthroughFs {
 
         if size == 0 {
             // Query size
+            // SAFETY: path and name are valid C strings; buffer is properly allocated.
             let ret = unsafe {
                 libc::getxattr(
                     path_cstr.as_ptr(),
@@ -1251,6 +1212,7 @@ impl PassthroughFs {
             Ok(vec![0u8; ret as usize])
         } else {
             let mut buf = vec![0u8; size as usize];
+            // SAFETY: path and name are valid C strings; buffer is properly allocated.
             let ret = unsafe {
                 libc::getxattr(
                     path_cstr.as_ptr(),
@@ -1276,6 +1238,7 @@ impl PassthroughFs {
             .map_err(|_| FsError::InvalidPath("invalid name".to_string()))?;
 
         if size == 0 {
+            // SAFETY: path and name are valid C strings; buffer is properly allocated.
             let ret = unsafe {
                 libc::getxattr(
                     path_cstr.as_ptr(),
@@ -1292,6 +1255,7 @@ impl PassthroughFs {
             Ok(vec![0u8; ret as usize])
         } else {
             let mut buf = vec![0u8; size as usize];
+            // SAFETY: path and name are valid C strings; buffer is properly allocated.
             let ret = unsafe {
                 libc::getxattr(
                     path_cstr.as_ptr(),
@@ -1324,6 +1288,7 @@ impl PassthroughFs {
         let name_cstr = std::ffi::CString::new(name.as_bytes())
             .map_err(|_| FsError::InvalidPath("invalid name".to_string()))?;
 
+        // SAFETY: path and name are valid C strings; value buffer is valid.
         let ret = unsafe {
             libc::setxattr(
                 path_cstr.as_ptr(),
@@ -1348,6 +1313,7 @@ impl PassthroughFs {
         let name_cstr = std::ffi::CString::new(name.as_bytes())
             .map_err(|_| FsError::InvalidPath("invalid name".to_string()))?;
 
+        // SAFETY: path and name are valid C strings; value buffer is valid.
         let ret = unsafe {
             libc::setxattr(
                 path_cstr.as_ptr(),
@@ -1379,6 +1345,7 @@ impl PassthroughFs {
         let name_cstr = std::ffi::CString::new(name.as_bytes())
             .map_err(|_| FsError::InvalidPath("invalid name".to_string()))?;
 
+        // SAFETY: path and name are valid C strings.
         let ret = unsafe { libc::removexattr(path_cstr.as_ptr(), name_cstr.as_ptr()) };
         if ret != 0 {
             Err(FsError::io(std::io::Error::last_os_error()))
@@ -1395,6 +1362,7 @@ impl PassthroughFs {
         let name_cstr = std::ffi::CString::new(name.as_bytes())
             .map_err(|_| FsError::InvalidPath("invalid name".to_string()))?;
 
+        // SAFETY: path and name are valid C strings.
         let ret = unsafe { libc::removexattr(path_cstr.as_ptr(), name_cstr.as_ptr(), 0) };
         if ret != 0 {
             Err(FsError::io(std::io::Error::last_os_error()))
@@ -1402,10 +1370,6 @@ impl PassthroughFs {
             Ok(())
         }
     }
-
-    // ========================================================================
-    // Filesystem Information
-    // ========================================================================
 
     /// Gets filesystem statistics.
     ///
@@ -1416,7 +1380,9 @@ impl PassthroughFs {
         let path_cstr = std::ffi::CString::new(self.root.as_os_str().as_bytes())
             .map_err(|_| FsError::InvalidPath("invalid path".to_string()))?;
 
+        // SAFETY: The target type is a C struct that can be safely zero-initialized.
         let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let ret = unsafe { libc::statfs(path_cstr.as_ptr(), &raw mut stat) };
         if ret != 0 {
             return Err(FsError::io(std::io::Error::last_os_error()));
@@ -1447,6 +1413,7 @@ impl PassthroughFs {
             .map_err(|_| FsError::InvalidPath("invalid path".to_string()))?;
 
         #[allow(clippy::cast_possible_wrap)]
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let ret = unsafe { libc::access(path_cstr.as_ptr(), mask as i32) };
         if ret != 0 {
             let err = std::io::Error::last_os_error();
@@ -1477,10 +1444,6 @@ impl std::fmt::Debug for PassthroughFs {
             .finish()
     }
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
 mod tests {

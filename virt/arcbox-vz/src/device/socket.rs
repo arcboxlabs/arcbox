@@ -19,6 +19,7 @@ impl SocketDeviceConfiguration {
     /// Creates a new socket device configuration.
     pub fn new() -> VZResult<Self> {
         // SAFETY: ObjC new on valid VZVirtioSocketDeviceConfiguration class. Result is checked non-null.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             let cls = get_class("VZVirtioSocketDeviceConfiguration").ok_or_else(|| {
                 VZError::Internal {

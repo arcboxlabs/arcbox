@@ -176,10 +176,6 @@ pub struct LoopbackBackend {
     packets: VecDeque<Vec<u8>>,
 }
 
-// ============================================================================
-// TAP Backend (Linux)
-// ============================================================================
-
 /// TAP network backend for Linux.
 #[cfg(target_os = "linux")]
 pub struct TapBackend {
@@ -203,6 +199,7 @@ impl TapBackend {
         use std::os::unix::io::RawFd;
 
         // Open /dev/net/tun
+        // SAFETY: path is a valid null-terminated C string; flags are valid open(2) arguments.
         let fd: RawFd = unsafe {
             libc::open(
                 b"/dev/net/tun\0".as_ptr() as *const libc::c_char,
@@ -239,8 +236,10 @@ impl TapBackend {
 
         // Create TAP device
         const TUNSETIFF: libc::c_ulong = 0x400454ca;
+        // SAFETY: fd is a valid open file descriptor owned by this context.
         let ret = unsafe { libc::ioctl(fd, TUNSETIFF, &ifr) };
         if ret < 0 {
+            // SAFETY: fd is a valid open file descriptor owned by this context.
             unsafe { libc::close(fd) };
             return Err(std::io::Error::last_os_error());
         }
@@ -267,6 +266,7 @@ impl TapBackend {
 
     /// Sets non-blocking mode.
     pub fn set_nonblocking(&mut self, nonblocking: bool) -> std::io::Result<()> {
+        // SAFETY: fd is a valid open file descriptor; command and arguments are valid.
         let flags = unsafe { libc::fcntl(self.fd, libc::F_GETFL) };
         if flags < 0 {
             return Err(std::io::Error::last_os_error());
@@ -278,6 +278,7 @@ impl TapBackend {
             flags & !libc::O_NONBLOCK
         };
 
+        // SAFETY: fd is a valid open file descriptor; command and arguments are valid.
         let ret = unsafe { libc::fcntl(self.fd, libc::F_SETFL, new_flags) };
         if ret < 0 {
             return Err(std::io::Error::last_os_error());
@@ -335,6 +336,7 @@ impl TapBackend {
 impl Drop for TapBackend {
     fn drop(&mut self) {
         if self.fd >= 0 {
+            // SAFETY: fd is a valid open file descriptor owned by this context.
             unsafe { libc::close(self.fd) };
         }
     }
@@ -343,6 +345,7 @@ impl Drop for TapBackend {
 #[cfg(target_os = "linux")]
 impl NetBackend for TapBackend {
     fn send(&mut self, packet: &NetPacket) -> std::io::Result<usize> {
+        // SAFETY: fd is valid; buffer pointer and length are within the slice bounds.
         let ret = unsafe {
             libc::write(
                 self.fd,
@@ -359,6 +362,7 @@ impl NetBackend for TapBackend {
     }
 
     fn recv(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // SAFETY: fd is valid; buffer pointer and length are within the allocated slice bounds.
         let ret = unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
 
         if ret < 0 {
@@ -381,14 +385,11 @@ impl NetBackend for TapBackend {
             revents: 0,
         };
 
+        // SAFETY: pollfd is properly initialized; nfds and timeout are valid.
         let ret = unsafe { libc::poll(&mut pollfd, 1, 0) };
         ret > 0 && (pollfd.revents & libc::POLLIN) != 0
     }
 }
-
-// ============================================================================
-// macOS Userspace Network Backend
-// ============================================================================
 
 /// Socket-based network backend for macOS using UDP tunnel.
 #[cfg(target_os = "macos")]
@@ -837,10 +838,6 @@ impl VirtioDevice for VirtioNet {
 mod tests {
     use super::*;
 
-    // ==========================================================================
-    // NetConfig Tests
-    // ==========================================================================
-
     #[test]
     fn test_net_config_default() {
         let config = NetConfig::default();
@@ -879,10 +876,6 @@ mod tests {
         assert_eq!(mac2[1], 0x54);
         assert_eq!(mac2[2], 0xAB);
     }
-
-    // ==========================================================================
-    // VirtioNetHeader Tests
-    // ==========================================================================
 
     #[test]
     fn test_header_size() {
@@ -973,10 +966,6 @@ mod tests {
         assert_eq!(bytes[3], 0x01);
     }
 
-    // ==========================================================================
-    // NetPacket Tests
-    // ==========================================================================
-
     #[test]
     fn test_packet_new() {
         let data = vec![0xAA, 0xBB, 0xCC];
@@ -1008,10 +997,6 @@ mod tests {
         let packet = NetPacket::new(data);
         assert_eq!(packet.total_size(), VirtioNetHeader::SIZE + 9000);
     }
-
-    // ==========================================================================
-    // LoopbackBackend Tests
-    // ==========================================================================
 
     #[test]
     fn test_loopback_backend_new() {
@@ -1088,10 +1073,6 @@ mod tests {
         assert!(buf.iter().all(|&b| b == 0xAA));
     }
 
-    // ==========================================================================
-    // SocketBackend Tests (macOS)
-    // ==========================================================================
-
     #[cfg(target_os = "macos")]
     mod socket_backend_tests {
         use super::*;
@@ -1123,10 +1104,6 @@ mod tests {
             assert_eq!(n, 0); // Would block returns 0
         }
     }
-
-    // ==========================================================================
-    // VirtioNet Device Tests
-    // ==========================================================================
 
     #[test]
     fn test_net_device_creation() {
@@ -1429,19 +1406,11 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ==========================================================================
-    // NetStatus Tests
-    // ==========================================================================
-
     #[test]
     fn test_net_status_values() {
         assert_eq!(NetStatus::LinkUp as u16, 1);
         assert_eq!(NetStatus::Announce as u16, 2);
     }
-
-    // ==========================================================================
-    // Feature Constants Tests
-    // ==========================================================================
 
     #[test]
     fn test_feature_constants() {
@@ -1464,10 +1433,6 @@ mod tests {
         assert_eq!(VirtioNet::FEATURE_MQ, 1 << 22);
         assert_eq!(VirtioNet::FEATURE_VERSION_1, 1 << 32);
     }
-
-    // ==========================================================================
-    // Edge Case Tests
-    // ==========================================================================
 
     #[test]
     fn test_loopback_large_packet() {

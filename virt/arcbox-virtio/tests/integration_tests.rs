@@ -16,10 +16,6 @@ use arcbox_virtio::net::{
 use arcbox_virtio::vsock::{VirtioVsock, VsockAddr, VsockConfig};
 use arcbox_virtio::{VirtioDevice, VirtioDeviceId};
 
-// ============================================================================
-// Block Device Integration Tests
-// ============================================================================
-
 #[test]
 fn test_block_device_full_lifecycle() {
     // Create block device
@@ -92,10 +88,6 @@ fn test_block_config_space_read() {
     assert!(capacity > 0);
 }
 
-// ============================================================================
-// Console Device Integration Tests
-// ============================================================================
-
 #[test]
 fn test_console_device_full_lifecycle() {
     let config = ConsoleConfig {
@@ -153,10 +145,6 @@ fn test_console_config_space() {
     console.read_config(2, &mut rows);
     assert_eq!(u16::from_le_bytes(rows), 43);
 }
-
-// ============================================================================
-// Network Device Integration Tests
-// ============================================================================
 
 #[test]
 fn test_network_device_full_lifecycle() {
@@ -269,10 +257,6 @@ fn test_loopback_backend_throughput() {
     assert_eq!(received, PACKET_COUNT);
 }
 
-// ============================================================================
-// Vsock Device Integration Tests
-// ============================================================================
-
 #[test]
 fn test_vsock_device_full_lifecycle() {
     let config = VsockConfig { guest_cid: 10 };
@@ -312,10 +296,6 @@ fn test_vsock_addressing() {
     let addr2 = VsockAddr::new(3, 8080);
     assert_eq!(addr1, addr2);
 }
-
-// ============================================================================
-// Filesystem Device Integration Tests
-// ============================================================================
 
 #[test]
 fn test_fs_device_full_lifecycle() {
@@ -361,10 +341,6 @@ fn test_fs_config_space() {
     fs.read_config(36, &mut num_queues);
     assert_eq!(u32::from_le_bytes(num_queues), 8);
 }
-
-// ============================================================================
-// Cross-Device Integration Tests
-// ============================================================================
 
 #[test]
 fn test_all_device_ids_unique() {
@@ -448,10 +424,6 @@ fn test_device_config_immutability() {
     fs.write_config(0, b"modified");
     assert_eq!(fs.tag(), "original");
 }
-
-// ============================================================================
-// Stress Tests
-// ============================================================================
 
 #[test]
 fn test_console_high_throughput() {

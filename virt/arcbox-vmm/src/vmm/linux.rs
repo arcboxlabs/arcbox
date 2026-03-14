@@ -184,6 +184,7 @@ impl Vmm {
             .guest_cid
             .ok_or_else(|| VmmError::invalid_state("guest_cid not configured".to_string()))?;
 
+        // SAFETY: Arguments are valid socket(2) parameters.
         let fd = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
         if fd < 0 {
             return Err(VmmError::Device(format!(
@@ -193,6 +194,7 @@ impl Vmm {
         }
 
         let sockaddr = SockaddrVm::new(guest_cid, port);
+        // SAFETY: fd is a valid socket; addr and addrlen are correct for the address family.
         let result = unsafe {
             libc::connect(
                 fd,
@@ -203,6 +205,7 @@ impl Vmm {
 
         if result < 0 {
             let err = std::io::Error::last_os_error();
+            // SAFETY: fd is a valid open file descriptor owned by this context.
             unsafe { libc::close(fd) };
             return Err(VmmError::Device(format!("vsock connect failed: {}", err)));
         }

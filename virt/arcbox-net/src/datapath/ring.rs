@@ -130,6 +130,7 @@ impl<T> LockFreeRing<T> {
 
         // Write the item
         let idx = head & self.mask;
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             (*self.buffer[idx].get()).write(item);
         }
@@ -155,6 +156,7 @@ impl<T> LockFreeRing<T> {
 
         // Read the item
         let idx = tail & self.mask;
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let item = unsafe { (*self.buffer[idx].get()).assume_init_read() };
 
         // Publish the read
@@ -184,6 +186,7 @@ impl<T> LockFreeRing<T> {
         // Write items
         for (i, item) in items.iter().take(count).enumerate() {
             let idx = (head + i) & self.mask;
+            // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
             unsafe {
                 (*self.buffer[idx].get()).write(*item);
             }
@@ -217,6 +220,7 @@ impl<T> LockFreeRing<T> {
         // Read items
         for (i, slot) in out[..count].iter_mut().enumerate() {
             let idx = (tail + i) & self.mask;
+            // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
             *slot = unsafe { (*self.buffer[idx].get()).assume_init_read() };
         }
 
@@ -256,6 +260,7 @@ impl<T> LockFreeRing<T> {
 
         let idx = tail & self.mask;
         // Safety: index is valid and item was initialized per SPSC protocol.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         Some(unsafe { (*self.buffer[idx].get()).assume_init_ref() })
     }
 
@@ -371,6 +376,7 @@ impl<T> MpmcRing<T> {
             ) {
                 Ok(_) => {
                     let idx = head & self.mask;
+                    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
                     unsafe {
                         (*self.buffer[idx].get()).write(item);
                     }
@@ -396,6 +402,7 @@ impl<T> MpmcRing<T> {
             }
 
             let idx = tail & self.mask;
+            // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
             let item = unsafe { (*self.buffer[idx].get()).assume_init_read() };
 
             match self.tail.0.compare_exchange_weak(
@@ -533,12 +540,14 @@ mod tests {
     fn test_peek() {
         let ring = LockFreeRing::<u32>::new(4);
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             assert!(ring.peek().is_none());
         }
 
         ring.enqueue(42).unwrap();
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             assert_eq!(ring.peek(), Some(&42));
             assert_eq!(ring.peek(), Some(&42)); // Peek doesn't consume

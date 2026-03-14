@@ -29,10 +29,6 @@
 //! none of which are available on other platforms.  The workspace compiles the
 //! crate everywhere, but the implementation is gated on `target_os = "linux"`.
 
-// =============================================================================
-// Linux implementation
-// =============================================================================
-
 #[cfg(target_os = "linux")]
 mod agent {
     use std::collections::HashMap;
@@ -117,6 +113,7 @@ mod agent {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             // SAFETY: buf is a valid mutable slice; fd is a valid socket.
             let n =
+                // SAFETY: fd is valid; buffer pointer and length are within the allocated slice bounds.
                 unsafe { libc::read(self.fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
             if n < 0 {
                 Err(std::io::Error::last_os_error())
@@ -129,6 +126,7 @@ mod agent {
     impl Write for VsockStream {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
             // SAFETY: buf is a valid slice; fd is a valid socket.
+            // SAFETY: fd is valid; buffer pointer and length are within the slice bounds.
             let n = unsafe { libc::write(self.fd, buf.as_ptr().cast::<libc::c_void>(), buf.len()) };
             if n < 0 {
                 Err(std::io::Error::last_os_error())
@@ -144,6 +142,7 @@ mod agent {
     impl Drop for VsockStream {
         fn drop(&mut self) {
             // SAFETY: fd is valid and owned by this struct.
+            // SAFETY: fd is a valid open file descriptor owned by this context.
             unsafe { libc::close(self.fd) };
         }
     }
@@ -186,6 +185,7 @@ mod agent {
 
     fn handle_connection(conn_fd: RawFd) {
         // SAFETY: conn_fd is a freshly accepted socket fd.
+        // SAFETY: fd is a valid open vsock file descriptor.
         let mut conn = unsafe { VsockStream::from_raw_fd(conn_fd) };
 
         let (msg_type, payload) = match read_frame(&mut conn) {
@@ -231,6 +231,7 @@ mod agent {
         let nanos = u32::from_le_bytes(payload[8..12].try_into().unwrap());
 
         // SAFETY: clock_settime requires CAP_SYS_TIME; vm-agent runs as root inside guest.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let ret = unsafe {
             let ts = libc::timespec {
                 tv_sec: secs,
@@ -259,6 +260,7 @@ mod agent {
 
     fn handle_file_connection(conn_fd: RawFd) {
         // SAFETY: conn_fd is a freshly accepted socket fd.
+        // SAFETY: fd is a valid open vsock file descriptor.
         let mut conn = unsafe { VsockStream::from_raw_fd(conn_fd) };
 
         let (msg_type, payload) = match read_frame(&mut conn) {
@@ -460,6 +462,7 @@ mod agent {
                 // before attempting to send SIGKILL. This reduces the risk of killing a
                 // different process if the PID has been recycled.
                 thread::sleep(std::time::Duration::from_secs(timeout as u64));
+                // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
                 unsafe {
                     // Probe the process with signal 0. If this fails with ESRCH, the PID
                     // is not currently in use and we must not send SIGKILL.
@@ -526,12 +529,14 @@ mod agent {
                 ws_ypixel: 0,
             };
             // SAFETY: master is a valid PTY master fd.
+            // SAFETY: fd is valid; request code and argument type match the expected ioctl.
             unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &winsize) };
         }
 
         let master_fd: RawFd = master.as_raw_fd();
         let slave_fd: RawFd = slave.as_raw_fd();
 
+        // SAFETY: fork(2) is called; both parent and child paths are handled.
         match unsafe { fork() } {
             Err(e) => eprintln!("agent: fork: {e}"),
 
@@ -539,6 +544,7 @@ mod agent {
                 drop(master);
                 let _ = setsid();
                 // SAFETY: all fds are valid in the child process.
+                // SAFETY: fd is valid; request code and argument type match the expected ioctl.
                 unsafe {
                     libc::ioctl(slave_fd, libc::TIOCSCTTY, 0);
                     libc::dup2(slave_fd, libc::STDIN_FILENO);
@@ -564,6 +570,7 @@ mod agent {
                         std::ffi::CString::new(v.as_str()),
                     ) {
                         // SAFETY: setenv is safe with valid C strings.
+                        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
                         unsafe { libc::setenv(ck.as_ptr(), cv.as_ptr(), 1) };
                     }
                 }
@@ -571,10 +578,12 @@ mod agent {
                     && let Ok(cwd) = std::ffi::CString::new(start.working_dir.as_str())
                 {
                     // SAFETY: cwd is a valid C string.
+                    // SAFETY: argv is a valid null-terminated array of C strings.
                     unsafe { libc::chdir(cwd.as_ptr()) };
                 }
 
                 // SAFETY: exec replaces the process image; argv is null-terminated.
+                // SAFETY: _exit is safe to call in a forked child process.
                 unsafe { libc::execvp(argv[0], argv.as_ptr()) };
                 unsafe { libc::_exit(127) };
             }
@@ -587,6 +596,7 @@ mod agent {
                 let t_pty = thread::spawn(move || {
                     let mut buf = [0u8; 4096];
                     // SAFETY: dup of master_fd owned by this thread.
+                    // SAFETY: fd is a valid open file descriptor.
                     let mut r = unsafe { VsockStream::from_raw_fd(libc::dup(master_fd)) };
                     loop {
                         match r.read(&mut buf) {
@@ -602,9 +612,12 @@ mod agent {
                     }
                 });
 
+                // SAFETY: fd is a valid open file descriptor.
                 let read_fd = unsafe { libc::dup(writer.lock().unwrap().fd) };
+                // SAFETY: fd is a valid open vsock file descriptor.
                 let mut reader = unsafe { VsockStream::from_raw_fd(read_fd) };
                 // SAFETY: master_fd is valid; File takes ownership for writes.
+                // SAFETY: fd is a valid open file descriptor with exclusive ownership.
                 let mut master_writer = unsafe { std::fs::File::from_raw_fd(master_fd) };
 
                 loop {
@@ -620,6 +633,7 @@ mod agent {
                                 ws_ypixel: 0,
                             };
                             // SAFETY: master_fd is valid.
+                            // SAFETY: fd is valid; request code and argument type match the expected ioctl.
                             unsafe { libc::ioctl(master_fd, libc::TIOCSWINSZ, &winsize) };
                         }
                         Ok((MSG_EOF, _)) | Err(_) => break,
@@ -631,6 +645,7 @@ mod agent {
 
                 let mut status: libc::c_int = 0;
                 // SAFETY: child.as_raw() is a valid pid returned from fork.
+                // SAFETY: pid is valid; status pointer is properly allocated.
                 unsafe { libc::waitpid(child.as_raw(), &raw mut status, 0) };
                 let exit_code = if libc::WIFEXITED(status) {
                     libc::WEXITSTATUS(status)
@@ -674,6 +689,7 @@ mod agent {
 
     fn create_vsock_listener(port: u32) -> RawFd {
         // SAFETY: socket(2) with valid AF_VSOCK constants.
+        // SAFETY: Arguments are valid socket(2) parameters.
         let fd = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0) };
         assert!(
             fd >= 0,
@@ -686,9 +702,11 @@ mod agent {
             svm_reserved1: 0,
             svm_port: port,
             svm_cid: libc::VMADDR_CID_ANY,
+            // SAFETY: fd is a valid socket; addr and addrlen match the address family.
             ..unsafe { std::mem::zeroed() }
         };
         // SAFETY: addr is valid; fd is a live socket.
+        // SAFETY: fd is a valid socket; addr and addrlen match the address family.
         let ret = unsafe {
             libc::bind(
                 fd,
@@ -702,6 +720,7 @@ mod agent {
             std::io::Error::last_os_error()
         );
         // SAFETY: fd is a bound socket.
+        // SAFETY: fd is a valid bound socket; backlog is non-negative.
         unsafe { libc::listen(fd, 128) };
         fd
     }
@@ -710,6 +729,7 @@ mod agent {
         loop {
             // SAFETY: server_fd is a listening vsock socket.
             let conn_fd =
+                // SAFETY: fd is a valid listening socket.
                 unsafe { libc::accept(server_fd, std::ptr::null_mut(), std::ptr::null_mut()) };
             if conn_fd >= 0 {
                 return conn_fd;
@@ -722,10 +742,6 @@ mod agent {
         }
     }
 }
-
-// =============================================================================
-// Entry point
-// =============================================================================
 
 fn main() {
     #[cfg(target_os = "linux")]

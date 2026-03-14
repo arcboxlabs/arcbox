@@ -29,10 +29,6 @@ use crate::{VirtioDevice, VirtioDeviceId};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-// ============================================================================
-// FUSE Constants
-// ============================================================================
-
 /// FUSE kernel protocol major version.
 pub const FUSE_KERNEL_VERSION: u32 = 7;
 
@@ -54,10 +50,6 @@ pub const DEFAULT_MAX_WRITE: u32 = 128 * 1024;
 
 /// Default max pages per request.
 pub const DEFAULT_MAX_PAGES: u16 = 32;
-
-// ============================================================================
-// Traits
-// ============================================================================
 
 /// Trait for handling FUSE requests.
 ///
@@ -94,10 +86,6 @@ pub trait FuseRequestHandler: Send + Sync {
     /// Called when the FUSE session is destroyed.
     fn on_destroy(&self) {}
 }
-
-// ============================================================================
-// FUSE Request/Response Types
-// ============================================================================
 
 /// FUSE request from guest.
 #[derive(Debug)]
@@ -216,10 +204,6 @@ impl FuseResponse {
         self.data
     }
 }
-
-// ============================================================================
-// FUSE Session
-// ============================================================================
 
 /// FUSE session state.
 ///
@@ -409,10 +393,6 @@ impl Default for FuseSession {
     }
 }
 
-// ============================================================================
-// Filesystem Configuration
-// ============================================================================
-
 /// Filesystem device configuration.
 #[derive(Debug, Clone)]
 pub struct FsConfig {
@@ -436,10 +416,6 @@ impl Default for FsConfig {
         }
     }
 }
-
-// ============================================================================
-// VirtIO Filesystem Device
-// ============================================================================
 
 /// `VirtIO` filesystem device.
 ///
@@ -806,10 +782,6 @@ mod tests {
     use crate::queue::flags;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    // ==========================================================================
-    // FsConfig Tests
-    // ==========================================================================
-
     #[test]
     fn test_fs_config_default() {
         let config = FsConfig::default();
@@ -845,10 +817,6 @@ mod tests {
         assert_eq!(cloned.tag, "test");
         assert_eq!(cloned.num_queues, 2);
     }
-
-    // ==========================================================================
-    // VirtioFs Tests
-    // ==========================================================================
 
     #[test]
     fn test_fs_new() {
@@ -1022,18 +990,10 @@ mod tests {
         assert_eq!(fs.shared_dir(), "/mnt/share");
     }
 
-    // ==========================================================================
-    // Constants Tests
-    // ==========================================================================
-
     #[test]
     fn test_fs_feature_constants() {
         assert_eq!(VirtioFs::FEATURE_NOTIFICATION, 1 << 0);
     }
-
-    // ==========================================================================
-    // FuseSession Tests
-    // ==========================================================================
 
     #[test]
     fn test_fuse_session_new() {
@@ -1288,10 +1248,6 @@ mod tests {
         assert_eq!(&response[16..18], b"ok");
     }
 
-    // ==========================================================================
-    // FuseRequest Tests
-    // ==========================================================================
-
     #[test]
     fn test_fuse_request_new() {
         let data = vec![0u8; 64];
@@ -1331,10 +1287,6 @@ mod tests {
         let request = FuseRequest::new(&data);
         assert_eq!(request.unique(), Some(12345));
     }
-
-    // ==========================================================================
-    // FuseResponse Tests
-    // ==========================================================================
 
     #[test]
     fn test_fuse_response_new() {
@@ -1379,10 +1331,6 @@ mod tests {
         let data = response.into_data();
         assert_eq!(data.len(), 16);
     }
-
-    // ==========================================================================
-    // VirtioFs Process Request Tests
-    // ==========================================================================
 
     #[test]
     fn test_fs_process_request_too_small() {

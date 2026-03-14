@@ -252,10 +252,6 @@ impl VsockAddr {
     }
 }
 
-// ============================================================================
-// Vsock Packet Types
-// ============================================================================
-
 /// Vsock operation types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
@@ -349,10 +345,6 @@ impl VsockHeader {
         VsockOp::from_u16(self.op)
     }
 }
-
-// ============================================================================
-// Connection State
-// ============================================================================
 
 /// Connection state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -451,10 +443,6 @@ impl VsockConnection {
         self.peer_fwd_cnt = fwd_cnt;
     }
 }
-
-// ============================================================================
-// Vsock Backend
-// ============================================================================
 
 /// Vsock backend trait for handling host-side socket operations.
 pub trait VsockBackend: Send + Sync {
@@ -655,10 +643,6 @@ impl std::fmt::Debug for TcpBackend {
 mod tests {
     use super::*;
 
-    // ==========================================================================
-    // VsockConfig Tests
-    // ==========================================================================
-
     #[test]
     fn test_vsock_config_default() {
         let config = VsockConfig::default();
@@ -677,10 +661,6 @@ mod tests {
         let cloned = config.clone();
         assert_eq!(cloned.guest_cid, 42);
     }
-
-    // ==========================================================================
-    // VirtioVsock Tests
-    // ==========================================================================
 
     #[test]
     fn test_vsock_new() {
@@ -799,10 +779,6 @@ mod tests {
         assert_eq!(vsock.acked_features, 0);
     }
 
-    // ==========================================================================
-    // VsockAddr Tests
-    // ==========================================================================
-
     #[test]
     fn test_vsock_addr_new() {
         let addr = VsockAddr::new(3, 1234);
@@ -850,10 +826,6 @@ mod tests {
         assert_eq!(set.len(), 2);
     }
 
-    // ==========================================================================
-    // Constants Tests
-    // ==========================================================================
-
     #[test]
     fn test_vsock_constants() {
         assert_eq!(VirtioVsock::HOST_CID, 2);
@@ -861,10 +833,6 @@ mod tests {
         assert_eq!(VirtioVsock::FEATURE_STREAM, 1 << 0);
         assert_eq!(VirtioVsock::FEATURE_SEQPACKET, 1 << 1);
     }
-
-    // ==========================================================================
-    // Backend Tests
-    // ==========================================================================
 
     #[test]
     fn test_loopback_backend() {

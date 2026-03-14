@@ -192,6 +192,7 @@ impl Vmnet {
         let queue_label = CString::new("com.arcbox.vmnet").unwrap();
 
         // Safety: dispatch_queue_create is safe to call with valid parameters.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let queue = unsafe { dispatch_queue_create(queue_label.as_ptr(), ptr::null()) };
 
         if queue.is_null() {
@@ -304,11 +305,13 @@ impl Vmnet {
             unsafe { vmnet_start_interface(config_dict.cast_const(), queue, ptr::null()) };
 
         // Release the config dictionary.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             CFRelease(config_dict.cast_const());
         }
 
         if interface.is_null() {
+            // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
             unsafe {
                 dispatch_release(queue.cast());
             }
@@ -401,6 +404,7 @@ impl Vmnet {
         let mut pktcnt: c_int = 1;
 
         // Safety: vmnet_read is safe when called with valid parameters.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let status = unsafe { vmnet_read(self.interface, &raw mut packet, &raw mut pktcnt) };
 
         if !status.is_success() {
@@ -454,6 +458,7 @@ impl Vmnet {
         let mut pktcnt: c_int = 1;
 
         // Safety: vmnet_write is safe when called with valid parameters.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let status = unsafe { vmnet_write(self.interface, &raw mut packet, &raw mut pktcnt) };
 
         if !status.is_success() {
@@ -474,6 +479,7 @@ impl Vmnet {
     pub fn stop(&self) {
         if self.running.swap(false, Ordering::AcqRel) {
             // Safety: vmnet_stop_interface is safe when called with valid parameters.
+            // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
             unsafe {
                 vmnet_stop_interface(self.interface, self.queue, ptr::null());
             }

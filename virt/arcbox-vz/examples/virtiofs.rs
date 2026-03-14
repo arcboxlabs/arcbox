@@ -157,6 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(fd) = read_fd {
         // Set non-blocking
         // SAFETY: fd is a valid file descriptor from SerialPortConfiguration. fcntl F_GETFL/F_SETFL are safe on valid fds.
+        // SAFETY: fd is a valid open file descriptor; command and arguments are valid.
         unsafe {
             let flags = libc::fcntl(fd, libc::F_GETFL);
             libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
@@ -167,6 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         while start.elapsed() < Duration::from_secs(10) {
             let mut buf = [0u8; 1024];
             // SAFETY: fd is a valid non-blocking file descriptor. buf is a valid write target.
+            // SAFETY: fd is valid; buffer pointer and length are within the allocated slice bounds.
             let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
             if n > 0 {
                 let s = String::from_utf8_lossy(&buf[..n as usize]);

@@ -17,10 +17,6 @@ use crate::error::{Result, VirtioError};
 use crate::queue::{Descriptor, VirtQueue};
 use crate::{VirtioDevice, VirtioDeviceId};
 
-// ============================================================================
-// Async Block Backend Trait
-// ============================================================================
-
 /// Async block I/O backend trait.
 #[async_trait::async_trait]
 pub trait AsyncBlockBackend: Send + Sync {
@@ -39,10 +35,6 @@ pub trait AsyncBlockBackend: Send + Sync {
     /// Returns whether the device is read-only.
     fn is_read_only(&self) -> bool;
 }
-
-// ============================================================================
-// Direct I/O Backend (Linux)
-// ============================================================================
 
 /// Direct I/O block backend using O_DIRECT.
 #[cfg(target_os = "linux")]
@@ -76,6 +68,7 @@ impl DirectIoBackend {
         let path_cstr = std::ffi::CString::new(path.to_string_lossy().as_bytes())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
 
+        // SAFETY: path is a valid null-terminated C string; flags are valid open(2) arguments.
         let fd = unsafe { libc::open(path_cstr.as_ptr(), flags, 0o644) };
 
         if fd < 0 {
@@ -83,9 +76,12 @@ impl DirectIoBackend {
         }
 
         // Get file size
+        // SAFETY: fd is a valid open file descriptor owned by this context.
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: fd is a valid open file descriptor owned by this context.
         let ret = unsafe { libc::fstat(fd, &mut stat) };
         if ret < 0 {
+            // SAFETY: fd is a valid open file descriptor owned by this context.
             unsafe { libc::close(fd) };
             return Err(std::io::Error::last_os_error());
         }
@@ -108,6 +104,7 @@ impl DirectIoBackend {
 
     /// Reads data at the given offset using pread.
     pub fn pread(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+        // SAFETY: fd is valid; buffer pointer and length are within bounds.
         let ret = unsafe {
             libc::pread(
                 self.fd,
@@ -133,6 +130,7 @@ impl DirectIoBackend {
             ));
         }
 
+        // SAFETY: fd is valid; buffer pointer and length are within bounds.
         let ret = unsafe {
             libc::pwrite(
                 self.fd,
@@ -151,6 +149,7 @@ impl DirectIoBackend {
 
     /// Syncs the file to disk.
     pub fn sync(&self) -> std::io::Result<()> {
+        // SAFETY: fd is a valid open file descriptor.
         let ret = unsafe { libc::fdatasync(self.fd) };
         if ret < 0 {
             Err(std::io::Error::last_os_error())
@@ -164,14 +163,11 @@ impl DirectIoBackend {
 impl Drop for DirectIoBackend {
     fn drop(&mut self) {
         if self.fd >= 0 {
+            // SAFETY: fd is a valid open file descriptor owned by this context.
             unsafe { libc::close(self.fd) };
         }
     }
 }
-
-// ============================================================================
-// Async File Backend (Cross-platform)
-// ============================================================================
 
 /// Async file-based block backend using tokio.
 #[allow(dead_code)]
@@ -257,10 +253,6 @@ impl AsyncFileBackend {
     }
 }
 
-// ============================================================================
-// Memory-Mapped I/O Backend
-// ============================================================================
-
 /// Memory-mapped I/O backend for zero-copy operations.
 pub struct MmapBackend {
     /// Mapped memory pointer.
@@ -305,6 +297,7 @@ impl MmapBackend {
             libc::PROT_READ | libc::PROT_WRITE
         };
 
+        // SAFETY: Arguments are valid for mmap(2); fd is a valid open file descriptor.
         let ptr = unsafe { libc::mmap(std::ptr::null_mut(), size, prot, libc::MAP_SHARED, fd, 0) };
 
         if ptr == libc::MAP_FAILED {
@@ -338,6 +331,7 @@ impl MmapBackend {
         }
 
         let len = buf.len().min(self.size - offset);
+        // SAFETY: Source and destination do not overlap; both are valid for the given count.
         unsafe {
             std::ptr::copy_nonoverlapping(self.ptr.add(offset), buf.as_mut_ptr(), len);
         }
@@ -358,6 +352,7 @@ impl MmapBackend {
         }
 
         let len = buf.len().min(self.size - offset);
+        // SAFETY: Source and destination do not overlap; both are valid for the given count.
         unsafe {
             std::ptr::copy_nonoverlapping(buf.as_ptr(), self.ptr.add(offset), len);
         }
@@ -366,6 +361,7 @@ impl MmapBackend {
 
     /// Syncs the mapping to disk.
     pub fn sync(&self) -> std::io::Result<()> {
+        // SAFETY: ptr and size correspond to a valid mmap'd region.
         let ret = unsafe { libc::msync(self.ptr as *mut libc::c_void, self.size, libc::MS_SYNC) };
         if ret < 0 {
             Err(std::io::Error::last_os_error())
@@ -399,6 +395,7 @@ impl MmapBackend {
 impl Drop for MmapBackend {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
+            // SAFETY: ptr and size correspond to a previously mmap'd region owned by this struct.
             unsafe {
                 libc::munmap(self.ptr as *mut libc::c_void, self.size);
             }
@@ -889,10 +886,6 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    // ========================================================================
-    // Basic VirtioBlock Tests
-    // ========================================================================
-
     #[test]
     fn test_block_device_creation() {
         let config = BlockConfig {
@@ -958,10 +951,6 @@ mod tests {
 
         assert_eq!(&read_data, write_data);
     }
-
-    // ========================================================================
-    // MmapBackend Tests
-    // ========================================================================
 
     #[test]
     fn test_mmap_backend_creation() {
@@ -1064,10 +1053,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ========================================================================
-    // AsyncFileBackend Tests
-    // ========================================================================
-
     #[test]
     fn test_async_file_backend_creation() {
         let mut temp_file = NamedTempFile::new().unwrap();
@@ -1132,10 +1117,6 @@ mod tests {
         // Flush should succeed
         assert!(backend.async_flush().await.is_ok());
     }
-
-    // ========================================================================
-    // Edge Cases and Error Handling
-    // ========================================================================
 
     #[test]
     fn test_request_header_too_short() {

@@ -20,10 +20,6 @@ use super::vcpu::KvmVcpu;
 /// Global VM ID counter.
 static VM_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-// ============================================================================
-// VirtIO MMIO Constants
-// ============================================================================
-
 /// Base address for VirtIO MMIO devices (ARM64).
 /// This is placed at 160MB to avoid conflicts with RAM and other devices.
 const VIRTIO_MMIO_BASE: u64 = 0x0a00_0000;
@@ -49,10 +45,6 @@ const VIRTIO_IRQ_BASE: u32 = 5;
 /// Maximum number of VirtIO devices.
 const MAX_VIRTIO_DEVICES: usize = 32;
 
-// ============================================================================
-// Memory Slot Tracking for Dirty Logging
-// ============================================================================
-
 /// Information about a memory slot for dirty page tracking.
 #[derive(Debug, Clone)]
 struct MemorySlotInfo {
@@ -65,10 +57,6 @@ struct MemorySlotInfo {
     /// Host virtual address.
     userspace_addr: u64,
 }
-
-// ============================================================================
-// VirtIO Device Tracking
-// ============================================================================
 
 /// Information about an attached VirtIO device.
 #[derive(Debug)]
@@ -381,10 +369,6 @@ impl KvmVm {
         Ok(())
     }
 
-    // ========================================================================
-    // IRQ Injection Interface
-    // ========================================================================
-
     /// Sets the IRQ line level on the in-kernel irqchip.
     ///
     /// For edge-triggered interrupts, call with level=true then level=false.
@@ -435,10 +419,6 @@ impl KvmVm {
             .map_err(|e| HypervisorError::DeviceError(format!("Failed to unregister IRQFD: {}", e)))
     }
 
-    // ========================================================================
-    // VirtIO Device Support
-    // ========================================================================
-
     /// Allocates an MMIO region for a VirtIO device.
     ///
     /// Returns the base address for the device.
@@ -467,6 +447,7 @@ impl KvmVm {
 
     /// Creates an eventfd.
     fn create_eventfd() -> Result<RawFd, HypervisorError> {
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
         if fd < 0 {
             return Err(HypervisorError::DeviceError(format!(
@@ -492,6 +473,7 @@ impl KvmVm {
             .register_ioeventfd(notify_addr, 4, notify_fd, None)
             .map_err(|e| {
                 // Clean up the eventfd on failure.
+                // SAFETY: fd is a valid open file descriptor owned by this context.
                 unsafe { libc::close(notify_fd) };
                 HypervisorError::DeviceError(format!("Failed to register IOEVENTFD: {}", e))
             })?;
@@ -524,10 +506,6 @@ impl KvmVm {
             })
             .collect())
     }
-
-    // ========================================================================
-    // Dirty Page Tracking
-    // ========================================================================
 
     /// Enables dirty page tracking for all memory regions.
     ///
@@ -808,6 +786,7 @@ impl VirtualMachine for KvmVm {
 
         if let Err(e) = self.register_irqfd(irq_fd, gsi, None) {
             // Clean up on failure.
+            // SAFETY: fd is a valid open file descriptor owned by this context.
             unsafe { libc::close(irq_fd) };
             return Err(e);
         }
@@ -818,6 +797,7 @@ impl VirtualMachine for KvmVm {
             Err(e) => {
                 // Clean up on failure.
                 let _ = self.unregister_irqfd(irq_fd, gsi);
+                // SAFETY: fd is a valid open file descriptor owned by this context.
                 unsafe { libc::close(irq_fd) };
                 return Err(e);
             }
@@ -837,6 +817,7 @@ impl VirtualMachine for KvmVm {
             let mut devices = self.virtio_devices.write().map_err(|_| {
                 // Clean up on failure.
                 let _ = self.unregister_irqfd(irq_fd, gsi);
+                // SAFETY: fd is a valid open file descriptor owned by this context.
                 unsafe {
                     libc::close(irq_fd);
                     libc::close(notify_fd);
@@ -1067,6 +1048,7 @@ impl Drop for KvmVm {
                     .unregister_ioeventfd(notify_addr, 4, device.notify_fd);
 
                 // Close eventfds.
+                // SAFETY: fd is a valid open file descriptor owned by this context.
                 unsafe {
                     libc::close(device.irq_fd);
                     libc::close(device.notify_fd);

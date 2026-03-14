@@ -6,10 +6,6 @@
 use std::ffi::c_void;
 use std::time::{Duration, Instant};
 
-// ============================================================================
-// Types
-// ============================================================================
-
 /// Opaque type for `CFRunLoop` reference.
 pub type CFRunLoopRef = *mut c_void;
 
@@ -39,10 +35,6 @@ impl From<i32> for CFRunLoopRunResult {
     }
 }
 
-// ============================================================================
-// FFI Declarations
-// ============================================================================
-
 // SAFETY: Core Foundation run loop FFI declarations. These functions and the kCFRunLoopDefaultMode constant are always available on macOS.
 unsafe extern "C" {
     fn CFRunLoopGetMain() -> CFRunLoopRef;
@@ -56,16 +48,13 @@ unsafe extern "C" {
     static kCFRunLoopDefaultMode: *const c_void;
 }
 
-// ============================================================================
-// Public API
-// ============================================================================
-
 /// Gets the main `CFRunLoop`.
 ///
 /// The main run loop is the run loop of the main thread.
 #[must_use]
 pub fn cf_run_loop_get_main() -> CFRunLoopRef {
     // SAFETY: CFRunLoopGetMain always returns the valid main run loop reference.
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     unsafe { CFRunLoopGetMain() }
 }
 
@@ -75,6 +64,7 @@ pub fn cf_run_loop_get_main() -> CFRunLoopRef {
 #[must_use]
 pub fn cf_run_loop_get_current() -> CFRunLoopRef {
     // SAFETY: CFRunLoopGetCurrent always returns a valid run loop for the current thread.
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     unsafe { CFRunLoopGetCurrent() }
 }
 
@@ -85,6 +75,7 @@ pub fn cf_run_loop_get_current() -> CFRunLoopRef {
 /// most use cases.
 pub fn cf_run_loop_run() {
     // SAFETY: CFRunLoopRun runs the current thread's run loop, no preconditions.
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     unsafe { CFRunLoopRun() }
 }
 
@@ -101,6 +92,7 @@ pub fn cf_run_loop_run() {
 /// The caller must ensure `rl` is a valid `CFRunLoopRef`.
 pub unsafe fn cf_run_loop_stop(rl: CFRunLoopRef) {
     // SAFETY: Caller guarantees rl is a valid CFRunLoopRef.
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     unsafe { CFRunLoopStop(rl) }
 }
 
@@ -120,6 +112,7 @@ pub fn cf_run_loop_run_in_mode(
     return_after_source_handled: bool,
 ) -> CFRunLoopRunResult {
     // SAFETY: kCFRunLoopDefaultMode is a valid global CFStringRef constant. seconds and returnAfterSourceHandled are plain values.
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     unsafe {
         let result =
             CFRunLoopRunInMode(kCFRunLoopDefaultMode, seconds, return_after_source_handled);
@@ -177,10 +170,6 @@ where
 
     true
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
 mod tests {

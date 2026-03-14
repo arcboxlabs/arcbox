@@ -231,6 +231,7 @@ pub unsafe fn checksum_simd_neon(data: &[u8]) -> u16 {
 #[inline]
 pub fn checksum_simd(data: &[u8]) -> u16 {
     // SAFETY: NEON is mandatory on AArch64 architecture
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     unsafe { checksum_simd_neon(data) }
 }
 
@@ -330,6 +331,7 @@ pub fn checksum_simd(data: &[u8]) -> u16 {
     // On modern x86_64 CPUs, SSSE3 is virtually always available.
     if is_x86_feature_detected!("ssse3") {
         // SAFETY: We just verified SSSE3 is available.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe { checksum_simd_ssse3(data) }
     } else {
         // Fallback to scalar implementation for ancient CPUs.

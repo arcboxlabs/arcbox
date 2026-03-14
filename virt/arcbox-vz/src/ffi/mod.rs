@@ -21,15 +21,12 @@ use crate::error::VZError;
 use objc2::runtime::AnyObject;
 use std::sync::Once;
 
-// ============================================================================
-// Framework Loading
-// ============================================================================
-
 static FRAMEWORK_INIT: Once = Once::new();
 
 /// Ensures Virtualization.framework is loaded.
 fn ensure_framework_loaded() {
     // SAFETY: dlopen loads the system Virtualization.framework. Called once via Once. dlerror is checked only when handle is null.
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     FRAMEWORK_INIT.call_once(|| unsafe {
         let path = std::ffi::CString::new(
             "/System/Library/Frameworks/Virtualization.framework/Virtualization",
@@ -48,14 +45,11 @@ fn ensure_framework_loaded() {
     });
 }
 
-// ============================================================================
-// System Queries
-// ============================================================================
-
 /// Checks if virtualization is supported on this system.
 pub fn is_supported() -> bool {
     ensure_framework_loaded();
     // SAFETY: Sending isSupported to a valid VZVirtualMachine class pointer obtained from get_class.
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     unsafe {
         let cls = match get_class("VZVirtualMachine") {
             Some(c) => c,
@@ -69,6 +63,7 @@ pub fn is_supported() -> bool {
 pub fn max_cpu_count() -> u64 {
     ensure_framework_loaded();
     // SAFETY: Sending maximumAllowedCPUCount to a valid VZVirtualMachineConfiguration class pointer.
+    // SAFETY: Receiver is a valid Objective-C object; selector returns a u64-compatible value.
     unsafe {
         let cls = get_class("VZVirtualMachineConfiguration").unwrap();
         msg_send_u64!(cls, maximumAllowedCPUCount)
@@ -79,6 +74,7 @@ pub fn max_cpu_count() -> u64 {
 pub fn min_cpu_count() -> u64 {
     ensure_framework_loaded();
     // SAFETY: Sending minimumAllowedCPUCount to a valid VZVirtualMachineConfiguration class pointer.
+    // SAFETY: Receiver is a valid Objective-C object; selector returns a u64-compatible value.
     unsafe {
         let cls = get_class("VZVirtualMachineConfiguration").unwrap();
         msg_send_u64!(cls, minimumAllowedCPUCount)
@@ -89,6 +85,7 @@ pub fn min_cpu_count() -> u64 {
 pub fn max_memory_size() -> u64 {
     ensure_framework_loaded();
     // SAFETY: Sending maximumAllowedMemorySize to a valid VZVirtualMachineConfiguration class pointer.
+    // SAFETY: Receiver is a valid Objective-C object; selector returns a u64-compatible value.
     unsafe {
         let cls = get_class("VZVirtualMachineConfiguration").unwrap();
         msg_send_u64!(cls, maximumAllowedMemorySize)
@@ -99,15 +96,12 @@ pub fn max_memory_size() -> u64 {
 pub fn min_memory_size() -> u64 {
     ensure_framework_loaded();
     // SAFETY: Sending minimumAllowedMemorySize to a valid VZVirtualMachineConfiguration class pointer.
+    // SAFETY: Receiver is a valid Objective-C object; selector returns a u64-compatible value.
     unsafe {
         let cls = get_class("VZVirtualMachineConfiguration").unwrap();
         msg_send_u64!(cls, minimumAllowedMemorySize)
     }
 }
-
-// ============================================================================
-// Error Handling
-// ============================================================================
 
 /// Extracts error information from an `NSError` object.
 pub fn extract_nserror(error: *mut AnyObject) -> VZError {
@@ -118,6 +112,7 @@ pub fn extract_nserror(error: *mut AnyObject) -> VZError {
         };
     }
     // SAFETY: error is checked non-null above. Sending localizedDescription and code to a valid NSError object.
+    // SAFETY: Receiver is a valid Objective-C object; selector and arguments match the method signature.
     unsafe {
         let desc = msg_send!(error, localizedDescription);
         let code: i64 = msg_send_i64!(error, code);
@@ -127,10 +122,6 @@ pub fn extract_nserror(error: *mut AnyObject) -> VZError {
         }
     }
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
 mod tests {

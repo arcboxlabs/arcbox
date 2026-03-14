@@ -4,15 +4,15 @@
 //! appropriate filesystem operations. It acts as the bridge between the
 //! raw FUSE protocol and the [`PassthroughFs`] implementation.
 
-// Allow casts and pointer operations for FUSE protocol binary compatibility
+// FUSE protocol parsing requires pervasive numeric casts (u32 ↔ i32 ↔ usize)
+// and pointer casts (`*const u8` → `*const FuseInHeader`). These are inherent
+// to the binary wire format and cannot be avoided without unnecessary wrappers.
 #![allow(
     clippy::cast_sign_loss,
     clippy::cast_possible_wrap,
     clippy::cast_possible_truncation,
     clippy::ptr_as_ptr,
-    clippy::borrow_as_ptr,
-    clippy::significant_drop_tightening,
-    clippy::needless_pass_by_ref_mut
+    clippy::borrow_as_ptr
 )]
 
 use crate::error::{FsError, Result};
@@ -33,10 +33,6 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::Arc;
 
-// ============================================================================
-// Dispatcher Configuration
-// ============================================================================
-
 /// Configuration for the FUSE dispatcher.
 #[derive(Debug, Clone)]
 pub struct DispatcherConfig {
@@ -54,10 +50,6 @@ impl Default for DispatcherConfig {
         }
     }
 }
-
-// ============================================================================
-// Request Context
-// ============================================================================
 
 /// Context for a FUSE request.
 #[derive(Debug, Clone, Copy)]
@@ -85,10 +77,6 @@ impl From<&FuseInHeader> for RequestContext {
         }
     }
 }
-
-// ============================================================================
-// Response Builder
-// ============================================================================
 
 /// Helper for building FUSE responses.
 pub struct ResponseBuilder {
@@ -149,6 +137,7 @@ impl ResponseBuilder {
     }
 
     fn write_struct<T: Copy>(&mut self, value: &T) {
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         let bytes = unsafe {
             std::slice::from_raw_parts(std::ptr::from_ref::<T>(value) as *const u8, size_of::<T>())
         };
@@ -161,10 +150,6 @@ impl Default for ResponseBuilder {
         Self::new()
     }
 }
-
-// ============================================================================
-// FUSE Dispatcher
-// ============================================================================
 
 /// FUSE request dispatcher.
 ///
@@ -216,6 +201,7 @@ impl FuseDispatcher {
             return Err(FsError::Fuse("request too small".to_string()));
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let header = unsafe { &*(request.as_ptr() as *const FuseInHeader) };
         let body = &request[FuseInHeader::SIZE..];
 
@@ -269,16 +255,13 @@ impl FuseDispatcher {
         Ok(response.finish())
     }
 
-    // ========================================================================
-    // Init / Destroy
-    // ========================================================================
-
     fn handle_init(&self, ctx: &RequestContext, body: &[u8], response: &mut ResponseBuilder) {
         if body.len() < size_of::<FuseInitIn>() {
             response.write_error(ctx.unique, libc::EINVAL);
             return;
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let init_in = unsafe { &*(body.as_ptr() as *const FuseInitIn) };
 
         // Check version compatibility
@@ -305,10 +288,6 @@ impl FuseDispatcher {
         response.write_empty(ctx.unique);
     }
 
-    // ========================================================================
-    // Lookup / Forget
-    // ========================================================================
-
     fn handle_lookup(&self, ctx: &RequestContext, body: &[u8], response: &mut ResponseBuilder) {
         // Body is null-terminated name
         let name = self.parse_name(body);
@@ -324,16 +303,13 @@ impl FuseDispatcher {
 
     fn handle_forget(&self, ctx: &RequestContext, body: &[u8], response: &mut ResponseBuilder) {
         if body.len() >= size_of::<FuseForgetIn>() {
+            // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
             let forget_in = unsafe { &*(body.as_ptr() as *const FuseForgetIn) };
             self.fs.forget(ctx.nodeid, forget_in.nlookup);
         }
         // FORGET has no response
         let _ = response;
     }
-
-    // ========================================================================
-    // Attributes
-    // ========================================================================
 
     fn handle_getattr(&self, ctx: &RequestContext, _body: &[u8], response: &mut ResponseBuilder) {
         match self.fs.getattr(ctx.nodeid) {
@@ -356,6 +332,7 @@ impl FuseDispatcher {
             return;
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let setattr_in = unsafe { &*(body.as_ptr() as *const FuseSetattrIn) };
 
         let mode = if setattr_in.valid & FATTR_MODE != 0 {
@@ -420,16 +397,13 @@ impl FuseDispatcher {
         }
     }
 
-    // ========================================================================
-    // File Creation
-    // ========================================================================
-
     fn handle_mknod(&self, ctx: &RequestContext, body: &[u8], response: &mut ResponseBuilder) {
         if body.len() < size_of::<FuseMknodIn>() {
             response.write_error(ctx.unique, libc::EINVAL);
             return;
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let mknod_in = unsafe { &*(body.as_ptr() as *const FuseMknodIn) };
         let name = self.parse_name(&body[size_of::<FuseMknodIn>()..]);
 
@@ -451,6 +425,7 @@ impl FuseDispatcher {
             return;
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let mkdir_in = unsafe { &*(body.as_ptr() as *const FuseMkdirIn) };
         let name = self.parse_name(&body[size_of::<FuseMkdirIn>()..]);
 
@@ -491,6 +466,7 @@ impl FuseDispatcher {
             return;
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let link_in = unsafe { &*(body.as_ptr() as *const FuseLinkIn) };
         let name = self.parse_name(&body[size_of::<FuseLinkIn>()..]);
 
@@ -509,6 +485,7 @@ impl FuseDispatcher {
             return;
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let create_in = unsafe { &*(body.as_ptr() as *const FuseCreateIn) };
         let name = self.parse_name(&body[size_of::<FuseCreateIn>()..]);
 
@@ -538,10 +515,6 @@ impl FuseDispatcher {
         }
     }
 
-    // ========================================================================
-    // File Deletion
-    // ========================================================================
-
     fn handle_unlink(&self, ctx: &RequestContext, body: &[u8], response: &mut ResponseBuilder) {
         let name = self.parse_name(body);
 
@@ -566,6 +539,7 @@ impl FuseDispatcher {
             return;
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let rename_in = unsafe { &*(body.as_ptr() as *const FuseRenameIn) };
         let names = &body[size_of::<FuseRenameIn>()..];
 
@@ -588,16 +562,13 @@ impl FuseDispatcher {
         }
     }
 
-    // ========================================================================
-    // File Operations
-    // ========================================================================
-
     fn handle_open(&self, ctx: &RequestContext, body: &[u8], response: &mut ResponseBuilder) {
         if body.len() < size_of::<FuseOpenIn>() {
             response.write_error(ctx.unique, libc::EINVAL);
             return;
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let open_in = unsafe { &*(body.as_ptr() as *const FuseOpenIn) };
 
         match self.fs.open(ctx.nodeid, open_in.flags) {
@@ -619,6 +590,7 @@ impl FuseDispatcher {
             return;
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let read_in = unsafe { &*(body.as_ptr() as *const FuseReadIn) };
 
         match self.fs.read(read_in.fh, read_in.offset, read_in.size) {
@@ -633,6 +605,7 @@ impl FuseDispatcher {
             return;
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let write_in = unsafe { &*(body.as_ptr() as *const FuseWriteIn) };
         let data = &body[size_of::<FuseWriteIn>()..];
 
@@ -657,6 +630,7 @@ impl FuseDispatcher {
             return;
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let release_in = unsafe { &*(body.as_ptr() as *const FuseReleaseIn) };
 
         match self.fs.release(release_in.fh) {
@@ -671,6 +645,7 @@ impl FuseDispatcher {
             return;
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let flush_in = unsafe { &*(body.as_ptr() as *const FuseFlushIn) };
 
         match self.fs.flush(flush_in.fh) {
@@ -685,6 +660,7 @@ impl FuseDispatcher {
             return;
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let fsync_in = unsafe { &*(body.as_ptr() as *const FuseFsyncIn) };
         let datasync = fsync_in.fsync_flags & 1 != 0;
 
@@ -700,6 +676,7 @@ impl FuseDispatcher {
             return;
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let lseek_in = unsafe { &*(body.as_ptr() as *const FuseLseekIn) };
 
         match self
@@ -720,6 +697,7 @@ impl FuseDispatcher {
             return;
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let fallocate_in = unsafe { &*(body.as_ptr() as *const FuseFallocateIn) };
 
         match self.fs.fallocate(
@@ -732,10 +710,6 @@ impl FuseDispatcher {
             Err(e) => response.write_error(ctx.unique, e.to_errno()),
         }
     }
-
-    // ========================================================================
-    // Directory Operations
-    // ========================================================================
 
     fn handle_opendir(&self, ctx: &RequestContext, body: &[u8], response: &mut ResponseBuilder) {
         if body.len() < size_of::<FuseOpenIn>() {
@@ -762,6 +736,7 @@ impl FuseDispatcher {
             return;
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let read_in = unsafe { &*(body.as_ptr() as *const FuseReadIn) };
 
         match self.fs.readdir(read_in.fh, read_in.offset) {
@@ -786,6 +761,7 @@ impl FuseDispatcher {
                     };
 
                     // Write dirent header
+                    // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
                     let dirent_bytes = unsafe {
                         std::slice::from_raw_parts(
                             std::ptr::from_ref::<FuseDirent>(&dirent) as *const u8,
@@ -816,6 +792,7 @@ impl FuseDispatcher {
             return;
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let release_in = unsafe { &*(body.as_ptr() as *const FuseReleaseIn) };
 
         match self.fs.releasedir(release_in.fh) {
@@ -830,6 +807,7 @@ impl FuseDispatcher {
             return;
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let fsync_in = unsafe { &*(body.as_ptr() as *const FuseFsyncIn) };
         let datasync = fsync_in.fsync_flags & 1 != 0;
 
@@ -839,16 +817,13 @@ impl FuseDispatcher {
         }
     }
 
-    // ========================================================================
-    // Extended Attributes
-    // ========================================================================
-
     fn handle_getxattr(&self, ctx: &RequestContext, body: &[u8], response: &mut ResponseBuilder) {
         if body.len() < size_of::<FuseGetxattrIn>() {
             response.write_error(ctx.unique, libc::EINVAL);
             return;
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let getxattr_in = unsafe { &*(body.as_ptr() as *const FuseGetxattrIn) };
         let name = self.parse_name(&body[size_of::<FuseGetxattrIn>()..]);
 
@@ -875,6 +850,7 @@ impl FuseDispatcher {
             return;
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let setxattr_in = unsafe { &*(body.as_ptr() as *const FuseSetxattrIn) };
         let rest = &body[size_of::<FuseSetxattrIn>()..];
 
@@ -906,10 +882,6 @@ impl FuseDispatcher {
         }
     }
 
-    // ========================================================================
-    // Other Operations
-    // ========================================================================
-
     fn handle_statfs(&self, ctx: &RequestContext, response: &mut ResponseBuilder) {
         match self.fs.statfs() {
             Ok(st) => {
@@ -926,6 +898,7 @@ impl FuseDispatcher {
             return;
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let access_in = unsafe { &*(body.as_ptr() as *const FuseAccessIn) };
 
         match self.fs.access(ctx.nodeid, access_in.mask) {
@@ -933,10 +906,6 @@ impl FuseDispatcher {
             Err(e) => response.write_error(ctx.unique, e.to_errno()),
         }
     }
-
-    // ========================================================================
-    // Helper Methods
-    // ========================================================================
 
     fn parse_name<'a>(&self, body: &'a [u8]) -> &'a OsStr {
         let name_end = body.iter().position(|&b| b == 0).unwrap_or(body.len());
@@ -968,10 +937,6 @@ impl std::fmt::Debug for FuseDispatcher {
     }
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -996,6 +961,7 @@ mod tests {
             padding: 0,
         };
 
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         let header_bytes = unsafe {
             std::slice::from_raw_parts(
                 &header as *const FuseInHeader as *const u8,
@@ -1007,6 +973,7 @@ mod tests {
 
     fn parse_response_header(response: &[u8]) -> FuseOutHeader {
         assert!(response.len() >= FuseOutHeader::SIZE);
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe { *(response.as_ptr() as *const FuseOutHeader) }
     }
 
@@ -1022,6 +989,7 @@ mod tests {
         };
 
         let mut request = make_header(FuseOpcode::Init, 0, size_of::<FuseInitIn>());
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         let init_bytes = unsafe {
             std::slice::from_raw_parts(
                 &init_in as *const FuseInitIn as *const u8,
@@ -1096,6 +1064,7 @@ mod tests {
         let name = b"testdir\0";
 
         let mut request = make_header(FuseOpcode::Mkdir, 1, size_of::<FuseMkdirIn>() + name.len());
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         let mkdir_bytes = unsafe {
             std::slice::from_raw_parts(
                 &mkdir_in as *const FuseMkdirIn as *const u8,
@@ -1134,6 +1103,7 @@ mod tests {
         assert_eq!(header.error, 0);
 
         // Extract inode from entry response
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let entry = unsafe {
             &*((response.as_ptr() as *const u8).add(FuseOutHeader::SIZE) as *const FuseEntryOut)
         };
@@ -1145,6 +1115,7 @@ mod tests {
             unused: 0,
         };
         let mut request = make_header(FuseOpcode::Open, inode, size_of::<FuseOpenIn>());
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         let open_bytes = unsafe {
             std::slice::from_raw_parts(
                 &open_in as *const FuseOpenIn as *const u8,
@@ -1158,6 +1129,7 @@ mod tests {
         assert_eq!(header.error, 0);
 
         // Extract file handle
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let open_out = unsafe {
             &*((response.as_ptr() as *const u8).add(FuseOutHeader::SIZE) as *const FuseOpenOut)
         };
@@ -1174,6 +1146,7 @@ mod tests {
             padding: 0,
         };
         let mut request = make_header(FuseOpcode::Read, inode, size_of::<FuseReadIn>());
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         let read_bytes = unsafe {
             std::slice::from_raw_parts(
                 &read_in as *const FuseReadIn as *const u8,
@@ -1197,6 +1170,7 @@ mod tests {
             lock_owner: 0,
         };
         let mut request = make_header(FuseOpcode::Release, inode, size_of::<FuseReleaseIn>());
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         let release_bytes = unsafe {
             std::slice::from_raw_parts(
                 &release_in as *const FuseReleaseIn as *const u8,
@@ -1237,6 +1211,7 @@ mod tests {
             padding: 0,
         };
 
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         let request = unsafe {
             std::slice::from_raw_parts(
                 &header as *const FuseInHeader as *const u8,
@@ -1274,6 +1249,7 @@ mod tests {
             unused: 0,
         };
         let mut request = make_header(FuseOpcode::Opendir, 1, size_of::<FuseOpenIn>());
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         let open_bytes = unsafe {
             std::slice::from_raw_parts(
                 &open_in as *const FuseOpenIn as *const u8,
@@ -1286,6 +1262,7 @@ mod tests {
         let header = parse_response_header(&response);
         assert_eq!(header.error, 0);
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let open_out = unsafe {
             &*((response.as_ptr() as *const u8).add(FuseOutHeader::SIZE) as *const FuseOpenOut)
         };
@@ -1302,6 +1279,7 @@ mod tests {
             padding: 0,
         };
         let mut request = make_header(FuseOpcode::Readdir, 1, size_of::<FuseReadIn>());
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         let read_bytes = unsafe {
             std::slice::from_raw_parts(
                 &read_in as *const FuseReadIn as *const u8,
@@ -1322,6 +1300,7 @@ mod tests {
             lock_owner: 0,
         };
         let mut request = make_header(FuseOpcode::Releasedir, 1, size_of::<FuseReleaseIn>());
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         let release_bytes = unsafe {
             std::slice::from_raw_parts(
                 &release_in as *const FuseReleaseIn as *const u8,

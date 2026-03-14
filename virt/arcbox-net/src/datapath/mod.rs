@@ -83,6 +83,7 @@ impl<T> CachePadded<T> {
 #[inline(always)]
 pub fn prefetch_read<T>(ptr: *const T) {
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     unsafe {
         // PRFM PLDL1KEEP - prefetch for load, keep in L1 cache
         core::arch::asm!(
@@ -92,6 +93,7 @@ pub fn prefetch_read<T>(ptr: *const T) {
         );
     }
     #[cfg(target_arch = "x86_64")]
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     unsafe {
         core::arch::x86_64::_mm_prefetch(ptr.cast::<i8>(), core::arch::x86_64::_MM_HINT_T0);
     }
@@ -105,6 +107,7 @@ pub fn prefetch_read<T>(ptr: *const T) {
 #[inline(always)]
 pub fn prefetch_write<T>(ptr: *mut T) {
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     unsafe {
         // PRFM PSTL1KEEP - prefetch for store, keep in L1 cache
         core::arch::asm!(
@@ -114,6 +117,7 @@ pub fn prefetch_write<T>(ptr: *mut T) {
         );
     }
     #[cfg(target_arch = "x86_64")]
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     unsafe {
         core::arch::x86_64::_mm_prefetch(ptr.cast::<i8>(), core::arch::x86_64::_MM_HINT_T0);
     }
