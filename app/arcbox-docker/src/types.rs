@@ -6,10 +6,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-// ============================================================================
-// Container Types
-// ============================================================================
-
 /// Container summary (for list).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -407,10 +403,6 @@ pub struct WaitError {
     pub message: String,
 }
 
-// ============================================================================
-// Exec Types
-// ============================================================================
-
 /// Exec create request.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -501,10 +493,6 @@ pub struct ExecInspectResponse {
     pub pid: i32,
 }
 
-// ============================================================================
-// Image Types
-// ============================================================================
-
 /// Image summary.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -588,10 +576,6 @@ pub struct ImageDeleteResponse {
     pub untagged: Option<String>,
 }
 
-// ============================================================================
-// Network Types
-// ============================================================================
-
 /// Network summary.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Serialize, Deserialize)]
@@ -650,10 +634,6 @@ pub struct NetworkCreateResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
 }
-
-// ============================================================================
-// Volume Types
-// ============================================================================
 
 /// Volume summary.
 #[derive(Debug, Serialize, Deserialize)]

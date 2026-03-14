@@ -43,10 +43,6 @@ pub struct StatusArgs {
     pub offline: bool,
 }
 
-// =============================================================================
-// JSON output structures
-// =============================================================================
-
 /// JSON output for `arcbox boot status`.
 #[derive(Serialize)]
 struct StatusOutput {
@@ -113,10 +109,6 @@ struct ClearOutput {
     cleared: bool,
 }
 
-// =============================================================================
-// Command dispatch
-// =============================================================================
-
 /// Execute boot commands.
 pub async fn execute(command: BootCommands, format: OutputFormat) -> anyhow::Result<()> {
     // Use Config::load() so the cache directory are consistent with daemon.
@@ -132,10 +124,6 @@ pub async fn execute(command: BootCommands, format: OutputFormat) -> anyhow::Res
         BootCommands::List => list(boot_cache_dir, format).await,
     }
 }
-
-// =============================================================================
-// Status
-// =============================================================================
 
 /// Show boot asset status.
 async fn status(data_dir: PathBuf, args: StatusArgs, format: OutputFormat) -> anyhow::Result<()> {
@@ -282,10 +270,6 @@ async fn status(data_dir: PathBuf, args: StatusArgs, format: OutputFormat) -> an
 
     Ok(())
 }
-
-// =============================================================================
-// Prefetch
-// =============================================================================
 
 /// Prefetch boot assets and runtime binaries.
 async fn prefetch(
@@ -474,10 +458,6 @@ async fn prefetch_table(
     Ok(())
 }
 
-// =============================================================================
-// Clear
-// =============================================================================
-
 /// Clear cached boot assets.
 async fn clear(data_dir: PathBuf, format: OutputFormat) -> anyhow::Result<()> {
     use arcbox_core::boot_assets::{BootAssetConfig, BootAssetProvider};
@@ -514,10 +494,6 @@ async fn clear(data_dir: PathBuf, format: OutputFormat) -> anyhow::Result<()> {
 
     Ok(())
 }
-
-// =============================================================================
-// List
-// =============================================================================
 
 /// List cached versions.
 async fn list(data_dir: PathBuf, format: OutputFormat) -> anyhow::Result<()> {

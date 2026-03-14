@@ -18,10 +18,6 @@ use std::sync::LazyLock;
 pub use arcbox_boot::download::{PreparePhase, PrepareProgress as DownloadProgress};
 pub use arcbox_boot::manifest::Manifest as BootAssetManifest;
 
-// =============================================================================
-// Lockfile
-// =============================================================================
-
 /// Embedded lockfile (compiled-in from workspace root).
 const LOCK_TOML: &str = include_str!("../../../assets.lock");
 
@@ -56,10 +52,6 @@ pub fn boot_asset_version() -> &'static str {
 pub fn boot_asset_cdn() -> &'static str {
     LOCK.boot.cdn.as_deref().unwrap_or(DEFAULT_CDN_BASE_URL)
 }
-
-// =============================================================================
-// Configuration
-// =============================================================================
 
 /// Boot asset configuration.
 #[derive(Debug, Clone)]
@@ -124,10 +116,6 @@ impl BootAssetConfig {
     }
 }
 
-// =============================================================================
-// Boot Assets (consumed by vm_lifecycle)
-// =============================================================================
-
 /// Boot assets required for VM startup.
 ///
 /// Contains kernel + EROFS read-only rootfs. No initramfs.
@@ -153,16 +141,8 @@ impl BootAssets {
     }
 }
 
-// =============================================================================
-// Progress Callback
-// =============================================================================
-
 /// Progress callback type.
 pub type ProgressCallback = Box<dyn Fn(PrepareProgress) + Send + Sync>;
-
-// =============================================================================
-// Boot Asset Provider
-// =============================================================================
 
 /// Boot asset provider — delegates to `arcbox_boot::AssetManager`.
 pub struct BootAssetProvider {
@@ -259,10 +239,6 @@ impl BootAssetProvider {
             .map_err(|e| CoreError::config(format!("binary prepare error: {e}")))
     }
 
-    // =========================================================================
-    // CLI convenience methods
-    // =========================================================================
-
     /// Returns true if the current version's boot assets are fully cached
     /// (manifest + kernel + rootfs all present).
     #[must_use]
@@ -345,10 +321,6 @@ impl BootAssetProvider {
             .map(String::from))
     }
 
-    // =========================================================================
-    // Internal helpers
-    // =========================================================================
-
     fn build_inner_config(config: &BootAssetConfig) -> AssetManagerConfig {
         AssetManagerConfig {
             cdn_base_url: config.cdn_base_url.clone(),
@@ -387,6 +359,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let original = std::env::var(BOOT_ASSET_VERSION_ENV).ok();
         // SAFETY: Test code running under ENV_LOCK mutex.
+        // SAFETY: Called in a single-threaded test context.
         unsafe { std::env::remove_var(BOOT_ASSET_VERSION_ENV) };
 
         let config = BootAssetConfig::default();
@@ -400,6 +373,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let original = std::env::var(BOOT_ASSET_VERSION_ENV).ok();
         // SAFETY: Test code running under ENV_LOCK mutex.
+        // SAFETY: Called in a single-threaded test context.
         unsafe { std::env::set_var(BOOT_ASSET_VERSION_ENV, "9.9.9") };
 
         let config = BootAssetConfig::default();
@@ -451,6 +425,7 @@ mod tests {
 
     fn restore_env(original: Option<String>) {
         // SAFETY: Test code running under ENV_LOCK mutex.
+        // SAFETY: Called in a single-threaded test context.
         unsafe {
             match original {
                 Some(value) => std::env::set_var(BOOT_ASSET_VERSION_ENV, value),

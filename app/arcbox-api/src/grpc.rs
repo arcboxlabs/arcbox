@@ -29,10 +29,6 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tonic::codec::Streaming;
 use tonic::{Request, Response, Status};
 
-// =============================================================================
-// Machine Service
-// =============================================================================
-
 /// Machine service implementation.
 pub struct MachineServiceImpl {
     runtime: Arc<Runtime>,
@@ -278,10 +274,6 @@ impl machine_service_server::MachineService for MachineServiceImpl {
     }
 }
 
-// =============================================================================
-// Sandbox Service
-// =============================================================================
-
 /// Extracts the machine name from the `x-machine` gRPC metadata header.
 #[allow(clippy::result_large_err)]
 fn extract_machine_id<T>(request: &Request<T>) -> Result<String, Status> {
@@ -445,10 +437,6 @@ impl SandboxService for SandboxServiceImpl {
         Ok(Response::new(Box::pin(stream)))
     }
 }
-
-// =============================================================================
-// Sandbox Snapshot Service
-// =============================================================================
 
 /// Sandbox snapshot service implementation.
 pub struct SandboxSnapshotServiceImpl {

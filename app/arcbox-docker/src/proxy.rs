@@ -39,10 +39,6 @@ const MAX_CONCURRENT_CONNECTS: usize = 8;
 static CONNECT_SEMAPHORE: LazyLock<Semaphore> =
     LazyLock::new(|| Semaphore::new(MAX_CONCURRENT_CONNECTS));
 
-// =============================================================================
-// RawFdStream — async I/O wrapper around a raw vsock file descriptor
-// =============================================================================
-
 struct RawFdWrapper(OwnedFd);
 
 impl AsRawFd for RawFdWrapper {
@@ -66,6 +62,7 @@ impl RawFdStream {
 
         Self::set_nonblocking(fd)?;
         // SAFETY: fd is a valid, newly-opened vsock file descriptor owned by us.
+        // SAFETY: fd is a valid open file descriptor with exclusive ownership.
         let owned = unsafe { OwnedFd::from_raw_fd(fd) };
         let inner = AsyncFd::new(RawFdWrapper(owned))?;
         Ok(Self { inner })
@@ -73,10 +70,12 @@ impl RawFdStream {
 
     fn set_nonblocking(fd: RawFd) -> io::Result<()> {
         // SAFETY: F_GETFL/F_SETFL are safe on valid fds.
+        // SAFETY: fd is a valid open file descriptor; command and arguments are valid.
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
         if flags < 0 {
             return Err(io::Error::last_os_error());
         }
+        // SAFETY: fd is a valid open file descriptor; command and arguments are valid.
         let result = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
         if result < 0 {
             return Err(io::Error::last_os_error());
@@ -97,6 +96,7 @@ impl AsyncRead for RawFdStream {
                 let fd = inner.get_ref().as_raw_fd();
                 let slice = buf.initialize_unfilled();
                 // SAFETY: reading into our buffer from a valid fd.
+                // SAFETY: fd is valid; buffer pointer and length are within the allocated slice bounds.
                 let n = unsafe { libc::read(fd, slice.as_mut_ptr().cast(), slice.len()) };
                 if n < 0 {
                     Err(io::Error::last_os_error())
@@ -129,6 +129,7 @@ impl AsyncWrite for RawFdStream {
             match guard.try_io(|inner| {
                 let fd = inner.get_ref().as_raw_fd();
                 // SAFETY: writing from our buffer to a valid fd.
+                // SAFETY: fd is valid; buffer pointer and length are within the slice bounds.
                 let n = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
                 if n < 0 {
                     Err(io::Error::last_os_error())
@@ -153,6 +154,7 @@ impl AsyncWrite for RawFdStream {
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let fd = self.inner.get_ref().as_raw_fd();
         // SAFETY: shutdown on a valid fd.
+        // SAFETY: fd is a valid open socket file descriptor.
         let result = unsafe { libc::shutdown(fd, libc::SHUT_WR) };
         if result == 0 {
             return Poll::Ready(Ok(()));
@@ -165,10 +167,6 @@ impl AsyncWrite for RawFdStream {
         Poll::Ready(Err(err))
     }
 }
-
-// =============================================================================
-// Guest connection
-// =============================================================================
 
 /// Opens a vsock connection to guest dockerd with a timeout.
 ///
@@ -220,10 +218,6 @@ async fn connect_guest(runtime: &Runtime) -> Result<TokioIo<RawFdStream>> {
         .map_err(|e| DockerError::Server(format!("failed to create guest stream: {e}")))?;
     Ok(TokioIo::new(stream))
 }
-
-// =============================================================================
-// Proxy helpers
-// =============================================================================
 
 /// Forward an HTTP request to guest dockerd and return the response.
 ///
@@ -460,10 +454,6 @@ pub async fn proxy_with_upgrade(
     Ok(response)
 }
 
-// =============================================================================
-// Fallback handler — catches any unmatched route and proxies to guest
-// =============================================================================
-
 /// Catch-all handler that proxies unmatched requests to guest dockerd.
 ///
 /// Ensures forward compatibility with newer Docker API versions — any endpoint
@@ -498,10 +488,6 @@ pub async fn proxy_fallback(
 
     proxy_to_guest_stream(&state.runtime, &uri, req).await
 }
-
-// =============================================================================
-// Port binding parsing (for post-hook port forwarding)
-// =============================================================================
 
 /// A parsed port binding from Docker inspect JSON.
 #[derive(Debug, Clone)]
