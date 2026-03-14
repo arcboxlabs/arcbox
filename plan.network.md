@@ -1,6 +1,6 @@
 # Plan: L3 Direct Routing via utun
 
-> Status: IN PROGRESS
+> Status: IMPLEMENTED
 > Date: 2026-03-14
 > Revision: 3 (fixed return path: bidirectional utun with tunnel conntrack)
 
