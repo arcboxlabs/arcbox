@@ -283,15 +283,15 @@ impl DockerContextManager {
 
     /// Enables `ArcBox` Docker integration.
     ///
-    /// Creates the context if it doesn't exist and sets it as default.
+    /// Always creates or updates the context to ensure the socket path is current,
+    /// then sets it as default. This handles upgrades where the socket path changes
+    /// (e.g. `~/.arcbox/docker.sock` → `~/.arcbox/run/docker.sock`).
     ///
     /// # Errors
     ///
     /// Returns an error if the integration cannot be enabled.
     pub fn enable(&self) -> Result<()> {
-        if !self.context_exists() {
-            self.create_context()?;
-        }
+        self.create_context()?;
         self.set_default()?;
         Ok(())
     }
