@@ -351,7 +351,8 @@ impl TcpBridge {
         }
 
         for (key, result) in completed {
-            let pending = self.pending_syns.remove(&key).unwrap();
+            let pending = self.pending_syns.remove(&key)
+                .expect("pending_syns entry must exist for completed key");
             match result {
                 Some(stream) => {
                     // 1. Ensure listen socket for the port.

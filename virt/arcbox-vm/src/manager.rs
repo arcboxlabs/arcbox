@@ -75,7 +75,7 @@ impl VmmManager {
 
         // Ensure name uniqueness.
         {
-            let instances = self.instances.read().unwrap();
+            let instances = self.instances.read().expect("instances lock poisoned");
             if instances
                 .values()
                 .any(|i| i.lock().expect("i lock poisoned").name == spec.name)
@@ -228,7 +228,7 @@ impl VmmManager {
 
         // Update instance to Running.
         {
-            let mut instances = self.instances.write().unwrap();
+            let mut instances = self.instances.write().expect("instances lock poisoned");
             let entry = instances.entry(id.clone()).or_insert_with(|| {
                 Arc::new(Mutex::new(VmInstance::new(
                     id.clone(),
@@ -331,7 +331,7 @@ impl VmmManager {
         let _ = self.stop_vm(id, force).await;
 
         let instance = {
-            let mut instances = self.instances.write().unwrap();
+            let mut instances = self.instances.write().expect("instances lock poisoned");
             instances.remove(id)
         };
 
@@ -352,7 +352,7 @@ impl VmmManager {
 
     /// List VMs.  `all = false` returns only running VMs.
     pub fn list_vms(&self, all: bool) -> Result<Vec<VmSummary>> {
-        let instances = self.instances.read().unwrap();
+        let instances = self.instances.read().expect("instances lock poisoned");
         let summaries = instances
             .values()
             .filter_map(|arc| {
@@ -428,12 +428,12 @@ impl VmmManager {
         let vm = self.get_vm_handle(id)?;
         match req.snapshot_type {
             SnapshotType::Full => {
-                vm.create_snapshot(vmstate_path.to_str().unwrap(), mem_path.to_str().unwrap())
+                vm.create_snapshot(vmstate_path.to_str().expect("path is not valid UTF-8"), mem_path.to_str().expect("path is not valid UTF-8"))
                     .await
                     .map_err(VmmError::from)?;
             }
             SnapshotType::Diff => {
-                vm.create_diff_snapshot(vmstate_path.to_str().unwrap(), mem_path.to_str().unwrap())
+                vm.create_diff_snapshot(vmstate_path.to_str().expect("path is not valid UTF-8"), mem_path.to_str().expect("path is not valid UTF-8"))
                     .await
                     .map_err(VmmError::from)?;
             }
@@ -483,10 +483,10 @@ impl VmmManager {
         .await?;
 
         let snap_dir = PathBuf::from(&spec.snapshot_dir);
-        let vmstate_path = snap_dir.join("vmstate").to_str().unwrap().to_owned();
+        let vmstate_path = snap_dir.join("vmstate").to_str().expect("path is not valid UTF-8").to_owned();
         let mem_path = snap_dir.join("mem");
         let mem_file_path = if mem_path.exists() {
-            Some(mem_path.to_str().unwrap().to_owned())
+            Some(mem_path.to_str().expect("path is not valid UTF-8").to_owned())
         } else {
             None
         };
@@ -509,7 +509,7 @@ impl VmmManager {
         }
 
         let vm = Arc::new(
-            fc_sdk::restore(socket_path.to_str().unwrap(), load_params)
+            fc_sdk::restore(socket_path.to_str().expect("path is not valid UTF-8"), load_params)
                 .await
                 .map_err(VmmError::from)?,
         );
@@ -531,7 +531,7 @@ impl VmmManager {
         self.store.save(&instance)?;
 
         {
-            let mut instances = self.instances.write().unwrap();
+            let mut instances = self.instances.write().expect("instances lock poisoned");
             instances.insert(id.clone(), Arc::new(Mutex::new(instance)));
         }
 

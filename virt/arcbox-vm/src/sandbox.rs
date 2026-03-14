@@ -354,7 +354,7 @@ impl SandboxManager {
 
         // Uniqueness check.
         {
-            let instances = self.instances.read().unwrap();
+            let instances = self.instances.read().expect("instances lock poisoned");
             if instances.contains_key(&id) {
                 return Err(VmmError::AlreadyExists(id));
             }
@@ -382,7 +382,7 @@ impl SandboxManager {
         let instance =
             SandboxInstance::new(id.clone(), spec.clone(), net_alloc.clone(), vm_dir.clone());
         {
-            let mut instances = self.instances.write().unwrap();
+            let mut instances = self.instances.write().expect("instances lock poisoned");
             instances.insert(id.clone(), Arc::new(Mutex::new(instance)));
         }
 
@@ -623,7 +623,7 @@ impl SandboxManager {
                 let send_result = match &result {
                     Ok(chunk) if chunk.stream == "exit" => {
                         let exit_code = chunk.exit_code;
-                        let value = instances.read().unwrap().get(&sandbox_id).cloned();
+                        let value = instances.read().expect("instances lock poisoned").get(&sandbox_id).cloned();
                         if let Some(arc) = value {
                             let mut inst = arc.lock().expect("arc lock poisoned");
                             inst.state = SandboxState::Ready;
@@ -703,7 +703,7 @@ impl SandboxManager {
                 let send_result = match &result {
                     Ok(chunk) if chunk.stream == "exit" => {
                         let exit_code = chunk.exit_code;
-                        let value = instances.read().unwrap().get(&sandbox_id).cloned();
+                        let value = instances.read().expect("instances lock poisoned").get(&sandbox_id).cloned();
                         if let Some(arc) = value {
                             let mut inst = arc.lock().expect("arc lock poisoned");
                             inst.state = SandboxState::Ready;
@@ -780,8 +780,8 @@ impl SandboxManager {
             } else {
                 let snap_dir = self.snapshots.prepare_dir(sandbox_id, &snapshot_id)?;
                 (
-                    snap_dir.join("vmstate").to_str().unwrap().to_owned(),
-                    snap_dir.join("mem").to_str().unwrap().to_owned(),
+                    snap_dir.join("vmstate").to_str().expect("path is not valid UTF-8").to_owned(),
+                    snap_dir.join("mem").to_str().expect("path is not valid UTF-8").to_owned(),
                     None,
                 )
             };
@@ -870,7 +870,7 @@ impl SandboxManager {
 
         // Uniqueness check.
         {
-            let instances = self.instances.read().unwrap();
+            let instances = self.instances.read().expect("instances lock poisoned");
             if instances.contains_key(&new_id) {
                 return Err(VmmError::AlreadyExists(new_id.clone()));
             }
@@ -897,10 +897,10 @@ impl SandboxManager {
 
         // Locate checkpoint on disk.
         let snap_meta = self.snapshots.find_by_id(&spec.snapshot_id)?;
-        let vmstate_str = snap_meta.vmstate_path.to_str().unwrap().to_owned();
+        let vmstate_str = snap_meta.vmstate_path.to_str().expect("path is not valid UTF-8").to_owned();
         let mem_file = snap_meta.mem_path.as_ref().and_then(|p| {
             if p.exists() {
-                Some(p.to_str().unwrap().to_owned())
+                Some(p.to_str().expect("path is not valid UTF-8").to_owned())
             } else {
                 None
             }
@@ -1040,7 +1040,7 @@ impl SandboxManager {
         // path reported by the process handle instead of vm_dir's socket_path.
         let effective_socket = process.socket_path().to_owned();
         let vm = Arc::new(
-            fc_sdk::restore(effective_socket.to_str().unwrap(), load_params)
+            fc_sdk::restore(effective_socket.to_str().expect("path is not valid UTF-8"), load_params)
                 .await
                 .map_err(VmmError::from)?,
         );
@@ -1080,7 +1080,7 @@ impl SandboxManager {
         instance.ready_at = Some(Utc::now());
 
         {
-            let mut instances = self.instances.write().unwrap();
+            let mut instances = self.instances.write().expect("instances lock poisoned");
             instances.insert(new_id.clone(), Arc::new(Mutex::new(instance)));
         }
 
@@ -1193,7 +1193,7 @@ async fn boot_sandbox(
     match do_boot(&id, &spec, net_alloc.as_ref(), &vm_dir, &config).await {
         Ok((process, vm, vsock_uds_path)) => {
             let ready_at = Utc::now();
-            let value = instances.read().unwrap().get(&id).cloned();
+            let value = instances.read().expect("instances lock poisoned").get(&id).cloned();
             if let Some(arc) = value {
                 let mut inst = arc.lock().expect("arc lock poisoned");
                 // If stop was requested while booting, do not transition to Ready.
@@ -1211,7 +1211,7 @@ async fn boot_sandbox(
             info!(sandbox_id = %id, "sandbox booted and ready");
         }
         Err(e) => {
-            let value = instances.read().unwrap().get(&id).cloned();
+            let value = instances.read().expect("instances lock poisoned").get(&id).cloned();
             if let Some(arc) = value {
                 let mut inst = arc.lock().expect("arc lock poisoned");
                 inst.state = SandboxState::Failed;
@@ -1332,7 +1332,7 @@ async fn do_boot(
             (
                 spec.kernel.clone(),
                 spec.rootfs.clone(),
-                vsock_path.to_str().unwrap().to_owned(),
+                vsock_path.to_str().expect("path is not valid UTF-8").to_owned(),
                 vsock_path,
             )
         };
@@ -1404,7 +1404,7 @@ async fn remove_sandbox_impl(
     events_tx: &broadcast::Sender<SandboxEvent>,
     config: &Arc<VmmConfig>,
 ) {
-    let entry = instances.read().unwrap().get(id).cloned();
+    let entry = instances.read().expect("instances lock poisoned").get(id).cloned();
     let Some(arc) = entry else {
         return;
     };
@@ -1450,7 +1450,7 @@ async fn remove_sandbox_impl(
         warn!(sandbox_id = %id, err = %e, "failed to remove sandbox dir");
     }
 
-    instances.write().unwrap().remove(id);
+    instances.write().expect("instances lock poisoned").remove(id);
     let _ = events_tx.send(SandboxEvent::new(id, "removed"));
 }
 

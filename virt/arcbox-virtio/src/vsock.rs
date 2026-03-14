@@ -127,7 +127,7 @@ impl VirtioVsock {
             backend.lock().expect("backend lock poisoned").on_send(local, data)
         } else {
             // Store in connection buffer
-            let mut conns = self.connections.write().unwrap();
+            let mut conns = self.connections.write().expect("connections lock poisoned");
             if let Some(conn) = conns.get_mut(&(src_port, dst_port)) {
                 conn.enqueue_tx(data);
                 Ok(data.len())
@@ -145,7 +145,7 @@ impl VirtioVsock {
             backend.lock().expect("backend lock poisoned").on_recv(local, buf)
         } else {
             // Read from connection buffer
-            let mut conns = self.connections.write().unwrap();
+            let mut conns = self.connections.write().expect("connections lock poisoned");
             if let Some(conn) = conns.get_mut(&(src_port, dst_port)) {
                 let data = conn.dequeue_rx(buf.len());
                 buf[..data.len()].copy_from_slice(&data);
@@ -176,7 +176,7 @@ impl VirtioVsock {
     /// Returns the number of active connections.
     #[must_use]
     pub fn connection_count(&self) -> usize {
-        self.connections.read().unwrap().len()
+        self.connections.read().expect("connections lock poisoned").len()
     }
 }
 
@@ -224,7 +224,7 @@ impl VirtioDevice for VirtioVsock {
 
     fn reset(&mut self) {
         self.acked_features = 0;
-        self.connections.write().unwrap().clear();
+        self.connections.write().expect("connections lock poisoned").clear();
         self.backend = None;
     }
 }
@@ -550,14 +550,14 @@ impl TcpBackend {
             .set_nonblocking(true)
             .map_err(|e| VirtioError::Io(format!("Failed to set nonblocking: {e}")))?;
 
-        self.listeners.write().unwrap().insert(port, listener);
+        self.listeners.write().expect("listeners lock poisoned").insert(port, listener);
         tracing::info!("Vsock listening on port {} (TCP {})", port, tcp_port);
         Ok(())
     }
 
     /// Accepts a pending connection.
     pub fn accept(&self, port: u32) -> Result<Option<VsockAddr>> {
-        let listeners = self.listeners.read().unwrap();
+        let listeners = self.listeners.read().expect("listeners lock poisoned");
         if let Some(listener) = listeners.get(&port) {
             match listener.accept() {
                 Ok((stream, _addr)) => {
@@ -568,7 +568,7 @@ impl TcpBackend {
                     let local = VsockAddr::new(VirtioVsock::HOST_CID, port);
                     let remote = VsockAddr::new(self.guest_cid, port);
 
-                    self.connections.write().unwrap().insert(remote, stream);
+                    self.connections.write().expect("connections lock poisoned").insert(remote, stream);
                     Ok(Some(local))
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
@@ -590,12 +590,12 @@ impl VsockBackend for TcpBackend {
             .set_nonblocking(true)
             .map_err(|e| VirtioError::Io(format!("Failed to set nonblocking: {e}")))?;
 
-        self.connections.write().unwrap().insert(addr, stream);
+        self.connections.write().expect("connections lock poisoned").insert(addr, stream);
         Ok(())
     }
 
     fn on_send(&mut self, addr: VsockAddr, data: &[u8]) -> Result<usize> {
-        let mut connections = self.connections.write().unwrap();
+        let mut connections = self.connections.write().expect("connections lock poisoned");
         if let Some(stream) = connections.get_mut(&addr) {
             stream
                 .write(data)
@@ -606,7 +606,7 @@ impl VsockBackend for TcpBackend {
     }
 
     fn on_recv(&mut self, addr: VsockAddr, buf: &mut [u8]) -> Result<usize> {
-        let mut connections = self.connections.write().unwrap();
+        let mut connections = self.connections.write().expect("connections lock poisoned");
         if let Some(stream) = connections.get_mut(&addr) {
             match stream.read(buf) {
                 Ok(n) => Ok(n),
@@ -619,14 +619,14 @@ impl VsockBackend for TcpBackend {
     }
 
     fn on_close(&mut self, addr: VsockAddr) -> Result<()> {
-        self.connections.write().unwrap().remove(&addr);
+        self.connections.write().expect("connections lock poisoned").remove(&addr);
         Ok(())
     }
 
     fn has_pending_data(&self, addr: VsockAddr) -> bool {
         // TCP streams don't have a simple way to check pending data
         // Would need peek() or poll()
-        self.connections.read().unwrap().contains_key(&addr)
+        self.connections.read().expect("connections lock poisoned").contains_key(&addr)
     }
 }
 
