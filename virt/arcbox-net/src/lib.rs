@@ -151,12 +151,22 @@ impl NetworkManager {
     /// Replaces the DNS forwarder's local domain.
     ///
     /// Call this before registering any hostnames to ensure the domain suffix
-    /// is consistent across all entries.
+    /// is consistent across all entries. Preserves the shared hosts table
+    /// but removes stale FQDN entries from the old domain.
     pub fn set_dns_domain(&self, domain: &str) {
         if let Ok(mut forwarder) = self.dns_forwarder.write() {
+            // Remove FQDN entries belonging to the old domain.
+            if let Some(ref old_domain) = forwarder.config().local_domain {
+                let suffix = format!(".{old_domain}");
+                let table = forwarder.local_hosts_table();
+                if let Ok(mut hosts) = table.write() {
+                    hosts.retain(|k, _| !k.ends_with(&suffix) && k != old_domain);
+                }
+            }
             let mut cfg = forwarder.config().clone();
             cfg.local_domain = Some(domain.to_string());
-            *forwarder = dns::DnsForwarder::new(cfg);
+            let shared_table = forwarder.local_hosts_table();
+            *forwarder = dns::DnsForwarder::with_shared_hosts(cfg, shared_table);
         }
     }
 
@@ -338,16 +348,28 @@ impl NetworkManager {
             .unwrap_or(0)
     }
 
+    /// Returns the shared local-hosts table for this network manager.
+    ///
+    /// Pass this to the VMM when constructing the datapath's `DnsForwarder`
+    /// so that both the host-side `DnsService` and the VMM-side forwarder
+    /// resolve from the same table.
+    pub fn local_hosts_table(&self) -> std::sync::Arc<arcbox_dns::LocalHostsTable> {
+        self.dns_forwarder
+            .read()
+            .expect("dns forwarder lock")
+            .local_hosts_table()
+    }
+
     /// Registers a local DNS hostname → IP mapping.
     pub fn register_dns(&self, hostname: &str, ip: IpAddr) {
-        if let Ok(mut forwarder) = self.dns_forwarder.write() {
+        if let Ok(forwarder) = self.dns_forwarder.read() {
             forwarder.add_local_host(hostname, ip);
         }
     }
 
     /// Removes a local DNS hostname mapping.
     pub fn deregister_dns(&self, hostname: &str) {
-        if let Ok(mut forwarder) = self.dns_forwarder.write() {
+        if let Ok(forwarder) = self.dns_forwarder.read() {
             forwarder.remove_local_host(hostname);
         }
     }
@@ -363,6 +385,7 @@ impl NetworkManager {
     /// Handles a full DNS query: local resolution first, then upstream forwarding.
     /// This blocks on network I/O for upstream queries.
     pub fn handle_dns_query(&self, query: &[u8]) -> Result<Vec<u8>> {
+        // handle_query needs &mut self for cache updates, so take a write lock.
         let mut forwarder = self
             .dns_forwarder
             .write()

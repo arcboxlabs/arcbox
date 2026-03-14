@@ -145,9 +145,17 @@ impl Runtime {
         let event_bus = EventBus::new();
         let snapshot_dir = config.data_dir.join("snapshots");
         let vm_manager = Arc::new(VmManager::new(snapshot_dir));
+        let network_manager = Arc::new(NetworkManager::new(arcbox_net::NetConfig::default()));
+
+        // Share the host-side DNS hosts table with the VMM so both
+        // the host DnsService and the VMM-side datapath DnsForwarder
+        // resolve from the same table.
+        let shared_dns_table = Some(network_manager.local_hosts_table());
+
         let machine_manager = Arc::new(MachineManager::new(
             Arc::clone(&vm_manager),
             config.data_dir.clone(),
+            shared_dns_table,
         ));
 
         // Create VM lifecycle manager with the machine manager.
@@ -163,8 +171,6 @@ impl Runtime {
             Arc::clone(&machine_manager),
             DEFAULT_MACHINE_NAME,
         );
-
-        let network_manager = Arc::new(NetworkManager::new(arcbox_net::NetConfig::default()));
 
         Ok(Self {
             config,

@@ -38,7 +38,7 @@ mod tests {
     /// Creates a test MachineManager.
     fn test_machine_manager(data_dir: &std::path::Path) -> MachineManager {
         let vm_manager = Arc::new(VmManager::new(data_dir.join("snapshots")));
-        MachineManager::new(vm_manager, data_dir.to_path_buf())
+        MachineManager::new(vm_manager, data_dir.to_path_buf(), None)
     }
 
     #[tokio::test]
@@ -206,12 +206,18 @@ pub struct MachineManager {
     data_dir: PathBuf,
     /// Machine-specific directory (`data_dir/machines`/).
     machines_dir: PathBuf,
+    /// Shared DNS hosts table from NetworkManager, passed to VMM on start.
+    shared_dns_hosts: Option<std::sync::Arc<arcbox_dns::LocalHostsTable>>,
 }
 
 impl MachineManager {
     /// Creates a new machine manager.
     #[must_use]
-    pub fn new(vm_manager: Arc<VmManager>, data_dir: PathBuf) -> Self {
+    pub fn new(
+        vm_manager: Arc<VmManager>,
+        data_dir: PathBuf,
+        shared_dns_hosts: Option<std::sync::Arc<arcbox_dns::LocalHostsTable>>,
+    ) -> Self {
         let machines_dir = data_dir.join("machines");
         let persistence = MachinePersistence::new(&machines_dir);
 
@@ -272,6 +278,7 @@ impl MachineManager {
             persistence,
             data_dir,
             machines_dir,
+            shared_dns_hosts,
         }
     }
 
@@ -376,7 +383,7 @@ impl MachineManager {
             .is_some();
 
         // Start underlying VM
-        self.vm_manager.start(&vm_id)?;
+        self.vm_manager.start(&vm_id, self.shared_dns_hosts.clone())?;
 
         // Update machine state
         {
@@ -546,6 +553,8 @@ impl MachineManager {
     pub fn vm_manager(&self) -> &VmManager {
         &self.vm_manager
     }
+
+
 
     /// Gets the vsock CID for a running machine.
     #[must_use]
