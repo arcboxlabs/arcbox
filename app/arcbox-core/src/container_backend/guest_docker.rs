@@ -150,6 +150,19 @@ fn validate_reported_vsock_endpoint(endpoint: &str, expected_port: u32) -> Resul
     Ok(())
 }
 
+#[async_trait]
+impl ContainerBackend for GuestDockerBackend {
+    fn name(&self) -> &'static str {
+        "guest_docker"
+    }
+
+    async fn ensure_ready(&self) -> Result<u32> {
+        let cid = self.vm_lifecycle.ensure_ready().await?;
+        self.wait_guest_endpoint_ready().await?;
+        Ok(cid)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{parse_vsock_endpoint_port, validate_reported_vsock_endpoint};
@@ -185,18 +198,5 @@ mod tests {
         let err =
             validate_reported_vsock_endpoint("unix:///var/run/docker.sock", 2375).unwrap_err();
         assert!(err.to_string().contains("format invalid"));
-    }
-}
-
-#[async_trait]
-impl ContainerBackend for GuestDockerBackend {
-    fn name(&self) -> &'static str {
-        "guest_docker"
-    }
-
-    async fn ensure_ready(&self) -> Result<u32> {
-        let cid = self.vm_lifecycle.ensure_ready().await?;
-        self.wait_guest_endpoint_ready().await?;
-        Ok(cid)
     }
 }

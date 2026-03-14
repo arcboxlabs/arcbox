@@ -7,6 +7,7 @@
 //!
 //! - `MachineService` - Virtual machine management
 //! - `AgentService` - Guest agent communication
+//! - `MigrationService` - Host-side runtime migration planning and execution
 //! - `VolumeService` - Volume management (from api.proto)
 //! - `SandboxService` - Sandbox lifecycle (create / run / exec / stop / remove)
 //! - `SandboxSnapshotService` - Sandbox checkpoint and restore
@@ -41,6 +42,7 @@ pub use tonic;
 /// This module contains tonic-generated client and server code for:
 /// - MachineService - VM management
 /// - AgentService - Guest agent communication
+/// - MigrationService - Host-side migration planning and execution
 /// - VolumeService - Volume management
 pub mod v1 {
     tonic::include_proto!("arcbox.v1");
@@ -65,6 +67,7 @@ pub use sandbox_v1::sandbox_service_client::SandboxServiceClient;
 pub use sandbox_v1::sandbox_snapshot_service_client::SandboxSnapshotServiceClient;
 pub use v1::agent_service_client::AgentServiceClient;
 pub use v1::machine_service_client::MachineServiceClient;
+pub use v1::migration_service_client::MigrationServiceClient;
 pub use v1::volume_service_client::VolumeServiceClient;
 
 // =============================================================================
@@ -77,4 +80,5 @@ pub use sandbox_v1::sandbox_snapshot_service_server::{
 };
 pub use v1::agent_service_server::{AgentService, AgentServiceServer};
 pub use v1::machine_service_server::{MachineService, MachineServiceServer};
+pub use v1::migration_service_server::{MigrationService, MigrationServiceServer};
 pub use v1::volume_service_server::{VolumeService, VolumeServiceServer};

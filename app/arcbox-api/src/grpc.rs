@@ -298,6 +298,14 @@ fn core_to_status(e: &arcbox_core::CoreError) -> Status {
     Status::internal(e.to_string())
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "tonic streaming APIs require Result<T, Status> items"
+)]
+fn sandbox_stream_status<T>(result: arcbox_core::Result<T>) -> Result<T, Status> {
+    result.map_err(|error| Status::internal(error.to_string()))
+}
+
 /// Sandbox service implementation.
 ///
 /// Routes each RPC to the `arcbox-agent` running in the target guest VM
@@ -345,8 +353,7 @@ impl SandboxService for SandboxServiceImpl {
             .sandbox_run(request.into_inner())
             .await
             .map_err(|e| core_to_status(&e))?;
-        let stream = UnboundedReceiverStream::new(rx)
-            .map(|r| r.map_err(|e| Status::internal(e.to_string())));
+        let stream = UnboundedReceiverStream::new(rx).map(sandbox_stream_status);
         Ok(Response::new(Box::pin(stream)))
     }
 
@@ -440,8 +447,7 @@ impl SandboxService for SandboxServiceImpl {
             .sandbox_events(request.into_inner())
             .await
             .map_err(|e| core_to_status(&e))?;
-        let stream = UnboundedReceiverStream::new(rx)
-            .map(|r| r.map_err(|e| Status::internal(e.to_string())));
+        let stream = UnboundedReceiverStream::new(rx).map(sandbox_stream_status);
         Ok(Response::new(Box::pin(stream)))
     }
 }

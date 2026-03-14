@@ -20,7 +20,7 @@ re-exported through:
 | `container` | `container.proto` | Container lifecycle and exec messages |
 | `image` | `image.proto` | Image pull/list/inspect/remove messages |
 | `agent` | `agent.proto` | Guest agent health/runtime messages |
-| `api` | `api.proto` | Network/system/volume API messages |
+| `api` | `api.proto` | Network/system/volume/migration API messages |
 
 ## Usage
 

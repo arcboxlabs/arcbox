@@ -43,6 +43,7 @@ members = [
     "app/arcbox-cli",
     "app/arcbox-daemon",
     "app/arcbox",
+    "app/arcbox-migration",
 
     # ============================================
     # Guest Components (MIT OR Apache-2.0)

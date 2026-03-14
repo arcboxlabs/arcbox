@@ -35,6 +35,7 @@ pub mod container_backend;
 pub mod error;
 pub mod event;
 pub mod machine;
+pub mod migration;
 pub mod persistence;
 pub mod runtime;
 pub mod trace;
@@ -49,6 +50,7 @@ pub use boot_assets::{
 pub use config::{Config, ContainerRuntimeConfig};
 pub use error::{CoreError, Result};
 pub use machine::MachineManager;
+pub use migration::MigrationManager;
 pub use runtime::Runtime;
 pub use vm::{SharedDirConfig, VmConfig, VmManager};
 pub use vm_lifecycle::{
