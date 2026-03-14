@@ -438,7 +438,7 @@ impl SandboxManager {
     pub async fn stop_sandbox(&self, id: &SandboxId, timeout_seconds: u32) -> Result<()> {
         let vm_handle = {
             let instance = self.get_instance(id)?;
-            let mut inst = instance.lock().unwrap();
+            let mut inst = instance.lock().expect("instance lock poisoned");
             match inst.state {
                 SandboxState::Ready | SandboxState::Running => {}
                 s => {
@@ -470,7 +470,7 @@ impl SandboxManager {
         // Force-kill the Firecracker process if it is still alive.
         {
             let instance = self.get_instance(id)?;
-            let mut inst = instance.lock().unwrap();
+            let mut inst = instance.lock().expect("instance lock poisoned");
             if let Some(ref mut proc) = inst.process
                 && let Some(pid) = proc.pid()
                 && pid > 0
@@ -494,7 +494,7 @@ impl SandboxManager {
         // Verify the sandbox exists.
         let state = {
             let instance = self.get_instance(id)?;
-            instance.lock().unwrap().state
+            instance.lock().expect("instance lock poisoned").state
         };
 
         if !force && state == SandboxState::Running {
@@ -521,7 +521,7 @@ impl SandboxManager {
     /// Return the current state and metadata of a sandbox.
     pub fn inspect_sandbox(&self, id: &SandboxId) -> Result<SandboxInfo> {
         let instance = self.get_instance(id)?;
-        let inst = instance.lock().unwrap();
+        let inst = instance.lock().expect("instance lock poisoned");
         Ok(inst_to_info(&inst))
     }
 
@@ -536,7 +536,7 @@ impl SandboxManager {
             .unwrap()
             .values()
             .filter_map(|arc| {
-                let inst = arc.lock().unwrap();
+                let inst = arc.lock().expect("arc lock poisoned");
                 // State filter.
                 if let Some(sf) = state_filter
                     && !sf.is_empty()
@@ -608,7 +608,7 @@ impl SandboxManager {
         // Transition to Running only after vsock session is established.
         {
             let inst = self.get_instance(id)?;
-            inst.lock().unwrap().state = SandboxState::Running;
+            inst.lock().expect("inst lock poisoned").state = SandboxState::Running;
         }
         let _ = self.events_tx.send(SandboxEvent::new(id, "running"));
 
@@ -625,7 +625,7 @@ impl SandboxManager {
                         let exit_code = chunk.exit_code;
                         let value = instances.read().unwrap().get(&sandbox_id).cloned();
                         if let Some(arc) = value {
-                            let mut inst = arc.lock().unwrap();
+                            let mut inst = arc.lock().expect("arc lock poisoned");
                             inst.state = SandboxState::Ready;
                             inst.last_exit_code = Some(exit_code);
                             inst.last_exited_at = Some(Utc::now());
@@ -688,7 +688,7 @@ impl SandboxManager {
         // Transition to Running only after vsock session is established.
         {
             let inst = self.get_instance(id)?;
-            inst.lock().unwrap().state = SandboxState::Running;
+            inst.lock().expect("inst lock poisoned").state = SandboxState::Running;
         }
         let _ = self.events_tx.send(SandboxEvent::new(id, "running"));
 
@@ -705,7 +705,7 @@ impl SandboxManager {
                         let exit_code = chunk.exit_code;
                         let value = instances.read().unwrap().get(&sandbox_id).cloned();
                         if let Some(arc) = value {
-                            let mut inst = arc.lock().unwrap();
+                            let mut inst = arc.lock().expect("arc lock poisoned");
                             inst.state = SandboxState::Ready;
                             inst.last_exit_code = Some(exit_code);
                             inst.last_exited_at = Some(Utc::now());
@@ -738,7 +738,7 @@ impl SandboxManager {
         // Verify state and capture the kernel/rootfs paths for jailer re-staging.
         let (kernel_path, rootfs_path) = {
             let instance = self.get_instance(sandbox_id)?;
-            let inst = instance.lock().unwrap();
+            let inst = instance.lock().expect("instance lock poisoned");
             if inst.state != SandboxState::Ready {
                 return Err(VmmError::WrongState {
                     id: sandbox_id.clone(),
@@ -1148,7 +1148,7 @@ impl SandboxManager {
     /// Verify the sandbox is `Ready` and return its vsock UDS path.
     fn require_ready_vsock(&self, id: &SandboxId) -> Result<PathBuf> {
         let instance = self.get_instance(id)?;
-        let inst = instance.lock().unwrap();
+        let inst = instance.lock().expect("instance lock poisoned");
         match inst.state {
             SandboxState::Ready => {}
             s => {
@@ -1166,7 +1166,7 @@ impl SandboxManager {
 
     fn get_vm_handle(&self, id: &SandboxId) -> Result<Arc<fc_sdk::Vm>> {
         let instance = self.get_instance(id)?;
-        let inst = instance.lock().unwrap();
+        let inst = instance.lock().expect("instance lock poisoned");
         inst.vm
             .as_ref()
             .map(Arc::clone)
@@ -1195,7 +1195,7 @@ async fn boot_sandbox(
             let ready_at = Utc::now();
             let value = instances.read().unwrap().get(&id).cloned();
             if let Some(arc) = value {
-                let mut inst = arc.lock().unwrap();
+                let mut inst = arc.lock().expect("arc lock poisoned");
                 // If stop was requested while booting, do not transition to Ready.
                 if inst.state == SandboxState::Stopping || inst.state == SandboxState::Stopped {
                     info!(sandbox_id = %id, "sandbox boot completed but stop was requested; staying stopped");
@@ -1213,7 +1213,7 @@ async fn boot_sandbox(
         Err(e) => {
             let value = instances.read().unwrap().get(&id).cloned();
             if let Some(arc) = value {
-                let mut inst = arc.lock().unwrap();
+                let mut inst = arc.lock().expect("arc lock poisoned");
                 inst.state = SandboxState::Failed;
                 inst.error = Some(e.to_string());
             }
@@ -1410,7 +1410,7 @@ async fn remove_sandbox_impl(
     };
 
     {
-        let mut inst = arc.lock().unwrap();
+        let mut inst = arc.lock().expect("arc lock poisoned");
         // Kill the Firecracker process.
         if let Some(ref mut proc) = inst.process
             && let Some(pid) = proc.pid()

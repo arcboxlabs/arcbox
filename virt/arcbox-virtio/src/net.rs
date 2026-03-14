@@ -1349,7 +1349,7 @@ mod tests {
 
         // Send packet through backend
         if let Some(backend) = &net.backend {
-            let mut backend = backend.lock().unwrap();
+            let mut backend = backend.lock().expect("backend lock poisoned");
             backend.send(&NetPacket::new(vec![1, 2, 3, 4, 5])).unwrap();
         }
 
@@ -1365,7 +1365,7 @@ mod tests {
 
         // Send multiple packets
         if let Some(backend) = &net.backend {
-            let mut backend = backend.lock().unwrap();
+            let mut backend = backend.lock().expect("backend lock poisoned");
             for i in 0..5 {
                 backend.send(&NetPacket::new(vec![i; 100])).unwrap();
             }

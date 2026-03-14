@@ -100,7 +100,7 @@ impl VirtioVsock {
 
         // Notify backend
         if let Some(ref backend) = self.backend {
-            backend.lock().unwrap().on_connect(local)?;
+            backend.lock().expect("backend lock poisoned").on_connect(local)?;
             conn.state = ConnectionState::Connected;
         }
 
@@ -124,7 +124,7 @@ impl VirtioVsock {
         let local = VsockAddr::new(self.config.guest_cid, src_port);
 
         if let Some(ref backend) = self.backend {
-            backend.lock().unwrap().on_send(local, data)
+            backend.lock().expect("backend lock poisoned").on_send(local, data)
         } else {
             // Store in connection buffer
             let mut conns = self.connections.write().unwrap();
@@ -142,7 +142,7 @@ impl VirtioVsock {
         let local = VsockAddr::new(self.config.guest_cid, src_port);
 
         if let Some(ref backend) = self.backend {
-            backend.lock().unwrap().on_recv(local, buf)
+            backend.lock().expect("backend lock poisoned").on_recv(local, buf)
         } else {
             // Read from connection buffer
             let mut conns = self.connections.write().unwrap();
@@ -161,7 +161,7 @@ impl VirtioVsock {
         let local = VsockAddr::new(self.config.guest_cid, src_port);
 
         if let Some(ref backend) = self.backend {
-            backend.lock().unwrap().on_close(local)?;
+            backend.lock().expect("backend lock poisoned").on_close(local)?;
         }
 
         self.connections

@@ -356,7 +356,7 @@ mod tests {
 
     #[test]
     fn test_default_config_uses_boot_asset_version() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().expect("ENV_LOCK lock poisoned");
         let original = std::env::var(BOOT_ASSET_VERSION_ENV).ok();
         // SAFETY: Test code running under ENV_LOCK mutex.
         // SAFETY: Called in a single-threaded test context.
@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn test_default_config_env_override() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().expect("ENV_LOCK lock poisoned");
         let original = std::env::var(BOOT_ASSET_VERSION_ENV).ok();
         // SAFETY: Test code running under ENV_LOCK mutex.
         // SAFETY: Called in a single-threaded test context.
