@@ -207,6 +207,9 @@ impl Vmm {
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(64);
         let socket_proxy = SocketProxy::new(gateway_ip, gateway_mac, guest_ip, reply_tx);
 
+        // Store a clone of cmd_tx for L3 tunnel routing before moving into the listener manager.
+        self.inbound_cmd_tx = Some(cmd_tx.clone());
+
         // Create the inbound listener manager for port forwarding.
         self.inbound_listener_manager = Some(InboundListenerManager::new(cmd_tx));
 
@@ -233,7 +236,7 @@ impl Vmm {
         let cancel = CancellationToken::new();
         self.net_cancel = Some(cancel.clone());
 
-        let datapath = NetworkDatapath::new(
+        let mut datapath = NetworkDatapath::new(
             host_fd,
             socket_proxy,
             reply_rx,
@@ -251,6 +254,25 @@ impl Vmm {
                 "tokio runtime not available for network datapath: {e}"
             ))
         })?;
+
+        // Start L3 tunnel if subnets are configured.
+        if !self.l3_tunnel_subnets.is_empty() {
+            let subnets = self.l3_tunnel_subnets.clone();
+            let tunnel_cmd_tx = self.inbound_cmd_tx.clone().unwrap();
+            match runtime.block_on(
+                arcbox_net::darwin::l3_tunnel::L3TunnelService::start(subnets, tunnel_cmd_tx),
+            ) {
+                Ok((tunnel_svc, tun_writer)) => {
+                    datapath.tun_writer = Some(tun_writer);
+                    self.l3_tunnel = Some(tunnel_svc);
+                    tracing::info!("L3 tunnel service started for datapath");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to start L3 tunnel, continuing without");
+                }
+            }
+        }
+
         runtime.spawn(async move {
             if let Err(e) = datapath.run().await {
                 tracing::error!("Network datapath exited with error: {}", e);
