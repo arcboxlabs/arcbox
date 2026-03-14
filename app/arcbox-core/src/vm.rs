@@ -280,7 +280,11 @@ impl VmManager {
     /// # Errors
     ///
     /// Returns an error if the VM cannot be started.
-    pub fn start(&self, id: &VmId) -> Result<()> {
+    pub fn start(
+        &self,
+        id: &VmId,
+        shared_dns_hosts: Option<std::sync::Arc<arcbox_dns::LocalHostsTable>>,
+    ) -> Result<()> {
         let mut vms = self
             .vms
             .write()
@@ -309,6 +313,15 @@ impl VmManager {
                 return Err(CoreError::Vm(e.to_string()));
             }
         };
+
+        // Share the host DNS hosts table with the VMM-side DnsForwarder.
+        #[cfg(target_os = "macos")]
+        if let Some(table) = shared_dns_hosts {
+            vmm.set_shared_dns_hosts(table);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = shared_dns_hosts;
+
         if let Err(e) = vmm.start() {
             entry.info.state = VmState::Created;
             return Err(CoreError::Vm(e.to_string()));
@@ -959,7 +972,7 @@ mod tests {
         let (manager, _dir) = test_vm_manager();
         let vm_id = manager.create(VmConfig::default()).unwrap();
 
-        let _ = manager.start(&vm_id);
+        let _ = manager.start(&vm_id, None);
         let info = manager.get(&vm_id).expect("vm should still exist");
         assert_eq!(info.state, VmState::Created);
     }
