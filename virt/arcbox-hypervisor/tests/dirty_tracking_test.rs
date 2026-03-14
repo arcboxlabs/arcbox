@@ -19,10 +19,6 @@ use arcbox_hypervisor::{
     traits::GuestMemory,
 };
 
-// ============================================================================
-// Dirty Tracking Enable/Disable Tests
-// ============================================================================
-
 /// Test enabling dirty page tracking.
 ///
 /// Verifies that:
@@ -83,10 +79,6 @@ fn test_disable_dirty_tracking() {
 
     println!("Dirty tracking disabled successfully");
 }
-
-// ============================================================================
-// Dirty Page Detection Tests
-// ============================================================================
 
 /// Test that get_dirty_pages returns empty when no pages have been modified.
 ///
@@ -282,10 +274,6 @@ fn test_cross_page_write() {
     println!("Cross-page boundary write detection works correctly");
 }
 
-// ============================================================================
-// Performance Tests
-// ============================================================================
-
 /// Test dirty page tracking performance (FNV-1a hash overhead).
 ///
 /// This test measures the overhead of the software-based dirty tracking
@@ -418,10 +406,6 @@ fn test_dirty_tracking_performance_with_writes() {
     println!();
     println!("Performance test with writes completed");
 }
-
-// ============================================================================
-// Edge Case Tests
-// ============================================================================
 
 /// Test dirty tracking with minimum memory size (single page).
 #[test]

@@ -88,6 +88,7 @@ impl GuestDockerBackend {
                     .connect_vsock_port(self.machine_name, port)
                 {
                     Ok(fd) => {
+                        // SAFETY: fd is a valid open file descriptor with exclusive ownership.
                         let _owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
                         tracing::debug!(port, "guest docker endpoint is ready");
                         return Ok(());

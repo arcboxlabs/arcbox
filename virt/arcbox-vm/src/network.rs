@@ -177,10 +177,6 @@ impl NetworkManager {
     }
 }
 
-// =============================================================================
-// Platform helpers
-// =============================================================================
-
 #[cfg(target_os = "linux")]
 fn destroy_tap(tap_name: &str) {
     use std::process::Command;

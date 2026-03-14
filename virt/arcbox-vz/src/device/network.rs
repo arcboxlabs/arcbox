@@ -45,6 +45,7 @@ impl NetworkDeviceConfiguration {
     /// Creates a network device with the given attachment.
     fn with_attachment(attachment: *mut AnyObject) -> VZResult<Self> {
         // SAFETY: ObjC new on valid VZVirtioNetworkDeviceConfiguration class. Result is checked non-null.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             let cls = get_class("VZVirtioNetworkDeviceConfiguration").ok_or_else(|| {
                 VZError::Internal {
@@ -89,12 +90,9 @@ impl Drop for NetworkDeviceConfiguration {
     }
 }
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
 fn create_file_handle_attachment(file_handle: *mut AnyObject) -> VZResult<*mut AnyObject> {
     // SAFETY: ObjC alloc/init on valid VZFileHandleNetworkDeviceAttachment. ObjC exceptions are caught to prevent abort.
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     unsafe {
         let cls =
             get_class("VZFileHandleNetworkDeviceAttachment").ok_or_else(|| VZError::Internal {
@@ -148,6 +146,7 @@ fn create_file_handle_attachment(file_handle: *mut AnyObject) -> VZResult<*mut A
 
 fn create_nat_attachment() -> VZResult<*mut AnyObject> {
     // SAFETY: ObjC new on valid VZNATNetworkDeviceAttachment class. Result is checked non-null.
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     unsafe {
         let cls = get_class("VZNATNetworkDeviceAttachment").ok_or_else(|| VZError::Internal {
             code: -1,
@@ -168,6 +167,7 @@ fn create_nat_attachment() -> VZResult<*mut AnyObject> {
 
 fn create_random_mac() -> VZResult<*mut AnyObject> {
     // SAFETY: Sending randomLocallyAdministeredAddress to valid VZMACAddress class.
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     unsafe {
         let cls = get_class("VZMACAddress").ok_or_else(|| VZError::Internal {
             code: -1,

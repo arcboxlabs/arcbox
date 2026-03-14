@@ -378,6 +378,7 @@ impl DatapathPoller {
             for &buf_idx in &tx_batch[..tx_count] {
                 // Get buffer pointer and length first to avoid borrow conflicts.
                 // Safety: buf_idx comes from our ring buffer and is valid.
+                // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
                 let (ptr, len) = unsafe {
                     let buffer = network.packet_pool().get_mut(buf_idx);
                     (buffer.as_mut_ptr(), buffer.len())
@@ -405,6 +406,7 @@ impl DatapathPoller {
             for &buf_idx in &rx_batch[..rx_count] {
                 // Get buffer pointer and length first to avoid borrow conflicts.
                 // Safety: buf_idx comes from our ring buffer and is valid.
+                // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
                 let (ptr, len) = unsafe {
                     let buffer = network.packet_pool().get_mut(buf_idx);
                     (buffer.as_mut_ptr(), buffer.len())

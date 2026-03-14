@@ -74,18 +74,22 @@ impl DarwinTun {
     pub fn new() -> io::Result<Self> {
         // Step 1: Create a PF_SYSTEM socket with SYSPROTO_CONTROL protocol.
         // Safety: socket() is safe to call with valid parameters.
+        // SAFETY: Arguments are valid socket(2) parameters.
         let fd = unsafe { libc::socket(libc::PF_SYSTEM, libc::SOCK_DGRAM, libc::SYSPROTO_CONTROL) };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
 
         // Safety: fd is valid from the socket() call above.
+        // SAFETY: fd is a valid open file descriptor with exclusive ownership.
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
 
         // Step 2: Look up the control ID for "com.apple.net.utun_control".
+        // SAFETY: The target type is a C struct that can be safely zero-initialized.
         let mut ctl_info: libc::ctl_info = unsafe { std::mem::zeroed() };
         let ctl_name = b"com.apple.net.utun_control\0";
         // Safety: ctl_name fits within ctl_info.ctl_name (MAX_KCTL_NAME = 96 bytes).
+        // SAFETY: Source and destination do not overlap; both are valid for the given count.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 ctl_name.as_ptr(),
@@ -95,6 +99,7 @@ impl DarwinTun {
         }
 
         // Safety: CTLIOCGINFO ioctl is safe with a valid fd and ctl_info pointer.
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe { libc::ioctl(fd.as_raw_fd(), libc::CTLIOCGINFO, &mut ctl_info) };
         if ret < 0 {
             return Err(io::Error::last_os_error());
@@ -112,6 +117,7 @@ impl DarwinTun {
         };
 
         // Safety: connect() is safe with valid fd and properly initialized addr.
+        // SAFETY: fd is a valid socket; addr and addrlen are correct for the address family.
         let ret = unsafe {
             libc::connect(
                 fd.as_raw_fd(),
@@ -141,6 +147,7 @@ impl DarwinTun {
         let mut name_len: libc::socklen_t = name_buf.len() as libc::socklen_t;
 
         // Safety: getsockopt is safe with valid fd and properly sized buffer.
+        // SAFETY: fd is valid; buffer is properly sized for the option.
         let ret = unsafe {
             libc::getsockopt(
                 fd,
@@ -197,11 +204,13 @@ impl DarwinTun {
     ) -> io::Result<()> {
         // Use a temporary DGRAM socket for ioctl operations on the interface.
         // Safety: socket() with AF_INET/SOCK_DGRAM is always safe.
+        // SAFETY: Arguments are valid socket(2) parameters.
         let ctl_fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
         if ctl_fd < 0 {
             return Err(io::Error::last_os_error());
         }
         // Safety: ctl_fd is valid from socket() above.
+        // SAFETY: fd is a valid open file descriptor with exclusive ownership.
         let ctl_fd = unsafe { OwnedFd::from_raw_fd(ctl_fd) };
 
         // Build the interface name as a C-compatible fixed-size array.
@@ -245,8 +254,10 @@ impl DarwinTun {
         ioctl_cmd: libc::c_ulong,
         addr: Ipv4Addr,
     ) -> io::Result<()> {
+        // SAFETY: The target type is a C struct that can be safely zero-initialized.
         let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
         // Safety: ifr_name is IFNAMSIZ bytes.
+        // SAFETY: Source and destination do not overlap; both are valid for the given count.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 ifr_name.as_ptr(),
@@ -258,6 +269,7 @@ impl DarwinTun {
         // Build sockaddr_in for the address.
         let sin = Self::make_sockaddr_in(addr);
         // Safety: sockaddr_in fits within the ifr_ifru union.
+        // SAFETY: Source and destination do not overlap; both are valid for the given count.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 (&raw const sin).cast::<u8>(),
@@ -267,6 +279,7 @@ impl DarwinTun {
         }
 
         // Safety: ioctl with valid fd and properly initialized ifreq.
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe { libc::ioctl(ctl_fd, ioctl_cmd, &ifr) };
         if ret < 0 {
             return Err(io::Error::last_os_error());
@@ -277,8 +290,10 @@ impl DarwinTun {
 
     /// Brings the interface up by setting the IFF_UP flag.
     fn set_if_up(ctl_fd: RawFd, ifr_name: &[u8; libc::IFNAMSIZ]) -> io::Result<()> {
+        // SAFETY: The target type is a C struct that can be safely zero-initialized.
         let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
         // Safety: ifr_name is IFNAMSIZ bytes.
+        // SAFETY: Source and destination do not overlap; both are valid for the given count.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 ifr_name.as_ptr(),
@@ -313,6 +328,7 @@ impl DarwinTun {
 
     /// Constructs a `sockaddr_in` for the given IPv4 address.
     fn make_sockaddr_in(addr: Ipv4Addr) -> libc::sockaddr_in {
+        // SAFETY: The target type is a C struct that can be safely zero-initialized.
         let mut sin: libc::sockaddr_in = unsafe { std::mem::zeroed() };
         sin.sin_len = std::mem::size_of::<libc::sockaddr_in>() as u8;
         sin.sin_family = libc::AF_INET as u8;
@@ -394,6 +410,7 @@ impl DarwinTun {
         ];
 
         // Safety: readv is safe with valid fd and properly initialized iovecs.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let n = unsafe { libc::readv(self.fd.as_raw_fd(), iov.as_ptr(), 2) };
         if n < 0 {
             return Err(io::Error::last_os_error());
@@ -415,6 +432,7 @@ impl DarwinTun {
     /// Returns an error if the fcntl call fails.
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         // Safety: fcntl with F_GETFL is safe on a valid fd.
+        // SAFETY: fd is a valid open file descriptor; command and arguments are valid.
         let flags = unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_GETFL) };
         if flags < 0 {
             return Err(io::Error::last_os_error());
@@ -427,6 +445,7 @@ impl DarwinTun {
         };
 
         // Safety: fcntl with F_SETFL is safe on a valid fd.
+        // SAFETY: fd is a valid open file descriptor; command and arguments are valid.
         let ret = unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_SETFL, new_flags) };
         if ret < 0 {
             return Err(io::Error::last_os_error());
@@ -462,6 +481,7 @@ impl crate::nat_backend::HostNetIO for DarwinTun {
             revents: 0,
         };
         // Safety: poll with timeout=0 is non-blocking and safe with a valid fd.
+        // SAFETY: pollfd is properly initialized; nfds and timeout are valid.
         let ret = unsafe { libc::poll(&raw mut pfd, 1, 0) };
         ret > 0 && (pfd.revents & libc::POLLIN) != 0
     }

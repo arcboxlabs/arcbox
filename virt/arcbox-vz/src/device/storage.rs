@@ -36,6 +36,7 @@ impl StorageDeviceConfiguration {
     /// Creates a storage device with the given attachment.
     fn with_attachment(attachment: *mut AnyObject) -> VZResult<Self> {
         // SAFETY: ObjC alloc/init on valid VZVirtioBlockDeviceConfiguration class with a valid attachment pointer.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             let cls =
                 get_class("VZVirtioBlockDeviceConfiguration").ok_or_else(|| VZError::Internal {
@@ -73,12 +74,9 @@ impl Drop for StorageDeviceConfiguration {
     }
 }
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
 fn create_disk_attachment(path: &str, read_only: bool) -> VZResult<*mut AnyObject> {
     // SAFETY: ObjC alloc/init on valid VZDiskImageStorageDeviceAttachment class. NSURL from validated path. Error out-parameter is checked.
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     unsafe {
         let cls =
             get_class("VZDiskImageStorageDeviceAttachment").ok_or_else(|| VZError::Internal {

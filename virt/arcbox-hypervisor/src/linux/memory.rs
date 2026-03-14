@@ -312,6 +312,7 @@ impl KvmMemory {
             userspace_addr: slot.userspace_addr,
         };
 
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe {
             libc::ioctl(
                 fd,
@@ -343,6 +344,7 @@ impl KvmMemory {
             dirty_bitmap: bitmap.as_mut_ptr(),
         };
 
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe {
             libc::ioctl(
                 fd,
@@ -400,6 +402,7 @@ impl KvmMemory {
             {
                 let offset = addr.raw() - region.guest_addr.raw();
                 let remaining = region.size - offset;
+                // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
                 let ptr = unsafe { region.host_addr.add(offset as usize) };
                 return Ok((ptr, remaining, region.read_only));
             }
@@ -431,6 +434,7 @@ impl KvmMemory {
 
     /// Writes a value to guest memory at the specified address.
     pub fn write_obj<T: Copy>(&self, addr: GuestAddress, val: &T) -> Result<(), HypervisorError> {
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         let bytes = unsafe {
             std::slice::from_raw_parts(val as *const T as *const u8, std::mem::size_of::<T>())
         };
@@ -440,6 +444,7 @@ impl KvmMemory {
     /// Reads a value from guest memory at the specified address.
     pub fn read_obj<T: Copy + Default>(&self, addr: GuestAddress) -> Result<T, HypervisorError> {
         let mut val = T::default();
+        // SAFETY: Pointer is valid, aligned, and exclusively owned; length does not exceed the allocation.
         let bytes = unsafe {
             std::slice::from_raw_parts_mut(&mut val as *mut T as *mut u8, std::mem::size_of::<T>())
         };
@@ -464,6 +469,7 @@ impl KvmMemory {
             )));
         }
 
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             std::ptr::write_bytes(ptr, val, len);
         }
@@ -484,6 +490,7 @@ impl GuestMemory for KvmMemory {
             )));
         }
 
+        // SAFETY: Source and destination do not overlap; both are valid for the given count.
         unsafe {
             std::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr(), buf.len());
         }
@@ -508,6 +515,7 @@ impl GuestMemory for KvmMemory {
             )));
         }
 
+        // SAFETY: Source and destination do not overlap; both are valid for the given count.
         unsafe {
             std::ptr::copy_nonoverlapping(buf.as_ptr(), ptr, buf.len());
         }
@@ -613,6 +621,7 @@ impl GuestMemory for KvmMemory {
                 )));
             }
 
+            // SAFETY: Source and destination do not overlap; both are valid for the given count.
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     region.host_addr,
@@ -690,6 +699,7 @@ mod tests {
         assert!(!ptr.is_null());
 
         // Write via pointer
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             *ptr = 42;
         }

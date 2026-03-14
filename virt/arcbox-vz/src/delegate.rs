@@ -31,10 +31,6 @@ pub enum DelegateError {
     ClassNotInitialized,
 }
 
-// ============================================================================
-// FFI Declarations
-// ============================================================================
-
 // SAFETY: ObjC runtime FFI declarations — these are well-known C functions with stable ABI.
 unsafe extern "C" {
     fn class_addMethod(
@@ -62,10 +58,6 @@ unsafe extern "C" {
     ) -> *mut c_void;
     fn sel_registerName(name: *const c_char) -> Sel;
 }
-
-// ============================================================================
-// Listener Registry
-// ============================================================================
 
 /// Handle type for listener callbacks.
 pub type ListenerHandle = u64;
@@ -128,10 +120,6 @@ fn send_connection(handle: ListenerHandle, conn: IncomingConnection) -> bool {
     }
 }
 
-// ============================================================================
-// VZVirtioSocketListenerDelegate Implementation
-// ============================================================================
-
 /// Wrapper for optional class pointer that implements Send + Sync.
 struct ClassResult(Result<*const AnyClass, DelegateError>);
 
@@ -155,6 +143,7 @@ const HANDLE_IVAR: &[u8] = b"_listenerHandle\0";
 /// Returns an error if the delegate class cannot be created.
 pub fn get_delegate_class() -> Result<*const AnyClass, DelegateError> {
     // SAFETY: Class creation is done once via OnceLock; `create_delegate_class` is unsafe fn.
+    // SAFETY: Called once via OnceLock; class registration is thread-safe.
     let result = DELEGATE_CLASS.get_or_init(|| ClassResult(unsafe { create_delegate_class() }));
     // Clone the result since we can't move out of OnceLock
     match &result.0 {
@@ -315,10 +304,6 @@ unsafe extern "C" fn should_accept_connection(
         }
     }
 }
-
-// ============================================================================
-// Delegate Instance Creation
-// ============================================================================
 
 /// Creates a new delegate instance with the given handle.
 ///

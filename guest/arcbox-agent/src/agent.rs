@@ -6,10 +6,6 @@
 use anyhow::Result;
 use arcbox_constants::ports::AGENT_PORT;
 
-// =============================================================================
-// EnsureRuntime State Machine (platform-independent, testable)
-// =============================================================================
-
 pub mod ensure_runtime {
     use std::sync::OnceLock;
 
@@ -191,10 +187,6 @@ pub mod ensure_runtime {
     }
 }
 
-// =============================================================================
-// Linux Implementation
-// =============================================================================
-
 #[cfg(target_os = "linux")]
 mod linux {
     use std::io::{Read as _, Seek as _, SeekFrom};
@@ -234,10 +226,6 @@ mod linux {
         PingResponse, RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest,
         RuntimeStatusResponse, SystemInfo,
     };
-
-    // =========================================================================
-    // Sandbox service singleton
-    // =========================================================================
 
     /// Returns the global [`SandboxService`] singleton.
     ///
@@ -974,6 +962,7 @@ mod linux {
             };
             // SAFETY: `ts` points to a valid initialized timespec for this call,
             // and CLOCK_REALTIME is a valid clock ID on Linux guests.
+            // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
             let ret = unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &ts) };
             if ret != 0 {
                 tracing::warn!(
@@ -1639,10 +1628,6 @@ mod linux {
         info
     }
 }
-// =============================================================================
-// macOS Stub Implementation (for development/testing)
-// =============================================================================
-
 #[cfg(not(target_os = "linux"))]
 mod stub {
     use anyhow::Result;
@@ -1681,10 +1666,6 @@ mod stub {
     }
 }
 
-// =============================================================================
-// Public API
-// =============================================================================
-
 #[cfg(target_os = "linux")]
 pub use linux::Agent;
 
@@ -1697,17 +1678,9 @@ pub async fn run() -> Result<()> {
     agent.run().await
 }
 
-// =============================================================================
-// Tests
-// =============================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // =========================================================================
-    // Docker Log Format Parsing Tests
-    // =========================================================================
 
     /// Helper to parse Docker JSON log line for testing.
     fn parse_docker_log_line(line: &str, stdout: bool, stderr: bool) -> Option<String> {
@@ -1802,18 +1775,10 @@ mod tests {
         assert!(result.unwrap().contains("\\n"));
     }
 
-    // =========================================================================
-    // Agent Creation Tests
-    // =========================================================================
-
     #[test]
     fn test_agent_creation() {
         let _agent = Agent::new();
     }
-
-    // =========================================================================
-    // EnsureRuntime State Machine Tests
-    // =========================================================================
 
     use crate::agent::ensure_runtime::{
         self, RuntimeGuard, RuntimeState, STATUS_FAILED, STATUS_REUSED, STATUS_STARTED,

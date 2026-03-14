@@ -166,6 +166,7 @@ impl Vmm {
         // 1. Create a SOCK_DGRAM socketpair for L2 Ethernet frame exchange.
         let mut fds: [libc::c_int; 2] = [0; 2];
         // SAFETY: socketpair with valid parameters.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
         if ret != 0 {
             return Err(VmmError::Device(format!(

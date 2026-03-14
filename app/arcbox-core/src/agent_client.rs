@@ -310,10 +310,6 @@ impl AgentClient {
             .map_err(|e| CoreError::Machine(format!("failed to decode response: {e}")))
     }
 
-    // =========================================================================
-    // Sandbox operations
-    // =========================================================================
-
     /// Creates a new sandbox in the guest VM.
     ///
     /// # Errors

@@ -35,10 +35,6 @@ use std::os::unix::io::RawFd;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
-// ============================================================================
-// FFI Declarations
-// ============================================================================
-
 // SAFETY: dispatch_async_f is a GCD function from libdispatch, always available on macOS.
 unsafe extern "C" {
     fn dispatch_async_f(
@@ -47,10 +43,6 @@ unsafe extern "C" {
         work: unsafe extern "C" fn(*mut c_void),
     );
 }
-
-// ============================================================================
-// Connect Context
-// ============================================================================
 
 /// Context passed to `dispatch_async_f` for vsock connection.
 struct ConnectContext {
@@ -69,6 +61,7 @@ unsafe impl Send for ConnectContext {}
 unsafe extern "C" fn connect_work(ctx: *mut c_void) {
     // SAFETY: ctx is a valid pointer to a Box<ConnectContext> leaked via Box::into_raw in connect().
     // We reclaim ownership here. objc_msgSend is called with a valid device pointer and selector.
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     unsafe {
         let context = Box::from_raw(ctx as *mut ConnectContext);
 
@@ -89,10 +82,6 @@ unsafe extern "C" fn connect_work(ctx: *mut c_void) {
         // We don't release it here because VZ Framework retains it during the async operation.
     }
 }
-
-// ============================================================================
-// Virtio Socket Device
-// ============================================================================
 
 /// A virtio socket device for host-guest communication.
 ///
@@ -198,6 +187,7 @@ impl VirtioSocketDevice {
             Ok(Ok(result)) => {
                 // Release the block now that we're done
                 // SAFETY: block was heap-allocated by create_vsock_context_block via _Block_copy.
+                // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
                 unsafe {
                     _Block_release(block);
                 }
@@ -237,6 +227,7 @@ impl VirtioSocketDevice {
             Ok(Err(_)) => {
                 // Channel was closed without sending (shouldn't happen)
                 // SAFETY: block was heap-allocated by create_vsock_context_block via _Block_copy.
+                // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
                 unsafe {
                     _Block_release(block);
                 }
@@ -358,6 +349,7 @@ impl VirtioSocketDevice {
             unsafe extern "C" fn set_listener_work(ctx: *mut c_void) {
                 // SAFETY: ctx is a valid Box<SetListenerContext> pointer.
                 // Sending setSocketListener:forPort: to a valid VZVirtioSocketDevice.
+                // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
                 unsafe {
                     let context = Box::from_raw(ctx as *mut SetListenerContext);
                     tracing::debug!(
@@ -424,6 +416,7 @@ impl VirtioSocketDevice {
         tracing::debug!("VirtioSocketDevice::remove_listener(port={})", port);
 
         // SAFETY: Sending setSocketListener:forPort: to a valid VZVirtioSocketDevice with nil listener.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             let set_listener_sel = objc2::sel!(setSocketListener:forPort:);
             let set_listener_fn: unsafe extern "C" fn(
@@ -444,10 +437,6 @@ fn is_transient_connect_error(message: &str) -> bool {
         || msg.contains("connection aborted")
         || msg.contains("broken pipe")
 }
-
-// ============================================================================
-// Virtio Socket Connection
-// ============================================================================
 
 /// A vsock connection to the guest.
 ///
@@ -516,6 +505,7 @@ impl VirtioSocketConnection {
     /// The number of bytes read, or an error.
     pub fn read(&self, buf: &mut [u8]) -> std::io::Result<usize> {
         // SAFETY: self.fd is a valid file descriptor. buf.as_mut_ptr() and buf.len() provide a valid write target.
+        // SAFETY: fd is valid; buffer pointer and length are within the allocated slice bounds.
         let n = unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut c_void, buf.len()) };
         if n < 0 {
             Err(std::io::Error::last_os_error())
@@ -537,6 +527,7 @@ impl VirtioSocketConnection {
     /// The number of bytes written, or an error.
     pub fn write(&self, buf: &[u8]) -> std::io::Result<usize> {
         // SAFETY: self.fd is a valid file descriptor. buf.as_ptr() and buf.len() provide valid read source.
+        // SAFETY: fd is valid; buffer pointer and length are within the slice bounds.
         let n = unsafe { libc::write(self.fd, buf.as_ptr() as *const c_void, buf.len()) };
         if n < 0 {
             Err(std::io::Error::last_os_error())
@@ -560,16 +551,13 @@ impl Drop for VirtioSocketConnection {
     fn drop(&mut self) {
         if self.fd >= 0 {
             // SAFETY: self.fd is a valid file descriptor obtained via dup() during connection setup.
+            // SAFETY: fd is a valid open file descriptor owned by this context.
             unsafe {
                 libc::close(self.fd);
             }
         }
     }
 }
-
-// ============================================================================
-// Virtio Socket Listener
-// ============================================================================
 
 /// A listener for incoming vsock connections from the guest.
 ///

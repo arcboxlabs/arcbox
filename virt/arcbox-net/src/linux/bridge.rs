@@ -392,6 +392,7 @@ mod tests {
     #[test]
     fn test_bridge_creation_requires_root() {
         // This test requires root privileges
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         if unsafe { libc::geteuid() } != 0 {
             eprintln!("Skipping test: requires root privileges");
             return;

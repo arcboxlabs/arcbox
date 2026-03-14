@@ -19,6 +19,7 @@ impl EntropyDeviceConfiguration {
     /// Creates a new entropy device configuration.
     pub fn new() -> VZResult<Self> {
         // SAFETY: ObjC new on valid VZVirtioEntropyDeviceConfiguration class. Result is checked non-null. retain prevents autorelease.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             let cls = get_class("VZVirtioEntropyDeviceConfiguration").ok_or_else(|| {
                 VZError::Internal {

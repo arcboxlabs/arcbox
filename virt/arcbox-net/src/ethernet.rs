@@ -109,10 +109,6 @@ pub fn prepend_ethernet_header(ip_packet: &[u8], dst_mac: [u8; 6], src_mac: [u8;
     frame
 }
 
-// ============================================================================
-// ARP Responder
-// ============================================================================
-
 /// Responds to ARP requests targeting the gateway IP.
 pub struct ArpResponder {
     gateway_ip: Ipv4Addr,
@@ -184,10 +180,6 @@ impl ArpResponder {
         Some(reply)
     }
 }
-
-// ============================================================================
-// UDP/IP/Ethernet packet builder
-// ============================================================================
 
 /// Builds a complete Ethernet frame containing a UDP/IPv4 packet.
 ///
@@ -297,10 +289,6 @@ fn udp_checksum(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, udp_segment: &[u8]) -> u16 {
     // UDP uses 0xFFFF to represent a computed zero checksum
     if result == 0 { 0xFFFF } else { result }
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
 mod tests {

@@ -89,10 +89,6 @@ impl<K: std::hash::Hash + Eq + Clone, V: Clone> MetadataCache<K, V> {
     }
 }
 
-// ============================================================================
-// Negative Cache
-// ============================================================================
-
 /// Configuration for the negative cache.
 ///
 /// Negative caching stores "file not found" results to avoid repeated

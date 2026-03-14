@@ -61,10 +61,6 @@ const MSG_EXIT: u8 = 0x12;
 /// Maximum allowed frame payload size (16 MiB).
 pub(crate) const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 
-// =============================================================================
-// Public types
-// =============================================================================
-
 /// A chunk of output emitted by a guest process.
 #[derive(Debug, Clone)]
 pub struct OutputChunk {
@@ -99,10 +95,6 @@ pub struct StartCommand {
     pub tty_height: u16,
     pub timeout_seconds: u32,
 }
-
-// =============================================================================
-// Internal helpers
-// =============================================================================
 
 /// How long to wait for the guest agent to start accepting vsock connections.
 const AGENT_READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -280,10 +272,6 @@ async fn drain_output<R: AsyncReadExt + Unpin>(
     }
 }
 
-// =============================================================================
-// run() — non-interactive command execution
-// =============================================================================
-
 /// Run a command in the sandbox and stream its output.
 ///
 /// The host sends `MSG_START` followed immediately by `MSG_EOF` (no stdin),
@@ -316,10 +304,6 @@ pub async fn run(
 
     Ok(rx)
 }
-
-// =============================================================================
-// exec() — interactive bidirectional session
-// =============================================================================
 
 /// Start an interactive session in the sandbox.
 ///
@@ -373,10 +357,6 @@ pub async fn exec(
 
     Ok((in_tx, out_rx))
 }
-
-// =============================================================================
-// sync_clock() — synchronise guest clock after snapshot restore
-// =============================================================================
 
 /// Synchronise the guest clock to the current host time.
 ///

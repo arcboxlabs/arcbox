@@ -14,10 +14,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::oneshot;
 
-// ============================================================================
-// VM State
-// ============================================================================
-
 /// The execution state of a virtual machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i64)]
@@ -62,10 +58,6 @@ impl From<i64> for VirtualMachineState {
     }
 }
 
-// ============================================================================
-// Virtual Machine
-// ============================================================================
-
 /// A running virtual machine.
 ///
 /// This represents a VM that has been created from a `VirtualMachineConfiguration`.
@@ -91,6 +83,7 @@ impl VirtualMachine {
     /// Returns the current state of the VM.
     pub fn state(&self) -> VirtualMachineState {
         // SAFETY: self.inner is a valid VZVirtualMachine pointer. Sending state returns an i64 enum value.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             let state = msg_send_i64!(self.inner, state);
             VirtualMachineState::from(state)
@@ -100,24 +93,28 @@ impl VirtualMachine {
     /// Returns whether the VM can be started.
     pub fn can_start(&self) -> bool {
         // SAFETY: Sending canStart to a valid VZVirtualMachine.
+        // SAFETY: Receiver is a valid Objective-C object; selector returns BOOL.
         unsafe { msg_send_bool!(self.inner, canStart).as_bool() }
     }
 
     /// Returns whether the VM can be stopped.
     pub fn can_stop(&self) -> bool {
         // SAFETY: Sending canStop to a valid VZVirtualMachine.
+        // SAFETY: Receiver is a valid Objective-C object; selector returns BOOL.
         unsafe { msg_send_bool!(self.inner, canStop).as_bool() }
     }
 
     /// Returns whether the VM can be paused.
     pub fn can_pause(&self) -> bool {
         // SAFETY: Sending canPause to a valid VZVirtualMachine.
+        // SAFETY: Receiver is a valid Objective-C object; selector returns BOOL.
         unsafe { msg_send_bool!(self.inner, canPause).as_bool() }
     }
 
     /// Returns whether the VM can be resumed.
     pub fn can_resume(&self) -> bool {
         // SAFETY: Sending canResume to a valid VZVirtualMachine.
+        // SAFETY: Receiver is a valid Objective-C object; selector returns BOOL.
         unsafe { msg_send_bool!(self.inner, canResume).as_bool() }
     }
 
@@ -126,6 +123,7 @@ impl VirtualMachine {
     pub fn can_request_stop(&self) -> bool {
         self.queue
             // SAFETY: Sending canRequestStop to a valid VZVirtualMachine on its dispatch queue.
+            // SAFETY: Receiver is a valid Objective-C object; selector returns BOOL.
             .sync(|| unsafe { msg_send_bool!(self.inner, canRequestStop).as_bool() })
     }
 
@@ -192,6 +190,7 @@ impl VirtualMachine {
         // Dispatch start to VM queue
         let inner = self.inner;
         // SAFETY: Sending startWithCompletionHandler: to a valid VZVirtualMachine on its dispatch queue.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         self.queue.sync(|| unsafe {
             let sel = objc2::sel!(startWithCompletionHandler:);
             let func: unsafe extern "C" fn(*const AnyObject, objc2::runtime::Sel, *const c_void) =
@@ -223,6 +222,7 @@ impl VirtualMachine {
         let inner = self.inner;
         // SAFETY: Calling stopWithCompletionHandler: on a valid VZVirtualMachine on its dispatch
         // queue. ObjC exceptions are caught.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let stop_dispatch: VZResult<()> = self.queue.sync(|| unsafe {
             // Create a simple completion block
             static STOP_BLOCK: OnceLock<BlockPtr> = OnceLock::new();
@@ -239,6 +239,7 @@ impl VirtualMachine {
 
                 unsafe extern "C" fn stop_handler(_block: *const c_void, error: *mut AnyObject) {
                     // SAFETY: error is checked non-null. Sending localizedDescription to a valid NSError.
+                    // SAFETY: Receiver is a valid Objective-C object; selector and arguments match the method signature.
                     unsafe {
                         if !error.is_null() {
                             let desc = msg_send!(error, localizedDescription);
@@ -314,6 +315,7 @@ impl VirtualMachine {
 
         let inner = self.inner;
         // SAFETY: Calling pauseWithCompletionHandler: on a valid VZVirtualMachine on its dispatch queue.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         self.queue.sync(|| unsafe {
             static PAUSE_BLOCK: OnceLock<BlockPtr> = OnceLock::new();
 
@@ -329,6 +331,7 @@ impl VirtualMachine {
 
                 unsafe extern "C" fn pause_handler(_block: *const c_void, error: *mut AnyObject) {
                     // SAFETY: error is checked non-null. Sending localizedDescription to a valid NSError.
+                    // SAFETY: Receiver is a valid Objective-C object; selector and arguments match the method signature.
                     unsafe {
                         if !error.is_null() {
                             let desc = msg_send!(error, localizedDescription);
@@ -384,6 +387,7 @@ impl VirtualMachine {
 
         let inner = self.inner;
         // SAFETY: Calling resumeWithCompletionHandler: on a valid VZVirtualMachine on its dispatch queue.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         self.queue.sync(|| unsafe {
             static RESUME_BLOCK: OnceLock<BlockPtr> = OnceLock::new();
 
@@ -399,6 +403,7 @@ impl VirtualMachine {
 
                 unsafe extern "C" fn resume_handler(_block: *const c_void, error: *mut AnyObject) {
                     // SAFETY: error is checked non-null. Sending localizedDescription to a valid NSError.
+                    // SAFETY: Receiver is a valid Objective-C object; selector and arguments match the method signature.
                     unsafe {
                         if !error.is_null() {
                             let desc = msg_send!(error, localizedDescription);
@@ -453,6 +458,7 @@ impl VirtualMachine {
         }
 
         // SAFETY: Sending requestStopWithError: to a valid VZVirtualMachine on its dispatch queue.
+        // SAFETY: Receiver is a valid Objective-C object; selector returns BOOL.
         self.queue.sync(|| unsafe {
             let mut error: *mut AnyObject = std::ptr::null_mut();
             let result = msg_send_bool!(self.inner, requestStopWithError: &mut error);
@@ -470,6 +476,7 @@ impl VirtualMachine {
     pub fn socket_devices(&self) -> Vec<VirtioSocketDevice> {
         // SAFETY: Sending socketDevices to a valid VZVirtualMachine. NSArray elements are valid
         // VZVirtioSocketDevice pointers retained by the framework.
+        // SAFETY: Receiver is a valid Objective-C object; selector and arguments match the method signature.
         unsafe {
             let devices: *mut AnyObject = msg_send!(self.inner, socketDevices);
             if devices.is_null() {

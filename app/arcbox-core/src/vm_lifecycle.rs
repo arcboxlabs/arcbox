@@ -45,10 +45,6 @@ use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
-// =============================================================================
-// Constants
-// =============================================================================
-
 /// Default machine name used for container operations.
 pub const DEFAULT_MACHINE_NAME: &str = "default";
 
@@ -75,10 +71,6 @@ const BALLOON_SHRINK_DELAY_SECS: u64 = 10;
 const DOCKER_DATA_IMAGE_NAME: &str = "docker.img";
 /// Persistent guest dockerd data image size (64 GiB sparse file).
 const DOCKER_DATA_IMAGE_SIZE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
-// =============================================================================
-// VM Lifecycle State
-// =============================================================================
-
 /// Extended VM lifecycle state.
 ///
 /// This extends the basic `MachineState` with additional states
@@ -177,10 +169,6 @@ pub enum VmEvent {
     Retry,
 }
 
-// =============================================================================
-// Configuration
-// =============================================================================
-
 /// VM lifecycle configuration.
 #[derive(Debug, Clone)]
 pub struct VmLifecycleConfig {
@@ -254,10 +242,6 @@ impl Default for DefaultVmConfig {
 
 // Note: BootAssetProvider and BootAssets are now in crate::boot_assets module.
 
-// =============================================================================
-// Health Monitor
-// =============================================================================
-
 /// Health monitor for VM.
 ///
 /// Continuously monitors VM health via agent ping.
@@ -319,10 +303,6 @@ impl HealthMonitor {
         self.shutdown.cancel();
     }
 }
-
-// =============================================================================
-// Recovery Policy
-// =============================================================================
 
 /// Backoff strategy for recovery retries.
 #[derive(Debug, Clone)]
@@ -406,10 +386,6 @@ impl RecoveryPolicy {
         self.retries.load(Ordering::SeqCst)
     }
 }
-
-// =============================================================================
-// VM Lifecycle Manager
-// =============================================================================
 
 /// VM lifecycle manager.
 ///
@@ -941,10 +917,6 @@ impl VmLifecycleManager {
         Err(CoreError::Vm("timeout waiting for agent".to_string()))
     }
 
-    // =========================================================================
-    // Activity tracking & balloon control (Phase 2.1)
-    // =========================================================================
-
     /// Records activity, updating the last-activity timestamp.
     fn record_activity(&self) {
         let now_ms = std::time::SystemTime::now()
@@ -1169,10 +1141,6 @@ impl VmLifecycleManager {
 const fn is_not_found_error(err: &CoreError) -> bool {
     matches!(err, CoreError::Common(CommonError::NotFound(_)))
 }
-
-// =============================================================================
-// Tests
-// =============================================================================
 
 #[cfg(test)]
 mod tests {

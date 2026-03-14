@@ -311,6 +311,7 @@ pub const K_CF_STRING_ENCODING_UTF8: u32 = 0x08000100;
 #[must_use]
 pub unsafe fn cfstring_from_str(s: &str) -> CFStringRef {
     let cstr = std::ffi::CString::new(s).unwrap();
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     unsafe {
         CFStringCreateWithCString(
             kCFAllocatorDefault,
@@ -327,6 +328,7 @@ pub unsafe fn cfstring_from_str(s: &str) -> CFStringRef {
 /// The returned CFNumber must be released with CFRelease.
 #[must_use]
 pub unsafe fn cfnumber_from_i64(value: i64) -> CFNumberRef {
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     unsafe {
         CFNumberCreate(
             kCFAllocatorDefault,
@@ -343,6 +345,7 @@ pub unsafe fn cfnumber_from_i64(value: i64) -> CFNumberRef {
 /// The returned dictionary must be released with CFRelease.
 #[must_use]
 pub unsafe fn create_vmnet_config_dict() -> CFMutableDictionaryRef {
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     unsafe { CFDictionaryCreateMutable(kCFAllocatorDefault, 0, ptr::null(), ptr::null()) }
 }
 

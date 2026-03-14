@@ -68,10 +68,6 @@ fn context_manager() -> Result<DockerContextManager> {
         .context("Failed to initialize Docker context manager")
 }
 
-// =============================================================================
-// Setup — NDJSON progress
-// =============================================================================
-
 /// NDJSON progress line for `arcbox docker setup --format json`.
 #[derive(Serialize, Default)]
 struct SetupProgress {
@@ -98,10 +94,6 @@ fn emit_ndjson(p: SetupProgress) {
         println!("{json}");
     }
 }
-
-// =============================================================================
-// Setup — dispatch
-// =============================================================================
 
 /// Downloads and installs Docker CLI tools.
 async fn execute_setup(format: OutputFormat) -> Result<()> {
@@ -263,10 +255,6 @@ async fn execute_setup_table(
     Ok(())
 }
 
-// =============================================================================
-// Completions
-// =============================================================================
-
 /// Generate Docker CLI completions by running the installed docker binary.
 async fn generate_docker_completions(home: &Path, runtime_bin: &Path) -> Result<()> {
     let comp_dir = home.join(".arcbox/completions");
@@ -341,10 +329,6 @@ async fn generate_docker_completions(home: &Path, runtime_bin: &Path) -> Result<
     Ok(())
 }
 
-// =============================================================================
-// Helpers
-// =============================================================================
-
 /// Create or update a symlink, removing any stale one first.
 async fn create_or_update_symlink(target: &Path, link: &Path) -> Result<()> {
     if tokio::fs::symlink_metadata(link).await.is_ok() {
@@ -375,10 +359,6 @@ fn detect_bundle_xbin() -> Option<PathBuf> {
     let xbin = exe.parent()?.parent()?.join("xbin");
     xbin.is_dir().then_some(xbin)
 }
-
-// =============================================================================
-// Docker context management
-// =============================================================================
 
 /// Enables Docker CLI integration.
 fn execute_enable(manager: &DockerContextManager) -> Result<()> {

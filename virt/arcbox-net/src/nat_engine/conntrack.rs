@@ -367,6 +367,7 @@ impl ConnTrackTable {
             if cache_entry.key_hash == hash && cache_entry.key == *key {
                 self.stats.fast_hits.0.fetch_add(1, Ordering::Relaxed);
                 // Safety: The pointer is valid as long as the entry exists.
+                // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
                 return Some(unsafe { &*cache_entry.entry_ptr });
             }
         }

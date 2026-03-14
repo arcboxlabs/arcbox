@@ -14,10 +14,6 @@
 
 use std::mem::size_of;
 
-// ============================================================================
-// Constants
-// ============================================================================
-
 /// FUSE kernel protocol major version.
 pub const FUSE_KERNEL_VERSION: u32 = 7;
 
@@ -74,10 +70,6 @@ pub const FOPEN_KEEP_CACHE: u32 = 1 << 1;
 pub const FOPEN_NONSEEKABLE: u32 = 1 << 2;
 pub const FOPEN_CACHE_DIR: u32 = 1 << 3;
 pub const FOPEN_STREAM: u32 = 1 << 4;
-
-// ============================================================================
-// Opcodes
-// ============================================================================
 
 /// FUSE operation codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,10 +201,6 @@ pub struct StatFs {
     /// Fragment size.
     pub frsize: u32,
 }
-
-// ============================================================================
-// Request Structures
-// ============================================================================
 
 /// FUSE_INIT request.
 #[derive(Debug, Clone, Copy)]
@@ -522,10 +510,6 @@ pub struct FuseBatchForgetIn {
     pub dummy: u32,
 }
 
-// ============================================================================
-// Response Structures
-// ============================================================================
-
 /// FUSE_INIT response.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -679,10 +663,6 @@ impl FuseDirent {
     }
 }
 
-// ============================================================================
-// Opcode Conversion
-// ============================================================================
-
 impl FuseOpcode {
     /// Tries to convert a u32 to a `FuseOpcode`.
     #[must_use]
@@ -739,10 +719,6 @@ impl FuseOpcode {
         }
     }
 }
-
-// ============================================================================
-// Header Size Constants
-// ============================================================================
 
 impl FuseInHeader {
     /// Size of the input header.

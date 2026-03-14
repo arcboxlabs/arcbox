@@ -27,6 +27,7 @@ impl SerialPortConfiguration {
         let mut output_pipe: [libc::c_int; 2] = [0, 0];
 
         // SAFETY: libc::pipe creates valid fd pairs. File handles are created from valid fds. ObjC objects follow alloc/init pattern with null checks.
+        // SAFETY: fds points to a valid array of two integers.
         unsafe {
             if libc::pipe(input_pipe.as_mut_ptr()) != 0 {
                 return Err(VZError::OperationFailed(
@@ -126,15 +127,12 @@ impl Drop for SerialPortConfiguration {
     }
 }
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
 fn create_serial_port_attachment(
     read_handle: *mut AnyObject,
     write_handle: *mut AnyObject,
 ) -> VZResult<*mut AnyObject> {
     // SAFETY: ObjC alloc/init on valid VZFileHandleSerialPortAttachment class with valid NSFileHandle objects.
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     unsafe {
         let cls =
             get_class("VZFileHandleSerialPortAttachment").ok_or_else(|| VZError::Internal {

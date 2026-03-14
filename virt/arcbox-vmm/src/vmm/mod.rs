@@ -467,10 +467,6 @@ impl Vmm {
         self.config.balloon
     }
 
-    // ========================================================================
-    // Snapshot
-    // ========================================================================
-
     /// Captures a VM snapshot context from the running hypervisor VM.
     ///
     /// The returned context contains device state and full guest memory.
@@ -548,10 +544,6 @@ impl Vmm {
             "hypervisor VM handle is unavailable for restore".to_string(),
         ))
     }
-
-    // ========================================================================
-    // Event loop and device I/O
-    // ========================================================================
 
     /// Runs the VMM until it exits.
     ///

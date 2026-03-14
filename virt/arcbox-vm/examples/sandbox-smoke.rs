@@ -61,9 +61,6 @@ async fn main() -> anyhow::Result<()> {
 
     let manager = SandboxManager::new(config).context("SandboxManager::new")?;
 
-    // =========================================================================
-    // Phase 1 — Core lifecycle
-    // =========================================================================
     println!("\n=== Phase 1: Core lifecycle ===");
 
     let mut events = manager.subscribe_events();
@@ -256,9 +253,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // =========================================================================
-    // Phase 3 — Checkpoint
-    // =========================================================================
     let mut snapshot_id_opt: Option<String> = None;
     if run_phase3 {
         println!("\n=== Phase 3: Checkpoint ===");
@@ -271,9 +265,6 @@ async fn main() -> anyhow::Result<()> {
         snapshot_id_opt = Some(ck.snapshot_id);
     }
 
-    // =========================================================================
-    // Phase 1 cleanup
-    // =========================================================================
     manager
         .stop_sandbox(&id, 30)
         .await
@@ -285,9 +276,6 @@ async fn main() -> anyhow::Result<()> {
         .context("remove_sandbox")?;
     println!("  [remove] done");
 
-    // =========================================================================
-    // Phase 3 (cont) — Restore
-    // =========================================================================
     if let Some(snapshot_id) = snapshot_id_opt {
         println!("\n=== Phase 3 (cont): Restore ===");
 
@@ -331,10 +319,6 @@ async fn main() -> anyhow::Result<()> {
     println!("\nSmoke test passed.");
     Ok(())
 }
-
-// =============================================================================
-// Helpers
-// =============================================================================
 
 /// Run a command inside a sandbox and return its stdout as a `String`.
 ///

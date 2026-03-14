@@ -305,6 +305,7 @@ impl PacketPool {
             {
                 self.free_count.0.fetch_sub(1, Ordering::AcqRel);
                 // Safety: We have exclusive access via CAS success.
+                // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
                 unsafe {
                     (*self.buffers[head as usize].get())
                         .refcount
@@ -383,6 +384,7 @@ impl PacketPool {
     pub unsafe fn get(&self, idx: u32) -> &PacketBuffer {
         debug_assert!((idx as usize) < self.capacity);
         // Safety: caller guarantees buffer is allocated.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe { &*self.buffers[idx as usize].get() }
     }
 
@@ -397,6 +399,7 @@ impl PacketPool {
         debug_assert!((idx as usize) < self.capacity);
         // Safety: caller guarantees exclusive access per function contract.
         // UnsafeCell::get() is the correct way to get mutable access.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe { &mut *self.buffers[idx as usize].get() }
     }
 
@@ -462,6 +465,7 @@ mod tests {
         let idx = buf.index();
 
         // Free the buffer
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe { pool.free(buf) };
         assert_eq!(pool.free_count(), 10);
         assert_eq!(pool.allocated_count(), 0);

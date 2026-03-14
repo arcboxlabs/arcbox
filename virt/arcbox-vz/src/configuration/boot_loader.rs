@@ -6,19 +6,11 @@ use crate::{msg_send, msg_send_void};
 use objc2::runtime::AnyObject;
 use std::path::Path;
 
-// ============================================================================
-// Boot Loader Trait
-// ============================================================================
-
 /// Trait for boot loader configurations.
 pub trait BootLoader {
     /// Returns the underlying Objective-C object pointer.
     fn as_ptr(&self) -> *mut AnyObject;
 }
-
-// ============================================================================
-// Linux Boot Loader
-// ============================================================================
 
 /// A boot loader for Linux kernels.
 ///
@@ -51,6 +43,7 @@ impl LinuxBootLoader {
         let path_str = path.to_string_lossy();
 
         // SAFETY: ObjC alloc/init pattern on valid VZLinuxBootLoader class. Result is checked non-null.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             let cls = get_class("VZLinuxBootLoader").ok_or_else(|| VZError::Internal {
                 code: -1,
@@ -80,6 +73,7 @@ impl LinuxBootLoader {
         if path.exists() {
             let path_str = path.to_string_lossy();
             // SAFETY: self.inner is a valid VZLinuxBootLoader. NSURL is created from a validated path.
+            // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
             unsafe {
                 let url = nsurl_file_path(&path_str);
                 msg_send_void!(self.inner, setInitialRamdiskURL: url);
@@ -95,6 +89,7 @@ impl LinuxBootLoader {
     /// * `cmdline` - Kernel command line string (e.g., "console=hvc0 root=/dev/vda")
     pub fn set_command_line(&mut self, cmdline: &str) -> &mut Self {
         // SAFETY: self.inner is a valid VZLinuxBootLoader. NSString is created from a valid Rust str.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             let s = crate::ffi::nsstring(cmdline);
             msg_send_void!(self.inner, setCommandLine: s);

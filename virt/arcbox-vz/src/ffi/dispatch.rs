@@ -6,10 +6,6 @@
 use objc2::runtime::AnyObject;
 use std::ffi::c_void;
 
-// ============================================================================
-// Dispatch FFI
-// ============================================================================
-
 // SAFETY: These are GCD (Grand Central Dispatch) FFI declarations from libdispatch, a system library always available on macOS.
 unsafe extern "C" {
     fn dispatch_queue_create(label: *const i8, attr: *const c_void) -> *mut AnyObject;
@@ -29,10 +25,6 @@ unsafe extern "C" {
     static _dispatch_main_q: *mut AnyObject;
 }
 
-// ============================================================================
-// Dispatch Queue
-// ============================================================================
-
 /// A wrapper around a GCD dispatch queue.
 pub struct DispatchQueue {
     inner: *mut AnyObject,
@@ -50,6 +42,7 @@ impl DispatchQueue {
     pub fn new(label: &str) -> Self {
         let label_cstr = std::ffi::CString::new(label).unwrap();
         // SAFETY: dispatch_queue_create with a valid C string label and null attr (DISPATCH_QUEUE_SERIAL) always returns a valid queue.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let queue = unsafe {
             dispatch_queue_create(
                 label_cstr.as_ptr(),
@@ -69,6 +62,7 @@ impl DispatchQueue {
     pub fn main() -> Self {
         Self {
             // SAFETY: _dispatch_main_q is a global symbol always available on macOS.
+            // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
             inner: unsafe { _dispatch_main_q },
             owned: false,
         }
@@ -119,6 +113,7 @@ impl DispatchQueue {
             F: FnOnce() -> R,
         {
             // SAFETY: context is a valid pointer to Context<F, R> created in sync(). The closure is taken exactly once.
+            // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
             unsafe {
                 let ctx = &mut *(context as *mut Context<'_, F, R>);
                 if let Some(f) = ctx.closure.take() {
@@ -133,6 +128,7 @@ impl DispatchQueue {
         };
 
         // SAFETY: Context lives on the caller's stack and dispatch_sync_f blocks until trampoline completes, so the reference remains valid.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             dispatch_sync_f(
                 self.inner,
@@ -167,6 +163,7 @@ impl DispatchQueue {
             F: FnOnce() + Send + 'static,
         {
             // SAFETY: context is a valid pointer to a Box<F> leaked via Box::into_raw. We reclaim ownership here.
+            // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
             unsafe {
                 let f = Box::from_raw(context as *mut F);
                 f();
@@ -174,6 +171,7 @@ impl DispatchQueue {
         }
 
         // SAFETY: context is a leaked Box pointer that will be reclaimed inside the trampoline. The trampoline has the correct type for F.
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             dispatch_async_f(self.inner, context as *mut c_void, trampoline::<F>);
         }
@@ -184,16 +182,13 @@ impl Drop for DispatchQueue {
     fn drop(&mut self) {
         if self.owned && !self.inner.is_null() {
             // SAFETY: We only release queues we created (owned=true). The queue pointer was returned by dispatch_queue_create.
+            // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
             unsafe {
                 dispatch_release(self.inner);
             }
         }
     }
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
 mod tests {

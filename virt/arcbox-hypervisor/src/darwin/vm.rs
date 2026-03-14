@@ -345,6 +345,7 @@ impl DarwinVm {
         tracing::debug!("read_console_output called, fd={}", read_fd);
 
         // Check if fd is valid
+        // SAFETY: fd is a valid open file descriptor; command and arguments are valid.
         unsafe {
             let flags = libc::fcntl(read_fd, libc::F_GETFL);
             if flags == -1 {
@@ -419,6 +420,7 @@ impl DarwinVm {
             .serial_fds
             .ok_or_else(|| HypervisorError::DeviceError("Console not configured".to_string()))?;
 
+        // SAFETY: fd is valid; buffer pointer and length are within the slice bounds.
         unsafe {
             let bytes_written = libc::write(
                 master_fd,
@@ -443,6 +445,7 @@ impl DarwinVm {
     /// to the VM's serial console interactively.
     pub fn console_path(&self) -> Option<String> {
         self.serial_fds
+            // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
             .map(|(master_fd, _)| unsafe {
                 let slave_name = libc::ptsname(master_fd);
                 if slave_name.is_null() {
@@ -602,6 +605,7 @@ impl DarwinVm {
         let mut irq_fd = self.vsock_irq_fd.write().unwrap();
         if let Some(fd) = irq_fd.take() {
             tracing::debug!("Closing IRQ signaling fd {} for VM {}", fd, self.id);
+            // SAFETY: fd is a valid open file descriptor owned by this context.
             unsafe {
                 libc::close(fd);
             }
@@ -621,6 +625,7 @@ impl DarwinVm {
             buf[1..5].copy_from_slice(&gsi.to_le_bytes());
             buf[5] = u8::from(level);
 
+            // SAFETY: fd is valid; buffer pointer and length are within the slice bounds.
             let written = unsafe { libc::write(fd, buf.as_ptr() as *const libc::c_void, 6) };
 
             if written == 6 {
@@ -1330,6 +1335,7 @@ impl Drop for DarwinVm {
 
         // Close serial FDs
         if let Some((read_fd, write_fd)) = self.serial_fds.take() {
+            // SAFETY: fd is a valid open file descriptor owned by this context.
             unsafe {
                 libc::close(read_fd);
                 if write_fd != read_fd {

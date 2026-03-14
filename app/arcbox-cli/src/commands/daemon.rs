@@ -380,6 +380,7 @@ fn process_is_running(pid: i32) -> bool {
 fn send_sigterm(pid: i32) -> Result<()> {
     // SAFETY: libc::kill is called with a validated positive PID and SIGTERM
     // to request graceful daemon shutdown.
+    // SAFETY: pid is a valid process ID; signal number is valid.
     let result = unsafe { libc::kill(pid, libc::SIGTERM) };
     if result == 0 {
         return Ok(());

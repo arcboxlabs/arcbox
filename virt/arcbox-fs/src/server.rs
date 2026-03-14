@@ -159,10 +159,6 @@ impl FsServer {
     }
 }
 
-// ============================================================================
-// FuseRequestHandler Implementation
-// ============================================================================
-
 impl FuseRequestHandler for FsServer {
     fn handle_request(&self, request: &[u8]) -> arcbox_virtio::Result<Vec<u8>> {
         self.handle_request(request)
@@ -258,9 +254,11 @@ mod tests {
         };
 
         let mut request = Vec::new();
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         request.extend_from_slice(unsafe {
             std::slice::from_raw_parts(&header as *const _ as *const u8, FuseInHeader::SIZE)
         });
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         request.extend_from_slice(unsafe {
             std::slice::from_raw_parts(&init_in as *const _ as *const u8, size_of::<FuseInitIn>())
         });

@@ -19,11 +19,13 @@ impl VsockStream {
     /// Sets a file descriptor to non-blocking mode.
     fn set_nonblocking(fd: RawFd) -> io::Result<()> {
         // SAFETY: fd is valid for the duration of the fcntl calls.
+        // SAFETY: fd is a valid open file descriptor; command and arguments are valid.
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
         if flags < 0 {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: fd is valid; O_NONBLOCK is a safe flag to set.
+        // SAFETY: fd is a valid open file descriptor; command and arguments are valid.
         let ret = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
         if ret < 0 {
             return Err(io::Error::last_os_error());
@@ -47,6 +49,7 @@ impl VsockStream {
     /// The caller must ensure `fd` is a valid connected vsock file descriptor.
     pub unsafe fn from_raw_fd(fd: RawFd) -> io::Result<Self> {
         // SAFETY: caller guarantees fd is valid.
+        // SAFETY: fd is a valid open file descriptor with exclusive ownership.
         Self::from_fd(unsafe { OwnedFd::from_raw_fd(fd) })
     }
 
@@ -142,6 +145,7 @@ impl AsyncWrite for VsockStream {
             match guard.try_io(|inner| {
                 // SAFETY: fd is valid; SHUT_WR is a safe shutdown direction that
                 // sends FIN to the peer without closing the read side.
+                // SAFETY: fd is a valid open socket file descriptor.
                 let ret = unsafe { libc::shutdown(inner.as_raw_fd(), libc::SHUT_WR) };
                 if ret < 0 {
                     let err = io::Error::last_os_error();

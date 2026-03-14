@@ -17,10 +17,6 @@ use tokio::sync::mpsc;
 
 use crate::error::SandboxError;
 
-// =============================================================================
-// SandboxService
-// =============================================================================
-
 /// Thin wrapper around [`SandboxManager`] for use in the agent's RPC layer.
 pub struct SandboxService {
     manager: Arc<SandboxManager>,
@@ -34,10 +30,6 @@ impl SandboxService {
             manager: Arc::new(manager),
         })
     }
-
-    // =========================================================================
-    // CRUD
-    // =========================================================================
 
     /// Create a sandbox.
     pub async fn create(
@@ -109,10 +101,6 @@ impl SandboxService {
             sandboxes: summaries.into_iter().map(vm_summary_to_proto).collect(),
         })
     }
-
-    // =========================================================================
-    // Workload
-    // =========================================================================
 
     /// Run a command in a sandbox.  Returns a channel of encoded [`RunOutput`] payloads.
     pub async fn run(
@@ -218,10 +206,6 @@ impl SandboxService {
         Ok(out_rx)
     }
 
-    // =========================================================================
-    // Snapshots
-    // =========================================================================
-
     /// Checkpoint a sandbox.
     pub async fn checkpoint(
         &self,
@@ -310,10 +294,6 @@ impl SandboxService {
             .map_err(|e| SandboxError::Internal(e.to_string()))
     }
 }
-
-// =============================================================================
-// Conversion helpers
-// =============================================================================
 
 /// Convert a `CreateSandboxRequest` proto to a [`SandboxSpec`].
 fn proto_to_spec(req: sandbox_v1::CreateSandboxRequest) -> SandboxSpec {

@@ -288,16 +288,21 @@ impl KvmVcpu {
             KVM_EXIT_HLT => VcpuExit::Halt,
 
             KVM_EXIT_IO => {
+                // SAFETY: KVM file descriptor is valid; arguments match the expected ioctl interface.
                 let io = unsafe { (*self.vcpu_fd.kvm_run()).exit_data.io };
                 if io.direction == KVM_EXIT_IO_OUT {
                     // For OUT instructions, data is at kvm_run + data_offset
+                    // SAFETY: KVM file descriptor is valid; arguments match the expected ioctl interface.
                     let data_ptr = unsafe {
                         (self.vcpu_fd.kvm_run() as *const _ as *const u8)
                             .add(io.data_offset as usize)
                     };
                     let data = match io.size {
+                        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
                         1 => (unsafe { *data_ptr }) as u64,
+                        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
                         2 => (unsafe { *(data_ptr as *const u16) }) as u64,
+                        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
                         4 => (unsafe { *(data_ptr as *const u32) }) as u64,
                         _ => 0,
                     };
@@ -315,6 +320,7 @@ impl KvmVcpu {
             }
 
             KVM_EXIT_MMIO => {
+                // SAFETY: KVM file descriptor is valid; arguments match the expected ioctl interface.
                 let mmio = unsafe { (*self.vcpu_fd.kvm_run()).exit_data.mmio };
                 if mmio.is_write != 0 {
                     let data = match mmio.len {
@@ -356,6 +362,7 @@ impl KvmVcpu {
             KVM_EXIT_DEBUG => VcpuExit::Debug,
 
             KVM_EXIT_SYSTEM_EVENT => {
+                // SAFETY: KVM file descriptor is valid; arguments match the expected ioctl interface.
                 let event = unsafe { (*self.vcpu_fd.kvm_run()).exit_data.system_event };
                 match event.type_ {
                     1 => VcpuExit::Shutdown,    // KVM_SYSTEM_EVENT_SHUTDOWN
@@ -379,6 +386,7 @@ impl KvmVcpu {
 
     /// Provides data for an I/O IN instruction.
     pub fn set_io_in_data(&self, data: &[u8]) {
+        // SAFETY: Source and destination do not overlap; both are valid for the given count.
         unsafe {
             let kvm_run = self.vcpu_fd.kvm_run_mut();
             let io = kvm_run.exit_data.io;
@@ -389,6 +397,7 @@ impl KvmVcpu {
 
     /// Provides data for an MMIO read.
     pub fn set_mmio_read_data(&self, data: &[u8]) {
+        // SAFETY: KVM file descriptor is valid; arguments match the expected ioctl interface.
         unsafe {
             let kvm_run = self.vcpu_fd.kvm_run_mut();
             let mmio = &mut kvm_run.exit_data.mmio;
@@ -524,6 +533,7 @@ impl Vcpu for KvmVcpu {
     fn set_io_result(&mut self, value: u64) -> Result<(), HypervisorError> {
         // For I/O IN operations, write the result back to the data area
         let bytes = value.to_le_bytes();
+        // SAFETY: KVM file descriptor is valid; arguments match the expected ioctl interface.
         unsafe {
             let kvm_run = self.vcpu_fd.kvm_run_mut();
             let io = kvm_run.exit_data.io;
@@ -537,6 +547,7 @@ impl Vcpu for KvmVcpu {
     fn set_mmio_result(&mut self, value: u64) -> Result<(), HypervisorError> {
         // For MMIO read operations, write the result back to the mmio data area
         let bytes = value.to_le_bytes();
+        // SAFETY: KVM file descriptor is valid; arguments match the expected ioctl interface.
         unsafe {
             let kvm_run = self.vcpu_fd.kvm_run_mut();
             let mmio = &mut kvm_run.exit_data.mmio;

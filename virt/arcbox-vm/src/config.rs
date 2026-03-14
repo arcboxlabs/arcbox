@@ -2,10 +2,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, VmmError};
 
-// =============================================================================
-// Rate-limiter primitives
-// =============================================================================
-
 /// A token-bucket rate-limit configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenBucketSpec {
@@ -43,10 +39,6 @@ impl From<RateLimitSpec> for fc_sdk::types::RateLimiter {
     }
 }
 
-// =============================================================================
-// Drive / IO enums
-// =============================================================================
-
 /// Block device IO engine.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -83,10 +75,6 @@ impl From<CacheType> for fc_sdk::types::DriveCacheType {
     }
 }
 
-// =============================================================================
-// CPU template
-// =============================================================================
-
 /// CPU template to apply for cross-host snapshot compatibility.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum CpuTemplateSpec {
@@ -111,10 +99,6 @@ impl From<CpuTemplateSpec> for fc_sdk::types::CpuTemplate {
     }
 }
 
-// =============================================================================
-// Huge pages
-// =============================================================================
-
 /// Huge-page backing for guest memory.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum HugePagesSpec {
@@ -130,10 +114,6 @@ impl From<HugePagesSpec> for fc_sdk::types::MachineConfigurationHugePages {
         }
     }
 }
-
-// =============================================================================
-// Extra drive spec
-// =============================================================================
 
 /// Configuration for an additional (non-root) block device.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,10 +136,6 @@ pub struct DriveSpec {
     pub rate_limit: Option<RateLimitSpec>,
 }
 
-// =============================================================================
-// Balloon device
-// =============================================================================
-
 /// Memory balloon device configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BalloonSpec {
@@ -175,10 +151,6 @@ pub struct BalloonSpec {
     pub free_page_reporting: Option<bool>,
 }
 
-// =============================================================================
-// Vsock device
-// =============================================================================
-
 /// Virtio-vsock device configuration.
 ///
 /// The UDS path is managed by the VMM at `{vm_dir}/vsock.sock`.
@@ -187,10 +159,6 @@ pub struct VsockSpec {
     /// Guest CID (must be ≥ 3).
     pub guest_cid: i64,
 }
-
-// =============================================================================
-// Memory hotplug
-// =============================================================================
 
 /// Virtio-mem hotpluggable memory configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -202,10 +170,6 @@ pub struct MemoryHotplugSpec {
     /// Minimum allocation unit in MiB (default: 2).
     pub block_size_mib: Option<i64>,
 }
-
-// =============================================================================
-// MMDS
-// =============================================================================
 
 /// MMDS API version.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
@@ -241,10 +205,6 @@ pub struct MmdsSpec {
     pub initial_data: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
-// =============================================================================
-// Jailer configuration
-// =============================================================================
-
 /// Configuration for running Firecracker under the Jailer sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JailerConfig {
@@ -269,10 +229,6 @@ pub struct JailerConfig {
     #[serde(default)]
     pub resource_limits: Vec<String>,
 }
-
-// =============================================================================
-// Top-level VMM configuration
-// =============================================================================
 
 /// Top-level VMM daemon configuration (maps to `config.toml`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -390,10 +346,6 @@ impl VmmConfig {
     }
 }
 
-// =============================================================================
-// VmSpec — per-VM creation parameters
-// =============================================================================
-
 /// Full VM specification supplied at creation time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmSpec {
@@ -506,10 +458,6 @@ impl Default for VmSpec {
         }
     }
 }
-
-// =============================================================================
-// Snapshot types
-// =============================================================================
 
 /// Snapshot type — mirrors Firecracker terminology.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

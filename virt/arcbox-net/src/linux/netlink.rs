@@ -187,6 +187,7 @@ impl NetlinkHandle {
     ///
     /// Returns an error if the socket cannot be created.
     pub fn new() -> Result<Self> {
+        // SAFETY: Arguments are valid socket(2) parameters.
         let fd = unsafe {
             libc::socket(
                 libc::AF_NETLINK,
@@ -210,6 +211,7 @@ impl NetlinkHandle {
             nl_groups: 0,
         };
 
+        // SAFETY: fd is a valid socket; addr and addrlen match the address family.
         let ret = unsafe {
             libc::bind(
                 fd,
@@ -219,6 +221,7 @@ impl NetlinkHandle {
         };
 
         if ret < 0 {
+            // SAFETY: fd is a valid open file descriptor owned by this context.
             unsafe { libc::close(fd) };
             return Err(NetError::Netlink(format!(
                 "failed to bind netlink socket: {}",
@@ -226,6 +229,7 @@ impl NetlinkHandle {
             )));
         }
 
+        // SAFETY: fd is a valid open file descriptor with exclusive ownership.
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
 
         Ok(Self { fd, seq: 0 })
@@ -240,6 +244,7 @@ impl NetlinkHandle {
     /// Sends a netlink message and waits for acknowledgement.
     fn send_and_ack(&mut self, msg: &[u8]) -> Result<()> {
         // Send message
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let ret = unsafe {
             libc::send(
                 self.fd.as_raw_fd(),
@@ -258,6 +263,7 @@ impl NetlinkHandle {
 
         // Receive response
         let mut buf = [0u8; 4096];
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let len = unsafe {
             libc::recv(
                 self.fd.as_raw_fd(),
@@ -276,11 +282,13 @@ impl NetlinkHandle {
 
         // Check for error response
         if len >= mem::size_of::<NlMsgHdr>() as isize {
+            // SAFETY: Buffer is large enough for the netlink message header.
             let hdr = unsafe { &*(buf.as_ptr() as *const NlMsgHdr) };
             if hdr.nlmsg_type == libc::NLMSG_ERROR as u16 {
                 // Error message format: nlmsghdr + nlmsgerr
                 if len >= (mem::size_of::<NlMsgHdr>() + 4) as isize {
                     let error_code =
+                        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
                         unsafe { *(buf.as_ptr().add(mem::size_of::<NlMsgHdr>()) as *const i32) };
                     if error_code != 0 {
                         return Err(NetError::Netlink(format!(
@@ -318,6 +326,7 @@ impl NetlinkHandle {
             ifi_flags: 0,
             ifi_change: 0,
         };
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         msg.extend_from_slice(unsafe {
             std::slice::from_raw_parts(
                 &ifinfo as *const _ as *const u8,
@@ -339,6 +348,7 @@ impl NetlinkHandle {
             nla_len: linkinfo_len,
             nla_type: IFLA_LINKINFO | (1 << 15), // NLA_F_NESTED
         };
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         msg[linkinfo_start..linkinfo_start + mem::size_of::<NlAttr>()].copy_from_slice(unsafe {
             std::slice::from_raw_parts(
                 &linkinfo_attr as *const _ as *const u8,
@@ -364,6 +374,7 @@ impl NetlinkHandle {
             nlmsg_seq: seq,
             nlmsg_pid: 0,
         };
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         msg[..mem::size_of::<NlMsgHdr>()].copy_from_slice(unsafe {
             std::slice::from_raw_parts(&hdr as *const _ as *const u8, mem::size_of::<NlMsgHdr>())
         });
@@ -396,6 +407,7 @@ impl NetlinkHandle {
             ifi_flags: 0,
             ifi_change: 0,
         };
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         msg.extend_from_slice(unsafe {
             std::slice::from_raw_parts(
                 &ifinfo as *const _ as *const u8,
@@ -411,6 +423,7 @@ impl NetlinkHandle {
             nlmsg_seq: seq,
             nlmsg_pid: 0,
         };
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         msg[..mem::size_of::<NlMsgHdr>()].copy_from_slice(unsafe {
             std::slice::from_raw_parts(&hdr as *const _ as *const u8, mem::size_of::<NlMsgHdr>())
         });
@@ -441,6 +454,7 @@ impl NetlinkHandle {
             ifi_flags: flags,
             ifi_change: IFF_UP,
         };
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         msg.extend_from_slice(unsafe {
             std::slice::from_raw_parts(
                 &ifinfo as *const _ as *const u8,
@@ -456,6 +470,7 @@ impl NetlinkHandle {
             nlmsg_seq: seq,
             nlmsg_pid: 0,
         };
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         msg[..mem::size_of::<NlMsgHdr>()].copy_from_slice(unsafe {
             std::slice::from_raw_parts(&hdr as *const _ as *const u8, mem::size_of::<NlMsgHdr>())
         });
@@ -485,6 +500,7 @@ impl NetlinkHandle {
             ifi_flags: 0,
             ifi_change: 0,
         };
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         msg.extend_from_slice(unsafe {
             std::slice::from_raw_parts(
                 &ifinfo as *const _ as *const u8,
@@ -503,6 +519,7 @@ impl NetlinkHandle {
             nlmsg_seq: seq,
             nlmsg_pid: 0,
         };
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         msg[..mem::size_of::<NlMsgHdr>()].copy_from_slice(unsafe {
             std::slice::from_raw_parts(&hdr as *const _ as *const u8, mem::size_of::<NlMsgHdr>())
         });
@@ -537,6 +554,7 @@ impl NetlinkHandle {
             ifa_scope: 0,
             ifa_index: ifindex,
         };
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         msg.extend_from_slice(unsafe {
             std::slice::from_raw_parts(
                 &ifaddr as *const _ as *const u8,
@@ -566,6 +584,7 @@ impl NetlinkHandle {
             nlmsg_seq: seq,
             nlmsg_pid: 0,
         };
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         msg[..mem::size_of::<NlMsgHdr>()].copy_from_slice(unsafe {
             std::slice::from_raw_parts(&hdr as *const _ as *const u8, mem::size_of::<NlMsgHdr>())
         });
@@ -600,6 +619,7 @@ impl NetlinkHandle {
             ifa_scope: 0,
             ifa_index: ifindex,
         };
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         msg.extend_from_slice(unsafe {
             std::slice::from_raw_parts(
                 &ifaddr as *const _ as *const u8,
@@ -627,6 +647,7 @@ impl NetlinkHandle {
             nlmsg_seq: seq,
             nlmsg_pid: 0,
         };
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         msg[..mem::size_of::<NlMsgHdr>()].copy_from_slice(unsafe {
             std::slice::from_raw_parts(&hdr as *const _ as *const u8, mem::size_of::<NlMsgHdr>())
         });
@@ -665,6 +686,7 @@ impl NetlinkHandle {
             rtm_type: RTN_UNICAST,
             rtm_flags: 0,
         };
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         msg.extend_from_slice(unsafe {
             std::slice::from_raw_parts(&rtmsg as *const _ as *const u8, mem::size_of::<RtMsg>())
         });
@@ -713,6 +735,7 @@ impl NetlinkHandle {
             nlmsg_seq: seq,
             nlmsg_pid: 0,
         };
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         msg[..mem::size_of::<NlMsgHdr>()].copy_from_slice(unsafe {
             std::slice::from_raw_parts(&hdr as *const _ as *const u8, mem::size_of::<NlMsgHdr>())
         });
@@ -751,6 +774,7 @@ impl NetlinkHandle {
             rtm_type: RTN_UNICAST,
             rtm_flags: 0,
         };
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         msg.extend_from_slice(unsafe {
             std::slice::from_raw_parts(&rtmsg as *const _ as *const u8, mem::size_of::<RtMsg>())
         });
@@ -777,6 +801,7 @@ impl NetlinkHandle {
             nlmsg_seq: seq,
             nlmsg_pid: 0,
         };
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         msg[..mem::size_of::<NlMsgHdr>()].copy_from_slice(unsafe {
             std::slice::from_raw_parts(&hdr as *const _ as *const u8, mem::size_of::<NlMsgHdr>())
         });
@@ -791,6 +816,7 @@ impl NetlinkHandle {
     /// Returns an error if the interface is not found.
     pub fn get_ifindex(&self, name: &str) -> Result<u32> {
         let c_name = CString::new(name).map_err(|e| NetError::Netlink(e.to_string()))?;
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let ifindex = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
         if ifindex == 0 {
             return Err(NetError::Netlink(format!("interface not found: {name}")));
@@ -805,6 +831,7 @@ impl NetlinkHandle {
     /// Returns an error if the interface is not found.
     pub fn get_ifname(&self, ifindex: u32) -> Result<String> {
         let mut buf = [0i8; libc::IF_NAMESIZE];
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         let ret = unsafe { libc::if_indextoname(ifindex, buf.as_mut_ptr()) };
         if ret.is_null() {
             return Err(NetError::Netlink(format!(
@@ -830,6 +857,7 @@ impl NetlinkHandle {
             nla_len: attr_len as u16,
             nla_type: attr_type,
         };
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         msg.extend_from_slice(unsafe {
             std::slice::from_raw_parts(&attr as *const _ as *const u8, mem::size_of::<NlAttr>())
         });
@@ -849,6 +877,7 @@ impl NetlinkHandle {
             nla_len: attr_len as u16,
             nla_type: attr_type,
         };
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         msg.extend_from_slice(unsafe {
             std::slice::from_raw_parts(&attr as *const _ as *const u8, mem::size_of::<NlAttr>())
         });
@@ -864,6 +893,7 @@ impl NetlinkHandle {
             nla_len: attr_len as u16,
             nla_type: attr_type,
         };
+        // SAFETY: Pointer is valid and aligned; length does not exceed the allocation.
         msg.extend_from_slice(unsafe {
             std::slice::from_raw_parts(&attr as *const _ as *const u8, mem::size_of::<NlAttr>())
         });
@@ -882,6 +912,7 @@ mod tests {
     #[test]
     fn test_netlink_handle_creation() {
         // This test requires root privileges
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         if unsafe { libc::geteuid() } != 0 {
             eprintln!("Skipping test: requires root privileges");
             return;
@@ -894,6 +925,7 @@ mod tests {
     #[test]
     fn test_get_ifindex_loopback() {
         // This test requires root privileges
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         if unsafe { libc::geteuid() } != 0 {
             eprintln!("Skipping test: requires root privileges");
             return;

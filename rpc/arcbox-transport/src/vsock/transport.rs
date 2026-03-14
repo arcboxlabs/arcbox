@@ -138,6 +138,7 @@ impl VsockTransport {
         }
         // SAFETY: fd has been validated to be non-negative and is expected to
         // be a valid connected vsock file descriptor from VZVirtioSocketDevice.
+        // SAFETY: fd is a valid open vsock file descriptor.
         let stream = unsafe { VsockStream::from_raw_fd(fd) }.map_err(TransportError::io)?;
         Ok(Self {
             addr,

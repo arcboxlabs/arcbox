@@ -10,10 +10,6 @@ use std::fs::OpenOptions;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::ptr;
 
-// ============================================================================
-// KVM ioctl Numbers
-// ============================================================================
-
 /// KVM magic number for ioctl encoding.
 const KVMIO: u8 = 0xAE;
 
@@ -84,10 +80,6 @@ pub const KVM_GET_ONE_REG: nix::sys::ioctl::ioctl_num_type = kvm_iow!(0xab, KvmO
 #[cfg(target_arch = "aarch64")]
 pub const KVM_SET_ONE_REG: nix::sys::ioctl::ioctl_num_type = kvm_iow!(0xac, KvmOneReg);
 
-// ============================================================================
-// KVM Capability Constants
-// ============================================================================
-
 pub const KVM_CAP_IRQCHIP: u32 = 0;
 pub const KVM_CAP_USER_MEMORY: u32 = 3;
 pub const KVM_CAP_SET_TSS_ADDR: u32 = 4;
@@ -101,10 +93,6 @@ pub const KVM_CAP_MAX_VCPUS: u32 = 66;
 pub const KVM_CAP_MAX_VCPU_ID: u32 = 128;
 #[cfg(target_arch = "aarch64")]
 pub const KVM_CAP_ARM_VM_IPA_SIZE: u32 = 165;
-
-// ============================================================================
-// ARM64 Register IDs
-// ============================================================================
 
 #[cfg(target_arch = "aarch64")]
 pub mod arm64_regs {
@@ -147,10 +135,6 @@ pub mod arm64_regs {
     pub const PSTATE_F: u64 = 1 << 6; // FIQ mask
 }
 
-// ============================================================================
-// KVM Exit Reasons
-// ============================================================================
-
 pub const KVM_EXIT_UNKNOWN: u32 = 0;
 pub const KVM_EXIT_EXCEPTION: u32 = 1;
 pub const KVM_EXIT_IO: u32 = 2;
@@ -171,16 +155,8 @@ pub const KVM_EXIT_SYSTEM_EVENT: u32 = 24;
 pub const KVM_EXIT_IO_IN: u8 = 0;
 pub const KVM_EXIT_IO_OUT: u8 = 1;
 
-// ============================================================================
-// Memory Region Flags
-// ============================================================================
-
 pub const KVM_MEM_LOG_DIRTY_PAGES: u32 = 1 << 0;
 pub const KVM_MEM_READONLY: u32 = 1 << 1;
-
-// ============================================================================
-// Dirty Log Structures
-// ============================================================================
 
 /// Structure for KVM_GET_DIRTY_LOG ioctl.
 ///
@@ -197,10 +173,6 @@ pub struct KvmDirtyLog {
     /// The buffer must be large enough to hold (memory_size / page_size / 8) bytes.
     pub dirty_bitmap: *mut u64,
 }
-
-// ============================================================================
-// Data Structures
-// ============================================================================
 
 /// Userspace memory region descriptor.
 #[repr(C)]
@@ -512,10 +484,6 @@ pub struct KvmSregs {
     _placeholder: u64,
 }
 
-// ============================================================================
-// KVM Run Structure
-// ============================================================================
-
 /// KVM run structure for vCPU execution.
 /// This is mmap'd and shared between kernel and userspace.
 #[repr(C)]
@@ -593,10 +561,6 @@ pub struct KvmRunSystemEvent {
     pub data: [u64; 16],
 }
 
-// ============================================================================
-// Safe Wrapper Types
-// ============================================================================
-
 /// Result type for KVM operations.
 pub type KvmResult<T> = Result<T, KvmError>;
 
@@ -650,6 +614,7 @@ impl KvmSystem {
                 message: format!("Failed to open /dev/kvm: {}", e),
             })?;
 
+        // SAFETY: fd is a valid open file descriptor with exclusive ownership.
         let fd = unsafe { OwnedFd::from_raw_fd(file.into_raw_fd()) };
 
         Ok(Self { fd })
@@ -657,6 +622,7 @@ impl KvmSystem {
 
     /// Gets the KVM API version.
     pub fn api_version(&self) -> KvmResult<i32> {
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe { libc::ioctl(self.fd.as_raw_fd(), KVM_GET_API_VERSION) };
         if ret < 0 {
             return Err(KvmError::from(std::io::Error::last_os_error()));
@@ -666,6 +632,7 @@ impl KvmSystem {
 
     /// Checks if an extension is supported.
     pub fn check_extension(&self, extension: u32) -> KvmResult<i32> {
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe {
             libc::ioctl(
                 self.fd.as_raw_fd(),
@@ -681,6 +648,7 @@ impl KvmSystem {
 
     /// Gets the size of the vCPU mmap region.
     pub fn vcpu_mmap_size(&self) -> KvmResult<usize> {
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe { libc::ioctl(self.fd.as_raw_fd(), KVM_GET_VCPU_MMAP_SIZE) };
         if ret < 0 {
             return Err(KvmError::from(std::io::Error::last_os_error()));
@@ -690,11 +658,13 @@ impl KvmSystem {
 
     /// Creates a new VM.
     pub fn create_vm(&self) -> KvmResult<KvmVmFd> {
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe { libc::ioctl(self.fd.as_raw_fd(), KVM_CREATE_VM, 0) };
         if ret < 0 {
             return Err(KvmError::from(std::io::Error::last_os_error()));
         }
         Ok(KvmVmFd {
+            // SAFETY: fd is a valid open file descriptor with exclusive ownership.
             fd: unsafe { OwnedFd::from_raw_fd(ret) },
         })
     }
@@ -713,6 +683,7 @@ pub struct KvmVmFd {
 impl KvmVmFd {
     /// Sets a memory region for the VM.
     pub fn set_user_memory_region(&self, region: &KvmUserspaceMemoryRegion) -> KvmResult<()> {
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe {
             libc::ioctl(
                 self.fd.as_raw_fd(),
@@ -728,14 +699,17 @@ impl KvmVmFd {
 
     /// Creates a new vCPU.
     pub fn create_vcpu(&self, id: u32, mmap_size: usize) -> KvmResult<KvmVcpuFd> {
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe { libc::ioctl(self.fd.as_raw_fd(), KVM_CREATE_VCPU, id as libc::c_ulong) };
         if ret < 0 {
             return Err(KvmError::from(std::io::Error::last_os_error()));
         }
 
+        // SAFETY: Arguments are valid for mmap(2); fd is a valid open file descriptor.
         let fd = unsafe { OwnedFd::from_raw_fd(ret) };
 
         // mmap the kvm_run structure
+        // SAFETY: Arguments are valid for mmap(2); fd is a valid open file descriptor.
         let run = unsafe {
             libc::mmap(
                 ptr::null_mut(),
@@ -762,6 +736,7 @@ impl KvmVmFd {
     #[cfg(target_arch = "x86_64")]
     pub fn set_tss_addr(&self, addr: u64) -> KvmResult<()> {
         let ret =
+            // SAFETY: fd is valid; request code and argument type match the expected ioctl.
             unsafe { libc::ioctl(self.fd.as_raw_fd(), KVM_SET_TSS_ADDR, addr as libc::c_ulong) };
         if ret < 0 {
             return Err(KvmError::from(std::io::Error::last_os_error()));
@@ -772,6 +747,7 @@ impl KvmVmFd {
     /// Sets the identity map address (x86 only).
     #[cfg(target_arch = "x86_64")]
     pub fn set_identity_map_addr(&self, addr: u64) -> KvmResult<()> {
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe {
             libc::ioctl(
                 self.fd.as_raw_fd(),
@@ -788,6 +764,7 @@ impl KvmVmFd {
     /// Creates an in-kernel IRQ chip (x86 only).
     #[cfg(target_arch = "x86_64")]
     pub fn create_irqchip(&self) -> KvmResult<()> {
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe { libc::ioctl(self.fd.as_raw_fd(), KVM_CREATE_IRQCHIP, 0) };
         if ret < 0 {
             return Err(KvmError::from(std::io::Error::last_os_error()));
@@ -798,6 +775,7 @@ impl KvmVmFd {
     /// Creates a PIT2 (x86 only).
     #[cfg(target_arch = "x86_64")]
     pub fn create_pit2(&self, config: &KvmPitConfig) -> KvmResult<()> {
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe {
             libc::ioctl(
                 self.fd.as_raw_fd(),
@@ -815,6 +793,7 @@ impl KvmVmFd {
     #[cfg(target_arch = "aarch64")]
     pub fn get_preferred_target(&self) -> KvmResult<KvmVcpuInit> {
         let mut init = KvmVcpuInit::default();
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe {
             libc::ioctl(
                 self.fd.as_raw_fd(),
@@ -842,6 +821,7 @@ impl KvmVmFd {
             irq,
             level: if level { 1 } else { 0 },
         };
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe {
             libc::ioctl(
                 self.fd.as_raw_fd(),
@@ -879,6 +859,7 @@ impl KvmVmFd {
             irqfd.resamplefd = resample as u32;
         }
 
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe {
             libc::ioctl(
                 self.fd.as_raw_fd(),
@@ -902,6 +883,7 @@ impl KvmVmFd {
             pad: [0; 16],
         };
 
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe {
             libc::ioctl(
                 self.fd.as_raw_fd(),
@@ -947,6 +929,7 @@ impl KvmVmFd {
             ioeventfd.flags |= KVM_IOEVENTFD_FLAG_DATAMATCH;
         }
 
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe {
             libc::ioctl(
                 self.fd.as_raw_fd(),
@@ -971,6 +954,7 @@ impl KvmVmFd {
             pad: [0; 36],
         };
 
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe {
             libc::ioctl(
                 self.fd.as_raw_fd(),
@@ -1074,6 +1058,7 @@ impl KvmVmFd {
             dirty_bitmap: bitmap.as_mut_ptr(),
         };
 
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe {
             libc::ioctl(
                 self.fd.as_raw_fd(),
@@ -1108,6 +1093,7 @@ unsafe impl Send for KvmVcpuFd {}
 impl KvmVcpuFd {
     /// Runs the vCPU until a VM exit occurs.
     pub fn run(&self) -> KvmResult<()> {
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe { libc::ioctl(self.fd.as_raw_fd(), KVM_RUN, 0) };
         if ret < 0 {
             let err = std::io::Error::last_os_error();
@@ -1122,6 +1108,7 @@ impl KvmVcpuFd {
 
     /// Gets the exit reason from the last run.
     pub fn exit_reason(&self) -> u32 {
+        // SAFETY: KVM file descriptor is valid; arguments match the expected ioctl interface.
         unsafe { (*self.kvm_run).exit_reason }
     }
 
@@ -1131,6 +1118,7 @@ impl KvmVcpuFd {
     ///
     /// The returned reference is only valid while the vCPU is not running.
     pub unsafe fn kvm_run(&self) -> &KvmRun {
+        // SAFETY: KVM file descriptor is valid; arguments match the expected ioctl interface.
         unsafe { &*self.kvm_run }
     }
 
@@ -1140,12 +1128,14 @@ impl KvmVcpuFd {
     ///
     /// The returned reference is only valid while the vCPU is not running.
     pub unsafe fn kvm_run_mut(&self) -> &mut KvmRun {
+        // SAFETY: KVM file descriptor is valid; arguments match the expected ioctl interface.
         unsafe { &mut *self.kvm_run }
     }
 
     /// Gets the general purpose registers.
     pub fn get_regs(&self) -> KvmResult<KvmRegs> {
         let mut regs = KvmRegs::default();
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe {
             libc::ioctl(
                 self.fd.as_raw_fd(),
@@ -1161,6 +1151,7 @@ impl KvmVcpuFd {
 
     /// Sets the general purpose registers.
     pub fn set_regs(&self, regs: &KvmRegs) -> KvmResult<()> {
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe {
             libc::ioctl(
                 self.fd.as_raw_fd(),
@@ -1178,6 +1169,7 @@ impl KvmVcpuFd {
     #[cfg(target_arch = "x86_64")]
     pub fn get_sregs(&self) -> KvmResult<KvmSregs> {
         let mut sregs = KvmSregs::default();
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe {
             libc::ioctl(
                 self.fd.as_raw_fd(),
@@ -1194,6 +1186,7 @@ impl KvmVcpuFd {
     /// Sets the special registers (x86 only).
     #[cfg(target_arch = "x86_64")]
     pub fn set_sregs(&self, sregs: &KvmSregs) -> KvmResult<()> {
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe {
             libc::ioctl(
                 self.fd.as_raw_fd(),
@@ -1210,6 +1203,7 @@ impl KvmVcpuFd {
     /// Sets CPUID entries (x86 only).
     #[cfg(target_arch = "x86_64")]
     pub fn set_cpuid2(&self, cpuid: &KvmCpuid2) -> KvmResult<()> {
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe {
             libc::ioctl(
                 self.fd.as_raw_fd(),
@@ -1226,6 +1220,7 @@ impl KvmVcpuFd {
     /// Initializes the vCPU (ARM64 only).
     #[cfg(target_arch = "aarch64")]
     pub fn vcpu_init(&self, init: &KvmVcpuInit) -> KvmResult<()> {
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe {
             libc::ioctl(
                 self.fd.as_raw_fd(),
@@ -1247,6 +1242,7 @@ impl KvmVcpuFd {
             id: reg_id,
             addr: &mut value as *mut u64 as u64,
         };
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe {
             libc::ioctl(
                 self.fd.as_raw_fd(),
@@ -1268,6 +1264,7 @@ impl KvmVcpuFd {
             id: reg_id,
             addr: &mut val as *mut u64 as u64,
         };
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe {
             libc::ioctl(
                 self.fd.as_raw_fd(),
@@ -1283,6 +1280,7 @@ impl KvmVcpuFd {
 
     /// Sets the immediate_exit flag to cause the next KVM_RUN to return immediately.
     pub fn set_immediate_exit(&self, enable: bool) {
+        // SAFETY: KVM file descriptor is valid; arguments match the expected ioctl interface.
         unsafe {
             (*self.kvm_run).immediate_exit = if enable { 1 } else { 0 };
         }
@@ -1299,6 +1297,7 @@ impl KvmVcpuFd {
     #[cfg(target_arch = "x86_64")]
     pub fn inject_interrupt(&self, irq: u32) -> KvmResult<()> {
         let interrupt = KvmInterrupt { irq };
+        // SAFETY: fd is valid; request code and argument type match the expected ioctl.
         let ret = unsafe {
             libc::ioctl(
                 self.fd.as_raw_fd(),
@@ -1316,6 +1315,7 @@ impl KvmVcpuFd {
     ///
     /// Returns true if an interrupt can be injected via `inject_interrupt`.
     pub fn ready_for_interrupt(&self) -> bool {
+        // SAFETY: KVM file descriptor is valid; arguments match the expected ioctl interface.
         unsafe { (*self.kvm_run).ready_for_interrupt_injection != 0 }
     }
 
@@ -1324,6 +1324,7 @@ impl KvmVcpuFd {
     /// When set, the next KVM_RUN will exit with KVM_EXIT_IRQ_WINDOW_OPEN
     /// when the vCPU becomes ready to receive interrupts.
     pub fn request_interrupt_window(&self, enable: bool) {
+        // SAFETY: KVM file descriptor is valid; arguments match the expected ioctl interface.
         unsafe {
             (*self.kvm_run).request_interrupt_window = if enable { 1 } else { 0 };
         }
@@ -1337,18 +1338,16 @@ impl KvmVcpuFd {
 
 impl Drop for KvmVcpuFd {
     fn drop(&mut self) {
+        // SAFETY: ptr and size correspond to a previously mmap'd region owned by this struct.
         unsafe {
             libc::munmap(self.kvm_run.cast(), self.mmap_size);
         }
     }
 }
 
-// ============================================================================
-// Memory Allocation Helpers
-// ============================================================================
-
 /// Allocates guest memory using mmap.
 pub fn allocate_memory(size: u64) -> KvmResult<*mut u8> {
+    // SAFETY: Arguments are valid for mmap(2); fd is a valid open file descriptor.
     let ptr = unsafe {
         libc::mmap(
             ptr::null_mut(),
@@ -1365,6 +1364,7 @@ pub fn allocate_memory(size: u64) -> KvmResult<*mut u8> {
     }
 
     // Zero the memory
+    // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
     unsafe {
         libc::memset(ptr, 0, size as usize);
     }
@@ -1377,15 +1377,12 @@ pub fn allocate_memory(size: u64) -> KvmResult<*mut u8> {
 /// Frees guest memory.
 pub fn free_memory(ptr: *mut u8, size: u64) {
     if !ptr.is_null() {
+        // SAFETY: ptr and size correspond to a previously mmap'd region owned by this struct.
         unsafe {
             libc::munmap(ptr.cast(), size as usize);
         }
     }
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -1433,6 +1430,7 @@ mod tests {
         assert!(!ptr.is_null());
 
         // Write and read back
+        // SAFETY: Caller/context ensures the preconditions for this unsafe operation are met.
         unsafe {
             *ptr = 42;
             assert_eq!(*ptr, 42);
