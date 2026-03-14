@@ -102,11 +102,15 @@ impl L3TunnelService {
         let tun = DarwinTun::new()?;
         let tun_name = tun.name().to_string();
 
-        // Bring the interface UP. No IP addresses are needed because we use
-        // `-interface` routing (route add -net X -interface utunN), not
-        // gateway-based routing. This avoids conflicts with VPN tools that
-        // claim specific IP ranges (e.g. Surge uses 198.18.0.0/15).
-        tun.bring_up()?;
+        // Configure the utun with a point-to-point address and bring UP.
+        // macOS requires an IPv4 address on the interface for `-interface`
+        // routes to work. We use 240.0.0.1 (Class E reserved, never routed
+        // on the internet, not claimed by any VPN/proxy tool).
+        tun.configure(
+            std::net::Ipv4Addr::new(240, 0, 0, 1),
+            std::net::Ipv4Addr::new(240, 0, 0, 1),
+            std::net::Ipv4Addr::new(255, 255, 255, 252),
+        )?;
         tun.set_nonblocking(true)?;
 
         // Install routes for container subnets via this utun interface.
