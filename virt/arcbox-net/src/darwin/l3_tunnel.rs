@@ -98,24 +98,34 @@ impl L3TunnelService {
         subnets: Vec<String>,
         inbound_cmd_tx: mpsc::Sender<InboundCommand>,
     ) -> io::Result<(Self, TunWriter)> {
-        // Create the utun device (no root needed on macOS 10.10+).
-        let tun = DarwinTun::new()?;
-        let tun_name = tun.name().to_string();
-
-        // Configure the utun via the privileged helper (sets IP + brings UP).
-        // Falls back to direct ioctl if the helper is not available (e.g.
-        // when daemon runs as root during development).
-        if super::helper_client::is_available() {
-            super::helper_client::configure_utun(&tun_name, "240.0.0.1")?;
+        // Create the utun device via the privileged helper (which creates
+        // utun as root and passes the fd via DGRAM socketpair).
+        // Falls back to direct creation if running as root (development).
+        let (tun_fd, tun_name) = if super::helper_client::is_available() {
+            tracing::info!("L3 tunnel: using privileged helper");
+            let session_id = format!("tunnel-{}", std::process::id());
+            let (fd, name) = super::helper_client::create_utun(&session_id, "240.0.0.1")?;
+            (fd, name)
         } else {
-            tracing::debug!("helper not available, trying direct configure (needs root)");
+            tracing::info!("L3 tunnel: helper not available, trying direct (needs root)");
+            let tun = DarwinTun::new()?;
             tun.configure(
                 std::net::Ipv4Addr::new(240, 0, 0, 1),
                 std::net::Ipv4Addr::new(240, 0, 0, 1),
                 std::net::Ipv4Addr::new(255, 255, 255, 252),
             )?;
+            let name = tun.name().to_string();
+            (extract_tun_fd(tun), name)
+        };
+
+        // Set non-blocking for async I/O.
+        // SAFETY: fcntl on valid fd.
+        let flags = unsafe { libc::fcntl(tun_fd.as_raw_fd(), libc::F_GETFL) };
+        if flags >= 0 {
+            unsafe { libc::fcntl(tun_fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
         }
-        tun.set_nonblocking(true)?;
+
+        tracing::info!(interface = %tun_name, "L3 tunnel: utun ready");
 
         // Install routes for container subnets via this utun interface.
         for subnet in &subnets {
@@ -124,10 +134,7 @@ impl L3TunnelService {
             }
         }
 
-        // Extract the fd for shared use between read loop and TunWriter.
-        // SAFETY: We're taking the OwnedFd out of DarwinTun. The DarwinTun
-        // struct is consumed (we only keep tun_name). The fd lives in the Arc.
-        let fd = Arc::new(extract_tun_fd(tun));
+        let fd = Arc::new(tun_fd);
 
         let writer = TunWriter { fd: Arc::clone(&fd) };
 
