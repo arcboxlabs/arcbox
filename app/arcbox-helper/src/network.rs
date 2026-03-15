@@ -31,10 +31,12 @@ pub fn create_utun(stream_fd: RawFd, ip: &str) -> io::Result<String> {
     let tun_name = tun.name().to_string();
 
     // Configure IP and bring UP.
-    // For utun, we set local=ip, peer=ip, netmask=/30.
-    // The peer address doesn't restrict what src IPs the kernel accepts
-    // on incoming packets — utun is a userspace device, not filtered.
-    tun.configure(ip_addr, ip_addr, Ipv4Addr::new(255, 255, 255, 0))?;
+    // local = requested IP, peer = local+1.
+    // Point-to-point semantics require distinct local/peer for proper
+    // kernel input path handling.
+    let local_u32 = u32::from(ip_addr);
+    let peer_addr = Ipv4Addr::from(local_u32.wrapping_add(1));
+    tun.configure(ip_addr, peer_addr, Ipv4Addr::new(255, 255, 255, 252))?;
 
     tracing::info!(interface = %tun_name, %ip, "utun created and configured");
 
