@@ -909,12 +909,14 @@ impl VmLifecycleManager {
                                             Ok(output) => {
                                                 let trimmed = output.trim_matches('\0');
                                                 if trimmed.is_empty() {
-                                                    tokio::time::sleep(Duration::from_millis(200)).await;
+                                                    tokio::time::sleep(Duration::from_millis(200))
+                                                        .await;
                                                     continue;
                                                 }
                                                 line_buf.push_str(trimmed);
                                                 while let Some(pos) = line_buf.find('\n') {
-                                                    let line = line_buf[..pos].trim_end().to_owned();
+                                                    let line =
+                                                        line_buf[..pos].trim_end().to_owned();
                                                     line_buf.drain(..=pos);
                                                     if line.is_empty() {
                                                         continue;
