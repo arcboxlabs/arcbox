@@ -47,16 +47,32 @@ fn parse_request(line: &str) -> Result<ParsedRequest, String> {
         serde_json::from_str(line).map_err(|e| format!("json parse: {e}"))?;
 
     if v.get("hello").is_some() {
-        let hello: HelloRequest = serde_json::from_value(v["hello"].clone())
-            .map_err(|e| format!("bad hello: {e}"))?;
+        let hello: HelloRequest =
+            serde_json::from_value(v["hello"].clone()).map_err(|e| format!("bad hello: {e}"))?;
         Ok(ParsedRequest::Hello(hello))
     } else if let Some(op) = v.get("op").and_then(|v| v.as_str()) {
         Ok(ParsedRequest::Op {
             op: op.to_string(),
-            ip: v.get("ip").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            subnet: v.get("subnet").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            iface: v.get("iface").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            gateway: v.get("gateway").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            ip: v
+                .get("ip")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            subnet: v
+                .get("subnet")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            iface: v
+                .get("iface")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            gateway: v
+                .get("gateway")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
         })
     } else {
         Err("expected 'hello' or 'op' field".to_string())
@@ -112,13 +128,25 @@ struct OpResponse {
 
 impl OpResponse {
     fn success() -> Self {
-        Self { ok: true, name: None, error: None }
+        Self {
+            ok: true,
+            name: None,
+            error: None,
+        }
     }
     fn with_name(name: String) -> Self {
-        Self { ok: true, name: Some(name), error: None }
+        Self {
+            ok: true,
+            name: Some(name),
+            error: None,
+        }
     }
     fn err(msg: impl Into<String>) -> Self {
-        Self { ok: false, name: None, error: Some(msg.into()) }
+        Self {
+            ok: false,
+            name: None,
+            error: Some(msg.into()),
+        }
     }
 }
 
@@ -129,7 +157,11 @@ fn main() {
 
     let config = load_config();
     if let Some(ref c) = config {
-        tracing::info!(uid = c.authorized_uid, gid = c.authorized_gid, "loaded config");
+        tracing::info!(
+            uid = c.authorized_uid,
+            gid = c.authorized_gid,
+            "loaded config"
+        );
     } else {
         tracing::warn!("no config at {CONFIG_PATH}, accepting all connections");
     }
@@ -194,10 +226,13 @@ fn handle_connection(stream: std::os::unix::net::UnixStream) {
             match parse_request(trimmed) {
                 Ok(ParsedRequest::Hello(hello)) => {
                     if hello.version > PROTOCOL_VERSION {
-                        let _ = write_json(&stream, &serde_json::json!({
-                            "error": "version_mismatch",
-                            "server_version": PROTOCOL_VERSION,
-                        }));
+                        let _ = write_json(
+                            &stream,
+                            &serde_json::json!({
+                                "error": "version_mismatch",
+                                "server_version": PROTOCOL_VERSION,
+                            }),
+                        );
                         break;
                     }
                     let resp = handle_hello(&hello);
@@ -213,9 +248,13 @@ fn handle_connection(stream: std::os::unix::net::UnixStream) {
         }
 
         let resp = match parse_request(trimmed) {
-            Ok(ParsedRequest::Op { op, ip, subnet, iface, gateway }) => {
-                dispatch_op(&op, &ip, &subnet, &iface, &gateway, peer_fd)
-            }
+            Ok(ParsedRequest::Op {
+                op,
+                ip,
+                subnet,
+                iface,
+                gateway,
+            }) => dispatch_op(&op, &ip, &subnet, &iface, &gateway, peer_fd),
             Ok(ParsedRequest::Hello(_)) => OpResponse::err("duplicate hello"),
             Err(e) => OpResponse::err(e),
         };
@@ -245,7 +284,14 @@ fn handle_hello(hello: &HelloRequest) -> HelloResponse {
     }
 }
 
-fn dispatch_op(op: &str, ip: &str, subnet: &str, iface: &str, gateway: &str, stream_fd: i32) -> OpResponse {
+fn dispatch_op(
+    op: &str,
+    ip: &str,
+    subnet: &str,
+    iface: &str,
+    gateway: &str,
+    stream_fd: i32,
+) -> OpResponse {
     match op {
         "create_utun" => match network::create_utun(stream_fd, ip) {
             Ok(name) => OpResponse::with_name(name),
@@ -297,7 +343,10 @@ fn authorize_connection(
     } else {
         Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("uid {uid} not authorized (expected {})", config.authorized_uid),
+            format!(
+                "uid {uid} not authorized (expected {})",
+                config.authorized_uid
+            ),
         ))
     }
 }

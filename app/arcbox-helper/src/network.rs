@@ -43,8 +43,7 @@ pub fn create_utun(stream_fd: RawFd, ip: &str) -> io::Result<String> {
     // Create a DGRAM socketpair for atomic fd transfer.
     let mut fds: [libc::c_int; 2] = [0; 2];
     // SAFETY: socketpair with valid parameters.
-    let ret =
-        unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
+    let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
     if ret != 0 {
         return Err(io::Error::last_os_error());
     }

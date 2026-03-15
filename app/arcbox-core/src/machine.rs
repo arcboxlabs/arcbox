@@ -383,7 +383,8 @@ impl MachineManager {
             .is_some();
 
         // Start underlying VM
-        self.vm_manager.start(&vm_id, self.shared_dns_hosts.clone())?;
+        self.vm_manager
+            .start(&vm_id, self.shared_dns_hosts.clone())?;
 
         // Update machine state
         {
@@ -553,8 +554,6 @@ impl MachineManager {
     pub fn vm_manager(&self) -> &VmManager {
         &self.vm_manager
     }
-
-
 
     /// Gets the vsock CID for a running machine.
     #[must_use]

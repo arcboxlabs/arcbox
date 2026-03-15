@@ -4,9 +4,7 @@ use std::net::Ipv4Addr;
 
 /// Validates a utun interface name (e.g. "utun13").
 pub fn is_valid_utun_name(name: &str) -> bool {
-    name.starts_with("utun")
-        && name.len() > 4
-        && name[4..].chars().all(|c| c.is_ascii_digit())
+    name.starts_with("utun") && name.len() > 4 && name[4..].chars().all(|c| c.is_ascii_digit())
 }
 
 /// Validates an IPv4 address string.
@@ -19,10 +17,7 @@ pub fn is_valid_cidr(cidr: &str) -> bool {
     let Some((addr, prefix)) = cidr.split_once('/') else {
         return false;
     };
-    addr.parse::<Ipv4Addr>().is_ok()
-        && prefix
-            .parse::<u8>()
-            .is_ok_and(|p| p <= 32)
+    addr.parse::<Ipv4Addr>().is_ok() && prefix.parse::<u8>().is_ok_and(|p| p <= 32)
 }
 
 #[cfg(test)]

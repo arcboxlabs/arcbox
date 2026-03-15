@@ -287,10 +287,7 @@ impl Vmm {
     /// `DnsForwarder` (in the network datapath) shares this table so that
     /// host-side `register_dns()` calls are visible to guest DNS queries.
     #[cfg(target_os = "macos")]
-    pub fn set_shared_dns_hosts(
-        &mut self,
-        table: std::sync::Arc<arcbox_dns::LocalHostsTable>,
-    ) {
+    pub fn set_shared_dns_hosts(&mut self, table: std::sync::Arc<arcbox_dns::LocalHostsTable>) {
         self.shared_dns_hosts = Some(table);
     }
 
