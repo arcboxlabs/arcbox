@@ -40,6 +40,7 @@
 //! ```
 
 pub mod datapath_loop;
+pub mod helper_client;
 pub mod inbound_relay;
 pub mod l3_tunnel;
 pub mod nat;

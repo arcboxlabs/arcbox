@@ -102,15 +102,19 @@ impl L3TunnelService {
         let tun = DarwinTun::new()?;
         let tun_name = tun.name().to_string();
 
-        // Configure the utun with a point-to-point address and bring UP.
-        // macOS requires an IPv4 address on the interface for `-interface`
-        // routes to work. We use 240.0.0.1 (Class E reserved, never routed
-        // on the internet, not claimed by any VPN/proxy tool).
-        tun.configure(
-            std::net::Ipv4Addr::new(240, 0, 0, 1),
-            std::net::Ipv4Addr::new(240, 0, 0, 1),
-            std::net::Ipv4Addr::new(255, 255, 255, 252),
-        )?;
+        // Configure the utun via the privileged helper (sets IP + brings UP).
+        // Falls back to direct ioctl if the helper is not available (e.g.
+        // when daemon runs as root during development).
+        if super::helper_client::is_available() {
+            super::helper_client::configure_utun(&tun_name, "240.0.0.1")?;
+        } else {
+            tracing::debug!("helper not available, trying direct configure (needs root)");
+            tun.configure(
+                std::net::Ipv4Addr::new(240, 0, 0, 1),
+                std::net::Ipv4Addr::new(240, 0, 0, 1),
+                std::net::Ipv4Addr::new(255, 255, 255, 252),
+            )?;
+        }
         tun.set_nonblocking(true)?;
 
         // Install routes for container subnets via this utun interface.
