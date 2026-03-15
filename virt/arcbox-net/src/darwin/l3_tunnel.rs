@@ -73,9 +73,13 @@ impl TunWriter {
         // SAFETY: writev with valid fd and properly initialized iovecs.
         let n = unsafe { libc::writev(self.fd.as_raw_fd(), iov.as_ptr(), 2) };
         if n < 0 {
-            return Err(io::Error::last_os_error());
+            let e = io::Error::last_os_error();
+            tracing::warn!(fd = self.fd.as_raw_fd(), error = %e, "TunWriter: writev failed");
+            return Err(e);
         }
-        Ok((n as usize).saturating_sub(4))
+        let written = (n as usize).saturating_sub(4);
+        tracing::trace!(fd = self.fd.as_raw_fd(), written, "TunWriter: wrote to utun");
+        Ok(written)
     }
 }
 
@@ -101,19 +105,24 @@ impl L3TunnelService {
         // Create the utun device via the privileged helper (which creates
         // utun as root and passes the fd via DGRAM socketpair).
         // Falls back to direct creation if running as root (development).
+        // Use an IP in the guest's subnet (192.168.64.0/24) so that:
+        // 1. Host kernel uses this IP as src when routing to container subnets
+        // 2. Guest can route replies back via eth0 (default route to 192.168.64.1)
+        // 3. Reply arrives at datapath → TunnelConnTrack matches → TunWriter → utun
+        //
+        // We use .3 to avoid colliding with gateway (.1) and guest (.2).
+        let utun_ip = "192.168.64.3";
+
         let (tun_fd, tun_name) = if super::helper_client::is_available() {
             tracing::info!("L3 tunnel: using privileged helper");
             let session_id = format!("tunnel-{}", std::process::id());
-            let (fd, name) = super::helper_client::create_utun(&session_id, "240.0.0.1")?;
+            let (fd, name) = super::helper_client::create_utun(&session_id, utun_ip)?;
             (fd, name)
         } else {
             tracing::info!("L3 tunnel: helper not available, trying direct (needs root)");
             let tun = DarwinTun::new()?;
-            tun.configure(
-                std::net::Ipv4Addr::new(240, 0, 0, 1),
-                std::net::Ipv4Addr::new(240, 0, 0, 1),
-                std::net::Ipv4Addr::new(255, 255, 255, 252),
-            )?;
+            let ip: std::net::Ipv4Addr = utun_ip.parse().unwrap();
+            tun.configure(ip, ip, std::net::Ipv4Addr::new(255, 255, 255, 252))?;
             let name = tun.name().to_string();
             (extract_tun_fd(tun), name)
         };
