@@ -29,6 +29,7 @@ smoltcp = { version = "0.12.0", default-features = false, features = ["std", "al
 arcbox-dns = { version = "0.1.12", path = "../../common/arcbox-dns" }
 serde_json.workspace = true
 serde = { workspace = true, features = ["derive"] }
+sendfd = "0.4"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
