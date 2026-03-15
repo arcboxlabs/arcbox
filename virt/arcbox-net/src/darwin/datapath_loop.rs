@@ -532,16 +532,22 @@ fn filter_rx_queue_tunnel_returns(
         return;
     };
     let queue = device.rx_queue_mut();
+    let before = queue.len();
     queue.retain(|frame| {
         if frame.len() > ETH_HEADER_LEN {
             let ip = &frame[ETH_HEADER_LEN..];
             if tunnel_ct.is_tunnel_return(ip) {
+                tracing::info!(bytes = ip.len(), "tunnel return: writing to utun");
                 let _ = writer.write_packet(ip);
                 return false; // consumed
             }
         }
         true
     });
+    let after = queue.len();
+    if before > 0 {
+        tracing::debug!(before, after, consumed = before - after, "filter_rx_queue_tunnel_returns");
+    }
 }
 
 /// Filters raw L2 frames (e.g. gated SYN frames): tunnel-return packets

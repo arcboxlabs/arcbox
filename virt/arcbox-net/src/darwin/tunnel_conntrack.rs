@@ -76,8 +76,15 @@ impl TunnelConnTrack {
     /// Parses the IP packet and registers the expected reverse flow.
     pub fn register_injected(&mut self, ip_packet: &[u8]) {
         let Some(fwd) = parse_five_tuple(ip_packet) else {
+            tracing::debug!("conntrack: cannot parse 5-tuple from injected packet");
             return;
         };
+        tracing::debug!(
+            src = %fwd.src_ip, dst = %fwd.dst_ip,
+            sport = fwd.src_port, dport = fwd.dst_port,
+            proto = fwd.proto,
+            "conntrack: registered injected flow"
+        );
         // Register the reverse tuple so we can match the reply.
         let rev = FiveTuple {
             src_ip: fwd.dst_ip,
@@ -104,6 +111,19 @@ impl TunnelConnTrack {
         let Some(tuple) = parse_five_tuple(ip_packet) else {
             return false;
         };
+        let matched = self.entries.contains_key(&tuple);
+        if !matched && ip_packet.len() >= 20 {
+            let proto = ip_packet[9];
+            if proto == 6 || proto == 17 {
+                // Log TCP/UDP misses for debugging
+                tracing::trace!(
+                    src = %tuple.src_ip, dst = %tuple.dst_ip,
+                    sport = tuple.src_port, dport = tuple.dst_port,
+                    proto, entries = self.entries.len(),
+                    "conntrack: no match for packet"
+                );
+            }
+        }
         if let Some(entry) = self.entries.get_mut(&tuple) {
             entry.last_seen = Instant::now();
             entry.established = true;
