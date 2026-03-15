@@ -162,6 +162,7 @@ fc-sdk = "0.2.3"
 
 # Internal crates
 arcbox-constants = { version = "0.1.12", path = "common/arcbox-constants" } # x-release-please-version
+arcbox-dns = { version = "0.1.12", path = "common/arcbox-dns" } # x-release-please-version
 arcbox-error = { version = "0.1.12", path = "common/arcbox-error" } # x-release-please-version
 arcbox-vz = { version = "0.1.12", path = "virt/arcbox-vz" } # x-release-please-version
 arcbox-hypervisor = { version = "0.1.12", path = "virt/arcbox-hypervisor" } # x-release-please-version
