@@ -145,8 +145,7 @@ impl DnsQuery {
         let qtype_raw = u16::from_be_bytes([data[offset], data[offset + 1]]);
         let qclass_raw = u16::from_be_bytes([data[offset + 2], data[offset + 3]]);
 
-        let qtype =
-            DnsRecordType::try_from(qtype_raw).map_err(DnsError::UnsupportedType)?;
+        let qtype = DnsRecordType::try_from(qtype_raw).map_err(DnsError::UnsupportedType)?;
 
         if qclass_raw != 1 {
             return Err(DnsError::UnsupportedClass(qclass_raw));
@@ -215,11 +214,7 @@ pub fn build_response_ip(query_bytes: &[u8], ip: IpAddr, ttl: u32) -> Result<Vec
 }
 
 /// Shorthand: build an A record response.
-pub fn build_response_a(
-    query_bytes: &[u8],
-    ip: Ipv4Addr,
-    ttl: u32,
-) -> Result<Vec<u8>, DnsError> {
+pub fn build_response_a(query_bytes: &[u8], ip: Ipv4Addr, ttl: u32) -> Result<Vec<u8>, DnsError> {
     build_response_ip(query_bytes, IpAddr::V4(ip), ttl)
 }
 

@@ -11,16 +11,14 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
-use arcbox_dns::{DnsQuery, DnsRecordType, DEFAULT_TTL};
+use arcbox_dns::{DEFAULT_TTL, DnsQuery, DnsRecordType};
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 /// Gateway address where the host-side DNS forwarder runs.
-const GATEWAY: SocketAddr = SocketAddr::new(
-    std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 64, 1)),
-    53,
-);
+const GATEWAY: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 64, 1)), 53);
 
 /// Local domain suffix — queries for `*.arcbox.local` that miss the
 /// registries get an authoritative NXDOMAIN instead of forwarding.
@@ -170,11 +168,21 @@ impl GuestDnsServer {
         }
 
         // 3. Sandbox registry lookup (std::sync::RwLock, not async).
-        if let Some(ip) = self.sandboxes.read().ok().and_then(|g| g.get(&name_lower).copied()) {
+        if let Some(ip) = self
+            .sandboxes
+            .read()
+            .ok()
+            .and_then(|g| g.get(&name_lower).copied())
+        {
             return Ok(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?);
         }
         if bare_name != name_lower {
-            if let Some(ip) = self.sandboxes.read().ok().and_then(|g| g.get(bare_name).copied()) {
+            if let Some(ip) = self
+                .sandboxes
+                .read()
+                .ok()
+                .and_then(|g| g.get(bare_name).copied())
+            {
                 return Ok(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?);
             }
         }

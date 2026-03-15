@@ -214,9 +214,7 @@ async fn docker_get(path: &str) -> anyhow::Result<serde_json::Value> {
     let stream = UnixStream::connect(DOCKER_SOCK).await?;
     let (reader, mut writer) = tokio::io::split(stream);
 
-    let request = format!(
-        "GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n"
-    );
+    let request = format!("GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n");
     writer.write_all(request.as_bytes()).await?;
     writer.shutdown().await?;
 
