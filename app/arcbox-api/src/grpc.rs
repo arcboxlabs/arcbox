@@ -333,9 +333,7 @@ impl SandboxService for SandboxServiceImpl {
 
         // Register sandbox DNS so the host can resolve sandbox-id.arcbox.local.
         if let Ok(ip) = resp.ip_address.parse() {
-            self.runtime
-                .register_dns(&resp.id, &resp.id, ip)
-                .await;
+            self.runtime.register_dns(&resp.id, &resp.id, ip).await;
         }
 
         Ok(Response::new(resp))
@@ -513,9 +511,7 @@ impl SandboxSnapshotService for SandboxSnapshotServiceImpl {
 
         // Register restored sandbox DNS.
         if let Ok(ip) = resp.ip_address.parse() {
-            self.runtime
-                .register_dns(&resp.id, &resp.id, ip)
-                .await;
+            self.runtime.register_dns(&resp.id, &resp.id, ip).await;
         }
 
         Ok(Response::new(resp))

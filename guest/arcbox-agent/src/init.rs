@@ -326,7 +326,19 @@ exit 0
         let _ = fs::set_permissions(script_path, fs::Permissions::from_mode(0o755));
 
         match std::process::Command::new("/bin/busybox")
-            .args(["udhcpc", "-i", bridge_iface, "-n", "-q", "-t", "3", "-T", "2", "-s", script_path])
+            .args([
+                "udhcpc",
+                "-i",
+                bridge_iface,
+                "-n",
+                "-q",
+                "-t",
+                "3",
+                "-T",
+                "2",
+                "-s",
+                script_path,
+            ])
             .status()
         {
             Ok(s) if s.success() => {
@@ -351,7 +363,18 @@ exit 0
             "FORWARD accept from bridge NIC",
         );
         run_iptables(
-            &["-I", "FORWARD", "-o", bridge_iface, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"],
+            &[
+                "-I",
+                "FORWARD",
+                "-o",
+                bridge_iface,
+                "-m",
+                "conntrack",
+                "--ctstate",
+                "RELATED,ESTABLISHED",
+                "-j",
+                "ACCEPT",
+            ],
             "FORWARD accept established to bridge NIC",
         );
     }
