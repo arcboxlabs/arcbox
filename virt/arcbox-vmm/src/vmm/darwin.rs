@@ -76,6 +76,16 @@ impl Vmm {
             }
         }
 
+        // Add a second NIC with Apple NAT (VZNATNetworkDeviceAttachment).
+        // This creates a bridge (bridge100) on the host, giving the VM a
+        // real L2 path. Host can route container subnets through this NIC's
+        // IP, avoiding the utun write limitation on macOS.
+        if self.config.networking {
+            let bridge_nic = VirtioDeviceConfig::network();
+            vm.add_virtio_device(bridge_nic)?;
+            tracing::info!("Added bridge NIC (VZNATNetworkDeviceAttachment) for L3 routing");
+        }
+
         // Add vsock if enabled
         if self.config.vsock {
             let vsock_config = VirtioDeviceConfig::vsock();

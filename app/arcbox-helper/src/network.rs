@@ -112,6 +112,42 @@ pub fn add_route(subnet: &str, iface: &str) -> io::Result<()> {
     }
 }
 
+/// Adds a route for a subnet via a gateway IP.
+///
+/// Uses `/sbin/route -n add -net <subnet> <gateway>`.
+pub fn add_route_gateway(subnet: &str, gateway: &str) -> io::Result<()> {
+    if !validate::is_valid_cidr(subnet) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid subnet: {subnet}"),
+        ));
+    }
+    if !validate::is_valid_ipv4(gateway) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid gateway: {gateway}"),
+        ));
+    }
+
+    let output = std::process::Command::new("/sbin/route")
+        .args(["-n", "add", "-net", subnet, gateway])
+        .output()?;
+
+    if output.status.success() {
+        tracing::info!(subnet, gateway, "gateway route added");
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("File exists") {
+            tracing::debug!(subnet, gateway, "route already exists");
+            Ok(())
+        } else {
+            tracing::warn!(subnet, gateway, stderr = %stderr, "route add failed");
+            Err(io::Error::new(io::ErrorKind::Other, stderr.to_string()))
+        }
+    }
+}
+
 /// Removes a route for a subnet via an interface.
 pub fn remove_route(subnet: &str, iface: &str) -> io::Result<()> {
     if !validate::is_valid_cidr(subnet) || !validate::is_valid_utun_name(iface) {

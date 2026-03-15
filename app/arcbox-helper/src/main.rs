@@ -56,6 +56,7 @@ fn parse_request(line: &str) -> Result<ParsedRequest, String> {
             ip: v.get("ip").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             subnet: v.get("subnet").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             iface: v.get("iface").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            gateway: v.get("gateway").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         })
     } else {
         Err("expected 'hello' or 'op' field".to_string())
@@ -69,6 +70,7 @@ enum ParsedRequest {
         ip: String,
         subnet: String,
         iface: String,
+        gateway: String,
     },
 }
 
@@ -211,8 +213,8 @@ fn handle_connection(stream: std::os::unix::net::UnixStream) {
         }
 
         let resp = match parse_request(trimmed) {
-            Ok(ParsedRequest::Op { op, ip, subnet, iface }) => {
-                dispatch_op(&op, &ip, &subnet, &iface, peer_fd)
+            Ok(ParsedRequest::Op { op, ip, subnet, iface, gateway }) => {
+                dispatch_op(&op, &ip, &subnet, &iface, &gateway, peer_fd)
             }
             Ok(ParsedRequest::Hello(_)) => OpResponse::err("duplicate hello"),
             Err(e) => OpResponse::err(e),
@@ -243,13 +245,17 @@ fn handle_hello(hello: &HelloRequest) -> HelloResponse {
     }
 }
 
-fn dispatch_op(op: &str, ip: &str, subnet: &str, iface: &str, stream_fd: i32) -> OpResponse {
+fn dispatch_op(op: &str, ip: &str, subnet: &str, iface: &str, gateway: &str, stream_fd: i32) -> OpResponse {
     match op {
         "create_utun" => match network::create_utun(stream_fd, ip) {
             Ok(name) => OpResponse::with_name(name),
             Err(e) => OpResponse::err(e.to_string()),
         },
         "add_route" => match network::add_route(subnet, iface) {
+            Ok(()) => OpResponse::success(),
+            Err(e) => OpResponse::err(e.to_string()),
+        },
+        "add_route_gw" => match network::add_route_gateway(subnet, gateway) {
             Ok(()) => OpResponse::success(),
             Err(e) => OpResponse::err(e.to_string()),
         },
