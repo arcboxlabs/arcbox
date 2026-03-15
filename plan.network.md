@@ -65,7 +65,7 @@ Host: curl http://my-nginx.arcbox.local/
   │       (now routable because Phase 2 adds the route)
   │
   ├─ macOS route table: 172.17.0.0/16 → utun{N}   (added by L3TunnelService)
-  │                     10.88.0.0/16  → utun{N}
+  │                     172.20.0.0/16  → utun{N}
   │
   ├─ L3TunnelService reads IP packet [dst=172.17.0.2] from utun{N}
   │   └─ sends RoutePacket(bytes) → InboundListenerManager.cmd_tx
@@ -350,11 +350,11 @@ the TAP IP. `RestoreResponse.ip_address` also exists.
 **Modify `app/arcbox-api/src/grpc.rs`** (`SandboxServiceImpl`):
 - `create()`: after forwarding RPC and getting `CreateSandboxResponse`, call
   `runtime.register_dns(resp.id, resp.ip_address.parse()?)` and
-  `runtime.add_container_subnet(tap_subnet)` (e.g. `10.88.0.0/16`)
+  `runtime.add_container_subnet(tap_subnet)` (e.g. `172.20.0.0/16`)
 - `stop()` / `remove()`: call `runtime.deregister_dns_by_id(id)`
 - `restore()`: same as `create()` using `RestoreResponse.ip_address`
 
-The `10.88.0.0/16` route is already added at VM startup by `L3TunnelService`
+The `172.20.0.0/16` route is already added at VM startup by `L3TunnelService`
 (Phase 3), so `add_container_subnet` is a no-op here.
 
 **Deliverable**: `ssh user@10.88.0.2` from host, and `sandbox-abc.arcbox.local`

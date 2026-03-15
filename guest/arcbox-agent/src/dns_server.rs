@@ -160,9 +160,18 @@ impl GuestDnsServer {
         let query = DnsQuery::parse(data)?;
         let name_lower = query.name.to_lowercase();
 
+        // Only answer A queries from local registries. AAAA queries for
+        // known names get NXDOMAIN (we only have IPv4 container IPs).
+        // Other types are forwarded to the gateway.
+        let is_a_query = query.qtype == DnsRecordType::A;
+
         // 1. Container registry lookup.
         if let Some(&ip) = self.containers.read().await.get(&name_lower) {
-            return Ok(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?);
+            if is_a_query {
+                return Ok(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?);
+            }
+            // AAAA for known container → empty answer (no IPv6).
+            return Ok(arcbox_dns::build_nxdomain(data)?);
         }
 
         // 2. Try with `.arcbox.local` suffix stripped.
@@ -171,7 +180,10 @@ impl GuestDnsServer {
             .unwrap_or(&name_lower);
         if bare_name != name_lower {
             if let Some(&ip) = self.containers.read().await.get(bare_name) {
-                return Ok(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?);
+                if is_a_query {
+                    return Ok(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?);
+                }
+                return Ok(arcbox_dns::build_nxdomain(data)?);
             }
         }
 
@@ -182,7 +194,10 @@ impl GuestDnsServer {
             .ok()
             .and_then(|g| g.get(&name_lower).copied())
         {
-            return Ok(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?);
+            if is_a_query {
+                return Ok(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?);
+            }
+            return Ok(arcbox_dns::build_nxdomain(data)?);
         }
         if bare_name != name_lower {
             if let Some(ip) = self
@@ -191,7 +206,10 @@ impl GuestDnsServer {
                 .ok()
                 .and_then(|g| g.get(bare_name).copied())
             {
-                return Ok(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?);
+                if is_a_query {
+                    return Ok(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?);
+                }
+                return Ok(arcbox_dns::build_nxdomain(data)?);
             }
         }
 

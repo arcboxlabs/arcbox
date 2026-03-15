@@ -39,7 +39,7 @@ tokio-util = "0.7"
 flate2 = "1"
 tar = "0.4"
 num_cpus = "1"
-arcbox-dns = { version = "0.1.12", path = "../../common/arcbox-dns" }
+arcbox-dns = { workspace = true }
 
 # vsock and arcbox-vm are Linux-only
 [target.'cfg(target_os = "linux")'.dependencies]
