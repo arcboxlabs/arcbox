@@ -48,7 +48,7 @@ mod tests {
     #[test]
     fn cidr() {
         assert!(is_valid_cidr("172.16.0.0/12"));
-        assert!(is_valid_cidr("10.88.0.0/16"));
+        assert!(is_valid_cidr("172.20.0.0/16"));
         assert!(is_valid_cidr("0.0.0.0/0"));
         assert!(!is_valid_cidr("172.16.0.0"));
         assert!(!is_valid_cidr("172.16.0.0/33"));

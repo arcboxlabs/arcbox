@@ -507,8 +507,10 @@ fn dns_domain() -> String {
 }
 
 /// Container subnets to route through the bridge NIC.
+/// 172.16.0.0/12 covers all Docker subnets (default bridge 172.17/16,
+/// custom networks 172.18-31/16) and sandbox TAP networks.
 #[cfg(target_os = "macos")]
-const CONTAINER_SUBNETS: &[&str] = &["172.16.0.0/12", "10.88.0.0/16"];
+const CONTAINER_SUBNETS: &[&str] = &["172.16.0.0/12"];
 
 /// Discovers the guest bridge NIC IP and installs host routes.
 ///

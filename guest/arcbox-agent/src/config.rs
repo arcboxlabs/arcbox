@@ -28,8 +28,8 @@ fn guest_defaults() -> VmmConfig {
         },
         network: NetworkConfig {
             bridge: "arcbox-sb0".into(),
-            cidr: "10.88.0.0/16".into(),
-            gateway: "10.88.0.1".into(),
+            cidr: "172.20.0.0/16".into(),
+            gateway: "172.20.0.1".into(),
             dns: vec!["1.1.1.1".into(), "8.8.8.8".into()],
         },
         grpc: GrpcConfig {
