@@ -228,6 +228,17 @@ pub fn add_route(subnet: &str, iface: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Asks the helper to add a gateway route (route via IP, not interface).
+pub fn add_route_gateway(subnet: &str, gateway: &str) -> io::Result<()> {
+    let mut stream = connect_and_hello("route")?;
+    let req = format!(
+        r#"{{"op":"add_route_gw","subnet":"{}","gateway":"{}"}}"#,
+        subnet, gateway,
+    );
+    send_op(&mut stream, &req)?;
+    Ok(())
+}
+
 /// Asks the helper to remove a route.
 pub fn remove_route(subnet: &str, iface: &str) -> io::Result<()> {
     let mut stream = connect_and_hello("route")?;

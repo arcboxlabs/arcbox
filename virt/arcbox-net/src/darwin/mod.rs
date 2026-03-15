@@ -39,6 +39,7 @@
 //! vmnet.write_packet(&buf[..n])?;
 //! ```
 
+pub mod bridge_discovery;
 pub mod datapath_loop;
 pub mod helper_client;
 pub mod inbound_relay;
