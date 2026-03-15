@@ -63,6 +63,3 @@ jobs:
 
       - name: Smoke test arcbox daemon
         run: ./target/debug/arcbox-daemon --help
-
-      - name: Smoke test arcbox helper
-        run: ./target/debug/arcbox-helper --help || true

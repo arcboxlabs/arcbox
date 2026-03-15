@@ -149,8 +149,6 @@ async fn run(args: DaemonArgs) -> Result<()> {
         "Runtime initialized"
     );
 
-    info!("DEBUG: post-init, about to bind DNS");
-
     // Apply custom DNS domain if configured via ARCBOX_DNS_DOMAIN.
     let dns_local_domain = dns_domain();
     if dns_local_domain != DEFAULT_DNS_DOMAIN {
@@ -174,13 +172,6 @@ async fn run(args: DaemonArgs) -> Result<()> {
     runtime
         .network_manager()
         .register_dns("host", IpAddr::V4(gateway_ip));
-
-    // Install host routes for container subnets via the bridge NIC.
-    // The bridge NIC (VZNATNetworkDeviceAttachment) creates a bridge100
-    // interface with a real L2 path to the guest. We discover the guest's
-    // bridge IP from vmnet DHCP leases and install routes via the helper.
-    #[cfg(target_os = "macos")]
-    install_bridge_routes();
 
     let shutdown = CancellationToken::new();
 
@@ -504,68 +495,6 @@ fn first_address_in_subnet(subnet: &str) -> Option<Ipv4Addr> {
 fn dns_domain() -> String {
     let key = format!("{}_DNS_DOMAIN", to_env_prefix(DNS_PREFIX));
     std::env::var(key).unwrap_or_else(|_| DEFAULT_DNS_DOMAIN.to_string())
-}
-
-/// Container subnets to route through the bridge NIC.
-/// 172.16.0.0/12 covers all Docker subnets (default bridge 172.17/16,
-/// custom networks 172.18-31/16) and sandbox TAP networks.
-#[cfg(target_os = "macos")]
-const CONTAINER_SUBNETS: &[&str] = &["172.16.0.0/12"];
-
-/// Discovers the guest bridge NIC IP and installs host routes.
-///
-/// The VZNATNetworkDeviceAttachment creates a bridge (bridge100) with vmnet
-/// DHCP. We find the guest's IP on that bridge and route container subnets
-/// through it. Route installation requires the privileged helper.
-#[cfg(target_os = "macos")]
-fn install_bridge_routes() {
-    use arcbox_net::darwin::{bridge_discovery, helper_client};
-
-    // Wait a moment for DHCP lease to settle.
-    std::thread::sleep(std::time::Duration::from_secs(2));
-
-    let Some(guest_ip) = bridge_discovery::discover_bridge_ip() else {
-        warn!("Bridge routing: no bridge NIC IP found in DHCP leases");
-        return;
-    };
-
-    let bridge_iface = bridge_discovery::find_bridge_interface(guest_ip)
-        .unwrap_or_else(|| "bridge100".to_string());
-
-    info!(
-        guest_ip = %guest_ip,
-        bridge = %bridge_iface,
-        "Bridge routing: discovered guest bridge NIC"
-    );
-
-    let guest_ip_str = guest_ip.to_string();
-
-    // Install routes via helper (needs root for /sbin/route).
-    // Falls back to direct route command if helper is unavailable.
-    for subnet in CONTAINER_SUBNETS {
-        let result = if helper_client::is_available() {
-            helper_client::add_route_gateway(subnet, &guest_ip_str)
-        } else {
-            // Direct fallback (works if daemon runs as root).
-            std::process::Command::new("/sbin/route")
-                .args(["-n", "add", "-net", subnet, &guest_ip_str])
-                .output()
-                .map(|_| ())
-                .map_err(|e| e)
-        };
-
-        match result {
-            Ok(()) => info!(subnet, gateway = %guest_ip, "route installed"),
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("File exists") {
-                    info!(subnet, "route already exists");
-                } else {
-                    warn!(subnet, error = %e, "failed to install route (is arcbox-helper running?)");
-                }
-            }
-        }
-    }
 }
 
 fn check_resolver_installed() {

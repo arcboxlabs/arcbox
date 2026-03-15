@@ -41,10 +41,8 @@
 
 pub mod bridge_discovery;
 pub mod datapath_loop;
-pub mod helper_client;
 pub mod inbound_relay;
 pub mod nat;
-pub mod route_manager;
 pub mod smoltcp_device;
 pub mod socket_proxy;
 pub mod tcp_bridge;

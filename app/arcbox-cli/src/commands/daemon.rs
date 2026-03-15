@@ -63,10 +63,6 @@ pub enum DaemonAction {
     Start,
     Stop,
     Status,
-    /// Install the privileged helper (requires sudo).
-    Install,
-    /// Uninstall the privileged helper (requires sudo).
-    Uninstall,
 }
 
 /// Executes the daemon command.
@@ -76,8 +72,6 @@ pub async fn execute(args: DaemonArgs) -> Result<()> {
         DaemonAction::Start => spawn_background(&args),
         DaemonAction::Stop => execute_stop(&args).await,
         DaemonAction::Status => execute_status(&args).await,
-        DaemonAction::Install => execute_install(),
-        DaemonAction::Uninstall => execute_uninstall(),
     }
 }
 
@@ -394,126 +388,6 @@ fn send_sigterm(pid: i32) -> Result<()> {
     Err(std::io::Error::last_os_error())
         .with_context(|| format!("Failed to send SIGTERM to daemon process {pid}"))
 }
-
-// ─── Privileged helper install/uninstall ─────────────────────────────────────
-
-const HELPER_LABEL: &str = "dev.arcbox.helper";
-const HELPER_PLIST_PATH: &str = "/Library/LaunchDaemons/dev.arcbox.helper.plist";
-const HELPER_INSTALL_PATH: &str = "/usr/local/bin/arcbox-helper";
-const HELPER_SOCKET: &str = "/var/run/arcbox/helper.sock";
-
-fn execute_install() -> Result<()> {
-    // Must be root.
-    if !nix::unistd::geteuid().is_root() {
-        bail!(
-            "Installing the helper requires root. Run:\n  \
-             sudo abctl daemon install"
-        );
-    }
-
-    // Find the helper binary next to the CLI binary.
-    let helper_src = resolve_helper_binary()?;
-
-    // Copy to /usr/local/bin.
-    std::fs::copy(&helper_src, HELPER_INSTALL_PATH)
-        .with_context(|| format!("failed to copy helper to {HELPER_INSTALL_PATH}"))?;
-
-    // Ensure executable.
-    let perms = std::fs::Permissions::from_mode(0o755);
-    std::fs::set_permissions(HELPER_INSTALL_PATH, perms)?;
-
-    // Write LaunchDaemon plist.
-    let plist = generate_helper_plist();
-    std::fs::write(HELPER_PLIST_PATH, plist)
-        .with_context(|| format!("failed to write {HELPER_PLIST_PATH}"))?;
-
-    // Bootstrap the LaunchDaemon.
-    let status = Command::new("launchctl")
-        .args(["bootstrap", "system", HELPER_PLIST_PATH])
-        .status()
-        .context("failed to run launchctl bootstrap")?;
-
-    if !status.success() {
-        // May already be loaded; try kickstart instead.
-        let _ = Command::new("launchctl")
-            .args(["kickstart", "-k", &format!("system/{HELPER_LABEL}")])
-            .status();
-    }
-
-    println!("Privileged helper installed and started.");
-    println!("  Binary: {HELPER_INSTALL_PATH}");
-    println!("  Plist:  {HELPER_PLIST_PATH}");
-    println!("  Socket: {HELPER_SOCKET}");
-    Ok(())
-}
-
-fn execute_uninstall() -> Result<()> {
-    if !nix::unistd::geteuid().is_root() {
-        bail!(
-            "Uninstalling the helper requires root. Run:\n  \
-             sudo abctl daemon uninstall"
-        );
-    }
-
-    // Stop and remove the LaunchDaemon.
-    let _ = Command::new("launchctl")
-        .args(["bootout", &format!("system/{HELPER_LABEL}")])
-        .status();
-
-    // Remove files.
-    let _ = std::fs::remove_file(HELPER_PLIST_PATH);
-    let _ = std::fs::remove_file(HELPER_INSTALL_PATH);
-    let _ = std::fs::remove_file(HELPER_SOCKET);
-
-    println!("Privileged helper uninstalled.");
-    Ok(())
-}
-
-fn resolve_helper_binary() -> Result<PathBuf> {
-    // Look next to the current CLI binary.
-    let current_exe = std::env::current_exe().context("cannot determine current binary path")?;
-    let dir = current_exe
-        .parent()
-        .context("cannot determine binary directory")?;
-    let helper = dir.join("arcbox-helper");
-    if helper.exists() {
-        return Ok(helper);
-    }
-
-    bail!(
-        "arcbox-helper binary not found at {}. Build it first with:\n  \
-         cargo build -p arcbox-helper",
-        helper.display()
-    );
-}
-
-fn generate_helper_plist() -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>{HELPER_LABEL}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{HELPER_INSTALL_PATH}</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/var/log/arcbox-helper.log</string>
-    <key>StandardErrorPath</key>
-    <string>/var/log/arcbox-helper.log</string>
-</dict>
-</plist>
-"#
-    )
-}
-
-use std::os::unix::fs::PermissionsExt;
 
 #[cfg(test)]
 mod tests {

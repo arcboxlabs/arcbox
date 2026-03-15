@@ -73,7 +73,7 @@ jobs:
 
       - name: Build arcbox binaries (release)
         timeout-minutes: 15
-        run: cargo build --release --locked -p arcbox-cli -p arcbox-daemon -p arcbox-helper
+        run: cargo build --release --locked -p arcbox-cli -p arcbox-daemon
 
       - name: Codesign arcbox-daemon with virtualization entitlement
         run: |
@@ -85,10 +85,8 @@ jobs:
           echo "=== Build artifacts ==="
           ls -lh target/release/abctl
           ls -lh target/release/arcbox-daemon
-          ls -lh target/release/arcbox-helper
           file target/release/abctl
           file target/release/arcbox-daemon
-          file target/release/arcbox-helper
 
       - name: Upload host binaries
         uses: actions/upload-artifact@v4
@@ -97,7 +95,6 @@ jobs:
           path: |
             target/release/abctl
             target/release/arcbox-daemon
-            target/release/arcbox-helper
             tests/resources/entitlements.plist
           retention-days: 5
 
@@ -184,7 +181,6 @@ jobs:
           mkdir -p "$STAGING"
           cp artifacts/host/target/release/abctl "$STAGING/"
           cp artifacts/host/target/release/arcbox-daemon "$STAGING/"
-          cp artifacts/host/target/release/arcbox-helper "$STAGING/"
           cp artifacts/agent/arcbox-agent "$STAGING/"
           cp artifacts/host/tests/resources/entitlements.plist "$STAGING/"
 
