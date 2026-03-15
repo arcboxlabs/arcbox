@@ -9,11 +9,11 @@ use arcbox_grpc::v1::machine_service_server;
 use arcbox_grpc::{SandboxService, SandboxSnapshotService};
 use arcbox_protocol::sandbox_v1::Empty as SandboxEmpty;
 use arcbox_protocol::sandbox_v1::{
-    CheckpointRequest, CheckpointResponse, CreateSandboxRequest, CreateSandboxResponse,
-    DeleteSnapshotRequest, ExecInput, ExecOutput, InspectSandboxRequest, ListSandboxesRequest,
-    ListSandboxesResponse, ListSnapshotsRequest, ListSnapshotsResponse, RemoveSandboxRequest,
-    RestoreRequest, RestoreResponse, RunOutput, RunRequest, SandboxEvent, SandboxEventsRequest,
-    SandboxInfo, StopSandboxRequest,
+    exec_input, CheckpointRequest, CheckpointResponse, CreateSandboxRequest,
+    CreateSandboxResponse, DeleteSnapshotRequest, ExecInput, ExecOutput, InspectSandboxRequest,
+    ListSandboxesRequest, ListSandboxesResponse, ListSnapshotsRequest, ListSnapshotsResponse,
+    RemoveSandboxRequest, RestoreRequest, RestoreResponse, RunOutput, RunRequest, SandboxEvent,
+    SandboxEventsRequest, SandboxInfo, StopSandboxRequest,
 };
 use arcbox_protocol::v1::{
     CreateMachineRequest, CreateMachineResponse, Empty, InspectMachineRequest, ListMachinesRequest,
@@ -354,11 +354,65 @@ impl SandboxService for SandboxServiceImpl {
 
     async fn exec(
         &self,
-        _request: Request<Streaming<ExecInput>>,
+        request: Request<Streaming<ExecInput>>,
     ) -> Result<Response<Self::ExecStream>, Status> {
-        Err(Status::unimplemented(
-            "sandbox exec bidirectional stream not yet implemented",
-        ))
+        let machine = extract_machine_id(&request)?;
+        let agent = self
+            .runtime
+            .get_agent(&machine)
+            .map_err(|e| core_to_status(&e))?;
+
+        let mut stream = request.into_inner();
+
+        // The first message in the stream must carry the Init payload.
+        let first = stream
+            .next()
+            .await
+            .ok_or_else(|| {
+                Status::invalid_argument("exec: stream closed before Init message")
+            })??;
+
+        let exec_req = match first.payload {
+            Some(exec_input::Payload::Init(req)) => req,
+            _ => return Err(Status::invalid_argument("exec: first message must be Init")),
+        };
+
+        let (in_tx, out_rx) = agent
+            .sandbox_exec(exec_req)
+            .await
+            .map_err(|e| core_to_status(&e))?;
+
+        // Stdin pump: gRPC stream → AgentClient stdin channel.
+        tokio::spawn(async move {
+            while let Some(msg) = stream.next().await {
+                match msg {
+                    Ok(input) => match input.payload {
+                        Some(exec_input::Payload::Stdin(data)) => {
+                            if in_tx.send(data).await.is_err() {
+                                return;
+                            }
+                        }
+                        Some(exec_input::Payload::Resize(_)) => {
+                            // TTY resize not yet forwarded over the wire protocol.
+                        }
+                        Some(exec_input::Payload::Init(_)) | None => {
+                            // Unexpected message; ignore.
+                        }
+                    },
+                    Err(_) => {
+                        // gRPC stream error; signal EOF.
+                        let _ = in_tx.send(Vec::new()).await;
+                        return;
+                    }
+                }
+            }
+            // Client closed the input stream; send EOF to the agent.
+            let _ = in_tx.send(Vec::new()).await;
+        });
+
+        let out_stream = UnboundedReceiverStream::new(out_rx)
+            .map(|r| r.map_err(|e| Status::internal(e.to_string())));
+        Ok(Response::new(Box::pin(out_stream)))
     }
 
     async fn stop(

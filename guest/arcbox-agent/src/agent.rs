@@ -562,7 +562,6 @@ mod linux {
                 match listener.accept().await {
                     Ok((stream, peer_addr)) => {
                         tracing::info!("Accepted connection from {:?}", peer_addr);
-                        eprintln!("[AGENT] Accepted connection from {:?}", peer_addr);
                         tokio::spawn(async move {
                             if let Err(e) = handle_connection(stream).await {
                                 tracing::error!("Connection error: {}", e);
@@ -719,7 +718,7 @@ mod linux {
         payload: &[u8],
     ) -> anyhow::Result<()>
     where
-        S: tokio::io::AsyncWrite + Unpin,
+        S: AsyncRead + AsyncWrite + Unpin,
     {
         let svc = match sandbox_service() {
             Some(s) => Arc::clone(s),
@@ -809,11 +808,10 @@ mod linux {
                 handle_sandbox_events(stream, &svc, trace_id, payload).await?;
             }
             // -----------------------------------------------------------------
-            // Exec: not yet implemented
+            // Streaming: Exec
             // -----------------------------------------------------------------
             MessageType::SandboxExecRequest => {
-                send_sandbox_error(stream, trace_id, 501, "SandboxExec not yet implemented")
-                    .await?;
+                svc.handle_exec(stream, trace_id, payload).await?;
             }
             // -----------------------------------------------------------------
             // Snapshots

@@ -6,16 +6,38 @@
 
 use std::sync::Arc;
 
+use arcbox_constants::wire::MessageType;
 use arcbox_protocol::sandbox_v1;
 use arcbox_vm::{
-    CheckpointInfo, CheckpointSummary, RestoreSandboxSpec, SandboxEvent as VmSandboxEvent,
-    SandboxInfo, SandboxManager, SandboxMountSpec, SandboxNetworkSpec, SandboxSpec, SandboxSummary,
-    VmmConfig,
+    CheckpointInfo, CheckpointSummary, ExecInputMsg, RestoreSandboxSpec,
+    SandboxEvent as VmSandboxEvent, SandboxInfo, SandboxManager, SandboxMountSpec,
+    SandboxNetworkSpec, SandboxSpec, SandboxSummary, VmmConfig,
 };
 use prost::Message;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 
 use crate::error::SandboxError;
+
+/// Drain any trailing input frames after exec completes.
+///
+/// The client may send a final `SandboxExecInput` (EOF) after the command
+/// exits.  We consume it here so it doesn't leak into the next dispatch loop
+/// iteration in `agent.rs`.
+async fn drain_trailing_input<S: AsyncRead + Unpin>(stream: &mut S) {
+    use tokio::time::{Duration, timeout};
+    // Give the client a short window to send trailing frames.
+    let _ = timeout(Duration::from_millis(100), async {
+        let mut buf = [0u8; 4096];
+        loop {
+            match tokio::io::AsyncReadExt::read(stream, &mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => continue, // discard
+            }
+        }
+    })
+    .await;
+}
 
 // =============================================================================
 // SandboxService
@@ -175,7 +197,155 @@ impl SandboxService {
         Ok(out_rx)
     }
 
-    /// Subscribe to sandbox lifecycle events.  Returns a channel of encoded
+    /// Start an interactive exec session.
+    ///
+    /// Returns `(input_sender, output_receiver)`:
+    /// - Send [`ExecInputMsg`]s into `input_sender` to forward stdin / EOF to
+    ///   the running process.
+    /// - Read pre-encoded [`sandbox_v1::ExecOutput`] payloads from
+    ///   `output_receiver`.  The final payload has `done == true`.
+    pub async fn exec(
+        &self,
+        payload: &[u8],
+    ) -> Result<(mpsc::Sender<ExecInputMsg>, mpsc::UnboundedReceiver<Vec<u8>>), String> {
+        let req = sandbox_v1::ExecRequest::decode(payload)
+            .map_err(|e| format!("decode error: {e}"))?;
+
+        let tty_size = req.tty_size.map(|s| (s.width as u16, s.height as u16));
+
+        let (in_tx, mut out_rx) = self
+            .manager
+            .exec_in_sandbox(
+                &req.id,
+                req.cmd,
+                req.env,
+                req.working_dir,
+                req.user,
+                req.tty,
+                tty_size,
+                req.timeout_seconds,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let (tx, out_stream_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        tokio::spawn(async move {
+            while let Some(result) = out_rx.recv().await {
+                let chunk = match result {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let done_msg = sandbox_v1::ExecOutput {
+                            stream: "exit".into(),
+                            data: Vec::new(),
+                            exit_code: 1,
+                            done: true,
+                        };
+                        tracing::warn!(error = %e, "exec_in_sandbox stream error");
+                        let _ = tx.send(done_msg.encode_to_vec());
+                        break;
+                    }
+                };
+                let is_done = chunk.stream == "exit";
+                let msg = sandbox_v1::ExecOutput {
+                    stream: chunk.stream,
+                    data: chunk.data,
+                    exit_code: chunk.exit_code,
+                    done: is_done,
+                };
+                if tx.send(msg.encode_to_vec()).is_err() {
+                    break;
+                }
+                if is_done {
+                    break;
+                }
+            }
+        });
+
+        Ok((in_tx, out_stream_rx))
+    }
+
+    /// Bridge a `SandboxExecRequest` between the host vsock stream and the
+    /// vm-agent.
+    ///
+    /// The host sends [`MessageType::SandboxExecInput`] frames carrying raw
+    /// stdin bytes; an empty payload signals EOF on stdin.  The agent forwards
+    /// [`MessageType::SandboxExecOutput`] frames (stdout / stderr / exit) back
+    /// to the host until the process terminates.
+    pub async fn handle_exec<S>(
+        &self,
+        stream: &mut S,
+        trace_id: &str,
+        payload: &[u8],
+    ) -> anyhow::Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let (in_tx, mut out_rx) = match self.exec(payload).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                let err = ErrorResponse::new(500, &e);
+                write_message(stream, MessageType::Error, trace_id, &err.encode()).await?;
+                return Ok(());
+            }
+        };
+
+        loop {
+            tokio::select! {
+                // Output from vm-agent → host.
+                encoded_opt = out_rx.recv() => {
+                    match encoded_opt {
+                        None => break, // output channel closed
+                        Some(encoded) => {
+                            // The last frame has done==true; check before writing
+                            // so we can break after sending it.
+                            let done = sandbox_v1::ExecOutput::decode(encoded.as_slice())
+                                .map(|m| m.done)
+                                .unwrap_or(false);
+                            write_message(
+                                stream,
+                                MessageType::SandboxExecOutput,
+                                trace_id,
+                                &encoded,
+                            )
+                            .await?;
+                            if done {
+                                // Drain any trailing input frames (e.g. EOF) the
+                                // client may send after the command exits, so they
+                                // don't leak into the next dispatch iteration.
+                                drain_trailing_input(stream).await;
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+
+                // Input from host → vm-agent.
+                read_result = read_message(stream) => {
+                    match read_result {
+                        Err(_) => {
+                            // Host stream closed; signal EOF to the process.
+                            let _ = in_tx.send(ExecInputMsg::Eof).await;
+                            break;
+                        }
+                        Ok((MessageType::SandboxExecInput, _, data)) => {
+                            if data.is_empty() {
+                                let _ = in_tx.send(ExecInputMsg::Eof).await;
+                            } else {
+                                let _ = in_tx.send(ExecInputMsg::Stdin(data)).await;
+                            }
+                        }
+                        Ok(_) => {
+                            // Unexpected message type during exec; ignore.
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+/// Subscribe to sandbox lifecycle events.  Returns a channel of encoded
     /// [`SandboxEvent`] payloads.
     pub fn subscribe_events(
         &self,

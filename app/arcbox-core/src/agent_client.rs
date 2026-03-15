@@ -13,10 +13,10 @@ use arcbox_protocol::agent::{
 };
 use arcbox_protocol::sandbox_v1::{
     CheckpointRequest, CheckpointResponse, CreateSandboxRequest, CreateSandboxResponse,
-    DeleteSnapshotRequest, InspectSandboxRequest, ListSandboxesRequest, ListSandboxesResponse,
-    ListSnapshotsRequest, ListSnapshotsResponse, RemoveSandboxRequest, RestoreRequest,
-    RestoreResponse, RunOutput, RunRequest, SandboxEvent, SandboxEventsRequest, SandboxInfo,
-    StopSandboxRequest,
+    DeleteSnapshotRequest, ExecOutput, ExecRequest, InspectSandboxRequest, ListSandboxesRequest,
+    ListSandboxesResponse, ListSnapshotsRequest, ListSnapshotsResponse, RemoveSandboxRequest,
+    RestoreRequest, RestoreResponse, RunOutput, RunRequest, SandboxEvent, SandboxEventsRequest,
+    SandboxInfo, StopSandboxRequest,
 };
 use arcbox_transport::Transport;
 use arcbox_transport::vsock::{VsockAddr, VsockTransport};
@@ -576,6 +576,113 @@ impl AgentClient {
         });
 
         Ok(rx)
+    }
+
+    /// Starts an interactive exec session inside a sandbox.
+    ///
+    /// Consumes the client because the stream task requires exclusive transport
+    /// access.  Returns `(stdin_sender, output_receiver)`:
+    ///
+    /// - Push raw stdin bytes into `stdin_sender`; an empty `Vec` signals EOF.
+    /// - Read [`ExecOutput`] frames from `output_receiver` for stdout, stderr,
+    ///   and the final exit frame (`done == true`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the initial send fails.
+    pub async fn sandbox_exec(
+        mut self,
+        req: ExecRequest,
+    ) -> Result<(
+        mpsc::Sender<Vec<u8>>,
+        mpsc::UnboundedReceiver<Result<ExecOutput>>,
+    )> {
+        if !self.connected {
+            self.connect().await?;
+        }
+
+        let payload = req.encode_to_vec();
+        let buf = Self::build_message(MessageType::SandboxExecRequest, "", &payload);
+        self.transport
+            .send(buf)
+            .await
+            .map_err(|e| CoreError::Machine(format!("failed to send exec request: {}", e)))?;
+
+        let (mut sender, mut receiver) = self
+            .transport
+            .into_split()
+            .map_err(|e| CoreError::Machine(format!("failed to split transport: {}", e)))?;
+
+        let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(16);
+        let (out_tx, out_rx) = mpsc::unbounded_channel();
+
+        // Stdin pump: channel → SandboxExecInput frames.
+        tokio::spawn(async move {
+            while let Some(data) = in_rx.recv().await {
+                let frame = Self::build_message(MessageType::SandboxExecInput, "", &data);
+                if sender.send(frame).await.is_err() {
+                    break;
+                }
+                if data.is_empty() {
+                    // Empty payload = EOF; stop pumping stdin.
+                    break;
+                }
+            }
+        });
+
+        // Output pump: SandboxExecOutput frames → channel.
+        tokio::spawn(async move {
+            loop {
+                let raw = match receiver.recv().await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let _ = out_tx
+                            .send(Err(CoreError::Machine(format!("recv error: {}", e))));
+                        break;
+                    }
+                };
+
+                let (resp_type, _, resp_payload) = match Self::parse_response(&raw) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let _ = out_tx.send(Err(e));
+                        break;
+                    }
+                };
+
+                if resp_type == MessageType::Error as u32 {
+                    let msg = parse_error_response(&resp_payload)
+                        .unwrap_or_else(|_| "unknown error".to_string());
+                    let _ = out_tx.send(Err(CoreError::Machine(msg)));
+                    break;
+                }
+
+                if resp_type != MessageType::SandboxExecOutput as u32 {
+                    let _ = out_tx.send(Err(CoreError::Machine(format!(
+                        "unexpected response type: 0x{:04x}",
+                        resp_type
+                    ))));
+                    break;
+                }
+
+                match ExecOutput::decode(&resp_payload[..]) {
+                    Ok(output) => {
+                        let done = output.done;
+                        let _ = out_tx.send(Ok(output));
+                        if done {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = out_tx
+                            .send(Err(CoreError::Machine(format!("decode error: {}", e))));
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok((in_tx, out_rx))
     }
 
     /// Checkpoints a sandbox (creates a snapshot).

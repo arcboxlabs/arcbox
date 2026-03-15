@@ -7,17 +7,21 @@ use anyhow::{Context, Result};
 use arcbox_core::vm_lifecycle::DEFAULT_MACHINE_NAME;
 use arcbox_grpc::{SandboxServiceClient, SandboxSnapshotServiceClient};
 use arcbox_protocol::sandbox_v1::{
-    CheckpointRequest, CreateSandboxRequest, DeleteSnapshotRequest, InspectSandboxRequest,
-    ListSandboxesRequest, ListSnapshotsRequest, RemoveSandboxRequest, ResourceLimits,
-    RestoreRequest, RunRequest, SandboxEventsRequest, StopSandboxRequest,
+    exec_input, CheckpointRequest, CreateSandboxRequest, DeleteSnapshotRequest, ExecInput,
+    ExecRequest, InspectSandboxRequest, ListSandboxesRequest, ListSnapshotsRequest,
+    RemoveSandboxRequest, ResourceLimits, RestoreRequest, RunRequest, SandboxEventsRequest,
+    StopSandboxRequest, TerminalSize as ProtoTerminalSize,
 };
 use clap::{Args, Subcommand};
 use std::collections::HashMap;
 use std::io::Write;
+use tokio::io::AsyncReadExt as _;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 
 use super::machine::UnixConnector;
+use arcbox_cli::terminal::{RawModeGuard, ResizeWatcher, TerminalSize};
 use std::path::PathBuf;
 
 fn resolve_grpc_socket_path() -> PathBuf {
@@ -84,8 +88,10 @@ pub enum SandboxCommands {
     List(ListArgs),
     /// Inspect sandbox details
     Inspect(InspectArgs),
-    /// Run a command inside a sandbox (streaming output)
+    /// Run a command inside a sandbox (streaming output, no stdin)
     Run(RunArgs),
+    /// Execute an interactive command inside a sandbox (bidirectional)
+    Exec(ExecArgs),
     /// Subscribe to sandbox lifecycle events
     Events(EventsArgs),
     /// Checkpoint a sandbox into a snapshot
@@ -175,6 +181,21 @@ pub struct RunArgs {
 }
 
 #[derive(Args)]
+pub struct ExecArgs {
+    /// Sandbox ID
+    pub id: String,
+    /// Command and arguments
+    #[arg(trailing_var_arg = true, required = true)]
+    pub cmd: Vec<String>,
+    /// Allocate a pseudo-TTY
+    #[arg(short = 't', long)]
+    pub tty: bool,
+    /// Kill after this many seconds (0 = no timeout)
+    #[arg(long, default_value = "0")]
+    pub timeout: u32,
+}
+
+#[derive(Args)]
 pub struct EventsArgs {
     /// Filter by sandbox ID (empty = all sandboxes)
     #[arg(long)]
@@ -227,6 +248,7 @@ pub async fn execute(cmd: SandboxCommands) -> Result<()> {
         SandboxCommands::List(args) => execute_list(args).await,
         SandboxCommands::Inspect(args) => execute_inspect(args).await,
         SandboxCommands::Run(args) => execute_run(args).await,
+        SandboxCommands::Exec(args) => execute_exec(args).await,
         SandboxCommands::Events(args) => execute_events(args).await,
         SandboxCommands::Checkpoint(args) => execute_checkpoint(args).await,
         SandboxCommands::Restore(args) => execute_restore(args).await,
@@ -424,6 +446,163 @@ async fn execute_run(args: RunArgs) -> Result<()> {
                     std::io::stdout()
                         .write_all(&output.data)
                         .context("Failed to write stdout")?;
+                }
+            }
+        }
+        if output.done {
+            exit_code = output.exit_code;
+        }
+    }
+
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+    Ok(())
+}
+
+async fn execute_exec(args: ExecArgs) -> Result<()> {
+    let channel = sandbox_channel().await?;
+    let mut client = SandboxServiceClient::new(channel);
+
+    let (msg_tx, msg_rx) = tokio::sync::mpsc::channel::<ExecInput>(16);
+
+    // Detect initial terminal size when TTY is requested.
+    let tty_size = if args.tty {
+        TerminalSize::current().ok().map(|s| ProtoTerminalSize {
+            width: u32::from(s.cols),
+            height: u32::from(s.rows),
+        })
+    } else {
+        None
+    };
+
+    // The first message in the stream must be the Init payload.
+    msg_tx
+        .send(ExecInput {
+            payload: Some(exec_input::Payload::Init(ExecRequest {
+                id: args.id,
+                cmd: args.cmd,
+                tty: args.tty,
+                tty_size,
+                timeout_seconds: args.timeout,
+                ..Default::default()
+            })),
+        })
+        .await
+        .context("Failed to send exec init")?;
+
+    // Enable raw terminal mode when TTY is requested.
+    let _raw_guard = if args.tty {
+        Some(RawModeGuard::new()?)
+    } else {
+        None
+    };
+
+    // Stdin pump: local terminal → gRPC stream.
+    let stdin_tx = msg_tx;
+    let tty = args.tty;
+    tokio::spawn(async move {
+        let mut stdin = tokio::io::stdin();
+        let mut buf = [0u8; 1024];
+
+        if tty {
+            let mut resize_watcher = ResizeWatcher::new().ok();
+            loop {
+                if let Some(watcher) = &mut resize_watcher {
+                    tokio::select! {
+                        result = stdin.read(&mut buf) => {
+                            match result {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => {
+                                    if stdin_tx
+                                        .send(ExecInput {
+                                            payload: Some(exec_input::Payload::Stdin(
+                                                buf[..n].to_vec(),
+                                            )),
+                                        })
+                                        .await
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Some(size) = watcher.recv() => {
+                            let _ = stdin_tx
+                                .send(ExecInput {
+                                    payload: Some(exec_input::Payload::Resize(ProtoTerminalSize {
+                                        width: u32::from(size.cols),
+                                        height: u32::from(size.rows),
+                                    })),
+                                })
+                                .await;
+                        }
+                    }
+                } else {
+                    match stdin.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if stdin_tx
+                                .send(ExecInput {
+                                    payload: Some(exec_input::Payload::Stdin(buf[..n].to_vec())),
+                                })
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            loop {
+                match stdin.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if stdin_tx
+                            .send(ExecInput {
+                                payload: Some(exec_input::Payload::Stdin(buf[..n].to_vec())),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        // Stdin closed; the channel drop signals EOF to the server.
+    });
+
+    let request = attach_machine(tonic::Request::new(ReceiverStream::new(msg_rx)));
+    let mut stream = client
+        .exec(request)
+        .await
+        .context("Failed to exec in sandbox")?
+        .into_inner();
+
+    let mut exit_code = 0i32;
+    while let Some(output) = stream
+        .message()
+        .await
+        .context("Failed to read exec output")?
+    {
+        if !output.data.is_empty() {
+            match output.stream.as_str() {
+                "stderr" => {
+                    std::io::stderr()
+                        .write_all(&output.data)
+                        .context("Failed to write stderr")?;
+                    std::io::stderr().flush()?;
+                }
+                _ => {
+                    std::io::stdout()
+                        .write_all(&output.data)
+                        .context("Failed to write stdout")?;
+                    std::io::stdout().flush()?;
                 }
             }
         }
