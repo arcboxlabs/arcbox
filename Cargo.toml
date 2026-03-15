@@ -43,7 +43,6 @@ members = [
     "app/arcbox-docker-tools",
     "app/arcbox-cli",
     "app/arcbox-daemon",
-    "app/arcbox-helper",
     "app/arcbox",
 
     # ============================================

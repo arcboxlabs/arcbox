@@ -226,7 +226,6 @@ dependencies = [
  "hyper-util",
  "libc",
  "macos-resolver",
- "nix 0.29.0",
  "sentry",
  "serde",
  "serde_json",
@@ -415,19 +414,6 @@ dependencies = [
  "tonic",
  "tonic-build",
  "tracing",
-]
-
-[[package]]
-name = "arcbox-helper"
-version = "0.1.12"
-dependencies = [
- "arcbox-net",
- "libc",
- "sendfd",
- "serde",
- "serde_json",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -3272,15 +3258,6 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 dependencies = [
  "serde",
  "serde_core",
-]
-
-[[package]]
-name = "sendfd"
-version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b183bfd5b1bc64ab0c1ef3ee06b008a9ef1b68a7d3a99ba566fbfe7a7c6d745b"
-dependencies = [
- "libc",
 ]
 
 [[package]]
