@@ -356,6 +356,19 @@ exit 0
             }
         }
 
+        // Enable proxy ARP on the bridge NIC so the guest answers ARP
+        // requests for container IPs (172.17.x.x) on behalf of docker0.
+        // This lets the host use `-interface bridge100` routing without
+        // needing to know the guest's bridge IP as a gateway.
+        if let Err(e) = fs::write(
+            format!("/proc/sys/net/ipv4/conf/{bridge_iface}/proxy_arp"),
+            b"1\n",
+        ) {
+            tracing::warn!(interface = bridge_iface, error = %e, "failed to enable proxy_arp");
+        } else {
+            tracing::info!(interface = bridge_iface, "proxy ARP enabled");
+        }
+
         // Add iptables FORWARD rules for the bridge NIC so container
         // traffic can flow through.
         run_iptables(
