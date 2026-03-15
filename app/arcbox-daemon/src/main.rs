@@ -83,11 +83,15 @@ fn main() -> Result<()> {
         .with(sentry::integrations::tracing::layer())
         .init();
 
-    tokio::runtime::Builder::new_multi_thread()
+    let result = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("Failed to build tokio runtime")
-        .block_on(run(DaemonArgs::parse()))
+        .block_on(run(DaemonArgs::parse()));
+    if let Err(ref e) = result {
+        eprintln!("Error: {e:?}");
+    }
+    result
 }
 
 async fn run(args: DaemonArgs) -> Result<()> {
@@ -144,6 +148,8 @@ async fn run(args: DaemonArgs) -> Result<()> {
         guest_docker_vsock_port = selected_guest_docker_port,
         "Runtime initialized"
     );
+
+    info!("DEBUG: post-init, about to bind DNS");
 
     // Apply custom DNS domain if configured via ARCBOX_DNS_DOMAIN.
     let dns_local_domain = dns_domain();
