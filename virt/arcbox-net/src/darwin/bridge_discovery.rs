@@ -26,12 +26,31 @@ pub fn discover_bridge_ip() -> Option<Ipv4Addr> {
 }
 
 /// Parses the vmnet DHCP lease file for a bridge NIC IP.
+///
+/// Selects the lease with the most recent timestamp (highest `lease=0x...`)
+/// to handle stale entries from previous VM boots.
 fn parse_bridge_ip_from_leases(content: &str) -> Option<Ipv4Addr> {
-    // The lease file format is brace-delimited blocks with key=value lines.
-    // We look for ip_address=X.X.X.X where X.X.X is NOT 192.168.64.
+    // Lease file format: brace-delimited blocks with key=value lines.
+    // Each block has ip_address=... and lease=0x... (epoch timestamp).
+    let mut best_ip: Option<Ipv4Addr> = None;
+    let mut best_lease: u64 = 0;
+    let mut current_ip: Option<Ipv4Addr> = None;
+    let mut current_lease: u64 = 0;
+
     for line in content.lines() {
         let line = line.trim();
-        if let Some(ip_str) = line.strip_prefix("ip_address=") {
+
+        if line == "{" {
+            current_ip = None;
+            current_lease = 0;
+        } else if line == "}" {
+            if let Some(ip) = current_ip {
+                if current_lease >= best_lease {
+                    best_ip = Some(ip);
+                    best_lease = current_lease;
+                }
+            }
+        } else if let Some(ip_str) = line.strip_prefix("ip_address=") {
             if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
                 let octets = ip.octets();
                 // Skip the primary subnet (192.168.64.x).
@@ -45,11 +64,16 @@ fn parse_bridge_ip_from_leases(content: &str) -> Option<Ipv4Addr> {
                 if octets[0] == 127 || octets[0] == 169 {
                     continue;
                 }
-                return Some(ip);
+                current_ip = Some(ip);
             }
+        } else if let Some(lease_str) = line.strip_prefix("lease=") {
+            current_lease =
+                u64::from_str_radix(lease_str.strip_prefix("0x").unwrap_or(lease_str), 16)
+                    .unwrap_or(0);
         }
     }
-    None
+
+    best_ip
 }
 
 /// Finds which bridge interface the guest is connected to.
@@ -120,7 +144,28 @@ mod tests {
 
     #[test]
     fn skip_primary_subnet() {
-        let content = "ip_address=192.168.64.2\n";
+        let content = "{\nip_address=192.168.64.2\nlease=0x99999999\n}\n";
         assert_eq!(parse_bridge_ip_from_leases(content), None);
+    }
+
+    #[test]
+    fn picks_most_recent_lease() {
+        let content = r#"
+{
+	ip_address=192.168.65.2
+	lease=0x10000000
+}
+{
+	ip_address=192.168.65.4
+	lease=0x20000000
+}
+{
+	ip_address=192.168.64.55
+	lease=0x30000000
+}
+"#;
+        // 192.168.65.4 has higher lease timestamp than 192.168.65.2
+        let ip = parse_bridge_ip_from_leases(content);
+        assert_eq!(ip, Some(Ipv4Addr::new(192, 168, 65, 4)));
     }
 }

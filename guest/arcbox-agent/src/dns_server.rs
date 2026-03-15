@@ -135,10 +135,18 @@ impl GuestDnsServer {
                             }
                         }
                         Err(e) => {
-                            tracing::debug!(error = %e, "dns: failed to handle query");
-                            // Try to send SERVFAIL.
-                            if let Ok(fail) = arcbox_dns::build_servfail(data) {
-                                let _ = sock.send_to(&fail, peer).await;
+                            tracing::debug!(error = %e, "dns: query parse failed, forwarding to gateway");
+                            // Forward unparseable queries (e.g. HTTPS/SVCB type)
+                            // to gateway instead of returning SERVFAIL.
+                            match self.forward_to_gateway(data).await {
+                                Ok(response) => {
+                                    let _ = sock.send_to(&response, peer).await;
+                                }
+                                Err(_) => {
+                                    if let Ok(fail) = arcbox_dns::build_servfail(data) {
+                                        let _ = sock.send_to(&fail, peer).await;
+                                    }
+                                }
                             }
                         }
                     }
