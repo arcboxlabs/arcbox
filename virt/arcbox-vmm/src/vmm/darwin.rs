@@ -76,6 +76,16 @@ impl Vmm {
             }
         }
 
+        // Add a second NIC with Apple NAT (VZNATNetworkDeviceAttachment).
+        // This creates a bridge (bridge100) on the host, giving the VM a
+        // real L2 path. Host can route container subnets through this NIC's
+        // IP, avoiding the utun write limitation on macOS.
+        if self.config.networking {
+            let bridge_nic = VirtioDeviceConfig::network();
+            vm.add_virtio_device(bridge_nic)?;
+            tracing::info!("Added bridge NIC (VZNATNetworkDeviceAttachment) for L3 routing");
+        }
+
         // Add vsock if enabled
         if self.config.vsock {
             let vsock_config = VirtioDeviceConfig::vsock();
@@ -223,7 +233,11 @@ impl Vmm {
         let dhcp_server = DhcpServer::new(dhcp_config);
 
         let dns_config = DnsConfig::new(gateway_ip);
-        let dns_forwarder = DnsForwarder::new(dns_config);
+        let dns_forwarder = if let Some(ref shared_table) = self.shared_dns_hosts {
+            DnsForwarder::with_shared_hosts(dns_config, std::sync::Arc::clone(shared_table))
+        } else {
+            DnsForwarder::new(dns_config)
+        };
 
         // 4. Build the datapath and spawn it on the tokio runtime.
         let cancel = CancellationToken::new();
@@ -247,6 +261,7 @@ impl Vmm {
                 "tokio runtime not available for network datapath: {e}"
             ))
         })?;
+
         runtime.spawn(async move {
             if let Err(e) = datapath.run().await {
                 tracing::error!("Network datapath exited with error: {}", e);

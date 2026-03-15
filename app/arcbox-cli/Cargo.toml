@@ -11,7 +11,6 @@ authors.workspace = true
 
 [lib]
 name = "arcbox_cli"
-publish = false
 path = "src/lib.rs"
 
 [[bin]]
@@ -20,7 +19,6 @@ path = "src/main.rs"
 
 [[bin]]
 name = "arcbox"
-publish = false
 path = "src/bin/arcbox_placeholder.rs"
 
 [dependencies]
@@ -47,6 +45,7 @@ dirs = { workspace = true }
 crossterm = { workspace = true }
 libc = { workspace = true }
 humantime = "2.3.0"
+nix = { workspace = true, features = ["user"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 macos-resolver = { workspace = true }

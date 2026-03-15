@@ -52,7 +52,7 @@ impl SandboxService {
             .create_sandbox(spec)
             .await
             .map_err(|e| SandboxError::Internal(e.to_string()))?;
-        crate::dns::add_sandbox_dns(&id, &ip_address);
+        register_sandbox_dns(&id, &ip_address);
         Ok(sandbox_v1::CreateSandboxResponse {
             id,
             ip_address,
@@ -68,7 +68,7 @@ impl SandboxService {
             .stop_sandbox(&req.id, req.timeout_seconds)
             .await
             .map_err(|e| SandboxError::Internal(e.to_string()))?;
-        crate::dns::remove_dns(&req.id);
+        deregister_sandbox_dns(&req.id);
         Ok(())
     }
 
@@ -80,7 +80,7 @@ impl SandboxService {
             .remove_sandbox(&req.id, req.force)
             .await
             .map_err(|e| SandboxError::Internal(e.to_string()))?;
-        crate::dns::remove_dns(&req.id);
+        deregister_sandbox_dns(&req.id);
         Ok(())
     }
 
@@ -260,7 +260,7 @@ impl SandboxService {
             .restore_sandbox(spec)
             .await
             .map_err(|e| SandboxError::Internal(e.to_string()))?;
-        crate::dns::add_sandbox_dns(&id, &ip_address);
+        register_sandbox_dns(&id, &ip_address);
         Ok(sandbox_v1::RestoreResponse { id, ip_address })
     }
 
@@ -308,6 +308,30 @@ impl SandboxService {
         self.manager
             .delete_checkpoint(&req.snapshot_id)
             .map_err(|e| SandboxError::Internal(e.to_string()))
+    }
+}
+
+// =============================================================================
+// DNS registration helpers
+// =============================================================================
+
+/// Register a sandbox in the guest DNS server registry.
+fn register_sandbox_dns(id: &str, ip: &str) {
+    let Ok(ipv4) = ip.parse::<std::net::Ipv4Addr>() else {
+        tracing::warn!(id, ip, "invalid sandbox IP for DNS registration");
+        return;
+    };
+    let registry = crate::dns_server::sandbox_registry();
+    if let Ok(mut map) = registry.write() {
+        map.insert(id.to_lowercase(), ipv4);
+    }
+}
+
+/// Deregister a sandbox from the guest DNS server registry.
+fn deregister_sandbox_dns(id: &str) {
+    let registry = crate::dns_server::sandbox_registry();
+    if let Ok(mut map) = registry.write() {
+        map.remove(&id.to_lowercase());
     }
 }
 

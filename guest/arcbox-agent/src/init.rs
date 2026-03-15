@@ -34,6 +34,7 @@ mod platform {
         write_etc_hosts();
         write_etc_passwd();
         write_etc_group();
+        write_docker_daemon_dns();
 
         // TLS CA certificates: EROFS has /cacerts/ca-certificates.crt.
         // Symlink into tmpfs /etc so programs find it at the standard path.
@@ -166,6 +167,12 @@ mod platform {
         // gateway services (DNS/NAT at 192.168.64.1).
         configure_primary_interface_dhcp();
 
+        // Configure the bridge NIC (eth1) via DHCP for inbound L3 routing.
+        // This NIC is connected to Apple's vmnet bridge (bridge100) and
+        // provides a real L2 path for host → container traffic.
+        // We only take an IP — no default route (outbound stays on eth0).
+        configure_bridge_nic();
+
         // Allow forwarding between the primary interface and sandbox TAP
         // interfaces. Docker/containerd sets the default FORWARD policy to
         // DROP, so blanket ACCEPT rules are required for sandbox traffic.
@@ -257,6 +264,121 @@ exit 0
         }
     }
 
+    /// Configures the bridge NIC (second interface) via DHCP.
+    ///
+    /// Uses a custom udhcpc script that only sets the IP address — no default
+    /// route, no DNS. This ensures outbound traffic still goes through eth0
+    /// (socketpair datapath), while the bridge NIC is reachable from the host
+    /// for inbound container traffic.
+    fn configure_bridge_nic() {
+        // Find the second non-loopback interface (eth1 or similar).
+        let entries = match fs::read_dir("/sys/class/net") {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        let mut candidates: Vec<String> = Vec::new();
+        for entry in entries.flatten() {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            if name == "lo"
+                || name.starts_with("dummy")
+                || name.starts_with("veth")
+                || name.starts_with("br-")
+                || name.starts_with("docker")
+            {
+                continue;
+            }
+            candidates.push(name);
+        }
+        candidates.sort();
+
+        // The primary interface is the first one (eth0). The bridge NIC is the second.
+        if candidates.len() < 2 {
+            tracing::debug!("no bridge NIC found (only {} candidates)", candidates.len());
+            return;
+        }
+        let bridge_iface = &candidates[1];
+
+        // Bring up the interface.
+        let _ = std::process::Command::new("/bin/busybox")
+            .args(["ip", "link", "set", bridge_iface, "up"])
+            .status();
+
+        // DHCP script that only sets the IP, no default route.
+        let script = r#"#!/bin/sh
+case "$1" in
+  deconfig)
+    /bin/busybox ifconfig "$interface" 0.0.0.0 || true
+    ;;
+  renew|bound)
+    /bin/busybox ifconfig "$interface" "$ip" netmask "${subnet:-255.255.255.0}" up
+    # Intentionally no default route — outbound stays on eth0.
+    ;;
+esac
+exit 0
+"#;
+        let script_path = "/run/udhcpc-bridge.script";
+        if let Err(e) = fs::write(script_path, script) {
+            tracing::warn!(error = %e, "failed to write bridge DHCP script");
+            return;
+        }
+        let _ = fs::set_permissions(script_path, fs::Permissions::from_mode(0o755));
+
+        match std::process::Command::new("/bin/busybox")
+            .args([
+                "udhcpc",
+                "-i",
+                bridge_iface,
+                "-n",
+                "-q",
+                "-t",
+                "3",
+                "-T",
+                "2",
+                "-s",
+                script_path,
+            ])
+            .status()
+        {
+            Ok(s) if s.success() => {
+                tracing::info!(interface = bridge_iface, "bridge NIC DHCP lease acquired");
+            }
+            Ok(s) => {
+                tracing::warn!(
+                    interface = bridge_iface,
+                    exit_code = s.code().unwrap_or(-1),
+                    "bridge NIC DHCP failed"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(interface = bridge_iface, error = %e, "bridge NIC udhcpc failed");
+            }
+        }
+
+        // Add iptables FORWARD rules for the bridge NIC so container
+        // traffic can flow through.
+        run_iptables(
+            &["-I", "FORWARD", "-i", bridge_iface, "-j", "ACCEPT"],
+            "FORWARD accept from bridge NIC",
+        );
+        run_iptables(
+            &[
+                "-I",
+                "FORWARD",
+                "-o",
+                bridge_iface,
+                "-m",
+                "conntrack",
+                "--ctstate",
+                "RELATED,ESTABLISHED",
+                "-j",
+                "ACCEPT",
+            ],
+            "FORWARD accept established to bridge NIC",
+        );
+    }
+
     /// Install blanket iptables FORWARD ACCEPT rules for the sandbox subnet.
     ///
     /// The subnet is read from the VMM config (default `10.88.0.0/16`).
@@ -314,12 +436,27 @@ exit 0
     }
 
     fn write_etc_resolv_conf() {
-        // Point to the gateway (192.168.64.1) where ArcBox's DNS forwarder runs.
-        // The forwarder resolves using the host's real DNS servers, which handles
-        // corporate/intranet environments correctly (unlike hardcoded 8.8.8.8).
-        let content = "nameserver 192.168.64.1\n";
+        // Point to the local guest DNS server (dns_server.rs) which handles:
+        // - Container/sandbox name resolution from its registries
+        // - *.arcbox.local → authoritative NXDOMAIN if not registered
+        // - Everything else → forward to gateway (192.168.64.1)
+        let content = "nameserver 127.0.0.1\n";
         if let Err(e) = std::fs::write("/etc/resolv.conf", content) {
             tracing::warn!(error = %e, "failed to write /etc/resolv.conf");
+        }
+    }
+
+    /// Configures Docker daemon to use the gateway as its DNS server.
+    ///
+    /// Containers get their DNS from the Docker daemon config, NOT from the
+    /// guest's /etc/resolv.conf. We point them to 192.168.64.1 (the gateway)
+    /// so container DNS queries go through the host-side forwarder which can
+    /// resolve *.arcbox.local names registered from the host.
+    pub fn write_docker_daemon_dns() {
+        mkdir_p("/etc/docker");
+        let content = r#"{"dns": ["192.168.64.1"]}"#;
+        if let Err(e) = std::fs::write("/etc/docker/daemon.json", content) {
+            tracing::warn!(error = %e, "failed to write /etc/docker/daemon.json");
         }
     }
 

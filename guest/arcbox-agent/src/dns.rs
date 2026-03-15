@@ -1,128 +1,8 @@
-//! Name resolution via /etc/hosts for containers and sandboxes.
+//! Container/sandbox name alias extraction for DNS registration.
 //!
-//! Containers use 127.0.0.1 (shared guest network namespace).
-//! Sandboxes use their actual TAP IP (e.g. `10.88.0.2`).
-//!
-//! For compose compatibility, both the full container name and the service
-//! name (extracted from the compose naming pattern `project-service-N`) are
-//! registered.
-
-#![allow(dead_code)]
-
-/// IP address used for container name resolution.
-/// All containers share the guest network namespace, so localhost works.
-const HOSTS_IP: &str = "127.0.0.1";
-
-/// Marker comment appended to lines managed by arcbox.
-const HOSTS_MARKER: &str = "# arcbox";
-
-/// Path to the hosts file.
-const HOSTS_PATH: &str = "/etc/hosts";
-
-/// Adds a DNS entry for a container to /etc/hosts (using 127.0.0.1).
-///
-/// Registers the container name (and an extracted compose service alias, if
-/// applicable) so that other containers can resolve it by name.
-pub fn add_container_dns(container_name: &str) {
-    let aliases = collect_aliases(container_name);
-    add_dns_entry(container_name, HOSTS_IP, &aliases);
-}
-
-/// Adds a DNS entry for a sandbox to /etc/hosts with the given IP.
-pub fn add_sandbox_dns(sandbox_id: &str, ip: &str) {
-    add_dns_entry(sandbox_id, ip, &[sandbox_id.to_string()]);
-}
-
-/// Removes the DNS entry for a name from /etc/hosts.
-pub fn remove_dns(name: &str) {
-    if name.is_empty() {
-        return;
-    }
-
-    let content = match std::fs::read_to_string(HOSTS_PATH) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-
-    let marker_suffix = format!(" {HOSTS_MARKER}:{name}");
-    let filtered: Vec<&str> = content
-        .lines()
-        .filter(|line| !line.ends_with(&marker_suffix))
-        .collect();
-
-    // Nothing changed.
-    if filtered.len() == content.lines().count() {
-        return;
-    }
-
-    let mut updated = filtered.join("\n");
-    if !updated.is_empty() && !updated.ends_with('\n') {
-        updated.push('\n');
-    }
-
-    if let Err(e) = std::fs::write(HOSTS_PATH, &updated) {
-        tracing::warn!(
-            "Failed to remove DNS entry for '{}' from {}: {}",
-            name,
-            HOSTS_PATH,
-            e
-        );
-    } else {
-        tracing::debug!("Removed DNS entry for '{}'", name);
-    }
-}
-
-/// Removes the DNS entry for a container from /etc/hosts.
-pub fn remove_container_dns(container_name: &str) {
-    remove_dns(container_name);
-}
-
-// -------------------------------------------------------------------------
-// Internal
-// -------------------------------------------------------------------------
-
-/// Shared implementation: upsert an entry in /etc/hosts.
-///
-/// If an entry with the same marker already exists it is replaced (handles IP
-/// changes on sandbox recreate). Matching uses `ends_with` on the marker
-/// suffix to avoid false positives with prefix names (e.g. `web` vs `web-api`).
-fn add_dns_entry(name: &str, ip: &str, aliases: &[String]) {
-    if name.is_empty() || aliases.is_empty() {
-        return;
-    }
-
-    let names = aliases.join(" ");
-    let new_line = format!("{ip}\t{names} {HOSTS_MARKER}:{name}");
-
-    let content = std::fs::read_to_string(HOSTS_PATH).unwrap_or_default();
-
-    // Remove any existing entry for the same name (upsert).
-    let marker_suffix = format!(" {HOSTS_MARKER}:{name}");
-    let filtered: String = content
-        .lines()
-        .filter(|line| !line.ends_with(&marker_suffix))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let updated = if filtered.is_empty() {
-        format!("{new_line}\n")
-    } else if filtered.ends_with('\n') {
-        format!("{filtered}{new_line}\n")
-    } else {
-        format!("{filtered}\n{new_line}\n")
-    };
-
-    if let Err(e) = std::fs::write(HOSTS_PATH, &updated) {
-        tracing::warn!(
-            "Failed to add DNS entry for '{}' to {}: {}",
-            name,
-            HOSTS_PATH,
-            e
-        );
-    } else {
-        tracing::info!("Added DNS entry: {} -> {}", names, ip);
-    }
-}
+//! Provides compose-aware alias extraction used by `dns_server.rs` and
+//! `docker_events.rs` to register containers under both their full name
+//! and their compose service name.
 
 /// Collects all name aliases for a container.
 ///
@@ -131,7 +11,7 @@ fn add_dns_entry(name: &str, ip: &str, aliases: &[String]) {
 ///
 /// For a plain container named `mycontainer`, this returns:
 /// `["mycontainer"]`
-fn collect_aliases(container_name: &str) -> Vec<String> {
+pub fn collect_aliases(container_name: &str) -> Vec<String> {
     if container_name.is_empty() {
         return vec![];
     }
@@ -219,11 +99,8 @@ mod tests {
 
     #[test]
     fn test_extract_compose_service_edge_cases() {
-        // Single character project and service.
         assert_eq!(extract_compose_service("a-b-1"), Some("b".to_string()));
-        // No digit suffix.
         assert_eq!(extract_compose_service("project-web-abc"), None);
-        // Only project and suffix, no service.
         assert_eq!(extract_compose_service("1"), None);
         assert_eq!(extract_compose_service("-1"), None);
     }
@@ -241,50 +118,5 @@ mod tests {
     fn test_collect_aliases_empty() {
         let aliases = collect_aliases("");
         assert!(aliases.is_empty());
-    }
-
-    /// Helper: build a hosts line with the arcbox marker.
-    fn hosts_line(ip: &str, names: &str, marker_name: &str) -> String {
-        format!("{ip}\t{names} {HOSTS_MARKER}:{marker_name}")
-    }
-
-    /// `remove_dns` must not remove entries whose marker is a prefix match.
-    /// e.g. removing "web" must not remove "web-api".
-    #[test]
-    fn test_remove_dns_no_prefix_false_positive() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("hosts");
-        let web_line = hosts_line("10.88.0.2", "web", "web");
-        let web_api_line = hosts_line("10.88.0.3", "web-api", "web-api");
-        std::fs::write(&path, format!("{web_line}\n{web_api_line}\n")).unwrap();
-
-        // Operate on the temp file by temporarily overriding HOSTS_PATH.
-        // Since HOSTS_PATH is a const we test the filter logic directly.
-        let content = std::fs::read_to_string(&path).unwrap();
-        let marker_suffix = format!(" {HOSTS_MARKER}:web");
-        let filtered: Vec<&str> = content
-            .lines()
-            .filter(|line| !line.ends_with(&marker_suffix))
-            .collect();
-
-        assert_eq!(filtered.len(), 1);
-        assert!(filtered[0].contains("web-api"));
-    }
-
-    /// `add_dns_entry` filter logic must replace an existing entry (upsert).
-    #[test]
-    fn test_add_dns_upsert_replaces_existing() {
-        let old_line = hosts_line("10.88.0.2", "web", "web");
-        let content = format!("127.0.0.1\tlocalhost\n{old_line}\n");
-
-        let marker_suffix = format!(" {HOSTS_MARKER}:web");
-        let filtered: Vec<&str> = content
-            .lines()
-            .filter(|line| !line.ends_with(&marker_suffix))
-            .collect();
-
-        // Old entry removed, localhost preserved.
-        assert_eq!(filtered.len(), 1);
-        assert!(filtered[0].contains("localhost"));
     }
 }

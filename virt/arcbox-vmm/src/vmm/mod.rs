@@ -202,6 +202,9 @@ pub struct Vmm {
     /// Inbound listener manager for port forwarding (Darwin only).
     #[cfg(target_os = "macos")]
     inbound_listener_manager: Option<arcbox_net::darwin::inbound_relay::InboundListenerManager>,
+    /// Shared DNS hosts table from NetworkManager.
+    #[cfg(target_os = "macos")]
+    shared_dns_hosts: Option<std::sync::Arc<arcbox_dns::LocalHostsTable>>,
 }
 
 impl Vmm {
@@ -255,6 +258,8 @@ impl Vmm {
             net_vz_fd: None,
             #[cfg(target_os = "macos")]
             inbound_listener_manager: None,
+            #[cfg(target_os = "macos")]
+            shared_dns_hosts: None,
         })
     }
 
@@ -274,6 +279,16 @@ impl Vmm {
     #[must_use]
     pub fn running_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.running)
+    }
+
+    /// Sets the shared DNS hosts table from the host-side `NetworkManager`.
+    ///
+    /// Must be called before `initialize()`. When set, the VMM-side
+    /// `DnsForwarder` (in the network datapath) shares this table so that
+    /// host-side `register_dns()` calls are visible to guest DNS queries.
+    #[cfg(target_os = "macos")]
+    pub fn set_shared_dns_hosts(&mut self, table: std::sync::Arc<arcbox_dns::LocalHostsTable>) {
+        self.shared_dns_hosts = Some(table);
     }
 
     /// Initializes the VMM components.

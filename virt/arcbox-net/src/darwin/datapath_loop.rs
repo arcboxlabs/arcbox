@@ -256,6 +256,7 @@ impl NetworkDatapath {
                             enqueue_or_write(&guest_async, rst, &mut write_queue);
                         }
                     }
+
                 }
 
                 // Proxy → Guest: relay reply frames from socket proxy.
@@ -415,9 +416,6 @@ fn process_inbound_cmd(
                 host_port,
                 stream.peer_addr().ok(),
             );
-            // Connect to the host_port on the guest, not the container_port.
-            // Docker inside the guest listens on `host_port` (e.g. 8080) and
-            // forwards to the container's internal port (e.g. 80).
             tcp_bridge.initiate_inbound(host_port, stream, guest_ip, gateway_ip, iface, sockets);
         }
         cmd @ InboundCommand::UdpReceived { .. } => {

@@ -11,7 +11,7 @@ GRPC_SOCKET="${GRPC_SOCKET:-/tmp/arcbox-grpc.sock}"
 DATA_DIR="${DATA_DIR:-/tmp/arcbox-data}"
 GUEST_DOCKER_VSOCK_PORT="${GUEST_DOCKER_VSOCK_PORT:-2375}"
 SIGN="${SIGN:-1}"
-ENTITLEMENTS="${ENTITLEMENTS:-$ROOT/tests/resources/entitlements.plist}"
+ENTITLEMENTS="${ENTITLEMENTS:-$ROOT/bundle/arcbox.entitlements}"
 
 cd "$ROOT"
 
