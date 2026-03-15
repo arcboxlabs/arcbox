@@ -35,11 +35,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::darwin::inbound_relay::InboundCommand;
-use crate::darwin::l3_tunnel::TunWriter;
 use crate::darwin::smoltcp_device::{InterceptedKind, SmoltcpDevice};
 use crate::darwin::socket_proxy::SocketProxy;
 use crate::darwin::tcp_bridge::TcpBridge;
-use crate::darwin::tunnel_conntrack::TunnelConnTrack;
 use crate::dhcp::DhcpServer;
 use crate::dns::DnsForwarder;
 use crate::ethernet::{ETH_HEADER_LEN, build_udp_ip_ethernet};
@@ -82,9 +80,6 @@ pub struct NetworkDatapath {
     pub guest_ip: Ipv4Addr,
     /// Cancellation token for graceful shutdown.
     pub cancel: CancellationToken,
-    /// Optional TunWriter for sending return packets through the L3 tunnel.
-    /// Set when L3TunnelService is active.
-    pub tun_writer: Option<TunWriter>,
 }
 
 impl NetworkDatapath {
@@ -117,7 +112,6 @@ impl NetworkDatapath {
             gateway_ip,
             guest_ip,
             cancel,
-            tun_writer: None,
         }
     }
 
@@ -141,13 +135,7 @@ impl NetworkDatapath {
             gateway_ip,
             guest_ip,
             cancel,
-            tun_writer,
         } = self;
-
-        // Tunnel conntrack: tracks flows injected via RoutePacket so that
-        // return packets from the guest are routed back through the utun
-        // instead of being dispatched to SmoltcpDevice/proxy.
-        let mut tunnel_ct = TunnelConnTrack::new();
 
         // Set guest_fd to non-blocking for AsyncFd.
         set_nonblocking(guest_fd.as_raw_fd())?;
@@ -242,17 +230,8 @@ impl NetworkDatapath {
                     // spinning on the biased readable arm.
                     guard.clear_ready();
 
-                    // L3 tunnel return path: check intercepted frames against
-                    // TunnelConnTrack BEFORE proxy dispatch. Matched packets
-                    // are stripped to IP and written back to the utun.
+                    // Process intercepted frames (DHCP, DNS, UDP, ICMP).
                     let intercepted = device.take_intercepted();
-                    let intercepted = filter_tunnel_returns(
-                        intercepted,
-                        &mut tunnel_ct,
-                        &tun_writer,
-                    );
-
-                    // Process remaining intercepted frames (DHCP, DNS, UDP, ICMP).
                     for intercepted_frame in &intercepted {
                         handle_intercepted_frame(
                             intercepted_frame,
@@ -278,15 +257,6 @@ impl NetworkDatapath {
                         }
                     }
 
-                    // Check smoltcp rx_queue for tunnel returns (TCP frames
-                    // that SmoltcpDevice classified as ARP/TCP go to rx_queue).
-                    // SYN-ACK replies to tunneled connections must be caught
-                    // here before smoltcp processes them.
-                    filter_rx_queue_tunnel_returns(
-                        &mut device,
-                        &mut tunnel_ct,
-                        &tun_writer,
-                    );
                 }
 
                 // Proxy → Guest: relay reply frames from socket proxy.
@@ -305,10 +275,6 @@ impl NetworkDatapath {
                         guest_ip,
                         gateway_ip,
                         guest_mac,
-                        &mut write_queue,
-                        &guest_async,
-                        &mut tunnel_ct,
-                        gateway_mac,
                     );
                 }
 
@@ -320,7 +286,6 @@ impl NetworkDatapath {
                 // Periodic maintenance.
                 _ = maintenance.tick() => {
                     socket_proxy.maintenance();
-                    tunnel_ct.gc();
                 }
             }
 
@@ -346,10 +311,6 @@ impl NetworkDatapath {
                 guest_ip,
                 gateway_ip,
                 guest_mac,
-                &mut write_queue,
-                &guest_async,
-                &mut tunnel_ct,
-                gateway_mac,
             );
 
             // 2. smoltcp poll: processes injected SYN frames (from gate) +
@@ -434,8 +395,7 @@ fn handle_intercepted_frame(
 /// Processes one inbound command from `InboundListenerManager`.
 ///
 /// TCP accepted streams are bridged via smoltcp active-connect; UDP datagrams
-/// are routed through the socket proxy inbound path; RoutePackets are wrapped
-/// in L2 and injected into the guest.
+/// are routed through the socket proxy inbound path.
 #[allow(clippy::too_many_arguments)]
 fn process_inbound_cmd(
     cmd: InboundCommand,
@@ -446,10 +406,6 @@ fn process_inbound_cmd(
     guest_ip: Ipv4Addr,
     gateway_ip: Ipv4Addr,
     guest_mac: Option<[u8; 6]>,
-    write_queue: &mut VecDeque<Vec<u8>>,
-    guest_async: &AsyncFd<FdWrapper>,
-    tunnel_ct: &mut TunnelConnTrack,
-    gateway_mac: [u8; 6],
 ) {
     match cmd {
         InboundCommand::TcpAccepted {
@@ -466,115 +422,7 @@ fn process_inbound_cmd(
             let mac = guest_mac.unwrap_or([0xFF; 6]);
             socket_proxy.handle_inbound_command(cmd, mac);
         }
-        InboundCommand::RoutePacket(ip_packet) => {
-            let Some(mac) = guest_mac else {
-                tracing::debug!("RoutePacket dropped: guest MAC not yet learned");
-                return;
-            };
-            // Register the reverse flow so return packets are routed to utun.
-            tunnel_ct.register_injected(&ip_packet);
-
-            // Wrap in L2 Ethernet frame and inject into guest.
-            let frame = wrap_ip_in_l2(&ip_packet, gateway_mac, mac);
-            enqueue_or_write(guest_async, frame, write_queue);
-        }
     }
-}
-
-/// Wraps a raw IP packet in an Ethernet II frame.
-fn wrap_ip_in_l2(ip_packet: &[u8], src_mac: [u8; 6], dst_mac: [u8; 6]) -> Vec<u8> {
-    let mut frame = Vec::with_capacity(ETH_HEADER_LEN + ip_packet.len());
-    frame.extend_from_slice(&dst_mac);
-    frame.extend_from_slice(&src_mac);
-    frame.extend_from_slice(&0x0800u16.to_be_bytes()); // EtherType: IPv4
-    frame.extend_from_slice(ip_packet);
-    frame
-}
-
-// ============================================================================
-// L3 tunnel return path helpers
-// ============================================================================
-
-/// Filters intercepted frames: tunnel-return packets are written to the utun,
-/// and the remaining frames are returned for normal proxy dispatch.
-fn filter_tunnel_returns(
-    intercepted: Vec<crate::darwin::smoltcp_device::InterceptedFrame>,
-    tunnel_ct: &mut TunnelConnTrack,
-    tun_writer: &Option<TunWriter>,
-) -> Vec<crate::darwin::smoltcp_device::InterceptedFrame> {
-    let Some(writer) = tun_writer.as_ref() else {
-        return intercepted;
-    };
-
-    intercepted
-        .into_iter()
-        .filter(|f| {
-            if f.frame.len() > ETH_HEADER_LEN {
-                let ip = &f.frame[ETH_HEADER_LEN..];
-                if tunnel_ct.is_tunnel_return(ip) {
-                    let _ = writer.write_packet(ip);
-                    return false; // consumed
-                }
-            }
-            true
-        })
-        .collect()
-}
-
-/// Filters SmoltcpDevice rx_queue: removes tunnel-return frames and
-/// writes their IP payload to the utun.
-fn filter_rx_queue_tunnel_returns(
-    device: &mut SmoltcpDevice,
-    tunnel_ct: &mut TunnelConnTrack,
-    tun_writer: &Option<TunWriter>,
-) {
-    let Some(writer) = tun_writer.as_ref() else {
-        return;
-    };
-    let queue = device.rx_queue_mut();
-    let before = queue.len();
-    queue.retain(|frame| {
-        if frame.len() > ETH_HEADER_LEN {
-            let ip = &frame[ETH_HEADER_LEN..];
-            if tunnel_ct.is_tunnel_return(ip) {
-                tracing::info!(bytes = ip.len(), "tunnel return: writing to utun");
-                let _ = writer.write_packet(ip);
-                return false; // consumed
-            }
-        }
-        true
-    });
-    let after = queue.len();
-    if before > 0 {
-        tracing::debug!(before, after, consumed = before - after, "filter_rx_queue_tunnel_returns");
-    }
-}
-
-/// Filters raw L2 frames (e.g. gated SYN frames): tunnel-return packets
-/// are written to the utun, remaining frames are returned.
-#[allow(dead_code)]
-fn filter_tunnel_return_frames(
-    frames: Vec<Vec<u8>>,
-    tunnel_ct: &mut TunnelConnTrack,
-    tun_writer: &Option<TunWriter>,
-) -> Vec<Vec<u8>> {
-    let Some(writer) = tun_writer.as_ref() else {
-        return frames;
-    };
-
-    frames
-        .into_iter()
-        .filter(|frame| {
-            if frame.len() > ETH_HEADER_LEN {
-                let ip = &frame[ETH_HEADER_LEN..];
-                if tunnel_ct.is_tunnel_return(ip) {
-                    let _ = writer.write_packet(ip);
-                    return false;
-                }
-            }
-            true
-        })
-        .collect()
 }
 
 /// Handles a DHCP packet from the guest.
@@ -825,10 +673,6 @@ fn drain_cmd_rx(
     guest_ip: Ipv4Addr,
     gateway_ip: Ipv4Addr,
     guest_mac: Option<[u8; 6]>,
-    write_queue: &mut VecDeque<Vec<u8>>,
-    guest_async: &AsyncFd<FdWrapper>,
-    tunnel_ct: &mut TunnelConnTrack,
-    gateway_mac: [u8; 6],
 ) {
     for _ in 0..DRAIN_CMD_BATCH {
         match cmd_rx.try_recv() {
@@ -841,10 +685,6 @@ fn drain_cmd_rx(
                 guest_ip,
                 gateway_ip,
                 guest_mac,
-                write_queue,
-                guest_async,
-                tunnel_ct,
-                gateway_mac,
             ),
             Err(_) => break,
         }

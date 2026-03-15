@@ -98,10 +98,6 @@ prost = "0.13"
 tonic-build = "0.12"
 prost-build = "0.13"
 
-# ttrpc (high-performance RPC)
-ttrpc = "0.8"
-ttrpc-codegen = "0.5"
-
 # HTTP server (Docker REST API)
 axum = { version = "0.8", features = ["macros"] }
 tower = "0.5"
@@ -167,7 +163,6 @@ fc-sdk = "0.2.3"
 
 # Internal crates
 arcbox-constants = { version = "0.1.12", path = "common/arcbox-constants" } # x-release-please-version
-arcbox-dns = { version = "0.1.12", path = "common/arcbox-dns" } # x-release-please-version
 arcbox-error = { version = "0.1.12", path = "common/arcbox-error" } # x-release-please-version
 arcbox-vz = { version = "0.1.12", path = "virt/arcbox-vz" } # x-release-please-version
 arcbox-hypervisor = { version = "0.1.12", path = "virt/arcbox-hypervisor" } # x-release-please-version
@@ -178,16 +173,12 @@ arcbox-fs = { version = "0.1.12", path = "virt/arcbox-fs" } # x-release-please-v
 arcbox-net = { version = "0.1.12", path = "virt/arcbox-net" } # x-release-please-version
 arcbox-dhcp = { version = "0.1.12", path = "virt/arcbox-dhcp" } # x-release-please-version
 arcbox-container = { version = "0.1.12", path = "runtime/arcbox-container" } # x-release-please-version
-arcbox-oci = { version = "0.1.12", path = "runtime/arcbox-oci" } # x-release-please-version
 arcbox-protocol = { version = "0.1.12", path = "rpc/arcbox-protocol" } # x-release-please-version
 arcbox-grpc = { version = "0.1.12", path = "rpc/arcbox-grpc" } # x-release-please-version
 arcbox-transport = { version = "0.1.12", path = "rpc/arcbox-transport" } # x-release-please-version
 arcbox-docker = { version = "0.1.12", path = "app/arcbox-docker" } # x-release-please-version
 arcbox-core = { version = "0.1.12", path = "app/arcbox-core" } # x-release-please-version
 arcbox-api = { version = "0.1.12", path = "app/arcbox-api" } # x-release-please-version
-arcbox-cli = { version = "0.1.12", path = "app/arcbox-cli" } # x-release-please-version
-arcbox-agent = { version = "0.1.12", path = "guest/arcbox-agent" } # x-release-please-version
-arcbox = { version = "0.1.12", path = "app/arcbox" } # x-release-please-version
 
 # Test infrastructure
 tempfile = "3"

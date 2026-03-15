@@ -465,7 +465,6 @@ dependencies = [
  "ipnetwork",
  "libc",
  "nix 0.29.0",
- "sendfd",
  "serde",
  "serde_json",
  "smoltcp",
