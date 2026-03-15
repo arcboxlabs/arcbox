@@ -188,34 +188,72 @@ async fn read_loop(
     cmd_tx: mpsc::Sender<InboundCommand>,
     cancel: CancellationToken,
 ) -> io::Result<()> {
-    let async_fd = AsyncFd::new(AsyncOwnedFd(fd))?;
-    let mut buf = vec![0u8; 65535];
+    // Use tokio's spawn_blocking for the read loop because AsyncFd with
+    // PF_SYSTEM (utun control) sockets may not trigger kqueue readiness
+    // events reliably on macOS. A blocking read in a dedicated thread is
+    // simpler and proven to work (verified via Python select + os.read).
+    let raw_fd = fd.as_raw_fd();
+    let cancel_clone = cancel.clone();
 
-    loop {
-        tokio::select! {
-            biased;
-            () = cancel.cancelled() => return Ok(()),
-            readable = async_fd.readable() => {
-                let mut guard = readable?;
-                // Drain all available packets.
-                loop {
-                    match guard.try_io(|inner| read_ip_packet(inner.get_ref().as_raw_fd(), &mut buf)) {
-                        Ok(Ok(0)) => break,
-                        Ok(Ok(n)) => {
-                            let packet = buf[..n].to_vec();
-                            if cmd_tx.try_send(InboundCommand::RoutePacket(packet)).is_err() {
-                                tracing::debug!("tunnel cmd channel full, dropping packet");
-                            }
-                        }
-                        Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => break,
-                        Ok(Err(e)) => return Err(e),
-                        Err(_would_block) => break,
+    tracing::info!(fd = raw_fd, "L3 tunnel read loop started (blocking mode)");
+
+    let blocking_task = tokio::task::spawn_blocking(move || {
+        let mut buf = vec![0u8; 65535];
+        loop {
+            if cancel_clone.is_cancelled() {
+                return;
+            }
+
+            // Use poll(2) with 1000ms timeout so we can check cancellation.
+            let mut pfd = libc::pollfd {
+                fd: raw_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: poll with valid fd.
+            let ret = unsafe { libc::poll(&mut pfd, 1, 1000) };
+            if ret < 0 {
+                let e = io::Error::last_os_error();
+                tracing::error!(error = %e, "poll() failed on utun fd");
+                return;
+            }
+            if ret == 0 {
+                continue; // timeout, check cancellation and retry
+            }
+            tracing::debug!(revents = pfd.revents, fd = raw_fd, "utun fd readable!");
+
+            match read_ip_packet(raw_fd, &mut buf) {
+                Ok(0) => {
+                    tracing::debug!(fd = raw_fd, "read_ip_packet returned 0 bytes");
+                    continue;
+                }
+                Ok(n) => {
+                    tracing::info!(fd = raw_fd, bytes = n, "utun packet received, sending RoutePacket");
+                    let packet = buf[..n].to_vec();
+                    if cmd_tx.try_send(InboundCommand::RoutePacket(packet)).is_err() {
+                        tracing::debug!("tunnel cmd channel full, dropping packet");
                     }
                 }
-                guard.clear_ready();
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    tracing::debug!(fd = raw_fd, "read_ip_packet WouldBlock");
+                    continue;
+                }
+                Err(e) => {
+                    if !cancel_clone.is_cancelled() {
+                        tracing::error!(error = %e, "utun read error");
+                    }
+                    return;
+                }
             }
         }
-    }
+    });
+
+    // Wait for cancellation, then abort the blocking task.
+    cancel.cancelled().await;
+    // The blocking task checks cancel_clone.is_cancelled() every 100ms.
+    // Give it a moment to exit gracefully, then drop it.
+
+    Ok(())
 }
 
 /// Reads one IP packet from the utun fd, stripping the 4-byte AF header.

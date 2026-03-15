@@ -184,7 +184,35 @@ pub fn create_utun(session_id: &str, ip: &str) -> io::Result<(OwnedFd, String)> 
         .name
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing utun name"))?;
 
-    tracing::info!(interface = %name, "received utun fd from helper");
+    // Verify the fd is really a utun by trying getsockopt.
+    let mut verify_buf = [0u8; 64];
+    let mut verify_len: libc::socklen_t = 64;
+    let verify_ret = unsafe {
+        libc::getsockopt(
+            utun_fd.as_raw_fd(),
+            libc::SYSPROTO_CONTROL,
+            2, // UTUN_OPT_IFNAME
+            verify_buf.as_mut_ptr().cast(),
+            &mut verify_len,
+        )
+    };
+    if verify_ret == 0 {
+        let verified_name = std::str::from_utf8(&verify_buf[..verify_len as usize])
+            .unwrap_or("???")
+            .trim_end_matches('\0');
+        tracing::info!(
+            fd = utun_fd.as_raw_fd(),
+            verified_name,
+            json_name = %name,
+            "received and verified utun fd from helper"
+        );
+    } else {
+        tracing::error!(
+            fd = utun_fd.as_raw_fd(),
+            errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1),
+            "received fd from helper but getsockopt UTUN_OPT_IFNAME FAILED — fd may not be a utun"
+        );
+    }
 
     Ok((utun_fd, name))
 }

@@ -129,6 +129,7 @@ version = "0.1.12"
 dependencies = [
  "anyhow",
  "arcbox-constants",
+ "arcbox-dns",
  "arcbox-protocol",
  "arcbox-vm",
  "async-trait",
@@ -225,6 +226,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "macos-resolver",
+ "nix 0.29.0",
  "sentry",
  "serde",
  "serde_json",
@@ -259,6 +261,7 @@ version = "0.1.12"
 dependencies = [
  "arcbox-boot",
  "arcbox-constants",
+ "arcbox-dns",
  "arcbox-error",
  "arcbox-fs",
  "arcbox-hypervisor",
@@ -320,6 +323,13 @@ version = "0.1.12"
 dependencies = [
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "arcbox-dns"
+version = "0.1.12"
+dependencies = [
+ "thiserror",
 ]
 
 [[package]]
@@ -408,6 +418,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "arcbox-helper"
+version = "0.1.12"
+dependencies = [
+ "arcbox-net",
+ "libc",
+ "sendfd",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "arcbox-hypervisor"
 version = "0.1.12"
 dependencies = [
@@ -432,6 +455,7 @@ name = "arcbox-net"
 version = "0.1.12"
 dependencies = [
  "arcbox-dhcp",
+ "arcbox-dns",
  "arcbox-error",
  "arcbox-virtio",
  "bytes",
@@ -441,6 +465,9 @@ dependencies = [
  "ipnetwork",
  "libc",
  "nix 0.29.0",
+ "sendfd",
+ "serde",
+ "serde_json",
  "smoltcp",
  "socket2 0.5.10",
  "thiserror",
@@ -533,6 +560,7 @@ dependencies = [
 name = "arcbox-vmm"
 version = "0.1.12"
 dependencies = [
+ "arcbox-dns",
  "arcbox-error",
  "arcbox-hypervisor",
  "arcbox-net",
@@ -3245,6 +3273,15 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 dependencies = [
  "serde",
  "serde_core",
+]
+
+[[package]]
+name = "sendfd"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b183bfd5b1bc64ab0c1ef3ee06b008a9ef1b68a7d3a99ba566fbfe7a7c6d745b"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
