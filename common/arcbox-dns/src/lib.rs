@@ -218,6 +218,30 @@ pub fn build_response_a(query_bytes: &[u8], ip: Ipv4Addr, ttl: u32) -> Result<Ve
     build_response_ip(query_bytes, IpAddr::V4(ip), ttl)
 }
 
+/// Builds a NODATA response (RCODE=0, ANCOUNT=0).
+///
+/// Used when the name exists but has no records of the requested type
+/// (e.g. AAAA query for a name that only has an A record).
+pub fn build_nodata(query_bytes: &[u8]) -> Result<Vec<u8>, DnsError> {
+    let query = DnsQuery::parse(query_bytes)?;
+    let mut r = Vec::with_capacity(HEADER_LEN + query.raw_question.len());
+    r.extend_from_slice(&query.raw_header);
+
+    // QR=1, AA=1, RD=1
+    r[2] = 0x85;
+    // RA=1, RCODE=0 (NOERROR — name exists, just no data for this type)
+    r[3] = 0x80;
+    r[6] = 0x00;
+    r[7] = 0x00; // ANCOUNT = 0
+    r[8] = 0x00;
+    r[9] = 0x00;
+    r[10] = 0x00;
+    r[11] = 0x00;
+
+    r.extend_from_slice(&query.raw_question);
+    Ok(r)
+}
+
 /// Builds an NXDOMAIN response.
 ///
 /// Zeroes ANCOUNT/NSCOUNT/ARCOUNT so EDNS(0) queries (ARCOUNT=1 in request)
@@ -246,15 +270,24 @@ pub fn build_nxdomain(query_bytes: &[u8]) -> Result<Vec<u8>, DnsError> {
 }
 
 /// Builds a SERVFAIL response.
+///
+/// Does NOT require full query parsing — works even for unsupported query types.
+/// Copies the raw header and flips QR/RCODE bits.
 pub fn build_servfail(query_bytes: &[u8]) -> Result<Vec<u8>, DnsError> {
-    let query = DnsQuery::parse(query_bytes)?;
-    let mut r = Vec::with_capacity(HEADER_LEN + query.raw_question.len());
-    r.extend_from_slice(&query.raw_header);
+    if query_bytes.len() < HEADER_LEN {
+        return Err(DnsError::TooShort {
+            need: HEADER_LEN,
+            got: query_bytes.len(),
+        });
+    }
+    // Copy entire query (header + question), then fix flags.
+    let mut r = query_bytes.to_vec();
 
     // QR=1, RD=1
     r[2] = 0x81;
     // RA=1, RCODE=2 (SERVFAIL)
     r[3] = 0x82;
+    // Clear answer/authority/additional counts.
     r[6] = 0x00;
     r[7] = 0x00;
     r[8] = 0x00;
@@ -262,7 +295,7 @@ pub fn build_servfail(query_bytes: &[u8]) -> Result<Vec<u8>, DnsError> {
     r[10] = 0x00;
     r[11] = 0x00;
 
-    r.extend_from_slice(&query.raw_question);
+    // Question section already included (we copied the full query).
     Ok(r)
 }
 

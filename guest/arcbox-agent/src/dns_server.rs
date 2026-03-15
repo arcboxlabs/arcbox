@@ -171,7 +171,7 @@ impl GuestDnsServer {
                 return Ok(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?);
             }
             // AAAA for known container → empty answer (no IPv6).
-            return Ok(arcbox_dns::build_nxdomain(data)?);
+            return Ok(arcbox_dns::build_nodata(data)?);
         }
 
         // 2. Try with `.arcbox.local` suffix stripped.
@@ -183,7 +183,7 @@ impl GuestDnsServer {
                 if is_a_query {
                     return Ok(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?);
                 }
-                return Ok(arcbox_dns::build_nxdomain(data)?);
+                return Ok(arcbox_dns::build_nodata(data)?);
             }
         }
 
@@ -197,7 +197,7 @@ impl GuestDnsServer {
             if is_a_query {
                 return Ok(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?);
             }
-            return Ok(arcbox_dns::build_nxdomain(data)?);
+            return Ok(arcbox_dns::build_nodata(data)?);
         }
         if bare_name != name_lower {
             if let Some(ip) = self
@@ -209,13 +209,13 @@ impl GuestDnsServer {
                 if is_a_query {
                     return Ok(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?);
                 }
-                return Ok(arcbox_dns::build_nxdomain(data)?);
+                return Ok(arcbox_dns::build_nodata(data)?);
             }
         }
 
         // 4. Authoritative NXDOMAIN for unresolved local-domain queries.
+        // NXDOMAIN (not NODATA) because the name genuinely doesn't exist.
         if name_lower == LOCAL_DOMAIN || name_lower.ends_with(&format!(".{LOCAL_DOMAIN}")) {
-            // Only for A/AAAA — let other types pass through.
             if matches!(query.qtype, DnsRecordType::A | DnsRecordType::Aaaa) {
                 return Ok(arcbox_dns::build_nxdomain(data)?);
             }

@@ -1,4 +1,4 @@
-# Plan: L3 Direct Routing via utun
+# Plan: L3 Direct Routing via vmnet bridge
 
 > Status: IMPLEMENTED
 > Date: 2026-03-14
