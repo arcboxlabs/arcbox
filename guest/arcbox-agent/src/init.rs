@@ -381,7 +381,7 @@ exit 0
 
     /// Install blanket iptables FORWARD ACCEPT rules for the sandbox subnet.
     ///
-    /// The subnet is read from the VMM config (default `10.88.0.0/16`).
+    /// The subnet is read from the VMM config (default `172.20.0.0/16`).
     /// Uses `-I` (insert at chain top) so rules take effect even when
     /// Docker sets the default FORWARD policy to DROP.
     fn setup_sandbox_forwarding() {
