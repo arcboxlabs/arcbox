@@ -452,7 +452,7 @@ exit 0
     /// guest's /etc/resolv.conf. We point them to 192.168.64.1 (the gateway)
     /// so container DNS queries go through the host-side forwarder which can
     /// resolve *.arcbox.local names registered from the host.
-    pub fn write_docker_daemon_dns() {
+    fn write_docker_daemon_dns() {
         mkdir_p("/etc/docker");
         let content = r#"{"dns": ["192.168.64.1"]}"#;
         if let Err(e) = std::fs::write("/etc/docker/daemon.json", content) {
