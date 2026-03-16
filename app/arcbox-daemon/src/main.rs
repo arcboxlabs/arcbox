@@ -107,6 +107,7 @@ async fn run(args: DaemonArgs) -> Result<()> {
     std::fs::create_dir_all(&data_subdir).context("Failed to create persistent data directory")?;
 
     let pid_file = run_dir.join("daemon.pid");
+    cleanup_stale_state(&pid_file, &run_dir);
     std::fs::write(&pid_file, format!("{}\n", std::process::id()))
         .context("Failed to write daemon PID file")?;
 
@@ -503,6 +504,97 @@ fn first_address_in_subnet(subnet: &str) -> Option<Ipv4Addr> {
 fn dns_domain() -> String {
     let key = format!("{}_DNS_DOMAIN", to_env_prefix(DNS_PREFIX));
     std::env::var(key).unwrap_or_else(|_| DEFAULT_DNS_DOMAIN.to_string())
+}
+
+/// Clean up stale state from a previous daemon run that did not shut down
+/// cleanly.
+///
+/// Safety strategy: always prefer graceful shutdown over forced kill.
+/// SIGKILL on a VM process can corrupt the guest filesystem (BTRFS on
+/// docker.img), so we give the old daemon time to shut down its VM
+/// properly and only escalate as a last resort.
+fn cleanup_stale_state(pid_file: &std::path::Path, run_dir: &std::path::Path) {
+    // 1. Gracefully stop stale daemon — it will shut down its VM and flush
+    //    disk writes before exiting.
+    if let Ok(contents) = std::fs::read_to_string(pid_file) {
+        if let Ok(old_pid) = contents.trim().parse::<i32>() {
+            #[allow(clippy::cast_possible_wrap)]
+            let current_pid = std::process::id() as i32;
+            if old_pid != current_pid && is_process_alive(old_pid) {
+                warn!(old_pid, "Stale daemon still running, sending SIGTERM");
+                // SAFETY: sending a signal to a known-alive process.
+                unsafe { libc::kill(old_pid, libc::SIGTERM) };
+
+                // Wait up to 30s for graceful shutdown (VM stop + disk flush).
+                let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                while std::time::Instant::now() < deadline && is_process_alive(old_pid) {
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+
+                if is_process_alive(old_pid) {
+                    warn!(old_pid, "Stale daemon did not exit after 30s, sending SIGKILL");
+                    // SAFETY: last resort — the old daemon is unresponsive.
+                    unsafe { libc::kill(old_pid, libc::SIGKILL) };
+                    std::thread::sleep(Duration::from_secs(1));
+                } else {
+                    info!(old_pid, "Stale daemon exited gracefully");
+                }
+            }
+        }
+    }
+
+    // 2. Wait for orphaned Virtualization.framework XPC processes to exit.
+    //    After the daemon exits, its VM child processes should terminate on
+    //    their own. We do NOT SIGKILL them — that risks corrupting the guest
+    //    filesystem. Instead, wait with a timeout and warn if they linger.
+    #[cfg(target_os = "macos")]
+    {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let pids = find_vm_xpc_pids();
+            if pids.is_empty() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                warn!(
+                    "Orphaned Virtualization.framework processes still alive after 10s: {:?}. \
+                     Not killing them to avoid data loss — VM startup may fail.",
+                    pids
+                );
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+
+    // 3. Remove stale sockets so bind() doesn't fail.
+    for name in ["docker.sock", "arcbox.sock"] {
+        let path = run_dir.join(name);
+        if path.exists() {
+            if let Err(e) = std::fs::remove_file(&path) {
+                warn!("Failed to remove stale socket {}: {}", path.display(), e);
+            }
+        }
+    }
+}
+
+fn is_process_alive(pid: i32) -> bool {
+    // SAFETY: kill(pid, 0) is a standard POSIX existence check.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[cfg(target_os = "macos")]
+fn find_vm_xpc_pids() -> Vec<i32> {
+    let Ok(output) = std::process::Command::new("pgrep")
+        .args(["-f", "com.apple.Virtualization.VirtualMachine"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .collect()
 }
 
 fn check_resolver_installed() {
