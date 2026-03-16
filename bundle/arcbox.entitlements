@@ -10,6 +10,10 @@
     <key>com.apple.security.hypervisor</key>
     <true/>
 
+    <!-- VM networking (required for VZNATNetworkDeviceAttachment / vmnet bridge) -->
+    <key>com.apple.vm.networking</key>
+    <true/>
+
     <!-- Network access for container networking -->
     <key>com.apple.security.network.client</key>
     <true/>
