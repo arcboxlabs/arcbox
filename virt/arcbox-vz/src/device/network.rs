@@ -1,7 +1,7 @@
 //! Network device configuration.
 
 use crate::error::{VZError, VZResult};
-use crate::ffi::{file_handle_for_fd, get_class};
+use crate::ffi::{file_handle_for_fd, get_class, nsstring, release};
 use crate::{msg_send, msg_send_void};
 use objc2::runtime::AnyObject;
 use std::os::unix::io::RawFd;
@@ -20,7 +20,13 @@ impl NetworkDeviceConfiguration {
     /// NAT allows the guest to access external networks through the host.
     pub fn nat() -> VZResult<Self> {
         let attachment = create_nat_attachment()?;
-        Self::with_attachment(attachment)
+        Self::with_attachment(attachment, None)
+    }
+
+    /// Creates a network device with NAT attachment and an explicit MAC address.
+    pub fn nat_with_mac(mac_address: &str) -> VZResult<Self> {
+        let attachment = create_nat_attachment()?;
+        Self::with_attachment(attachment, Some(mac_address))
     }
 
     /// Creates a network device with file handle attachment.
@@ -39,11 +45,11 @@ impl NetworkDeviceConfiguration {
         }
 
         let attachment = create_file_handle_attachment(net_handle)?;
-        Self::with_attachment(attachment)
+        Self::with_attachment(attachment, None)
     }
 
     /// Creates a network device with the given attachment.
-    fn with_attachment(attachment: *mut AnyObject) -> VZResult<Self> {
+    fn with_attachment(attachment: *mut AnyObject, mac_address: Option<&str>) -> VZResult<Self> {
         // SAFETY: ObjC new on valid VZVirtioNetworkDeviceConfiguration class. Result is checked non-null.
         unsafe {
             let cls = get_class("VZVirtioNetworkDeviceConfiguration").ok_or_else(|| {
@@ -63,8 +69,11 @@ impl NetworkDeviceConfiguration {
 
             msg_send_void!(obj, setAttachment: attachment);
 
-            // Set random MAC address
-            if let Ok(mac) = create_random_mac() {
+            let mac = match mac_address {
+                Some(mac_address) => create_mac_address(mac_address)?,
+                None => create_random_mac()?,
+            };
+            if !mac.is_null() {
                 msg_send_void!(obj, setMACAddress: mac);
             }
 
@@ -183,5 +192,34 @@ fn create_random_mac() -> VZResult<*mut AnyObject> {
         }
 
         Ok(obj)
+    }
+}
+
+fn create_mac_address(mac_address: &str) -> VZResult<*mut AnyObject> {
+    // SAFETY: ObjC alloc/init on a valid VZMACAddress class with a valid NSString argument.
+    unsafe {
+        let cls = get_class("VZMACAddress").ok_or_else(|| VZError::Internal {
+            code: -1,
+            message: "VZMACAddress class not found".into(),
+        })?;
+        let obj = msg_send!(cls, alloc);
+        if obj.is_null() {
+            return Err(VZError::Internal {
+                code: -1,
+                message: "Failed to allocate MAC address".into(),
+            });
+        }
+
+        let mac_ns = nsstring(mac_address);
+        let initialized = msg_send!(obj, initWithString: mac_ns);
+        release(mac_ns);
+
+        if initialized.is_null() {
+            return Err(VZError::InvalidConfiguration(format!(
+                "Invalid MAC address: {mac_address}"
+            )));
+        }
+
+        Ok(initialized)
     }
 }

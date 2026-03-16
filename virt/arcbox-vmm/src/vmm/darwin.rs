@@ -81,9 +81,15 @@ impl Vmm {
         // real L2 path. Host can route container subnets through this NIC's
         // IP, avoiding the utun write limitation on macOS.
         if self.config.networking {
-            let bridge_nic = VirtioDeviceConfig::network();
+            let bridge_nic = match self.config.bridge_nic_mac.as_deref() {
+                Some(mac_address) => VirtioDeviceConfig::network_with_mac(mac_address),
+                None => VirtioDeviceConfig::network(),
+            };
             vm.add_virtio_device(bridge_nic)?;
-            tracing::info!("Added bridge NIC (VZNATNetworkDeviceAttachment) for L3 routing");
+            tracing::info!(
+                mac_address = self.config.bridge_nic_mac.as_deref().unwrap_or("random"),
+                "Added bridge NIC (VZNATNetworkDeviceAttachment) for L3 routing"
+            );
         }
 
         // Add vsock if enabled

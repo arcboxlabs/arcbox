@@ -718,6 +718,15 @@ impl VmLifecycleManager {
                     self.event_bus.publish(Event::MachineStarted {
                         name: DEFAULT_MACHINE_NAME.to_string(),
                     });
+
+                    // Install host route for container subnets via bridge NIC.
+                    #[cfg(target_os = "macos")]
+                    if let Some(mac) = self.machine_manager.bridge_mac(DEFAULT_MACHINE_NAME) {
+                        tokio::task::spawn_blocking(move || {
+                            crate::route_reconciler::ensure_route(&mac);
+                        });
+                    }
+
                     return Ok(());
                 }
                 Err(e) => {

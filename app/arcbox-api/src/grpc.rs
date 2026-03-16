@@ -186,6 +186,7 @@ impl machine_service_server::MachineService for MachineServiceImpl {
                 gateway: String::new(),
                 mac_address: String::new(),
                 dns_servers: vec![],
+                bridge_mac_address: arcbox_core::vm::bridge_nic_mac_for_vm_id(&machine.vm_id),
             }),
             storage: Some(arcbox_protocol::v1::MachineStorage {
                 disk_size: machine.disk_gb * 1024 * 1024 * 1024,

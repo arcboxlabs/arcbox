@@ -42,6 +42,29 @@ impl std::fmt::Display for VmId {
     }
 }
 
+/// Derives a stable locally-administered MAC address for the macOS bridge NIC.
+#[must_use]
+pub fn bridge_nic_mac_for_vm_id(vm_id: &VmId) -> String {
+    let hex: String = vm_id
+        .as_str()
+        .chars()
+        .filter(|ch| ch.is_ascii_hexdigit())
+        .collect();
+
+    let mut bytes = [0_u8; 6];
+    bytes[0] = 0x02;
+
+    for (index, chunk) in hex.as_bytes().chunks(2).take(5).enumerate() {
+        let text = std::str::from_utf8(chunk).unwrap_or("00");
+        bytes[index + 1] = u8::from_str_radix(text, 16).unwrap_or(0);
+    }
+
+    format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]
+    )
+}
+
 /// VM state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmState {
@@ -272,6 +295,7 @@ impl VmManager {
                     read_only: bd.read_only,
                 })
                 .collect(),
+            bridge_nic_mac: Some(bridge_nic_mac_for_vm_id(&entry.info.id)),
         }
     }
 
@@ -965,6 +989,18 @@ mod tests {
         let vm_id = manager.create(config).unwrap();
         let vmm_config = manager.build_vmm_config_for_test(&vm_id).unwrap();
         assert_eq!(vmm_config.guest_cid, Some(9));
+        assert_eq!(
+            vmm_config.bridge_nic_mac,
+            Some(bridge_nic_mac_for_vm_id(&vm_id))
+        );
+    }
+
+    #[test]
+    fn test_bridge_nic_mac_is_stable_and_locally_administered() {
+        let vm_id = VmId("00112233-4455-6677-8899-aabbccddeeff".to_string());
+        let mac = bridge_nic_mac_for_vm_id(&vm_id);
+
+        assert_eq!(mac, "02:00:11:22:33:44");
     }
 
     #[test]

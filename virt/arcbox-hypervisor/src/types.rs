@@ -139,6 +139,8 @@ pub struct VirtioDeviceConfig {
     /// File descriptor for file-handle-based network attachment.
     #[serde(skip)]
     pub net_fd: Option<i32>,
+    /// Optional MAC address for network devices.
+    pub mac_address: Option<String>,
 }
 
 impl VirtioDeviceConfig {
@@ -151,6 +153,7 @@ impl VirtioDeviceConfig {
             read_only,
             tag: None,
             net_fd: None,
+            mac_address: None,
         }
     }
 
@@ -164,6 +167,20 @@ impl VirtioDeviceConfig {
             read_only: false,
             tag: None,
             net_fd: None,
+            mac_address: None,
+        }
+    }
+
+    /// Creates a new network device configuration with NAT attachment and an explicit MAC address.
+    pub fn network_with_mac(mac_address: impl Into<String>) -> Self {
+        Self {
+            device_type: VirtioDeviceType::Net,
+            config: Vec::new(),
+            path: None,
+            read_only: false,
+            tag: None,
+            net_fd: None,
+            mac_address: Some(mac_address.into()),
         }
     }
 
@@ -180,6 +197,7 @@ impl VirtioDeviceConfig {
             read_only: false,
             tag: None,
             net_fd: Some(fd),
+            mac_address: None,
         }
     }
 
@@ -193,6 +211,7 @@ impl VirtioDeviceConfig {
             read_only: false,
             tag: None,
             net_fd: None,
+            mac_address: None,
         }
     }
 
@@ -205,6 +224,7 @@ impl VirtioDeviceConfig {
             read_only,
             tag: Some(tag.into()),
             net_fd: None,
+            mac_address: None,
         }
     }
 
@@ -218,6 +238,7 @@ impl VirtioDeviceConfig {
             read_only: false,
             tag: None,
             net_fd: None,
+            mac_address: None,
         }
     }
 
@@ -231,6 +252,7 @@ impl VirtioDeviceConfig {
             read_only: false,
             tag: None,
             net_fd: None,
+            mac_address: None,
         }
     }
 }
@@ -314,6 +336,7 @@ impl VirtioDeviceConfig {
             read_only: false,
             tag: None,
             net_fd: None,
+            mac_address: None,
         }
     }
 }

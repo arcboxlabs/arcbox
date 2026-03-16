@@ -236,6 +236,8 @@ message MachineNetwork {
     string mac_address = 3;
     // DNS servers.
     repeated string dns_servers = 4;
+    // MAC address of the bridge NAT NIC used for host-side vmnet routing on macOS.
+    string bridge_mac_address = 5;
 }
 
 // Machine storage configuration.

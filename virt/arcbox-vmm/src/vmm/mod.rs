@@ -87,6 +87,8 @@ pub struct VmmConfig {
     pub balloon: bool,
     /// Block devices to attach to the VM.
     pub block_devices: Vec<BlockDeviceConfig>,
+    /// Optional MAC address for the bridge NAT NIC on macOS.
+    pub bridge_nic_mac: Option<String>,
 }
 
 impl Default for VmmConfig {
@@ -106,6 +108,7 @@ impl Default for VmmConfig {
             guest_cid: None,
             balloon: true, // Enable balloon by default for memory optimization
             block_devices: Vec::new(),
+            bridge_nic_mac: None,
         }
     }
 }

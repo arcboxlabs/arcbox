@@ -310,6 +310,7 @@ impl VmBuilder {
                     read_only: cfg.read_only,
                 })
                 .collect(),
+            bridge_nic_mac: None,
         };
 
         tracing::info!(

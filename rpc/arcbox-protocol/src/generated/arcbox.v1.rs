@@ -370,6 +370,9 @@ pub struct MachineNetwork {
     /// DNS servers.
     #[prost(string, repeated, tag = "4")]
     pub dns_servers: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// MAC address of the bridge NAT NIC used for host-side vmnet routing on macOS.
+    #[prost(string, tag = "5")]
+    pub bridge_mac_address: ::prost::alloc::string::String,
 }
 /// Machine storage configuration.
 #[derive(serde::Serialize, serde::Deserialize)]

@@ -555,6 +555,13 @@ impl MachineManager {
         &self.vm_manager
     }
 
+    /// Returns the bridge NIC MAC address for a machine's VM.
+    pub fn bridge_mac(&self, name: &str) -> Option<String> {
+        let machines = self.machines.read().ok()?;
+        let machine = machines.get(name)?;
+        Some(crate::vm::bridge_nic_mac_for_vm_id(&machine.vm_id))
+    }
+
     /// Gets the vsock CID for a running machine.
     #[must_use]
     pub fn get_cid(&self, name: &str) -> Option<u32> {

@@ -900,11 +900,16 @@ impl VirtualMachine for DarwinVm {
                         .map_err(|e| HypervisorError::DeviceError(e.to_string()))?
                 } else {
                     // Fallback to Apple's built-in NAT attachment.
-                    NetworkDeviceConfiguration::nat()
-                        .map_err(|e| HypervisorError::DeviceError(e.to_string()))?
+                    match device.mac_address.as_deref() {
+                        Some(mac_address) => NetworkDeviceConfiguration::nat_with_mac(mac_address)
+                            .map_err(|e| HypervisorError::DeviceError(e.to_string()))?,
+                        None => NetworkDeviceConfiguration::nat()
+                            .map_err(|e| HypervisorError::DeviceError(e.to_string()))?,
+                    }
                 };
                 vz_config.add_network_device(network_device);
                 tracing::debug!(
+                    mac_address = device.mac_address.as_deref().unwrap_or("random"),
                     "Added network device (file_handle={})",
                     device.net_fd.is_some()
                 );

@@ -48,6 +48,7 @@ fn main() {
         guest_cid: None,
         balloon: false,
         block_devices: Vec::new(),
+        bridge_nic_mac: None,
     };
 
     println!("VMM Configuration:");
