@@ -11,24 +11,29 @@ use std::process::Command;
 /// Container subnet to route.
 const CONTAINER_SUBNET: &str = "172.16.0.0/12";
 
-/// Path to the helperctl binary (bundled in the app).
-/// Falls back to searching PATH for development builds.
-fn helperctl_path() -> String {
-    // In production: bundled alongside abctl in the app's MacOS/bin/.
-    // Check well-known locations.
+/// Path to the ArcBoxHelper binary (used in CLI mode with `route` subcommand).
+/// The same binary serves as XPC daemon (no args) and CLI bridge (`route ...`).
+fn helper_path() -> String {
     let candidates = [
-        // Desktop app bundle.
-        "/Applications/ArcBox Desktop.app/Contents/MacOS/bin/arcbox-helperctl",
-        // Development: next to the daemon binary.
-        "arcbox-helperctl",
+        // Production: inside the app bundle's HelperTools.
+        "/Applications/ArcBox Desktop.app/Contents/Library/HelperTools/ArcBoxHelper",
     ];
     for path in candidates {
         if std::path::Path::new(path).exists() {
             return path.to_string();
         }
     }
-    // Fallback: hope it's in PATH.
-    "arcbox-helperctl".to_string()
+    // Development: look next to the daemon binary.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let helper = dir.join("ArcBoxHelper");
+            if helper.exists() {
+                return helper.to_string_lossy().to_string();
+            }
+        }
+    }
+    // Last resort: hope it's in PATH.
+    "ArcBoxHelper".to_string()
 }
 
 /// Ensures the container subnet route exists, pointing to the bridge
@@ -36,7 +41,7 @@ fn helperctl_path() -> String {
 ///
 /// Called on: VM ready, VM recovery, daemon startup reconcile.
 pub fn ensure_route(bridge_mac: &str) {
-    let ctl = helperctl_path();
+    let ctl = helper_path();
     match Command::new(&ctl)
         .args([
             "route",
@@ -75,7 +80,7 @@ pub fn ensure_route(bridge_mac: &str) {
 ///
 /// Called on: VM stop, daemon shutdown.
 pub fn remove_route() {
-    let ctl = helperctl_path();
+    let ctl = helper_path();
     match Command::new(&ctl)
         .args(["route", "remove", "--subnet", CONTAINER_SUBNET])
         .output()
@@ -101,7 +106,7 @@ pub fn remove_route() {
 /// Queries current route status.
 #[allow(dead_code)]
 pub fn route_status() -> Option<String> {
-    let ctl = helperctl_path();
+    let ctl = helper_path();
     let output = Command::new(&ctl)
         .args(["route", "status", "--subnet", CONTAINER_SUBNET])
         .output()
