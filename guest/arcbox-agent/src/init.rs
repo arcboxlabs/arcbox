@@ -271,34 +271,39 @@ exit 0
     /// (socketpair datapath), while the bridge NIC is reachable from the host
     /// for inbound container traffic.
     fn configure_bridge_nic() {
-        // Find the second non-loopback interface (eth1 or similar).
+        // Find the bridge NIC: it's the non-loopback interface that is NOT
+        // the primary interface. The primary interface was already configured
+        // by configure_primary_interface_dhcp() and has an IP in 192.168.64.0/24.
+        let primary = detect_primary_interface();
         let entries = match fs::read_dir("/sys/class/net") {
             Ok(e) => e,
             Err(_) => return,
         };
-        let mut candidates: Vec<String> = Vec::new();
+        let mut bridge_iface: Option<String> = None;
         for entry in entries.flatten() {
             let Ok(name) = entry.file_name().into_string() else {
                 continue;
             };
+            // Skip loopback, virtual, and the primary interface.
             if name == "lo"
                 || name.starts_with("dummy")
                 || name.starts_with("veth")
                 || name.starts_with("br-")
                 || name.starts_with("docker")
+                || name.starts_with("vmtap")
+                || name.starts_with("sit")
+                || primary.as_deref() == Some(&name)
             {
                 continue;
             }
-            candidates.push(name);
+            bridge_iface = Some(name);
+            break;
         }
-        candidates.sort();
 
-        // The primary interface is the first one (eth0). The bridge NIC is the second.
-        if candidates.len() < 2 {
-            tracing::debug!("no bridge NIC found (only {} candidates)", candidates.len());
+        let Some(bridge_iface) = bridge_iface.as_deref() else {
+            tracing::debug!("no bridge NIC found");
             return;
-        }
-        let bridge_iface = &candidates[1];
+        };
 
         // Bring up the interface.
         let _ = std::process::Command::new("/bin/busybox")
