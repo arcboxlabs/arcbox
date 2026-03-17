@@ -38,7 +38,7 @@ pub async fn execute(args: UninstallArgs) -> Result<()> {
         println!("  • Remove ALL app data (~/.arcbox) including containers");
     }
     println!("  • Remove app (/Applications/ArcBox Desktop.app)");
-    println!("  • Reset login item registration                  [sudo]");
+    println!("  • Reset login item approvals (System Settings)   [sudo]");
     println!();
 
     if !args.yes {
@@ -60,7 +60,7 @@ pub async fn execute(args: UninstallArgs) -> Result<()> {
     }
 
     let mut step = 0u32;
-    let total = 9u32;
+    let total = 10u32;
 
     macro_rules! step {
         ($label:expr, $body:expr) => {
@@ -189,8 +189,13 @@ pub async fn execute(args: UninstallArgs) -> Result<()> {
         let _ = std::fs::remove_dir_all("/Applications/ArcBox Desktop.app");
     });
 
-    // Reset SMAppService registration (best-effort, non-fatal).
-    let _ = Command::new("sudo").args(["sfltool", "resetbtm"]).output();
+    // 10. Reset login item approvals (SMAppService / BTM database).
+    //     This clears the "Allow in the Background" toggles in System
+    //     Settings → General → Login Items for both the daemon and helper,
+    //     so a reinstall starts with a clean approval state.
+    step!("Resetting login item approvals...   [sudo]", {
+        let _ = Command::new("sudo").args(["sfltool", "resetbtm"]).output();
+    });
 
     println!("\nArcBox has been uninstalled.");
     if args.keep_data {
