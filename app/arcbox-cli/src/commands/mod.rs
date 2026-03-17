@@ -18,6 +18,7 @@ pub mod daemon;
 #[cfg(target_os = "macos")]
 pub mod dns;
 pub mod docker;
+pub mod doctor;
 pub mod machine;
 pub mod sandbox;
 pub mod setup;
@@ -90,6 +91,9 @@ pub enum Commands {
     /// Manage CLI shell integration (PATH, completions)
     #[command(subcommand)]
     Setup(setup::SetupCommands),
+
+    /// Run diagnostic checks on the ArcBox runtime
+    Doctor,
 
     /// Display system-wide information
     Info,
