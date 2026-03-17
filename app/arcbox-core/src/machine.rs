@@ -105,9 +105,9 @@ mod tests {
             "::1".to_string(),
             "fe80::1".to_string(),
             "2001:db8::10".to_string(),
-            "192.168.64.2".to_string(),
+            "10.0.2.2".to_string(),
         ];
-        assert_eq!(select_routable_ip(&ips), Some("192.168.64.2".to_string()));
+        assert_eq!(select_routable_ip(&ips), Some("10.0.2.2".to_string()));
     }
 
     #[test]

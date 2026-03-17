@@ -908,7 +908,7 @@ mod tests {
         let (host_fd, guest_fd) = socketpair();
         set_nonblocking(host_fd.as_raw_fd()).unwrap();
 
-        let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
+        let gateway_ip = Ipv4Addr::new(10, 0, 2, 1);
         let gateway_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
         let guest_mac_addr = [0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
 
@@ -922,7 +922,7 @@ mod tests {
         });
         let mut sockets = SocketSet::new(vec![]);
 
-        // Build an ARP request: "Who has 192.168.64.1? Tell 192.168.64.2"
+        // Build an ARP request: "Who has 10.0.2.1? Tell 10.0.2.2"
         let mut arp_request = Vec::with_capacity(42);
         arp_request.extend_from_slice(&[0xFF; 6]); // dst=broadcast
         arp_request.extend_from_slice(&guest_mac_addr); // src=guest
@@ -933,9 +933,9 @@ mod tests {
         arp_request.push(4); // PLEN
         arp_request.extend_from_slice(&[0x00, 0x01]); // Op: Request
         arp_request.extend_from_slice(&guest_mac_addr); // Sender MAC
-        arp_request.extend_from_slice(&[192, 168, 64, 2]); // Sender IP
+        arp_request.extend_from_slice(&[10, 0, 2, 2]); // Sender IP
         arp_request.extend_from_slice(&[0x00; 6]); // Target MAC
-        arp_request.extend_from_slice(&[192, 168, 64, 1]); // Target IP
+        arp_request.extend_from_slice(&[10, 0, 2, 1]); // Target IP
 
         // Inject the ARP request directly into the device's rx_queue
         // (bypassing the FD, which is tested separately in smoltcp_device tests).
@@ -958,7 +958,7 @@ mod tests {
         assert_eq!(&reply[22..28], &gateway_mac, "Sender MAC should be gateway");
         assert_eq!(
             &reply[28..32],
-            &[192, 168, 64, 1],
+            &[10, 0, 2, 1],
             "Sender IP should be gateway"
         );
     }

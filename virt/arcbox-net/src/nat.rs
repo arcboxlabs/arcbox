@@ -35,11 +35,11 @@ pub struct NatConfig {
 impl Default for NatConfig {
     fn default() -> Self {
         Self {
-            subnet: Ipv4Addr::new(192, 168, 64, 0),
+            subnet: Ipv4Addr::new(10, 0, 2, 0),
             prefix_len: 24,
-            gateway: Ipv4Addr::new(192, 168, 64, 1),
-            dhcp_start: Ipv4Addr::new(192, 168, 64, 2),
-            dhcp_end: Ipv4Addr::new(192, 168, 64, 254),
+            gateway: Ipv4Addr::new(10, 0, 2, 1),
+            dhcp_start: Ipv4Addr::new(10, 0, 2, 2),
+            dhcp_end: Ipv4Addr::new(10, 0, 2, 254),
             bridge_name: "arcbox0".to_string(),
             external_interface: "eth0".to_string(),
         }
@@ -533,9 +533,9 @@ mod tests {
     #[test]
     fn test_nat_config_default() {
         let config = NatConfig::default();
-        assert_eq!(config.subnet, Ipv4Addr::new(192, 168, 64, 0));
+        assert_eq!(config.subnet, Ipv4Addr::new(10, 0, 2, 0));
         assert_eq!(config.prefix_len, 24);
-        assert_eq!(config.gateway, Ipv4Addr::new(192, 168, 64, 1));
+        assert_eq!(config.gateway, Ipv4Addr::new(10, 0, 2, 1));
     }
 
     #[test]

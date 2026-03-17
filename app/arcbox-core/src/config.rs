@@ -21,7 +21,7 @@
 //! default_distro = "ubuntu"
 //!
 //! [network]
-//! subnet = "192.168.64.0/24"
+//! subnet = "10.0.2.0/24"
 //! dns = ["8.8.8.8", "8.8.4.4"]
 //!
 //! [docker]
@@ -228,7 +228,7 @@ pub struct NetworkConfig {
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
-            subnet: "192.168.64.0/24".to_string(),
+            subnet: "10.0.2.0/24".to_string(),
             gateway: None,
             dns: vec!["8.8.8.8".to_string(), "8.8.4.4".to_string()],
             ipv6: false,

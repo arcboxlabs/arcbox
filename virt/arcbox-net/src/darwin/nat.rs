@@ -448,7 +448,7 @@ mod tests {
         let network = DarwinNatNetwork::with_defaults().unwrap();
         assert!(!network.is_running());
         assert_eq!(network.endpoint_count(), 0);
-        assert_eq!(network.gateway(), Ipv4Addr::new(192, 168, 64, 1));
+        assert_eq!(network.gateway(), Ipv4Addr::new(10, 0, 2, 1));
     }
 
     #[test]

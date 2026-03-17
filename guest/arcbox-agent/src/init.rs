@@ -164,7 +164,7 @@ mod platform {
         }
 
         // Configure the primary interface via DHCP so the guest can reach
-        // gateway services (DNS/NAT at 192.168.64.1).
+        // gateway services (DNS/NAT at 10.0.2.1).
         configure_primary_interface_dhcp();
 
         // Configure the bridge NIC (eth1) via DHCP for inbound L3 routing.
@@ -273,7 +273,7 @@ exit 0
     fn configure_bridge_nic() {
         // Find the bridge NIC: it's the non-loopback interface that is NOT
         // the primary interface. The primary interface was already configured
-        // by configure_primary_interface_dhcp() and has an IP in 192.168.64.0/24.
+        // by configure_primary_interface_dhcp() and has an IP in 10.0.2.0/24.
         let primary = detect_primary_interface();
         let entries = match fs::read_dir("/sys/class/net") {
             Ok(e) => e,
@@ -457,7 +457,7 @@ exit 0
         // Point to the local guest DNS server (dns_server.rs) which handles:
         // - Container/sandbox name resolution from its registries
         // - *.arcbox.local → authoritative NXDOMAIN if not registered
-        // - Everything else → forward to gateway (192.168.64.1)
+        // - Everything else → forward to gateway (10.0.2.1)
         let content = "nameserver 127.0.0.1\n";
         if let Err(e) = std::fs::write("/etc/resolv.conf", content) {
             tracing::warn!(error = %e, "failed to write /etc/resolv.conf");
@@ -467,12 +467,12 @@ exit 0
     /// Configures Docker daemon to use the gateway as its DNS server.
     ///
     /// Containers get their DNS from the Docker daemon config, NOT from the
-    /// guest's /etc/resolv.conf. We point them to 192.168.64.1 (the gateway)
+    /// guest's /etc/resolv.conf. We point them to 10.0.2.1 (the gateway)
     /// so container DNS queries go through the host-side forwarder which can
     /// resolve *.arcbox.local names registered from the host.
     fn write_docker_daemon_dns() {
         mkdir_p("/etc/docker");
-        let content = r#"{"dns": ["192.168.64.1"]}"#;
+        let content = r#"{"dns": ["10.0.2.1"]}"#;
         if let Err(e) = std::fs::write("/etc/docker/daemon.json", content) {
             tracing::warn!(error = %e, "failed to write /etc/docker/daemon.json");
         }

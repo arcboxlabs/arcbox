@@ -5,7 +5,7 @@
 //! 1. Container registry (name → Docker bridge IP)
 //! 2. Sandbox registry (id → TAP IP)
 //! 3. `*.arcbox.local` not found → NXDOMAIN
-//! 4. Everything else → forward to gateway (`192.168.64.1:53`)
+//! 4. Everything else → forward to gateway (`10.0.2.1:53`)
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 /// Gateway address where the host-side DNS forwarder runs.
 const GATEWAY: SocketAddr =
-    SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 64, 1)), 53);
+    SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)), 53);
 
 /// Local domain suffix — queries for `*.arcbox.local` that miss the
 /// registries get an authoritative NXDOMAIN instead of forwarding.

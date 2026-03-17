@@ -169,7 +169,7 @@ async fn run(args: DaemonArgs) -> Result<()> {
         .as_ref()
         .and_then(|s| s.parse::<Ipv4Addr>().ok())
         .or_else(|| first_address_in_subnet(&network_cfg.subnet))
-        .unwrap_or(Ipv4Addr::new(192, 168, 64, 1));
+        .unwrap_or(Ipv4Addr::new(10, 0, 2, 1));
     runtime
         .network_manager()
         .register_dns("host", IpAddr::V4(gateway_ip));

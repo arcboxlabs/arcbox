@@ -174,8 +174,8 @@ impl Vmm {
         use arcbox_net::dns::{DnsConfig, DnsForwarder};
         use std::net::Ipv4Addr;
 
-        let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
-        let guest_ip = Ipv4Addr::new(192, 168, 64, 2);
+        let gateway_ip = Ipv4Addr::new(10, 0, 2, 1);
+        let guest_ip = Ipv4Addr::new(10, 0, 2, 2);
         let netmask = Ipv4Addr::new(255, 255, 255, 0);
         let gateway_mac: [u8; 6] = [0x02, 0xAB, 0xCD, 0x00, 0x00, 0x01];
 
@@ -234,7 +234,7 @@ impl Vmm {
 
         // 3. Create the network stack components.
         let dhcp_config = DhcpConfig::new(gateway_ip, netmask)
-            .with_pool_range(guest_ip, Ipv4Addr::new(192, 168, 64, 254))
+            .with_pool_range(guest_ip, Ipv4Addr::new(10, 0, 2, 254))
             .with_dns_servers(vec![gateway_ip]);
         let dhcp_server = DhcpServer::new(dhcp_config);
 
