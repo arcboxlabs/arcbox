@@ -8,14 +8,14 @@
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.85+-orange.svg)](https://www.rust-lang.org)
-[![Status](https://img.shields.io/badge/status-alpha-red.svg)](#known-limitations)
+[![Desktop](https://img.shields.io/github/v/release/arcboxlabs/arcbox-desktop?label=desktop&color=green)](https://github.com/arcboxlabs/arcbox-desktop/releases)
+[![Discord](https://img.shields.io/discord/1234567890?logo=discord&label=discord&color=5865F2)](https://arcbox.link/discord)
+[![Telegram](https://img.shields.io/badge/telegram-chat-26A5E4?logo=telegram)](https://arcbox.link/telegram)
+[![Docs](https://img.shields.io/badge/docs-arcbox.dev-blueviolet?logo=gitbook)](https://arcbox.link/docs)
 
 </div>
 
 ---
-
-> **Alpha software.** ArcBox is under active development. Expect rough edges,
-> missing features, and breaking changes.
 
 ## Why ArcBox
 
@@ -148,6 +148,6 @@ and development setup.
 
 <div align="center">
 
-**[Website](https://arcbox.dev)** · **[Docs](https://docs.arcbox.dev)** · **[Discord](https://discord.gg/arcbox)**
+**[Website](https://arcbox.dev)** · **[Docs](https://arcbox.link/docs)** · **[Discord](https://arcbox.link/discord)**
 
 </div>
