@@ -139,6 +139,7 @@ hostname = "0.4"
 # Nix (Unix APIs)
 nix = { version = "0.29", features = [
     "fs",
+    "net",
     "process",
     "socket",
     "ioctl",
@@ -150,6 +151,12 @@ nix = { version = "0.29", features = [
 
 # libc
 libc = "0.2"
+
+# macOS bridge FDB (forwarding database) access via private ioctls
+ifbridge = "0.1"
+
+# Process identity (pidpath, bsdinfo)
+libproc = "0.14"
 
 arcbox-asset = { version = "0.2.5", path = "common/arcbox-asset", features = ["download"] } # x-release-please-version
 arcbox-docker-tools = { version = "0.2.5", path = "app/arcbox-docker-tools" } # x-release-please-version

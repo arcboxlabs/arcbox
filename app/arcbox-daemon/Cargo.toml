@@ -37,6 +37,7 @@ tokio-util = "0.7"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 macos-resolver = { workspace = true }
+libproc = { workspace = true }
 
 [lints]
 workspace = true
