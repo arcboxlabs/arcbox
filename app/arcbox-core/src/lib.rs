@@ -30,6 +30,8 @@
 //! ```
 pub mod agent_client;
 pub mod boot_assets;
+#[cfg(target_os = "macos")]
+pub mod bridge_discovery;
 pub mod config;
 pub mod container_backend;
 pub mod error;
