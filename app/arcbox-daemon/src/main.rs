@@ -532,7 +532,10 @@ fn cleanup_stale_state(pid_file: &std::path::Path, run_dir: &std::path::Path) {
                 }
 
                 if is_process_alive(old_pid) {
-                    warn!(old_pid, "Stale daemon did not exit after 30s, sending SIGKILL");
+                    warn!(
+                        old_pid,
+                        "Stale daemon did not exit after 30s, sending SIGKILL"
+                    );
                     // SAFETY: last resort — the old daemon is unresponsive.
                     unsafe { libc::kill(old_pid, libc::SIGKILL) };
                     std::thread::sleep(Duration::from_secs(1));

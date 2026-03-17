@@ -17,8 +17,7 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 /// Gateway address where the host-side DNS forwarder runs.
-const GATEWAY: SocketAddr =
-    SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)), 53);
+const GATEWAY: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)), 53);
 
 /// Local domain suffix — queries for `*.arcbox.local` that miss the
 /// registries get an authoritative NXDOMAIN instead of forwarding.
