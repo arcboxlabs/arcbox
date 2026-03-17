@@ -8,12 +8,47 @@
 //! exactly which interface to add/remove a route for. No MAC resolution
 //! or route status queries happen in the helper.
 
+use std::fmt;
 use std::process::Command;
+use std::time::Duration;
 
 use crate::bridge_discovery;
 
 /// Container subnet to route.
 const CONTAINER_SUBNET: &str = "172.16.0.0/12";
+
+/// Maximum retry attempts for transient route installation failures.
+const MAX_ROUTE_ATTEMPTS: u32 = 5;
+
+/// Delay between retry attempts.
+const ROUTE_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Errors from route installation.
+///
+/// All variants are retryable — the caller decides whether to retry via
+/// [`ensure_route_with_retry`].
+#[derive(Debug)]
+pub enum RouteError {
+    /// Bridge MAC not found in kernel FDB. Retryable — the bridge/FDB may
+    /// not have stabilized yet (VM just started, vmenet member not learned).
+    BridgeNotReady,
+    /// Helper CLI failed (not running, XPC timeout, etc). Retryable.
+    HelperUnavailable(String),
+    /// `/sbin/route` returned an unexpected error. Retryable.
+    RouteFailed(String),
+}
+
+impl fmt::Display for RouteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BridgeNotReady => write!(f, "bridge not found in kernel FDB"),
+            Self::HelperUnavailable(msg) => write!(f, "helper unavailable: {msg}"),
+            Self::RouteFailed(msg) => write!(f, "route command failed: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for RouteError {}
 
 /// Path to the ArcBoxHelper binary.
 fn helper_path() -> String {
@@ -39,19 +74,14 @@ fn helper_path() -> String {
 /// 1. Resolves bridge MAC → bridge interface via kernel FDB (`ifbridge`)
 /// 2. Calls ArcBoxHelper to add/replace the route
 ///
+/// Returns `Ok(())` on success (including "already installed").
+/// Returns a typed error on failure — all variants are retryable.
+///
 /// Called on: VM ready, VM recovery, daemon cold-start reconcile.
-pub fn ensure_route(bridge_mac: &str) {
+pub fn ensure_route(bridge_mac: &str) -> Result<(), RouteError> {
     // Step 1: Resolve MAC → bridge via kernel FDB (typed API, no text parsing).
-    let bridge = match bridge_discovery::resolve_bridge_by_mac(bridge_mac) {
-        Some(b) => b,
-        None => {
-            tracing::warn!(
-                %bridge_mac,
-                "no bridge found for VM MAC in kernel FDB"
-            );
-            return;
-        }
-    };
+    let bridge = bridge_discovery::resolve_bridge_by_mac(bridge_mac)
+        .ok_or(RouteError::BridgeNotReady)?;
 
     // Step 2: Tell helper to add the route (pure mutation, no intelligence).
     let ctl = helper_path();
@@ -73,6 +103,7 @@ pub fn ensure_route(bridge_mac: &str) {
                 %bridge_mac,
                 "route ensured"
             );
+            Ok(())
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -83,22 +114,52 @@ pub fn ensure_route(bridge_mac: &str) {
                     bridge = %bridge.name,
                     "route already installed"
                 );
+                Ok(())
             } else {
-                tracing::warn!(
-                    subnet = CONTAINER_SUBNET,
-                    bridge = %bridge.name,
-                    stderr = %stderr.trim(),
-                    "route add failed"
-                );
+                Err(RouteError::RouteFailed(stderr.trim().to_string()))
             }
         }
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "failed to run ArcBoxHelper (is ArcBox Desktop installed?)"
-            );
+        Err(e) => Err(RouteError::HelperUnavailable(e.to_string())),
+    }
+}
+
+/// Ensures the container subnet route with automatic retry on transient failures.
+///
+/// All [`RouteError`] variants are treated as retryable. Retries up to 5 times
+/// with 2-second intervals (~10s total). This covers:
+/// - Bridge FDB not yet populated after VM start (~1-2s to learn MAC)
+/// - Helper XPC daemon not yet ready (registration in progress)
+/// - Helper mid-restart during app update (unregister → register window)
+pub async fn ensure_route_with_retry(bridge_mac: &str) -> Result<(), RouteError> {
+    let mac = bridge_mac.to_string();
+    for attempt in 1..=MAX_ROUTE_ATTEMPTS {
+        let mac_clone = mac.clone();
+        let result = tokio::task::spawn_blocking(move || ensure_route(&mac_clone))
+            .await
+            .unwrap_or_else(|_| Err(RouteError::HelperUnavailable("task panicked".into())));
+
+        match result {
+            Ok(()) => return Ok(()),
+            Err(ref e) if attempt < MAX_ROUTE_ATTEMPTS => {
+                tracing::debug!(
+                    attempt,
+                    max_attempts = MAX_ROUTE_ATTEMPTS,
+                    error = %e,
+                    "route install failed, retrying"
+                );
+                tokio::time::sleep(ROUTE_RETRY_INTERVAL).await;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    attempt,
+                    error = %e,
+                    "route install failed after all attempts"
+                );
+                return Err(e);
+            }
         }
     }
+    unreachable!()
 }
 
 /// Removes the container subnet route.
