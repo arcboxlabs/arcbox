@@ -187,6 +187,19 @@ async fn run(args: DaemonArgs) -> Result<()> {
     // in the guest VM (handles daemon restart without VM restart).
     recover_container_networking(&runtime).await;
 
+    // Cold-start route reconcile: if the VM is already running (daemon
+    // restarted but VM survived), re-install the host route. The route may
+    // have been lost or dirtied during the daemon restart.
+    #[cfg(target_os = "macos")]
+    {
+        use arcbox_core::DEFAULT_MACHINE_NAME;
+        if let Some(mac) = runtime.machine_manager().bridge_mac(DEFAULT_MACHINE_NAME) {
+            tokio::task::spawn_blocking(move || {
+                arcbox_core::route_reconciler::ensure_route(&mac);
+            });
+        }
+    }
+
     let docker_server = DockerApiServer::new(
         ServerConfig {
             socket_path: socket_path.clone(),
@@ -516,13 +529,14 @@ fn dns_domain() -> String {
 fn cleanup_stale_state(pid_file: &std::path::Path, run_dir: &std::path::Path) {
     // 1. Gracefully stop stale daemon — it will shut down its VM and flush
     //    disk writes before exiting.
+    //    Guard against PID reuse: verify the process name before signalling.
     if let Ok(contents) = std::fs::read_to_string(pid_file) {
         if let Ok(old_pid) = contents.trim().parse::<i32>() {
             #[allow(clippy::cast_possible_wrap)]
             let current_pid = std::process::id() as i32;
-            if old_pid != current_pid && is_process_alive(old_pid) {
+            if old_pid != current_pid && is_process_alive(old_pid) && is_arcbox_daemon(old_pid) {
                 warn!(old_pid, "Stale daemon still running, sending SIGTERM");
-                // SAFETY: sending a signal to a known-alive process.
+                // SAFETY: sending a signal to a verified arcbox-daemon process.
                 unsafe { libc::kill(old_pid, libc::SIGTERM) };
 
                 // Wait up to 30s for graceful shutdown (VM stop + disk flush).
@@ -546,15 +560,16 @@ fn cleanup_stale_state(pid_file: &std::path::Path, run_dir: &std::path::Path) {
         }
     }
 
-    // 2. Wait for orphaned Virtualization.framework XPC processes to exit.
-    //    After the daemon exits, its VM child processes should terminate on
-    //    their own. We do NOT SIGKILL them — that risks corrupting the guest
-    //    filesystem. Instead, wait with a timeout and warn if they linger.
+    // 2. Wait for orphaned Virtualization.framework XPC processes that were
+    //    children of *our* stale daemon. We scope by checking the parent PID
+    //    (should be 1/launchd if the parent daemon already exited) and only
+    //    wait for processes whose PPID is 1 (true orphans).
+    //    We do NOT SIGKILL them — that risks corrupting the guest filesystem.
     #[cfg(target_os = "macos")]
     {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
-            let pids = find_vm_xpc_pids();
+            let pids = find_orphaned_vm_pids();
             if pids.is_empty() {
                 break;
             }
@@ -586,17 +601,49 @@ fn is_process_alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
+/// Verify that the given PID is actually an arcbox-daemon process, not an
+/// unrelated process that reused the PID after the old daemon exited.
+fn is_arcbox_daemon(pid: i32) -> bool {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()
+    else {
+        return false;
+    };
+    let comm = String::from_utf8_lossy(&output.stdout);
+    let name = comm.trim();
+    // Match both the bare binary name and the bundle identifier form.
+    name.contains("arcbox-daemon") || name.contains("arcboxlabs.desktop.daemon")
+}
+
+/// Find Virtualization.framework XPC processes that are true orphans (PPID=1),
+/// i.e. their parent daemon has already exited. This avoids interfering with
+/// VM processes owned by other apps or a still-running daemon.
 #[cfg(target_os = "macos")]
-fn find_vm_xpc_pids() -> Vec<i32> {
-    let Ok(output) = std::process::Command::new("pgrep")
-        .args(["-f", "com.apple.Virtualization.VirtualMachine"])
+fn find_orphaned_vm_pids() -> Vec<i32> {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-eo", "pid,ppid,comm"])
         .output()
     else {
         return Vec::new();
     };
     String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter_map(|l| l.trim().parse().ok())
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 3 {
+                return None;
+            }
+            let pid: i32 = fields[0].parse().ok()?;
+            let ppid: i32 = fields[1].parse().ok()?;
+            let comm = fields[2..].join(" ");
+            // Only match orphaned (PPID=1) Virtualization.framework processes.
+            if ppid == 1 && comm.contains("com.apple.Virtualization.VirtualMachine") {
+                Some(pid)
+            } else {
+                None
+            }
+        })
         .collect()
 }
 
