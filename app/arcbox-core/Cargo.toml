@@ -38,6 +38,10 @@ toml = { workspace = true }
 sha2 = { workspace = true }
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "json"] }
 arcbox-dns = { workspace = true }
+libc = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+ifbridge = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

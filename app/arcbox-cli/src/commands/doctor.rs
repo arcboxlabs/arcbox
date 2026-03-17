@@ -173,27 +173,10 @@ fn check_dns_resolver() -> CheckResult {
 /// Check if a vmnet bridge interface exists with a VM member.
 #[cfg(target_os = "macos")]
 fn check_bridge_nic() -> CheckResult {
-    let Ok(output) = Command::new("ifconfig").args(["-a"]).output() else {
-        return CheckResult::Fail("ifconfig failed".into());
-    };
-    let text = String::from_utf8_lossy(&output.stdout);
-
-    let mut current_bridge: Option<String> = None;
-    for line in text.lines() {
-        if !line.starts_with('\t') && !line.starts_with(' ') && line.contains(": flags=") {
-            let name: String = line.chars().take_while(|c| *c != ':').collect();
-            current_bridge = if name.starts_with("bridge") {
-                Some(name)
-            } else {
-                None
-            };
-        } else if let Some(ref bridge) = current_bridge {
-            if line.contains("member: vmenet") {
-                return CheckResult::Pass(format!("{bridge} with vmenet member"));
-            }
-        }
+    match arcbox_core::bridge_discovery::find_bridge_with_vmenet() {
+        Some((bridge, member)) => CheckResult::Pass(format!("{bridge} with {member} member")),
+        None => CheckResult::Fail("no bridge interface with vmenet member found".into()),
     }
-    CheckResult::Fail("no bridge interface with vmenet member found".into())
 }
 
 /// Check if the container subnet route is installed correctly.

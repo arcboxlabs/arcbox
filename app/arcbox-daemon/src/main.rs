@@ -603,17 +603,14 @@ fn is_process_alive(pid: i32) -> bool {
 
 /// Verify that the given PID is actually an arcbox-daemon process, not an
 /// unrelated process that reused the PID after the old daemon exited.
+///
+/// Uses `libproc::pidpath` to get the full executable path directly from the
+/// kernel, avoiding `ps` text parsing and its inherent race conditions.
 fn is_arcbox_daemon(pid: i32) -> bool {
-    let Ok(output) = std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "comm="])
-        .output()
-    else {
-        return false;
-    };
-    let comm = String::from_utf8_lossy(&output.stdout);
-    let name = comm.trim();
-    // Match both the bare binary name and the bundle identifier form.
-    name.contains("arcbox-daemon") || name.contains("arcboxlabs.desktop.daemon")
+    match libproc::proc_pid::pidpath(pid) {
+        Ok(path) => path.contains("arcbox-daemon") || path.contains("arcboxlabs.desktop.daemon"),
+        Err(_) => false,
+    }
 }
 
 /// Find Virtualization.framework XPC processes that are true orphans (PPID=1),
