@@ -22,6 +22,7 @@ pub mod doctor;
 pub mod machine;
 pub mod sandbox;
 pub mod setup;
+pub mod uninstall;
 pub mod version;
 
 /// ArcBox - High-performance container and VM runtime
@@ -94,6 +95,9 @@ pub enum Commands {
 
     /// Run diagnostic checks on the ArcBox runtime
     Doctor,
+
+    /// Uninstall ArcBox from this machine
+    Uninstall(uninstall::UninstallArgs),
 
     /// Display system-wide information
     Info,

@@ -68,6 +68,7 @@ fn main() -> Result<()> {
                 Commands::Daemon(args) => commands::daemon::execute(args).await,
                 Commands::Setup(cmd) => commands::setup::execute(cmd, cli.format).await,
                 Commands::Doctor => commands::doctor::execute().await,
+                Commands::Uninstall(args) => commands::uninstall::execute(args).await,
                 Commands::Info => execute_info().await,
                 Commands::Version => commands::version::execute().await,
             }
