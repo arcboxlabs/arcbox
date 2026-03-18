@@ -104,6 +104,9 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 hyper = { version = "1", features = ["full"] }
 
+# RPC (privileged helper)
+tarpc = { version = "0.37", features = ["serde-transport", "unix", "serde-transport-bincode"] }
+
 # Async utilities
 futures = "0.3"
 async-trait = "0.1"
@@ -185,6 +188,7 @@ arcbox-protocol = { version = "0.2.6", path = "rpc/arcbox-protocol" } # x-releas
 arcbox-grpc = { version = "0.2.6", path = "rpc/arcbox-grpc" } # x-release-please-version
 arcbox-transport = { version = "0.2.6", path = "rpc/arcbox-transport" } # x-release-please-version
 arcbox-docker = { version = "0.2.6", path = "app/arcbox-docker" } # x-release-please-version
+arcbox-helper = { version = "0.2.6", path = "app/arcbox-helper" } # x-release-please-version
 arcbox-core = { version = "0.2.6", path = "app/arcbox-core" } # x-release-please-version
 arcbox-api = { version = "0.2.6", path = "app/arcbox-api" } # x-release-please-version
 

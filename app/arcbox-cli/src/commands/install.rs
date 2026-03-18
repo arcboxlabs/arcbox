@@ -84,13 +84,22 @@ fn print_skipped() {
 }
 
 // =============================================================================
-// Step 1: Install helper binary
+// Step 1: Install helper binary + launchd service
 // =============================================================================
 
-/// Installs the arcbox-helper binary to `/usr/local/libexec/arcbox-helper`
-/// and sets the setuid bit.
+/// Helper binary install path.
+const HELPER_DEST: &str = "/usr/local/libexec/arcbox-helper";
+
+/// launchd plist path (system-level daemon, runs as root).
+const HELPER_PLIST: &str = "/Library/LaunchDaemons/com.arcboxlabs.helper.plist";
+
+/// Installs the arcbox-helper binary and registers it as a launchd system
+/// daemon with socket activation.
+///
+/// launchd creates the socket at `/var/run/arcbox-helper.sock` and starts
+/// the helper on-demand when the main daemon connects.
 fn install_helper() -> Result<()> {
-    let dest = PathBuf::from("/usr/local/libexec/arcbox-helper");
+    let dest = PathBuf::from(HELPER_DEST);
 
     // Find the helper binary next to our own executable.
     let exe = std::env::current_exe().context("could not determine current executable")?;
@@ -105,7 +114,8 @@ fn install_helper() -> Result<()> {
     }
 
     // Create target directory.
-    std::fs::create_dir_all("/usr/local/libexec").context("failed to create /usr/local/libexec")?;
+    std::fs::create_dir_all("/usr/local/libexec")
+        .context("failed to create /usr/local/libexec")?;
 
     // Copy binary.
     std::fs::copy(&helper_src, &dest).with_context(|| {
@@ -116,29 +126,35 @@ fn install_helper() -> Result<()> {
         )
     })?;
 
-    // macOS's std::fs::copy uses copyfile() which preserves source ownership.
-    // We must explicitly chown to root before setting the setuid bit,
-    // otherwise setuid elevates to the build user, not root.
-    let chown_status = Command::new("chown")
-        .args(["root:wheel", &dest.to_string_lossy()])
+    // Ensure root ownership (macOS copyfile preserves source ownership).
+    let status = Command::new("chown")
+        .args(["root:wheel", HELPER_DEST])
         .status()
-        .context("failed to run chown")?;
-
-    if !chown_status.success() {
-        bail!(
-            "chown root:wheel failed on {} (are you running with sudo?)",
-            dest.display()
-        );
+        .context("failed to chown helper binary")?;
+    if !status.success() {
+        bail!("chown root:wheel failed (are you running with sudo?)");
     }
 
-    // Set setuid bit: chmod u+s,a+rx
-    let status = Command::new("chmod")
-        .args(["u+s,a+rx", &dest.to_string_lossy()])
+    // Install bundled launchd plist (socket activation config is static).
+    std::fs::write(
+        HELPER_PLIST,
+        include_bytes!("../../../../bundle/com.arcboxlabs.helper.plist"),
+    )
+    .with_context(|| format!("failed to write {HELPER_PLIST}"))?;
+
+    // Bootout existing service (ignore errors if not loaded).
+    let _ = Command::new("launchctl")
+        .args(["bootout", "system", HELPER_PLIST])
+        .output();
+
+    // Bootstrap the service into the system domain.
+    let status = Command::new("launchctl")
+        .args(["bootstrap", "system", HELPER_PLIST])
         .status()
-        .context("failed to run chmod")?;
+        .context("failed to run launchctl bootstrap")?;
 
     if !status.success() {
-        bail!("chmod u+s failed on {}", dest.display());
+        bail!("launchctl bootstrap failed for helper service");
     }
 
     Ok(())

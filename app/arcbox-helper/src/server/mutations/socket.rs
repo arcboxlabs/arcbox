@@ -8,7 +8,7 @@ use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::Path;
 
-use crate::validate;
+use arcbox_helper::validate;
 
 /// Standard Docker socket path.
 const DOCKER_SOCK: &str = "/var/run/docker.sock";

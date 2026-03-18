@@ -1,7 +1,7 @@
 [package]
 name = "arcbox-helper"
 publish = false
-description = "Minimal setuid-capable helper for privileged host mutations"
+description = "Privileged helper daemon for host mutations (routes, DNS, sockets)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,14 +9,25 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[lib]
+name = "arcbox_helper"
+path = "src/lib.rs"
+
 [[bin]]
 name = "arcbox-helper"
 path = "src/main.rs"
 
 [dependencies]
-clap = { workspace = true }
-serde_json = { workspace = true }
+tarpc = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
 libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros"] }
 
 [lints]
 workspace = true

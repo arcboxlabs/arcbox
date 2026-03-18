@@ -6,7 +6,7 @@
 
 use std::process::Command;
 
-use crate::validate;
+use arcbox_helper::validate;
 
 /// Adds a route for `subnet` via `iface`.
 ///

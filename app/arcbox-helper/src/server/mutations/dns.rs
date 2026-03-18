@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use crate::validate;
+use arcbox_helper::validate;
 
 /// Directory where macOS looks for per-domain resolver files.
 const RESOLVER_DIR: &str = "/etc/resolver";
