@@ -1,144 +1,78 @@
 //! Best-effort self-setup tasks that the daemon runs during startup.
 //!
 //! Each function checks if the setup is already in place and, if not, attempts
-//! to install it via `arcbox-helper`. Failures are logged as warnings — they
-//! never block daemon startup. The canonical setup path is `arcbox install`.
+//! to configure it via `arcbox-helper` (tarpc). Failures are logged as
+//! warnings — they never block daemon startup. The canonical setup path
+//! is `arcbox install`.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
+
+use arcbox_helper::client::Client;
 
 /// Ensures the DNS resolver file is installed for the given domain/port.
 ///
-/// Checks `/etc/resolver/<domain>` first; if absent, invokes
-/// `arcbox-helper dns install`.
+/// Checks `/etc/resolver/<domain>` first; if absent, asks the helper to
+/// install it.
 pub async fn ensure_dns_resolver(port: u16, domain: &str) {
-    let domain = domain.to_string();
-    let result = tokio::task::spawn_blocking(move || {
-        let resolver_path = format!("/etc/resolver/{domain}");
-        if Path::new(&resolver_path).exists() {
-            tracing::debug!(domain, "DNS resolver already installed");
+    let resolver_path = format!("/etc/resolver/{domain}");
+    if Path::new(&resolver_path).exists() {
+        tracing::debug!(domain, "DNS resolver already installed");
+        return;
+    }
+
+    let client = match Client::connect().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!(error = %e, "arcbox-helper not reachable, skipping DNS resolver setup");
             return;
         }
+    };
 
-        let helper = helper_path();
-        match Command::new(&helper)
-            .args([
-                "dns",
-                "install",
-                "--domain",
-                &domain,
-                "--port",
-                &port.to_string(),
-            ])
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                tracing::info!(domain, port, "DNS resolver installed via helper");
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                tracing::warn!(
-                    domain,
-                    stderr = %stderr.trim(),
-                    stdout = %stdout.trim(),
-                    "DNS resolver install failed (run 'sudo arcbox install' to fix)"
-                );
-            }
-            Err(e) => {
-                tracing::debug!(
-                    error = %e,
-                    "arcbox-helper not found, skipping DNS resolver setup"
-                );
-            }
+    match client.dns_install(domain, port).await {
+        Ok(()) => {
+            tracing::info!(domain, port, "DNS resolver installed via helper");
         }
-    })
-    .await;
-
-    if let Err(e) = result {
-        tracing::warn!(error = %e, "DNS resolver setup task panicked");
+        Err(e) => {
+            tracing::warn!(
+                domain,
+                error = %e,
+                "DNS resolver install failed (run 'sudo arcbox install' to fix)"
+            );
+        }
     }
 }
 
 /// Ensures the Docker socket symlink exists at `/var/run/docker.sock`.
 ///
 /// Checks if the symlink already points to `docker_sock_path`; if not,
-/// invokes `arcbox-helper socket link`.
+/// asks the helper to create it.
 pub async fn ensure_docker_socket(docker_sock_path: &Path) {
-    let target = docker_sock_path.to_path_buf();
-    let result = tokio::task::spawn_blocking(move || {
-        // Check if /var/run/docker.sock already points to our socket.
-        let system_sock = Path::new("/var/run/docker.sock");
-        if let Ok(existing) = std::fs::read_link(system_sock) {
-            if existing == target {
-                tracing::debug!("Docker socket symlink already correct");
-                return;
-            }
-        }
-
-        let helper = helper_path();
-        let target_str = target.to_string_lossy();
-        match Command::new(&helper)
-            .args(["socket", "link", "--target", &target_str])
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                tracing::info!(target = %target_str, "Docker socket symlink created via helper");
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                tracing::warn!(
-                    stderr = %stderr.trim(),
-                    stdout = %stdout.trim(),
-                    "Docker socket link failed (run 'sudo arcbox install' to fix)"
-                );
-            }
-            Err(e) => {
-                tracing::debug!(
-                    error = %e,
-                    "arcbox-helper not found, skipping Docker socket setup"
-                );
-            }
-        }
-    })
-    .await;
-
-    if let Err(e) = result {
-        tracing::warn!(error = %e, "Docker socket setup task panicked");
-    }
-}
-
-/// Resolves the helper binary path (mirrors route_reconciler::helper_path).
-fn helper_path() -> PathBuf {
-    if let Ok(path) = std::env::var("ARCBOX_HELPER_PATH") {
-        return PathBuf::from(path);
-    }
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let helper = dir.join("arcbox-helper");
-            if helper.exists() {
-                return helper;
-            }
+    let system_sock = Path::new("/var/run/docker.sock");
+    if let Ok(existing) = std::fs::read_link(system_sock) {
+        if existing == docker_sock_path {
+            tracing::debug!("Docker socket symlink already correct");
+            return;
         }
     }
 
-    if let Some(home) = dirs::home_dir() {
-        let helper = home.join(".arcbox/bin/arcbox-helper");
-        if helper.exists() {
-            return helper;
+    let client = match Client::connect().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!(error = %e, "arcbox-helper not reachable, skipping Docker socket setup");
+            return;
+        }
+    };
+
+    let target_str = docker_sock_path.to_string_lossy();
+    match client.socket_link(&target_str).await {
+        Ok(()) => {
+            tracing::info!(target = %target_str, "Docker socket symlink created via helper");
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "Docker socket link failed (run 'sudo arcbox install' to fix)"
+            );
         }
     }
-
-    for path in [
-        "/usr/local/libexec/arcbox-helper",
-        "/usr/local/bin/arcbox-helper",
-    ] {
-        if Path::new(path).exists() {
-            return PathBuf::from(path);
-        }
-    }
-
-    PathBuf::from("arcbox-helper")
 }

@@ -296,9 +296,7 @@ async fn run(args: DaemonArgs) -> Result<()> {
     // Remove container subnet route before stopping the VM.
     #[cfg(target_os = "macos")]
     {
-        tokio::task::spawn_blocking(arcbox_core::route_reconciler::remove_route)
-            .await
-            .ok();
+        arcbox_core::route_reconciler::remove_route().await;
     }
 
     runtime
