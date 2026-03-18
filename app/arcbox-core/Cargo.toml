@@ -53,6 +53,7 @@ backend-native = []
 backend-guest-docker = []
 provision-bundled = []
 provision-distro = []
+vmnet = ["arcbox-vmm/vmnet"]
 
 [lints]
 workspace = true
