@@ -55,7 +55,7 @@ jobs:
 
       - name: Code sign arcbox-daemon
         run: |
-          codesign --entitlements tests/resources/entitlements.plist --force -s - \
+          codesign --entitlements bundle/arcbox.entitlements --force -s - \
             target/debug/arcbox-daemon
 
       - name: Smoke test arcbox CLI

@@ -8,7 +8,7 @@
 //! ```bash
 //! # Build and sign
 //! cargo build --example vsock_echo -p arcbox-vz
-//! codesign --entitlements tests/resources/entitlements.plist --force -s - \
+//! codesign --entitlements bundle/arcbox.entitlements --force -s - \
 //!     target/debug/examples/vsock_echo
 //!
 //! # Run with PUI PUI Linux

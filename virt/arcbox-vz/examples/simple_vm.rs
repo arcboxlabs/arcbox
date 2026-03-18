@@ -8,7 +8,7 @@
 //! ```bash
 //! # Build and sign (required for virtualization entitlement)
 //! cargo build --example simple_vm
-//! codesign --entitlements tests/resources/entitlements.plist --force -s - \
+//! codesign --entitlements bundle/arcbox.entitlements --force -s - \
 //!     target/debug/examples/simple_vm
 //!
 //! # Run

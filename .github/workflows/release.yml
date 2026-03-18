@@ -77,7 +77,7 @@ jobs:
 
       - name: Codesign arcbox-daemon with virtualization entitlement
         run: |
-          codesign --entitlements tests/resources/entitlements.plist \
+          codesign --entitlements bundle/arcbox.entitlements \
             --force -s - target/release/arcbox-daemon
 
       - name: Verify artifacts
@@ -95,7 +95,7 @@ jobs:
           path: |
             target/release/abctl
             target/release/arcbox-daemon
-            tests/resources/entitlements.plist
+            bundle/arcbox.entitlements
           retention-days: 5
 
   # ==========================================================================
@@ -182,7 +182,7 @@ jobs:
           cp artifacts/host/target/release/abctl "$STAGING/"
           cp artifacts/host/target/release/arcbox-daemon "$STAGING/"
           cp artifacts/agent/arcbox-agent "$STAGING/"
-          cp artifacts/host/tests/resources/entitlements.plist "$STAGING/"
+          cp artifacts/host/bundle/arcbox.entitlements "$STAGING/"
 
           tar czf "$TARBALL_NAME" "$STAGING"
           echo "tarball=$TARBALL_NAME" >> "$GITHUB_OUTPUT"

@@ -4,7 +4,7 @@
 //!
 //! Usage:
 //! 1. Build: cargo build --bin arcbox-perf -p arcbox-hypervisor --release
-//! 2. Sign: codesign --entitlements tests/resources/entitlements.plist -s - target/release/arcbox-perf
+//! 2. Sign: codesign --entitlements bundle/arcbox.entitlements -s - target/release/arcbox-perf
 //! 3. Run: arcbox-perf <kernel_path> [initrd_path] [--iterations N]
 
 use clap::Parser;
