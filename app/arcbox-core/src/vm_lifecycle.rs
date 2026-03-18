@@ -720,11 +720,19 @@ impl VmLifecycleManager {
                     });
 
                     // Install host route for container subnets via bridge NIC.
+                    // Non-blocking: retries transient failures (helper not ready,
+                    // bridge FDB not populated) but does not gate VM readiness.
                     #[cfg(target_os = "macos")]
                     if let Some(mac) = self.machine_manager.bridge_mac(DEFAULT_MACHINE_NAME) {
-                        tokio::task::spawn_blocking(move || {
-                            crate::route_reconciler::ensure_route(&mac);
-                        });
+                        // Intentionally fire-and-forget: route retry runs in the
+                        // background and logs its own outcome.
+                        drop(tokio::spawn(async move {
+                            if let Err(e) =
+                                crate::route_reconciler::ensure_route_with_retry(&mac).await
+                            {
+                                tracing::warn!(error = %e, "failed to install container route");
+                            }
+                        }));
                     }
 
                     return Ok(());

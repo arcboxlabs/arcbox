@@ -190,13 +190,19 @@ async fn run(args: DaemonArgs) -> Result<()> {
     // Cold-start route reconcile: if the VM is already running (daemon
     // restarted but VM survived), re-install the host route. The route may
     // have been lost or dirtied during the daemon restart.
+    // Non-blocking: retries transient failures (helper not ready, bridge
+    // FDB not populated) but does not gate daemon readiness.
     #[cfg(target_os = "macos")]
     {
         use arcbox_core::DEFAULT_MACHINE_NAME;
         if let Some(mac) = runtime.machine_manager().bridge_mac(DEFAULT_MACHINE_NAME) {
-            tokio::task::spawn_blocking(move || {
-                arcbox_core::route_reconciler::ensure_route(&mac);
-            });
+            drop(tokio::spawn(async move {
+                if let Err(e) =
+                    arcbox_core::route_reconciler::ensure_route_with_retry(&mac).await
+                {
+                    tracing::warn!(error = %e, "failed to install container route on cold start");
+                }
+            }));
         }
     }
 
