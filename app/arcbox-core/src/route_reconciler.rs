@@ -4,7 +4,7 @@
 //! - Bridge discovery via `ifbridge` (kernel FDB, no text parsing)
 //! - Route state decisions (add, replace, remove)
 //!
-//! The ArcBoxHelper is a pure mutation executor — the daemon tells it
+//! `arcbox-helper` is a pure mutation executor — the daemon tells it
 //! exactly which interface to add/remove a route for. No MAC resolution
 //! or route status queries happen in the helper.
 
@@ -50,7 +50,7 @@ impl fmt::Display for RouteError {
 
 impl std::error::Error for RouteError {}
 
-/// Resolves the path to the helper binary.
+/// Resolves the path to `arcbox-helper`.
 ///
 /// Search order:
 /// 1. `ARCBOX_HELPER_PATH` env override (for dev/testing)
@@ -59,15 +59,11 @@ impl std::error::Error for RouteError {}
 /// 4. `/usr/local/libexec/arcbox-helper`
 /// 5. `/usr/local/bin/arcbox-helper`
 /// 6. Bare `arcbox-helper` (rely on PATH)
-/// 7. Legacy: `/Applications/ArcBox Desktop.app/.../ArcBoxHelper`
-/// 8. Legacy: `ArcBoxHelper` (PATH)
 fn helper_path() -> String {
-    // 1. Env override.
     if let Ok(path) = std::env::var("ARCBOX_HELPER_PATH") {
         return path;
     }
 
-    // 2. Sibling of current exe.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let helper = dir.join("arcbox-helper");
@@ -77,7 +73,6 @@ fn helper_path() -> String {
         }
     }
 
-    // 3. ~/.arcbox/bin/arcbox-helper
     if let Some(home) = dirs::home_dir() {
         let helper = home.join(".arcbox/bin/arcbox-helper");
         if helper.exists() {
@@ -85,7 +80,6 @@ fn helper_path() -> String {
         }
     }
 
-    // 4-5. Well-known system paths.
     for path in [
         "/usr/local/libexec/arcbox-helper",
         "/usr/local/bin/arcbox-helper",
@@ -95,31 +89,26 @@ fn helper_path() -> String {
         }
     }
 
-    // 6. Bare name (rely on PATH).
-    if which_exists("arcbox-helper") {
-        return "arcbox-helper".to_string();
-    }
-
-    // 7. Legacy: desktop app bundle.
-    let legacy = "/Applications/ArcBox Desktop.app/Contents/Library/HelperTools/ArcBoxHelper";
-    if std::path::Path::new(legacy).exists() {
-        return legacy.to_string();
-    }
-
-    // 8. Legacy fallback.
-    "ArcBoxHelper".to_string()
+    "arcbox-helper".to_string()
 }
 
-/// Checks if a binary name is resolvable via PATH.
-fn which_exists(name: &str) -> bool {
-    std::env::var_os("PATH")
-        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(name).exists()))
+/// Extracts the error message from `arcbox-helper` JSON stdout.
+///
+/// Output format: `{"ok":false,"error":"..."}`.
+fn helper_error_message(output: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(stdout.trim()) {
+        if let Some(err) = json.get("error").and_then(|v| v.as_str()) {
+            return err.to_string();
+        }
+    }
+    stdout.trim().to_string()
 }
 
 /// Ensures the container subnet route points to the correct bridge.
 ///
 /// 1. Resolves bridge MAC → bridge interface via kernel FDB (`ifbridge`)
-/// 2. Calls ArcBoxHelper to add/replace the route
+/// 2. Calls helper to add/replace the route
 ///
 /// Returns `Ok(())` on success (including "already installed").
 /// Returns a typed error on failure — all variants are retryable.
@@ -152,20 +141,7 @@ pub fn ensure_route(bridge_mac: &str) -> Result<(), RouteError> {
             );
             Ok(())
         }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            // "File exists" means the route is already installed — not an error.
-            if stderr.contains("File exists") {
-                tracing::info!(
-                    subnet = CONTAINER_SUBNET,
-                    bridge = %bridge.name,
-                    "route already installed"
-                );
-                Ok(())
-            } else {
-                Err(RouteError::RouteFailed(stderr.trim().to_string()))
-            }
-        }
+        Ok(ref output) => Err(RouteError::RouteFailed(helper_error_message(output))),
         Err(e) => Err(RouteError::HelperUnavailable(e.to_string())),
     }
 }
@@ -239,19 +215,7 @@ pub async fn ensure_route_for_bridge(bridge_name: &str) -> Result<(), RouteError
                     );
                     Ok(())
                 }
-                Ok(output) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    if stderr.contains("File exists") {
-                        tracing::info!(
-                            subnet = CONTAINER_SUBNET,
-                            bridge = %name_clone,
-                            "route already installed"
-                        );
-                        Ok(())
-                    } else {
-                        Err(RouteError::RouteFailed(stderr.trim().to_string()))
-                    }
-                }
+                Ok(ref output) => Err(RouteError::RouteFailed(helper_error_message(output))),
                 Err(e) => Err(RouteError::HelperUnavailable(e.to_string())),
             }
         })
@@ -282,20 +246,20 @@ pub fn remove_route() {
         Ok(output) if output.status.success() => {
             tracing::info!(subnet = CONTAINER_SUBNET, "route removed");
         }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("not in table") {
+        Ok(ref output) => {
+            let msg = helper_error_message(output);
+            if msg.contains("not in table") {
                 tracing::debug!(subnet = CONTAINER_SUBNET, "route already absent");
             } else {
                 tracing::debug!(
                     subnet = CONTAINER_SUBNET,
-                    stderr = %stderr.trim(),
+                    error = %msg,
                     "route remove: non-zero exit"
                 );
             }
         }
         Err(e) => {
-            tracing::debug!(error = %e, "ArcBoxHelper not available for route cleanup");
+            tracing::debug!(error = %e, "arcbox-helper not available for route cleanup");
         }
     }
 }
