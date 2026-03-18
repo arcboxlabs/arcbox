@@ -19,6 +19,7 @@ pub mod daemon;
 pub mod dns;
 pub mod docker;
 pub mod doctor;
+pub mod install;
 pub mod machine;
 pub mod sandbox;
 pub mod setup;
@@ -95,6 +96,9 @@ pub enum Commands {
 
     /// Run diagnostic checks on the ArcBox runtime
     Doctor,
+
+    /// Install ArcBox (helper, DNS, socket, daemon service)
+    Install(install::InstallArgs),
 
     /// Uninstall ArcBox from this machine
     Uninstall(uninstall::UninstallArgs),
