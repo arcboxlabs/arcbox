@@ -14,12 +14,25 @@ pub struct NetworkAllocation {
     pub tap_name: String,
     /// IP address assigned to the guest.
     pub ip_address: Ipv4Addr,
+    /// Network prefix length (e.g. 16 for /16).
+    pub prefix_len: u8,
     /// Gateway IP.
     pub gateway: Ipv4Addr,
     /// MAC address (deterministic from VM ID).
     pub mac_address: String,
     /// DNS servers.
     pub dns_servers: Vec<String>,
+}
+
+impl NetworkAllocation {
+    /// Return the subnet mask as an `Ipv4Addr` (e.g. prefix_len 16 → 255.255.0.0).
+    pub fn netmask(&self) -> Ipv4Addr {
+        if self.prefix_len == 0 {
+            Ipv4Addr::new(0, 0, 0, 0)
+        } else {
+            Ipv4Addr::from(!0u32 << (32 - self.prefix_len))
+        }
+    }
 }
 
 /// Shared manager for TAP interfaces and guest IP addresses.
@@ -89,6 +102,7 @@ impl NetworkManager {
         Ok(NetworkAllocation {
             tap_name,
             ip_address: ip,
+            prefix_len: self.prefix_len,
             gateway: self.gateway,
             mac_address: mac,
             dns_servers: self.dns.clone(),

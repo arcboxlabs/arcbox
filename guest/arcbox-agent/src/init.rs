@@ -397,7 +397,12 @@ exit 0
         );
     }
 
-    /// Install blanket iptables FORWARD ACCEPT rules for the sandbox subnet.
+    /// Install iptables rules for sandbox networking:
+    ///
+    /// 1. FORWARD ACCEPT rules so the kernel forwards sandbox traffic.
+    /// 2. MASQUERADE rule so outbound sandbox traffic is SNATed to the
+    ///    guest's primary IP, enabling external access through the host's
+    ///    VZ NAT.
     ///
     /// The subnet is read from the VMM config (default `172.20.0.0/16`).
     /// Uses `-I` (insert at chain top) so rules take effect even when
@@ -415,7 +420,27 @@ exit 0
             "FORWARD accept from sandbox subnet",
         );
 
-        tracing::info!(subnet, "sandbox forwarding rules installed");
+        // MASQUERADE outbound sandbox traffic so replies can be routed back.
+        // Without this, packets from 10.88.0.0/16 leave the guest with a
+        // source IP that the host VZ NAT cannot route back.
+        run_iptables(
+            &[
+                "-t",
+                "nat",
+                "-A",
+                "POSTROUTING",
+                "-s",
+                subnet,
+                "!",
+                "-o",
+                &config.network.bridge,
+                "-j",
+                "MASQUERADE",
+            ],
+            "MASQUERADE sandbox subnet outbound",
+        );
+
+        tracing::info!(subnet, "sandbox forwarding and NAT rules installed");
     }
 
     /// Run an iptables command, logging on failure.

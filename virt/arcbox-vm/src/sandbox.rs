@@ -1393,10 +1393,24 @@ async fn do_boot(
     let vcpu_count = NonZeroU64::new(spec.vcpus.max(1) as u64)
         .ok_or_else(|| VmmError::Config("vcpus must be > 0".into()))?;
 
+    // Append static IP configuration to boot args so the kernel configures
+    // eth0 before init runs.  Format: ip=<client>:<server>:<gw>:<mask>::<dev>:off
+    let boot_args = if let Some(net) = net_alloc {
+        format!(
+            "{} ip={}::{}:{}::eth0:off",
+            spec.boot_args,
+            net.ip_address,
+            net.gateway,
+            net.netmask(),
+        )
+    } else {
+        spec.boot_args.clone()
+    };
+
     let mut builder = VmBuilder::new(process.socket_path())
         .boot_source(BootSource {
             kernel_image_path: kernel_path,
-            boot_args: Some(spec.boot_args.clone()),
+            boot_args: Some(boot_args),
             initrd_path: None,
         })
         .machine_config(fc_sdk::types::MachineConfiguration {
