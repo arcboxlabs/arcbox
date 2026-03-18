@@ -21,7 +21,7 @@ use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 
 use super::machine::UnixConnector;
-use arcbox_cli::terminal::{RawModeGuard, ResizeWatcher, TerminalSize};
+use arcbox_cli::terminal::{RawModeGuard, TerminalSize};
 use std::path::PathBuf;
 
 fn resolve_grpc_socket_path() -> PathBuf {
@@ -499,45 +499,27 @@ async fn execute_exec(args: ExecArgs) -> Result<()> {
     };
 
     // Stdin pump: local terminal → gRPC stream.
+    // NOTE: TTY resize (SIGWINCH) is not yet forwarded — the gRPC→agent
+    // pipeline has no resize wire message. Will be added when the full
+    // resize path is wired up.
     let stdin_tx = msg_tx;
-    let tty = args.tty;
     tokio::spawn(async move {
         let mut stdin = tokio::io::stdin();
         let mut buf = [0u8; 1024];
-        let mut resize_watcher = if tty { ResizeWatcher::new().ok() } else { None };
-
         loop {
-            let stdin_data = async { stdin.read(&mut buf).await };
-
-            // When a resize watcher is available, race stdin against SIGWINCH.
-            let payload = if let Some(watcher) = &mut resize_watcher {
-                tokio::select! {
-                    result = stdin_data => match result {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => exec_input::Payload::Stdin(buf[..n].to_vec()),
-                    },
-                    Some(size) = watcher.recv() => exec_input::Payload::Resize(
-                        ProtoTerminalSize {
-                            width: u32::from(size.cols),
-                            height: u32::from(size.rows),
-                        },
-                    ),
+            match stdin.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if stdin_tx
+                        .send(ExecInput {
+                            payload: Some(exec_input::Payload::Stdin(buf[..n].to_vec())),
+                        })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
-            } else {
-                match stdin_data.await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => exec_input::Payload::Stdin(buf[..n].to_vec()),
-                }
-            };
-
-            if stdin_tx
-                .send(ExecInput {
-                    payload: Some(payload),
-                })
-                .await
-                .is_err()
-            {
-                break;
             }
         }
     });
