@@ -206,9 +206,9 @@ impl SandboxService {
     pub async fn exec(
         &self,
         payload: &[u8],
-    ) -> Result<(mpsc::Sender<ExecInputMsg>, mpsc::UnboundedReceiver<Vec<u8>>), String> {
-        let req =
-            sandbox_v1::ExecRequest::decode(payload).map_err(|e| format!("decode error: {e}"))?;
+    ) -> Result<(mpsc::Sender<ExecInputMsg>, mpsc::UnboundedReceiver<Vec<u8>>), SandboxError> {
+        let req = sandbox_v1::ExecRequest::decode(payload)
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
 
         let tty_size = req.tty_size.map(|s| (s.width as u16, s.height as u16));
 
@@ -225,7 +225,7 @@ impl SandboxService {
                 req.timeout_seconds,
             )
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| SandboxError::Internal(e.to_string()))?;
 
         let (tx, out_stream_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         tokio::spawn(async move {
@@ -282,64 +282,79 @@ impl SandboxService {
         let (in_tx, mut out_rx) = match self.exec(payload).await {
             Ok(pair) => pair,
             Err(e) => {
-                let err = ErrorResponse::new(500, &e);
+                let err = ErrorResponse::new(e.status_code(), &e.to_string());
                 write_message(stream, MessageType::Error, trace_id, &err.encode()).await?;
                 return Ok(());
             }
         };
 
-        loop {
-            tokio::select! {
-                // Output from vm-agent → host.
-                encoded_opt = out_rx.recv() => {
-                    match encoded_opt {
-                        None => break, // output channel closed
-                        Some(encoded) => {
-                            // The last frame has done==true; check before writing
-                            // so we can break after sending it.
-                            let done = sandbox_v1::ExecOutput::decode(encoded.as_slice())
-                                .map(|m| m.done)
-                                .unwrap_or(false);
-                            write_message(
-                                stream,
-                                MessageType::SandboxExecOutput,
-                                trace_id,
-                                &encoded,
-                            )
-                            .await?;
-                            if done {
-                                // Drain any trailing input frames (e.g. EOF) the
-                                // client may send after the command exits, so they
-                                // don't leak into the next dispatch iteration.
-                                drain_trailing_input(stream).await;
-                                return Ok(());
-                            }
-                        }
-                    }
-                }
+        // Split the stream so reads and writes operate independently.
+        // This lets us run the input reader as a dedicated future that is
+        // never cancelled mid-frame by tokio::select!.
+        {
+            let (mut rh, mut wh) = tokio::io::split(&mut *stream);
 
-                // Input from host → vm-agent.
-                read_result = read_message(stream) => {
-                    match read_result {
+            let input_fut = async {
+                loop {
+                    match read_message(&mut rh).await {
                         Err(_) => {
-                            // Host stream closed; signal EOF to the process.
                             let _ = in_tx.send(ExecInputMsg::Eof).await;
                             break;
                         }
                         Ok((MessageType::SandboxExecInput, _, data)) => {
-                            if data.is_empty() {
-                                let _ = in_tx.send(ExecInputMsg::Eof).await;
+                            let msg = if data.is_empty() {
+                                ExecInputMsg::Eof
                             } else {
-                                let _ = in_tx.send(ExecInputMsg::Stdin(data)).await;
+                                ExecInputMsg::Stdin(data)
+                            };
+                            if in_tx.send(msg).await.is_err() {
+                                break;
                             }
                         }
-                        Ok(_) => {
-                            // Unexpected message type during exec; ignore.
-                        }
+                        Ok(_) => break,
                     }
+                }
+            };
+
+            let trace_id_owned = trace_id.to_owned();
+            let output_fut = async {
+                while let Some(encoded) = out_rx.recv().await {
+                    let done = sandbox_v1::ExecOutput::decode(encoded.as_slice())
+                        .map(|m| m.done)
+                        .unwrap_or(false);
+                    write_message(
+                        &mut wh,
+                        MessageType::SandboxExecOutput,
+                        &trace_id_owned,
+                        &encoded,
+                    )
+                    .await?;
+                    if done {
+                        break;
+                    }
+                }
+                Ok::<_, anyhow::Error>(())
+            };
+
+            tokio::pin!(input_fut);
+            tokio::pin!(output_fut);
+
+            // Run both concurrently.  When output finishes (process exited),
+            // the input reader is cancelled — this is safe because the host
+            // consumes its AgentClient (via into_split) for exec sessions, so
+            // this vsock connection is never reused for further requests.
+            tokio::select! {
+                () = &mut input_fut => {
+                    // Host disconnected first; drain remaining output.
+                    output_fut.await?;
+                }
+                result = &mut output_fut => {
+                    result?;
                 }
             }
         }
+        // Split halves are dropped here; `stream` is usable again.
+        drain_trailing_input(stream).await;
 
         Ok(())
     }
