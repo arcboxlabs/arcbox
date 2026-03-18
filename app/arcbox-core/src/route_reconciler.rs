@@ -50,23 +50,70 @@ impl fmt::Display for RouteError {
 
 impl std::error::Error for RouteError {}
 
-/// Path to the ArcBoxHelper binary.
+/// Resolves the path to the helper binary.
+///
+/// Search order:
+/// 1. `ARCBOX_HELPER_PATH` env override (for dev/testing)
+/// 2. Sibling of current exe: `arcbox-helper`
+/// 3. `~/.arcbox/bin/arcbox-helper`
+/// 4. `/usr/local/libexec/arcbox-helper`
+/// 5. `/usr/local/bin/arcbox-helper`
+/// 6. Bare `arcbox-helper` (rely on PATH)
+/// 7. Legacy: `/Applications/ArcBox Desktop.app/.../ArcBoxHelper`
+/// 8. Legacy: `ArcBoxHelper` (PATH)
 fn helper_path() -> String {
-    let candidates = ["/Applications/ArcBox Desktop.app/Contents/Library/HelperTools/ArcBoxHelper"];
-    for path in candidates {
-        if std::path::Path::new(path).exists() {
-            return path.to_string();
-        }
+    // 1. Env override.
+    if let Ok(path) = std::env::var("ARCBOX_HELPER_PATH") {
+        return path;
     }
+
+    // 2. Sibling of current exe.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let helper = dir.join("ArcBoxHelper");
+            let helper = dir.join("arcbox-helper");
             if helper.exists() {
                 return helper.to_string_lossy().to_string();
             }
         }
     }
+
+    // 3. ~/.arcbox/bin/arcbox-helper
+    if let Some(home) = dirs::home_dir() {
+        let helper = home.join(".arcbox/bin/arcbox-helper");
+        if helper.exists() {
+            return helper.to_string_lossy().to_string();
+        }
+    }
+
+    // 4-5. Well-known system paths.
+    for path in [
+        "/usr/local/libexec/arcbox-helper",
+        "/usr/local/bin/arcbox-helper",
+    ] {
+        if std::path::Path::new(path).exists() {
+            return path.to_string();
+        }
+    }
+
+    // 6. Bare name (rely on PATH).
+    if which_exists("arcbox-helper") {
+        return "arcbox-helper".to_string();
+    }
+
+    // 7. Legacy: desktop app bundle.
+    let legacy = "/Applications/ArcBox Desktop.app/Contents/Library/HelperTools/ArcBoxHelper";
+    if std::path::Path::new(legacy).exists() {
+        return legacy.to_string();
+    }
+
+    // 8. Legacy fallback.
     "ArcBoxHelper".to_string()
+}
+
+/// Checks if a binary name is resolvable via PATH.
+fn which_exists(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(name).exists()))
 }
 
 /// Ensures the container subnet route points to the correct bridge.
@@ -88,7 +135,7 @@ pub fn ensure_route(bridge_mac: &str) -> Result<(), RouteError> {
     match Command::new(&ctl)
         .args([
             "route",
-            "add-interface",
+            "add",
             "--subnet",
             CONTAINER_SUBNET,
             "--iface",
@@ -176,7 +223,7 @@ pub async fn ensure_route_for_bridge(bridge_name: &str) -> Result<(), RouteError
             match std::process::Command::new(&ctl)
                 .args([
                     "route",
-                    "add-interface",
+                    "add",
                     "--subnet",
                     CONTAINER_SUBNET,
                     "--iface",
@@ -229,7 +276,7 @@ pub async fn ensure_route_for_bridge(bridge_name: &str) -> Result<(), RouteError
 pub fn remove_route() {
     let ctl = helper_path();
     match Command::new(&ctl)
-        .args(["route", "remove-interface", "--subnet", CONTAINER_SUBNET])
+        .args(["route", "remove", "--subnet", CONTAINER_SUBNET])
         .output()
     {
         Ok(output) if output.status.success() => {
