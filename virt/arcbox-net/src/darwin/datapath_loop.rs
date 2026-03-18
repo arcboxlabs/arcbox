@@ -176,6 +176,11 @@ impl NetworkDatapath {
         // TCP bridge: manages smoltcp TCP socket pool and host connections.
         let mut tcp_bridge = TcpBridge::new();
 
+        // Enable proxy-aware connections: detect host VPN/proxy environment
+        // and share the DNS resolution log so TcpBridge can map IPs to domains.
+        let proxy_env = super::proxy_detect::ProxyEnvironment::detect();
+        tcp_bridge.set_proxy_awareness(dns_log.clone(), proxy_env);
+
         let guest_async = AsyncFd::new(FdWrapper(guest_fd))?;
 
         // Clone the reply sender for async DNS forwarding tasks.
