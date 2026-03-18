@@ -209,8 +209,8 @@ impl SandboxService {
         &self,
         payload: &[u8],
     ) -> Result<(mpsc::Sender<ExecInputMsg>, mpsc::UnboundedReceiver<Vec<u8>>), String> {
-        let req = sandbox_v1::ExecRequest::decode(payload)
-            .map_err(|e| format!("decode error: {e}"))?;
+        let req =
+            sandbox_v1::ExecRequest::decode(payload).map_err(|e| format!("decode error: {e}"))?;
 
         let tty_size = req.tty_size.map(|s| (s.width as u16, s.height as u16));
 

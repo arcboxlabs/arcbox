@@ -629,8 +629,7 @@ impl AgentClient {
                 let raw = match receiver.recv().await {
                     Ok(r) => r,
                     Err(e) => {
-                        let _ =
-                            out_tx.send(Err(CoreError::Machine(format!("recv error: {}", e))));
+                        let _ = out_tx.send(Err(CoreError::Machine(format!("recv error: {}", e))));
                         break;
                     }
                 };

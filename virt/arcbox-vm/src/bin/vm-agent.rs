@@ -655,10 +655,28 @@ mod agent {
         use std::ffi::CString;
 
         let mounts: &[(&str, &str, &str, libc::c_ulong, &str)] = &[
-            ("/proc", "proc", "proc", libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC, ""),
-            ("/sys", "sysfs", "sysfs", libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC, ""),
+            (
+                "/proc",
+                "proc",
+                "proc",
+                libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+                "",
+            ),
+            (
+                "/sys",
+                "sysfs",
+                "sysfs",
+                libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+                "",
+            ),
             ("/dev", "devtmpfs", "devtmpfs", libc::MS_NOSUID, "mode=0755"),
-            ("/dev/pts", "devpts", "devpts", libc::MS_NOSUID | libc::MS_NOEXEC, "newinstance,ptmxmode=0666"),
+            (
+                "/dev/pts",
+                "devpts",
+                "devpts",
+                libc::MS_NOSUID | libc::MS_NOEXEC,
+                "newinstance,ptmxmode=0666",
+            ),
         ];
 
         for (target, source, fstype, flags, data) in mounts {
@@ -678,10 +696,7 @@ mod agent {
                 )
             };
             if ret != 0 {
-                eprintln!(
-                    "mount {target}: {}",
-                    std::io::Error::last_os_error()
-                );
+                eprintln!("mount {target}: {}", std::io::Error::last_os_error());
             }
         }
 
