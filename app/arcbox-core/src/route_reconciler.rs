@@ -162,6 +162,67 @@ pub async fn ensure_route_with_retry(bridge_mac: &str) -> Result<(), RouteError>
     unreachable!()
 }
 
+/// Ensures the container subnet route using a known bridge interface name.
+///
+/// When vmnet.framework creates the bridge, we know the interface immediately —
+/// no need to scan the kernel FDB. Only retries for helper XPC readiness.
+#[cfg(feature = "vmnet")]
+pub async fn ensure_route_for_bridge(bridge_name: &str) -> Result<(), RouteError> {
+    let name = bridge_name.to_string();
+    for attempt in 1..=2 {
+        let name_clone = name.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let ctl = helper_path();
+            match std::process::Command::new(&ctl)
+                .args([
+                    "route",
+                    "add-interface",
+                    "--subnet",
+                    CONTAINER_SUBNET,
+                    "--iface",
+                    &name_clone,
+                ])
+                .output()
+            {
+                Ok(output) if output.status.success() => {
+                    tracing::info!(
+                        subnet = CONTAINER_SUBNET,
+                        bridge = %name_clone,
+                        "route ensured (vmnet direct)"
+                    );
+                    Ok(())
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    if stderr.contains("File exists") {
+                        tracing::info!(
+                            subnet = CONTAINER_SUBNET,
+                            bridge = %name_clone,
+                            "route already installed"
+                        );
+                        Ok(())
+                    } else {
+                        Err(RouteError::RouteFailed(stderr.trim().to_string()))
+                    }
+                }
+                Err(e) => Err(RouteError::HelperUnavailable(e.to_string())),
+            }
+        })
+        .await
+        .unwrap_or_else(|_| Err(RouteError::HelperUnavailable("task panicked".into())));
+
+        match result {
+            Ok(()) => return Ok(()),
+            Err(ref e) if attempt < 2 => {
+                tracing::debug!(attempt, error = %e, "vmnet route install retry");
+                tokio::time::sleep(ROUTE_RETRY_INTERVAL).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!()
+}
+
 /// Removes the container subnet route.
 ///
 /// Called on: VM stop, daemon shutdown.

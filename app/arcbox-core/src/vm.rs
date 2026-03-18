@@ -935,6 +935,23 @@ impl VmManager {
         entry.vmm.as_mut()?.take_inbound_listener_manager()
     }
 
+    /// Returns the vmnet bridge interface name for a running VM.
+    ///
+    /// After vmnet creates the shared interface, the system also creates a
+    /// bridge with a vmenet member. We resolve it via the MAC that vmnet
+    /// reported. Since vmnet has already started, the bridge is immediately
+    /// present — no retry needed.
+    #[cfg(all(target_os = "macos", feature = "vmnet"))]
+    pub fn vmnet_bridge_name(&self, id: &VmId) -> Option<String> {
+        let vms = self.vms.read().ok()?;
+        let entry = vms.get(id)?;
+        let vmm = entry.vmm.as_ref()?;
+        let info = vmm.vmnet_interface_info()?;
+        let mac_str = arcbox_net::darwin::format_mac(&info.mac);
+        let bridge = crate::bridge_discovery::resolve_bridge_by_mac(&mac_str)?;
+        Some(bridge.name)
+    }
+
     #[cfg(test)]
     pub(crate) fn guest_cid_for_test(&self, id: &VmId) -> Option<u32> {
         self.vms

@@ -722,10 +722,25 @@ impl VmLifecycleManager {
                     // Install host route for container subnets via bridge NIC.
                     // Non-blocking: retries transient failures (helper not ready,
                     // bridge FDB not populated) but does not gate VM readiness.
-                    #[cfg(target_os = "macos")]
+                    #[cfg(all(target_os = "macos", feature = "vmnet"))]
+                    if let Some(bridge) =
+                        self.machine_manager.vmnet_bridge_name(DEFAULT_MACHINE_NAME)
+                    {
+                        // vmnet path: bridge name is known instantly, only need
+                        // helper retry (1-2 attempts for XPC readiness).
+                        drop(tokio::spawn(async move {
+                            if let Err(e) =
+                                crate::route_reconciler::ensure_route_for_bridge(&bridge).await
+                            {
+                                tracing::warn!(error = %e, "failed to install container route (vmnet)");
+                            }
+                        }));
+                    }
+
+                    #[cfg(all(target_os = "macos", not(feature = "vmnet")))]
                     if let Some(mac) = self.machine_manager.bridge_mac(DEFAULT_MACHINE_NAME) {
-                        // Intentionally fire-and-forget: route retry runs in the
-                        // background and logs its own outcome.
+                        // Non-vmnet path: scan kernel FDB to discover bridge
+                        // (retries up to ~10s for FDB learning).
                         drop(tokio::spawn(async move {
                             if let Err(e) =
                                 crate::route_reconciler::ensure_route_with_retry(&mac).await
