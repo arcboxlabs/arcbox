@@ -504,77 +504,36 @@ async fn execute_exec(args: ExecArgs) -> Result<()> {
     tokio::spawn(async move {
         let mut stdin = tokio::io::stdin();
         let mut buf = [0u8; 1024];
+        let mut resize_watcher = if tty { ResizeWatcher::new().ok() } else { None };
 
-        if tty {
-            let mut resize_watcher = ResizeWatcher::new().ok();
-            loop {
-                if let Some(watcher) = &mut resize_watcher {
-                    tokio::select! {
-                        result = stdin.read(&mut buf) => {
-                            match result {
-                                Ok(0) | Err(_) => break,
-                                Ok(n) => {
-                                    if stdin_tx
-                                        .send(ExecInput {
-                                            payload: Some(exec_input::Payload::Stdin(
-                                                buf[..n].to_vec(),
-                                            )),
-                                        })
-                                        .await
-                                        .is_err()
-                                    {
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        Some(size) = watcher.recv() => {
-                            let _ = stdin_tx
-                                .send(ExecInput {
-                                    payload: Some(exec_input::Payload::Resize(ProtoTerminalSize {
-                                        width: u32::from(size.cols),
-                                        height: u32::from(size.rows),
-                                    })),
-                                })
-                                .await;
-                        }
-                    }
-                } else {
-                    match stdin.read(&mut buf).await {
+        loop {
+            let stdin_data = async { stdin.read(&mut buf).await };
+
+            // When a resize watcher is available, race stdin against SIGWINCH.
+            let payload = if let Some(watcher) = &mut resize_watcher {
+                tokio::select! {
+                    result = stdin_data => match result {
                         Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            if stdin_tx
-                                .send(ExecInput {
-                                    payload: Some(exec_input::Payload::Stdin(buf[..n].to_vec())),
-                                })
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                    }
+                        Ok(n) => exec_input::Payload::Stdin(buf[..n].to_vec()),
+                    },
+                    Some(size) = watcher.recv() => exec_input::Payload::Resize(
+                        ProtoTerminalSize {
+                            width: u32::from(size.cols),
+                            height: u32::from(size.rows),
+                        },
+                    ),
                 }
-            }
-        } else {
-            loop {
-                match stdin.read(&mut buf).await {
+            } else {
+                match stdin_data.await {
                     Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if stdin_tx
-                            .send(ExecInput {
-                                payload: Some(exec_input::Payload::Stdin(buf[..n].to_vec())),
-                            })
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
+                    Ok(n) => exec_input::Payload::Stdin(buf[..n].to_vec()),
                 }
+            };
+
+            if stdin_tx.send(ExecInput { payload: Some(payload) }).await.is_err() {
+                break;
             }
         }
-        // Stdin closed; the channel drop signals EOF to the server.
     });
 
     let request = attach_machine(tonic::Request::new(ReceiverStream::new(msg_rx)));

@@ -45,6 +45,7 @@ dirs = { workspace = true }
 crossterm = { workspace = true }
 libc = { workspace = true }
 humantime = "2.3.0"
+tokio-stream.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 macos-resolver = { workspace = true }
