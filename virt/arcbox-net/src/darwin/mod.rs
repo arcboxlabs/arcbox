@@ -51,7 +51,7 @@ pub mod vmnet_ffi;
 
 pub use nat::DarwinNatNetwork;
 pub use tun::DarwinTun;
-pub use vmnet::{Vmnet, VmnetConfig, VmnetMode};
+pub use vmnet::{Vmnet, VmnetConfig, VmnetInterfaceInfo, VmnetMode};
 
 use std::net::Ipv4Addr;
 
