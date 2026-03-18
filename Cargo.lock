@@ -301,6 +301,7 @@ dependencies = [
  "arcbox-core",
  "arcbox-docker",
  "arcbox-net",
+ "async-trait",
  "axum 0.8.8",
  "bytes",
  "clap",

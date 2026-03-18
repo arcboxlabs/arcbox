@@ -11,8 +11,8 @@
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
 
-use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
+use tokio::io::unix::AsyncFd;
 use tokio_util::sync::CancellationToken;
 
 use super::vmnet::Vmnet;
@@ -75,9 +75,8 @@ impl VmnetRelay {
                     Ok(n) => {
                         let fd = reader_fd.as_raw_fd();
                         // SAFETY: write to a valid socketpair fd with valid buffer.
-                        let written = unsafe {
-                            libc::write(fd, buf.as_ptr().cast::<libc::c_void>(), n)
-                        };
+                        let written =
+                            unsafe { libc::write(fd, buf.as_ptr().cast::<libc::c_void>(), n) };
                         if written < 0 {
                             let err = std::io::Error::last_os_error();
                             if err.kind() == std::io::ErrorKind::BrokenPipe {

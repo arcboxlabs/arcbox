@@ -320,14 +320,12 @@ impl Vmnet {
 
         // Start the interface with the appropriate completion handler strategy.
         #[cfg(feature = "vmnet")]
-        let (interface, mac, mtu, max_packet_size, interface_info) = {
-            Self::start_with_completion_handler(config_dict, queue, &config)?
-        };
+        let (interface, mac, mtu, max_packet_size, interface_info) =
+            { Self::start_with_completion_handler(config_dict, queue, &config)? };
 
         #[cfg(not(feature = "vmnet"))]
-        let (interface, mac, mtu, max_packet_size, interface_info) = {
-            Self::start_with_null_handler(config_dict, queue, &config)?
-        };
+        let (interface, mac, mtu, max_packet_size, interface_info) =
+            { Self::start_with_null_handler(config_dict, queue, &config)? };
 
         Ok(Self {
             interface,
@@ -360,7 +358,9 @@ impl Vmnet {
                 CFRelease(config_dict.cast_const());
                 dispatch_release(queue.cast());
             }
-            return Err(NetError::config("failed to create dispatch semaphore".to_string()));
+            return Err(NetError::config(
+                "failed to create dispatch semaphore".to_string(),
+            ));
         }
 
         // SAFETY: create_vmnet_completion_block takes a valid semaphore.
@@ -421,16 +421,14 @@ impl Vmnet {
 
             // Parse MTU.
             let mtu_key = c"mtu";
-            let mtu_val =
-                unsafe { xpc_dictionary_get_uint64(xpc_params, mtu_key.as_ptr()) };
+            let mtu_val = unsafe { xpc_dictionary_get_uint64(xpc_params, mtu_key.as_ptr()) };
             if mtu_val > 0 {
                 info.mtu = mtu_val as u16;
             }
 
             // Parse max packet size.
             let mps_key = c"max_packet_size";
-            let mps_val =
-                unsafe { xpc_dictionary_get_uint64(xpc_params, mps_key.as_ptr()) };
+            let mps_val = unsafe { xpc_dictionary_get_uint64(xpc_params, mps_key.as_ptr()) };
             if mps_val > 0 {
                 info.max_packet_size = mps_val as usize;
             }
@@ -447,7 +445,11 @@ impl Vmnet {
 
         // If the user specified a MAC, prefer it. Otherwise use what vmnet returned.
         let mac = config.mac.unwrap_or(info.mac);
-        let mtu = if config.mtu != DEFAULT_MTU { config.mtu } else { info.mtu };
+        let mtu = if config.mtu != DEFAULT_MTU {
+            config.mtu
+        } else {
+            info.mtu
+        };
         let max_packet_size = info.max_packet_size;
 
         // Update info to reflect final values.
