@@ -20,20 +20,18 @@ use tokio::sync::mpsc;
 use crate::error::SandboxError;
 use crate::rpc::{ErrorResponse, read_message, write_message};
 
-/// Drain any trailing input frames after exec completes.
+/// Drain a single trailing `SandboxExecInput` frame after exec completes.
 ///
-/// The client may send a final `SandboxExecInput` (EOF) after the command
-/// exits.  We consume it here so it doesn't leak into the next dispatch loop
-/// iteration in `agent.rs`.
+/// The client may send a final EOF frame after the command exits.  We read
+/// it here using the framing protocol so we never consume bytes belonging
+/// to a subsequent request.  Only `SandboxExecInput` frames are discarded;
+/// any other message type causes an immediate return.
 async fn drain_trailing_input<S: AsyncRead + Unpin>(stream: &mut S) {
     use tokio::time::{Duration, timeout};
-    // Give the client a short window to send trailing frames.
     let _ = timeout(Duration::from_millis(100), async {
-        let mut buf = [0u8; 4096];
-        loop {
-            match tokio::io::AsyncReadExt::read(stream, &mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(_) => continue, // discard
+        if let Ok((msg_type, _, _)) = read_message(stream).await {
+            if msg_type != MessageType::SandboxExecInput {
+                tracing::warn!(?msg_type, "unexpected trailing message after exec");
             }
         }
     })
