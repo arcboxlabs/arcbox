@@ -4,7 +4,8 @@ mod self_setup;
 use anyhow::{Context, Result};
 use arcbox_api::{
     MachineServiceImpl, SandboxServiceImpl, SandboxServiceServer, SandboxSnapshotServiceImpl,
-    SandboxSnapshotServiceServer, machine_service_server::MachineServiceServer,
+    SandboxSnapshotServiceServer, SetupPhase, SetupState, SystemServiceImpl, SystemServiceServer,
+    machine_service_server::MachineServiceServer,
 };
 use arcbox_core::{Config, Runtime, VmLifecycleConfig};
 use arcbox_docker::{DockerApiServer, DockerContextManager, ServerConfig};
@@ -98,6 +99,8 @@ fn main() -> Result<()> {
 async fn run(args: DaemonArgs) -> Result<()> {
     info!("Starting ArcBox daemon...");
 
+    let setup_state = Arc::new(SetupState::new());
+
     let data_dir = resolve_data_dir(args.data_dir.as_ref());
     let run_dir = data_dir.join(arcbox_constants::paths::host::RUN);
     let log_dir = data_dir.join(arcbox_constants::paths::host::LOG);
@@ -145,6 +148,7 @@ async fn run(args: DaemonArgs) -> Result<()> {
         .await
         .context("Failed to initialize runtime")?;
 
+    setup_state.set_phase(SetupPhase::AssetsReady, "Runtime initialized");
     info!(
         data_dir = %data_dir.display(),
         guest_docker_vsock_port = selected_guest_docker_port,
@@ -219,8 +223,13 @@ async fn run(args: DaemonArgs) -> Result<()> {
         }
     });
 
-    let mut grpc_handle =
-        start_grpc_server(Arc::clone(&runtime), grpc_socket.clone(), shutdown.clone()).await?;
+    let mut grpc_handle = start_grpc_server(
+        Arc::clone(&runtime),
+        Arc::clone(&setup_state),
+        grpc_socket.clone(),
+        shutdown.clone(),
+    )
+    .await?;
 
     if args.docker_integration {
         match DockerContextManager::new(socket_path.clone()) {
@@ -251,6 +260,8 @@ async fn run(args: DaemonArgs) -> Result<()> {
     }
 
     check_resolver_installed();
+
+    setup_state.set_phase(SetupPhase::Ready, "Daemon ready");
 
     println!("ArcBox daemon started");
     println!("  Docker API: {}", socket_path.display());
@@ -330,6 +341,7 @@ fn resolve_data_dir(data_dir: Option<&PathBuf>) -> PathBuf {
 
 async fn start_grpc_server(
     runtime: Arc<Runtime>,
+    setup_state: Arc<SetupState>,
     socket_path: PathBuf,
     shutdown: CancellationToken,
 ) -> Result<tokio::task::JoinHandle<()>> {
@@ -350,12 +362,14 @@ async fn start_grpc_server(
     let machine_service = MachineServiceImpl::new(Arc::clone(&runtime));
     let sandbox_service = SandboxServiceImpl::new(Arc::clone(&runtime));
     let sandbox_snapshot_service = SandboxSnapshotServiceImpl::new(Arc::clone(&runtime));
+    let system_service = SystemServiceImpl::new(setup_state);
 
     let handle = tokio::spawn(async move {
         let result = Server::builder()
             .add_service(MachineServiceServer::new(machine_service))
             .add_service(SandboxServiceServer::new(sandbox_service))
             .add_service(SandboxSnapshotServiceServer::new(sandbox_snapshot_service))
+            .add_service(SystemServiceServer::new(system_service))
             .serve_with_incoming_shutdown(incoming, shutdown.cancelled())
             .await;
 

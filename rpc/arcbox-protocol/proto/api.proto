@@ -182,6 +182,14 @@ service SystemService {
 
     // Prunes unused resources.
     rpc Prune(PruneRequest) returns (PruneResponse);
+
+    // Gets current daemon setup status. Used by desktop app to show
+    // startup progress without managing the daemon lifecycle.
+    rpc GetSetupStatus(Empty) returns (SetupStatus);
+
+    // Streams setup status updates. The server pushes a new message
+    // each time the daemon phase changes (e.g. VM starting → ready).
+    rpc WatchSetupStatus(Empty) returns (stream SetupStatus);
 }
 
 // Request to get system info.
@@ -440,4 +448,38 @@ message TerminalSize {
     uint32 width = 1;
     // Terminal height.
     uint32 height = 2;
+}
+
+// =============================================================================
+// Setup Status
+// =============================================================================
+
+// Daemon startup progress and infrastructure health.
+// Allows the desktop app (or any gRPC client) to observe daemon readiness
+// without managing its lifecycle.
+message SetupStatus {
+    // Daemon startup phases, ordered by progression.
+    enum Phase {
+        PHASE_UNSPECIFIED = 0;
+        INITIALIZING = 1;
+        ASSETS_READY = 2;
+        VM_STARTING = 3;
+        VM_READY = 4;
+        NETWORK_READY = 5;
+        READY = 6;
+        DEGRADED = 7;
+    }
+
+    // Current daemon phase.
+    Phase phase = 1;
+    // Whether the DNS resolver file is installed.
+    bool dns_resolver_installed = 2;
+    // Whether /var/run/docker.sock is symlinked to ArcBox.
+    bool docker_socket_linked = 3;
+    // Whether the container subnet route is installed.
+    bool route_installed = 4;
+    // Whether the default VM is running.
+    bool vm_running = 5;
+    // Human-readable status message.
+    string message = 6;
 }

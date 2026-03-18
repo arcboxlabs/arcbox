@@ -420,6 +420,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "arcbox-helper"
+version = "0.2.6"
+dependencies = [
+ "clap",
+ "libc",
+ "serde_json",
+]
+
+[[package]]
 name = "arcbox-hypervisor"
 version = "0.2.6"
 dependencies = [
