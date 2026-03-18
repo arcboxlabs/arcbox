@@ -5,15 +5,16 @@
 //! Failures are logged as warnings — they never block daemon readiness.
 //! The canonical setup path is `sudo arcbox install`.
 //!
-//! Adding a new task: implement [`SetupTask`], add it to [`run`].
+//! Adding a new task: implement [`SetupTask`] in a new file under
+//! `self_setup/`, then add it to the `run()` call in `main.rs`.
 
-use std::path::{Path, PathBuf};
+mod dns_resolver;
+mod docker_socket;
+
+pub use dns_resolver::DnsResolver;
+pub use docker_socket::DockerSocket;
 
 use arcbox_helper::client::{Client, ClientError};
-
-// =============================================================================
-// Task trait
-// =============================================================================
 
 /// A self-setup task that can be checked and applied via the helper daemon.
 #[async_trait::async_trait]
@@ -27,10 +28,6 @@ pub trait SetupTask: Send + Sync {
     /// Applies the task via the helper client.
     async fn apply(&self, client: &Client) -> Result<(), ClientError>;
 }
-
-// =============================================================================
-// Task runner
-// =============================================================================
 
 /// Runs all setup tasks on a shared helper connection.
 ///
@@ -65,50 +62,5 @@ pub async fn run(tasks: &[&dyn SetupTask]) {
                 "failed (run 'sudo arcbox install' to fix)"
             ),
         }
-    }
-}
-
-// =============================================================================
-// Concrete tasks
-// =============================================================================
-
-/// Ensures `/etc/resolver/<domain>` points to the daemon's DNS server.
-pub struct DnsResolver {
-    pub domain: String,
-    pub port: u16,
-}
-
-#[async_trait::async_trait]
-impl SetupTask for DnsResolver {
-    fn name(&self) -> &'static str {
-        "DNS resolver"
-    }
-
-    fn is_satisfied(&self) -> bool {
-        Path::new(&format!("/etc/resolver/{}", self.domain)).exists()
-    }
-
-    async fn apply(&self, client: &Client) -> Result<(), ClientError> {
-        client.dns_install(&self.domain, self.port).await
-    }
-}
-
-/// Ensures `/var/run/docker.sock` is symlinked to the daemon's Docker socket.
-pub struct DockerSocket {
-    pub target: PathBuf,
-}
-
-#[async_trait::async_trait]
-impl SetupTask for DockerSocket {
-    fn name(&self) -> &'static str {
-        "Docker socket"
-    }
-
-    fn is_satisfied(&self) -> bool {
-        std::fs::read_link("/var/run/docker.sock").is_ok_and(|existing| existing == self.target)
-    }
-
-    async fn apply(&self, client: &Client) -> Result<(), ClientError> {
-        client.socket_link(&self.target.to_string_lossy()).await
     }
 }
