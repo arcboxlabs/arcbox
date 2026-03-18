@@ -9,16 +9,16 @@ use arcbox_grpc::v1::machine_service_server;
 use arcbox_grpc::{SandboxService, SandboxSnapshotService};
 use arcbox_protocol::sandbox_v1::Empty as SandboxEmpty;
 use arcbox_protocol::sandbox_v1::{
-    exec_input, CheckpointRequest, CheckpointResponse, CreateSandboxRequest,
-    CreateSandboxResponse, DeleteSnapshotRequest, ExecInput, ExecOutput, InspectSandboxRequest,
-    ListSandboxesRequest, ListSandboxesResponse, ListSnapshotsRequest, ListSnapshotsResponse,
-    RemoveSandboxRequest, RestoreRequest, RestoreResponse, RunOutput, RunRequest, SandboxEvent,
-    SandboxEventsRequest, SandboxInfo, StopSandboxRequest,
+    CheckpointRequest, CheckpointResponse, CreateSandboxRequest, CreateSandboxResponse,
+    DeleteSnapshotRequest, ExecInput, ExecOutput, InspectSandboxRequest, ListSandboxesRequest,
+    ListSandboxesResponse, ListSnapshotsRequest, ListSnapshotsResponse, RemoveSandboxRequest,
+    RestoreRequest, RestoreResponse, RunOutput, RunRequest, SandboxEvent, SandboxEventsRequest,
+    SandboxInfo, StopSandboxRequest, exec_input,
 };
 use arcbox_protocol::v1::{
     CreateMachineRequest, CreateMachineResponse, Empty, InspectMachineRequest, ListMachinesRequest,
-    ListMachinesResponse, MachineAgentRequest, MachineExecOutput, MachineExecRequest, MachineInfo,
-    MachineNetwork, MachinePingResponse, MachineSummary, MachineSystemInfo, RemoveMachineRequest,
+    ListMachinesResponse, MachineAgentRequest, MachineInfo, MachineNetwork, MachinePingResponse,
+    MachineRunOutput, MachineRunRequest, MachineSummary, MachineSystemInfo, RemoveMachineRequest,
     StartMachineRequest, StopMachineRequest,
 };
 use std::pin::Pin;
@@ -258,16 +258,30 @@ impl machine_service_server::MachineService for MachineServiceImpl {
         }))
     }
 
-    type ExecStream =
-        Pin<Box<dyn Stream<Item = Result<MachineExecOutput, Status>> + Send + 'static>>;
+    type RunStream = Pin<Box<dyn Stream<Item = Result<MachineRunOutput, Status>> + Send + 'static>>;
 
-    async fn exec(
+    async fn run(
         &self,
-        _request: Request<MachineExecRequest>,
-    ) -> Result<Response<Self::ExecStream>, Status> {
-        Err(Status::unimplemented(
-            "machine exec is no longer supported by guest agent RPC",
-        ))
+        request: Request<MachineRunRequest>,
+    ) -> Result<Response<Self::RunStream>, Status> {
+        let req = request.into_inner();
+
+        let agent = self
+            .runtime
+            .get_agent(&req.id)
+            .map_err(|e| Status::not_found(e.to_string()))?;
+
+        let rx = agent
+            .machine_run(req)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let stream = UnboundedReceiverStream::new(rx).map(|item| match item {
+            Ok(output) => Ok(output),
+            Err(e) => Err(Status::internal(e.to_string())),
+        });
+
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn ssh_info(
@@ -375,9 +389,7 @@ impl SandboxService for SandboxServiceImpl {
         let first = stream
             .next()
             .await
-            .ok_or_else(|| {
-                Status::invalid_argument("exec: stream closed before Init message")
-            })??;
+            .ok_or_else(|| Status::invalid_argument("exec: stream closed before Init message"))??;
 
         let exec_req = match first.payload {
             Some(exec_input::Payload::Init(req)) => req,

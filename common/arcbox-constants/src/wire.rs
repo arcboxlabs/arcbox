@@ -20,6 +20,9 @@ pub enum MessageType {
     EnsureRuntimeRequest = 0x0003,
     RuntimeStatusRequest = 0x0004,
 
+    // Machine workload request type.
+    MachineRunRequest = 0x0005,
+
     // Sandbox CRUD request types (0x0020 - 0x0024).
     SandboxCreateRequest = 0x0020,
     SandboxStopRequest = 0x0021,
@@ -46,6 +49,10 @@ pub enum MessageType {
     GetSystemInfoResponse = 0x1002,
     EnsureRuntimeResponse = 0x1003,
     RuntimeStatusResponse = 0x1004,
+
+    // Machine workload response type (streaming).
+    MachineRunOutput = 0x1005,
+
     PortBindingsChanged = 0x1030,
     PortBindingsRemoved = 0x1031,
 
@@ -81,6 +88,8 @@ impl MessageType {
             0x0002 => Some(Self::GetSystemInfoRequest),
             0x0003 => Some(Self::EnsureRuntimeRequest),
             0x0004 => Some(Self::RuntimeStatusRequest),
+            // Machine workload.
+            0x0005 => Some(Self::MachineRunRequest),
             // Sandbox CRUD requests.
             0x0020 => Some(Self::SandboxCreateRequest),
             0x0021 => Some(Self::SandboxStopRequest),
@@ -102,6 +111,7 @@ impl MessageType {
             0x1002 => Some(Self::GetSystemInfoResponse),
             0x1003 => Some(Self::EnsureRuntimeResponse),
             0x1004 => Some(Self::RuntimeStatusResponse),
+            0x1005 => Some(Self::MachineRunOutput),
             0x1030 => Some(Self::PortBindingsChanged),
             0x1031 => Some(Self::PortBindingsRemoved),
             // Sandbox CRUD responses.
@@ -158,10 +168,12 @@ mod tests {
             (0x0002, MessageType::GetSystemInfoRequest),
             (0x0003, MessageType::EnsureRuntimeRequest),
             (0x0004, MessageType::RuntimeStatusRequest),
+            (0x0005, MessageType::MachineRunRequest),
             (0x1001, MessageType::PingResponse),
             (0x1002, MessageType::GetSystemInfoResponse),
             (0x1003, MessageType::EnsureRuntimeResponse),
             (0x1004, MessageType::RuntimeStatusResponse),
+            (0x1005, MessageType::MachineRunOutput),
             (0x1030, MessageType::PortBindingsChanged),
             (0x1031, MessageType::PortBindingsRemoved),
             (0x0000, MessageType::Empty),

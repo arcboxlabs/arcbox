@@ -404,15 +404,15 @@ pub struct MachineOs {
     #[prost(string, tag = "3")]
     pub kernel: ::prost::alloc::string::String,
 }
-/// Request to execute a command in a machine.
+/// Request to run a command in a machine.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct MachineExecRequest {
+pub struct MachineRunRequest {
     /// Machine ID or name.
     #[prost(string, tag = "1")]
     pub id: ::prost::alloc::string::String,
-    /// Command to execute.
+    /// Command to run.
     #[prost(string, repeated, tag = "2")]
     pub cmd: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     /// Working directory.
@@ -429,11 +429,11 @@ pub struct MachineExecRequest {
     #[prost(bool, tag = "6")]
     pub tty: bool,
 }
-/// Exec output from a machine.
+/// Run output from a machine.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct MachineExecOutput {
+pub struct MachineRunOutput {
     /// Stream type: stdout or stderr.
     #[prost(string, tag = "1")]
     pub stream: ::prost::alloc::string::String,

@@ -17,6 +17,7 @@ mod supervisor;
 #[cfg(target_os = "linux")]
 mod error;
 
+mod machine;
 mod rpc;
 
 // Mount module uses Linux-specific syscalls (mount/umount).

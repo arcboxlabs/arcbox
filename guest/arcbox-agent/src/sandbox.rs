@@ -18,6 +18,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 
 use crate::error::SandboxError;
+use crate::rpc::{ErrorResponse, read_message, write_message};
 
 /// Drain any trailing input frames after exec completes.
 ///
@@ -208,8 +209,8 @@ impl SandboxService {
         &self,
         payload: &[u8],
     ) -> Result<(mpsc::Sender<ExecInputMsg>, mpsc::UnboundedReceiver<Vec<u8>>), String> {
-        let req = sandbox_v1::ExecRequest::decode(payload)
-            .map_err(|e| format!("decode error: {e}"))?;
+        let req =
+            sandbox_v1::ExecRequest::decode(payload).map_err(|e| format!("decode error: {e}"))?;
 
         let tty_size = req.tty_size.map(|s| (s.width as u16, s.height as u16));
 
@@ -345,7 +346,7 @@ impl SandboxService {
         Ok(())
     }
 
-/// Subscribe to sandbox lifecycle events.  Returns a channel of encoded
+    /// Subscribe to sandbox lifecycle events.  Returns a channel of encoded
     /// [`SandboxEvent`] payloads.
     pub fn subscribe_events(
         &self,

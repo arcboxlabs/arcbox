@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use arcbox_grpc::v1::machine_service_client::MachineServiceClient;
 use arcbox_protocol::v1::{
     CreateMachineRequest, DirectoryMount, InspectMachineRequest, ListMachinesRequest,
-    MachineAgentRequest, MachineExecRequest, RemoveMachineRequest, StartMachineRequest,
+    MachineAgentRequest, MachineRunRequest, RemoveMachineRequest, StartMachineRequest,
     StopMachineRequest,
 };
 use clap::{Args, Subcommand};
@@ -153,8 +153,8 @@ pub enum MachineCommands {
     Info(InfoArgs),
     /// SSH into a machine
     Ssh(SshArgs),
-    /// Execute a command in a machine
-    Exec(ExecArgs),
+    /// Run a command in a machine
+    Run(RunArgs),
 }
 
 #[derive(Args)]
@@ -258,7 +258,7 @@ pub struct SshArgs {
 }
 
 #[derive(Args)]
-pub struct ExecArgs {
+pub struct RunArgs {
     /// Machine name
     pub name: String,
     /// Command to run
@@ -279,7 +279,7 @@ pub async fn execute(cmd: MachineCommands) -> Result<()> {
         MachineCommands::Ping(args) => execute_ping(args).await,
         MachineCommands::Info(args) => execute_info(args).await,
         MachineCommands::Ssh(args) => execute_ssh(args).await,
-        MachineCommands::Exec(args) => execute_exec(args).await,
+        MachineCommands::Run(args) => execute_run(args).await,
     }
 }
 
@@ -576,15 +576,15 @@ async fn execute_ssh(args: SshArgs) -> Result<()> {
         (args.command.clone(), false)
     };
 
-    exec_via_grpc(&args.name, cmd, HashMap::new(), tty).await
+    run_via_grpc(&args.name, cmd, HashMap::new(), tty).await
 }
 
-async fn execute_exec(args: ExecArgs) -> Result<()> {
-    exec_via_grpc(&args.name, args.command, HashMap::new(), false).await
+async fn execute_run(args: RunArgs) -> Result<()> {
+    run_via_grpc(&args.name, args.command, HashMap::new(), false).await
 }
 
-/// Runs a command in a machine via the daemon's gRPC Exec RPC.
-async fn exec_via_grpc(
+/// Runs a command in a machine via the daemon's gRPC Run RPC.
+async fn run_via_grpc(
     name: &str,
     cmd: Vec<String>,
     env: HashMap<String, String>,
@@ -592,7 +592,7 @@ async fn exec_via_grpc(
 ) -> Result<()> {
     let mut client = machine_client().await?;
     let mut stream = client
-        .exec(tonic::Request::new(MachineExecRequest {
+        .run(tonic::Request::new(MachineRunRequest {
             id: name.to_string(),
             cmd,
             working_dir: String::new(),
@@ -601,14 +601,14 @@ async fn exec_via_grpc(
             tty,
         }))
         .await
-        .context("Failed to execute command in machine")?
+        .context("Failed to run command in machine")?
         .into_inner();
 
     let mut exit_code = 0i32;
     while let Some(output) = stream
         .message()
         .await
-        .context("Failed to read exec output")?
+        .context("Failed to read run output")?
     {
         if !output.data.is_empty() {
             match output.stream.as_str() {
