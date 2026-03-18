@@ -558,6 +558,9 @@ async fn execute_exec(args: ExecArgs) -> Result<()> {
         }
     }
 
+    // Drop the raw mode guard before exiting so the terminal is restored.
+    drop(_raw_guard);
+
     if exit_code != 0 {
         std::process::exit(exit_code);
     }
