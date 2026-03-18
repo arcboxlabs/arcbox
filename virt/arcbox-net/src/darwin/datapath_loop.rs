@@ -72,6 +72,8 @@ pub struct NetworkDatapath {
     pub dhcp_server: DhcpServer,
     /// DNS forwarder.
     pub dns_forwarder: DnsForwarder,
+    /// DNS resolution log: maps IPs back to domain names for proxy-aware TCP.
+    pub dns_log: super::dns_log::DnsResolutionLog,
     /// Gateway MAC address used in L2 headers sent to the guest.
     pub gateway_mac: [u8; 6],
     /// Gateway IP address.
@@ -108,6 +110,7 @@ impl NetworkDatapath {
             cmd_rx,
             dhcp_server,
             dns_forwarder,
+            dns_log: super::dns_log::DnsResolutionLog::new(),
             gateway_mac,
             gateway_ip,
             guest_ip,
@@ -131,6 +134,7 @@ impl NetworkDatapath {
             mut cmd_rx,
             mut dhcp_server,
             dns_forwarder,
+            dns_log,
             gateway_mac,
             gateway_ip,
             guest_ip,
@@ -241,6 +245,7 @@ impl NetworkDatapath {
                             &mut dhcp_server,
                             &dns_forwarder,
                             &dns_reply_tx,
+                            &dns_log,
                             gateway_ip,
                             gateway_mac,
                             guest_mac.unwrap_or([0xFF; 6]),
@@ -358,6 +363,7 @@ fn handle_intercepted_frame(
     dhcp_server: &mut DhcpServer,
     dns_forwarder: &DnsForwarder,
     dns_reply_tx: &mpsc::Sender<Vec<u8>>,
+    dns_log: &super::dns_log::DnsResolutionLog,
     gateway_ip: Ipv4Addr,
     gateway_mac: [u8; 6],
     guest_mac: [u8; 6],
@@ -380,6 +386,7 @@ fn handle_intercepted_frame(
                 frame,
                 dns_forwarder,
                 dns_reply_tx,
+                dns_log,
                 gateway_ip,
                 gateway_mac,
                 guest_mac,
@@ -472,10 +479,15 @@ fn handle_dhcp(
 /// Local host mappings are resolved synchronously (no I/O). All other
 /// queries are forwarded to upstream servers asynchronously via a spawned
 /// tokio task, keeping the datapath event loop unblocked.
+///
+/// When an upstream response is received, A record IPs are recorded in
+/// the [`DnsResolutionLog`] so that [`TcpBridge`] can map destination IPs
+/// back to domain names for proxy-aware connections.
 fn handle_dns(
     frame: &[u8],
     dns_forwarder: &DnsForwarder,
     dns_reply_tx: &mpsc::Sender<Vec<u8>>,
+    dns_log: &super::dns_log::DnsResolutionLog,
     gateway_ip: Ipv4Addr,
     gateway_mac: [u8; 6],
     guest_mac: [u8; 6],
@@ -522,10 +534,22 @@ fn handle_dns(
     let upstream = dns_forwarder.upstream().to_vec();
     let data = dns_data.to_vec();
     let tx = dns_reply_tx.clone();
+    let log = dns_log.clone();
 
     tokio::spawn(async move {
         match forward_dns_async(&data, &upstream).await {
             Ok(response) => {
+                // Record IP → domain mapping for proxy-aware TCP connections.
+                if let Some((domain, ips)) = super::dns_log::parse_dns_response_a_records(&response)
+                {
+                    tracing::debug!(
+                        domain = %domain,
+                        ips = ?ips,
+                        "DNS resolution logged"
+                    );
+                    log.record(&domain, &ips);
+                }
+
                 let reply_frame = build_udp_ip_ethernet(
                     gateway_ip,
                     src_ip,
