@@ -581,11 +581,8 @@ impl AgentClient {
     /// Starts an interactive exec session inside a sandbox.
     ///
     /// Consumes the client because the stream task requires exclusive transport
-    /// access.  Returns `(stdin_sender, output_receiver)`:
-    ///
-    /// - Push raw stdin bytes into `stdin_sender`; an empty `Vec` signals EOF.
-    /// - Read [`ExecOutput`] frames from `output_receiver` for stdout, stderr,
-    ///   and the final exit frame (`done == true`).
+    /// access.  The caller supplies a receiver of raw stdin bytes (empty `Vec`
+    /// signals EOF).  Returns an output receiver of [`ExecOutput`] frames.
     ///
     /// # Errors
     ///
@@ -593,10 +590,8 @@ impl AgentClient {
     pub async fn sandbox_exec(
         mut self,
         req: ExecRequest,
-    ) -> Result<(
-        mpsc::Sender<Vec<u8>>,
-        mpsc::UnboundedReceiver<Result<ExecOutput>>,
-    )> {
+        mut stdin_rx: mpsc::Receiver<Vec<u8>>,
+    ) -> Result<mpsc::UnboundedReceiver<Result<ExecOutput>>> {
         if !self.connected {
             self.connect().await?;
         }
@@ -613,18 +608,16 @@ impl AgentClient {
             .into_split()
             .map_err(|e| CoreError::Machine(format!("failed to split transport: {}", e)))?;
 
-        let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(16);
         let (out_tx, out_rx) = mpsc::unbounded_channel();
 
         // Stdin pump: channel → SandboxExecInput frames.
         tokio::spawn(async move {
-            while let Some(data) = in_rx.recv().await {
+            while let Some(data) = stdin_rx.recv().await {
                 let frame = Self::build_message(MessageType::SandboxExecInput, "", &data);
                 if sender.send(frame).await.is_err() {
                     break;
                 }
                 if data.is_empty() {
-                    // Empty payload = EOF; stop pumping stdin.
                     break;
                 }
             }
@@ -636,8 +629,8 @@ impl AgentClient {
                 let raw = match receiver.recv().await {
                     Ok(r) => r,
                     Err(e) => {
-                        let _ = out_tx
-                            .send(Err(CoreError::Machine(format!("recv error: {}", e))));
+                        let _ =
+                            out_tx.send(Err(CoreError::Machine(format!("recv error: {}", e))));
                         break;
                     }
                 };
@@ -674,15 +667,15 @@ impl AgentClient {
                         }
                     }
                     Err(e) => {
-                        let _ = out_tx
-                            .send(Err(CoreError::Machine(format!("decode error: {}", e))));
+                        let _ =
+                            out_tx.send(Err(CoreError::Machine(format!("decode error: {}", e))));
                         break;
                     }
                 }
             }
         });
 
-        Ok((in_tx, out_rx))
+        Ok(out_rx)
     }
 
     /// Checkpoints a sandbox (creates a snapshot).
