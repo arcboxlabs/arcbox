@@ -48,6 +48,8 @@ pub mod tcp_bridge;
 pub mod tun;
 pub mod vmnet;
 pub mod vmnet_ffi;
+#[cfg(feature = "vmnet")]
+pub mod vmnet_relay;
 
 pub use nat::DarwinNatNetwork;
 pub use tun::DarwinTun;
