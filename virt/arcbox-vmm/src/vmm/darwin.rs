@@ -76,20 +76,46 @@ impl Vmm {
             }
         }
 
-        // Add a second NIC with Apple NAT (VZNATNetworkDeviceAttachment).
-        // This creates a bridge (bridge100) on the host, giving the VM a
-        // real L2 path. Host can route container subnets through this NIC's
-        // IP, avoiding the utun write limitation on macOS.
+        // Add a second NIC for host→container L3 routing.
+        //
+        // With the `vmnet` feature: create a vmnet.framework interface directly,
+        // relay it through a socketpair, and use VZFileHandleNetworkDeviceAttachment.
+        // Bridge discovery is instant (no FDB learning delay).
+        //
+        // Without: use VZNATNetworkDeviceAttachment (Apple creates bridge100,
+        // requiring FDB scanning to discover it).
         if self.config.networking {
-            let bridge_nic = match self.config.bridge_nic_mac.as_deref() {
-                Some(mac_address) => VirtioDeviceConfig::network_with_mac(mac_address),
-                None => VirtioDeviceConfig::network(),
-            };
-            vm.add_virtio_device(bridge_nic)?;
-            tracing::info!(
-                mac_address = self.config.bridge_nic_mac.as_deref().unwrap_or("random"),
-                "Added bridge NIC (VZNATNetworkDeviceAttachment) for L3 routing"
-            );
+            #[cfg(feature = "vmnet")]
+            {
+                match self.create_vmnet_bridge_nic() {
+                    Ok(bridge_nic) => {
+                        vm.add_virtio_device(bridge_nic)?;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "vmnet bridge NIC failed, falling back to VZNATNetworkDeviceAttachment: {e}"
+                        );
+                        let bridge_nic = match self.config.bridge_nic_mac.as_deref() {
+                            Some(mac_address) => VirtioDeviceConfig::network_with_mac(mac_address),
+                            None => VirtioDeviceConfig::network(),
+                        };
+                        vm.add_virtio_device(bridge_nic)?;
+                    }
+                }
+            }
+
+            #[cfg(not(feature = "vmnet"))]
+            {
+                let bridge_nic = match self.config.bridge_nic_mac.as_deref() {
+                    Some(mac_address) => VirtioDeviceConfig::network_with_mac(mac_address),
+                    None => VirtioDeviceConfig::network(),
+                };
+                vm.add_virtio_device(bridge_nic)?;
+                tracing::info!(
+                    mac_address = self.config.bridge_nic_mac.as_deref().unwrap_or("random"),
+                    "Added bridge NIC (VZNATNetworkDeviceAttachment) for L3 routing"
+                );
+            }
         }
 
         // Add vsock if enabled
@@ -283,6 +309,100 @@ impl Vmm {
         Ok(VirtioDeviceConfig::network_file_handle(vz_raw_fd))
     }
 
+    /// Creates the bridge NIC via vmnet.framework and a socketpair relay.
+    ///
+    /// Returns a `VirtioDeviceConfig` with the VZ-side raw fd.
+    #[cfg(feature = "vmnet")]
+    fn create_vmnet_bridge_nic(&mut self) -> Result<VirtioDeviceConfig> {
+        use arcbox_net::darwin::vmnet::{Vmnet, VmnetConfig};
+        use arcbox_net::darwin::vmnet_relay::VmnetRelay;
+
+        // Parse MAC from config.
+        let config = if let Some(ref mac_str) = self.config.bridge_nic_mac {
+            let mac = arcbox_net::darwin::parse_mac(mac_str)
+                .map_err(|e| VmmError::Device(format!("invalid bridge NIC MAC: {e}")))?;
+            VmnetConfig::shared().with_mac(mac)
+        } else {
+            VmnetConfig::shared()
+        };
+
+        let vmnet = std::sync::Arc::new(
+            Vmnet::new(config).map_err(|e| VmmError::Device(format!("vmnet start failed: {e}")))?,
+        );
+
+        let info = vmnet
+            .interface_info()
+            .ok_or_else(|| VmmError::Device("vmnet interface_info unavailable".to_string()))?;
+
+        tracing::info!(
+            mac = arcbox_net::darwin::format_mac(&info.mac),
+            mtu = info.mtu,
+            max_packet_size = info.max_packet_size,
+            "vmnet bridge NIC created"
+        );
+
+        // Create socketpair for the relay.
+        let mut fds: [libc::c_int; 2] = [0; 2];
+        // SAFETY: socketpair with valid parameters.
+        let ret =
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
+        if ret != 0 {
+            return Err(VmmError::Device(format!(
+                "socketpair for vmnet bridge failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        // SAFETY: fds are valid from socketpair.
+        let vz_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        // SAFETY: fds are valid from socketpair.
+        let relay_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+
+        // Set large buffers on the VZ side.
+        let buf_size: libc::c_int = 2 * 1024 * 1024;
+        // SAFETY: setsockopt with valid fd and parameters.
+        unsafe {
+            libc::setsockopt(
+                vz_fd.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&raw const buf_size).cast::<libc::c_void>(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+            libc::setsockopt(
+                vz_fd.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                (&raw const buf_size).cast::<libc::c_void>(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+
+        // Spawn the relay task.
+        let cancel = CancellationToken::new();
+        let relay = VmnetRelay::new(std::sync::Arc::clone(&vmnet), cancel.clone());
+
+        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
+            VmmError::Device(format!("tokio runtime not available for vmnet relay: {e}"))
+        })?;
+
+        runtime.spawn(async move {
+            if let Err(e) = relay.run(relay_fd).await {
+                tracing::error!("vmnet relay exited with error: {e}");
+            }
+        });
+
+        tracing::info!("vmnet relay task spawned");
+
+        // Store state for cleanup.
+        let vz_raw_fd = vz_fd.as_raw_fd();
+        self.vmnet_bridge = Some(vmnet);
+        self.vmnet_relay_cancel = Some(cancel);
+        self.vmnet_bridge_fd = Some(vz_fd);
+
+        Ok(VirtioDeviceConfig::network_file_handle(vz_raw_fd))
+    }
+
     /// Starts the managed VM.
     pub(super) fn start_managed_vm(&mut self) -> Result<()> {
         if let Some(ref mut managed_vm) = self.managed_vm {
@@ -329,6 +449,18 @@ impl Vmm {
             cancel.cancel();
         }
         let _ = self.net_vz_fd.take();
+
+        // Stop vmnet relay and bridge interface.
+        #[cfg(feature = "vmnet")]
+        {
+            if let Some(cancel) = self.vmnet_relay_cancel.take() {
+                cancel.cancel();
+            }
+            let _ = self.vmnet_bridge_fd.take();
+            if let Some(vmnet) = self.vmnet_bridge.take() {
+                vmnet.stop();
+            }
+        }
     }
 
     /// Requests graceful guest shutdown via ACPI and waits for it to stop.
