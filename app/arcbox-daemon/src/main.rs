@@ -246,16 +246,18 @@ async fn run(args: DaemonArgs) -> Result<()> {
         }
     }
 
-    // Best-effort self-setup: install DNS resolver and Docker socket symlink
-    // if not already configured. Non-blocking — failures are logged as warnings.
+    // Best-effort self-setup: configure DNS resolver and Docker socket symlink
+    // if not already in place. Non-blocking — failures are logged as warnings.
     {
-        let dns_domain_clone = dns_local_domain.clone();
+        let dns_task = self_setup::DnsResolver {
+            domain: dns_local_domain.clone(),
+            port: dns_listen_port,
+        };
+        let socket_task = self_setup::DockerSocket {
+            target: socket_path.clone(),
+        };
         tokio::spawn(async move {
-            self_setup::ensure_dns_resolver(dns_listen_port, &dns_domain_clone).await;
-        });
-        let docker_sock_clone = socket_path.clone();
-        tokio::spawn(async move {
-            self_setup::ensure_docker_socket(&docker_sock_clone).await;
+            self_setup::run(&[&dns_task, &socket_task]).await;
         });
     }
 

@@ -1,78 +1,114 @@
 //! Best-effort self-setup tasks that the daemon runs during startup.
 //!
-//! Each function checks if the setup is already in place and, if not, attempts
-//! to configure it via `arcbox-helper` (tarpc). Failures are logged as
-//! warnings — they never block daemon startup. The canonical setup path
-//! is `arcbox install`.
+//! Each task follows the check → apply pattern: if the precondition is
+//! already met, skip; otherwise ask `arcbox-helper` to configure it.
+//! Failures are logged as warnings — they never block daemon readiness.
+//! The canonical setup path is `sudo arcbox install`.
+//!
+//! Adding a new task: implement [`SetupTask`], add it to [`run`].
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use arcbox_helper::client::Client;
+use arcbox_helper::client::{Client, ClientError};
 
-/// Ensures the DNS resolver file is installed for the given domain/port.
+// =============================================================================
+// Task trait
+// =============================================================================
+
+/// A self-setup task that can be checked and applied via the helper daemon.
+#[async_trait::async_trait]
+pub trait SetupTask: Send + Sync {
+    /// Human-readable name for log messages.
+    fn name(&self) -> &'static str;
+
+    /// Returns `true` if the task is already satisfied (no work needed).
+    fn is_satisfied(&self) -> bool;
+
+    /// Applies the task via the helper client.
+    async fn apply(&self, client: &Client) -> Result<(), ClientError>;
+}
+
+// =============================================================================
+// Task runner
+// =============================================================================
+
+/// Runs all setup tasks on a shared helper connection.
 ///
-/// Checks `/etc/resolver/<domain>` first; if absent, asks the helper to
-/// install it.
-pub async fn ensure_dns_resolver(port: u16, domain: &str) {
-    let resolver_path = format!("/etc/resolver/{domain}");
-    if Path::new(&resolver_path).exists() {
-        tracing::debug!(domain, "DNS resolver already installed");
-        return;
-    }
-
+/// Connects once and runs tasks sequentially — this keeps the helper alive
+/// for the duration (launchd socket activation starts it on first connect).
+/// If the helper is unreachable, all tasks are skipped.
+pub async fn run(tasks: &[&dyn SetupTask]) {
     let client = match Client::connect().await {
         Ok(c) => c,
         Err(e) => {
-            tracing::debug!(error = %e, "arcbox-helper not reachable, skipping DNS resolver setup");
+            tracing::debug!(
+                error = %e,
+                "arcbox-helper not reachable, skipping self-setup"
+            );
             return;
         }
     };
 
-    match client.dns_install(domain, port).await {
-        Ok(()) => {
-            tracing::info!(domain, port, "DNS resolver installed via helper");
+    for task in tasks {
+        let name = task.name();
+
+        if task.is_satisfied() {
+            tracing::debug!(task = name, "already satisfied");
+            continue;
         }
-        Err(e) => {
-            tracing::warn!(
-                domain,
+
+        match task.apply(&client).await {
+            Ok(()) => tracing::info!(task = name, "configured"),
+            Err(e) => tracing::warn!(
+                task = name,
                 error = %e,
-                "DNS resolver install failed (run 'sudo arcbox install' to fix)"
-            );
+                "failed (run 'sudo arcbox install' to fix)"
+            ),
         }
     }
 }
 
-/// Ensures the Docker socket symlink exists at `/var/run/docker.sock`.
-///
-/// Checks if the symlink already points to `docker_sock_path`; if not,
-/// asks the helper to create it.
-pub async fn ensure_docker_socket(docker_sock_path: &Path) {
-    let system_sock = Path::new("/var/run/docker.sock");
-    if let Ok(existing) = std::fs::read_link(system_sock) {
-        if existing == docker_sock_path {
-            tracing::debug!("Docker socket symlink already correct");
-            return;
-        }
+// =============================================================================
+// Concrete tasks
+// =============================================================================
+
+/// Ensures `/etc/resolver/<domain>` points to the daemon's DNS server.
+pub struct DnsResolver {
+    pub domain: String,
+    pub port: u16,
+}
+
+#[async_trait::async_trait]
+impl SetupTask for DnsResolver {
+    fn name(&self) -> &'static str {
+        "DNS resolver"
     }
 
-    let client = match Client::connect().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::debug!(error = %e, "arcbox-helper not reachable, skipping Docker socket setup");
-            return;
-        }
-    };
+    fn is_satisfied(&self) -> bool {
+        Path::new(&format!("/etc/resolver/{}", self.domain)).exists()
+    }
 
-    let target_str = docker_sock_path.to_string_lossy();
-    match client.socket_link(&target_str).await {
-        Ok(()) => {
-            tracing::info!(target = %target_str, "Docker socket symlink created via helper");
-        }
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "Docker socket link failed (run 'sudo arcbox install' to fix)"
-            );
-        }
+    async fn apply(&self, client: &Client) -> Result<(), ClientError> {
+        client.dns_install(&self.domain, self.port).await
+    }
+}
+
+/// Ensures `/var/run/docker.sock` is symlinked to the daemon's Docker socket.
+pub struct DockerSocket {
+    pub target: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl SetupTask for DockerSocket {
+    fn name(&self) -> &'static str {
+        "Docker socket"
+    }
+
+    fn is_satisfied(&self) -> bool {
+        std::fs::read_link("/var/run/docker.sock").is_ok_and(|existing| existing == self.target)
+    }
+
+    async fn apply(&self, client: &Client) -> Result<(), ClientError> {
+        client.socket_link(&self.target.to_string_lossy()).await
     }
 }

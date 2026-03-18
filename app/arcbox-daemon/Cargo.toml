@@ -18,6 +18,7 @@ arcbox-api = { workspace = true }
 arcbox-core = { workspace = true }
 arcbox-docker = { workspace = true }
 arcbox-helper = { workspace = true }
+async-trait = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { version = "0.1", features = ["net"] }
