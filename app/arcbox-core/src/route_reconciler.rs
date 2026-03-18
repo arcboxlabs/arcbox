@@ -80,8 +80,8 @@ fn helper_path() -> String {
 /// Called on: VM ready, VM recovery, daemon cold-start reconcile.
 pub fn ensure_route(bridge_mac: &str) -> Result<(), RouteError> {
     // Step 1: Resolve MAC → bridge via kernel FDB (typed API, no text parsing).
-    let bridge = bridge_discovery::resolve_bridge_by_mac(bridge_mac)
-        .ok_or(RouteError::BridgeNotReady)?;
+    let bridge =
+        bridge_discovery::resolve_bridge_by_mac(bridge_mac).ok_or(RouteError::BridgeNotReady)?;
 
     // Step 2: Tell helper to add the route (pure mutation, no intelligence).
     let ctl = helper_path();

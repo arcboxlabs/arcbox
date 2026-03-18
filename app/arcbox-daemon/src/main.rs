@@ -197,9 +197,7 @@ async fn run(args: DaemonArgs) -> Result<()> {
         use arcbox_core::DEFAULT_MACHINE_NAME;
         if let Some(mac) = runtime.machine_manager().bridge_mac(DEFAULT_MACHINE_NAME) {
             drop(tokio::spawn(async move {
-                if let Err(e) =
-                    arcbox_core::route_reconciler::ensure_route_with_retry(&mac).await
-                {
+                if let Err(e) = arcbox_core::route_reconciler::ensure_route_with_retry(&mac).await {
                     tracing::warn!(error = %e, "failed to install container route on cold start");
                 }
             }));
