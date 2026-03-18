@@ -14,6 +14,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  APPLE_TEAM_ID: "422ACSY6Y5"
 
 jobs:
   # ==========================================================================
@@ -37,7 +38,7 @@ jobs:
           echo "Building version: $VERSION"
 
   # ==========================================================================
-  # Build macOS ARM64 host binaries (abctl + arcbox-daemon)
+  # Build + sign macOS ARM64 host binaries
   # ==========================================================================
   build-macos-arm64:
     name: Build macOS ARM64
@@ -71,22 +72,83 @@ jobs:
             ${{ runner.os }}-cargo-release-
             ${{ runner.os }}-cargo-
 
+      - name: Import signing certificate
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          # Create temporary keychain.
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Import certificate.
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$CERT_PATH"
+          security import "$CERT_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+
+          # Allow codesign to access the key without UI prompt.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Add to search list.
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+
+          # Verify.
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      - name: Install provisioning profile
+        env:
+          APPLE_PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+        run: |
+          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROFILE_DIR"
+          echo "$APPLE_PROVISIONING_PROFILE" | base64 --decode \
+            > "$PROFILE_DIR/arcbox-daemon.provisionprofile"
+
       - name: Build arcbox binaries (release)
         timeout-minutes: 15
-        run: cargo build --release --locked -p arcbox-cli -p arcbox-daemon
+        run: cargo build --release --locked -p arcbox-cli -p arcbox-daemon -p arcbox-helper
 
-      - name: Codesign arcbox-daemon with virtualization entitlement
+      - name: Codesign arcbox-daemon
         run: |
-          codesign --entitlements bundle/arcbox.entitlements \
-            --force -s - target/release/arcbox-daemon
+          codesign --force --options runtime \
+            --identifier com.arcboxlabs.desktop.daemon \
+            --entitlements bundle/arcbox.entitlements \
+            --sign "Developer ID Application: ArcBox, Inc. ($APPLE_TEAM_ID)" \
+            target/release/arcbox-daemon
+          codesign -v --deep --strict target/release/arcbox-daemon
+
+      - name: Codesign arcbox-helper
+        run: |
+          codesign --force --options runtime \
+            --identifier com.arcboxlabs.helper \
+            --sign "Developer ID Application: ArcBox, Inc. ($APPLE_TEAM_ID)" \
+            target/release/arcbox-helper
+          codesign -v --deep --strict target/release/arcbox-helper
+
+      - name: Codesign abctl
+        run: |
+          codesign --force --options runtime \
+            --identifier com.arcboxlabs.cli \
+            --sign "Developer ID Application: ArcBox, Inc. ($APPLE_TEAM_ID)" \
+            target/release/abctl
+          codesign -v --deep --strict target/release/abctl
 
       - name: Verify artifacts
         run: |
           echo "=== Build artifacts ==="
-          ls -lh target/release/abctl
-          ls -lh target/release/arcbox-daemon
-          file target/release/abctl
-          file target/release/arcbox-daemon
+          for bin in abctl arcbox-daemon arcbox-helper; do
+            ls -lh "target/release/$bin"
+            file "target/release/$bin"
+            codesign -d -v "target/release/$bin"
+            echo
+          done
 
       - name: Upload host binaries
         uses: actions/upload-artifact@v4
@@ -95,7 +157,9 @@ jobs:
           path: |
             target/release/abctl
             target/release/arcbox-daemon
+            target/release/arcbox-helper
             bundle/arcbox.entitlements
+            bundle/com.arcboxlabs.helper.plist
           retention-days: 5
 
   # ==========================================================================
@@ -178,11 +242,13 @@ jobs:
           TARBALL_NAME="arcbox-darwin-arm64-${VERSION}.tar.gz"
           STAGING="arcbox-darwin-arm64-${VERSION}"
 
-          mkdir -p "$STAGING"
+          mkdir -p "$STAGING/bundle"
           cp artifacts/host/target/release/abctl "$STAGING/"
           cp artifacts/host/target/release/arcbox-daemon "$STAGING/"
+          cp artifacts/host/target/release/arcbox-helper "$STAGING/"
           cp artifacts/agent/arcbox-agent "$STAGING/"
-          cp artifacts/host/bundle/arcbox.entitlements "$STAGING/"
+          cp artifacts/host/bundle/arcbox.entitlements "$STAGING/bundle/"
+          cp artifacts/host/bundle/com.arcboxlabs.helper.plist "$STAGING/bundle/"
 
           tar czf "$TARBALL_NAME" "$STAGING"
           echo "tarball=$TARBALL_NAME" >> "$GITHUB_OUTPUT"
