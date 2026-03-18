@@ -91,7 +91,7 @@ fn print_skipped() {
 const HELPER_DEST: &str = "/usr/local/libexec/arcbox-helper";
 
 /// launchd plist path (system-level daemon, runs as root).
-const HELPER_PLIST: &str = "/Library/LaunchDaemons/com.arcboxlabs.helper.plist";
+const HELPER_PLIST: &str = "/Library/LaunchDaemons/com.arcboxlabs.desktop.helper.plist";
 
 /// Installs the arcbox-helper binary and registers it as a launchd system
 /// daemon with socket activation.
@@ -138,7 +138,7 @@ fn install_helper() -> Result<()> {
     // Install bundled launchd plist (socket activation config is static).
     std::fs::write(
         HELPER_PLIST,
-        include_bytes!("../../../../bundle/com.arcboxlabs.helper.plist"),
+        include_bytes!("../../../../bundle/com.arcboxlabs.desktop.helper.plist"),
     )
     .with_context(|| format!("failed to write {HELPER_PLIST}"))?;
 

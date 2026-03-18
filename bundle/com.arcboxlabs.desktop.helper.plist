@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.arcboxlabs.helper</string>
+    <string>com.arcboxlabs.desktop.helper</string>
     <key>Program</key>
     <string>/usr/local/libexec/arcbox-helper</string>
     <key>Sockets</key>

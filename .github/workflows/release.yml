@@ -127,7 +127,7 @@ jobs:
       - name: Codesign arcbox-helper
         run: |
           codesign --force --options runtime \
-            --identifier com.arcboxlabs.helper \
+            --identifier com.arcboxlabs.desktop.helper \
             --sign "Developer ID Application: ArcBox, Inc. ($APPLE_TEAM_ID)" \
             target/release/arcbox-helper
           codesign -v --deep --strict target/release/arcbox-helper
@@ -159,7 +159,7 @@ jobs:
             target/release/arcbox-daemon
             target/release/arcbox-helper
             bundle/arcbox.entitlements
-            bundle/com.arcboxlabs.helper.plist
+            bundle/com.arcboxlabs.desktop.helper.plist
           retention-days: 5
 
   # ==========================================================================
@@ -248,7 +248,7 @@ jobs:
           cp artifacts/host/target/release/arcbox-helper "$STAGING/"
           cp artifacts/agent/arcbox-agent "$STAGING/"
           cp artifacts/host/bundle/arcbox.entitlements "$STAGING/bundle/"
-          cp artifacts/host/bundle/com.arcboxlabs.helper.plist "$STAGING/bundle/"
+          cp artifacts/host/bundle/com.arcboxlabs.desktop.helper.plist "$STAGING/bundle/"
 
           tar czf "$TARBALL_NAME" "$STAGING"
           echo "tarball=$TARBALL_NAME" >> "$GITHUB_OUTPUT"
