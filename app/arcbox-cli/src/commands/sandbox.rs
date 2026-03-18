@@ -7,10 +7,10 @@ use anyhow::{Context, Result};
 use arcbox_core::vm_lifecycle::DEFAULT_MACHINE_NAME;
 use arcbox_grpc::{SandboxServiceClient, SandboxSnapshotServiceClient};
 use arcbox_protocol::sandbox_v1::{
-    exec_input, CheckpointRequest, CreateSandboxRequest, DeleteSnapshotRequest, ExecInput,
-    ExecRequest, InspectSandboxRequest, ListSandboxesRequest, ListSnapshotsRequest,
-    RemoveSandboxRequest, ResourceLimits, RestoreRequest, RunRequest, SandboxEventsRequest,
-    StopSandboxRequest, TerminalSize as ProtoTerminalSize,
+    CheckpointRequest, CreateSandboxRequest, DeleteSnapshotRequest, ExecInput, ExecRequest,
+    InspectSandboxRequest, ListSandboxesRequest, ListSnapshotsRequest, RemoveSandboxRequest,
+    ResourceLimits, RestoreRequest, RunRequest, SandboxEventsRequest, StopSandboxRequest,
+    TerminalSize as ProtoTerminalSize, exec_input,
 };
 use clap::{Args, Subcommand};
 use std::collections::HashMap;
