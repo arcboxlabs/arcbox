@@ -1,4 +1,5 @@
 mod dns_service;
+mod self_setup;
 
 use anyhow::{Context, Result};
 use arcbox_api::{
@@ -234,6 +235,19 @@ async fn run(args: DaemonArgs) -> Result<()> {
                 warn!("Failed to create Docker context manager: {}", e);
             }
         }
+    }
+
+    // Best-effort self-setup: install DNS resolver and Docker socket symlink
+    // if not already configured. Non-blocking — failures are logged as warnings.
+    {
+        let dns_domain_clone = dns_local_domain.clone();
+        tokio::spawn(async move {
+            self_setup::ensure_dns_resolver(dns_listen_port, &dns_domain_clone).await;
+        });
+        let docker_sock_clone = socket_path.clone();
+        tokio::spawn(async move {
+            self_setup::ensure_docker_socket(&docker_sock_clone).await;
+        });
     }
 
     check_resolver_installed();
