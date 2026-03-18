@@ -18,6 +18,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 
 use crate::error::SandboxError;
+use crate::rpc::{ErrorResponse, read_message, write_message};
 
 /// Drain any trailing input frames after exec completes.
 ///
@@ -345,7 +346,59 @@ impl SandboxService {
         Ok(())
     }
 
-/// Subscribe to sandbox lifecycle events.  Returns a channel of encoded
+    /// Stream `SandboxRunOutput` frames from [`SandboxService::run`].
+    pub async fn handle_run<S>(
+        &self,
+        stream: &mut S,
+        trace_id: &str,
+        payload: &[u8],
+    ) -> anyhow::Result<()>
+    where
+        S: AsyncWrite + Unpin,
+    {
+        let mut rx = match self.run(payload).await {
+            Ok(r) => r,
+            Err(e) => {
+                let err = ErrorResponse::new(e.status_code(), &e.to_string());
+                write_message(stream, MessageType::Error, trace_id, &err.encode()).await?;
+                return Ok(());
+            }
+        };
+
+        while let Some(encoded) = rx.recv().await {
+            write_message(stream, MessageType::SandboxRunOutput, trace_id, &encoded).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Stream `SandboxEvent` frames from [`SandboxService::subscribe_events`].
+    pub async fn handle_events<S>(
+        &self,
+        stream: &mut S,
+        trace_id: &str,
+        payload: &[u8],
+    ) -> anyhow::Result<()>
+    where
+        S: AsyncWrite + Unpin,
+    {
+        let mut rx = match self.subscribe_events(payload) {
+            Ok(r) => r,
+            Err(e) => {
+                let err = ErrorResponse::new(e.status_code(), &e.to_string());
+                write_message(stream, MessageType::Error, trace_id, &err.encode()).await?;
+                return Ok(());
+            }
+        };
+
+        while let Some(encoded) = rx.recv().await {
+            write_message(stream, MessageType::SandboxEvent, trace_id, &encoded).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Subscribe to sandbox lifecycle events.  Returns a channel of encoded
     /// [`SandboxEvent`] payloads.
     pub fn subscribe_events(
         &self,
