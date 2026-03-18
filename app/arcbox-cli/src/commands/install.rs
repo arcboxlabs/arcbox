@@ -116,7 +116,22 @@ fn install_helper() -> Result<()> {
         )
     })?;
 
-    // Set ownership to root and setuid bit: chmod u+s,a+rx
+    // macOS's std::fs::copy uses copyfile() which preserves source ownership.
+    // We must explicitly chown to root before setting the setuid bit,
+    // otherwise setuid elevates to the build user, not root.
+    let chown_status = Command::new("chown")
+        .args(["root:wheel", &dest.to_string_lossy()])
+        .status()
+        .context("failed to run chown")?;
+
+    if !chown_status.success() {
+        bail!(
+            "chown root:wheel failed on {} (are you running with sudo?)",
+            dest.display()
+        );
+    }
+
+    // Set setuid bit: chmod u+s,a+rx
     let status = Command::new("chmod")
         .args(["u+s,a+rx", &dest.to_string_lossy()])
         .status()
