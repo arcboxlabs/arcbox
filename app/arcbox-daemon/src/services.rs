@@ -25,6 +25,9 @@ pub async fn start(ctx: &DaemonContext) -> Result<ServiceHandles> {
         .await
         .context("Failed to start DNS service")?;
 
+    // DNS listener is bound and ready to serve queries.
+    ctx.setup_state.set_dns_installed(true);
+
     register_host_dns(ctx);
 
     let dns_shutdown = ctx.shutdown.clone();

@@ -8,6 +8,7 @@ use tracing::info;
 
 use crate::context::DaemonContext;
 use crate::self_setup;
+use crate::self_setup::SetupTask as _;
 
 /// Runs all recovery and best-effort setup tasks.
 ///
@@ -15,7 +16,7 @@ use crate::self_setup;
 /// - Re-installs the container subnet route (cold-start reconcile)
 /// - Installs DNS resolver and Docker socket via helper (best-effort)
 pub async fn run(ctx: &DaemonContext) {
-    recover_container_networking(&ctx.runtime).await;
+    recover_container_networking(&ctx.runtime, &ctx.setup_state).await;
 
     // Cold-start route reconcile (non-blocking).
     #[cfg(target_os = "macos")]
@@ -26,9 +27,13 @@ pub async fn run(ctx: &DaemonContext) {
             .machine_manager()
             .bridge_mac(DEFAULT_MACHINE_NAME)
         {
+            let setup_state = Arc::clone(&ctx.setup_state);
             drop(tokio::spawn(async move {
-                if let Err(e) = arcbox_core::route_reconciler::ensure_route_with_retry(&mac).await {
-                    tracing::warn!(error = %e, "failed to install container route on cold start");
+                match arcbox_core::route_reconciler::ensure_route_with_retry(&mac).await {
+                    Ok(()) => setup_state.set_route_installed(true),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to install container route on cold start");
+                    }
                 }
             }));
         }
@@ -42,13 +47,23 @@ pub async fn run(ctx: &DaemonContext) {
     let socket_task = self_setup::DockerSocket {
         target: ctx.socket_path.clone(),
     };
+    let setup_state_self = Arc::clone(&ctx.setup_state);
     tokio::spawn(async move {
         self_setup::run(&[&dns_task, &socket_task]).await;
+        // Update status flags based on whether each task is now satisfied.
+        setup_state_self.set_dns_installed(dns_task.is_satisfied());
+        setup_state_self.set_docker_socket_linked(socket_task.is_satisfied());
     });
 }
 
 /// Re-registers DNS entries and port forwarding for all running containers.
-async fn recover_container_networking(runtime: &Arc<Runtime>) {
+///
+/// If the guest VM responds (even with an empty container list), the
+/// `vm_running` flag on `setup_state` is set to `true`.
+async fn recover_container_networking(
+    runtime: &Arc<Runtime>,
+    setup_state: &Arc<arcbox_api::SetupState>,
+) {
     use axum::http::{HeaderMap, Method};
     use bytes::Bytes;
 
@@ -71,6 +86,9 @@ async fn recover_container_networking(runtime: &Arc<Runtime>) {
             return;
         }
     };
+
+    // Successfully queried the guest VM — it is running.
+    setup_state.set_vm_running(true);
 
     let body_bytes = match http_body_util::BodyExt::collect(resp.into_body()).await {
         Ok(collected) => collected.to_bytes(),
