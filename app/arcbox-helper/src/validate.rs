@@ -5,6 +5,7 @@
 //! match the expected patterns for ArcBox's use cases.
 
 use std::net::Ipv4Addr;
+use std::path::Component;
 
 /// Validates a CIDR subnet string. Only private ranges are allowed:
 /// - 10.0.0.0/8
@@ -116,6 +117,16 @@ pub fn validate_socket_target(s: &str) -> Result<(), String> {
         return Err(format!("socket target '{s}' must end with .sock"));
     }
 
+    // Reject path traversal (e.g. /Users/alice/.arcbox/../../../../var/run/other.sock).
+    if std::path::Path::new(s)
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return Err(format!(
+            "socket target '{s}' contains '..' path traversal component"
+        ));
+    }
+
     Ok(())
 }
 
@@ -200,5 +211,13 @@ mod tests {
         assert!(validate_socket_target("/Users//.arcbox/run/docker.sock").is_err());
         assert!(validate_socket_target("/Users/alice/.config/docker.sock").is_err());
         assert!(validate_socket_target("/Users/alice/.arcbox/run/docker.txt").is_err());
+    }
+
+    #[test]
+    fn socket_target_rejects_path_traversal() {
+        let result =
+            validate_socket_target("/Users/alice/.arcbox/../../../../var/run/other.sock");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains(".."));
     }
 }
