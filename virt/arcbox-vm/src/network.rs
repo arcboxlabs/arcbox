@@ -67,10 +67,8 @@ impl NetworkManager {
             .parse::<Ipv4Addr>()
             .map_err(|e| VmmError::Network(format!("invalid gateway: {e}")))?;
 
-        #[cfg(target_os = "linux")]
-        if !bridge.is_empty() {
-            ensure_bridge(bridge, gateway, prefix_len)?;
-        }
+        // Bridge creation removed — sandbox networking now uses per-sandbox
+        // AF_PACKET + userspace smoltcp datapath instead of a shared bridge.
 
         Ok(Self {
             bridge: bridge.to_owned(),
@@ -107,6 +105,26 @@ impl NetworkManager {
             mac_address: mac,
             dns_servers: self.dns.clone(),
         })
+    }
+
+    /// Allocate network resources and return an AF_PACKET fd bound to the TAP.
+    ///
+    /// The returned `OwnedFd` receives/sends L2 Ethernet frames from/to the
+    /// TAP interface.  This is the Linux replacement for bridge-based networking:
+    /// the caller feeds frames into a userspace smoltcp datapath instead of
+    /// relying on kernel bridge + iptables.
+    #[cfg(target_os = "linux")]
+    pub fn allocate_with_fd(
+        &self,
+        vm_id: &str,
+    ) -> Result<(NetworkAllocation, std::os::fd::OwnedFd)> {
+        let alloc = self.allocate(vm_id)?;
+        let fd = arcbox_net::linux::open_af_packet(&alloc.tap_name).map_err(|e| {
+            // Release the allocation on failure so the IP + TAP don't leak.
+            self.release(&alloc);
+            VmmError::Network(format!("AF_PACKET on {}: {e}", alloc.tap_name))
+        })?;
+        Ok((alloc, fd))
     }
 
     /// Release the TAP interface and guest IP associated with `vm_id`.
@@ -231,48 +249,7 @@ impl NetworkManager {
             )));
         }
 
-        // 3. Attach to bridge via SIOCBRADDIF.
-        if !self.bridge.is_empty() {
-            // SAFETY: sock and ifr.ifr_name are valid.
-            if unsafe { libc::ioctl(sock.as_raw_fd(), libc::SIOCGIFINDEX as _, &ifr) } < 0 {
-                destroy_tap(tap_name);
-                return Err(VmmError::Network(format!(
-                    "SIOCGIFINDEX {tap_name}: {}",
-                    std::io::Error::last_os_error()
-                )));
-            }
-            let if_index = unsafe { ifr.ifr_ifru.ifru_ifindex };
-
-            let bridge_bytes = self.bridge.as_bytes();
-            if bridge_bytes.len() >= libc::IFNAMSIZ {
-                destroy_tap(tap_name);
-                return Err(VmmError::Network(format!(
-                    "bridge name too long: {}",
-                    self.bridge
-                )));
-            }
-            let mut br_ifr: libc::ifreq = unsafe { std::mem::zeroed() };
-            // SAFETY: bridge_bytes.len() < IFNAMSIZ checked above.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    bridge_bytes.as_ptr(),
-                    br_ifr.ifr_name.as_mut_ptr().cast::<u8>(),
-                    bridge_bytes.len(),
-                );
-                br_ifr.ifr_ifru.ifru_ifindex = if_index;
-            }
-
-            const SIOCBRADDIF: libc::c_ulong = 0x89a2;
-            // SAFETY: sock is valid; br_ifr has bridge name and TAP ifindex.
-            if unsafe { libc::ioctl(sock.as_raw_fd(), SIOCBRADDIF as _, &br_ifr) } < 0 {
-                destroy_tap(tap_name);
-                return Err(VmmError::Network(format!(
-                    "SIOCBRADDIF {tap_name} -> {}: {}",
-                    self.bridge,
-                    std::io::Error::last_os_error()
-                )));
-            }
-        }
+        // Bridge attachment removed — TAP is used directly via AF_PACKET.
 
         Ok(())
     }

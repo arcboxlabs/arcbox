@@ -25,6 +25,9 @@ libc.workspace         = true
 chrono.workspace       = true
 toml.workspace         = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+arcbox-net.workspace = true
+
 [dev-dependencies]
 tokio              = { workspace = true, features = ["rt", "macros"] }
 anyhow.workspace   = true
