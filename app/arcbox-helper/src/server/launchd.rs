@@ -38,6 +38,14 @@ pub fn listener() -> Option<tokio::net::UnixListener> {
     // SAFETY: fds points to a valid array of cnt ints allocated by the system.
     let fd = unsafe { *fds };
 
+    // Close any extra fds beyond the first to prevent fd leaks.
+    // launchd may pass more than one socket when the plist has multiple
+    // SockPathName entries or after a fast re-bootstrap.
+    for i in 1..cnt {
+        // SAFETY: fds[i] is a valid fd within the array of cnt ints.
+        unsafe { libc::close(*fds.add(i)) };
+    }
+
     // SAFETY: fds was allocated by launch_activate_socket; we must free it.
     unsafe { libc::free(fds.cast::<libc::c_void>()) };
 
