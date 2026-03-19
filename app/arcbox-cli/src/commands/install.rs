@@ -205,8 +205,12 @@ async fn setup_docker_socket(client: &Client) -> Result<()> {
 // =============================================================================
 
 /// Registers the daemon as a launchd user agent.
+///
+/// Under `sudo`, `dirs::home_dir()` returns `/var/root` and `getuid()`
+/// returns 0. We detect this via `SUDO_USER` / `SUDO_UID` and resolve
+/// the real user's home and UID instead.
 fn register_daemon_service() -> Result<()> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
+    let (home, uid) = resolve_real_user()?;
     let plist_dir = home.join("Library/LaunchAgents");
     std::fs::create_dir_all(&plist_dir).context("failed to create LaunchAgents directory")?;
 
@@ -257,8 +261,6 @@ fn register_daemon_service() -> Result<()> {
     std::fs::write(&plist_path, plist_content)
         .with_context(|| format!("failed to write {}", plist_path.display()))?;
 
-    // Bootstrap the service. Use launchctl bootstrap for the current user domain.
-    let uid = unsafe { libc::getuid() };
     let domain_target = format!("gui/{uid}");
 
     // Bootout first to handle re-install (ignore errors if not loaded).
@@ -276,6 +278,47 @@ fn register_daemon_service() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Resolves the real user's home directory and UID.
+///
+/// When running under `sudo`, `dirs::home_dir()` returns `/var/root` and
+/// `libc::getuid()` returns 0. We use `SUDO_USER` to look up the home
+/// directory and `SUDO_UID` for the UID. Falls back to the current process
+/// values when not running under sudo.
+fn resolve_real_user() -> Result<(PathBuf, u32)> {
+    if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+        let uid: u32 = std::env::var("SUDO_UID")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .context("SUDO_USER is set but SUDO_UID is missing or invalid")?;
+
+        // Resolve home directory from the password database.
+        let home = home_for_user(&sudo_user)
+            .unwrap_or_else(|| PathBuf::from(format!("/Users/{sudo_user}")));
+
+        return Ok((home, uid));
+    }
+
+    let home = dirs::home_dir().context("could not determine home directory")?;
+    // SAFETY: getuid() is a trivial POSIX syscall with no preconditions.
+    let uid = unsafe { libc::getuid() };
+    Ok((home, uid))
+}
+
+/// Looks up a user's home directory via the POSIX password database.
+fn home_for_user(username: &str) -> Option<PathBuf> {
+    let c_name = std::ffi::CString::new(username).ok()?;
+    // SAFETY: getpwnam is a standard POSIX function. We pass a valid
+    // null-terminated string and check the return value before
+    // dereferencing. The returned pointer is to static storage.
+    let pw = unsafe { libc::getpwnam(c_name.as_ptr()) };
+    if pw.is_null() {
+        return None;
+    }
+    // SAFETY: pw is non-null and pw_dir is a valid C string.
+    let dir = unsafe { std::ffi::CStr::from_ptr((*pw).pw_dir) };
+    Some(PathBuf::from(dir.to_string_lossy().into_owned()))
 }
 
 // =============================================================================
