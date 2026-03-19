@@ -37,7 +37,7 @@ arcbox-hypervisor / arcbox-vz (platform virtualization)
   ```bash
   codesign --entitlements bundle/arcbox.entitlements --force -s - arcbox-daemon
   ```
-  Required for: examples, tests touching hypervisor. See [entitlements.plist](bundle/arcbox.entitlements)
+  Required for: examples, tests touching hypervisor. See [arcbox.entitlements](bundle/arcbox.entitlements)
 - `mode_t` types (e.g., `libc::S_IFMT`) are `u16` (Linux: `u32`). Use `u32::from()` for cross-platform compatibility
 - No `fallocate` - use `ftruncate` instead
 - xattr APIs have different argument order than Linux
