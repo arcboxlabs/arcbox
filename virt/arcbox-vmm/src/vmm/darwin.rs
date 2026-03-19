@@ -388,8 +388,7 @@ impl Vmm {
         // Create socketpair for the relay.
         let mut fds: [libc::c_int; 2] = [0; 2];
         // SAFETY: socketpair with valid parameters.
-        let ret =
-            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
+        let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
         if ret != 0 {
             return Err(VmmError::Device(format!(
                 "socketpair for vmnet bridge failed: {}",

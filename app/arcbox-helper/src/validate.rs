@@ -215,8 +215,7 @@ mod tests {
 
     #[test]
     fn socket_target_rejects_path_traversal() {
-        let result =
-            validate_socket_target("/Users/alice/.arcbox/../../../../var/run/other.sock");
+        let result = validate_socket_target("/Users/alice/.arcbox/../../../../var/run/other.sock");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains(".."));
     }

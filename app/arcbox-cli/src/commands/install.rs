@@ -120,8 +120,7 @@ fn install_helper() -> Result<()> {
     }
 
     // Create target directory.
-    std::fs::create_dir_all("/usr/local/libexec")
-        .context("failed to create /usr/local/libexec")?;
+    std::fs::create_dir_all("/usr/local/libexec").context("failed to create /usr/local/libexec")?;
 
     // Copy binary.
     std::fs::copy(&helper_src, &dest).with_context(|| {
@@ -342,4 +341,3 @@ fn docker_socket_path() -> PathBuf {
         |h| h.join(".arcbox/run/docker.sock"),
     )
 }
-

@@ -4,9 +4,9 @@
 //! on a temp Unix socket, connects with the real `Client`, and verifies the
 //! full serialize → transport → validate → respond round-trip.
 
+use arcbox_helper::HelperService;
 use arcbox_helper::client::{Client, ClientError};
 use arcbox_helper::validate;
-use arcbox_helper::HelperService;
 use futures::prelude::*;
 use tarpc::server::{BaseChannel, Channel};
 use tarpc::tokio_serde::formats::Bincode;
