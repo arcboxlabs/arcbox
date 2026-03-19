@@ -184,6 +184,46 @@ impl Vmm {
         Ok(())
     }
 
+    /// Sets `O_NONBLOCK` and `FD_CLOEXEC` on a raw file descriptor.
+    ///
+    /// Socketpair fds are blocking and inheritable by default. Setting
+    /// `CLOEXEC` prevents leaking them to child processes, and `NONBLOCK`
+    /// is required for async I/O via tokio.
+    fn set_nonblock_cloexec(fd: libc::c_int) -> Result<()> {
+        // SAFETY: fcntl F_GETFD/F_SETFD/F_GETFL/F_SETFL are standard POSIX
+        // operations on a valid fd.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags == -1 {
+                return Err(VmmError::Device(format!(
+                    "fcntl F_GETFD failed: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            if libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) == -1 {
+                return Err(VmmError::Device(format!(
+                    "fcntl F_SETFD FD_CLOEXEC failed: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags == -1 {
+                return Err(VmmError::Device(format!(
+                    "fcntl F_GETFL failed: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            if libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) == -1 {
+                return Err(VmmError::Device(format!(
+                    "fcntl F_SETFL O_NONBLOCK failed: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Creates the network device configuration for Darwin.
     ///
     /// Sets up a socketpair for `VZFileHandleNetworkDeviceAttachment` and a
@@ -215,6 +255,10 @@ impl Vmm {
                 std::io::Error::last_os_error()
             )));
         }
+
+        // Prevent fd inheritance to child processes and enable non-blocking I/O.
+        Self::set_nonblock_cloexec(fds[0])?;
+        Self::set_nonblock_cloexec(fds[1])?;
 
         // fds[0] = VZ framework side (read guest tx, write guest rx)
         // fds[1] = host datapath side
@@ -352,6 +396,10 @@ impl Vmm {
                 std::io::Error::last_os_error()
             )));
         }
+
+        // Prevent fd inheritance to child processes and enable non-blocking I/O.
+        Self::set_nonblock_cloexec(fds[0])?;
+        Self::set_nonblock_cloexec(fds[1])?;
 
         // SAFETY: fds are valid from socketpair.
         let vz_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
