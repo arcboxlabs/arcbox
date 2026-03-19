@@ -39,9 +39,9 @@ use smoltcp::wire::IpEndpoint;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::darwin::smoltcp_device::{SmoltcpDevice, TcpSynInfo};
 use crate::ethernet::ETH_HEADER_LEN;
 use crate::nat_engine::checksum;
+use crate::userstack::smoltcp_device::{SmoltcpDevice, TcpSynInfo};
 
 /// Size of each smoltcp socket's rx/tx buffer. 256 KiB enables window scaling
 /// and provides enough headroom for high-bandwidth transfers.
@@ -1055,8 +1055,8 @@ mod tests {
     use smoltcp::iface::{Config, Interface};
     use smoltcp::wire::{EthernetAddress, IpCidr};
 
-    use crate::darwin::smoltcp_device::{SmoltcpDevice, TcpSynInfo};
     use crate::ethernet::ETH_HEADER_LEN;
+    use crate::userstack::smoltcp_device::{SmoltcpDevice, TcpSynInfo};
 
     const GW_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 64, 1);
     const GW_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];

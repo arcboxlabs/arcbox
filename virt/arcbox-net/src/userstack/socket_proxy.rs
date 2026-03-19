@@ -286,7 +286,9 @@ impl IcmpProxy {
             let dst_addr: SocketAddr = SocketAddrV4::new(dst_ip, 0).into();
 
             match icmp_socket.send_to(&icmp_payload, &dst_addr.into()) {
-                Ok(n) => tracing::info!("ICMP proxy: sendto {} -> {} ({} bytes)", src_ip, dst_ip, n),
+                Ok(n) => {
+                    tracing::info!("ICMP proxy: sendto {} -> {} ({} bytes)", src_ip, dst_ip, n)
+                }
                 Err(e) => {
                     tracing::warn!("ICMP proxy: sendto {} -> {} failed: {}", src_ip, dst_ip, e);
                     return;
@@ -337,7 +339,12 @@ impl IcmpProxy {
 
             match recv {
                 Ok(Ok(n)) if n > 0 => {
-                    tracing::info!("ICMP proxy: received reply ({} bytes) for {} -> {}", n, src_ip, dst_ip);
+                    tracing::info!(
+                        "ICMP proxy: received reply ({} bytes) for {} -> {}",
+                        n,
+                        src_ip,
+                        dst_ip
+                    );
                     let reply_packet = &buf[..n];
                     // Extract the ICMP payload from the reply. macOS DGRAM
                     // ICMP sockets return the full IPv4 packet whose dst IP
@@ -357,8 +364,8 @@ impl IcmpProxy {
                         icmp_data[5] = orig_icmp_id[1];
                     }
                     let reply_frame = build_icmp_ipv4_ethernet(
-                        dst_ip,   // original dst becomes reply src
-                        src_ip,   // original src (guest) becomes reply dst
+                        dst_ip, // original dst becomes reply src
+                        src_ip, // original src (guest) becomes reply dst
                         &icmp_data,
                         gateway_mac,
                         guest_mac,
@@ -366,16 +373,25 @@ impl IcmpProxy {
                     tracing::info!(
                         "ICMP proxy: sending reply frame ({} bytes) dst_mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} ip_src={} ip_dst={}",
                         reply_frame.len(),
-                        reply_frame[0], reply_frame[1], reply_frame[2],
-                        reply_frame[3], reply_frame[4], reply_frame[5],
-                        dst_ip, src_ip,
+                        reply_frame[0],
+                        reply_frame[1],
+                        reply_frame[2],
+                        reply_frame[3],
+                        reply_frame[4],
+                        reply_frame[5],
+                        dst_ip,
+                        src_ip,
                     );
                     if reply_tx.send(reply_frame).await.is_err() {
                         tracing::warn!("ICMP proxy: reply_tx channel closed");
                     }
                 }
                 _ => {
-                    tracing::warn!("ICMP proxy: no reply (timeout/error) for {} -> {}", src_ip, dst_ip);
+                    tracing::warn!(
+                        "ICMP proxy: no reply (timeout/error) for {} -> {}",
+                        src_ip,
+                        dst_ip
+                    );
                 }
             }
         });

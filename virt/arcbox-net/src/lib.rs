@@ -50,6 +50,7 @@ pub mod nat;
 pub mod nat_backend;
 pub mod nat_engine;
 pub mod port_forward;
+pub mod userstack;
 
 #[cfg(target_os = "linux")]
 pub mod linux;

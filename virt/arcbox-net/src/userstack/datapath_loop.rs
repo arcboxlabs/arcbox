@@ -34,13 +34,13 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::darwin::inbound_relay::InboundCommand;
-use crate::darwin::smoltcp_device::{InterceptedKind, SmoltcpDevice};
-use crate::darwin::socket_proxy::SocketProxy;
-use crate::darwin::tcp_bridge::TcpBridge;
 use crate::dhcp::DhcpServer;
 use crate::dns::DnsForwarder;
 use crate::ethernet::{ETH_HEADER_LEN, build_udp_ip_ethernet};
+use crate::userstack::inbound_relay::InboundCommand;
+use crate::userstack::smoltcp_device::{InterceptedKind, SmoltcpDevice};
+use crate::userstack::socket_proxy::SocketProxy;
+use crate::userstack::tcp_bridge::TcpBridge;
 
 /// Stop consuming reply_rx when write queue exceeds this depth, propagating
 /// backpressure through the reply channel to upstream TCP/UDP proxies.
