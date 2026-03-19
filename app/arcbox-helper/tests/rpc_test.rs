@@ -6,7 +6,7 @@
 
 use arcbox_helper::client::{Client, ClientError};
 use arcbox_helper::validate;
-use arcbox_helper::{HelperService, HELPER_SOCKET_ENV};
+use arcbox_helper::HelperService;
 use futures::prelude::*;
 use tarpc::server::{BaseChannel, Channel};
 use tarpc::tokio_serde::formats::Bincode;
@@ -100,10 +100,8 @@ async fn setup() -> (Client, tempfile::TempDir) {
         }
     });
 
-    // Connect client via env override.
-    unsafe { std::env::set_var(HELPER_SOCKET_ENV, &sock_str) };
-    let client = Client::connect().await.unwrap();
-    unsafe { std::env::remove_var(HELPER_SOCKET_ENV) };
+    // Connect client via explicit socket path (avoids env var race in parallel tests).
+    let client = Client::connect_to(&sock_str).await.unwrap();
 
     (client, dir)
 }
@@ -196,10 +194,7 @@ async fn socket_unlink_valid() {
 
 #[tokio::test]
 async fn connection_refused_when_no_server() {
-    // Point to a nonexistent socket.
-    unsafe { std::env::set_var(HELPER_SOCKET_ENV, "/tmp/arcbox-helper-nonexistent.sock") };
-    let err = Client::connect().await;
-    unsafe { std::env::remove_var(HELPER_SOCKET_ENV) };
-
+    // Point to a nonexistent socket via explicit path (no env var mutation).
+    let err = Client::connect_to("/tmp/arcbox-helper-nonexistent.sock").await;
     assert!(matches!(err, Err(ClientError::Connection(_))));
 }

@@ -35,6 +35,21 @@ impl Client {
         Ok(Self { inner })
     }
 
+    /// Connects to the helper daemon at an explicit socket path.
+    ///
+    /// Unlike [`connect()`](Self::connect), this does not read the
+    /// `ARCBOX_HELPER_SOCKET` env var, making it safe for parallel tests.
+    pub async fn connect_to(path: &str) -> Result<Self, ClientError> {
+        let transport = tarpc::serde_transport::unix::connect(
+            path,
+            tarpc::tokio_serde::formats::Bincode::default,
+        )
+        .await?;
+        let inner =
+            crate::HelperServiceClient::new(tarpc::client::Config::default(), transport).spawn();
+        Ok(Self { inner })
+    }
+
     /// Adds a host route for `subnet` via `iface`.
     pub async fn route_add(&self, subnet: &str, iface: &str) -> Result<(), ClientError> {
         self.inner
