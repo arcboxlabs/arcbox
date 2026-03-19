@@ -186,7 +186,13 @@ fn cleanup_stale_state(pid_file: &std::path::Path, run_dir: &std::path::Path) {
 
 fn is_process_alive(pid: i32) -> bool {
     // SAFETY: kill(pid, 0) is a standard POSIX existence check.
-    unsafe { libc::kill(pid, 0) == 0 }
+    let ret = unsafe { libc::kill(pid, 0) };
+    if ret == 0 {
+        return true;
+    }
+    // EPERM means the process exists but we lack permission to signal it.
+    let err = std::io::Error::last_os_error();
+    err.raw_os_error() == Some(libc::EPERM)
 }
 
 fn is_arcbox_daemon(pid: i32) -> bool {
