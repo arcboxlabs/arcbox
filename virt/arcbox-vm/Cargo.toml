@@ -27,6 +27,7 @@ toml.workspace         = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 arcbox-net.workspace = true
+tokio-util = { version = "0.7", features = ["rt"] }
 
 [dev-dependencies]
 tokio              = { workspace = true, features = ["rt", "macros"] }

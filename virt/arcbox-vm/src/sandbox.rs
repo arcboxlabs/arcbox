@@ -177,6 +177,9 @@ pub struct SandboxInstance {
     pub last_exit_code: Option<i32>,
     /// Human-readable error (only set when state == `Failed`).
     pub error: Option<String>,
+    /// Cancellation token for the per-sandbox network datapath task.
+    #[cfg(target_os = "linux")]
+    pub datapath_cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl SandboxInstance {
@@ -201,6 +204,8 @@ impl SandboxInstance {
             last_exited_at: None,
             last_exit_code: None,
             error: None,
+            #[cfg(target_os = "linux")]
+            datapath_cancel: None,
         }
     }
 
@@ -392,7 +397,15 @@ impl SandboxManager {
             }
         }
 
-        // Allocate network resources.
+        // Allocate network resources (and AF_PACKET fd on Linux).
+        #[cfg(target_os = "linux")]
+        let (net_alloc, tap_fd) = if spec.network.mode == "none" {
+            (None, None)
+        } else {
+            let (alloc, fd) = self.network.allocate_with_fd(&id)?;
+            (Some(alloc), Some(fd))
+        };
+        #[cfg(not(target_os = "linux"))]
         let net_alloc = if spec.network.mode == "none" {
             None
         } else {
@@ -430,6 +443,8 @@ impl SandboxManager {
             let id_clone = id.clone();
             let spec_clone = spec.clone();
             let net_alloc_clone = net_alloc;
+            #[cfg(target_os = "linux")]
+            let tap_fd_move = tap_fd;
             tokio::spawn(async move {
                 boot_sandbox(
                     id_clone,
@@ -440,6 +455,8 @@ impl SandboxManager {
                     network,
                     config,
                     events_tx,
+                    #[cfg(target_os = "linux")]
+                    tap_fd_move,
                 )
                 .await;
             });
@@ -1241,10 +1258,16 @@ async fn boot_sandbox(
     network: Arc<NetworkManager>,
     config: Arc<VmmConfig>,
     events_tx: broadcast::Sender<SandboxEvent>,
+    #[cfg(target_os = "linux")] tap_fd: Option<std::os::fd::OwnedFd>,
 ) {
     match do_boot(&id, &spec, net_alloc.as_ref(), &vm_dir, &config).await {
         Ok((process, vm, vsock_uds_path)) => {
             let ready_at = Utc::now();
+
+            // Spawn per-sandbox userspace network datapath on Linux.
+            #[cfg(target_os = "linux")]
+            let datapath_cancel = spawn_sandbox_datapath(&id, &net_alloc, tap_fd);
+
             let value = instances.read().unwrap().get(&id).cloned();
             if let Some(arc) = value {
                 let mut inst = arc.lock().unwrap();
@@ -1258,6 +1281,10 @@ async fn boot_sandbox(
                 inst.vsock_uds_path = Some(vsock_uds_path);
                 inst.state = SandboxState::Ready;
                 inst.ready_at = Some(ready_at);
+                #[cfg(target_os = "linux")]
+                {
+                    inst.datapath_cancel = datapath_cancel;
+                }
             }
             let _ = events_tx.send(SandboxEvent::new(&id, "ready"));
             info!(sandbox_id = %id, "sandbox booted and ready");
@@ -1278,6 +1305,66 @@ async fn boot_sandbox(
             error!(sandbox_id = %id, error = %e, "sandbox boot failed");
         }
     }
+}
+
+/// Spawn a per-sandbox userspace network datapath (smoltcp + SocketProxy).
+///
+/// Returns a `CancellationToken` that should be stored in the sandbox instance
+/// and cancelled when the sandbox is removed.
+#[cfg(target_os = "linux")]
+fn spawn_sandbox_datapath(
+    id: &str,
+    net_alloc: &Option<NetworkAllocation>,
+    tap_fd: Option<std::os::fd::OwnedFd>,
+) -> Option<tokio_util::sync::CancellationToken> {
+    use arcbox_net::dhcp::{DhcpConfig, DhcpServer};
+    use arcbox_net::dns::{DnsConfig, DnsForwarder};
+    use arcbox_net::userstack::datapath_loop::NetworkDatapath;
+    use arcbox_net::userstack::socket_proxy::SocketProxy;
+    use tokio_util::sync::CancellationToken;
+
+    let tap_fd = tap_fd?;
+    let net = net_alloc.as_ref()?;
+
+    let cancel = CancellationToken::new();
+    let gateway_mac: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+
+    let (reply_tx, reply_rx) = tokio::sync::mpsc::channel(256);
+    let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(64);
+    let socket_proxy = SocketProxy::new(net.gateway, gateway_mac, net.ip_address, reply_tx);
+
+    let dhcp_config = DhcpConfig::new(net.gateway, net.netmask())
+        .with_pool_range(net.ip_address, net.ip_address)
+        .with_dns_servers(vec![net.gateway]);
+    let dhcp_server = DhcpServer::new(dhcp_config);
+
+    // DNS upstream is the sandbox gateway; from the Guest VM's network
+    // namespace this resolves via the default route to 10.0.2.1 (the
+    // Host-side DnsForwarder).
+    let dns_forwarder = DnsForwarder::new(DnsConfig::new(net.gateway));
+
+    let datapath = NetworkDatapath::new(
+        tap_fd,
+        socket_proxy,
+        reply_rx,
+        cmd_rx,
+        dhcp_server,
+        dns_forwarder,
+        net.gateway,
+        net.ip_address,
+        gateway_mac,
+        cancel.clone(),
+    );
+
+    let sandbox_id = id.to_owned();
+    tokio::spawn(async move {
+        if let Err(e) = datapath.run().await {
+            tracing::error!(sandbox_id = %sandbox_id, error = %e, "sandbox network datapath exited");
+        }
+    });
+
+    info!(sandbox_id = %id, gateway = %net.gateway, guest = %net.ip_address, "sandbox network datapath spawned");
+    Some(cancel)
 }
 
 /// Compute the host-side absolute path to the jailer chroot root directory.
@@ -1481,6 +1568,11 @@ async fn remove_sandbox_impl(
 
     {
         let mut inst = arc.lock().unwrap();
+        // Cancel the per-sandbox network datapath before killing FC.
+        #[cfg(target_os = "linux")]
+        if let Some(ref cancel) = inst.datapath_cancel {
+            cancel.cancel();
+        }
         // Kill the Firecracker process.
         if let Some(ref mut proc) = inst.process
             && let Some(pid) = proc.pid()
