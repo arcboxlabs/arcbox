@@ -135,7 +135,7 @@ jobs:
       - name: Codesign abctl
         run: |
           codesign --force --options runtime \
-            --identifier com.arcboxlabs.cli \
+            --identifier com.arcboxlabs.desktop.cli \
             --sign "Developer ID Application: ArcBox, Inc. ($APPLE_TEAM_ID)" \
             target/release/abctl
           codesign -v --deep --strict target/release/abctl

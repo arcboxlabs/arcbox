@@ -3,9 +3,10 @@
 mod handler;
 mod launchd;
 mod mutations;
+mod peer_auth;
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use futures::prelude::*;
@@ -79,6 +80,10 @@ async fn accept_loop(listener: tokio::net::UnixListener, tracker: Arc<Connection
                 continue;
             }
         };
+
+        if !peer_auth::verify(&conn) {
+            continue;
+        }
 
         tracker.connect();
         let tracker_clone = Arc::clone(&tracker);
