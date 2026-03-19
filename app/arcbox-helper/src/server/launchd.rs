@@ -24,30 +24,29 @@ unsafe extern "C" {
 /// `None` when started manually (dev mode).
 pub fn listener() -> Option<tokio::net::UnixListener> {
     let name = std::ffi::CString::new(LAUNCHD_SOCKET_NAME).ok()?;
-    let mut fds: *mut libc::c_int = std::ptr::null_mut();
+    let mut fds_ptr: *mut libc::c_int = std::ptr::null_mut();
     let mut cnt: libc::size_t = 0;
 
     // SAFETY: launch_activate_socket is a well-defined macOS API. We pass
-    // valid pointers and check the return value before using fds.
-    let ret = unsafe { launch_activate_socket(name.as_ptr(), &raw mut fds, &raw mut cnt) };
+    // valid pointers and check the return value before using fds_ptr.
+    let ret = unsafe { launch_activate_socket(name.as_ptr(), &raw mut fds_ptr, &raw mut cnt) };
 
-    if ret != 0 || cnt == 0 || fds.is_null() {
+    if ret != 0 || cnt == 0 || fds_ptr.is_null() {
         return None;
     }
 
-    // SAFETY: fds points to a valid array of cnt ints allocated by the system.
-    let fd = unsafe { *fds };
-
-    // Close any extra fds beyond the first to prevent fd leaks.
-    // launchd may pass more than one socket when the plist has multiple
-    // SockPathName entries or after a fast re-bootstrap.
-    for i in 1..cnt {
-        // SAFETY: fds[i] is a valid fd within the array of cnt ints.
-        unsafe { libc::close(*fds.add(i)) };
-    }
-
-    // SAFETY: fds was allocated by launch_activate_socket; we must free it.
-    unsafe { libc::free(fds.cast::<libc::c_void>()) };
+    // SAFETY: launch_activate_socket succeeded with cnt > 0 and non-null
+    // fds_ptr. The pointer is valid for cnt elements. We take the first fd
+    // and close the rest to prevent leaks, then free the array.
+    let fd = unsafe {
+        let fds = std::slice::from_raw_parts(fds_ptr, cnt);
+        let first = fds[0];
+        for &extra in &fds[1..] {
+            libc::close(extra);
+        }
+        libc::free(fds_ptr.cast::<libc::c_void>());
+        first
+    };
 
     // SAFETY: fd is a valid listening socket from launchd.
     let std_listener = unsafe { std::os::unix::net::UnixListener::from_raw_fd(fd) };
