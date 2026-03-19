@@ -4,10 +4,11 @@
 //! binary, DNS resolver, Docker socket symlink, daemon launchd service,
 //! and shell integration in a single `sudo arcbox install` invocation.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use arcbox_helper::client::Client;
 
 /// Arguments for the install command.
 #[derive(clap::Args)]
@@ -32,14 +33,19 @@ pub async fn execute(args: InstallArgs) -> Result<()> {
     install_helper()?;
     print_done();
 
-    // 2. Install DNS resolver.
+    // 2. Install DNS resolver via helper tarpc client.
+    // The socket is available immediately after launchctl bootstrap because
+    // launchd socket activation creates the socket file eagerly.
     print_step(2, 5, "Installing DNS resolver...");
-    install_dns_resolver()?;
+    let client = Client::connect()
+        .await
+        .context("failed to connect to arcbox-helper (is the service running?)")?;
+    install_dns_resolver(&client).await?;
     print_done();
 
-    // 3. Set up Docker socket.
+    // 3. Set up Docker socket via helper tarpc client.
     print_step(3, 5, "Setting up Docker socket...");
-    setup_docker_socket()?;
+    setup_docker_socket(&client).await?;
     print_done();
 
     // 4. Register daemon service.
@@ -164,54 +170,34 @@ fn install_helper() -> Result<()> {
 // Step 2: DNS resolver
 // =============================================================================
 
-/// Installs the DNS resolver file via the helper binary.
-fn install_dns_resolver() -> Result<()> {
+/// Installs the DNS resolver file via the helper tarpc client.
+async fn install_dns_resolver(client: &Client) -> Result<()> {
     let domain = dns_domain();
     let port = dns_port();
 
-    let helper = find_helper()?;
-    run_helper(
-        &helper,
-        &[
-            "dns",
-            "install",
-            "--domain",
-            &domain,
-            "--port",
-            &port.to_string(),
-        ],
-    )
+    client
+        .dns_install(&domain, port)
+        .await
+        .context("failed to install DNS resolver via helper")?;
+
+    Ok(())
 }
 
 // =============================================================================
 // Step 3: Docker socket
 // =============================================================================
 
-/// Sets up the Docker socket symlink via the helper binary.
-fn setup_docker_socket() -> Result<()> {
+/// Sets up the Docker socket symlink via the helper tarpc client.
+async fn setup_docker_socket(client: &Client) -> Result<()> {
     let target = docker_socket_path();
     let target_str = target.to_string_lossy();
 
-    let helper = find_helper();
+    client
+        .socket_link(&target_str)
+        .await
+        .context("failed to create Docker socket symlink via helper")?;
 
-    // If we just installed the helper, use it. Otherwise fall back to direct
-    // symlink (we're presumably running as root via sudo).
-    match helper {
-        Ok(h) => run_helper(&h, &["socket", "link", "--target", &target_str]),
-        Err(_) => {
-            // Direct fallback when helper isn't found yet.
-            let link = Path::new("/var/run/docker.sock");
-            if let Ok(existing) = std::fs::read_link(link) {
-                if existing == target {
-                    return Ok(());
-                }
-                std::fs::remove_file(link).ok();
-            }
-            std::os::unix::fs::symlink(&target, link)
-                .context("failed to create /var/run/docker.sock symlink")?;
-            Ok(())
-        }
-    }
+    Ok(())
 }
 
 // =============================================================================
@@ -314,50 +300,3 @@ fn docker_socket_path() -> PathBuf {
     )
 }
 
-/// Finds the arcbox-helper binary. Checks the just-installed location first,
-/// then the locations route_reconciler would search.
-fn find_helper() -> Result<PathBuf> {
-    let candidates = [
-        // Just installed by step 1.
-        Some(PathBuf::from("/usr/local/libexec/arcbox-helper")),
-        // Sibling of current exe.
-        std::env::current_exe()
-            .ok()
-            .and_then(|e| e.parent().map(|d| d.join("arcbox-helper"))),
-        // ~/.arcbox/bin
-        dirs::home_dir().map(|h| h.join(".arcbox/bin/arcbox-helper")),
-        Some(PathBuf::from("/usr/local/bin/arcbox-helper")),
-    ];
-
-    for candidate in candidates.into_iter().flatten() {
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-
-    bail!("arcbox-helper not found")
-}
-
-/// Runs the helper binary with the given arguments and checks for success.
-fn run_helper(helper: &Path, args: &[&str]) -> Result<()> {
-    let output = Command::new(helper)
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to execute {}", helper.display()))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    bail!(
-        "helper command failed: {}{}",
-        stdout.trim(),
-        if stderr.is_empty() {
-            String::new()
-        } else {
-            format!(" (stderr: {})", stderr.trim())
-        }
-    );
-}
