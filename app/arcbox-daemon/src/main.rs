@@ -87,18 +87,18 @@ async fn run(args: DaemonArgs) -> Result<()> {
     // Phase 1: directories, config, sockets — no runtime yet.
     let mut ctx = startup::init_early(args).await?;
 
-    // Start gRPC immediately (SystemService only) so clients can
-    // observe DOWNLOADING_ASSETS → ASSETS_READY → VM_STARTING.
-    let early_grpc = services::start_grpc_system_only(&ctx).await?;
+    // Start gRPC with all services. Machine/Sandbox return UNAVAILABLE
+    // until runtime is ready. SystemService works immediately so clients
+    // can observe DOWNLOADING_ASSETS → ASSETS_READY progression.
+    let shared_runtime = ctx.shared_runtime.clone();
+    let grpc = services::start_grpc(&ctx, shared_runtime).await?;
 
     // Phase 2: seed/download boot assets, build runtime, start VM.
     // Progress is visible to gRPC clients via WatchSetupStatus.
     startup::init_runtime(&mut ctx).await?;
 
-    // Upgrade: stop the SystemService-only server and restart with
-    // all services. The desktop reconnects automatically.
-    early_grpc.abort();
-    let handles = services::start(&ctx).await?;
+    // Phase 3: start remaining services that require the runtime.
+    let handles = services::start_services(&ctx, grpc).await?;
     recovery::run(&ctx).await;
 
     check_resolver_installed(&ctx.dns_domain);

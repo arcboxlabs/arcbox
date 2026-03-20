@@ -22,12 +22,25 @@ use arcbox_protocol::v1::{
     StartMachineRequest, StopMachineRequest,
 };
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio_stream::Stream;
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tonic::codec::Streaming;
 use tonic::{Request, Response, Status};
+
+/// Shared handle to a runtime that may not be initialized yet.
+///
+/// Services are registered with tonic before the runtime exists.
+/// Each RPC method calls `get_runtime()` which returns `UNAVAILABLE`
+/// while the daemon is still downloading assets / starting the VM.
+pub type SharedRuntime = Arc<OnceLock<Arc<Runtime>>>;
+
+fn get_runtime(shared: &SharedRuntime) -> Result<&Arc<Runtime>, Status> {
+    shared
+        .get()
+        .ok_or_else(|| Status::unavailable("daemon is starting, runtime not ready yet"))
+}
 
 // =============================================================================
 // Machine Service
@@ -35,13 +48,13 @@ use tonic::{Request, Response, Status};
 
 /// Machine service implementation.
 pub struct MachineServiceImpl {
-    runtime: Arc<Runtime>,
+    runtime: SharedRuntime,
 }
 
 impl MachineServiceImpl {
-    /// Creates a new machine service.
+    /// Creates a new machine service with a deferred runtime.
     #[must_use]
-    pub const fn new(runtime: Arc<Runtime>) -> Self {
+    pub fn new(runtime: SharedRuntime) -> Self {
         Self { runtime }
     }
 }
@@ -86,7 +99,7 @@ impl machine_service_server::MachineService for MachineServiceImpl {
             block_devices: Vec::new(),
         };
 
-        self.runtime
+        get_runtime(&self.runtime)?
             .machine_manager()
             .create(config)
             .await
@@ -101,7 +114,7 @@ impl machine_service_server::MachineService for MachineServiceImpl {
     ) -> Result<Response<Empty>, Status> {
         let id = request.into_inner().id;
 
-        self.runtime
+        get_runtime(&self.runtime)?
             .machine_manager()
             .start(&id)
             .await
@@ -113,7 +126,7 @@ impl machine_service_server::MachineService for MachineServiceImpl {
     async fn stop(&self, request: Request<StopMachineRequest>) -> Result<Response<Empty>, Status> {
         let id = request.into_inner().id;
 
-        self.runtime
+        get_runtime(&self.runtime)?
             .machine_manager()
             .stop(&id)
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -127,7 +140,7 @@ impl machine_service_server::MachineService for MachineServiceImpl {
     ) -> Result<Response<Empty>, Status> {
         let req = request.into_inner();
 
-        self.runtime
+        get_runtime(&self.runtime)?
             .machine_manager()
             .remove(&req.id, req.force)
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -139,7 +152,7 @@ impl machine_service_server::MachineService for MachineServiceImpl {
         &self,
         _request: Request<ListMachinesRequest>,
     ) -> Result<Response<ListMachinesResponse>, Status> {
-        let machines = self.runtime.machine_manager().list();
+        let machines = get_runtime(&self.runtime)?.machine_manager().list();
 
         let summaries: Vec<_> = machines
             .into_iter()
@@ -166,8 +179,7 @@ impl machine_service_server::MachineService for MachineServiceImpl {
     ) -> Result<Response<MachineInfo>, Status> {
         let id = request.into_inner().id;
 
-        let machine = self
-            .runtime
+        let machine = get_runtime(&self.runtime)?
             .machine_manager()
             .get(&id)
             .ok_or_else(|| Status::not_found("machine not found"))?;
@@ -213,8 +225,7 @@ impl machine_service_server::MachineService for MachineServiceImpl {
     ) -> Result<Response<MachinePingResponse>, Status> {
         let id = request.into_inner().id;
 
-        let mut agent = self
-            .runtime
+        let mut agent = get_runtime(&self.runtime)?
             .get_agent(&id)
             .map_err(|e| Status::internal(e.to_string()))?;
         let response = agent
@@ -234,8 +245,7 @@ impl machine_service_server::MachineService for MachineServiceImpl {
     ) -> Result<Response<MachineSystemInfo>, Status> {
         let id = request.into_inner().id;
 
-        let mut agent = self
-            .runtime
+        let mut agent = get_runtime(&self.runtime)?
             .get_agent(&id)
             .map_err(|e| Status::internal(e.to_string()))?;
         let info = agent
@@ -305,13 +315,13 @@ fn core_to_status(e: &arcbox_core::CoreError) -> Status {
 /// via the port-1024 vsock binary-frame protocol. The target machine is
 /// identified by the `x-machine` gRPC metadata header attached by the CLI.
 pub struct SandboxServiceImpl {
-    runtime: Arc<Runtime>,
+    runtime: SharedRuntime,
 }
 
 impl SandboxServiceImpl {
-    /// Creates a new sandbox service.
+    /// Creates a new sandbox service with a deferred runtime.
     #[must_use]
-    pub const fn new(runtime: Arc<Runtime>) -> Self {
+    pub fn new(runtime: SharedRuntime) -> Self {
         Self { runtime }
     }
 }
@@ -323,8 +333,7 @@ impl SandboxService for SandboxServiceImpl {
         request: Request<CreateSandboxRequest>,
     ) -> Result<Response<CreateSandboxResponse>, Status> {
         let machine = extract_machine_id(&request)?;
-        let mut agent = self
-            .runtime
+        let mut agent = get_runtime(&self.runtime)?
             .get_agent(&machine)
             .map_err(|e| core_to_status(&e))?;
         let resp = agent
@@ -334,7 +343,9 @@ impl SandboxService for SandboxServiceImpl {
 
         // Register sandbox DNS so the host can resolve sandbox-id.arcbox.local.
         if let Ok(ip) = resp.ip_address.parse() {
-            self.runtime.register_dns(&resp.id, &resp.id, ip).await;
+            get_runtime(&self.runtime)?
+                .register_dns(&resp.id, &resp.id, ip)
+                .await;
         }
 
         Ok(Response::new(resp))
@@ -344,8 +355,7 @@ impl SandboxService for SandboxServiceImpl {
 
     async fn run(&self, request: Request<RunRequest>) -> Result<Response<Self::RunStream>, Status> {
         let machine = extract_machine_id(&request)?;
-        let agent = self
-            .runtime
+        let agent = get_runtime(&self.runtime)?
             .get_agent(&machine)
             .map_err(|e| core_to_status(&e))?;
         let rx = agent
@@ -374,8 +384,7 @@ impl SandboxService for SandboxServiceImpl {
     ) -> Result<Response<SandboxEmpty>, Status> {
         let machine = extract_machine_id(&request)?;
         let sandbox_id = request.get_ref().id.clone();
-        let mut agent = self
-            .runtime
+        let mut agent = get_runtime(&self.runtime)?
             .get_agent(&machine)
             .map_err(|e| core_to_status(&e))?;
         agent
@@ -383,7 +392,9 @@ impl SandboxService for SandboxServiceImpl {
             .await
             .map_err(|e| core_to_status(&e))?;
 
-        self.runtime.deregister_dns_by_id(&sandbox_id).await;
+        get_runtime(&self.runtime)?
+            .deregister_dns_by_id(&sandbox_id)
+            .await;
 
         Ok(Response::new(SandboxEmpty {}))
     }
@@ -394,8 +405,7 @@ impl SandboxService for SandboxServiceImpl {
     ) -> Result<Response<SandboxEmpty>, Status> {
         let machine = extract_machine_id(&request)?;
         let sandbox_id = request.get_ref().id.clone();
-        let mut agent = self
-            .runtime
+        let mut agent = get_runtime(&self.runtime)?
             .get_agent(&machine)
             .map_err(|e| core_to_status(&e))?;
         agent
@@ -403,7 +413,9 @@ impl SandboxService for SandboxServiceImpl {
             .await
             .map_err(|e| core_to_status(&e))?;
 
-        self.runtime.deregister_dns_by_id(&sandbox_id).await;
+        get_runtime(&self.runtime)?
+            .deregister_dns_by_id(&sandbox_id)
+            .await;
 
         Ok(Response::new(SandboxEmpty {}))
     }
@@ -413,8 +425,7 @@ impl SandboxService for SandboxServiceImpl {
         request: Request<InspectSandboxRequest>,
     ) -> Result<Response<SandboxInfo>, Status> {
         let machine = extract_machine_id(&request)?;
-        let mut agent = self
-            .runtime
+        let mut agent = get_runtime(&self.runtime)?
             .get_agent(&machine)
             .map_err(|e| core_to_status(&e))?;
         let info = agent
@@ -429,8 +440,7 @@ impl SandboxService for SandboxServiceImpl {
         request: Request<ListSandboxesRequest>,
     ) -> Result<Response<ListSandboxesResponse>, Status> {
         let machine = extract_machine_id(&request)?;
-        let mut agent = self
-            .runtime
+        let mut agent = get_runtime(&self.runtime)?
             .get_agent(&machine)
             .map_err(|e| core_to_status(&e))?;
         let resp = agent
@@ -447,8 +457,7 @@ impl SandboxService for SandboxServiceImpl {
         request: Request<SandboxEventsRequest>,
     ) -> Result<Response<Self::EventsStream>, Status> {
         let machine = extract_machine_id(&request)?;
-        let agent = self
-            .runtime
+        let agent = get_runtime(&self.runtime)?
             .get_agent(&machine)
             .map_err(|e| core_to_status(&e))?;
         let rx = agent
@@ -467,13 +476,13 @@ impl SandboxService for SandboxServiceImpl {
 
 /// Sandbox snapshot service implementation.
 pub struct SandboxSnapshotServiceImpl {
-    runtime: Arc<Runtime>,
+    runtime: SharedRuntime,
 }
 
 impl SandboxSnapshotServiceImpl {
-    /// Creates a new sandbox snapshot service.
+    /// Creates a new sandbox snapshot service with a deferred runtime.
     #[must_use]
-    pub const fn new(runtime: Arc<Runtime>) -> Self {
+    pub fn new(runtime: SharedRuntime) -> Self {
         Self { runtime }
     }
 }
@@ -485,8 +494,7 @@ impl SandboxSnapshotService for SandboxSnapshotServiceImpl {
         request: Request<CheckpointRequest>,
     ) -> Result<Response<CheckpointResponse>, Status> {
         let machine = extract_machine_id(&request)?;
-        let mut agent = self
-            .runtime
+        let mut agent = get_runtime(&self.runtime)?
             .get_agent(&machine)
             .map_err(|e| core_to_status(&e))?;
         let resp = agent
@@ -501,8 +509,7 @@ impl SandboxSnapshotService for SandboxSnapshotServiceImpl {
         request: Request<RestoreRequest>,
     ) -> Result<Response<RestoreResponse>, Status> {
         let machine = extract_machine_id(&request)?;
-        let mut agent = self
-            .runtime
+        let mut agent = get_runtime(&self.runtime)?
             .get_agent(&machine)
             .map_err(|e| core_to_status(&e))?;
         let resp = agent
@@ -512,7 +519,9 @@ impl SandboxSnapshotService for SandboxSnapshotServiceImpl {
 
         // Register restored sandbox DNS.
         if let Ok(ip) = resp.ip_address.parse() {
-            self.runtime.register_dns(&resp.id, &resp.id, ip).await;
+            get_runtime(&self.runtime)?
+                .register_dns(&resp.id, &resp.id, ip)
+                .await;
         }
 
         Ok(Response::new(resp))
@@ -523,8 +532,7 @@ impl SandboxSnapshotService for SandboxSnapshotServiceImpl {
         request: Request<ListSnapshotsRequest>,
     ) -> Result<Response<ListSnapshotsResponse>, Status> {
         let machine = extract_machine_id(&request)?;
-        let mut agent = self
-            .runtime
+        let mut agent = get_runtime(&self.runtime)?
             .get_agent(&machine)
             .map_err(|e| core_to_status(&e))?;
         let resp = agent
@@ -539,8 +547,7 @@ impl SandboxSnapshotService for SandboxSnapshotServiceImpl {
         request: Request<DeleteSnapshotRequest>,
     ) -> Result<Response<SandboxEmpty>, Status> {
         let machine = extract_machine_id(&request)?;
-        let mut agent = self
-            .runtime
+        let mut agent = get_runtime(&self.runtime)?
             .get_agent(&machine)
             .map_err(|e| core_to_status(&e))?;
         agent

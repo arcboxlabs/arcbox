@@ -57,7 +57,7 @@ pub async fn init_early(args: DaemonArgs) -> Result<DaemonContext> {
         socket_path,
         grpc_socket,
         pid_file,
-        runtime: None,
+        shared_runtime: Arc::new(std::sync::OnceLock::new()),
         setup_state,
         shutdown: CancellationToken::new(),
         dns_domain,
@@ -119,7 +119,7 @@ pub async fn init_runtime(ctx: &mut DaemonContext) -> Result<()> {
         runtime.network_manager().set_dns_domain(&ctx.dns_domain);
     }
 
-    ctx.runtime = Some(runtime);
+    let _ = ctx.shared_runtime.set(runtime);
     Ok(())
 }
 

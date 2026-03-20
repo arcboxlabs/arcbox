@@ -18,5 +18,5 @@ pub use arcbox_grpc::{
 
 pub use arcbox_protocol::v1::setup_status::Phase as SetupPhase;
 pub use error::{ApiError, Result};
-pub use grpc::{MachineServiceImpl, SandboxServiceImpl, SandboxSnapshotServiceImpl};
+pub use grpc::{MachineServiceImpl, SandboxServiceImpl, SandboxSnapshotServiceImpl, SharedRuntime};
 pub use system::{SetupState, SystemServiceImpl};

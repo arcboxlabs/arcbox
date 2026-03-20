@@ -1,9 +1,9 @@
 //! Shared daemon state threaded through all lifecycle phases.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use arcbox_api::SetupState;
+use arcbox_api::{SetupState, SharedRuntime};
 use arcbox_core::Runtime;
 use tokio_util::sync::CancellationToken;
 
@@ -13,8 +13,8 @@ pub struct DaemonContext {
     pub socket_path: PathBuf,
     pub grpc_socket: PathBuf,
     pub pid_file: PathBuf,
-    /// `None` after `init_early`, `Some` after `init_runtime`.
-    pub runtime: Option<Arc<Runtime>>,
+    /// Shared with gRPC services. Empty after `init_early`, filled by `init_runtime`.
+    pub shared_runtime: SharedRuntime,
     pub setup_state: Arc<SetupState>,
     pub shutdown: CancellationToken,
     pub dns_domain: String,
@@ -26,8 +26,8 @@ pub struct DaemonContext {
 impl DaemonContext {
     /// Returns the runtime. Panics if called before `init_runtime`.
     pub fn runtime(&self) -> &Arc<Runtime> {
-        self.runtime
-            .as_ref()
+        self.shared_runtime
+            .get()
             .expect("runtime not initialized — called before init_runtime?")
     }
 }

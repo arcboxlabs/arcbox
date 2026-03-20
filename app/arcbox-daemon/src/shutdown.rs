@@ -25,7 +25,7 @@ pub async fn run(ctx: DaemonContext, mut handles: ServiceHandles) -> Result<()> 
         arcbox_core::route_reconciler::remove_route().await;
     }
 
-    if let Some(ref runtime) = ctx.runtime {
+    if let Some(runtime) = ctx.shared_runtime.get() {
         runtime
             .shutdown()
             .await
