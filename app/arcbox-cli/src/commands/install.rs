@@ -1,14 +1,14 @@
-//! One-time privileged setup for ArcBox.
+//! One-time privileged setup for ArcBox (CLI-only users).
 //!
-//! Replaces the desktop app's `StartupOrchestrator` — installs the helper
-//! binary, DNS resolver, Docker socket symlink, daemon launchd service,
-//! and shell integration in a single `sudo arcbox install` invocation.
+//! Installs the helper binary (requires sudo) and registers the daemon as
+//! a launchd user agent. Everything else — DNS resolver, Docker socket,
+//! boot assets, runtime binaries, Docker CLI tools — is handled by the
+//! daemon during startup via self-setup.
 
 use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use arcbox_helper::client::Client;
 
 /// Arguments for the install command.
 #[derive(clap::Args)]
@@ -28,33 +28,13 @@ pub async fn execute(args: InstallArgs) -> Result<()> {
     println!("==============");
     println!();
 
-    // 1. Install helper binary.
-    print_step(1, 6, "Installing arcbox-helper...");
+    // 1. Install helper binary (requires sudo).
+    print_step(1, 3, "Installing arcbox-helper...");
     install_helper()?;
     print_done();
 
-    // 2. Install DNS resolver via helper tarpc client.
-    // The socket is available immediately after launchctl bootstrap because
-    // launchd socket activation creates the socket file eagerly.
-    print_step(2, 6, "Installing DNS resolver...");
-    let client = Client::connect()
-        .await
-        .context("failed to connect to arcbox-helper (is the service running?)")?;
-    install_dns_resolver(&client).await?;
-    print_done();
-
-    // 3. Set up Docker socket via helper tarpc client.
-    print_step(3, 6, "Setting up Docker socket...");
-    setup_docker_socket(&client).await?;
-    print_done();
-
-    // 4. Provision boot assets so the daemon can start without network.
-    print_step(4, 6, "Provisioning boot assets...");
-    provision_boot_assets().await?;
-    print_done();
-
-    // 5. Register daemon service.
-    print_step(5, 6, "Registering daemon service...");
+    // 2. Register daemon service.
+    print_step(2, 3, "Registering daemon service...");
     if args.no_daemon {
         print_skipped();
     } else {
@@ -62,10 +42,10 @@ pub async fn execute(args: InstallArgs) -> Result<()> {
         print_done();
     }
 
-    // 6. Shell integration.
+    // 3. Shell integration.
     // Under sudo, dirs::home_dir() returns /var/root, so setup would
     // install to root's home instead of the real user's. Skip and hint.
-    print_step(6, 6, "Setting up shell integration...");
+    print_step(3, 3, "Setting up shell integration...");
     if args.no_shell {
         print_skipped();
     } else if std::env::var("SUDO_USER").is_ok() {
@@ -83,6 +63,7 @@ pub async fn execute(args: InstallArgs) -> Result<()> {
 
     println!();
     println!("ArcBox installed. The daemon will start automatically.");
+    println!("DNS, Docker socket, and boot assets are configured on first daemon start.");
 
     Ok(())
 }
@@ -176,74 +157,7 @@ fn install_helper() -> Result<()> {
 }
 
 // =============================================================================
-// Step 2: DNS resolver
-// =============================================================================
-
-/// Installs the DNS resolver file via the helper tarpc client.
-async fn install_dns_resolver(client: &Client) -> Result<()> {
-    let domain = dns_domain();
-    let port = dns_port();
-
-    client
-        .dns_install(&domain, port)
-        .await
-        .context("failed to install DNS resolver via helper")?;
-
-    Ok(())
-}
-
-// =============================================================================
-// Step 3: Docker socket
-// =============================================================================
-
-/// Sets up the Docker socket symlink via the helper tarpc client.
-async fn setup_docker_socket(client: &Client) -> Result<()> {
-    let target = docker_socket_path();
-    let target_str = target.to_string_lossy();
-
-    client
-        .socket_link(&target_str)
-        .await
-        .context("failed to create Docker socket symlink via helper")?;
-
-    Ok(())
-}
-
-// =============================================================================
-// Step 4: Boot asset provisioning
-// =============================================================================
-
-/// Downloads boot assets (kernel, rootfs) and runtime binaries so the daemon
-/// can start without requiring a network connection.
-async fn provision_boot_assets() -> Result<()> {
-    use arcbox_core::boot_assets::{BootAssetConfig, BootAssetProvider};
-
-    let (home, _) = resolve_real_user()?;
-    let data_dir = home.join(".arcbox");
-    let boot_cache_dir = data_dir.join("boot");
-
-    let config = BootAssetConfig::with_cache_dir(boot_cache_dir);
-    let provider = BootAssetProvider::with_config(config)?;
-
-    // Download kernel + rootfs.
-    provider
-        .get_assets()
-        .await
-        .context("failed to download boot assets")?;
-
-    // Download runtime binaries (dockerd, containerd, shim, runc).
-    let runtime_bin_dir = data_dir.join("runtime/bin");
-    std::fs::create_dir_all(&runtime_bin_dir).context("failed to create runtime bin directory")?;
-    provider
-        .prepare_binaries(&runtime_bin_dir, None)
-        .await
-        .context("failed to prepare runtime binaries")?;
-
-    Ok(())
-}
-
-// =============================================================================
-// Step 5: Daemon service
+// Step 2: Daemon service
 // =============================================================================
 
 /// Registers the daemon as a launchd user agent.
@@ -339,6 +253,10 @@ fn register_daemon_service() -> Result<()> {
     Ok(())
 }
 
+// =============================================================================
+// Helpers
+// =============================================================================
+
 /// Resolves the real user's home directory and UID.
 ///
 /// When running under `sudo`, `dirs::home_dir()` returns `/var/root` and
@@ -378,27 +296,4 @@ fn home_for_user(username: &str) -> Option<PathBuf> {
     // SAFETY: pw is non-null and pw_dir is a valid C string.
     let dir = unsafe { std::ffi::CStr::from_ptr((*pw).pw_dir) };
     Some(PathBuf::from(dir.to_string_lossy().into_owned()))
-}
-
-// =============================================================================
-// Helpers
-// =============================================================================
-
-fn dns_domain() -> String {
-    std::env::var("ARCBOX_DNS_DOMAIN").unwrap_or_else(|_| "arcbox.local".to_string())
-}
-
-fn dns_port() -> u16 {
-    std::env::var("ARCBOX_DNS_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(5553)
-}
-
-fn docker_socket_path() -> PathBuf {
-    // Use resolve_real_user() instead of dirs::home_dir() so that under
-    // `sudo` we get the invoking user's home, not /var/root.
-    resolve_real_user()
-        .map(|(home, _uid)| home.join(".arcbox/run/docker.sock"))
-        .unwrap_or_else(|_| PathBuf::from("/var/run/arcbox-docker.sock"))
 }
