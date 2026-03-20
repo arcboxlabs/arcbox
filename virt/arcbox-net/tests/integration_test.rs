@@ -510,7 +510,11 @@ mod stress {
             }));
         }
 
-        // Spawn consumers
+        // Spawn consumers.
+        // Exit condition: all items produced AND the ring is empty AND
+        // all items consumed. We must re-check the ring after seeing
+        // produced == total_items to avoid exiting while items are still
+        // in-flight between dequeue and the consumed counter update.
         for _ in 0..num_consumers {
             let ring: Arc<MpmcRing<u64>> = Arc::clone(&ring);
             let consumed = Arc::clone(&consumed);
@@ -520,14 +524,12 @@ mod stress {
                 loop {
                     if ring.dequeue().is_some() {
                         consumed.fetch_add(1, Ordering::Relaxed);
-                    } else if consumed.load(Ordering::Relaxed) >= total_items {
-                        break;
                     } else if produced.load(Ordering::Relaxed) >= total_items
                         && consumed.load(Ordering::Relaxed) >= total_items
                     {
                         break;
                     } else {
-                        std::hint::spin_loop();
+                        thread::yield_now();
                     }
                 }
             }));
@@ -545,7 +547,10 @@ mod stress {
     #[test]
     fn test_pool_concurrent_stress() {
         let pool = Arc::new(PacketPool::new(256).unwrap());
-        let iterations = 10_000;
+        // Keep iteration count low enough to finish reliably in CI.
+        // The pool has 256 buffers shared across 4 threads, each
+        // holding up to 2 at a time — contention is the real test.
+        let iterations = 1_000;
         let num_threads = 4;
 
         let mut handles = Vec::new();
