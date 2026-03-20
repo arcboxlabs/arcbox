@@ -6,7 +6,6 @@
 //! destination IP is a virtual address that only the proxy can resolve.
 
 use std::io;
-use std::net::SocketAddr;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -15,50 +14,84 @@ use tokio::net::TcpStream;
 ///
 /// The returned `TcpStream` is an end-to-end tunnel — all subsequent reads
 /// and writes go directly to the target host through the proxy.
-pub async fn connect_via_http_proxy(
-    proxy: SocketAddr,
-    host: &str,
-    port: u16,
-) -> io::Result<TcpStream> {
+pub async fn connect_via_http_proxy(proxy: &str, host: &str, port: u16) -> io::Result<TcpStream> {
     let mut stream = TcpStream::connect(proxy).await?;
 
     let request = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n");
     stream.write_all(request.as_bytes()).await?;
 
-    // Read the proxy's response. HTTP CONNECT responses are typically short.
-    let mut buf = [0u8; 1024];
-    let n = stream.read(&mut buf).await?;
-    if n == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "proxy closed connection before responding",
-        ));
+    // Read until we find "\r\n" marking the end of the status line. The
+    // response may arrive split across multiple TCP segments, so we loop.
+    let mut buf = Vec::with_capacity(256);
+    let mut tmp = [0u8; 1];
+    loop {
+        let n = stream.read(&mut tmp).await?;
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "proxy closed connection before completing status line",
+            ));
+        }
+        buf.push(tmp[0]);
+        if buf.ends_with(b"\r\n") {
+            break;
+        }
+        if buf.len() > 1024 {
+            return Err(io::Error::other(
+                "HTTP CONNECT status line exceeds 1024 bytes",
+            ));
+        }
     }
 
-    let response = String::from_utf8_lossy(&buf[..n]);
+    let status_line = String::from_utf8_lossy(&buf);
     // Accept any 2xx status as success (200, 204, etc).
-    let status_ok = response.starts_with("HTTP/1.1 2") || response.starts_with("HTTP/1.0 2");
+    let status_ok = status_line.starts_with("HTTP/1.1 2") || status_line.starts_with("HTTP/1.0 2");
 
-    if status_ok {
-        tracing::debug!(
-            proxy = %proxy,
-            target = %format!("{host}:{port}"),
-            "HTTP CONNECT tunnel established"
-        );
-        Ok(stream)
-    } else {
-        let status_line = response.lines().next().unwrap_or("<empty>");
-        Err(io::Error::other(format!(
-            "HTTP CONNECT proxy rejected: {status_line}"
-        )))
+    if !status_ok {
+        let line = status_line.trim_end();
+        return Err(io::Error::other(format!(
+            "HTTP CONNECT proxy rejected: {line}"
+        )));
     }
+
+    // Consume remaining headers until a blank line. We already read the
+    // status line (including its \r\n). The headers end with \r\n\r\n, so
+    // we look for two consecutive \r\n sequences in the remaining data.
+    let mut header_buf = Vec::with_capacity(512);
+    loop {
+        let n = stream.read(&mut tmp).await?;
+        if n == 0 {
+            break;
+        }
+        header_buf.push(tmp[0]);
+        // A standalone \r\n (i.e. header_buf == b"\r\n") means the first
+        // header line is blank → end of headers. Otherwise \r\n\r\n at the
+        // tail means the previous header ended and a blank line followed.
+        if header_buf.len() >= 2 && header_buf.ends_with(b"\r\n") {
+            if header_buf.len() == 2 || header_buf[..header_buf.len() - 2].ends_with(b"\r\n") {
+                break;
+            }
+        }
+        if header_buf.len() > 8192 {
+            return Err(io::Error::other(
+                "HTTP CONNECT response headers exceed 8192 bytes",
+            ));
+        }
+    }
+
+    tracing::debug!(
+        proxy = proxy,
+        target = %format!("{host}:{port}"),
+        "HTTP CONNECT tunnel established"
+    );
+    Ok(stream)
 }
 
 /// Establishes a TCP tunnel via a SOCKS5 proxy (RFC 1928, no-auth subset).
 ///
 /// Uses ATYP=0x03 (domain name) so the proxy resolves the hostname, avoiding
 /// fake-ip issues entirely.
-pub async fn connect_via_socks5(proxy: SocketAddr, host: &str, port: u16) -> io::Result<TcpStream> {
+pub async fn connect_via_socks5(proxy: &str, host: &str, port: u16) -> io::Result<TcpStream> {
     let mut stream = TcpStream::connect(proxy).await?;
 
     // Phase 1: Greeting — version=5, 1 method (no auth).
@@ -73,10 +106,11 @@ pub async fn connect_via_socks5(proxy: SocketAddr, host: &str, port: u16) -> io:
             greeting_resp[0]
         )));
     }
-    if greeting_resp[1] == 0xFF {
-        return Err(io::Error::other(
-            "SOCKS5: no acceptable authentication method",
-        ));
+    if greeting_resp[1] != 0x00 {
+        return Err(io::Error::other(format!(
+            "SOCKS5: server chose unsupported auth method 0x{:02X} (expected 0x00 no-auth)",
+            greeting_resp[1]
+        )));
     }
 
     // Phase 2: Connect request — ATYP=0x03 (domain name).
@@ -98,19 +132,20 @@ pub async fn connect_via_socks5(proxy: SocketAddr, host: &str, port: u16) -> io:
     req.extend_from_slice(&port.to_be_bytes());
     stream.write_all(&req).await?;
 
-    // Phase 3: Read response (at least 10 bytes for IPv4 bind addr).
-    let mut resp = [0u8; 10];
-    stream.read_exact(&mut resp).await?;
+    // Phase 3: Parse response incrementally.
+    // Read the 4-byte header: [VER, REP, RSV, ATYP].
+    let mut hdr = [0u8; 4];
+    stream.read_exact(&mut hdr).await?;
 
-    if resp[0] != 0x05 {
+    if hdr[0] != 0x05 {
         return Err(io::Error::other(format!(
             "SOCKS5: unexpected version in response: {}",
-            resp[0]
+            hdr[0]
         )));
     }
 
-    if resp[1] != 0x00 {
-        let reason = match resp[1] {
+    if hdr[1] != 0x00 {
+        let reason = match hdr[1] {
             0x01 => "general SOCKS server failure",
             0x02 => "connection not allowed by ruleset",
             0x03 => "network unreachable",
@@ -123,31 +158,35 @@ pub async fn connect_via_socks5(proxy: SocketAddr, host: &str, port: u16) -> io:
         };
         return Err(io::Error::other(format!(
             "SOCKS5: connect failed: {reason} (code {})",
-            resp[1]
+            hdr[1]
         )));
     }
 
-    // Consume remaining bind address bytes based on ATYP.
-    match resp[3] {
-        0x01 => {} // IPv4: already read 4 bytes + 2 port = within resp
+    // Consume the bind address based on ATYP. We discard the data.
+    match hdr[3] {
+        0x01 => {
+            // IPv4: 4 bytes address + 2 bytes port.
+            let mut buf = [0u8; 6];
+            stream.read_exact(&mut buf).await?;
+        }
         0x04 => {
-            // IPv6: need 12 more bytes (16 total - 4 already read).
-            let mut extra = [0u8; 12];
-            stream.read_exact(&mut extra).await?;
+            // IPv6: 16 bytes address + 2 bytes port.
+            let mut buf = [0u8; 18];
+            stream.read_exact(&mut buf).await?;
         }
         0x03 => {
-            // Domain: read length + domain + port. The 4th byte we read
-            // as IPv4 octets is actually the domain length.
-            let dlen = resp[4] as usize;
-            if dlen > 0 {
-                let remaining = dlen.saturating_sub(4) + 2; // domain bytes - already read + port
-                if remaining > 0 {
-                    let mut extra = vec![0u8; remaining];
-                    stream.read_exact(&mut extra).await?;
-                }
-            }
+            // Domain: 1 byte length, N bytes domain, 2 bytes port.
+            let mut len_buf = [0u8; 1];
+            stream.read_exact(&mut len_buf).await?;
+            let dlen = len_buf[0] as usize;
+            let mut domain_and_port = vec![0u8; dlen + 2];
+            stream.read_exact(&mut domain_and_port).await?;
         }
-        _ => {}
+        atyp => {
+            return Err(io::Error::other(format!(
+                "SOCKS5: unsupported ATYP 0x{atyp:02X} in response"
+            )));
+        }
     }
 
     tracing::debug!(

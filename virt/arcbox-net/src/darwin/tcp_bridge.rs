@@ -349,17 +349,18 @@ impl TcpBridge {
                 let connect_fut = async {
                     match proxy_target {
                         Some((proxy_addr, host, port, proto)) => {
+                            let proxy_str = proxy_addr.to_string();
                             tracing::debug!(
-                                proxy = %proxy_addr,
+                                proxy = %proxy_str,
                                 target = %format!("{host}:{port}"),
                                 protocol = proto,
                                 "TCP SYN gate: connecting via proxy"
                             );
                             if proto == "socks5" {
-                                super::proxy_tunnel::connect_via_socks5(proxy_addr, &host, port)
+                                super::proxy_tunnel::connect_via_socks5(&proxy_str, &host, port)
                                     .await
                             } else {
-                                super::proxy_tunnel::connect_via_http_proxy(proxy_addr, &host, port)
+                                super::proxy_tunnel::connect_via_http_proxy(&proxy_str, &host, port)
                                     .await
                             }
                         }
