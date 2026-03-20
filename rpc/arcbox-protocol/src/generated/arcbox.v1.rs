@@ -2160,6 +2160,9 @@ pub struct SetupStatus {
     /// Human-readable status message.
     #[prost(string, tag = "6")]
     pub message: ::prost::alloc::string::String,
+    /// Whether Docker CLI tools are installed.
+    #[prost(bool, tag = "7")]
+    pub docker_tools_installed: bool,
 }
 /// Nested message and enum types in `SetupStatus`.
 pub mod setup_status {
@@ -2177,6 +2180,7 @@ pub mod setup_status {
         NetworkReady = 5,
         Ready = 6,
         Degraded = 7,
+        DownloadingAssets = 8,
     }
     impl Phase {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -2193,6 +2197,7 @@ pub mod setup_status {
                 Self::NetworkReady => "NETWORK_READY",
                 Self::Ready => "READY",
                 Self::Degraded => "DEGRADED",
+                Self::DownloadingAssets => "DOWNLOADING_ASSETS",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -2206,6 +2211,7 @@ pub mod setup_status {
                 "NETWORK_READY" => Some(Self::NetworkReady),
                 "READY" => Some(Self::Ready),
                 "DEGRADED" => Some(Self::Degraded),
+                "DOWNLOADING_ASSETS" => Some(Self::DownloadingAssets),
                 _ => None,
             }
         }

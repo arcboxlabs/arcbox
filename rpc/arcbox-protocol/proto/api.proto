@@ -468,6 +468,7 @@ message SetupStatus {
         NETWORK_READY = 5;
         READY = 6;
         DEGRADED = 7;
+        DOWNLOADING_ASSETS = 8;
     }
 
     // Current daemon phase.
@@ -482,4 +483,6 @@ message SetupStatus {
     bool vm_running = 5;
     // Human-readable status message.
     string message = 6;
+    // Whether Docker CLI tools are installed.
+    bool docker_tools_installed = 7;
 }

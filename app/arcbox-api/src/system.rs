@@ -31,6 +31,7 @@ impl SetupState {
             route_installed: false,
             vm_running: false,
             message: "Daemon starting...".to_string(),
+            docker_tools_installed: false,
         };
         let (tx, _) = watch::channel(initial);
         Self { tx: Arc::new(tx) }
@@ -60,6 +61,11 @@ impl SetupState {
 
     pub fn set_vm_running(&self, running: bool) {
         self.tx.send_modify(|s| s.vm_running = running);
+    }
+
+    pub fn set_docker_tools_installed(&self, installed: bool) {
+        self.tx
+            .send_modify(|s| s.docker_tools_installed = installed);
     }
 
     /// Returns a watch receiver for streaming updates.
