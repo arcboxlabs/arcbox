@@ -47,6 +47,13 @@ pub trait HelperService {
     /// Removes the `/var/run/docker.sock` symlink.
     async fn socket_unlink() -> Result<(), String>;
 
+    /// Creates `/usr/local/bin/{name}` symlink pointing to `target`.
+    /// Used to expose Docker CLI tools from the app bundle.
+    async fn cli_link(name: String, target: String) -> Result<(), String>;
+
+    /// Removes `/usr/local/bin/{name}` symlink if it points inside an ArcBox bundle.
+    async fn cli_unlink(name: String) -> Result<(), String>;
+
     /// Returns the helper version string.
     async fn version() -> String;
 }

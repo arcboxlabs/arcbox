@@ -48,10 +48,27 @@ pub async fn run(ctx: &DaemonContext) {
     let socket_task = self_setup::DockerSocket {
         target: ctx.socket_path.clone(),
     };
+
+    // Create /usr/local/bin/ symlinks for Docker CLI tools if running from bundle.
+    let cli_tasks: Vec<Box<dyn self_setup::SetupTask>> =
+        if let Some(contents) = crate::startup::find_bundle_contents() {
+            let xbin = contents.join("MacOS/xbin");
+            if xbin.is_dir() {
+                vec![Box::new(self_setup::CliTools { xbin_dir: xbin })]
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        };
+
     let setup_state_self = Arc::clone(&ctx.setup_state);
     tokio::spawn(async move {
-        self_setup::run(&[&dns_task, &socket_task]).await;
-        // Update status flags based on whether each task is now satisfied.
+        let mut tasks: Vec<&dyn self_setup::SetupTask> = vec![&dns_task, &socket_task];
+        for t in &cli_tasks {
+            tasks.push(t.as_ref());
+        }
+        self_setup::run(&tasks).await;
         setup_state_self.set_dns_installed(dns_task.is_satisfied());
         setup_state_self.set_docker_socket_linked(socket_task.is_satisfied());
     });
@@ -91,17 +108,11 @@ async fn ensure_docker_tools(data_dir: &Path) -> anyhow::Result<()> {
     };
 
     let install_dir = data_dir.join("runtime/bin");
-    let mut mgr = arcbox_docker_tools::DockerToolManager::new(tools, arch, install_dir);
+    let mgr = arcbox_docker_tools::DockerToolManager::new(tools, arch, install_dir);
 
-    // If running from an app bundle, try Contents/MacOS/xbin/ first.
-    if let Some(bundle_dir) = crate::startup::find_bundle_contents() {
-        let xbin = bundle_dir.join("MacOS/xbin");
-        if xbin.is_dir() {
-            mgr = mgr.with_bundle_dir(xbin);
-        }
-    }
-
-    // Check if all tools are already valid — skip work if so.
+    // Docker tools are already seeded from the app bundle by
+    // seed_from_bundle() (via Resources/runtime/bin/). This check
+    // is a fast no-op when they're present and checksums match.
     if mgr.validate_all().await.is_ok() {
         tracing::debug!("Docker CLI tools already installed and valid");
         return Ok(());

@@ -140,6 +140,51 @@ pub fn validate_socket_target(s: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Allowed CLI tool names for `/usr/local/bin/` symlinks.
+const ALLOWED_CLI_NAMES: &[&str] = &[
+    "docker",
+    "docker-buildx",
+    "docker-compose",
+    "docker-credential-osxkeychain",
+];
+
+/// Validates a CLI tool name for `/usr/local/bin/` symlink creation.
+pub fn validate_cli_name(name: &str) -> Result<(), String> {
+    if ALLOWED_CLI_NAMES.contains(&name) {
+        Ok(())
+    } else {
+        Err(format!(
+            "CLI name '{name}' is not in the allow list: {}",
+            ALLOWED_CLI_NAMES.join(", ")
+        ))
+    }
+}
+
+/// Validates a CLI symlink target. Must point inside an app bundle's
+/// `Contents/MacOS/xbin/` directory. Rejects path traversal.
+pub fn validate_cli_target(target: &str) -> Result<(), String> {
+    let path = std::path::Path::new(target);
+
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(format!(
+            "CLI target '{target}' contains '..' path traversal"
+        ));
+    }
+
+    // Must be inside an .app bundle's Contents/MacOS/xbin/
+    if !target.contains(".app/Contents/MacOS/xbin/") {
+        return Err(format!(
+            "CLI target '{target}' must be inside an .app bundle's Contents/MacOS/xbin/"
+        ));
+    }
+
+    if !path.is_absolute() {
+        return Err(format!("CLI target '{target}' must be an absolute path"));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

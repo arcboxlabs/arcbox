@@ -263,10 +263,7 @@ fn seed_dir_recursive(src: &Path, dst: &Path, label: &str) {
                         // Source was executable, preserve it.
                         let src_meta = std::fs::metadata(src.join(&rel))?;
                         if src_meta.permissions().mode() & 0o111 != 0 {
-                            std::fs::set_permissions(
-                                &d,
-                                std::fs::Permissions::from_mode(0o755),
-                            )?;
+                            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755))?;
                         }
                     }
                 }
@@ -284,9 +281,7 @@ fn seed_dir_recursive(src: &Path, dst: &Path, label: &str) {
 }
 
 /// Simple recursive directory walker yielding `(relative_path, is_dir)`.
-fn walkdir(
-    root: &Path,
-) -> std::io::Result<impl Iterator<Item = std::io::Result<(PathBuf, bool)>>> {
+fn walkdir(root: &Path) -> std::io::Result<impl Iterator<Item = std::io::Result<(PathBuf, bool)>>> {
     let mut stack = vec![PathBuf::new()];
     let root = root.to_path_buf();
     Ok(std::iter::from_fn(move || {

@@ -8,9 +8,11 @@
 //! Adding a new task: implement [`SetupTask`] in a new file under
 //! `self_setup/`, then add it to the `run()` call in `main.rs`.
 
+mod cli_tools;
 mod dns_resolver;
 mod docker_socket;
 
+pub use cli_tools::CliTools;
 pub use dns_resolver::DnsResolver;
 pub use docker_socket::DockerSocket;
 
