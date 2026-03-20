@@ -143,7 +143,10 @@ pub fn parse_dns_response_a_records(data: &[u8]) -> Option<(String, Vec<Ipv4Addr
         offset += 1 + len;
     }
 
-    // Skip QTYPE + QCLASS.
+    // Skip QTYPE + QCLASS (4 bytes).
+    if offset + 4 > data.len() {
+        return None;
+    }
     offset += 4;
 
     let domain = name_parts.join(".");
