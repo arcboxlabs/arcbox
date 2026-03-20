@@ -42,7 +42,7 @@ impl ProxyEnvironment {
     /// Checks:
     /// 1. utun interfaces for fake-ip indicators (198.18.0.0/15)
     /// 2. `scutil --proxy` for system proxy settings
-    /// 3. Environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`)
+    /// 3. Environment variables (`HTTP_PROXY`, `HTTPS_PROXY`)
     #[must_use]
     pub fn detect() -> Self {
         let fake_ip_active = detect_fake_ip_utun();
