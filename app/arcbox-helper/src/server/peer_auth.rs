@@ -70,7 +70,11 @@ fn peer_pid(stream: &tokio::net::UnixStream) -> Option<i32> {
         )
     };
 
-    if ret == 0 { Some(pid) } else { None }
+    if ret == 0 {
+        Some(pid)
+    } else {
+        None
+    }
 }
 
 // =============================================================================
@@ -157,12 +161,16 @@ mod security {
 
         const K_CF_STRING_ENCODING_UTF8: u32 = 0x08000100;
 
+        let num_bytes = match isize::try_from(s.len()) {
+            Ok(n) => n,
+            Err(_) => return std::ptr::null(),
+        };
+
         unsafe {
             CFStringCreateWithBytes(
                 K_CF_ALLOCATOR_DEFAULT,
                 s.as_ptr(),
-                #[allow(clippy::cast_possible_wrap)]
-                s.len() as isize,
+                num_bytes,
                 K_CF_STRING_ENCODING_UTF8,
                 0,
             )
