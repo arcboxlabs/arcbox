@@ -34,6 +34,7 @@ tempfile = "3"
 [features]
 default = []
 criu = []
+vmnet = ["arcbox-net/vmnet"]
 
 [lints]
 workspace = true

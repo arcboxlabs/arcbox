@@ -17,6 +17,10 @@
     <key>com.apple.security.network.server</key>
     <true/>
 
+    <!-- vmnet.framework direct access (bridge NIC without root) -->
+    <key>com.apple.vm.networking</key>
+    <true/>
+
     <!-- Allow unsigned executable memory (for JIT in containers) -->
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
     <true/>

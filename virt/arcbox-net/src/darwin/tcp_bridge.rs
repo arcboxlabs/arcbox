@@ -149,6 +149,10 @@ pub struct TcpBridge {
     /// Pre-connected host streams ready for detect_new_connections to consume.
     /// Keyed by four-tuple so the correct stream is matched to its connection.
     pre_connected: HashMap<SynFlowKey, PreConnected>,
+    /// DNS resolution log for mapping IPs back to domain names.
+    dns_log: Option<super::dns_log::DnsResolutionLog>,
+    /// Detected proxy environment on the host.
+    proxy_env: Option<super::proxy_detect::ProxyEnvironment>,
 }
 
 impl Default for TcpBridge {
@@ -166,7 +170,84 @@ impl TcpBridge {
             next_ephemeral: INBOUND_EPHEMERAL_START,
             pending_syns: HashMap::new(),
             pre_connected: HashMap::new(),
+            dns_log: None,
+            proxy_env: None,
         }
+    }
+
+    /// Determines whether to connect via a proxy tunnel for the given destination.
+    ///
+    /// Returns `Some((proxy_authority, target_host, target_port, protocol))` if a
+    /// proxy should be used, or `None` for direct connection. The proxy authority
+    /// is a `"host:port"` string that `TcpStream::connect` can resolve (supports
+    /// both IP addresses and hostnames like `proxy.corp.com`).
+    fn resolve_proxy_target(
+        &self,
+        dst_ip: Ipv4Addr,
+        dst_port: u16,
+        domain: Option<&str>,
+    ) -> Option<(String, String, u16, &'static str)> {
+        let env = self.proxy_env.as_ref()?;
+
+        // No proxy configured → always direct.
+        if !env.has_usable_proxy() {
+            return None;
+        }
+
+        // Need a domain name to use proxy tunnel (can't send raw IP to CONNECT).
+        let host = domain?;
+
+        // Check bypass list.
+        if env.should_bypass(host) {
+            return None;
+        }
+
+        // Only proxy traffic to fake-ip destinations or when a system proxy is
+        // explicitly configured. For non-fake-ip destinations, direct connect
+        // through the host socket already works with VPNs.
+        let is_fake = env.is_fake_ip(dst_ip);
+        if !is_fake
+            && env.http_proxy.is_none()
+            && env.https_proxy.is_none()
+            && env.socks_proxy.is_none()
+        {
+            return None;
+        }
+
+        // Prefer SOCKS5 (supports all protocols), then HTTPS proxy for TLS,
+        // then HTTP proxy as last resort.
+        if let Some(ref socks) = env.socks_proxy {
+            let authority = format!("{}:{}", socks.host, socks.port);
+            return Some((authority, host.to_string(), dst_port, "socks5"));
+        }
+
+        if dst_port == 443 {
+            if let Some(ref https) = env.https_proxy {
+                let authority = format!("{}:{}", https.host, https.port);
+                return Some((authority, host.to_string(), dst_port, "http-connect"));
+            }
+        }
+
+        if let Some(ref http) = env.http_proxy {
+            let authority = format!("{}:{}", http.host, http.port);
+            return Some((authority, host.to_string(), dst_port, "http-connect"));
+        }
+
+        None
+    }
+
+    /// Configures proxy-aware connection support.
+    ///
+    /// When set, `gate_syns()` will use the DNS log to resolve destination IPs
+    /// to domain names and connect via system proxy (HTTP CONNECT / SOCKS5)
+    /// when available. Without this, all connections use direct `TcpStream::connect`.
+    pub fn set_proxy_awareness(
+        &mut self,
+        dns_log: super::dns_log::DnsResolutionLog,
+        proxy_env: super::proxy_detect::ProxyEnvironment,
+    ) {
+        self.dns_log = Some(dns_log);
+        self.proxy_env = Some(proxy_env);
     }
 
     /// Ensures listen sockets exist for the given TCP SYN destination ports.
@@ -258,11 +339,47 @@ impl TcpBridge {
 
             let (result_tx, result_rx) = oneshot::channel();
 
+            // Resolve domain name from DNS log (if available) for proxy-aware connects.
+            let domain = self.dns_log.as_ref().and_then(|log| log.lookup(syn.dst_ip));
+
+            // Determine connect strategy: proxy tunnel or direct.
+            let proxy_target =
+                self.resolve_proxy_target(syn.dst_ip, syn.dst_port, domain.as_deref());
+
             // Spawn host connect task.
             tokio::spawn(async move {
+                let connect_fut = async {
+                    match proxy_target {
+                        Some((proxy_authority, host, port, proto)) => {
+                            tracing::debug!(
+                                proxy = %proxy_authority,
+                                target = %format!("{host}:{port}"),
+                                protocol = proto,
+                                "TCP SYN gate: connecting via proxy"
+                            );
+                            if proto == "socks5" {
+                                super::proxy_tunnel::connect_via_socks5(
+                                    &proxy_authority,
+                                    &host,
+                                    port,
+                                )
+                                .await
+                            } else {
+                                super::proxy_tunnel::connect_via_http_proxy(
+                                    &proxy_authority,
+                                    &host,
+                                    port,
+                                )
+                                .await
+                            }
+                        }
+                        None => tokio::net::TcpStream::connect(dst_addr).await,
+                    }
+                };
+
                 let result = tokio::time::timeout(
                     std::time::Duration::from_secs(SYN_GATE_CONNECT_TIMEOUT_SECS),
-                    tokio::net::TcpStream::connect(dst_addr),
+                    connect_fut,
                 )
                 .await;
 

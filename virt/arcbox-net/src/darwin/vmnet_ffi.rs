@@ -300,6 +300,185 @@ unsafe extern "C" {
     pub static _dispatch_queue_attr_concurrent: *const c_void;
 }
 
+// ============================================================================
+// XPC types and functions (used by vmnet completion handler)
+// ============================================================================
+
+/// Opaque XPC object.
+#[cfg(feature = "vmnet")]
+pub type XpcObjectT = *mut c_void;
+
+#[cfg(feature = "vmnet")]
+#[link(name = "System")]
+unsafe extern "C" {
+    pub fn xpc_dictionary_get_string(dict: XpcObjectT, key: *const c_char) -> *const c_char;
+    pub fn xpc_dictionary_get_uint64(dict: XpcObjectT, key: *const c_char) -> u64;
+    pub fn xpc_retain(object: XpcObjectT) -> XpcObjectT;
+    pub fn xpc_release(object: XpcObjectT);
+}
+
+// ============================================================================
+// Dispatch semaphore (used to synchronize the completion handler)
+// ============================================================================
+
+/// Opaque dispatch semaphore.
+#[cfg(feature = "vmnet")]
+pub type DispatchSemaphore = *mut c_void;
+
+/// Opaque dispatch time.
+#[cfg(feature = "vmnet")]
+pub type DispatchTime = u64;
+
+/// Wait forever.
+#[cfg(feature = "vmnet")]
+pub const DISPATCH_TIME_FOREVER: DispatchTime = !0;
+
+/// Absolute time zero (now).
+#[cfg(feature = "vmnet")]
+pub const DISPATCH_TIME_NOW: DispatchTime = 0;
+
+/// Nanoseconds per second.
+#[cfg(feature = "vmnet")]
+pub const NSEC_PER_SEC: u64 = 1_000_000_000;
+
+#[cfg(feature = "vmnet")]
+#[link(name = "System")]
+unsafe extern "C" {
+    pub fn dispatch_semaphore_create(value: isize) -> DispatchSemaphore;
+    pub fn dispatch_semaphore_signal(dsema: DispatchSemaphore) -> isize;
+    pub fn dispatch_semaphore_wait(dsema: DispatchSemaphore, timeout: DispatchTime) -> isize;
+    pub fn dispatch_time(when: DispatchTime, delta: i64) -> DispatchTime;
+}
+
+// ============================================================================
+// Objective-C Block ABI for vmnet completion handler
+// ============================================================================
+//
+// vmnet_start_interface expects a block with signature:
+//   void (^)(vmnet_return_t status, xpc_object_t interface_param)
+//
+// We build this block manually using the stable C ABI layout described in
+// the Clang Block Implementation Specification.
+
+#[cfg(feature = "vmnet")]
+#[repr(C)]
+pub struct BlockDescriptor {
+    pub reserved: usize,
+    pub size: usize,
+    pub copy_helper: unsafe extern "C" fn(*mut c_void, *const c_void),
+    pub dispose_helper: unsafe extern "C" fn(*mut c_void),
+}
+
+/// Completion block layout matching the C ABI for Objective-C blocks.
+///
+/// Fields after `descriptor` are captured variables that the invoke function
+/// reads when the block is called by vmnet.
+#[cfg(feature = "vmnet")]
+#[repr(C)]
+pub struct VmnetCompletionBlock {
+    pub isa: *const c_void,
+    pub flags: i32,
+    pub reserved: i32,
+    pub invoke: unsafe extern "C" fn(*mut Self, VmnetReturnT, XpcObjectT),
+    pub descriptor: *const BlockDescriptor,
+    // Captured variables:
+    pub status: VmnetReturnT,
+    pub interface_param: XpcObjectT,
+    pub semaphore: DispatchSemaphore,
+}
+
+#[cfg(feature = "vmnet")]
+unsafe extern "C" {
+    /// Block ISA for stack-allocated blocks.
+    #[link_name = "_NSConcreteStackBlock"]
+    pub static NS_CONCRETE_STACK_BLOCK: *const c_void;
+    pub fn _Block_copy(block: *const c_void) -> *mut c_void;
+    pub fn _Block_release(block: *const c_void);
+}
+
+/// Block invoke function: stores status + interface_param and signals the semaphore.
+///
+/// # Safety
+///
+/// Called by vmnet.framework on the dispatch queue; `block` must point to a
+/// valid `VmnetCompletionBlock` that was created by `create_vmnet_completion_block`.
+#[cfg(feature = "vmnet")]
+unsafe extern "C" fn vmnet_block_invoke(
+    block: *mut VmnetCompletionBlock,
+    status: VmnetReturnT,
+    interface_param: XpcObjectT,
+) {
+    // SAFETY: `block` is valid and exclusively ours on this dispatch queue.
+    unsafe {
+        (*block).status = status;
+        if !interface_param.is_null() {
+            (*block).interface_param = xpc_retain(interface_param);
+        }
+        dispatch_semaphore_signal((*block).semaphore);
+    }
+}
+
+/// Block copy helper: retain the captured XPC object.
+#[cfg(feature = "vmnet")]
+unsafe extern "C" fn vmnet_block_copy(dst: *mut c_void, _src: *const c_void) {
+    // SAFETY: dst points to a VmnetCompletionBlock allocated by _Block_copy.
+    unsafe {
+        let block = dst.cast::<VmnetCompletionBlock>();
+        if !(*block).interface_param.is_null() {
+            xpc_retain((*block).interface_param);
+        }
+    }
+}
+
+/// Block dispose helper: release the captured XPC object.
+#[cfg(feature = "vmnet")]
+unsafe extern "C" fn vmnet_block_dispose(block: *mut c_void) {
+    // SAFETY: block points to a VmnetCompletionBlock being destroyed.
+    unsafe {
+        let block = block.cast::<VmnetCompletionBlock>();
+        if !(*block).interface_param.is_null() {
+            xpc_release((*block).interface_param);
+        }
+    }
+}
+
+#[cfg(feature = "vmnet")]
+static VMNET_BLOCK_DESCRIPTOR: BlockDescriptor = BlockDescriptor {
+    reserved: 0,
+    size: std::mem::size_of::<VmnetCompletionBlock>(),
+    copy_helper: vmnet_block_copy,
+    dispose_helper: vmnet_block_dispose,
+};
+
+/// Block flags: `BLOCK_HAS_COPY_DISPOSE` (1 << 25).
+#[cfg(feature = "vmnet")]
+const BLOCK_HAS_COPY_DISPOSE: i32 = 1 << 25;
+
+/// Creates a heap-allocated vmnet completion block.
+///
+/// The caller must release it with `_Block_release` after the semaphore fires.
+///
+/// # Safety
+///
+/// `sema` must be a valid dispatch semaphore.
+#[cfg(feature = "vmnet")]
+#[must_use]
+pub unsafe fn create_vmnet_completion_block(sema: DispatchSemaphore) -> *mut c_void {
+    let stack_block = VmnetCompletionBlock {
+        isa: unsafe { NS_CONCRETE_STACK_BLOCK },
+        flags: BLOCK_HAS_COPY_DISPOSE,
+        reserved: 0,
+        invoke: vmnet_block_invoke,
+        descriptor: &raw const VMNET_BLOCK_DESCRIPTOR,
+        status: VmnetReturnT::Failure,
+        interface_param: ptr::null_mut(),
+        semaphore: sema,
+    };
+    // SAFETY: _Block_copy takes a pointer to a valid stack block and returns
+    // a heap-allocated copy that is safe to pass to vmnet.
+    unsafe { _Block_copy((&raw const stack_block).cast()) }
+}
+
 /// UTF-8 string encoding for Core Foundation.
 pub const K_CF_STRING_ENCODING_UTF8: u32 = 0x08000100;
 

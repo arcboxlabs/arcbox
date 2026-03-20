@@ -2135,3 +2135,79 @@ pub struct TerminalSize {
     #[prost(uint32, tag = "2")]
     pub height: u32,
 }
+/// Daemon startup progress and infrastructure health.
+/// Allows the desktop app (or any gRPC client) to observe daemon readiness
+/// without managing its lifecycle.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetupStatus {
+    /// Current daemon phase.
+    #[prost(enumeration = "setup_status::Phase", tag = "1")]
+    pub phase: i32,
+    /// Whether the DNS resolver file is installed.
+    #[prost(bool, tag = "2")]
+    pub dns_resolver_installed: bool,
+    /// Whether /var/run/docker.sock is symlinked to ArcBox.
+    #[prost(bool, tag = "3")]
+    pub docker_socket_linked: bool,
+    /// Whether the container subnet route is installed.
+    #[prost(bool, tag = "4")]
+    pub route_installed: bool,
+    /// Whether the default VM is running.
+    #[prost(bool, tag = "5")]
+    pub vm_running: bool,
+    /// Human-readable status message.
+    #[prost(string, tag = "6")]
+    pub message: ::prost::alloc::string::String,
+}
+/// Nested message and enum types in `SetupStatus`.
+pub mod setup_status {
+    /// Daemon startup phases, ordered by progression.
+    #[derive(serde::Serialize, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum Phase {
+        Unspecified = 0,
+        Initializing = 1,
+        AssetsReady = 2,
+        VmStarting = 3,
+        VmReady = 4,
+        NetworkReady = 5,
+        Ready = 6,
+        Degraded = 7,
+    }
+    impl Phase {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unspecified => "PHASE_UNSPECIFIED",
+                Self::Initializing => "INITIALIZING",
+                Self::AssetsReady => "ASSETS_READY",
+                Self::VmStarting => "VM_STARTING",
+                Self::VmReady => "VM_READY",
+                Self::NetworkReady => "NETWORK_READY",
+                Self::Ready => "READY",
+                Self::Degraded => "DEGRADED",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "PHASE_UNSPECIFIED" => Some(Self::Unspecified),
+                "INITIALIZING" => Some(Self::Initializing),
+                "ASSETS_READY" => Some(Self::AssetsReady),
+                "VM_STARTING" => Some(Self::VmStarting),
+                "VM_READY" => Some(Self::VmReady),
+                "NETWORK_READY" => Some(Self::NetworkReady),
+                "READY" => Some(Self::Ready),
+                "DEGRADED" => Some(Self::Degraded),
+                _ => None,
+            }
+        }
+    }
+}

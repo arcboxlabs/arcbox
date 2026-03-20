@@ -2,7 +2,7 @@
 //!
 //! Usage:
 //! 1. Build: cargo build --bin arcbox-boot -p arcbox-hypervisor
-//! 2. Sign: codesign --entitlements tests/resources/entitlements.plist --force -s - target/debug/arcbox-boot
+//! 2. Sign: codesign --entitlements bundle/arcbox.entitlements --force -s - target/debug/arcbox-boot
 //! 3. Run: arcbox-boot <kernel_path> [initrd_path] [options]
 
 use clap::Parser;

@@ -14,7 +14,7 @@ cd arcbox
 cargo build --release -p arcbox-cli -p arcbox-daemon
 
 # Sign both binaries (required for macOS virtualization)
-codesign --entitlements tests/resources/entitlements.plist --force -s - \
+codesign --entitlements bundle/arcbox.entitlements --force -s - \
     target/release/arcbox target/release/arcbox-daemon
 
 # Run
@@ -66,7 +66,7 @@ guest/           In-VM agent (cross-compiled for Linux)
 
 - Virtualization.framework requires entitlement signing after every build:
   ```bash
-  codesign --entitlements tests/resources/entitlements.plist --force -s - target/debug/arcbox
+  codesign --entitlements bundle/arcbox.entitlements --force -s - target/debug/arcbox
   ```
 - Without signing, you get "Virtualization not available" errors
 

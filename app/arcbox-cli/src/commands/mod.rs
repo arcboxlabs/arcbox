@@ -19,6 +19,8 @@ pub mod daemon;
 pub mod dns;
 pub mod docker;
 pub mod doctor;
+#[cfg(target_os = "macos")]
+pub mod install;
 pub mod machine;
 pub mod sandbox;
 pub mod setup;
@@ -95,6 +97,10 @@ pub enum Commands {
 
     /// Run diagnostic checks on the ArcBox runtime
     Doctor,
+
+    /// Install ArcBox (helper, DNS, socket, daemon service)
+    #[cfg(target_os = "macos")]
+    Install(install::InstallArgs),
 
     /// Uninstall ArcBox from this machine
     Uninstall(uninstall::UninstallArgs),

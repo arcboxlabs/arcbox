@@ -40,18 +40,23 @@
 //! ```
 
 pub mod datapath_loop;
+pub mod dns_log;
 pub mod inbound_relay;
 pub mod nat;
+pub mod proxy_detect;
+pub mod proxy_tunnel;
 pub mod smoltcp_device;
 pub mod socket_proxy;
 pub mod tcp_bridge;
 pub mod tun;
 pub mod vmnet;
 pub mod vmnet_ffi;
+#[cfg(feature = "vmnet")]
+pub mod vmnet_relay;
 
 pub use nat::DarwinNatNetwork;
 pub use tun::DarwinTun;
-pub use vmnet::{Vmnet, VmnetConfig, VmnetMode};
+pub use vmnet::{Vmnet, VmnetConfig, VmnetInterfaceInfo, VmnetMode};
 
 use std::net::Ipv4Addr;
 

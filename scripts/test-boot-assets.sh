@@ -77,7 +77,7 @@ check_prerequisites() {
 
     if ! codesign -d --entitlements :- "$PROJECT_DIR/target/release/arcbox-daemon" 2>/dev/null | grep -q "com.apple.security.virtualization"; then
         log_warn "Binary not signed with virtualization entitlement. Signing..."
-        codesign --entitlements "$PROJECT_DIR/tests/resources/entitlements.plist" --force -s - "$PROJECT_DIR/target/release/arcbox-daemon"
+        codesign --entitlements "$PROJECT_DIR/bundle/arcbox.entitlements" --force -s - "$PROJECT_DIR/target/release/arcbox-daemon"
     fi
 
     log_info "Prerequisites OK"

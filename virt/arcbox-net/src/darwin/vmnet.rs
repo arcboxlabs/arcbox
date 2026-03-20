@@ -24,6 +24,19 @@ use super::vmnet_ffi::*;
 use crate::backend::NetworkBackend;
 use crate::error::{NetError, Result};
 
+/// Information returned by vmnet_start_interface completion handler.
+///
+/// Only available when the `vmnet` feature is enabled (proper block ABI).
+#[derive(Debug, Clone)]
+pub struct VmnetInterfaceInfo {
+    /// MAC address assigned by vmnet.
+    pub mac: [u8; 6],
+    /// MTU reported by vmnet.
+    pub mtu: u16,
+    /// Maximum Ethernet frame size.
+    pub max_packet_size: usize,
+}
+
 /// Default MTU size.
 const DEFAULT_MTU: u16 = 1500;
 
@@ -156,6 +169,15 @@ impl From<VmnetMode> for VmnetOperatingMode {
     }
 }
 
+/// Return value from the interface start helpers: (handle, mac, mtu, max_pkt, info).
+type StartResult = (
+    VmnetInterfaceRef,
+    [u8; 6],
+    u16,
+    usize,
+    Option<VmnetInterfaceInfo>,
+);
+
 /// vmnet backend for macOS.
 ///
 /// Provides network connectivity for VMs using Apple's vmnet.framework.
@@ -172,6 +194,8 @@ pub struct Vmnet {
     max_packet_size: usize,
     /// Running state.
     running: AtomicBool,
+    /// Parsed interface parameters from completion handler (`vmnet` feature only).
+    interface_info: Option<VmnetInterfaceInfo>,
 }
 
 // Safety: Vmnet uses thread-safe primitives and vmnet.framework is thread-safe.
@@ -294,45 +318,198 @@ impl Vmnet {
             dict
         };
 
-        // Start the interface.
-        // Note: vmnet_start_interface requires an Objective-C block for the completion handler.
-        // Passing NULL for the handler causes it to operate synchronously.
-        // A production implementation might use proper block support for async operation.
+        // Start the interface with the appropriate completion handler strategy.
+        #[cfg(feature = "vmnet")]
+        let (interface, mac, mtu, max_packet_size, interface_info) =
+            { Self::start_with_completion_handler(config_dict, queue, &config)? };
 
-        // Safety: We're calling vmnet with valid configuration.
-        let interface =
-            unsafe { vmnet_start_interface(config_dict.cast_const(), queue, ptr::null()) };
-
-        // Release the config dictionary.
-        unsafe {
-            CFRelease(config_dict.cast_const());
-        }
-
-        if interface.is_null() {
-            unsafe {
-                dispatch_release(queue.cast());
-            }
-            return Err(NetError::config(
-                "failed to start vmnet interface (requires root or entitlements)".to_string(),
-            ));
-        }
-
-        // Use default max packet size.
-        // The actual value is returned by the completion handler, but without
-        // proper Objective-C block support, we use a safe default.
-        let max_packet_size = DEFAULT_MAX_PACKET_SIZE;
-
-        // Use provided or generated MAC.
-        let mac = config.mac.unwrap_or_else(super::generate_mac);
+        #[cfg(not(feature = "vmnet"))]
+        let (interface, mac, mtu, max_packet_size, interface_info) =
+            { Self::start_with_null_handler(config_dict, queue, &config)? };
 
         Ok(Self {
             interface,
             queue,
             mac,
-            mtu: config.mtu,
+            mtu,
             max_packet_size,
             running: AtomicBool::new(true),
+            interface_info,
         })
+    }
+
+    /// Starts vmnet with a proper Objective-C block completion handler.
+    ///
+    /// Extracts MAC, MTU, and max_packet_size from the interface_param dictionary
+    /// returned by vmnet. This path is only available when the `vmnet` feature is
+    /// enabled (requires `com.apple.vm.networking` entitlement or root).
+    #[cfg(feature = "vmnet")]
+    fn start_with_completion_handler(
+        config_dict: CFMutableDictionaryRef,
+        queue: DispatchQueue,
+        config: &VmnetConfig,
+    ) -> Result<StartResult> {
+        use std::ffi::CStr;
+
+        // SAFETY: dispatch_semaphore_create is safe with value 0.
+        let sema = unsafe { dispatch_semaphore_create(0) };
+        if sema.is_null() {
+            unsafe {
+                CFRelease(config_dict.cast_const());
+                dispatch_release(queue.cast());
+            }
+            return Err(NetError::config(
+                "failed to create dispatch semaphore".to_string(),
+            ));
+        }
+
+        // SAFETY: create_vmnet_completion_block takes a valid semaphore.
+        let block = unsafe { create_vmnet_completion_block(sema) };
+
+        // SAFETY: vmnet_start_interface with valid config, queue, and block.
+        let interface = unsafe { vmnet_start_interface(config_dict.cast_const(), queue, block) };
+
+        // Wait for the completion handler to fire with a bounded timeout.
+        // 10 seconds is generous; vmnet usually completes within milliseconds.
+        let timeout = unsafe { dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC as i64) };
+        // SAFETY: Valid semaphore and computed timeout.
+        let wait_result = unsafe { dispatch_semaphore_wait(sema, timeout) };
+        if wait_result != 0 {
+            // Intentionally leak the block and semaphore. vmnet may still
+            // invoke the completion handler after our timeout — releasing
+            // the block now would cause a use-after-free when that happens.
+            // A small leak is preferable to a crash. The dispatch queue is
+            // also leaked to keep the handler's execution context valid.
+            unsafe { CFRelease(config_dict.cast_const()) };
+            return Err(NetError::config(
+                "vmnet_start_interface timed out after 10s (completion handler never fired)"
+                    .to_string(),
+            ));
+        }
+
+        // SAFETY: After semaphore fires, the block's captured fields are populated.
+        let (status, xpc_params) = unsafe {
+            let b = block.cast::<VmnetCompletionBlock>();
+            ((*b).status, (*b).interface_param)
+        };
+
+        // Release config dict now that vmnet has consumed it.
+        unsafe { CFRelease(config_dict.cast_const()) };
+
+        if !status.is_success() || interface.is_null() {
+            unsafe {
+                if !xpc_params.is_null() {
+                    xpc_release(xpc_params);
+                }
+                _Block_release(block);
+                dispatch_release(sema);
+                dispatch_release(queue.cast());
+            }
+            return Err(NetError::config(format!(
+                "vmnet_start_interface failed: {} (requires entitlement or root)",
+                status.message()
+            )));
+        }
+
+        // Parse interface parameters from the XPC dictionary.
+        let mut info = VmnetInterfaceInfo {
+            mac: [0u8; 6],
+            mtu: DEFAULT_MTU,
+            max_packet_size: DEFAULT_MAX_PACKET_SIZE,
+        };
+
+        if !xpc_params.is_null() {
+            // Parse MAC address string (e.g. "aa:bb:cc:dd:ee:ff").
+            let mac_key = c"mac_address";
+            // SAFETY: xpc_dictionary_get_string returns a valid C string or NULL.
+            let mac_ptr = unsafe { xpc_dictionary_get_string(xpc_params, mac_key.as_ptr()) };
+            if !mac_ptr.is_null() {
+                // SAFETY: mac_ptr is a valid C string from XPC.
+                let mac_cstr = unsafe { CStr::from_ptr(mac_ptr) };
+                if let Ok(mac_str) = mac_cstr.to_str() {
+                    if let Ok(parsed) = super::parse_mac(mac_str) {
+                        info.mac = parsed;
+                    }
+                }
+            }
+
+            // Parse MTU.
+            let mtu_key = c"mtu";
+            let mtu_val = unsafe { xpc_dictionary_get_uint64(xpc_params, mtu_key.as_ptr()) };
+            if mtu_val > 0 {
+                info.mtu = mtu_val as u16;
+            }
+
+            // Parse max packet size.
+            let mps_key = c"max_packet_size";
+            let mps_val = unsafe { xpc_dictionary_get_uint64(xpc_params, mps_key.as_ptr()) };
+            if mps_val > 0 {
+                info.max_packet_size = mps_val as usize;
+            }
+
+            // Note: xpc_params is owned by the block (retained in vmnet_block_invoke).
+            // vmnet_block_dispose releases it when _Block_release runs below.
+        }
+
+        // Clean up the block (releases captured xpc_params) and semaphore.
+        unsafe {
+            _Block_release(block);
+            dispatch_release(sema);
+        }
+
+        // If the user specified a MAC, prefer it. Otherwise use what vmnet returned.
+        let mac = config.mac.unwrap_or(info.mac);
+        let mtu = if config.mtu != DEFAULT_MTU {
+            config.mtu
+        } else {
+            info.mtu
+        };
+        let max_packet_size = info.max_packet_size;
+
+        // Update info to reflect final values.
+        let final_info = VmnetInterfaceInfo {
+            mac,
+            mtu,
+            max_packet_size,
+        };
+
+        Ok((interface, mac, mtu, max_packet_size, Some(final_info)))
+    }
+
+    /// Starts vmnet with NULL handler (synchronous, no interface_param).
+    ///
+    /// Fallback when the `vmnet` feature is not enabled. Uses default values
+    /// for max_packet_size since the completion handler is not invoked.
+    #[cfg(not(feature = "vmnet"))]
+    fn start_with_null_handler(
+        config_dict: CFMutableDictionaryRef,
+        queue: DispatchQueue,
+        config: &VmnetConfig,
+    ) -> Result<StartResult> {
+        // SAFETY: vmnet_start_interface with NULL handler operates synchronously.
+        let interface =
+            unsafe { vmnet_start_interface(config_dict.cast_const(), queue, ptr::null()) };
+
+        unsafe { CFRelease(config_dict.cast_const()) };
+
+        if interface.is_null() {
+            unsafe { dispatch_release(queue.cast()) };
+            return Err(NetError::config(
+                "failed to start vmnet interface (requires root or entitlements)".to_string(),
+            ));
+        }
+
+        let mac = config.mac.unwrap_or_else(super::generate_mac);
+
+        Ok((interface, mac, config.mtu, DEFAULT_MAX_PACKET_SIZE, None))
+    }
+
+    /// Returns interface parameters parsed from the vmnet completion handler.
+    ///
+    /// Only populated when the `vmnet` feature is enabled.
+    #[must_use]
+    pub fn interface_info(&self) -> Option<&VmnetInterfaceInfo> {
+        self.interface_info.as_ref()
     }
 
     /// Creates a vmnet interface with default NAT (shared) configuration.

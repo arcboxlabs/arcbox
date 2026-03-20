@@ -70,7 +70,7 @@ When asked to plan, the plan must be fully resolved before implementation begins
 
 ## macOS Development
 
-- Virtualization.framework requires entitlement signing: `codesign --entitlements tests/resources/entitlements.plist --force -s - arcbox-daemon`
+- Virtualization.framework requires entitlement signing: `codesign --entitlements bundle/arcbox.entitlements --force -s - arcbox-daemon`
 - Without signing, you get "Virtualization not available" errors
 - Requires Xcode Command Line Tools
 - Some tasks require a running daemon. Start it in a background terminal: `arcbox daemon start`

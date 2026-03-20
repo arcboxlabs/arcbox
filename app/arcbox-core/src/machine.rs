@@ -555,6 +555,16 @@ impl MachineManager {
         &self.vm_manager
     }
 
+    /// Returns the vmnet bridge interface name for a machine's VM.
+    ///
+    /// Only available when the `vmnet` feature is enabled and the VM is running.
+    #[cfg(all(target_os = "macos", feature = "vmnet"))]
+    pub fn vmnet_bridge_name(&self, name: &str) -> Option<String> {
+        let machines = self.machines.read().ok()?;
+        let machine = machines.get(name)?;
+        self.vm_manager.vmnet_bridge_name(&machine.vm_id)
+    }
+
     /// Returns the bridge NIC MAC address for a machine's VM.
     pub fn bridge_mac(&self, name: &str) -> Option<String> {
         let machines = self.machines.read().ok()?;

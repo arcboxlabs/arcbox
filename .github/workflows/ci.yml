@@ -53,13 +53,17 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --exclude arcbox-agent
 
-      - name: Code sign arcbox-daemon
+      - name: Code sign arcbox-daemon (adhoc, for smoke test only)
         run: |
-          codesign --entitlements tests/resources/entitlements.plist --force -s - \
-            target/debug/arcbox-daemon
+          codesign --force --options runtime \
+            --entitlements bundle/arcbox.dev.entitlements \
+            -s - target/debug/arcbox-daemon
 
       - name: Smoke test arcbox CLI
         run: ./target/debug/abctl --help
 
       - name: Smoke test arcbox daemon
         run: ./target/debug/arcbox-daemon --help
+
+      - name: Smoke test arcbox helper
+        run: ./target/debug/arcbox-helper --help

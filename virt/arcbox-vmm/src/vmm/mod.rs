@@ -208,6 +208,15 @@ pub struct Vmm {
     /// Shared DNS hosts table from NetworkManager.
     #[cfg(target_os = "macos")]
     shared_dns_hosts: Option<std::sync::Arc<arcbox_dns::LocalHostsTable>>,
+    /// vmnet bridge interface for the bridge NIC (`vmnet` feature only).
+    #[cfg(all(target_os = "macos", feature = "vmnet"))]
+    vmnet_bridge: Option<std::sync::Arc<arcbox_net::darwin::Vmnet>>,
+    /// Cancellation token for the vmnet relay task.
+    #[cfg(all(target_os = "macos", feature = "vmnet"))]
+    vmnet_relay_cancel: Option<tokio_util::sync::CancellationToken>,
+    /// VZ-side fd for the vmnet bridge NIC attachment.
+    #[cfg(all(target_os = "macos", feature = "vmnet"))]
+    vmnet_bridge_fd: Option<OwnedFd>,
 }
 
 impl Vmm {
@@ -263,6 +272,12 @@ impl Vmm {
             inbound_listener_manager: None,
             #[cfg(target_os = "macos")]
             shared_dns_hosts: None,
+            #[cfg(all(target_os = "macos", feature = "vmnet"))]
+            vmnet_bridge: None,
+            #[cfg(all(target_os = "macos", feature = "vmnet"))]
+            vmnet_relay_cancel: None,
+            #[cfg(all(target_os = "macos", feature = "vmnet"))]
+            vmnet_bridge_fd: None,
         })
     }
 
@@ -292,6 +307,17 @@ impl Vmm {
     #[cfg(target_os = "macos")]
     pub fn set_shared_dns_hosts(&mut self, table: std::sync::Arc<arcbox_dns::LocalHostsTable>) {
         self.shared_dns_hosts = Some(table);
+    }
+
+    /// Returns vmnet interface info for the bridge NIC, if available.
+    ///
+    /// Only populated when `vmnet` feature is enabled and interface started.
+    #[cfg(all(target_os = "macos", feature = "vmnet"))]
+    #[must_use]
+    pub fn vmnet_interface_info(&self) -> Option<arcbox_net::darwin::VmnetInterfaceInfo> {
+        self.vmnet_bridge
+            .as_ref()
+            .and_then(|v| v.interface_info().cloned())
     }
 
     /// Initializes the VMM components.
