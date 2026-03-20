@@ -127,7 +127,7 @@ fn first_address_in_subnet(subnet: &str) -> Option<Ipv4Addr> {
     let (ip_str, prefix_str) = subnet.split_once('/')?;
     let base: Ipv4Addr = ip_str.parse().ok()?;
     let prefix: u8 = prefix_str.parse().ok()?;
-    if prefix >= 32 {
+    if prefix == 0 || prefix >= 32 {
         return None;
     }
     let mask: u32 = (!0u32) << (32 - prefix);
