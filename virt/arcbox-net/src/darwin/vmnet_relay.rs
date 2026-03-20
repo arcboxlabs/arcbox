@@ -69,8 +69,8 @@ impl VmnetRelay {
                 }
                 match vmnet_read.read_packet(&mut buf) {
                     Ok(0) => {
-                        // No data available, brief yield.
-                        std::thread::sleep(std::time::Duration::from_micros(100));
+                        // No data available — back off to reduce idle CPU.
+                        std::thread::sleep(std::time::Duration::from_millis(1));
                     }
                     Ok(n) => {
                         let fd = reader_fd.as_raw_fd();
@@ -152,9 +152,14 @@ impl VmnetRelay {
 
         tokio::select! {
             () = self.cancel.cancelled() => {}
-            _ = vmnet_to_guest => {}
+            _ = &mut vmnet_to_guest => {}
             () = guest_to_vmnet => {}
         }
+
+        // Whichever direction finished first (or external cancel): signal
+        // the blocking reader thread to stop and wait for it to exit.
+        self.cancel.cancel();
+        let _ = vmnet_to_guest.await;
 
         Ok(())
     }
