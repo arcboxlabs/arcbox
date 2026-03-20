@@ -902,6 +902,7 @@ impl VmLifecycleManager {
                                 let machine_manager = Arc::clone(&self.machine_manager);
                                 tokio::spawn(async move {
                                     let mut line_buf = String::new();
+                                    const MAX_LINE_BUF: usize = 64 * 1024;
                                     loop {
                                         match machine_manager
                                             .read_console_output(DEFAULT_MACHINE_NAME)
@@ -914,6 +915,14 @@ impl VmLifecycleManager {
                                                     continue;
                                                 }
                                                 line_buf.push_str(trimmed);
+                                                // Guard against runaway output without newlines.
+                                                if line_buf.len() > MAX_LINE_BUF {
+                                                    tracing::warn!(
+                                                        "Guest console line buffer overflow, flushing"
+                                                    );
+                                                    line_buf.clear();
+                                                    continue;
+                                                }
                                                 while let Some(pos) = line_buf.find('\n') {
                                                     let line =
                                                         line_buf[..pos].trim_end().to_owned();
@@ -932,6 +941,11 @@ impl VmLifecycleManager {
                                                 }
                                             }
                                             Err(e) => {
+                                                // Flush any remaining partial line.
+                                                let trailing = line_buf.trim().to_owned();
+                                                if !trailing.is_empty() {
+                                                    tracing::info!("Guest: {}", trailing);
+                                                }
                                                 tracing::debug!("Console read loop stopped: {}", e);
                                                 break;
                                             }
