@@ -147,7 +147,6 @@ mod security {
     }
 
     /// Creates a CFString from a Rust &str. Caller must CFRelease.
-    #[allow(clippy::cast_possible_wrap)]
     unsafe fn cf_string(s: &str) -> CFStringRef {
         #[link(name = "CoreFoundation", kind = "framework")]
         unsafe extern "C" {
@@ -162,11 +161,16 @@ mod security {
 
         const K_CF_STRING_ENCODING_UTF8: u32 = 0x08000100;
 
+        let num_bytes = match isize::try_from(s.len()) {
+            Ok(n) => n,
+            Err(_) => return std::ptr::null(),
+        };
+
         unsafe {
             CFStringCreateWithBytes(
                 K_CF_ALLOCATOR_DEFAULT,
                 s.as_ptr(),
-                s.len() as isize,
+                num_bytes,
                 K_CF_STRING_ENCODING_UTF8,
                 0,
             )
