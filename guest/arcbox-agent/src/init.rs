@@ -420,7 +420,10 @@ exit 0
 
     /// Run an iptables command, logging on failure.
     fn run_iptables(args: &[&str], desc: &str) {
-        match std::process::Command::new("/sbin/iptables").args(args).status() {
+        match std::process::Command::new("/sbin/iptables")
+            .args(args)
+            .status()
+        {
             Ok(s) if s.success() => {}
             Ok(s) => tracing::warn!(
                 desc,

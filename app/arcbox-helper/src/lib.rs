@@ -54,10 +54,8 @@ pub trait HelperService {
 /// Low-level connect — use [`client::Client::connect()`] instead.
 pub(crate) async fn connect() -> Result<HelperServiceClient, std::io::Error> {
     let path = socket_path();
-    let transport = tarpc::serde_transport::unix::connect(
-        &path,
-        tarpc::tokio_serde::formats::Bincode::default,
-    )
-    .await?;
+    let transport =
+        tarpc::serde_transport::unix::connect(&path, tarpc::tokio_serde::formats::Bincode::default)
+            .await?;
     Ok(HelperServiceClient::new(tarpc::client::Config::default(), transport).spawn())
 }
