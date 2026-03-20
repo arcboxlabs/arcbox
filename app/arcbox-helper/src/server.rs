@@ -113,6 +113,12 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         l
     } else {
         // Fallback: bind our own socket (development / manual start).
+        //
+        // Socket is 0o666 intentionally for development convenience. In
+        // production, launchd owns the socket (SockPathMode in the plist)
+        // and peer_auth enforces code-signature verification in release
+        // builds. Manual mode is only used on dev machines where the
+        // threat model doesn't include local privilege escalation.
         let path = arcbox_helper::socket_path();
         let _ = std::fs::remove_file(&path);
 
