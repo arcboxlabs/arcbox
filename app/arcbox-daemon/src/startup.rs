@@ -1,12 +1,12 @@
 //! Daemon startup: directories, PID file, config, runtime initialization.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use arcbox_api::{SetupPhase, SetupState};
-use arcbox_core::{Config, Runtime, VmLifecycleConfig};
+use arcbox_core::{BootAssetProvider, Config, Runtime, VmLifecycleConfig};
 use macos_resolver::to_env_prefix;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -68,6 +68,12 @@ pub async fn init(args: DaemonArgs) -> Result<DaemonContext> {
         vm_lifecycle_config.default_vm.kernel = Some(kernel);
     }
 
+    // Provision boot assets before runtime.init() so the VM has everything
+    // it needs (kernel, rootfs, agent binary). This is a no-op when cached.
+    ensure_boot_assets(&data_dir, &setup_state).await?;
+    ensure_agent_binary(&data_dir)?;
+    setup_state.set_phase(SetupPhase::AssetsReady, "Boot assets ready");
+
     let runtime = Arc::new(
         Runtime::with_vm_lifecycle_config(config, vm_lifecycle_config)
             .context("Failed to create runtime")?,
@@ -76,8 +82,6 @@ pub async fn init(args: DaemonArgs) -> Result<DaemonContext> {
         .init()
         .await
         .context("Failed to initialize runtime")?;
-
-    setup_state.set_phase(SetupPhase::AssetsReady, "Runtime initialized");
     info!(
         data_dir = %data_dir.display(),
         guest_docker_vsock_port = selected_guest_docker_port,
@@ -126,6 +130,75 @@ fn dns_port() -> u16 {
 fn dns_domain() -> String {
     let key = format!("{}_DNS_DOMAIN", to_env_prefix(DNS_PREFIX));
     std::env::var(key).unwrap_or_else(|_| DEFAULT_DNS_DOMAIN.to_string())
+}
+
+// =============================================================================
+// Boot asset provisioning
+// =============================================================================
+
+/// Downloads kernel and rootfs if not already cached. Sets the setup phase to
+/// `DownloadingAssets` while the download is in progress.
+async fn ensure_boot_assets(data_dir: &Path, setup_state: &Arc<SetupState>) -> Result<()> {
+    let cache_dir = data_dir.join("boot");
+    let provider = BootAssetProvider::new(cache_dir).context("Failed to create boot asset provider")?;
+
+    if provider.is_cached() {
+        tracing::debug!("Boot assets already cached");
+        return Ok(());
+    }
+
+    setup_state.set_phase(SetupPhase::DownloadingAssets, "Downloading boot assets...");
+    provider
+        .get_assets_with_progress(Some(Box::new(|p| {
+            tracing::info!(
+                name = %p.name,
+                current = p.current,
+                total = p.total,
+                "Boot asset progress: {:?}",
+                p.phase
+            );
+        })))
+        .await
+        .context("Failed to download boot assets")?;
+
+    info!("Boot assets downloaded");
+    Ok(())
+}
+
+/// Copies the arcbox-agent binary from the boot asset cache to the daemon's
+/// bin directory if it is not already present.
+fn ensure_agent_binary(data_dir: &Path) -> Result<()> {
+    let agent_dest = data_dir.join("bin/arcbox-agent");
+    if agent_dest.exists() {
+        return Ok(());
+    }
+
+    let version = arcbox_core::boot_asset_version();
+    let agent_src = data_dir.join(format!("boot/{version}/arcbox-agent"));
+    if !agent_src.exists() {
+        // Agent binary is not part of the boot cache for this version.
+        // runtime.init() will fail with a clear error if the agent is truly
+        // missing.
+        tracing::debug!(
+            "Agent binary not found in boot cache at {}",
+            agent_src.display()
+        );
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(agent_dest.parent().unwrap())
+        .context("Failed to create agent bin directory")?;
+    std::fs::copy(&agent_src, &agent_dest).context("Failed to copy agent binary")?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&agent_dest, std::fs::Permissions::from_mode(0o755))
+            .context("Failed to set agent binary permissions")?;
+    }
+
+    info!("Agent binary installed from boot cache");
+    Ok(())
 }
 
 // =============================================================================
