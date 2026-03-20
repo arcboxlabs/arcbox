@@ -336,8 +336,9 @@ fn dns_port() -> u16 {
 }
 
 fn docker_socket_path() -> PathBuf {
-    dirs::home_dir().map_or_else(
-        || PathBuf::from("/var/run/arcbox-docker.sock"),
-        |h| h.join(".arcbox/run/docker.sock"),
-    )
+    // Use resolve_real_user() instead of dirs::home_dir() so that under
+    // `sudo` we get the invoking user's home, not /var/root.
+    resolve_real_user()
+        .map(|(home, _uid)| home.join(".arcbox/run/docker.sock"))
+        .unwrap_or_else(|_| PathBuf::from("/var/run/arcbox-docker.sock"))
 }
