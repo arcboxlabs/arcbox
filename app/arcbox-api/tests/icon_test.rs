@@ -1,5 +1,5 @@
-use arcbox_api::grpc::IconServiceImpl;
 use arcbox_api::IconService;
+use arcbox_api::grpc::IconServiceImpl;
 use arcbox_protocol::v1::GetImageIconRequest;
 use tonic::Request;
 
