@@ -17,14 +17,14 @@ use crate::self_setup::SetupTask as _;
 /// - Re-installs the container subnet route (cold-start reconcile)
 /// - Installs DNS resolver and Docker socket via helper (best-effort)
 pub async fn run(ctx: &DaemonContext) {
-    recover_container_networking(&ctx.runtime, &ctx.setup_state).await;
+    recover_container_networking(ctx.runtime(), &ctx.setup_state).await;
 
     // Cold-start route reconcile (non-blocking).
     #[cfg(target_os = "macos")]
     {
         use arcbox_core::DEFAULT_MACHINE_NAME;
         if let Some(mac) = ctx
-            .runtime
+            .runtime()
             .machine_manager()
             .bridge_mac(DEFAULT_MACHINE_NAME)
         {

@@ -84,7 +84,20 @@ fn main() -> Result<()> {
 async fn run(args: DaemonArgs) -> Result<()> {
     info!("Starting ArcBox daemon...");
 
-    let ctx = startup::init(args).await?;
+    // Phase 1: directories, config, sockets — no runtime yet.
+    let mut ctx = startup::init_early(args).await?;
+
+    // Start gRPC immediately (SystemService only) so clients can
+    // observe DOWNLOADING_ASSETS → ASSETS_READY → VM_STARTING.
+    let early_grpc = services::start_grpc_system_only(&ctx).await?;
+
+    // Phase 2: seed/download boot assets, build runtime, start VM.
+    // Progress is visible to gRPC clients via WatchSetupStatus.
+    startup::init_runtime(&mut ctx).await?;
+
+    // Upgrade: stop the SystemService-only server and restart with
+    // all services. The desktop reconnects automatically.
+    early_grpc.abort();
     let handles = services::start(&ctx).await?;
     recovery::run(&ctx).await;
 

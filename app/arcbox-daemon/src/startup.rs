@@ -12,14 +12,16 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::DaemonArgs;
-use crate::context::DaemonContext;
+use crate::context::{DaemonContext, VmArgs};
 
 const DNS_PREFIX: &str = "arcbox";
 const DEFAULT_DNS_DOMAIN: &str = "arcbox.local";
 
-/// Initializes the daemon: creates directories, cleans stale state,
-/// builds the runtime, and returns a fully initialized [`DaemonContext`].
-pub async fn init(args: DaemonArgs) -> Result<DaemonContext> {
+/// Phase 1: directories, PID, config, sockets. No runtime yet.
+///
+/// Returns a context sufficient to start the gRPC SystemService so
+/// clients can observe the full startup progression.
+pub async fn init_early(args: DaemonArgs) -> Result<DaemonContext> {
     let setup_state = Arc::new(SetupState::new());
 
     let data_dir = resolve_data_dir(args.data_dir.as_ref());
@@ -32,8 +34,6 @@ pub async fn init(args: DaemonArgs) -> Result<DaemonContext> {
     std::fs::create_dir_all(&data_subdir).context("Failed to create persistent data directory")?;
 
     let pid_file = run_dir.join("daemon.pid");
-    // cleanup_stale_state uses blocking std::thread::sleep loops (up to 30s
-    // waiting for a stale daemon to exit). Run it off the async runtime.
     {
         let pf = pid_file.clone();
         let rd = run_dir.clone();
@@ -49,11 +49,37 @@ pub async fn init(args: DaemonArgs) -> Result<DaemonContext> {
         .grpc_socket
         .unwrap_or_else(|| run_dir.join("arcbox.sock"));
 
+    let dns_domain = dns_domain();
+    let dns_port = dns_port();
+
+    Ok(DaemonContext {
+        data_dir,
+        socket_path,
+        grpc_socket,
+        pid_file,
+        runtime: None,
+        setup_state,
+        shutdown: CancellationToken::new(),
+        dns_domain,
+        dns_port,
+        docker_integration: args.docker_integration,
+        vm_args: VmArgs {
+            guest_docker_vsock_port: args.guest_docker_vsock_port,
+            kernel: args.kernel,
+        },
+    })
+}
+
+/// Phase 2: seed/download boot assets, build runtime, start VM.
+///
+/// Called after gRPC SystemService is already listening so clients
+/// can observe DOWNLOADING_ASSETS → ASSETS_READY progression.
+pub async fn init_runtime(ctx: &mut DaemonContext) -> Result<()> {
     let mut config = Config {
-        data_dir: data_dir.clone(),
+        data_dir: ctx.data_dir.clone(),
         ..Default::default()
     };
-    if let Some(port) = args.guest_docker_vsock_port {
+    if let Some(port) = ctx.vm_args.guest_docker_vsock_port {
         config.container.guest_docker_vsock_port = port;
     }
     let selected_guest_docker_port = config.container.guest_docker_vsock_port;
@@ -64,15 +90,16 @@ pub async fn init(args: DaemonArgs) -> Result<DaemonContext> {
     if let Some(ref kernel) = config.vm.kernel_path {
         vm_lifecycle_config.default_vm.kernel = Some(kernel.clone());
     }
-    if let Some(kernel) = args.kernel {
-        vm_lifecycle_config.default_vm.kernel = Some(kernel);
+    if let Some(ref kernel) = ctx.vm_args.kernel {
+        vm_lifecycle_config.default_vm.kernel = Some(kernel.clone());
     }
 
-    // Provision boot assets before runtime.init() so the VM has everything
-    // it needs (kernel, rootfs, agent binary). This is a no-op when cached.
-    ensure_boot_assets(&data_dir, &setup_state).await?;
-    ensure_agent_binary(&data_dir)?;
-    setup_state.set_phase(SetupPhase::AssetsReady, "Boot assets ready");
+    // Seed boot assets from app bundle if available, otherwise download.
+    seed_boot_assets_from_bundle(&ctx.data_dir);
+    ensure_boot_assets(&ctx.data_dir, &ctx.setup_state).await?;
+    ensure_agent_binary(&ctx.data_dir)?;
+    ctx.setup_state
+        .set_phase(SetupPhase::AssetsReady, "Boot assets ready");
 
     let runtime = Arc::new(
         Runtime::with_vm_lifecycle_config(config, vm_lifecycle_config)
@@ -83,31 +110,17 @@ pub async fn init(args: DaemonArgs) -> Result<DaemonContext> {
         .await
         .context("Failed to initialize runtime")?;
     info!(
-        data_dir = %data_dir.display(),
+        data_dir = %ctx.data_dir.display(),
         guest_docker_vsock_port = selected_guest_docker_port,
         "Runtime initialized"
     );
 
-    let dns_domain = dns_domain();
-    let dns_port = dns_port();
-
-    // Apply custom DNS domain if configured.
-    if dns_domain != DEFAULT_DNS_DOMAIN {
-        runtime.network_manager().set_dns_domain(&dns_domain);
+    if ctx.dns_domain != DEFAULT_DNS_DOMAIN {
+        runtime.network_manager().set_dns_domain(&ctx.dns_domain);
     }
 
-    Ok(DaemonContext {
-        data_dir,
-        socket_path,
-        grpc_socket,
-        pid_file,
-        runtime,
-        setup_state,
-        shutdown: CancellationToken::new(),
-        dns_domain,
-        dns_port,
-        docker_integration: args.docker_integration,
-    })
+    ctx.runtime = Some(runtime);
+    Ok(())
 }
 
 fn resolve_data_dir(data_dir: Option<&PathBuf>) -> PathBuf {
@@ -130,6 +143,63 @@ fn dns_port() -> u16 {
 fn dns_domain() -> String {
     let key = format!("{}_DNS_DOMAIN", to_env_prefix(DNS_PREFIX));
     std::env::var(key).unwrap_or_else(|_| DEFAULT_DNS_DOMAIN.to_string())
+}
+
+// =============================================================================
+// Bundle asset seeding
+// =============================================================================
+
+/// Copies boot assets from the app bundle to the cache directory if available.
+///
+/// When running inside an app bundle (e.g. `ArcBox Desktop.app/Contents/Helpers/`),
+/// boot assets are at `Contents/Resources/assets/{version}/`. Seeding from the
+/// bundle avoids a CDN download on first launch.
+fn seed_boot_assets_from_bundle(data_dir: &Path) {
+    let version = arcbox_core::boot_asset_version();
+    let cache_dir = data_dir.join(format!("boot/{version}"));
+
+    // Already cached — nothing to do.
+    if cache_dir.join("manifest.json").exists()
+        && cache_dir.join("kernel").exists()
+        && cache_dir.join("rootfs.erofs").exists()
+    {
+        return;
+    }
+
+    // Find the app bundle root relative to the daemon binary.
+    // Layout: Contents/Helpers/com.arcboxlabs.desktop.daemon
+    //         Contents/Resources/assets/{version}/
+    let bundle_assets = (|| {
+        let exe = std::env::current_exe().ok()?;
+        // exe = .../Contents/Helpers/com.arcboxlabs.desktop.daemon
+        let contents = exe.parent()?.parent()?;
+        let assets = contents.join(format!("Resources/assets/{version}"));
+        if assets.join("manifest.json").exists() {
+            Some(assets)
+        } else {
+            None
+        }
+    })();
+
+    let Some(src) = bundle_assets else {
+        return;
+    };
+
+    tracing::info!("Seeding boot assets from app bundle: {}", src.display());
+
+    if let Err(e) = (|| -> std::io::Result<()> {
+        std::fs::create_dir_all(&cache_dir)?;
+        for name in ["manifest.json", "kernel", "rootfs.erofs"] {
+            let src_file = src.join(name);
+            let dst_file = cache_dir.join(name);
+            if src_file.exists() && !dst_file.exists() {
+                std::fs::copy(&src_file, &dst_file)?;
+            }
+        }
+        Ok(())
+    })() {
+        tracing::warn!("Failed to seed boot assets from bundle: {e}");
+    }
 }
 
 // =============================================================================

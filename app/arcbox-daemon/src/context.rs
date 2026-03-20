@@ -13,12 +13,29 @@ pub struct DaemonContext {
     pub socket_path: PathBuf,
     pub grpc_socket: PathBuf,
     pub pid_file: PathBuf,
-    pub runtime: Arc<Runtime>,
+    /// `None` after `init_early`, `Some` after `init_runtime`.
+    pub runtime: Option<Arc<Runtime>>,
     pub setup_state: Arc<SetupState>,
     pub shutdown: CancellationToken,
     pub dns_domain: String,
     pub dns_port: u16,
     pub docker_integration: bool,
+    pub vm_args: VmArgs,
+}
+
+impl DaemonContext {
+    /// Returns the runtime. Panics if called before `init_runtime`.
+    pub fn runtime(&self) -> &Arc<Runtime> {
+        self.runtime
+            .as_ref()
+            .expect("runtime not initialized — called before init_runtime?")
+    }
+}
+
+/// VM-related CLI arguments, deferred until `init_runtime`.
+pub struct VmArgs {
+    pub guest_docker_vsock_port: Option<u32>,
+    pub kernel: Option<PathBuf>,
 }
 
 /// Handles to spawned services for drain-on-shutdown.

@@ -1,4 +1,10 @@
 //! Service startup: DNS, Docker API, gRPC servers.
+//!
+//! gRPC startup is split into two phases:
+//! 1. `start_grpc_system_only` — before runtime, serves only SystemService
+//!    (SetupStatus queries) so clients can observe boot progress.
+//! 2. `start` — after runtime, starts DNS + Docker + full gRPC server.
+//!    The early gRPC handle is aborted and replaced.
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -18,10 +24,59 @@ use tracing::{info, warn};
 use crate::context::{DaemonContext, ServiceHandles};
 use crate::dns_service::DnsService;
 
-/// Starts all daemon services and returns their join handles for shutdown.
+// =============================================================================
+// Phase 1: SystemService only (before runtime)
+// =============================================================================
+
+/// Starts a lightweight gRPC server with only SystemService.
+///
+/// Called before boot-asset download so clients can connect early and
+/// watch the setup phase progression via `WatchSetupStatus`.
+pub async fn start_grpc_system_only(ctx: &DaemonContext) -> Result<tokio::task::JoinHandle<()>> {
+    let socket_path = &ctx.grpc_socket;
+    let _ = std::fs::remove_file(socket_path);
+
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent).context("Failed to create socket directory")?;
+    }
+
+    let listener = UnixListener::bind(socket_path).context(format!(
+        "Failed to bind gRPC socket: {}",
+        socket_path.display()
+    ))?;
+    let incoming = UnixListenerStream::new(listener);
+
+    info!(socket = %socket_path.display(), "gRPC server listening (SystemService only)");
+
+    let system_service = SystemServiceImpl::new(Arc::clone(&ctx.setup_state));
+
+    let handle = tokio::spawn(async move {
+        let result = Server::builder()
+            .add_service(SystemServiceServer::new(system_service))
+            .serve_with_incoming(incoming)
+            .await;
+        if let Err(e) = result {
+            // Expected when the early server is aborted during upgrade.
+            tracing::debug!("Early gRPC server stopped: {e}");
+        }
+    });
+
+    Ok(handle)
+}
+
+// =============================================================================
+// Phase 2: Full services (after runtime)
+// =============================================================================
+
+/// Starts DNS, Docker API, and the full gRPC server (all services).
+///
+/// The caller must abort the early gRPC handle before calling this
+/// so the socket can be re-bound.
 pub async fn start(ctx: &DaemonContext) -> Result<ServiceHandles> {
+    let runtime = ctx.runtime();
+
     // DNS service.
-    let dns_service = DnsService::bind(Arc::clone(ctx.runtime.network_manager()), ctx.dns_port)
+    let dns_service = DnsService::bind(Arc::clone(runtime.network_manager()), ctx.dns_port)
         .await
         .context("Failed to start DNS service")?;
 
@@ -39,7 +94,7 @@ pub async fn start(ctx: &DaemonContext) -> Result<ServiceHandles> {
         ServerConfig {
             socket_path: ctx.socket_path.clone(),
         },
-        Arc::clone(&ctx.runtime),
+        Arc::clone(runtime),
     );
 
     let docker_shutdown = ctx.shutdown.clone();
@@ -49,8 +104,8 @@ pub async fn start(ctx: &DaemonContext) -> Result<ServiceHandles> {
         }
     });
 
-    // gRPC server.
-    let grpc = start_grpc(ctx).await?;
+    // Full gRPC server (replaces the early SystemService-only server).
+    let grpc = start_grpc_full(ctx).await?;
 
     // Docker CLI integration (optional).
     if ctx.docker_integration {
@@ -71,26 +126,14 @@ pub async fn start(ctx: &DaemonContext) -> Result<ServiceHandles> {
     Ok(ServiceHandles { dns, docker, grpc })
 }
 
-fn register_host_dns(ctx: &DaemonContext) {
-    let network_cfg = &ctx.runtime.config().network;
-    let gateway_ip = network_cfg
-        .gateway
-        .as_ref()
-        .and_then(|s| s.parse::<Ipv4Addr>().ok())
-        .or_else(|| first_address_in_subnet(&network_cfg.subnet))
-        .unwrap_or(Ipv4Addr::new(10, 0, 2, 1));
-    ctx.runtime
-        .network_manager()
-        .register_dns("host", IpAddr::V4(gateway_ip));
-}
-
-async fn start_grpc(ctx: &DaemonContext) -> Result<tokio::task::JoinHandle<()>> {
+/// Full gRPC server with all services. Requires runtime.
+async fn start_grpc_full(ctx: &DaemonContext) -> Result<tokio::task::JoinHandle<()>> {
+    let runtime = ctx.runtime();
     let socket_path = &ctx.grpc_socket;
-    let _ = std::fs::remove_file(socket_path);
 
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent).context("Failed to create socket directory")?;
-    }
+    // The early server's socket is cleaned up by abort + a brief wait
+    // for the OS to release it.
+    let _ = std::fs::remove_file(socket_path);
 
     let listener = UnixListener::bind(socket_path).context(format!(
         "Failed to bind gRPC socket: {}",
@@ -98,11 +141,11 @@ async fn start_grpc(ctx: &DaemonContext) -> Result<tokio::task::JoinHandle<()>> 
     ))?;
     let incoming = UnixListenerStream::new(listener);
 
-    info!(socket = %socket_path.display(), "gRPC server listening");
+    info!(socket = %socket_path.display(), "gRPC server listening (all services)");
 
-    let machine_service = MachineServiceImpl::new(Arc::clone(&ctx.runtime));
-    let sandbox_service = SandboxServiceImpl::new(Arc::clone(&ctx.runtime));
-    let sandbox_snapshot_service = SandboxSnapshotServiceImpl::new(Arc::clone(&ctx.runtime));
+    let machine_service = MachineServiceImpl::new(Arc::clone(runtime));
+    let sandbox_service = SandboxServiceImpl::new(Arc::clone(runtime));
+    let sandbox_snapshot_service = SandboxSnapshotServiceImpl::new(Arc::clone(runtime));
     let system_service = SystemServiceImpl::new(Arc::clone(&ctx.setup_state));
 
     let shutdown = ctx.shutdown.clone();
@@ -121,6 +164,24 @@ async fn start_grpc(ctx: &DaemonContext) -> Result<tokio::task::JoinHandle<()>> 
     });
 
     Ok(handle)
+}
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+fn register_host_dns(ctx: &DaemonContext) {
+    let runtime = ctx.runtime();
+    let network_cfg = &runtime.config().network;
+    let gateway_ip = network_cfg
+        .gateway
+        .as_ref()
+        .and_then(|s| s.parse::<Ipv4Addr>().ok())
+        .or_else(|| first_address_in_subnet(&network_cfg.subnet))
+        .unwrap_or(Ipv4Addr::new(10, 0, 2, 1));
+    runtime
+        .network_manager()
+        .register_dns("host", IpAddr::V4(gateway_ip));
 }
 
 fn first_address_in_subnet(subnet: &str) -> Option<Ipv4Addr> {
