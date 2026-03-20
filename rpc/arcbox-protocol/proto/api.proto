@@ -322,6 +322,30 @@ message PruneResponse {
 }
 
 // =============================================================================
+// Icon Service
+// =============================================================================
+
+// IconService provides container image icon lookups.
+service IconService {
+    // Gets the icon URL for a container image reference.
+    rpc GetImageIcon(GetImageIconRequest) returns (GetImageIconResponse);
+}
+
+// Request to get the icon URL for a container image.
+message GetImageIconRequest {
+    // Image reference (e.g., "nginx", "localstack/localstack", "ghcr.io/astral-sh/uv").
+    string reference = 1;
+}
+
+// Response containing the icon URL.
+message GetImageIconResponse {
+    // Icon URL, empty if not found.
+    string url = 1;
+    // Icon source (e.g., "docker_hub_logo", "docker_official_image", "ghcr_avatar").
+    string source = 2;
+}
+
+// =============================================================================
 // Volume Service
 // =============================================================================
 

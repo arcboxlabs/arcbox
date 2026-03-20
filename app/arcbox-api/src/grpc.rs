@@ -6,7 +6,7 @@
 
 use arcbox_core::Runtime;
 use arcbox_grpc::v1::machine_service_server;
-use arcbox_grpc::{SandboxService, SandboxSnapshotService};
+use arcbox_grpc::{IconService, SandboxService, SandboxSnapshotService};
 use arcbox_protocol::sandbox_v1::Empty as SandboxEmpty;
 use arcbox_protocol::sandbox_v1::{
     CheckpointRequest, CheckpointResponse, CreateSandboxRequest, CreateSandboxResponse,
@@ -16,10 +16,11 @@ use arcbox_protocol::sandbox_v1::{
     SandboxInfo, StopSandboxRequest,
 };
 use arcbox_protocol::v1::{
-    CreateMachineRequest, CreateMachineResponse, Empty, InspectMachineRequest, ListMachinesRequest,
-    ListMachinesResponse, MachineAgentRequest, MachineExecOutput, MachineExecRequest, MachineInfo,
-    MachineNetwork, MachinePingResponse, MachineSummary, MachineSystemInfo, RemoveMachineRequest,
-    StartMachineRequest, StopMachineRequest,
+    CreateMachineRequest, CreateMachineResponse, Empty, GetImageIconRequest, GetImageIconResponse,
+    InspectMachineRequest, ListMachinesRequest, ListMachinesResponse, MachineAgentRequest,
+    MachineExecOutput, MachineExecRequest, MachineInfo, MachineNetwork, MachinePingResponse,
+    MachineSummary, MachineSystemInfo, RemoveMachineRequest, StartMachineRequest,
+    StopMachineRequest,
 };
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
@@ -286,6 +287,55 @@ impl machine_service_server::MachineService for MachineServiceImpl {
     ) -> Result<Response<arcbox_protocol::v1::SshInfoResponse>, Status> {
         // TODO: Implement SSH info.
         Err(Status::unimplemented("ssh_info not implemented"))
+    }
+}
+
+// =============================================================================
+// Icon Service
+// =============================================================================
+
+/// Icon service implementation — delegates to `dimicon` for image icon lookups.
+pub struct IconServiceImpl {
+    icon_service: dimicon::IconService,
+}
+
+impl IconServiceImpl {
+    /// Creates a new icon service.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            icon_service: dimicon::IconService::new(),
+        }
+    }
+}
+
+#[tonic::async_trait]
+impl IconService for IconServiceImpl {
+    async fn get_image_icon(
+        &self,
+        request: Request<GetImageIconRequest>,
+    ) -> Result<Response<GetImageIconResponse>, Status> {
+        let reference = request.into_inner().reference;
+
+        let icon = self
+            .icon_service
+            .get_icon(&reference)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let source = match &icon {
+            dimicon::IconSource::DockerHubLogo { .. } => "docker_hub_logo",
+            dimicon::IconSource::DockerHubOrgGravatar { .. } => "docker_hub_org_gravatar",
+            dimicon::IconSource::DockerOfficialImage { .. } => "docker_official_image",
+            dimicon::IconSource::GhcrAvatar { .. } => "ghcr_avatar",
+            dimicon::IconSource::Custom { .. } => "custom",
+            dimicon::IconSource::NotFound => "not_found",
+        };
+
+        Ok(Response::new(GetImageIconResponse {
+            url: icon.url().unwrap_or_default().to_string(),
+            source: source.to_string(),
+        }))
     }
 }
 

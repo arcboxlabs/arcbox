@@ -1970,6 +1970,27 @@ pub struct PruneResponse {
     #[prost(string, repeated, tag = "5")]
     pub volumes_deleted: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
+/// Request to get the icon URL for a container image.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetImageIconRequest {
+    /// Image reference (e.g., "nginx", "localstack/localstack", "ghcr.io/astral-sh/uv").
+    #[prost(string, tag = "1")]
+    pub reference: ::prost::alloc::string::String,
+}
+/// Response containing the icon URL.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetImageIconResponse {
+    /// Icon URL, empty if not found.
+    #[prost(string, tag = "1")]
+    pub url: ::prost::alloc::string::String,
+    /// Icon source (e.g., "docker_hub_logo", "docker_official_image", "ghcr_avatar").
+    #[prost(string, tag = "2")]
+    pub source: ::prost::alloc::string::String,
+}
 /// Request to create a volume.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

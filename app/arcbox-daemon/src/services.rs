@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use arcbox_api::{
-    MachineServiceImpl, SandboxServiceImpl, SandboxServiceServer, SandboxSnapshotServiceImpl,
-    SandboxSnapshotServiceServer, SharedRuntime, SystemServiceImpl, SystemServiceServer,
-    machine_service_server::MachineServiceServer,
+    IconServiceImpl, IconServiceServer, MachineServiceImpl, SandboxServiceImpl,
+    SandboxServiceServer, SandboxSnapshotServiceImpl, SandboxSnapshotServiceServer, SharedRuntime,
+    SystemServiceImpl, SystemServiceServer, machine_service_server::MachineServiceServer,
 };
 use arcbox_docker::{DockerApiServer, DockerContextManager, ServerConfig};
 use tokio::net::UnixListener;
@@ -50,6 +50,7 @@ pub async fn start_grpc(
     let sandbox_service = SandboxServiceImpl::new(Arc::clone(&shared_runtime));
     let sandbox_snapshot_service = SandboxSnapshotServiceImpl::new(Arc::clone(&shared_runtime));
     let system_service = SystemServiceImpl::new(Arc::clone(&ctx.setup_state));
+    let icon_service = IconServiceImpl::new();
 
     let shutdown = ctx.shutdown.clone();
     let handle = tokio::spawn(async move {
@@ -58,6 +59,7 @@ pub async fn start_grpc(
             .add_service(SandboxServiceServer::new(sandbox_service))
             .add_service(SandboxSnapshotServiceServer::new(sandbox_snapshot_service))
             .add_service(SystemServiceServer::new(system_service))
+            .add_service(IconServiceServer::new(icon_service))
             .serve_with_incoming_shutdown(incoming, shutdown.cancelled())
             .await;
 
