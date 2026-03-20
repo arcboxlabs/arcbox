@@ -58,11 +58,16 @@ pub async fn execute(args: InstallArgs) -> Result<()> {
     }
 
     // 5. Shell integration.
+    // Under sudo, dirs::home_dir() returns /var/root, so setup would
+    // install to root's home instead of the real user's. Skip and hint.
     print_step(5, 5, "Setting up shell integration...");
     if args.no_shell {
         print_skipped();
+    } else if std::env::var("SUDO_USER").is_ok() {
+        println!("skipped (sudo)");
+        println!();
+        println!("  Run as your normal user: abctl setup install");
     } else {
-        // Delegate to `arcbox setup install` logic.
         super::setup::execute(
             super::setup::SetupCommands::Install,
             super::OutputFormat::Quiet,
@@ -208,12 +213,30 @@ async fn setup_docker_socket(client: &Client) -> Result<()> {
 /// Under `sudo`, `dirs::home_dir()` returns `/var/root` and `getuid()`
 /// returns 0. We detect this via `SUDO_USER` / `SUDO_UID` and resolve
 /// the real user's home and UID instead.
+/// Daemon launchd label — must match uninstall.rs.
+const DAEMON_LABEL: &str = "com.arcboxlabs.desktop.daemon";
+
 fn register_daemon_service() -> Result<()> {
     let (home, uid) = resolve_real_user()?;
     let plist_dir = home.join("Library/LaunchAgents");
     std::fs::create_dir_all(&plist_dir).context("failed to create LaunchAgents directory")?;
 
-    let plist_path = plist_dir.join("com.arcbox.daemon.plist");
+    // Create log directory so launchd's stdout/stderr redirection works
+    // on fresh installs where ~/.arcbox/log/ doesn't exist yet.
+    let log_dir = home.join(".arcbox/log");
+    std::fs::create_dir_all(&log_dir).context("failed to create log directory")?;
+
+    // Under sudo, the directory is created as root. Chown to the real user
+    // so the daemon (running as user) can write logs.
+    let _ = Command::new("chown")
+        .args([
+            "-R",
+            &format!("{uid}:staff"),
+            &home.join(".arcbox").to_string_lossy(),
+        ])
+        .status();
+
+    let plist_path = plist_dir.join(format!("{DAEMON_LABEL}.plist"));
 
     // Find the daemon binary.
     let exe = std::env::current_exe().context("could not determine current executable")?;
@@ -223,7 +246,6 @@ fn register_daemon_service() -> Result<()> {
     let daemon_path = if daemon_bin.exists() {
         daemon_bin.to_string_lossy().to_string()
     } else {
-        // Fall back to ~/.arcbox/bin if not found next to CLI.
         let alt = home.join(".arcbox/bin/arcbox-daemon");
         if alt.exists() {
             alt.to_string_lossy().to_string()
@@ -238,7 +260,7 @@ fn register_daemon_service() -> Result<()> {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.arcbox.daemon</string>
+    <string>{DAEMON_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
         <string>{daemon_path}</string>
