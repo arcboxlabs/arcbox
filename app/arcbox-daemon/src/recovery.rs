@@ -1,6 +1,7 @@
 //! Post-startup recovery: re-establish networking for surviving containers
 //! and reconcile host routes.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use arcbox_core::Runtime;
@@ -54,7 +55,61 @@ pub async fn run(ctx: &DaemonContext) {
         setup_state_self.set_dns_installed(dns_task.is_satisfied());
         setup_state_self.set_docker_socket_linked(socket_task.is_satisfied());
     });
+
+    // Docker CLI tools installation (non-blocking, best-effort).
+    if ctx.docker_integration {
+        let data_dir = ctx.data_dir.clone();
+        let setup_state = Arc::clone(&ctx.setup_state);
+        tokio::spawn(async move {
+            match ensure_docker_tools(&data_dir).await {
+                Ok(()) => setup_state.set_docker_tools_installed(true),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Docker tools setup failed");
+                }
+            }
+        });
+    }
 }
+
+// =============================================================================
+// Docker CLI tools
+// =============================================================================
+
+/// Embedded lockfile (same one used by arcbox-core for boot assets).
+const LOCK_TOML: &str = include_str!("../../../assets.lock");
+
+/// Installs Docker CLI tools (docker, buildx, compose, credential helper)
+/// if not already present. Parses tool definitions from assets.lock.
+async fn ensure_docker_tools(data_dir: &Path) -> anyhow::Result<()> {
+    let tools = arcbox_docker_tools::parse_tools(LOCK_TOML)
+        .map_err(|e| anyhow::anyhow!("failed to parse tools from assets.lock: {e}"))?;
+
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x86_64"
+    };
+
+    let install_dir = data_dir.join("runtime/bin");
+    let mgr = arcbox_docker_tools::DockerToolManager::new(tools, arch, install_dir);
+
+    // Check if all tools are already valid — skip work if so.
+    if mgr.validate_all().await.is_ok() {
+        tracing::debug!("Docker CLI tools already installed and valid");
+        return Ok(());
+    }
+
+    mgr.install_all(None)
+        .await
+        .map_err(|e| anyhow::anyhow!("docker tools install failed: {e}"))?;
+
+    info!("Docker CLI tools installed");
+    Ok(())
+}
+
+// =============================================================================
+// Container networking recovery
+// =============================================================================
 
 /// Re-registers DNS entries and port forwarding for all running containers.
 ///
