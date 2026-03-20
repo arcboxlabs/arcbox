@@ -32,7 +32,15 @@ pub async fn init(args: DaemonArgs) -> Result<DaemonContext> {
     std::fs::create_dir_all(&data_subdir).context("Failed to create persistent data directory")?;
 
     let pid_file = run_dir.join("daemon.pid");
-    cleanup_stale_state(&pid_file, &run_dir);
+    // cleanup_stale_state uses blocking std::thread::sleep loops (up to 30s
+    // waiting for a stale daemon to exit). Run it off the async runtime.
+    {
+        let pf = pid_file.clone();
+        let rd = run_dir.clone();
+        tokio::task::spawn_blocking(move || cleanup_stale_state(&pf, &rd))
+            .await
+            .ok();
+    }
     std::fs::write(&pid_file, format!("{}\n", std::process::id()))
         .context("Failed to write daemon PID file")?;
 
