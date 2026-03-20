@@ -723,16 +723,40 @@ impl VmLifecycleManager {
                     // Non-blocking: retries transient failures (helper not ready,
                     // bridge FDB not populated) but does not gate VM readiness.
                     #[cfg(all(target_os = "macos", feature = "vmnet"))]
-                    if let Some(bridge) =
-                        self.machine_manager.vmnet_bridge_name(DEFAULT_MACHINE_NAME)
                     {
-                        // vmnet path: bridge name is known instantly, only need
-                        // helper retry (1-2 attempts for XPC readiness).
+                        let mm = self.machine_manager.clone();
                         drop(tokio::spawn(async move {
+                            // Retry bridge discovery: after VM start, the kernel
+                            // bridge FDB may not be populated immediately. We
+                            // retry a few times before giving up.
+                            let mut bridge = None;
+                            for attempt in 1..=5u32 {
+                                if let Some(name) = mm.vmnet_bridge_name(DEFAULT_MACHINE_NAME) {
+                                    bridge = Some(name);
+                                    break;
+                                }
+                                if attempt < 5 {
+                                    tracing::debug!(
+                                        attempt,
+                                        "vmnet bridge not yet discoverable, retrying"
+                                    );
+                                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                }
+                            }
+                            let Some(bridge) = bridge else {
+                                tracing::warn!(
+                                    "vmnet bridge not found after 5 attempts, \
+                                     skipping route install"
+                                );
+                                return;
+                            };
                             if let Err(e) =
                                 crate::route_reconciler::ensure_route_for_bridge(&bridge).await
                             {
-                                tracing::warn!(error = %e, "failed to install container route (vmnet)");
+                                tracing::warn!(
+                                    error = %e,
+                                    "failed to install container route (vmnet)"
+                                );
                             }
                         }));
                     }
