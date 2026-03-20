@@ -56,7 +56,7 @@ jobs:
       - name: Code sign arcbox-daemon (adhoc, for smoke test only)
         run: |
           codesign --force --options runtime \
-            --entitlements bundle/arcbox.entitlements \
+            --entitlements bundle/arcbox.dev.entitlements \
             -s - target/debug/arcbox-daemon
 
       - name: Smoke test arcbox CLI
