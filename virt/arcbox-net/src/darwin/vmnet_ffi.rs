@@ -333,12 +333,21 @@ pub type DispatchTime = u64;
 #[cfg(feature = "vmnet")]
 pub const DISPATCH_TIME_FOREVER: DispatchTime = !0;
 
+/// Absolute time zero (now).
+#[cfg(feature = "vmnet")]
+pub const DISPATCH_TIME_NOW: DispatchTime = 0;
+
+/// Nanoseconds per second.
+#[cfg(feature = "vmnet")]
+pub const NSEC_PER_SEC: u64 = 1_000_000_000;
+
 #[cfg(feature = "vmnet")]
 #[link(name = "System")]
 unsafe extern "C" {
     pub fn dispatch_semaphore_create(value: isize) -> DispatchSemaphore;
     pub fn dispatch_semaphore_signal(dsema: DispatchSemaphore) -> isize;
     pub fn dispatch_semaphore_wait(dsema: DispatchSemaphore, timeout: DispatchTime) -> isize;
+    pub fn dispatch_time(when: DispatchTime, delta: i64) -> DispatchTime;
 }
 
 // ============================================================================

@@ -369,9 +369,23 @@ impl Vmnet {
         // SAFETY: vmnet_start_interface with valid config, queue, and block.
         let interface = unsafe { vmnet_start_interface(config_dict.cast_const(), queue, block) };
 
-        // Wait for the completion handler to fire.
-        // SAFETY: Valid semaphore and DISPATCH_TIME_FOREVER constant.
-        unsafe { dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER) };
+        // Wait for the completion handler to fire with a bounded timeout.
+        // 10 seconds is generous; vmnet usually completes within milliseconds.
+        let timeout = unsafe { dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC as i64) };
+        // SAFETY: Valid semaphore and computed timeout.
+        let wait_result = unsafe { dispatch_semaphore_wait(sema, timeout) };
+        if wait_result != 0 {
+            unsafe {
+                _Block_release(block);
+                dispatch_release(sema);
+                CFRelease(config_dict.cast_const());
+                dispatch_release(queue.cast());
+            }
+            return Err(NetError::config(
+                "vmnet_start_interface timed out after 10s (completion handler never fired)"
+                    .to_string(),
+            ));
+        }
 
         // SAFETY: After semaphore fires, the block's captured fields are populated.
         let (status, xpc_params) = unsafe {
