@@ -302,6 +302,7 @@ dependencies = [
  "arcbox-constants",
  "arcbox-core",
  "arcbox-docker",
+ "arcbox-docker-tools",
  "arcbox-helper",
  "arcbox-net",
  "async-trait",

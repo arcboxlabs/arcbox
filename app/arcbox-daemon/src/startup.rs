@@ -140,7 +140,8 @@ fn dns_domain() -> String {
 /// `DownloadingAssets` while the download is in progress.
 async fn ensure_boot_assets(data_dir: &Path, setup_state: &Arc<SetupState>) -> Result<()> {
     let cache_dir = data_dir.join("boot");
-    let provider = BootAssetProvider::new(cache_dir).context("Failed to create boot asset provider")?;
+    let provider =
+        BootAssetProvider::new(cache_dir).context("Failed to create boot asset provider")?;
 
     if provider.is_cached() {
         tracing::debug!("Boot assets already cached");

@@ -233,8 +233,7 @@ async fn provision_boot_assets() -> Result<()> {
 
     // Download runtime binaries (dockerd, containerd, shim, runc).
     let runtime_bin_dir = data_dir.join("runtime/bin");
-    std::fs::create_dir_all(&runtime_bin_dir)
-        .context("failed to create runtime bin directory")?;
+    std::fs::create_dir_all(&runtime_bin_dir).context("failed to create runtime bin directory")?;
     provider
         .prepare_binaries(&runtime_bin_dir, None)
         .await
