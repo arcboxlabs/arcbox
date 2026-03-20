@@ -29,14 +29,14 @@ pub async fn execute(args: InstallArgs) -> Result<()> {
     println!();
 
     // 1. Install helper binary.
-    print_step(1, 5, "Installing arcbox-helper...");
+    print_step(1, 6, "Installing arcbox-helper...");
     install_helper()?;
     print_done();
 
     // 2. Install DNS resolver via helper tarpc client.
     // The socket is available immediately after launchctl bootstrap because
     // launchd socket activation creates the socket file eagerly.
-    print_step(2, 5, "Installing DNS resolver...");
+    print_step(2, 6, "Installing DNS resolver...");
     let client = Client::connect()
         .await
         .context("failed to connect to arcbox-helper (is the service running?)")?;
@@ -44,12 +44,17 @@ pub async fn execute(args: InstallArgs) -> Result<()> {
     print_done();
 
     // 3. Set up Docker socket via helper tarpc client.
-    print_step(3, 5, "Setting up Docker socket...");
+    print_step(3, 6, "Setting up Docker socket...");
     setup_docker_socket(&client).await?;
     print_done();
 
-    // 4. Register daemon service.
-    print_step(4, 5, "Registering daemon service...");
+    // 4. Provision boot assets so the daemon can start without network.
+    print_step(4, 6, "Provisioning boot assets...");
+    provision_boot_assets().await?;
+    print_done();
+
+    // 5. Register daemon service.
+    print_step(5, 6, "Registering daemon service...");
     if args.no_daemon {
         print_skipped();
     } else {
@@ -57,10 +62,10 @@ pub async fn execute(args: InstallArgs) -> Result<()> {
         print_done();
     }
 
-    // 5. Shell integration.
+    // 6. Shell integration.
     // Under sudo, dirs::home_dir() returns /var/root, so setup would
     // install to root's home instead of the real user's. Skip and hint.
-    print_step(5, 5, "Setting up shell integration...");
+    print_step(6, 6, "Setting up shell integration...");
     if args.no_shell {
         print_skipped();
     } else if std::env::var("SUDO_USER").is_ok() {
@@ -205,7 +210,41 @@ async fn setup_docker_socket(client: &Client) -> Result<()> {
 }
 
 // =============================================================================
-// Step 4: Daemon service
+// Step 4: Boot asset provisioning
+// =============================================================================
+
+/// Downloads boot assets (kernel, rootfs) and runtime binaries so the daemon
+/// can start without requiring a network connection.
+async fn provision_boot_assets() -> Result<()> {
+    use arcbox_core::boot_assets::{BootAssetConfig, BootAssetProvider};
+
+    let (home, _) = resolve_real_user()?;
+    let data_dir = home.join(".arcbox");
+    let boot_cache_dir = data_dir.join("boot");
+
+    let config = BootAssetConfig::with_cache_dir(boot_cache_dir);
+    let provider = BootAssetProvider::with_config(config)?;
+
+    // Download kernel + rootfs.
+    provider
+        .get_assets()
+        .await
+        .context("failed to download boot assets")?;
+
+    // Download runtime binaries (dockerd, containerd, shim, runc).
+    let runtime_bin_dir = data_dir.join("runtime/bin");
+    std::fs::create_dir_all(&runtime_bin_dir)
+        .context("failed to create runtime bin directory")?;
+    provider
+        .prepare_binaries(&runtime_bin_dir, None)
+        .await
+        .context("failed to prepare runtime binaries")?;
+
+    Ok(())
+}
+
+// =============================================================================
+// Step 5: Daemon service
 // =============================================================================
 
 /// Registers the daemon as a launchd user agent.
