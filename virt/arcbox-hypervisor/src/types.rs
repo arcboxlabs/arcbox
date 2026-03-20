@@ -201,6 +201,22 @@ impl VirtioDeviceConfig {
         }
     }
 
+    /// Creates a network device with file-handle attachment and explicit MAC.
+    ///
+    /// Used by the vmnet bridge NIC path so the VZ-side NIC uses the same
+    /// MAC as the vmnet interface, keeping bridge FDB lookup consistent.
+    pub fn network_file_handle_with_mac(fd: i32, mac_address: impl Into<String>) -> Self {
+        Self {
+            device_type: VirtioDeviceType::Net,
+            config: Vec::new(),
+            path: None,
+            read_only: false,
+            tag: None,
+            net_fd: Some(fd),
+            mac_address: Some(mac_address.into()),
+        }
+    }
+
     /// Creates a new console device configuration.
     #[must_use]
     pub const fn console() -> Self {
