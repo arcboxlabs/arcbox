@@ -126,10 +126,10 @@ impl ProxyEnvironment {
         false
     }
 
-    /// Whether a usable proxy tunnel is available for TLS traffic.
+    /// Whether a usable proxy tunnel is available.
     #[must_use]
     pub fn has_usable_proxy(&self) -> bool {
-        self.https_proxy.is_some() || self.socks_proxy.is_some()
+        self.http_proxy.is_some() || self.https_proxy.is_some() || self.socks_proxy.is_some()
     }
 }
 

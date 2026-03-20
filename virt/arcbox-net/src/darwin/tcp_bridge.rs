@@ -177,14 +177,16 @@ impl TcpBridge {
 
     /// Determines whether to connect via a proxy tunnel for the given destination.
     ///
-    /// Returns `Some((proxy_addr, target_host, target_port, protocol))` if a proxy
-    /// should be used, or `None` for direct connection.
+    /// Returns `Some((proxy_authority, target_host, target_port, protocol))` if a
+    /// proxy should be used, or `None` for direct connection. The proxy authority
+    /// is a `"host:port"` string that `TcpStream::connect` can resolve (supports
+    /// both IP addresses and hostnames like `proxy.corp.com`).
     fn resolve_proxy_target(
         &self,
         dst_ip: Ipv4Addr,
         dst_port: u16,
         domain: Option<&str>,
-    ) -> Option<(SocketAddr, String, u16, &'static str)> {
+    ) -> Option<(String, String, u16, &'static str)> {
         let env = self.proxy_env.as_ref()?;
 
         // No proxy configured → always direct.
@@ -215,20 +217,20 @@ impl TcpBridge {
         // Prefer SOCKS5 (supports all protocols), then HTTPS proxy for TLS,
         // then HTTP proxy as last resort.
         if let Some(ref socks) = env.socks_proxy {
-            let addr = SocketAddr::new(socks.host.parse().ok()?, socks.port);
-            return Some((addr, host.to_string(), dst_port, "socks5"));
+            let authority = format!("{}:{}", socks.host, socks.port);
+            return Some((authority, host.to_string(), dst_port, "socks5"));
         }
 
         if dst_port == 443 {
             if let Some(ref https) = env.https_proxy {
-                let addr = SocketAddr::new(https.host.parse().ok()?, https.port);
-                return Some((addr, host.to_string(), dst_port, "http-connect"));
+                let authority = format!("{}:{}", https.host, https.port);
+                return Some((authority, host.to_string(), dst_port, "http-connect"));
             }
         }
 
         if let Some(ref http) = env.http_proxy {
-            let addr = SocketAddr::new(http.host.parse().ok()?, http.port);
-            return Some((addr, host.to_string(), dst_port, "http-connect"));
+            let authority = format!("{}:{}", http.host, http.port);
+            return Some((authority, host.to_string(), dst_port, "http-connect"));
         }
 
         None
@@ -348,20 +350,27 @@ impl TcpBridge {
             tokio::spawn(async move {
                 let connect_fut = async {
                     match proxy_target {
-                        Some((proxy_addr, host, port, proto)) => {
-                            let proxy_str = proxy_addr.to_string();
+                        Some((proxy_authority, host, port, proto)) => {
                             tracing::debug!(
-                                proxy = %proxy_str,
+                                proxy = %proxy_authority,
                                 target = %format!("{host}:{port}"),
                                 protocol = proto,
                                 "TCP SYN gate: connecting via proxy"
                             );
                             if proto == "socks5" {
-                                super::proxy_tunnel::connect_via_socks5(&proxy_str, &host, port)
-                                    .await
+                                super::proxy_tunnel::connect_via_socks5(
+                                    &proxy_authority,
+                                    &host,
+                                    port,
+                                )
+                                .await
                             } else {
-                                super::proxy_tunnel::connect_via_http_proxy(&proxy_str, &host, port)
-                                    .await
+                                super::proxy_tunnel::connect_via_http_proxy(
+                                    &proxy_authority,
+                                    &host,
+                                    port,
+                                )
+                                .await
                             }
                         }
                         None => tokio::net::TcpStream::connect(dst_addr).await,
