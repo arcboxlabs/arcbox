@@ -98,11 +98,13 @@ pub enum Commands {
     /// Run diagnostic checks on the ArcBox runtime
     Doctor,
 
-    /// Install ArcBox (helper, DNS, socket, daemon service)
+    /// Internal: install helper + register daemon (used by brew/DMG installers)
     #[cfg(target_os = "macos")]
+    #[command(name = "_install", hide = true)]
     Install(install::InstallArgs),
 
-    /// Uninstall ArcBox from this machine
+    /// Internal: uninstall helper + deregister daemon (used by brew/DMG installers)
+    #[command(name = "_uninstall", hide = true)]
     Uninstall(uninstall::UninstallArgs),
 
     /// Display system-wide information
