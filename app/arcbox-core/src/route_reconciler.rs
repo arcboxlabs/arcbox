@@ -114,7 +114,7 @@ pub async fn ensure_route_with_retry(bridge_mac: &str) -> Result<(), RouteError>
 ///
 /// When vmnet.framework creates the bridge, we know the interface immediately —
 /// no need to scan the kernel FDB. Only retries for helper readiness.
-#[cfg(feature = "vmnet")]
+#[cfg(all(feature = "vmnet", target_os = "macos"))]
 pub async fn ensure_route_for_bridge(bridge_name: &str) -> Result<(), RouteError> {
     for attempt in 1..=2 {
         match async {
