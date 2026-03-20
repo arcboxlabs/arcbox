@@ -447,11 +447,11 @@ impl Vmnet {
                 info.max_packet_size = mps_val as usize;
             }
 
-            // SAFETY: Release the retained XPC dict.
-            unsafe { xpc_release(xpc_params) };
+            // Note: xpc_params is owned by the block (retained in vmnet_block_invoke).
+            // vmnet_block_dispose releases it when _Block_release runs below.
         }
 
-        // Clean up the block and semaphore.
+        // Clean up the block (releases captured xpc_params) and semaphore.
         unsafe {
             _Block_release(block);
             dispatch_release(sema);
