@@ -729,15 +729,18 @@ impl VmLifecycleManager {
                             // Retry bridge discovery: after VM start, the kernel
                             // bridge FDB may not be populated immediately. We
                             // retry a few times before giving up.
+                            const MAX_ATTEMPTS: u32 = 5;
                             let mut bridge = None;
-                            for attempt in 1..=5u32 {
+                            for attempt in 1..=MAX_ATTEMPTS {
                                 if let Some(name) = mm.vmnet_bridge_name(DEFAULT_MACHINE_NAME) {
                                     bridge = Some(name);
                                     break;
                                 }
-                                if attempt < 5 {
+                                if attempt < MAX_ATTEMPTS {
                                     tracing::debug!(
                                         attempt,
+                                        max_attempts = MAX_ATTEMPTS,
+                                        machine = DEFAULT_MACHINE_NAME,
                                         "vmnet bridge not yet discoverable, retrying"
                                     );
                                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -745,8 +748,9 @@ impl VmLifecycleManager {
                             }
                             let Some(bridge) = bridge else {
                                 tracing::warn!(
-                                    "vmnet bridge not found after 5 attempts, \
-                                     skipping route install"
+                                    machine = DEFAULT_MACHINE_NAME,
+                                    max_attempts = MAX_ATTEMPTS,
+                                    "vmnet bridge not found, skipping route install"
                                 );
                                 return;
                             };
