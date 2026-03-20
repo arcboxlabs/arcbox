@@ -95,7 +95,7 @@ pub async fn init_runtime(ctx: &mut DaemonContext) -> Result<()> {
     }
 
     // Seed boot assets from app bundle if available, otherwise download.
-    seed_boot_assets_from_bundle(&ctx.data_dir);
+    seed_from_bundle(&ctx.data_dir);
     ensure_boot_assets(&ctx.data_dir, &ctx.setup_state).await?;
     ensure_agent_binary(&ctx.data_dir)?;
     ctx.setup_state
@@ -146,60 +146,175 @@ fn dns_domain() -> String {
 }
 
 // =============================================================================
-// Bundle asset seeding
+// App bundle detection & seeding
 // =============================================================================
 
-/// Copies boot assets from the app bundle to the cache directory if available.
+/// Returns the `Contents/` directory if the daemon is running inside an app bundle.
 ///
-/// When running inside an app bundle (e.g. `ArcBox Desktop.app/Contents/Helpers/`),
-/// boot assets are at `Contents/Resources/assets/{version}/`. Seeding from the
-/// bundle avoids a CDN download on first launch.
-fn seed_boot_assets_from_bundle(data_dir: &Path) {
-    let version = arcbox_core::boot_asset_version();
-    let cache_dir = data_dir.join(format!("boot/{version}"));
-
-    // Already cached — nothing to do.
-    if cache_dir.join("manifest.json").exists()
-        && cache_dir.join("kernel").exists()
-        && cache_dir.join("rootfs.erofs").exists()
-    {
-        return;
+/// Layout: `ArcBox Desktop.app/Contents/Helpers/com.arcboxlabs.desktop.daemon`
+/// → returns `ArcBox Desktop.app/Contents/`
+pub(crate) fn find_bundle_contents() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    // exe = .../Contents/Helpers/com.arcboxlabs.desktop.daemon
+    let contents = exe.parent()?.parent()?;
+    if contents.join("Resources").is_dir() && contents.join("Info.plist").exists() {
+        Some(contents.to_path_buf())
+    } else {
+        None
     }
+}
 
-    // Find the app bundle root relative to the daemon binary.
-    // Layout: Contents/Helpers/com.arcboxlabs.desktop.daemon
-    //         Contents/Resources/assets/{version}/
-    let bundle_assets = (|| {
-        let exe = std::env::current_exe().ok()?;
-        // exe = .../Contents/Helpers/com.arcboxlabs.desktop.daemon
-        let contents = exe.parent()?.parent()?;
-        let assets = contents.join(format!("Resources/assets/{version}"));
-        if assets.join("manifest.json").exists() {
-            Some(assets)
-        } else {
-            None
-        }
-    })();
-
-    let Some(src) = bundle_assets else {
+/// Seeds all assets from the app bundle to `~/.arcbox/` if available.
+///
+/// Copies boot assets, runtime binaries, and the agent binary from the
+/// bundle so the daemon can start without network on first launch.
+///
+/// Bundle layout:
+/// ```text
+/// Contents/Resources/assets/{version}/  → ~/.arcbox/boot/{version}/
+/// Contents/Resources/runtime/           → ~/.arcbox/runtime/
+/// Contents/Resources/bin/arcbox-agent   → ~/.arcbox/bin/arcbox-agent
+/// ```
+fn seed_from_bundle(data_dir: &Path) {
+    let Some(contents) = find_bundle_contents() else {
         return;
     };
+    tracing::info!("App bundle detected: {}", contents.display());
 
-    tracing::info!("Seeding boot assets from app bundle: {}", src.display());
+    // 1. Boot assets: kernel, rootfs, manifest.
+    let version = arcbox_core::boot_asset_version();
+    let boot_dst = data_dir.join(format!("boot/{version}"));
+    let boot_src = contents.join(format!("Resources/assets/{version}"));
+    if boot_src.join("manifest.json").exists() {
+        seed_dir_files(
+            &boot_src,
+            &boot_dst,
+            &["manifest.json", "kernel", "rootfs.erofs"],
+            "boot assets",
+        );
+    }
 
+    // 2. Runtime binaries: dockerd, containerd, runc, etc.
+    let runtime_src = contents.join("Resources/runtime");
+    let runtime_dst = data_dir.join("runtime");
+    if runtime_src.is_dir() {
+        seed_dir_recursive(&runtime_src, &runtime_dst, "runtime binaries");
+    }
+
+    // 3. Agent binary.
+    let agent_src = contents.join("Resources/bin/arcbox-agent");
+    let agent_dst = data_dir.join("bin/arcbox-agent");
+    if agent_src.exists() && !agent_dst.exists() {
+        if let Err(e) = (|| -> std::io::Result<()> {
+            std::fs::create_dir_all(agent_dst.parent().unwrap())?;
+            std::fs::copy(&agent_src, &agent_dst)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&agent_dst, std::fs::Permissions::from_mode(0o755))?;
+            }
+            Ok(())
+        })() {
+            tracing::warn!("Failed to seed agent from bundle: {e}");
+        } else {
+            tracing::info!("Seeded arcbox-agent from bundle");
+        }
+    }
+}
+
+/// Copies specific files from `src` to `dst`, skipping those already present.
+fn seed_dir_files(src: &Path, dst: &Path, files: &[&str], label: &str) {
     if let Err(e) = (|| -> std::io::Result<()> {
-        std::fs::create_dir_all(&cache_dir)?;
-        for name in ["manifest.json", "kernel", "rootfs.erofs"] {
-            let src_file = src.join(name);
-            let dst_file = cache_dir.join(name);
-            if src_file.exists() && !dst_file.exists() {
-                std::fs::copy(&src_file, &dst_file)?;
+        std::fs::create_dir_all(dst)?;
+        for name in files {
+            let s = src.join(name);
+            let d = dst.join(name);
+            if s.exists() && !d.exists() {
+                std::fs::copy(&s, &d)?;
             }
         }
         Ok(())
     })() {
-        tracing::warn!("Failed to seed boot assets from bundle: {e}");
+        tracing::warn!("Failed to seed {label} from bundle: {e}");
+    } else {
+        tracing::info!("Seeded {label} from bundle");
     }
+}
+
+/// Recursively copies a directory tree, skipping files already present.
+fn seed_dir_recursive(src: &Path, dst: &Path, label: &str) {
+    let result = (|| -> std::io::Result<u32> {
+        let mut count = 0u32;
+        for entry in walkdir(src)? {
+            let (rel, is_dir) = entry?;
+            let d = dst.join(&rel);
+            if is_dir {
+                std::fs::create_dir_all(&d)?;
+            } else if !d.exists() {
+                if let Some(parent) = d.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(src.join(&rel), &d)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let meta = std::fs::metadata(&d)?;
+                    if meta.permissions().mode() & 0o111 == 0 {
+                        // Source was executable, preserve it.
+                        let src_meta = std::fs::metadata(src.join(&rel))?;
+                        if src_meta.permissions().mode() & 0o111 != 0 {
+                            std::fs::set_permissions(
+                                &d,
+                                std::fs::Permissions::from_mode(0o755),
+                            )?;
+                        }
+                    }
+                }
+                count += 1;
+            }
+        }
+        Ok(count)
+    })();
+
+    match result {
+        Ok(0) => tracing::debug!("{label}: already seeded"),
+        Ok(n) => tracing::info!("Seeded {n} {label} from bundle"),
+        Err(e) => tracing::warn!("Failed to seed {label} from bundle: {e}"),
+    }
+}
+
+/// Simple recursive directory walker yielding `(relative_path, is_dir)`.
+fn walkdir(
+    root: &Path,
+) -> std::io::Result<impl Iterator<Item = std::io::Result<(PathBuf, bool)>>> {
+    let mut stack = vec![PathBuf::new()];
+    let root = root.to_path_buf();
+    Ok(std::iter::from_fn(move || {
+        while let Some(rel) = stack.pop() {
+            let abs = root.join(&rel);
+            let Ok(meta) = std::fs::metadata(&abs) else {
+                continue;
+            };
+            if meta.is_dir() {
+                match std::fs::read_dir(&abs) {
+                    Ok(entries) => {
+                        for entry in entries.flatten() {
+                            if let Ok(name) = entry.file_name().into_string() {
+                                stack.push(rel.join(name));
+                            }
+                        }
+                    }
+                    Err(e) => return Some(Err(e)),
+                }
+                if !rel.as_os_str().is_empty() {
+                    return Some(Ok((rel, true)));
+                }
+            } else {
+                return Some(Ok((rel, false)));
+            }
+        }
+        None
+    }))
 }
 
 // =============================================================================

@@ -79,7 +79,7 @@ pub async fn run(ctx: &DaemonContext) {
 const LOCK_TOML: &str = include_str!("../../../assets.lock");
 
 /// Installs Docker CLI tools (docker, buildx, compose, credential helper)
-/// if not already present. Parses tool definitions from assets.lock.
+/// if not already present. Tries the app bundle first, then CDN.
 async fn ensure_docker_tools(data_dir: &Path) -> anyhow::Result<()> {
     let tools = arcbox_docker_tools::parse_tools(LOCK_TOML)
         .map_err(|e| anyhow::anyhow!("failed to parse tools from assets.lock: {e}"))?;
@@ -91,7 +91,15 @@ async fn ensure_docker_tools(data_dir: &Path) -> anyhow::Result<()> {
     };
 
     let install_dir = data_dir.join("runtime/bin");
-    let mgr = arcbox_docker_tools::DockerToolManager::new(tools, arch, install_dir);
+    let mut mgr = arcbox_docker_tools::DockerToolManager::new(tools, arch, install_dir);
+
+    // If running from an app bundle, try Contents/MacOS/xbin/ first.
+    if let Some(bundle_dir) = crate::startup::find_bundle_contents() {
+        let xbin = bundle_dir.join("MacOS/xbin");
+        if xbin.is_dir() {
+            mgr = mgr.with_bundle_dir(xbin);
+        }
+    }
 
     // Check if all tools are already valid — skip work if so.
     if mgr.validate_all().await.is_ok() {
