@@ -58,7 +58,9 @@ pub fn validate_iface(s: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Validates a DNS domain. Must match `^[a-z0-9.-]+$`, max 253 chars.
+/// Validates a DNS domain. Must match `^[a-z0-9.-]+$`, max 253 chars,
+/// no empty labels, no leading/trailing dots, no consecutive dots.
+/// Also rejects `.` and `..` to prevent path traversal in `/etc/resolver/`.
 pub fn validate_domain(s: &str) -> Result<(), String> {
     if s.is_empty() {
         return Err("domain must not be empty".to_string());
@@ -72,6 +74,14 @@ pub fn validate_domain(s: &str) -> Result<(), String> {
     {
         return Err(format!(
             "domain '{s}' contains invalid characters (allowed: a-z, 0-9, '.', '-')"
+        ));
+    }
+    if s.starts_with('.') || s.ends_with('.') {
+        return Err(format!("domain '{s}' must not start or end with '.'"));
+    }
+    if s.contains("..") {
+        return Err(format!(
+            "domain '{s}' contains empty label (consecutive dots)"
         ));
     }
     Ok(())
@@ -183,6 +193,12 @@ mod tests {
         // 254 chars
         let long = "a".repeat(254);
         assert!(validate_domain(&long).is_err());
+        // Path traversal / malformed labels
+        assert!(validate_domain(".").is_err());
+        assert!(validate_domain("..").is_err());
+        assert!(validate_domain(".leading").is_err());
+        assert!(validate_domain("trailing.").is_err());
+        assert!(validate_domain("empty..label").is_err());
     }
 
     #[test]
