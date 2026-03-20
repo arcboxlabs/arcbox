@@ -375,12 +375,12 @@ impl Vmnet {
         // SAFETY: Valid semaphore and computed timeout.
         let wait_result = unsafe { dispatch_semaphore_wait(sema, timeout) };
         if wait_result != 0 {
-            unsafe {
-                _Block_release(block);
-                dispatch_release(sema);
-                CFRelease(config_dict.cast_const());
-                dispatch_release(queue.cast());
-            }
+            // Intentionally leak the block and semaphore. vmnet may still
+            // invoke the completion handler after our timeout — releasing
+            // the block now would cause a use-after-free when that happens.
+            // A small leak is preferable to a crash. The dispatch queue is
+            // also leaked to keep the handler's execution context valid.
+            unsafe { CFRelease(config_dict.cast_const()) };
             return Err(NetError::config(
                 "vmnet_start_interface timed out after 10s (completion handler never fired)"
                     .to_string(),
