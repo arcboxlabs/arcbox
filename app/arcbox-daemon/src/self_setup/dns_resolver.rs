@@ -1,7 +1,5 @@
 //! Ensures `/etc/resolver/<domain>` points to the daemon's DNS server.
 
-use std::path::Path;
-
 use arcbox_helper::client::{Client, ClientError};
 
 use super::SetupTask;
@@ -18,7 +16,11 @@ impl SetupTask for DnsResolver {
     }
 
     fn is_satisfied(&self) -> bool {
-        Path::new(&format!("/etc/resolver/{}", self.domain)).exists()
+        let path = format!("/etc/resolver/{}", self.domain);
+        std::fs::read_to_string(&path).is_ok_and(|content| {
+            content.contains("nameserver 127.0.0.1")
+                && content.contains(&format!("port {}", self.port))
+        })
     }
 
     async fn apply(&self, client: &Client) -> Result<(), ClientError> {
