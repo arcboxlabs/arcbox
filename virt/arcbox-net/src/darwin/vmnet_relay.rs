@@ -79,10 +79,14 @@ impl VmnetRelay {
                             unsafe { libc::write(fd, buf.as_ptr().cast::<libc::c_void>(), n) };
                         if written < 0 {
                             let err = std::io::Error::last_os_error();
-                            if err.kind() == std::io::ErrorKind::BrokenPipe {
-                                break;
+                            match err.kind() {
+                                std::io::ErrorKind::BrokenPipe => break,
+                                // Non-blocking fd: backpressure from guest.
+                                // Drop the packet and continue — the guest
+                                // will retransmit at the transport layer.
+                                std::io::ErrorKind::WouldBlock => {}
+                                _ => tracing::debug!("vmnet→guest write error: {err}"),
                             }
-                            tracing::debug!("vmnet→guest write error: {err}");
                         }
                     }
                     Err(e) => {
