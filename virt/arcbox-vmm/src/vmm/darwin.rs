@@ -272,20 +272,32 @@ impl Vmm {
         // SAFETY: setsockopt with valid fd and parameters.
         let buf_size: libc::c_int = 2 * 1024 * 1024;
         unsafe {
-            libc::setsockopt(
+            if libc::setsockopt(
                 vz_fd.as_raw_fd(),
                 libc::SOL_SOCKET,
                 libc::SO_SNDBUF,
                 (&raw const buf_size).cast::<libc::c_void>(),
                 std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            );
-            libc::setsockopt(
+            ) != 0
+            {
+                tracing::warn!(
+                    "setsockopt SO_SNDBUF failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+            if libc::setsockopt(
                 vz_fd.as_raw_fd(),
                 libc::SOL_SOCKET,
                 libc::SO_RCVBUF,
                 (&raw const buf_size).cast::<libc::c_void>(),
                 std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            );
+            ) != 0
+            {
+                tracing::warn!(
+                    "setsockopt SO_RCVBUF failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
         }
 
         // 2. Create the socket proxy, reply channel, and inbound command channel.
@@ -409,20 +421,32 @@ impl Vmm {
         let buf_size: libc::c_int = 2 * 1024 * 1024;
         // SAFETY: setsockopt with valid fd and parameters.
         unsafe {
-            libc::setsockopt(
+            if libc::setsockopt(
                 vz_fd.as_raw_fd(),
                 libc::SOL_SOCKET,
                 libc::SO_SNDBUF,
                 (&raw const buf_size).cast::<libc::c_void>(),
                 std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            );
-            libc::setsockopt(
+            ) != 0
+            {
+                tracing::warn!(
+                    "setsockopt SO_SNDBUF (vmnet bridge) failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+            if libc::setsockopt(
                 vz_fd.as_raw_fd(),
                 libc::SOL_SOCKET,
                 libc::SO_RCVBUF,
                 (&raw const buf_size).cast::<libc::c_void>(),
                 std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            );
+            ) != 0
+            {
+                tracing::warn!(
+                    "setsockopt SO_RCVBUF (vmnet bridge) failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
         }
 
         // Spawn the relay task.
