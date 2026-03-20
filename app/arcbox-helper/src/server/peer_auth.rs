@@ -70,7 +70,11 @@ fn peer_pid(stream: &tokio::net::UnixStream) -> Option<i32> {
         )
     };
 
-    if ret == 0 { Some(pid) } else { None }
+    if ret == 0 {
+        Some(pid)
+    } else {
+        None
+    }
 }
 
 // =============================================================================
@@ -143,6 +147,7 @@ mod security {
     }
 
     /// Creates a CFString from a Rust &str. Caller must CFRelease.
+    #[allow(clippy::cast_possible_wrap)]
     unsafe fn cf_string(s: &str) -> CFStringRef {
         #[link(name = "CoreFoundation", kind = "framework")]
         unsafe extern "C" {
@@ -161,7 +166,6 @@ mod security {
             CFStringCreateWithBytes(
                 K_CF_ALLOCATOR_DEFAULT,
                 s.as_ptr(),
-                #[allow(clippy::cast_possible_wrap)]
                 s.len() as isize,
                 K_CF_STRING_ENCODING_UTF8,
                 0,
