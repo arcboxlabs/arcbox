@@ -7,7 +7,7 @@ use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::Path;
 
-use arcbox_helper::validate;
+use arcbox_helper::validate::{CliName, CliTarget};
 
 /// Returns true if a symlink target looks like an ArcBox bundle path.
 fn is_arcbox_owned(target: &Path) -> bool {
@@ -22,11 +22,11 @@ fn is_arcbox_owned(target: &Path) -> bool {
 /// Only replaces existing symlinks that point into an ArcBox bundle.
 /// Refuses to overwrite regular files or non-ArcBox symlinks.
 pub fn link(name: &str, target: &str) -> Result<(), String> {
-    validate::validate_cli_name(name)?;
-    validate::validate_cli_target(target)?;
+    let name: CliName = name.parse()?;
+    let target: CliTarget = target.parse()?;
 
-    let link_path = Path::new("/usr/local/bin").join(name);
-    let target_path = Path::new(target);
+    let link_path = Path::new("/usr/local/bin").join(name.as_str());
+    let target_path = Path::new(target.as_str());
 
     if !target_path.exists() {
         return Err(format!("CLI target does not exist: {target}"));
@@ -78,9 +78,9 @@ pub fn link(name: &str, target: &str) -> Result<(), String> {
 ///
 /// Idempotent: returns Ok if already absent or not an ArcBox-owned symlink.
 pub fn unlink(name: &str) -> Result<(), String> {
-    validate::validate_cli_name(name)?;
+    let name: CliName = name.parse()?;
 
-    let link_path = Path::new("/usr/local/bin").join(name);
+    let link_path = Path::new("/usr/local/bin").join(name.as_str());
 
     match fs::symlink_metadata(&link_path) {
         Ok(meta) if meta.file_type().is_symlink() => {

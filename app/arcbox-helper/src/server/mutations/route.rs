@@ -6,18 +6,18 @@
 
 use std::process::Command;
 
-use arcbox_helper::validate;
+use arcbox_helper::validate::{BridgeIface, Subnet};
 
 /// Adds a route for `subnet` via `iface`.
 ///
 /// Invokes `/sbin/route -n add -net <subnet> -interface <iface>`.
 /// Idempotent: returns Ok if the route already exists.
 pub fn add(subnet: &str, iface: &str) -> Result<(), String> {
-    validate::validate_subnet(subnet)?;
-    validate::validate_iface(iface)?;
+    let subnet: Subnet = subnet.parse()?;
+    let iface: BridgeIface = iface.parse()?;
 
     let output = Command::new("/sbin/route")
-        .args(["-n", "add", "-net", subnet, "-interface", iface])
+        .args(["-n", "add", "-net", &subnet.to_string(), "-interface", iface.as_str()])
         .output()
         .map_err(|e| format!("failed to execute /sbin/route: {e}"))?;
 
@@ -39,10 +39,10 @@ pub fn add(subnet: &str, iface: &str) -> Result<(), String> {
 /// Invokes `/sbin/route -n delete -net <subnet>`.
 /// Idempotent: returns Ok if the route is already absent.
 pub fn remove(subnet: &str) -> Result<(), String> {
-    validate::validate_subnet(subnet)?;
+    let subnet: Subnet = subnet.parse()?;
 
     let output = Command::new("/sbin/route")
-        .args(["-n", "delete", "-net", subnet])
+        .args(["-n", "delete", "-net", &subnet.to_string()])
         .output()
         .map_err(|e| format!("failed to execute /sbin/route: {e}"))?;
 

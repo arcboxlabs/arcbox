@@ -8,7 +8,7 @@ use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::Path;
 
-use arcbox_helper::validate;
+use arcbox_helper::validate::SocketTarget;
 
 /// Standard Docker socket path.
 const DOCKER_SOCK: &str = arcbox_constants::paths::privileged::DOCKER_SOCKET;
@@ -20,9 +20,9 @@ const DOCKER_SOCK: &str = arcbox_constants::paths::privileged::DOCKER_SOCKET;
 /// but is not a symlink (e.g. a real socket from Docker Desktop), returns an
 /// error asking the user to stop Docker Desktop first.
 pub fn link(target: &str) -> Result<(), String> {
-    validate::validate_socket_target(target)?;
+    let target: SocketTarget = target.parse()?;
 
-    let target_path = Path::new(target);
+    let target_path = Path::new(target.as_str());
     let link_path = Path::new(DOCKER_SOCK);
 
     // Check if the path already exists.
