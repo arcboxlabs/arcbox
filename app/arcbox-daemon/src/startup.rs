@@ -119,7 +119,9 @@ pub async fn init_runtime(ctx: &mut DaemonContext) -> Result<()> {
         runtime.network_manager().set_dns_domain(&ctx.dns_domain);
     }
 
-    let _ = ctx.shared_runtime.set(runtime);
+    ctx.shared_runtime
+        .set(runtime)
+        .map_err(|_| anyhow::anyhow!("init_runtime called twice"))?;
     Ok(())
 }
 

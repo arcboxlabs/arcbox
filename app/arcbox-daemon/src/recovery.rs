@@ -49,8 +49,9 @@ pub async fn run(ctx: &DaemonContext) {
         target: ctx.socket_path.clone(),
     };
 
-    // Create /usr/local/bin/ symlinks for Docker CLI tools if running from bundle.
-    let cli_tasks: Vec<Box<dyn self_setup::SetupTask>> =
+    // Create /usr/local/bin/ symlinks for Docker CLI tools if running from
+    // bundle with docker integration enabled.
+    let cli_tasks: Vec<Box<dyn self_setup::SetupTask>> = if ctx.docker_integration {
         if let Some(contents) = crate::startup::find_bundle_contents() {
             let xbin = contents.join("MacOS/xbin");
             if xbin.is_dir() {
@@ -60,7 +61,10 @@ pub async fn run(ctx: &DaemonContext) {
             }
         } else {
             vec![]
-        };
+        }
+    } else {
+        vec![]
+    };
 
     let setup_state_self = Arc::clone(&ctx.setup_state);
     tokio::spawn(async move {

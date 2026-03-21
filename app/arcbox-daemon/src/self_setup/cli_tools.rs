@@ -22,8 +22,7 @@ impl SetupTask for CliTools {
     fn is_satisfied(&self) -> bool {
         DOCKER_CLI_TOOLS.iter().all(|name| {
             let link = PathBuf::from(format!("/usr/local/bin/{name}"));
-            std::fs::read_link(&link)
-                .is_ok_and(|target| target.to_string_lossy().contains("ArcBox"))
+            std::fs::read_link(&link).is_ok_and(|target| target == self.xbin_dir.join(name))
         })
     }
 

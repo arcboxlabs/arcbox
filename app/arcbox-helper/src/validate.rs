@@ -272,4 +272,46 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().contains(".."));
     }
+
+    // -- CLI name/target validation tests --
+
+    #[test]
+    fn valid_cli_names() {
+        assert!(validate_cli_name("docker").is_ok());
+        assert!(validate_cli_name("docker-buildx").is_ok());
+        assert!(validate_cli_name("docker-compose").is_ok());
+        assert!(validate_cli_name("docker-credential-osxkeychain").is_ok());
+    }
+
+    #[test]
+    fn invalid_cli_names() {
+        assert!(validate_cli_name("").is_err());
+        assert!(validate_cli_name("curl").is_err());
+        assert!(validate_cli_name("rm").is_err());
+        assert!(validate_cli_name("../docker").is_err());
+    }
+
+    #[test]
+    fn valid_cli_targets() {
+        assert!(
+            validate_cli_target("/Applications/ArcBox Desktop.app/Contents/MacOS/xbin/docker")
+                .is_ok()
+        );
+        assert!(
+            validate_cli_target("/Users/test/Apps/ArcBox.app/Contents/MacOS/xbin/docker-compose")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn invalid_cli_targets() {
+        // Not absolute
+        assert!(validate_cli_target("Contents/MacOS/xbin/docker").is_err());
+        // Not inside an app bundle
+        assert!(validate_cli_target("/usr/local/bin/docker").is_err());
+        // Path traversal
+        assert!(
+            validate_cli_target("/Applications/ArcBox.app/Contents/MacOS/xbin/../../evil").is_err()
+        );
+    }
 }

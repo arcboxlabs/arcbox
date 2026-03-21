@@ -9,10 +9,18 @@ use std::path::Path;
 
 use arcbox_helper::validate;
 
+/// Returns true if a symlink target looks like an ArcBox bundle path.
+fn is_arcbox_owned(target: &Path) -> bool {
+    target
+        .to_string_lossy()
+        .contains(".app/Contents/MacOS/xbin/")
+}
+
 /// Creates `/usr/local/bin/{name}` → `target`.
 ///
 /// Idempotent: if the symlink already points to `target`, this is a no-op.
-/// If it points elsewhere (another ArcBox version), it is replaced.
+/// Only replaces existing symlinks that point into an ArcBox bundle.
+/// Refuses to overwrite regular files or non-ArcBox symlinks.
 pub fn link(name: &str, target: &str) -> Result<(), String> {
     validate::validate_cli_name(name)?;
     validate::validate_cli_target(target)?;
@@ -31,7 +39,14 @@ pub fn link(name: &str, target: &str) -> Result<(), String> {
             if existing == target_path {
                 return Ok(());
             }
-            // Replace existing symlink.
+            // Only replace if the existing symlink is ArcBox-owned.
+            if !is_arcbox_owned(&existing) {
+                return Err(format!(
+                    "{} is a symlink to {} (not ArcBox-owned, not replacing)",
+                    link_path.display(),
+                    existing.display()
+                ));
+            }
             fs::remove_file(&link_path)
                 .map_err(|e| format!("failed to remove {}: {e}", link_path.display()))?;
         }
@@ -71,8 +86,7 @@ pub fn unlink(name: &str) -> Result<(), String> {
         Ok(meta) if meta.file_type().is_symlink() => {
             let target = fs::read_link(&link_path)
                 .map_err(|e| format!("failed to read symlink {}: {e}", link_path.display()))?;
-            // Only remove if it points into an ArcBox bundle.
-            if target.to_string_lossy().contains("ArcBox") {
+            if is_arcbox_owned(&target) {
                 fs::remove_file(&link_path)
                     .map_err(|e| format!("failed to remove {}: {e}", link_path.display()))?;
             }

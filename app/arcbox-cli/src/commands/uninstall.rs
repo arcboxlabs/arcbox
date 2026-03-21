@@ -163,7 +163,10 @@ pub async fn execute(args: UninstallArgs) -> Result<()> {
         for name in DOCKER_CLI_TOOLS {
             let path = format!("/usr/local/bin/{name}");
             if let Ok(target) = std::fs::read_link(&path) {
-                if target.to_string_lossy().contains("ArcBox") {
+                if target
+                    .to_string_lossy()
+                    .contains(".app/Contents/MacOS/xbin/")
+                {
                     let _ = Command::new("sudo").args(["rm", "-f", &path]).output();
                 }
             }

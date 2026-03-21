@@ -1,7 +1,7 @@
 //! Shared daemon state threaded through all lifecycle phases.
 
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use arcbox_api::{SetupState, SharedRuntime};
 use arcbox_core::Runtime;
