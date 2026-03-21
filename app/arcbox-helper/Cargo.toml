@@ -25,6 +25,7 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 libc = { workspace = true }
 arcbox-constants.workspace = true
+ipnetwork = "0.21.1"
 
 [dev-dependencies]
 tempfile = { workspace = true }

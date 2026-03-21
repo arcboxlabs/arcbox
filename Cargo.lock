@@ -429,6 +429,7 @@ version = "0.3.2"
 dependencies = [
  "arcbox-constants",
  "futures",
+ "ipnetwork 0.21.1",
  "libc",
  "serde",
  "tarpc",
@@ -469,7 +470,7 @@ dependencies = [
  "chrono",
  "crossbeam-utils",
  "hashbrown 0.14.5",
- "ipnetwork",
+ "ipnetwork 0.20.0",
  "libc",
  "nix 0.29.0",
  "serde",
@@ -2016,6 +2017,12 @@ checksum = "bf466541e9d546596ee94f9f69590f89473455f88372423e0008fc1a7daf100e"
 dependencies = [
  "serde",
 ]
+
+[[package]]
+name = "ipnetwork"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf370abdafd54d13e54a620e8c3e1145f28e46cc9d704bc6d94414559df41763"
 
 [[package]]
 name = "iri-string"
