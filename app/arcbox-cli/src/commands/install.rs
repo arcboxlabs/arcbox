@@ -1,14 +1,14 @@
-//! One-time privileged setup for ArcBox.
+//! One-time privileged setup for ArcBox (CLI-only users).
 //!
-//! Replaces the desktop app's `StartupOrchestrator` — installs the helper
-//! binary, DNS resolver, Docker socket symlink, daemon launchd service,
-//! and shell integration in a single `sudo arcbox install` invocation.
+//! Installs the helper binary (requires sudo) and registers the daemon as
+//! a launchd user agent. Everything else — DNS resolver, Docker socket,
+//! boot assets, runtime binaries, Docker CLI tools — is handled by the
+//! daemon during startup via self-setup.
 
 use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use arcbox_helper::client::Client;
 
 /// Arguments for the install command.
 #[derive(clap::Args)]
@@ -20,6 +20,11 @@ pub struct InstallArgs {
     /// Skip shell integration setup.
     #[arg(long)]
     pub no_shell: bool,
+
+    /// Path to the arcbox-helper binary to install.
+    /// Defaults to looking next to the current executable.
+    #[arg(long)]
+    pub helper_path: Option<PathBuf>,
 }
 
 /// Executes the install command.
@@ -28,28 +33,13 @@ pub async fn execute(args: InstallArgs) -> Result<()> {
     println!("==============");
     println!();
 
-    // 1. Install helper binary.
-    print_step(1, 5, "Installing arcbox-helper...");
-    install_helper()?;
+    // 1. Install helper binary (requires sudo).
+    print_step(1, 3, "Installing arcbox-helper...");
+    install_helper(args.helper_path.as_deref())?;
     print_done();
 
-    // 2. Install DNS resolver via helper tarpc client.
-    // The socket is available immediately after launchctl bootstrap because
-    // launchd socket activation creates the socket file eagerly.
-    print_step(2, 5, "Installing DNS resolver...");
-    let client = Client::connect()
-        .await
-        .context("failed to connect to arcbox-helper (is the service running?)")?;
-    install_dns_resolver(&client).await?;
-    print_done();
-
-    // 3. Set up Docker socket via helper tarpc client.
-    print_step(3, 5, "Setting up Docker socket...");
-    setup_docker_socket(&client).await?;
-    print_done();
-
-    // 4. Register daemon service.
-    print_step(4, 5, "Registering daemon service...");
+    // 2. Register daemon service.
+    print_step(2, 3, "Registering daemon service...");
     if args.no_daemon {
         print_skipped();
     } else {
@@ -57,10 +47,10 @@ pub async fn execute(args: InstallArgs) -> Result<()> {
         print_done();
     }
 
-    // 5. Shell integration.
+    // 3. Shell integration.
     // Under sudo, dirs::home_dir() returns /var/root, so setup would
     // install to root's home instead of the real user's. Skip and hint.
-    print_step(5, 5, "Setting up shell integration...");
+    print_step(3, 3, "Setting up shell integration...");
     if args.no_shell {
         print_skipped();
     } else if std::env::var("SUDO_USER").is_ok() {
@@ -78,6 +68,7 @@ pub async fn execute(args: InstallArgs) -> Result<()> {
 
     println!();
     println!("ArcBox installed. The daemon will start automatically.");
+    println!("DNS, Docker socket, and boot assets are configured on first daemon start.");
 
     Ok(())
 }
@@ -98,24 +89,24 @@ fn print_skipped() {
 // Step 1: Install helper binary + launchd service
 // =============================================================================
 
-/// Helper binary install path.
-const HELPER_DEST: &str = "/usr/local/libexec/arcbox-helper";
-
-/// launchd plist path (system-level daemon, runs as root).
-const HELPER_PLIST: &str = "/Library/LaunchDaemons/com.arcboxlabs.desktop.helper.plist";
+use arcbox_constants::paths::privileged;
 
 /// Installs the arcbox-helper binary and registers it as a launchd system
 /// daemon with socket activation.
 ///
 /// launchd creates the socket at `/var/run/arcbox-helper.sock` and starts
 /// the helper on-demand when the main daemon connects.
-fn install_helper() -> Result<()> {
-    let dest = PathBuf::from(HELPER_DEST);
+fn install_helper(custom_path: Option<&std::path::Path>) -> Result<()> {
+    let dest = PathBuf::from(privileged::HELPER_BINARY);
 
-    // Find the helper binary next to our own executable.
-    let exe = std::env::current_exe().context("could not determine current executable")?;
-    let exe_dir = exe.parent().context("executable has no parent directory")?;
-    let helper_src = exe_dir.join("arcbox-helper");
+    // Use custom path if provided, otherwise look next to our own executable.
+    let helper_src = if let Some(path) = custom_path {
+        path.to_path_buf()
+    } else {
+        let exe = std::env::current_exe().context("could not determine current executable")?;
+        let exe_dir = exe.parent().context("executable has no parent directory")?;
+        exe_dir.join("arcbox-helper")
+    };
 
     if !helper_src.exists() {
         bail!(
@@ -138,7 +129,7 @@ fn install_helper() -> Result<()> {
 
     // Ensure root ownership (macOS copyfile preserves source ownership).
     let status = Command::new("chown")
-        .args(["root:wheel", HELPER_DEST])
+        .args(["root:wheel", privileged::HELPER_BINARY])
         .status()
         .context("failed to chown helper binary")?;
     if !status.success() {
@@ -147,19 +138,19 @@ fn install_helper() -> Result<()> {
 
     // Install bundled launchd plist (socket activation config is static).
     std::fs::write(
-        HELPER_PLIST,
+        privileged::HELPER_PLIST,
         include_bytes!("../../../../bundle/com.arcboxlabs.desktop.helper.plist"),
     )
-    .with_context(|| format!("failed to write {HELPER_PLIST}"))?;
+    .with_context(|| format!("failed to write {}", privileged::HELPER_PLIST))?;
 
     // Bootout existing service (ignore errors if not loaded).
     let _ = Command::new("launchctl")
-        .args(["bootout", "system", HELPER_PLIST])
+        .args(["bootout", "system", privileged::HELPER_PLIST])
         .output();
 
     // Bootstrap the service into the system domain.
     let status = Command::new("launchctl")
-        .args(["bootstrap", "system", HELPER_PLIST])
+        .args(["bootstrap", "system", privileged::HELPER_PLIST])
         .status()
         .context("failed to run launchctl bootstrap")?;
 
@@ -171,41 +162,7 @@ fn install_helper() -> Result<()> {
 }
 
 // =============================================================================
-// Step 2: DNS resolver
-// =============================================================================
-
-/// Installs the DNS resolver file via the helper tarpc client.
-async fn install_dns_resolver(client: &Client) -> Result<()> {
-    let domain = dns_domain();
-    let port = dns_port();
-
-    client
-        .dns_install(&domain, port)
-        .await
-        .context("failed to install DNS resolver via helper")?;
-
-    Ok(())
-}
-
-// =============================================================================
-// Step 3: Docker socket
-// =============================================================================
-
-/// Sets up the Docker socket symlink via the helper tarpc client.
-async fn setup_docker_socket(client: &Client) -> Result<()> {
-    let target = docker_socket_path();
-    let target_str = target.to_string_lossy();
-
-    client
-        .socket_link(&target_str)
-        .await
-        .context("failed to create Docker socket symlink via helper")?;
-
-    Ok(())
-}
-
-// =============================================================================
-// Step 4: Daemon service
+// Step 2: Daemon service
 // =============================================================================
 
 /// Registers the daemon as a launchd user agent.
@@ -301,6 +258,10 @@ fn register_daemon_service() -> Result<()> {
     Ok(())
 }
 
+// =============================================================================
+// Helpers
+// =============================================================================
+
 /// Resolves the real user's home directory and UID.
 ///
 /// When running under `sudo`, `dirs::home_dir()` returns `/var/root` and
@@ -340,27 +301,4 @@ fn home_for_user(username: &str) -> Option<PathBuf> {
     // SAFETY: pw is non-null and pw_dir is a valid C string.
     let dir = unsafe { std::ffi::CStr::from_ptr((*pw).pw_dir) };
     Some(PathBuf::from(dir.to_string_lossy().into_owned()))
-}
-
-// =============================================================================
-// Helpers
-// =============================================================================
-
-fn dns_domain() -> String {
-    std::env::var("ARCBOX_DNS_DOMAIN").unwrap_or_else(|_| "arcbox.local".to_string())
-}
-
-fn dns_port() -> u16 {
-    std::env::var("ARCBOX_DNS_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(5553)
-}
-
-fn docker_socket_path() -> PathBuf {
-    // Use resolve_real_user() instead of dirs::home_dir() so that under
-    // `sudo` we get the invoking user's home, not /var/root.
-    resolve_real_user()
-        .map(|(home, _uid)| home.join(".arcbox/run/docker.sock"))
-        .unwrap_or_else(|_| PathBuf::from("/var/run/arcbox-docker.sock"))
 }

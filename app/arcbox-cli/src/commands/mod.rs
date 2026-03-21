@@ -24,6 +24,7 @@ pub mod install;
 pub mod machine;
 pub mod sandbox;
 pub mod setup;
+#[cfg(target_os = "macos")]
 pub mod uninstall;
 pub mod version;
 
@@ -98,11 +99,14 @@ pub enum Commands {
     /// Run diagnostic checks on the ArcBox runtime
     Doctor,
 
-    /// Install ArcBox (helper, DNS, socket, daemon service)
+    /// Internal: install helper + register daemon (used by brew/DMG installers)
     #[cfg(target_os = "macos")]
+    #[command(name = "_install", hide = true)]
     Install(install::InstallArgs),
 
-    /// Uninstall ArcBox from this machine
+    /// Internal: uninstall helper + deregister daemon (used by brew/DMG installers)
+    #[cfg(target_os = "macos")]
+    #[command(name = "_uninstall", hide = true)]
     Uninstall(uninstall::UninstallArgs),
 
     /// Display system-wide information

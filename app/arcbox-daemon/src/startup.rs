@@ -1,25 +1,27 @@
 //! Daemon startup: directories, PID file, config, runtime initialization.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use arcbox_api::{SetupPhase, SetupState};
-use arcbox_core::{Config, Runtime, VmLifecycleConfig};
+use arcbox_core::{BootAssetProvider, Config, Runtime, VmLifecycleConfig};
 use macos_resolver::to_env_prefix;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::DaemonArgs;
-use crate::context::DaemonContext;
+use crate::context::{DaemonContext, VmArgs};
 
 const DNS_PREFIX: &str = "arcbox";
 const DEFAULT_DNS_DOMAIN: &str = "arcbox.local";
 
-/// Initializes the daemon: creates directories, cleans stale state,
-/// builds the runtime, and returns a fully initialized [`DaemonContext`].
-pub async fn init(args: DaemonArgs) -> Result<DaemonContext> {
+/// Phase 1: directories, PID, config, sockets. No runtime yet.
+///
+/// Returns a context sufficient to start the gRPC SystemService so
+/// clients can observe the full startup progression.
+pub async fn init_early(args: DaemonArgs) -> Result<DaemonContext> {
     let setup_state = Arc::new(SetupState::new());
 
     let data_dir = resolve_data_dir(args.data_dir.as_ref());
@@ -32,8 +34,6 @@ pub async fn init(args: DaemonArgs) -> Result<DaemonContext> {
     std::fs::create_dir_all(&data_subdir).context("Failed to create persistent data directory")?;
 
     let pid_file = run_dir.join("daemon.pid");
-    // cleanup_stale_state uses blocking std::thread::sleep loops (up to 30s
-    // waiting for a stale daemon to exit). Run it off the async runtime.
     {
         let pf = pid_file.clone();
         let rd = run_dir.clone();
@@ -49,11 +49,37 @@ pub async fn init(args: DaemonArgs) -> Result<DaemonContext> {
         .grpc_socket
         .unwrap_or_else(|| run_dir.join("arcbox.sock"));
 
+    let dns_domain = dns_domain();
+    let dns_port = dns_port();
+
+    Ok(DaemonContext {
+        data_dir,
+        socket_path,
+        grpc_socket,
+        pid_file,
+        shared_runtime: Arc::new(std::sync::OnceLock::new()),
+        setup_state,
+        shutdown: CancellationToken::new(),
+        dns_domain,
+        dns_port,
+        docker_integration: args.docker_integration,
+        vm_args: VmArgs {
+            guest_docker_vsock_port: args.guest_docker_vsock_port,
+            kernel: args.kernel,
+        },
+    })
+}
+
+/// Phase 2: seed/download boot assets, build runtime, start VM.
+///
+/// Called after gRPC SystemService is already listening so clients
+/// can observe DOWNLOADING_ASSETS → ASSETS_READY progression.
+pub async fn init_runtime(ctx: &mut DaemonContext) -> Result<()> {
     let mut config = Config {
-        data_dir: data_dir.clone(),
+        data_dir: ctx.data_dir.clone(),
         ..Default::default()
     };
-    if let Some(port) = args.guest_docker_vsock_port {
+    if let Some(port) = ctx.vm_args.guest_docker_vsock_port {
         config.container.guest_docker_vsock_port = port;
     }
     let selected_guest_docker_port = config.container.guest_docker_vsock_port;
@@ -64,9 +90,24 @@ pub async fn init(args: DaemonArgs) -> Result<DaemonContext> {
     if let Some(ref kernel) = config.vm.kernel_path {
         vm_lifecycle_config.default_vm.kernel = Some(kernel.clone());
     }
-    if let Some(kernel) = args.kernel {
-        vm_lifecycle_config.default_vm.kernel = Some(kernel);
+    if let Some(ref kernel) = ctx.vm_args.kernel {
+        vm_lifecycle_config.default_vm.kernel = Some(kernel.clone());
     }
+
+    // Seed boot assets from app bundle if available, otherwise download.
+    // Run on a blocking thread to avoid stalling the async runtime during
+    // large file copies (kernel + rootfs + runtime binaries).
+    let data_dir = ctx.data_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        seed_from_bundle(&data_dir);
+        ensure_agent_binary(&data_dir)
+    })
+    .await
+    .context("seed task panicked")?
+    .context("seed failed")?;
+    ensure_boot_assets(&ctx.data_dir, &ctx.setup_state).await?;
+    ctx.setup_state
+        .set_phase(SetupPhase::AssetsReady, "Boot assets ready");
 
     let runtime = Arc::new(
         Runtime::with_vm_lifecycle_config(config, vm_lifecycle_config)
@@ -76,34 +117,20 @@ pub async fn init(args: DaemonArgs) -> Result<DaemonContext> {
         .init()
         .await
         .context("Failed to initialize runtime")?;
-
-    setup_state.set_phase(SetupPhase::AssetsReady, "Runtime initialized");
     info!(
-        data_dir = %data_dir.display(),
+        data_dir = %ctx.data_dir.display(),
         guest_docker_vsock_port = selected_guest_docker_port,
         "Runtime initialized"
     );
 
-    let dns_domain = dns_domain();
-    let dns_port = dns_port();
-
-    // Apply custom DNS domain if configured.
-    if dns_domain != DEFAULT_DNS_DOMAIN {
-        runtime.network_manager().set_dns_domain(&dns_domain);
+    if ctx.dns_domain != DEFAULT_DNS_DOMAIN {
+        runtime.network_manager().set_dns_domain(&ctx.dns_domain);
     }
 
-    Ok(DaemonContext {
-        data_dir,
-        socket_path,
-        grpc_socket,
-        pid_file,
-        runtime,
-        setup_state,
-        shutdown: CancellationToken::new(),
-        dns_domain,
-        dns_port,
-        docker_integration: args.docker_integration,
-    })
+    ctx.shared_runtime
+        .set(runtime)
+        .map_err(|_| anyhow::anyhow!("init_runtime called twice"))?;
+    Ok(())
 }
 
 fn resolve_data_dir(data_dir: Option<&PathBuf>) -> PathBuf {
@@ -126,6 +153,243 @@ fn dns_port() -> u16 {
 fn dns_domain() -> String {
     let key = format!("{}_DNS_DOMAIN", to_env_prefix(DNS_PREFIX));
     std::env::var(key).unwrap_or_else(|_| DEFAULT_DNS_DOMAIN.to_string())
+}
+
+// =============================================================================
+// App bundle detection & seeding
+// =============================================================================
+
+/// Returns the `Contents/` directory if the daemon is running inside an app bundle.
+///
+/// Layout: `ArcBox Desktop.app/Contents/Helpers/com.arcboxlabs.desktop.daemon`
+/// → returns `ArcBox Desktop.app/Contents/`
+pub(crate) fn find_bundle_contents() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    // exe = .../Contents/Helpers/com.arcboxlabs.desktop.daemon
+    let contents = exe.parent()?.parent()?;
+    if contents.join("Resources").is_dir() && contents.join("Info.plist").exists() {
+        Some(contents.to_path_buf())
+    } else {
+        None
+    }
+}
+
+/// Seeds all assets from the app bundle to `~/.arcbox/` if available.
+///
+/// Copies boot assets, runtime binaries, and the agent binary from the
+/// bundle so the daemon can start without network on first launch.
+///
+/// Bundle layout:
+/// ```text
+/// Contents/Resources/assets/{version}/  → ~/.arcbox/boot/{version}/
+/// Contents/Resources/runtime/           → ~/.arcbox/runtime/
+/// Contents/Resources/bin/arcbox-agent   → ~/.arcbox/bin/arcbox-agent
+/// ```
+fn seed_from_bundle(data_dir: &Path) {
+    let Some(contents) = find_bundle_contents() else {
+        return;
+    };
+    tracing::info!("App bundle detected: {}", contents.display());
+
+    // 1. Boot assets: kernel, rootfs, manifest.
+    let version = arcbox_core::boot_asset_version();
+    let boot_dst = data_dir.join(format!("boot/{version}"));
+    let boot_src = contents.join(format!("Resources/assets/{version}"));
+    if boot_src.join("manifest.json").exists() {
+        seed_dir_files(
+            &boot_src,
+            &boot_dst,
+            &["manifest.json", "kernel", "rootfs.erofs"],
+            "boot assets",
+        );
+    }
+
+    // 2. Runtime binaries: dockerd, containerd, runc, etc.
+    let runtime_src = contents.join("Resources/runtime");
+    let runtime_dst = data_dir.join("runtime");
+    if runtime_src.is_dir() {
+        seed_dir_recursive(&runtime_src, &runtime_dst, "runtime binaries");
+    }
+
+    // 3. Agent binary.
+    let agent_src = contents.join("Resources/bin/arcbox-agent");
+    let agent_dst = data_dir.join("bin/arcbox-agent");
+    if agent_src.exists() && !agent_dst.exists() {
+        if let Err(e) = (|| -> std::io::Result<()> {
+            std::fs::create_dir_all(agent_dst.parent().unwrap())?;
+            std::fs::copy(&agent_src, &agent_dst)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&agent_dst, std::fs::Permissions::from_mode(0o755))?;
+            }
+            Ok(())
+        })() {
+            tracing::warn!("Failed to seed agent from bundle: {e}");
+        } else {
+            tracing::info!("Seeded arcbox-agent from bundle");
+        }
+    }
+}
+
+/// Copies specific files from `src` to `dst`, skipping those already present.
+fn seed_dir_files(src: &Path, dst: &Path, files: &[&str], label: &str) {
+    if let Err(e) = (|| -> std::io::Result<()> {
+        std::fs::create_dir_all(dst)?;
+        for name in files {
+            let s = src.join(name);
+            let d = dst.join(name);
+            if s.exists() && !d.exists() {
+                std::fs::copy(&s, &d)?;
+            }
+        }
+        Ok(())
+    })() {
+        tracing::warn!("Failed to seed {label} from bundle: {e}");
+    } else {
+        tracing::info!("Seeded {label} from bundle");
+    }
+}
+
+/// Recursively copies a directory tree, skipping files already present.
+fn seed_dir_recursive(src: &Path, dst: &Path, label: &str) {
+    let result = (|| -> std::io::Result<u32> {
+        let mut count = 0u32;
+        for entry in walkdir(src)? {
+            let (rel, is_dir) = entry?;
+            let d = dst.join(&rel);
+            if is_dir {
+                std::fs::create_dir_all(&d)?;
+            } else if !d.exists() {
+                if let Some(parent) = d.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(src.join(&rel), &d)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let meta = std::fs::metadata(&d)?;
+                    if meta.permissions().mode() & 0o111 == 0 {
+                        // Source was executable, preserve it.
+                        let src_meta = std::fs::metadata(src.join(&rel))?;
+                        if src_meta.permissions().mode() & 0o111 != 0 {
+                            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755))?;
+                        }
+                    }
+                }
+                count += 1;
+            }
+        }
+        Ok(count)
+    })();
+
+    match result {
+        Ok(0) => tracing::debug!("{label}: already seeded"),
+        Ok(n) => tracing::info!("Seeded {n} {label} from bundle"),
+        Err(e) => tracing::warn!("Failed to seed {label} from bundle: {e}"),
+    }
+}
+
+/// Simple recursive directory walker yielding `(relative_path, is_dir)`.
+fn walkdir(root: &Path) -> std::io::Result<impl Iterator<Item = std::io::Result<(PathBuf, bool)>>> {
+    let mut stack = vec![PathBuf::new()];
+    let root = root.to_path_buf();
+    Ok(std::iter::from_fn(move || {
+        while let Some(rel) = stack.pop() {
+            let abs = root.join(&rel);
+            let Ok(meta) = std::fs::metadata(&abs) else {
+                continue;
+            };
+            if meta.is_dir() {
+                match std::fs::read_dir(&abs) {
+                    Ok(entries) => {
+                        for entry in entries.flatten() {
+                            if let Ok(name) = entry.file_name().into_string() {
+                                stack.push(rel.join(name));
+                            }
+                        }
+                    }
+                    Err(e) => return Some(Err(e)),
+                }
+                if !rel.as_os_str().is_empty() {
+                    return Some(Ok((rel, true)));
+                }
+            } else {
+                return Some(Ok((rel, false)));
+            }
+        }
+        None
+    }))
+}
+
+// =============================================================================
+// Boot asset provisioning
+// =============================================================================
+
+/// Downloads kernel and rootfs if not already cached. Sets the setup phase to
+/// `DownloadingAssets` while the download is in progress.
+async fn ensure_boot_assets(data_dir: &Path, setup_state: &Arc<SetupState>) -> Result<()> {
+    let cache_dir = data_dir.join("boot");
+    let provider =
+        BootAssetProvider::new(cache_dir).context("Failed to create boot asset provider")?;
+
+    if provider.is_cached() {
+        tracing::debug!("Boot assets already cached");
+        return Ok(());
+    }
+
+    setup_state.set_phase(SetupPhase::DownloadingAssets, "Downloading boot assets...");
+    provider
+        .get_assets_with_progress(Some(Box::new(|p| {
+            tracing::info!(
+                name = %p.name,
+                current = p.current,
+                total = p.total,
+                "Boot asset progress: {:?}",
+                p.phase
+            );
+        })))
+        .await
+        .context("Failed to download boot assets")?;
+
+    info!("Boot assets downloaded");
+    Ok(())
+}
+
+/// Copies the arcbox-agent binary from the boot asset cache to the daemon's
+/// bin directory if it is not already present.
+fn ensure_agent_binary(data_dir: &Path) -> Result<()> {
+    let agent_dest = data_dir.join("bin/arcbox-agent");
+    if agent_dest.exists() {
+        return Ok(());
+    }
+
+    let version = arcbox_core::boot_asset_version();
+    let agent_src = data_dir.join(format!("boot/{version}/arcbox-agent"));
+    if !agent_src.exists() {
+        // Agent binary is not part of the boot cache for this version.
+        // runtime.init() will fail with a clear error if the agent is truly
+        // missing.
+        tracing::debug!(
+            "Agent binary not found in boot cache at {}",
+            agent_src.display()
+        );
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(agent_dest.parent().unwrap())
+        .context("Failed to create agent bin directory")?;
+    std::fs::copy(&agent_src, &agent_dest).context("Failed to copy agent binary")?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&agent_dest, std::fs::Permissions::from_mode(0o755))
+            .context("Failed to set agent binary permissions")?;
+    }
+
+    info!("Agent binary installed from boot cache");
+    Ok(())
 }
 
 // =============================================================================

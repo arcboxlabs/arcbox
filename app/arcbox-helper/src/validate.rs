@@ -140,6 +140,50 @@ pub fn validate_socket_target(s: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Validates a CLI tool name for `/usr/local/bin/` symlink creation.
+pub fn validate_cli_name(name: &str) -> Result<(), String> {
+    if arcbox_constants::paths::DOCKER_CLI_TOOLS.contains(&name) {
+        Ok(())
+    } else {
+        Err(format!(
+            "CLI name '{name}' is not in the allow list: {}",
+            arcbox_constants::paths::DOCKER_CLI_TOOLS.join(", ")
+        ))
+    }
+}
+
+/// Validates a CLI symlink target. Must be an absolute path inside an app
+/// bundle's `Contents/MacOS/xbin/` under `/Applications/` or `/Users/`.
+/// Rejects path traversal and arbitrary locations like `/tmp/fake.app/`.
+pub fn validate_cli_target(target: &str) -> Result<(), String> {
+    let path = std::path::Path::new(target);
+
+    if !path.is_absolute() {
+        return Err(format!("CLI target '{target}' must be an absolute path"));
+    }
+
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(format!(
+            "CLI target '{target}' contains '..' path traversal"
+        ));
+    }
+
+    if !target.contains(".app/Contents/MacOS/xbin/") {
+        return Err(format!(
+            "CLI target '{target}' must be inside an .app bundle's Contents/MacOS/xbin/"
+        ));
+    }
+
+    // Restrict to trusted base directories to prevent fake .app paths.
+    if !target.starts_with("/Applications/") && !target.starts_with("/Users/") {
+        return Err(format!(
+            "CLI target '{target}' must be under /Applications/ or /Users/"
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +278,49 @@ mod tests {
         let result = validate_socket_target("/Users/alice/.arcbox/../../../../var/run/other.sock");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains(".."));
+    }
+
+    // -- CLI name/target validation tests --
+
+    #[test]
+    fn valid_cli_names() {
+        assert!(validate_cli_name("docker").is_ok());
+        assert!(validate_cli_name("docker-buildx").is_ok());
+        assert!(validate_cli_name("docker-compose").is_ok());
+        assert!(validate_cli_name("docker-credential-osxkeychain").is_ok());
+    }
+
+    #[test]
+    fn invalid_cli_names() {
+        assert!(validate_cli_name("").is_err());
+        assert!(validate_cli_name("curl").is_err());
+        assert!(validate_cli_name("rm").is_err());
+        assert!(validate_cli_name("../docker").is_err());
+    }
+
+    #[test]
+    fn valid_cli_targets() {
+        assert!(
+            validate_cli_target("/Applications/ArcBox Desktop.app/Contents/MacOS/xbin/docker")
+                .is_ok()
+        );
+        assert!(
+            validate_cli_target("/Users/test/Apps/ArcBox.app/Contents/MacOS/xbin/docker-compose")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn invalid_cli_targets() {
+        // Not absolute
+        assert!(validate_cli_target("Contents/MacOS/xbin/docker").is_err());
+        // Not inside an app bundle
+        assert!(validate_cli_target("/usr/local/bin/docker").is_err());
+        // Path traversal
+        assert!(
+            validate_cli_target("/Applications/ArcBox.app/Contents/MacOS/xbin/../../evil").is_err()
+        );
+        // Fake .app in untrusted location
+        assert!(validate_cli_target("/tmp/evil.app/Contents/MacOS/xbin/docker").is_err());
     }
 }

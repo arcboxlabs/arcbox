@@ -84,8 +84,21 @@ fn main() -> Result<()> {
 async fn run(args: DaemonArgs) -> Result<()> {
     info!("Starting ArcBox daemon...");
 
-    let ctx = startup::init(args).await?;
-    let handles = services::start(&ctx).await?;
+    // Phase 1: directories, config, sockets — no runtime yet.
+    let mut ctx = startup::init_early(args).await?;
+
+    // Start gRPC with all services. Machine/Sandbox return UNAVAILABLE
+    // until runtime is ready. SystemService works immediately so clients
+    // can observe DOWNLOADING_ASSETS → ASSETS_READY progression.
+    let shared_runtime = ctx.shared_runtime.clone();
+    let grpc = services::start_grpc(&ctx, shared_runtime).await?;
+
+    // Phase 2: seed/download boot assets, build runtime, start VM.
+    // Progress is visible to gRPC clients via WatchSetupStatus.
+    startup::init_runtime(&mut ctx).await?;
+
+    // Phase 3: start remaining services that require the runtime.
+    let handles = services::start_services(&ctx, grpc).await?;
     recovery::run(&ctx).await;
 
     check_resolver_installed(&ctx.dns_domain);

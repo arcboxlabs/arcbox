@@ -1,6 +1,7 @@
 //! Post-startup recovery: re-establish networking for surviving containers
 //! and reconcile host routes.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use arcbox_core::Runtime;
@@ -16,14 +17,14 @@ use crate::self_setup::SetupTask as _;
 /// - Re-installs the container subnet route (cold-start reconcile)
 /// - Installs DNS resolver and Docker socket via helper (best-effort)
 pub async fn run(ctx: &DaemonContext) {
-    recover_container_networking(&ctx.runtime, &ctx.setup_state).await;
+    recover_container_networking(ctx.runtime(), &ctx.setup_state).await;
 
     // Cold-start route reconcile (non-blocking).
     #[cfg(target_os = "macos")]
     {
         use arcbox_core::DEFAULT_MACHINE_NAME;
         if let Some(mac) = ctx
-            .runtime
+            .runtime()
             .machine_manager()
             .bridge_mac(DEFAULT_MACHINE_NAME)
         {
@@ -47,14 +48,91 @@ pub async fn run(ctx: &DaemonContext) {
     let socket_task = self_setup::DockerSocket {
         target: ctx.socket_path.clone(),
     };
+
+    // Create /usr/local/bin/ symlinks for Docker CLI tools if running from
+    // bundle with docker integration enabled.
+    let cli_tasks: Vec<Box<dyn self_setup::SetupTask>> = if ctx.docker_integration {
+        if let Some(contents) = crate::startup::find_bundle_contents() {
+            let xbin = contents.join("MacOS/xbin");
+            if xbin.is_dir() {
+                vec![Box::new(self_setup::CliTools { xbin_dir: xbin })]
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        }
+    } else {
+        vec![]
+    };
+
     let setup_state_self = Arc::clone(&ctx.setup_state);
     tokio::spawn(async move {
-        self_setup::run(&[&dns_task, &socket_task]).await;
-        // Update status flags based on whether each task is now satisfied.
+        let mut tasks: Vec<&dyn self_setup::SetupTask> = vec![&dns_task, &socket_task];
+        for t in &cli_tasks {
+            tasks.push(t.as_ref());
+        }
+        self_setup::run(&tasks).await;
         setup_state_self.set_dns_installed(dns_task.is_satisfied());
         setup_state_self.set_docker_socket_linked(socket_task.is_satisfied());
     });
+
+    // Docker CLI tools installation (non-blocking, best-effort).
+    if ctx.docker_integration {
+        let data_dir = ctx.data_dir.clone();
+        let setup_state = Arc::clone(&ctx.setup_state);
+        tokio::spawn(async move {
+            match ensure_docker_tools(&data_dir).await {
+                Ok(()) => setup_state.set_docker_tools_installed(true),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Docker tools setup failed");
+                }
+            }
+        });
+    }
 }
+
+// =============================================================================
+// Docker CLI tools
+// =============================================================================
+
+/// Embedded lockfile (same one used by arcbox-core for boot assets).
+const LOCK_TOML: &str = include_str!("../../../assets.lock");
+
+/// Installs Docker CLI tools (docker, buildx, compose, credential helper)
+/// if not already present. Tries the app bundle first, then CDN.
+async fn ensure_docker_tools(data_dir: &Path) -> anyhow::Result<()> {
+    let tools = arcbox_docker_tools::parse_tools(LOCK_TOML)
+        .map_err(|e| anyhow::anyhow!("failed to parse tools from assets.lock: {e}"))?;
+
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x86_64"
+    };
+
+    let install_dir = data_dir.join("runtime/bin");
+    let mgr = arcbox_docker_tools::DockerToolManager::new(tools, arch, install_dir);
+
+    // Docker tools are already seeded from the app bundle by
+    // seed_from_bundle() (via Resources/runtime/bin/). This check
+    // is a fast no-op when they're present and checksums match.
+    if mgr.validate_all().await.is_ok() {
+        tracing::debug!("Docker CLI tools already installed and valid");
+        return Ok(());
+    }
+
+    mgr.install_all(None)
+        .await
+        .map_err(|e| anyhow::anyhow!("docker tools install failed: {e}"))?;
+
+    info!("Docker CLI tools installed");
+    Ok(())
+}
+
+// =============================================================================
+// Container networking recovery
+// =============================================================================
 
 /// Re-registers DNS entries and port forwarding for all running containers.
 ///

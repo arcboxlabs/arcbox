@@ -3,14 +3,16 @@
 //! Each task follows the check → apply pattern: if the precondition is
 //! already met, skip; otherwise ask `arcbox-helper` to configure it.
 //! Failures are logged as warnings — they never block daemon readiness.
-//! The canonical setup path is `sudo arcbox install`.
+//! For CLI-only users, `abctl _install` performs the initial helper setup.
 //!
 //! Adding a new task: implement [`SetupTask`] in a new file under
 //! `self_setup/`, then add it to the `run()` call in `main.rs`.
 
+mod cli_tools;
 mod dns_resolver;
 mod docker_socket;
 
+pub use cli_tools::CliTools;
 pub use dns_resolver::DnsResolver;
 pub use docker_socket::DockerSocket;
 

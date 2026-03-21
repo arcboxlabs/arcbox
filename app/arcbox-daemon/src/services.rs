@@ -1,4 +1,8 @@
 //! Service startup: DNS, Docker API, gRPC servers.
+//!
+//! gRPC is started once with all services. Machine/Sandbox/Snapshot services
+//! use `SharedRuntime` (backed by `OnceLock`) and return `UNAVAILABLE` until
+//! `init_runtime()` fills it. This avoids restarting the gRPC server mid-boot.
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -6,7 +10,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use arcbox_api::{
     MachineServiceImpl, SandboxServiceImpl, SandboxServiceServer, SandboxSnapshotServiceImpl,
-    SandboxSnapshotServiceServer, SystemServiceImpl, SystemServiceServer,
+    SandboxSnapshotServiceServer, SharedRuntime, SystemServiceImpl, SystemServiceServer,
     machine_service_server::MachineServiceServer,
 };
 use arcbox_docker::{DockerApiServer, DockerContextManager, ServerConfig};
@@ -18,10 +22,64 @@ use tracing::{info, warn};
 use crate::context::{DaemonContext, ServiceHandles};
 use crate::dns_service::DnsService;
 
-/// Starts all daemon services and returns their join handles for shutdown.
-pub async fn start(ctx: &DaemonContext) -> Result<ServiceHandles> {
+/// Starts the gRPC server with all services.
+///
+/// Called before `init_runtime()` — Machine/Sandbox/Snapshot services will
+/// return `UNAVAILABLE` until the runtime is set. SystemService works
+/// immediately so clients can observe setup progress.
+pub async fn start_grpc(
+    ctx: &DaemonContext,
+    shared_runtime: SharedRuntime,
+) -> Result<tokio::task::JoinHandle<()>> {
+    let socket_path = &ctx.grpc_socket;
+    let _ = std::fs::remove_file(socket_path);
+
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent).context("Failed to create socket directory")?;
+    }
+
+    let listener = UnixListener::bind(socket_path).context(format!(
+        "Failed to bind gRPC socket: {}",
+        socket_path.display()
+    ))?;
+    let incoming = UnixListenerStream::new(listener);
+
+    info!(socket = %socket_path.display(), "gRPC server listening");
+
+    let machine_service = MachineServiceImpl::new(Arc::clone(&shared_runtime));
+    let sandbox_service = SandboxServiceImpl::new(Arc::clone(&shared_runtime));
+    let sandbox_snapshot_service = SandboxSnapshotServiceImpl::new(Arc::clone(&shared_runtime));
+    let system_service = SystemServiceImpl::new(Arc::clone(&ctx.setup_state));
+
+    let shutdown = ctx.shutdown.clone();
+    let handle = tokio::spawn(async move {
+        let result = Server::builder()
+            .add_service(MachineServiceServer::new(machine_service))
+            .add_service(SandboxServiceServer::new(sandbox_service))
+            .add_service(SandboxSnapshotServiceServer::new(sandbox_snapshot_service))
+            .add_service(SystemServiceServer::new(system_service))
+            .serve_with_incoming_shutdown(incoming, shutdown.cancelled())
+            .await;
+
+        if let Err(e) = result {
+            tracing::error!("gRPC server error: {}", e);
+        }
+    });
+
+    Ok(handle)
+}
+
+/// Starts DNS, Docker API, and Docker CLI integration.
+///
+/// Called after `init_runtime()` — the runtime must be available.
+pub async fn start_services(
+    ctx: &DaemonContext,
+    grpc: tokio::task::JoinHandle<()>,
+) -> Result<ServiceHandles> {
+    let runtime = ctx.runtime();
+
     // DNS service.
-    let dns_service = DnsService::bind(Arc::clone(ctx.runtime.network_manager()), ctx.dns_port)
+    let dns_service = DnsService::bind(Arc::clone(runtime.network_manager()), ctx.dns_port)
         .await
         .context("Failed to start DNS service")?;
 
@@ -39,7 +97,7 @@ pub async fn start(ctx: &DaemonContext) -> Result<ServiceHandles> {
         ServerConfig {
             socket_path: ctx.socket_path.clone(),
         },
-        Arc::clone(&ctx.runtime),
+        Arc::clone(runtime),
     );
 
     let docker_shutdown = ctx.shutdown.clone();
@@ -48,9 +106,6 @@ pub async fn start(ctx: &DaemonContext) -> Result<ServiceHandles> {
             tracing::error!("Docker API server error: {}", e);
         }
     });
-
-    // gRPC server.
-    let grpc = start_grpc(ctx).await?;
 
     // Docker CLI integration (optional).
     if ctx.docker_integration {
@@ -71,56 +126,22 @@ pub async fn start(ctx: &DaemonContext) -> Result<ServiceHandles> {
     Ok(ServiceHandles { dns, docker, grpc })
 }
 
+// =============================================================================
+// Helpers
+// =============================================================================
+
 fn register_host_dns(ctx: &DaemonContext) {
-    let network_cfg = &ctx.runtime.config().network;
+    let runtime = ctx.runtime();
+    let network_cfg = &runtime.config().network;
     let gateway_ip = network_cfg
         .gateway
         .as_ref()
         .and_then(|s| s.parse::<Ipv4Addr>().ok())
         .or_else(|| first_address_in_subnet(&network_cfg.subnet))
         .unwrap_or(Ipv4Addr::new(10, 0, 2, 1));
-    ctx.runtime
+    runtime
         .network_manager()
         .register_dns("host", IpAddr::V4(gateway_ip));
-}
-
-async fn start_grpc(ctx: &DaemonContext) -> Result<tokio::task::JoinHandle<()>> {
-    let socket_path = &ctx.grpc_socket;
-    let _ = std::fs::remove_file(socket_path);
-
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent).context("Failed to create socket directory")?;
-    }
-
-    let listener = UnixListener::bind(socket_path).context(format!(
-        "Failed to bind gRPC socket: {}",
-        socket_path.display()
-    ))?;
-    let incoming = UnixListenerStream::new(listener);
-
-    info!(socket = %socket_path.display(), "gRPC server listening");
-
-    let machine_service = MachineServiceImpl::new(Arc::clone(&ctx.runtime));
-    let sandbox_service = SandboxServiceImpl::new(Arc::clone(&ctx.runtime));
-    let sandbox_snapshot_service = SandboxSnapshotServiceImpl::new(Arc::clone(&ctx.runtime));
-    let system_service = SystemServiceImpl::new(Arc::clone(&ctx.setup_state));
-
-    let shutdown = ctx.shutdown.clone();
-    let handle = tokio::spawn(async move {
-        let result = Server::builder()
-            .add_service(MachineServiceServer::new(machine_service))
-            .add_service(SandboxServiceServer::new(sandbox_service))
-            .add_service(SandboxSnapshotServiceServer::new(sandbox_snapshot_service))
-            .add_service(SystemServiceServer::new(system_service))
-            .serve_with_incoming_shutdown(incoming, shutdown.cancelled())
-            .await;
-
-        if let Err(e) = result {
-            tracing::error!("gRPC server error: {}", e);
-        }
-    });
-
-    Ok(handle)
 }
 
 fn first_address_in_subnet(subnet: &str) -> Option<Ipv4Addr> {

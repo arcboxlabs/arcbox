@@ -36,6 +36,7 @@ axum.workspace = true
 bytes.workspace = true
 http-body-util = "0.1"
 tokio-util = "0.7"
+arcbox-docker-tools.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 macos-resolver = { workspace = true }

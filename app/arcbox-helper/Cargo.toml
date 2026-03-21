@@ -24,6 +24,7 @@ futures = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 libc = { workspace = true }
+arcbox-constants.workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }

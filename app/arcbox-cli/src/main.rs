@@ -70,6 +70,7 @@ fn main() -> Result<()> {
                 Commands::Doctor => commands::doctor::execute().await,
                 #[cfg(target_os = "macos")]
                 Commands::Install(args) => commands::install::execute(args).await,
+                #[cfg(target_os = "macos")]
                 Commands::Uninstall(args) => commands::uninstall::execute(args).await,
                 Commands::Info => execute_info().await,
                 Commands::Version => commands::version::execute().await,

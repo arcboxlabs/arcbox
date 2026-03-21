@@ -50,6 +50,19 @@ impl HelperService for HelperServer {
         mutations::socket::unlink()
     }
 
+    async fn cli_link(
+        self,
+        _: tarpc::context::Context,
+        name: String,
+        target: String,
+    ) -> Result<(), String> {
+        mutations::cli::link(&name, &target)
+    }
+
+    async fn cli_unlink(self, _: tarpc::context::Context, name: String) -> Result<(), String> {
+        mutations::cli::unlink(&name)
+    }
+
     async fn version(self, _: tarpc::context::Context) -> String {
         env!("CARGO_PKG_VERSION").to_string()
     }

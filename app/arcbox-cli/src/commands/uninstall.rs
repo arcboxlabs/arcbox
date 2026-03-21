@@ -5,6 +5,7 @@
 //! privileged operations.
 
 use anyhow::{Context, Result};
+use arcbox_constants::paths::{DOCKER_CLI_TOOLS, privileged};
 use clap::Args;
 use std::io::Write;
 use std::process::Command;
@@ -27,10 +28,10 @@ pub async fn execute(args: UninstallArgs) -> Result<()> {
 
     println!("This will remove ArcBox and all its data:\n");
     println!("  • Stop and remove daemon (LaunchAgent)");
-    println!("  • Stop and remove helper (LaunchDaemon)          [sudo]");
+    println!("  • Stop and remove helper (binary, plist, socket)  [sudo]");
     println!("  • Remove DNS resolver (/etc/resolver/arcbox.local) [sudo]");
     println!("  • Remove Docker socket (/var/run/docker.sock)    [sudo]");
-    println!("  • Remove CLI symlink (/usr/local/bin/abctl)      [sudo]");
+    println!("  • Remove CLI symlinks (/usr/local/bin/docker...) [sudo]");
     println!("  • Remove Docker context 'arcbox'");
     if args.keep_data {
         println!("  • Remove app data (~/.arcbox) — keeping container data");
@@ -107,8 +108,8 @@ pub async fn execute(args: UninstallArgs) -> Result<()> {
             .output();
     });
 
-    // 3. Stop helper.
-    step!("Stopping helper...                  [sudo]", {
+    // 3. Stop and remove helper.
+    step!("Removing helper...                  [sudo]", {
         let _ = Command::new("sudo")
             .args([
                 "launchctl",
@@ -117,7 +118,16 @@ pub async fn execute(args: UninstallArgs) -> Result<()> {
             ])
             .output();
         let _ = Command::new("sudo")
-            .args(["pkill", "-f", "ArcBoxHelper"])
+            .args(["pkill", "-f", "arcbox-helper"])
+            .output();
+        let _ = Command::new("sudo")
+            .args(["rm", "-f", privileged::HELPER_BINARY])
+            .output();
+        let _ = Command::new("sudo")
+            .args(["rm", "-f", privileged::HELPER_PLIST])
+            .output();
+        let _ = Command::new("sudo")
+            .args(["rm", "-f", privileged::HELPER_SOCKET])
             .output();
     });
 
@@ -130,23 +140,35 @@ pub async fn execute(args: UninstallArgs) -> Result<()> {
 
     // 5. Remove Docker socket symlink.
     step!("Removing Docker socket...           [sudo]", {
-        // Only remove if it's a symlink pointing to arcbox.
-        if let Ok(target) = std::fs::read_link("/var/run/docker.sock") {
+        if let Ok(target) = std::fs::read_link(privileged::DOCKER_SOCKET) {
             if target.to_string_lossy().contains(".arcbox") {
                 let _ = Command::new("sudo")
-                    .args(["rm", "-f", "/var/run/docker.sock"])
+                    .args(["rm", "-f", privileged::DOCKER_SOCKET])
                     .output();
             }
         }
     });
 
-    // 6. Remove CLI symlink.
-    step!("Removing CLI symlink...             [sudo]", {
+    // 6. Remove CLI and Docker symlinks.
+    step!("Removing CLI symlinks...            [sudo]", {
+        // Remove abctl symlink if it points to ArcBox.
         if let Ok(target) = std::fs::read_link("/usr/local/bin/abctl") {
             if target.to_string_lossy().contains("ArcBox") {
                 let _ = Command::new("sudo")
                     .args(["rm", "-f", "/usr/local/bin/abctl"])
                     .output();
+            }
+        }
+        // Remove Docker CLI symlinks created by helper cli_link.
+        for name in DOCKER_CLI_TOOLS {
+            let path = format!("/usr/local/bin/{name}");
+            if let Ok(target) = std::fs::read_link(&path) {
+                if target
+                    .to_string_lossy()
+                    .contains(".app/Contents/MacOS/xbin/")
+                {
+                    let _ = Command::new("sudo").args(["rm", "-f", &path]).output();
+                }
             }
         }
     });

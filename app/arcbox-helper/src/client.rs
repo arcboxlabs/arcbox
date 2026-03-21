@@ -106,6 +106,22 @@ impl Client {
             .map_err(ClientError::Helper)
     }
 
+    /// Creates `/usr/local/bin/{name}` → `target` symlink.
+    pub async fn cli_link(&self, name: &str, target: &str) -> Result<(), ClientError> {
+        self.inner
+            .cli_link(tarpc::context::current(), name.into(), target.into())
+            .await?
+            .map_err(ClientError::Helper)
+    }
+
+    /// Removes `/usr/local/bin/{name}` symlink if ArcBox-owned.
+    pub async fn cli_unlink(&self, name: &str) -> Result<(), ClientError> {
+        self.inner
+            .cli_unlink(tarpc::context::current(), name.into())
+            .await?
+            .map_err(ClientError::Helper)
+    }
+
     /// Returns the helper daemon version.
     pub async fn version(&self) -> Result<String, ClientError> {
         Ok(self.inner.version(tarpc::context::current()).await?)

@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use arcbox_api::SetupState;
+use arcbox_api::{SetupState, SharedRuntime};
 use arcbox_core::Runtime;
 use tokio_util::sync::CancellationToken;
 
@@ -13,12 +13,29 @@ pub struct DaemonContext {
     pub socket_path: PathBuf,
     pub grpc_socket: PathBuf,
     pub pid_file: PathBuf,
-    pub runtime: Arc<Runtime>,
+    /// Shared with gRPC services. Empty after `init_early`, filled by `init_runtime`.
+    pub shared_runtime: SharedRuntime,
     pub setup_state: Arc<SetupState>,
     pub shutdown: CancellationToken,
     pub dns_domain: String,
     pub dns_port: u16,
     pub docker_integration: bool,
+    pub vm_args: VmArgs,
+}
+
+impl DaemonContext {
+    /// Returns the runtime. Panics if called before `init_runtime`.
+    pub fn runtime(&self) -> &Arc<Runtime> {
+        self.shared_runtime
+            .get()
+            .expect("runtime not initialized — called before init_runtime?")
+    }
+}
+
+/// VM-related CLI arguments, deferred until `init_runtime`.
+pub struct VmArgs {
+    pub guest_docker_vsock_port: Option<u32>,
+    pub kernel: Option<PathBuf>,
 }
 
 /// Handles to spawned services for drain-on-shutdown.

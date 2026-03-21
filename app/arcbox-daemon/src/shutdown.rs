@@ -25,10 +25,12 @@ pub async fn run(ctx: DaemonContext, mut handles: ServiceHandles) -> Result<()> 
         arcbox_core::route_reconciler::remove_route().await;
     }
 
-    ctx.runtime
-        .shutdown()
-        .await
-        .context("Failed to shutdown runtime")?;
+    if let Some(runtime) = ctx.shared_runtime.get() {
+        runtime
+            .shutdown()
+            .await
+            .context("Failed to shutdown runtime")?;
+    }
 
     if ctx.docker_integration {
         if let Ok(ctx_manager) = DockerContextManager::new(ctx.socket_path.clone()) {

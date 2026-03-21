@@ -8,7 +8,7 @@ pub mod client;
 pub mod validate;
 
 /// Unix socket path where the helper daemon listens.
-pub const HELPER_SOCKET: &str = "/var/run/arcbox-helper.sock";
+pub const HELPER_SOCKET: &str = arcbox_constants::paths::privileged::HELPER_SOCKET;
 
 /// Override the socket path for development/testing.
 pub const HELPER_SOCKET_ENV: &str = "ARCBOX_HELPER_SOCKET";
@@ -46,6 +46,13 @@ pub trait HelperService {
 
     /// Removes the `/var/run/docker.sock` symlink.
     async fn socket_unlink() -> Result<(), String>;
+
+    /// Creates `/usr/local/bin/{name}` symlink pointing to `target`.
+    /// Used to expose Docker CLI tools from the app bundle.
+    async fn cli_link(name: String, target: String) -> Result<(), String>;
+
+    /// Removes `/usr/local/bin/{name}` symlink if it points inside an ArcBox bundle.
+    async fn cli_unlink(name: String) -> Result<(), String>;
 
     /// Returns the helper version string.
     async fn version() -> String;
