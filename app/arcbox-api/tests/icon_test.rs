@@ -8,7 +8,7 @@ async fn get_icon_for_official_image() {
     let svc = IconServiceImpl::new();
     let resp = svc
         .get_image_icon(Request::new(GetImageIconRequest {
-            reference: "nginx".to_string(),
+            fqin: "nginx".to_string(),
         }))
         .await
         .unwrap()
@@ -23,7 +23,7 @@ async fn get_icon_for_dockerhub_org() {
     let svc = IconServiceImpl::new();
     let resp = svc
         .get_image_icon(Request::new(GetImageIconRequest {
-            reference: "localstack/localstack".to_string(),
+            fqin: "localstack/localstack".to_string(),
         }))
         .await
         .unwrap()
@@ -42,7 +42,7 @@ async fn get_icon_for_ghcr() {
     let svc = IconServiceImpl::new();
     let resp = svc
         .get_image_icon(Request::new(GetImageIconRequest {
-            reference: "ghcr.io/astral-sh/uv".to_string(),
+            fqin: "ghcr.io/astral-sh/uv".to_string(),
         }))
         .await
         .unwrap()
@@ -57,7 +57,7 @@ async fn get_icon_not_found() {
     let svc = IconServiceImpl::new();
     let resp = svc
         .get_image_icon(Request::new(GetImageIconRequest {
-            reference: "registry.example.com/nonexistent/image".to_string(),
+            fqin: "registry.example.com/nonexistent/image".to_string(),
         }))
         .await
         .unwrap()

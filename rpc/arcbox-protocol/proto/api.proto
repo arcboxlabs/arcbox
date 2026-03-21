@@ -333,8 +333,8 @@ service IconService {
 
 // Request to get the icon URL for a container image.
 message GetImageIconRequest {
-    // Image reference (e.g., "nginx", "localstack/localstack", "ghcr.io/astral-sh/uv").
-    string reference = 1;
+    // Fully qualified image name (e.g., "nginx", "localstack/localstack", "ghcr.io/astral-sh/uv").
+    string fqin = 1;
 }
 
 // Response containing the icon URL.

@@ -315,11 +315,11 @@ impl IconService for IconServiceImpl {
         &self,
         request: Request<GetImageIconRequest>,
     ) -> Result<Response<GetImageIconResponse>, Status> {
-        let reference = request.into_inner().reference;
+        let fqin = request.into_inner().fqin;
 
         let icon = self
             .icon_service
-            .get_icon(&reference)
+            .get_icon(&fqin)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 

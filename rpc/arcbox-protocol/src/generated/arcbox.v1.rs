@@ -1975,9 +1975,9 @@ pub struct PruneResponse {
 #[serde(rename_all = "camelCase")]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetImageIconRequest {
-    /// Image reference (e.g., "nginx", "localstack/localstack", "ghcr.io/astral-sh/uv").
+    /// Fully qualified image name (e.g., "nginx", "localstack/localstack", "ghcr.io/astral-sh/uv").
     #[prost(string, tag = "1")]
-    pub reference: ::prost::alloc::string::String,
+    pub fqin: ::prost::alloc::string::String,
 }
 /// Response containing the icon URL.
 #[derive(serde::Serialize, serde::Deserialize)]
