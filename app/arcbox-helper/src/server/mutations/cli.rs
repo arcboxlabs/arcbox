@@ -21,10 +21,7 @@ fn is_arcbox_owned(target: &Path) -> bool {
 /// Idempotent: if the symlink already points to `target`, this is a no-op.
 /// Only replaces existing symlinks that point into an ArcBox bundle.
 /// Refuses to overwrite regular files or non-ArcBox symlinks.
-pub fn link(name: &str, target: &str) -> Result<(), String> {
-    let name: CliName = name.parse()?;
-    let target: CliTarget = target.parse()?;
-
+pub fn link(name: &CliName, target: &CliTarget) -> Result<(), String> {
     let link_path = Path::new("/usr/local/bin").join(name.as_str());
     let target_path = Path::new(target.as_str());
 
@@ -39,7 +36,6 @@ pub fn link(name: &str, target: &str) -> Result<(), String> {
             if existing == target_path {
                 return Ok(());
             }
-            // Only replace if the existing symlink is ArcBox-owned.
             if !is_arcbox_owned(&existing) {
                 return Err(format!(
                     "{} is a symlink to {} (not ArcBox-owned, not replacing)",
@@ -51,7 +47,6 @@ pub fn link(name: &str, target: &str) -> Result<(), String> {
                 .map_err(|e| format!("failed to remove {}: {e}", link_path.display()))?;
         }
         Ok(_) => {
-            // Regular file — don't overwrite (could be user's own binary).
             return Err(format!(
                 "{} exists and is not a symlink (not replacing)",
                 link_path.display()
@@ -77,9 +72,7 @@ pub fn link(name: &str, target: &str) -> Result<(), String> {
 /// Removes `/usr/local/bin/{name}` if it is a symlink pointing inside an ArcBox bundle.
 ///
 /// Idempotent: returns Ok if already absent or not an ArcBox-owned symlink.
-pub fn unlink(name: &str) -> Result<(), String> {
-    let name: CliName = name.parse()?;
-
+pub fn unlink(name: &CliName) -> Result<(), String> {
     let link_path = Path::new("/usr/local/bin").join(name.as_str());
 
     match fs::symlink_metadata(&link_path) {
@@ -92,7 +85,7 @@ pub fn unlink(name: &str) -> Result<(), String> {
             }
             Ok(())
         }
-        Ok(_) => Ok(()), // Regular file, not ours.
+        Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(format!("failed to stat {}: {e}", link_path.display())),
     }

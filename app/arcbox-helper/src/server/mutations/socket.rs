@@ -19,35 +19,27 @@ const DOCKER_SOCK: &str = arcbox_constants::paths::privileged::DOCKER_SOCKET;
 /// If it is a symlink pointing elsewhere, it is replaced. If the path exists
 /// but is not a symlink (e.g. a real socket from Docker Desktop), returns an
 /// error asking the user to stop Docker Desktop first.
-pub fn link(target: &str) -> Result<(), String> {
-    let target: SocketTarget = target.parse()?;
-
+pub fn link(target: &SocketTarget) -> Result<(), String> {
     let target_path = Path::new(target.as_str());
     let link_path = Path::new(DOCKER_SOCK);
 
-    // Check if the path already exists.
     match fs::symlink_metadata(link_path) {
         Ok(meta) if meta.file_type().is_symlink() => {
-            // It's a symlink — check if it already points to the right target.
             let existing = fs::read_link(link_path)
                 .map_err(|e| format!("failed to read symlink {DOCKER_SOCK}: {e}"))?;
             if existing == target_path {
                 return Ok(());
             }
-            // Points elsewhere — remove and replace below.
             fs::remove_file(link_path)
                 .map_err(|e| format!("failed to remove existing {DOCKER_SOCK}: {e}"))?;
         }
         Ok(_) => {
-            // Exists but is NOT a symlink (real socket file from Docker Desktop, etc.).
             return Err(format!(
                 "{DOCKER_SOCK} exists but is not a symlink \
                  (is Docker Desktop running? stop it first)"
             ));
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Does not exist — create below.
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
             return Err(format!("failed to stat {DOCKER_SOCK}: {e}"));
         }
@@ -68,12 +60,9 @@ pub fn unlink() -> Result<(), String> {
         Ok(meta) if meta.file_type().is_symlink() => {
             fs::remove_file(link_path).map_err(|e| format!("failed to remove {DOCKER_SOCK}: {e}"))
         }
-        Ok(_) => {
-            // It's a real file/socket, not ours — don't touch it.
-            Err(format!(
-                "{DOCKER_SOCK} exists but is not a symlink (owned by another Docker daemon?)"
-            ))
-        }
+        Ok(_) => Err(format!(
+            "{DOCKER_SOCK} exists but is not a symlink (owned by another Docker daemon?)"
+        )),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(format!("failed to stat {DOCKER_SOCK}: {e}")),
     }

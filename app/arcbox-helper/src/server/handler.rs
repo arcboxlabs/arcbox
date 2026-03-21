@@ -1,10 +1,11 @@
 //! tarpc service implementation.
 //!
-//! Dispatches each RPC to the corresponding operation module
-//! (route, dns, socket). All input validation happens inside
-//! those modules before any privileged syscall.
+//! Dispatches each RPC to the corresponding operation module.
+//! Input validation (parse, don't validate) happens here at the RPC
+//! boundary — mutation functions only accept validated types.
 
 use arcbox_helper::HelperService;
+use arcbox_helper::validate::{BridgeIface, CliName, CliTarget, DnsPort, Domain, SocketTarget, Subnet};
 
 use super::mutations;
 
@@ -18,10 +19,13 @@ impl HelperService for HelperServer {
         subnet: String,
         iface: String,
     ) -> Result<(), String> {
+        let subnet: Subnet = subnet.parse()?;
+        let iface: BridgeIface = iface.parse()?;
         mutations::route::add(&subnet, &iface)
     }
 
     async fn route_remove(self, _: tarpc::context::Context, subnet: String) -> Result<(), String> {
+        let subnet: Subnet = subnet.parse()?;
         mutations::route::remove(&subnet)
     }
 
@@ -31,18 +35,23 @@ impl HelperService for HelperServer {
         domain: String,
         port: u16,
     ) -> Result<(), String> {
+        let domain: Domain = domain.parse()?;
+        let port = DnsPort::try_from(port)?;
         mutations::dns::install(&domain, port)
     }
 
     async fn dns_uninstall(self, _: tarpc::context::Context, domain: String) -> Result<(), String> {
+        let domain: Domain = domain.parse()?;
         mutations::dns::uninstall(&domain)
     }
 
     async fn dns_status(self, _: tarpc::context::Context, domain: String) -> Result<bool, String> {
+        let domain: Domain = domain.parse()?;
         mutations::dns::status(&domain)
     }
 
     async fn socket_link(self, _: tarpc::context::Context, target: String) -> Result<(), String> {
+        let target: SocketTarget = target.parse()?;
         mutations::socket::link(&target)
     }
 
@@ -56,10 +65,13 @@ impl HelperService for HelperServer {
         name: String,
         target: String,
     ) -> Result<(), String> {
+        let name: CliName = name.parse()?;
+        let target: CliTarget = target.parse()?;
         mutations::cli::link(&name, &target)
     }
 
     async fn cli_unlink(self, _: tarpc::context::Context, name: String) -> Result<(), String> {
+        let name: CliName = name.parse()?;
         mutations::cli::unlink(&name)
     }
 
