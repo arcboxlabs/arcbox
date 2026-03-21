@@ -117,7 +117,7 @@ setup-boot-assets:
 	./scripts/setup-dev-boot-assets.sh
 
 run-daemon: sign-daemon
-	./scripts/rebuild-run-daemon.sh
+	SIGN=0 ./scripts/rebuild-run-daemon.sh
 
 ## ── Cleanup ───────────────────────────────────────────
 

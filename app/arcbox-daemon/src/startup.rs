@@ -95,9 +95,17 @@ pub async fn init_runtime(ctx: &mut DaemonContext) -> Result<()> {
     }
 
     // Seed boot assets from app bundle if available, otherwise download.
-    seed_from_bundle(&ctx.data_dir);
+    // Run on a blocking thread to avoid stalling the async runtime during
+    // large file copies (kernel + rootfs + runtime binaries).
+    let data_dir = ctx.data_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        seed_from_bundle(&data_dir);
+        ensure_agent_binary(&data_dir)
+    })
+    .await
+    .context("seed task panicked")?
+    .context("seed failed")?;
     ensure_boot_assets(&ctx.data_dir, &ctx.setup_state).await?;
-    ensure_agent_binary(&ctx.data_dir)?;
     ctx.setup_state
         .set_phase(SetupPhase::AssetsReady, "Boot assets ready");
 

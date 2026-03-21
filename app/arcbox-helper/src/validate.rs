@@ -152,10 +152,15 @@ pub fn validate_cli_name(name: &str) -> Result<(), String> {
     }
 }
 
-/// Validates a CLI symlink target. Must point inside an app bundle's
-/// `Contents/MacOS/xbin/` directory. Rejects path traversal.
+/// Validates a CLI symlink target. Must be an absolute path inside an app
+/// bundle's `Contents/MacOS/xbin/` under `/Applications/` or `/Users/`.
+/// Rejects path traversal and arbitrary locations like `/tmp/fake.app/`.
 pub fn validate_cli_target(target: &str) -> Result<(), String> {
     let path = std::path::Path::new(target);
+
+    if !path.is_absolute() {
+        return Err(format!("CLI target '{target}' must be an absolute path"));
+    }
 
     if path.components().any(|c| matches!(c, Component::ParentDir)) {
         return Err(format!(
@@ -163,15 +168,17 @@ pub fn validate_cli_target(target: &str) -> Result<(), String> {
         ));
     }
 
-    // Must be inside an .app bundle's Contents/MacOS/xbin/
     if !target.contains(".app/Contents/MacOS/xbin/") {
         return Err(format!(
             "CLI target '{target}' must be inside an .app bundle's Contents/MacOS/xbin/"
         ));
     }
 
-    if !path.is_absolute() {
-        return Err(format!("CLI target '{target}' must be an absolute path"));
+    // Restrict to trusted base directories to prevent fake .app paths.
+    if !target.starts_with("/Applications/") && !target.starts_with("/Users/") {
+        return Err(format!(
+            "CLI target '{target}' must be under /Applications/ or /Users/"
+        ));
     }
 
     Ok(())
@@ -313,5 +320,7 @@ mod tests {
         assert!(
             validate_cli_target("/Applications/ArcBox.app/Contents/MacOS/xbin/../../evil").is_err()
         );
+        // Fake .app in untrusted location
+        assert!(validate_cli_target("/tmp/evil.app/Contents/MacOS/xbin/docker").is_err());
     }
 }

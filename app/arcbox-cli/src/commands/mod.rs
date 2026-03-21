@@ -24,6 +24,7 @@ pub mod install;
 pub mod machine;
 pub mod sandbox;
 pub mod setup;
+#[cfg(target_os = "macos")]
 pub mod uninstall;
 pub mod version;
 
@@ -104,6 +105,7 @@ pub enum Commands {
     Install(install::InstallArgs),
 
     /// Internal: uninstall helper + deregister daemon (used by brew/DMG installers)
+    #[cfg(target_os = "macos")]
     #[command(name = "_uninstall", hide = true)]
     Uninstall(uninstall::UninstallArgs),
 
