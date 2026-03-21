@@ -17,7 +17,8 @@ impl SetupTask for DockerSocket {
     }
 
     fn is_satisfied(&self) -> bool {
-        std::fs::read_link("/var/run/docker.sock").is_ok_and(|existing| existing == self.target)
+        std::fs::read_link(arcbox_constants::paths::privileged::DOCKER_SOCKET)
+            .is_ok_and(|existing| existing == self.target)
     }
 
     async fn apply(&self, client: &Client) -> Result<(), ClientError> {

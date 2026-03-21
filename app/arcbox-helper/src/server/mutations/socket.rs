@@ -11,7 +11,7 @@ use std::path::Path;
 use arcbox_helper::validate;
 
 /// Standard Docker socket path.
-const DOCKER_SOCK: &str = "/var/run/docker.sock";
+const DOCKER_SOCK: &str = arcbox_constants::paths::privileged::DOCKER_SOCKET;
 
 /// Creates a symlink at `/var/run/docker.sock` → `target`.
 ///

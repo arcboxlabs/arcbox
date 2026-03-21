@@ -427,6 +427,7 @@ dependencies = [
 name = "arcbox-helper"
 version = "0.3.1"
 dependencies = [
+ "arcbox-constants",
  "futures",
  "libc",
  "serde",

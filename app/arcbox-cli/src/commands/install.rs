@@ -20,6 +20,11 @@ pub struct InstallArgs {
     /// Skip shell integration setup.
     #[arg(long)]
     pub no_shell: bool,
+
+    /// Path to the arcbox-helper binary to install.
+    /// Defaults to looking next to the current executable.
+    #[arg(long)]
+    pub helper_path: Option<PathBuf>,
 }
 
 /// Executes the install command.
@@ -30,7 +35,7 @@ pub async fn execute(args: InstallArgs) -> Result<()> {
 
     // 1. Install helper binary (requires sudo).
     print_step(1, 3, "Installing arcbox-helper...");
-    install_helper()?;
+    install_helper(args.helper_path.as_deref())?;
     print_done();
 
     // 2. Register daemon service.
@@ -84,24 +89,24 @@ fn print_skipped() {
 // Step 1: Install helper binary + launchd service
 // =============================================================================
 
-/// Helper binary install path.
-const HELPER_DEST: &str = "/usr/local/libexec/arcbox-helper";
-
-/// launchd plist path (system-level daemon, runs as root).
-const HELPER_PLIST: &str = "/Library/LaunchDaemons/com.arcboxlabs.desktop.helper.plist";
+use arcbox_constants::paths::privileged;
 
 /// Installs the arcbox-helper binary and registers it as a launchd system
 /// daemon with socket activation.
 ///
 /// launchd creates the socket at `/var/run/arcbox-helper.sock` and starts
 /// the helper on-demand when the main daemon connects.
-fn install_helper() -> Result<()> {
-    let dest = PathBuf::from(HELPER_DEST);
+fn install_helper(custom_path: Option<&std::path::Path>) -> Result<()> {
+    let dest = PathBuf::from(privileged::HELPER_BINARY);
 
-    // Find the helper binary next to our own executable.
-    let exe = std::env::current_exe().context("could not determine current executable")?;
-    let exe_dir = exe.parent().context("executable has no parent directory")?;
-    let helper_src = exe_dir.join("arcbox-helper");
+    // Use custom path if provided, otherwise look next to our own executable.
+    let helper_src = if let Some(path) = custom_path {
+        path.to_path_buf()
+    } else {
+        let exe = std::env::current_exe().context("could not determine current executable")?;
+        let exe_dir = exe.parent().context("executable has no parent directory")?;
+        exe_dir.join("arcbox-helper")
+    };
 
     if !helper_src.exists() {
         bail!(
@@ -124,7 +129,7 @@ fn install_helper() -> Result<()> {
 
     // Ensure root ownership (macOS copyfile preserves source ownership).
     let status = Command::new("chown")
-        .args(["root:wheel", HELPER_DEST])
+        .args(["root:wheel", privileged::HELPER_BINARY])
         .status()
         .context("failed to chown helper binary")?;
     if !status.success() {
@@ -133,19 +138,19 @@ fn install_helper() -> Result<()> {
 
     // Install bundled launchd plist (socket activation config is static).
     std::fs::write(
-        HELPER_PLIST,
+        privileged::HELPER_PLIST,
         include_bytes!("../../../../bundle/com.arcboxlabs.desktop.helper.plist"),
     )
-    .with_context(|| format!("failed to write {HELPER_PLIST}"))?;
+    .with_context(|| format!("failed to write {}", privileged::HELPER_PLIST))?;
 
     // Bootout existing service (ignore errors if not loaded).
     let _ = Command::new("launchctl")
-        .args(["bootout", "system", HELPER_PLIST])
+        .args(["bootout", "system", privileged::HELPER_PLIST])
         .output();
 
     // Bootstrap the service into the system domain.
     let status = Command::new("launchctl")
-        .args(["bootstrap", "system", HELPER_PLIST])
+        .args(["bootstrap", "system", privileged::HELPER_PLIST])
         .status()
         .context("failed to run launchctl bootstrap")?;
 

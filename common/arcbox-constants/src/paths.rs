@@ -18,6 +18,34 @@ pub const CONTAINERD_SOCKET: &str = "/run/containerd/containerd.sock";
 /// accessed via VirtioFS live execution.
 pub const ARCBOX_RUNTIME_BIN_DIR: &str = "/arcbox/runtime/bin";
 
+/// Host-side privileged paths (require root to write).
+pub mod privileged {
+    /// Installed helper binary path.
+    pub const HELPER_BINARY: &str = "/usr/local/libexec/arcbox-helper";
+    /// Helper launchd plist path.
+    pub const HELPER_PLIST: &str = "/Library/LaunchDaemons/com.arcboxlabs.desktop.helper.plist";
+    /// Helper socket-activation socket path.
+    pub const HELPER_SOCKET: &str = "/var/run/arcbox-helper.sock";
+    /// Docker socket symlink path.
+    pub const DOCKER_SOCKET: &str = "/var/run/docker.sock";
+}
+
+/// launchd service labels.
+pub mod labels {
+    /// Daemon (user-level LaunchAgent).
+    pub const DAEMON: &str = "com.arcboxlabs.desktop.daemon";
+    /// Helper (system-level LaunchDaemon).
+    pub const HELPER: &str = "com.arcboxlabs.desktop.helper";
+}
+
+/// Docker CLI tool names managed by the helper's cli_link.
+pub const DOCKER_CLI_TOOLS: &[&str] = &[
+    "docker",
+    "docker-buildx",
+    "docker-compose",
+    "docker-credential-osxkeychain",
+];
+
 /// Host-side subdirectory names within `~/.arcbox/`.
 pub mod host {
     /// Runtime state (sockets, PID files, ephemeral markers).

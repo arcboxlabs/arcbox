@@ -140,22 +140,14 @@ pub fn validate_socket_target(s: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Allowed CLI tool names for `/usr/local/bin/` symlinks.
-const ALLOWED_CLI_NAMES: &[&str] = &[
-    "docker",
-    "docker-buildx",
-    "docker-compose",
-    "docker-credential-osxkeychain",
-];
-
 /// Validates a CLI tool name for `/usr/local/bin/` symlink creation.
 pub fn validate_cli_name(name: &str) -> Result<(), String> {
-    if ALLOWED_CLI_NAMES.contains(&name) {
+    if arcbox_constants::paths::DOCKER_CLI_TOOLS.contains(&name) {
         Ok(())
     } else {
         Err(format!(
             "CLI name '{name}' is not in the allow list: {}",
-            ALLOWED_CLI_NAMES.join(", ")
+            arcbox_constants::paths::DOCKER_CLI_TOOLS.join(", ")
         ))
     }
 }

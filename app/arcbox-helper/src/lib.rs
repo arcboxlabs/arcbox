@@ -8,7 +8,7 @@ pub mod client;
 pub mod validate;
 
 /// Unix socket path where the helper daemon listens.
-pub const HELPER_SOCKET: &str = "/var/run/arcbox-helper.sock";
+pub const HELPER_SOCKET: &str = arcbox_constants::paths::privileged::HELPER_SOCKET;
 
 /// Override the socket path for development/testing.
 pub const HELPER_SOCKET_ENV: &str = "ARCBOX_HELPER_SOCKET";

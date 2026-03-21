@@ -6,13 +6,7 @@ use arcbox_helper::client::{Client, ClientError};
 
 use super::SetupTask;
 
-/// Docker CLI tool names to symlink.
-const CLI_TOOLS: &[&str] = &[
-    "docker",
-    "docker-buildx",
-    "docker-compose",
-    "docker-credential-osxkeychain",
-];
+use arcbox_constants::paths::DOCKER_CLI_TOOLS;
 
 pub struct CliTools {
     /// Path to `Contents/MacOS/xbin/` inside the app bundle.
@@ -26,7 +20,7 @@ impl SetupTask for CliTools {
     }
 
     fn is_satisfied(&self) -> bool {
-        CLI_TOOLS.iter().all(|name| {
+        DOCKER_CLI_TOOLS.iter().all(|name| {
             let link = PathBuf::from(format!("/usr/local/bin/{name}"));
             std::fs::read_link(&link)
                 .is_ok_and(|target| target.to_string_lossy().contains("ArcBox"))
@@ -34,7 +28,7 @@ impl SetupTask for CliTools {
     }
 
     async fn apply(&self, client: &Client) -> Result<(), ClientError> {
-        for name in CLI_TOOLS {
+        for name in DOCKER_CLI_TOOLS {
             let target = self.xbin_dir.join(name);
             if target.exists() {
                 client.cli_link(name, &target.to_string_lossy()).await?;
