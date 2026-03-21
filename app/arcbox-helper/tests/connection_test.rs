@@ -13,7 +13,6 @@ async fn version_returns_crate_version() {
 
 #[tokio::test]
 async fn connection_refused_when_no_server() {
-    // Point to a nonexistent socket via explicit path (no env var mutation).
     let err = Client::connect_to("/tmp/arcbox-helper-nonexistent.sock").await;
     assert!(matches!(err, Err(ClientError::Connection(_))));
 }

@@ -73,10 +73,6 @@ fn peer_pid(stream: &tokio::net::UnixStream) -> Option<i32> {
     if ret == 0 { Some(pid) } else { None }
 }
 
-// =============================================================================
-// Security.framework code signature verification
-// =============================================================================
-
 #[cfg(not(debug_assertions))]
 mod security {
     use std::ffi::c_void;

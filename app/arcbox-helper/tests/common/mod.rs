@@ -6,15 +6,11 @@
 
 use arcbox_helper::HelperService;
 use arcbox_helper::client::Client;
-use arcbox_helper::validate::{
-    BridgeIface, CliName, CliTarget, DnsPort, Domain, SocketTarget, Subnet,
-};
+use arcbox_helper::validate;
 use futures::prelude::*;
 use tarpc::server::{BaseChannel, Channel};
 use tarpc::tokio_serde::formats::Bincode;
 
-/// Mock server — parses inputs into validated types (mirrors real handler)
-/// but skips privileged ops.
 #[derive(Clone)]
 pub struct MockHelperServer;
 
@@ -25,13 +21,13 @@ impl HelperService for MockHelperServer {
         subnet: String,
         iface: String,
     ) -> Result<(), String> {
-        let _subnet: Subnet = subnet.parse()?;
-        let _iface: BridgeIface = iface.parse()?;
+        validate::validate_subnet(&subnet)?;
+        validate::validate_iface(&iface)?;
         Ok(())
     }
 
     async fn route_remove(self, _: tarpc::context::Context, subnet: String) -> Result<(), String> {
-        let _subnet: Subnet = subnet.parse()?;
+        validate::validate_subnet(&subnet)?;
         Ok(())
     }
 
@@ -41,43 +37,27 @@ impl HelperService for MockHelperServer {
         domain: String,
         port: u16,
     ) -> Result<(), String> {
-        let _domain: Domain = domain.parse()?;
-        let _port = DnsPort::try_from(port)?;
+        validate::validate_domain(&domain)?;
+        validate::validate_port(port)?;
         Ok(())
     }
 
     async fn dns_uninstall(self, _: tarpc::context::Context, domain: String) -> Result<(), String> {
-        let _domain: Domain = domain.parse()?;
+        validate::validate_domain(&domain)?;
         Ok(())
     }
 
     async fn dns_status(self, _: tarpc::context::Context, domain: String) -> Result<bool, String> {
-        let _domain: Domain = domain.parse()?;
+        validate::validate_domain(&domain)?;
         Ok(false)
     }
 
     async fn socket_link(self, _: tarpc::context::Context, target: String) -> Result<(), String> {
-        let _target: SocketTarget = target.parse()?;
+        validate::validate_socket_target(&target)?;
         Ok(())
     }
 
     async fn socket_unlink(self, _: tarpc::context::Context) -> Result<(), String> {
-        Ok(())
-    }
-
-    async fn cli_link(
-        self,
-        _: tarpc::context::Context,
-        name: String,
-        target: String,
-    ) -> Result<(), String> {
-        let _name: CliName = name.parse()?;
-        let _target: CliTarget = target.parse()?;
-        Ok(())
-    }
-
-    async fn cli_unlink(self, _: tarpc::context::Context, name: String) -> Result<(), String> {
-        let _name: CliName = name.parse()?;
         Ok(())
     }
 
@@ -95,7 +75,6 @@ pub async fn setup() -> (Client, tempfile::TempDir) {
     let sock_path = dir.path().join("helper.sock");
     let sock_str = sock_path.to_str().unwrap().to_string();
 
-    // Start server.
     let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
     let codec = tarpc::tokio_util::codec::length_delimited::LengthDelimitedCodec::builder();
 
@@ -115,8 +94,6 @@ pub async fn setup() -> (Client, tempfile::TempDir) {
         }
     });
 
-    // Connect client via explicit socket path (avoids env var race in parallel tests).
     let client = Client::connect_to(&sock_str).await.unwrap();
-
     (client, dir)
 }

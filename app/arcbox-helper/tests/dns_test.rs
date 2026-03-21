@@ -28,5 +28,5 @@ async fn dns_install_rejects_invalid_domain() {
 async fn dns_status_valid() {
     let (client, _dir) = common::setup().await;
     let installed = client.dns_status("arcbox.local").await.unwrap();
-    assert!(!installed); // mock always returns false
+    assert!(!installed);
 }
