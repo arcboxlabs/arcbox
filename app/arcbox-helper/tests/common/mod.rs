@@ -6,12 +6,15 @@
 
 use arcbox_helper::HelperService;
 use arcbox_helper::client::Client;
-use arcbox_helper::validate;
+use arcbox_helper::validate::{
+    BridgeIface, CliName, CliTarget, DnsPort, Domain, SocketTarget, Subnet,
+};
 use futures::prelude::*;
 use tarpc::server::{BaseChannel, Channel};
 use tarpc::tokio_serde::formats::Bincode;
 
-/// Mock server — validates inputs but skips privileged ops.
+/// Mock server — parses inputs into validated types (mirrors real handler)
+/// but skips privileged ops.
 #[derive(Clone)]
 pub struct MockHelperServer;
 
@@ -22,13 +25,13 @@ impl HelperService for MockHelperServer {
         subnet: String,
         iface: String,
     ) -> Result<(), String> {
-        validate::validate_subnet(&subnet)?;
-        validate::validate_iface(&iface)?;
+        let _subnet: Subnet = subnet.parse()?;
+        let _iface: BridgeIface = iface.parse()?;
         Ok(())
     }
 
     async fn route_remove(self, _: tarpc::context::Context, subnet: String) -> Result<(), String> {
-        validate::validate_subnet(&subnet)?;
+        let _subnet: Subnet = subnet.parse()?;
         Ok(())
     }
 
@@ -38,23 +41,23 @@ impl HelperService for MockHelperServer {
         domain: String,
         port: u16,
     ) -> Result<(), String> {
-        validate::validate_domain(&domain)?;
-        validate::validate_port(port)?;
+        let _domain: Domain = domain.parse()?;
+        let _port = DnsPort::try_from(port)?;
         Ok(())
     }
 
     async fn dns_uninstall(self, _: tarpc::context::Context, domain: String) -> Result<(), String> {
-        validate::validate_domain(&domain)?;
+        let _domain: Domain = domain.parse()?;
         Ok(())
     }
 
     async fn dns_status(self, _: tarpc::context::Context, domain: String) -> Result<bool, String> {
-        validate::validate_domain(&domain)?;
+        let _domain: Domain = domain.parse()?;
         Ok(false)
     }
 
     async fn socket_link(self, _: tarpc::context::Context, target: String) -> Result<(), String> {
-        validate::validate_socket_target(&target)?;
+        let _target: SocketTarget = target.parse()?;
         Ok(())
     }
 
@@ -68,13 +71,13 @@ impl HelperService for MockHelperServer {
         name: String,
         target: String,
     ) -> Result<(), String> {
-        validate::validate_cli_name(&name)?;
-        validate::validate_cli_target(&target)?;
+        let _name: CliName = name.parse()?;
+        let _target: CliTarget = target.parse()?;
         Ok(())
     }
 
     async fn cli_unlink(self, _: tarpc::context::Context, name: String) -> Result<(), String> {
-        validate::validate_cli_name(&name)?;
+        let _name: CliName = name.parse()?;
         Ok(())
     }
 
