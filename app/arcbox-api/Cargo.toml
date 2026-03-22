@@ -25,7 +25,6 @@ async-stream = { workspace = true }
 libc = { workspace = true }
 uuid = { workspace = true }
 dimicon = "0.1.0"
-serde_json.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

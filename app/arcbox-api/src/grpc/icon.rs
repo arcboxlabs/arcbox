@@ -4,26 +4,25 @@ use arcbox_grpc::IconService;
 use arcbox_protocol::v1::{GetImageIconRequest, GetImageIconResponse};
 use tonic::{Request, Response, Status};
 
-/// Extracts the serde tag name from an `IconSource` variant.
-///
-/// `IconSource` is `#[serde(tag = "type", rename_all = "snake_case")]`,
-/// so serializing yields `{"type": "<variant_name>", "url": "..."}`.
-fn icon_source_name(source: &dimicon::IconSource) -> String {
-    serde_json::to_value(source)
-        .ok()
-        .and_then(|v| v.get("type").and_then(|t| t.as_str().map(String::from)))
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
 struct ResolvedIcon(Option<dimicon::IconSource>);
 
 impl From<ResolvedIcon> for GetImageIconResponse {
     fn from(resolved: ResolvedIcon) -> Self {
         match resolved.0 {
-            Some(source) => Self {
-                source: icon_source_name(&source),
-                url: source.url().to_string(),
-            },
+            Some(source) => {
+                let name = match &source {
+                    dimicon::IconSource::DockerHubLogo { .. } => "docker_hub_logo",
+                    dimicon::IconSource::DockerHubOrgGravatar { .. } => "docker_hub_org_gravatar",
+                    dimicon::IconSource::DockerOfficialImage { .. } => "docker_official_image",
+                    dimicon::IconSource::GhcrAvatar { .. } => "ghcr_avatar",
+                    dimicon::IconSource::Custom { .. } => "custom",
+                    _ => "unknown",
+                };
+                Self {
+                    url: source.url().to_string(),
+                    source: name.to_string(),
+                }
+            }
             None => Self {
                 url: String::new(),
                 source: "not_found".to_string(),
