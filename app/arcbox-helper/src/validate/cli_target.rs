@@ -26,10 +26,7 @@ impl FromStr for CliTarget {
             return Err(format!("CLI target '{s}' must be an absolute path"));
         }
 
-        if path
-            .components()
-            .any(|c| matches!(c, Component::ParentDir))
-        {
+        if path.components().any(|c| matches!(c, Component::ParentDir)) {
             return Err(format!("CLI target '{s}' contains '..' path traversal"));
         }
 

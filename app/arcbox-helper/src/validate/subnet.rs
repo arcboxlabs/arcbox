@@ -29,9 +29,7 @@ impl FromStr for Subnet {
             return Err(format!("invalid CIDR: missing '/' in '{s}'"));
         }
 
-        let net: Ipv4Network = s
-            .parse()
-            .map_err(|e| format!("invalid CIDR '{s}': {e}"))?;
+        let net: Ipv4Network = s.parse().map_err(|e| format!("invalid CIDR '{s}': {e}"))?;
 
         if net.ip() != net.network() {
             return Err(format!(

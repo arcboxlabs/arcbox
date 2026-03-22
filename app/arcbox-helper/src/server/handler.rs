@@ -5,7 +5,9 @@
 //! boundary — mutation functions only accept validated types.
 
 use arcbox_helper::HelperService;
-use arcbox_helper::validate::{BridgeIface, CliName, CliTarget, DnsPort, Domain, SocketTarget, Subnet};
+use arcbox_helper::validate::{
+    BridgeIface, CliName, CliTarget, DnsPort, Domain, SocketTarget, Subnet,
+};
 
 use super::mutations;
 

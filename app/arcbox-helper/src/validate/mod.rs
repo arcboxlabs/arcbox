@@ -164,36 +164,50 @@ mod tests {
 
     #[test]
     fn valid_socket_targets() {
-        assert!("/Users/alice/.arcbox/run/docker.sock"
-            .parse::<SocketTarget>()
-            .is_ok());
-        assert!("/Users/bob/.arcbox/run/arcbox.sock"
-            .parse::<SocketTarget>()
-            .is_ok());
+        assert!(
+            "/Users/alice/.arcbox/run/docker.sock"
+                .parse::<SocketTarget>()
+                .is_ok()
+        );
+        assert!(
+            "/Users/bob/.arcbox/run/arcbox.sock"
+                .parse::<SocketTarget>()
+                .is_ok()
+        );
     }
 
     #[test]
     fn invalid_socket_targets() {
         assert!("/tmp/docker.sock".parse::<SocketTarget>().is_err());
-        assert!("/Users//.arcbox/run/docker.sock"
-            .parse::<SocketTarget>()
-            .is_err());
-        assert!("/Users/alice/.config/docker.sock"
-            .parse::<SocketTarget>()
-            .is_err());
-        assert!("/Users/alice/.arcbox/run/docker.txt"
-            .parse::<SocketTarget>()
-            .is_err());
+        assert!(
+            "/Users//.arcbox/run/docker.sock"
+                .parse::<SocketTarget>()
+                .is_err()
+        );
+        assert!(
+            "/Users/alice/.config/docker.sock"
+                .parse::<SocketTarget>()
+                .is_err()
+        );
+        assert!(
+            "/Users/alice/.arcbox/run/docker.txt"
+                .parse::<SocketTarget>()
+                .is_err()
+        );
     }
 
     #[test]
     fn socket_target_rejects_uppercase_extension() {
-        assert!("/Users/alice/.arcbox/run/docker.SOCK"
-            .parse::<SocketTarget>()
-            .is_err());
-        assert!("/Users/alice/.arcbox/run/docker.Sock"
-            .parse::<SocketTarget>()
-            .is_err());
+        assert!(
+            "/Users/alice/.arcbox/run/docker.SOCK"
+                .parse::<SocketTarget>()
+                .is_err()
+        );
+        assert!(
+            "/Users/alice/.arcbox/run/docker.Sock"
+                .parse::<SocketTarget>()
+                .is_err()
+        );
     }
 
     #[test]
@@ -221,24 +235,32 @@ mod tests {
 
     #[test]
     fn valid_cli_targets() {
-        assert!("/Applications/ArcBox Desktop.app/Contents/MacOS/xbin/docker"
-            .parse::<CliTarget>()
-            .is_ok());
-        assert!("/Users/test/Apps/ArcBox.app/Contents/MacOS/xbin/docker-compose"
-            .parse::<CliTarget>()
-            .is_ok());
+        assert!(
+            "/Applications/ArcBox Desktop.app/Contents/MacOS/xbin/docker"
+                .parse::<CliTarget>()
+                .is_ok()
+        );
+        assert!(
+            "/Users/test/Apps/ArcBox.app/Contents/MacOS/xbin/docker-compose"
+                .parse::<CliTarget>()
+                .is_ok()
+        );
     }
 
     #[test]
     fn invalid_cli_targets() {
         assert!("Contents/MacOS/xbin/docker".parse::<CliTarget>().is_err());
         assert!("/usr/local/bin/docker".parse::<CliTarget>().is_err());
-        assert!("/Applications/ArcBox.app/Contents/MacOS/xbin/../../evil"
-            .parse::<CliTarget>()
-            .is_err());
-        assert!("/tmp/evil.app/Contents/MacOS/xbin/docker"
-            .parse::<CliTarget>()
-            .is_err());
+        assert!(
+            "/Applications/ArcBox.app/Contents/MacOS/xbin/../../evil"
+                .parse::<CliTarget>()
+                .is_err()
+        );
+        assert!(
+            "/tmp/evil.app/Contents/MacOS/xbin/docker"
+                .parse::<CliTarget>()
+                .is_err()
+        );
     }
 
     #[test]

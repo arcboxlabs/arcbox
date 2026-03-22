@@ -43,10 +43,7 @@ impl FromStr for SocketTarget {
             return Err(format!("socket target '{s}' must end with .sock"));
         }
 
-        if path
-            .components()
-            .any(|c| matches!(c, Component::ParentDir))
-        {
+        if path.components().any(|c| matches!(c, Component::ParentDir)) {
             return Err(format!(
                 "socket target '{s}' contains '..' path traversal component"
             ));

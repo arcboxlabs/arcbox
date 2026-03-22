@@ -14,7 +14,14 @@ use arcbox_helper::validate::{BridgeIface, Subnet};
 /// Idempotent: returns Ok if the route already exists.
 pub fn add(subnet: &Subnet, iface: &BridgeIface) -> Result<(), String> {
     let output = Command::new("/sbin/route")
-        .args(["-n", "add", "-net", &subnet.to_string(), "-interface", iface.as_str()])
+        .args([
+            "-n",
+            "add",
+            "-net",
+            &subnet.to_string(),
+            "-interface",
+            iface.as_str(),
+        ])
         .output()
         .map_err(|e| format!("failed to execute /sbin/route: {e}"))?;
 
