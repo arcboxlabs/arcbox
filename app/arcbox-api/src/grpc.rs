@@ -22,6 +22,33 @@ use arcbox_protocol::v1::{
     MachineSummary, MachineSystemInfo, RemoveMachineRequest, StartMachineRequest,
     StopMachineRequest,
 };
+
+struct ResolvedIcon(Option<dimicon::IconSource>);
+
+impl From<ResolvedIcon> for GetImageIconResponse {
+    fn from(resolved: ResolvedIcon) -> Self {
+        match resolved.0 {
+            Some(source) => {
+                let name = match &source {
+                    dimicon::IconSource::DockerHubLogo { .. } => "docker_hub_logo",
+                    dimicon::IconSource::DockerHubOrgGravatar { .. } => "docker_hub_org_gravatar",
+                    dimicon::IconSource::DockerOfficialImage { .. } => "docker_official_image",
+                    dimicon::IconSource::GhcrAvatar { .. } => "ghcr_avatar",
+                    dimicon::IconSource::Custom { .. } => "custom",
+                    _ => "unknown",
+                };
+                Self {
+                    url: source.url().to_string(),
+                    source: name.to_string(),
+                }
+            }
+            None => Self {
+                url: String::new(),
+                source: "not_found".to_string(),
+            },
+        }
+    }
+}
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use tokio_stream::Stream;
@@ -37,6 +64,7 @@ use tonic::{Request, Response, Status};
 /// while the daemon is still downloading assets / starting the VM.
 pub type SharedRuntime = Arc<OnceLock<Arc<Runtime>>>;
 
+#[allow(clippy::result_large_err)]
 fn get_runtime(shared: &SharedRuntime) -> Result<&Arc<Runtime>, Status> {
     shared
         .get()
@@ -299,13 +327,19 @@ pub struct IconServiceImpl {
     icon_service: dimicon::IconService,
 }
 
+impl Default for IconServiceImpl {
+    fn default() -> Self {
+        Self {
+            icon_service: dimicon::IconService::new(),
+        }
+    }
+}
+
 impl IconServiceImpl {
     /// Creates a new icon service.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            icon_service: dimicon::IconService::new(),
-        }
+        Self::default()
     }
 }
 
@@ -323,19 +357,7 @@ impl IconService for IconServiceImpl {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        let source = match &icon {
-            dimicon::IconSource::DockerHubLogo { .. } => "docker_hub_logo",
-            dimicon::IconSource::DockerHubOrgGravatar { .. } => "docker_hub_org_gravatar",
-            dimicon::IconSource::DockerOfficialImage { .. } => "docker_official_image",
-            dimicon::IconSource::GhcrAvatar { .. } => "ghcr_avatar",
-            dimicon::IconSource::Custom { .. } => "custom",
-            dimicon::IconSource::NotFound => "not_found",
-        };
-
-        Ok(Response::new(GetImageIconResponse {
-            url: icon.url().unwrap_or_default().to_string(),
-            source: source.to_string(),
-        }))
+        Ok(Response::new(ResolvedIcon(icon).into()))
     }
 }
 
