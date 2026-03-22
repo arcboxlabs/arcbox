@@ -1,8 +1,10 @@
 //! gRPC service implementations.
 //!
-//! This module implements the gRPC services defined in arcbox-protocol.
-//! All types are imported from `arcbox_protocol::v1`, and service traits
-//! are from `arcbox_grpc::v1`.
+//! This module implements the gRPC services defined in `arcbox-protocol`.
+//! Core service types are imported from `arcbox_protocol::v1`, with the
+//! corresponding service traits from `arcbox_grpc::v1`. Sandbox-related
+//! APIs use `arcbox_protocol::sandbox_v1` and sandbox service traits
+//! re-exported from `arcbox_grpc` (non-`v1`).
 
 mod icon;
 mod machine;
@@ -27,6 +29,7 @@ use tonic::Status;
 pub type SharedRuntime = Arc<OnceLock<Arc<Runtime>>>;
 
 /// Extension trait for obtaining the runtime from a deferred handle.
+#[allow(clippy::result_large_err)]
 trait SharedRuntimeExt {
     /// Returns the runtime, or `UNAVAILABLE` if it hasn't been initialized yet.
     fn ready(&self) -> Result<&Arc<Runtime>, Status>;
@@ -41,6 +44,7 @@ impl SharedRuntimeExt for SharedRuntime {
 }
 
 /// Extension trait for extracting routing metadata from gRPC requests.
+#[allow(clippy::result_large_err)]
 trait RequestExt {
     /// Returns the target machine name from the `x-machine` metadata header.
     fn machine_id(&self) -> Result<String, Status>;
@@ -49,10 +53,16 @@ trait RequestExt {
 impl<T> RequestExt for tonic::Request<T> {
     #[allow(clippy::result_large_err)]
     fn machine_id(&self) -> Result<String, Status> {
-        self.metadata()
-            .get("x-machine")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string)
-            .ok_or_else(|| Status::invalid_argument("missing x-machine metadata header"))
+        match self.metadata().get("x-machine") {
+            None => Err(Status::invalid_argument(
+                "missing x-machine metadata header",
+            )),
+            Some(value) => match value.to_str() {
+                Ok(s) => Ok(s.to_string()),
+                Err(_) => Err(Status::invalid_argument(
+                    "invalid x-machine metadata header: must be valid UTF-8",
+                )),
+            },
+        }
     }
 }
