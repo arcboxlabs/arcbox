@@ -4,10 +4,10 @@ use std::pin::Pin;
 
 use arcbox_grpc::v1::machine_service_server;
 use arcbox_protocol::v1::{
-    CreateMachineRequest, CreateMachineResponse, Empty, InspectMachineRequest,
-    ListMachinesRequest, ListMachinesResponse, MachineAgentRequest, MachineExecOutput,
-    MachineExecRequest, MachineInfo, MachineNetwork, MachinePingResponse, MachineSummary,
-    MachineSystemInfo, RemoveMachineRequest, StartMachineRequest, StopMachineRequest,
+    CreateMachineRequest, CreateMachineResponse, Empty, InspectMachineRequest, ListMachinesRequest,
+    ListMachinesResponse, MachineAgentRequest, MachineExecOutput, MachineExecRequest, MachineInfo,
+    MachineNetwork, MachinePingResponse, MachineSummary, MachineSystemInfo, RemoveMachineRequest,
+    StartMachineRequest, StopMachineRequest,
 };
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
@@ -67,7 +67,8 @@ impl machine_service_server::MachineService for MachineServiceImpl {
             block_devices: Vec::new(),
         };
 
-        self.runtime.ready()?
+        self.runtime
+            .ready()?
             .machine_manager()
             .create(config)
             .await
@@ -82,7 +83,8 @@ impl machine_service_server::MachineService for MachineServiceImpl {
     ) -> Result<Response<Empty>, Status> {
         let id = request.into_inner().id;
 
-        self.runtime.ready()?
+        self.runtime
+            .ready()?
             .machine_manager()
             .start(&id)
             .await
@@ -94,7 +96,8 @@ impl machine_service_server::MachineService for MachineServiceImpl {
     async fn stop(&self, request: Request<StopMachineRequest>) -> Result<Response<Empty>, Status> {
         let id = request.into_inner().id;
 
-        self.runtime.ready()?
+        self.runtime
+            .ready()?
             .machine_manager()
             .stop(&id)
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -108,7 +111,8 @@ impl machine_service_server::MachineService for MachineServiceImpl {
     ) -> Result<Response<Empty>, Status> {
         let req = request.into_inner();
 
-        self.runtime.ready()?
+        self.runtime
+            .ready()?
             .machine_manager()
             .remove(&req.id, req.force)
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -147,7 +151,9 @@ impl machine_service_server::MachineService for MachineServiceImpl {
     ) -> Result<Response<MachineInfo>, Status> {
         let id = request.into_inner().id;
 
-        let machine = self.runtime.ready()?
+        let machine = self
+            .runtime
+            .ready()?
             .machine_manager()
             .get(&id)
             .ok_or_else(|| Status::not_found("machine not found"))?;
@@ -193,7 +199,9 @@ impl machine_service_server::MachineService for MachineServiceImpl {
     ) -> Result<Response<MachinePingResponse>, Status> {
         let id = request.into_inner().id;
 
-        let mut agent = self.runtime.ready()?
+        let mut agent = self
+            .runtime
+            .ready()?
             .get_agent(&id)
             .map_err(|e| Status::internal(e.to_string()))?;
         let response = agent
@@ -213,7 +221,9 @@ impl machine_service_server::MachineService for MachineServiceImpl {
     ) -> Result<Response<MachineSystemInfo>, Status> {
         let id = request.into_inner().id;
 
-        let mut agent = self.runtime.ready()?
+        let mut agent = self
+            .runtime
+            .ready()?
             .get_agent(&id)
             .map_err(|e| Status::internal(e.to_string()))?;
         let info = agent

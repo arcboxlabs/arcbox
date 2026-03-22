@@ -43,7 +43,9 @@ impl SandboxService for SandboxServiceImpl {
         request: Request<CreateSandboxRequest>,
     ) -> Result<Response<CreateSandboxResponse>, Status> {
         let machine = request.machine_id()?;
-        let mut agent = self.runtime.ready()?
+        let mut agent = self
+            .runtime
+            .ready()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         let resp = agent
@@ -53,7 +55,8 @@ impl SandboxService for SandboxServiceImpl {
 
         // Register sandbox DNS so the host can resolve sandbox-id.arcbox.local.
         if let Ok(ip) = resp.ip_address.parse() {
-            self.runtime.ready()?
+            self.runtime
+                .ready()?
                 .register_dns(&resp.id, &resp.id, ip)
                 .await;
         }
@@ -65,7 +68,9 @@ impl SandboxService for SandboxServiceImpl {
 
     async fn run(&self, request: Request<RunRequest>) -> Result<Response<Self::RunStream>, Status> {
         let machine = request.machine_id()?;
-        let agent = self.runtime.ready()?
+        let agent = self
+            .runtime
+            .ready()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         let rx = agent
@@ -94,7 +99,9 @@ impl SandboxService for SandboxServiceImpl {
     ) -> Result<Response<SandboxEmpty>, Status> {
         let machine = request.machine_id()?;
         let sandbox_id = request.get_ref().id.clone();
-        let mut agent = self.runtime.ready()?
+        let mut agent = self
+            .runtime
+            .ready()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         agent
@@ -102,7 +109,8 @@ impl SandboxService for SandboxServiceImpl {
             .await
             .map_err(ApiError::from)?;
 
-        self.runtime.ready()?
+        self.runtime
+            .ready()?
             .deregister_dns_by_id(&sandbox_id)
             .await;
 
@@ -115,7 +123,9 @@ impl SandboxService for SandboxServiceImpl {
     ) -> Result<Response<SandboxEmpty>, Status> {
         let machine = request.machine_id()?;
         let sandbox_id = request.get_ref().id.clone();
-        let mut agent = self.runtime.ready()?
+        let mut agent = self
+            .runtime
+            .ready()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         agent
@@ -123,7 +133,8 @@ impl SandboxService for SandboxServiceImpl {
             .await
             .map_err(ApiError::from)?;
 
-        self.runtime.ready()?
+        self.runtime
+            .ready()?
             .deregister_dns_by_id(&sandbox_id)
             .await;
 
@@ -135,7 +146,9 @@ impl SandboxService for SandboxServiceImpl {
         request: Request<InspectSandboxRequest>,
     ) -> Result<Response<SandboxInfo>, Status> {
         let machine = request.machine_id()?;
-        let mut agent = self.runtime.ready()?
+        let mut agent = self
+            .runtime
+            .ready()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         let info = agent
@@ -150,7 +163,9 @@ impl SandboxService for SandboxServiceImpl {
         request: Request<ListSandboxesRequest>,
     ) -> Result<Response<ListSandboxesResponse>, Status> {
         let machine = request.machine_id()?;
-        let mut agent = self.runtime.ready()?
+        let mut agent = self
+            .runtime
+            .ready()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         let resp = agent
@@ -167,7 +182,9 @@ impl SandboxService for SandboxServiceImpl {
         request: Request<SandboxEventsRequest>,
     ) -> Result<Response<Self::EventsStream>, Status> {
         let machine = request.machine_id()?;
-        let agent = self.runtime.ready()?
+        let agent = self
+            .runtime
+            .ready()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         let rx = agent

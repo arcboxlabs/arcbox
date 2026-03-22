@@ -32,7 +32,9 @@ impl SandboxSnapshotService for SandboxSnapshotServiceImpl {
         request: Request<CheckpointRequest>,
     ) -> Result<Response<CheckpointResponse>, Status> {
         let machine = request.machine_id()?;
-        let mut agent = self.runtime.ready()?
+        let mut agent = self
+            .runtime
+            .ready()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         let resp = agent
@@ -47,7 +49,9 @@ impl SandboxSnapshotService for SandboxSnapshotServiceImpl {
         request: Request<RestoreRequest>,
     ) -> Result<Response<RestoreResponse>, Status> {
         let machine = request.machine_id()?;
-        let mut agent = self.runtime.ready()?
+        let mut agent = self
+            .runtime
+            .ready()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         let resp = agent
@@ -57,7 +61,8 @@ impl SandboxSnapshotService for SandboxSnapshotServiceImpl {
 
         // Register restored sandbox DNS.
         if let Ok(ip) = resp.ip_address.parse() {
-            self.runtime.ready()?
+            self.runtime
+                .ready()?
                 .register_dns(&resp.id, &resp.id, ip)
                 .await;
         }
@@ -70,7 +75,9 @@ impl SandboxSnapshotService for SandboxSnapshotServiceImpl {
         request: Request<ListSnapshotsRequest>,
     ) -> Result<Response<ListSnapshotsResponse>, Status> {
         let machine = request.machine_id()?;
-        let mut agent = self.runtime.ready()?
+        let mut agent = self
+            .runtime
+            .ready()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         let resp = agent
@@ -85,7 +92,9 @@ impl SandboxSnapshotService for SandboxSnapshotServiceImpl {
         request: Request<DeleteSnapshotRequest>,
     ) -> Result<Response<SandboxEmpty>, Status> {
         let machine = request.machine_id()?;
-        let mut agent = self.runtime.ready()?
+        let mut agent = self
+            .runtime
+            .ready()?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         agent
