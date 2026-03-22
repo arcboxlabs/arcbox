@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3](https://github.com/arcboxlabs/arcbox/compare/v0.3.2...v0.3.3) (2026-03-22)
+
+
+### Features
+
+* **api:** add IconService gRPC for container image icon lookups ([6f7abf5](https://github.com/arcboxlabs/arcbox/commit/6f7abf53c6fd2a75f3d92f35aacc86233a865814))
+
+
+### Bug Fixes
+
+* **api:** bump dimicon to 0.1.0 for stable API ([19aa521](https://github.com/arcboxlabs/arcbox/commit/19aa52152e16c107cbd62bb5b319c9b875bb2723))
+* **helper:** add missing cli_link/cli_unlink stubs, rename misleading test ([01c65e4](https://github.com/arcboxlabs/arcbox/commit/01c65e4326cb4e10d617634c4ae8ce23c1313e6b))
+* **helper:** harden input validation in validate.rs ([ff57feb](https://github.com/arcboxlabs/arcbox/commit/ff57feb6e5141a525af6a1ad4119e32036d4034f))
+
+
+### Code Refactoring
+
+* **api:** extract icon-to-response conversion via From&lt;ResolvedIcon&gt; ([4def9a4](https://github.com/arcboxlabs/arcbox/commit/4def9a471d30f5ba4139bb1d338b5effd40c4ea7))
+* **api:** rename IconService field `reference` to `fqin` ([34188ad](https://github.com/arcboxlabs/arcbox/commit/34188ad468bc54999df7cbd13e237dc4dafe5529))
+* **helper:** apply newtype pattern to validation types ([de9261e](https://github.com/arcboxlabs/arcbox/commit/de9261e03cefcc718243f42a9470268f6e7cf8cb))
+* **helper:** push validation to RPC boundary, mutations accept strong types ([1015bc1](https://github.com/arcboxlabs/arcbox/commit/1015bc11f71d38038d2c58ed60ce9d28e35be7dd))
+* **helper:** remove separator comments, split rpc_test.rs ([9268410](https://github.com/arcboxlabs/arcbox/commit/92684109022956be62395a1e02569a457e735389))
+* **helper:** split validate.rs into per-type modules ([6dc9c29](https://github.com/arcboxlabs/arcbox/commit/6dc9c29b49914d38ac46a8f224493994f32e6a6d))
+
+
+### Tests
+
+* **helper:** align mock servers with newtype parse pattern ([a856b52](https://github.com/arcboxlabs/arcbox/commit/a856b52f6dca6cb1c18be2d4c12cd6a30942dd25))
+
+
+### Styles
+
+* cargo fmt arcbox-helper ([340553f](https://github.com/arcboxlabs/arcbox/commit/340553f5d9623cd47b50ea14defddd161f3048de))
+* cargo fmt validate/mod.rs ([6ca69db](https://github.com/arcboxlabs/arcbox/commit/6ca69db21c49b987d1c7250471b1d26f2167316e))
+* fix import ordering in icon_test ([ce20b5c](https://github.com/arcboxlabs/arcbox/commit/ce20b5c0361f99ede05c6f114aa69497f312bc37))
+
 ## [0.3.2](https://github.com/arcboxlabs/arcbox/compare/v0.3.1...v0.3.2) (2026-03-21)
 
 
