@@ -6,6 +6,9 @@
 //! binary. It provides machine and sandbox gRPC services.
 
 pub mod error;
+// tonic::Status is ~176 bytes — every gRPC method returns Result<_, Status>,
+// so this lint is unavoidable throughout the module tree.
+#[allow(clippy::result_large_err)]
 pub mod grpc;
 pub mod system;
 

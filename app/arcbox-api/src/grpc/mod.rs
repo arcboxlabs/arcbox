@@ -29,30 +29,26 @@ use tonic::Status;
 pub type SharedRuntime = Arc<OnceLock<Arc<Runtime>>>;
 
 /// Extension trait for obtaining the runtime from a deferred handle.
-#[allow(clippy::result_large_err)]
 trait SharedRuntimeExt {
     /// Returns the runtime, or `UNAVAILABLE` if it hasn't been initialized yet.
     fn ready(&self) -> Result<&Arc<Runtime>, Status>;
 }
 
 impl SharedRuntimeExt for SharedRuntime {
-    #[allow(clippy::result_large_err)]
-    fn ready(&self) -> Result<&Arc<Runtime>, Status> {
+        fn ready(&self) -> Result<&Arc<Runtime>, Status> {
         self.get()
             .ok_or_else(|| Status::unavailable("daemon is starting, runtime not ready yet"))
     }
 }
 
 /// Extension trait for extracting routing metadata from gRPC requests.
-#[allow(clippy::result_large_err)]
 trait RequestExt {
     /// Returns the target machine name from the `x-machine` metadata header.
     fn machine_id(&self) -> Result<String, Status>;
 }
 
 impl<T> RequestExt for tonic::Request<T> {
-    #[allow(clippy::result_large_err)]
-    fn machine_id(&self) -> Result<String, Status> {
+        fn machine_id(&self) -> Result<String, Status> {
         match self.metadata().get("x-machine") {
             None => Err(Status::invalid_argument(
                 "missing x-machine metadata header",
