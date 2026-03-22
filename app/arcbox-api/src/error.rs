@@ -37,6 +37,12 @@ impl From<std::io::Error> for ApiError {
     }
 }
 
+impl From<ApiError> for tonic::Status {
+    fn from(err: ApiError) -> Self {
+        Self::internal(err.to_string())
+    }
+}
+
 impl ApiError {
     /// Creates a new configuration error.
     #[must_use]

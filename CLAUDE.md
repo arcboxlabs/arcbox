@@ -46,6 +46,9 @@ When asked to plan, the plan must be fully resolved before implementation begins
 - Use `thiserror` for crate-specific errors, `anyhow` in CLI/API layers
 - Hot paths: prefer lock-free / `RwLock` over `Arc<Mutex<T>>`, use `#[repr(C, align(64))]` to avoid false sharing
 - Performance-critical paths (VirtioFS, network stack, VirtIO devices) are all custom-built, not vendored
+- Prefer extension traits over free helper functions when the operation is specific to a type (e.g. `request.machine_id()?` not `extract_machine_id(&request)?`; `self.runtime.ready()?` not `get_runtime(&self.runtime)?`).
+- Prefer `From`/`Into` trait chains for error conversion. Don't write manual mapping helpers like `core_to_status()` — instead, implement `From<LocalError> for ForeignType` (using a crate-local error type to satisfy the orphan rule) and let `.map_err(LocalError::from)?` drive the conversion.
+- When a source file contains multiple distinct implementations separated by section dividers, split into a module directory (`foo/mod.rs` + one file per logical unit). Shared types and trait extensions go in `mod.rs`.
 - Prefer refactoring over layered, patchy fixes. Code changes must be coherent, not duct-taped on.
 - No hacky workarounds. If a workaround is truly unavoidable, pause and get user approval first.
 - When the right choice is obvious, make the decision — don't ask unnecessary questions. But when a plan or request is blocked or infeasible, surface the blocker with enough context for the user to decide the path forward.
