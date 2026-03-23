@@ -222,9 +222,11 @@ impl NetworkDatapath {
                         match guard.try_io(|inner| fd_write(inner.get_ref().as_raw_fd(), frame)) {
                             Ok(Ok(n)) if n >= frame.len() => { write_queue.pop_front(); }
                             Ok(Ok(n)) => {
-                                // SOCK_DGRAM delivers whole frames or fails. A short
-                                // write would corrupt L2 boundaries, so drop the frame.
-                                tracing::warn!(
+                                // SOCK_DGRAM delivers whole frames or fails — a short
+                                // write should never happen and indicates a broken
+                                // invariant. Drop the frame to avoid corrupting L2
+                                // boundaries.
+                                tracing::error!(
                                     "Guest write: short datagram ({n}/{} bytes), dropping frame",
                                     frame.len(),
                                 );
@@ -768,8 +770,8 @@ fn enqueue_or_write(
     match fd_write(fd, &frame) {
         Ok(n) if n >= frame.len() => {}
         Ok(n) => {
-            // SOCK_DGRAM: short write would split an L2 frame across datagrams.
-            tracing::warn!(
+            // SOCK_DGRAM: short write should never happen — invariant violation.
+            tracing::error!(
                 "Guest write: short datagram ({n}/{} bytes), dropping frame",
                 frame.len(),
             );

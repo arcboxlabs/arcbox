@@ -156,9 +156,19 @@ fn parse_resolv_conf_nameservers(contents: &str) -> Vec<SocketAddr> {
         return preferred;
     }
 
-    // No preferred servers found. Fall back to IPv4 entries (including
-    // loopback) rather than returning an empty list.
-    all.into_iter().filter(|a| a.ip().is_ipv4()).collect()
+    // No preferred servers. Fall back to IPv4 entries (including loopback)
+    // but still exclude fake-IP — returning empty lets DnsConfig::new keep
+    // DEFAULT_UPSTREAM (8.8.8.8, 1.1.1.1).
+    all.into_iter()
+        .filter(|a| {
+            if let IpAddr::V4(v4) = a.ip() {
+                let o = v4.octets();
+                !(o[0] == 198 && (o[1] == 18 || o[1] == 19))
+            } else {
+                false
+            }
+        })
+        .collect()
 }
 
 /// Detects system DNS upstream servers from `/etc/resolv.conf`.
@@ -957,5 +967,13 @@ nameserver 10.0.0.2
                 DNS_PORT
             )]
         );
+    }
+
+    #[test]
+    fn test_parse_resolv_conf_only_fake_ip_returns_empty() {
+        // Only fake-IP entries → empty list so DnsConfig::new keeps DEFAULT_UPSTREAM.
+        let conf = "nameserver 198.18.0.2\nnameserver 198.19.1.1\n";
+        let servers = parse_resolv_conf_nameservers(conf);
+        assert!(servers.is_empty());
     }
 }
