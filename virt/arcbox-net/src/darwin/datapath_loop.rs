@@ -42,9 +42,6 @@ use crate::dhcp::DhcpServer;
 use crate::dns::DnsForwarder;
 use crate::ethernet::{ETH_HEADER_LEN, build_udp_ip_ethernet};
 
-/// Stop consuming reply_rx when write queue exceeds this depth, propagating
-/// backpressure through the reply channel to upstream TCP/UDP proxies.
-const WRITE_QUEUE_HIGH: usize = 512;
 
 /// Wraps an `OwnedFd` so it can be registered with `AsyncFd`.
 struct FdWrapper(OwnedFd);
@@ -204,7 +201,6 @@ impl NetworkDatapath {
 
         loop {
             let has_pending = !write_queue.is_empty();
-            let accept_replies = write_queue.len() < WRITE_QUEUE_HIGH;
 
             tokio::select! {
                 biased;
@@ -276,7 +272,9 @@ impl NetworkDatapath {
                 }
 
                 // Proxy → Guest: relay reply frames from socket proxy.
-                Some(reply_frame) = reply_rx.recv(), if accept_replies => {
+                // Always poll — the bounded channel (256) provides natural backpressure
+                // to spawned tasks. Gating on write_queue depth starved DNS replies.
+                Some(reply_frame) = reply_rx.recv() => {
                     enqueue_or_write(&guest_async, reply_frame, &mut write_queue);
                 }
 
@@ -676,17 +674,14 @@ const DRAIN_CMD_BATCH: usize = 64;
 /// Non-blocking drain of the reply channel. Delivers pending proxy
 /// responses (DNS, UDP, ICMP) to the guest without blocking the event loop.
 ///
-/// Respects `WRITE_QUEUE_HIGH` backpressure and limits each call to
-/// `DRAIN_REPLY_BATCH` frames to avoid starving other `select!` branches.
+/// Limits each call to `DRAIN_REPLY_BATCH` frames to avoid starving other
+/// `select!` branches.
 fn drain_reply_rx(
     reply_rx: &mut mpsc::Receiver<Vec<u8>>,
     guest_async: &AsyncFd<FdWrapper>,
     write_queue: &mut VecDeque<Vec<u8>>,
 ) {
     for _ in 0..DRAIN_REPLY_BATCH {
-        if write_queue.len() >= WRITE_QUEUE_HIGH {
-            break;
-        }
         match reply_rx.try_recv() {
             Ok(reply_frame) => enqueue_or_write(guest_async, reply_frame, write_queue),
             Err(_) => break,
