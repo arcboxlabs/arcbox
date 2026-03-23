@@ -27,6 +27,7 @@ libc = { workspace = true }
 arcbox-constants.workspace = true
 arcbox-logging.workspace = true
 tracing = { workspace = true }
+tokio-util = "0.7"
 ipnetwork = "0.21.1"
 
 [dev-dependencies]
