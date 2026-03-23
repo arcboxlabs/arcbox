@@ -691,6 +691,27 @@ impl MachineManager {
         self.vm_manager.read_console_output(&machine.vm_id)
     }
 
+    /// Reads agent log output (hvc1) for a running machine (macOS only).
+    #[cfg(target_os = "macos")]
+    pub fn read_agent_log_output(&self, name: &str) -> Result<String> {
+        let machines = self
+            .machines
+            .read()
+            .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
+
+        let machine = machines
+            .get(name)
+            .ok_or_else(|| CoreError::not_found(name.to_string()))?;
+
+        if machine.state != MachineState::Running {
+            return Err(CoreError::invalid_state(format!(
+                "machine '{name}' is not running"
+            )));
+        }
+
+        self.vm_manager.read_agent_log_output(&machine.vm_id)
+    }
+
     /// Stops a machine.
     ///
     /// # Errors

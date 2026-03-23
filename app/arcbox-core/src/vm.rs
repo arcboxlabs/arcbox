@@ -826,6 +826,34 @@ impl VmManager {
             .map_err(|e| CoreError::Vm(format!("read console failed: {e}")))
     }
 
+    /// Reads agent log output (hvc1) from a running VM (macOS only).
+    #[cfg(target_os = "macos")]
+    pub fn read_agent_log_output(&self, id: &VmId) -> Result<String> {
+        let vms = self
+            .vms
+            .read()
+            .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?;
+
+        let entry = vms
+            .get(id)
+            .ok_or_else(|| CoreError::not_found(id.to_string()))?;
+
+        if entry.info.state != VmState::Running {
+            return Err(CoreError::invalid_state(format!(
+                "cannot read agent log: VM is {:?}",
+                entry.info.state
+            )));
+        }
+
+        let vmm = entry
+            .vmm
+            .as_ref()
+            .ok_or_else(|| CoreError::Vm("VMM not initialized".to_string()))?;
+
+        vmm.read_agent_log_output()
+            .map_err(|e| CoreError::Vm(format!("read agent log failed: {e}")))
+    }
+
     // ========================================================================
     // Memory Balloon Control
     // ========================================================================

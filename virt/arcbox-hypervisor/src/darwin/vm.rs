@@ -3,8 +3,10 @@
 //! This module uses arcbox-vz for Virtualization.framework bindings.
 
 use std::os::unix::io::RawFd;
-use std::sync::RwLock;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{
+    RwLock,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 use std::time::Duration;
 
 use arcbox_vz::{
@@ -73,9 +75,10 @@ pub struct DarwinVm {
     vz_config: Option<VirtualMachineConfiguration>,
     /// VZ virtual machine handle (created from configuration).
     vz_vm: Option<arcbox_vz::VirtualMachine>,
-    /// Serial port file descriptors (read, write).
-    /// Read from VM output, write to VM input.
-    serial_fds: Option<(RawFd, RawFd)>,
+    /// Console serial port file descriptors (hvc0): kernel/init output.
+    console_fds: Option<(RawFd, RawFd)>,
+    /// Agent log serial port file descriptors (hvc1): dedicated agent tracing channel.
+    agent_log_fds: Option<(RawFd, RawFd)>,
     /// Device configuration metadata for snapshots.
     ///
     /// Since Virtualization.framework doesn't expose device state, we store
@@ -173,42 +176,59 @@ impl DarwinVm {
             running: AtomicBool::new(false),
             vz_config: Some(vz_config),
             vz_vm: None,
-            serial_fds: None,
+            console_fds: None,
+            agent_log_fds: None,
             device_configs: Vec::new(),
             vsock_irq_fd: RwLock::new(None),
             balloon_configured: false,
         })
     }
 
-    /// Configures a serial console using pipes.
+    /// Configures dual serial console ports using pipes.
     ///
-    /// Returns "pipe" on success. Use `read_console_output()` to read output.
-    /// Note: Console output may not work with all Linux kernels. Virtio console
-    /// driver must be properly configured in the guest kernel.
+    /// Creates two VirtIO console ports:
+    /// - Port 0 (`hvc0`): kernel/init console output
+    /// - Port 1 (`hvc1`): dedicated agent log channel
+    ///
+    /// Returns "pipe" on success. Use `read_console_output()` and
+    /// `read_agent_log_output()` to read from each port.
     pub fn setup_serial_console(&mut self) -> Result<String, HypervisorError> {
-        // Use arcbox-vz's SerialPortConfiguration which handles pipe creation internally
-        let serial_port = SerialPortConfiguration::virtio_console()
-            .map_err(|e| HypervisorError::DeviceError(e.to_string()))?;
+        let make_port =
+            |label: &str| -> Result<(SerialPortConfiguration, RawFd, RawFd), HypervisorError> {
+                let port = SerialPortConfiguration::virtio_console()
+                    .map_err(|e| HypervisorError::DeviceError(e.to_string()))?;
+                let read_fd = port.read_fd().ok_or_else(|| {
+                    HypervisorError::DeviceError(format!("Failed to get {label} read fd"))
+                })?;
+                let write_fd = port.write_fd().ok_or_else(|| {
+                    HypervisorError::DeviceError(format!("Failed to get {label} write fd"))
+                })?;
+                Ok((port, read_fd, write_fd))
+            };
 
-        // Store FDs: (read_from_vm, write_to_vm)
-        let read_fd = serial_port.read_fd().ok_or_else(|| {
-            HypervisorError::DeviceError("Failed to get serial read fd".to_string())
-        })?;
-        let write_fd = serial_port.write_fd().ok_or_else(|| {
-            HypervisorError::DeviceError("Failed to get serial write fd".to_string())
-        })?;
-        self.serial_fds = Some((read_fd, write_fd));
-
+        // Port 0 (hvc0): kernel/init console
+        let (console_port, console_read, console_write) = make_port("console")?;
+        self.console_fds = Some((console_read, console_write));
         tracing::info!(
-            "Created serial console pipes: read_fd={}, write_fd={}",
-            read_fd,
-            write_fd
+            "Console port (hvc0): read_fd={}, write_fd={}",
+            console_read,
+            console_write
         );
 
-        // Add serial port to configuration
+        // Port 1 (hvc1): agent log channel
+        let (agent_log_port, agent_read, agent_write) = make_port("agent-log")?;
+        self.agent_log_fds = Some((agent_read, agent_write));
+        tracing::info!(
+            "Agent log port (hvc1): read_fd={}, write_fd={}",
+            agent_read,
+            agent_write
+        );
+
+        // Add ports in order — array index determines hvc device number.
         if let Some(ref mut vz_config) = self.vz_config {
-            vz_config.add_serial_port(serial_port);
-            tracing::debug!("Serial port configured (will be added to serialPorts)");
+            vz_config.add_serial_port(console_port);
+            vz_config.add_serial_port(agent_log_port);
+            tracing::debug!("Dual serial ports configured (hvc0 + hvc1)");
         }
 
         Ok("pipe".to_string())
@@ -330,21 +350,10 @@ impl DarwinVm {
         }
     }
 
-    /// Reads available console output from the PTY.
-    ///
-    /// Returns the output as a String. Returns an empty string if no output
-    /// is available or if the console hasn't been set up.
-    ///
-    /// This is a non-blocking read that returns whatever data is currently
-    /// available in the PTY buffer.
-    pub fn read_console_output(&self) -> Result<String, HypervisorError> {
-        let (read_fd, _) = self
-            .serial_fds
-            .ok_or_else(|| HypervisorError::DeviceError("Console not configured".to_string()))?;
-
-        tracing::debug!("read_console_output called, fd={}", read_fd);
-
-        // Check if fd is valid
+    /// Non-blocking read of all available data from a serial port file descriptor.
+    fn read_serial_fd(read_fd: RawFd) -> Result<String, HypervisorError> {
+        // SAFETY: All fd operations use valid pipe fds from setup_serial_console().
+        // Flags are saved and restored to avoid side effects.
         unsafe {
             let flags = libc::fcntl(read_fd, libc::F_GETFL);
             if flags == -1 {
@@ -353,26 +362,14 @@ impl DarwinVm {
                 return Ok(String::new());
             }
 
-            // Use poll to check if data is available
-            let mut pfd = libc::pollfd {
-                fd: read_fd,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let poll_result = libc::poll(&mut pfd, 1, 0);
-            tracing::debug!(
-                "poll on fd {}: result={}, revents={:#x}",
-                read_fd,
-                poll_result,
-                pfd.revents
-            );
-
-            // Set non-blocking mode for the read
-            libc::fcntl(read_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            if libc::fcntl(read_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) == -1 {
+                let errno = *libc::__error();
+                tracing::warn!("fcntl F_SETFL failed on fd {}: errno={}", read_fd, errno);
+                return Ok(String::new());
+            }
 
             let mut buffer = vec![0u8; 4096];
             let mut output = String::new();
-            let mut total_bytes = 0isize;
 
             loop {
                 let bytes_read = libc::read(
@@ -382,49 +379,58 @@ impl DarwinVm {
                 );
 
                 if bytes_read > 0 {
-                    total_bytes += bytes_read;
                     if let Ok(s) = std::str::from_utf8(&buffer[..bytes_read as usize]) {
                         output.push_str(s);
                     }
                 } else if bytes_read == 0 {
-                    // EOF
                     break;
                 } else {
-                    // Error - check if it's EAGAIN/EWOULDBLOCK
                     let errno = *libc::__error();
                     if errno != libc::EAGAIN && errno != libc::EWOULDBLOCK {
-                        tracing::warn!("Console read error on fd {}: errno={}", read_fd, errno);
+                        tracing::warn!("Serial read error on fd {}: errno={}", read_fd, errno);
                     }
                     break;
                 }
             }
 
-            // Log if we read any data
-            if total_bytes > 0 {
-                tracing::debug!("Read {} bytes from console fd {}", total_bytes, read_fd);
+            if libc::fcntl(read_fd, libc::F_SETFL, flags) == -1 {
+                let errno = *libc::__error();
+                tracing::warn!(
+                    "fcntl F_SETFL restore failed on fd {}: errno={}",
+                    read_fd,
+                    errno
+                );
             }
-
-            // Restore blocking mode
-            libc::fcntl(read_fd, libc::F_SETFL, flags);
-
             Ok(output)
         }
     }
 
-    /// Writes input to the console.
-    ///
-    /// This sends data to the guest's serial console input.
+    /// Reads available console output (hvc0) from the guest.
+    pub fn read_console_output(&self) -> Result<String, HypervisorError> {
+        let (read_fd, _) = self
+            .console_fds
+            .ok_or_else(|| HypervisorError::DeviceError("Console not configured".to_string()))?;
+        Self::read_serial_fd(read_fd)
+    }
+
+    /// Reads available agent log output (hvc1) from the guest.
+    pub fn read_agent_log_output(&self) -> Result<String, HypervisorError> {
+        let (read_fd, _) = self.agent_log_fds.ok_or_else(|| {
+            HypervisorError::DeviceError("Agent log port not configured".to_string())
+        })?;
+        Self::read_serial_fd(read_fd)
+    }
+
+    /// Writes input to the console (hvc0).
     pub fn write_console_input(&self, input: &str) -> Result<usize, HypervisorError> {
-        let (master_fd, _) = self
-            .serial_fds
+        let (_, write_fd) = self
+            .console_fds
             .ok_or_else(|| HypervisorError::DeviceError("Console not configured".to_string()))?;
 
+        // SAFETY: write_fd is a valid pipe fd from setup_serial_console().
         unsafe {
-            let bytes_written = libc::write(
-                master_fd,
-                input.as_ptr() as *const libc::c_void,
-                input.len(),
-            );
+            let bytes_written =
+                libc::write(write_fd, input.as_ptr() as *const libc::c_void, input.len());
 
             if bytes_written < 0 {
                 return Err(HypervisorError::DeviceError(format!(
@@ -442,7 +448,7 @@ impl DarwinVm {
     /// This can be used with tools like `screen` or `minicom` to connect
     /// to the VM's serial console interactively.
     pub fn console_path(&self) -> Option<String> {
-        self.serial_fds
+        self.console_fds
             .map(|(master_fd, _)| unsafe {
                 let slave_name = libc::ptsname(master_fd);
                 if slave_name.is_null() {
@@ -980,7 +986,7 @@ impl VirtualMachine for DarwinVm {
         // Finalize configuration if VM hasn't been created yet
         if self.vz_vm.is_none() {
             // Enable serial console for boot diagnostics unless already configured.
-            if self.serial_fds.is_none() {
+            if self.console_fds.is_none() {
                 if let Err(err) = self.setup_serial_console() {
                     tracing::warn!("Failed to set up serial console: {}", err);
                 }
@@ -1218,12 +1224,19 @@ impl VirtualMachine for DarwinVm {
             });
         }
 
-        // Also record serial port if configured (not in device_configs)
-        if self.serial_fds.is_some() {
+        // Record serial ports if configured (not in device_configs).
+        if self.console_fds.is_some() {
             snapshots.push(DeviceSnapshot {
                 device_type: VirtioDeviceType::Console,
                 name: "serial-0".to_string(),
-                state: Vec::new(), // Serial state is managed by guest
+                state: Vec::new(),
+            });
+        }
+        if self.agent_log_fds.is_some() {
+            snapshots.push(DeviceSnapshot {
+                device_type: VirtioDeviceType::Console,
+                name: "serial-1".to_string(),
+                state: Vec::new(),
             });
         }
 
@@ -1333,12 +1346,16 @@ impl Drop for DarwinVm {
             let _ = self.stop();
         }
 
-        // Close serial FDs
-        if let Some((read_fd, write_fd)) = self.serial_fds.take() {
+        // Close serial FDs for both console ports.
+        for fds in [self.console_fds.take(), self.agent_log_fds.take()]
+            .into_iter()
+            .flatten()
+        {
+            // SAFETY: These are valid pipe fds from setup_serial_console().
             unsafe {
-                libc::close(read_fd);
-                if write_fd != read_fd {
-                    libc::close(write_fd);
+                libc::close(fds.0);
+                if fds.1 != fds.0 {
+                    libc::close(fds.1);
                 }
             }
         }

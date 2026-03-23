@@ -41,12 +41,23 @@ async fn main() -> Result<()> {
     let is_pid1 = std::process::id() == 1;
 
     // Initialize logging early so init_system() has tracing output.
+    // Write to /dev/hvc1 (dedicated agent log port) when available,
+    // falling back to stderr (which goes to hvc0 alongside kernel output).
+    let log_writer: Box<dyn std::io::Write + Send> =
+        match std::fs::OpenOptions::new().write(true).open("/dev/hvc1") {
+            Ok(f) => Box::new(f),
+            Err(_) => Box::new(std::io::stderr()),
+        };
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "arcbox_agent=info".into()),
         )
-        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(log_writer)),
+        )
         .init();
 
     // PID 1 path: agent was exec'd by busybox trampoline on EROFS rootfs.

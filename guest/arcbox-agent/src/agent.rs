@@ -562,7 +562,6 @@ mod linux {
                 match listener.accept().await {
                     Ok((stream, peer_addr)) => {
                         tracing::info!("Accepted connection from {:?}", peer_addr);
-                        eprintln!("[AGENT] Accepted connection from {:?}", peer_addr);
                         tokio::spawn(async move {
                             if let Err(e) = handle_connection(stream).await {
                                 tracing::error!("Connection error: {}", e);
