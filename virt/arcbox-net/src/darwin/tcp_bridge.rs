@@ -1951,4 +1951,34 @@ mod tests {
         );
         assert_eq!(bridge.pending_syns[&key].syn_seq, 5000);
     }
+
+    #[test]
+    fn prune_excess_listen_sockets_keeps_one() {
+        let mut device = SmoltcpDevice::new(0, GW_IP);
+        let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
+        let mut bridge = TcpBridge::new();
+
+        // Simulate what happens when multiple SYNs to port 443 complete:
+        // create_listen_socket is called multiple times for the same port.
+        assert!(bridge.create_listen_socket(443, &mut sockets));
+        assert!(bridge.create_listen_socket(443, &mut sockets));
+        assert!(bridge.create_listen_socket(443, &mut sockets));
+
+        assert_eq!(bridge.port_handles[&443].len(), 3);
+
+        // Pruning should keep exactly one LISTEN socket per port.
+        bridge.prune_excess_listen_sockets(&mut sockets);
+
+        assert_eq!(
+            bridge.port_handles[&443].len(),
+            1,
+            "Should keep exactly one idle listen socket per port"
+        );
+        assert!(bridge.listening_ports.contains(&443));
+
+        // The remaining socket should still be in LISTEN state.
+        let handle = bridge.port_handles[&443][0];
+        let sock = sockets.get_mut::<tcp::Socket>(handle);
+        assert_eq!(sock.state(), tcp::State::Listen);
+    }
 }
