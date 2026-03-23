@@ -202,30 +202,28 @@ impl TcpBridge {
             return None;
         }
 
-        // Only proxy traffic to fake-ip destinations or when a system proxy is
-        // explicitly configured. For non-fake-ip destinations, direct connect
-        // through the host socket already works with VPNs.
-        let is_fake = env.is_fake_ip(dst_ip);
-        if !is_fake
-            && env.http_proxy.is_none()
-            && env.https_proxy.is_none()
-            && env.socks_proxy.is_none()
-        {
+        // Proxy fake-ip destinations (VPN virtual IPs that only the proxy can
+        // resolve) and traffic when an explicit system proxy is configured
+        // (corporate proxy environments).
+        let need_proxy = env.is_fake_ip(dst_ip)
+            || env.http_proxy.is_some()
+            || env.https_proxy.is_some()
+            || env.socks_proxy.is_some();
+        if !need_proxy {
             return None;
         }
 
-        // Prefer SOCKS5 (supports all protocols), then HTTPS proxy for TLS,
+        // Prefer SOCKS5 (supports all protocols and avoids TLS issues),
+        // then HTTPS proxy (HTTP CONNECT works on any port, not just 443),
         // then HTTP proxy as last resort.
         if let Some(ref socks) = env.socks_proxy {
             let authority = format!("{}:{}", socks.host, socks.port);
             return Some((authority, host.to_string(), dst_port, "socks5"));
         }
 
-        if dst_port == 443 {
-            if let Some(ref https) = env.https_proxy {
-                let authority = format!("{}:{}", https.host, https.port);
-                return Some((authority, host.to_string(), dst_port, "http-connect"));
-            }
+        if let Some(ref https) = env.https_proxy {
+            let authority = format!("{}:{}", https.host, https.port);
+            return Some((authority, host.to_string(), dst_port, "http-connect"));
         }
 
         if let Some(ref http) = env.http_proxy {
@@ -471,8 +469,12 @@ impl TcpBridge {
             let pending = self.pending_syns.remove(&key).unwrap();
             match result {
                 Some(stream) => {
-                    // 1. Ensure listen socket for the port.
-                    if !self.ensure_listen_socket_for_port(key.dst_port, sockets) {
+                    // 1. Create a dedicated listen socket for this SYN.
+                    //    Each injected SYN needs its own listen socket because
+                    //    smoltcp transitions a listen socket to SYN-RECEIVED on
+                    //    accept. If multiple SYNs to the same port are injected
+                    //    in one batch, iface.poll() would RST the extras.
+                    if !self.create_listen_socket(key.dst_port, sockets) {
                         // Listen failed — send RST instead of injecting SYN.
                         if let Some(rst) = build_rst_from_syn(&pending.frame, gateway_mac) {
                             rst_frames.push(rst);
@@ -521,14 +523,13 @@ impl TcpBridge {
         rst_frames
     }
 
-    /// Creates a listen socket for a single port (used by SYN gate).
+    /// Unconditionally creates a new listen socket for `port`.
     ///
-    /// Returns `true` if a listen socket is now available for `port`.
-    fn ensure_listen_socket_for_port(&mut self, port: u16, sockets: &mut SocketSet<'_>) -> bool {
-        if self.listening_ports.contains(&port) {
-            return true;
-        }
-
+    /// Used by `poll_pending_syns` where each injected SYN needs its own
+    /// listen socket — smoltcp consumes a listen socket when it transitions
+    /// to SYN-RECEIVED, so concurrent SYNs to the same port each need a
+    /// dedicated listener.
+    fn create_listen_socket(&mut self, port: u16, sockets: &mut SocketSet<'_>) -> bool {
         let rx_buf = tcp::SocketBuffer::new(vec![0u8; SOCKET_BUF_SIZE]);
         let tx_buf = tcp::SocketBuffer::new(vec![0u8; SOCKET_BUF_SIZE]);
         let mut sock = tcp::Socket::new(rx_buf, tx_buf);
@@ -912,14 +913,76 @@ impl TcpBridge {
 
         for handle in to_remove {
             self.connections.remove(&handle);
-            // Remove the handle from port_handles so it doesn't get scanned
-            // in detect_new_connections for a port that no longer has this socket.
             self.port_handles.retain(|_, handles| {
                 handles.retain(|h| *h != handle);
                 !handles.is_empty()
             });
             sockets.remove(handle);
         }
+
+        // Prune excess listen sockets created by `create_listen_socket`.
+        // Each port needs at most one idle listener; extras waste 512 KiB each.
+        self.prune_excess_listen_sockets(sockets);
+    }
+
+    /// Removes surplus listen sockets so at most one remains per port.
+    ///
+    /// `create_listen_socket` creates a fresh listener for every injected SYN.
+    /// After `iface.poll()` consumes some and `detect_new_connections` promotes
+    /// them to active connections, leftover LISTEN or CLOSED sockets accumulate
+    /// in `port_handles`. This method keeps one LISTEN socket per port and
+    /// removes the rest.
+    fn prune_excess_listen_sockets(&mut self, sockets: &mut SocketSet<'_>) {
+        for (port, handles) in &mut self.port_handles {
+            // Partition handles: active connections stay, non-connection sockets
+            // are candidates for pruning.
+            let mut idle_listen: Vec<SocketHandle> = Vec::new();
+            let mut to_remove: Vec<SocketHandle> = Vec::new();
+
+            handles.retain(|&handle| {
+                // Active connections are managed by cleanup_closed above.
+                if self.connections.contains_key(&handle) {
+                    return true;
+                }
+
+                let sock = sockets.get_mut::<tcp::Socket>(handle);
+                match sock.state() {
+                    tcp::State::Listen => {
+                        idle_listen.push(handle);
+                        true // keep for now, prune extras below
+                    }
+                    tcp::State::Closed => {
+                        to_remove.push(handle);
+                        false
+                    }
+                    // SYN-RECEIVED, ESTABLISHED, etc. — leave alone; these will
+                    // be picked up by detect_new_connections or close naturally.
+                    _ => true,
+                }
+            });
+
+            // Keep one idle listener, remove the rest.
+            if idle_listen.len() > 1 {
+                for &extra in &idle_listen[1..] {
+                    to_remove.push(extra);
+                    handles.retain(|h| *h != extra);
+                }
+            }
+
+            // Update listening_ports: true if at least one idle listener remains.
+            if idle_listen.is_empty() {
+                self.listening_ports.remove(port);
+            } else {
+                self.listening_ports.insert(*port);
+            }
+
+            for handle in to_remove {
+                sockets.remove(handle);
+            }
+        }
+
+        // Remove ports with no handles left.
+        self.port_handles.retain(|_, handles| !handles.is_empty());
     }
 
     /// Returns the number of active connections.
@@ -1882,5 +1945,92 @@ mod tests {
             "New ISN should create a new pending entry"
         );
         assert_eq!(bridge.pending_syns[&key].syn_seq, 5000);
+    }
+
+    #[test]
+    fn prune_excess_listen_sockets_keeps_one() {
+        let mut device = SmoltcpDevice::new(0, GW_IP);
+        let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
+        let mut bridge = TcpBridge::new();
+
+        // Simulate what happens when multiple SYNs to port 443 complete:
+        // create_listen_socket is called multiple times for the same port.
+        assert!(bridge.create_listen_socket(443, &mut sockets));
+        assert!(bridge.create_listen_socket(443, &mut sockets));
+        assert!(bridge.create_listen_socket(443, &mut sockets));
+
+        assert_eq!(bridge.port_handles[&443].len(), 3);
+
+        // Pruning should keep exactly one LISTEN socket per port.
+        bridge.prune_excess_listen_sockets(&mut sockets);
+
+        assert_eq!(
+            bridge.port_handles[&443].len(),
+            1,
+            "Should keep exactly one idle listen socket per port"
+        );
+        assert!(bridge.listening_ports.contains(&443));
+
+        // The remaining socket should still be in LISTEN state.
+        let handle = bridge.port_handles[&443][0];
+        let sock = sockets.get_mut::<tcp::Socket>(handle);
+        assert_eq!(sock.state(), tcp::State::Listen);
+    }
+
+    /// Regression test: multiple SYNs to the same port completing in one
+    /// poll_pending_syns batch must each get their own listen socket so
+    /// smoltcp doesn't RST the extras.
+    #[tokio::test]
+    async fn concurrent_syns_same_port_no_rst() {
+        let mut device = SmoltcpDevice::new(0, GW_IP);
+        let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
+        let mut bridge = TcpBridge::new();
+
+        // Single listener — both SYNs connect to the same (ip, port).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let dst_ip: Ipv4Addr = addr.ip().to_string().parse().unwrap();
+        let port = addr.port();
+
+        // Two SYN frames: same dst but different source ports (distinct four-tuples).
+        let syn_a = make_syn_frame(dst_ip, port);
+        let mut syn_b_frame = syn_a.clone();
+        let tcp_start = ETH_HEADER_LEN + 20;
+        syn_b_frame[tcp_start..tcp_start + 2].copy_from_slice(&54321u16.to_be_bytes());
+
+        let syn_info_a = TcpSynInfo {
+            dst_port: port,
+            src_ip: GUEST_IP,
+            src_port: 12345,
+            dst_ip,
+            syn_seq: 1000,
+            frame: syn_a,
+        };
+        let syn_info_b = TcpSynInfo {
+            dst_port: port,
+            src_ip: GUEST_IP,
+            src_port: 54321,
+            dst_ip,
+            syn_seq: 2000,
+            frame: syn_b_frame,
+        };
+
+        // Gate both SYNs — spawns two concurrent connect tasks.
+        bridge.gate_syns(&[syn_info_a, syn_info_b], GW_MAC);
+        assert_eq!(bridge.pending_syns.len(), 2);
+
+        // Accept both connections on the single listener.
+        let _a = listener.accept().await.unwrap();
+        let _b = listener.accept().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Both should complete without RST.
+        let rst_frames = bridge.poll_pending_syns(&mut device, &mut sockets, GW_MAC);
+        assert!(
+            rst_frames.is_empty(),
+            "No RSTs should be generated for concurrent SYNs to the same port"
+        );
+        assert_eq!(bridge.pre_connected.len(), 2);
+        assert!(bridge.pending_syns.is_empty());
     }
 }
