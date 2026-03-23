@@ -965,24 +965,31 @@ mod linux {
     }
 
     /// Handles a Ping request.
+    /// Sets CLOCK_REALTIME from the host-provided timestamp (seconds since
+    /// UNIX epoch). Idempotent — safe to call more than once.
+    fn sync_clock_from_host(timestamp_secs: i64) {
+        if timestamp_secs <= 0 {
+            return;
+        }
+        let ts = libc::timespec {
+            tv_sec: timestamp_secs,
+            tv_nsec: 0,
+        };
+        // SAFETY: `ts` points to a valid initialized timespec for this call,
+        // and CLOCK_REALTIME is a valid clock ID on Linux guests.
+        let ret = unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &ts) };
+        if ret != 0 {
+            tracing::warn!(
+                timestamp_secs,
+                error = %std::io::Error::last_os_error(),
+                "failed to set clock from host"
+            );
+        }
+    }
+
     fn handle_ping(req: arcbox_protocol::agent::PingRequest) -> RpcResponse {
         tracing::debug!("Ping request: {:?}", req.message);
-        if req.timestamp_secs > 0 {
-            let ts = libc::timespec {
-                tv_sec: req.timestamp_secs,
-                tv_nsec: 0,
-            };
-            // SAFETY: `ts` points to a valid initialized timespec for this call,
-            // and CLOCK_REALTIME is a valid clock ID on Linux guests.
-            let ret = unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &ts) };
-            if ret != 0 {
-                tracing::warn!(
-                    timestamp_secs = req.timestamp_secs,
-                    error = %std::io::Error::last_os_error(),
-                    "failed to set clock from host ping"
-                );
-            }
-        }
+        sync_clock_from_host(req.timestamp_secs);
         RpcResponse::Ping(PingResponse {
             message: if req.message.is_empty() {
                 "pong".to_string()
@@ -1330,10 +1337,21 @@ mod linux {
             }
         }
 
-        // Clock sync: the host daemon sets CLOCK_REALTIME via the PingRequest
-        // timestamp_secs field (see handle_ping), which runs before
-        // EnsureRuntime. No NTP needed — removes a blocking DNS lookup that
-        // fails when the guest resolver is not yet ready.
+        // Clock guard: if the wall clock is still near epoch (pre-2024), the
+        // host Ping hasn't arrived yet. Set it to a known-good minimum so
+        // TLS certificate validation in dockerd/containerd doesn't fail with
+        // "certificate is not yet valid". The next Ping will overwrite this
+        // with the real host time.
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // 2024-01-01T00:00:00Z
+        const MIN_REASONABLE_EPOCH: u64 = 1_704_067_200;
+        if now_secs < MIN_REASONABLE_EPOCH {
+            sync_clock_from_host(MIN_REASONABLE_EPOCH as i64);
+            notes.push("clock guard: set to 2024-01-01 (pre-ping fallback)".to_string());
+        }
 
         notes
     }
