@@ -54,6 +54,18 @@ pub mod host {
     pub const LOG: &str = "log";
     /// Persistent data aggregation (images, containers, volumes, …).
     pub const DATA: &str = "data";
+
+    /// Log file names (written by each component's tracing-appender).
+    pub const DAEMON_LOG: &str = "daemon.log";
+    pub const AGENT_LOG: &str = "agent.log";
+}
+
+/// Privileged log directory (root-owned, for arcbox-helper).
+pub mod privileged_log {
+    /// Directory for helper logs (root-writable).
+    pub const HELPER_LOG_DIR: &str = "/var/log/arcbox";
+    /// Helper log file name.
+    pub const HELPER_LOG: &str = "helper.log";
 }
 
 /// Guest-side subdirectory names within `/arcbox/`.

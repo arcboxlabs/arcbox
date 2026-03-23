@@ -10,10 +10,10 @@ mod startup;
 
 use anyhow::Result;
 use arcbox_api::SetupPhase;
+use arcbox_logging::LogConfig;
 use clap::Parser;
 use macos_resolver::FileResolver;
 use tracing::info;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Debug, Parser)]
 #[command(name = "arcbox-daemon")]
@@ -39,12 +39,18 @@ pub struct DaemonArgs {
     #[arg(long)]
     pub docker_integration: bool,
 
+    /// Run in foreground (also log to stderr in human-readable format).
+    #[arg(long)]
+    pub foreground: bool,
+
     /// Guest dockerd API vsock port.
     #[arg(long)]
     pub guest_docker_vsock_port: Option<u32>,
 }
 
 fn main() -> Result<()> {
+    let args = DaemonArgs::parse();
+
     let _sentry_guard = sentry::init(sentry::ClientOptions {
         dsn: std::env::var("ARCBOX_DAEMON_SENTRY_DSN")
             .or_else(|_| std::env::var("SENTRY_DSN"))
@@ -61,23 +67,25 @@ fn main() -> Result<()> {
         ..Default::default()
     });
 
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "arcbox=info,arcbox_daemon=info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer().with_target(false))
-        .with(sentry::integrations::tracing::layer())
-        .init();
+    let data_dir = startup::resolve_data_dir(args.data_dir.as_ref());
+    let log_guard = arcbox_logging::init_with_sentry(LogConfig {
+        log_dir: data_dir.join(arcbox_constants::paths::host::LOG),
+        file_name: arcbox_constants::paths::host::DAEMON_LOG.to_string(),
+        default_filter: "arcbox=info,arcbox_daemon=info".to_string(),
+        foreground: args.foreground,
+        ..LogConfig::default()
+    });
 
     let result = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("Failed to build tokio runtime")
-        .block_on(run(DaemonArgs::parse()));
+        .block_on(run(args));
     if let Err(ref e) = result {
-        eprintln!("Error: {e:?}");
+        tracing::error!("Daemon exited with error: {e:?}");
     }
+
+    log_guard.flush();
     result
 }
 

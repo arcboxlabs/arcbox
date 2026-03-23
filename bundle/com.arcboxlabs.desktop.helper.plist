@@ -6,6 +6,8 @@
     <string>com.arcboxlabs.desktop.helper</string>
     <key>Program</key>
     <string>/usr/local/libexec/arcbox-helper</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/arcbox/helper.err</string>
     <key>Sockets</key>
     <dict>
         <key>helper</key>

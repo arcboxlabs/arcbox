@@ -19,6 +19,7 @@ pub mod daemon;
 pub mod dns;
 pub mod docker;
 pub mod doctor;
+pub mod logs;
 #[cfg(target_os = "macos")]
 pub mod install;
 pub mod machine;
@@ -91,6 +92,9 @@ pub enum Commands {
 
     /// Manage the ArcBox daemon
     Daemon(daemon::DaemonArgs),
+
+    /// View component logs
+    Logs(logs::LogsArgs),
 
     /// Manage CLI shell integration (PATH, completions)
     #[command(subcommand)]

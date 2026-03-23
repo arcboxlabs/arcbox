@@ -58,7 +58,7 @@ async fn idle_watchdog(tracker: Arc<ConnectionTracker>) {
         if tracker.is_idle() {
             let start = *idle_since.get_or_insert_with(tokio::time::Instant::now);
             if start.elapsed() >= IDLE_TIMEOUT {
-                eprintln!("arcbox-helper: idle timeout, exiting");
+                tracing::info!("idle timeout, exiting");
                 std::process::exit(0);
             }
         } else {
@@ -76,7 +76,7 @@ async fn accept_loop(listener: tokio::net::UnixListener, tracker: Arc<Connection
         let (conn, _addr) = match listener.accept().await {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("accept error: {e}");
+                tracing::warn!("accept error: {e}");
                 continue;
             }
         };
@@ -109,7 +109,7 @@ async fn accept_loop(listener: tokio::net::UnixListener, tracker: Arc<Connection
 /// binding its own socket (for development).
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let listener = if let Some(l) = launchd::listener() {
-        eprintln!("arcbox-helper: using launchd socket activation");
+        tracing::info!("using launchd socket activation");
         l
     } else {
         // Fallback: bind our own socket (development / manual start).
@@ -129,7 +129,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))?;
         }
 
-        eprintln!("arcbox-helper: listening on {path} (manual mode)");
+        tracing::info!("listening on {path} (manual mode)");
         l
     };
 

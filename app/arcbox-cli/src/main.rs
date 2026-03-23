@@ -66,6 +66,7 @@ fn main() -> Result<()> {
                 #[cfg(target_os = "macos")]
                 Commands::Dns(cmd) => commands::dns::execute(cmd).await,
                 Commands::Daemon(args) => commands::daemon::execute(args).await,
+                Commands::Logs(args) => commands::logs::execute(args).await,
                 Commands::Setup(cmd) => commands::setup::execute(cmd, cli.format).await,
                 Commands::Doctor => commands::doctor::execute().await,
                 #[cfg(target_os = "macos")]
