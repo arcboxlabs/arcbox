@@ -219,7 +219,13 @@ impl NetworkDatapath {
                     let mut guard = writable?;
                     while let Some(frame) = write_queue.front() {
                         match guard.try_io(|inner| fd_write(inner.get_ref().as_raw_fd(), frame)) {
-                            Ok(Ok(_)) => { write_queue.pop_front(); }
+                            Ok(Ok(n)) if n >= frame.len() => { write_queue.pop_front(); }
+                            Ok(Ok(n)) => {
+                                // Partial write: trim the frame to the unwritten remainder.
+                                let remaining = write_queue.pop_front().unwrap()[n..].to_vec();
+                                write_queue.push_front(remaining);
+                                break;
+                            }
                             Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => break,
                             Ok(Err(e)) => {
                                 tracing::warn!("Guest write error: {}", e);
@@ -735,7 +741,11 @@ fn enqueue_or_write(
     }
     let fd = guest_async.get_ref().as_raw_fd();
     match fd_write(fd, &frame) {
-        Ok(_) => {}
+        Ok(n) if n >= frame.len() => {}
+        Ok(n) => {
+            // Partial write: queue the unwritten remainder.
+            write_queue.push_front(frame[n..].to_vec());
+        }
         Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
             write_queue.push_back(frame);
         }
