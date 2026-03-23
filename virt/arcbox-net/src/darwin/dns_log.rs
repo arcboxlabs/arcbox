@@ -175,6 +175,9 @@ pub fn parse_dns_response_a_records(data: &[u8]) -> Option<(String, Vec<Ipv4Addr
                     offset += 2;
                     break;
                 }
+                if offset + 1 + len > data.len() {
+                    return None;
+                }
                 offset += 1 + len;
             }
         }

@@ -54,7 +54,12 @@ impl UdpProxy {
     }
 
     /// Proxies a UDP packet from the guest to the host network.
-    fn proxy_udp(&mut self, frame: &[u8], guest_mac: [u8; 6]) {
+    fn proxy_udp(
+        &mut self,
+        frame: &[u8],
+        guest_mac: [u8; 6],
+        cancel: tokio_util::sync::CancellationToken,
+    ) {
         // Parse IP + UDP headers from the frame.
         if frame.len() < ETH_HEADER_LEN + 28 {
             return;
@@ -142,6 +147,7 @@ impl UdpProxy {
             let mut buf = vec![0u8; 65535];
             loop {
                 tokio::select! {
+                    () = cancel.cancelled() => break,
                     // Subsequent payloads from the same flow.
                     msg = payload_rx.recv() => {
                         match msg {
@@ -211,7 +217,12 @@ impl IcmpProxy {
     }
 
     /// Proxies an ICMP packet from the guest to the host.
-    fn proxy_icmp(&self, frame: &[u8], guest_mac: [u8; 6]) {
+    fn proxy_icmp(
+        &self,
+        frame: &[u8],
+        guest_mac: [u8; 6],
+        cancel: tokio_util::sync::CancellationToken,
+    ) {
         if self.disabled.load(Ordering::Relaxed) {
             return;
         }
@@ -289,7 +300,7 @@ impl IcmpProxy {
             };
 
             let mut buf = vec![0u8; 65535];
-            let recv = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let recv_fut = tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 loop {
                     let readable = async_fd.readable().await;
                     match readable {
@@ -318,8 +329,14 @@ impl IcmpProxy {
                         Err(e) => return Err(e),
                     }
                 }
-            })
-            .await;
+            });
+
+            // Cancel promptly on datapath shutdown instead of waiting the
+            // full 10 s recv timeout.
+            let recv = tokio::select! {
+                r = recv_fut => r,
+                () = cancel.cancelled() => return,
+            };
 
             match recv {
                 Ok(Ok(n)) if n > 0 => {
@@ -451,6 +468,8 @@ pub struct SocketProxy {
     inbound: super::inbound_relay::InboundRelay,
     /// Shared reply sender for injecting L2 frames towards the guest.
     reply_tx: mpsc::Sender<Vec<u8>>,
+    /// Cancellation token for graceful shutdown of spawned tasks.
+    cancel: tokio_util::sync::CancellationToken,
 }
 
 impl SocketProxy {
@@ -464,6 +483,7 @@ impl SocketProxy {
         gateway_mac: [u8; 6],
         guest_ip: Ipv4Addr,
         reply_tx: mpsc::Sender<Vec<u8>>,
+        cancel: tokio_util::sync::CancellationToken,
     ) -> Self {
         let inbound = super::inbound_relay::InboundRelay::new(
             reply_tx.clone(),
@@ -476,6 +496,7 @@ impl SocketProxy {
             udp: UdpProxy::new(reply_tx.clone(), gateway_mac),
             inbound,
             reply_tx,
+            cancel,
         }
     }
 
@@ -502,9 +523,10 @@ impl SocketProxy {
         }
 
         let protocol = frame[ETH_HEADER_LEN + 9];
+        let cancel = self.cancel.clone();
         match protocol {
-            1 => self.icmp.proxy_icmp(frame, guest_mac),
-            17 => self.udp.proxy_udp(frame, guest_mac),
+            1 => self.icmp.proxy_icmp(frame, guest_mac, cancel),
+            17 => self.udp.proxy_udp(frame, guest_mac, cancel),
             _ => {
                 tracing::trace!("Socket proxy: dropping protocol {}", protocol);
             }
@@ -542,6 +564,7 @@ impl SocketProxy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn test_socket_proxy_creation() {
@@ -549,7 +572,7 @@ mod tests {
         let gw_ip = Ipv4Addr::new(192, 168, 64, 1);
         let gw_mac = [0x02, 0xAB, 0xCD, 0x00, 0x00, 0x01];
         let guest_ip = Ipv4Addr::new(192, 168, 64, 2);
-        let _proxy = SocketProxy::new(gw_ip, gw_mac, guest_ip, tx);
+        let _proxy = SocketProxy::new(gw_ip, gw_mac, guest_ip, tx, CancellationToken::new());
     }
 
     #[test]
@@ -558,7 +581,7 @@ mod tests {
         let gw_ip = Ipv4Addr::new(192, 168, 64, 1);
         let gw_mac = [0x02, 0xAB, 0xCD, 0x00, 0x00, 0x01];
         let guest_ip = Ipv4Addr::new(192, 168, 64, 2);
-        let mut proxy = SocketProxy::new(gw_ip, gw_mac, guest_ip, tx);
+        let mut proxy = SocketProxy::new(gw_ip, gw_mac, guest_ip, tx, CancellationToken::new());
 
         // Build a minimal Ethernet + IPv4 frame with protocol=50 (ESP).
         let mut frame = vec![0u8; ETH_HEADER_LEN + 20];
@@ -579,7 +602,7 @@ mod tests {
         let gw_ip = Ipv4Addr::new(192, 168, 64, 1);
         let gw_mac = [0x02, 0xAB, 0xCD, 0x00, 0x00, 0x01];
         let guest_ip = Ipv4Addr::new(192, 168, 64, 2);
-        let mut proxy = SocketProxy::new(gw_ip, gw_mac, guest_ip, tx);
+        let mut proxy = SocketProxy::new(gw_ip, gw_mac, guest_ip, tx, CancellationToken::new());
 
         let guest_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x99];
         // Frame shorter than Ethernet + IP minimum.
@@ -630,6 +653,6 @@ mod tests {
 
         // Verify the proxy creates correctly with the same tx.
         let guest_ip = Ipv4Addr::new(192, 168, 64, 2);
-        let _proxy = SocketProxy::new(gw_ip, gw_mac, guest_ip, tx);
+        let _proxy = SocketProxy::new(gw_ip, gw_mac, guest_ip, tx, CancellationToken::new());
     }
 }

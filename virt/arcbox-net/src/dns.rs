@@ -101,8 +101,13 @@ impl DnsConfig {
 }
 
 /// Parses `nameserver` entries from resolv.conf text.
+///
+/// Filters out problematic upstreams (loopback, fake-IP VPN ranges) when
+/// better alternatives are available. Falls back to loopback if it's the
+/// only IPv4 option — `forward_dns_async` binds `0.0.0.0:0` so only IPv4
+/// upstreams are usable today.
 fn parse_resolv_conf_nameservers(contents: &str) -> Vec<SocketAddr> {
-    let mut servers = Vec::new();
+    let mut all = Vec::new();
     for line in contents.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
@@ -120,12 +125,50 @@ fn parse_resolv_conf_nameservers(contents: &str) -> Vec<SocketAddr> {
         let Ok(ip) = raw_ip.parse::<IpAddr>() else {
             continue;
         };
+
         let addr = SocketAddr::new(ip, DNS_PORT);
-        if !servers.contains(&addr) {
-            servers.push(addr);
+        if !all.contains(&addr) {
+            all.push(addr);
         }
     }
-    servers
+
+    // Prefer non-loopback, non-fake-IP IPv4 servers. Keep loopback as
+    // fallback when it's the only IPv4 option (common macOS default).
+    let preferred: Vec<SocketAddr> = all
+        .iter()
+        .copied()
+        .filter(|a| {
+            if a.ip().is_loopback() {
+                return false;
+            }
+            if let IpAddr::V4(v4) = a.ip() {
+                let o = v4.octets();
+                if o[0] == 198 && (o[1] == 18 || o[1] == 19) {
+                    return false;
+                }
+            }
+            // Skip IPv6-only — forward_dns_async binds 0.0.0.0:0 today.
+            a.ip().is_ipv4()
+        })
+        .collect();
+
+    if !preferred.is_empty() {
+        return preferred;
+    }
+
+    // No preferred servers. Fall back to IPv4 entries (including loopback)
+    // but still exclude fake-IP — returning empty lets DnsConfig::new keep
+    // DEFAULT_UPSTREAM (8.8.8.8, 1.1.1.1).
+    all.into_iter()
+        .filter(|a| {
+            if let IpAddr::V4(v4) = a.ip() {
+                let o = v4.octets();
+                !(o[0] == 198 && (o[1] == 18 || o[1] == 19))
+            } else {
+                false
+            }
+        })
+        .collect()
 }
 
 /// Detects system DNS upstream servers from `/etc/resolv.conf`.
@@ -888,15 +931,49 @@ nameserver invalid
 nameserver 10.0.0.2
 "#;
         let servers = parse_resolv_conf_nameservers(conf);
+        // IPv6 servers are filtered because forward_dns_async binds 0.0.0.0:0.
+        // The IPv4 server is preferred; duplicates are deduplicated.
         assert_eq!(
             servers,
-            vec![
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), DNS_PORT),
-                SocketAddr::new(
-                    IpAddr::V6("2001:4860:4860::8888".parse().unwrap()),
-                    DNS_PORT
-                )
-            ]
+            vec![SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                DNS_PORT
+            )]
         );
+    }
+
+    #[test]
+    fn test_parse_resolv_conf_loopback_fallback() {
+        // When only loopback + IPv6 are available, keep loopback as fallback.
+        let conf = "nameserver 127.0.0.1\nnameserver 2001:4860:4860::8888\n";
+        let servers = parse_resolv_conf_nameservers(conf);
+        assert_eq!(
+            servers,
+            vec![SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                DNS_PORT
+            )]
+        );
+    }
+
+    #[test]
+    fn test_parse_resolv_conf_filters_fake_ip() {
+        let conf = "nameserver 198.18.0.2\nnameserver 8.8.8.8\n";
+        let servers = parse_resolv_conf_nameservers(conf);
+        assert_eq!(
+            servers,
+            vec![SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+                DNS_PORT
+            )]
+        );
+    }
+
+    #[test]
+    fn test_parse_resolv_conf_only_fake_ip_returns_empty() {
+        // Only fake-IP entries → empty list so DnsConfig::new keeps DEFAULT_UPSTREAM.
+        let conf = "nameserver 198.18.0.2\nnameserver 198.19.1.1\n";
+        let servers = parse_resolv_conf_nameservers(conf);
+        assert!(servers.is_empty());
     }
 }

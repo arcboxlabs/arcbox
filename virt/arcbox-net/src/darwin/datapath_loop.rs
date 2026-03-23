@@ -42,9 +42,11 @@ use crate::dhcp::DhcpServer;
 use crate::dns::DnsForwarder;
 use crate::ethernet::{ETH_HEADER_LEN, build_udp_ip_ethernet};
 
-/// Stop consuming reply_rx when write queue exceeds this depth, propagating
-/// backpressure through the reply channel to upstream TCP/UDP proxies.
-const WRITE_QUEUE_HIGH: usize = 512;
+/// Hard cap on write_queue depth. Frames beyond this are dropped to prevent
+/// unbounded memory growth when the guest FD is blocked (VM paused, VZ socket
+/// buffer full). The reply_rx channel (capacity 256) is always polled so DNS
+/// tasks don't block, but the write_queue acts as the final memory bound.
+const WRITE_QUEUE_HARD_CAP: usize = 2048;
 
 /// Wraps an `OwnedFd` so it can be registered with `AsyncFd`.
 struct FdWrapper(OwnedFd);
@@ -204,7 +206,6 @@ impl NetworkDatapath {
 
         loop {
             let has_pending = !write_queue.is_empty();
-            let accept_replies = write_queue.len() < WRITE_QUEUE_HIGH;
 
             tokio::select! {
                 biased;
@@ -219,7 +220,18 @@ impl NetworkDatapath {
                     let mut guard = writable?;
                     while let Some(frame) = write_queue.front() {
                         match guard.try_io(|inner| fd_write(inner.get_ref().as_raw_fd(), frame)) {
-                            Ok(Ok(_)) => { write_queue.pop_front(); }
+                            Ok(Ok(n)) if n >= frame.len() => { write_queue.pop_front(); }
+                            Ok(Ok(n)) => {
+                                // SOCK_DGRAM delivers whole frames or fails — a short
+                                // write should never happen and indicates a broken
+                                // invariant. Drop the frame to avoid corrupting L2
+                                // boundaries.
+                                tracing::error!(
+                                    "Guest write: short datagram ({n}/{} bytes), dropping frame",
+                                    frame.len(),
+                                );
+                                write_queue.pop_front();
+                            }
                             Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => break,
                             Ok(Err(e)) => {
                                 tracing::warn!("Guest write error: {}", e);
@@ -251,6 +263,7 @@ impl NetworkDatapath {
                             &dns_forwarder,
                             &dns_reply_tx,
                             &dns_log,
+                            &cancel,
                             gateway_ip,
                             gateway_mac,
                             guest_mac.unwrap_or([0xFF; 6]),
@@ -270,7 +283,9 @@ impl NetworkDatapath {
                 }
 
                 // Proxy → Guest: relay reply frames from socket proxy.
-                Some(reply_frame) = reply_rx.recv(), if accept_replies => {
+                // Always poll — the bounded channel (256) provides natural backpressure
+                // to spawned tasks. Gating on write_queue depth starved DNS replies.
+                Some(reply_frame) = reply_rx.recv() => {
                     enqueue_or_write(&guest_async, reply_frame, &mut write_queue);
                 }
 
@@ -369,6 +384,7 @@ fn handle_intercepted_frame(
     dns_forwarder: &DnsForwarder,
     dns_reply_tx: &mpsc::Sender<Vec<u8>>,
     dns_log: &super::dns_log::DnsResolutionLog,
+    cancel: &CancellationToken,
     gateway_ip: Ipv4Addr,
     gateway_mac: [u8; 6],
     guest_mac: [u8; 6],
@@ -392,6 +408,7 @@ fn handle_intercepted_frame(
                 dns_forwarder,
                 dns_reply_tx,
                 dns_log,
+                cancel,
                 gateway_ip,
                 gateway_mac,
                 guest_mac,
@@ -493,6 +510,7 @@ fn handle_dns(
     dns_forwarder: &DnsForwarder,
     dns_reply_tx: &mpsc::Sender<Vec<u8>>,
     dns_log: &super::dns_log::DnsResolutionLog,
+    cancel: &CancellationToken,
     gateway_ip: Ipv4Addr,
     gateway_mac: [u8; 6],
     guest_mac: [u8; 6],
@@ -540,9 +558,16 @@ fn handle_dns(
     let data = dns_data.to_vec();
     let tx = dns_reply_tx.clone();
     let log = dns_log.clone();
+    let cancel = cancel.clone();
 
     tokio::spawn(async move {
-        match forward_dns_async(&data, &upstream).await {
+        // Cancel promptly on shutdown instead of waiting for upstream
+        // DNS timeouts (up to 2 s × number of upstream servers).
+        let result = tokio::select! {
+            r = forward_dns_async(&data, &upstream) => r,
+            () = cancel.cancelled() => return,
+        };
+        match result {
             Ok(response) => {
                 // Record IP → domain mapping for proxy-aware TCP connections.
                 if let Some((domain, ips)) = super::dns_log::parse_dns_response_a_records(&response)
@@ -677,17 +702,14 @@ const DRAIN_CMD_BATCH: usize = 64;
 /// Non-blocking drain of the reply channel. Delivers pending proxy
 /// responses (DNS, UDP, ICMP) to the guest without blocking the event loop.
 ///
-/// Respects `WRITE_QUEUE_HIGH` backpressure and limits each call to
-/// `DRAIN_REPLY_BATCH` frames to avoid starving other `select!` branches.
+/// Limits each call to `DRAIN_REPLY_BATCH` frames to avoid starving other
+/// `select!` branches.
 fn drain_reply_rx(
     reply_rx: &mut mpsc::Receiver<Vec<u8>>,
     guest_async: &AsyncFd<FdWrapper>,
     write_queue: &mut VecDeque<Vec<u8>>,
 ) {
     for _ in 0..DRAIN_REPLY_BATCH {
-        if write_queue.len() >= WRITE_QUEUE_HIGH {
-            break;
-        }
         match reply_rx.try_recv() {
             Ok(reply_frame) => enqueue_or_write(guest_async, reply_frame, write_queue),
             Err(_) => break,
@@ -737,12 +759,23 @@ fn enqueue_or_write(
     write_queue: &mut VecDeque<Vec<u8>>,
 ) {
     if !write_queue.is_empty() {
-        write_queue.push_back(frame);
+        if write_queue.len() < WRITE_QUEUE_HARD_CAP {
+            write_queue.push_back(frame);
+        } else {
+            tracing::debug!("Write queue full ({WRITE_QUEUE_HARD_CAP}), dropping frame");
+        }
         return;
     }
     let fd = guest_async.get_ref().as_raw_fd();
     match fd_write(fd, &frame) {
-        Ok(_) => {}
+        Ok(n) if n >= frame.len() => {}
+        Ok(n) => {
+            // SOCK_DGRAM: short write should never happen — invariant violation.
+            tracing::error!(
+                "Guest write: short datagram ({n}/{} bytes), dropping frame",
+                frame.len(),
+            );
+        }
         Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
             write_queue.push_back(frame);
         }
