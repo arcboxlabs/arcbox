@@ -253,6 +253,7 @@ impl NetworkDatapath {
                             &dns_forwarder,
                             &dns_reply_tx,
                             &dns_log,
+                            &cancel,
                             gateway_ip,
                             gateway_mac,
                             guest_mac.unwrap_or([0xFF; 6]),
@@ -373,6 +374,7 @@ fn handle_intercepted_frame(
     dns_forwarder: &DnsForwarder,
     dns_reply_tx: &mpsc::Sender<Vec<u8>>,
     dns_log: &super::dns_log::DnsResolutionLog,
+    cancel: &CancellationToken,
     gateway_ip: Ipv4Addr,
     gateway_mac: [u8; 6],
     guest_mac: [u8; 6],
@@ -396,6 +398,7 @@ fn handle_intercepted_frame(
                 dns_forwarder,
                 dns_reply_tx,
                 dns_log,
+                cancel,
                 gateway_ip,
                 gateway_mac,
                 guest_mac,
@@ -497,6 +500,7 @@ fn handle_dns(
     dns_forwarder: &DnsForwarder,
     dns_reply_tx: &mpsc::Sender<Vec<u8>>,
     dns_log: &super::dns_log::DnsResolutionLog,
+    cancel: &CancellationToken,
     gateway_ip: Ipv4Addr,
     gateway_mac: [u8; 6],
     guest_mac: [u8; 6],
@@ -544,8 +548,12 @@ fn handle_dns(
     let data = dns_data.to_vec();
     let tx = dns_reply_tx.clone();
     let log = dns_log.clone();
+    let cancel = cancel.clone();
 
     tokio::spawn(async move {
+        if cancel.is_cancelled() {
+            return;
+        }
         match forward_dns_async(&data, &upstream).await {
             Ok(response) => {
                 // Record IP → domain mapping for proxy-aware TCP connections.

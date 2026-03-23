@@ -300,10 +300,15 @@ impl Vmm {
             }
         }
 
-        // 2. Create the socket proxy, reply channel, and inbound command channel.
+        // 2. Cancellation token shared by all spawned network tasks.
+        let cancel = CancellationToken::new();
+        self.net_cancel = Some(cancel.clone());
+
+        // 3. Create the socket proxy, reply channel, and inbound command channel.
         let (reply_tx, reply_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(64);
-        let socket_proxy = SocketProxy::new(gateway_ip, gateway_mac, guest_ip, reply_tx);
+        let socket_proxy =
+            SocketProxy::new(gateway_ip, gateway_mac, guest_ip, reply_tx, cancel.clone());
 
         // Create the inbound listener manager for port forwarding.
         self.inbound_listener_manager = Some(InboundListenerManager::new(cmd_tx));
@@ -314,7 +319,7 @@ impl Vmm {
             guest_ip,
         );
 
-        // 3. Create the network stack components.
+        // 4. Create the network stack components.
         let dhcp_config = DhcpConfig::new(gateway_ip, netmask)
             .with_pool_range(guest_ip, Ipv4Addr::new(10, 0, 2, 254))
             .with_dns_servers(vec![gateway_ip]);
@@ -327,9 +332,7 @@ impl Vmm {
             DnsForwarder::new(dns_config)
         };
 
-        // 4. Build the datapath and spawn it on the tokio runtime.
-        let cancel = CancellationToken::new();
-        self.net_cancel = Some(cancel.clone());
+        // 5. Build the datapath and spawn it on the tokio runtime.
 
         let datapath = NetworkDatapath::new(
             host_fd,
