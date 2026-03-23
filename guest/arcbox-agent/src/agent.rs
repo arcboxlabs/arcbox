@@ -964,12 +964,13 @@ mod linux {
         }
     }
 
-    /// Handles a Ping request.
-    /// Sets CLOCK_REALTIME from the host-provided timestamp (seconds since
-    /// UNIX epoch). Idempotent — safe to call more than once.
-    fn sync_clock_from_host(timestamp_secs: i64) {
+    /// Sets CLOCK_REALTIME from the given timestamp (seconds since UNIX epoch).
+    ///
+    /// Idempotent — safe to call more than once. Returns `true` if the clock
+    /// was set successfully.
+    fn sync_clock_from_host(timestamp_secs: i64) -> bool {
         if timestamp_secs <= 0 {
-            return;
+            return false;
         }
         let ts = libc::timespec {
             tv_sec: timestamp_secs,
@@ -984,9 +985,12 @@ mod linux {
                 error = %std::io::Error::last_os_error(),
                 "failed to set clock from host"
             );
+            return false;
         }
+        true
     }
 
+    /// Handles a Ping request.
     fn handle_ping(req: arcbox_protocol::agent::PingRequest) -> RpcResponse {
         tracing::debug!("Ping request: {:?}", req.message);
         sync_clock_from_host(req.timestamp_secs);
@@ -1338,37 +1342,35 @@ mod linux {
         }
 
         // Clock guard: if the wall clock is still near epoch, the host Ping
-        // (which carries the real timestamp) hasn't arrived yet. Use the
-        // binary's build time as a safe lower bound so TLS certificate
-        // validation in dockerd/containerd doesn't fail with "certificate
-        // is not yet valid". The next Ping overwrites this with the real
-        // host time.
+        // (which carries the real timestamp) hasn't arrived yet. Set it to a
+        // known-safe minimum so TLS validation in dockerd/containerd doesn't
+        // fail with "certificate is not yet valid". The next Ping overwrites
+        // this with the real host time.
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let build_ts: u64 = option_env!("SOURCE_DATE_EPOCH")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(compile_time_epoch());
-        if now_secs < build_ts {
-            sync_clock_from_host(build_ts as i64);
-            notes.push("clock guard: set to build time (pre-ping fallback)".to_string());
+        let min_epoch = option_env!("SOURCE_DATE_EPOCH")
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0)
+            .max(MIN_SANE_EPOCH);
+        if now_secs < min_epoch {
+            if sync_clock_from_host(min_epoch as i64) {
+                notes.push("clock guard: set to minimum sane time (pre-ping fallback)".to_string());
+            } else {
+                notes.push("clock guard: failed to set clock (pre-ping fallback)".to_string());
+            }
         }
 
         notes
     }
 
-    /// Returns a UNIX timestamp derived from the compile-time date string.
+    /// Minimum "sane" UNIX timestamp for TLS certificate validation.
     ///
-    /// Uses the `VERGEN_BUILD_TIMESTAMP` env var if available (set by the
-    /// vergen build script), otherwise falls back to a rough parse of the
-    /// Cargo `CARGO_PKG_VERSION` or a hardcoded recent epoch. The result
-    /// doesn't need to be precise — it just needs to be recent enough for
-    /// TLS certificate validation.
-    fn compile_time_epoch() -> u64 {
-        // Fallback: a conservative "recent enough" epoch (2025-01-01).
-        1_735_689_600
-    }
+    /// Chosen to be old enough that it's always in the past, but recent
+    /// enough that TLS certificates issued after 2020 pass validation.
+    /// 2020-01-01T00:00:00Z
+    const MIN_SANE_EPOCH: u64 = 1_577_836_800;
 
     /// Redirects daemon stdout/stderr to a log file so crashes are diagnosable.
     ///
