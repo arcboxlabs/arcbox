@@ -349,11 +349,22 @@ impl Vmm {
         ))
     }
 
-    /// Reads serial console output from a managed VM.
+    /// Reads console output (hvc0) from a managed VM.
     pub fn read_console_output(&self) -> Result<String> {
         if let Some(ref managed_vm) = self.managed_vm {
             if let Some(vm) = managed_vm.downcast_ref::<DarwinVm>() {
                 return vm.read_console_output().map_err(VmmError::Hypervisor);
+            }
+        }
+
+        Ok(String::new())
+    }
+
+    /// Reads agent log output (hvc1) from a managed VM.
+    pub fn read_agent_log_output(&self) -> Result<String> {
+        if let Some(ref managed_vm) = self.managed_vm {
+            if let Some(vm) = managed_vm.downcast_ref::<DarwinVm>() {
+                return vm.read_agent_log_output().map_err(VmmError::Hypervisor);
             }
         }
 

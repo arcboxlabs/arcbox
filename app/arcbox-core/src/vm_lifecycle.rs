@@ -899,60 +899,19 @@ impl VmLifecycleManager {
                             self.health_monitor.record_success();
                             #[cfg(target_os = "macos")]
                             {
-                                let machine_manager = Arc::clone(&self.machine_manager);
-                                tokio::spawn(async move {
-                                    let mut line_buf = String::new();
-                                    const MAX_LINE_BUF: usize = 64 * 1024;
-                                    loop {
-                                        match machine_manager
-                                            .read_console_output(DEFAULT_MACHINE_NAME)
-                                        {
-                                            Ok(output) => {
-                                                let trimmed = output.trim_matches('\0');
-                                                if trimmed.is_empty() {
-                                                    tokio::time::sleep(Duration::from_millis(200))
-                                                        .await;
-                                                    continue;
-                                                }
-                                                line_buf.push_str(trimmed);
-                                                // Guard against runaway output without newlines.
-                                                if line_buf.len() > MAX_LINE_BUF {
-                                                    tracing::warn!(
-                                                        "Guest console line buffer overflow, flushing"
-                                                    );
-                                                    line_buf.clear();
-                                                    continue;
-                                                }
-                                                while let Some(pos) = line_buf.find('\n') {
-                                                    let line =
-                                                        line_buf[..pos].trim_end().to_owned();
-                                                    line_buf.drain(..=pos);
-                                                    if line.is_empty() {
-                                                        continue;
-                                                    }
-                                                    // Agent tracing lines already have
-                                                    // timestamps — log at debug to avoid
-                                                    // double-wrapping.
-                                                    if line.contains("arcbox_agent::") {
-                                                        tracing::debug!("Guest: {}", line);
-                                                    } else {
-                                                        tracing::info!("Guest: {}", line);
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => {
-                                                // Flush any remaining partial line.
-                                                let trailing = line_buf.trim().to_owned();
-                                                if !trailing.is_empty() {
-                                                    tracing::info!("Guest: {}", trailing);
-                                                }
-                                                tracing::debug!("Console read loop stopped: {}", e);
-                                                break;
-                                            }
-                                        }
-                                        tokio::time::sleep(Duration::from_millis(200)).await;
-                                    }
-                                });
+                                // Spawn line-buffered read loops for both serial ports.
+                                // hvc0 (console): kernel/init output → info
+                                // hvc1 (agent log): agent tracing → debug
+                                let mm = Arc::clone(&self.machine_manager);
+                                tokio::spawn(serial_read_loop(
+                                    mm,
+                                    SerialPort::Console,
+                                ));
+                                let mm = Arc::clone(&self.machine_manager);
+                                tokio::spawn(serial_read_loop(
+                                    mm,
+                                    SerialPort::AgentLog,
+                                ));
                             }
                             return Ok(());
                         }
@@ -1199,6 +1158,93 @@ impl VmLifecycleManager {
 
 const fn is_not_found_error(err: &CoreError) -> bool {
     matches!(err, CoreError::Common(CommonError::NotFound(_)))
+}
+
+// =============================================================================
+// Serial port read loops
+// =============================================================================
+
+/// Which serial port to read from.
+#[cfg(target_os = "macos")]
+enum SerialPort {
+    /// hvc0 — kernel/init console output.
+    Console,
+    /// hvc1 — dedicated agent tracing channel.
+    AgentLog,
+}
+
+/// Line-buffered read loop for a serial port.
+///
+/// Reads raw output, splits by newline, and logs each complete line.
+/// Guards against unbounded buffer growth with a 64 KiB cap.
+#[cfg(target_os = "macos")]
+async fn serial_read_loop(machine_manager: Arc<MachineManager>, port: SerialPort) {
+    let (label, level_info) = match port {
+        SerialPort::Console => ("Guest", true),
+        SerialPort::AgentLog => ("Agent", false),
+    };
+
+    let mut line_buf = String::new();
+    const MAX_LINE_BUF: usize = 64 * 1024;
+
+    loop {
+        let result = match port {
+            SerialPort::Console => {
+                machine_manager.read_console_output(DEFAULT_MACHINE_NAME)
+            }
+            SerialPort::AgentLog => {
+                machine_manager.read_agent_log_output(DEFAULT_MACHINE_NAME)
+            }
+        };
+
+        match result {
+            Ok(output) => {
+                let trimmed = output.trim_matches('\0');
+                if trimmed.is_empty() {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    continue;
+                }
+
+                line_buf.push_str(trimmed);
+
+                // Cap buffer to prevent unbounded growth.
+                if line_buf.len() > MAX_LINE_BUF {
+                    tracing::warn!("{label}: line buffer overflow, flushing");
+                    line_buf.clear();
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    continue;
+                }
+
+                while let Some(pos) = line_buf.find('\n') {
+                    let line = line_buf[..pos].trim_end().to_owned();
+                    line_buf.drain(..=pos);
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if level_info {
+                        tracing::info!("{label}: {line}");
+                    } else {
+                        tracing::debug!("{label}: {line}");
+                    }
+                }
+            }
+            Err(e) => {
+                // Flush any remaining partial line.
+                let trailing = line_buf.trim().to_owned();
+                if !trailing.is_empty() {
+                    if level_info {
+                        tracing::info!("{label}: {trailing}");
+                    } else {
+                        tracing::debug!("{label}: {trailing}");
+                    }
+                }
+                tracing::debug!("{label} read loop stopped: {e}");
+                break;
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 // =============================================================================
