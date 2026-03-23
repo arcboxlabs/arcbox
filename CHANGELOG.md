@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4](https://github.com/arcboxlabs/arcbox/compare/v0.3.3...v0.3.4) (2026-03-23)
+
+
+### Bug Fixes
+
+* **agent:** disable jailer and update sandbox paths for virtiofs mount ([c4a8355](https://github.com/arcboxlabs/arcbox/commit/c4a8355b1f471997cd6d868fb605a8ee5e712e69))
+* **net:** create per-SYN listen sockets for concurrent connections ([#97](https://github.com/arcboxlabs/arcbox/issues/97)) ([65d6a53](https://github.com/arcboxlabs/arcbox/commit/65d6a536adb567339004e22505ceed11482c9bfc))
+* **net:** harden outbound network stack (P0 + P1) ([#98](https://github.com/arcboxlabs/arcbox/issues/98)) ([aa0f8dc](https://github.com/arcboxlabs/arcbox/commit/aa0f8dc7c586bd424636d05832d0062370be7bcf))
+
+
+### Code Refactoring
+
+* **api:** split grpc.rs into per-service modules ([#93](https://github.com/arcboxlabs/arcbox/issues/93)) ([fa597ba](https://github.com/arcboxlabs/arcbox/commit/fa597bacf7269da4f237babe9edda315553976af))
+
 ## [0.3.3](https://github.com/arcboxlabs/arcbox/compare/v0.3.2...v0.3.3) (2026-03-22)
 
 
