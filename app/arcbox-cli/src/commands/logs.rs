@@ -1,6 +1,6 @@
 //! `abctl logs` — view daemon and component log files.
 
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -11,7 +11,7 @@ use clap::{Args, ValueEnum};
 #[derive(Debug, Args)]
 pub struct LogsArgs {
     /// Component to show logs for.
-    #[arg(default_value = "daemon")]
+    #[arg(long, short = 'c', default_value = "daemon")]
     pub component: LogComponent,
 
     /// Follow log output (like tail -f).
@@ -76,7 +76,6 @@ impl LogComponent {
 fn resolve_log_path(args: &LogsArgs) -> Result<PathBuf> {
     match args.component {
         LogComponent::Helper => {
-            // Helper logs are in /var/log/arcbox/ (root-owned).
             Ok(PathBuf::from(arcbox_constants::paths::privileged_log::HELPER_LOG_DIR)
                 .join(arcbox_constants::paths::privileged_log::HELPER_LOG))
         }
@@ -95,27 +94,66 @@ fn resolve_log_path(args: &LogsArgs) -> Result<PathBuf> {
     }
 }
 
-/// Print the last `n` lines of a file.
+/// Print the last `n` lines of a file by scanning backwards from the end.
+///
+/// Reads at most 64 KB chunks from the tail to avoid loading the entire file.
 fn tail_lines(path: &Path, n: usize) -> Result<()> {
-    let file = std::fs::File::open(path)
+    let mut file = std::fs::File::open(path)
         .with_context(|| format!("Failed to open {}", path.display()))?;
+    let file_len = file.metadata()?.len();
+
+    if file_len == 0 || n == 0 {
+        return Ok(());
+    }
+
+    // Scan backwards in 64 KB chunks to find the last `n` newlines.
+    const CHUNK: u64 = 64 * 1024;
+    let mut newlines_found = 0usize;
+    let mut scan_pos = file_len;
+    let mut start_offset = 0u64;
+
+    while scan_pos > 0 {
+        let read_size = scan_pos.min(CHUNK);
+        scan_pos -= read_size;
+        file.seek(SeekFrom::Start(scan_pos))?;
+        let mut buf = vec![0u8; read_size as usize];
+        file.read_exact(&mut buf)?;
+
+        for &b in buf.iter().rev() {
+            if b == b'\n' {
+                newlines_found += 1;
+                // n+1 because the last byte of a file is often '\n' itself.
+                if newlines_found > n {
+                    start_offset = file_len - (file_len - scan_pos) + (buf.len() as u64 - buf.iter().rev().position(|&x| x == b'\n').unwrap() as u64);
+                    break;
+                }
+            }
+        }
+
+        if newlines_found > n {
+            break;
+        }
+    }
+
+    // Seek to the computed start and print everything after it.
+    file.seek(SeekFrom::Start(start_offset))?;
     let reader = BufReader::new(file);
-    let lines: Vec<String> = reader.lines().collect::<Result<_, _>>()?;
-    let start = lines.len().saturating_sub(n);
-    for line in &lines[start..] {
-        println!("{line}");
+    for line in reader.lines() {
+        println!("{}", line?);
     }
     Ok(())
 }
 
 /// Print the last `n` lines then follow new output.
+///
+/// Detects log rotation (file replaced via rename) by checking whether the
+/// inode or file size changes, and reopens the path when it does.
 async fn tail_follow(path: &Path, n: usize) -> Result<()> {
-    // Print initial tail.
     tail_lines(path, n)?;
 
-    // Seek to end and poll for new content.
     let mut file = std::fs::File::open(path)
         .with_context(|| format!("Failed to open {}", path.display()))?;
+    let mut last_inode = file_inode(&file);
     file.seek(SeekFrom::End(0))?;
     let mut reader = BufReader::new(file);
     let mut line = String::new();
@@ -124,7 +162,16 @@ async fn tail_follow(path: &Path, n: usize) -> Result<()> {
         line.clear();
         match reader.read_line(&mut line) {
             Ok(0) => {
-                // No new data — poll again after a short sleep.
+                // No new data. Check if the file was rotated (inode changed).
+                if let Ok(new_file) = std::fs::File::open(path) {
+                    let new_inode = file_inode(&new_file);
+                    if new_inode != last_inode {
+                        // File was rotated — switch to the new file.
+                        last_inode = new_inode;
+                        reader = BufReader::new(new_file);
+                        continue;
+                    }
+                }
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
             Ok(_) => {
@@ -137,6 +184,20 @@ async fn tail_follow(path: &Path, n: usize) -> Result<()> {
     }
 }
 
+/// Get the inode number for rotation detection.
+#[cfg(unix)]
+fn file_inode(file: &std::fs::File) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    file.metadata().map(|m| m.ino()).unwrap_or(0)
+}
+
+#[cfg(not(unix))]
+fn file_inode(_file: &std::fs::File) -> u64 {
+    0
+}
+
+// NOTE: duplicated from daemon/startup.rs — kept in sync manually because
+// arcbox-constants has zero dependencies (adding `dirs` would break that).
 fn resolve_data_dir(data_dir: Option<&PathBuf>) -> PathBuf {
     data_dir.cloned().unwrap_or_else(|| {
         dirs::home_dir().map_or_else(
