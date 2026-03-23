@@ -256,11 +256,6 @@ impl IcmpProxy {
         let permission_warned = Arc::clone(&self.permission_warned);
 
         tokio::spawn(async move {
-            // Exit immediately if the datapath is shutting down.
-            if cancel.is_cancelled() {
-                return;
-            }
-
             // On modern macOS, SOCK_RAW for ICMP requires elevated privileges.
             // Prefer SOCK_DGRAM + IPPROTO_ICMP to support unprivileged daemon.
             let icmp_socket = match socket2::Socket::new(
@@ -306,7 +301,7 @@ impl IcmpProxy {
             };
 
             let mut buf = vec![0u8; 65535];
-            let recv = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let recv_fut = tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 loop {
                     let readable = async_fd.readable().await;
                     match readable {
@@ -335,8 +330,14 @@ impl IcmpProxy {
                         Err(e) => return Err(e),
                     }
                 }
-            })
-            .await;
+            });
+
+            // Cancel promptly on datapath shutdown instead of waiting the
+            // full 10 s recv timeout.
+            let recv = tokio::select! {
+                r = recv_fut => r,
+                () = cancel.cancelled() => return,
+            };
 
             match recv {
                 Ok(Ok(n)) if n > 0 => {

@@ -42,6 +42,11 @@ use crate::dhcp::DhcpServer;
 use crate::dns::DnsForwarder;
 use crate::ethernet::{ETH_HEADER_LEN, build_udp_ip_ethernet};
 
+/// Hard cap on write_queue depth. Frames beyond this are dropped to prevent
+/// unbounded memory growth when the guest FD is blocked (VM paused, VZ socket
+/// buffer full). The reply_rx channel (capacity 256) is always polled so DNS
+/// tasks don't block, but the write_queue acts as the final memory bound.
+const WRITE_QUEUE_HARD_CAP: usize = 2048;
 
 /// Wraps an `OwnedFd` so it can be registered with `AsyncFd`.
 struct FdWrapper(OwnedFd);
@@ -217,10 +222,13 @@ impl NetworkDatapath {
                         match guard.try_io(|inner| fd_write(inner.get_ref().as_raw_fd(), frame)) {
                             Ok(Ok(n)) if n >= frame.len() => { write_queue.pop_front(); }
                             Ok(Ok(n)) => {
-                                // Partial write: trim the frame to the unwritten remainder.
-                                let remaining = write_queue.pop_front().unwrap()[n..].to_vec();
-                                write_queue.push_front(remaining);
-                                break;
+                                // SOCK_DGRAM delivers whole frames or fails. A short
+                                // write would corrupt L2 boundaries, so drop the frame.
+                                tracing::warn!(
+                                    "Guest write: short datagram ({n}/{} bytes), dropping frame",
+                                    frame.len(),
+                                );
+                                write_queue.pop_front();
                             }
                             Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => break,
                             Ok(Err(e)) => {
@@ -551,10 +559,13 @@ fn handle_dns(
     let cancel = cancel.clone();
 
     tokio::spawn(async move {
-        if cancel.is_cancelled() {
-            return;
-        }
-        match forward_dns_async(&data, &upstream).await {
+        // Cancel promptly on shutdown instead of waiting for upstream
+        // DNS timeouts (up to 2 s × number of upstream servers).
+        let result = tokio::select! {
+            r = forward_dns_async(&data, &upstream) => r,
+            () = cancel.cancelled() => return,
+        };
+        match result {
             Ok(response) => {
                 // Record IP → domain mapping for proxy-aware TCP connections.
                 if let Some((domain, ips)) = super::dns_log::parse_dns_response_a_records(&response)
@@ -739,15 +750,22 @@ fn enqueue_or_write(
     write_queue: &mut VecDeque<Vec<u8>>,
 ) {
     if !write_queue.is_empty() {
-        write_queue.push_back(frame);
+        if write_queue.len() < WRITE_QUEUE_HARD_CAP {
+            write_queue.push_back(frame);
+        } else {
+            tracing::debug!("Write queue full ({WRITE_QUEUE_HARD_CAP}), dropping frame");
+        }
         return;
     }
     let fd = guest_async.get_ref().as_raw_fd();
     match fd_write(fd, &frame) {
         Ok(n) if n >= frame.len() => {}
         Ok(n) => {
-            // Partial write: queue the unwritten remainder.
-            write_queue.push_front(frame[n..].to_vec());
+            // SOCK_DGRAM: short write would split an L2 frame across datagrams.
+            tracing::warn!(
+                "Guest write: short datagram ({n}/{} bytes), dropping frame",
+                frame.len(),
+            );
         }
         Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
             write_queue.push_back(frame);
