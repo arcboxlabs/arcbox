@@ -29,7 +29,14 @@ impl SizeRotatingWriter {
     ///
     /// Opens (or creates) the file at `path` in append mode. The file is
     /// rotated when it exceeds `max_size` bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_size` is 0 or `max_files` is 0.
     pub fn new(path: PathBuf, max_size: u64, max_files: usize) -> Self {
+        assert!(max_size > 0, "max_size must be > 0");
+        assert!(max_files > 0, "max_files must be > 0");
+
         let (file, current_size) = open_log_file(&path);
         Self {
             inner: Mutex::new(RotatingState {
@@ -88,18 +95,30 @@ fn rotate(state: &mut RotatingState) {
 
     // Delete the oldest rotated file first, then shift the rest up.
     let oldest = rotated_path(&state.path, state.max_files);
-    let _ = fs::remove_file(&oldest);
+    if let Err(e) = fs::remove_file(&oldest) {
+        if e.kind() != io::ErrorKind::NotFound {
+            eprintln!("log rotate: failed to remove {}: {e}", oldest.display());
+        }
+    }
 
     // Shift existing rotated files: .{n-1} → .{n}, ..., .1 → .2
     for i in (1..state.max_files).rev() {
         let from = rotated_path(&state.path, i);
         let to = rotated_path(&state.path, i + 1);
-        let _ = fs::rename(&from, &to);
+        if let Err(e) = fs::rename(&from, &to) {
+            if e.kind() != io::ErrorKind::NotFound {
+                eprintln!("log rotate: failed to rename {} → {}: {e}", from.display(), to.display());
+            }
+        }
     }
 
     // Move current log to .1
     let rotated = rotated_path(&state.path, 1);
-    let _ = fs::rename(&state.path, &rotated);
+    if let Err(e) = fs::rename(&state.path, &rotated) {
+        eprintln!("log rotate: failed to rename {} → {}: {e}", state.path.display(), rotated.display());
+        // Rotation failed — continue writing to the same file.
+        return;
+    }
 
     // Open a fresh file.
     let (file, size) = open_log_file(&state.path);

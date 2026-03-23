@@ -19,7 +19,7 @@ pub use rotating::SizeRotatingWriter;
 pub struct LogConfig {
     /// Directory to write log files into (e.g. `~/.arcbox/log`).
     pub log_dir: PathBuf,
-    /// Log file name prefix (e.g. `"daemon"` → `daemon.log`).
+    /// Log file name (e.g. `"daemon.log"`).
     pub file_name: String,
     /// Default `EnvFilter` directive when `RUST_LOG` is unset.
     pub default_filter: String,
