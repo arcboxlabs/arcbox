@@ -15,6 +15,7 @@ impl From<ResolvedIcon> for GetImageIconResponse {
                     dimicon::IconSource::DockerHubOrgGravatar { .. } => "docker_hub_org_gravatar",
                     dimicon::IconSource::DockerOfficialImage { .. } => "docker_official_image",
                     dimicon::IconSource::GhcrAvatar { .. } => "ghcr_avatar",
+                    dimicon::IconSource::Devicon { .. } => "devicon",
                     dimicon::IconSource::Custom { .. } => "custom",
                     _ => "unknown",
                 };
