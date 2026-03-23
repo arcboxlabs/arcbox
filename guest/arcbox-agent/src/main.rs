@@ -51,26 +51,45 @@ async fn main() -> Result<()> {
             Err(_) => Box::new(std::io::stderr()),
         };
     let _log_guard = if std::path::Path::new("/arcbox").exists() {
-        let _ = std::fs::create_dir_all(&log_dir);
-        let file_appender = tracing_appender::rolling::never(&log_dir, "agent.log");
-        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
-        tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "arcbox_agent=info".into()),
-            )
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_ansi(false)
-                    .with_writer(std::sync::Mutex::new(console_writer)),
-            )
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_target(true)
-                    .with_writer(non_blocking),
-            )
-            .init();
-        Some(guard)
+        match std::fs::create_dir_all(&log_dir) {
+            Ok(()) => {
+                let file_appender = tracing_appender::rolling::never(&log_dir, "agent.log");
+                let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+                tracing_subscriber::registry()
+                    .with(
+                        tracing_subscriber::EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| "arcbox_agent=info".into()),
+                    )
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .with_ansi(false)
+                            .with_writer(std::sync::Mutex::new(console_writer)),
+                    )
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .with_target(true)
+                            .with_writer(non_blocking),
+                    )
+                    .init();
+                Some(guard)
+            }
+            Err(e) => {
+                // VirtioFS log dir not writable — fall back to console only.
+                eprintln!("arcbox-agent: failed to create {log_dir}: {e}, falling back to console");
+                tracing_subscriber::registry()
+                    .with(
+                        tracing_subscriber::EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| "arcbox_agent=info".into()),
+                    )
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .with_ansi(false)
+                            .with_writer(std::sync::Mutex::new(console_writer)),
+                    )
+                    .init();
+                None
+            }
+        }
     } else {
         // No VirtioFS mount — console only (development / testing).
         tracing_subscriber::registry()
