@@ -31,18 +31,18 @@ Created by daemon on startup. Cleaned on next launch if stale.
 
 ### 1.2 `log/` — Logs
 
-Each component writes its own log file via `tracing-appender` with size-based
-rotation (10 MB per file, 5 rotated files max). Daemon and helper logs are
-JSON; guest logs are plain text.
+Daemon and helper use `arcbox-logging` with size-based rotation (10 MB per
+file, 5 rotated files max) and JSON format. Guest logs (agent, containerd,
+dockerd) are plain text without rotation.
 
-| Path | Format | Creator |
-|------|--------|---------|
-| `log/daemon.log` | JSON | daemon (tracing-appender) |
-| `log/agent.log` | text | agent (via VirtioFS from guest) |
-| `log/containerd.log` | text | agent (via VirtioFS from guest) |
-| `log/dockerd.log` | text | agent (via VirtioFS from guest) |
+| Path | Format | Rotation | Creator |
+|------|--------|----------|---------|
+| `log/daemon.log` | JSON | size-based (10 MB × 5) | daemon (tracing-appender) |
+| `log/agent.log` | text | none | agent (via VirtioFS from guest) |
+| `log/containerd.log` | text | none | agent (via VirtioFS from guest) |
+| `log/dockerd.log` | text | none | agent (via VirtioFS from guest) |
 
-Rotated files are named `daemon.log.1`, `daemon.log.2`, etc.
+Rotated daemon files: `daemon.log.1`, `daemon.log.2`, etc.
 
 Use `abctl logs` to view logs (supports `--follow` and `--component`).
 
@@ -253,12 +253,18 @@ Tags defined in `common/arcbox-constants/src/virtiofs.rs`.
 
 ---
 
-## 10. Temporary Paths
+## 10. Legacy Paths
 
-| Path | Purpose | Creator |
-|------|---------|---------|
-| `/tmp/arcbox-daemon.stdout.log` | Daemon stdout (Desktop LaunchAgent plist) | launchd |
-| `/tmp/arcbox-daemon.stderr.log` | Daemon stderr (Desktop LaunchAgent plist) | launchd |
+These paths are no longer created by current versions but may exist from
+older installations. They can be safely deleted.
+
+| Path | Purpose | Status |
+|------|---------|--------|
+| `/tmp/arcbox-daemon.stdout.log` | Daemon stdout (old Desktop plist) | Legacy — daemon now writes `~/.arcbox/log/daemon.log` |
+| `/tmp/arcbox-daemon.stderr.log` | Daemon stderr (old Desktop plist) | Legacy |
+| `~/.arcbox/log/daemon.stdout.log` | Old CLI `daemon start` stdout | Legacy |
+| `~/.arcbox/log/daemon.stderr.log` | Old CLI `daemon start` stderr | Legacy |
+| `~/.arcbox/log/daemon.err` | Old `arcbox install` plist stderr | Legacy |
 
 ---
 
