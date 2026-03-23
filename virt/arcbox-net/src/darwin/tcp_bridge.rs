@@ -202,30 +202,23 @@ impl TcpBridge {
             return None;
         }
 
-        // Only proxy traffic to fake-ip destinations or when a system proxy is
-        // explicitly configured. For non-fake-ip destinations, direct connect
-        // through the host socket already works with VPNs.
-        let is_fake = env.is_fake_ip(dst_ip);
-        if !is_fake
-            && env.http_proxy.is_none()
-            && env.https_proxy.is_none()
-            && env.socks_proxy.is_none()
-        {
+        // Only proxy fake-ip destinations. Non-fake-ip traffic works fine via
+        // direct host socket connect (the host VPN/routing handles it).
+        if !env.is_fake_ip(dst_ip) {
             return None;
         }
 
-        // Prefer SOCKS5 (supports all protocols), then HTTPS proxy for TLS,
+        // Prefer SOCKS5 (supports all protocols and avoids TLS issues),
+        // then HTTPS proxy (HTTP CONNECT works on any port, not just 443),
         // then HTTP proxy as last resort.
         if let Some(ref socks) = env.socks_proxy {
             let authority = format!("{}:{}", socks.host, socks.port);
             return Some((authority, host.to_string(), dst_port, "socks5"));
         }
 
-        if dst_port == 443 {
-            if let Some(ref https) = env.https_proxy {
-                let authority = format!("{}:{}", https.host, https.port);
-                return Some((authority, host.to_string(), dst_port, "http-connect"));
-            }
+        if let Some(ref https) = env.https_proxy {
+            let authority = format!("{}:{}", https.host, https.port);
+            return Some((authority, host.to_string(), dst_port, "http-connect"));
         }
 
         if let Some(ref http) = env.http_proxy {
@@ -925,14 +918,76 @@ impl TcpBridge {
 
         for handle in to_remove {
             self.connections.remove(&handle);
-            // Remove the handle from port_handles so it doesn't get scanned
-            // in detect_new_connections for a port that no longer has this socket.
             self.port_handles.retain(|_, handles| {
                 handles.retain(|h| *h != handle);
                 !handles.is_empty()
             });
             sockets.remove(handle);
         }
+
+        // Prune excess listen sockets created by `create_listen_socket`.
+        // Each port needs at most one idle listener; extras waste 512 KiB each.
+        self.prune_excess_listen_sockets(sockets);
+    }
+
+    /// Removes surplus listen sockets so at most one remains per port.
+    ///
+    /// `create_listen_socket` creates a fresh listener for every injected SYN.
+    /// After `iface.poll()` consumes some and `detect_new_connections` promotes
+    /// them to active connections, leftover LISTEN or CLOSED sockets accumulate
+    /// in `port_handles`. This method keeps one LISTEN socket per port and
+    /// removes the rest.
+    fn prune_excess_listen_sockets(&mut self, sockets: &mut SocketSet<'_>) {
+        for (port, handles) in &mut self.port_handles {
+            // Partition handles: active connections stay, non-connection sockets
+            // are candidates for pruning.
+            let mut idle_listen: Vec<SocketHandle> = Vec::new();
+            let mut to_remove: Vec<SocketHandle> = Vec::new();
+
+            handles.retain(|&handle| {
+                // Active connections are managed by cleanup_closed above.
+                if self.connections.contains_key(&handle) {
+                    return true;
+                }
+
+                let sock = sockets.get_mut::<tcp::Socket>(handle);
+                match sock.state() {
+                    tcp::State::Listen => {
+                        idle_listen.push(handle);
+                        true // keep for now, prune extras below
+                    }
+                    tcp::State::Closed => {
+                        to_remove.push(handle);
+                        false
+                    }
+                    // SYN-RECEIVED, ESTABLISHED, etc. — leave alone; these will
+                    // be picked up by detect_new_connections or close naturally.
+                    _ => true,
+                }
+            });
+
+            // Keep one idle listener, remove the rest.
+            if idle_listen.len() > 1 {
+                for &extra in &idle_listen[1..] {
+                    to_remove.push(extra);
+                    handles.retain(|h| *h != extra);
+                }
+            }
+
+            // Update listening_ports: true if at least one idle listener remains.
+            if idle_listen.is_empty() {
+                self.listening_ports.remove(port);
+            } else {
+                self.listening_ports.insert(*port);
+            }
+
+            for handle in to_remove {
+                sockets.remove(handle);
+            }
+        }
+
+        // Remove ports with no handles left.
+        self.port_handles.retain(|_, handles| !handles.is_empty());
     }
 
     /// Returns the number of active connections.

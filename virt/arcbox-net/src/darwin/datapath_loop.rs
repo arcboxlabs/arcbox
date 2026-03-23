@@ -592,6 +592,11 @@ fn handle_dns(
 
 /// Forwards a raw DNS query to upstream servers using async I/O.
 async fn forward_dns_async(data: &[u8], upstream: &[SocketAddr]) -> Result<Vec<u8>, String> {
+    if data.len() < 2 {
+        return Err("query too short".to_string());
+    }
+    let query_id = [data[0], data[1]];
+
     let socket = tokio::net::UdpSocket::bind("0.0.0.0:0")
         .await
         .map_err(|e| format!("bind failed: {e}"))?;
@@ -603,7 +608,9 @@ async fn forward_dns_async(data: &[u8], upstream: &[SocketAddr]) -> Result<Vec<u
 
         let mut buf = [0u8; 4096];
         match tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut buf)).await {
-            Ok(Ok((len, _))) => return Ok(buf[..len].to_vec()),
+            Ok(Ok((len, _))) if len >= 2 && buf[0] == query_id[0] && buf[1] == query_id[1] => {
+                return Ok(buf[..len].to_vec());
+            }
             _ => continue,
         }
     }
