@@ -362,7 +362,11 @@ impl DarwinVm {
                 return Ok(String::new());
             }
 
-            libc::fcntl(read_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            if libc::fcntl(read_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) == -1 {
+                let errno = *libc::__error();
+                tracing::warn!("fcntl F_SETFL failed on fd {}: errno={}", read_fd, errno);
+                return Ok(String::new());
+            }
 
             let mut buffer = vec![0u8; 4096];
             let mut output = String::new();
@@ -389,7 +393,14 @@ impl DarwinVm {
                 }
             }
 
-            libc::fcntl(read_fd, libc::F_SETFL, flags);
+            if libc::fcntl(read_fd, libc::F_SETFL, flags) == -1 {
+                let errno = *libc::__error();
+                tracing::warn!(
+                    "fcntl F_SETFL restore failed on fd {}: errno={}",
+                    read_fd,
+                    errno
+                );
+            }
             Ok(output)
         }
     }
