@@ -120,6 +120,19 @@ fn parse_resolv_conf_nameservers(contents: &str) -> Vec<SocketAddr> {
         let Ok(ip) = raw_ip.parse::<IpAddr>() else {
             continue;
         };
+
+        // Skip loopback (macOS mDNSResponder writes 127.0.0.1) and the
+        // 198.18.0.0/15 fake-IP range used by Surge/Clash DNS proxies.
+        if ip.is_loopback() {
+            continue;
+        }
+        if let IpAddr::V4(v4) = ip {
+            let o = v4.octets();
+            if o[0] == 198 && (o[1] == 18 || o[1] == 19) {
+                continue;
+            }
+        }
+
         let addr = SocketAddr::new(ip, DNS_PORT);
         if !servers.contains(&addr) {
             servers.push(addr);
