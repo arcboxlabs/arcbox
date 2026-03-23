@@ -3,8 +3,10 @@
 //! This module uses arcbox-vz for Virtualization.framework bindings.
 
 use std::os::unix::io::RawFd;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::RwLock;
+use std::sync::{
+    RwLock,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 use std::time::Duration;
 
 use arcbox_vz::{

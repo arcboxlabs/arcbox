@@ -903,15 +903,9 @@ impl VmLifecycleManager {
                                 // hvc0 (console): kernel/init output → info
                                 // hvc1 (agent log): agent tracing → debug
                                 let mm = Arc::clone(&self.machine_manager);
-                                tokio::spawn(serial_read_loop(
-                                    mm,
-                                    SerialPort::Console,
-                                ));
+                                tokio::spawn(serial_read_loop(mm, SerialPort::Console));
                                 let mm = Arc::clone(&self.machine_manager);
-                                tokio::spawn(serial_read_loop(
-                                    mm,
-                                    SerialPort::AgentLog,
-                                ));
+                                tokio::spawn(serial_read_loop(mm, SerialPort::AgentLog));
                             }
                             return Ok(());
                         }
@@ -1189,12 +1183,8 @@ async fn serial_read_loop(machine_manager: Arc<MachineManager>, port: SerialPort
 
     loop {
         let result = match port {
-            SerialPort::Console => {
-                machine_manager.read_console_output(DEFAULT_MACHINE_NAME)
-            }
-            SerialPort::AgentLog => {
-                machine_manager.read_agent_log_output(DEFAULT_MACHINE_NAME)
-            }
+            SerialPort::Console => machine_manager.read_console_output(DEFAULT_MACHINE_NAME),
+            SerialPort::AgentLog => machine_manager.read_agent_log_output(DEFAULT_MACHINE_NAME),
         };
 
         match result {
