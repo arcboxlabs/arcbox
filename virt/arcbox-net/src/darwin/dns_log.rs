@@ -255,7 +255,7 @@ mod tests {
         }
         pkt.push(0x00); // root
         pkt.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]); // QTYPE=A, QCLASS=IN
-                                                          // Answer: compression pointer + A record
+        // Answer: compression pointer + A record
         pkt.extend_from_slice(&[0xC0, 0x0C]); // name pointer
         pkt.extend_from_slice(&[0x00, 0x01]); // TYPE=A
         pkt.extend_from_slice(&[0x00, 0x01]); // CLASS=IN
