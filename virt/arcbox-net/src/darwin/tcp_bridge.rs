@@ -471,8 +471,12 @@ impl TcpBridge {
             let pending = self.pending_syns.remove(&key).unwrap();
             match result {
                 Some(stream) => {
-                    // 1. Ensure listen socket for the port.
-                    if !self.ensure_listen_socket_for_port(key.dst_port, sockets) {
+                    // 1. Create a dedicated listen socket for this SYN.
+                    //    Each injected SYN needs its own listen socket because
+                    //    smoltcp transitions a listen socket to SYN-RECEIVED on
+                    //    accept. If multiple SYNs to the same port are injected
+                    //    in one batch, iface.poll() would RST the extras.
+                    if !self.create_listen_socket(key.dst_port, sockets) {
                         // Listen failed — send RST instead of injecting SYN.
                         if let Some(rst) = build_rst_from_syn(&pending.frame, gateway_mac) {
                             rst_frames.push(rst);
@@ -521,14 +525,23 @@ impl TcpBridge {
         rst_frames
     }
 
-    /// Creates a listen socket for a single port (used by SYN gate).
+    /// Creates a listen socket for a single port if none exists yet.
     ///
     /// Returns `true` if a listen socket is now available for `port`.
     fn ensure_listen_socket_for_port(&mut self, port: u16, sockets: &mut SocketSet<'_>) -> bool {
         if self.listening_ports.contains(&port) {
             return true;
         }
+        self.create_listen_socket(port, sockets)
+    }
 
+    /// Unconditionally creates a new listen socket for `port`.
+    ///
+    /// Used by `poll_pending_syns` where each injected SYN needs its own
+    /// listen socket — smoltcp consumes a listen socket when it transitions
+    /// to SYN-RECEIVED, so concurrent SYNs to the same port each need a
+    /// dedicated listener.
+    fn create_listen_socket(&mut self, port: u16, sockets: &mut SocketSet<'_>) -> bool {
         let rx_buf = tcp::SocketBuffer::new(vec![0u8; SOCKET_BUF_SIZE]);
         let tx_buf = tcp::SocketBuffer::new(vec![0u8; SOCKET_BUF_SIZE]);
         let mut sock = tcp::Socket::new(rx_buf, tx_buf);
