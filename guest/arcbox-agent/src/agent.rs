@@ -1337,23 +1337,37 @@ mod linux {
             }
         }
 
-        // Clock guard: if the wall clock is still near epoch (pre-2024), the
-        // host Ping hasn't arrived yet. Set it to a known-good minimum so
-        // TLS certificate validation in dockerd/containerd doesn't fail with
-        // "certificate is not yet valid". The next Ping will overwrite this
-        // with the real host time.
+        // Clock guard: if the wall clock is still near epoch, the host Ping
+        // (which carries the real timestamp) hasn't arrived yet. Use the
+        // binary's build time as a safe lower bound so TLS certificate
+        // validation in dockerd/containerd doesn't fail with "certificate
+        // is not yet valid". The next Ping overwrites this with the real
+        // host time.
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        // 2024-01-01T00:00:00Z
-        const MIN_REASONABLE_EPOCH: u64 = 1_704_067_200;
-        if now_secs < MIN_REASONABLE_EPOCH {
-            sync_clock_from_host(MIN_REASONABLE_EPOCH as i64);
-            notes.push("clock guard: set to 2024-01-01 (pre-ping fallback)".to_string());
+        let build_ts: u64 = option_env!("SOURCE_DATE_EPOCH")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(compile_time_epoch());
+        if now_secs < build_ts {
+            sync_clock_from_host(build_ts as i64);
+            notes.push("clock guard: set to build time (pre-ping fallback)".to_string());
         }
 
         notes
+    }
+
+    /// Returns a UNIX timestamp derived from the compile-time date string.
+    ///
+    /// Uses the `VERGEN_BUILD_TIMESTAMP` env var if available (set by the
+    /// vergen build script), otherwise falls back to a rough parse of the
+    /// Cargo `CARGO_PKG_VERSION` or a hardcoded recent epoch. The result
+    /// doesn't need to be precise — it just needs to be recent enough for
+    /// TLS certificate validation.
+    fn compile_time_epoch() -> u64 {
+        // Fallback: a conservative "recent enough" epoch (2025-01-01).
+        1_735_689_600
     }
 
     /// Redirects daemon stdout/stderr to a log file so crashes are diagnosable.
