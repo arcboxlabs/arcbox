@@ -202,9 +202,14 @@ impl TcpBridge {
             return None;
         }
 
-        // Only proxy fake-ip destinations. Non-fake-ip traffic works fine via
-        // direct host socket connect (the host VPN/routing handles it).
-        if !env.is_fake_ip(dst_ip) {
+        // Proxy fake-ip destinations (VPN virtual IPs that only the proxy can
+        // resolve) and traffic when an explicit system proxy is configured
+        // (corporate proxy environments).
+        let need_proxy = env.is_fake_ip(dst_ip)
+            || env.http_proxy.is_some()
+            || env.https_proxy.is_some()
+            || env.socks_proxy.is_some();
+        if !need_proxy {
             return None;
         }
 
@@ -516,16 +521,6 @@ impl TcpBridge {
         });
 
         rst_frames
-    }
-
-    /// Creates a listen socket for a single port if none exists yet.
-    ///
-    /// Returns `true` if a listen socket is now available for `port`.
-    fn ensure_listen_socket_for_port(&mut self, port: u16, sockets: &mut SocketSet<'_>) -> bool {
-        if self.listening_ports.contains(&port) {
-            return true;
-        }
-        self.create_listen_socket(port, sockets)
     }
 
     /// Unconditionally creates a new listen socket for `port`.
@@ -1980,5 +1975,62 @@ mod tests {
         let handle = bridge.port_handles[&443][0];
         let sock = sockets.get_mut::<tcp::Socket>(handle);
         assert_eq!(sock.state(), tcp::State::Listen);
+    }
+
+    /// Regression test: multiple SYNs to the same port completing in one
+    /// poll_pending_syns batch must each get their own listen socket so
+    /// smoltcp doesn't RST the extras.
+    #[tokio::test]
+    async fn concurrent_syns_same_port_no_rst() {
+        let mut device = SmoltcpDevice::new(0, GW_IP);
+        let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
+        let mut bridge = TcpBridge::new();
+
+        // Single listener — both SYNs connect to the same (ip, port).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let dst_ip: Ipv4Addr = addr.ip().to_string().parse().unwrap();
+        let port = addr.port();
+
+        // Two SYN frames: same dst but different source ports (distinct four-tuples).
+        let syn_a = make_syn_frame(dst_ip, port);
+        let mut syn_b_frame = syn_a.clone();
+        let tcp_start = ETH_HEADER_LEN + 20;
+        syn_b_frame[tcp_start..tcp_start + 2].copy_from_slice(&54321u16.to_be_bytes());
+
+        let syn_info_a = TcpSynInfo {
+            dst_port: port,
+            src_ip: GUEST_IP,
+            src_port: 12345,
+            dst_ip,
+            syn_seq: 1000,
+            frame: syn_a,
+        };
+        let syn_info_b = TcpSynInfo {
+            dst_port: port,
+            src_ip: GUEST_IP,
+            src_port: 54321,
+            dst_ip,
+            syn_seq: 2000,
+            frame: syn_b_frame,
+        };
+
+        // Gate both SYNs — spawns two concurrent connect tasks.
+        bridge.gate_syns(&[syn_info_a, syn_info_b], GW_MAC);
+        assert_eq!(bridge.pending_syns.len(), 2);
+
+        // Accept both connections on the single listener.
+        let _a = listener.accept().await.unwrap();
+        let _b = listener.accept().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Both should complete without RST.
+        let rst_frames = bridge.poll_pending_syns(&mut device, &mut sockets, GW_MAC);
+        assert!(
+            rst_frames.is_empty(),
+            "No RSTs should be generated for concurrent SYNs to the same port"
+        );
+        assert_eq!(bridge.pre_connected.len(), 2);
+        assert!(bridge.pending_syns.is_empty());
     }
 }
