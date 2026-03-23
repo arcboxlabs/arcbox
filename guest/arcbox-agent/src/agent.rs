@@ -964,25 +964,36 @@ mod linux {
         }
     }
 
+    /// Sets CLOCK_REALTIME from the given timestamp (seconds since UNIX epoch).
+    ///
+    /// Idempotent — safe to call more than once. Returns `true` if the clock
+    /// was set successfully.
+    fn sync_clock_from_host(timestamp_secs: i64) -> bool {
+        if timestamp_secs <= 0 {
+            return false;
+        }
+        let ts = libc::timespec {
+            tv_sec: timestamp_secs,
+            tv_nsec: 0,
+        };
+        // SAFETY: `ts` points to a valid initialized timespec for this call,
+        // and CLOCK_REALTIME is a valid clock ID on Linux guests.
+        let ret = unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &ts) };
+        if ret != 0 {
+            tracing::warn!(
+                timestamp_secs,
+                error = %std::io::Error::last_os_error(),
+                "failed to set clock from host"
+            );
+            return false;
+        }
+        true
+    }
+
     /// Handles a Ping request.
     fn handle_ping(req: arcbox_protocol::agent::PingRequest) -> RpcResponse {
         tracing::debug!("Ping request: {:?}", req.message);
-        if req.timestamp_secs > 0 {
-            let ts = libc::timespec {
-                tv_sec: req.timestamp_secs,
-                tv_nsec: 0,
-            };
-            // SAFETY: `ts` points to a valid initialized timespec for this call,
-            // and CLOCK_REALTIME is a valid clock ID on Linux guests.
-            let ret = unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &ts) };
-            if ret != 0 {
-                tracing::warn!(
-                    timestamp_secs = req.timestamp_secs,
-                    error = %std::io::Error::last_os_error(),
-                    "failed to set clock from host ping"
-                );
-            }
-        }
+        sync_clock_from_host(req.timestamp_secs);
         RpcResponse::Ping(PingResponse {
             message: if req.message.is_empty() {
                 "pong".to_string()
@@ -1330,23 +1341,36 @@ mod linux {
             }
         }
 
-        // Sync system clock via NTP before spawning containerd/dockerd.
-        // The VM guest clock starts at epoch (1970-01-01) because VZ framework's
-        // virtualised RTC is not automatically read by the Alpine kernel on boot.
-        // Without a correct clock, TLS certificate verification fails with
-        // "x509: certificate is not yet valid".
-        // busybox ntpd -q performs a one-shot adjustment and exits.
-        let ntp = std::process::Command::new(busybox)
-            .args(["ntpd", "-q", "-n", "-p", "pool.ntp.org"])
-            .status();
-        match ntp {
-            Ok(s) if s.success() => notes.push("ntp synced".to_string()),
-            Ok(s) => notes.push(format!("ntp exit={}", s.code().unwrap_or(-1))),
-            Err(e) => notes.push(format!("ntp failed({})", e)),
+        // Clock guard: if the wall clock is still near epoch, the host Ping
+        // (which carries the real timestamp) hasn't arrived yet. Set it to a
+        // known-safe minimum so TLS validation in dockerd/containerd doesn't
+        // fail with "certificate is not yet valid". The next Ping overwrites
+        // this with the real host time.
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let min_epoch = option_env!("SOURCE_DATE_EPOCH")
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0)
+            .max(MIN_SANE_EPOCH);
+        if now_secs < min_epoch {
+            if sync_clock_from_host(min_epoch as i64) {
+                notes.push("clock guard: set to minimum sane time (pre-ping fallback)".to_string());
+            } else {
+                notes.push("clock guard: failed to set clock (pre-ping fallback)".to_string());
+            }
         }
 
         notes
     }
+
+    /// Minimum "sane" UNIX timestamp for TLS certificate validation.
+    ///
+    /// Chosen to be old enough that it's always in the past, but recent
+    /// enough that TLS certificates issued after 2020 pass validation.
+    /// 2020-01-01T00:00:00Z
+    const MIN_SANE_EPOCH: u64 = 1_577_836_800;
 
     /// Redirects daemon stdout/stderr to a log file so crashes are diagnosable.
     ///
