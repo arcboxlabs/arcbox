@@ -24,8 +24,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    tokio::runtime::Builder::new_multi_thread()
+    // Helper runs as root — write logs to /var/log/arcbox/helper.log.
+    let _log_guard = arcbox_logging::init(arcbox_logging::LogConfig {
+        log_dir: std::path::PathBuf::from(arcbox_constants::paths::privileged_log::HELPER_LOG_DIR),
+        file_name: arcbox_constants::paths::privileged_log::HELPER_LOG.to_string(),
+        default_filter: "arcbox_helper=info".to_string(),
+        foreground: true, // Also log to stderr (captured by launchd).
+        ..arcbox_logging::LogConfig::default()
+    });
+
+    let result = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(server::run())
+        .block_on(server::run());
+
+    _log_guard.flush();
+    result
 }

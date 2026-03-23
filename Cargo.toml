@@ -8,6 +8,7 @@ members = [
     "common/arcbox-error",
     "common/arcbox-dns",
     "common/arcbox-asset",
+    "common/arcbox-logging",
 
     # ============================================
     # L1-3: Virtualization (MIT OR Apache-2.0)
@@ -74,7 +75,8 @@ serde_json = "1"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
 
 # Error reporting
 sentry = { version = "0.46", default-features = false, features = [
@@ -191,6 +193,7 @@ arcbox-docker = { version = "0.3.7", path = "app/arcbox-docker" } # x-release-pl
 arcbox-helper = { version = "0.3.7", path = "app/arcbox-helper" } # x-release-please-version
 arcbox-core = { version = "0.3.7", path = "app/arcbox-core" } # x-release-please-version
 arcbox-api = { version = "0.3.7", path = "app/arcbox-api" } # x-release-please-version
+arcbox-logging = { version = "0.3.7", path = "common/arcbox-logging", default-features = false } # x-release-please-version
 
 # Test infrastructure
 tempfile = "3"

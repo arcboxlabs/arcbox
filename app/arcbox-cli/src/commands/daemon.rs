@@ -11,7 +11,6 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use humantime::format_duration;
 use std::ffi::OsString;
-use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -224,8 +223,7 @@ fn spawn_background(args: &DaemonArgs) -> Result<()> {
     let run_dir = data_dir.join(arcbox_constants::paths::host::RUN);
     let log_dir = data_dir.join(arcbox_constants::paths::host::LOG);
     let lock_file = run_dir.join("daemon.lock");
-    let stdout_path = log_dir.join("daemon.stdout.log");
-    let stderr_path = log_dir.join("daemon.stderr.log");
+    let log_path = log_dir.join(arcbox_constants::paths::host::DAEMON_LOG);
 
     std::fs::create_dir_all(&run_dir).context("Failed to create daemon run directory")?;
     std::fs::create_dir_all(&log_dir).context("Failed to create daemon log directory")?;
@@ -239,22 +237,14 @@ fn spawn_background(args: &DaemonArgs) -> Result<()> {
     let daemon_binary = resolve_daemon_binary()?;
     let daemon_args = build_daemon_args(args);
 
-    let stdout_log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&stdout_path)
-        .context("Failed to open daemon stdout log file")?;
-    let stderr_log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&stderr_path)
-        .context("Failed to open daemon stderr log file")?;
-
+    // Daemon writes its own log files via tracing-appender — no fd
+    // redirection needed. Discard stdout/stderr to avoid launchd capturing
+    // duplicate output.
     let child = Command::new(&daemon_binary)
         .args(&daemon_args)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout_log))
-        .stderr(Stdio::from(stderr_log))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .with_context(|| {
             format!(
@@ -268,8 +258,7 @@ fn spawn_background(args: &DaemonArgs) -> Result<()> {
 
     println!("ArcBox daemon started (PID {})", child.id());
     println!("  Lock file: {}", lock_file.display());
-    println!("  Stdout:   {}", stdout_path.display());
-    println!("  Stderr:   {}", stderr_path.display());
+    println!("  Logs:     {}", log_path.display());
     Ok(())
 }
 
@@ -315,6 +304,9 @@ fn build_daemon_args(args: &DaemonArgs) -> Vec<OsString> {
     if let Some(kernel) = &args.kernel {
         daemon_args.push(OsString::from("--kernel"));
         daemon_args.push(kernel.as_os_str().to_os_string());
+    }
+    if args.foreground {
+        daemon_args.push(OsString::from("--foreground"));
     }
     if args.docker_integration {
         daemon_args.push(OsString::from("--docker-integration"));

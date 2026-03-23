@@ -211,6 +211,9 @@ fn register_daemon_service() -> Result<()> {
         }
     };
 
+    // Daemon manages its own log files via tracing-appender, so we no
+    // longer set StandardOutPath / StandardErrorPath. Stdout/stderr are
+    // discarded to avoid launchd writing duplicate output.
     let plist_content = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -226,14 +229,9 @@ fn register_daemon_service() -> Result<()> {
     <true/>
     <key>KeepAlive</key>
     <true/>
-    <key>StandardOutPath</key>
-    <string>{home}/.arcbox/log/daemon.log</string>
-    <key>StandardErrorPath</key>
-    <string>{home}/.arcbox/log/daemon.err</string>
 </dict>
 </plist>
-"#,
-        home = home.display()
+"#
     );
 
     std::fs::write(&plist_path, plist_content)

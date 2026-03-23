@@ -181,7 +181,7 @@ pub async fn init_runtime(ctx: &mut DaemonContext) -> Result<()> {
     Ok(())
 }
 
-fn resolve_data_dir(data_dir: Option<&PathBuf>) -> PathBuf {
+pub fn resolve_data_dir(data_dir: Option<&PathBuf>) -> PathBuf {
     data_dir.cloned().unwrap_or_else(|| {
         dirs::home_dir().map_or_else(
             || PathBuf::from("/var/lib/arcbox"),
