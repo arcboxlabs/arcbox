@@ -39,6 +39,17 @@ const MAX_CONCURRENT_CONNECTS: usize = 8;
 static CONNECT_SEMAPHORE: LazyLock<Semaphore> =
     LazyLock::new(|| Semaphore::new(MAX_CONCURRENT_CONNECTS));
 
+fn build_guest_request_headers(source: &HeaderMap) -> HeaderMap {
+    let mut forwarded = HeaderMap::new();
+    for (name, value) in source {
+        if name != header::HOST {
+            forwarded.append(name.clone(), value.clone());
+        }
+    }
+    forwarded.insert(header::HOST, HeaderValue::from_static("localhost"));
+    forwarded
+}
+
 // =============================================================================
 // RawFdStream — async I/O wrapper around a raw vsock file descriptor
 // =============================================================================
@@ -266,15 +277,7 @@ pub async fn proxy_to_guest(
         .uri(path_and_query)
         .body(Full::new(body))
         .map_err(|e| DockerError::Server(format!("failed to build guest request: {e}")))?;
-
-    // Forward content-type so the guest dockerd can parse JSON bodies.
-    if let Some(ct) = headers.get(header::CONTENT_TYPE) {
-        req.headers_mut().insert(header::CONTENT_TYPE, ct.clone());
-    }
-    req.headers_mut()
-        .insert(header::HOST, HeaderValue::from_static("localhost"));
-    req.headers_mut()
-        .insert(header::CONNECTION, HeaderValue::from_static("close"));
+    *req.headers_mut() = build_guest_request_headers(headers);
 
     let response = sender
         .send_request(req)
@@ -322,7 +325,7 @@ pub async fn proxy_to_guest_stream(
         .path_and_query()
         .map_or("/", hyper::http::uri::PathAndQuery::as_str);
     let method = req.method().clone();
-    let content_type = req.headers().get(header::CONTENT_TYPE).cloned();
+    let forwarded_headers = build_guest_request_headers(req.headers());
     let body = req.into_body();
 
     let mut guest_req = hyper::Request::builder()
@@ -330,16 +333,7 @@ pub async fn proxy_to_guest_stream(
         .uri(path_and_query)
         .body(body)
         .map_err(|e| DockerError::Server(format!("failed to build guest request: {e}")))?;
-
-    if let Some(ct) = content_type {
-        guest_req.headers_mut().insert(header::CONTENT_TYPE, ct);
-    }
-    guest_req
-        .headers_mut()
-        .insert(header::HOST, HeaderValue::from_static("localhost"));
-    guest_req
-        .headers_mut()
-        .insert(header::CONNECTION, HeaderValue::from_static("close"));
+    *guest_req.headers_mut() = forwarded_headers;
 
     let response = sender
         .send_request(guest_req)
@@ -396,16 +390,7 @@ pub async fn proxy_with_upgrade(
         .uri(path_and_query)
         .body(req_body)
         .map_err(|e| DockerError::Server(format!("failed to build guest request: {e}")))?;
-
-    // Forward all headers except Host.
-    for (key, value) in client_req.headers() {
-        if key != header::HOST {
-            guest_req.headers_mut().insert(key.clone(), value.clone());
-        }
-    }
-    guest_req
-        .headers_mut()
-        .insert(header::HOST, HeaderValue::from_static("localhost"));
+    *guest_req.headers_mut() = build_guest_request_headers(client_req.headers());
 
     let guest_response = sender
         .send_request(guest_req)
@@ -583,6 +568,27 @@ pub fn parse_port_bindings(inspect_json: &[u8]) -> Vec<PortBindingInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn build_guest_request_headers_preserves_buildkit_session_headers() {
+        let mut source = HeaderMap::new();
+        source.insert(header::HOST, HeaderValue::from_static("docker.example"));
+        source.insert(
+            "x-docker-expose-session-uuid",
+            HeaderValue::from_static("session-123"),
+        );
+        source.insert(
+            "x-registry-config",
+            HeaderValue::from_static("eyJhdXRocyI6e319"),
+        );
+
+        let forwarded = build_guest_request_headers(&source);
+
+        assert_eq!(forwarded[header::HOST], "localhost");
+        assert_eq!(forwarded["x-docker-expose-session-uuid"], "session-123");
+        assert_eq!(forwarded["x-registry-config"], "eyJhdXRocyI6e319");
+    }
 
     #[test]
     fn parse_port_bindings_from_network_settings() {
