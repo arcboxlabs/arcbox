@@ -532,6 +532,7 @@ async fn execute_exec(args: ExecArgs) -> Result<()> {
         .into_inner();
 
     let mut exit_code = 0i32;
+    let mut received_done = false;
     while let Some(output) = stream
         .message()
         .await
@@ -555,11 +556,16 @@ async fn execute_exec(args: ExecArgs) -> Result<()> {
         }
         if output.done {
             exit_code = output.exit_code;
+            received_done = true;
         }
     }
 
     // Drop the raw mode guard before exiting so the terminal is restored.
     drop(_raw_guard);
+
+    if !received_done {
+        anyhow::bail!("exec stream closed without a terminal status frame");
+    }
 
     if exit_code != 0 {
         std::process::exit(exit_code);

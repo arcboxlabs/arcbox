@@ -612,13 +612,26 @@ impl AgentClient {
 
         // Stdin pump: channel → SandboxExecInput frames.
         let stdin_handle = tokio::spawn(async move {
-            while let Some(data) = stdin_rx.recv().await {
-                let frame = Self::build_message(MessageType::SandboxExecInput, "", &data);
-                if sender.send(frame).await.is_err() {
-                    break;
-                }
-                if data.is_empty() {
-                    break;
+            loop {
+                match stdin_rx.recv().await {
+                    Some(data) => {
+                        let frame =
+                            Self::build_message(MessageType::SandboxExecInput, "", &data);
+                        if sender.send(frame).await.is_err() {
+                            break;
+                        }
+                        if data.is_empty() {
+                            break;
+                        }
+                    }
+                    None => {
+                        // Channel closed without explicit EOF; send best-effort EOF frame
+                        // so the guest-side exec session doesn't hang waiting on stdin.
+                        let eof =
+                            Self::build_message(MessageType::SandboxExecInput, "", &[]);
+                        let _ = sender.send(eof).await;
+                        break;
+                    }
                 }
             }
         });

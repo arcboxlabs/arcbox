@@ -210,7 +210,18 @@ impl SandboxService {
         let req = sandbox_v1::ExecRequest::decode(payload)
             .map_err(|e| SandboxError::Decode(e.to_string()))?;
 
-        let tty_size = req.tty_size.map(|s| (s.width as u16, s.height as u16));
+        let tty_size = req
+            .tty_size
+            .map(|s| {
+                let width = u16::try_from(s.width).map_err(|_| {
+                    SandboxError::Decode(format!("invalid tty width {}", s.width))
+                })?;
+                let height = u16::try_from(s.height).map_err(|_| {
+                    SandboxError::Decode(format!("invalid tty height {}", s.height))
+                })?;
+                Ok::<_, SandboxError>((width, height))
+            })
+            .transpose()?;
 
         let (in_tx, mut out_rx) = self
             .manager
@@ -289,8 +300,9 @@ impl SandboxService {
         };
 
         // Split the stream so reads and writes operate independently.
-        // This lets us run the input reader as a dedicated future that is
-        // never cancelled mid-frame by tokio::select!.
+        // The input reader may be cancelled mid-frame by tokio::select!
+        // when the output side finishes first; this is safe because this
+        // connection is not reused for subsequent requests.
         {
             let (mut rh, mut wh) = tokio::io::split(&mut *stream);
 
