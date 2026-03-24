@@ -9,9 +9,6 @@
 
 use arcbox_vm::VmmConfig;
 use arcbox_vm::config::{DefaultVmConfig, FirecrackerConfig, GrpcConfig, NetworkConfig};
-// JailerConfig will be needed once jailer is re-enabled.
-#[allow(unused_imports)]
-use arcbox_vm::config::JailerConfig;
 
 /// Guest-specific VMM configuration defaults.
 ///

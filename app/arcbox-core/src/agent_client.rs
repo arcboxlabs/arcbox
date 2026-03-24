@@ -611,7 +611,7 @@ impl AgentClient {
         let (out_tx, out_rx) = mpsc::unbounded_channel();
 
         // Stdin pump: channel → SandboxExecInput frames.
-        tokio::spawn(async move {
+        let stdin_handle = tokio::spawn(async move {
             while let Some(data) = stdin_rx.recv().await {
                 let frame = Self::build_message(MessageType::SandboxExecInput, "", &data);
                 if sender.send(frame).await.is_err() {
@@ -624,6 +624,8 @@ impl AgentClient {
         });
 
         // Output pump: SandboxExecOutput frames → channel.
+        // When the loop exits (process done / error / receiver dropped), the
+        // stdin pump is aborted so the transport write half is released promptly.
         tokio::spawn(async move {
             loop {
                 let raw = match receiver.recv().await {
@@ -660,7 +662,9 @@ impl AgentClient {
                 match ExecOutput::decode(&resp_payload[..]) {
                     Ok(output) => {
                         let done = output.done;
-                        let _ = out_tx.send(Ok(output));
+                        if out_tx.send(Ok(output)).is_err() {
+                            break;
+                        }
                         if done {
                             break;
                         }
@@ -672,6 +676,7 @@ impl AgentClient {
                     }
                 }
             }
+            stdin_handle.abort();
         });
 
         Ok(out_rx)
