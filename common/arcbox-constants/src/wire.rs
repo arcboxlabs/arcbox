@@ -31,6 +31,9 @@ pub enum MessageType {
     SandboxRunRequest = 0x0030,
     SandboxExecRequest = 0x0031,
     SandboxEventsRequest = 0x0032,
+    /// Streaming stdin frame sent by the host after [`SandboxExecRequest`]
+    /// to forward user input to the running process.
+    SandboxExecInput = 0x0033,
 
     // Sandbox snapshot request types (0x0040 - 0x0043).
     SandboxCheckpointRequest = 0x0040,
@@ -88,6 +91,7 @@ impl MessageType {
             0x0030 => Some(Self::SandboxRunRequest),
             0x0031 => Some(Self::SandboxExecRequest),
             0x0032 => Some(Self::SandboxEventsRequest),
+            0x0033 => Some(Self::SandboxExecInput),
             // Sandbox snapshot requests.
             0x0040 => Some(Self::SandboxCheckpointRequest),
             0x0041 => Some(Self::SandboxRestoreRequest),
@@ -177,6 +181,7 @@ mod tests {
             (0x0030, MessageType::SandboxRunRequest),
             (0x0031, MessageType::SandboxExecRequest),
             (0x0032, MessageType::SandboxEventsRequest),
+            (0x0033, MessageType::SandboxExecInput),
             (0x1035, MessageType::SandboxRunOutput),
             (0x1036, MessageType::SandboxExecOutput),
             (0x1037, MessageType::SandboxEvent),

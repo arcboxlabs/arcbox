@@ -718,7 +718,7 @@ mod linux {
         payload: &[u8],
     ) -> anyhow::Result<()>
     where
-        S: tokio::io::AsyncWrite + Unpin,
+        S: AsyncRead + AsyncWrite + Unpin,
     {
         let svc = match sandbox_service() {
             Some(s) => Arc::clone(s),
@@ -799,20 +799,19 @@ mod linux {
             // Streaming: Run
             // -----------------------------------------------------------------
             MessageType::SandboxRunRequest => {
-                handle_sandbox_run(stream, &svc, trace_id, payload).await?;
+                svc.handle_run(stream, trace_id, payload).await?;
             }
             // -----------------------------------------------------------------
             // Streaming: Events
             // -----------------------------------------------------------------
             MessageType::SandboxEventsRequest => {
-                handle_sandbox_events(stream, &svc, trace_id, payload).await?;
+                svc.handle_events(stream, trace_id, payload).await?;
             }
             // -----------------------------------------------------------------
-            // Exec: not yet implemented
+            // Streaming: Exec
             // -----------------------------------------------------------------
             MessageType::SandboxExecRequest => {
-                send_sandbox_error(stream, trace_id, 501, "SandboxExec not yet implemented")
-                    .await?;
+                svc.handle_exec(stream, trace_id, payload).await?;
             }
             // -----------------------------------------------------------------
             // Snapshots
@@ -880,56 +879,6 @@ mod linux {
                 send_sandbox_error(stream, trace_id, 400, "unrecognised sandbox message type")
                     .await?;
             }
-        }
-
-        Ok(())
-    }
-
-    /// Stream `SandboxRunOutput` frames from `SandboxService::run`.
-    async fn handle_sandbox_run<S>(
-        stream: &mut S,
-        svc: &SandboxService,
-        trace_id: &str,
-        payload: &[u8],
-    ) -> anyhow::Result<()>
-    where
-        S: tokio::io::AsyncWrite + Unpin,
-    {
-        let mut rx = match svc.run(payload).await {
-            Ok(r) => r,
-            Err(e) => {
-                send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
-                return Ok(());
-            }
-        };
-
-        while let Some(encoded) = rx.recv().await {
-            write_message(stream, MessageType::SandboxRunOutput, trace_id, &encoded).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Stream `SandboxEvent` frames from `SandboxService::subscribe_events`.
-    async fn handle_sandbox_events<S>(
-        stream: &mut S,
-        svc: &SandboxService,
-        trace_id: &str,
-        payload: &[u8],
-    ) -> anyhow::Result<()>
-    where
-        S: tokio::io::AsyncWrite + Unpin,
-    {
-        let mut rx = match svc.subscribe_events(payload) {
-            Ok(r) => r,
-            Err(e) => {
-                send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
-                return Ok(());
-            }
-        };
-
-        while let Some(encoded) = rx.recv().await {
-            write_message(stream, MessageType::SandboxEvent, trace_id, &encoded).await?;
         }
 
         Ok(())

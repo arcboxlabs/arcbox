@@ -1002,8 +1002,12 @@ impl SandboxManager {
                 return Err(VmmError::Io(e));
             }
 
+            // Pre-create log/metrics files — Firecracker requires them to
+            // exist at startup (same as the boot path in do_boot).
             let log_path = vm_dir.join("firecracker.log");
             let metrics_path = vm_dir.join("firecracker.metrics");
+            std::fs::File::create(&log_path).map_err(VmmError::Io)?;
+            std::fs::File::create(&metrics_path).map_err(VmmError::Io)?;
             let proc =
                 spawn_direct(fc_cfg, &new_id, &socket_path, &log_path, &metrics_path).await?;
             (proc, original_vsock_path)
