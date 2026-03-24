@@ -23,9 +23,13 @@ use crate::rpc::{ErrorResponse, read_message, write_message};
 /// Drain a single trailing `SandboxExecInput` frame after exec completes.
 ///
 /// The client may send a final EOF frame after the command exits.  We read
-/// it here using the framing protocol so we never consume bytes belonging
-/// to a subsequent request.  Only `SandboxExecInput` frames are discarded;
-/// any other message type causes an immediate return.
+/// it here using the framing protocol so we only discard complete frames.
+/// Only `SandboxExecInput` frames are discarded; any other message type
+/// causes an immediate return.
+///
+/// This is safe because exec sessions are one-shot: the host consumes its
+/// `AgentClient` via `into_split()`, so the vsock connection is never
+/// reused for subsequent requests.
 async fn drain_trailing_input<S: AsyncRead + Unpin>(stream: &mut S) {
     use tokio::time::{Duration, timeout};
     let _ = timeout(Duration::from_millis(100), async {
