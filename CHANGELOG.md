@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.6](https://github.com/arcboxlabs/arcbox/compare/v0.3.5...v0.3.6) (2026-03-24)
+
+
+### Features
+
+* **api:** enable `devicon` for `IconService` ([#102](https://github.com/arcboxlabs/arcbox/issues/102)) ([315df2a](https://github.com/arcboxlabs/arcbox/commit/315df2aea5fdfbc1ba5d7085ef05a9872fb69ece))
+
+
+### Bug Fixes
+
+* **daemon:** address review feedback on stale cleanup ([4e9f48c](https://github.com/arcboxlabs/arcbox/commit/4e9f48c8ce660ca739bf9bcf359dfffb23dbf807))
+* **daemon:** clean up stale state before startup ([#73](https://github.com/arcboxlabs/arcbox/issues/73)) ([4e9f48c](https://github.com/arcboxlabs/arcbox/commit/4e9f48c8ce660ca739bf9bcf359dfffb23dbf807))
+* **log:** clean up guest console log formatting ([#67](https://github.com/arcboxlabs/arcbox/issues/67)) ([6f79688](https://github.com/arcboxlabs/arcbox/commit/6f79688b8a02fe22f20161d480e061b04adb726e))
+
 ## [0.3.5](https://github.com/arcboxlabs/arcbox/compare/v0.3.4...v0.3.5) (2026-03-23)
 
 
