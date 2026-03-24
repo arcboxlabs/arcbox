@@ -615,8 +615,7 @@ impl AgentClient {
             loop {
                 match stdin_rx.recv().await {
                     Some(data) => {
-                        let frame =
-                            Self::build_message(MessageType::SandboxExecInput, "", &data);
+                        let frame = Self::build_message(MessageType::SandboxExecInput, "", &data);
                         if sender.send(frame).await.is_err() {
                             break;
                         }
@@ -627,8 +626,7 @@ impl AgentClient {
                     None => {
                         // Channel closed without explicit EOF; send best-effort EOF frame
                         // so the guest-side exec session doesn't hang waiting on stdin.
-                        let eof =
-                            Self::build_message(MessageType::SandboxExecInput, "", &[]);
+                        let eof = Self::build_message(MessageType::SandboxExecInput, "", &[]);
                         let _ = sender.send(eof).await;
                         break;
                     }

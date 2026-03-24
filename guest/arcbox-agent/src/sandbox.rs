@@ -213,9 +213,8 @@ impl SandboxService {
         let tty_size = req
             .tty_size
             .map(|s| {
-                let width = u16::try_from(s.width).map_err(|_| {
-                    SandboxError::Decode(format!("invalid tty width {}", s.width))
-                })?;
+                let width = u16::try_from(s.width)
+                    .map_err(|_| SandboxError::Decode(format!("invalid tty width {}", s.width)))?;
                 let height = u16::try_from(s.height).map_err(|_| {
                     SandboxError::Decode(format!("invalid tty height {}", s.height))
                 })?;
