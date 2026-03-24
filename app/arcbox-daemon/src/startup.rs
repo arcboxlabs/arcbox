@@ -34,10 +34,12 @@ pub async fn init_early(args: DaemonArgs) -> Result<DaemonContext> {
     std::fs::create_dir_all(&data_subdir).context("Failed to create persistent data directory")?;
 
     let pid_file = run_dir.join("daemon.pid");
+    let docker_img = data_subdir.join("docker.img");
     {
         let pf = pid_file.clone();
         let rd = run_dir.clone();
-        tokio::task::spawn_blocking(move || cleanup_stale_state(&pf, &rd))
+        let di = docker_img.clone();
+        tokio::task::spawn_blocking(move || cleanup_stale_state(&pf, &rd, &di))
             .await
             .ok();
     }
@@ -396,56 +398,42 @@ fn ensure_agent_binary(data_dir: &Path) -> Result<()> {
 // Stale state cleanup
 // =============================================================================
 
-fn cleanup_stale_state(pid_file: &std::path::Path, run_dir: &std::path::Path) {
+fn cleanup_stale_state(
+    pid_file: &std::path::Path,
+    run_dir: &std::path::Path,
+    docker_img: &std::path::Path,
+) {
+    // 1. Gracefully stop stale daemon — it will shut down its VM and flush
+    //    disk writes before exiting.
     if let Ok(contents) = std::fs::read_to_string(pid_file) {
         if let Ok(old_pid) = contents.trim().parse::<i32>() {
             #[allow(clippy::cast_possible_wrap)]
             let current_pid = std::process::id() as i32;
-            if old_pid != current_pid && is_process_alive(old_pid) && is_arcbox_daemon(old_pid) {
-                warn!(old_pid, "Stale daemon still running, sending SIGTERM");
-                // SAFETY: sending a signal to a verified arcbox-daemon process.
-                unsafe { libc::kill(old_pid, libc::SIGTERM) };
-
-                let deadline = std::time::Instant::now() + Duration::from_secs(30);
-                while std::time::Instant::now() < deadline && is_process_alive(old_pid) {
-                    std::thread::sleep(Duration::from_millis(500));
-                }
-
-                if is_process_alive(old_pid) {
+            if old_pid > 0 && old_pid != current_pid && is_process_alive(old_pid) {
+                if !is_arcbox_daemon(old_pid) {
                     warn!(
                         old_pid,
-                        "Stale daemon did not exit after 30s, sending SIGKILL"
+                        "PID from daemon.pid is alive but is not arcbox-daemon, skipping signal"
                     );
-                    // SAFETY: last resort — the old daemon is unresponsive.
-                    unsafe { libc::kill(old_pid, libc::SIGKILL) };
-                    std::thread::sleep(Duration::from_secs(1));
                 } else {
-                    info!(old_pid, "Stale daemon exited gracefully");
+                    terminate_stale_daemon(old_pid);
                 }
             }
         }
     }
 
+    // 2. Wait for processes that still hold docker.img open (typically
+    //    orphaned Virtualization.framework XPC helpers). We do NOT SIGKILL
+    //    them — that risks corrupting the guest filesystem.
     #[cfg(target_os = "macos")]
-    {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            let pids = find_orphaned_vm_pids();
-            if pids.is_empty() {
-                break;
-            }
-            if std::time::Instant::now() >= deadline {
-                warn!(
-                    "Orphaned Virtualization.framework processes still alive after 10s: {:?}. \
-                     Not killing them to avoid data loss — VM startup may fail.",
-                    pids
-                );
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        }
+    if docker_img.exists() {
+        wait_for_docker_img_holders(docker_img);
     }
 
+    #[cfg(not(target_os = "macos"))]
+    let _ = docker_img;
+
+    // 3. Remove stale sockets so bind() doesn't fail.
     for name in ["docker.sock", "arcbox.sock"] {
         let path = run_dir.join(name);
         if path.exists() {
@@ -456,6 +444,40 @@ fn cleanup_stale_state(pid_file: &std::path::Path, run_dir: &std::path::Path) {
     }
 }
 
+/// Send SIGTERM to a verified stale daemon and wait for it to exit.  Falls
+/// back to SIGKILL after 30 s as a last resort.
+fn terminate_stale_daemon(old_pid: i32) {
+    warn!(old_pid, "Stale daemon still running, sending SIGTERM");
+    // SAFETY: sending a signal to a verified arcbox-daemon process.
+    let ret = unsafe { libc::kill(old_pid, libc::SIGTERM) };
+    if ret != 0 {
+        let err = std::io::Error::last_os_error();
+        warn!(old_pid, %err, "Failed to send SIGTERM to stale daemon");
+        return;
+    }
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::time::Instant::now() < deadline && is_process_alive(old_pid) {
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    if is_process_alive(old_pid) {
+        warn!(
+            old_pid,
+            "Stale daemon did not exit after 30s, sending SIGKILL"
+        );
+        // SAFETY: last resort — the old daemon is unresponsive.
+        let ret = unsafe { libc::kill(old_pid, libc::SIGKILL) };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            warn!(old_pid, %err, "Failed to send SIGKILL to stale daemon");
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    } else {
+        info!(old_pid, "Stale daemon exited gracefully");
+    }
+}
+
 fn is_process_alive(pid: i32) -> bool {
     // SAFETY: kill(pid, 0) is a standard POSIX existence check.
     let ret = unsafe { libc::kill(pid, 0) };
@@ -463,8 +485,7 @@ fn is_process_alive(pid: i32) -> bool {
         return true;
     }
     // EPERM means the process exists but we lack permission to signal it.
-    let err = std::io::Error::last_os_error();
-    err.raw_os_error() == Some(libc::EPERM)
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 fn is_arcbox_daemon(pid: i32) -> bool {
@@ -474,29 +495,32 @@ fn is_arcbox_daemon(pid: i32) -> bool {
     }
 }
 
+/// Wait for processes holding `docker.img` open to exit on their own.
 #[cfg(target_os = "macos")]
-fn find_orphaned_vm_pids() -> Vec<i32> {
-    let Ok(output) = std::process::Command::new("ps")
-        .args(["-eo", "pid,ppid,comm"])
-        .output()
-    else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.len() < 3 {
-                return None;
+fn wait_for_docker_img_holders(docker_img: &std::path::Path) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let pids = match libproc::processes::pids_by_path(docker_img, false, false) {
+            Ok(pids) => pids
+                .into_iter()
+                .filter(|&p| p != std::process::id())
+                .collect::<Vec<_>>(),
+            Err(e) => {
+                warn!(%e, "Failed to query processes holding docker.img");
+                break;
             }
-            let pid: i32 = fields[0].parse().ok()?;
-            let ppid: i32 = fields[1].parse().ok()?;
-            let comm = fields[2..].join(" ");
-            if ppid == 1 && comm.contains("com.apple.Virtualization.VirtualMachine") {
-                Some(pid)
-            } else {
-                None
-            }
-        })
-        .collect()
+        };
+        if pids.is_empty() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            warn!(
+                ?pids,
+                "Processes still holding docker.img after 10s — \
+                 not killing them to avoid data loss; VM startup may fail"
+            );
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
