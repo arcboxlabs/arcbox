@@ -14,15 +14,30 @@ use bytes::Bytes;
 use http_body_util::Full;
 use hyper::client::conn::http1;
 use hyper_util::rt::TokioIo;
+use std::future::Future;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::pin::Pin;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::Semaphore;
+
+// =============================================================================
+// GuestConnector — abstraction over guest connection establishment
+// =============================================================================
+
+/// Abstraction over guest connection establishment.
+///
+/// Production code connects via vsock ([`VsockConnector`]); integration tests
+/// can connect via Unix socket. Both produce a [`TokioIo<RawFdStream>`]
+/// because [`RawFdStream`] wraps any pollable file descriptor.
+pub trait GuestConnector: Send + Sync + 'static {
+    /// Opens a new connection to guest dockerd.
+    fn connect(&self) -> Pin<Box<dyn Future<Output = Result<TokioIo<RawFdStream>>> + Send + '_>>;
+}
 
 /// Timeout for establishing a vsock connection to guest dockerd.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -51,23 +66,18 @@ impl AsRawFd for RawFdWrapper {
     }
 }
 
-pub(crate) struct RawFdStream {
+pub struct RawFdStream {
     inner: AsyncFd<RawFdWrapper>,
 }
 
 impl RawFdStream {
-    pub(crate) fn from_raw_fd(fd: RawFd) -> io::Result<Self> {
-        if fd < 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid file descriptor",
-            ));
-        }
-
-        Self::set_nonblocking(fd)?;
-        // SAFETY: fd is a valid, newly-opened vsock file descriptor owned by us.
-        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-        let inner = AsyncFd::new(RawFdWrapper(owned))?;
+    /// Creates a new async stream from an owned file descriptor.
+    ///
+    /// The fd is set to non-blocking mode. Ownership is taken via
+    /// [`OwnedFd`] so the descriptor is always closed on error.
+    pub fn new(fd: OwnedFd) -> io::Result<Self> {
+        Self::set_nonblocking(fd.as_raw_fd())?;
+        let inner = AsyncFd::new(RawFdWrapper(fd))?;
         Ok(Self { inner })
     }
 
@@ -179,58 +189,65 @@ impl AsyncWrite for RawFdStream {
 }
 
 // =============================================================================
-// Guest connection
+// VsockConnector — production guest connection via vsock
 // =============================================================================
 
-/// Opens a vsock connection to guest dockerd with a timeout.
-///
-/// A semaphore limits concurrent connection attempts to prevent blocking
-/// thread pool exhaustion when the guest is unresponsive. If the timeout
-/// fires, the spawned blocking task may still complete — we close the
-/// leaked fd in that case to avoid resource leaks.
-async fn connect_guest(runtime: &Runtime) -> Result<TokioIo<RawFdStream>> {
-    let _permit = CONNECT_SEMAPHORE
-        .acquire()
-        .await
-        .map_err(|_| DockerError::Server("connect semaphore closed".into()))?;
+/// Connects to guest dockerd via vsock through the machine manager.
+pub struct VsockConnector {
+    runtime: Arc<Runtime>,
+}
 
-    let port = runtime.guest_docker_vsock_port();
-    let machine_name = runtime.default_machine_name();
-    let manager = runtime.machine_manager().clone();
-    let name = machine_name.to_string();
+impl VsockConnector {
+    #[must_use]
+    pub fn new(runtime: Arc<Runtime>) -> Self {
+        Self { runtime }
+    }
+}
 
-    let handle = tokio::task::spawn_blocking(move || {
-        let fd = manager.connect_vsock_port(&name, port)?;
-        // Wrap in OwnedFd so the fd is closed on drop if the result is
-        // discarded (e.g. after a timeout abort).
-        // SAFETY: fd is a valid, newly-opened vsock file descriptor.
-        Ok::<_, arcbox_core::CoreError>(unsafe { OwnedFd::from_raw_fd(fd) })
-    });
-    let abort_handle = handle.abort_handle();
+impl GuestConnector for VsockConnector {
+    fn connect(&self) -> Pin<Box<dyn Future<Output = Result<TokioIo<RawFdStream>>> + Send + '_>> {
+        Box::pin(async move {
+            let _permit = CONNECT_SEMAPHORE
+                .acquire()
+                .await
+                .map_err(|_| DockerError::Server("connect semaphore closed".into()))?;
 
-    let owned_fd = match tokio::time::timeout(CONNECT_TIMEOUT, handle).await {
-        Ok(join_result) => join_result
-            .map_err(|e| {
-                let reason = if e.is_cancelled() {
-                    "cancelled"
-                } else {
-                    "panicked"
-                };
-                DockerError::Server(format!("connect task {reason}: {e}"))
-            })?
-            .map_err(|e| DockerError::Server(format!("failed to connect to guest docker: {e}")))?,
-        Err(_elapsed) => {
-            // Abort the join handle. The blocking task may still complete,
-            // but the OwnedFd in its return value will be dropped (closed)
-            // when tokio discards the aborted task's output.
-            abort_handle.abort();
-            return Err(CommonError::timeout("guest docker connect timed out").into());
-        }
-    };
+            let port = self.runtime.guest_docker_vsock_port();
+            let machine_name = self.runtime.default_machine_name();
+            let manager = self.runtime.machine_manager().clone();
+            let name = machine_name.to_string();
 
-    let stream = RawFdStream::from_raw_fd(owned_fd.into_raw_fd())
-        .map_err(|e| DockerError::Server(format!("failed to create guest stream: {e}")))?;
-    Ok(TokioIo::new(stream))
+            let handle = tokio::task::spawn_blocking(move || {
+                let fd = manager.connect_vsock_port(&name, port)?;
+                // SAFETY: fd is a valid, newly-opened vsock file descriptor.
+                Ok::<_, arcbox_core::CoreError>(unsafe { OwnedFd::from_raw_fd(fd) })
+            });
+            let abort_handle = handle.abort_handle();
+
+            let owned_fd = match tokio::time::timeout(CONNECT_TIMEOUT, handle).await {
+                Ok(join_result) => join_result
+                    .map_err(|e| {
+                        let reason = if e.is_cancelled() {
+                            "cancelled"
+                        } else {
+                            "panicked"
+                        };
+                        DockerError::Server(format!("connect task {reason}: {e}"))
+                    })?
+                    .map_err(|e| {
+                        DockerError::Server(format!("failed to connect to guest docker: {e}"))
+                    })?,
+                Err(_elapsed) => {
+                    abort_handle.abort();
+                    return Err(CommonError::timeout("guest docker connect timed out").into());
+                }
+            };
+
+            let stream = RawFdStream::new(owned_fd)
+                .map_err(|e| DockerError::Server(format!("failed to create guest stream: {e}")))?;
+            Ok(TokioIo::new(stream))
+        })
+    }
 }
 
 // =============================================================================
@@ -248,13 +265,13 @@ async fn connect_guest(runtime: &Runtime) -> Result<TokioIo<RawFdStream>> {
 /// Returns an error if guest connection, handshake, request forwarding,
 /// or response mapping fails.
 pub async fn proxy_to_guest(
-    runtime: &Runtime,
+    connector: &dyn GuestConnector,
     method: Method,
     path_and_query: &str,
     headers: &HeaderMap,
     body: Bytes,
 ) -> Result<Response<Body>> {
-    let io = connect_guest(runtime).await?;
+    let io = connector.connect().await?;
 
     let (mut sender, conn) =
         tokio::time::timeout(HANDSHAKE_TIMEOUT, http1::Builder::new().handshake(io))
@@ -307,11 +324,11 @@ pub async fn proxy_to_guest(
 /// Returns an error if guest connection, handshake, request forwarding,
 /// or response mapping fails.
 pub async fn proxy_to_guest_stream(
-    runtime: &Runtime,
+    connector: &dyn GuestConnector,
     original_uri: &Uri,
     req: Request<Body>,
 ) -> Result<Response<Body>> {
-    let io = connect_guest(runtime).await?;
+    let io = connector.connect().await?;
 
     let (mut sender, conn) =
         tokio::time::timeout(HANDSHAKE_TIMEOUT, http1::Builder::new().handshake(io))
@@ -485,11 +502,11 @@ async fn send_raw_upgrade(
 /// Returns an error if guest connection, upgrade handshake, or response
 /// construction fails.
 pub async fn proxy_with_upgrade(
-    runtime: &Runtime,
+    connector: &dyn GuestConnector,
     mut client_req: axum::http::Request<Body>,
     original_uri: &Uri,
 ) -> Result<Response<Body>> {
-    let io = connect_guest(runtime).await?;
+    let io = connector.connect().await?;
     // Unwrap TokioIo to get the raw vsock stream — we drive the guest
     // side manually so the fd stays alive throughout the bridge.
     let mut guest_stream = io.into_inner();
@@ -619,10 +636,10 @@ pub async fn proxy_fallback(
             .is_some_and(|v| v.to_ascii_lowercase().contains("upgrade"));
 
     if wants_upgrade {
-        return proxy_with_upgrade(&state.runtime, req, &uri).await;
+        return proxy_with_upgrade(state.connector.as_ref(), req, &uri).await;
     }
 
-    proxy_to_guest_stream(&state.runtime, &uri, req).await
+    proxy_to_guest_stream(state.connector.as_ref(), &uri, req).await
 }
 
 // =============================================================================

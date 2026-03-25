@@ -4,6 +4,7 @@
 
 use arcbox_core::{Config, Runtime, VmLifecycleConfig};
 use arcbox_docker::api::create_router;
+use arcbox_docker::proxy::VsockConnector;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -13,7 +14,7 @@ use tower::ServiceExt;
 
 /// Creates a test runtime with a temporary data directory.
 /// Uses skip_vm_check=true to avoid needing actual VM boot assets.
-async fn create_test_runtime() -> (Arc<Runtime>, TempDir) {
+async fn create_test_runtime() -> (Arc<Runtime>, Arc<VsockConnector>, TempDir) {
     let tmp_dir = TempDir::new().expect("Failed to create temp dir");
     let config = Config {
         data_dir: tmp_dir.path().to_path_buf(),
@@ -28,7 +29,8 @@ async fn create_test_runtime() -> (Arc<Runtime>, TempDir) {
             .expect("Failed to create runtime"),
     );
     runtime.init().await.expect("Failed to init runtime");
-    (runtime, tmp_dir)
+    let connector = Arc::new(VsockConnector::new(Arc::clone(&runtime)));
+    (runtime, connector, tmp_dir)
 }
 
 // ============================================================================
@@ -38,8 +40,8 @@ async fn create_test_runtime() -> (Arc<Runtime>, TempDir) {
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
 async fn test_ping() {
-    let (runtime, _tmp) = create_test_runtime().await;
-    let app = create_router(runtime);
+    let (runtime, connector, _tmp) = create_test_runtime().await;
+    let app = create_router(runtime, connector);
 
     let response = app
         .oneshot(
@@ -57,8 +59,8 @@ async fn test_ping() {
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
 async fn test_version() {
-    let (runtime, _tmp) = create_test_runtime().await;
-    let app = create_router(runtime);
+    let (runtime, connector, _tmp) = create_test_runtime().await;
+    let app = create_router(runtime, connector);
 
     let response = app
         .oneshot(
@@ -84,8 +86,8 @@ async fn test_version() {
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
 async fn test_info() {
-    let (runtime, _tmp) = create_test_runtime().await;
-    let app = create_router(runtime);
+    let (runtime, connector, _tmp) = create_test_runtime().await;
+    let app = create_router(runtime, connector);
 
     let response = app
         .oneshot(Request::builder().uri("/info").body(Body::empty()).unwrap())
@@ -109,8 +111,8 @@ async fn test_info() {
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
 async fn test_list_containers_empty() {
-    let (runtime, _tmp) = create_test_runtime().await;
-    let app = create_router(runtime);
+    let (runtime, connector, _tmp) = create_test_runtime().await;
+    let app = create_router(runtime, connector);
 
     let response = app
         .oneshot(
@@ -138,8 +140,8 @@ async fn test_list_containers_empty() {
 #[tokio::test]
 #[ignore = "requires image alpine:latest in local store"]
 async fn test_create_container() {
-    let (runtime, _tmp) = create_test_runtime().await;
-    let app = create_router(runtime);
+    let (runtime, connector, _tmp) = create_test_runtime().await;
+    let app = create_router(runtime, connector);
 
     let body = serde_json::json!({
         "Image": "alpine:latest",
@@ -174,10 +176,10 @@ async fn test_create_container() {
 #[tokio::test]
 #[ignore = "requires image nginx:latest in local store"]
 async fn test_container_lifecycle() {
-    let (runtime, _tmp) = create_test_runtime().await;
+    let (runtime, connector, _tmp) = create_test_runtime().await;
 
     // Create container
-    let app = create_router(Arc::clone(&runtime));
+    let app = create_router(Arc::clone(&runtime), Arc::clone(&connector) as _);
     let create_body = serde_json::json!({
         "Image": "nginx:latest"
     });
@@ -201,7 +203,7 @@ async fn test_container_lifecycle() {
     let container_id = json["Id"].as_str().unwrap().to_string();
 
     // Start container
-    let app = create_router(Arc::clone(&runtime));
+    let app = create_router(Arc::clone(&runtime), Arc::clone(&connector) as _);
     let response = app
         .oneshot(
             Request::builder()
@@ -216,7 +218,7 @@ async fn test_container_lifecycle() {
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
     // List containers (should show running)
-    let app = create_router(Arc::clone(&runtime));
+    let app = create_router(Arc::clone(&runtime), Arc::clone(&connector) as _);
     let response = app
         .oneshot(
             Request::builder()
@@ -233,7 +235,7 @@ async fn test_container_lifecycle() {
     assert_eq!(json.as_array().unwrap().len(), 1);
 
     // Stop container
-    let app = create_router(Arc::clone(&runtime));
+    let app = create_router(Arc::clone(&runtime), Arc::clone(&connector) as _);
     let response = app
         .oneshot(
             Request::builder()
@@ -248,7 +250,7 @@ async fn test_container_lifecycle() {
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
     // Remove container
-    let app = create_router(Arc::clone(&runtime));
+    let app = create_router(Arc::clone(&runtime), Arc::clone(&connector) as _);
     let response = app
         .oneshot(
             Request::builder()
@@ -263,7 +265,7 @@ async fn test_container_lifecycle() {
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
     // List containers (should be empty)
-    let app = create_router(Arc::clone(&runtime));
+    let app = create_router(Arc::clone(&runtime), Arc::clone(&connector) as _);
     let response = app
         .oneshot(
             Request::builder()
@@ -286,10 +288,10 @@ async fn test_container_lifecycle() {
 #[tokio::test]
 #[ignore = "requires image alpine:latest in local store"]
 async fn test_inspect_container() {
-    let (runtime, _tmp) = create_test_runtime().await;
+    let (runtime, connector, _tmp) = create_test_runtime().await;
 
     // Create container
-    let app = create_router(Arc::clone(&runtime));
+    let app = create_router(Arc::clone(&runtime), Arc::clone(&connector) as _);
     let create_body = serde_json::json!({
         "Image": "alpine:latest"
     });
@@ -313,7 +315,7 @@ async fn test_inspect_container() {
     let container_id = json["Id"].as_str().unwrap().to_string();
 
     // Inspect container
-    let app = create_router(Arc::clone(&runtime));
+    let app = create_router(Arc::clone(&runtime), Arc::clone(&connector) as _);
     let response = app
         .oneshot(
             Request::builder()
@@ -338,8 +340,8 @@ async fn test_inspect_container() {
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
 async fn test_container_not_found() {
-    let (runtime, _tmp) = create_test_runtime().await;
-    let app = create_router(runtime);
+    let (runtime, connector, _tmp) = create_test_runtime().await;
+    let app = create_router(runtime, connector);
 
     let response = app
         .oneshot(
@@ -357,9 +359,9 @@ async fn test_container_not_found() {
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
 async fn test_wait_container_invalid_condition_returns_bad_request() {
-    let (runtime, _tmp) = create_test_runtime().await;
+    let (runtime, connector, _tmp) = create_test_runtime().await;
 
-    let app = create_router(Arc::clone(&runtime));
+    let app = create_router(Arc::clone(&runtime), Arc::clone(&connector) as _);
     let response = app
         .oneshot(
             Request::builder()
@@ -388,10 +390,10 @@ async fn test_wait_container_invalid_condition_returns_bad_request() {
 #[tokio::test]
 #[ignore = "requires image alpine:latest in local store"]
 async fn test_exec_create() {
-    let (runtime, _tmp) = create_test_runtime().await;
+    let (runtime, connector, _tmp) = create_test_runtime().await;
 
     // Create and start container first
-    let app = create_router(Arc::clone(&runtime));
+    let app = create_router(Arc::clone(&runtime), Arc::clone(&connector) as _);
     let create_body = serde_json::json!({
         "Image": "alpine:latest"
     });
@@ -413,7 +415,7 @@ async fn test_exec_create() {
     let container_id = json["Id"].as_str().unwrap().to_string();
 
     // Start container
-    let app = create_router(Arc::clone(&runtime));
+    let app = create_router(Arc::clone(&runtime), Arc::clone(&connector) as _);
     app.oneshot(
         Request::builder()
             .method("POST")
@@ -425,7 +427,7 @@ async fn test_exec_create() {
     .unwrap();
 
     // Create exec
-    let app = create_router(Arc::clone(&runtime));
+    let app = create_router(Arc::clone(&runtime), Arc::clone(&connector) as _);
     let exec_body = serde_json::json!({
         "Cmd": ["ls", "-la"],
         "AttachStdout": true,
@@ -458,8 +460,8 @@ async fn test_exec_create() {
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
 async fn test_list_networks() {
-    let (runtime, _tmp) = create_test_runtime().await;
-    let app = create_router(runtime);
+    let (runtime, connector, _tmp) = create_test_runtime().await;
+    let app = create_router(runtime, connector);
 
     let response = app
         .oneshot(
@@ -485,8 +487,8 @@ async fn test_list_networks() {
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
 async fn test_create_network() {
-    let (runtime, _tmp) = create_test_runtime().await;
-    let app = create_router(runtime);
+    let (runtime, connector, _tmp) = create_test_runtime().await;
+    let app = create_router(runtime, connector);
 
     let body = serde_json::json!({
         "Name": "test-network",
@@ -519,8 +521,8 @@ async fn test_create_network() {
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
 async fn test_list_volumes() {
-    let (runtime, _tmp) = create_test_runtime().await;
-    let app = create_router(runtime);
+    let (runtime, connector, _tmp) = create_test_runtime().await;
+    let app = create_router(runtime, connector);
 
     let response = app
         .oneshot(
@@ -544,8 +546,8 @@ async fn test_list_volumes() {
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
 async fn test_create_volume() {
-    let (runtime, _tmp) = create_test_runtime().await;
-    let app = create_router(runtime);
+    let (runtime, connector, _tmp) = create_test_runtime().await;
+    let app = create_router(runtime, connector);
 
     let body = serde_json::json!({
         "Name": "test-volume"
@@ -575,10 +577,10 @@ async fn test_create_volume() {
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
 async fn test_volume_lifecycle() {
-    let (runtime, _tmp) = create_test_runtime().await;
+    let (runtime, connector, _tmp) = create_test_runtime().await;
 
     // Create volume
-    let app = create_router(Arc::clone(&runtime));
+    let app = create_router(Arc::clone(&runtime), Arc::clone(&connector) as _);
     let create_body = serde_json::json!({
         "Name": "lifecycle-volume"
     });
@@ -598,7 +600,7 @@ async fn test_volume_lifecycle() {
     assert_eq!(response.status(), StatusCode::CREATED);
 
     // Inspect volume
-    let app = create_router(Arc::clone(&runtime));
+    let app = create_router(Arc::clone(&runtime), Arc::clone(&connector) as _);
     let response = app
         .oneshot(
             Request::builder()
@@ -612,7 +614,7 @@ async fn test_volume_lifecycle() {
     assert_eq!(response.status(), StatusCode::OK);
 
     // Remove volume
-    let app = create_router(Arc::clone(&runtime));
+    let app = create_router(Arc::clone(&runtime), Arc::clone(&connector) as _);
     let response = app
         .oneshot(
             Request::builder()
@@ -627,7 +629,7 @@ async fn test_volume_lifecycle() {
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
     // Verify removed
-    let app = create_router(Arc::clone(&runtime));
+    let app = create_router(Arc::clone(&runtime), Arc::clone(&connector) as _);
     let response = app
         .oneshot(
             Request::builder()
@@ -648,8 +650,8 @@ async fn test_volume_lifecycle() {
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
 async fn test_list_images() {
-    let (runtime, _tmp) = create_test_runtime().await;
-    let app = create_router(runtime);
+    let (runtime, connector, _tmp) = create_test_runtime().await;
+    let app = create_router(runtime, connector);
 
     let response = app
         .oneshot(
@@ -676,8 +678,8 @@ async fn test_list_images() {
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
 async fn test_versioned_api() {
-    let (runtime, _tmp) = create_test_runtime().await;
-    let app = create_router(runtime);
+    let (runtime, connector, _tmp) = create_test_runtime().await;
+    let app = create_router(runtime, connector);
 
     // Test v1.43 (current)
     let response = app
@@ -695,8 +697,8 @@ async fn test_versioned_api() {
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
 async fn test_older_api_version() {
-    let (runtime, _tmp) = create_test_runtime().await;
-    let app = create_router(runtime);
+    let (runtime, connector, _tmp) = create_test_runtime().await;
+    let app = create_router(runtime, connector);
 
     // Test v1.24 (minimum supported)
     let response = app
@@ -718,8 +720,8 @@ async fn test_older_api_version() {
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
 async fn test_prune_containers() {
-    let (runtime, _tmp) = create_test_runtime().await;
-    let app = create_router(runtime);
+    let (runtime, connector, _tmp) = create_test_runtime().await;
+    let app = create_router(runtime, connector);
 
     let response = app
         .oneshot(
@@ -745,8 +747,8 @@ async fn test_prune_containers() {
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
 async fn test_pause_container_not_found() {
-    let (runtime, _tmp) = create_test_runtime().await;
-    let app = create_router(runtime);
+    let (runtime, connector, _tmp) = create_test_runtime().await;
+    let app = create_router(runtime, connector);
 
     let response = app
         .oneshot(
@@ -765,8 +767,8 @@ async fn test_pause_container_not_found() {
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
 async fn test_unpause_container_not_found() {
-    let (runtime, _tmp) = create_test_runtime().await;
-    let app = create_router(runtime);
+    let (runtime, connector, _tmp) = create_test_runtime().await;
+    let app = create_router(runtime, connector);
 
     let response = app
         .oneshot(
@@ -785,8 +787,8 @@ async fn test_unpause_container_not_found() {
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
 async fn test_rename_container_not_found() {
-    let (runtime, _tmp) = create_test_runtime().await;
-    let app = create_router(runtime);
+    let (runtime, connector, _tmp) = create_test_runtime().await;
+    let app = create_router(runtime, connector);
 
     let response = app
         .oneshot(
@@ -805,8 +807,8 @@ async fn test_rename_container_not_found() {
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
 async fn test_container_top_not_found() {
-    let (runtime, _tmp) = create_test_runtime().await;
-    let app = create_router(runtime);
+    let (runtime, connector, _tmp) = create_test_runtime().await;
+    let app = create_router(runtime, connector);
 
     let response = app
         .oneshot(
@@ -824,8 +826,8 @@ async fn test_container_top_not_found() {
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
 async fn test_container_stats_not_found() {
-    let (runtime, _tmp) = create_test_runtime().await;
-    let app = create_router(runtime);
+    let (runtime, connector, _tmp) = create_test_runtime().await;
+    let app = create_router(runtime, connector);
 
     let response = app
         .oneshot(
@@ -843,8 +845,8 @@ async fn test_container_stats_not_found() {
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
 async fn test_container_changes_not_found() {
-    let (runtime, _tmp) = create_test_runtime().await;
-    let app = create_router(runtime);
+    let (runtime, connector, _tmp) = create_test_runtime().await;
+    let app = create_router(runtime, connector);
 
     let response = app
         .oneshot(
@@ -857,4 +859,65 @@ async fn test_container_changes_not_found() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+// ============================================================================
+// E2E Smoke Tests (require running daemon + Docker CLI)
+// ============================================================================
+
+#[tokio::test]
+#[ignore = "requires running daemon with guest dockerd and docker CLI"]
+async fn e2e_docker_run_echo() {
+    let output = tokio::process::Command::new("docker")
+        .args([
+            "--context",
+            "arcbox",
+            "run",
+            "--rm",
+            "alpine",
+            "echo",
+            "e2e-smoke-test",
+        ])
+        .output()
+        .await
+        .expect("docker CLI not found");
+
+    assert!(
+        output.status.success(),
+        "docker run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.trim().contains("e2e-smoke-test"));
+}
+
+#[tokio::test]
+#[ignore = "requires running daemon with guest dockerd and docker CLI"]
+async fn e2e_docker_buildx_build() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dockerfile = tmp.path().join("Dockerfile");
+    tokio::fs::write(&dockerfile, "FROM alpine:latest\nRUN echo built\n")
+        .await
+        .unwrap();
+
+    let output = tokio::process::Command::new("docker")
+        .args([
+            "--context",
+            "arcbox",
+            "buildx",
+            "build",
+            "--no-cache",
+            "-t",
+            "arcbox-e2e-smoke:latest",
+            tmp.path().to_str().unwrap(),
+        ])
+        .output()
+        .await
+        .expect("docker CLI not found");
+
+    assert!(
+        output.status.success(),
+        "docker buildx build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
