@@ -2,6 +2,63 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Returns the total physical memory of the host system in bytes.
+///
+/// On macOS this queries `hw.memsize` via `sysctlbyname`.
+/// On Linux this uses `sysinfo(2)`.
+///
+/// Returns 0 if the query fails (should never happen on supported platforms).
+#[must_use]
+pub fn host_memory_size() -> u64 {
+    #[cfg(target_os = "macos")]
+    {
+        let mut size: u64 = 0;
+        let mut len = std::mem::size_of::<u64>();
+        // SAFETY: sysctlbyname with valid name, correctly-sized output buffer.
+        let ret = unsafe {
+            libc::sysctlbyname(
+                c"hw.memsize".as_ptr(),
+                std::ptr::addr_of_mut!(size).cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if ret == 0 { size } else { 0 }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: sysinfo always succeeds when given a valid pointer.
+        unsafe {
+            let mut info: libc::sysinfo = std::mem::zeroed();
+            if libc::sysinfo(&mut info) == 0 {
+                info.totalram * u64::from(info.mem_unit)
+            } else {
+                0
+            }
+        }
+    }
+}
+
+/// Returns a sensible default VM memory size based on host physical memory.
+///
+/// The default is half of host RAM, clamped to `[512 MB, 16 GB]`.
+/// Falls back to 4 GB if host memory detection fails.
+#[must_use]
+pub fn default_vm_memory_size() -> u64 {
+    const MIN_DEFAULT: u64 = 512 * 1024 * 1024; // 512 MB
+    const MAX_DEFAULT: u64 = 16 * 1024 * 1024 * 1024; // 16 GB
+    const FALLBACK: u64 = 4 * 1024 * 1024 * 1024; // 4 GB
+
+    let host = host_memory_size();
+    if host == 0 {
+        return FALLBACK;
+    }
+
+    (host / 2).clamp(MIN_DEFAULT, MAX_DEFAULT)
+}
+
 /// CPU architecture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CpuArch {

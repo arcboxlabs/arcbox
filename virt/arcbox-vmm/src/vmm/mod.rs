@@ -95,7 +95,7 @@ impl Default for VmmConfig {
     fn default() -> Self {
         Self {
             vcpu_count: 1,
-            memory_size: 512 * 1024 * 1024, // 512MB
+            memory_size: arcbox_hypervisor::default_vm_memory_size(),
             kernel_path: PathBuf::new(),
             kernel_cmdline: String::new(),
             initrd_path: None,

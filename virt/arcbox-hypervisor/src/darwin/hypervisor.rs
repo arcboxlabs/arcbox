@@ -145,6 +145,17 @@ impl DarwinHypervisor {
             )));
         }
 
+        // Warn if memory exceeds half of host physical RAM — the guest will
+        // still start, but the host may experience memory pressure.
+        let host_mem = crate::types::host_memory_size();
+        if host_mem > 0 && config.memory_size > host_mem / 2 {
+            tracing::warn!(
+                "VM memory {}MB exceeds 50% of host RAM ({}MB total) — host may experience memory pressure",
+                config.memory_size / (1024 * 1024),
+                host_mem / (1024 * 1024),
+            );
+        }
+
         // Check architecture
         if !self.supports_arch(config.arch) {
             return Err(HypervisorError::invalid_config(format!(
