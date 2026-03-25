@@ -158,7 +158,13 @@ impl VmnetRelay {
 
         // Ensure the blocking thread exits regardless of which branch won.
         self.cancel.cancel();
-        let _ = vmnet_to_guest.await;
+        if let Err(e) = vmnet_to_guest.await {
+            if e.is_panic() {
+                tracing::error!("vmnet→guest blocking task panicked: {e}");
+            } else {
+                tracing::debug!("vmnet→guest blocking task join error: {e}");
+            }
+        }
 
         Ok(())
     }
