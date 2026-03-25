@@ -671,25 +671,11 @@ impl VirtioFs {
             requests
         };
 
-        // Process all requests. Partition into control requests (INIT/DESTROY,
-        // which mutate session state and must go through self.process_request)
-        // and normal requests (which can be dispatched in parallel via handler).
-
-        // Partition: control ops go serial, normal ops can go parallel.
-        let mut serial_requests = Vec::new();
-        let mut normal_requests = Vec::new();
-        for item in pending_requests {
-            let opcode = if item.1.len() >= 8 {
-                u32::from_le_bytes([item.1[4], item.1[5], item.1[6], item.1[7]])
-            } else {
-                0 // Will fail in process_request with "too small"
-            };
-            if opcode == Self::FUSE_INIT || opcode == Self::FUSE_DESTROY {
-                serial_requests.push(item);
-            } else {
-                normal_requests.push(item);
-            }
-        }
+        // Process requests preserving avail ring order. Control requests
+        // (INIT/DESTROY) must go through self.process_request() for session
+        // state mutation. Normal requests can be dispatched in parallel via
+        // handler when multiple are pending, but their results are collected
+        // back into original order.
 
         type ResponseItem = (
             u16,
@@ -697,40 +683,76 @@ impl VirtioFs {
             Vec<(usize, usize)>,
         );
 
-        // Phase 1a: Process control requests sequentially through self
-        let mut responses: Vec<ResponseItem> = serial_requests
-            .into_iter()
-            .map(|(head_idx, request_data, write_buffers)| {
-                let response = self.process_request(&request_data);
-                (head_idx, response, write_buffers)
-            })
-            .collect();
-
-        // Phase 1b: Process normal requests (parallel when >1 and handler available)
+        // Identify which requests are parallelizable (normal, non-control).
         let handler = self.handler.clone();
         let session_initialized = self.session.is_initialized();
 
-        let normal_responses: Vec<ResponseItem> =
-            if normal_requests.len() > 1 && session_initialized && handler.is_some() {
-                let handler_ref = handler.as_ref().unwrap();
-                use rayon::prelude::*;
-                normal_requests
+        // Collect indices of normal requests eligible for parallel dispatch.
+        let normal_indices: Vec<usize> = pending_requests
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, data, _))| {
+                if data.len() >= 8 {
+                    let opcode = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+                    opcode != Self::FUSE_INIT && opcode != Self::FUSE_DESTROY
+                } else {
+                    false
+                }
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        let can_parallel = normal_indices.len() > 1 && session_initialized && handler.is_some();
+
+        // If parallelizable: dispatch normal requests in parallel, then
+        // process control requests sequentially, all in avail ring order.
+        let responses: Vec<ResponseItem> = if can_parallel {
+            let handler_ref = handler.as_ref().unwrap();
+            use rayon::prelude::*;
+
+            // Pre-dispatch: parallel handler calls for normal requests.
+            // Use a map of index→response to merge back in order.
+            let normal_set: std::collections::HashSet<usize> = normal_indices.into_iter().collect();
+            let normal_items: Vec<(usize, &[u8])> = pending_requests
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| normal_set.contains(i))
+                .map(|(i, (_, data, _))| (i, data.as_slice()))
+                .collect();
+
+            let parallel_results: Vec<(usize, std::result::Result<Vec<u8>, VirtioError>)> =
+                normal_items
                     .into_par_iter()
-                    .map(|(head_idx, request_data, write_buffers)| {
-                        let response = handler_ref.handle_request(&request_data);
-                        (head_idx, response, write_buffers)
-                    })
-                    .collect()
-            } else {
-                normal_requests
-                    .into_iter()
-                    .map(|(head_idx, request_data, write_buffers)| {
-                        let response = self.process_request(&request_data);
-                        (head_idx, response, write_buffers)
-                    })
-                    .collect()
-            };
-        responses.extend(normal_responses);
+                    .map(|(i, data)| (i, handler_ref.handle_request(data)))
+                    .collect();
+
+            let mut result_map: std::collections::HashMap<usize, _> =
+                parallel_results.into_iter().collect();
+
+            // Now process all requests in order, using pre-computed results
+            // for normal requests and self.process_request for control ops.
+            pending_requests
+                .into_iter()
+                .enumerate()
+                .map(|(i, (head_idx, request_data, write_buffers))| {
+                    let response = if let Some(r) = result_map.remove(&i) {
+                        r
+                    } else {
+                        self.process_request(&request_data)
+                    };
+                    (head_idx, response, write_buffers)
+                })
+                .collect()
+        } else {
+            // Sequential: single request, control ops present, or no handler
+            pending_requests
+                .into_iter()
+                .map(|(head_idx, request_data, write_buffers)| {
+                    let response = self.process_request(&request_data);
+                    (head_idx, response, write_buffers)
+                })
+                .collect()
+        };
 
         // Phase 2: Write responses into guest memory (sequential)
         // TODO(ABX-208): Use push_used_batch() for single interrupt notification
