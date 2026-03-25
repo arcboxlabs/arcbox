@@ -123,7 +123,7 @@ impl NegativeCacheConfig {
     pub const fn new() -> Self {
         Self {
             max_entries: 10_000,
-            timeout: Duration::from_secs(1),
+            timeout: Duration::from_secs(5),
         }
     }
 }

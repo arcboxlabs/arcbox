@@ -201,6 +201,7 @@ mod tests {
             num_threads: 1,
             writeback_cache: false,
             cache_timeout: 1,
+            negative_cache_ttl: 1,
         };
 
         let mut server = FsServer::new(config);
@@ -233,6 +234,7 @@ mod tests {
             num_threads: 1,
             writeback_cache: false,
             cache_timeout: 1,
+            negative_cache_ttl: 1,
         };
 
         let mut server = FsServer::new(config);
@@ -278,6 +280,7 @@ mod tests {
             num_threads: 1,
             writeback_cache: false,
             cache_timeout: 1,
+            negative_cache_ttl: 1,
         };
 
         let server = FsServer::new(config);

@@ -177,7 +177,7 @@ impl PassthroughConfig {
         Self {
             negative_cache_enabled: true,
             negative_cache_max_entries: 10_000,
-            negative_cache_timeout: Duration::from_secs(1),
+            negative_cache_timeout: Duration::from_secs(5),
         }
     }
 }
