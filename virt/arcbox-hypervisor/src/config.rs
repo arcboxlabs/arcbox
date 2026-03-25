@@ -1,6 +1,6 @@
 //! VM configuration types.
 
-use crate::types::CpuArch;
+use crate::types::{CpuArch, default_vm_memory_size};
 
 /// Virtual machine configuration.
 #[derive(Debug, Clone)]
@@ -25,7 +25,7 @@ impl Default for VmConfig {
     fn default() -> Self {
         Self {
             vcpu_count: 1,
-            memory_size: 512 * 1024 * 1024, // 512MB
+            memory_size: default_vm_memory_size(),
             arch: CpuArch::native(),
             kernel_path: None,
             kernel_cmdline: None,
