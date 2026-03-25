@@ -688,8 +688,8 @@ impl VirtioNet {
         Ok(())
     }
 
-    /// Maximum number of packets to receive in a single `poll_backend_batch` call.
-    const DEFAULT_RX_BATCH_SIZE: usize = 64;
+    /// Default maximum number of packets per `poll_backend_batch` call.
+    pub const DEFAULT_RX_BATCH_SIZE: usize = 64;
 
     /// Processes the TX queue.
     ///
@@ -810,16 +810,24 @@ impl VirtioNet {
         while let Some(packet) = self.rx_buffer.pop_front() {
             match queue.pop_avail() {
                 Some((head_idx, chain)) => {
+                    // Build full frame: virtio-net header + ethernet data
+                    let header_bytes = packet.header.to_bytes();
+                    let full_frame_len = header_bytes.len() + packet.data.len();
+                    let mut frame = Vec::with_capacity(full_frame_len);
+                    frame.extend_from_slice(&header_bytes);
+                    frame.extend_from_slice(&packet.data);
+
+                    // Write into guest descriptor chain
                     let mut written = 0usize;
                     for desc in chain {
                         if desc.is_write_only() {
                             let start = desc.addr as usize;
-                            let remaining = packet.data.len().saturating_sub(written);
+                            let remaining = frame.len().saturating_sub(written);
                             let to_write = remaining.min(desc.len as usize);
                             let end = start + to_write;
                             if end <= memory.len() && to_write > 0 {
                                 memory[start..end]
-                                    .copy_from_slice(&packet.data[written..written + to_write]);
+                                    .copy_from_slice(&frame[written..written + to_write]);
                                 written += to_write;
                             }
                         }
