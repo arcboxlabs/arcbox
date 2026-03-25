@@ -468,9 +468,10 @@ impl MachineManager {
                                 }
 
                                 tracing::trace!(
-                                    "Machine '{}' system info has no routable IP yet (attempt {})",
+                                    "Machine '{}' system info has no routable IP yet (attempt {}, reported={:?})",
                                     name,
-                                    attempt
+                                    attempt,
+                                    info.ip_addresses
                                 );
                             }
                             Err(e) => {

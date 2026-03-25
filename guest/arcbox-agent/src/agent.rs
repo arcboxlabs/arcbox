@@ -198,6 +198,7 @@ pub mod ensure_runtime {
 
 #[cfg(target_os = "linux")]
 mod linux {
+    use nix::ifaddrs::getifaddrs;
     use std::io::{Read as _, Seek as _, SeekFrom};
     use std::net::IpAddr;
     use std::path::{Path, PathBuf};
@@ -1560,20 +1561,31 @@ mod linux {
 
     /// Collects system information from the guest.
     fn collect_system_info() -> SystemInfo {
-        fn parse_ip_output(stdout: &[u8]) -> Vec<String> {
+        fn collect_interface_ips() -> Vec<String> {
             let mut ips = Vec::new();
-            let output = String::from_utf8_lossy(stdout);
 
-            for token in output.split(|c: char| c.is_whitespace() || c == ',') {
-                let token = token.trim();
-                if token.is_empty() {
-                    continue;
-                }
+            let Ok(addrs) = getifaddrs() else {
+                return ips;
+            };
 
-                let Ok(addr) = token.parse::<IpAddr>() else {
+            for ifaddr in addrs {
+                let Some(address) = ifaddr.address else {
                     continue;
                 };
-                if addr.is_loopback() {
+
+                let addr = if let Some(v4) = address.as_sockaddr_in() {
+                    IpAddr::V4(v4.ip())
+                } else if let Some(v6) = address.as_sockaddr_in6() {
+                    let ip = v6.ip();
+                    if ip.is_unicast_link_local() {
+                        continue;
+                    }
+                    IpAddr::V6(ip)
+                } else {
+                    continue;
+                };
+
+                if addr.is_loopback() || addr.is_multicast() || addr.is_unspecified() {
                     continue;
                 }
 
@@ -1646,23 +1658,11 @@ mod linux {
             }
         }
 
-        // IP addresses (excluding loopback).
-        // Coreutils `hostname` supports `-I`, BusyBox supports `-i`.
-        for flag in ["-I", "-i"] {
-            let Ok(output) = std::process::Command::new("hostname").arg(flag).output() else {
-                continue;
-            };
-
-            if !output.status.success() {
-                continue;
-            }
-
-            let ips = parse_ip_output(&output.stdout);
-            if !ips.is_empty() {
-                info.ip_addresses = ips;
-                break;
-            }
-        }
+        // IP addresses (excluding loopback/link-local IPv6) are collected
+        // directly from interface addresses instead of shelling out to
+        // `hostname -I` / `hostname -i`, which is inconsistent across
+        // busybox/coreutils environments.
+        info.ip_addresses = collect_interface_ips();
 
         info
     }
