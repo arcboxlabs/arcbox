@@ -663,7 +663,7 @@ impl Vmm {
     fn handle_vcpu_exit(&self, vcpu_id: u32, exit: arcbox_hypervisor::VcpuExit) {
         use arcbox_hypervisor::VcpuExit;
 
-        match exit {
+        match &exit {
             VcpuExit::Halt => {
                 tracing::debug!("vCPU {} halted", vcpu_id);
                 // HLT instruction - guest is idle, can reduce CPU usage
@@ -678,12 +678,12 @@ impl Vmm {
                     size,
                     data
                 );
-                self.handle_io_out(port, size, data);
+                self.handle_io_out(*port, *size, *data);
             }
 
             VcpuExit::IoIn { port, size } => {
                 tracing::trace!("vCPU {} I/O in: port={:#x}, size={}", vcpu_id, port, size);
-                let _value = self.handle_io_in(port, size);
+                let _value = self.handle_io_in(*port, *size);
                 // Note: The value would need to be written back to the vCPU,
                 // which requires access to the vCPU registers.
             }
@@ -696,7 +696,7 @@ impl Vmm {
                     size
                 );
                 if let Some(ref device_manager) = self.device_manager {
-                    match device_manager.handle_mmio_read(addr, size as usize) {
+                    match device_manager.handle_mmio_read(*addr, *size as usize) {
                         Ok(value) => {
                             tracing::trace!("MMIO read returned: {:#x}", value);
                             // Note: Value would need to be written back to vCPU
@@ -717,7 +717,7 @@ impl Vmm {
                     data
                 );
                 if let Some(ref device_manager) = self.device_manager {
-                    if let Err(e) = device_manager.handle_mmio_write(addr, size as usize, data) {
+                    if let Err(e) = device_manager.handle_mmio_write(*addr, *size as usize, *data) {
                         tracing::warn!("MMIO write failed at {:#x}: {}", addr, e);
                     }
                 }
@@ -726,7 +726,7 @@ impl Vmm {
             VcpuExit::Hypercall { nr, args } => {
                 tracing::debug!("vCPU {} hypercall: nr={}, args={:?}", vcpu_id, nr, args);
                 // Hypercall handling - used for paravirtualization
-                self.handle_hypercall(vcpu_id, nr, args);
+                self.handle_hypercall(vcpu_id, *nr, *args);
             }
 
             VcpuExit::SystemReset => {

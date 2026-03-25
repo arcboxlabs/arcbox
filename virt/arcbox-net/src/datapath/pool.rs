@@ -26,7 +26,7 @@ pub struct PacketBuffer {
 impl PacketBuffer {
     /// Creates a new empty buffer.
     #[inline]
-    #[allow(clippy::large_stack_arrays)] // PacketBuffer is allocated in a pool on the heap; the array never lives on the stack in practice
+    #[allow(clippy::large_stack_arrays)] // 64 KB array — the temporary may briefly touch the stack during Box::new, but the buffer is immediately moved into the heap-backed pool
     const fn new(index: u32) -> Self {
         Self {
             data: [0; MAX_PACKET_SIZE],

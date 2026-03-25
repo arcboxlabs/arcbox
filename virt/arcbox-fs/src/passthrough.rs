@@ -1416,7 +1416,11 @@ impl PassthroughFs {
             return Err(FsError::io(std::io::Error::last_os_error()));
         }
 
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        #[allow(
+            clippy::cast_sign_loss,
+            clippy::cast_possible_truncation,
+            clippy::unnecessary_cast // Field types differ between macOS (u32) and Linux (u64).
+        )]
         Ok(crate::fuse::StatFs {
             blocks: stat.f_blocks as u64,
             bfree: stat.f_bfree as u64,
