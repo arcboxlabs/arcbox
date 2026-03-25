@@ -48,6 +48,12 @@ use crate::ethernet::{ETH_HEADER_LEN, build_udp_ip_ethernet};
 /// tasks don't block, but the write_queue acts as the final memory bound.
 const WRITE_QUEUE_HARD_CAP: usize = 2048;
 
+/// smoltcp poll interval. Controls how often the TCP/IP stack is polled for
+/// retransmissions, ARP cache aging, and connection state transitions.
+/// 250ms is a good balance between responsiveness and wakeup reduction.
+/// (Was 100ms — reduced from 10 Hz to 4 Hz to save ~6 wakeups/s.)
+const SMOLTCP_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
 /// Wraps an `OwnedFd` so it can be registered with `AsyncFd`.
 struct FdWrapper(OwnedFd);
 
@@ -207,7 +213,7 @@ impl NetworkDatapath {
         maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // smoltcp poll timer: drives retransmissions and ARP cache expiry.
-        let mut smoltcp_timer = tokio::time::interval(Duration::from_millis(100));
+        let mut smoltcp_timer = tokio::time::interval(SMOLTCP_POLL_INTERVAL);
         smoltcp_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         tracing::info!("Network datapath started (smoltcp + socket proxy mode)");
