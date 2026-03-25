@@ -6,7 +6,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use parking_lot::Mutex;
 
@@ -107,7 +107,11 @@ fn rotate(state: &mut RotatingState) {
         let to = rotated_path(&state.path, i + 1);
         if let Err(e) = fs::rename(&from, &to) {
             if e.kind() != io::ErrorKind::NotFound {
-                eprintln!("log rotate: failed to rename {} → {}: {e}", from.display(), to.display());
+                eprintln!(
+                    "log rotate: failed to rename {} → {}: {e}",
+                    from.display(),
+                    to.display()
+                );
             }
         }
     }
@@ -115,7 +119,11 @@ fn rotate(state: &mut RotatingState) {
     // Move current log to .1
     let rotated = rotated_path(&state.path, 1);
     if let Err(e) = fs::rename(&state.path, &rotated) {
-        eprintln!("log rotate: failed to rename {} → {}: {e}", state.path.display(), rotated.display());
+        eprintln!(
+            "log rotate: failed to rename {} → {}: {e}",
+            state.path.display(),
+            rotated.display()
+        );
         // Rotation failed — continue writing to the same file.
         return;
     }
@@ -126,13 +134,13 @@ fn rotate(state: &mut RotatingState) {
     state.current_size = size;
 }
 
-fn rotated_path(base: &PathBuf, index: usize) -> PathBuf {
+fn rotated_path(base: &Path, index: usize) -> PathBuf {
     let mut p = base.as_os_str().to_os_string();
     p.push(format!(".{index}"));
     PathBuf::from(p)
 }
 
-fn open_log_file(path: &PathBuf) -> (File, u64) {
+fn open_log_file(path: &Path) -> (File, u64) {
     let file = OpenOptions::new()
         .create(true)
         .append(true)
