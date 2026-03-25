@@ -212,6 +212,8 @@ pub struct IrqChip {
     pending: AtomicU32,
     /// Callback for actually triggering interrupts on the VM.
     trigger_callback: Mutex<Option<Arc<IrqTriggerCallback>>>,
+    /// Per-IRQ timer-based coalescing state.
+    coalescing_states: RwLock<HashMap<Irq, Arc<CoalescingState>>>,
     /// Statistics for monitoring.
     stats: IrqStats,
 }
@@ -230,6 +232,7 @@ impl IrqChip {
             irq_configs: RwLock::new(HashMap::new()),
             pending: AtomicU32::new(0),
             trigger_callback: Mutex::new(None),
+            coalescing_states: RwLock::new(HashMap::new()),
             stats: IrqStats::default(),
         })
     }
@@ -245,6 +248,55 @@ impl IrqChip {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *cb = Some(callback);
         tracing::debug!("IRQ trigger callback registered");
+    }
+
+    /// Configures timer-based coalescing for an IRQ.
+    ///
+    /// When enabled, interrupts are accumulated for up to `config.max_delay`
+    /// before delivery. This trades slight latency for significant wakeup
+    /// reduction during steady-state I/O.
+    pub fn set_coalescing(&self, irq: Irq, config: CoalescingConfig) {
+        let state = Arc::new(CoalescingState::new(config));
+        let mut states = self
+            .coalescing_states
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        states.insert(irq, state);
+    }
+
+    /// Returns the coalescing state for an IRQ (for timer-expiry flushing).
+    #[must_use]
+    pub fn coalescing_state(&self, irq: Irq) -> Option<Arc<CoalescingState>> {
+        let states = self
+            .coalescing_states
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        states.get(&irq).cloned()
+    }
+
+    /// Flush coalesced interrupts for an IRQ (called when timer expires).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if interrupt delivery fails.
+    pub fn flush_coalesced(&self, irq: Irq) -> Result<()> {
+        let state = {
+            let states = self
+                .coalescing_states
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            states.get(&irq).cloned()
+        };
+        if let Some(state) = state {
+            let count = state.flush();
+            if count > 0 {
+                self.stats
+                    .coalesced
+                    .fetch_add(u64::from(count.saturating_sub(1)), Ordering::Relaxed);
+                self.deliver_irq(irq)?;
+            }
+        }
+        Ok(())
     }
 
     /// Allocates an IRQ number with the specified configuration.
@@ -365,31 +417,64 @@ impl IrqChip {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let config = configs.get(&irq);
-        let (gsi, trigger_mode) = match config {
-            Some(c) => (c.gsi, c.trigger_mode),
-            None => {
-                // Legacy fallback: IRQ maps directly to GSI
-                (irq % MAX_GSIS, TriggerMode::Edge)
-            }
+        let trigger_mode = match config {
+            Some(c) => c.trigger_mode,
+            None => TriggerMode::Edge,
         };
         drop(configs);
 
-        // Check for coalescing (only for edge-triggered)
+        // Bitmap-level dedup (only for edge-triggered)
         if trigger_mode == TriggerMode::Edge {
             let irq_bit = 1u32 << (irq % 32);
             let old_pending = self.pending.fetch_or(irq_bit, Ordering::SeqCst);
             if (old_pending & irq_bit) != 0 {
-                // Already pending, coalesce
                 self.stats.coalesced.fetch_add(1, Ordering::Relaxed);
                 tracing::trace!("IRQ {} coalesced (already pending)", irq);
                 return Ok(());
             }
         }
 
+        // Timer-based coalescing: if configured for this IRQ, accumulate
+        // interrupts and only deliver when the count threshold is reached
+        // or the timer expires (via flush_coalesced).
+        {
+            let states = self
+                .coalescing_states
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(state) = states.get(&irq) {
+                if state.config.enabled {
+                    let force_deliver = state.record();
+                    if !force_deliver {
+                        // Accumulated — caller should poll timer_expired()
+                        // and call flush_coalesced() when it fires.
+                        return Ok(());
+                    }
+                    // Threshold reached — fall through to immediate delivery
+                    state.flush();
+                }
+            }
+        }
+
+        self.deliver_irq(irq)
+    }
+
+    /// Delivers an interrupt immediately (bypassing coalescing).
+    fn deliver_irq(&self, irq: Irq) -> Result<()> {
+        let configs = self
+            .irq_configs
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let config = configs.get(&irq);
+        let (gsi, trigger_mode) = match config {
+            Some(c) => (c.gsi, c.trigger_mode),
+            None => (irq % MAX_GSIS, TriggerMode::Edge),
+        };
+        drop(configs);
+
         self.stats.triggered.fetch_add(1, Ordering::Relaxed);
         tracing::trace!("Triggering IRQ {} -> GSI {}", irq, gsi);
 
-        // Invoke the trigger callback
         let callback = self
             .trigger_callback
             .lock()
@@ -397,17 +482,13 @@ impl IrqChip {
         if let Some(ref cb) = *callback {
             match trigger_mode {
                 TriggerMode::Edge => {
-                    // Edge: pulse the line (assert then deassert)
                     cb(gsi, true)?;
                     cb(gsi, false)?;
-                    // Clear pending after delivery
                     let irq_bit = 1u32 << (irq % 32);
                     self.pending.fetch_and(!irq_bit, Ordering::SeqCst);
                 }
                 TriggerMode::Level => {
-                    // Level: just assert (caller must deassert when done)
                     cb(gsi, true)?;
-                    // Mark as asserted in config
                     drop(callback);
                     let mut configs = self
                         .irq_configs
