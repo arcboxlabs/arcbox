@@ -19,7 +19,7 @@ pub mod ensure_runtime {
     use arcbox_protocol::agent::RuntimeEnsureResponse;
     use tokio::sync::{Mutex, Notify};
 
-    #[cfg(test)]
+    #[cfg(any(test, target_os = "linux"))]
     pub const STATUS_STARTED: &str = arcbox_constants::status::RUNTIME_STARTED;
 
     /// Runtime lifecycle state.

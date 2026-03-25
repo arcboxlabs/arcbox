@@ -61,7 +61,7 @@ mod platform {
 
         ensure_nfsd_mount()?;
 
-        if !crate::mount::is_mounted(cfg.export_docker) {
+        if !is_mounted(cfg.export_docker) {
             bind_readonly(DOCKER_DATA_MOUNT_POINT, cfg.export_docker)?;
             notes.push(format!(
                 "bound {} -> {} (ro)",
@@ -99,7 +99,7 @@ mod platform {
     }
 
     pub fn export_ready() -> bool {
-        crate::mount::is_mounted(EXPORT_DOCKER)
+        is_mounted(EXPORT_DOCKER)
             && Path::new(EXPORTS_PATH).exists()
             && Path::new(NFS_CONF_PATH).exists()
     }
@@ -113,7 +113,7 @@ mod platform {
     }
 
     fn ensure_nfsd_mount() -> Result<(), String> {
-        if crate::mount::is_mounted(NFSD_MOUNTPOINT) {
+        if is_mounted(NFSD_MOUNTPOINT) {
             return Ok(());
         }
 
@@ -243,6 +243,15 @@ mod platform {
 
     fn tcp_port_ready(port: u16) -> bool {
         std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
+    }
+
+    fn is_mounted(path: &str) -> bool {
+        fs::read_to_string("/proc/mounts").is_ok_and(|content| {
+            content.lines().any(|line| {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                parts.get(1).is_some_and(|&mountpoint| mountpoint == path)
+            })
+        })
     }
 
     fn render_exports(cfg: &ExportConfig<'_>) -> String {
