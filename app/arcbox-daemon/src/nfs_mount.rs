@@ -102,7 +102,7 @@ async fn reconcile(runtime: Arc<Runtime>, shutdown: &CancellationToken) -> Resul
     let proxy_shutdown = shutdown.clone();
     tokio::spawn(run_proxy(listener, proxy_runtime, proxy_shutdown));
 
-    let expected_source = format!("localhost:/");
+    let expected_source = "127.0.0.1:/".to_string();
 
     match current_mount_info(&mount_path) {
         Some(info) if info.source == expected_source && info.fstype == "nfs" => {
