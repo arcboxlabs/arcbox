@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.9](https://github.com/arcboxlabs/arcbox/compare/v0.3.8...v0.3.9) (2026-03-25)
+
+
+### Features
+
+* **hypervisor:** derive default VM memory from host physical RAM ([af2ae7f](https://github.com/arcboxlabs/arcbox/commit/af2ae7fa08a044f4883f04dee25ccb6a9f922a23))
+
+
+### Bug Fixes
+
+* address PR review comments (8 items) ([8ab1786](https://github.com/arcboxlabs/arcbox/commit/8ab178658d27341738568d1dc330c30fe652bfe1))
+* **fs:** wire negative_cache_ttl from FsConfig through to PassthroughFs ([c11042e](https://github.com/arcboxlabs/arcbox/commit/c11042e505127b8d74c74be0d0c5e1a628beacfd))
+* **hypervisor:** address review comments on memory defaults ([930a0bb](https://github.com/arcboxlabs/arcbox/commit/930a0bb2d297750b74bb00f1793848c178f2b166))
+* **hypervisor:** resolve cgroup path and align memory to 1 MiB ([68cea43](https://github.com/arcboxlabs/arcbox/commit/68cea436dc7f2b6da3e1b35a5473b52ac88a40c8))
+* **net:** integrate timer wheel into datapath loop select! ([b0fa321](https://github.com/arcboxlabs/arcbox/commit/b0fa3210617667c9c543b93290af53b6641808fd))
+* resolve all clippy warnings, enforce -D warnings ([#111](https://github.com/arcboxlabs/arcbox/issues/111)) ([da27253](https://github.com/arcboxlabs/arcbox/commit/da272533ae14234bbaaec143cad462b0f977a418))
+* update stale test assertion, comments, and config example ([e640cf0](https://github.com/arcboxlabs/arcbox/commit/e640cf04fa30b0baff8aa289172c81184053c26b))
+* **virtio:** include virtio-net header in inject_rx_batch, fix warning ([053dd25](https://github.com/arcboxlabs/arcbox/commit/053dd25d16ba36fa8b04ef195eae434fe6d7073a))
+* **virtio:** integrate EVENT_IDX into device feature negotiation ([281881d](https://github.com/arcboxlabs/arcbox/commit/281881d9fccd44ea45180bbad8b03f7d965e0e45))
+* **virtio:** partition INIT/DESTROY from parallel FUSE dispatch ([48308dd](https://github.com/arcboxlabs/arcbox/commit/48308ddb6eab86b3de43c06b6af6fc951df415bd))
+* **virtio:** preserve avail ring order in parallel FUSE dispatch ([6e57fb2](https://github.com/arcboxlabs/arcbox/commit/6e57fb2ec208d7d77eb860d75961cd41622702d6))
+* **vmm:** fix coalescing/bitmap ordering, add end-to-end tests ([5dffa3e](https://github.com/arcboxlabs/arcbox/commit/5dffa3ea8e5006ae8d76bc09348735c967b58fd6))
+* **vmm:** unify remaining hardcoded memory defaults ([7d9cb27](https://github.com/arcboxlabs/arcbox/commit/7d9cb2703dc0062a80989cc58b28c1a7644d99bf))
+* **vmm:** wire CoalescingState into IrqChip.trigger_irq() ([ac569f2](https://github.com/arcboxlabs/arcbox/commit/ac569f2fe3d735c73597717246512f1751febc53))
+
+
+### Performance Improvements
+
+* **core:** replace serial port 200ms polling with adaptive backoff ([a77ebb9](https://github.com/arcboxlabs/arcbox/commit/a77ebb93dde984a128471fcc79b70fdd8da45bf0))
+* **fs:** increase FUSE cache TTL from 1s to 10s ([a81316c](https://github.com/arcboxlabs/arcbox/commit/a81316c80d1315101431d1728aef7f6f08ffe152))
+* **net:** add unified timer wheel for flow timeout management ([02c82cd](https://github.com/arcboxlabs/arcbox/commit/02c82cd603ef653cadf67ef8c3b0e824f6a0ecc9))
+* **net:** increase smoltcp poll interval from 100ms to 250ms ([acda2f4](https://github.com/arcboxlabs/arcbox/commit/acda2f4b9ce35aa77818dbd22c54b6d9ce241e18))
+* **virtio:** enable concurrent FUSE request processing with rayon ([fcd6c3c](https://github.com/arcboxlabs/arcbox/commit/fcd6c3cae40e4decb091570ab99b908470b08eed))
+* **virtio:** implement EVENT_IDX and interrupt suppression in VirtQueue ([feb7d51](https://github.com/arcboxlabs/arcbox/commit/feb7d51cb4abc984e9e94ae4a1b9bf2e15d5895b))
+* **virtio:** implement TX/RX batch coalescing in virtio-net ([a5f3aa7](https://github.com/arcboxlabs/arcbox/commit/a5f3aa7a6cae260ddc523fdc0c1a5a618e881d4c))
+* **vmm:** add timer-based interrupt coalescing to IRQ manager ([a21201d](https://github.com/arcboxlabs/arcbox/commit/a21201dedc93b8f2312440f4ec05bdcdafb5d45c))
+
 ## [0.3.8](https://github.com/arcboxlabs/arcbox/compare/v0.3.7...v0.3.8) (2026-03-25)
 
 
