@@ -223,7 +223,7 @@ impl Default for VmLifecycleConfig {
 pub struct DefaultVmConfig {
     /// Number of vCPUs (default: host cores / 2, min: 2).
     pub cpus: u32,
-    /// Memory in MB (default: 2048).
+    /// Memory in MB (default: half of host RAM, clamped to 512–16384).
     pub memory_mb: u64,
     /// Disk size in GB (default: 50).
     pub disk_gb: u64,

@@ -451,7 +451,10 @@ mod tests {
     fn test_builder_defaults() {
         let builder = VmBuilder::new();
         assert_eq!(builder.cpus, 1);
-        assert_eq!(builder.memory_size, 512 * 1024 * 1024);
+        assert_eq!(
+            builder.memory_size,
+            arcbox_hypervisor::default_vm_memory_size()
+        );
     }
 
     #[test]
