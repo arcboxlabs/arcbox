@@ -48,6 +48,25 @@ impl NetworkDeviceConfiguration {
         Self::with_attachment(attachment, None)
     }
 
+    /// Creates a network device with file handle attachment and an explicit MAC
+    /// address.
+    ///
+    /// Use this when the VZ-side MAC must match an external interface (e.g.
+    /// vmnet) so that bridge FDB lookups resolve correctly.
+    pub fn file_handle_with_mac(fd: RawFd, mac_address: &str) -> VZResult<Self> {
+        let net_handle = file_handle_for_fd(fd);
+
+        if net_handle.is_null() {
+            return Err(VZError::Internal {
+                code: -1,
+                message: "Failed to create NSFileHandle for network fd".into(),
+            });
+        }
+
+        let attachment = create_file_handle_attachment(net_handle)?;
+        Self::with_attachment(attachment, Some(mac_address))
+    }
+
     /// Creates a network device with the given attachment.
     fn with_attachment(attachment: *mut AnyObject, mac_address: Option<&str>) -> VZResult<Self> {
         // SAFETY: ObjC new on valid VZVirtioNetworkDeviceConfiguration class. Result is checked non-null.
