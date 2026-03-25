@@ -3,6 +3,8 @@ mod common;
 use std::path::PathBuf;
 
 use arcbox_vm::config::SnapshotType;
+#[cfg(target_os = "linux")]
+use arcbox_vm::network::NetworkManager;
 use arcbox_vm::snapshot::SnapshotCatalog;
 
 // ---------------------------------------------------------------------------
@@ -108,4 +110,78 @@ fn network_ip_returns_to_pool_with_tap() {
         "TAP {} should be gone after final release",
         a2.tap_name
     );
+}
+
+// ---------------------------------------------------------------------------
+// Point-to-point TAP configuration (Linux, root only)
+// ---------------------------------------------------------------------------
+
+/// Each TAP gets a point-to-point IP with the gateway as local addr and
+/// the sandbox IP as peer.
+#[test]
+#[cfg(target_os = "linux")]
+fn tap_has_point_to_point_peer_address() {
+    if !common::is_root() {
+        eprintln!("SKIP tap_has_point_to_point_peer_address — requires root");
+        return;
+    }
+
+    let mgr = NetworkManager::new("", "10.0.12.0/28", "10.0.12.1", vec![]).unwrap();
+    let alloc = mgr.allocate("itg-ptp-1").unwrap();
+
+    // TAP should have the peer address configured.
+    let peer = common::get_peer_addr(&alloc.tap_name);
+    assert_eq!(
+        peer.as_deref(),
+        Some(&*alloc.ip_address.to_string()),
+        "TAP {} should have peer address {}",
+        alloc.tap_name,
+        alloc.ip_address
+    );
+
+    mgr.release(&alloc);
+}
+
+/// Multiple TAPs get isolated point-to-point links — each has its own /32
+/// route and there is no shared bridge interface.
+#[test]
+#[cfg(target_os = "linux")]
+fn multiple_taps_are_isolated() {
+    if !common::is_root() {
+        eprintln!("SKIP multiple_taps_are_isolated — requires root");
+        return;
+    }
+
+    let mgr = NetworkManager::new("", "10.0.13.0/28", "10.0.13.1", vec![]).unwrap();
+    let a1 = mgr.allocate("itg-iso-1").unwrap();
+    let a2 = mgr.allocate("itg-iso-2").unwrap();
+
+    // Both TAPs exist with different IPs.
+    assert!(common::iface_exists(&a1.tap_name));
+    assert!(common::iface_exists(&a2.tap_name));
+    assert_ne!(a1.ip_address, a2.ip_address);
+
+    // Each has its own peer and /32 route.
+    assert_eq!(
+        common::get_peer_addr(&a1.tap_name).as_deref(),
+        Some(&*a1.ip_address.to_string()),
+    );
+    assert_eq!(
+        common::get_peer_addr(&a2.tap_name).as_deref(),
+        Some(&*a2.ip_address.to_string()),
+    );
+
+    // Neither TAP is attached to a bridge (no "master" in ip link output).
+    let out1 = std::process::Command::new("ip")
+        .args(["link", "show", &a1.tap_name])
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&out1.stdout).contains("master"),
+        "TAP {} should not be attached to any bridge",
+        a1.tap_name
+    );
+
+    mgr.release(&a1);
+    mgr.release(&a2);
 }
