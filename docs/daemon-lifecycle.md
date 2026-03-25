@@ -180,5 +180,6 @@ descriptor, not the PID. Even if the kernel reuses a PID for an unrelated
 process, the new daemon detects that the lock is not held (because the
 original holder's fd was closed on exit) and proceeds immediately.
 
-This is the key advantage over PID-file-based detection, where a reused
-PID could cause the daemon to incorrectly signal an unrelated process.
+The CLI (`arcbox daemon status/stop/start`) also uses `flock` probing
+(`LOCK_EX | LOCK_NB`) rather than `kill(pid, 0)` for liveness detection.
+PID is only read from the lock file for SIGTERM delivery and display.
