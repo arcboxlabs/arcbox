@@ -105,8 +105,10 @@ pub async fn wait_for_resources(ctx: &DaemonContext) -> Result<()> {
         .await
         .context("resource wait task panicked")?;
 
-    ctx.setup_state
-        .set_phase(SetupPhase::Initializing, "Resources released");
+    ctx.setup_state.set_phase(
+        SetupPhase::Initializing,
+        "Finished waiting for resource release (see logs for details)",
+    );
     Ok(())
 }
 

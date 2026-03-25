@@ -117,13 +117,12 @@ fn seed_dir_recursive(src: &Path, dst: &Path, label: &str) {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let meta = std::fs::metadata(&d)?;
-                    if meta.permissions().mode() & 0o111 == 0 {
-                        // Source was executable, preserve it.
-                        let src_meta = std::fs::metadata(src.join(&rel))?;
-                        if src_meta.permissions().mode() & 0o111 != 0 {
-                            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755))?;
-                        }
+                    // Preserve source executable bits without broadening.
+                    let src_mode = std::fs::metadata(src.join(&rel))?.permissions().mode();
+                    if src_mode & 0o111 != 0 {
+                        let dst_mode = std::fs::metadata(&d)?.permissions().mode();
+                        let new_mode = (dst_mode & !0o111) | (src_mode & 0o111);
+                        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(new_mode))?;
                     }
                 }
                 count += 1;
