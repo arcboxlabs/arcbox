@@ -559,6 +559,17 @@ impl SocketProxy {
         self.udp.cleanup_stale_flows();
         self.inbound.cleanup();
     }
+
+    /// Expire a specific flow by address (called from timer wheel).
+    ///
+    /// This is the timer-wheel-driven counterpart to `maintenance()`.
+    /// Instead of scanning all flows, it targets a specific expired flow.
+    pub fn expire_flow(&mut self, _addr: std::net::SocketAddr) {
+        // TODO: Once UDP/ICMP flows are registered with the timer wheel,
+        // this will remove the specific flow by address. For now, the
+        // timer wheel is wired into the datapath loop but individual
+        // flow registration is not yet migrated from per-flow timeouts.
+    }
 }
 
 #[cfg(test)]
