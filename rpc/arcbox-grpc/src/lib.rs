@@ -54,6 +54,7 @@ pub mod v1 {
 ///
 /// Message types are imported from `arcbox_protocol::sandbox_v1`.
 pub mod sandbox_v1 {
+    #![allow(clippy::doc_markdown, clippy::too_long_first_doc_paragraph)]
     tonic::include_proto!("sandbox.v1");
 }
 

@@ -4,7 +4,7 @@ mod assets;
 mod cleanup;
 mod lock;
 
-pub(crate) use assets::find_bundle_contents;
+pub use assets::find_bundle_contents;
 pub use lock::DaemonLock;
 
 use std::path::PathBuf;
@@ -122,7 +122,7 @@ pub async fn wait_for_resources(_ctx: &DaemonContext) -> Result<()> {
 ///
 /// Called after gRPC SystemService is already listening so clients
 /// can observe DOWNLOADING_ASSETS → ASSETS_READY progression.
-pub async fn init_runtime(ctx: &mut DaemonContext) -> Result<()> {
+pub async fn init_runtime(ctx: &DaemonContext) -> Result<()> {
     let mut config = Config {
         data_dir: ctx.data_dir.clone(),
         ..Default::default()

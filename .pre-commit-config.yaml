@@ -10,7 +10,7 @@ repos:
 
       - id: rust-clippy
         name: Rust clippy check
-        entry: cargo clippy --workspace --exclude arcbox-agent
+        entry: cargo clippy --workspace --exclude arcbox-agent -- -D warnings
         language: system
         types: [rust]
         pass_filenames: false

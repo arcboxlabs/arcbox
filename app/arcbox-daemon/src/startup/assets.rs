@@ -12,7 +12,7 @@ use tracing::info;
 ///
 /// Layout: `ArcBox Desktop.app/Contents/Helpers/com.arcboxlabs.desktop.daemon`
 /// → returns `ArcBox Desktop.app/Contents/`
-pub(crate) fn find_bundle_contents() -> Option<PathBuf> {
+pub fn find_bundle_contents() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     // exe = .../Contents/Helpers/com.arcboxlabs.desktop.daemon
     let contents = exe.parent()?.parent()?;
@@ -104,7 +104,7 @@ fn seed_dir_files(src: &Path, dst: &Path, files: &[&str], label: &str) {
 fn seed_dir_recursive(src: &Path, dst: &Path, label: &str) {
     let result = (|| -> std::io::Result<u32> {
         let mut count = 0u32;
-        for entry in walkdir(src)? {
+        for entry in walkdir(src) {
             let (rel, is_dir) = entry?;
             let d = dst.join(&rel);
             if is_dir {
@@ -139,10 +139,10 @@ fn seed_dir_recursive(src: &Path, dst: &Path, label: &str) {
 }
 
 /// Simple recursive directory walker yielding `(relative_path, is_dir)`.
-fn walkdir(root: &Path) -> std::io::Result<impl Iterator<Item = std::io::Result<(PathBuf, bool)>>> {
+fn walkdir(root: &Path) -> impl Iterator<Item = std::io::Result<(PathBuf, bool)>> {
     let mut stack = vec![PathBuf::new()];
     let root = root.to_path_buf();
-    Ok(std::iter::from_fn(move || {
+    std::iter::from_fn(move || {
         while let Some(rel) = stack.pop() {
             let abs = root.join(&rel);
             let Ok(meta) = std::fs::metadata(&abs) else {
@@ -167,7 +167,7 @@ fn walkdir(root: &Path) -> std::io::Result<impl Iterator<Item = std::io::Result<
             }
         }
         None
-    }))
+    })
 }
 
 /// Downloads kernel and rootfs if not already cached. Sets the setup phase to

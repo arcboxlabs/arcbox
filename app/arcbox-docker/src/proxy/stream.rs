@@ -121,7 +121,7 @@ impl AsyncWrite for RawFdStream {
         // when `OwnedFd` is dropped, so the no-op is safe.
         #[cfg(target_os = "macos")]
         {
-            return Poll::Ready(Ok(()));
+            Poll::Ready(Ok(()))
         }
 
         #[cfg(not(target_os = "macos"))]

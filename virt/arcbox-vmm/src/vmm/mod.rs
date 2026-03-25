@@ -617,7 +617,7 @@ impl Vmm {
             // Poll event loop
             if let Some(ref mut event_loop) = self.event_loop {
                 if let Some(event) = event_loop.poll().await {
-                    self.handle_event(event)?;
+                    self.handle_event(event);
                 }
             }
 
@@ -630,12 +630,12 @@ impl Vmm {
     }
 
     /// Handles an event from the event loop.
-    fn handle_event(&mut self, event: crate::event::VmmEvent) -> Result<()> {
+    fn handle_event(&self, event: crate::event::VmmEvent) {
         use crate::event::VmmEvent;
 
         match event {
             VmmEvent::VcpuExit { vcpu_id, exit } => {
-                self.handle_vcpu_exit(vcpu_id, exit)?;
+                self.handle_vcpu_exit(vcpu_id, exit);
             }
             VmmEvent::DeviceIo {
                 device_id,
@@ -643,7 +643,7 @@ impl Vmm {
                 addr,
                 data,
             } => {
-                self.handle_device_io(device_id, is_read, addr, data)?;
+                self.handle_device_io(device_id, is_read, addr, data);
             }
             VmmEvent::Timer { id } => {
                 tracing::trace!("Timer {} fired", id);
@@ -654,15 +654,13 @@ impl Vmm {
                 self.running.store(false, Ordering::SeqCst);
             }
         }
-
-        Ok(())
     }
 
     /// Handles a vCPU exit event.
     ///
     /// This processes exits from the hypervisor such as I/O, MMIO, and special
     /// instructions that require VMM intervention.
-    fn handle_vcpu_exit(&mut self, vcpu_id: u32, exit: arcbox_hypervisor::VcpuExit) -> Result<()> {
+    fn handle_vcpu_exit(&self, vcpu_id: u32, exit: arcbox_hypervisor::VcpuExit) {
         use arcbox_hypervisor::VcpuExit;
 
         match exit {
@@ -680,12 +678,12 @@ impl Vmm {
                     size,
                     data
                 );
-                self.handle_io_out(port, size, data)?;
+                self.handle_io_out(port, size, data);
             }
 
             VcpuExit::IoIn { port, size } => {
                 tracing::trace!("vCPU {} I/O in: port={:#x}, size={}", vcpu_id, port, size);
-                let _value = self.handle_io_in(port, size)?;
+                let _value = self.handle_io_in(port, size);
                 // Note: The value would need to be written back to the vCPU,
                 // which requires access to the vCPU registers.
             }
@@ -728,7 +726,7 @@ impl Vmm {
             VcpuExit::Hypercall { nr, args } => {
                 tracing::debug!("vCPU {} hypercall: nr={}, args={:?}", vcpu_id, nr, args);
                 // Hypercall handling - used for paravirtualization
-                self.handle_hypercall(vcpu_id, nr, args)?;
+                self.handle_hypercall(vcpu_id, nr, args);
             }
 
             VcpuExit::SystemReset => {
@@ -746,22 +744,14 @@ impl Vmm {
                 tracing::warn!("vCPU {} unknown exit: {}", vcpu_id, code);
             }
 
-            _ => {
+            VcpuExit::Debug => {
                 tracing::debug!("vCPU {} unhandled exit: {:?}", vcpu_id, exit);
             }
         }
-
-        Ok(())
     }
 
     /// Handles device I/O events.
-    fn handle_device_io(
-        &mut self,
-        device_id: u32,
-        is_read: bool,
-        addr: u64,
-        data: Option<u64>,
-    ) -> Result<()> {
+    fn handle_device_io(&self, device_id: u32, is_read: bool, addr: u64, data: Option<u64>) {
         if let Some(ref device_manager) = self.device_manager {
             if is_read {
                 match device_manager.handle_mmio_read(addr, 4) {
@@ -778,11 +768,10 @@ impl Vmm {
                 }
             }
         }
-        Ok(())
     }
 
     /// Handles I/O port output.
-    fn handle_io_out(&self, port: u16, size: u8, data: u64) -> Result<()> {
+    fn handle_io_out(&self, port: u16, size: u8, data: u64) {
         match port {
             // Serial ports (COM1-COM4)
             0x3F8..=0x3FF => {
@@ -835,12 +824,11 @@ impl Vmm {
                 );
             }
         }
-        Ok(())
     }
 
     /// Handles I/O port input.
-    fn handle_io_in(&self, port: u16, size: u8) -> Result<u64> {
-        let value = match port {
+    fn handle_io_in(&self, port: u16, size: u8) -> u64 {
+        match port {
             // Serial ports - Line Status Register
             0x3FD => {
                 // LSR: Always report transmitter empty (0x60)
@@ -863,12 +851,11 @@ impl Vmm {
                 tracing::trace!("Unhandled I/O in: port={:#x}, size={}", port, size);
                 0xFF // Return all 1s for unhandled ports
             }
-        };
-        Ok(value)
+        }
     }
 
     /// Handles a hypercall from the guest.
-    fn handle_hypercall(&self, vcpu_id: u32, nr: u64, args: [u64; 6]) -> Result<()> {
+    fn handle_hypercall(&self, vcpu_id: u32, nr: u64, args: [u64; 6]) {
         // Common hypercall numbers (KVM convention):
         // 0: KVM_HC_VAPIC_POLL_IRQ
         // 1: KVM_HC_MMU_OP (deprecated)
@@ -905,7 +892,6 @@ impl Vmm {
                 );
             }
         }
-        Ok(())
     }
 }
 

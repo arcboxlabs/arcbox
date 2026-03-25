@@ -351,7 +351,7 @@ impl DarwinVm {
     }
 
     /// Non-blocking read of all available data from a serial port file descriptor.
-    fn read_serial_fd(read_fd: RawFd) -> Result<String, HypervisorError> {
+    fn read_serial_fd(read_fd: RawFd) -> String {
         // SAFETY: All fd operations use valid pipe fds from setup_serial_console().
         // Flags are saved and restored to avoid side effects.
         unsafe {
@@ -359,13 +359,13 @@ impl DarwinVm {
             if flags == -1 {
                 let errno = *libc::__error();
                 tracing::warn!("fcntl F_GETFL failed on fd {}: errno={}", read_fd, errno);
-                return Ok(String::new());
+                return String::new();
             }
 
             if libc::fcntl(read_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) == -1 {
                 let errno = *libc::__error();
                 tracing::warn!("fcntl F_SETFL failed on fd {}: errno={}", read_fd, errno);
-                return Ok(String::new());
+                return String::new();
             }
 
             let mut buffer = vec![0u8; 4096];
@@ -401,7 +401,7 @@ impl DarwinVm {
                     errno
                 );
             }
-            Ok(output)
+            output
         }
     }
 
@@ -410,7 +410,7 @@ impl DarwinVm {
         let (read_fd, _) = self
             .console_fds
             .ok_or_else(|| HypervisorError::DeviceError("Console not configured".to_string()))?;
-        Self::read_serial_fd(read_fd)
+        Ok(Self::read_serial_fd(read_fd))
     }
 
     /// Reads available agent log output (hvc1) from the guest.
@@ -418,7 +418,7 @@ impl DarwinVm {
         let (read_fd, _) = self.agent_log_fds.ok_or_else(|| {
             HypervisorError::DeviceError("Agent log port not configured".to_string())
         })?;
-        Self::read_serial_fd(read_fd)
+        Ok(Self::read_serial_fd(read_fd))
     }
 
     /// Writes input to the console (hvc0).

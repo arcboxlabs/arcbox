@@ -1091,16 +1091,10 @@ impl PassthroughFs {
             file_type: FileType::Directory,
         });
 
-        // For .., we need the parent inode
-        let parent_ino = if inode == Self::ROOT_INODE {
-            Self::ROOT_INODE
-        } else {
-            // Try to find parent, default to root
-            Self::ROOT_INODE
-        };
+        // For .., use root inode (parent tracking not yet implemented).
         entries.push(DirEntry {
             name: OsString::from(".."),
-            ino: parent_ino,
+            ino: Self::ROOT_INODE,
             file_type: FileType::Directory,
         });
 
@@ -1461,6 +1455,10 @@ impl PassthroughFs {
     }
 }
 
+// Internal counters and atomics (next_inode, next_handle, negative_cache, config)
+// are intentionally omitted from Debug — they are implementation details that
+// add noise without aiding diagnostics.
+#[allow(clippy::missing_fields_in_debug)]
 impl std::fmt::Debug for PassthroughFs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PassthroughFs")

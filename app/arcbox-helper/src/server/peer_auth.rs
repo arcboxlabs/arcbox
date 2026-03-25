@@ -11,9 +11,13 @@
 
 use std::os::unix::io::AsRawFd;
 
+// TODO: enable when peer verification is wired up
+#[allow(dead_code)]
 /// ArcBox Team ID (Apple Developer Portal).
 const TEAM_ID: &str = "422ACSY6Y5";
 
+// TODO: enable when peer verification is wired up
+#[allow(dead_code)]
 /// Bundle identifiers allowed to connect to the helper.
 const ALLOWED_IDENTIFIERS: &[&str] = &[
     "com.arcboxlabs.desktop.daemon",
@@ -54,6 +58,8 @@ fn verify_release(_stream: &tokio::net::UnixStream) -> bool {
 }
 
 /// Gets the PID of the peer process via `LOCAL_PEERPID`.
+// TODO: enable when peer verification is wired up
+#[allow(dead_code)]
 fn peer_pid(stream: &tokio::net::UnixStream) -> Option<i32> {
     let fd = stream.as_raw_fd();
     let mut pid: libc::pid_t = 0;

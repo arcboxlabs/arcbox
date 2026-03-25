@@ -230,7 +230,7 @@ fn spawn_background(args: &DaemonArgs) -> Result<()> {
 
     if daemon_is_alive(&lock_file) {
         let pid = read_lock_file(&lock_file)?;
-        let pid_str = pid.map_or("unknown".to_string(), |p| p.to_string());
+        let pid_str = pid.map_or_else(|| "unknown".to_string(), |p| p.to_string());
         bail!("Daemon already running (PID {pid_str})");
     }
 
@@ -363,7 +363,6 @@ fn daemon_is_alive(lock_file: &Path) -> bool {
         // Lock acquired — daemon is dead. Release immediately.
         // SAFETY: unlocking a lock we just acquired.
         unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
-        false
     } else {
         // EWOULDBLOCK or EAGAIN both mean "lock is held by another process".
         let err = std::io::Error::last_os_error();
@@ -372,8 +371,8 @@ fn daemon_is_alive(lock_file: &Path) -> bool {
             return true;
         }
         warn!(%err, "Unexpected flock error probing daemon lock, assuming not running");
-        false
     }
+    false
 }
 
 fn send_sigterm(pid: i32) -> Result<()> {

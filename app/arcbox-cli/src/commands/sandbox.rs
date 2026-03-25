@@ -492,7 +492,7 @@ async fn execute_exec(args: ExecArgs) -> Result<()> {
         .context("Failed to send exec init")?;
 
     // Enable raw terminal mode when TTY is requested.
-    let _raw_guard = if args.tty {
+    let raw_guard = if args.tty {
         Some(RawModeGuard::new()?)
     } else {
         None
@@ -561,7 +561,7 @@ async fn execute_exec(args: ExecArgs) -> Result<()> {
     }
 
     // Drop the raw mode guard before exiting so the terminal is restored.
-    drop(_raw_guard);
+    drop(raw_guard);
 
     if !received_done {
         anyhow::bail!("exec stream closed without a terminal status frame");

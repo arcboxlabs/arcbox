@@ -44,7 +44,7 @@ pub enum LogComponent {
 
 /// Execute the logs command.
 pub async fn execute(args: LogsArgs) -> Result<()> {
-    let log_path = resolve_log_path(&args)?;
+    let log_path = resolve_log_path(&args);
 
     if !log_path.exists() {
         bail!(
@@ -73,12 +73,12 @@ impl LogComponent {
     }
 }
 
-fn resolve_log_path(args: &LogsArgs) -> Result<PathBuf> {
+fn resolve_log_path(args: &LogsArgs) -> PathBuf {
     match args.component {
-        LogComponent::Helper => Ok(PathBuf::from(
-            arcbox_constants::paths::privileged_log::HELPER_LOG_DIR,
-        )
-        .join(arcbox_constants::paths::privileged_log::HELPER_LOG)),
+        LogComponent::Helper => {
+            PathBuf::from(arcbox_constants::paths::privileged_log::HELPER_LOG_DIR)
+                .join(arcbox_constants::paths::privileged_log::HELPER_LOG)
+        }
         _ => {
             let data_dir = resolve_data_dir(args.data_dir.as_ref());
             let log_dir = data_dir.join(arcbox_constants::paths::host::LOG);
@@ -89,7 +89,7 @@ fn resolve_log_path(args: &LogsArgs) -> Result<PathBuf> {
                 LogComponent::Containerd => "containerd.log",
                 LogComponent::Helper => unreachable!(),
             };
-            Ok(log_dir.join(file_name))
+            log_dir.join(file_name)
         }
     }
 }
