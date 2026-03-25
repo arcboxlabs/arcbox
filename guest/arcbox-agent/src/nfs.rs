@@ -52,36 +52,75 @@ mod platform {
         let cfg = ExportConfig::default();
         let mut notes = Vec::new();
 
-        fs::create_dir_all(cfg.export_root)
-            .map_err(|e| format!("mkdir {} failed({})", cfg.export_root, e))?;
+        tracing::info!(
+            var_fstype = mounted_fstype("/var").as_deref().unwrap_or("unmounted"),
+            etc_fstype = mounted_fstype("/etc").as_deref().unwrap_or("unmounted"),
+            export_fstype = mounted_fstype(cfg.export_root)
+                .as_deref()
+                .unwrap_or("unmounted"),
+            var_lib_nfs_fstype = mounted_fstype(NFS_STATE_DIR)
+                .as_deref()
+                .unwrap_or("unmounted"),
+            "nfs export: mount state before setup"
+        );
+
+        tracing::info!("nfs export: ensuring writable export root");
+        ensure_export_root_tmpfs(cfg.export_root)?;
         fs::create_dir_all(cfg.export_docker)
             .map_err(|e| format!("mkdir {} failed({})", cfg.export_docker, e))?;
         fs::create_dir_all(NFS_STATE_DIR)
             .map_err(|e| format!("mkdir {} failed({})", NFS_STATE_DIR, e))?;
 
+        tracing::info!("nfs export: ensuring nfsd pseudo-fs");
         ensure_nfsd_mount()?;
 
         if !is_mounted(cfg.export_docker) {
+            tracing::info!(
+                source = DOCKER_DATA_MOUNT_POINT,
+                target = cfg.export_docker,
+                "nfs export: binding docker data mount"
+            );
             bind_readonly(DOCKER_DATA_MOUNT_POINT, cfg.export_docker)?;
             notes.push(format!(
                 "bound {} -> {} (ro)",
                 DOCKER_DATA_MOUNT_POINT, cfg.export_docker
             ));
+        } else {
+            tracing::info!(
+                target = cfg.export_docker,
+                "nfs export: docker bind mount already present"
+            );
         }
 
+        tracing::info!("nfs export: writing exports and nfs.conf");
         write_exports(&cfg).map_err(|e| format!("write {} failed({})", cfg.exports_path, e))?;
         write_nfs_conf(&cfg).map_err(|e| format!("write {} failed({})", cfg.nfs_conf_path, e))?;
 
         if !mountd_running() {
+            tracing::info!("nfs export: starting rpc.mountd");
             spawn_mountd()?;
             notes.push("spawned rpc.mountd".to_string());
+        } else {
+            tracing::info!("nfs export: rpc.mountd already running");
         }
 
+        tracing::info!("nfs export: refreshing export table");
+        refresh_exports()?;
+        notes.push("refreshed exportfs".to_string());
+
+        tracing::info!(
+            threads = cfg.threads,
+            "nfs export: ensuring rpc.nfsd threads"
+        );
         ensure_nfsd_threads(&cfg)?;
         notes.push(format!("ensured rpc.nfsd threads={}", cfg.threads));
 
-        refresh_exports()?;
-        notes.push("refreshed exportfs".to_string());
+        tracing::info!(
+            export_ready = export_ready(),
+            mountd_ready = mountd_ready(),
+            nfsd_ready = nfsd_ready(),
+            "nfs export: ensure complete"
+        );
 
         Ok(notes)
     }
@@ -114,6 +153,10 @@ mod platform {
 
     fn ensure_nfsd_mount() -> Result<(), String> {
         if is_mounted(NFSD_MOUNTPOINT) {
+            tracing::info!(
+                target = NFSD_MOUNTPOINT,
+                "nfs export: nfsd pseudo-fs already mounted"
+            );
             return Ok(());
         }
 
@@ -126,7 +169,40 @@ mod platform {
             MsFlags::empty(),
             None::<&str>,
         )
-        .map_err(|e| format!("mount -t nfsd {} failed({})", NFSD_MOUNTPOINT, e))
+        .map_err(|e| format!("mount -t nfsd {} failed({})", NFSD_MOUNTPOINT, e))?;
+        tracing::info!(
+            target = NFSD_MOUNTPOINT,
+            "nfs export: mounted nfsd pseudo-fs"
+        );
+        Ok(())
+    }
+
+    fn ensure_export_root_tmpfs(target: &str) -> Result<(), String> {
+        match mounted_fstype(target).as_deref() {
+            Some("tmpfs") => {
+                tracing::info!(target, "nfs export: export root already mounted as tmpfs");
+                return Ok(());
+            }
+            Some(fstype) => {
+                return Err(format!(
+                    "unexpected filesystem mounted at {}: {}",
+                    target, fstype
+                ));
+            }
+            None => {}
+        }
+
+        fs::create_dir_all(target).map_err(|e| format!("mkdir {} failed({})", target, e))?;
+        mount(
+            Some("tmpfs"),
+            target,
+            Some("tmpfs"),
+            MsFlags::MS_NODEV | MsFlags::MS_NOSUID,
+            Some("mode=0755"),
+        )
+        .map_err(|e| format!("mount -t tmpfs {} failed({})", target, e))?;
+        tracing::info!(target, "nfs export: mounted tmpfs export root");
+        Ok(())
     }
 
     fn bind_readonly(source: &str, target: &str) -> Result<(), String> {
@@ -158,17 +234,19 @@ mod platform {
     }
 
     fn refresh_exports() -> Result<(), String> {
-        let status = Command::new("/sbin/exportfs")
+        let output = Command::new("/sbin/exportfs")
             .args(["-ra"])
-            .status()
+            .output()
             .map_err(|e| format!("failed to execute exportfs: {e}"))?;
 
-        if status.success() {
+        if output.status.success() {
             Ok(())
         } else {
             Err(format!(
-                "exportfs -ra exited with {}",
-                status.code().unwrap_or(-1)
+                "exportfs -ra exited with {} stderr='{}' stdout='{}'",
+                output.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&output.stderr).trim(),
+                String::from_utf8_lossy(&output.stdout).trim()
             ))
         }
     }
@@ -181,25 +259,29 @@ mod platform {
             .stdout(daemon_log_file("rpc.mountd"))
             .stderr(daemon_log_file("rpc.mountd"));
 
-        cmd.spawn()
-            .map(|_| ())
-            .map_err(|e| format!("failed to spawn rpc.mountd: {e}"))
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("failed to spawn rpc.mountd: {e}"))?;
+        tracing::info!(pid = child.id(), "nfs export: rpc.mountd spawned");
+        Ok(())
     }
 
     fn ensure_nfsd_threads(cfg: &ExportConfig<'_>) -> Result<(), String> {
-        let status = Command::new("/sbin/rpc.nfsd")
+        let output = Command::new("/sbin/rpc.nfsd")
             .args([cfg.threads])
             .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
-            .status()
+            .output()
             .map_err(|e| format!("failed to execute rpc.nfsd: {e}"))?;
 
-        if status.success() {
+        if output.status.success() {
             Ok(())
         } else {
             Err(format!(
-                "rpc.nfsd {} exited with {}",
+                "rpc.nfsd {} exited with {} stderr='{}' stdout='{}'",
                 cfg.threads,
-                status.code().unwrap_or(-1)
+                output.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&output.stderr).trim(),
+                String::from_utf8_lossy(&output.stdout).trim()
             ))
         }
     }
@@ -246,10 +328,19 @@ mod platform {
     }
 
     fn is_mounted(path: &str) -> bool {
-        fs::read_to_string("/proc/mounts").is_ok_and(|content| {
-            content.lines().any(|line| {
+        mounted_fstype(path).is_some()
+    }
+
+    fn mounted_fstype(path: &str) -> Option<String> {
+        fs::read_to_string("/proc/mounts").ok().and_then(|content| {
+            content.lines().find_map(|line| {
                 let parts: Vec<&str> = line.split_whitespace().collect();
-                parts.get(1).is_some_and(|&mountpoint| mountpoint == path)
+                match (parts.get(1), parts.get(2)) {
+                    (Some(&mountpoint), Some(&fstype)) if mountpoint == path => {
+                        Some(fstype.to_string())
+                    }
+                    _ => None,
+                }
             })
         })
     }
