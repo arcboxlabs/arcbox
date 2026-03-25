@@ -422,7 +422,7 @@ impl MachineManager {
     ///
     /// Polls the agent via vsock with exponential backoff. Once the agent
     /// responds, queries `SystemInfo` to get the guest IP.
-    async fn wait_for_machine_ready(&self, name: &str) -> Result<()> {
+    pub async fn wait_for_machine_ready(&self, name: &str) -> Result<()> {
         const MAX_ATTEMPTS: u32 = 20;
         const INITIAL_DELAY_MS: u64 = 500;
         const MAX_DELAY_MS: u64 = 3000;

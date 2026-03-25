@@ -635,6 +635,12 @@ impl VmLifecycleManager {
         // Wait for agent to be ready
         self.wait_for_agent(timeout).await?;
 
+        // Persist the default VM's routable IP so daemon integrations can
+        // consume machine metadata instead of rediscovering it ad hoc.
+        self.machine_manager
+            .wait_for_machine_ready(DEFAULT_MACHINE_NAME)
+            .await?;
+
         // Reset recovery counter on success
         self.recovery.reset();
         self.health_monitor.reset();

@@ -150,32 +150,34 @@ async fn wait_for_guest_nfs_ready(
             .and_then(|machine| machine.ip_address)
             .filter(|ip| !ip.is_empty());
 
-        match (guest_ip, runtime.get_agent(DEFAULT_MACHINE_NAME)) {
-            (Some(guest_ip), Ok(mut agent)) => {
-                match agent.ensure_runtime(true).await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        last_error = format!("EnsureRuntime failed: {e}");
-                        tokio::time::sleep(MOUNT_RETRY_INTERVAL).await;
-                        continue;
+        match guest_ip {
+            Some(guest_ip) => match runtime.get_agent(DEFAULT_MACHINE_NAME) {
+                Ok(mut agent) => {
+                    match agent.ensure_runtime(true).await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            last_error = format!("EnsureRuntime failed: {e}");
+                            tokio::time::sleep(MOUNT_RETRY_INTERVAL).await;
+                            continue;
+                        }
                     }
-                }
 
-                match agent.get_runtime_status().await {
-                    Ok(status) if nfs_services_ready(&status.services) => return Ok(guest_ip),
-                    Ok(status) => {
-                        last_error = format!("guest NFS services not ready: {}", status.detail);
-                    }
-                    Err(e) => {
-                        last_error = format!("GetRuntimeStatus failed: {e}");
+                    match agent.get_runtime_status().await {
+                        Ok(status) if nfs_services_ready(&status.services) => return Ok(guest_ip),
+                        Ok(status) => {
+                            last_error = format!("guest NFS services not ready: {}", status.detail);
+                        }
+                        Err(e) => {
+                            last_error = format!("GetRuntimeStatus failed: {e}");
+                        }
                     }
                 }
-            }
-            (None, _) => {
+                Err(e) => {
+                    last_error = format!("failed to connect to guest agent: {e}");
+                }
+            },
+            None => {
                 last_error = "default machine has no routable IP yet".to_string();
-            }
-            (_, Err(e)) => {
-                last_error = format!("failed to connect to guest agent: {e}");
             }
         }
 
