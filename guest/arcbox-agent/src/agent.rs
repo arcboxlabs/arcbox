@@ -1440,7 +1440,18 @@ mod linux {
             Err(e) => return format!("data volume setup failed: {}", e),
         }
         match crate::nfs::ensure_docker_export() {
-            Ok(export_notes) => notes.extend(export_notes),
+            Ok(export_notes) => {
+                notes.extend(export_notes);
+                // Spawn the NFS vsock relay once nfsd is running. The relay
+                // lives for the agent's lifetime; OnceLock ensures it's only
+                // started on the first successful EnsureRuntime call.
+                static NFS_RELAY_STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+                NFS_RELAY_STARTED.get_or_init(|| {
+                    let cancel = tokio_util::sync::CancellationToken::new();
+                    tokio::spawn(crate::nfs::run_nfs_relay(cancel));
+                    notes.push("spawned NFS vsock relay".to_string());
+                });
+            }
             Err(e) => notes.push(format!("nfs export setup failed({})", e)),
         }
 

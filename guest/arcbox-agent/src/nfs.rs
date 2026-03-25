@@ -337,3 +337,58 @@ mod platform {
 pub use platform::{
     ensure_docker_export, export_ready, export_root, mountd_ready, nfsd_ready, port, service_names,
 };
+
+/// Vsock-to-TCP relay for NFS.
+///
+/// Accepts vsock connections on [`arcbox_constants::ports::NFS_RELAY_PORT`] and
+/// relays each bidirectionally to the local nfsd at `127.0.0.1:2049`. This
+/// allows the host daemon to reach guest nfsd via vsock, bypassing the bridge
+/// NIC entirely.
+#[cfg(target_os = "linux")]
+pub async fn run_nfs_relay(cancel: tokio_util::sync::CancellationToken) {
+    use tokio::io::copy_bidirectional;
+    use tokio::net::TcpStream;
+    use tokio_vsock::{VMADDR_CID_ANY, VsockAddr, VsockListener};
+
+    let port = arcbox_constants::ports::NFS_RELAY_PORT;
+    let addr = VsockAddr::new(VMADDR_CID_ANY, port);
+    let mut listener = match VsockListener::bind(addr) {
+        Ok(l) => {
+            tracing::info!(port, "NFS vsock relay listening");
+            l
+        }
+        Err(e) => {
+            tracing::error!(port, error = %e, "failed to bind NFS vsock relay");
+            return;
+        }
+    };
+
+    loop {
+        let stream = tokio::select! {
+            biased;
+            () = cancel.cancelled() => {
+                tracing::info!("NFS vsock relay shutting down");
+                return;
+            }
+            result = listener.accept() => match result {
+                Ok((stream, _)) => stream,
+                Err(e) => {
+                    tracing::warn!(error = %e, "NFS vsock relay accept failed");
+                    continue;
+                }
+            }
+        };
+
+        tokio::spawn(async move {
+            match TcpStream::connect("127.0.0.1:2049").await {
+                Ok(mut tcp) => {
+                    let mut vsock = stream;
+                    let _ = copy_bidirectional(&mut vsock, &mut tcp).await;
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "NFS relay: failed to connect to local nfsd");
+                }
+            }
+        });
+    }
+}
