@@ -688,7 +688,13 @@ impl VirtioNet {
         Ok(())
     }
 
+    /// Maximum number of packets to receive in a single `poll_backend_batch` call.
+    const DEFAULT_RX_BATCH_SIZE: usize = 64;
+
     /// Processes the TX queue.
+    ///
+    /// Collects all pending TX descriptors and sends them. Returns completions
+    /// for batch notification via `push_used_batch()`.
     ///
     /// # Errors
     ///
@@ -742,12 +748,27 @@ impl VirtioNet {
     ///
     /// Returns an error if polling fails.
     pub fn poll_backend(&mut self) -> Result<()> {
+        self.poll_backend_batch(usize::MAX).map(|_| ())
+    }
+
+    /// Polls the backend for up to `max_batch` incoming packets.
+    ///
+    /// Returns the number of packets received. Use this instead of
+    /// `poll_backend()` to limit per-iteration work and ensure fairness
+    /// with other select! arms.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if polling fails.
+    pub fn poll_backend_batch(&mut self, max_batch: usize) -> Result<usize> {
+        let mut received = 0;
+
         if let Some(backend) = &self.backend {
             let mut backend = backend
                 .lock()
                 .map_err(|e| VirtioError::Io(format!("Failed to lock backend: {e}")))?;
 
-            while backend.has_data() {
+            while received < max_batch && backend.has_data() {
                 let mut buf = vec![0u8; 65536];
                 let n = backend
                     .recv(&mut buf)
@@ -759,11 +780,61 @@ impl VirtioNet {
                     self.rx_packets += 1;
                     self.rx_bytes += n as u64;
                     self.rx_buffer.push_back(packet);
+                    received += 1;
+                } else {
+                    break;
                 }
             }
         }
 
-        Ok(())
+        Ok(received)
+    }
+
+    /// Inject packets from `rx_buffer` into the guest RX virtqueue.
+    ///
+    /// Drains as many packets as possible from the buffer into guest-provided
+    /// descriptors. Returns completions for batch notification.
+    /// TODO(ABX-208): Caller should use `push_used_batch()` for single interrupt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the RX queue is not ready.
+    pub fn inject_rx_batch(&mut self, memory: &mut [u8]) -> Result<Vec<(u16, u32)>> {
+        let queue = self
+            .rx_queue
+            .as_mut()
+            .ok_or_else(|| VirtioError::NotReady("RX queue not ready".into()))?;
+
+        let mut completions = Vec::new();
+
+        while let Some(packet) = self.rx_buffer.pop_front() {
+            match queue.pop_avail() {
+                Some((head_idx, chain)) => {
+                    let mut written = 0usize;
+                    for desc in chain {
+                        if desc.is_write_only() {
+                            let start = desc.addr as usize;
+                            let remaining = packet.data.len().saturating_sub(written);
+                            let to_write = remaining.min(desc.len as usize);
+                            let end = start + to_write;
+                            if end <= memory.len() && to_write > 0 {
+                                memory[start..end]
+                                    .copy_from_slice(&packet.data[written..written + to_write]);
+                                written += to_write;
+                            }
+                        }
+                    }
+                    completions.push((head_idx, written as u32));
+                }
+                None => {
+                    // No guest buffers available — push packet back
+                    self.rx_buffer.push_front(packet);
+                    break;
+                }
+            }
+        }
+
+        Ok(completions)
     }
 }
 
