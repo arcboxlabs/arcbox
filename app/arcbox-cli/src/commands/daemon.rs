@@ -345,8 +345,12 @@ fn read_lock_file(lock_file: &Path) -> Result<Option<i32>> {
         return Ok(None);
     }
 
-    let pid_text = std::fs::read_to_string(lock_file)
-        .with_context(|| format!("Failed to read daemon lock file from {}", lock_file.display()))?;
+    let pid_text = std::fs::read_to_string(lock_file).with_context(|| {
+        format!(
+            "Failed to read daemon lock file from {}",
+            lock_file.display()
+        )
+    })?;
 
     match pid_text.trim().parse::<i32>() {
         Ok(pid) if pid > 0 => Ok(Some(pid)),
