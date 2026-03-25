@@ -15,10 +15,12 @@ pub mod ensure_runtime {
 
     pub use arcbox_constants::status::{
         RUNTIME_FAILED as STATUS_FAILED, RUNTIME_REUSED as STATUS_REUSED,
-        RUNTIME_STARTED as STATUS_STARTED,
     };
     use arcbox_protocol::agent::RuntimeEnsureResponse;
     use tokio::sync::{Mutex, Notify};
+
+    #[cfg(test)]
+    pub const STATUS_STARTED: &str = arcbox_constants::status::RUNTIME_STARTED;
 
     /// Runtime lifecycle state.
     #[derive(Debug, Clone)]
@@ -175,7 +177,6 @@ pub mod ensure_runtime {
                     // Release lock before waiting.
                     drop(state);
                     notified.await;
-                    continue;
                 }
                 RuntimeState::NotStarted => {
                     // Should not happen, but treat as failed.
@@ -1095,6 +1096,54 @@ mod linux {
             detail: docker_detail,
         });
 
+        let (export_service_name, mountd_service_name, nfsd_service_name) =
+            crate::nfs::service_names();
+        let export_ready = crate::nfs::export_ready();
+        let mountd_ready = crate::nfs::mountd_ready();
+        let nfsd_ready = crate::nfs::nfsd_ready();
+
+        services.push(ServiceStatus {
+            name: export_service_name.to_string(),
+            status: if export_ready {
+                SERVICE_READY.to_string()
+            } else {
+                SERVICE_NOT_READY.to_string()
+            },
+            detail: if export_ready {
+                format!("bind-mounted: {}/docker", crate::nfs::export_root())
+            } else {
+                format!("bind mount missing: {}/docker", crate::nfs::export_root())
+            },
+        });
+
+        services.push(ServiceStatus {
+            name: mountd_service_name.to_string(),
+            status: if mountd_ready {
+                SERVICE_READY.to_string()
+            } else {
+                SERVICE_NOT_READY.to_string()
+            },
+            detail: if mountd_ready {
+                "rpc.mountd running".to_string()
+            } else {
+                "rpc.mountd not running".to_string()
+            },
+        });
+
+        services.push(ServiceStatus {
+            name: nfsd_service_name.to_string(),
+            status: if nfsd_ready {
+                SERVICE_READY.to_string()
+            } else {
+                SERVICE_NOT_READY.to_string()
+            },
+            detail: if nfsd_ready {
+                format!("NFSv4 listener ready on tcp/{}", crate::nfs::port())
+            } else {
+                format!("NFSv4 listener not ready on tcp/{}", crate::nfs::port())
+            },
+        });
+
         // Build the summary detail string.
         let detail = if docker_ready {
             "docker socket ready".to_string()
@@ -1364,9 +1413,7 @@ mod linux {
     async fn try_start_bundled_runtime() -> String {
         let _guard = runtime_start_lock().lock().await;
 
-        if probe_unix_socket(DOCKER_API_UNIX_SOCKET).await {
-            return "docker socket already ready".to_string();
-        }
+        let docker_already_ready = probe_unix_socket(DOCKER_API_UNIX_SOCKET).await;
 
         let Some(runtime_bin_dir) = detect_runtime_bin_dir() else {
             return runtime_missing_detail();
@@ -1390,6 +1437,15 @@ mod linux {
         match ensure_data_mount() {
             Ok(note) => notes.push(note),
             Err(e) => return format!("data volume setup failed: {}", e),
+        }
+        match crate::nfs::ensure_docker_export() {
+            Ok(export_notes) => notes.extend(export_notes),
+            Err(e) => notes.push(format!("nfs export setup failed({})", e)),
+        }
+
+        if docker_already_ready {
+            notes.push("docker socket already ready".to_string());
+            return notes.join("; ");
         }
 
         for dir in ["/run/containerd", "/var/run/docker", "/etc/docker"] {
@@ -1760,7 +1816,7 @@ mod tests {
         let line = r#"{"log":"","stream":"stdout","time":"2024-01-08T12:00:00Z"}"#;
 
         let result = parse_docker_log_line(line, true, false);
-        assert_eq!(result, Some("".to_string()));
+        assert_eq!(result, Some(String::new()));
     }
 
     #[test]

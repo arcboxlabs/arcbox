@@ -22,6 +22,8 @@ mod rpc;
 // Mount module uses Linux-specific syscalls (mount/umount).
 #[cfg(target_os = "linux")]
 mod mount;
+#[cfg(target_os = "linux")]
+mod nfs;
 
 // VMM config loading and sandbox service are Linux-only.
 #[cfg(target_os = "linux")]
