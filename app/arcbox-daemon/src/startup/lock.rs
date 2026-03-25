@@ -59,10 +59,17 @@ impl DaemonLock {
             info!("Daemon lock acquired after stale daemon exited");
         }
 
-        // Write our PID into the lock file.
-        file.set_len(0).ok();
-        file.seek(std::io::SeekFrom::Start(0)).ok();
-        write!(file, "{}\n", std::process::id()).ok();
+        // Write our PID into the lock file. Non-critical — the flock is
+        // the source of truth, PID is for diagnostics only.
+        if let Err(e) = file.set_len(0) {
+            warn!(%e, "Failed to truncate daemon.lock");
+        }
+        if let Err(e) = file.seek(std::io::SeekFrom::Start(0)) {
+            warn!(%e, "Failed to seek daemon.lock");
+        }
+        if let Err(e) = write!(file, "{}\n", std::process::id()) {
+            warn!(%e, "Failed to write PID to daemon.lock");
+        }
 
         Ok(Self { _file: file })
     }
@@ -76,12 +83,21 @@ fn read_pid_from_file(file: &mut std::fs::File) -> Option<i32> {
     buf.trim().parse().ok()
 }
 
-/// Non-blocking `LOCK_EX`. Returns `true` if the lock was acquired.
+/// Non-blocking `LOCK_EX`. Returns `true` if the lock was acquired,
+/// `false` if held by another process (EWOULDBLOCK). Other errors
+/// (e.g. EINTR) are logged and treated as "held" to be safe.
 fn try_flock_exclusive(file: &std::fs::File) -> bool {
     use std::os::unix::io::AsRawFd;
     // SAFETY: flock on a valid fd with LOCK_EX|LOCK_NB is safe.
     let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    ret == 0
+    if ret == 0 {
+        return true;
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
+        warn!(%err, "Unexpected flock error, assuming lock is held");
+    }
+    false
 }
 
 /// Blocking `LOCK_EX`.

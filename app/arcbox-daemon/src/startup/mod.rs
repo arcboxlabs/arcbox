@@ -67,9 +67,11 @@ pub async fn init_early(args: DaemonArgs) -> Result<DaemonContext> {
 
 /// Acquire the daemon lock, terminating any stale daemon.
 ///
-/// Fast when no stale daemon exists. Blocks up to ~30 s if a stale
-/// daemon needs to be terminated. Must run before `start_grpc` because
-/// the old daemon may still be listening on the same socket paths.
+/// Fast when no stale daemon exists. If a stale daemon holds the lock,
+/// sends SIGTERM (with 30 s grace period and SIGKILL fallback), then
+/// blocks on `flock(LOCK_EX)` until the lock is released. Must run
+/// before `start_grpc` because the old daemon may still be listening
+/// on the same socket paths.
 pub async fn acquire_lock(ctx: &mut DaemonContext) -> Result<()> {
     let run_dir = ctx.data_dir.join(arcbox_constants::paths::host::RUN);
     let lock = tokio::task::spawn_blocking(move || DaemonLock::acquire(&run_dir))
@@ -82,9 +84,12 @@ pub async fn acquire_lock(ctx: &mut DaemonContext) -> Result<()> {
 
 /// Wait for residual resource holders (e.g. docker.img) to release.
 ///
-/// Must complete before [`init_runtime`] — orphaned
+/// Must complete before [`init_runtime`] — on macOS, orphaned
 /// Virtualization.framework XPC helpers may still hold the disk image.
 /// Reports the `CleaningUp` phase so gRPC clients can show progress.
+///
+/// On non-macOS this is a no-op (no XPC helpers).
+#[cfg(target_os = "macos")]
 pub async fn wait_for_resources(ctx: &DaemonContext) -> Result<()> {
     let data_subdir = ctx.data_dir.join(arcbox_constants::paths::host::DATA);
     let docker_img = data_subdir.join("docker.img");
@@ -102,6 +107,12 @@ pub async fn wait_for_resources(ctx: &DaemonContext) -> Result<()> {
 
     ctx.setup_state
         .set_phase(SetupPhase::Initializing, "Resources released");
+    Ok(())
+}
+
+/// No-op on non-macOS — no Virtualization.framework XPC helpers.
+#[cfg(not(target_os = "macos"))]
+pub async fn wait_for_resources(_ctx: &DaemonContext) -> Result<()> {
     Ok(())
 }
 
