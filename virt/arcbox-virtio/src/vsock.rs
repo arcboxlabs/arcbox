@@ -59,7 +59,7 @@ impl VirtioVsock {
     pub fn new(config: VsockConfig) -> Self {
         Self {
             config,
-            features: Self::FEATURE_STREAM,
+            features: Self::FEATURE_STREAM | crate::queue::VIRTIO_F_EVENT_IDX,
             acked_features: 0,
             backend: None,
             connections: RwLock::new(HashMap::new()),
@@ -71,7 +71,7 @@ impl VirtioVsock {
     pub fn with_backend<B: VsockBackend + 'static>(config: VsockConfig, backend: B) -> Self {
         Self {
             config,
-            features: Self::FEATURE_STREAM,
+            features: Self::FEATURE_STREAM | crate::queue::VIRTIO_F_EVENT_IDX,
             acked_features: 0,
             backend: Some(Arc::new(Mutex::new(backend))),
             connections: RwLock::new(HashMap::new()),

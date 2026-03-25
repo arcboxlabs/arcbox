@@ -332,8 +332,8 @@ fn test_fs_device_full_lifecycle() {
     assert_eq!(fs.tag(), "myshare");
     assert_eq!(fs.shared_dir(), "/tmp/shared");
 
-    // Features (none by default)
-    assert_eq!(fs.features(), 0);
+    // Features: EVENT_IDX is always advertised
+    assert_ne!(fs.features(), 0);
 
     // Activate
     fs.activate().unwrap();

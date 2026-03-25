@@ -588,7 +588,8 @@ impl VirtioNet {
             | Self::FEATURE_STATUS
             | Self::FEATURE_CSUM
             | Self::FEATURE_GUEST_CSUM
-            | Self::FEATURE_VERSION_1;
+            | Self::FEATURE_VERSION_1
+            | crate::queue::VIRTIO_F_EVENT_IDX;
 
         Self {
             config,
@@ -803,9 +804,14 @@ impl VirtioDevice for VirtioNet {
     }
 
     fn activate(&mut self) -> Result<()> {
-        // Create queues
-        self.rx_queue = Some(VirtQueue::new(256)?);
-        self.tx_queue = Some(VirtQueue::new(256)?);
+        let event_idx = (self.acked_features & crate::queue::VIRTIO_F_EVENT_IDX) != 0;
+
+        let mut rx = VirtQueue::new(256)?;
+        let mut tx = VirtQueue::new(256)?;
+        rx.set_event_idx(event_idx);
+        tx.set_event_idx(event_idx);
+        self.rx_queue = Some(rx);
+        self.tx_queue = Some(tx);
 
         tracing::info!(
             "VirtIO net activated: MAC={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, MTU={}",
