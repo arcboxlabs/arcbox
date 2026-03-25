@@ -10,20 +10,17 @@
 //!   → guest relay → 127.0.0.1:2049 (nfsd)
 //! ```
 
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::process::Command;
 use std::sync::Arc;
-use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
 use arcbox_constants::ports::NFS_RELAY_PORT;
 use arcbox_core::{DEFAULT_MACHINE_NAME, Runtime};
 use arcbox_protocol::agent::ServiceStatus;
-use tokio::io::unix::AsyncFd;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, copy_bidirectional};
+use tokio::io::copy_bidirectional;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -174,7 +171,7 @@ async fn run_proxy(listener: TcpListener, runtime: Arc<Runtime>, shutdown: Cance
         let runtime = Arc::clone(&runtime);
         tokio::spawn(async move {
             if let Err(e) = relay_connection(stream, &runtime).await {
-                debug!(error = %e, "NFS proxy connection ended");
+                warn!(error = %e, "NFS proxy relay failed");
             }
         });
     }
@@ -185,14 +182,19 @@ async fn relay_connection(mut tcp: tokio::net::TcpStream, runtime: &Runtime) -> 
     let name = DEFAULT_MACHINE_NAME.to_string();
     let manager = runtime.machine_manager().clone();
 
+    debug!("NFS proxy: connecting vsock to guest port {NFS_RELAY_PORT}");
     let fd = tokio::task::spawn_blocking(move || manager.connect_vsock_port(&name, NFS_RELAY_PORT))
         .await??;
 
+    info!("NFS proxy: vsock connected, relaying");
     // SAFETY: fd is a valid, newly-opened vsock file descriptor.
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-    let mut vsock = VsockStream::new(owned)?;
+    let mut vsock = arcbox_docker::proxy::RawFdStream::new(owned)?;
 
-    let _ = copy_bidirectional(&mut tcp, &mut vsock).await;
+    match copy_bidirectional(&mut tcp, &mut vsock).await {
+        Ok((tx, rx)) => debug!(tx, rx, "NFS proxy: relay finished"),
+        Err(e) => debug!(error = %e, "NFS proxy: relay error"),
+    }
     Ok(())
 }
 
@@ -307,99 +309,6 @@ fn unmount(path: &Path) -> Result<()> {
         Ok(())
     } else {
         bail!("umount exited with {}", status.code().unwrap_or(-1))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Async wrapper for vsock raw file descriptors
-// ---------------------------------------------------------------------------
-
-struct FdWrapper(OwnedFd);
-
-impl AsRawFd for FdWrapper {
-    fn as_raw_fd(&self) -> RawFd {
-        self.0.as_raw_fd()
-    }
-}
-
-/// Minimal async stream over a raw vsock file descriptor.
-struct VsockStream {
-    inner: AsyncFd<FdWrapper>,
-}
-
-impl VsockStream {
-    fn new(fd: OwnedFd) -> std::io::Result<Self> {
-        // SAFETY: F_GETFL/F_SETFL on a valid fd.
-        unsafe {
-            let flags = libc::fcntl(fd.as_raw_fd(), libc::F_GETFL);
-            if flags < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-        }
-        Ok(Self {
-            inner: AsyncFd::new(FdWrapper(fd))?,
-        })
-    }
-}
-
-impl AsyncRead for VsockStream {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        loop {
-            let mut guard = ready!(self.inner.poll_read_ready(cx))?;
-            let fd = self.inner.as_raw_fd();
-            let unfilled = buf.initialize_unfilled();
-            // SAFETY: read from a valid non-blocking fd into a valid buffer.
-            let n = unsafe { libc::read(fd, unfilled.as_mut_ptr().cast(), unfilled.len()) };
-            if n >= 0 {
-                buf.advance(n as usize);
-                return Poll::Ready(Ok(()));
-            }
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::WouldBlock {
-                guard.clear_ready();
-                continue;
-            }
-            return Poll::Ready(Err(err));
-        }
-    }
-}
-
-impl AsyncWrite for VsockStream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        loop {
-            let mut guard = ready!(self.inner.poll_write_ready(cx))?;
-            let fd = self.inner.as_raw_fd();
-            // SAFETY: write to a valid non-blocking fd from a valid buffer.
-            let n = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
-            if n >= 0 {
-                return Poll::Ready(Ok(n as usize));
-            }
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::WouldBlock {
-                guard.clear_ready();
-                continue;
-            }
-            return Poll::Ready(Err(err));
-        }
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Poll::Ready(Ok(()))
     }
 }
 
