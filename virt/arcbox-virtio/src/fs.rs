@@ -671,10 +671,46 @@ impl VirtioFs {
             requests
         };
 
-        // Now process all requests (self.request_queues borrow is released)
-        let mut completions = Vec::new();
-        for (head_idx, request_data, write_buffers) in pending_requests {
-            let response = self.process_request(&request_data)?;
+        // Process all requests. For >1 normal (non-INIT/DESTROY) requests,
+        // dispatch handler calls in parallel via rayon thread pool.
+        // Response writes remain sequential (they target non-overlapping memory
+        // regions but go through &mut memory).
+
+        // Phase 1: Dispatch — get responses (parallel when possible)
+        let handler = self.handler.clone();
+        let session_initialized = self.session.is_initialized();
+
+        let responses: Vec<(
+            u16,
+            std::result::Result<Vec<u8>, VirtioError>,
+            Vec<(usize, usize)>,
+        )> = if pending_requests.len() > 1 && session_initialized && handler.is_some() {
+            // Multiple normal requests — parallel dispatch via handler
+            let handler_ref = handler.as_ref().unwrap();
+            use rayon::prelude::*;
+            pending_requests
+                .into_par_iter()
+                .map(|(head_idx, request_data, write_buffers)| {
+                    let response = handler_ref.handle_request(&request_data);
+                    (head_idx, response, write_buffers)
+                })
+                .collect()
+        } else {
+            // Single request or INIT/DESTROY — process sequentially through self
+            pending_requests
+                .into_iter()
+                .map(|(head_idx, request_data, write_buffers)| {
+                    let response = self.process_request(&request_data);
+                    (head_idx, response, write_buffers)
+                })
+                .collect()
+        };
+
+        // Phase 2: Write responses into guest memory (sequential)
+        // TODO(ABX-208): Use push_used_batch() for single interrupt notification
+        let mut completions = Vec::with_capacity(responses.len());
+        for (head_idx, response_result, write_buffers) in responses {
+            let response = response_result?;
             let mut remaining = response.as_slice();
             let mut written = 0usize;
 
