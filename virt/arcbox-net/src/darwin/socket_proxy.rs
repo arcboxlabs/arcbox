@@ -19,7 +19,7 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use socket2::{Domain, Protocol, Type};
 use tokio::io::unix::AsyncFd;
@@ -27,6 +27,10 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 use crate::ethernet::{ETH_HEADER_LEN, build_udp_ip_ethernet, prepend_ethernet_header};
+
+/// Timeout for inactive UDP flows. When no packets are seen for this duration,
+/// the timer wheel expires the flow and its spawned task is cleaned up.
+const UDP_FLOW_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Per-flow UDP state.
 struct UdpFlow {
@@ -59,6 +63,7 @@ impl UdpProxy {
         frame: &[u8],
         guest_mac: [u8; 6],
         cancel: tokio_util::sync::CancellationToken,
+        timer_wheel: &mut crate::timer_wheel::TimerWheel,
     ) {
         // Parse IP + UDP headers from the frame.
         if frame.len() < ETH_HEADER_LEN + 28 {
@@ -96,18 +101,29 @@ impl UdpProxy {
         let payload = frame[l4_start + 8..l4_start + udp_len].to_vec();
         let flow_key = (src_ip, src_port, dst_ip, dst_port);
 
-        // Existing flow: send payload through its channel.
+        let timer_key = crate::timer_wheel::TimerKey::Udp {
+            src_ip,
+            src_port,
+            dst_ip,
+            dst_port,
+        };
+
+        // Existing flow: send payload and refresh timer wheel deadline.
         if let Some(flow) = self.flows.get_mut(&flow_key) {
             flow.last_active = Instant::now();
+            timer_wheel.register(
+                timer_key,
+                UDP_FLOW_TIMEOUT,
+                crate::timer_wheel::TimerAction::UdpFlowExpiry,
+            );
             if flow.payload_tx.try_send(payload).is_err() {
-                // Task exited or channel full — remove stale flow so it
-                // gets recreated on the next packet.
                 self.flows.remove(&flow_key);
+                timer_wheel.cancel(&timer_key);
             }
             return;
         }
 
-        // New flow: create a channel and spawn a task that owns the socket.
+        // New flow: create channel, register timer, spawn task.
         let (payload_tx, mut payload_rx) = mpsc::channel::<Vec<u8>>(64);
 
         self.flows.insert(
@@ -116,6 +132,11 @@ impl UdpProxy {
                 last_active: Instant::now(),
                 payload_tx,
             },
+        );
+        timer_wheel.register(
+            timer_key,
+            UDP_FLOW_TIMEOUT,
+            crate::timer_wheel::TimerAction::UdpFlowExpiry,
         );
 
         let reply_tx = self.reply_tx.clone();
@@ -188,11 +209,11 @@ impl UdpProxy {
         });
     }
 
-    /// Removes flows inactive for more than 60 seconds.
-    fn cleanup_stale_flows(&mut self) {
-        let now = Instant::now();
-        self.flows
-            .retain(|_, flow| now.duration_since(flow.last_active).as_secs() < 60);
+    /// Removes a specific UDP flow by key (called from timer wheel expiry).
+    fn remove_flow(&mut self, key: &(Ipv4Addr, u16, Ipv4Addr, u16)) {
+        if self.flows.remove(key).is_some() {
+            tracing::trace!("UDP proxy: timer wheel expired flow {key:?}");
+        }
     }
 }
 
@@ -511,7 +532,12 @@ impl SocketProxy {
     ///
     /// Inbound reply frames (matching an active inbound connection) are
     /// intercepted first; everything else is proxied through host sockets.
-    pub fn handle_outbound(&mut self, frame: &[u8], guest_mac: [u8; 6]) {
+    pub fn handle_outbound(
+        &mut self,
+        frame: &[u8],
+        guest_mac: [u8; 6],
+        timer_wheel: &mut crate::timer_wheel::TimerWheel,
+    ) {
         if frame.len() < ETH_HEADER_LEN + 20 {
             return;
         }
@@ -526,7 +552,7 @@ impl SocketProxy {
         let cancel = self.cancel.clone();
         match protocol {
             1 => self.icmp.proxy_icmp(frame, guest_mac, cancel),
-            17 => self.udp.proxy_udp(frame, guest_mac, cancel),
+            17 => self.udp.proxy_udp(frame, guest_mac, cancel, timer_wheel),
             _ => {
                 tracing::trace!("Socket proxy: dropping protocol {}", protocol);
             }
@@ -554,21 +580,20 @@ impl SocketProxy {
         }
     }
 
-    /// Runs periodic maintenance (flow cleanup).
+    /// Runs periodic maintenance for subsystems not yet on the timer wheel.
     pub fn maintenance(&mut self) {
-        self.udp.cleanup_stale_flows();
         self.inbound.cleanup();
     }
 
-    /// Expire a specific flow by address (called from timer wheel).
-    ///
-    /// This is the timer-wheel-driven counterpart to `maintenance()`.
-    /// Instead of scanning all flows, it targets a specific expired flow.
-    pub fn expire_flow(&mut self, _addr: std::net::SocketAddr) {
-        // TODO: Once UDP/ICMP flows are registered with the timer wheel,
-        // this will remove the specific flow by address. For now, the
-        // timer wheel is wired into the datapath loop but individual
-        // flow registration is not yet migrated from per-flow timeouts.
+    /// Expire a specific outbound UDP flow (called from timer wheel).
+    pub fn expire_udp_flow(
+        &mut self,
+        src_ip: Ipv4Addr,
+        src_port: u16,
+        dst_ip: Ipv4Addr,
+        dst_port: u16,
+    ) {
+        self.udp.remove_flow(&(src_ip, src_port, dst_ip, dst_port));
     }
 }
 
@@ -604,7 +629,8 @@ mod tests {
 
         let guest_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x99];
         // Should not panic.
-        proxy.handle_outbound(&frame, guest_mac);
+        let mut tw = crate::timer_wheel::TimerWheel::new(Duration::from_secs(1));
+        proxy.handle_outbound(&frame, guest_mac, &mut tw);
     }
 
     #[test]
@@ -616,18 +642,17 @@ mod tests {
         let mut proxy = SocketProxy::new(gw_ip, gw_mac, guest_ip, tx, CancellationToken::new());
 
         let guest_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x99];
+        let mut tw = crate::timer_wheel::TimerWheel::new(Duration::from_secs(1));
         // Frame shorter than Ethernet + IP minimum.
-        proxy.handle_outbound(&[0u8; 10], guest_mac);
+        proxy.handle_outbound(&[0u8; 10], guest_mac, &mut tw);
     }
 
     #[test]
-    fn test_udp_proxy_cleanup_stale_flows() {
+    fn test_udp_proxy_remove_flow() {
         let (tx, _rx) = mpsc::channel(16);
-        let gw_ip = Ipv4Addr::new(192, 168, 64, 1);
         let gw_mac = [0x02, 0xAB, 0xCD, 0x00, 0x00, 0x01];
         let mut proxy = UdpProxy::new(tx, gw_mac);
 
-        // Insert a flow that is already expired.
         let key = (
             Ipv4Addr::new(192, 168, 64, 2),
             1234,
@@ -643,8 +668,12 @@ mod tests {
         );
         assert_eq!(proxy.flows.len(), 1);
 
-        proxy.cleanup_stale_flows();
-        assert_eq!(proxy.flows.len(), 0, "Stale flow should be cleaned up");
+        proxy.remove_flow(&key);
+        assert_eq!(
+            proxy.flows.len(),
+            0,
+            "Flow should be removed by timer wheel"
+        );
     }
 
     /// Verifies that reply frames from the socket proxy flow through the

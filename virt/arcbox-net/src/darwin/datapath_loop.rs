@@ -48,10 +48,8 @@ use crate::ethernet::{ETH_HEADER_LEN, build_udp_ip_ethernet};
 /// tasks don't block, but the write_queue acts as the final memory bound.
 const WRITE_QUEUE_HARD_CAP: usize = 2048;
 
-/// smoltcp poll interval. Controls how often the TCP/IP stack is polled for
-/// retransmissions, ARP cache aging, and connection state transitions.
-/// 250ms is a good balance between responsiveness and wakeup reduction.
-/// (Was 100ms — reduced from 10 Hz to 4 Hz to save ~6 wakeups/s.)
+/// smoltcp poll interval (250ms). Reduced from 100ms to cut wakeups from 10/s
+/// to 4/s while keeping TCP retransmission detection responsive.
 const SMOLTCP_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Wraps an `OwnedFd` so it can be registered with `AsyncFd`.
@@ -200,14 +198,6 @@ impl NetworkDatapath {
         // due to EWOULDBLOCK. Drained when the FD becomes writable again.
         let mut write_queue: VecDeque<Vec<u8>> = VecDeque::new();
 
-        // Unified timer wheel for flow timeout management (1s tick).
-        // Replaces per-flow tokio::time::timeout() objects with a single
-        // shared timer, reducing wakeup count from O(active_flows) to O(1).
-        let mut timer_wheel =
-            crate::timer_wheel::TimerWheel::<std::net::SocketAddr>::new(Duration::from_secs(1));
-        let mut timer_wheel_tick = tokio::time::interval(Duration::from_secs(1));
-        timer_wheel_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
         // Periodic maintenance interval for cleaning up stale flows.
         let mut maintenance = tokio::time::interval(Duration::from_secs(30));
         maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -215,6 +205,13 @@ impl NetworkDatapath {
         // smoltcp poll timer: drives retransmissions and ARP cache expiry.
         let mut smoltcp_timer = tokio::time::interval(SMOLTCP_POLL_INTERVAL);
         smoltcp_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        // Unified timer wheel for flow timeout management (1s tick).
+        // UDP flow timeouts are registered here; expired entries drive
+        // targeted removal instead of periodic full-table scans.
+        let mut timer_wheel = crate::timer_wheel::TimerWheel::new(Duration::from_secs(1));
+        let mut timer_wheel_tick = tokio::time::interval(Duration::from_secs(1));
+        timer_wheel_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         tracing::info!("Network datapath started (smoltcp + socket proxy mode)");
 
@@ -273,6 +270,7 @@ impl NetworkDatapath {
                             &guest_async,
                             &mut write_queue,
                             &mut socket_proxy,
+                            &mut timer_wheel,
                             &mut dhcp_server,
                             &dns_forwarder,
                             &dns_reply_tx,
@@ -322,33 +320,22 @@ impl NetworkDatapath {
                 // poll via the common tail below.
                 _ = smoltcp_timer.tick() => {}
 
-                // Periodic maintenance.
+                // Timer wheel tick: expire flows registered by socket_proxy.
                 _ = timer_wheel_tick.tick() => {
-                    // Advance the timer wheel and handle expired flow timers.
-                    // TODO: Migrate tcp_bridge SYN gate and socket_proxy UDP/ICMP
-                    // per-flow timeouts to use timer_wheel.register() instead of
-                    // spawning independent tokio::time::timeout() tasks. For now
-                    // the wheel is wired but consumers are not yet migrated.
-                    let expired = timer_wheel.advance();
-                    for entry in &expired {
-                        tracing::trace!(
-                            "Timer wheel expired: {:?} action={:?}",
-                            entry.key,
-                            entry.action
-                        );
-                    }
-                    // Feed expired entries back to socket_proxy for cleanup
-                    for entry in expired {
-                        use crate::timer_wheel::TimerAction;
-                        match entry.action {
-                            TimerAction::UdpFlowExpiry | TimerAction::IcmpTimeout => {
-                                socket_proxy.expire_flow(entry.key);
+                    use crate::timer_wheel::{TimerAction, TimerKey};
+                    for entry in timer_wheel.advance() {
+                        match (entry.action, entry.key) {
+                            (TimerAction::UdpFlowExpiry, TimerKey::Udp { src_ip, src_port, dst_ip, dst_port }) => {
+                                socket_proxy.expire_udp_flow(src_ip, src_port, dst_ip, dst_port);
                             }
-                            _ => {}
+                            _ => {
+                                tracing::trace!("Timer wheel expired: {:?} {:?}", entry.key, entry.action);
+                            }
                         }
                     }
                 }
 
+                // Periodic maintenance for subsystems not yet on timer wheel.
                 _ = maintenance.tick() => {
                     socket_proxy.maintenance();
                 }
@@ -420,6 +407,7 @@ fn handle_intercepted_frame(
     guest_async: &AsyncFd<FdWrapper>,
     write_queue: &mut VecDeque<Vec<u8>>,
     socket_proxy: &mut SocketProxy,
+    timer_wheel: &mut crate::timer_wheel::TimerWheel,
     dhcp_server: &mut DhcpServer,
     dns_forwarder: &DnsForwarder,
     dns_reply_tx: &mpsc::Sender<Vec<u8>>,
@@ -456,7 +444,7 @@ fn handle_intercepted_frame(
         }
         InterceptedKind::Udp | InterceptedKind::Icmp => {
             // Route through socket proxy (UDP/ICMP).
-            socket_proxy.handle_outbound(frame, guest_mac);
+            socket_proxy.handle_outbound(frame, guest_mac, timer_wheel);
         }
     }
 }
