@@ -375,6 +375,23 @@ impl VirtioDeviceConfig {
         }
     }
 
+    /// Creates a network device configuration with file-handle attachment and
+    /// an explicit MAC address.
+    ///
+    /// Use this when the MAC must match an external interface (e.g. vmnet) so
+    /// that bridge FDB lookups resolve correctly.
+    pub fn network_file_handle_with_mac(fd: i32, mac_address: impl Into<String>) -> Self {
+        Self {
+            device_type: VirtioDeviceType::Net,
+            config: Vec::new(),
+            path: None,
+            read_only: false,
+            tag: None,
+            net_fd: Some(fd),
+            mac_address: Some(mac_address.into()),
+        }
+    }
+
     /// Creates a new console device configuration.
     #[must_use]
     pub const fn console() -> Self {

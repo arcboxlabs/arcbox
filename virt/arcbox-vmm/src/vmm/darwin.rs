@@ -474,7 +474,11 @@ impl Vmm {
         self.vmnet_relay_cancel = Some(cancel);
         self.vmnet_bridge_fd = Some(vz_fd);
 
-        Ok(VirtioDeviceConfig::network_file_handle(vz_raw_fd))
+        // Pass the vmnet MAC to the VZ-side NIC so bridge FDB lookups match.
+        let mac_str = arcbox_net::darwin::format_mac(&info.mac);
+        Ok(VirtioDeviceConfig::network_file_handle_with_mac(
+            vz_raw_fd, mac_str,
+        ))
     }
 
     /// Starts the managed VM.
