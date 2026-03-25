@@ -687,64 +687,39 @@ impl VirtioFs {
         let handler = self.handler.clone();
         let session_initialized = self.session.is_initialized();
 
-        // Collect indices of normal requests eligible for parallel dispatch.
-        let normal_indices: Vec<usize> = pending_requests
-            .iter()
-            .enumerate()
-            .filter(|(_, (_, data, _))| {
-                if data.len() >= 8 {
-                    let opcode = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-                    opcode != Self::FUSE_INIT && opcode != Self::FUSE_DESTROY
-                } else {
-                    false
-                }
-            })
-            .map(|(i, _)| i)
-            .collect();
+        // Parallel dispatch is only safe when the entire batch contains
+        // normal requests (no INIT/DESTROY) with valid FUSE headers (>= 40
+        // bytes). If any control request is present, we must fall back to
+        // sequential processing because pre-computing handler results for
+        // normal requests around a DESTROY would violate avail ring ordering.
+        let has_control = pending_requests.iter().any(|(_, data, _)| {
+            if data.len() >= 8 {
+                let op = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+                op == Self::FUSE_INIT || op == Self::FUSE_DESTROY
+            } else {
+                true // malformed → force sequential for proper error handling
+            }
+        });
+        let all_valid = pending_requests.iter().all(|(_, data, _)| data.len() >= 40);
+        let can_parallel = !has_control
+            && all_valid
+            && pending_requests.len() > 1
+            && session_initialized
+            && handler.is_some();
 
-        let can_parallel = normal_indices.len() > 1 && session_initialized && handler.is_some();
-
-        // If parallelizable: dispatch normal requests in parallel, then
-        // process control requests sequentially, all in avail ring order.
         let responses: Vec<ResponseItem> = if can_parallel {
+            // All requests are normal with valid headers — safe to parallelize.
             let handler_ref = handler.as_ref().unwrap();
             use rayon::prelude::*;
-
-            // Pre-dispatch: parallel handler calls for normal requests.
-            // Use a map of index→response to merge back in order.
-            let normal_set: std::collections::HashSet<usize> = normal_indices.into_iter().collect();
-            let normal_items: Vec<(usize, &[u8])> = pending_requests
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| normal_set.contains(i))
-                .map(|(i, (_, data, _))| (i, data.as_slice()))
-                .collect();
-
-            let parallel_results: Vec<(usize, std::result::Result<Vec<u8>, VirtioError>)> =
-                normal_items
-                    .into_par_iter()
-                    .map(|(i, data)| (i, handler_ref.handle_request(data)))
-                    .collect();
-
-            let mut result_map: std::collections::HashMap<usize, _> =
-                parallel_results.into_iter().collect();
-
-            // Now process all requests in order, using pre-computed results
-            // for normal requests and self.process_request for control ops.
             pending_requests
-                .into_iter()
-                .enumerate()
-                .map(|(i, (head_idx, request_data, write_buffers))| {
-                    let response = if let Some(r) = result_map.remove(&i) {
-                        r
-                    } else {
-                        self.process_request(&request_data)
-                    };
-                    (head_idx, response, write_buffers)
+                .into_par_iter()
+                .map(|(head_idx, data, bufs)| {
+                    let response = handler_ref.handle_request(&data);
+                    (head_idx, response, bufs)
                 })
                 .collect()
         } else {
-            // Sequential: single request, control ops present, or no handler
+            // Sequential: control ops present, malformed headers, or single request.
             pending_requests
                 .into_iter()
                 .map(|(head_idx, request_data, write_buffers)| {

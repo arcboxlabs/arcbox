@@ -423,10 +423,9 @@ impl IrqChip {
         };
         drop(configs);
 
-        // Coalescing: timer-based takes priority over bitmap dedup when
-        // configured, because bitmap dedup would swallow repeated IRQs before
-        // the coalescing counter can accumulate them.
-        let has_coalescing = {
+        // Timer-based coalescing: only for edge-triggered IRQs (level-triggered
+        // must always assert/deassert to maintain correct line state).
+        let has_coalescing = if trigger_mode == TriggerMode::Edge {
             let states = self
                 .coalescing_states
                 .read()
@@ -435,23 +434,30 @@ impl IrqChip {
                 Some(state) if state.config.enabled => {
                     let force_deliver = state.record();
                     if !force_deliver {
-                        // Accumulated — caller should poll timer_expired()
-                        // and call flush_coalesced() when it fires.
                         return Ok(());
                     }
-                    // Threshold reached — flush and fall through to deliver
-                    state.flush();
+                    // Threshold reached — flush and deliver. N merged into 1
+                    // means N-1 coalesced.
+                    let flushed = state.flush();
+                    if flushed > 1 {
+                        self.stats
+                            .coalesced
+                            .fetch_add(u64::from(flushed - 1), Ordering::Relaxed);
+                    }
                     true
                 }
                 _ => false,
             }
+        } else {
+            false
         };
 
-        // Bitmap-level dedup: only used for edge-triggered IRQs WITHOUT
-        // timer-based coalescing. When coalescing is active, the
-        // CoalescingState already handles dedup via its pending_count.
-        if !has_coalescing && trigger_mode == TriggerMode::Edge {
-            let irq_bit = 1u32 << (irq % 32);
+        // Bitmap-level dedup: only for edge-triggered IRQs 0–31 without
+        // timer-based coalescing. The bitmap is a single u32; IRQs >= 32
+        // would alias (e.g. 32 and 64 map to the same bit), so we skip
+        // bitmap dedup for them entirely.
+        if !has_coalescing && trigger_mode == TriggerMode::Edge && irq < 32 {
+            let irq_bit = 1u32 << irq;
             let old_pending = self.pending.fetch_or(irq_bit, Ordering::SeqCst);
             if (old_pending & irq_bit) != 0 {
                 self.stats.coalesced.fetch_add(1, Ordering::Relaxed);

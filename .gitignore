@@ -17,3 +17,4 @@ tests/resources/boot-assets-*
 tests/resources/boot-assets-arm64-*
 # Claude Code settings (user-specific)
 .claude/
+perf-issue.md
