@@ -151,12 +151,30 @@ impl AsyncWrite for RawFdStream {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // No-op: vsock on macOS does not support half-close.
-        // `shutdown(fd, SHUT_WR)` destroys the entire connection instead of
-        // performing a graceful write-side close, which breaks hyper's
-        // upgrade path (the fd becomes ENOTCONN before the bridge starts).
-        // The fd is properly closed when `OwnedFd` is dropped.
-        Poll::Ready(Ok(()))
+        // macOS vsock does not support half-close: `shutdown(fd, SHUT_WR)`
+        // destroys the entire connection instead of closing only the write
+        // side. This breaks hyper's upgrade path because the fd becomes
+        // ENOTCONN before the bridge can start. The fd is properly closed
+        // when `OwnedFd` is dropped, so the no-op is safe.
+        #[cfg(target_os = "macos")]
+        {
+            return Poll::Ready(Ok(()));
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let fd = self.inner.get_ref().as_raw_fd();
+            // SAFETY: shutdown on a valid fd.
+            let result = unsafe { libc::shutdown(fd, libc::SHUT_WR) };
+            if result == 0 {
+                return Poll::Ready(Ok(()));
+            }
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ENOTCONN) {
+                return Poll::Ready(Ok(()));
+            }
+            Poll::Ready(Err(err))
+        }
     }
 }
 
@@ -357,11 +375,18 @@ async fn send_raw_upgrade(
     method: &Method,
     path_and_query: &str,
     headers: &HeaderMap,
+    body: &[u8],
 ) -> Result<(StatusCode, HeaderMap)> {
     // Build HTTP/1.1 request.
     let mut raw = format!("{method} {path_and_query} HTTP/1.1\r\nHost: localhost\r\n");
+    let has_content_length = headers.contains_key(header::CONTENT_LENGTH);
+    let has_transfer_encoding = headers.contains_key(header::TRANSFER_ENCODING);
     for (key, value) in headers {
         if key == header::HOST {
+            continue;
+        }
+        // Override Content-Length to match the body we actually send.
+        if key == header::CONTENT_LENGTH {
             continue;
         }
         let Ok(v) = value.to_str() else { continue };
@@ -370,12 +395,25 @@ async fn send_raw_upgrade(
         raw.push_str(v);
         raw.push_str("\r\n");
     }
+    // Always emit an accurate Content-Length so guest dockerd does not
+    // wait for bytes that will never arrive.
+    if !has_transfer_encoding {
+        raw.push_str(&format!("content-length: {}\r\n", body.len()));
+    } else if !has_content_length && !has_transfer_encoding {
+        raw.push_str("content-length: 0\r\n");
+    }
     raw.push_str("\r\n");
 
     stream
         .write_all(raw.as_bytes())
         .await
         .map_err(|e| DockerError::Server(format!("failed to write upgrade request: {e}")))?;
+    if !body.is_empty() {
+        stream
+            .write_all(body)
+            .await
+            .map_err(|e| DockerError::Server(format!("failed to write upgrade body: {e}")))?;
+    }
 
     // Read response headers byte-by-byte until the blank line delimiter.
     // Upgrade responses are small (< 512 bytes), so this is fine.
@@ -460,6 +498,16 @@ pub async fn proxy_with_upgrade(
         .path_and_query()
         .map_or("/", hyper::http::uri::PathAndQuery::as_str);
 
+    // Collect the request body so it can be forwarded to the guest.
+    // Upgrade request bodies (e.g. exec-start JSON) are small.
+    let body_bytes = {
+        let body = std::mem::take(client_req.body_mut());
+        http_body_util::BodyExt::collect(body)
+            .await
+            .map_err(|e| DockerError::Server(format!("failed to read request body: {e}")))?
+            .to_bytes()
+    };
+
     let (status, response_headers) = tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
         send_raw_upgrade(
@@ -467,15 +515,26 @@ pub async fn proxy_with_upgrade(
             client_req.method(),
             path_and_query,
             client_req.headers(),
+            &body_bytes,
         ),
     )
     .await
     .map_err(|_| DockerError::from(CommonError::timeout("guest docker upgrade timed out")))??;
 
     if status != StatusCode::SWITCHING_PROTOCOLS {
-        return Err(DockerError::Server(format!(
-            "guest did not upgrade (status {status})"
-        )));
+        // Forward the guest's actual error status and headers so the
+        // client sees actionable failures instead of a generic 500.
+        let mut builder = Response::builder().status(status);
+        for (key, value) in &response_headers {
+            builder = builder.header(key, value);
+        }
+        // Read whatever response body the guest sent (bounded).
+        let mut error_body = vec![0u8; 8192];
+        let n = guest_stream.read(&mut error_body).await.unwrap_or(0);
+        error_body.truncate(n);
+        return builder
+            .body(Body::from(error_body))
+            .map_err(|e| DockerError::Server(format!("failed to build error response: {e}")));
     }
 
     // Forward the guest's actual Upgrade value (h2c, tcp, etc.)
@@ -486,6 +545,8 @@ pub async fn proxy_with_upgrade(
         .unwrap_or_else(|| HeaderValue::from_static("tcp"));
     let content_type = response_headers.get(header::CONTENT_TYPE).cloned();
 
+    // Ensure no leftover request body data interferes with the upgraded stream.
+    *client_req.body_mut() = Body::empty();
     let client_upgrade = hyper::upgrade::on(&mut client_req);
 
     let mut builder = Response::builder()
