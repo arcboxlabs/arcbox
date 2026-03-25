@@ -556,7 +556,8 @@ impl VirtioBlock {
             | Self::FEATURE_SEG_MAX
             | Self::FEATURE_BLK_SIZE
             | Self::FEATURE_FLUSH
-            | Self::FEATURE_VERSION_1;
+            | Self::FEATURE_VERSION_1
+            | crate::queue::VIRTIO_F_EVENT_IDX;
 
         if config.read_only {
             features |= Self::FEATURE_RO;
@@ -869,8 +870,11 @@ impl VirtioDevice for VirtioBlock {
             self.file = Some(Arc::new(RwLock::new(file)));
         }
 
-        // Create request queue
-        self.queue = Some(VirtQueue::new(256)?);
+        // Create request queue with EVENT_IDX if negotiated
+        let event_idx = (self.acked_features & crate::queue::VIRTIO_F_EVENT_IDX) != 0;
+        let mut queue = VirtQueue::new(256)?;
+        queue.set_event_idx(event_idx);
+        self.queue = Some(queue);
 
         tracing::info!("VirtIO block device activated: {:?}", self.config.path);
         Ok(())

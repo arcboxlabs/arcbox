@@ -511,7 +511,10 @@ impl VirtioConsole {
     /// Creates a new console device.
     #[must_use]
     pub fn new(config: ConsoleConfig) -> Self {
-        let mut features = Self::FEATURE_SIZE | Self::FEATURE_EMERG_WRITE | Self::FEATURE_VERSION_1;
+        let mut features = Self::FEATURE_SIZE
+            | Self::FEATURE_EMERG_WRITE
+            | Self::FEATURE_VERSION_1
+            | crate::queue::VIRTIO_F_EVENT_IDX;
 
         if config.multiport {
             features |= Self::FEATURE_MULTIPORT;

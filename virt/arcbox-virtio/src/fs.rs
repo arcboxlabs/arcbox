@@ -474,7 +474,7 @@ impl VirtioFs {
     pub fn new(config: FsConfig) -> Self {
         Self {
             config,
-            features: 0,
+            features: crate::queue::VIRTIO_F_EVENT_IDX,
             acked_features: 0,
             session: FuseSession::new(),
             handler: None,
@@ -488,7 +488,7 @@ impl VirtioFs {
     pub fn with_handler(config: FsConfig, handler: Arc<dyn FuseRequestHandler>) -> Self {
         Self {
             config,
-            features: 0,
+            features: crate::queue::VIRTIO_F_EVENT_IDX,
             acked_features: 0,
             session: FuseSession::new(),
             handler: Some(handler),
@@ -764,9 +764,12 @@ impl VirtioDevice for VirtioFs {
         self.session.reset();
 
         // Create request queues
+        let event_idx = (self.acked_features & crate::queue::VIRTIO_F_EVENT_IDX) != 0;
         let mut queues = Vec::with_capacity(self.config.num_queues as usize);
         for _ in 0..self.config.num_queues {
-            queues.push(VirtQueue::new(self.config.queue_size)?);
+            let mut q = VirtQueue::new(self.config.queue_size)?;
+            q.set_event_idx(event_idx);
+            queues.push(q);
         }
         self.request_queues = queues;
 
@@ -866,16 +869,16 @@ mod tests {
     #[test]
     fn test_fs_features() {
         let fs = VirtioFs::new(FsConfig::default());
-        // Default has no features
-        assert_eq!(fs.features(), 0);
+        // Default advertises EVENT_IDX
+        assert_ne!(fs.features() & crate::queue::VIRTIO_F_EVENT_IDX, 0);
     }
 
     #[test]
     fn test_fs_ack_features() {
         let mut fs = VirtioFs::new(FsConfig::default());
         fs.ack_features(VirtioFs::FEATURE_NOTIFICATION);
-        // Since feature is not supported, acked should be 0
-        assert_eq!(fs.acked_features, 0);
+        // NOTIFICATION is not in our features, so only EVENT_IDX remains
+        assert_eq!(fs.acked_features & VirtioFs::FEATURE_NOTIFICATION, 0);
     }
 
     #[test]
