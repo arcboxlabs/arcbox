@@ -79,9 +79,10 @@ impl RawFdStream {
             ));
         }
 
-        Self::set_nonblocking(fd)?;
-        // SAFETY: fd is a valid, newly-opened vsock file descriptor owned by us.
+        // SAFETY: fd is a valid, newly-opened file descriptor owned by us.
+        // Take ownership first so the fd is closed on any subsequent error.
         let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+        Self::set_nonblocking(owned.as_raw_fd())?;
         let inner = AsyncFd::new(RawFdWrapper(owned))?;
         Ok(Self { inner })
     }

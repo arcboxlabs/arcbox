@@ -4,7 +4,8 @@
 //! without a VM. They call proxy functions directly (bypassing the
 //! handler layer's `ensure_vm_ready`) to isolate proxy forwarding logic.
 
-mod mock_guest;
+mod support;
+use support::mock_guest;
 
 use arcbox_docker::proxy::{
     GuestConnector, RawFdStream, proxy_to_guest, proxy_to_guest_stream, proxy_with_upgrade,
@@ -62,7 +63,6 @@ async fn setup() -> (
 ) {
     let tmp = TempDir::new().unwrap();
     let (socket_path, cancel) = mock_guest::start(tmp.path()).await;
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let connector = UnixSocketConnector { socket_path };
     (connector, tmp, cancel)
 }

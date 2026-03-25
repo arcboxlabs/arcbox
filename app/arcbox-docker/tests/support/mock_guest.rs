@@ -35,14 +35,12 @@ pub async fn start(dir: &Path) -> (PathBuf, CancellationToken) {
                 () = token.cancelled() => break,
             };
 
-            let child_token = token.clone();
             tokio::spawn(async move {
                 let io = TokioIo::new(stream);
                 let _ = http1::Builder::new()
                     .serve_connection(io, service_fn(handle))
                     .with_upgrades()
                     .await;
-                drop(child_token);
             });
         }
     });
