@@ -276,6 +276,7 @@ impl<T> Drop for LockFreeRing<T> {
     }
 }
 
+#[allow(clippy::missing_fields_in_debug)] // buffer omitted intentionally (ring buffer contents not useful in debug output)
 impl<T> std::fmt::Debug for LockFreeRing<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LockFreeRing")

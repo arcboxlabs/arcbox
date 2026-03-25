@@ -67,10 +67,11 @@ pub async fn connect_via_http_proxy(proxy: &str, host: &str, port: u16) -> io::R
         // A standalone \r\n (i.e. header_buf == b"\r\n") means the first
         // header line is blank → end of headers. Otherwise \r\n\r\n at the
         // tail means the previous header ended and a blank line followed.
-        if header_buf.len() >= 2 && header_buf.ends_with(b"\r\n") {
-            if header_buf.len() == 2 || header_buf[..header_buf.len() - 2].ends_with(b"\r\n") {
-                break;
-            }
+        if header_buf.len() >= 2
+            && header_buf.ends_with(b"\r\n")
+            && (header_buf.len() == 2 || header_buf[..header_buf.len() - 2].ends_with(b"\r\n"))
+        {
+            break;
         }
         if header_buf.len() > 8192 {
             return Err(io::Error::other(

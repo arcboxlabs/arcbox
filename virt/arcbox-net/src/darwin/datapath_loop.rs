@@ -505,6 +505,7 @@ fn handle_dhcp(
 /// When an upstream response is received, A record IPs are recorded in
 /// the [`DnsResolutionLog`] so that [`TcpBridge`] can map destination IPs
 /// back to domain names for proxy-aware connections.
+#[allow(clippy::too_many_arguments)] // all parameters are required context for DNS frame handling
 fn handle_dns(
     frame: &[u8],
     dns_forwarder: &DnsForwarder,
@@ -636,7 +637,7 @@ async fn forward_dns_async(data: &[u8], upstream: &[SocketAddr]) -> Result<Vec<u
             Ok(Ok((len, _))) if len >= 2 && buf[0] == query_id[0] && buf[1] == query_id[1] => {
                 return Ok(buf[..len].to_vec());
             }
-            _ => continue,
+            _ => {}
         }
     }
 

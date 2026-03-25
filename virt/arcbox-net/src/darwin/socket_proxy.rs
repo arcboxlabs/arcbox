@@ -323,7 +323,7 @@ impl IcmpProxy {
                             }) {
                                 Ok(Ok(n)) if n > 0 => return Ok(n),
                                 Ok(Err(e)) => return Err(e),
-                                _ => continue, // WouldBlock, retry
+                                _ => {} // WouldBlock, retry
                             }
                         }
                         Err(e) => return Err(e),

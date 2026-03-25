@@ -216,6 +216,7 @@ impl ConnTrackEntry {
     }
 }
 
+#[allow(clippy::missing_fields_in_debug)] // flags/timestamps omitted intentionally (internal state not useful in debug output)
 impl std::fmt::Debug for ConnTrackEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConnTrackEntry")
@@ -509,6 +510,7 @@ impl ConnTrackTable {
     }
 }
 
+#[allow(clippy::missing_fields_in_debug)] // reverse/fast_cache omitted intentionally (internal lookup tables not useful in debug output)
 impl std::fmt::Debug for ConnTrackTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConnTrackTable")

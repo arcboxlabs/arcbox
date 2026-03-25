@@ -284,6 +284,7 @@ impl DarwinNatNetwork {
     }
 }
 
+#[allow(clippy::missing_fields_in_debug)] // config/arp_table omitted intentionally (not useful in debug output)
 impl std::fmt::Debug for DarwinNatNetwork {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DarwinNatNetwork")

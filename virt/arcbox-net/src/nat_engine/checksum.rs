@@ -4,6 +4,7 @@
 //! IP and TCP/UDP headers, including incremental updates for NAT.
 
 /// Folds a 32-bit sum into a 16-bit checksum.
+#[allow(clippy::inline_always)] // hot path: called in every packet's checksum update, must inline to avoid call overhead
 #[inline(always)]
 pub fn checksum_fold(mut sum: u32) -> u16 {
     while sum >> 16 != 0 {
@@ -49,6 +50,7 @@ pub fn checksum(data: &[u8]) -> u16 {
 ///
 /// Formula: ~C' = ~C + ~m + m'
 /// Where C is old checksum, m is old value, m' is new value.
+#[allow(clippy::inline_always)] // hot path: called per NAT field update on every translated packet
 #[inline(always)]
 pub fn incremental_checksum_update(old_checksum: u16, old_value: u16, new_value: u16) -> u16 {
     // ~C + ~m + m'

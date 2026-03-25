@@ -179,6 +179,7 @@ impl NatEngine {
 
     /// Translates an outbound packet (SNAT).
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::unnecessary_wraps)] // Result kept for consistent interface with translate_inbound
     fn translate_outbound(
         &mut self,
         packet: &mut [u8],
@@ -250,6 +251,7 @@ impl NatEngine {
 
     /// Translates an inbound packet (reverse NAT).
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::unnecessary_wraps)] // Result kept for consistent interface with translate_outbound
     fn translate_inbound(
         &mut self,
         packet: &mut [u8],
@@ -346,6 +348,7 @@ impl NatEngine {
     }
 }
 
+#[allow(clippy::missing_fields_in_debug)] // conntrack/port_range omitted intentionally (internal state not useful in debug output)
 impl std::fmt::Debug for NatEngine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NatEngine")
