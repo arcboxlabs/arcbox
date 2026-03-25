@@ -55,7 +55,7 @@ impl LogGuard {
     /// Call this during graceful shutdown before process exit.
     pub fn flush(self) {
         // Drop triggers flush in WorkerGuard.
-        drop(self._file_guard);
+        drop(self);
     }
 }
 

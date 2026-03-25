@@ -75,10 +75,10 @@ impl LogComponent {
 
 fn resolve_log_path(args: &LogsArgs) -> Result<PathBuf> {
     match args.component {
-        LogComponent::Helper => {
-            Ok(PathBuf::from(arcbox_constants::paths::privileged_log::HELPER_LOG_DIR)
-                .join(arcbox_constants::paths::privileged_log::HELPER_LOG))
-        }
+        LogComponent::Helper => Ok(PathBuf::from(
+            arcbox_constants::paths::privileged_log::HELPER_LOG_DIR,
+        )
+        .join(arcbox_constants::paths::privileged_log::HELPER_LOG)),
         _ => {
             let data_dir = resolve_data_dir(args.data_dir.as_ref());
             let log_dir = data_dir.join(arcbox_constants::paths::host::LOG);
@@ -98,8 +98,8 @@ fn resolve_log_path(args: &LogsArgs) -> Result<PathBuf> {
 ///
 /// Reads at most 64 KB chunks from the tail to avoid loading the entire file.
 fn tail_lines(path: &Path, n: usize) -> Result<()> {
-    let mut file = std::fs::File::open(path)
-        .with_context(|| format!("Failed to open {}", path.display()))?;
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
     let file_len = file.metadata()?.len();
 
     if file_len == 0 || n == 0 {
@@ -147,8 +147,8 @@ fn tail_lines(path: &Path, n: usize) -> Result<()> {
 async fn tail_follow(path: &Path, n: usize) -> Result<()> {
     tail_lines(path, n)?;
 
-    let mut file = std::fs::File::open(path)
-        .with_context(|| format!("Failed to open {}", path.display()))?;
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
     let mut last_inode = file_inode(&file);
     file.seek(SeekFrom::End(0))?;
     let mut reader = BufReader::new(file);

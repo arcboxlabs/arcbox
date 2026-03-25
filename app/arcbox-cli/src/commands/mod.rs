@@ -19,9 +19,9 @@ pub mod daemon;
 pub mod dns;
 pub mod docker;
 pub mod doctor;
-pub mod logs;
 #[cfg(target_os = "macos")]
 pub mod install;
+pub mod logs;
 pub mod machine;
 pub mod sandbox;
 pub mod setup;
