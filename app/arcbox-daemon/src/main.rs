@@ -2,6 +2,7 @@
 
 mod context;
 mod dns_service;
+mod nfs_mount;
 mod recovery;
 mod self_setup;
 mod services;
@@ -42,6 +43,10 @@ pub struct DaemonArgs {
     /// Guest dockerd API vsock port.
     #[arg(long)]
     pub guest_docker_vsock_port: Option<u32>,
+
+    /// Skip mounting the guest Docker data export at ~/ArcBox.
+    #[arg(long)]
+    pub no_mount_nfs: bool,
 }
 
 fn main() -> Result<()> {
@@ -85,7 +90,7 @@ async fn run(args: DaemonArgs) -> Result<()> {
     info!("Starting ArcBox daemon...");
 
     // Phase 1: directories, config, sockets — no runtime yet.
-    let mut ctx = startup::init_early(args).await?;
+    let ctx = startup::init_early(args).await?;
 
     // Start gRPC with all services. Machine/Sandbox return UNAVAILABLE
     // until runtime is ready. SystemService works immediately so clients
@@ -95,11 +100,12 @@ async fn run(args: DaemonArgs) -> Result<()> {
 
     // Phase 2: seed/download boot assets, build runtime, start VM.
     // Progress is visible to gRPC clients via WatchSetupStatus.
-    startup::init_runtime(&mut ctx).await?;
+    startup::init_runtime(&ctx).await?;
 
     // Phase 3: start remaining services that require the runtime.
     let handles = services::start_services(&ctx, grpc).await?;
     recovery::run(&ctx).await;
+    nfs_mount::spawn(&ctx);
 
     check_resolver_installed(&ctx.dns_domain);
     ctx.setup_state.set_phase(SetupPhase::Ready, "Daemon ready");

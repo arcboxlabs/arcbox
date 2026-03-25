@@ -8,10 +8,6 @@
 
 use super::machine::UnixConnector;
 use anyhow::{Context, Result, bail};
-use arcbox_core::DEFAULT_MACHINE_NAME;
-use arcbox_grpc::v1::machine_service_client::MachineServiceClient;
-use arcbox_grpc::v1::system_service_client::SystemServiceClient;
-use arcbox_protocol::v1::{Empty, InspectMachineRequest, setup_status};
 use clap::{Args, ValueEnum};
 use humantime::format_duration;
 use std::ffi::OsString;
@@ -22,12 +18,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 use tokio::time::{Instant, sleep, timeout};
-use tonic::Request;
 use tonic::transport::Endpoint;
 use tracing::warn;
-
-const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(40);
-const NFS_PORT: u16 = 2049;
 
 /// Arguments for the daemon command.
 #[derive(Debug, Args)]
@@ -138,7 +130,6 @@ async fn execute_stop(args: &DaemonArgs) -> Result<()> {
         return Ok(());
     }
 
-    maybe_unmount_nfs();
     send_sigterm(pid)?;
     println!("Stopping ArcBox daemon (PID {pid})...");
 
@@ -243,10 +234,6 @@ async fn spawn_background(args: &DaemonArgs) -> Result<()> {
     let run_dir = data_dir.join(arcbox_constants::paths::host::RUN);
     let log_dir = data_dir.join(arcbox_constants::paths::host::LOG);
     let pid_file = run_dir.join("daemon.pid");
-    let grpc_socket = args
-        .grpc_socket
-        .clone()
-        .unwrap_or_else(|| run_dir.join("arcbox.sock"));
     let stdout_path = log_dir.join("daemon.stdout.log");
     let stderr_path = log_dir.join("daemon.stderr.log");
 
@@ -296,11 +283,6 @@ async fn spawn_background(args: &DaemonArgs) -> Result<()> {
     println!("  PID file: {}", pid_file.display());
     println!("  Stdout:   {}", stdout_path.display());
     println!("  Stderr:   {}", stderr_path.display());
-
-    if !args.no_mount_nfs {
-        maybe_mount_nfs(&grpc_socket).await;
-    }
-
     Ok(())
 }
 
@@ -354,226 +336,10 @@ fn build_daemon_args(args: &DaemonArgs) -> Vec<OsString> {
         daemon_args.push(OsString::from("--guest-docker-vsock-port"));
         daemon_args.push(OsString::from(port.to_string()));
     }
+    if args.no_mount_nfs {
+        daemon_args.push(OsString::from("--no-mount-nfs"));
+    }
     daemon_args
-}
-
-fn resolve_nfs_mount_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| resolve_nfs_mount_path_from_home(&home))
-}
-
-fn resolve_nfs_mount_path_from_home(home: &Path) -> PathBuf {
-    home.join("ArcBox")
-}
-
-async fn maybe_mount_nfs(grpc_socket: &Path) {
-    if !wait_for_daemon_ready(grpc_socket).await {
-        warn!(
-            socket = %grpc_socket.display(),
-            "daemon did not become ready in time; skipping NFS mount"
-        );
-        return;
-    }
-
-    let Some(mount_path) = resolve_nfs_mount_path() else {
-        warn!("could not determine home directory; skipping NFS mount");
-        return;
-    };
-
-    let Some(guest_ip) = fetch_default_machine_ip(grpc_socket).await else {
-        warn!("default machine has no routable IP yet; skipping NFS mount");
-        return;
-    };
-
-    let expected_source = format!("{guest_ip}:/");
-    match current_mount_info(&mount_path) {
-        Some(info) if info.source == expected_source => return,
-        Some(info) => {
-            warn!(
-                mount_path = %mount_path.display(),
-                source = %info.source,
-                fstype = %info.fstype,
-                "mount path already occupied; skipping NFS mount"
-            );
-            return;
-        }
-        None => {}
-    }
-
-    if let Err(e) = std::fs::create_dir_all(&mount_path) {
-        warn!(path = %mount_path.display(), error = %e, "failed to create NFS mount path");
-        return;
-    }
-
-    let status = Command::new("/sbin/mount_nfs")
-        .args([
-            "-o",
-            &format!("vers=4,port={NFS_PORT},ro,namedattr"),
-            &expected_source,
-        ])
-        .arg(&mount_path)
-        .status();
-
-    match status {
-        Ok(exit) if exit.success() => {
-            println!("Mounted guest Docker data at {}", mount_path.display());
-        }
-        Ok(exit) => {
-            warn!(
-                mount_path = %mount_path.display(),
-                source = %expected_source,
-                exit_code = exit.code().unwrap_or(-1),
-                "mount_nfs failed"
-            );
-        }
-        Err(e) => {
-            warn!(
-                mount_path = %mount_path.display(),
-                source = %expected_source,
-                error = %e,
-                "failed to execute mount_nfs"
-            );
-        }
-    }
-}
-
-fn maybe_unmount_nfs() {
-    let Some(mount_path) = resolve_nfs_mount_path() else {
-        return;
-    };
-
-    let Some(info) = current_mount_info(&mount_path) else {
-        return;
-    };
-
-    if info.fstype != "nfs" {
-        return;
-    }
-
-    match Command::new("/sbin/umount").arg(&mount_path).status() {
-        Ok(exit) if exit.success() => {
-            println!("Unmounted {}", mount_path.display());
-        }
-        Ok(exit) => {
-            warn!(
-                mount_path = %mount_path.display(),
-                exit_code = exit.code().unwrap_or(-1),
-                "umount failed"
-            );
-        }
-        Err(e) => {
-            warn!(mount_path = %mount_path.display(), error = %e, "failed to execute umount");
-        }
-    }
-}
-
-async fn wait_for_daemon_ready(grpc_socket: &Path) -> bool {
-    let deadline = Instant::now() + DAEMON_READY_TIMEOUT;
-
-    while Instant::now() < deadline {
-        if let Ok(mut client) = system_client(grpc_socket.to_path_buf()).await {
-            if let Ok(resp) = client.get_setup_status(Request::new(Empty {})).await {
-                if resp.into_inner().phase == setup_status::Phase::Ready as i32 {
-                    return true;
-                }
-            }
-        }
-        sleep(Duration::from_millis(250)).await;
-    }
-
-    false
-}
-
-async fn system_client(
-    socket_path: PathBuf,
-) -> Result<SystemServiceClient<tonic::transport::Channel>> {
-    let channel = Endpoint::from_static("http://[::]:50051")
-        .connect_with_connector(UnixConnector::new(socket_path.clone()))
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to connect to ArcBox gRPC daemon at {}",
-                socket_path.display()
-            )
-        })?;
-
-    Ok(SystemServiceClient::new(channel))
-}
-
-async fn machine_client(
-    socket_path: PathBuf,
-) -> Result<MachineServiceClient<tonic::transport::Channel>> {
-    let channel = Endpoint::from_static("http://[::]:50051")
-        .connect_with_connector(UnixConnector::new(socket_path.clone()))
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to connect to ArcBox gRPC daemon at {}",
-                socket_path.display()
-            )
-        })?;
-
-    Ok(MachineServiceClient::new(channel))
-}
-
-async fn fetch_default_machine_ip(grpc_socket: &Path) -> Option<String> {
-    let mut client = machine_client(grpc_socket.to_path_buf()).await.ok()?;
-    let response = client
-        .inspect(Request::new(InspectMachineRequest {
-            id: DEFAULT_MACHINE_NAME.to_string(),
-        }))
-        .await
-        .ok()?;
-    let info = response.into_inner();
-    let network = info.network?;
-    if network.ip_address.is_empty() {
-        None
-    } else {
-        Some(network.ip_address)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MountInfo {
-    source: String,
-    fstype: String,
-}
-
-fn current_mount_info(path: &Path) -> Option<MountInfo> {
-    let output = Command::new("/sbin/mount").output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let target = path.to_string_lossy();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let Some((mountpoint, info)) = parse_mount_line(line) else {
-            continue;
-        };
-        if mountpoint != target {
-            continue;
-        }
-        return Some(info);
-    }
-
-    None
-}
-
-fn parse_mount_line(line: &str) -> Option<(&str, MountInfo)> {
-    let (source, rest) = line.split_once(" on ")?;
-    let (mountpoint, suffix) = rest.split_once(" (")?;
-    let fstype = suffix
-        .split([',', ')'])
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    Some((
-        mountpoint,
-        MountInfo {
-            source: source.to_string(),
-            fstype,
-        },
-    ))
 }
 
 fn resolve_data_dir(data_dir: Option<&PathBuf>) -> PathBuf {
@@ -632,12 +398,9 @@ fn send_sigterm(pid: i32) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DaemonAction, DaemonArgs, build_daemon_args, parse_mount_line, read_pid_file,
-        resolve_nfs_mount_path_from_home,
-    };
+    use super::{DaemonAction, DaemonArgs, build_daemon_args, read_pid_file};
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     #[test]
@@ -671,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn build_daemon_args_omits_no_mount_nfs() {
+    fn build_daemon_args_includes_no_mount_nfs() {
         let args = DaemonArgs {
             action: DaemonAction::Start,
             socket: Some(PathBuf::from("/tmp/docker.sock")),
@@ -688,22 +451,7 @@ mod tests {
         assert!(
             daemon_args
                 .iter()
-                .all(|arg| arg.to_string_lossy() != "--no-mount-nfs")
+                .any(|arg| arg.to_string_lossy() == "--no-mount-nfs")
         );
-    }
-
-    #[test]
-    fn resolve_nfs_mount_path_uses_arcbox_home_dir() {
-        let path = resolve_nfs_mount_path_from_home(Path::new("/Users/tester"));
-        assert_eq!(path, PathBuf::from("/Users/tester/ArcBox"));
-    }
-
-    #[test]
-    fn current_mount_info_parses_nfs_line() {
-        let line = "10.0.0.2:/ on /Users/tester/ArcBox (nfs, nodev, nosuid, mounted by tester)";
-        let (mountpoint, info) = parse_mount_line(line).expect("line should parse");
-        assert_eq!(mountpoint, "/Users/tester/ArcBox");
-        assert_eq!(info.source, "10.0.0.2:/");
-        assert_eq!(info.fstype, "nfs");
     }
 }

@@ -65,6 +65,7 @@ pub async fn init_early(args: DaemonArgs) -> Result<DaemonContext> {
         dns_domain,
         dns_port,
         docker_integration: args.docker_integration,
+        mount_nfs: !args.no_mount_nfs,
         vm_args: VmArgs {
             guest_docker_vsock_port: args.guest_docker_vsock_port,
             kernel: args.kernel,
@@ -76,7 +77,7 @@ pub async fn init_early(args: DaemonArgs) -> Result<DaemonContext> {
 ///
 /// Called after gRPC SystemService is already listening so clients
 /// can observe DOWNLOADING_ASSETS → ASSETS_READY progression.
-pub async fn init_runtime(ctx: &mut DaemonContext) -> Result<()> {
+pub async fn init_runtime(ctx: &DaemonContext) -> Result<()> {
     let mut config = Config {
         data_dir: ctx.data_dir.clone(),
         ..Default::default()
@@ -165,7 +166,7 @@ fn dns_domain() -> String {
 ///
 /// Layout: `ArcBox Desktop.app/Contents/Helpers/com.arcboxlabs.desktop.daemon`
 /// → returns `ArcBox Desktop.app/Contents/`
-pub(crate) fn find_bundle_contents() -> Option<PathBuf> {
+pub fn find_bundle_contents() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     // exe = .../Contents/Helpers/com.arcboxlabs.desktop.daemon
     let contents = exe.parent()?.parent()?;
@@ -257,7 +258,7 @@ fn seed_dir_files(src: &Path, dst: &Path, files: &[&str], label: &str) {
 fn seed_dir_recursive(src: &Path, dst: &Path, label: &str) {
     let result = (|| -> std::io::Result<u32> {
         let mut count = 0u32;
-        for entry in walkdir(src)? {
+        for entry in walkdir(src) {
             let (rel, is_dir) = entry?;
             let d = dst.join(&rel);
             if is_dir {
@@ -293,10 +294,10 @@ fn seed_dir_recursive(src: &Path, dst: &Path, label: &str) {
 }
 
 /// Simple recursive directory walker yielding `(relative_path, is_dir)`.
-fn walkdir(root: &Path) -> std::io::Result<impl Iterator<Item = std::io::Result<(PathBuf, bool)>>> {
+fn walkdir(root: &Path) -> impl Iterator<Item = std::io::Result<(PathBuf, bool)>> {
     let mut stack = vec![PathBuf::new()];
     let root = root.to_path_buf();
-    Ok(std::iter::from_fn(move || {
+    std::iter::from_fn(move || {
         while let Some(rel) = stack.pop() {
             let abs = root.join(&rel);
             let Ok(meta) = std::fs::metadata(&abs) else {
@@ -321,7 +322,7 @@ fn walkdir(root: &Path) -> std::io::Result<impl Iterator<Item = std::io::Result<
             }
         }
         None
-    }))
+    })
 }
 
 // =============================================================================

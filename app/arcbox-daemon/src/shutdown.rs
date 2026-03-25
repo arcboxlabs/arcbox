@@ -8,6 +8,7 @@ use tokio::signal;
 use tracing::{info, warn};
 
 use crate::context::{DaemonContext, ServiceHandles};
+use crate::nfs_mount;
 
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -24,6 +25,8 @@ pub async fn run(ctx: DaemonContext, mut handles: ServiceHandles) -> Result<()> 
     {
         arcbox_core::route_reconciler::remove_route().await;
     }
+
+    nfs_mount::cleanup(&ctx);
 
     if let Some(runtime) = ctx.shared_runtime.get() {
         runtime

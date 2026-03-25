@@ -20,6 +20,7 @@ pub struct DaemonContext {
     pub dns_domain: String,
     pub dns_port: u16,
     pub docker_integration: bool,
+    pub mount_nfs: bool,
     pub vm_args: VmArgs,
 }
 
