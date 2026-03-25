@@ -2,10 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Returns the total physical memory of the host system in bytes.
+/// Returns the effective memory limit for the host process in bytes.
 ///
 /// On macOS this queries `hw.memsize` via `sysctlbyname`.
-/// On Linux this uses `sysinfo(2)`.
+/// On Linux this returns `min(sysinfo.totalram, cgroup_memory_limit)` so
+/// that defaults are sensible inside containers, CI runners, or systemd
+/// units with `MemoryMax`.
 ///
 /// Returns 0 if the query fails (should never happen on supported platforms).
 #[must_use]
@@ -14,7 +16,8 @@ pub fn host_memory_size() -> u64 {
     {
         let mut size: u64 = 0;
         let mut len = std::mem::size_of::<u64>();
-        // SAFETY: sysctlbyname with valid name, correctly-sized output buffer.
+        // SAFETY: `sysctlbyname` writes at most `len` bytes into `size`,
+        // which is a correctly-sized `u64` buffer we own.
         let ret = unsafe {
             libc::sysctlbyname(
                 c"hw.memsize".as_ptr(),
@@ -29,16 +32,57 @@ pub fn host_memory_size() -> u64 {
 
     #[cfg(target_os = "linux")]
     {
-        // SAFETY: sysinfo always succeeds when given a valid pointer.
-        unsafe {
+        // SAFETY: `info` is zero-initialized and we pass a valid pointer.
+        // `sysinfo(2)` only writes to the provided struct; fields are
+        // plain integers that are valid for any bit pattern.
+        let physical = unsafe {
             let mut info: libc::sysinfo = std::mem::zeroed();
             if libc::sysinfo(&mut info) == 0 {
                 info.totalram * u64::from(info.mem_unit)
             } else {
-                0
+                return 0;
+            }
+        };
+
+        // Respect cgroup memory limits so defaults are sensible inside
+        // containers, CI runners, or systemd units with MemoryMax.
+        let cgroup = cgroup_memory_limit();
+        if cgroup > 0 && cgroup < physical {
+            cgroup
+        } else {
+            physical
+        }
+    }
+}
+
+/// Reads the cgroup memory limit (bytes) visible to this process.
+///
+/// Tries cgroup v2 first (`memory.max`), then falls back to cgroup v1
+/// (`memory.limit_in_bytes`). Returns 0 if no limit is set or the files
+/// cannot be read.
+#[cfg(target_os = "linux")]
+fn cgroup_memory_limit() -> u64 {
+    // cgroup v2
+    if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory.max") {
+        let s = s.trim();
+        if s != "max" {
+            if let Ok(v) = s.parse::<u64>() {
+                return v;
             }
         }
     }
+    // cgroup v1
+    if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes") {
+        let s = s.trim();
+        if let Ok(v) = s.parse::<u64>() {
+            // Kernel sets this to a huge sentinel (PAGE_COUNTER_MAX) when
+            // there is no limit; ignore values above 2^62.
+            if v < (1 << 62) {
+                return v;
+            }
+        }
+    }
+    0
 }
 
 /// Returns a sensible default VM memory size based on host physical memory.
@@ -57,6 +101,21 @@ pub fn default_vm_memory_size() -> u64 {
     }
 
     (host / 2).clamp(MIN_DEFAULT, MAX_DEFAULT)
+}
+
+/// Emits a warning if `memory_size` exceeds 50% of host RAM.
+///
+/// Shared by Darwin and KVM `validate_config()` to keep the threshold
+/// and message consistent.
+pub fn warn_memory_exceeds_host_half(memory_size: u64) {
+    let host_mem = host_memory_size();
+    if host_mem > 0 && memory_size > host_mem / 2 {
+        tracing::warn!(
+            "VM memory {}MB exceeds 50% of host RAM ({}MB total) — host may experience memory pressure",
+            memory_size / (1024 * 1024),
+            host_mem / (1024 * 1024),
+        );
+    }
 }
 
 /// CPU architecture.
