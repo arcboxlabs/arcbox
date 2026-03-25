@@ -50,7 +50,7 @@ When asked to plan, the plan must be fully resolved before implementation begins
 - Performance-critical paths (VirtioFS, network stack, VirtIO devices) are all custom-built, not vendored
 - Prefer extension traits over free helper functions when the operation is specific to a type (e.g. `request.machine_id()?` not `extract_machine_id(&request)?`; `self.runtime.ready()?` not `get_runtime(&self.runtime)?`).
 - Prefer `From`/`Into` trait chains for error conversion. Don't write manual mapping helpers like `core_to_status()` — instead, implement `From<LocalError> for ForeignType` (using a crate-local error type to satisfy the orphan rule) and let `.map_err(LocalError::from)?` drive the conversion.
-- When a source file contains multiple distinct implementations separated by section dividers, split into a module directory (`foo/mod.rs` + one file per logical unit). Shared types and trait extensions go in `mod.rs`.
+- **Section dividers (`// ===...`) mean the file should be split.** If you find or are about to add a `// ====` section divider, that is the signal that the file contains multiple distinct implementations and must be refactored into a module directory (`foo/mod.rs` + one file per logical unit). Do not add new section dividers to keep a monolithic file — split immediately. Shared types and trait extensions go in `mod.rs`.
 - Prefer refactoring over layered, patchy fixes. Code changes must be coherent, not duct-taped on.
 - No hacky workarounds. If a workaround is truly unavoidable, pause and get user approval first.
 - When the right choice is obvious, make the decision — don't ask unnecessary questions. But when a plan or request is blocked or infeasible, surface the blocker with enough context for the user to decide the path forward.
