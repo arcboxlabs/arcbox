@@ -243,7 +243,7 @@ impl Default for DefaultVmConfig {
 
         Self {
             cpus: (host_cpus / 2).max(2),
-            memory_mb: 2048,
+            memory_mb: arcbox_hypervisor::default_vm_memory_size() / (1024 * 1024),
             disk_gb: 50,
             kernel: None,
             cmdline: None,
@@ -1314,7 +1314,11 @@ mod tests {
     fn test_default_vm_config() {
         let config = DefaultVmConfig::default();
         assert!(config.cpus >= 2);
-        assert_eq!(config.memory_mb, 2048);
+        // Default memory is half of host RAM, clamped to [512, 16384] MB.
+        let expected_mb = arcbox_hypervisor::default_vm_memory_size() / (1024 * 1024);
+        assert_eq!(config.memory_mb, expected_mb);
+        assert!(config.memory_mb >= 512);
+        assert!(config.memory_mb <= 16384);
         assert_eq!(config.disk_gb, 50);
     }
 

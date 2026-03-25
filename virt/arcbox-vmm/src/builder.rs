@@ -104,7 +104,7 @@ impl VmBuilder {
         Self {
             name: "arcbox-vm".to_string(),
             cpus: 1,
-            memory_size: 512 * 1024 * 1024, // 512MB
+            memory_size: arcbox_hypervisor::default_vm_memory_size(),
             kernel_path: None,
             kernel_cmdline: String::new(),
             initrd_path: None,

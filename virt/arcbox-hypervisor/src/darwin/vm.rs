@@ -1488,7 +1488,12 @@ mod tests {
             return;
         }
 
-        let config = VmConfig::default();
+        // Use a small fixed size — this test only checks state transitions,
+        // not actual guest execution.
+        let config = VmConfig {
+            memory_size: 128 * 1024 * 1024, // 128MB
+            ..Default::default()
+        };
         let mut vm = DarwinVm::new(config).unwrap();
 
         // Can't pause if not running
