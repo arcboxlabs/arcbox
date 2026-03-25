@@ -55,52 +55,110 @@ pub fn host_memory_size() -> u64 {
     }
 }
 
-/// Reads the cgroup memory limit (bytes) visible to this process.
+/// Reads the cgroup memory limit (bytes) for this process.
 ///
-/// Tries cgroup v2 first (`memory.max`), then falls back to cgroup v1
-/// (`memory.limit_in_bytes`). Returns 0 if no limit is set or the files
-/// cannot be read.
+/// Resolves the actual cgroup path via `/proc/self/cgroup`, then reads
+/// `memory.max` (v2) or `memory.limit_in_bytes` (v1) from the correct
+/// directory. Falls back to root cgroup paths if resolution fails.
+/// Returns 0 if no limit is set or the files cannot be read.
 #[cfg(target_os = "linux")]
 fn cgroup_memory_limit() -> u64 {
-    // cgroup v2
-    if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory.max") {
-        let s = s.trim();
-        if s != "max" {
-            if let Ok(v) = s.parse::<u64>() {
-                return v;
-            }
-        }
+    // Try cgroup v2 first, then v1.
+    if let Some(v) = cgroup_v2_memory_limit() {
+        return v;
     }
-    // cgroup v1
-    if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes") {
-        let s = s.trim();
-        if let Ok(v) = s.parse::<u64>() {
-            // Kernel sets this to a huge sentinel (PAGE_COUNTER_MAX) when
-            // there is no limit; ignore values above 2^62.
-            if v < (1 << 62) {
-                return v;
-            }
-        }
+    if let Some(v) = cgroup_v1_memory_limit() {
+        return v;
     }
     0
 }
 
+/// Reads memory.max from the process's cgroup v2 directory.
+#[cfg(target_os = "linux")]
+fn cgroup_v2_memory_limit() -> Option<u64> {
+    // Resolve current cgroup path from /proc/self/cgroup.
+    // cgroup v2 has a single "0::" line.
+    let cgroup_path = std::fs::read_to_string("/proc/self/cgroup")
+        .ok()?
+        .lines()
+        .find(|l| l.starts_with("0::"))
+        .map(|l| l.strip_prefix("0::").unwrap_or("/").to_string())?;
+
+    // Try the process's own cgroup directory first, fall back to root.
+    let paths = [
+        format!("/sys/fs/cgroup{cgroup_path}/memory.max"),
+        "/sys/fs/cgroup/memory.max".to_string(),
+    ];
+    for path in &paths {
+        if let Ok(s) = std::fs::read_to_string(path) {
+            let s = s.trim();
+            if s != "max" {
+                if let Ok(v) = s.parse::<u64>() {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Reads memory.limit_in_bytes from the process's cgroup v1 memory controller.
+#[cfg(target_os = "linux")]
+fn cgroup_v1_memory_limit() -> Option<u64> {
+    // Find the memory controller entry in /proc/self/cgroup.
+    // v1 lines look like "N:memory:/path".
+    let cgroup_path = std::fs::read_to_string("/proc/self/cgroup")
+        .ok()?
+        .lines()
+        .find_map(|l| {
+            let parts: Vec<&str> = l.splitn(3, ':').collect();
+            if parts.len() == 3 && parts[1].split(',').any(|c| c == "memory") {
+                Some(parts[2].to_string())
+            } else {
+                None
+            }
+        })?;
+
+    let paths = [
+        format!("/sys/fs/cgroup/memory{cgroup_path}/memory.limit_in_bytes"),
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes".to_string(),
+    ];
+    for path in &paths {
+        if let Ok(s) = std::fs::read_to_string(path) {
+            let s = s.trim();
+            if let Ok(v) = s.parse::<u64>() {
+                // Kernel sets this to a huge sentinel (PAGE_COUNTER_MAX)
+                // when there is no limit; ignore values above 2^62.
+                if v < (1 << 62) {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Returns a sensible default VM memory size based on host physical memory.
 ///
-/// The default is half of host RAM, clamped to `[512 MB, 16 GB]`.
+/// The default is half of host RAM, clamped to `[512 MB, 16 GB]` and
+/// rounded down to a 1 MiB boundary (KVM and Virtualization.framework
+/// both require page-aligned memory sizes).
 /// Falls back to 4 GB if host memory detection fails.
 #[must_use]
 pub fn default_vm_memory_size() -> u64 {
     const MIN_DEFAULT: u64 = 512 * 1024 * 1024; // 512 MB
     const MAX_DEFAULT: u64 = 16 * 1024 * 1024 * 1024; // 16 GB
     const FALLBACK: u64 = 4 * 1024 * 1024 * 1024; // 4 GB
+    const MIB: u64 = 1024 * 1024;
 
     let host = host_memory_size();
     if host == 0 {
         return FALLBACK;
     }
 
-    (host / 2).clamp(MIN_DEFAULT, MAX_DEFAULT)
+    let size = (host / 2).clamp(MIN_DEFAULT, MAX_DEFAULT);
+    // Round down to 1 MiB boundary.
+    size & !(MIB - 1)
 }
 
 /// Emits a warning if `memory_size` exceeds 50% of host RAM.
