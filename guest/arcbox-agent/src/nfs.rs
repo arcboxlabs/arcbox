@@ -70,6 +70,10 @@ mod platform {
             .map_err(|e| format!("mkdir {} failed({})", cfg.export_docker, e))?;
         fs::create_dir_all(NFS_STATE_DIR)
             .map_err(|e| format!("mkdir {} failed({})", NFS_STATE_DIR, e))?;
+        // nfsdcltrack stores its SQLite DB here. Must exist before nfsd
+        // starts so the UMH upcall can determine there are no prior clients.
+        fs::create_dir_all(format!("{NFS_STATE_DIR}/nfsdcltrack"))
+            .map_err(|e| format!("mkdir nfsdcltrack failed({e})"))?;
 
         tracing::info!("nfs export: ensuring nfsd pseudo-fs");
         ensure_nfsd_mount()?;
