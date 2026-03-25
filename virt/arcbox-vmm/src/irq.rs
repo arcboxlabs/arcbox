@@ -423,36 +423,40 @@ impl IrqChip {
         };
         drop(configs);
 
-        // Bitmap-level dedup (only for edge-triggered)
-        if trigger_mode == TriggerMode::Edge {
-            let irq_bit = 1u32 << (irq % 32);
-            let old_pending = self.pending.fetch_or(irq_bit, Ordering::SeqCst);
-            if (old_pending & irq_bit) != 0 {
-                self.stats.coalesced.fetch_add(1, Ordering::Relaxed);
-                tracing::trace!("IRQ {} coalesced (already pending)", irq);
-                return Ok(());
-            }
-        }
-
-        // Timer-based coalescing: if configured for this IRQ, accumulate
-        // interrupts and only deliver when the count threshold is reached
-        // or the timer expires (via flush_coalesced).
-        {
+        // Coalescing: timer-based takes priority over bitmap dedup when
+        // configured, because bitmap dedup would swallow repeated IRQs before
+        // the coalescing counter can accumulate them.
+        let has_coalescing = {
             let states = self
                 .coalescing_states
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(state) = states.get(&irq) {
-                if state.config.enabled {
+            match states.get(&irq) {
+                Some(state) if state.config.enabled => {
                     let force_deliver = state.record();
                     if !force_deliver {
                         // Accumulated — caller should poll timer_expired()
                         // and call flush_coalesced() when it fires.
                         return Ok(());
                     }
-                    // Threshold reached — fall through to immediate delivery
+                    // Threshold reached — flush and fall through to deliver
                     state.flush();
+                    true
                 }
+                _ => false,
+            }
+        };
+
+        // Bitmap-level dedup: only used for edge-triggered IRQs WITHOUT
+        // timer-based coalescing. When coalescing is active, the
+        // CoalescingState already handles dedup via its pending_count.
+        if !has_coalescing && trigger_mode == TriggerMode::Edge {
+            let irq_bit = 1u32 << (irq % 32);
+            let old_pending = self.pending.fetch_or(irq_bit, Ordering::SeqCst);
+            if (old_pending & irq_bit) != 0 {
+                self.stats.coalesced.fetch_add(1, Ordering::Relaxed);
+                tracing::trace!("IRQ {} coalesced (already pending)", irq);
+                return Ok(());
             }
         }
 
@@ -916,5 +920,64 @@ mod tests {
     fn test_coalescing_disabled() {
         let state = CoalescingState::new(CoalescingConfig::disabled());
         assert!(!state.config.enabled);
+    }
+
+    #[test]
+    fn test_trigger_irq_with_coalescing_accumulates() {
+        let chip = IrqChip::new().unwrap();
+        let trigger_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&trigger_count);
+
+        let callback: IrqTriggerCallback = Box::new(move |_gsi, _level| {
+            count_clone.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        chip.set_trigger_callback(Arc::new(callback));
+
+        // Allocate edge-triggered IRQ and enable coalescing (threshold=5)
+        let irq = chip.allocate_irq_with_config(1, TriggerMode::Edge).unwrap();
+        chip.set_coalescing(
+            irq,
+            CoalescingConfig {
+                max_coalesce_count: 5,
+                max_delay: Duration::from_secs(10),
+                enabled: true,
+            },
+        );
+
+        // Trigger 4 times — all should be accumulated, not delivered
+        for _ in 0..4 {
+            chip.trigger_irq(irq).unwrap();
+        }
+        assert_eq!(trigger_count.load(Ordering::SeqCst), 0);
+
+        // 5th trigger hits threshold → force delivery
+        chip.trigger_irq(irq).unwrap();
+        // deliver_irq does assert+deassert for edge → 2 callback invocations
+        assert_eq!(trigger_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn test_flush_coalesced_delivers() {
+        let chip = IrqChip::new().unwrap();
+        let trigger_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&trigger_count);
+
+        let callback: IrqTriggerCallback = Box::new(move |_gsi, _level| {
+            count_clone.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        chip.set_trigger_callback(Arc::new(callback));
+
+        let irq = chip.allocate_irq_with_config(1, TriggerMode::Edge).unwrap();
+        chip.set_coalescing(irq, CoalescingConfig::default());
+
+        // Trigger once — accumulated
+        chip.trigger_irq(irq).unwrap();
+        assert_eq!(trigger_count.load(Ordering::SeqCst), 0);
+
+        // Flush — should deliver
+        chip.flush_coalesced(irq).unwrap();
+        assert_eq!(trigger_count.load(Ordering::SeqCst), 2); // assert + deassert
     }
 }
