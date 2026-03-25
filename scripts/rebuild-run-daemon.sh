@@ -10,6 +10,7 @@ SOCKET="${SOCKET:-/tmp/arcbox.sock}"
 GRPC_SOCKET="${GRPC_SOCKET:-/tmp/arcbox-grpc.sock}"
 DATA_DIR="${DATA_DIR:-/tmp/arcbox-data}"
 GUEST_DOCKER_VSOCK_PORT="${GUEST_DOCKER_VSOCK_PORT:-2375}"
+HELPER_SOCKET="${HELPER_SOCKET:-/tmp/arcbox-helper.sock}"
 SIGN="${SIGN:-1}"
 ENTITLEMENTS="${ENTITLEMENTS:-$ROOT/bundle/arcbox.entitlements}"
 
@@ -41,6 +42,8 @@ if [[ "$SIGN" == "1" ]]; then
     exit 1
   fi
 fi
+
+export ARCBOX_HELPER_SOCKET="$HELPER_SOCKET"
 
 exec "$BIN" \
   --socket "$SOCKET" \
