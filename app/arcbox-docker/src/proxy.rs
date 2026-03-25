@@ -21,7 +21,7 @@ use std::sync::LazyLock;
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 use tokio::io::unix::AsyncFd;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::Semaphore;
 
 /// Timeout for establishing a vsock connection to guest dockerd.
@@ -151,18 +151,30 @@ impl AsyncWrite for RawFdStream {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let fd = self.inner.get_ref().as_raw_fd();
-        // SAFETY: shutdown on a valid fd.
-        let result = unsafe { libc::shutdown(fd, libc::SHUT_WR) };
-        if result == 0 {
+        // macOS vsock does not support half-close: `shutdown(fd, SHUT_WR)`
+        // destroys the entire connection instead of closing only the write
+        // side. This breaks hyper's upgrade path because the fd becomes
+        // ENOTCONN before the bridge can start. The fd is properly closed
+        // when `OwnedFd` is dropped, so the no-op is safe.
+        #[cfg(target_os = "macos")]
+        {
             return Poll::Ready(Ok(()));
         }
 
-        let err = io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::ENOTCONN) {
-            return Poll::Ready(Ok(()));
+        #[cfg(not(target_os = "macos"))]
+        {
+            let fd = self.inner.get_ref().as_raw_fd();
+            // SAFETY: shutdown on a valid fd.
+            let result = unsafe { libc::shutdown(fd, libc::SHUT_WR) };
+            if result == 0 {
+                return Poll::Ready(Ok(()));
+            }
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ENOTCONN) {
+                return Poll::Ready(Ok(()));
+            }
+            Poll::Ready(Err(err))
         }
-        Poll::Ready(Err(err))
     }
 }
 
@@ -350,85 +362,197 @@ pub async fn proxy_to_guest_stream(
     Ok(Response::from_parts(parts, Body::new(incoming)))
 }
 
+/// Send a raw HTTP/1.1 upgrade request to guest dockerd and read the
+/// response headers.
+///
+/// Bypasses hyper's client-side upgrade API. hyper's `upgrade::on(response)`
+/// transfers the IO through an internal oneshot channel, but the upgraded
+/// future never resolves for `TokioIo<RawFdStream>` — the IO is silently
+/// lost. Writing the HTTP exchange directly keeps the vsock fd owned by
+/// the caller throughout the entire upgrade + bridge lifecycle.
+async fn send_raw_upgrade(
+    stream: &mut RawFdStream,
+    method: &Method,
+    path_and_query: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<(StatusCode, HeaderMap)> {
+    // Build HTTP/1.1 request.
+    let mut raw = format!("{method} {path_and_query} HTTP/1.1\r\nHost: localhost\r\n");
+    let has_content_length = headers.contains_key(header::CONTENT_LENGTH);
+    let has_transfer_encoding = headers.contains_key(header::TRANSFER_ENCODING);
+    for (key, value) in headers {
+        if key == header::HOST {
+            continue;
+        }
+        // Override Content-Length to match the body we actually send.
+        if key == header::CONTENT_LENGTH {
+            continue;
+        }
+        let Ok(v) = value.to_str() else { continue };
+        raw.push_str(key.as_str());
+        raw.push_str(": ");
+        raw.push_str(v);
+        raw.push_str("\r\n");
+    }
+    // Always emit an accurate Content-Length so guest dockerd does not
+    // wait for bytes that will never arrive.
+    if !has_transfer_encoding {
+        raw.push_str(&format!("content-length: {}\r\n", body.len()));
+    } else if !has_content_length && !has_transfer_encoding {
+        raw.push_str("content-length: 0\r\n");
+    }
+    raw.push_str("\r\n");
+
+    stream
+        .write_all(raw.as_bytes())
+        .await
+        .map_err(|e| DockerError::Server(format!("failed to write upgrade request: {e}")))?;
+    if !body.is_empty() {
+        stream
+            .write_all(body)
+            .await
+            .map_err(|e| DockerError::Server(format!("failed to write upgrade body: {e}")))?;
+    }
+
+    // Read response headers byte-by-byte until the blank line delimiter.
+    // Upgrade responses are small (< 512 bytes), so this is fine.
+    let mut buf = Vec::with_capacity(512);
+    let mut byte = [0u8; 1];
+    loop {
+        stream
+            .read_exact(&mut byte)
+            .await
+            .map_err(|e| DockerError::Server(format!("failed to read upgrade response: {e}")))?;
+        buf.push(byte[0]);
+        if buf.len() >= 4 && buf[buf.len() - 4..] == *b"\r\n\r\n" {
+            break;
+        }
+        if buf.len() > 8192 {
+            return Err(DockerError::Server(
+                "upgrade response headers too large".into(),
+            ));
+        }
+    }
+
+    // Parse "HTTP/1.1 101 Switching Protocols\r\n..."
+    let header_str = String::from_utf8_lossy(&buf);
+    let status_line = header_str
+        .lines()
+        .next()
+        .ok_or_else(|| DockerError::Server("empty upgrade response".into()))?;
+    let status_code: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| DockerError::Server(format!("invalid status line: {status_line}")))?;
+    let status = StatusCode::from_u16(status_code)
+        .map_err(|_| DockerError::Server(format!("invalid status code: {status_code}")))?;
+
+    let mut response_headers = HeaderMap::new();
+    for line in header_str.lines().skip(1) {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            if let (Ok(name), Ok(val)) = (
+                header::HeaderName::from_bytes(key.trim().as_bytes()),
+                header::HeaderValue::from_str(value.trim()),
+            ) {
+                response_headers.insert(name, val);
+            }
+        }
+    }
+
+    Ok((status, response_headers))
+}
+
 /// Forward an HTTP request with upgrade support to guest dockerd.
 ///
-/// Used for attach and exec endpoints that use HTTP upgrade (101 Switching
-/// Protocols) for bidirectional streaming. After the upgrade, client and
-/// guest streams are bridged via `copy_bidirectional`.
+/// Used for attach/exec (raw-stream) and BuildKit gRPC/session (h2c)
+/// endpoints. After the 101 handshake, client and guest streams are
+/// bridged via `copy_bidirectional`.
+///
+/// The guest side uses a raw HTTP exchange instead of hyper's
+/// `upgrade::on()` API. hyper's client-side upgrade transfers the IO
+/// through an internal oneshot channel that never delivers for
+/// `TokioIo<RawFdStream>`, leaving the bridge future permanently
+/// blocked. Writing the HTTP exchange directly keeps the vsock fd
+/// alive and owned by the caller for the entire bridge lifetime.
 ///
 /// # Errors
 ///
-/// Returns an error if guest connection, handshake, request forwarding,
-/// or response construction fails.
+/// Returns an error if guest connection, upgrade handshake, or response
+/// construction fails.
 pub async fn proxy_with_upgrade(
     runtime: &Runtime,
     mut client_req: axum::http::Request<Body>,
     original_uri: &Uri,
 ) -> Result<Response<Body>> {
     let io = connect_guest(runtime).await?;
-
-    let (mut sender, conn) =
-        tokio::time::timeout(HANDSHAKE_TIMEOUT, http1::Builder::new().handshake(io))
-            .await
-            .map_err(|_| {
-                DockerError::from(CommonError::timeout("guest docker handshake timed out"))
-            })?
-            .map_err(|e| DockerError::Server(format!("guest docker handshake failed: {e}")))?;
-
-    // The connection task must keep running for the upgrade to work.
-    // `.with_upgrades()` is required so hyper::upgrade::on(response) works.
-    tokio::spawn(async move {
-        if let Err(e) = conn.with_upgrades().await {
-            let msg = e.to_string().to_lowercase();
-            if !msg.contains("canceled") && !msg.contains("incomplete") {
-                tracing::debug!("guest docker upgrade connection ended: {}", e);
-            }
-        }
-    });
+    // Unwrap TokioIo to get the raw vsock stream — we drive the guest
+    // side manually so the fd stays alive throughout the bridge.
+    let mut guest_stream = io.into_inner();
 
     let path_and_query = original_uri
         .path_and_query()
         .map_or("/", hyper::http::uri::PathAndQuery::as_str);
-    let req_body = std::mem::take(client_req.body_mut());
 
-    let mut guest_req = hyper::Request::builder()
-        .method(client_req.method())
-        .uri(path_and_query)
-        .body(req_body)
-        .map_err(|e| DockerError::Server(format!("failed to build guest request: {e}")))?;
+    // Collect the request body so it can be forwarded to the guest.
+    // Upgrade request bodies (e.g. exec-start JSON) are small.
+    let body_bytes = {
+        let body = std::mem::take(client_req.body_mut());
+        http_body_util::BodyExt::collect(body)
+            .await
+            .map_err(|e| DockerError::Server(format!("failed to read request body: {e}")))?
+            .to_bytes()
+    };
 
-    // Forward all headers except Host.
-    for (key, value) in client_req.headers() {
-        if key != header::HOST {
-            guest_req.headers_mut().insert(key.clone(), value.clone());
+    let (status, response_headers) = tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        send_raw_upgrade(
+            &mut guest_stream,
+            client_req.method(),
+            path_and_query,
+            client_req.headers(),
+            &body_bytes,
+        ),
+    )
+    .await
+    .map_err(|_| DockerError::from(CommonError::timeout("guest docker upgrade timed out")))??;
+
+    if status != StatusCode::SWITCHING_PROTOCOLS {
+        // Forward the guest's actual error status and headers so the
+        // client sees actionable failures instead of a generic 500.
+        let mut builder = Response::builder().status(status);
+        for (key, value) in &response_headers {
+            builder = builder.header(key, value);
         }
-    }
-    guest_req
-        .headers_mut()
-        .insert(header::HOST, HeaderValue::from_static("localhost"));
-
-    let guest_response = sender
-        .send_request(guest_req)
-        .await
-        .map_err(|e| DockerError::Server(format!("guest docker request failed: {e}")))?;
-
-    if guest_response.status() != StatusCode::SWITCHING_PROTOCOLS {
-        // Guest didn't upgrade — return its response as-is.
-        let (parts, incoming) = guest_response.into_parts();
-        return Ok(Response::from_parts(parts, Body::new(incoming)));
+        // Read whatever response body the guest sent (bounded).
+        let mut error_body = vec![0u8; 8192];
+        let n = guest_stream.read(&mut error_body).await.unwrap_or(0);
+        error_body.truncate(n);
+        return builder
+            .body(Body::from(error_body))
+            .map_err(|e| DockerError::Server(format!("failed to build error response: {e}")));
     }
 
-    // Preserve content-type from guest's 101 (raw-stream vs multiplexed-stream).
-    let content_type = guest_response.headers().get(header::CONTENT_TYPE).cloned();
+    // Forward the guest's actual Upgrade value (h2c, tcp, etc.)
+    // so the client negotiates the correct post-upgrade protocol.
+    let upgrade_proto = response_headers
+        .get(header::UPGRADE)
+        .cloned()
+        .unwrap_or_else(|| HeaderValue::from_static("tcp"));
+    let content_type = response_headers.get(header::CONTENT_TYPE).cloned();
 
-    // Prepare both upgrade futures BEFORE returning the 101 to the client.
+    // Ensure no leftover request body data interferes with the upgraded stream.
+    *client_req.body_mut() = Body::empty();
     let client_upgrade = hyper::upgrade::on(&mut client_req);
-    let guest_upgrade = hyper::upgrade::on(guest_response);
 
     let mut builder = Response::builder()
         .status(StatusCode::SWITCHING_PROTOCOLS)
         .header(header::CONNECTION, "Upgrade")
-        .header(header::UPGRADE, "tcp");
+        .header(header::UPGRADE, upgrade_proto);
 
     if let Some(ct) = content_type {
         builder = builder.header(header::CONTENT_TYPE, ct);
@@ -440,18 +564,20 @@ pub async fn proxy_with_upgrade(
 
     // Bridge upgraded connections in background.
     tokio::spawn(async move {
-        let (client_io, guest_io) = match tokio::try_join!(client_upgrade, guest_upgrade) {
-            Ok(pair) => pair,
+        let client_io = match client_upgrade.await {
+            Ok(io) => io,
             Err(e) => {
                 tracing::debug!("upgrade bridging setup failed: {}", e);
                 return;
             }
         };
         let mut client_io = TokioIo::new(client_io);
-        let mut guest_io = TokioIo::new(guest_io);
-        if let Err(e) = tokio::io::copy_bidirectional(&mut client_io, &mut guest_io).await {
+        if let Err(e) = tokio::io::copy_bidirectional(&mut client_io, &mut guest_stream).await {
             let msg = e.to_string().to_lowercase();
-            if !msg.contains("broken pipe") && !msg.contains("connection reset") {
+            if !msg.contains("broken pipe")
+                && !msg.contains("connection reset")
+                && !msg.contains("not connected")
+            {
                 tracing::debug!("upgrade bridge error: {}", e);
             }
         }
