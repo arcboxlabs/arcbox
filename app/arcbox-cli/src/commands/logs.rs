@@ -112,26 +112,22 @@ fn tail_lines(path: &Path, n: usize) -> Result<()> {
     let mut scan_pos = file_len;
     let mut start_offset = 0u64;
 
-    while scan_pos > 0 {
+    'outer: while scan_pos > 0 {
         let read_size = scan_pos.min(CHUNK);
         scan_pos -= read_size;
         file.seek(SeekFrom::Start(scan_pos))?;
         let mut buf = vec![0u8; read_size as usize];
         file.read_exact(&mut buf)?;
 
-        for &b in buf.iter().rev() {
+        for (idx, &b) in buf.iter().enumerate().rev() {
             if b == b'\n' {
                 newlines_found += 1;
                 // n+1 because the last byte of a file is often '\n' itself.
                 if newlines_found > n {
-                    start_offset = file_len - (file_len - scan_pos) + (buf.len() as u64 - buf.iter().rev().position(|&x| x == b'\n').unwrap() as u64);
-                    break;
+                    start_offset = scan_pos + idx as u64 + 1;
+                    break 'outer;
                 }
             }
-        }
-
-        if newlines_found > n {
-            break;
         }
     }
 
