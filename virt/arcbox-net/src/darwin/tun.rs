@@ -375,14 +375,15 @@ impl DarwinTun {
         };
 
         // Build the buffer: 4-byte AF header + IP packet.
-        let af_bytes = af.to_ne_bytes();
+        let mut af_bytes = af.to_ne_bytes();
         let iov = [
             libc::iovec {
-                iov_base: af_bytes.as_ptr() as *mut _,
+                iov_base: af_bytes.as_mut_ptr().cast::<libc::c_void>(),
                 iov_len: AF_HEADER_SIZE,
             },
             libc::iovec {
-                iov_base: packet.as_ptr() as *mut _,
+                // writev treats the buffer as read-only despite the *mut pointer
+                iov_base: packet.as_ptr().cast_mut().cast::<libc::c_void>(),
                 iov_len: packet.len(),
             },
         ];

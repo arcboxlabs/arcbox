@@ -25,7 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Helper runs as root — write logs to /var/log/arcbox/helper.log.
-    let _log_guard = arcbox_logging::init(arcbox_logging::LogConfig {
+    let log_guard = arcbox_logging::init(arcbox_logging::LogConfig {
         log_dir: std::path::PathBuf::from(arcbox_constants::paths::privileged_log::HELPER_LOG_DIR),
         file_name: arcbox_constants::paths::privileged_log::HELPER_LOG.to_string(),
         default_filter: "arcbox_helper=info".to_string(),
@@ -38,6 +38,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?
         .block_on(server::run());
 
-    _log_guard.flush();
+    log_guard.flush();
     result
 }

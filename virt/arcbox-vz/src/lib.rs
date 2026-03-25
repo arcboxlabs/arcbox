@@ -55,6 +55,9 @@
 #![allow(clippy::type_complexity)]
 #![allow(clippy::collapsible_if)]
 #![allow(clippy::map_unwrap_or)]
+// VM operations run on the main thread with ObjC FFI pointers (*const c_void,
+// *mut AnyObject) that are inherently not Send. This is by design.
+#![allow(clippy::future_not_send)]
 
 pub mod error;
 pub mod ffi;

@@ -479,6 +479,7 @@ impl DnsForwarder {
     }
 
     /// Builds a response for a local hostname.
+    #[allow(clippy::unnecessary_wraps)] // Result kept for consistent call-site interface
     fn build_local_response(&self, query: &DnsQuery, ip: IpAddr) -> Result<Vec<u8>> {
         let mut response = Vec::with_capacity(512);
 
@@ -529,6 +530,7 @@ impl DnsForwarder {
     }
 
     /// Builds a response from cached records.
+    #[allow(clippy::unnecessary_wraps)] // Result kept for consistent call-site interface
     fn build_cached_response(&self, query: &DnsQuery, records: &[DnsRecord]) -> Result<Vec<u8>> {
         let mut response = Vec::with_capacity(512);
 
@@ -600,18 +602,15 @@ impl DnsForwarder {
 
             // Receive response
             let mut buf = [0u8; 512];
-            match socket.recv_from(&mut buf) {
-                Ok((len, _)) => {
-                    let response = buf[..len].to_vec();
+            if let Ok((len, _)) = socket.recv_from(&mut buf) {
+                let response = buf[..len].to_vec();
 
-                    // Cache the response (simplified)
-                    if let Ok(query) = DnsQuery::parse(data) {
-                        self.cache_response(&query.name, query.qtype, &response);
-                    }
-
-                    return Ok(response);
+                // Cache the response (simplified)
+                if let Ok(query) = DnsQuery::parse(data) {
+                    self.cache_response(&query.name, query.qtype, &response);
                 }
-                Err(_) => continue,
+
+                return Ok(response);
             }
         }
 

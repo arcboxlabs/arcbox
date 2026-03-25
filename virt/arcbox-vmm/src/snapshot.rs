@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 
 use arcbox_hypervisor::{DeviceSnapshot, VcpuSnapshot, VmSnapshot};
 
+/// Callback type for reading guest memory into a caller-supplied buffer.
+type MemoryReaderFn = Box<dyn FnOnce(&mut [u8]) -> Result<(), SnapshotError> + Send>;
+
 /// Snapshot metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotInfo {
@@ -83,7 +86,7 @@ pub struct VmSnapshotContext {
     /// Memory size in bytes.
     pub memory_size: u64,
     /// Callback to read guest memory into a buffer.
-    pub memory_reader: Box<dyn FnOnce(&mut [u8]) -> Result<(), SnapshotError> + Send>,
+    pub memory_reader: MemoryReaderFn,
 }
 
 /// Data needed to restore a VM from a snapshot.
@@ -378,8 +381,7 @@ impl SnapshotManager {
             arch: context
                 .vcpu_snapshots
                 .first()
-                .map(|v| v.arch)
-                .unwrap_or(arcbox_hypervisor::CpuArch::native()),
+                .map_or(arcbox_hypervisor::CpuArch::native(), |v| v.arch),
             vcpus: context.vcpu_snapshots.clone(),
             devices: context
                 .device_snapshots

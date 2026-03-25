@@ -1091,16 +1091,10 @@ impl PassthroughFs {
             file_type: FileType::Directory,
         });
 
-        // For .., we need the parent inode
-        let parent_ino = if inode == Self::ROOT_INODE {
-            Self::ROOT_INODE
-        } else {
-            // Try to find parent, default to root
-            Self::ROOT_INODE
-        };
+        // For .., use root inode (parent tracking not yet implemented).
         entries.push(DirEntry {
             name: OsString::from(".."),
-            ino: parent_ino,
+            ino: Self::ROOT_INODE,
             file_type: FileType::Directory,
         });
 
@@ -1422,7 +1416,11 @@ impl PassthroughFs {
             return Err(FsError::io(std::io::Error::last_os_error()));
         }
 
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        #[allow(
+            clippy::cast_sign_loss,
+            clippy::cast_possible_truncation,
+            clippy::unnecessary_cast // Field types differ between macOS (u32) and Linux (u64).
+        )]
         Ok(crate::fuse::StatFs {
             blocks: stat.f_blocks as u64,
             bfree: stat.f_bfree as u64,
@@ -1461,6 +1459,10 @@ impl PassthroughFs {
     }
 }
 
+// Internal counters and atomics (next_inode, next_handle, negative_cache, config)
+// are intentionally omitted from Debug — they are implementation details that
+// add noise without aiding diagnostics.
+#[allow(clippy::missing_fields_in_debug)]
 impl std::fmt::Debug for PassthroughFs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PassthroughFs")

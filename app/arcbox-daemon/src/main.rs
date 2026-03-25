@@ -115,7 +115,7 @@ async fn run(args: DaemonArgs) -> Result<()> {
 
     // Phase 2: seed/download boot assets, build runtime, start VM.
     // Progress is visible to gRPC clients via WatchSetupStatus.
-    startup::init_runtime(&mut ctx).await?;
+    startup::init_runtime(&ctx).await?;
 
     // Phase 3: start remaining services that require the runtime.
     let handles = services::start_services(&ctx, grpc).await?;

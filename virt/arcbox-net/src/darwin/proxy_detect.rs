@@ -114,9 +114,10 @@ impl ProxyEnvironment {
         let domain_lower = domain.to_lowercase();
         for pattern in &self.bypass_domains {
             let pat = pattern.to_lowercase();
-            if pat.starts_with("*.") {
-                let suffix = &pat[1..]; // ".example.com"
-                if domain_lower.ends_with(suffix) || domain_lower == pat[2..] {
+            if let Some(bare) = pat.strip_prefix("*.") {
+                // bare = "example.com"; match "sub.example.com" or exact "example.com"
+                let suffix = format!(".{bare}");
+                if domain_lower.ends_with(suffix.as_str()) || domain_lower == bare {
                     return true;
                 }
             } else if domain_lower == pat {

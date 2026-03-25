@@ -80,6 +80,7 @@ impl<T> CachePadded<T> {
 ///
 /// This hints to the CPU to load data into cache before it's needed,
 /// reducing memory access latency in tight loops.
+#[allow(clippy::inline_always)] // must inline: function contains inline asm, call overhead would defeat the purpose
 #[inline(always)]
 pub fn prefetch_read<T>(ptr: *const T) {
     #[cfg(target_arch = "aarch64")]
@@ -102,6 +103,7 @@ pub fn prefetch_read<T>(ptr: *const T) {
 }
 
 /// Software prefetch for write access.
+#[allow(clippy::inline_always)] // must inline: function contains inline asm, call overhead would defeat the purpose
 #[inline(always)]
 pub fn prefetch_write<T>(ptr: *mut T) {
     #[cfg(target_arch = "aarch64")]

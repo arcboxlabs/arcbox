@@ -91,6 +91,7 @@ impl Config {
     /// # Errors
     ///
     /// Returns an error if configuration cannot be loaded.
+    #[allow(clippy::result_large_err)]
     pub fn load() -> Result<Self, figment::Error> {
         Figment::new()
             .merge(Serialized::defaults(Self::default()))
@@ -105,6 +106,7 @@ impl Config {
     /// # Errors
     ///
     /// Returns an error if the file cannot be read or parsed.
+    #[allow(clippy::result_large_err)]
     pub fn load_from(path: impl AsRef<std::path::Path>) -> Result<Self, figment::Error> {
         Figment::new()
             .merge(Serialized::defaults(Self::default()))

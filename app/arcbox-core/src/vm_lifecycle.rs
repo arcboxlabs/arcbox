@@ -840,7 +840,8 @@ impl VmLifecycleManager {
                 .any(|token| token.starts_with(GUEST_DOCKER_VSOCK_PORT_KEY))
             {
                 cmdline.push(' ');
-                cmdline.push_str(&format!("{GUEST_DOCKER_VSOCK_PORT_KEY}{port}"));
+                cmdline.push_str(GUEST_DOCKER_VSOCK_PORT_KEY);
+                cmdline.push_str(&port.to_string());
             }
         }
 

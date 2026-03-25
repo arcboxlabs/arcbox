@@ -216,6 +216,7 @@ impl ConnTrackEntry {
     }
 }
 
+#[allow(clippy::missing_fields_in_debug)] // flags/timestamps omitted intentionally (internal state not useful in debug output)
 impl std::fmt::Debug for ConnTrackEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConnTrackEntry")
@@ -376,7 +377,7 @@ impl ConnTrackTable {
 
         if let Some(entry) = self.entries.get(key) {
             // Update fast cache
-            let entry_ptr = entry.as_ref() as *const ConnTrackEntry;
+            let entry_ptr = std::ptr::from_ref::<ConnTrackEntry>(entry.as_ref());
             self.fast_cache[cache_idx] = Some(FastCacheEntry::new(*key, entry_ptr));
             return Some(entry);
         }
@@ -426,7 +427,7 @@ impl ConnTrackTable {
 
         // Update fast cache
         let entry_ref = self.entries.get(&key).unwrap();
-        let entry_ptr = entry_ref.as_ref() as *const ConnTrackEntry;
+        let entry_ptr = std::ptr::from_ref::<ConnTrackEntry>(entry_ref.as_ref());
         let hash = key.fast_hash();
         let cache_idx = (hash as usize) & self.fast_cache_mask;
         self.fast_cache[cache_idx] = Some(FastCacheEntry::new(key, entry_ptr));
@@ -509,6 +510,7 @@ impl ConnTrackTable {
     }
 }
 
+#[allow(clippy::missing_fields_in_debug)] // reverse/fast_cache omitted intentionally (internal lookup tables not useful in debug output)
 impl std::fmt::Debug for ConnTrackTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConnTrackTable")

@@ -67,7 +67,7 @@ impl DaemonLock {
         if let Err(e) = file.seek(std::io::SeekFrom::Start(0)) {
             warn!(%e, "Failed to seek daemon.lock");
         }
-        if let Err(e) = write!(file, "{}\n", std::process::id()) {
+        if let Err(e) = writeln!(file, "{}", std::process::id()) {
             warn!(%e, "Failed to write PID to daemon.lock");
         }
 

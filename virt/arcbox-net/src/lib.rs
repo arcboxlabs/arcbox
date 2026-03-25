@@ -311,6 +311,7 @@ impl NetworkManager {
     }
 
     /// Internal stop implementation.
+    #[allow(clippy::unnecessary_wraps)] // Result kept for forward-compatibility (stop may fail in future)
     fn do_stop(&self) -> Result<()> {
         // Clear IP allocator.
         if let Ok(mut ip_alloc) = self.ip_allocator.write() {

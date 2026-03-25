@@ -4,11 +4,14 @@
 //! appropriate filesystem operations. It acts as the bridge between the
 //! raw FUSE protocol and the [`PassthroughFs`] implementation.
 
-// Allow casts and pointer operations for FUSE protocol binary compatibility
+// Allow casts and pointer operations for FUSE protocol binary compatibility.
+// cast_ptr_alignment: FUSE structs are cast from raw VirtIO queue bytes; the
+// VirtIO queue allocator guarantees the required alignment.
 #![allow(
     clippy::cast_sign_loss,
     clippy::cast_possible_wrap,
     clippy::cast_possible_truncation,
+    clippy::cast_ptr_alignment,
     clippy::ptr_as_ptr,
     clippy::borrow_as_ptr,
     clippy::significant_drop_tightening,
@@ -956,6 +959,9 @@ impl FuseDispatcher {
     }
 }
 
+// The `fs` field is intentionally excluded from Debug output — it contains
+// internal locks and file descriptors that are not meaningful to log.
+#[allow(clippy::missing_fields_in_debug)]
 impl std::fmt::Debug for FuseDispatcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FuseDispatcher")

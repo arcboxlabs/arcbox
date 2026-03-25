@@ -24,6 +24,11 @@ use tokio::sync::RwLock as TokioRwLock;
 /// Default guest VM IP address in NAT network (used by PortForwarder fallback).
 #[cfg(not(target_os = "macos"))]
 const DEFAULT_GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 64, 2);
+
+/// Inbound port-forwarding rules per container: maps container ID to a list of
+/// `(guest_ip, host_port, protocol)` tuples registered for that container.
+#[cfg(target_os = "macos")]
+type InboundRulesMap = Arc<TokioRwLock<HashMap<String, Vec<(Ipv4Addr, u16, InboundProtocol)>>>>;
 const REQUIRED_RUNTIME_ASSETS: [&str; 4] =
     ["dockerd", "containerd", "containerd-shim-runc-v2", "runc"];
 
@@ -102,7 +107,7 @@ pub struct Runtime {
     inbound_listener: Arc<TokioRwLock<Option<InboundListenerManager>>>,
     /// Tracks which inbound rules belong to each container for cleanup (macOS).
     #[cfg(target_os = "macos")]
-    inbound_rules: Arc<TokioRwLock<HashMap<String, Vec<(Ipv4Addr, u16, InboundProtocol)>>>>,
+    inbound_rules: InboundRulesMap,
     /// Port forwarders for each container (non-macOS fallback).
     #[cfg(not(target_os = "macos"))]
     port_forwarders: Arc<TokioRwLock<HashMap<String, PortForwarder>>>,

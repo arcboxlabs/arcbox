@@ -45,7 +45,7 @@ jobs:
         run: cargo fmt --check
 
       - name: Run clippy
-        run: cargo clippy --workspace --exclude arcbox-agent
+        run: cargo clippy --workspace --exclude arcbox-agent -- -D warnings
 
       - name: Build workspace
         run: cargo build --workspace --exclude arcbox-agent

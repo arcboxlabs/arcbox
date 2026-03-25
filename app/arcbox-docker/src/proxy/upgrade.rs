@@ -45,7 +45,8 @@ async fn send_raw_upgrade(
         raw.push_str("\r\n");
     }
     // Always emit an accurate Content-Length for the collected body.
-    raw.push_str(&format!("content-length: {}\r\n", body.len()));
+    use std::fmt::Write as _;
+    write!(raw, "content-length: {}\r\n", body.len()).expect("write to String is infallible");
     raw.push_str("\r\n");
 
     stream

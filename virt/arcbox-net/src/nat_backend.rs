@@ -203,6 +203,7 @@ impl NetBackend for NatNetBackend {
     }
 }
 
+#[allow(clippy::missing_fields_in_debug)] // host_io and rx_queue internals omitted intentionally (not useful in debug output)
 impl std::fmt::Debug for NatNetBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NatNetBackend")

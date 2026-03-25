@@ -616,7 +616,8 @@ impl Vmnet {
         // Create iovec for the data.
         // Note: vmnet_write expects mutable pointers even though it doesn't modify the data.
         let mut iov = iovec {
-            iov_base: data.as_ptr() as *mut _,
+            // vmnet_write expects *mut even though it treats the buffer as read-only
+            iov_base: data.as_ptr().cast_mut().cast::<libc::c_void>(),
             iov_len: data.len(),
         };
 

@@ -26,6 +26,7 @@ pub struct PacketBuffer {
 impl PacketBuffer {
     /// Creates a new empty buffer.
     #[inline]
+    #[allow(clippy::large_stack_arrays)] // 64 KB array — the temporary may briefly touch the stack during Box::new, but the buffer is immediately moved into the heap-backed pool
     const fn new(index: u32) -> Self {
         Self {
             data: [0; MAX_PACKET_SIZE],
@@ -149,6 +150,7 @@ impl PacketBuffer {
     }
 }
 
+#[allow(clippy::missing_fields_in_debug)] // data omitted intentionally (hot-path buffer, not useful in debug output)
 impl std::fmt::Debug for PacketBuffer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PacketBuffer")
@@ -417,6 +419,7 @@ impl PacketPool {
     }
 }
 
+#[allow(clippy::missing_fields_in_debug)] // buffers/free_list omitted intentionally (large arrays, not useful in debug output)
 impl std::fmt::Debug for PacketPool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PacketPool")
