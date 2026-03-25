@@ -392,7 +392,7 @@ impl SandboxManager {
             }
         }
 
-        // Allocate network resources.
+        // Allocate network resources (point-to-point TAP).
         let net_alloc = if spec.network.mode == "none" {
             None
         } else {
@@ -1245,6 +1245,7 @@ async fn boot_sandbox(
     match do_boot(&id, &spec, net_alloc.as_ref(), &vm_dir, &config).await {
         Ok((process, vm, vsock_uds_path)) => {
             let ready_at = Utc::now();
+
             let value = instances.read().unwrap().get(&id).cloned();
             if let Some(arc) = value {
                 let mut inst = arc.lock().unwrap();
@@ -1393,10 +1394,24 @@ async fn do_boot(
     let vcpu_count = NonZeroU64::new(spec.vcpus.max(1) as u64)
         .ok_or_else(|| VmmError::Config("vcpus must be > 0".into()))?;
 
+    // Append static IP configuration to boot args so the kernel configures
+    // eth0 before init runs.  Format: ip=<client>:<server>:<gw>:<mask>::<dev>:off
+    let boot_args = if let Some(net) = net_alloc {
+        format!(
+            "{} ip={}::{}:{}::eth0:off",
+            spec.boot_args,
+            net.ip_address,
+            net.gateway,
+            net.netmask(),
+        )
+    } else {
+        spec.boot_args.clone()
+    };
+
     let mut builder = VmBuilder::new(process.socket_path())
         .boot_source(BootSource {
             kernel_image_path: kernel_path,
-            boot_args: Some(spec.boot_args.clone()),
+            boot_args: Some(boot_args),
             initrd_path: None,
         })
         .machine_config(fc_sdk::types::MachineConfiguration {
@@ -1465,9 +1480,11 @@ async fn remove_sandbox_impl(
         return;
     };
 
-    {
+    // Kill the Firecracker process and wait for it to exit before releasing
+    // network resources. `ip tuntap del` fails with EBUSY if the TAP fd is
+    // still held by a running process.
+    let mut fc_process = {
         let mut inst = arc.lock().unwrap();
-        // Kill the Firecracker process.
         if let Some(ref mut proc) = inst.process
             && let Some(pid) = proc.pid()
             && pid > 0
@@ -1478,7 +1495,15 @@ async fn remove_sandbox_impl(
                 nix::sys::signal::Signal::SIGKILL,
             );
         }
-        // Release network resources.
+        inst.process.take()
+    };
+    // Await process exit outside the lock.
+    if let Some(ref mut proc) = fc_process {
+        let _ = proc.wait().await;
+    }
+    // Release network resources (destroys TAP via `ip tuntap del`).
+    {
+        let inst = arc.lock().unwrap();
         if let Some(ref net) = inst.network {
             network.release(net);
         }

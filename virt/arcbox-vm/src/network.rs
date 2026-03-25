@@ -14,6 +14,8 @@ pub struct NetworkAllocation {
     pub tap_name: String,
     /// IP address assigned to the guest.
     pub ip_address: Ipv4Addr,
+    /// Network prefix length (e.g. 16 for /16).
+    pub prefix_len: u8,
     /// Gateway IP.
     pub gateway: Ipv4Addr,
     /// MAC address (deterministic from VM ID).
@@ -22,11 +24,19 @@ pub struct NetworkAllocation {
     pub dns_servers: Vec<String>,
 }
 
+impl NetworkAllocation {
+    /// Return the subnet mask as an `Ipv4Addr` (e.g. prefix_len 16 → 255.255.0.0).
+    pub fn netmask(&self) -> Ipv4Addr {
+        if self.prefix_len == 0 {
+            Ipv4Addr::UNSPECIFIED
+        } else {
+            Ipv4Addr::from(!0u32 << (32 - self.prefix_len))
+        }
+    }
+}
+
 /// Shared manager for TAP interfaces and guest IP addresses.
 pub struct NetworkManager {
-    /// Bridge interface name.
-    #[allow(dead_code)]
-    bridge: String,
     /// Base IP from which the pool starts (host-octet 2 onwards).
     base: Ipv4Addr,
     /// Network prefix length (e.g. 16 for /16).
@@ -43,7 +53,7 @@ impl NetworkManager {
     /// Create a new manager from the network configuration.
     ///
     /// `cidr` must be in `a.b.c.d/n` notation (e.g. `"172.20.0.0/16"`).
-    pub fn new(bridge: &str, cidr: &str, gateway: &str, dns: Vec<String>) -> Result<Self> {
+    pub fn new(_bridge: &str, cidr: &str, gateway: &str, dns: Vec<String>) -> Result<Self> {
         let (base, prefix_len) = parse_cidr(cidr)?;
         if !(1..=30).contains(&prefix_len) {
             return Err(VmmError::Network(format!(
@@ -55,7 +65,6 @@ impl NetworkManager {
             .map_err(|e| VmmError::Network(format!("invalid gateway: {e}")))?;
 
         Ok(Self {
-            bridge: bridge.to_owned(),
             base,
             prefix_len,
             gateway,
@@ -66,8 +75,9 @@ impl NetworkManager {
 
     /// Allocate a TAP interface and guest IP for `vm_id`.
     ///
-    /// On Linux this creates a real TAP device and attaches it to the bridge.
-    /// The call is best-effort on non-Linux platforms (tests / macOS CI).
+    /// On Linux this creates a persistent TAP device with a point-to-point IP
+    /// configuration (gateway ↔ sandbox IP). The call is best-effort on
+    /// non-Linux platforms (tests / macOS CI).
     pub fn allocate(&self, vm_id: &str) -> Result<NetworkAllocation> {
         let ip = self.next_ip()?;
         let tap_name = tap_name_from_ip(ip);
@@ -76,7 +86,7 @@ impl NetworkManager {
         info!(vm_id, tap = %tap_name, ip = %ip, "allocating network");
 
         #[cfg(target_os = "linux")]
-        if let Err(e) = self.create_tap(&tap_name) {
+        if let Err(e) = self.create_tap(&tap_name, ip) {
             self.allocated.lock().unwrap().remove(&u32::from(ip));
             return Err(e);
         }
@@ -84,6 +94,7 @@ impl NetworkManager {
         Ok(NetworkAllocation {
             tap_name,
             ip_address: ip,
+            prefix_len: self.prefix_len,
             gateway: self.gateway,
             mac_address: mac,
             dns_servers: self.dns.clone(),
@@ -127,51 +138,112 @@ impl NetworkManager {
     }
 
     #[cfg(target_os = "linux")]
-    fn create_tap(&self, tap_name: &str) -> Result<()> {
-        use std::process::Command;
+    fn create_tap(&self, tap_name: &str, ip: Ipv4Addr) -> Result<()> {
+        use std::os::fd::FromRawFd;
+        use std::os::unix::io::AsRawFd;
 
         // Remove any stale TAP left over from a previous crashed run.
-        let _ = Command::new("/usr/sbin/ip")
-            .args(["link", "delete", tap_name])
-            .status();
+        destroy_tap(tap_name);
 
-        // Create TAP interface
-        let status = Command::new("/usr/sbin/ip")
-            .args(["tuntap", "add", tap_name, "mode", "tap"])
-            .status()
-            .map_err(|e| VmmError::Network(format!("ip tuntap add: {e}")))?;
-        if !status.success() {
+        let name_bytes = tap_name.as_bytes();
+        if name_bytes.len() >= libc::IFNAMSIZ {
+            return Err(VmmError::Network(format!("TAP name too long: {tap_name}")));
+        }
+
+        // 1. Create persistent TAP device via /dev/net/tun.
+        let tun = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/net/tun")
+            .map_err(|e| VmmError::Network(format!("open /dev/net/tun: {e}")))?;
+
+        let mut ifr = new_ifreq(name_bytes);
+        ifr.ifr_ifru.ifru_flags = (libc::IFF_TAP | libc::IFF_NO_PI) as i16;
+
+        const TUNSETIFF: libc::c_ulong = 0x400454ca;
+        const TUNSETPERSIST: libc::c_ulong = 0x400454cb;
+
+        // SAFETY: tun fd is valid, ifr is initialized with name and flags.
+        if unsafe { libc::ioctl(tun.as_raw_fd(), TUNSETIFF as _, &ifr) } < 0 {
             return Err(VmmError::Network(format!(
-                "failed to create TAP {tap_name}"
+                "TUNSETIFF {tap_name}: {}",
+                std::io::Error::last_os_error()
             )));
         }
 
-        // Bring up
-        let status = Command::new("/usr/sbin/ip")
-            .args(["link", "set", tap_name, "up"])
-            .status()
-            .map_err(|e| VmmError::Network(format!("ip link set up: {e}")))?;
-        if !status.success() {
+        // Make persistent so Firecracker can reopen the TAP by name.
+        // SAFETY: tun fd is attached to the TAP device after TUNSETIFF.
+        if unsafe { libc::ioctl(tun.as_raw_fd(), TUNSETPERSIST as _, 1i32) } < 0 {
+            return Err(VmmError::Network(format!(
+                "TUNSETPERSIST {tap_name}: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        drop(tun);
+
+        // 2. Bring interface up via ioctl on a helper socket.
+        // SAFETY: standard socket creation.
+        let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+        if sock < 0 {
             destroy_tap(tap_name);
             return Err(VmmError::Network(format!(
-                "failed to bring up TAP {tap_name}"
+                "socket: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        // SAFETY: sock is a valid fd returned by socket().
+        let sock = unsafe { std::os::fd::OwnedFd::from_raw_fd(sock) };
+
+        // SAFETY: sock and ifr.ifr_name are valid; kernel writes ifr_flags.
+        if unsafe { libc::ioctl(sock.as_raw_fd(), libc::SIOCGIFFLAGS as _, &ifr) } < 0 {
+            destroy_tap(tap_name);
+            return Err(VmmError::Network(format!(
+                "SIOCGIFFLAGS {tap_name}: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        // SAFETY: ifr_flags is valid from SIOCGIFFLAGS; adding IFF_UP.
+        unsafe { ifr.ifr_ifru.ifru_flags |= libc::IFF_UP as i16 };
+        // SAFETY: sock and ifr are valid.
+        if unsafe { libc::ioctl(sock.as_raw_fd(), libc::SIOCSIFFLAGS as _, &ifr) } < 0 {
+            destroy_tap(tap_name);
+            return Err(VmmError::Network(format!(
+                "SIOCSIFFLAGS UP {tap_name}: {}",
+                std::io::Error::last_os_error()
             )));
         }
 
-        // Attach to bridge
-        if !self.bridge.is_empty() {
-            let status = Command::new("/usr/sbin/ip")
-                .args(["link", "set", tap_name, "master", &self.bridge])
-                .status()
-                .map_err(|e| VmmError::Network(format!("ip link set master: {e}")))?;
-            if !status.success() {
-                destroy_tap(tap_name);
-                return Err(VmmError::Network(format!(
-                    "failed to attach TAP {tap_name} to bridge {}",
-                    self.bridge
-                )));
-            }
-        }
+        // 3. Configure point-to-point IP on TAP host end (gateway IP) so the
+        //    sandbox can use it as its default gateway. Each TAP is an isolated
+        //    link — sandboxes cannot see each other at L2.
+
+        // Set local address (gateway).
+        set_ifaddr(
+            &sock,
+            &ifr,
+            libc::SIOCSIFADDR,
+            self.gateway,
+            tap_name,
+            "SIOCSIFADDR",
+        )?;
+        // Set peer (destination) address (sandbox IP).
+        set_ifaddr(
+            &sock,
+            &ifr,
+            libc::SIOCSIFDSTADDR,
+            ip,
+            tap_name,
+            "SIOCSIFDSTADDR",
+        )?;
+        // Set /32 netmask so the kernel creates a proper host route to the peer.
+        set_ifaddr(
+            &sock,
+            &ifr,
+            libc::SIOCSIFNETMASK,
+            Ipv4Addr::BROADCAST, // 255.255.255.255
+            tap_name,
+            "SIOCSIFNETMASK",
+        )?;
 
         Ok(())
     }
@@ -181,12 +253,96 @@ impl NetworkManager {
 // Platform helpers
 // =============================================================================
 
+/// Creates a zero-initialized `ifreq` with the given interface name.
+#[cfg(target_os = "linux")]
+fn new_ifreq(name_bytes: &[u8]) -> libc::ifreq {
+    let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
+    // SAFETY: caller must ensure name_bytes.len() < IFNAMSIZ.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            name_bytes.as_ptr(),
+            ifr.ifr_name.as_mut_ptr().cast::<u8>(),
+            name_bytes.len(),
+        );
+    }
+    ifr
+}
+
+/// Sets an IPv4 address on an interface via ioctl.
+#[cfg(target_os = "linux")]
+fn set_ifaddr(
+    sock: &std::os::fd::OwnedFd,
+    ifr: &libc::ifreq,
+    request: libc::c_ulong,
+    addr: Ipv4Addr,
+    tap_name: &str,
+    label: &str,
+) -> Result<()> {
+    use std::os::unix::io::AsRawFd;
+
+    let mut req = *ifr;
+    let mut addr_in: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+    addr_in.sin_family = libc::AF_INET as libc::sa_family_t;
+    addr_in.sin_addr.s_addr = u32::from(addr).to_be();
+
+    // SAFETY: sockaddr_in fits within ifr_ifru (both are >= 16 bytes).
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            (&raw const addr_in).cast::<u8>(),
+            (&raw mut req.ifr_ifru).cast::<u8>(),
+            std::mem::size_of::<libc::sockaddr_in>(),
+        );
+    }
+    // SAFETY: sock and req are valid; kernel reads ifr_name and sockaddr.
+    if unsafe { libc::ioctl(sock.as_raw_fd(), request as _, &req) } < 0 {
+        return Err(VmmError::Network(format!(
+            "{label} {tap_name} {addr}: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
+}
+
+/// Destroys a persistent TAP device.
+///
+/// First attempts to clear the persist flag via ioctl (re-attach then
+/// `TUNSETPERSIST 0`). If the interface still exists afterwards, falls back
+/// to `ip link delete` which works regardless of fd state.
 #[cfg(target_os = "linux")]
 fn destroy_tap(tap_name: &str) {
-    use std::process::Command;
-    let _ = Command::new("/usr/sbin/ip")
-        .args(["link", "delete", tap_name])
-        .status();
+    use std::os::unix::io::AsRawFd;
+
+    let name_bytes = tap_name.as_bytes();
+    if name_bytes.len() >= libc::IFNAMSIZ {
+        return;
+    }
+
+    // Try ioctl-based removal first.
+    if let Ok(tun) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/net/tun")
+    {
+        let mut ifr = new_ifreq(name_bytes);
+        ifr.ifr_ifru.ifru_flags = (libc::IFF_TAP | libc::IFF_NO_PI) as i16;
+
+        const TUNSETIFF: libc::c_ulong = 0x400454ca;
+        const TUNSETPERSIST: libc::c_ulong = 0x400454cb;
+
+        // SAFETY: tun fd is valid, ifr is properly initialized.
+        if unsafe { libc::ioctl(tun.as_raw_fd(), TUNSETIFF as _, &ifr) } >= 0 {
+            // SAFETY: tun fd is attached to the TAP device; clearing persist removes it.
+            let _ = unsafe { libc::ioctl(tun.as_raw_fd(), TUNSETPERSIST as _, 0i32) };
+        }
+        drop(tun);
+    }
+
+    // Fallback: if the interface still exists, use ip link delete.
+    if std::path::Path::new(&format!("/sys/class/net/{tap_name}")).exists() {
+        let _ = std::process::Command::new("ip")
+            .args(["link", "delete", tap_name])
+            .output();
+    }
 }
 
 fn parse_cidr(cidr: &str) -> Result<(Ipv4Addr, u8)> {

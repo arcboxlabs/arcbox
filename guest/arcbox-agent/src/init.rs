@@ -438,7 +438,12 @@ exit 0
         );
     }
 
-    /// Install blanket iptables FORWARD ACCEPT rules for the sandbox subnet.
+    /// Install iptables FORWARD rules for sandbox networking.
+    ///
+    /// Each sandbox has a point-to-point TAP — no bridge or MASQUERADE needed.
+    /// The host-side smoltcp TcpBridge/SocketProxy terminates connections and
+    /// creates new host sockets, so the original sandbox src IP is irrelevant
+    /// for reply routing.
     ///
     /// The subnet is read from the VMM config (default `172.20.0.0/16`).
     /// Uses `-I` (insert at chain top) so rules take effect even when
