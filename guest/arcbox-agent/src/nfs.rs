@@ -7,6 +7,7 @@
 mod platform {
     use std::fs;
     use std::io;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::process::{Command, Stdio};
 
@@ -17,6 +18,8 @@ mod platform {
     const EXPORT_DOCKER: &str = "/export/docker";
     const NFSD_MOUNTPOINT: &str = "/proc/fs/nfsd";
     const NFS_STATE_DIR: &str = "/var/lib/nfs";
+    const RPC_PIPEFS_DIR: &str = "/var/lib/nfs/rpc_pipefs";
+    const NFSDCLD_DIR: &str = "/var/lib/nfs/nfsdcld";
     const EXPORTS_PATH: &str = "/etc/exports";
     const NFS_CONF_PATH: &str = "/etc/nfs.conf";
     const NFSD_PORT: u16 = 2049;
@@ -70,10 +73,14 @@ mod platform {
             .map_err(|e| format!("mkdir {} failed({})", cfg.export_docker, e))?;
         fs::create_dir_all(NFS_STATE_DIR)
             .map_err(|e| format!("mkdir {} failed({})", NFS_STATE_DIR, e))?;
-        // nfsdcltrack stores its SQLite DB here. Must exist before nfsd
-        // starts so the UMH upcall can determine there are no prior clients.
-        fs::create_dir_all(format!("{NFS_STATE_DIR}/nfsdcltrack"))
-            .map_err(|e| format!("mkdir nfsdcltrack failed({e})"))?;
+
+        // Mount rpc_pipefs — required for nfsdcld to communicate with the kernel.
+        ensure_rpc_pipefs()?;
+
+        // Start nfsdcld (client tracking daemon) before nfsd threads.
+        // Only nfsdcld (not nfsdcltrack) can skip the grace period when there
+        // are no prior clients to reclaim.
+        ensure_nfsdcld()?;
 
         tracing::info!("nfs export: ensuring nfsd pseudo-fs");
         ensure_nfsd_mount()?;
@@ -206,6 +213,57 @@ mod platform {
         )
         .map_err(|e| format!("mount -t tmpfs {} failed({})", target, e))?;
         tracing::info!(target, "nfs export: mounted tmpfs export root");
+        Ok(())
+    }
+
+    /// Mounts rpc_pipefs, required for nfsdcld to communicate with the kernel.
+    fn ensure_rpc_pipefs() -> Result<(), String> {
+        if is_mounted(RPC_PIPEFS_DIR) {
+            tracing::info!("nfs export: rpc_pipefs already mounted");
+            return Ok(());
+        }
+
+        fs::create_dir_all(RPC_PIPEFS_DIR)
+            .map_err(|e| format!("mkdir {} failed({})", RPC_PIPEFS_DIR, e))?;
+        mount(
+            Some("sunrpc"),
+            RPC_PIPEFS_DIR,
+            Some("rpc_pipefs"),
+            MsFlags::empty(),
+            None::<&str>,
+        )
+        .map_err(|e| format!("mount -t rpc_pipefs {} failed({})", RPC_PIPEFS_DIR, e))?;
+        tracing::info!("nfs export: mounted rpc_pipefs");
+        Ok(())
+    }
+
+    /// Starts nfsdcld (NFSv4 client tracking daemon).
+    ///
+    /// nfsdcld communicates with the kernel via rpc_pipefs and can report
+    /// "no clients to reclaim" on fresh boot, causing the kernel to skip
+    /// the NFSv4 grace period entirely. The UMH-based nfsdcltrack cannot
+    /// do this — only the daemon-based nfsdcld can.
+    fn ensure_nfsdcld() -> Result<(), String> {
+        if process_named("nfsdcld") {
+            tracing::info!("nfs export: nfsdcld already running");
+            return Ok(());
+        }
+
+        fs::create_dir_all(NFSDCLD_DIR)
+            .map_err(|e| format!("mkdir {} failed({})", NFSDCLD_DIR, e))?;
+        // Mode 0700 required by nfsdcld.
+        let _ = fs::set_permissions(NFSDCLD_DIR, fs::Permissions::from_mode(0o700));
+
+        let child = Command::new("/sbin/nfsdcld")
+            .stdin(Stdio::null())
+            .stdout(daemon_log_file("nfsdcld"))
+            .stderr(daemon_log_file("nfsdcld"))
+            .spawn()
+            .map_err(|e| format!("failed to spawn nfsdcld: {e}"))?;
+        tracing::info!(pid = child.id(), "nfs export: nfsdcld spawned");
+
+        // Give nfsdcld a moment to set up its pipe in rpc_pipefs.
+        std::thread::sleep(std::time::Duration::from_millis(100));
         Ok(())
     }
 
@@ -475,13 +533,18 @@ pub async fn run_nfs_relay(cancel: tokio_util::sync::CancellationToken) {
         };
 
         tokio::spawn(async move {
+            tracing::info!("NFS relay: accepted vsock connection");
             match TcpStream::connect("127.0.0.1:2049").await {
                 Ok(mut tcp) => {
+                    tracing::info!("NFS relay: connected to local nfsd, relaying");
                     let mut vsock = stream;
-                    let _ = copy_bidirectional(&mut vsock, &mut tcp).await;
+                    match copy_bidirectional(&mut vsock, &mut tcp).await {
+                        Ok((tx, rx)) => tracing::info!(tx, rx, "NFS relay: finished"),
+                        Err(e) => tracing::warn!(error = %e, "NFS relay: copy error"),
+                    }
                 }
                 Err(e) => {
-                    tracing::debug!(error = %e, "NFS relay: failed to connect to local nfsd");
+                    tracing::warn!(error = %e, "NFS relay: failed to connect to local nfsd");
                 }
             }
         });
