@@ -136,6 +136,8 @@ Defined in `common/arcbox-constants/src/paths.rs`, `privileged` module.
 | `/var/run/arcbox-helper.sock` | Helper socket (created by launchd) | launchd |
 | `/var/run/docker.sock` | Symlink → `~/.arcbox/run/docker.sock` | helper |
 | `/etc/resolver/arcbox.local` | macOS DNS resolver file | helper |
+| `/var/log/arcbox/` | Privileged helper log directory | helper |
+| `/var/log/arcbox/helper.log` | Privileged helper log file (JSON, size-rotated) | helper |
 
 ---
 
@@ -277,4 +279,4 @@ older installations. They can be safely deleted.
 | **helper** (root) | `/etc/resolver/`, `/usr/local/bin/` symlinks, `/var/run/docker.sock` symlink |
 | **desktop** | SMAppService LaunchAgent registration, `~/.arcbox/run/` directory creation, helper install trigger |
 | **agent** (guest) | `/arcbox/` mount, `/var/lib/{docker,containerd}/`, guest sockets, Btrfs subvolumes |
-| **launchd** | `/var/run/arcbox-helper.sock` (socket-activation), log file redirection |
+| **launchd** | `/var/run/arcbox-helper.sock` (socket-activation), helper service lifecycle |
