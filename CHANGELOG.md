@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.7](https://github.com/arcboxlabs/arcbox/compare/v0.3.6...v0.3.7) (2026-03-25)
+
+
+### Features
+
+* implement sandbox exec with bidirectional streaming ([#80](https://github.com/arcboxlabs/arcbox/issues/80)) ([ad1f616](https://github.com/arcboxlabs/arcbox/commit/ad1f616d67354fc7af054e7942f0df4fdc62ebcc))
+
+
+### Bug Fixes
+
+* **docker:** repair HTTP upgrade proxy for BuildKit and attach ([#105](https://github.com/arcboxlabs/arcbox/issues/105)) ([bf3768d](https://github.com/arcboxlabs/arcbox/commit/bf3768d317e6471b81364f7855db93ebd607ee4a))
+
 ## [0.3.6](https://github.com/arcboxlabs/arcbox/compare/v0.3.5...v0.3.6) (2026-03-24)
 
 
