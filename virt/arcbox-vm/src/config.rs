@@ -315,10 +315,10 @@ pub struct FirecrackerConfig {
     pub socket_timeout_secs: Option<u64>,
 }
 
-/// Network bridge and IP-pool settings.
+/// Network IP-pool settings for sandbox TAP interfaces.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfig {
-    /// Linux bridge interface name for VM uplinks.
+    /// Legacy bridge name (unused — sandbox networking uses point-to-point TAP).
     pub bridge: String,
     /// IP CIDR pool from which guest addresses are allocated.
     pub cidr: String,
