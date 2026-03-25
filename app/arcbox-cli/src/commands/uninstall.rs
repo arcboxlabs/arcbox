@@ -68,11 +68,10 @@ pub async fn execute(args: UninstallArgs) -> Result<()> {
             step += 1;
             print!("[{step}/{total}] {:<42}", $label);
             std::io::stdout().flush().ok();
-            let result: std::result::Result<(), String> =
-                (|| -> std::result::Result<(), String> {
-                    $body;
-                    Ok(())
-                })();
+            let result: std::result::Result<(), String> = {
+                $body;
+                Ok(())
+            };
             match result {
                 Ok(()) => println!("✓"),
                 Err(e) => println!("✗ {e}"),
