@@ -511,10 +511,10 @@ impl VirtioConsole {
     /// Creates a new console device.
     #[must_use]
     pub fn new(config: ConsoleConfig) -> Self {
-        let mut features = Self::FEATURE_SIZE
-            | Self::FEATURE_EMERG_WRITE
-            | Self::FEATURE_VERSION_1
-            | crate::queue::VIRTIO_F_EVENT_IDX;
+        // Note: EVENT_IDX is not advertised for console because activate()
+        // does not propagate it to queues. Add it when console queue setup
+        // is updated to call set_event_idx().
+        let mut features = Self::FEATURE_SIZE | Self::FEATURE_EMERG_WRITE | Self::FEATURE_VERSION_1;
 
         if config.multiport {
             features |= Self::FEATURE_MULTIPORT;
@@ -788,7 +788,8 @@ mod tests {
 
         assert_eq!(u16::from_le_bytes([data[0], data[1]]), 120); // cols
         assert_eq!(u16::from_le_bytes([data[2], data[3]]), 40); // rows
-        assert_eq!(u32::from_le_bytes([data[4], data[5], data[6], data[7]]), 4); // max_ports
+        assert_eq!(u32::from_le_bytes([data[4], data[5], data[6], data[7]]), 4);
+        // max_ports
     }
 
     #[test]

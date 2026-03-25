@@ -268,6 +268,9 @@ impl VirtQueue {
     /// More efficient than calling `push_used()` in a loop because
     /// notification suppression is checked only once for the entire batch.
     pub fn push_used_batch(&mut self, completions: &[(u16, u32)]) -> bool {
+        if completions.is_empty() {
+            return false;
+        }
         let old_idx = self.used.idx;
         for &(head_idx, len) in completions {
             let slot = (self.used.idx % self.size) as usize;
@@ -875,7 +878,7 @@ mod tests {
     fn test_push_used_batch_empty() {
         let mut queue = VirtQueue::new(16).unwrap();
         let notify = queue.push_used_batch(&[]);
-        assert!(notify); // no EVENT_IDX, flags=0 → notify
+        assert!(!notify); // empty batch → no-op, no spurious interrupt
         assert_eq!(queue.used.idx, 0);
     }
 

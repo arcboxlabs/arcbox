@@ -817,22 +817,32 @@ impl VirtioNet {
                     frame.extend_from_slice(&header_bytes);
                     frame.extend_from_slice(&packet.data);
 
-                    // Write into guest descriptor chain
+                    // Write into guest descriptor chain. Drop the packet
+                    // (don't complete the descriptor) if any write-only
+                    // descriptor points outside guest memory.
                     let mut written = 0usize;
+                    let mut out_of_bounds = false;
                     for desc in chain {
-                        if desc.is_write_only() {
-                            let start = desc.addr as usize;
-                            let remaining = frame.len().saturating_sub(written);
-                            let to_write = remaining.min(desc.len as usize);
-                            let end = start + to_write;
-                            if end <= memory.len() && to_write > 0 {
-                                memory[start..end]
-                                    .copy_from_slice(&frame[written..written + to_write]);
-                                written += to_write;
-                            }
+                        if !desc.is_write_only() {
+                            continue;
                         }
+                        let start = desc.addr as usize;
+                        let remaining = frame.len().saturating_sub(written);
+                        let to_write = remaining.min(desc.len as usize);
+                        if to_write == 0 {
+                            continue;
+                        }
+                        let end = start + to_write;
+                        if end > memory.len() {
+                            out_of_bounds = true;
+                            break;
+                        }
+                        memory[start..end].copy_from_slice(&frame[written..written + to_write]);
+                        written += to_write;
                     }
-                    completions.push((head_idx, written as u32));
+                    if !out_of_bounds {
+                        completions.push((head_idx, written as u32));
+                    }
                 }
                 None => {
                     // No guest buffers available — push packet back
