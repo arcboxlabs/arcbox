@@ -122,9 +122,9 @@ async fn accept_loop(
 /// Uses launchd socket activation if available, otherwise falls back to
 /// binding its own socket (for development).
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let listener = if let Some(l) = launchd::listener() {
+    let (listener, launchd_mode) = if let Some(l) = launchd::listener() {
         tracing::info!("using launchd socket activation");
-        l
+        (l, true)
     } else {
         // Fallback: bind our own socket (development / manual start).
         //
@@ -144,12 +144,16 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         tracing::info!("listening on {path} (manual mode)");
-        l
+        (l, false)
     };
 
     let tracker = Arc::new(ConnectionTracker::new());
     let shutdown = CancellationToken::new();
-    tokio::spawn(idle_watchdog(Arc::clone(&tracker), shutdown.clone()));
+    if launchd_mode {
+        tokio::spawn(idle_watchdog(Arc::clone(&tracker), shutdown.clone()));
+    } else {
+        tracing::info!("idle timeout disabled in manual mode");
+    }
     accept_loop(listener, tracker, shutdown).await;
 
     Ok(())
