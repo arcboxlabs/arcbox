@@ -109,19 +109,18 @@ fn exec_foreground(args: &DaemonArgs) -> Result<()> {
 async fn execute_stop(args: &DaemonArgs) -> Result<()> {
     let data_dir = resolve_data_dir(args.data_dir.as_ref());
     let run_dir = data_dir.join(arcbox_constants::paths::host::RUN);
-    let pid_file = run_dir.join("daemon.pid");
+    let lock_file = run_dir.join("daemon.lock");
     let grpc_socket = args
         .grpc_socket
         .clone()
         .unwrap_or_else(|| run_dir.join("arcbox.sock"));
 
-    let Some(pid) = read_pid_file(&pid_file)? else {
+    let Some(pid) = read_lock_file(&lock_file)? else {
         println!("Daemon is not running");
         return Ok(());
     };
 
     if !process_is_running(pid) {
-        let _ = std::fs::remove_file(&pid_file);
         println!("Daemon is not running");
         return Ok(());
     }
@@ -136,7 +135,6 @@ async fn execute_stop(args: &DaemonArgs) -> Result<()> {
         let grpc_socket_removed = !grpc_socket.exists();
         if process_exited && grpc_socket_removed {
             println!("ArcBox daemon stopped");
-            let _ = std::fs::remove_file(&pid_file);
             return Ok(());
         }
 
@@ -156,7 +154,7 @@ async fn execute_stop(args: &DaemonArgs) -> Result<()> {
 async fn execute_status(args: &DaemonArgs) -> Result<()> {
     let data_dir = resolve_data_dir(args.data_dir.as_ref());
     let run_dir = data_dir.join(arcbox_constants::paths::host::RUN);
-    let pid_file = run_dir.join("daemon.pid");
+    let lock_file = run_dir.join("daemon.lock");
     let docker_socket = args
         .socket
         .clone()
@@ -166,10 +164,9 @@ async fn execute_status(args: &DaemonArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| run_dir.join("arcbox.sock"));
 
-    let mut pid = read_pid_file(&pid_file)?;
+    let mut pid = read_lock_file(&lock_file)?;
     if let Some(value) = pid {
         if !process_is_running(value) {
-            let _ = std::fs::remove_file(&pid_file);
             pid = None;
         }
     }
@@ -177,7 +174,7 @@ async fn execute_status(args: &DaemonArgs) -> Result<()> {
     let running = pid.is_some();
     let status = if running { "running" } else { "stopped" };
     let uptime = if running {
-        pid_file_uptime(&pid_file).map_or_else(
+        lock_file_uptime(&lock_file).map_or_else(
             || "unknown".to_string(),
             |duration| format_duration(duration).to_string(),
         )
@@ -220,8 +217,8 @@ async fn grpc_daemon_is_responsive(socket_path: &Path) -> bool {
     )
 }
 
-fn pid_file_uptime(pid_file: &Path) -> Option<Duration> {
-    let modified_at = std::fs::metadata(pid_file).ok()?.modified().ok()?;
+fn lock_file_uptime(lock_file: &Path) -> Option<Duration> {
+    let modified_at = std::fs::metadata(lock_file).ok()?.modified().ok()?;
     SystemTime::now().duration_since(modified_at).ok()
 }
 
@@ -229,20 +226,19 @@ fn spawn_background(args: &DaemonArgs) -> Result<()> {
     let data_dir = resolve_data_dir(args.data_dir.as_ref());
     let run_dir = data_dir.join(arcbox_constants::paths::host::RUN);
     let log_dir = data_dir.join(arcbox_constants::paths::host::LOG);
-    let pid_file = run_dir.join("daemon.pid");
+    let lock_file = run_dir.join("daemon.lock");
     let stdout_path = log_dir.join("daemon.stdout.log");
     let stderr_path = log_dir.join("daemon.stderr.log");
 
     std::fs::create_dir_all(&run_dir).context("Failed to create daemon run directory")?;
     std::fs::create_dir_all(&log_dir).context("Failed to create daemon log directory")?;
 
-    if let Some(pid) = read_pid_file(&pid_file)? {
+    if let Some(pid) = read_lock_file(&lock_file)? {
         if process_is_running(pid) {
             bail!("Daemon already running (PID {pid})");
         }
 
-        warn!("Removing stale daemon PID file for PID {}", pid);
-        let _ = std::fs::remove_file(&pid_file);
+        warn!("Stale PID {} found in daemon lock file", pid);
     }
 
     let daemon_binary = resolve_daemon_binary()?;
@@ -272,11 +268,11 @@ fn spawn_background(args: &DaemonArgs) -> Result<()> {
             )
         })?;
 
-    std::fs::write(&pid_file, format!("{}\n", child.id()))
-        .context("Failed to write daemon PID file")?;
+    std::fs::write(&lock_file, format!("{}\n", child.id()))
+        .context("Failed to write daemon lock file")?;
 
     println!("ArcBox daemon started (PID {})", child.id());
-    println!("  PID file: {}", pid_file.display());
+    println!("  Lock file: {}", lock_file.display());
     println!("  Stdout:   {}", stdout_path.display());
     println!("  Stderr:   {}", stderr_path.display());
     Ok(())
@@ -344,19 +340,18 @@ fn resolve_data_dir(data_dir: Option<&PathBuf>) -> PathBuf {
     })
 }
 
-fn read_pid_file(pid_file: &Path) -> Result<Option<i32>> {
-    if !pid_file.exists() {
+fn read_lock_file(lock_file: &Path) -> Result<Option<i32>> {
+    if !lock_file.exists() {
         return Ok(None);
     }
 
-    let pid_text = std::fs::read_to_string(pid_file)
-        .with_context(|| format!("Failed to read daemon PID file from {}", pid_file.display()))?;
+    let pid_text = std::fs::read_to_string(lock_file)
+        .with_context(|| format!("Failed to read daemon lock file from {}", lock_file.display()))?;
 
     match pid_text.trim().parse::<i32>() {
         Ok(pid) if pid > 0 => Ok(Some(pid)),
         _ => {
-            warn!("Invalid daemon PID file, removing {}", pid_file.display());
-            let _ = std::fs::remove_file(pid_file);
+            warn!("Invalid PID in daemon lock file {}", lock_file.display());
             Ok(None)
         }
     }
@@ -391,37 +386,38 @@ fn send_sigterm(pid: i32) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::read_pid_file;
+    use super::read_lock_file;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
-    fn read_pid_file_returns_none_when_missing() {
+    fn read_lock_file_returns_none_when_missing() {
         let dir = tempdir().expect("failed to create temp dir");
-        let pid_file = dir.path().join("daemon.pid");
-        let pid = read_pid_file(&pid_file).expect("read_pid_file should succeed");
+        let lock_file = dir.path().join("daemon.lock");
+        let pid = read_lock_file(&lock_file).expect("read_lock_file should succeed");
         assert_eq!(pid, None);
     }
 
     #[test]
-    fn read_pid_file_parses_valid_pid() {
+    fn read_lock_file_parses_valid_pid() {
         let dir = tempdir().expect("failed to create temp dir");
-        let pid_file = dir.path().join("daemon.pid");
-        fs::write(&pid_file, "12345\n").expect("failed to write pid file");
+        let lock_file = dir.path().join("daemon.lock");
+        fs::write(&lock_file, "12345\n").expect("failed to write lock file");
 
-        let pid = read_pid_file(&pid_file).expect("read_pid_file should succeed");
+        let pid = read_lock_file(&lock_file).expect("read_lock_file should succeed");
         assert_eq!(pid, Some(12345));
-        assert!(pid_file.exists());
+        assert!(lock_file.exists());
     }
 
     #[test]
-    fn read_pid_file_removes_invalid_content() {
+    fn read_lock_file_returns_none_for_invalid_content() {
         let dir = tempdir().expect("failed to create temp dir");
-        let pid_file = dir.path().join("daemon.pid");
-        fs::write(&pid_file, "not-a-pid").expect("failed to write pid file");
+        let lock_file = dir.path().join("daemon.lock");
+        fs::write(&lock_file, "not-a-pid").expect("failed to write lock file");
 
-        let pid = read_pid_file(&pid_file).expect("read_pid_file should succeed");
+        let pid = read_lock_file(&lock_file).expect("read_lock_file should succeed");
         assert_eq!(pid, None);
-        assert!(!pid_file.exists());
+        // Lock file is kept on disk; stale content is harmless.
+        assert!(lock_file.exists());
     }
 }
