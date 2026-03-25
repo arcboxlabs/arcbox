@@ -115,15 +115,14 @@ async fn execute_stop(args: &DaemonArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| run_dir.join("arcbox.sock"));
 
-    let Some(pid) = read_lock_file(&lock_file)? else {
-        println!("Daemon is not running");
-        return Ok(());
-    };
-
-    if !process_is_running(pid) {
+    if !daemon_is_alive(&lock_file) {
         println!("Daemon is not running");
         return Ok(());
     }
+
+    let Some(pid) = read_lock_file(&lock_file)? else {
+        bail!("Daemon is alive (lock held) but lock file has no valid PID");
+    };
 
     send_sigterm(pid)?;
     println!("Stopping ArcBox daemon (PID {pid})...");
@@ -131,18 +130,18 @@ async fn execute_stop(args: &DaemonArgs) -> Result<()> {
     let timeout_window = Duration::from_secs(40);
     let deadline = Instant::now() + timeout_window;
     loop {
-        let process_exited = !process_is_running(pid);
+        let still_alive = daemon_is_alive(&lock_file);
         let grpc_socket_removed = !grpc_socket.exists();
-        if process_exited && grpc_socket_removed {
+        if !still_alive && grpc_socket_removed {
             println!("ArcBox daemon stopped");
             return Ok(());
         }
 
         if Instant::now() >= deadline {
             bail!(
-                "ArcBox daemon (PID {pid}) did not fully stop within {}s (process_running={}, grpc_socket_present={})",
+                "ArcBox daemon (PID {pid}) did not fully stop within {}s (lock_held={}, grpc_socket_present={})",
                 timeout_window.as_secs(),
-                !process_exited,
+                still_alive,
                 !grpc_socket_removed,
             );
         }
@@ -164,14 +163,12 @@ async fn execute_status(args: &DaemonArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| run_dir.join("arcbox.sock"));
 
-    let mut pid = read_lock_file(&lock_file)?;
-    if let Some(value) = pid {
-        if !process_is_running(value) {
-            pid = None;
-        }
-    }
-
-    let running = pid.is_some();
+    let running = daemon_is_alive(&lock_file);
+    let pid = if running {
+        read_lock_file(&lock_file)?
+    } else {
+        None
+    };
     let status = if running { "running" } else { "stopped" };
     let uptime = if running {
         lock_file_uptime(&lock_file).map_or_else(
@@ -233,12 +230,10 @@ fn spawn_background(args: &DaemonArgs) -> Result<()> {
     std::fs::create_dir_all(&run_dir).context("Failed to create daemon run directory")?;
     std::fs::create_dir_all(&log_dir).context("Failed to create daemon log directory")?;
 
-    if let Some(pid) = read_lock_file(&lock_file)? {
-        if process_is_running(pid) {
-            bail!("Daemon already running (PID {pid})");
-        }
-
-        warn!("Stale PID {} found in daemon lock file", pid);
+    if daemon_is_alive(&lock_file) {
+        let pid = read_lock_file(&lock_file)?;
+        let pid_str = pid.map_or("unknown".to_string(), |p| p.to_string());
+        bail!("Daemon already running (PID {pid_str})");
     }
 
     let daemon_binary = resolve_daemon_binary()?;
@@ -361,19 +356,26 @@ fn read_lock_file(lock_file: &Path) -> Result<Option<i32>> {
     }
 }
 
-fn process_is_running(pid: i32) -> bool {
-    if pid <= 0 {
-        return false;
+/// Probe whether the daemon is alive by attempting a non-blocking flock
+/// on `daemon.lock`. If the lock is held (EWOULDBLOCK), the daemon is
+/// alive. This is immune to PID reuse — the kernel manages the lock.
+fn daemon_is_alive(lock_file: &Path) -> bool {
+    use std::os::unix::io::AsRawFd;
+    let file = match std::fs::OpenOptions::new().read(true).open(lock_file) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    // SAFETY: flock on a valid fd with LOCK_EX|LOCK_NB is safe.
+    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if ret == 0 {
+        // Lock acquired — daemon is dead. Release immediately.
+        // SAFETY: unlocking a lock we just acquired.
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+        false
+    } else {
+        // EWOULDBLOCK — daemon holds the lock.
+        true
     }
-
-    // SAFETY: libc::kill is called with a validated positive PID and signal 0,
-    // which performs existence/permission checks without sending a signal.
-    let result = unsafe { libc::kill(pid, 0) };
-    if result == 0 {
-        return true;
-    }
-
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 fn send_sigterm(pid: i32) -> Result<()> {
