@@ -11,14 +11,16 @@ git clone https://github.com/arcboxlabs/arcbox.git
 cd arcbox
 
 # Build
-cargo build --release -p arcbox-cli -p arcbox-daemon
+cargo build -p arcbox-cli -p arcbox-daemon
 
-# Sign both binaries (required for macOS virtualization)
-codesign --entitlements bundle/arcbox.entitlements --force -s - \
-    target/release/arcbox target/release/arcbox-daemon
+# Sign the daemon (see "Code Signing" below)
+codesign --force --options runtime \
+    --entitlements bundle/arcbox.entitlements \
+    -s "Developer ID Application: ArcBox, Inc. (422ACSY6Y5)" \
+    target/debug/arcbox-daemon
 
 # Run
-./target/release/arcbox --help
+./target/debug/arcbox-daemon
 ```
 
 ### Prerequisites
@@ -26,6 +28,7 @@ codesign --entitlements bundle/arcbox.entitlements --force -s - \
 - Rust 1.85+ (install via [rustup](https://rustup.rs))
 - macOS 13+ with Xcode Command Line Tools (`xcode-select --install`)
 - ~500 MB disk space
+- ArcBox Developer ID certificate + provisioning profile (see [Code Signing](#code-signing))
 
 ### Guest Agent Cross-Compilation (Optional)
 
@@ -62,13 +65,78 @@ guest/           In-VM agent (cross-compiled for Linux)
 - Keep commits atomic and compilable; target ~200 lines changed (excluding generated files)
 - Do not add `Co-Authored-By` lines
 
-## macOS Development Notes
+## Code Signing
 
-- Virtualization.framework requires entitlement signing after every build:
-  ```bash
-  codesign --entitlements bundle/arcbox.entitlements --force -s - target/debug/arcbox
-  ```
-- Without signing, you get "Virtualization not available" errors
+ArcBox uses restricted macOS entitlements (`com.apple.security.virtualization`,
+`com.apple.vm.networking`) that require a **Developer ID certificate** and a
+**provisioning profile** approved by Apple. Ad-hoc signing (`-s -`) will not
+work — the kernel kills the process on launch.
+
+> [!IMPORTANT]
+> You must sign `arcbox-daemon` after **every** build. Without signing, the
+> binary is killed immediately on launch with no error message (exit code 137).
+
+### What you need
+
+| Item | Description | How to get |
+|------|-------------|-----------|
+| **Developer ID certificate** | `Developer ID Application: ArcBox, Inc. (422ACSY6Y5)` | Import the `.p12` file into Keychain Access (ask a team lead) |
+| **Provisioning profile** | `ArcBox_Daemon_DeveloperID.provisionprofile` | Double-click to install (ask a team lead) |
+| **Entitlements file** | `bundle/arcbox.entitlements` | Already in the repo |
+
+> [!NOTE]
+> Both the `.p12` and `.provisionprofile` files are distributed internally.
+> Contact a team lead if you don't have them. **Do not commit these files to
+> the repository.**
+
+### Signing after build
+
+```bash
+codesign --force --options runtime \
+    --entitlements bundle/arcbox.entitlements \
+    -s "Developer ID Application: ArcBox, Inc. (422ACSY6Y5)" \
+    target/debug/arcbox-daemon
+```
+
+### Verifying your setup
+
+```bash
+# 1. Confirm the certificate is installed
+security find-identity -v -p codesigning | grep "ArcBox"
+# Expected: "Developer ID Application: ArcBox, Inc. (422ACSY6Y5)"
+
+# 2. Confirm signing succeeds
+codesign --force --options runtime \
+    --entitlements bundle/arcbox.entitlements \
+    -s "Developer ID Application: ArcBox, Inc. (422ACSY6Y5)" \
+    target/debug/arcbox-daemon
+
+# 3. Confirm entitlements are embedded
+codesign -d --entitlements - target/debug/arcbox-daemon
+# Should list com.apple.security.virtualization, com.apple.vm.networking, etc.
+
+# 4. Confirm the daemon starts
+target/debug/arcbox-daemon
+# Should print "ArcBox daemon started" (Ctrl+C to stop)
+```
+
+### Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `zsh: killed` immediately on launch | Missing provisioning profile | Install `ArcBox_Daemon_DeveloperID.provisionprofile` (double-click) |
+| `zsh: killed` immediately on launch | Certificate not trusted / incomplete chain | Re-import `.p12`, ensure Keychain shows the private key under the cert |
+| `codesign` reports `ambiguous identity` | Multiple certs with same name | `security delete-identity` to remove duplicates |
+| `codesign` reports `errSecInternalComponent` | Private key missing (only cert imported) | Re-export `.p12` with both cert **and** private key selected |
+| Daemon starts but `--options runtime` was omitted | Restricted entitlements silently ignored | Always include `--options runtime` in the codesign command |
+
+> [!WARNING]
+> The `--options runtime` flag enables Hardened Runtime, which is **required**
+> for restricted entitlements to take effect. Without it, macOS accepts the
+> signature but the kernel ignores `com.apple.vm.networking` — networking
+> features will fail silently or the process may be killed.
+
+## macOS Development Notes
 
 ### Platform Pitfalls
 
