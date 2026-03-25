@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.8](https://github.com/arcboxlabs/arcbox/compare/v0.3.7...v0.3.8) (2026-03-25)
+
+
+### Features
+
+* **docker:** GuestConnector trait + proxy integration tests ([#109](https://github.com/arcboxlabs/arcbox/issues/109)) ([1e2730a](https://github.com/arcboxlabs/arcbox/commit/1e2730a7327e03920ec55282d12f52e426399cf0))
+* overhaul logging system with unified paths, rotation, and structured output ([cef06d0](https://github.com/arcboxlabs/arcbox/commit/cef06d0dd5af5992a638cdc9f4a1a82ba79cb383))
+
+
+### Bug Fixes
+
+* **agent:** handle log directory creation failure gracefully ([e86166d](https://github.com/arcboxlabs/arcbox/commit/e86166d96c38cd5b6da4380ab58e4866b42db6c8))
+* **cli:** correct tail_lines offset calculation and update docs ([ad00ae9](https://github.com/arcboxlabs/arcbox/commit/ad00ae96c761d300630a928823438d0f576fb4bf))
+* **cli:** improve logs command reliability ([9eea7c1](https://github.com/arcboxlabs/arcbox/commit/9eea7c107c74e214e1f051ee25c2319261e670a1))
+* **daemon:** start gRPC before stale-state cleanup to prevent desktop timeout ([#107](https://github.com/arcboxlabs/arcbox/issues/107)) ([06edbc0](https://github.com/arcboxlabs/arcbox/commit/06edbc011e7cf22de69474a9308b1e455358279e))
+* **helper:** graceful shutdown on idle timeout for log flush ([9ab07ae](https://github.com/arcboxlabs/arcbox/commit/9ab07ae58ffedd08b249c135ee0b77e62d16d09d))
+* **logging:** validate config, improve rotation error handling ([388f519](https://github.com/arcboxlabs/arcbox/commit/388f5190cee791ed356b6decd43150db3e1aac08))
+* quote YAML description values in skill frontmatters ([7dab741](https://github.com/arcboxlabs/arcbox/commit/7dab741c5882372bfb6dbdbe95684a934d638b54))
+
+
+### Code Refactoring
+
+* **docker:** split proxy.rs into module directory ([#106](https://github.com/arcboxlabs/arcbox/issues/106)) ([ad4010a](https://github.com/arcboxlabs/arcbox/commit/ad4010a4df3597eda29c832e6f7a007f30c4e2ba))
+
+
+### Documentation
+
+* add Claude Code skills setup to CONTRIBUTING.md ([d638464](https://github.com/arcboxlabs/arcbox/commit/d638464ac04dc2ef8b1facd8c56978b91706725b))
+* add code signing guide to CONTRIBUTING.md ([e04dd8b](https://github.com/arcboxlabs/arcbox/commit/e04dd8be45e71f487cecdc505a1d33312173212a))
+* **CLAUDE.md:** update signing instructions and add architecture principles ([931db50](https://github.com/arcboxlabs/arcbox/commit/931db5051f44502831bf7e729298f34e63da7a3f))
+* fix log rotation claims and legacy path descriptions ([a6a6919](https://github.com/arcboxlabs/arcbox/commit/a6a69196d9771d148d63fe881b3e3dcb8bf36cc0))
+* **helper:** add local development guide and Makefile shortcuts ([848391a](https://github.com/arcboxlabs/arcbox/commit/848391ad0bcb752133479da354423e377ed84a06))
+
+
+### Miscellaneous Chores
+
+* add pre-commit config, fix clippy warnings in arcbox-logging ([a05bf8b](https://github.com/arcboxlabs/arcbox/commit/a05bf8b8f066cf2e6651adc7177c5a9964ad0e63))
+* move agent skills to .agents/skills/ for git sharing ([e39f612](https://github.com/arcboxlabs/arcbox/commit/e39f61290760549b6ce4cc67f1fdb639e629e5df))
+
 ## [0.3.7](https://github.com/arcboxlabs/arcbox/compare/v0.3.6...v0.3.7) (2026-03-25)
 
 
