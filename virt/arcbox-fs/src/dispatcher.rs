@@ -49,8 +49,8 @@ pub struct DispatcherConfig {
 impl Default for DispatcherConfig {
     fn default() -> Self {
         Self {
-            entry_timeout: 1,
-            attr_timeout: 1,
+            entry_timeout: 10,
+            attr_timeout: 10,
         }
     }
 }

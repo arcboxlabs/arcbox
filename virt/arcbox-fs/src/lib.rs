@@ -57,8 +57,13 @@ pub struct FsConfig {
     pub num_threads: usize,
     /// Enable writeback caching.
     pub writeback_cache: bool,
-    /// Cache timeout for directory entries (seconds).
+    /// Cache timeout for directory entries and attributes (seconds).
+    /// Higher values reduce FUSE round-trips but delay visibility of
+    /// host filesystem changes inside the guest.
     pub cache_timeout: u64,
+    /// Negative lookup cache TTL (seconds). Caches ENOENT results to avoid
+    /// repeated stat() calls for non-existent paths.
+    pub negative_cache_ttl: u64,
 }
 
 impl Default for FsConfig {
@@ -68,7 +73,8 @@ impl Default for FsConfig {
             source: String::new(),
             num_threads: 4,
             writeback_cache: true,
-            cache_timeout: 1,
+            cache_timeout: 10,
+            negative_cache_ttl: 5,
         }
     }
 }
