@@ -112,13 +112,10 @@ impl SandboxService for SandboxServiceImpl {
         let (in_tx, in_rx) = tokio::sync::mpsc::channel(16);
         tokio::spawn(async move {
             while let Some(Ok(input)) = stream.next().await {
-                match input.payload {
-                    Some(exec_input::Payload::Stdin(data)) => {
-                        if in_tx.send(data).await.is_err() {
-                            return;
-                        }
+                if let Some(exec_input::Payload::Stdin(data)) = input.payload {
+                    if in_tx.send(data).await.is_err() {
+                        return;
                     }
-                    _ => {}
                 }
             }
             let _ = in_tx.send(Vec::new()).await;

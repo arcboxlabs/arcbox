@@ -34,7 +34,7 @@ pub fn verify(stream: &tokio::net::UnixStream) -> bool {
 #[cfg(not(debug_assertions))]
 fn verify_release(stream: &tokio::net::UnixStream) -> bool {
     let Some(pid) = peer_pid(stream) else {
-        eprintln!("peer auth: failed to get peer PID");
+        tracing::warn!("peer auth: failed to get peer PID");
         return false;
     };
 
@@ -44,7 +44,7 @@ fn verify_release(stream: &tokio::net::UnixStream) -> bool {
         }
     }
 
-    eprintln!("peer auth: pid {pid} rejected (no matching code signature)");
+    tracing::warn!(pid, "peer auth: rejected (no matching code signature)");
     false
 }
 

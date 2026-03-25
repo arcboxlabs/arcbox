@@ -97,13 +97,7 @@ fn cleanup_files(ctx: &DaemonContext) {
         }
     }
 
-    if let Err(e) = std::fs::remove_file(&ctx.pid_file) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            warn!(
-                "Failed to remove PID file {}: {}",
-                ctx.pid_file.display(),
-                e
-            );
-        }
-    }
+    // daemon.lock is deliberately kept on disk — the flock is released
+    // automatically when the process exits, and the next daemon reuses the
+    // file. Removing it would race with a concurrent startup.
 }

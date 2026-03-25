@@ -24,7 +24,8 @@ endif
 
 .PHONY: build build-release build-cli build-daemon build-helper build-agent \
         test check fmt clean \
-        setup-boot-assets sign sign-daemon sign-all verify run-daemon
+        setup-boot-assets sign sign-daemon sign-all verify run-daemon \
+        run-helper install-helper reload-helper
 
 ## ── Build ──────────────────────────────────────────────
 
@@ -118,6 +119,30 @@ setup-boot-assets:
 
 run-daemon: sign-daemon
 	SIGN=0 ./scripts/rebuild-run-daemon.sh
+
+# Run the helper in manual mode (no launchd). Uses /tmp socket by default
+# so the daemon can connect without launchd registration.
+# Usage:
+#   make run-helper                    # default socket /tmp/arcbox-helper.sock
+#   make run-helper HELPER_SOCKET=/var/run/arcbox-helper.sock
+HELPER_SOCKET ?= /tmp/arcbox-helper.sock
+run-helper: build-helper
+	sudo ARCBOX_HELPER_SOCKET=$(HELPER_SOCKET) $(TARGET_DIR)/arcbox-helper
+
+# Install the helper into launchd (production-like). Requires sudo.
+install-helper: build-helper
+	sudo install -o root -g wheel -m 755 $(TARGET_DIR)/arcbox-helper /usr/local/libexec/arcbox-helper
+	sudo cp bundle/com.arcboxlabs.desktop.helper.plist /Library/LaunchDaemons/
+	-sudo launchctl bootout system/com.arcboxlabs.desktop.helper 2>/dev/null
+	sudo launchctl bootstrap system /Library/LaunchDaemons/com.arcboxlabs.desktop.helper.plist
+	@echo "✓ arcbox-helper installed and registered with launchd"
+
+# Rebuild and hot-reload the helper in launchd (bootout → copy → bootstrap).
+reload-helper: build-helper
+	-sudo launchctl bootout system/com.arcboxlabs.desktop.helper 2>/dev/null
+	sudo cp $(TARGET_DIR)/arcbox-helper /usr/local/libexec/arcbox-helper
+	sudo launchctl bootstrap system /Library/LaunchDaemons/com.arcboxlabs.desktop.helper.plist
+	@echo "✓ arcbox-helper reloaded"
 
 ## ── Cleanup ───────────────────────────────────────────
 

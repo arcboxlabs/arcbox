@@ -43,24 +43,70 @@ async fn main() -> Result<()> {
     let is_pid1 = std::process::id() == 1;
 
     // Initialize logging early so init_system() has tracing output.
-    // Write to /dev/hvc1 (dedicated agent log port) when available,
-    // falling back to stderr (which goes to hvc0 alongside kernel output).
-    let log_writer: Box<dyn std::io::Write + Send> =
+    // Write to /arcbox/log/agent.log (VirtioFS, visible from host as
+    // ~/.arcbox/log/agent.log) and to the VM console (hvc1 if available,
+    // falling back to stderr which goes to hvc0).
+    let log_dir = format!("/arcbox/{}", arcbox_constants::paths::guest::LOG);
+    let console_writer: Box<dyn std::io::Write + Send> =
         match std::fs::OpenOptions::new().write(true).open("/dev/hvc1") {
             Ok(f) => Box::new(f),
             Err(_) => Box::new(std::io::stderr()),
         };
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "arcbox_agent=info".into()),
-        )
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_ansi(false)
-                .with_writer(std::sync::Mutex::new(log_writer)),
-        )
-        .init();
+    let _log_guard = if std::path::Path::new("/arcbox").exists() {
+        match std::fs::create_dir_all(&log_dir) {
+            Ok(()) => {
+                let file_appender = tracing_appender::rolling::never(&log_dir, "agent.log");
+                let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+                tracing_subscriber::registry()
+                    .with(
+                        tracing_subscriber::EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| "arcbox_agent=info".into()),
+                    )
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .with_ansi(false)
+                            .with_writer(std::sync::Mutex::new(console_writer)),
+                    )
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .with_target(true)
+                            .with_writer(non_blocking),
+                    )
+                    .init();
+                Some(guard)
+            }
+            Err(e) => {
+                // VirtioFS log dir not writable — fall back to console only.
+                eprintln!("arcbox-agent: failed to create {log_dir}: {e}, falling back to console");
+                tracing_subscriber::registry()
+                    .with(
+                        tracing_subscriber::EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| "arcbox_agent=info".into()),
+                    )
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .with_ansi(false)
+                            .with_writer(std::sync::Mutex::new(console_writer)),
+                    )
+                    .init();
+                None
+            }
+        }
+    } else {
+        // No VirtioFS mount — console only (development / testing).
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "arcbox_agent=info".into()),
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(std::sync::Mutex::new(console_writer)),
+            )
+            .init();
+        None
+    };
 
     // PID 1 path: agent was exec'd by busybox trampoline on EROFS rootfs.
     if is_pid1 {

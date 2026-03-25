@@ -142,11 +142,13 @@ async fn recover_container_networking(
     runtime: &Arc<Runtime>,
     setup_state: &Arc<arcbox_api::SetupState>,
 ) {
+    use arcbox_docker::proxy::VsockConnector;
     use axum::http::{HeaderMap, Method};
     use bytes::Bytes;
 
+    let connector = VsockConnector::new(Arc::clone(runtime));
     let resp = match arcbox_docker::proxy::proxy_to_guest(
-        runtime,
+        &connector,
         Method::GET,
         "/containers/json",
         &HeaderMap::new(),
@@ -193,7 +195,7 @@ async fn recover_container_networking(
 
         let inspect_path = format!("/containers/{id}/json");
         let inspect_resp = match arcbox_docker::proxy::proxy_to_guest(
-            runtime,
+            &connector,
             Method::GET,
             &inspect_path,
             &HeaderMap::new(),

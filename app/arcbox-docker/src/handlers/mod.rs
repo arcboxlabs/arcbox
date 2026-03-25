@@ -37,7 +37,7 @@ pub(crate) async fn proxy(state: &AppState, uri: &Uri, req: Request<Body>) -> Re
         .ensure_vm_ready()
         .await
         .map_err(|e| DockerError::Server(format!("failed to ensure VM is ready: {e}")))?;
-    proxy::proxy_to_guest_stream(&state.runtime, uri, req).await
+    proxy::proxy_to_guest_stream(state.connector.as_ref(), uri, req).await
 }
 
 /// Forward an upgraded request to guest dockerd, ensuring the VM is running first.
@@ -51,7 +51,7 @@ pub(crate) async fn proxy_upgrade(
         .ensure_vm_ready()
         .await
         .map_err(|e| DockerError::Server(format!("failed to ensure VM is ready: {e}")))?;
-    proxy::proxy_with_upgrade(&state.runtime, req, uri).await
+    proxy::proxy_with_upgrade(state.connector.as_ref(), req, uri).await
 }
 
 mod container;

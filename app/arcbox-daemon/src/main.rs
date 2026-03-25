@@ -11,10 +11,10 @@ mod startup;
 
 use anyhow::Result;
 use arcbox_api::SetupPhase;
+use arcbox_logging::LogConfig;
 use clap::Parser;
 use macos_resolver::FileResolver;
 use tracing::info;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Debug, Parser)]
 #[command(name = "arcbox-daemon")]
@@ -40,6 +40,10 @@ pub struct DaemonArgs {
     #[arg(long)]
     pub docker_integration: bool,
 
+    /// Run in foreground (also log to stderr in human-readable format).
+    #[arg(long)]
+    pub foreground: bool,
+
     /// Guest dockerd API vsock port.
     #[arg(long)]
     pub guest_docker_vsock_port: Option<u32>,
@@ -50,6 +54,8 @@ pub struct DaemonArgs {
 }
 
 fn main() -> Result<()> {
+    let args = DaemonArgs::parse();
+
     let _sentry_guard = sentry::init(sentry::ClientOptions {
         dsn: std::env::var("ARCBOX_DAEMON_SENTRY_DSN")
             .or_else(|_| std::env::var("SENTRY_DSN"))
@@ -66,23 +72,25 @@ fn main() -> Result<()> {
         ..Default::default()
     });
 
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "arcbox=info,arcbox_daemon=info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer().with_target(false))
-        .with(sentry::integrations::tracing::layer())
-        .init();
+    let data_dir = startup::resolve_data_dir(args.data_dir.as_ref());
+    let log_guard = arcbox_logging::init_with_sentry(LogConfig {
+        log_dir: data_dir.join(arcbox_constants::paths::host::LOG),
+        file_name: arcbox_constants::paths::host::DAEMON_LOG.to_string(),
+        default_filter: "arcbox=info,arcbox_daemon=info".to_string(),
+        foreground: args.foreground,
+        ..LogConfig::default()
+    });
 
     let result = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("Failed to build tokio runtime")
-        .block_on(run(DaemonArgs::parse()));
+        .block_on(run(args));
     if let Err(ref e) = result {
-        eprintln!("Error: {e:?}");
+        tracing::error!("Daemon exited with error: {e:?}");
     }
+
+    log_guard.flush();
     result
 }
 
@@ -90,17 +98,29 @@ async fn run(args: DaemonArgs) -> Result<()> {
     info!("Starting ArcBox daemon...");
 
     // Phase 1: directories, config, sockets — no runtime yet.
-    let ctx = startup::init_early(args).await?;
+    let mut ctx = startup::init_early(args).await?;
+
+    // Acquire exclusive daemon lock. Terminates any stale daemon that
+    // still holds the lock (up to ~30 s SIGTERM wait). Must complete
+    // before start_grpc because the old daemon may be listening on the
+    // same socket paths.
+    startup::acquire_lock(&mut ctx).await?;
 
     // Start gRPC with all services. Machine/Sandbox return UNAVAILABLE
     // until runtime is ready. SystemService works immediately so clients
-    // can observe DOWNLOADING_ASSETS → ASSETS_READY progression.
+    // can observe the full startup progression (CLEANING_UP →
+    // INITIALIZING → DOWNLOADING_ASSETS → ASSETS_READY → …).
     let shared_runtime = ctx.shared_runtime.clone();
     let grpc = services::start_grpc(&ctx, shared_runtime).await?;
 
+    // Wait for residual resource holders (e.g. orphaned
+    // Virtualization.framework XPC helpers holding docker.img).
+    // Visible to gRPC clients as the CLEANING_UP phase.
+    startup::wait_for_resources(&ctx).await?;
+
     // Phase 2: seed/download boot assets, build runtime, start VM.
     // Progress is visible to gRPC clients via WatchSetupStatus.
-    startup::init_runtime(&ctx).await?;
+    startup::init_runtime(&mut ctx).await?;
 
     // Phase 3: start remaining services that require the runtime.
     let handles = services::start_services(&ctx, grpc).await?;

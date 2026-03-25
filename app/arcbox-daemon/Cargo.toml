@@ -27,6 +27,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 sentry = { workspace = true }
+arcbox-logging = { workspace = true, features = ["sentry"] }
 dirs = { workspace = true }
 libc = { workspace = true }
 arcbox-constants = { workspace = true }

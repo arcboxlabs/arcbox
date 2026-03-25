@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
+
 use futures::prelude::*;
 use tarpc::server::{BaseChannel, Channel};
 use tarpc::tokio_serde::formats::Bincode;
@@ -47,9 +49,9 @@ impl ConnectionTracker {
     }
 }
 
-/// Watches for idle timeout and exits the process so launchd can reclaim
-/// resources. launchd will re-launch us on the next incoming connection.
-async fn idle_watchdog(tracker: Arc<ConnectionTracker>) {
+/// Watches for idle timeout and signals shutdown so the log guard can
+/// flush before the process exits. launchd will re-launch on next connect.
+async fn idle_watchdog(tracker: Arc<ConnectionTracker>, shutdown: CancellationToken) {
     let mut idle_since: Option<tokio::time::Instant> = None;
 
     loop {
@@ -58,8 +60,9 @@ async fn idle_watchdog(tracker: Arc<ConnectionTracker>) {
         if tracker.is_idle() {
             let start = *idle_since.get_or_insert_with(tokio::time::Instant::now);
             if start.elapsed() >= IDLE_TIMEOUT {
-                eprintln!("arcbox-helper: idle timeout, exiting");
-                std::process::exit(0);
+                tracing::info!("idle timeout, shutting down");
+                shutdown.cancel();
+                return;
             }
         } else {
             idle_since = None;
@@ -69,15 +72,26 @@ async fn idle_watchdog(tracker: Arc<ConnectionTracker>) {
 
 /// Accept loop: dispatches incoming connections to the tarpc handler and
 /// tracks connection count for idle-exit.
-async fn accept_loop(listener: tokio::net::UnixListener, tracker: Arc<ConnectionTracker>) {
+async fn accept_loop(
+    listener: tokio::net::UnixListener,
+    tracker: Arc<ConnectionTracker>,
+    shutdown: CancellationToken,
+) {
     let codec = tarpc::tokio_util::codec::length_delimited::LengthDelimitedCodec::builder();
 
     loop {
-        let (conn, _addr) = match listener.accept().await {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("accept error: {e}");
-                continue;
+        let conn = tokio::select! {
+            result = listener.accept() => {
+                match result {
+                    Ok((conn, _addr)) => conn,
+                    Err(e) => {
+                        tracing::warn!("accept error: {e}");
+                        continue;
+                    }
+                }
+            }
+            () = shutdown.cancelled() => {
+                return;
             }
         };
 
@@ -108,9 +122,9 @@ async fn accept_loop(listener: tokio::net::UnixListener, tracker: Arc<Connection
 /// Uses launchd socket activation if available, otherwise falls back to
 /// binding its own socket (for development).
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let (listener, launchd_mode) = if let Some(l) = launchd::listener() {
-        eprintln!("arcbox-helper: using launchd socket activation");
-        (l, true)
+    let listener = if let Some(l) = launchd::listener() {
+        tracing::info!("using launchd socket activation");
+        l
     } else {
         // Fallback: bind our own socket (development / manual start).
         //
@@ -129,17 +143,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))?;
         }
 
-        eprintln!("arcbox-helper: listening on {path} (manual mode)");
-        (l, false)
+        tracing::info!("listening on {path} (manual mode)");
+        l
     };
 
     let tracker = Arc::new(ConnectionTracker::new());
-    if launchd_mode {
-        tokio::spawn(idle_watchdog(Arc::clone(&tracker)));
-    } else {
-        eprintln!("arcbox-helper: idle timeout disabled in manual mode");
-    }
-    accept_loop(listener, tracker).await;
+    let shutdown = CancellationToken::new();
+    tokio::spawn(idle_watchdog(Arc::clone(&tracker), shutdown.clone()));
+    accept_loop(listener, tracker, shutdown).await;
 
     Ok(())
 }
