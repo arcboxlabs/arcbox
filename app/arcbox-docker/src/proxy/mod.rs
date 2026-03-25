@@ -7,7 +7,7 @@ mod connector;
 mod fallback;
 mod forward;
 mod port_bindings;
-pub mod stream;
+mod stream;
 mod upgrade;
 
 pub use connector::VsockConnector;
