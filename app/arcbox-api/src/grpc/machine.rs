@@ -5,11 +5,13 @@ use std::pin::Pin;
 use arcbox_grpc::v1::machine_service_server;
 use arcbox_protocol::v1::{
     CreateMachineRequest, CreateMachineResponse, Empty, InspectMachineRequest, ListMachinesRequest,
-    ListMachinesResponse, MachineAgentRequest, MachineExecOutput, MachineExecRequest, MachineInfo,
-    MachineNetwork, MachinePingResponse, MachineSummary, MachineSystemInfo, RemoveMachineRequest,
+    ListMachinesResponse, MachineAgentRequest, MachineInfo, MachineNetwork, MachinePingResponse,
+    MachineRunOutput, MachineRunRequest, MachineSummary, MachineSystemInfo, RemoveMachineRequest,
     StartMachineRequest, StopMachineRequest,
 };
 use tokio_stream::Stream;
+use tokio_stream::StreamExt as _;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tonic::{Request, Response, Status};
 
 use super::{SharedRuntime, SharedRuntimeExt};
@@ -246,16 +248,31 @@ impl machine_service_server::MachineService for MachineServiceImpl {
         }))
     }
 
-    type ExecStream =
-        Pin<Box<dyn Stream<Item = Result<MachineExecOutput, Status>> + Send + 'static>>;
+    type RunStream = Pin<Box<dyn Stream<Item = Result<MachineRunOutput, Status>> + Send + 'static>>;
 
-    async fn exec(
+    async fn run(
         &self,
-        _request: Request<MachineExecRequest>,
-    ) -> Result<Response<Self::ExecStream>, Status> {
-        Err(Status::unimplemented(
-            "machine exec is no longer supported by guest agent RPC",
-        ))
+        request: Request<MachineRunRequest>,
+    ) -> Result<Response<Self::RunStream>, Status> {
+        let req = request.into_inner();
+
+        let agent = self
+            .runtime
+            .ready()?
+            .get_agent(&req.id)
+            .map_err(|e| Status::not_found(e.to_string()))?;
+
+        let rx = agent
+            .machine_run(req)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let stream = UnboundedReceiverStream::new(rx).map(|item| match item {
+            Ok(output) => Ok(output),
+            Err(e) => Err(Status::internal(e.to_string())),
+        });
+
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn ssh_info(

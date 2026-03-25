@@ -672,6 +672,16 @@ mod linux {
                 payload.len()
             );
 
+            // Machine-level run: execute a command directly in the guest VM.
+            if msg_type == MessageType::MachineRunRequest {
+                if let Err(e) =
+                    crate::machine::handle_machine_run(&mut stream, &trace_id, &payload).await
+                {
+                    tracing::warn!(trace_id = %trace_id, error = %e, "machine run handler error");
+                }
+                continue;
+            }
+
             // Sandbox requests are handled separately — they bypass the normal
             // RPC request/response cycle because streaming operations hold the
             // connection open and write multiple frames.

@@ -311,6 +311,85 @@ impl AgentClient {
     }
 
     // =========================================================================
+    // Machine workload operations
+    // =========================================================================
+
+    /// Runs a command directly in the guest VM and returns a channel of streaming output.
+    ///
+    /// Consumes the client because the stream task requires exclusive transport access.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the initial send fails.
+    pub async fn machine_run(
+        mut self,
+        req: arcbox_protocol::MachineRunRequest,
+    ) -> Result<mpsc::UnboundedReceiver<Result<arcbox_protocol::MachineRunOutput>>> {
+        if !self.connected {
+            self.connect().await?;
+        }
+
+        let payload = req.encode_to_vec();
+        let buf = Self::build_message(MessageType::MachineRunRequest, "", &payload);
+        self.transport
+            .send(buf)
+            .await
+            .map_err(|e| CoreError::Machine(format!("failed to send run request: {}", e)))?;
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            loop {
+                let raw = match self.transport.recv().await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let _ = tx.send(Err(CoreError::Machine(format!("recv error: {}", e))));
+                        break;
+                    }
+                };
+
+                let (resp_type, _, resp_payload) = match Self::parse_response(&raw) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        break;
+                    }
+                };
+
+                if resp_type == MessageType::Error as u32 {
+                    let msg = parse_error_response(&resp_payload)
+                        .unwrap_or_else(|_| "unknown error".to_string());
+                    let _ = tx.send(Err(CoreError::Machine(msg)));
+                    break;
+                }
+
+                if resp_type != MessageType::MachineRunOutput as u32 {
+                    let _ = tx.send(Err(CoreError::Machine(format!(
+                        "unexpected response type: 0x{:04x}",
+                        resp_type
+                    ))));
+                    break;
+                }
+
+                match arcbox_protocol::MachineRunOutput::decode(&resp_payload[..]) {
+                    Ok(output) => {
+                        let done = output.done;
+                        let _ = tx.send(Ok(output));
+                        if done {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(CoreError::Machine(format!("decode error: {}", e))));
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(rx)
+    }
+
+    // =========================================================================
     // Sandbox operations
     // =========================================================================
 

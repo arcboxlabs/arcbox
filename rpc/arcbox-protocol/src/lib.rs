@@ -57,8 +57,8 @@ pub mod common {
 pub mod machine {
     pub use super::v1::{
         CreateMachineRequest, CreateMachineResponse, DirectoryMount, InspectMachineRequest,
-        ListMachinesRequest, ListMachinesResponse, MachineExecOutput, MachineExecRequest,
-        MachineHardware, MachineInfo, MachineNetwork, MachineOs, MachineStorage, MachineSummary,
+        ListMachinesRequest, ListMachinesResponse, MachineHardware, MachineInfo, MachineNetwork,
+        MachineOs, MachineRunOutput, MachineRunRequest, MachineStorage, MachineSummary,
         RemoveMachineRequest, SshInfoRequest, SshInfoResponse, StartMachineRequest,
         StopMachineRequest,
     };
@@ -144,8 +144,8 @@ pub use v1::{Empty, KeyValue, Mount, PortBinding, ResourceLimits, Timestamp};
 // Machine types
 pub use v1::{
     CreateMachineRequest, CreateMachineResponse, DirectoryMount, InspectMachineRequest,
-    ListMachinesRequest, ListMachinesResponse, MachineExecOutput, MachineExecRequest,
-    MachineHardware, MachineInfo, MachineNetwork, MachineOs, MachineStorage, MachineSummary,
+    ListMachinesRequest, ListMachinesResponse, MachineHardware, MachineInfo, MachineNetwork,
+    MachineOs, MachineRunOutput, MachineRunRequest, MachineStorage, MachineSummary,
     RemoveMachineRequest, SshInfoRequest, SshInfoResponse, StartMachineRequest, StopMachineRequest,
 };
 

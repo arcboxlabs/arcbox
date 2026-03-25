@@ -39,8 +39,8 @@ service MachineService {
     // Gets guest system information for a machine.
     rpc GetSystemInfo(MachineAgentRequest) returns (MachineSystemInfo);
 
-    // Executes a command in a machine.
-    rpc Exec(MachineExecRequest) returns (stream MachineExecOutput);
+    // Runs a command in a machine and streams its output.
+    rpc Run(MachineRunRequest) returns (stream MachineRunOutput);
 
     // Gets the SSH connection info.
     rpc SSHInfo(SSHInfoRequest) returns (SSHInfoResponse);
@@ -260,11 +260,11 @@ message MachineOS {
     string kernel = 3;
 }
 
-// Request to execute a command in a machine.
-message MachineExecRequest {
+// Request to run a command in a machine.
+message MachineRunRequest {
     // Machine ID or name.
     string id = 1;
-    // Command to execute.
+    // Command to run.
     repeated string cmd = 2;
     // Working directory.
     string working_dir = 3;
@@ -276,8 +276,8 @@ message MachineExecRequest {
     bool tty = 6;
 }
 
-// Exec output from a machine.
-message MachineExecOutput {
+// Run output from a machine.
+message MachineRunOutput {
     // Stream type: stdout or stderr.
     string stream = 1;
     // Output data.
