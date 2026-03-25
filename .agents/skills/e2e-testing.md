@@ -1,6 +1,6 @@
 ---
 name: e2e-testing
-description: ArcBox end-to-end testing procedures. Covers VM boot, Docker containers, port forwarding, L3 direct routing, DNS resolution, and common debugging patterns. Trigger on: e2e, end-to-end test, docker run, curl container, integration test, smoke test.
+description: "ArcBox end-to-end testing procedures. Covers VM boot, Docker containers, port forwarding, L3 direct routing, DNS resolution, and common debugging patterns. Trigger on: e2e, end-to-end test, docker run, curl container, integration test, smoke test."
 ---
 
 # ArcBox E2E Testing

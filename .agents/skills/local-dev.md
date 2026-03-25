@@ -1,6 +1,6 @@
 ---
 name: local-dev
-description: ArcBox local development quick loop. Build, sign, run daemon + helper for rapid iteration. Covers code signing with Developer ID, process cleanup, helper/daemon coordination, and common pitfalls. Trigger on: local dev, run daemon, build and run, sign daemon, helper, quick test, iteration.
+description: "ArcBox local development quick loop. Build, sign, run daemon + helper for rapid iteration. Covers code signing with Developer ID, process cleanup, helper/daemon coordination, and common pitfalls. Trigger on: local dev, run daemon, build and run, sign daemon, helper, quick test, iteration."
 ---
 
 # ArcBox Local Development

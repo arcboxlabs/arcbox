@@ -1,6 +1,6 @@
 ---
 name: macos-network-debugging
-description: macOS network stack debugging for ArcBox. Covers utun, vmnet, bridge, routing, pf, entitlements, VPN compatibility. Use when troubleshooting VM networking, container direct access, tunnel devices, fd passing. Trigger on: utun, vmnet, bridge100, route, pf, network debug, tunnel, macOS network.
+description: "macOS network stack debugging for ArcBox. Covers utun, vmnet, bridge, routing, pf, entitlements, VPN compatibility. Use when troubleshooting VM networking, container direct access, tunnel devices, fd passing. Trigger on: utun, vmnet, bridge100, route, pf, network debug, tunnel, macOS network."
 ---
 
 # macOS Network Debugging for ArcBox
