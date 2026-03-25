@@ -14,7 +14,7 @@
 //!
 //! [vm]
 //! cpus = 4
-//! memory_mb = 4096
+//! # memory_mb = 8192  # default: half of host RAM (512–16384)
 //!
 //! [machine]
 //! disk_gb = 50
