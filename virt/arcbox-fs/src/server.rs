@@ -83,8 +83,12 @@ impl FsServer {
             return Ok(());
         }
 
-        // Initialize passthrough filesystem
-        let fs = PassthroughFs::new(&self.config.source)
+        // Initialize passthrough filesystem with configured cache TTL
+        let pt_config = crate::passthrough::PassthroughConfig {
+            negative_cache_timeout: std::time::Duration::from_secs(self.config.negative_cache_ttl),
+            ..crate::passthrough::PassthroughConfig::default()
+        };
+        let fs = PassthroughFs::with_config(&self.config.source, pt_config)
             .map_err(|e| FsError::not_found(format!("Failed to initialize filesystem: {}", e)))?;
         let fs = Arc::new(fs);
 
