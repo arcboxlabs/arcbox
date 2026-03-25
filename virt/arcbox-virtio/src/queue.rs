@@ -5,6 +5,12 @@
 
 use crate::error::{Result, VirtioError};
 
+/// VirtIO available ring flag: guest requests no interrupt on used buffer consumption.
+const VRING_AVAIL_F_NO_INTERRUPT: u16 = 1;
+
+/// VirtIO feature bit for event index-based notification suppression (VirtIO spec 2.7.7).
+pub const VIRTIO_F_EVENT_IDX: u64 = 1 << 29;
+
 /// Descriptor flags.
 pub mod flags {
     /// Descriptor continues via next field.
@@ -126,6 +132,8 @@ pub struct VirtQueue {
     last_avail_idx: u16,
     /// Whether the queue is ready.
     ready: bool,
+    /// Whether EVENT_IDX feature is negotiated.
+    event_idx_enabled: bool,
 }
 
 impl VirtQueue {
@@ -154,6 +162,7 @@ impl VirtQueue {
             used: UsedRing::new(size),
             last_avail_idx: 0,
             ready: false,
+            event_idx_enabled: false,
         })
     }
 
@@ -235,14 +244,59 @@ impl VirtQueue {
         ))
     }
 
+    /// Enable or disable EVENT_IDX feature.
+    pub fn set_event_idx(&mut self, enabled: bool) {
+        self.event_idx_enabled = enabled;
+    }
+
     /// Adds a used descriptor to the used ring.
-    pub fn push_used(&mut self, head_idx: u16, len: u32) {
-        let used_idx = self.used.idx;
-        self.used.ring[(used_idx % self.size) as usize] = UsedElement {
+    ///
+    /// Returns `true` if the guest should be notified (interrupt required),
+    /// `false` if notification is suppressed (EVENT_IDX or NO_INTERRUPT flag).
+    pub fn push_used(&mut self, head_idx: u16, len: u32) -> bool {
+        let old_idx = self.used.idx;
+        self.used.ring[(old_idx % self.size) as usize] = UsedElement {
             id: head_idx as u32,
             len,
         };
         self.used.idx = self.used.idx.wrapping_add(1);
+        self.should_notify(old_idx)
+    }
+
+    /// Push a batch of completions to the used ring.
+    ///
+    /// More efficient than calling `push_used()` in a loop because
+    /// notification suppression is checked only once for the entire batch.
+    pub fn push_used_batch(&mut self, completions: &[(u16, u32)]) -> bool {
+        let old_idx = self.used.idx;
+        for &(head_idx, len) in completions {
+            let slot = (self.used.idx % self.size) as usize;
+            self.used.ring[slot] = UsedElement {
+                id: head_idx as u32,
+                len,
+            };
+            self.used.idx = self.used.idx.wrapping_add(1);
+        }
+        self.should_notify(old_idx)
+    }
+
+    /// Set the avail_event index for kick suppression (device→guest direction).
+    pub fn set_avail_event(&mut self, event: u16) {
+        self.used.avail_event = event;
+    }
+
+    /// Check whether the guest should be notified after updating the used ring.
+    fn should_notify(&self, old_idx: u16) -> bool {
+        if self.event_idx_enabled {
+            Self::needs_notification(old_idx, self.used.idx, self.avail.used_event)
+        } else {
+            (self.avail.flags & VRING_AVAIL_F_NO_INTERRUPT) == 0
+        }
+    }
+
+    /// VirtIO spec 2.7.7.2: notify iff `used_event` is in (old_idx, new_idx].
+    fn needs_notification(old_idx: u16, new_idx: u16, used_event: u16) -> bool {
+        new_idx.wrapping_sub(used_event).wrapping_sub(1) < new_idx.wrapping_sub(old_idx)
     }
 
     /// Returns a reference to a descriptor.
@@ -498,12 +552,12 @@ mod tests {
     fn test_virtqueue_push_used() {
         let mut queue = VirtQueue::new(16).unwrap();
 
-        queue.push_used(0, 512);
+        let _notify = queue.push_used(0, 512);
         assert_eq!(queue.used.idx, 1);
         assert_eq!(queue.used.ring[0].id, 0);
         assert_eq!(queue.used.ring[0].len, 512);
 
-        queue.push_used(1, 1024);
+        let _notify = queue.push_used(1, 1024);
         assert_eq!(queue.used.idx, 2);
         assert_eq!(queue.used.ring[1].id, 1);
         assert_eq!(queue.used.ring[1].len, 1024);
@@ -515,7 +569,7 @@ mod tests {
 
         // Push more than queue size to test wrapping
         for i in 0..10 {
-            queue.push_used(i, i as u32 * 100);
+            let _notify = queue.push_used(i, i as u32 * 100);
         }
 
         assert_eq!(queue.used.idx, 10);
@@ -543,7 +597,7 @@ mod tests {
         assert!(!queue.has_available());
 
         // Device adds to used ring
-        queue.push_used(head_idx, 256);
+        let _notify = queue.push_used(head_idx, 256);
         assert_eq!(queue.used.idx, 1);
     }
 
@@ -694,7 +748,7 @@ mod tests {
         let mut queue = VirtQueue::new(4).unwrap();
         queue.used.idx = u16::MAX;
 
-        queue.push_used(0, 100);
+        let _notify = queue.push_used(0, 100);
         assert_eq!(queue.used.idx, 0); // Wrapped
 
         // Value should be at index (u16::MAX % 4) = 3
@@ -738,5 +792,97 @@ mod tests {
 
         // Should only get first descriptor, chain stops at invalid next
         assert_eq!(descs.len(), 1);
+    }
+
+    // ==========================================================================
+    // EVENT_IDX and Interrupt Suppression Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_needs_notification_basic() {
+        // old=0, new=1, event=0 → just completed what guest wants → notify
+        assert!(VirtQueue::needs_notification(0, 1, 0));
+    }
+
+    #[test]
+    fn test_needs_notification_past_event() {
+        // old=5, new=6, event=3 → guest already saw past event → no notify
+        assert!(!VirtQueue::needs_notification(5, 6, 3));
+    }
+
+    #[test]
+    fn test_needs_notification_wrap() {
+        // Wrapping: old=65534, new=0 (wrapped), event=65535
+        assert!(VirtQueue::needs_notification(65534, 0, 65535));
+    }
+
+    #[test]
+    fn test_needs_notification_wrap_no_notify() {
+        // old=65534, new=65535, event=0 → not yet at event
+        assert!(!VirtQueue::needs_notification(65534, 65535, 0));
+    }
+
+    #[test]
+    fn test_push_used_no_interrupt_flag() {
+        let mut queue = VirtQueue::new(16).unwrap();
+        // Guest sets NO_INTERRUPT flag
+        queue.avail.flags = VRING_AVAIL_F_NO_INTERRUPT;
+        let notify = queue.push_used(0, 512);
+        assert!(!notify); // suppressed
+    }
+
+    #[test]
+    fn test_push_used_default_notifies() {
+        let mut queue = VirtQueue::new(16).unwrap();
+        let notify = queue.push_used(0, 512);
+        assert!(notify); // default: always notify
+    }
+
+    #[test]
+    fn test_push_used_event_idx_suppresses() {
+        let mut queue = VirtQueue::new(16).unwrap();
+        queue.set_event_idx(true);
+        // Guest sets used_event = 5 (notify me when you reach index 5)
+        queue.avail.used_event = 5;
+        // Push to idx 1 → not at event yet → suppress
+        let notify = queue.push_used(0, 512);
+        assert!(!notify);
+    }
+
+    #[test]
+    fn test_push_used_event_idx_triggers() {
+        let mut queue = VirtQueue::new(16).unwrap();
+        queue.set_event_idx(true);
+        queue.avail.used_event = 0;
+        // used.idx starts at 0, push moves it to 1 → event=0 is in (0,1] → notify
+        let notify = queue.push_used(0, 512);
+        assert!(notify);
+    }
+
+    #[test]
+    fn test_push_used_batch() {
+        let mut queue = VirtQueue::new(16).unwrap();
+        let completions = vec![(0, 256), (1, 512), (2, 1024)];
+        let notify = queue.push_used_batch(&completions);
+        assert!(notify); // default: always notify
+        assert_eq!(queue.used.idx, 3);
+        assert_eq!(queue.used.ring[0].id, 0);
+        assert_eq!(queue.used.ring[1].id, 1);
+        assert_eq!(queue.used.ring[2].id, 2);
+    }
+
+    #[test]
+    fn test_push_used_batch_empty() {
+        let mut queue = VirtQueue::new(16).unwrap();
+        let notify = queue.push_used_batch(&[]);
+        assert!(notify); // no EVENT_IDX, flags=0 → notify
+        assert_eq!(queue.used.idx, 0);
+    }
+
+    #[test]
+    fn test_set_avail_event() {
+        let mut queue = VirtQueue::new(16).unwrap();
+        queue.set_avail_event(42);
+        assert_eq!(queue.used.avail_event, 42);
     }
 }
