@@ -2,6 +2,7 @@
 
 use crate::api::{create_router, strip_api_version_prefix};
 use crate::error::{DockerError, Result};
+use crate::proxy::VsockConnector;
 use arcbox_core::Runtime;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -91,9 +92,11 @@ impl DockerApiServer {
         // Wrap the Axum Router with a MapRequestLayer that strips API version
         // prefixes *before* route matching. `Router::layer` runs after routing
         // and cannot be used for URI rewriting.
+        let connector = Arc::new(VsockConnector::new(Arc::clone(&self.runtime)));
         let version_layer = tower::util::MapRequestLayer::new(strip_api_version_prefix);
-        let app = version_layer
-            .layer(create_router(Arc::clone(&self.runtime)).layer(TraceLayer::new_for_http()));
+        let app = version_layer.layer(
+            create_router(Arc::clone(&self.runtime), connector).layer(TraceLayer::new_for_http()),
+        );
 
         let mut connections = JoinSet::new();
 

@@ -205,7 +205,7 @@ async fn setup_container_networking(state: &AppState, container_id: &str) {
 async fn inspect_container_body(state: &AppState, container_id: &str) -> Option<Bytes> {
     let inspect_path = format!("/containers/{container_id}/json");
     let inspect_resp = match proxy_to_guest(
-        &state.runtime,
+        state.connector.as_ref(),
         Method::GET,
         &inspect_path,
         &HeaderMap::new(),
@@ -406,7 +406,7 @@ async fn resolve_canonical_from_uri(state: &AppState, uri: &Uri) -> Option<Strin
 async fn resolve_canonical_id(state: &AppState, id: &str) -> Option<String> {
     let inspect_path = format!("/containers/{id}/json");
     let resp = proxy_to_guest(
-        &state.runtime,
+        state.connector.as_ref(),
         Method::GET,
         &inspect_path,
         &HeaderMap::new(),

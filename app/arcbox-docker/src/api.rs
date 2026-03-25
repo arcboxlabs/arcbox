@@ -8,6 +8,7 @@
 
 use crate::handlers;
 use crate::proxy;
+use crate::proxy::GuestConnector;
 use crate::trace::trace_id_middleware;
 use arcbox_core::Runtime;
 use axum::extract::OriginalUri;
@@ -22,6 +23,8 @@ use std::sync::Arc;
 pub struct AppState {
     /// `ArcBox` runtime.
     pub runtime: Arc<Runtime>,
+    /// Guest connection factory (vsock in production, Unix socket in tests).
+    pub connector: Arc<dyn GuestConnector>,
 }
 
 /// Creates the Docker API router with all endpoints.
@@ -30,8 +33,8 @@ pub struct AppState {
 /// Use [`strip_api_version_prefix`] as a `MapRequestLayer` around this Router
 /// so that versioned paths (`/v1.51/containers/{id}/start`) are normalised
 /// *before* Axum route matching.
-pub fn create_router(runtime: Arc<Runtime>) -> Router {
-    let state = AppState { runtime };
+pub fn create_router(runtime: Arc<Runtime>, connector: Arc<dyn GuestConnector>) -> Router {
+    let state = AppState { runtime, connector };
 
     api_routes()
         .fallback(proxy::proxy_fallback)
