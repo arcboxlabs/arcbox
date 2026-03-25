@@ -194,6 +194,14 @@ impl NetworkDatapath {
         // due to EWOULDBLOCK. Drained when the FD becomes writable again.
         let mut write_queue: VecDeque<Vec<u8>> = VecDeque::new();
 
+        // Unified timer wheel for flow timeout management (1s tick).
+        // Replaces per-flow tokio::time::timeout() objects with a single
+        // shared timer, reducing wakeup count from O(active_flows) to O(1).
+        let mut timer_wheel =
+            crate::timer_wheel::TimerWheel::<std::net::SocketAddr>::new(Duration::from_secs(1));
+        let mut timer_wheel_tick = tokio::time::interval(Duration::from_secs(1));
+        timer_wheel_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         // Periodic maintenance interval for cleaning up stale flows.
         let mut maintenance = tokio::time::interval(Duration::from_secs(30));
         maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -309,6 +317,32 @@ impl NetworkDatapath {
                 _ = smoltcp_timer.tick() => {}
 
                 // Periodic maintenance.
+                _ = timer_wheel_tick.tick() => {
+                    // Advance the timer wheel and handle expired flow timers.
+                    // TODO: Migrate tcp_bridge SYN gate and socket_proxy UDP/ICMP
+                    // per-flow timeouts to use timer_wheel.register() instead of
+                    // spawning independent tokio::time::timeout() tasks. For now
+                    // the wheel is wired but consumers are not yet migrated.
+                    let expired = timer_wheel.advance();
+                    for entry in &expired {
+                        tracing::trace!(
+                            "Timer wheel expired: {:?} action={:?}",
+                            entry.key,
+                            entry.action
+                        );
+                    }
+                    // Feed expired entries back to socket_proxy for cleanup
+                    for entry in expired {
+                        use crate::timer_wheel::TimerAction;
+                        match entry.action {
+                            TimerAction::UdpFlowExpiry | TimerAction::IcmpTimeout => {
+                                socket_proxy.expire_flow(entry.key);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
                 _ = maintenance.tick() => {
                     socket_proxy.maintenance();
                 }
