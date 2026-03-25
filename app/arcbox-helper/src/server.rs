@@ -108,9 +108,9 @@ async fn accept_loop(listener: tokio::net::UnixListener, tracker: Arc<Connection
 /// Uses launchd socket activation if available, otherwise falls back to
 /// binding its own socket (for development).
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let listener = if let Some(l) = launchd::listener() {
+    let (listener, launchd_mode) = if let Some(l) = launchd::listener() {
         eprintln!("arcbox-helper: using launchd socket activation");
-        l
+        (l, true)
     } else {
         // Fallback: bind our own socket (development / manual start).
         //
@@ -130,11 +130,15 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         eprintln!("arcbox-helper: listening on {path} (manual mode)");
-        l
+        (l, false)
     };
 
     let tracker = Arc::new(ConnectionTracker::new());
-    tokio::spawn(idle_watchdog(Arc::clone(&tracker)));
+    if launchd_mode {
+        tokio::spawn(idle_watchdog(Arc::clone(&tracker)));
+    } else {
+        eprintln!("arcbox-helper: idle timeout disabled in manual mode");
+    }
     accept_loop(listener, tracker).await;
 
     Ok(())
