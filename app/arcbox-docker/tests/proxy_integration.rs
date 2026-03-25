@@ -5,7 +5,7 @@
 //! handler layer's `ensure_vm_ready`) to isolate proxy forwarding logic.
 
 mod support;
-use support::mock_guest;
+use support::mock_guest::{self, MockGuest};
 
 use arcbox_docker::proxy::{
     GuestConnector, RawFdStream, proxy_to_guest, proxy_to_guest_stream, proxy_with_upgrade,
@@ -16,8 +16,7 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper_util::rt::TokioIo;
 use std::future::Future;
-use std::os::fd::IntoRawFd;
-use std::os::unix::net::UnixStream as StdUnixStream;
+use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::pin::Pin;
 use tempfile::TempDir;
@@ -36,16 +35,15 @@ impl GuestConnector for UnixSocketConnector {
     ) -> Pin<Box<dyn Future<Output = arcbox_docker::Result<TokioIo<RawFdStream>>> + Send + '_>>
     {
         Box::pin(async {
-            let path = self.socket_path.clone();
-            let fd = tokio::task::spawn_blocking(move || {
-                let stream = StdUnixStream::connect(&path)
-                    .map_err(|e| arcbox_docker::DockerError::Server(e.to_string()))?;
-                Ok::<_, arcbox_docker::DockerError>(stream.into_raw_fd())
-            })
-            .await
-            .map_err(|e| arcbox_docker::DockerError::Server(e.to_string()))??;
-
-            let stream = RawFdStream::from_raw_fd(fd)
+            let std_stream = tokio::net::UnixStream::connect(&self.socket_path)
+                .await
+                .map_err(|e| arcbox_docker::DockerError::Server(e.to_string()))?
+                .into_std()
+                .map_err(|e| arcbox_docker::DockerError::Server(e.to_string()))?;
+            // SAFETY: into_raw_fd yields a valid, owned fd; wrap immediately
+            // in OwnedFd so it is closed on error.
+            let owned: OwnedFd = unsafe { OwnedFd::from_raw_fd(std_stream.into_raw_fd()) };
+            let stream = RawFdStream::new(owned)
                 .map_err(|e| arcbox_docker::DockerError::Server(e.to_string()))?;
             Ok(TokioIo::new(stream))
         })
@@ -56,15 +54,13 @@ impl GuestConnector for UnixSocketConnector {
 // Test helpers
 // =============================================================================
 
-async fn setup() -> (
-    UnixSocketConnector,
-    TempDir,
-    tokio_util::sync::CancellationToken,
-) {
+async fn setup() -> (UnixSocketConnector, MockGuest, TempDir) {
     let tmp = TempDir::new().unwrap();
-    let (socket_path, cancel) = mock_guest::start(tmp.path()).await;
-    let connector = UnixSocketConnector { socket_path };
-    (connector, tmp, cancel)
+    let guest = mock_guest::start(tmp.path()).await;
+    let connector = UnixSocketConnector {
+        socket_path: guest.socket_path.clone(),
+    };
+    (connector, guest, tmp)
 }
 
 // =============================================================================
@@ -73,7 +69,7 @@ async fn setup() -> (
 
 #[tokio::test]
 async fn proxy_to_guest_echoes_body() {
-    let (connector, _tmp, cancel) = setup().await;
+    let (connector, guest, _tmp) = setup().await;
 
     let payload = r#"{"Image":"alpine:latest"}"#;
     let resp = proxy_to_guest(
@@ -89,12 +85,12 @@ async fn proxy_to_guest_echoes_body() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(body, payload.as_bytes());
-    cancel.cancel();
+    guest.cancel.cancel();
 }
 
 #[tokio::test]
 async fn proxy_to_guest_empty_body() {
-    let (connector, _tmp, cancel) = setup().await;
+    let (connector, guest, _tmp) = setup().await;
 
     let resp = proxy_to_guest(
         &connector,
@@ -107,7 +103,7 @@ async fn proxy_to_guest_empty_body() {
     .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
-    cancel.cancel();
+    guest.cancel.cancel();
 }
 
 // =============================================================================
@@ -116,7 +112,7 @@ async fn proxy_to_guest_empty_body() {
 
 #[tokio::test]
 async fn proxy_stream_forwards_body() {
-    let (connector, _tmp, cancel) = setup().await;
+    let (connector, guest, _tmp) = setup().await;
 
     let payload = r#"{"Name":"test-volume"}"#;
     let uri: Uri = "/volumes/create".parse().unwrap();
@@ -132,7 +128,7 @@ async fn proxy_stream_forwards_body() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(body, payload.as_bytes());
-    cancel.cancel();
+    guest.cancel.cancel();
 }
 
 // =============================================================================
@@ -141,7 +137,7 @@ async fn proxy_stream_forwards_body() {
 
 #[tokio::test]
 async fn upgrade_returns_101_with_correct_protocol() {
-    let (connector, _tmp, cancel) = setup().await;
+    let (connector, guest, _tmp) = setup().await;
 
     let uri: Uri = "/grpc".parse().unwrap();
     let req = Request::builder()
@@ -161,12 +157,12 @@ async fn upgrade_returns_101_with_correct_protocol() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     assert_eq!(upgrade, "h2c");
-    cancel.cancel();
+    guest.cancel.cancel();
 }
 
 #[tokio::test]
 async fn upgrade_forwards_request_body() {
-    let (connector, _tmp, cancel) = setup().await;
+    let (connector, guest, _tmp) = setup().await;
 
     let payload = r#"{"Detach":false,"Tty":false}"#;
     let uri: Uri = "/exec/abc123/start".parse().unwrap();
@@ -180,9 +176,12 @@ async fn upgrade_forwards_request_body() {
         .unwrap();
 
     let resp = proxy_with_upgrade(&connector, req, &uri).await.unwrap();
-
-    // Mock guest accepts upgrade regardless of body — handshake success
-    // proves the body was forwarded (guest dockerd didn't hang waiting).
     assert_eq!(resp.status(), StatusCode::SWITCHING_PROTOCOLS);
-    cancel.cancel();
+
+    // Verify the mock guest actually received the request body.
+    // Small yield to let the mock's body-capture task run.
+    tokio::task::yield_now().await;
+    let observed = guest.last_upgrade_body().await;
+    assert_eq!(observed.as_deref(), Some(payload.as_bytes()));
+    guest.cancel.cancel();
 }

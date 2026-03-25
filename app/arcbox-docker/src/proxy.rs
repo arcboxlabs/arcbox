@@ -16,7 +16,7 @@ use hyper::client::conn::http1;
 use hyper_util::rt::TokioIo;
 use std::future::Future;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 use std::task::{Context, Poll, ready};
@@ -71,19 +71,13 @@ pub struct RawFdStream {
 }
 
 impl RawFdStream {
-    pub fn from_raw_fd(fd: RawFd) -> io::Result<Self> {
-        if fd < 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid file descriptor",
-            ));
-        }
-
-        // SAFETY: fd is a valid, newly-opened file descriptor owned by us.
-        // Take ownership first so the fd is closed on any subsequent error.
-        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-        Self::set_nonblocking(owned.as_raw_fd())?;
-        let inner = AsyncFd::new(RawFdWrapper(owned))?;
+    /// Creates a new async stream from an owned file descriptor.
+    ///
+    /// The fd is set to non-blocking mode. Ownership is taken via
+    /// [`OwnedFd`] so the descriptor is always closed on error.
+    pub fn new(fd: OwnedFd) -> io::Result<Self> {
+        Self::set_nonblocking(fd.as_raw_fd())?;
+        let inner = AsyncFd::new(RawFdWrapper(fd))?;
         Ok(Self { inner })
     }
 
@@ -249,7 +243,7 @@ impl GuestConnector for VsockConnector {
                 }
             };
 
-            let stream = RawFdStream::from_raw_fd(owned_fd.into_raw_fd())
+            let stream = RawFdStream::new(owned_fd)
                 .map_err(|e| DockerError::Server(format!("failed to create guest stream: {e}")))?;
             Ok(TokioIo::new(stream))
         })
