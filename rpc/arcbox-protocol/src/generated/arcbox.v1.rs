@@ -2202,6 +2202,7 @@ pub mod setup_status {
         Ready = 6,
         Degraded = 7,
         DownloadingAssets = 8,
+        CleaningUp = 9,
     }
     impl Phase {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -2219,6 +2220,7 @@ pub mod setup_status {
                 Self::Ready => "READY",
                 Self::Degraded => "DEGRADED",
                 Self::DownloadingAssets => "DOWNLOADING_ASSETS",
+                Self::CleaningUp => "CLEANING_UP",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -2233,6 +2235,7 @@ pub mod setup_status {
                 "READY" => Some(Self::Ready),
                 "DEGRADED" => Some(Self::Degraded),
                 "DOWNLOADING_ASSETS" => Some(Self::DownloadingAssets),
+                "CLEANING_UP" => Some(Self::CleaningUp),
                 _ => None,
             }
         }

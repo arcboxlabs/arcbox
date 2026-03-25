@@ -493,6 +493,7 @@ message SetupStatus {
         READY = 6;
         DEGRADED = 7;
         DOWNLOADING_ASSETS = 8;
+        CLEANING_UP = 9;
     }
 
     // Current daemon phase.

@@ -7,12 +7,16 @@ use arcbox_api::{SetupState, SharedRuntime};
 use arcbox_core::Runtime;
 use tokio_util::sync::CancellationToken;
 
+use crate::startup::DaemonLock;
+
 /// Daemon-wide context created during startup, passed to all phases.
 pub struct DaemonContext {
     pub data_dir: PathBuf,
     pub socket_path: PathBuf,
     pub grpc_socket: PathBuf,
-    pub pid_file: PathBuf,
+    /// Exclusive lock held for the daemon's lifetime. `None` until
+    /// [`startup::acquire_lock`] succeeds.
+    pub daemon_lock: Option<DaemonLock>,
     /// Shared with gRPC services. Empty after `init_early`, filled by `init_runtime`.
     pub shared_runtime: SharedRuntime,
     pub setup_state: Arc<SetupState>,

@@ -87,11 +87,23 @@ async fn run(args: DaemonArgs) -> Result<()> {
     // Phase 1: directories, config, sockets — no runtime yet.
     let mut ctx = startup::init_early(args).await?;
 
+    // Acquire exclusive daemon lock. Terminates any stale daemon that
+    // still holds the lock (up to ~30 s SIGTERM wait). Must complete
+    // before start_grpc because the old daemon may be listening on the
+    // same socket paths.
+    startup::acquire_lock(&mut ctx).await?;
+
     // Start gRPC with all services. Machine/Sandbox return UNAVAILABLE
     // until runtime is ready. SystemService works immediately so clients
-    // can observe DOWNLOADING_ASSETS → ASSETS_READY progression.
+    // can observe the full startup progression (CLEANING_UP →
+    // INITIALIZING → DOWNLOADING_ASSETS → ASSETS_READY → …).
     let shared_runtime = ctx.shared_runtime.clone();
     let grpc = services::start_grpc(&ctx, shared_runtime).await?;
+
+    // Wait for residual resource holders (e.g. orphaned
+    // Virtualization.framework XPC helpers holding docker.img).
+    // Visible to gRPC clients as the CLEANING_UP phase.
+    startup::wait_for_resources(&ctx).await?;
 
     // Phase 2: seed/download boot assets, build runtime, start VM.
     // Progress is visible to gRPC clients via WatchSetupStatus.
