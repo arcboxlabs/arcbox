@@ -42,6 +42,18 @@ for f in .agents/skills/*.md; do
 done
 ```
 
+### Claude Code Skills (Optional)
+
+If you use [Claude Code](https://docs.anthropic.com/en/docs/claude-code),
+shared skills are in `.agents/skills/`. Symlink them to activate:
+
+```bash
+mkdir -p .claude/skills
+for f in .agents/skills/*.md; do
+  ln -sf "../../$f" ".claude/skills/$(basename "$f")"
+done
+```
+
 ### Guest Agent Cross-Compilation (Optional)
 
 The `arcbox-agent` runs inside the Linux guest VM and must be cross-compiled:
