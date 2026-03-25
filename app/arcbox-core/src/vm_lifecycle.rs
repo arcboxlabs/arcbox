@@ -880,8 +880,11 @@ impl VmLifecycleManager {
             {
                 Ok(output) => {
                     let trimmed = output.trim_matches('\0');
-                    if !trimmed.is_empty() {
-                        tracing::info!("Guest console: {}", trimmed.trim_end());
+                    for line in trimmed.lines() {
+                        let line = line.trim_end();
+                        if !line.is_empty() {
+                            tracing::info!("Guest console: {line}");
+                        }
                     }
                 }
                 Err(e) => {
