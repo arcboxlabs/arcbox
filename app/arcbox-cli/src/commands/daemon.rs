@@ -373,7 +373,12 @@ fn daemon_is_alive(lock_file: &Path) -> bool {
         unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
         false
     } else {
-        // EWOULDBLOCK — daemon holds the lock.
+        // Only EWOULDBLOCK means "lock is held by another process".
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
+            warn!(%err, "Unexpected flock error probing daemon lock, assuming not running");
+            return false;
+        }
         true
     }
 }
