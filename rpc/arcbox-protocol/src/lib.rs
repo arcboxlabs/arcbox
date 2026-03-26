@@ -93,7 +93,10 @@ pub mod image {
 /// Re-exports all agent-related types for backward compatibility.
 pub mod agent {
     pub use super::v1::{
-        AgentPingRequest, AgentPingResponse, PortBindingsChanged, PortBindingsRemoved,
+        AgentPingRequest, AgentPingResponse, KubernetesDeleteRequest, KubernetesDeleteResponse,
+        KubernetesKubeconfigRequest, KubernetesKubeconfigResponse, KubernetesStartRequest,
+        KubernetesStartResponse, KubernetesStatusRequest, KubernetesStatusResponse,
+        KubernetesStopRequest, KubernetesStopResponse, PortBindingsChanged, PortBindingsRemoved,
         RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse,
         ServiceStatus, SystemInfo,
     };
@@ -101,6 +104,16 @@ pub mod agent {
     // Backward compatibility type aliases (short names without Agent prefix).
     pub type PingRequest = super::v1::AgentPingRequest;
     pub type PingResponse = super::v1::AgentPingResponse;
+}
+
+/// Kubernetes types (from kubernetes.proto).
+pub mod kubernetes {
+    pub use super::v1::{
+        KubernetesDeleteRequest, KubernetesDeleteResponse, KubernetesKubeconfigRequest,
+        KubernetesKubeconfigResponse, KubernetesStartRequest, KubernetesStartResponse,
+        KubernetesStatusRequest, KubernetesStatusResponse, KubernetesStopRequest,
+        KubernetesStopResponse,
+    };
 }
 
 /// API types (from api.proto).
@@ -168,7 +181,10 @@ pub use v1::{
 
 // Agent types
 pub use v1::{
-    AgentPingRequest, AgentPingResponse, PortBindingsChanged, PortBindingsRemoved,
+    AgentPingRequest, AgentPingResponse, KubernetesDeleteRequest, KubernetesDeleteResponse,
+    KubernetesKubeconfigRequest, KubernetesKubeconfigResponse, KubernetesStartRequest,
+    KubernetesStartResponse, KubernetesStatusRequest, KubernetesStatusResponse,
+    KubernetesStopRequest, KubernetesStopResponse, PortBindingsChanged, PortBindingsRemoved,
     RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse,
     ServiceStatus, SystemInfo,
 };

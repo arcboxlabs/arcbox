@@ -47,4 +47,5 @@ pub struct ServiceHandles {
     pub dns: tokio::task::JoinHandle<()>,
     pub docker: tokio::task::JoinHandle<()>,
     pub grpc: tokio::task::JoinHandle<()>,
+    pub kubernetes_proxy: Option<tokio::task::JoinHandle<()>>,
 }

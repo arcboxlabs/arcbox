@@ -15,8 +15,8 @@ pub mod system;
 
 // Re-export gRPC service types from arcbox-grpc for convenience.
 pub use arcbox_grpc::v1::{
-    machine_service_client, machine_service_server, migration_service_client,
-    migration_service_server,
+    kubernetes_service_client, kubernetes_service_server, machine_service_client,
+    machine_service_server, migration_service_client, migration_service_server,
 };
 pub use arcbox_grpc::{
     IconService, IconServiceServer, MigrationService, MigrationServiceServer, SandboxService,
@@ -27,8 +27,8 @@ pub use arcbox_grpc::{
 pub use arcbox_protocol::v1::setup_status::Phase as SetupPhase;
 pub use error::{ApiError, Result};
 pub use grpc::{
-    IconServiceImpl, MachineServiceImpl, SandboxServiceImpl, SandboxSnapshotServiceImpl,
-    SharedRuntime,
+    IconServiceImpl, KubernetesServiceImpl, MachineServiceImpl, SandboxServiceImpl,
+    SandboxSnapshotServiceImpl, SharedRuntime,
 };
 pub use migration::MigrationServiceImpl;
 pub use system::{SetupState, SystemServiceImpl};

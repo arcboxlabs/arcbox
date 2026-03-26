@@ -450,6 +450,8 @@ pub struct VmLifecycleManager {
     last_activity_ms: AtomicU64,
     /// Whether balloon is currently shrunk for idle state.
     balloon_shrunk: std::sync::atomic::AtomicBool,
+    /// Whether Kubernetes is holding the VM in the active state.
+    kubernetes_hold: std::sync::atomic::AtomicBool,
 }
 
 impl VmLifecycleManager {
@@ -561,6 +563,7 @@ impl VmLifecycleManager {
             transition_lock: Mutex::new(()),
             last_activity_ms: AtomicU64::new(now_ms),
             balloon_shrunk: std::sync::atomic::AtomicBool::new(false),
+            kubernetes_hold: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -969,6 +972,20 @@ impl VmLifecycleManager {
         self.last_activity_ms.store(now_ms, Ordering::Relaxed);
     }
 
+    /// Enables or disables the Kubernetes lifecycle hold.
+    pub async fn set_kubernetes_hold(&self, active: bool) {
+        self.kubernetes_hold.store(active, Ordering::Relaxed);
+        self.record_activity();
+
+        if active {
+            self.restore_balloon();
+            let mut state = self.state.write().await;
+            if *state == VmLifecycleState::Idle {
+                *state = VmLifecycleState::Running;
+            }
+        }
+    }
+
     /// Returns seconds since last activity.
     fn idle_seconds(&self) -> u64 {
         let now_ms = std::time::SystemTime::now()
@@ -1063,6 +1080,9 @@ impl VmLifecycleManager {
                 }
 
                 let idle_secs = this.idle_seconds();
+                if this.kubernetes_hold.load(Ordering::Relaxed) {
+                    continue;
+                }
                 if idle_secs >= idle_timeout.as_secs() {
                     *this.state.write().await = VmLifecycleState::Idle;
                     this.shrink_balloon();

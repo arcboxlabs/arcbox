@@ -54,6 +54,7 @@ pub mod docker;
 pub mod doctor;
 #[cfg(target_os = "macos")]
 pub mod install;
+pub mod kubernetes;
 pub mod logs;
 pub mod machine;
 pub mod migrate;
@@ -118,6 +119,10 @@ pub enum Commands {
     /// Manage Docker CLI integration
     #[command(subcommand)]
     Docker(docker::DockerCommands),
+
+    /// Manage native Kubernetes integration
+    #[command(subcommand, alias = "k8s")]
+    Kubernetes(kubernetes::KubernetesCommands),
 
     /// Manage boot assets (kernel/rootfs)
     #[command(subcommand)]

@@ -12,6 +12,7 @@ This crate provides a thin command-line interface for ArcBox machine management 
 - **Runtime Migration**: Import local workloads from Docker Desktop or OrbStack
 - **Daemon Lifecycle**: Start/stop daemon process
 - **Docker Context Integration**: Seamless switching between Docker and ArcBox
+- **Native Kubernetes Integration**: Manage the ArcBox k3s cluster and bundled `kubectl`
 - **Boot Asset & DNS Helpers**: Manage boot cache and resolver setup
 
 ## Usage
@@ -36,6 +37,11 @@ abctl version                   # Version info
 # Docker context integration
 abctl docker enable             # Set ArcBox as Docker context
 abctl docker disable            # Reset to default context
+
+# Native Kubernetes integration
+abctl k8s start                  # Start the ArcBox Kubernetes cluster
+abctl k8s enable                 # Install kubectl + activate ArcBox kube context
+kubectl get nodes
 
 # Run containers through Docker CLI
 docker run hello-world

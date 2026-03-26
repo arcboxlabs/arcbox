@@ -7,11 +7,13 @@
 //! re-exported from `arcbox_grpc` (non-`v1`).
 
 mod icon;
+mod kubernetes;
 mod machine;
 mod sandbox;
 mod snapshot;
 
 pub use icon::IconServiceImpl;
+pub use kubernetes::KubernetesServiceImpl;
 pub use machine::MachineServiceImpl;
 pub use sandbox::SandboxServiceImpl;
 pub use snapshot::SandboxSnapshotServiceImpl;

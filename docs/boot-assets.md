@@ -8,9 +8,9 @@ repository [`arcboxlabs/boot-assets`](https://github.com/arcboxlabs/boot-assets)
 Each release contains per-architecture artifacts plus a unified multi-target manifest:
 
 - `kernel` — pre-built Linux kernel (all drivers built-in, `CONFIG_MODULES=n`)
-- `rootfs.erofs` — minimal read-only EROFS rootfs (busybox + mkfs.btrfs + iptables-legacy + CA certs)
+- `rootfs.erofs` — minimal read-only EROFS rootfs (busybox + mkfs.btrfs + iptables-legacy + ebtables + ethtool + socat + CA certs)
 - `manifest.json` — manifest with SHA256 checksums and kernel cmdline (`schema_version` = major of `asset_version`)
-- Runtime binaries — dockerd, containerd, containerd-shim-runc-v2, runc (from Docker 27.5.1 static package)
+- Runtime binaries — dockerd, containerd, containerd-shim-runc-v2, runc (from Docker 27.5.1 static package) plus k3s
 
 No initramfs. The kernel boots directly into the EROFS rootfs (`root=/dev/vda ro rootfstype=erofs`).
 Agent and runtime binaries are distributed via VirtioFS from the host.

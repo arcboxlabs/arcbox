@@ -102,8 +102,11 @@ const LOCK_TOML: &str = include_str!("../../../assets.lock");
 /// Installs Docker CLI tools (docker, buildx, compose, credential helper)
 /// if not already present. Tries the app bundle first, then CDN.
 async fn ensure_docker_tools(data_dir: &Path) -> anyhow::Result<()> {
-    let tools = arcbox_docker_tools::parse_tools(LOCK_TOML)
-        .map_err(|e| anyhow::anyhow!("failed to parse tools from assets.lock: {e}"))?;
+    let tools = arcbox_docker_tools::parse_tools_for_group(
+        LOCK_TOML,
+        arcbox_docker_tools::ToolGroup::Docker,
+    )
+    .map_err(|e| anyhow::anyhow!("failed to parse tools from assets.lock: {e}"))?;
 
     let arch = if cfg!(target_arch = "aarch64") {
         "arm64"
@@ -112,7 +115,7 @@ async fn ensure_docker_tools(data_dir: &Path) -> anyhow::Result<()> {
     };
 
     let install_dir = data_dir.join("runtime/bin");
-    let mgr = arcbox_docker_tools::DockerToolManager::new(tools, arch, install_dir);
+    let mgr = arcbox_docker_tools::HostToolManager::new(tools, arch, install_dir);
 
     // Docker tools are already seeded from the app bundle by
     // seed_from_bundle() (via Resources/runtime/bin/). This check

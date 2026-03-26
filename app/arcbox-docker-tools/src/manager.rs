@@ -1,5 +1,5 @@
-//! Docker tool manager — download, extract, install, and validate Docker CLI
-//! binaries from the versions pinned in `assets.lock`.
+//! Host tool manager — download, extract, install, and validate ArcBox-managed
+//! host binaries from the versions pinned in `assets.lock`.
 
 use crate::lockfile::ToolEntry;
 use crate::registry::{self, ArtifactFormat};
@@ -8,8 +8,8 @@ use arcbox_asset::{PreparePhase, PrepareProgress, ProgressCallback};
 use std::path::{Path, PathBuf};
 use tracing::info;
 
-/// Manages Docker CLI tool installation.
-pub struct DockerToolManager {
+/// Manages ArcBox host tool installation.
+pub struct HostToolManager {
     /// Architecture string (e.g. "arm64", "x86_64").
     arch: String,
     /// Directory for downloaded artifacts (e.g. `~/.arcbox/runtime/bin/`).
@@ -21,7 +21,7 @@ pub struct DockerToolManager {
     bundle_dir: Option<PathBuf>,
 }
 
-impl DockerToolManager {
+impl HostToolManager {
     /// Create a new manager from parsed tool entries.
     #[must_use]
     pub fn new(tools: Vec<ToolEntry>, arch: impl Into<String>, install_dir: PathBuf) -> Self {
@@ -49,10 +49,10 @@ impl DockerToolManager {
     pub async fn install_all(
         &self,
         progress: Option<&ProgressCallback>,
-    ) -> Result<(), DockerToolError> {
+    ) -> Result<(), HostToolError> {
         tokio::fs::create_dir_all(&self.install_dir)
             .await
-            .map_err(DockerToolError::Io)?;
+            .map_err(HostToolError::Io)?;
 
         let total = self.tools.len();
         for (idx, tool) in self.tools.iter().enumerate() {
@@ -69,10 +69,10 @@ impl DockerToolManager {
         current: usize,
         total: usize,
         progress: Option<&ProgressCallback>,
-    ) -> Result<(), DockerToolError> {
+    ) -> Result<(), HostToolError> {
         let expected_sha =
             tool.sha256_for_arch(&self.arch)
-                .ok_or_else(|| DockerToolError::UnsupportedArch {
+                .ok_or_else(|| HostToolError::UnsupportedArch {
                     tool: tool.name.clone(),
                     arch: self.arch.clone(),
                 })?;
@@ -124,7 +124,7 @@ impl DockerToolManager {
                     });
                 })
                 .await
-                .map_err(DockerToolError::Asset)?;
+                .map_err(HostToolError::Asset)?;
             }
             ArtifactFormat::Tgz => {
                 // Download tgz to temp, verify checksum, then extract the binary.
@@ -136,7 +136,7 @@ impl DockerToolManager {
                     });
                 })
                 .await
-                .map_err(DockerToolError::Asset)?;
+                .map_err(HostToolError::Asset)?;
 
                 pg(PreparePhase::Verifying);
                 extract_from_tgz(&tgz_path, registry::tgz_inner_path(&tool.name), &dest)?;
@@ -188,7 +188,7 @@ impl DockerToolManager {
         dest: &Path,
         expected_sha: &str,
         format: ArtifactFormat,
-    ) -> Result<bool, DockerToolError> {
+    ) -> Result<bool, HostToolError> {
         let bundle_dir = match &self.bundle_dir {
             Some(dir) => dir,
             None => return Ok(false),
@@ -202,21 +202,20 @@ impl DockerToolManager {
         // Create a secure temp file in the install dir (randomized name,
         // O_CREAT|O_EXCL). Copy into the already-open handle to avoid TOCTOU
         // symlink races on the temp path.
-        let tmp =
-            tempfile::NamedTempFile::new_in(&self.install_dir).map_err(DockerToolError::Io)?;
+        let tmp = tempfile::NamedTempFile::new_in(&self.install_dir).map_err(HostToolError::Io)?;
         {
             use tokio::io::AsyncWriteExt;
             let src_bytes = tokio::fs::read(&src).await;
             match src_bytes {
                 Ok(bytes) => {
-                    let std_file = tmp.as_file().try_clone().map_err(DockerToolError::Io)?;
+                    let std_file = tmp.as_file().try_clone().map_err(HostToolError::Io)?;
                     let mut async_file = tokio::fs::File::from_std(std_file);
                     if let Err(e) = async_file.write_all(&bytes).await {
                         let _ = tmp.close();
                         info!(tool = %tool.name, error = %e, "bundle copy failed, will download");
                         return Ok(false);
                     }
-                    async_file.flush().await.map_err(DockerToolError::Io)?;
+                    async_file.flush().await.map_err(HostToolError::Io)?;
                 }
                 Err(e) => {
                     let _ = tmp.close();
@@ -276,26 +275,26 @@ impl DockerToolManager {
     }
 
     /// Validate that all tools are installed and checksums match.
-    pub async fn validate_all(&self) -> Result<(), DockerToolError> {
+    pub async fn validate_all(&self) -> Result<(), HostToolError> {
         for tool in &self.tools {
-            let expected_sha = tool.sha256_for_arch(&self.arch).ok_or_else(|| {
-                DockerToolError::UnsupportedArch {
-                    tool: tool.name.clone(),
-                    arch: self.arch.clone(),
-                }
-            })?;
+            let expected_sha =
+                tool.sha256_for_arch(&self.arch)
+                    .ok_or_else(|| HostToolError::UnsupportedArch {
+                        tool: tool.name.clone(),
+                        arch: self.arch.clone(),
+                    })?;
 
             let path = self.install_dir.join(&tool.name);
             if !path.exists() {
-                return Err(DockerToolError::NotInstalled(tool.name.clone()));
+                return Err(HostToolError::NotInstalled(tool.name.clone()));
             }
 
             let format = registry::artifact_format(&tool.name);
             match format {
                 ArtifactFormat::Binary => {
-                    let actual = sha256_file(&path).await.map_err(DockerToolError::Asset)?;
+                    let actual = sha256_file(&path).await.map_err(HostToolError::Asset)?;
                     if actual != expected_sha {
-                        return Err(DockerToolError::Asset(
+                        return Err(HostToolError::Asset(
                             arcbox_asset::AssetError::ChecksumMismatch {
                                 name: tool.name.clone(),
                                 expected: expected_sha.to_string(),
@@ -312,12 +311,12 @@ impl DockerToolManager {
                             // Missing sidecar means an older install that didn't
                             // create one — treat as not installed so callers can
                             // trigger a reinstall.
-                            return Err(DockerToolError::NotInstalled(tool.name.clone()));
+                            return Err(HostToolError::NotInstalled(tool.name.clone()));
                         }
-                        Err(e) => return Err(DockerToolError::Io(e)),
+                        Err(e) => return Err(HostToolError::Io(e)),
                     };
                     if content.trim() != expected_sha {
-                        return Err(DockerToolError::Asset(
+                        return Err(HostToolError::Asset(
                             arcbox_asset::AssetError::ChecksumMismatch {
                                 name: tool.name.clone(),
                                 expected: expected_sha.to_string(),
@@ -346,21 +345,21 @@ impl DockerToolManager {
 
 /// Mark a file as executable (0o755).
 #[cfg(unix)]
-async fn mark_executable(path: &Path) -> Result<(), DockerToolError> {
+async fn mark_executable(path: &Path) -> Result<(), HostToolError> {
     use std::os::unix::fs::PermissionsExt;
     let mut perms = tokio::fs::metadata(path)
         .await
-        .map_err(DockerToolError::Io)?
+        .map_err(HostToolError::Io)?
         .permissions();
     perms.set_mode(0o755);
     tokio::fs::set_permissions(path, perms)
         .await
-        .map_err(DockerToolError::Io)?;
+        .map_err(HostToolError::Io)?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-async fn mark_executable(_path: &Path) -> Result<(), DockerToolError> {
+async fn mark_executable(_path: &Path) -> Result<(), HostToolError> {
     Ok(())
 }
 
@@ -371,11 +370,11 @@ async fn write_sidecar(
     install_dir: &Path,
     name: &str,
     expected_sha: &str,
-) -> Result<(), DockerToolError> {
+) -> Result<(), HostToolError> {
     let sidecar = install_dir.join(format!("{name}.sha256"));
     tokio::fs::write(&sidecar, expected_sha)
         .await
-        .map_err(DockerToolError::Io)?;
+        .map_err(HostToolError::Io)?;
     Ok(())
 }
 
@@ -384,29 +383,29 @@ fn extract_from_tgz(
     archive_path: &Path,
     inner_path: &str,
     dest: &Path,
-) -> Result<(), DockerToolError> {
-    let file = std::fs::File::open(archive_path).map_err(DockerToolError::Io)?;
+) -> Result<(), HostToolError> {
+    let file = std::fs::File::open(archive_path).map_err(HostToolError::Io)?;
     let gz = flate2::read::GzDecoder::new(file);
     let mut archive = tar::Archive::new(gz);
 
-    for entry in archive.entries().map_err(DockerToolError::Io)? {
-        let mut entry = entry.map_err(DockerToolError::Io)?;
-        let path = entry.path().map_err(DockerToolError::Io)?;
+    for entry in archive.entries().map_err(HostToolError::Io)? {
+        let mut entry = entry.map_err(HostToolError::Io)?;
+        let path = entry.path().map_err(HostToolError::Io)?;
         if path.to_string_lossy() == inner_path {
-            entry.unpack(dest).map_err(DockerToolError::Io)?;
+            entry.unpack(dest).map_err(HostToolError::Io)?;
             return Ok(());
         }
     }
 
-    Err(DockerToolError::ExtractFailed {
+    Err(HostToolError::ExtractFailed {
         archive: archive_path.display().to_string(),
         inner: inner_path.to_string(),
     })
 }
 
-/// Errors from Docker tool operations.
+/// Errors from host tool operations.
 #[derive(Debug, thiserror::Error)]
-pub enum DockerToolError {
+pub enum HostToolError {
     #[error("asset error: {0}")]
     Asset(#[from] arcbox_asset::AssetError),
 
@@ -426,11 +425,12 @@ pub enum DockerToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lockfile::{ArchEntry, ToolGroup};
 
     fn make_tool(name: &str, sha: &str) -> ToolEntry {
-        use crate::lockfile::ArchEntry;
         ToolEntry {
             name: name.to_string(),
+            group: ToolGroup::Docker,
             version: "1.0.0".to_string(),
             arch: std::collections::HashMap::from([(
                 "arm64".to_string(),
@@ -452,7 +452,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mgr = DockerToolManager::new(vec![], "arm64", dir.path().to_path_buf());
+        let mgr = HostToolManager::new(vec![], "arm64", dir.path().to_path_buf());
         assert!(mgr.is_cached("my-tool", &sha, ArtifactFormat::Binary).await);
     }
 
@@ -463,7 +463,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mgr = DockerToolManager::new(vec![], "arm64", dir.path().to_path_buf());
+        let mgr = HostToolManager::new(vec![], "arm64", dir.path().to_path_buf());
         assert!(
             !mgr.is_cached("my-tool", "wrong-sha", ArtifactFormat::Binary)
                 .await
@@ -480,7 +480,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mgr = DockerToolManager::new(vec![], "arm64", dir.path().to_path_buf());
+        let mgr = HostToolManager::new(vec![], "arm64", dir.path().to_path_buf());
         assert!(mgr.is_cached("docker", "abc123", ArtifactFormat::Tgz).await);
     }
 
@@ -494,7 +494,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mgr = DockerToolManager::new(vec![], "arm64", dir.path().to_path_buf());
+        let mgr = HostToolManager::new(vec![], "arm64", dir.path().to_path_buf());
         assert!(
             !mgr.is_cached("docker", "new-sha", ArtifactFormat::Tgz)
                 .await
@@ -508,7 +508,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mgr = DockerToolManager::new(vec![], "arm64", dir.path().to_path_buf());
+        let mgr = HostToolManager::new(vec![], "arm64", dir.path().to_path_buf());
         assert!(
             !mgr.is_cached("docker", "any-sha", ArtifactFormat::Tgz)
                 .await
@@ -531,7 +531,7 @@ mod tests {
         let tool = make_tool("my-tool", &sha);
         let dest = install_dir.path().join("my-tool");
 
-        let mgr = DockerToolManager::new(vec![], "arm64", install_dir.path().to_path_buf())
+        let mgr = HostToolManager::new(vec![], "arm64", install_dir.path().to_path_buf())
             .with_bundle_dir(bundle_dir.path().to_path_buf());
 
         let ok = mgr
@@ -554,7 +554,7 @@ mod tests {
         let tool = make_tool("my-tool", "wrong-sha");
         let dest = install_dir.path().join("my-tool");
 
-        let mgr = DockerToolManager::new(vec![], "arm64", install_dir.path().to_path_buf())
+        let mgr = HostToolManager::new(vec![], "arm64", install_dir.path().to_path_buf())
             .with_bundle_dir(bundle_dir.path().to_path_buf());
 
         let ok = mgr
@@ -578,7 +578,7 @@ mod tests {
         let tool = make_tool("docker", "archive-sha");
         let dest = install_dir.path().join("docker");
 
-        let mgr = DockerToolManager::new(vec![], "arm64", install_dir.path().to_path_buf())
+        let mgr = HostToolManager::new(vec![], "arm64", install_dir.path().to_path_buf())
             .with_bundle_dir(bundle_dir.path().to_path_buf());
 
         let ok = mgr
@@ -603,7 +603,7 @@ mod tests {
         let tool = make_tool("docker", "archive-sha");
         let dest = install_dir.path().join("docker");
 
-        let mgr = DockerToolManager::new(vec![], "arm64", install_dir.path().to_path_buf())
+        let mgr = HostToolManager::new(vec![], "arm64", install_dir.path().to_path_buf())
             .with_bundle_dir(bundle_dir.path().to_path_buf());
 
         let ok = mgr
@@ -620,7 +620,7 @@ mod tests {
         let tool = make_tool("my-tool", "sha");
         let dest = install_dir.path().join("my-tool");
 
-        let mgr = DockerToolManager::new(vec![], "arm64", install_dir.path().to_path_buf());
+        let mgr = HostToolManager::new(vec![], "arm64", install_dir.path().to_path_buf());
         let ok = mgr
             .try_install_from_bundle(&tool, &dest, "sha", ArtifactFormat::Binary)
             .await

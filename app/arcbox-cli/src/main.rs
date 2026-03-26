@@ -63,6 +63,7 @@ fn main() -> Result<()> {
                 Commands::Migrate(cmd) => commands::migrate::execute(cmd).await,
                 Commands::Sandbox(cmd) => commands::sandbox::execute(cmd).await,
                 Commands::Docker(cmd) => commands::docker::execute(cmd, cli.format).await,
+                Commands::Kubernetes(cmd) => commands::kubernetes::execute(cmd).await,
                 Commands::Boot(cmd) => commands::boot::execute(cmd, cli.format).await,
                 #[cfg(target_os = "macos")]
                 Commands::Dns(cmd) => commands::dns::execute(cmd).await,

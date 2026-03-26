@@ -16,6 +16,7 @@
 /// - `image.proto` - Image management
 /// - `agent.proto` - Guest agent operations
 /// - `api.proto` - Network, volume, system, and migration services
+/// - `kubernetes.proto` - Native Kubernetes lifecycle
 #[path = "arcbox.v1.rs"]
 pub mod arcbox_v1;
 

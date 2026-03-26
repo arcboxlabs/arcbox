@@ -14,8 +14,12 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub use arcbox_constants::wire::MessageType;
 use arcbox_protocol::Empty;
 use arcbox_protocol::agent::{
-    PingRequest, PingResponse, PortBindingsChanged, PortBindingsRemoved, RuntimeEnsureRequest,
-    RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse, SystemInfo,
+    KubernetesDeleteRequest, KubernetesDeleteResponse, KubernetesKubeconfigRequest,
+    KubernetesKubeconfigResponse, KubernetesStartRequest, KubernetesStartResponse,
+    KubernetesStatusRequest, KubernetesStatusResponse, KubernetesStopRequest,
+    KubernetesStopResponse, PingRequest, PingResponse, PortBindingsChanged, PortBindingsRemoved,
+    RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse,
+    SystemInfo,
 };
 
 /// Agent version string.
@@ -67,6 +71,11 @@ pub enum RpcRequest {
     GetSystemInfo,
     EnsureRuntime(RuntimeEnsureRequest),
     RuntimeStatus(RuntimeStatusRequest),
+    StartKubernetes(KubernetesStartRequest),
+    StopKubernetes(KubernetesStopRequest),
+    DeleteKubernetes(KubernetesDeleteRequest),
+    KubernetesStatus(KubernetesStatusRequest),
+    KubernetesKubeconfig(KubernetesKubeconfigRequest),
 }
 
 /// RPC response envelope.
@@ -76,6 +85,11 @@ pub enum RpcResponse {
     SystemInfo(SystemInfo),
     RuntimeEnsure(RuntimeEnsureResponse),
     RuntimeStatus(RuntimeStatusResponse),
+    KubernetesStart(KubernetesStartResponse),
+    KubernetesStop(KubernetesStopResponse),
+    KubernetesDelete(KubernetesDeleteResponse),
+    KubernetesStatus(KubernetesStatusResponse),
+    KubernetesKubeconfig(KubernetesKubeconfigResponse),
     Empty,
     PortBindingsChanged(PortBindingsChanged),
     PortBindingsRemoved(PortBindingsRemoved),
@@ -90,6 +104,11 @@ impl RpcResponse {
             Self::SystemInfo(_) => MessageType::GetSystemInfoResponse,
             Self::RuntimeEnsure(_) => MessageType::EnsureRuntimeResponse,
             Self::RuntimeStatus(_) => MessageType::RuntimeStatusResponse,
+            Self::KubernetesStart(_) => MessageType::KubernetesStartResponse,
+            Self::KubernetesStop(_) => MessageType::KubernetesStopResponse,
+            Self::KubernetesDelete(_) => MessageType::KubernetesDeleteResponse,
+            Self::KubernetesStatus(_) => MessageType::KubernetesStatusResponse,
+            Self::KubernetesKubeconfig(_) => MessageType::KubernetesKubeconfigResponse,
             Self::Empty => MessageType::Empty,
             Self::PortBindingsChanged(_) => MessageType::PortBindingsChanged,
             Self::PortBindingsRemoved(_) => MessageType::PortBindingsRemoved,
@@ -104,6 +123,11 @@ impl RpcResponse {
             Self::SystemInfo(msg) => msg.encode_to_vec(),
             Self::RuntimeEnsure(msg) => msg.encode_to_vec(),
             Self::RuntimeStatus(msg) => msg.encode_to_vec(),
+            Self::KubernetesStart(msg) => msg.encode_to_vec(),
+            Self::KubernetesStop(msg) => msg.encode_to_vec(),
+            Self::KubernetesDelete(msg) => msg.encode_to_vec(),
+            Self::KubernetesStatus(msg) => msg.encode_to_vec(),
+            Self::KubernetesKubeconfig(msg) => msg.encode_to_vec(),
             Self::Empty => Empty::default().encode_to_vec(),
             Self::PortBindingsChanged(msg) => msg.encode_to_vec(),
             Self::PortBindingsRemoved(msg) => msg.encode_to_vec(),
@@ -246,6 +270,26 @@ pub fn parse_request(msg_type: MessageType, payload: &[u8]) -> Result<RpcRequest
         MessageType::RuntimeStatusRequest => {
             let req = RuntimeStatusRequest::decode(payload)?;
             Ok(RpcRequest::RuntimeStatus(req))
+        }
+        MessageType::KubernetesStartRequest => {
+            let req = KubernetesStartRequest::decode(payload)?;
+            Ok(RpcRequest::StartKubernetes(req))
+        }
+        MessageType::KubernetesStopRequest => {
+            let req = KubernetesStopRequest::decode(payload)?;
+            Ok(RpcRequest::StopKubernetes(req))
+        }
+        MessageType::KubernetesDeleteRequest => {
+            let req = KubernetesDeleteRequest::decode(payload)?;
+            Ok(RpcRequest::DeleteKubernetes(req))
+        }
+        MessageType::KubernetesStatusRequest => {
+            let req = KubernetesStatusRequest::decode(payload)?;
+            Ok(RpcRequest::KubernetesStatus(req))
+        }
+        MessageType::KubernetesKubeconfigRequest => {
+            let req = KubernetesKubeconfigRequest::decode(payload)?;
+            Ok(RpcRequest::KubernetesKubeconfig(req))
         }
         _ => anyhow::bail!("unexpected message type: {:?}", msg_type),
     }

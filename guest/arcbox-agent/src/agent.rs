@@ -199,7 +199,7 @@ pub mod ensure_runtime {
 #[cfg(target_os = "linux")]
 mod linux {
     use std::io::{Read as _, Seek as _, SeekFrom};
-    use std::net::IpAddr;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
     use std::path::{Path, PathBuf};
     use std::process::Stdio;
     use std::sync::{Arc, OnceLock};
@@ -207,6 +207,7 @@ mod linux {
 
     use anyhow::{Context, Result};
     use tokio::io::{AsyncRead, AsyncWrite};
+    use tokio::net::TcpStream;
     use tokio::net::UnixStream;
     use tokio::process::Command;
     use tokio::sync::Mutex;
@@ -225,15 +226,21 @@ mod linux {
     use arcbox_constants::devices::DOCKER_DATA_BLOCK_DEVICE as DOCKER_DATA_DEVICE_DEFAULT;
     use arcbox_constants::env::GUEST_DOCKER_VSOCK_PORT as GUEST_DOCKER_VSOCK_PORT_ENV;
     use arcbox_constants::paths::{
-        ARCBOX_RUNTIME_BIN_DIR, CONTAINERD_DATA_MOUNT_POINT, CONTAINERD_SOCKET,
-        DOCKER_API_UNIX_SOCKET, DOCKER_DATA_MOUNT_POINT,
+        ARCBOX_RUNTIME_BIN_DIR, CNI_DATA_MOUNT_POINT, CONTAINERD_DATA_MOUNT_POINT,
+        CONTAINERD_SOCKET, DOCKER_API_UNIX_SOCKET, DOCKER_DATA_MOUNT_POINT, K3S_CNI_BIN_DIR,
+        K3S_CNI_CONF_DIR, K3S_DATA_MOUNT_POINT, K3S_KUBECONFIG_PATH, KUBELET_DATA_MOUNT_POINT,
     };
-    use arcbox_constants::ports::DOCKER_API_VSOCK_PORT;
+    use arcbox_constants::ports::{
+        DOCKER_API_VSOCK_PORT, KUBERNETES_API_GUEST_PORT, KUBERNETES_API_VSOCK_PORT,
+    };
     use arcbox_constants::status::{SERVICE_ERROR, SERVICE_NOT_READY, SERVICE_READY};
 
     use arcbox_protocol::agent::{
-        PingResponse, RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest,
-        RuntimeStatusResponse, SystemInfo,
+        KubernetesDeleteRequest, KubernetesDeleteResponse, KubernetesKubeconfigRequest,
+        KubernetesKubeconfigResponse, KubernetesStartRequest, KubernetesStartResponse,
+        KubernetesStatusRequest, KubernetesStatusResponse, KubernetesStopRequest,
+        KubernetesStopResponse, PingResponse, RuntimeEnsureRequest, RuntimeEnsureResponse,
+        RuntimeStatusRequest, RuntimeStatusResponse, SystemInfo,
     };
 
     // =========================================================================
@@ -267,6 +274,9 @@ mod linux {
     /// Containerd socket candidates (primary + legacy fallback).
     const CONTAINERD_SOCKET_CANDIDATES: [&str; 2] =
         [CONTAINERD_SOCKET, "/var/run/containerd/containerd.sock"];
+    const K3S_PID_FILE: &str = "/run/arcbox/k3s.pid";
+    const K3S_NAMESPACE: &str = "k8s.io";
+    const KUBERNETES_HOST_ENDPOINT: &str = "https://127.0.0.1:16443";
 
     fn cmdline_value(key: &str) -> Option<String> {
         let cmdline = std::fs::read_to_string("/proc/cmdline").ok()?;
@@ -303,6 +313,10 @@ mod linux {
         cmdline_value(DOCKER_DATA_DEVICE_CMDLINE_KEY)
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| DOCKER_DATA_DEVICE_DEFAULT.to_string())
+    }
+
+    fn kubernetes_api_vsock_port() -> u32 {
+        KUBERNETES_API_VSOCK_PORT
     }
 
     /// Btrfs primary superblock magic `_BHRfS_M` at absolute disk offset
@@ -364,6 +378,9 @@ mod linux {
     /// - `/run/arcbox/data` — raw Btrfs mount (internal, not used by daemons)
     /// - `/var/lib/docker` — bind mount of `@docker` subvolume
     /// - `/var/lib/containerd` — bind mount of `@containerd` subvolume
+    /// - `/var/lib/rancher/k3s` — bind mount of `@k3s` subvolume
+    /// - `/var/lib/kubelet` — bind mount of `@kubelet` subvolume
+    /// - `/var/lib/cni` — bind mount of `@cni` subvolume
     ///
     /// Returns `Ok(notes)` on success or `Err(reason)` if the data volume
     /// could not be set up. Callers must abort runtime startup on error —
@@ -372,6 +389,9 @@ mod linux {
         // Already fully set up?
         if crate::mount::is_mounted(DOCKER_DATA_MOUNT_POINT)
             && crate::mount::is_mounted(CONTAINERD_DATA_MOUNT_POINT)
+            && crate::mount::is_mounted(K3S_DATA_MOUNT_POINT)
+            && crate::mount::is_mounted(KUBELET_DATA_MOUNT_POINT)
+            && crate::mount::is_mounted(CNI_DATA_MOUNT_POINT)
         {
             return Ok("data subvolumes already mounted".to_string());
         }
@@ -418,7 +438,7 @@ mod linux {
         }
 
         // Step 3: Create subvolumes if missing.
-        for subvol in ["@docker", "@containerd"] {
+        for subvol in ["@docker", "@containerd", "@k3s", "@kubelet", "@cni"] {
             let subvol_path = format!("{}/{}", BTRFS_TEMP_MOUNT, subvol);
             if Path::new(&subvol_path).exists() {
                 continue;
@@ -436,6 +456,9 @@ mod linux {
         for (subvol, target) in [
             ("@docker", DOCKER_DATA_MOUNT_POINT),
             ("@containerd", CONTAINERD_DATA_MOUNT_POINT),
+            ("@k3s", K3S_DATA_MOUNT_POINT),
+            ("@kubelet", KUBELET_DATA_MOUNT_POINT),
+            ("@cni", CNI_DATA_MOUNT_POINT),
         ] {
             if crate::mount::is_mounted(target) {
                 continue;
@@ -554,6 +577,13 @@ mod linux {
                 }
             });
 
+            // Start guest-side Kubernetes API proxy (vsock -> localhost:6443).
+            tokio::spawn(async {
+                if let Err(e) = run_kubernetes_api_proxy().await {
+                    tracing::warn!("Kubernetes API proxy exited: {}", e);
+                }
+            });
+
             let mut listener =
                 bind_vsock_listener_with_retry(AGENT_PORT, "agent rpc listener").await?;
 
@@ -636,6 +666,43 @@ mod linux {
         let _ = tokio::io::copy_bidirectional(&mut vsock_stream, &mut unix_stream)
             .await
             .context("docker api proxy copy failed")?;
+        Ok(())
+    }
+
+    async fn run_kubernetes_api_proxy() -> Result<()> {
+        let port = kubernetes_api_vsock_port();
+        let mut listener = bind_vsock_listener_with_retry(port, "kubernetes api proxy").await?;
+        tracing::info!("Kubernetes API proxy listening on vsock port {}", port);
+
+        loop {
+            match listener.accept().await {
+                Ok((stream, peer_addr)) => {
+                    tracing::debug!(
+                        "Kubernetes API proxy accepted connection from {:?}",
+                        peer_addr
+                    );
+                    tokio::spawn(async move {
+                        if let Err(e) = proxy_kubernetes_api_connection(stream).await {
+                            tracing::debug!("Kubernetes API proxy connection ended: {}", e);
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("Kubernetes API proxy accept failed: {}", e);
+                }
+            }
+        }
+    }
+
+    async fn proxy_kubernetes_api_connection(mut vsock_stream: VsockStream) -> Result<()> {
+        let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, KUBERNETES_API_GUEST_PORT);
+        let mut tcp_stream = TcpStream::connect(addr)
+            .await
+            .context("failed to connect guest kubernetes api socket")?;
+
+        let _ = tokio::io::copy_bidirectional(&mut vsock_stream, &mut tcp_stream)
+            .await
+            .context("kubernetes api proxy copy failed")?;
         Ok(())
     }
 
@@ -910,6 +977,21 @@ mod linux {
             RpcRequest::RuntimeStatus(req) => {
                 RequestResult::Single(handle_runtime_status(req).await)
             }
+            RpcRequest::StartKubernetes(req) => {
+                RequestResult::Single(handle_start_kubernetes(req).await)
+            }
+            RpcRequest::StopKubernetes(req) => {
+                RequestResult::Single(handle_stop_kubernetes(req).await)
+            }
+            RpcRequest::DeleteKubernetes(req) => {
+                RequestResult::Single(handle_delete_kubernetes(req).await)
+            }
+            RpcRequest::KubernetesStatus(req) => {
+                RequestResult::Single(handle_kubernetes_status(req).await)
+            }
+            RpcRequest::KubernetesKubeconfig(req) => {
+                RequestResult::Single(handle_kubernetes_kubeconfig(req).await)
+            }
         }
     }
 
@@ -1035,6 +1117,173 @@ mod linux {
         RpcResponse::RuntimeStatus(collect_runtime_status().await)
     }
 
+    fn kubernetes_control_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn read_pid_file(path: &str) -> Option<i32> {
+        std::fs::read_to_string(path)
+            .ok()?
+            .trim()
+            .parse::<i32>()
+            .ok()
+    }
+
+    fn write_pid_file(path: &str, pid: u32) -> Result<()> {
+        if let Some(parent) = Path::new(path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, format!("{pid}\n"))?;
+        Ok(())
+    }
+
+    fn remove_pid_file(path: &str) {
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn process_alive(pid: i32) -> bool {
+        Path::new(&format!("/proc/{pid}")).exists()
+    }
+
+    fn k3s_pid() -> Option<i32> {
+        let pid = read_pid_file(K3S_PID_FILE)?;
+        if process_alive(pid) {
+            Some(pid)
+        } else {
+            remove_pid_file(K3S_PID_FILE);
+            None
+        }
+    }
+
+    async fn probe_tcp(addr: SocketAddrV4) -> bool {
+        matches!(
+            tokio::time::timeout(Duration::from_millis(300), TcpStream::connect(addr)).await,
+            Ok(Ok(_))
+        )
+    }
+
+    async fn k3s_api_ready() -> bool {
+        probe_tcp(SocketAddrV4::new(
+            Ipv4Addr::LOCALHOST,
+            KUBERNETES_API_GUEST_PORT,
+        ))
+        .await
+    }
+
+    fn runtime_path_env(runtime_bin_dir: &Path) -> String {
+        let standard = "/usr/sbin:/usr/bin:/sbin:/bin";
+        match std::env::var("PATH") {
+            Ok(existing) if !existing.is_empty() => {
+                format!("{}:{}:{}", runtime_bin_dir.display(), existing, standard)
+            }
+            _ => format!("{}:{}", runtime_bin_dir.display(), standard),
+        }
+    }
+
+    fn ensure_shared_runtime_dirs(notes: &mut Vec<String>) {
+        for dir in [
+            "/run/containerd",
+            "/var/run/docker",
+            "/etc/docker",
+            "/etc/containerd",
+            "/run/arcbox",
+            K3S_CNI_CONF_DIR,
+            K3S_CNI_BIN_DIR,
+        ] {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                notes.push(format!("mkdir {} failed({})", dir, e));
+            }
+        }
+    }
+
+    fn shared_containerd_config() -> String {
+        format!(
+            "version = 2\n[plugins.\"io.containerd.grpc.v1.cri\".cni]\n  bin_dir = \"{K3S_CNI_BIN_DIR}\"\n  conf_dir = \"{K3S_CNI_CONF_DIR}\"\n  max_conf_num = 1\n"
+        )
+    }
+
+    async fn ensure_containerd_ready(runtime_bin_dir: &Path, notes: &mut Vec<String>) -> bool {
+        if probe_first_ready_socket(&CONTAINERD_SOCKET_CANDIDATES).await {
+            return true;
+        }
+
+        let containerd_config = "/etc/containerd/config.toml";
+        let config_toml = shared_containerd_config();
+        if let Err(e) = std::fs::write(containerd_config, config_toml) {
+            notes.push(format!("write containerd config failed({})", e));
+        }
+
+        let path_env = runtime_path_env(runtime_bin_dir);
+        let containerd_bin = runtime_bin_dir.join("containerd");
+        let mut cmd = Command::new(&containerd_bin);
+        cmd.args([
+            "--config",
+            containerd_config,
+            "--address",
+            CONTAINERD_SOCKET,
+            "--state",
+            "/run/containerd",
+        ])
+        .env("PATH", &path_env)
+        .stdin(Stdio::null())
+        .stdout(daemon_log_file("containerd"))
+        .stderr(daemon_log_file("containerd"));
+
+        match cmd.spawn() {
+            Ok(child) => {
+                let pid = child.id().unwrap_or_default();
+                tracing::info!(pid, "spawned bundled containerd");
+                notes.push(format!("spawned bundled containerd (pid={})", pid));
+            }
+            Err(e) => {
+                notes.push(format!("failed to spawn bundled containerd: {}", e));
+                return false;
+            }
+        }
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        while tokio::time::Instant::now() < deadline {
+            if probe_first_ready_socket(&CONTAINERD_SOCKET_CANDIDATES).await {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        notes.push("containerd socket not ready after 8s".to_string());
+        false
+    }
+
+    async fn ensure_dockerd_ready(runtime_bin_dir: &Path, notes: &mut Vec<String>) {
+        if probe_unix_socket(DOCKER_API_UNIX_SOCKET).await {
+            return;
+        }
+
+        let path_env = runtime_path_env(runtime_bin_dir);
+        let dockerd_bin = runtime_bin_dir.join("dockerd");
+        let mut cmd = Command::new(&dockerd_bin);
+        cmd.arg(format!("--host=unix://{DOCKER_API_UNIX_SOCKET}"))
+            .arg(format!("--containerd={CONTAINERD_SOCKET}"))
+            .arg("--exec-root=/var/run/docker")
+            .arg(format!("--data-root={DOCKER_DATA_MOUNT_POINT}"))
+            .arg("--userland-proxy=false")
+            .env("PATH", &path_env)
+            .stdin(Stdio::null())
+            .stdout(daemon_log_file("dockerd"))
+            .stderr(daemon_log_file("dockerd"));
+
+        match cmd.spawn() {
+            Ok(child) => {
+                let pid = child.id().unwrap_or_default();
+                tracing::info!(pid, "spawned bundled dockerd");
+                notes.push(format!("spawned bundled dockerd (pid={})", pid));
+            }
+            Err(e) => {
+                notes.push(format!("failed to spawn bundled dockerd: {}", e));
+            }
+        }
+    }
+
     async fn collect_runtime_status() -> RuntimeStatusResponse {
         use arcbox_protocol::agent::ServiceStatus;
 
@@ -1123,6 +1372,288 @@ mod linux {
         }
     }
 
+    async fn handle_start_kubernetes(_req: KubernetesStartRequest) -> RpcResponse {
+        RpcResponse::KubernetesStart(do_start_kubernetes().await)
+    }
+
+    async fn handle_stop_kubernetes(_req: KubernetesStopRequest) -> RpcResponse {
+        RpcResponse::KubernetesStop(do_stop_kubernetes().await)
+    }
+
+    async fn handle_delete_kubernetes(_req: KubernetesDeleteRequest) -> RpcResponse {
+        RpcResponse::KubernetesDelete(do_delete_kubernetes().await)
+    }
+
+    async fn handle_kubernetes_status(_req: KubernetesStatusRequest) -> RpcResponse {
+        let _guard = kubernetes_control_lock().lock().await;
+        RpcResponse::KubernetesStatus(collect_kubernetes_status().await)
+    }
+
+    async fn handle_kubernetes_kubeconfig(_req: KubernetesKubeconfigRequest) -> RpcResponse {
+        match std::fs::read_to_string(K3S_KUBECONFIG_PATH) {
+            Ok(kubeconfig) => RpcResponse::KubernetesKubeconfig(KubernetesKubeconfigResponse {
+                kubeconfig,
+                context_name: "arcbox".to_string(),
+                endpoint: KUBERNETES_HOST_ENDPOINT.to_string(),
+            }),
+            Err(e) => RpcResponse::Error(ErrorResponse::new(
+                404,
+                format!("kubeconfig unavailable: {e}"),
+            )),
+        }
+    }
+
+    async fn do_start_kubernetes() -> KubernetesStartResponse {
+        let _guard = kubernetes_control_lock().lock().await;
+        let runtime_bin_dir = PathBuf::from(ARCBOX_RUNTIME_BIN_DIR);
+        let missing = missing_kubernetes_binaries_at(&runtime_bin_dir);
+        if !missing.is_empty() {
+            return KubernetesStartResponse {
+                running: false,
+                api_ready: false,
+                endpoint: KUBERNETES_HOST_ENDPOINT.to_string(),
+                detail: format!(
+                    "missing kubernetes binaries under {}: {}",
+                    ARCBOX_RUNTIME_BIN_DIR,
+                    missing.join(", ")
+                ),
+            };
+        }
+
+        let mut notes = ensure_runtime_prerequisites();
+        match ensure_data_mount() {
+            Ok(note) => notes.push(note),
+            Err(e) => {
+                return KubernetesStartResponse {
+                    running: false,
+                    api_ready: false,
+                    endpoint: KUBERNETES_HOST_ENDPOINT.to_string(),
+                    detail: format!("data volume setup failed: {e}"),
+                };
+            }
+        }
+        ensure_shared_runtime_dirs(&mut notes);
+
+        if !ensure_containerd_ready(&runtime_bin_dir, &mut notes).await {
+            return KubernetesStartResponse {
+                running: false,
+                api_ready: false,
+                endpoint: KUBERNETES_HOST_ENDPOINT.to_string(),
+                detail: notes.join("; "),
+            };
+        }
+
+        if k3s_pid().is_none() {
+            let k3s_bin = runtime_bin_dir.join("k3s");
+            let mut cmd = Command::new(&k3s_bin);
+            cmd.arg("server")
+                .arg(format!("--container-runtime-endpoint={CONTAINERD_SOCKET}"))
+                .arg(format!("--data-dir={K3S_DATA_MOUNT_POINT}"))
+                .arg(format!("--write-kubeconfig={K3S_KUBECONFIG_PATH}"))
+                .arg("--write-kubeconfig-mode=0600")
+                .arg("--disable=traefik")
+                .arg("--disable=servicelb")
+                .env("PATH", runtime_path_env(&runtime_bin_dir))
+                .stdin(Stdio::null())
+                .stdout(daemon_log_file("k3s"))
+                .stderr(daemon_log_file("k3s"));
+
+            match cmd.spawn() {
+                Ok(child) => {
+                    let pid = child.id().unwrap_or_default();
+                    if let Err(e) = write_pid_file(K3S_PID_FILE, pid) {
+                        notes.push(format!("write k3s pid file failed({})", e));
+                    }
+                    notes.push(format!("spawned k3s (pid={pid})"));
+                }
+                Err(e) => {
+                    notes.push(format!("failed to spawn k3s: {}", e));
+                }
+            }
+        } else {
+            notes.push("k3s already running".to_string());
+        }
+
+        let mut status = collect_kubernetes_status().await;
+        for _ in 0..60 {
+            if status.api_ready {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            status = collect_kubernetes_status().await;
+        }
+
+        if !notes.is_empty() {
+            status.detail = format!("{}; {}", notes.join("; "), status.detail);
+        }
+        KubernetesStartResponse {
+            running: status.running,
+            api_ready: status.api_ready,
+            endpoint: status.endpoint,
+            detail: status.detail,
+        }
+    }
+
+    async fn do_stop_kubernetes() -> KubernetesStopResponse {
+        let _guard = kubernetes_control_lock().lock().await;
+        do_stop_kubernetes_locked().await
+    }
+
+    async fn do_stop_kubernetes_locked() -> KubernetesStopResponse {
+        let Some(pid) = k3s_pid() else {
+            return KubernetesStopResponse {
+                stopped: true,
+                detail: "k3s already stopped".to_string(),
+            };
+        };
+
+        let pid = nix::unistd::Pid::from_raw(pid);
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
+        for _ in 0..20 {
+            if !process_alive(pid.as_raw()) {
+                remove_pid_file(K3S_PID_FILE);
+                return KubernetesStopResponse {
+                    stopped: true,
+                    detail: "k3s stopped".to_string(),
+                };
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+        remove_pid_file(K3S_PID_FILE);
+        KubernetesStopResponse {
+            stopped: true,
+            detail: "k3s force-stopped".to_string(),
+        }
+    }
+
+    async fn do_delete_kubernetes() -> KubernetesDeleteResponse {
+        let _guard = kubernetes_control_lock().lock().await;
+        let stop = do_stop_kubernetes_locked().await;
+        let mut notes = vec![stop.detail];
+        clear_kubernetes_namespace(&mut notes).await;
+
+        for path in [
+            K3S_DATA_MOUNT_POINT,
+            KUBELET_DATA_MOUNT_POINT,
+            CNI_DATA_MOUNT_POINT,
+        ] {
+            if let Err(e) = clear_directory_contents(Path::new(path)) {
+                notes.push(format!("clear {} failed({})", path, e));
+            }
+        }
+
+        KubernetesDeleteResponse {
+            detail: notes.join("; "),
+        }
+    }
+
+    async fn clear_kubernetes_namespace(notes: &mut Vec<String>) {
+        let k3s_bin = PathBuf::from(ARCBOX_RUNTIME_BIN_DIR).join("k3s");
+        if !k3s_bin.exists() {
+            return;
+        }
+
+        match Command::new(&k3s_bin)
+            .arg("ctr")
+            .arg("--address")
+            .arg(CONTAINERD_SOCKET)
+            .arg("namespaces")
+            .arg("remove")
+            .arg(K3S_NAMESPACE)
+            .status()
+            .await
+        {
+            Ok(status) if status.success() => {
+                notes.push("removed containerd namespace k8s.io".to_string());
+            }
+            Ok(status) => {
+                notes.push(format!(
+                    "remove containerd namespace k8s.io exit={}",
+                    status.code().unwrap_or(-1)
+                ));
+            }
+            Err(e) => {
+                notes.push(format!("remove containerd namespace k8s.io failed({})", e));
+            }
+        }
+    }
+
+    fn clear_directory_contents(path: &Path) -> Result<()> {
+        if !path.exists() {
+            return Ok(());
+        }
+
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                std::fs::remove_dir_all(&entry_path)?;
+            } else {
+                std::fs::remove_file(&entry_path)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn collect_kubernetes_status() -> KubernetesStatusResponse {
+        use arcbox_protocol::agent::ServiceStatus;
+
+        let containerd_ready = probe_first_ready_socket(&CONTAINERD_SOCKET_CANDIDATES).await;
+        let running = k3s_pid().is_some();
+        let api_ready = k3s_api_ready().await;
+
+        let mut services = Vec::new();
+        services.push(ServiceStatus {
+            name: "containerd".to_string(),
+            status: if containerd_ready {
+                SERVICE_READY.to_string()
+            } else {
+                SERVICE_NOT_READY.to_string()
+            },
+            detail: if containerd_ready {
+                CONTAINERD_SOCKET.to_string()
+            } else {
+                "containerd socket not reachable".to_string()
+            },
+        });
+        services.push(ServiceStatus {
+            name: "k3s".to_string(),
+            status: if api_ready {
+                SERVICE_READY.to_string()
+            } else if running {
+                SERVICE_ERROR.to_string()
+            } else {
+                SERVICE_NOT_READY.to_string()
+            },
+            detail: if api_ready {
+                format!("api reachable on 127.0.0.1:{KUBERNETES_API_GUEST_PORT}")
+            } else if running {
+                "k3s process running but api not ready".to_string()
+            } else {
+                "k3s process not running".to_string()
+            },
+        });
+
+        let detail = if api_ready {
+            "kubernetes api ready".to_string()
+        } else if running {
+            "k3s running but kubernetes api not ready".to_string()
+        } else {
+            "k3s not running".to_string()
+        };
+
+        KubernetesStatusResponse {
+            running,
+            api_ready,
+            endpoint: KUBERNETES_HOST_ENDPOINT.to_string(),
+            detail,
+            services,
+        }
+    }
+
     async fn probe_first_ready_socket(paths: &[&str]) -> bool {
         for path in paths {
             if probe_unix_socket(path).await {
@@ -1149,6 +1680,8 @@ mod linux {
 
     const REQUIRED_RUNTIME_BINARIES: &[&str] =
         &["dockerd", "containerd", "containerd-shim-runc-v2", "runc"];
+    const REQUIRED_KUBERNETES_BINARIES: &[&str] =
+        &["containerd", "containerd-shim-runc-v2", "runc", "k3s"];
 
     fn detect_runtime_bin_dir() -> Option<PathBuf> {
         let dir = PathBuf::from(ARCBOX_RUNTIME_BIN_DIR);
@@ -1178,7 +1711,15 @@ mod linux {
     }
 
     fn missing_runtime_binaries_at(dir: &Path) -> Vec<&'static str> {
-        REQUIRED_RUNTIME_BINARIES
+        missing_binaries_at(dir, REQUIRED_RUNTIME_BINARIES)
+    }
+
+    fn missing_kubernetes_binaries_at(dir: &Path) -> Vec<&'static str> {
+        missing_binaries_at(dir, REQUIRED_KUBERNETES_BINARIES)
+    }
+
+    fn missing_binaries_at(dir: &Path, required: &[&'static str]) -> Vec<&'static str> {
+        required
             .iter()
             .copied()
             .filter(|name| !dir.join(name).exists())
@@ -1378,8 +1919,6 @@ mod linux {
             "starting bundled runtime"
         );
 
-        let containerd_bin = runtime_bin_dir.join("containerd");
-        let dockerd_bin = runtime_bin_dir.join("dockerd");
         let mut notes = Vec::new();
 
         // Ensure kernel/filesystem prerequisites before spawning daemons.
@@ -1393,112 +1932,13 @@ mod linux {
             Err(e) => return format!("data volume setup failed: {}", e),
         }
 
-        for dir in ["/run/containerd", "/var/run/docker", "/etc/docker"] {
-            if let Err(e) = std::fs::create_dir_all(dir) {
-                notes.push(format!("mkdir {} failed({})", dir, e));
-            }
+        ensure_shared_runtime_dirs(&mut notes);
+
+        if !ensure_containerd_ready(&runtime_bin_dir, &mut notes).await {
+            return notes.join("; ");
         }
 
-        // Include standard search paths so containerd/dockerd can invoke
-        // modprobe, mount, etc.
-        let path_env = {
-            let standard = "/usr/sbin:/usr/bin:/sbin:/bin";
-            match std::env::var("PATH") {
-                Ok(existing) if !existing.is_empty() => {
-                    format!("{}:{}:{}", runtime_bin_dir.display(), existing, standard)
-                }
-                _ => format!("{}:{}", runtime_bin_dir.display(), standard),
-            }
-        };
-
-        if !probe_first_ready_socket(&CONTAINERD_SOCKET_CANDIDATES).await {
-            // Write a minimal containerd config that disables the CRI plugin.
-            // CRI (Kubernetes Container Runtime Interface) is not needed for
-            // Docker-based container usage. The containerd CLI does not support
-            // a --disable-plugin flag (v1.7); the only way to disable plugins is
-            // via the TOML config file.
-            let containerd_config = "/etc/containerd/config.toml";
-            if let Err(e) = std::fs::create_dir_all("/etc/containerd") {
-                notes.push(format!("mkdir /etc/containerd failed({})", e));
-            }
-            let config_toml = "version = 2\ndisabled_plugins = [\"io.containerd.grpc.v1.cri\"]\n";
-            if let Err(e) = std::fs::write(containerd_config, config_toml) {
-                notes.push(format!("write containerd config failed({})", e));
-            }
-
-            let mut cmd = Command::new(&containerd_bin);
-            cmd.args([
-                "--config",
-                containerd_config,
-                "--address",
-                CONTAINERD_SOCKET,
-                "--state",
-                "/run/containerd",
-            ])
-            .env("PATH", &path_env)
-            .stdin(Stdio::null())
-            .stdout(daemon_log_file("containerd"))
-            .stderr(daemon_log_file("containerd"));
-
-            match cmd.spawn() {
-                Ok(child) => {
-                    let pid = child.id().unwrap_or_default();
-                    tracing::info!(pid, "spawned bundled containerd");
-                    notes.push(format!("spawned bundled containerd (pid={})", pid));
-                }
-                Err(e) => return format!("failed to spawn bundled containerd: {}", e),
-            }
-        }
-
-        // Poll for containerd socket readiness before spawning dockerd.
-        // containerd may take several seconds to initialise its gRPC socket,
-        // especially on first boot when it has to set up its state directories.
-        // We wait up to 8 s in 200 ms increments; failing to detect it is not
-        // fatal — dockerd will retry on its own, but logging it helps debugging.
-        {
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
-            let mut containerd_ok = false;
-            while tokio::time::Instant::now() < deadline {
-                if probe_first_ready_socket(&CONTAINERD_SOCKET_CANDIDATES).await {
-                    containerd_ok = true;
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-            let elapsed_ms = (tokio::time::Instant::now()
-                .duration_since(deadline - Duration::from_secs(8)))
-            .as_millis();
-            tracing::info!(
-                containerd_ready = containerd_ok,
-                elapsed_ms,
-                "containerd socket poll complete"
-            );
-            if !containerd_ok {
-                notes.push("containerd socket not ready after 8s".to_string());
-            }
-        }
-
-        if !probe_unix_socket(DOCKER_API_UNIX_SOCKET).await {
-            let mut cmd = Command::new(&dockerd_bin);
-            cmd.arg(format!("--host=unix://{DOCKER_API_UNIX_SOCKET}"))
-                .arg(format!("--containerd={CONTAINERD_SOCKET}"))
-                .arg("--exec-root=/var/run/docker")
-                .arg(format!("--data-root={DOCKER_DATA_MOUNT_POINT}"))
-                .arg("--userland-proxy=false")
-                .env("PATH", &path_env)
-                .stdin(Stdio::null())
-                .stdout(daemon_log_file("dockerd"))
-                .stderr(daemon_log_file("dockerd"));
-
-            match cmd.spawn() {
-                Ok(child) => {
-                    let pid = child.id().unwrap_or_default();
-                    tracing::info!(pid, "spawned bundled dockerd");
-                    notes.push(format!("spawned bundled dockerd (pid={})", pid));
-                }
-                Err(e) => return format!("failed to spawn bundled dockerd: {}", e),
-            }
-        }
+        ensure_dockerd_ready(&runtime_bin_dir, &mut notes).await;
 
         notes.join("; ")
     }
@@ -1773,6 +2213,15 @@ mod tests {
         assert!(result.is_some());
         // The escaped newline should be preserved
         assert!(result.unwrap().contains("\\n"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_shared_containerd_config_uses_k3s_cni_paths() {
+        let config = super::linux::shared_containerd_config();
+        assert!(config.contains("bin_dir = \"/var/lib/rancher/k3s/data/cni\""));
+        assert!(config.contains("conf_dir = \"/var/lib/rancher/k3s/agent/etc/cni/net.d\""));
+        assert!(config.contains("max_conf_num = 1"));
     }
 
     // =========================================================================

@@ -2,6 +2,7 @@
 
 mod context;
 mod dns_service;
+mod kubernetes_proxy;
 mod recovery;
 mod self_setup;
 mod services;

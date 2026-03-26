@@ -7,24 +7,35 @@ manifest_sha256 = ""
 
 [[tools]]
 name = "docker"
+group = "docker"
 version = "27.5.1"
 arch.arm64.sha256 = "b0366bf473b9b97b0c5556c4c2fd6d92ea63e4848af2f869c93a98d2e2e1d3fa"
 arch.x86_64.sha256 = "425560a99d1231433ae4b7149a4d1235461cb28783af32481741a367bd1a9f6a"
 
 [[tools]]
 name = "docker-buildx"
+group = "docker"
 version = "0.21.1"
 arch.arm64.sha256 = "ae147cfa0c56b8d86d7358962c31ff810f1d943a011dd74a643a5fbdfdd5aa19"
 arch.x86_64.sha256 = "2e8f454062d21f2bf877f5b364c22d00d6c3346fad5b810efd7e1ceb8eb264e4"
 
 [[tools]]
 name = "docker-compose"
+group = "docker"
 version = "2.33.1"
 arch.arm64.sha256 = "0577710624554abe3c357be069205321751f8d429d75f93de993be0de2e27107"
 arch.x86_64.sha256 = "17c05c6a42cab2302efed50e837aac099a52b10f9fc90dab04929496449b22ef"
 
 [[tools]]
 name = "docker-credential-osxkeychain"
+group = "docker"
 version = "0.9.1"
 arch.arm64.sha256 = "564552e7d97eb236956f1fc8040f816463667da32db187eccc16c7fb51a089af"
 arch.x86_64.sha256 = "34d7dcabc4630b2b2c2861c230b4f65a6499448d4cd1a129175ebbc54642928b"
+
+[[tools]]
+name = "kubectl"
+group = "kubernetes"
+version = "1.34.3"
+arch.arm64.sha256 = "e51367d2107d605f4edd7c2fb25897b0c0695a7de1a9f9d04cd6c9356b890b14"
+arch.x86_64.sha256 = "657afbd0e653c4ce3af1b5a645a4eaba282cf8eb2bcda7191ff60866e50e4d7f"
