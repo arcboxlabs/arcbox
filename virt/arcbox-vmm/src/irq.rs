@@ -485,11 +485,14 @@ impl IrqChip {
         self.stats.triggered.fetch_add(1, Ordering::Relaxed);
         tracing::trace!("Triggering IRQ {} -> GSI {}", irq, gsi);
 
+        // Clone the callback Arc and drop the lock before invoking. This prevents
+        // deadlock if the callback re-enters deliver_irq (e.g. device IRQ chaining).
         let callback = self
             .trigger_callback
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(ref cb) = *callback {
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(ref cb) = callback {
             match trigger_mode {
                 TriggerMode::Edge => {
                     cb(gsi, true)?;
@@ -499,7 +502,6 @@ impl IrqChip {
                 }
                 TriggerMode::Level => {
                     cb(gsi, true)?;
-                    drop(callback);
                     let mut configs = self
                         .irq_configs
                         .write()
@@ -542,12 +544,13 @@ impl IrqChip {
         };
         drop(configs);
 
-        // Invoke callback to deassert
+        // Clone and drop lock before invoking to prevent deadlock on re-entry.
         let callback = self
             .trigger_callback
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(ref cb) = *callback {
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(ref cb) = callback {
             cb(gsi, false)?;
         }
 
