@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use arcbox_vm::config::SnapshotType;
 #[cfg(target_os = "linux")]
-use arcbox_vm::network::NetworkManager;
+use arcbox_vm::network::{NetworkAllocation, NetworkManager};
 use arcbox_vm::snapshot::SnapshotCatalog;
 
 // ---------------------------------------------------------------------------
@@ -60,8 +60,6 @@ fn tap_lifecycle_via_network_manager() {
         return;
     }
 
-    use arcbox_vm::network::NetworkManager;
-
     // Third octet 10 → TAP name vmtap10<x>, distinct from the other TAP test.
     let mgr = NetworkManager::new("10.0.10.0/28", "10.0.10.1", vec![]).unwrap();
     let alloc = mgr.allocate("itg-tap-lifecycle").unwrap();
@@ -92,8 +90,6 @@ fn network_ip_returns_to_pool_with_tap() {
         return;
     }
 
-    use arcbox_vm::network::NetworkManager;
-
     // Third octet 11 → TAP name vmtap11<x>, distinct from the other TAP test.
     let mgr = NetworkManager::new("10.0.11.0/28", "10.0.11.1", vec![]).unwrap();
 
@@ -113,6 +109,25 @@ fn network_ip_returns_to_pool_with_tap() {
 }
 
 // ---------------------------------------------------------------------------
+// TAP cleanup guard
+// ---------------------------------------------------------------------------
+
+/// RAII guard that releases a TAP allocation on drop, ensuring cleanup even
+/// when an assertion panics mid-test.
+#[cfg(target_os = "linux")]
+struct TapGuard<'a> {
+    mgr: &'a NetworkManager,
+    alloc: &'a NetworkAllocation,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for TapGuard<'_> {
+    fn drop(&mut self) {
+        self.mgr.release(self.alloc);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Point-to-point TAP configuration (Linux, root only)
 // ---------------------------------------------------------------------------
 
@@ -128,6 +143,10 @@ fn tap_has_point_to_point_peer_address() {
 
     let mgr = NetworkManager::new("10.0.12.0/28", "10.0.12.1", vec![]).unwrap();
     let alloc = mgr.allocate("itg-ptp-1").unwrap();
+    let guard = TapGuard {
+        mgr: &mgr,
+        alloc: &alloc,
+    };
 
     // TAP should have the peer address configured.
     let peer = common::get_peer_addr(&alloc.tap_name);
@@ -148,7 +167,8 @@ fn tap_has_point_to_point_peer_address() {
         alloc.tap_name
     );
 
-    mgr.release(&alloc);
+    // Explicitly drop the guard to trigger release, then verify cleanup.
+    drop(guard);
 
     // Route should be gone after TAP destruction.
     assert!(
@@ -170,7 +190,15 @@ fn multiple_taps_are_isolated() {
 
     let mgr = NetworkManager::new("10.0.13.0/28", "10.0.13.1", vec![]).unwrap();
     let a1 = mgr.allocate("itg-iso-1").unwrap();
+    let _g1 = TapGuard {
+        mgr: &mgr,
+        alloc: &a1,
+    };
     let a2 = mgr.allocate("itg-iso-2").unwrap();
+    let _g2 = TapGuard {
+        mgr: &mgr,
+        alloc: &a2,
+    };
 
     // Both TAPs exist with different IPs.
     assert!(common::iface_exists(&a1.tap_name));
@@ -197,7 +225,4 @@ fn multiple_taps_are_isolated() {
         "TAP {} should not be attached to any bridge",
         a1.tap_name
     );
-
-    mgr.release(&a1);
-    mgr.release(&a2);
 }

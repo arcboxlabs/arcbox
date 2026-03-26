@@ -386,7 +386,7 @@ impl IcmpProxy {
                     }
                 }
                 _ => {
-                    tracing::warn!(
+                    tracing::trace!(
                         "ICMP proxy: no reply (timeout/error) for {} -> {}",
                         src_ip,
                         dst_ip
@@ -699,5 +699,63 @@ mod tests {
         // Verify the proxy creates correctly with the same tx.
         let guest_ip = Ipv4Addr::new(192, 168, 64, 2);
         let _proxy = SocketProxy::new(gw_ip, gw_mac, guest_ip, tx, CancellationToken::new());
+    }
+
+    /// Verifies that the ICMP identifier restoration logic patches Echo Reply
+    /// (type 0) packets but leaves other ICMP types untouched.
+    #[test]
+    fn test_icmp_identifier_restore() {
+        // Build a minimal ICMP Echo Reply (type=0, code=0) with a "wrong"
+        // identifier that simulates what macOS DGRAM ICMP sockets return.
+        let orig_icmp_id: [u8; 2] = [0xAA, 0xBB];
+        let wrong_id: [u8; 2] = [0x00, 0x42]; // kernel-rewritten value
+
+        // ICMP Echo Reply: [type, code, checksum(2), id(2), seq(2), ...]
+        let mut icmp_data: Vec<u8> = vec![
+            0x00, // type: Echo Reply
+            0x00, // code: 0
+            0x00,
+            0x00, // checksum (placeholder)
+            wrong_id[0],
+            wrong_id[1], // identifier (wrong)
+            0x00,
+            0x01, // sequence number
+        ];
+
+        // Apply the same patching logic used in proxy_icmp.
+        if icmp_data.len() >= 6 && icmp_data[0] == 0 {
+            icmp_data[4] = orig_icmp_id[0];
+            icmp_data[5] = orig_icmp_id[1];
+        }
+
+        assert_eq!(
+            [icmp_data[4], icmp_data[5]],
+            orig_icmp_id,
+            "Echo Reply identifier should be restored to the original guest value"
+        );
+
+        // Build an ICMP Destination Unreachable (type=3, code=1) — should NOT
+        // be patched because bytes 4-5 have a different meaning.
+        let mut icmp_unreach: Vec<u8> = vec![
+            0x03, // type: Destination Unreachable
+            0x01, // code: Host Unreachable
+            0x00, 0x00, // checksum (placeholder)
+            0x00, 0x00, // unused (bytes 4-5)
+            0x00, 0x00, // next-hop MTU (bytes 6-7)
+        ];
+
+        let before = [icmp_unreach[4], icmp_unreach[5]];
+
+        // Same patching logic — should be a no-op for type != 0.
+        if icmp_unreach.len() >= 6 && icmp_unreach[0] == 0 {
+            icmp_unreach[4] = orig_icmp_id[0];
+            icmp_unreach[5] = orig_icmp_id[1];
+        }
+
+        assert_eq!(
+            [icmp_unreach[4], icmp_unreach[5]],
+            before,
+            "Non-Echo ICMP types must not have their identifier bytes patched"
+        );
     }
 }

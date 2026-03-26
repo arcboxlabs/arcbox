@@ -1396,13 +1396,17 @@ async fn do_boot(
     // Append static IP configuration to boot args so the kernel configures
     // eth0 before init runs.  Format: ip=<client>:<server>:<gw>:<mask>::<dev>:off
     let boot_args = if let Some(net) = net_alloc {
-        format!(
-            "{} ip={}::{}:{}::eth0:off",
-            spec.boot_args,
-            net.ip_address,
-            net.gateway,
-            net.netmask(),
-        )
+        if spec.boot_args.contains("ip=") {
+            spec.boot_args.clone()
+        } else {
+            format!(
+                "{} ip={}::{}:{}::eth0:off",
+                spec.boot_args,
+                net.ip_address,
+                net.gateway,
+                net.netmask(),
+            )
+        }
     } else {
         spec.boot_args.clone()
     };
@@ -1480,8 +1484,8 @@ async fn remove_sandbox_impl(
     };
 
     // Kill the Firecracker process and wait for it to exit before releasing
-    // network resources. `ip tuntap del` fails with EBUSY if the TAP fd is
-    // still held by a running process.
+    // network resources. TAP destruction (ioctl TUNSETPERSIST clear / ip link
+    // delete fallback) fails if the TAP fd is still held by a running process.
     let mut fc_process = {
         let mut inst = arc.lock().unwrap();
         if let Some(ref mut proc) = inst.process
@@ -1496,11 +1500,12 @@ async fn remove_sandbox_impl(
         }
         inst.process.take()
     };
-    // Await process exit outside the lock.
+    // Await process exit outside the lock. Use a timeout so cleanup proceeds
+    // even if the process is stuck in uninterruptible sleep after SIGKILL.
     if let Some(ref mut proc) = fc_process {
-        let _ = proc.wait().await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), proc.wait()).await;
     }
-    // Release network resources (destroys TAP via `ip tuntap del`).
+    // Release network resources (destroys TAP via ioctl).
     {
         let inst = arc.lock().unwrap();
         if let Some(ref net) = inst.network {
