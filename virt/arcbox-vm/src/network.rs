@@ -26,11 +26,14 @@ pub struct NetworkAllocation {
 
 impl NetworkAllocation {
     /// Return the subnet mask as an `Ipv4Addr` (e.g. prefix_len 16 → 255.255.0.0).
+    ///
+    /// Values above 32 are clamped to 32 to avoid shift overflow.
     pub fn netmask(&self) -> Ipv4Addr {
-        if self.prefix_len == 0 {
+        let p = self.prefix_len.min(32);
+        if p == 0 {
             Ipv4Addr::UNSPECIFIED
         } else {
-            Ipv4Addr::from(!0u32 << (32 - self.prefix_len))
+            Ipv4Addr::from(!0u32 << (32 - p))
         }
     }
 }
@@ -216,34 +219,41 @@ impl NetworkManager {
         // 3. Configure point-to-point IP on TAP host end (gateway IP) so the
         //    sandbox can use it as its default gateway. Each TAP is an isolated
         //    link — sandboxes cannot see each other at L2.
-
-        // Set local address (gateway).
-        set_ifaddr(
-            &sock,
-            &ifr,
-            libc::SIOCSIFADDR,
-            self.gateway,
-            tap_name,
-            "SIOCSIFADDR",
-        )?;
-        // Set peer (destination) address (sandbox IP).
-        set_ifaddr(
-            &sock,
-            &ifr,
-            libc::SIOCSIFDSTADDR,
-            ip,
-            tap_name,
-            "SIOCSIFDSTADDR",
-        )?;
-        // Set /32 netmask so the kernel creates a proper host route to the peer.
-        set_ifaddr(
-            &sock,
-            &ifr,
-            libc::SIOCSIFNETMASK,
-            Ipv4Addr::BROADCAST, // 255.255.255.255
-            tap_name,
-            "SIOCSIFNETMASK",
-        )?;
+        //
+        // Wrap in a closure so a failure in any set_ifaddr triggers TAP cleanup.
+        if let Err(e) = (|| -> Result<()> {
+            // Set local address (gateway).
+            set_ifaddr(
+                &sock,
+                &ifr,
+                libc::SIOCSIFADDR,
+                self.gateway,
+                tap_name,
+                "SIOCSIFADDR",
+            )?;
+            // Set peer (destination) address (sandbox IP).
+            set_ifaddr(
+                &sock,
+                &ifr,
+                libc::SIOCSIFDSTADDR,
+                ip,
+                tap_name,
+                "SIOCSIFDSTADDR",
+            )?;
+            // Set /32 netmask so the kernel creates a proper host route to the peer.
+            set_ifaddr(
+                &sock,
+                &ifr,
+                libc::SIOCSIFNETMASK,
+                Ipv4Addr::BROADCAST, // 255.255.255.255
+                tap_name,
+                "SIOCSIFNETMASK",
+            )?;
+            Ok(())
+        })() {
+            destroy_tap(tap_name);
+            return Err(e);
+        }
 
         Ok(())
     }
@@ -339,9 +349,20 @@ fn destroy_tap(tap_name: &str) {
 
     // Fallback: if the interface still exists, use ip link delete.
     if std::path::Path::new(&format!("/sys/class/net/{tap_name}")).exists() {
-        let _ = std::process::Command::new("ip")
+        match std::process::Command::new("/usr/sbin/ip")
             .args(["link", "delete", tap_name])
-            .output();
+            .output()
+        {
+            Ok(o) if !o.status.success() => {
+                tracing::warn!(
+                    tap = tap_name,
+                    stderr = %String::from_utf8_lossy(&o.stderr),
+                    "ip link delete failed"
+                );
+            }
+            Err(e) => tracing::warn!(tap = tap_name, error = %e, "ip link delete failed"),
+            _ => {}
+        }
     }
 }
 
@@ -490,6 +511,98 @@ mod tests {
             "locally administered bit must be set"
         );
         assert_eq!(first_byte & 0x01, 0x00, "multicast bit must be clear");
+    }
+
+    #[test]
+    fn test_netmask_slash0() {
+        let alloc = NetworkAllocation {
+            tap_name: String::new(),
+            ip_address: Ipv4Addr::UNSPECIFIED,
+            prefix_len: 0,
+            gateway: Ipv4Addr::UNSPECIFIED,
+            mac_address: String::new(),
+            dns_servers: vec![],
+        };
+        assert_eq!(alloc.netmask(), Ipv4Addr::UNSPECIFIED);
+    }
+
+    #[test]
+    fn test_netmask_slash8() {
+        let alloc = NetworkAllocation {
+            tap_name: String::new(),
+            ip_address: Ipv4Addr::UNSPECIFIED,
+            prefix_len: 8,
+            gateway: Ipv4Addr::UNSPECIFIED,
+            mac_address: String::new(),
+            dns_servers: vec![],
+        };
+        assert_eq!(alloc.netmask(), Ipv4Addr::new(255, 0, 0, 0));
+    }
+
+    #[test]
+    fn test_netmask_slash16() {
+        let alloc = NetworkAllocation {
+            tap_name: String::new(),
+            ip_address: Ipv4Addr::UNSPECIFIED,
+            prefix_len: 16,
+            gateway: Ipv4Addr::UNSPECIFIED,
+            mac_address: String::new(),
+            dns_servers: vec![],
+        };
+        assert_eq!(alloc.netmask(), Ipv4Addr::new(255, 255, 0, 0));
+    }
+
+    #[test]
+    fn test_netmask_slash24() {
+        let alloc = NetworkAllocation {
+            tap_name: String::new(),
+            ip_address: Ipv4Addr::UNSPECIFIED,
+            prefix_len: 24,
+            gateway: Ipv4Addr::UNSPECIFIED,
+            mac_address: String::new(),
+            dns_servers: vec![],
+        };
+        assert_eq!(alloc.netmask(), Ipv4Addr::new(255, 255, 255, 0));
+    }
+
+    #[test]
+    fn test_netmask_slash30() {
+        let alloc = NetworkAllocation {
+            tap_name: String::new(),
+            ip_address: Ipv4Addr::UNSPECIFIED,
+            prefix_len: 30,
+            gateway: Ipv4Addr::UNSPECIFIED,
+            mac_address: String::new(),
+            dns_servers: vec![],
+        };
+        assert_eq!(alloc.netmask(), Ipv4Addr::new(255, 255, 255, 252));
+    }
+
+    #[test]
+    fn test_netmask_slash32() {
+        let alloc = NetworkAllocation {
+            tap_name: String::new(),
+            ip_address: Ipv4Addr::UNSPECIFIED,
+            prefix_len: 32,
+            gateway: Ipv4Addr::UNSPECIFIED,
+            mac_address: String::new(),
+            dns_servers: vec![],
+        };
+        assert_eq!(alloc.netmask(), Ipv4Addr::new(255, 255, 255, 255));
+    }
+
+    #[test]
+    fn test_netmask_out_of_range_clamps_to_32() {
+        let alloc = NetworkAllocation {
+            tap_name: String::new(),
+            ip_address: Ipv4Addr::UNSPECIFIED,
+            prefix_len: 33,
+            gateway: Ipv4Addr::UNSPECIFIED,
+            mac_address: String::new(),
+            dns_servers: vec![],
+        };
+        // prefix_len 33 should clamp to /32 → 255.255.255.255
+        assert_eq!(alloc.netmask(), Ipv4Addr::new(255, 255, 255, 255));
     }
 
     #[test]
