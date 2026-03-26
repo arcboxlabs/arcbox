@@ -508,7 +508,7 @@ mod agent {
     fn handle_tty(conn: VsockStream, start: StartCommand) {
         use nix::pty::OpenptyResult;
         use nix::unistd::{ForkResult, fork, setsid};
-        use std::os::unix::io::{AsRawFd, FromRawFd};
+        use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
 
         let OpenptyResult { master, slave } = match nix::pty::openpty(None, None) {
             Ok(r) => r,
