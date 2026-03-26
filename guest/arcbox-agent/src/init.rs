@@ -17,12 +17,18 @@ mod platform {
     use std::path::Path;
 
     use nix::mount::{MsFlags, mount};
+    use nix::sys::resource::{Resource, setrlimit};
 
     /// Runs one-time system initialization after trampoline hands off to agent.
     ///
     /// Trampoline already mounted: /proc, /sys, /dev, /arcbox (VirtioFS).
     /// EROFS rootfs is purely structural. All writable state goes on tmpfs.
     pub fn init_system() {
+        // Raise file descriptor limits before spawning any children so that
+        // containerd, dockerd, and all containers inherit a high ceiling.
+        // Docker Desktop and OrbStack both set 1048576 in their guest VMs.
+        raise_fd_limits();
+
         // Writable layers on top of read-only EROFS.
         mount_tmpfs("/tmp");
         mount_tmpfs("/run");
@@ -34,7 +40,7 @@ mod platform {
         write_etc_hosts();
         write_etc_passwd();
         write_etc_group();
-        write_docker_daemon_dns();
+        write_docker_daemon_config();
 
         // TLS CA certificates: EROFS has /cacerts/ca-certificates.crt.
         // Symlink into tmpfs /etc so programs find it at the standard path.
@@ -61,6 +67,37 @@ mod platform {
         mount_virtiofs_optional("users", "/Users");
 
         tracing::info!("PID 1 system initialization complete");
+    }
+
+    /// Raises process file descriptor limits so that containerd, dockerd, and
+    /// all containers inherit a sufficiently high ceiling.
+    ///
+    /// Without this, PID 1 inherits the kernel default (soft=1024, hard=4096)
+    /// and containers that need `ulimit -n` > 4096 fail with EINVAL.
+    fn raise_fd_limits() {
+        const TARGET_NOFILE: u64 = 1_048_576;
+
+        // Ensure the kernel ceiling (fs.nr_open) is at least TARGET_NOFILE.
+        // The default is already 1048576, but guard against custom kernels.
+        ensure_sysctl_at_least("/proc/sys/fs/nr_open", TARGET_NOFILE);
+
+        // Raise our own limit — all children inherit this via fork/exec.
+        if let Err(e) = setrlimit(Resource::RLIMIT_NOFILE, TARGET_NOFILE, TARGET_NOFILE) {
+            tracing::warn!(error = %e, "failed to raise RLIMIT_NOFILE");
+        }
+    }
+
+    /// Writes `value` to a sysctl path only if the current value is lower.
+    fn ensure_sysctl_at_least(path: &str, target: u64) {
+        let current = fs::read_to_string(path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        if current < target {
+            if let Err(e) = fs::write(path, format!("{target}\n")) {
+                tracing::warn!(path, error = %e, "failed to raise sysctl");
+            }
+        }
     }
 
     fn mount_tmpfs(target: &str) {
@@ -467,16 +504,19 @@ exit 0
         }
     }
 
-    /// Configures Docker daemon to use the gateway as its DNS server.
+    /// Writes Docker daemon configuration (DNS + default ulimits).
     ///
     /// Containers get their DNS from the Docker daemon config, NOT from the
     /// guest's /etc/resolv.conf. We point them to 10.0.2.1 (the gateway)
     /// so container DNS queries go through the host-side forwarder which can
     /// resolve *.arcbox.local names registered from the host.
-    fn write_docker_daemon_dns() {
+    ///
+    /// Default ulimits ensure containers get a high NOFILE limit even if
+    /// Docker's own heuristics pick a lower value.
+    fn write_docker_daemon_config() {
         mkdir_p("/etc/docker");
-        let content = r#"{"dns": ["10.0.2.1"]}"#;
-        if let Err(e) = std::fs::write("/etc/docker/daemon.json", content) {
+        let content = super::docker_daemon_json();
+        if let Err(e) = std::fs::write("/etc/docker/daemon.json", &content) {
             tracing::warn!(error = %e, "failed to write /etc/docker/daemon.json");
         }
     }
@@ -530,10 +570,47 @@ exit 0
     }
 }
 
+/// Returns the Docker daemon.json content as a string.
+///
+/// Extracted as a pure function so the output contract (DNS + default
+/// ulimits) is testable independently of the filesystem and platform.
+#[cfg(any(target_os = "linux", test))]
+fn docker_daemon_json() -> String {
+    serde_json::json!({
+        "dns": ["10.0.2.1"],
+        "default-ulimits": {
+            "nofile": { "Name": "nofile", "Soft": 1048576, "Hard": 1048576 }
+        }
+    })
+    .to_string()
+}
+
 #[cfg(target_os = "linux")]
 pub use platform::init_system;
 
 #[cfg(not(target_os = "linux"))]
 pub fn init_system() {
     tracing::warn!("init_system is only functional on Linux");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_json_contains_nofile_ulimit() {
+        let json = docker_daemon_json();
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let nofile = &v["default-ulimits"]["nofile"];
+        assert_eq!(nofile["Soft"], 1048576);
+        assert_eq!(nofile["Hard"], 1048576);
+        assert_eq!(nofile["Name"], "nofile");
+    }
+
+    #[test]
+    fn daemon_json_contains_dns() {
+        let json = docker_daemon_json();
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(v["dns"][0], "10.0.2.1");
+    }
 }

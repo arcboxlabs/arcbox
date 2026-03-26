@@ -214,10 +214,10 @@ impl GuestDnsServer {
 
         // 4. Authoritative NXDOMAIN for unresolved local-domain queries.
         // NXDOMAIN (not NODATA) because the name genuinely doesn't exist.
-        if name_lower == LOCAL_DOMAIN || name_lower.ends_with(&format!(".{LOCAL_DOMAIN}")) {
-            if matches!(query.qtype, DnsRecordType::A | DnsRecordType::Aaaa) {
-                return Ok(arcbox_dns::build_nxdomain(data)?);
-            }
+        if (name_lower == LOCAL_DOMAIN || name_lower.ends_with(&format!(".{LOCAL_DOMAIN}")))
+            && matches!(query.qtype, DnsRecordType::A | DnsRecordType::Aaaa)
+        {
+            return Ok(arcbox_dns::build_nxdomain(data)?);
         }
 
         // 5. Forward to gateway.
