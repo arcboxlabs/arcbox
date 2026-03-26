@@ -7,6 +7,12 @@ use tracing::{debug, info};
 
 use crate::error::{Result, VmmError};
 
+/// Default prefix length for backwards-compatible deserialization of records
+/// that predate the `prefix_len` field.
+const fn default_prefix_len() -> u8 {
+    16
+}
+
 /// Result of allocating network resources for a single VM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkAllocation {
@@ -15,6 +21,7 @@ pub struct NetworkAllocation {
     /// IP address assigned to the guest.
     pub ip_address: Ipv4Addr,
     /// Network prefix length (e.g. 16 for /16).
+    #[serde(default = "default_prefix_len")]
     pub prefix_len: u8,
     /// Gateway IP.
     pub gateway: Ipv4Addr,
