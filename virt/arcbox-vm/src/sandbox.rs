@@ -320,7 +320,6 @@ impl SandboxManager {
     /// Create a new manager from the given configuration.
     pub fn new(config: VmmConfig) -> Result<Self> {
         let network = Arc::new(NetworkManager::new(
-            &config.network.bridge,
             &config.network.cidr,
             &config.network.gateway,
             config.network.dns.clone(),

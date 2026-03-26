@@ -36,8 +36,6 @@ fn test_config() -> VmmConfig {
             socket_timeout_secs: Some(15),
         },
         network: NetworkConfig {
-            // Bridge is ignored for mode=none, keep explicit for clarity.
-            bridge: String::new(),
             cidr: "172.31.0.0/16".to_string(),
             gateway: "172.31.0.1".to_string(),
             dns: vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()],

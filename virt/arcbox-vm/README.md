@@ -395,7 +395,6 @@ no_seccomp                = false
 # resource_limits = ["fsize=2048"]
 
 [network]
-bridge   = "fcvmm0"
 cidr     = "172.20.0.0/16"
 gateway  = "172.20.0.1"
 dns      = ["1.1.1.1", "8.8.8.8"]

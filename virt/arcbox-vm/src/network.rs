@@ -53,7 +53,7 @@ impl NetworkManager {
     /// Create a new manager from the network configuration.
     ///
     /// `cidr` must be in `a.b.c.d/n` notation (e.g. `"172.20.0.0/16"`).
-    pub fn new(_bridge: &str, cidr: &str, gateway: &str, dns: Vec<String>) -> Result<Self> {
+    pub fn new(cidr: &str, gateway: &str, dns: Vec<String>) -> Result<Self> {
         let (base, prefix_len) = parse_cidr(cidr)?;
         if !(1..=30).contains(&prefix_len) {
             return Err(VmmError::Network(format!(
@@ -414,7 +414,7 @@ mod tests {
             eprintln!("SKIP test_allocate_sequential_ips — requires root (TAP creation)");
             return;
         }
-        let mgr = NetworkManager::new("fcvmm0", "172.20.0.0/16", "172.20.0.1", vec![]).unwrap();
+        let mgr = NetworkManager::new("172.20.0.0/16", "172.20.0.1", vec![]).unwrap();
         let a1 = mgr.allocate("vm-1").unwrap();
         let a2 = mgr.allocate("vm-2").unwrap();
         assert_ne!(a1.ip_address, a2.ip_address);
@@ -427,7 +427,7 @@ mod tests {
             eprintln!("SKIP test_release_returns_ip_to_pool — requires root (TAP creation)");
             return;
         }
-        let mgr = NetworkManager::new("fcvmm0", "172.20.0.0/16", "172.20.0.1", vec![]).unwrap();
+        let mgr = NetworkManager::new("172.20.0.0/16", "172.20.0.1", vec![]).unwrap();
         let a1 = mgr.allocate("vm-1").unwrap();
         let first_ip = a1.ip_address;
         mgr.release(&a1);
@@ -443,10 +443,10 @@ mod tests {
 
     #[test]
     fn test_invalid_prefix_len_rejected() {
-        assert!(NetworkManager::new("br0", "10.0.0.0/0", "10.0.0.1", vec![]).is_err());
-        assert!(NetworkManager::new("br0", "10.0.0.0/31", "10.0.0.1", vec![]).is_err());
-        assert!(NetworkManager::new("br0", "10.0.0.0/32", "10.0.0.1", vec![]).is_err());
-        assert!(NetworkManager::new("br0", "10.0.0.0/24", "10.0.0.1", vec![]).is_ok());
+        assert!(NetworkManager::new("10.0.0.0/0", "10.0.0.1", vec![]).is_err());
+        assert!(NetworkManager::new("10.0.0.0/31", "10.0.0.1", vec![]).is_err());
+        assert!(NetworkManager::new("10.0.0.0/32", "10.0.0.1", vec![]).is_err());
+        assert!(NetworkManager::new("10.0.0.0/24", "10.0.0.1", vec![]).is_ok());
     }
 
     #[test]
@@ -457,7 +457,7 @@ mod tests {
             return;
         }
         // /30 has exactly 2 host addresses (.1 gateway, .2 first usable)
-        let mgr = NetworkManager::new("br0", "10.0.0.0/30", "10.0.0.1", vec![]).unwrap();
+        let mgr = NetworkManager::new("10.0.0.0/30", "10.0.0.1", vec![]).unwrap();
         let a = mgr.allocate("vm-1").unwrap();
         assert_eq!(a.ip_address, "10.0.0.2".parse::<Ipv4Addr>().unwrap());
         // Pool is now exhausted
@@ -472,7 +472,7 @@ mod tests {
             return;
         }
         // /29 has 6 usable addresses; gateway takes offset 1, leaving 5 for VMs.
-        let mgr = NetworkManager::new("br0", "10.0.0.0/29", "10.0.0.1", vec![]).unwrap();
+        let mgr = NetworkManager::new("10.0.0.0/29", "10.0.0.1", vec![]).unwrap();
         for i in 0..5 {
             mgr.allocate(&format!("vm-{i}")).unwrap();
         }
