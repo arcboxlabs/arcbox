@@ -529,14 +529,16 @@ mod agent {
             unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &winsize) };
         }
 
-        let master_fd: RawFd = master.as_raw_fd();
+        // Transfer ownership so only one entity (File at line 608) closes master_fd.
+        let master_fd: RawFd = master.into_raw_fd();
         let slave_fd: RawFd = slave.as_raw_fd();
 
         match unsafe { fork() } {
             Err(e) => eprintln!("agent: fork: {e}"),
 
             Ok(ForkResult::Child) => {
-                drop(master);
+                // SAFETY: close the inherited master fd in the child process.
+                unsafe { libc::close(master_fd) };
                 let _ = setsid();
                 // SAFETY: all fds are valid in the child process.
                 unsafe {
