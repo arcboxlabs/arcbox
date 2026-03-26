@@ -926,16 +926,26 @@ impl Vmm {
     /// which can crash when the guest has already halted via ACPI.
     pub fn set_skip_hypervisor_stop(&mut self) {
         self.skip_hypervisor_stop = true;
+
+        // Also propagate to the DarwinVm inside managed_vm so its Drop
+        // doesn't call DarwinVm::stop() either.
+        #[cfg(target_os = "macos")]
+        self.mark_managed_vm_skip_stop();
     }
 }
 
 impl Drop for Vmm {
     fn drop(&mut self) {
-        if !self.skip_hypervisor_stop
-            && self.state != VmmState::Stopped
-            && self.state != VmmState::Created
-        {
-            let _ = self.stop();
+        if self.state != VmmState::Stopped && self.state != VmmState::Created {
+            if self.skip_hypervisor_stop {
+                // The hypervisor stop path is unsafe (VF may crash when guest
+                // already halted). Only clean up network resources.
+                #[cfg(target_os = "macos")]
+                self.stop_network();
+                self.state = VmmState::Stopped;
+            } else {
+                let _ = self.stop();
+            }
         }
     }
 }
