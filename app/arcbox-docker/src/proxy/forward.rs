@@ -17,11 +17,25 @@ use hyper::client::conn::http1;
 /// This ensures registry auth (`X-Registry-Auth`, `X-Registry-Config`),
 /// content negotiation (`Accept`), and other semantically significant
 /// headers are preserved when proxying to the guest dockerd.
+///
+/// Per RFC 7230 §6.1, hop-by-hop headers include the fixed set plus any
+/// header names listed in the `Connection` header's value.
 fn forward_client_headers(from: &HeaderMap, to: &mut HeaderMap) {
+    // Collect header names nominated by the Connection header (RFC 7230 §6.1).
+    let mut connection_tokens: Vec<String> = Vec::new();
+    if let Some(conn) = from.get(header::CONNECTION) {
+        if let Ok(s) = conn.to_str() {
+            for token in s.split(',') {
+                connection_tokens.push(token.trim().to_ascii_lowercase());
+            }
+        }
+    }
+
     for (name, value) in from {
-        // Skip hop-by-hop headers (RFC 7230 §6.1) and Host (overridden later).
+        // Skip fixed hop-by-hop headers and Host (overridden later).
         if name == header::CONNECTION
             || name.as_str() == "keep-alive"
+            || name.as_str() == "proxy-connection"
             || name == header::PROXY_AUTHENTICATE
             || name == header::PROXY_AUTHORIZATION
             || name == header::TE
@@ -32,7 +46,14 @@ fn forward_client_headers(from: &HeaderMap, to: &mut HeaderMap) {
         {
             continue;
         }
-        to.insert(name.clone(), value.clone());
+
+        // Skip headers nominated by the Connection header.
+        if connection_tokens.contains(&name.as_str().to_ascii_lowercase()) {
+            continue;
+        }
+
+        // Use append to preserve multi-valued headers (e.g. multiple Accept).
+        to.append(name.clone(), value.clone());
     }
 }
 

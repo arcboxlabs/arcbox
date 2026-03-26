@@ -429,10 +429,11 @@ impl VmManager {
         match stop_result {
             Ok(true) => {
                 if let Some(mut vmm) = entry.vmm.take() {
-                    // The guest has already halted via ACPI, but Vmm::Drop
-                    // would call the hypervisor stop path which can crash on
-                    // macOS. Skip the hypervisor teardown but still drop
-                    // normally to close FDs and free resources.
+                    // On macOS the VF stop path can crash when the guest has
+                    // already halted via ACPI. Skip it but still drop normally
+                    // to close FDs and free resources. On Linux/KVM the normal
+                    // stop path is safe, so let Drop handle it.
+                    #[cfg(target_os = "macos")]
                     vmm.set_skip_hypervisor_stop();
                     drop(vmm);
                 }
@@ -476,8 +477,9 @@ impl VmManager {
         entry.info.state = VmState::Stopping;
 
         if let Some(mut vmm) = entry.vmm.take() {
-            // Skip the hypervisor teardown (can crash on macOS) but still
-            // run Drop to close serial FDs, network FDs, and free resources.
+            // On macOS the VF stop path can crash. Skip it but still drop
+            // to close FDs and free resources. Linux/KVM is safe.
+            #[cfg(target_os = "macos")]
             vmm.set_skip_hypervisor_stop();
             drop(vmm);
         }

@@ -525,7 +525,7 @@ impl Vmm {
     pub(super) fn mark_managed_vm_skip_stop(&mut self) {
         if let Some(ref mut managed_vm) = self.managed_vm {
             if let Some(vm) = managed_vm.downcast_mut::<DarwinVm>() {
-                vm.skip_stop_on_drop = true;
+                vm.set_skip_stop_on_drop();
             }
         }
     }
