@@ -373,7 +373,7 @@ impl VmManager {
             .get_mut(id)
             .ok_or_else(|| CoreError::not_found(id.to_string()))?;
 
-        if entry.info.state != VmState::Running {
+        if !matches!(entry.info.state, VmState::Running | VmState::Stopping) {
             return Err(CoreError::invalid_state(format!(
                 "cannot stop VM in state {:?}",
                 entry.info.state
@@ -399,55 +399,92 @@ impl VmManager {
     /// Returns `Ok(true)` if the VM stopped, `Ok(false)` if graceful shutdown
     /// timed out or is unavailable.
     pub fn graceful_stop(&self, id: &VmId, timeout: Duration) -> Result<bool> {
+        // Take the Vmm out under write lock so the blocking request_stop()
+        // call below doesn't hold the lock for up to `timeout`.
+        let vmm = {
+            let mut vms = self
+                .vms
+                .write()
+                .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?;
+
+            let entry = vms
+                .get_mut(id)
+                .ok_or_else(|| CoreError::not_found(id.to_string()))?;
+
+            if entry.info.state != VmState::Running {
+                return Err(CoreError::invalid_state(format!(
+                    "cannot stop VM in state {:?}",
+                    entry.info.state
+                )));
+            }
+
+            entry.info.state = VmState::Stopping;
+            entry
+                .vmm
+                .take()
+                .ok_or_else(|| CoreError::Vm("VMM not initialized".to_string()))?
+        };
+
+        // No lock held — this may block for the full timeout duration.
+        let stop_result = vmm
+            .request_stop(timeout)
+            .map_err(|e| CoreError::Vm(e.to_string()));
+
+        // Re-acquire to update final state. The entry may have been removed
+        // by a concurrent force_stop while the lock was released — if so,
+        // safely drop the Vmm (skipping the macOS VF stop path) and return
+        // Ok since the force path already handled teardown.
         let mut vms = self
             .vms
             .write()
             .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?;
-
-        let entry = vms
-            .get_mut(id)
-            .ok_or_else(|| CoreError::not_found(id.to_string()))?;
-
-        if entry.info.state != VmState::Running {
-            return Err(CoreError::invalid_state(format!(
-                "cannot stop VM in state {:?}",
-                entry.info.state
-            )));
-        }
-
-        entry.info.state = VmState::Stopping;
-
-        let stop_result = entry
-            .vmm
-            .as_ref()
-            .ok_or_else(|| CoreError::Vm("VMM not initialized".to_string()))
-            .and_then(|vmm| {
-                vmm.request_stop(timeout)
-                    .map_err(|e| CoreError::Vm(e.to_string()))
-            });
+        let Some(entry) = vms.get_mut(id) else {
+            tracing::warn!("VM {id} removed during graceful stop (concurrent force stop)");
+            // Force path already handled teardown. Skip the macOS VF stop
+            // path (could crash) but still drop to release FDs/resources.
+            #[allow(unused_mut)]
+            let mut vmm = vmm;
+            #[cfg(target_os = "macos")]
+            vmm.set_skip_hypervisor_stop();
+            drop(vmm);
+            return Ok(stop_result.unwrap_or(false));
+        };
 
         match stop_result {
             Ok(true) => {
-                if let Some(mut vmm) = entry.vmm.take() {
-                    // On macOS the VF stop path can crash when the guest has
-                    // already halted via ACPI. Skip it but still drop normally
-                    // to close FDs and free resources. On Linux/KVM the normal
-                    // stop path is safe, so let Drop handle it.
-                    #[cfg(target_os = "macos")]
-                    vmm.set_skip_hypervisor_stop();
-                    drop(vmm);
-                }
+                // On macOS the VF stop path can crash when the guest has
+                // already halted via ACPI. Skip it but still drop normally
+                // to close FDs and free resources. On Linux/KVM the normal
+                // stop path is safe, so let Drop handle it.
+                #[allow(unused_mut)]
+                let mut vmm = vmm;
+                #[cfg(target_os = "macos")]
+                vmm.set_skip_hypervisor_stop();
+                drop(vmm);
                 entry.info.state = VmState::Stopped;
                 tracing::info!("Gracefully stopped VM {}", id);
                 Ok(true)
             }
-            Ok(false) => {
-                entry.info.state = VmState::Running;
-                Ok(false)
-            }
-            Err(e) => {
-                entry.info.state = VmState::Running;
-                Err(e)
+            Ok(false) | Err(_) => {
+                // Only restore if no concurrent stop changed the state while
+                // the lock was released. If state is no longer Stopping, a
+                // concurrent stop() already handled teardown — drop the VMM
+                // safely instead of resurrecting the VM.
+                if entry.info.state == VmState::Stopping {
+                    entry.vmm = Some(vmm);
+                    entry.info.state = VmState::Running;
+                } else {
+                    tracing::warn!(
+                        "VM {id} state changed to {:?} during graceful stop, not restoring",
+                        entry.info.state
+                    );
+                    #[allow(unused_mut)]
+                    let mut vmm = vmm;
+                    #[cfg(target_os = "macos")]
+                    vmm.set_skip_hypervisor_stop();
+                    drop(vmm);
+                }
+                stop_result.map(|_| false)
             }
         }
     }

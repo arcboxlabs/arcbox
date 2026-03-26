@@ -1135,15 +1135,14 @@ impl VmLifecycleManager {
 
     /// Forces VM termination.
     ///
+    /// Does not take `transition_lock` — force stop must succeed even when
+    /// a graceful shutdown holds the lock (blocked in a sync VM stop call).
+    ///
     /// # Errors
     /// Returns an error if the VM cannot be terminated.
     pub async fn force_stop(&self) -> Result<()> {
-        let _lock = self.transition_lock.lock().await;
-
-        // Stop health monitor
         self.health_monitor.stop();
 
-        // Force stop by removing and recreating
         let _ = self.machine_manager.remove(DEFAULT_MACHINE_NAME, true);
 
         *self.state.write().await = VmLifecycleState::NotExist;
