@@ -54,7 +54,10 @@ If you prefer not to use `make`:
 cargo build -p arcbox-cli -p arcbox-daemon
 
 # Sign the daemon (see "Code Signing" below)
-make sign-daemon
+codesign --force --options runtime \
+    --entitlements bundle/arcbox.entitlements \
+    -s "Developer ID Application: ArcBox, Inc. (422ACSY6Y5)" \
+    target/debug/arcbox-daemon
 
 # Run
 ./target/debug/arcbox-daemon
@@ -198,9 +201,9 @@ arcbox-daemon / abctl
 ### Production Registration
 
 ```bash
-# Build everything, then install (requires sudo)
-cargo build -p arcbox-cli -p arcbox-helper
-sudo ./target/debug/abctl _install
+# Build CLI and helper in release mode, then install (requires sudo)
+cargo build --release -p arcbox-cli -p arcbox-helper
+sudo ./target/release/abctl _install
 ```
 
 This does three things:
