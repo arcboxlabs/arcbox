@@ -1,0 +1,506 @@
+//! Migration plan construction.
+
+use crate::docker_types::{
+    ContainerInspect, DockerInfo, ImageInspect, MountPoint, NetworkInspect, RestartPolicy,
+    VolumeInspect,
+};
+use crate::error::Result;
+use crate::helper_image::helper_image_reference;
+use crate::model::{
+    ContainerMount, ContainerNetworkAttachment, ContainerPlan, ContainerSpec, ImagePlan,
+    MigrationPlan, NetworkPlan, PortPublish, ReplacementSummary, RestartPolicySpec,
+    RunningVolumeBlocker, SourceConfig, SourceInfo, VolumePlan,
+};
+use crate::runner::DockerCliRunner;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+/// Builds migration plans from source and target Docker daemons.
+#[derive(Debug, Clone)]
+pub struct MigrationPlanner {
+    target: DockerCliRunner,
+}
+
+impl MigrationPlanner {
+    /// Creates a planner for the provided ArcBox target socket.
+    #[must_use]
+    pub fn new(target: DockerCliRunner) -> Self {
+        Self { target }
+    }
+
+    /// Plans a migration from the provided source into the configured target.
+    pub async fn plan(&self, source: SourceConfig) -> Result<MigrationPlan> {
+        let source_runner = DockerCliRunner::new(source.socket_path.clone())?;
+
+        let source_info = source_runner.info().await?;
+        let target_images = self.target.list_images().await?;
+        let target_image_tags = collect_target_tags(&target_images);
+        let target_volumes =
+            collect_names(self.target.list_volumes().await?, |volume| &volume.name);
+        let target_networks =
+            collect_names(self.target.list_networks().await?, |network| &network.name);
+        let target_containers = collect_names(self.target.list_containers().await?, |container| {
+            trimmed_name(container)
+        });
+
+        let source_images = source_runner.list_images().await?;
+        let source_volumes = source_runner.list_volumes().await?;
+        let source_networks = source_runner.list_networks().await?;
+        let source_containers = source_runner.list_containers().await?;
+
+        let mut unsupported_resources = Vec::new();
+
+        let mut volume_usage: HashMap<String, Vec<(String, bool)>> = HashMap::new();
+        for container in &source_containers {
+            let container_name = trimmed_name(container).to_string();
+            for mount in &container.mounts {
+                if mount.mount_type == "volume" && !mount.name.is_empty() {
+                    volume_usage
+                        .entry(mount.name.clone())
+                        .or_default()
+                        .push((container_name.clone(), container.state.running));
+                } else if mount.mount_type != "volume"
+                    && mount.mount_type != "bind"
+                    && mount.mount_type != "tmpfs"
+                {
+                    unsupported_resources.push(format!(
+                        "container '{}' uses unsupported mount type '{}'",
+                        container_name, mount.mount_type
+                    ));
+                }
+            }
+        }
+
+        let volume_plans: Vec<_> = source_volumes
+            .into_iter()
+            .map(|volume| normalize_volume(volume, &target_volumes, &volume_usage))
+            .inspect(|plan| {
+                if plan.driver != "local" {
+                    unsupported_resources.push(format!(
+                        "volume '{}' uses unsupported driver '{}'",
+                        plan.name, plan.driver
+                    ));
+                }
+            })
+            .collect();
+
+        let blockers = volume_plans
+            .iter()
+            .filter_map(|volume| {
+                let running: Vec<_> = volume_usage
+                    .get(&volume.name)?
+                    .iter()
+                    .filter(|(_, running)| *running)
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                if running.is_empty() {
+                    None
+                } else {
+                    Some(RunningVolumeBlocker {
+                        volume_name: volume.name.clone(),
+                        containers: running,
+                    })
+                }
+            })
+            .collect();
+
+        let network_plans: Vec<_> = source_networks
+            .into_iter()
+            .map(|network| normalize_network(network, &target_networks))
+            .inspect(|plan| {
+                if plan.driver != "bridge" {
+                    unsupported_resources.push(format!(
+                        "network '{}' uses unsupported driver '{}'",
+                        plan.name, plan.driver
+                    ));
+                }
+            })
+            .collect();
+        let migrated_network_names: BTreeSet<_> = network_plans
+            .iter()
+            .map(|network| network.name.clone())
+            .collect();
+
+        let image_plan_data =
+            normalize_images(&source_images, &source_containers, &target_image_tags);
+        let image_reference_by_id: HashMap<_, _> = image_plan_data
+            .iter()
+            .map(|image| (image.image_id.clone(), image.export_reference.clone()))
+            .collect();
+
+        let container_plans: Vec<_> = source_containers
+            .into_iter()
+            .map(|container| {
+                normalize_container(
+                    container,
+                    &target_containers,
+                    &image_reference_by_id,
+                    &migrated_network_names,
+                )
+            })
+            .collect();
+
+        let replacements = build_replacements(
+            &image_plan_data,
+            &volume_plans,
+            &network_plans,
+            &container_plans,
+        );
+
+        Ok(MigrationPlan {
+            source: normalize_source_info(source, source_info),
+            helper_image: helper_image_reference().to_string(),
+            images: image_plan_data,
+            volumes: volume_plans,
+            networks: network_plans,
+            containers: container_plans,
+            unsupported_resources,
+            replacements,
+            blockers,
+        })
+    }
+}
+
+fn normalize_source_info(source: SourceConfig, info: DockerInfo) -> SourceInfo {
+    SourceInfo {
+        kind: source.kind,
+        socket_path: source.socket_path,
+        daemon_name: info.name,
+        server_version: info.server_version,
+        operating_system: info.operating_system,
+        architecture: info.architecture,
+    }
+}
+
+fn normalize_images(
+    images: &[ImageInspect],
+    containers: &[ContainerInspect],
+    target_tags: &BTreeSet<String>,
+) -> Vec<ImagePlan> {
+    let mut ordered = BTreeMap::new();
+
+    for image in images {
+        let tags = meaningful_tags(&image.repo_tags);
+        if !tags.is_empty() {
+            ordered.insert(
+                image.id.clone(),
+                ImagePlan {
+                    image_id: image.id.clone(),
+                    export_reference: tags[0].clone(),
+                    replace_tags: tags
+                        .iter()
+                        .filter(|tag| target_tags.contains(*tag))
+                        .cloned()
+                        .collect(),
+                    repo_tags: tags,
+                },
+            );
+        }
+    }
+
+    for container in containers {
+        ordered
+            .entry(container.image.clone())
+            .or_insert_with(|| ImagePlan {
+                image_id: container.image.clone(),
+                export_reference: container.image.clone(),
+                repo_tags: meaningful_tags(&[]),
+                replace_tags: Vec::new(),
+            });
+    }
+
+    ordered.into_values().collect()
+}
+
+fn normalize_volume(
+    volume: VolumeInspect,
+    target_volumes: &BTreeSet<String>,
+    usage: &HashMap<String, Vec<(String, bool)>>,
+) -> VolumePlan {
+    let attached_containers = usage
+        .get(&volume.name)
+        .map(|items| items.iter().map(|(name, _)| name.clone()).collect())
+        .unwrap_or_default();
+
+    VolumePlan {
+        name: volume.name.clone(),
+        driver: volume.driver,
+        labels: volume.labels.unwrap_or_default(),
+        options: volume.options.unwrap_or_default(),
+        replace_existing: target_volumes.contains(&volume.name),
+        attached_containers,
+    }
+}
+
+fn normalize_network(network: NetworkInspect, target_networks: &BTreeSet<String>) -> NetworkPlan {
+    NetworkPlan {
+        name: network.name.clone(),
+        id: network.id,
+        driver: network.driver,
+        internal: network.internal,
+        enable_ipv6: network.enable_ipv6,
+        attachable: network.attachable,
+        labels: network.labels.unwrap_or_default(),
+        options: network.options.unwrap_or_default(),
+        ipam: network.ipam.config,
+        replace_existing: target_networks.contains(&network.name),
+    }
+}
+
+fn normalize_container(
+    container: ContainerInspect,
+    target_containers: &BTreeSet<String>,
+    image_reference_by_id: &HashMap<String, String>,
+    migrated_network_names: &BTreeSet<String>,
+) -> ContainerPlan {
+    let name = trimmed_name(&container).to_string();
+    let image_reference = image_reference_by_id
+        .get(&container.image)
+        .cloned()
+        .unwrap_or_else(|| {
+            if container.config.image.is_empty() {
+                container.image.clone()
+            } else {
+                container.config.image.clone()
+            }
+        });
+
+    let mut attachments = normalized_network_attachments(&container, migrated_network_names);
+    let primary_network = attachments.first().cloned();
+    if primary_network.is_some() {
+        let _ = attachments.remove(0);
+    }
+
+    ContainerPlan {
+        name: name.clone(),
+        id: container.id,
+        image_reference,
+        spec: ContainerSpec {
+            hostname: non_empty(&container.config.hostname),
+            domainname: non_empty(&container.config.domainname),
+            user: non_empty(&container.config.user),
+            env: container.config.env.unwrap_or_default(),
+            labels: container.config.labels.unwrap_or_default(),
+            exposed_ports: container
+                .config
+                .exposed_ports
+                .unwrap_or_default()
+                .into_keys()
+                .collect(),
+            tty: container.config.tty,
+            open_stdin: container.config.open_stdin,
+            working_dir: non_empty(&container.config.working_dir),
+            entrypoint: container.config.entrypoint.unwrap_or_default(),
+            cmd: container.config.cmd.unwrap_or_default(),
+            mounts: container.mounts.iter().map(normalize_mount).collect(),
+            publishes: normalized_publishes(container.host_config.port_bindings),
+            restart_policy: normalize_restart_policy(container.host_config.restart_policy),
+            privileged: container.host_config.privileged,
+            read_only_rootfs: container.host_config.readonly_rootfs,
+            extra_hosts: container.host_config.extra_hosts.unwrap_or_default(),
+            auto_remove: container.host_config.auto_remove,
+            primary_network,
+        },
+        extra_networks: attachments,
+        replace_existing: target_containers.contains(&name),
+    }
+}
+
+fn normalize_mount(mount: &MountPoint) -> ContainerMount {
+    match mount.mount_type.as_str() {
+        "bind" => ContainerMount::Bind {
+            source: mount.source.clone(),
+            target: mount.destination.clone(),
+            rw: mount.rw,
+        },
+        "tmpfs" => ContainerMount::Tmpfs {
+            target: mount.destination.clone(),
+            options: non_empty(&mount.mode),
+        },
+        _ => ContainerMount::Volume {
+            source: if mount.name.is_empty() {
+                mount.source.clone()
+            } else {
+                mount.name.clone()
+            },
+            target: mount.destination.clone(),
+            rw: mount.rw,
+        },
+    }
+}
+
+fn normalized_publishes(
+    port_bindings: Option<HashMap<String, Option<Vec<crate::docker_types::PortBinding>>>>,
+) -> Vec<PortPublish> {
+    let Some(port_bindings) = port_bindings else {
+        return Vec::new();
+    };
+
+    let mut publishes = Vec::new();
+    let mut ports: Vec<_> = port_bindings.into_iter().collect();
+    ports.sort_by(|(left, _), (right, _)| left.cmp(right));
+    for (container_port, bindings) in ports {
+        match bindings {
+            Some(bindings) if !bindings.is_empty() => {
+                for binding in bindings {
+                    publishes.push(PortPublish {
+                        container_port: container_port.clone(),
+                        host_ip: non_empty(&binding.host_ip),
+                        host_port: non_empty(&binding.host_port),
+                    });
+                }
+            }
+            _ => publishes.push(PortPublish {
+                container_port,
+                host_ip: None,
+                host_port: None,
+            }),
+        }
+    }
+    publishes
+}
+
+fn normalize_restart_policy(policy: Option<RestartPolicy>) -> Option<RestartPolicySpec> {
+    let policy = policy?;
+    if policy.name.is_empty() || policy.name == "no" {
+        None
+    } else {
+        Some(RestartPolicySpec {
+            name: policy.name,
+            maximum_retry_count: if policy.maximum_retry_count > 0 {
+                Some(policy.maximum_retry_count)
+            } else {
+                None
+            },
+        })
+    }
+}
+
+fn normalized_network_attachments(
+    container: &ContainerInspect,
+    migrated_network_names: &BTreeSet<String>,
+) -> Vec<ContainerNetworkAttachment> {
+    let name = trimmed_name(container);
+    let mut attachments: Vec<_> = container
+        .network_settings
+        .networks
+        .iter()
+        .filter(|(network, _)| migrated_network_names.contains(*network))
+        .map(|(network, endpoint)| ContainerNetworkAttachment {
+            network: network.clone(),
+            aliases: endpoint
+                .aliases
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|alias| alias != name)
+                .collect(),
+        })
+        .collect();
+    attachments.sort_by(|left, right| left.network.cmp(&right.network));
+    attachments
+}
+
+fn build_replacements(
+    images: &[ImagePlan],
+    volumes: &[VolumePlan],
+    networks: &[NetworkPlan],
+    containers: &[ContainerPlan],
+) -> ReplacementSummary {
+    ReplacementSummary {
+        image_tags: images
+            .iter()
+            .flat_map(|image| image.replace_tags.clone())
+            .collect(),
+        volumes: volumes
+            .iter()
+            .filter(|volume| volume.replace_existing)
+            .map(|volume| volume.name.clone())
+            .collect(),
+        networks: networks
+            .iter()
+            .filter(|network| network.replace_existing)
+            .map(|network| network.name.clone())
+            .collect(),
+        containers: containers
+            .iter()
+            .filter(|container| container.replace_existing)
+            .map(|container| container.name.clone())
+            .collect(),
+    }
+}
+
+fn meaningful_tags(tags: &[String]) -> Vec<String> {
+    tags.iter()
+        .filter(|tag| *tag != "<none>:<none>")
+        .cloned()
+        .collect()
+}
+
+fn collect_names<T, F>(items: Vec<T>, name_fn: F) -> BTreeSet<String>
+where
+    F: Fn(&T) -> &str,
+{
+    items
+        .into_iter()
+        .map(|item| name_fn(&item).to_string())
+        .collect()
+}
+
+fn collect_target_tags(images: &[ImageInspect]) -> BTreeSet<String> {
+    images
+        .iter()
+        .flat_map(|image| meaningful_tags(&image.repo_tags))
+        .collect()
+}
+
+fn trimmed_name(container: &ContainerInspect) -> &str {
+    container.name.trim_start_matches('/')
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::docker_types::{EndpointSettings, NetworkSettings};
+    use std::collections::HashMap;
+
+    #[test]
+    fn meaningful_tags_filters_none_entries() {
+        let tags = meaningful_tags(&["<none>:<none>".into(), "nginx:latest".into()]);
+        assert_eq!(tags, vec!["nginx:latest"]);
+    }
+
+    #[test]
+    fn network_aliases_filter_container_name() {
+        let mut networks = HashMap::new();
+        networks.insert(
+            "usernet".to_string(),
+            EndpointSettings {
+                aliases: Some(vec!["demo".into(), "api".into()]),
+            },
+        );
+        let container = ContainerInspect {
+            id: "id".into(),
+            name: "/demo".into(),
+            image: "img".into(),
+            state: crate::docker_types::ContainerState {
+                status: "running".into(),
+                running: true,
+            },
+            config: crate::docker_types::ContainerConfig::default(),
+            host_config: crate::docker_types::HostConfig::default(),
+            network_settings: NetworkSettings { networks },
+            mounts: Vec::new(),
+        };
+        let migrated_network_names = BTreeSet::from(["usernet".to_string()]);
+        let attachments = normalized_network_attachments(&container, &migrated_network_names);
+        assert_eq!(attachments[0].aliases, vec!["api".to_string()]);
+    }
+}

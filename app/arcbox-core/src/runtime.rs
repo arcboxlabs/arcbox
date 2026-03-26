@@ -5,6 +5,7 @@ use crate::container_backend::{DynContainerBackend, create_backend};
 use crate::error::{CoreError, Result};
 use crate::event::EventBus;
 use crate::machine::{MachineManager, MachineState};
+use crate::migration::MigrationManager;
 use crate::vm::VmManager;
 use crate::vm_lifecycle::{DEFAULT_MACHINE_NAME, VmLifecycleConfig, VmLifecycleManager};
 use arcbox_net::NetworkManager;
@@ -102,6 +103,8 @@ pub struct Runtime {
     container_backend: DynContainerBackend,
     /// Network manager.
     network_manager: Arc<NetworkManager>,
+    /// Host-side runtime migration manager.
+    migration_manager: Arc<MigrationManager>,
     /// Inbound listener manager for port forwarding via L2 frame injection (macOS).
     #[cfg(target_os = "macos")]
     inbound_listener: Arc<TokioRwLock<Option<InboundListenerManager>>>,
@@ -177,6 +180,8 @@ impl Runtime {
             DEFAULT_MACHINE_NAME,
         );
 
+        let migration_manager = Arc::new(MigrationManager::new(config.docker.socket_path.clone()));
+
         Ok(Self {
             config,
             event_bus,
@@ -185,6 +190,7 @@ impl Runtime {
             vm_lifecycle,
             container_backend,
             network_manager,
+            migration_manager,
             #[cfg(target_os = "macos")]
             inbound_listener: Arc::new(TokioRwLock::new(None)),
             #[cfg(target_os = "macos")]
@@ -223,6 +229,12 @@ impl Runtime {
     #[must_use]
     pub const fn network_manager(&self) -> &Arc<NetworkManager> {
         &self.network_manager
+    }
+
+    /// Returns the host-side migration manager.
+    #[must_use]
+    pub const fn migration_manager(&self) -> &Arc<MigrationManager> {
+        &self.migration_manager
     }
 
     /// Returns the VM lifecycle manager.
@@ -790,8 +802,10 @@ mod tests {
     fn test_runtime_new_propagates_config_vm_defaults() {
         let temp_dir = tempfile::tempdir().unwrap();
 
-        let mut config = Config::default();
-        config.data_dir = temp_dir.path().to_path_buf();
+        let mut config = Config {
+            data_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
         config.vm.cpus = 6;
         config.vm.memory_mb = 3072;
         config.vm.kernel_path = Some(PathBuf::from("/tmp/arcbox-test-kernel"));

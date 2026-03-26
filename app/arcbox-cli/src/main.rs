@@ -60,6 +60,7 @@ fn main() -> Result<()> {
         .block_on(async {
             match cli.command {
                 Commands::Machine(cmd) => commands::machine::execute(cmd).await,
+                Commands::Migrate(cmd) => commands::migrate::execute(cmd).await,
                 Commands::Sandbox(cmd) => commands::sandbox::execute(cmd).await,
                 Commands::Docker(cmd) => commands::docker::execute(cmd, cli.format).await,
                 Commands::Boot(cmd) => commands::boot::execute(cmd, cli.format).await,

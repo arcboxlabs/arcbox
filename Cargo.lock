@@ -268,6 +268,7 @@ dependencies = [
  "arcbox-fs",
  "arcbox-helper",
  "arcbox-hypervisor",
+ "arcbox-migration",
  "arcbox-net",
  "arcbox-protocol",
  "arcbox-transport",
@@ -475,6 +476,19 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "arcbox-migration"
+version = "0.3.12"
+dependencies = [
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

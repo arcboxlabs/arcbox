@@ -91,14 +91,14 @@ impl Config {
     /// # Errors
     ///
     /// Returns an error if configuration cannot be loaded.
-    #[allow(clippy::result_large_err)]
-    pub fn load() -> Result<Self, figment::Error> {
+    pub fn load() -> Result<Self, Box<figment::Error>> {
         Figment::new()
             .merge(Serialized::defaults(Self::default()))
             .merge(Toml::file(system_config_path()))
             .merge(Toml::file(user_config_path()))
             .merge(Env::prefixed("ARCBOX_").split("_"))
             .extract()
+            .map_err(Box::new)
     }
 
     /// Loads configuration from a specific file.
@@ -106,13 +106,13 @@ impl Config {
     /// # Errors
     ///
     /// Returns an error if the file cannot be read or parsed.
-    #[allow(clippy::result_large_err)]
-    pub fn load_from(path: impl AsRef<std::path::Path>) -> Result<Self, figment::Error> {
+    pub fn load_from(path: impl AsRef<std::path::Path>) -> Result<Self, Box<figment::Error>> {
         Figment::new()
             .merge(Serialized::defaults(Self::default()))
             .merge(Toml::file(path))
             .merge(Env::prefixed("ARCBOX_").split("_"))
             .extract()
+            .map_err(Box::new)
     }
 
     /// Returns the path to the persistent data directory (`data/`).

@@ -30,7 +30,7 @@
 //! - Image management
 //! - Virtual machine management
 //! - Guest agent operations
-//! - Network, volume, and system operations (API layer)
+//! - Network, volume, system, and migration operations (API layer)
 
 mod generated;
 
@@ -105,7 +105,7 @@ pub mod agent {
 
 /// API types (from api.proto).
 ///
-/// Re-exports network, volume, and system service types.
+/// Re-exports network, volume, system, and migration service types.
 pub mod api {
     // Network service types
     pub use super::v1::{
@@ -124,6 +124,11 @@ pub mod api {
     pub use super::v1::{
         CreateVolumeRequest, CreateVolumeResponse, InspectVolumeRequest, ListVolumesRequest,
         ListVolumesResponse, RemoveVolumeRequest, VolumeInfo, VolumeUsage,
+    };
+
+    // Migration service types
+    pub use super::v1::{
+        PrepareMigrationRequest, PrepareMigrationResponse, RunMigrationEvent, RunMigrationRequest,
     };
 
     // Shell/interactive session types
@@ -185,6 +190,11 @@ pub use v1::{
 pub use v1::{
     CreateVolumeRequest, CreateVolumeResponse, InspectVolumeRequest, ListVolumesRequest,
     ListVolumesResponse, RemoveVolumeRequest, VolumeInfo, VolumeUsage,
+};
+
+// API types - Migration
+pub use v1::{
+    PrepareMigrationRequest, PrepareMigrationResponse, RunMigrationEvent, RunMigrationRequest,
 };
 
 // API types - Shell
