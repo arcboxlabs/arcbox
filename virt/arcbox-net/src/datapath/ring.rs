@@ -384,16 +384,19 @@ impl<T: Copy> MpmcRing<T> {
                 return None;
             }
 
-            let idx = tail & self.mask;
-            let item = unsafe { (*self.buffer[idx].get()).assume_init_read() };
-
+            // CAS first to claim ownership of this slot, then read.
+            // Reading before CAS would cause double-read/double-free on failure.
             match self.tail.0.compare_exchange_weak(
                 tail,
                 tail.wrapping_add(1),
                 Ordering::AcqRel,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => return Some(item),
+                Ok(_) => {
+                    let idx = tail & self.mask;
+                    // SAFETY: We won the CAS, so we exclusively own this slot.
+                    return Some(unsafe { (*self.buffer[idx].get()).assume_init_read() });
+                }
                 Err(t) => {
                     tail = t;
                     std::hint::spin_loop();
