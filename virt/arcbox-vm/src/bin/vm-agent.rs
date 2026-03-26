@@ -534,7 +534,11 @@ mod agent {
         let slave_fd: RawFd = slave.as_raw_fd();
 
         match unsafe { fork() } {
-            Err(e) => eprintln!("agent: fork: {e}"),
+            Err(e) => {
+                // SAFETY: fork failed; close the unowned master fd to prevent leak.
+                unsafe { libc::close(master_fd) };
+                eprintln!("agent: fork: {e}");
+            }
 
             Ok(ForkResult::Child) => {
                 // SAFETY: close the inherited master fd in the child process.
