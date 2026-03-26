@@ -26,7 +26,7 @@ pub fn iface_exists(iface: &str) -> bool {
 /// Returns true if the kernel routing table has a route for `ip` via `dev`.
 #[cfg(target_os = "linux")]
 pub fn has_route(ip: &str, dev: &str) -> bool {
-    std::process::Command::new("ip")
+    std::process::Command::new("/usr/sbin/ip")
         .args(["route", "show", ip])
         .output()
         .map(|o| {
@@ -39,7 +39,7 @@ pub fn has_route(ip: &str, dev: &str) -> bool {
 /// Returns the point-to-point peer address configured on `iface`, if any.
 #[cfg(target_os = "linux")]
 pub fn get_peer_addr(iface: &str) -> Option<String> {
-    let output = std::process::Command::new("ip")
+    let output = std::process::Command::new("/usr/sbin/ip")
         .args(["addr", "show", "dev", iface])
         .output()
         .ok()?;

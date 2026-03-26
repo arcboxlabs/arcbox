@@ -216,7 +216,7 @@ fn multiple_taps_are_isolated() {
     );
 
     // Neither TAP is attached to a bridge (no "master" in ip link output).
-    let out1 = std::process::Command::new("ip")
+    let out1 = std::process::Command::new("/usr/sbin/ip")
         .args(["link", "show", &a1.tap_name])
         .output()
         .unwrap();
