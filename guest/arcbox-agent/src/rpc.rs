@@ -138,7 +138,7 @@ pub async fn read_message<R: AsyncRead + Unpin>(
     let msg_type_raw = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
 
     let msg_type = MessageType::from_u32(msg_type_raw)
-        .context(format!("unknown message type: {msg_type_raw}"))?;
+        .with_context(|| format!("unknown message type: {msg_type_raw}"))?;
 
     // Remaining bytes = length - 4 (type already consumed from length).
     let remaining = length.saturating_sub(4);

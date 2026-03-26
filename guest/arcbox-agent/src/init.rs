@@ -75,15 +75,19 @@ mod platform {
     /// Without this, PID 1 inherits the kernel default (soft=1024, hard=4096)
     /// and containers that need `ulimit -n` > 4096 fail with EINVAL.
     fn raise_fd_limits() {
-        const TARGET_NOFILE: u64 = 1_048_576;
-
-        // Ensure the kernel ceiling (fs.nr_open) is at least TARGET_NOFILE.
+        // Ensure the kernel ceiling (fs.nr_open) is at least the target.
         // The default is already 1048576, but guard against custom kernels.
-        ensure_sysctl_at_least("/proc/sys/fs/nr_open", TARGET_NOFILE);
+        ensure_sysctl_at_least("/proc/sys/fs/nr_open", super::NOFILE_LIMIT);
 
-        // Raise our own limit — all children inherit this via fork/exec.
-        if let Err(e) = setrlimit(Resource::RLIMIT_NOFILE, TARGET_NOFILE, TARGET_NOFILE) {
-            tracing::warn!(error = %e, "failed to raise RLIMIT_NOFILE");
+        // Only raise — never lower a previously higher inherited limit.
+        let target = super::NOFILE_LIMIT;
+        match nix::sys::resource::getrlimit(Resource::RLIMIT_NOFILE) {
+            Ok((soft, hard)) if soft >= target && hard >= target => {}
+            _ => {
+                if let Err(e) = setrlimit(Resource::RLIMIT_NOFILE, target, target) {
+                    tracing::warn!(error = %e, "failed to raise RLIMIT_NOFILE");
+                }
+            }
         }
     }
 
@@ -570,6 +574,11 @@ exit 0
     }
 }
 
+/// Target NOFILE limit for the guest VM, matching Docker Desktop / OrbStack.
+/// Used by both `raise_fd_limits()` and `docker_daemon_json()`.
+#[cfg(any(target_os = "linux", test))]
+const NOFILE_LIMIT: u64 = 1_048_576;
+
 /// Returns the Docker daemon.json content as a string.
 ///
 /// Extracted as a pure function so the output contract (DNS + default
@@ -579,7 +588,7 @@ fn docker_daemon_json() -> String {
     serde_json::json!({
         "dns": ["10.0.2.1"],
         "default-ulimits": {
-            "nofile": { "Name": "nofile", "Soft": 1048576, "Hard": 1048576 }
+            "nofile": { "Name": "nofile", "Soft": NOFILE_LIMIT, "Hard": NOFILE_LIMIT }
         }
     })
     .to_string()
