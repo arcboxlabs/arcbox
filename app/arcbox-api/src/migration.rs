@@ -76,8 +76,13 @@ impl migration_service_server::MigrationService for MigrationServiceImpl {
             .await
             .map_err(ApiError::from)?;
 
-        let stream = UnboundedReceiverStream::new(receiver)
-            .map(|r| r.map_err(|e| Status::internal(e.to_string())));
+        #[allow(clippy::result_large_err)]
+        fn stream_status(
+            result: arcbox_core::Result<RunMigrationEvent>,
+        ) -> Result<RunMigrationEvent, Status> {
+            result.map_err(|e| Status::internal(e.to_string()))
+        }
+        let stream = UnboundedReceiverStream::new(receiver).map(stream_status);
 
         Ok(Response::new(Box::pin(stream)))
     }
