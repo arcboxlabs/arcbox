@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.10](https://github.com/arcboxlabs/arcbox/compare/v0.3.9...v0.3.10) (2026-03-26)
+
+
+### Features
+
+* **helper:** default to persistent mode, add --idle-exit flag ([#117](https://github.com/arcboxlabs/arcbox/issues/117)) ([5ec0b33](https://github.com/arcboxlabs/arcbox/commit/5ec0b333faf3d1ecbb892e8777dc79fd1e6851a2))
+
+
+### Bug Fixes
+
+* **guest-agent:** raise inherited nofile limits ([#120](https://github.com/arcboxlabs/arcbox/issues/120)) ([d836dbe](https://github.com/arcboxlabs/arcbox/commit/d836dbe83a4da02495d06a9484762b1ed6b2e3b8))
+* vmnet relay thread leak, MAC mismatch, and idle backoff ([#115](https://github.com/arcboxlabs/arcbox/issues/115)) ([c91d7fa](https://github.com/arcboxlabs/arcbox/commit/c91d7fabd456ff6cfa2d5254c825eb5b2faffdc8))
+
+
+### Miscellaneous Chores
+
+* remove visual section dividers from test/small files ([#118](https://github.com/arcboxlabs/arcbox/issues/118)) ([b01b547](https://github.com/arcboxlabs/arcbox/commit/b01b54713299cd0c72f50c3ca2f97b473173ab48))
+
 ## [0.3.9](https://github.com/arcboxlabs/arcbox/compare/v0.3.8...v0.3.9) (2026-03-25)
 
 
