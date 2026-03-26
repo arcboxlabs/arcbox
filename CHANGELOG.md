@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.13](https://github.com/arcboxlabs/arcbox/compare/v0.3.12...v0.3.13) (2026-03-26)
+
+
+### Features
+
+* **net:** point-to-point TAP networking with ioctl for sandbox isolation ([a78edcf](https://github.com/arcboxlabs/arcbox/commit/a78edcf9a477deb1b3f12ef572af8667aa048783))
+
+
+### Bug Fixes
+
+* **net:** add serde default for prefix_len backwards compatibility ([bc24efc](https://github.com/arcboxlabs/arcbox/commit/bc24efc8c04d9e7d7aadf8a0e47dfc0ce9cdb557))
+* **net:** address review feedback on sandbox networking PR ([9fa5fc7](https://github.com/arcboxlabs/arcbox/commit/9fa5fc76c02a3940b3c6ec4db3c7770a3ee0f500))
+* **net:** restore ICMP identifier and filter Echo Reply in proxy ([14928e8](https://github.com/arcboxlabs/arcbox/commit/14928e8dd4a0959046e4e40b0bad41445787349e))
+* **test:** use absolute /usr/sbin/ip path in integration tests ([cebed05](https://github.com/arcboxlabs/arcbox/commit/cebed05163871652d427f181c7b367dada6b4fa0))
+
+
+### Tests
+
+* **net:** add integration tests for point-to-point TAP networking ([357973e](https://github.com/arcboxlabs/arcbox/commit/357973ed693d7a9dbf0ebd05183d71cd33cd870e))
+
+
+### Documentation
+
+* **contributing:** fix consistency issues and align with Makefile ([#126](https://github.com/arcboxlabs/arcbox/issues/126)) ([2d77d91](https://github.com/arcboxlabs/arcbox/commit/2d77d911cb544591aa537af19c35acd510edb291))
+
+
+### Miscellaneous Chores
+
+* gitignore profraw/profdata and remove scratch notes ([694d681](https://github.com/arcboxlabs/arcbox/commit/694d6812d91c4d807f930e0164de2db8cfaa71ea))
+* **net:** remove dead bridge field and fix per-packet log levels ([03b30ef](https://github.com/arcboxlabs/arcbox/commit/03b30ef26d8b53daed84c1e8fdd57f9807949ddc))
+
 ## [0.3.12](https://github.com/arcboxlabs/arcbox/compare/v0.3.11...v0.3.12) (2026-03-26)
 
 
