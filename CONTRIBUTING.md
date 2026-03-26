@@ -6,22 +6,18 @@ improvements, and code.
 ## Building from Source
 
 ```bash
-# Clone
 git clone https://github.com/arcboxlabs/arcbox.git
 cd arcbox
 
-# Build
-cargo build -p arcbox-cli -p arcbox-daemon
+# Build, sign, and run the daemon (requires Developer ID certificate)
+make run-daemon
 
-# Sign the daemon (see "Code Signing" below)
-codesign --force --options runtime \
-    --entitlements bundle/arcbox.entitlements \
-    -s "Developer ID Application: ArcBox, Inc. (422ACSY6Y5)" \
-    target/debug/arcbox-daemon
-
-# Run
-./target/debug/arcbox-daemon
+# In another terminal, run the privileged helper (requires sudo)
+make run-helper
 ```
+
+The Makefile handles building, code signing, and launching. See
+[Code Signing](#code-signing) for certificate setup.
 
 ### Prerequisites
 
@@ -29,15 +25,39 @@ codesign --force --options runtime \
 - macOS 13+ with Xcode Command Line Tools (`xcode-select --install`)
 - ~500 MB disk space
 - ArcBox Developer ID certificate + provisioning profile (see [Code Signing](#code-signing))
+- [musl-cross](https://github.com/nicklockwood/musl-cross) for guest agent cross-compilation (see below)
 
-### Guest Agent Cross-Compilation (Optional)
+### Guest Agent Cross-Compilation
 
-The `arcbox-agent` runs inside the Linux guest VM and must be cross-compiled:
+The `arcbox-agent` runs inside the Linux guest VM. Without it, the VM
+cannot boot. Build and install it before running the daemon:
 
 ```bash
+# One-time toolchain setup
 brew install FiloSottile/musl-cross/musl-cross
 rustup target add aarch64-unknown-linux-musl
-cargo build -p arcbox-agent --target aarch64-unknown-linux-musl --release
+
+# Build the agent (always builds in release mode)
+make build-agent
+
+# Copy to the data directory so the daemon can find it
+mkdir -p ~/.arcbox/bin
+cp target/aarch64-unknown-linux-musl/release/arcbox-agent ~/.arcbox/bin/
+```
+
+### Manual Build (Without Make)
+
+If you prefer not to use `make`:
+
+```bash
+# Build CLI and daemon
+cargo build -p arcbox-cli -p arcbox-daemon
+
+# Sign the daemon (see "Code Signing" below)
+make sign-daemon
+
+# Run
+./target/debug/arcbox-daemon
 ```
 
 ## Project Structure
@@ -49,11 +69,16 @@ rpc/             Protobuf definitions, gRPC services, vsock/unix transport
 runtime/         Container state, OCI image/runtime
 app/             Core orchestration, API server, Docker Engine API, CLI, daemon
 guest/           In-VM agent (cross-compiled for Linux)
+bundle/          Entitlements, launchd plists, app bundle resources
+scripts/         Dev workflow scripts (boot asset setup, rebuild-and-run)
+tests/           Test resources and fixture build scripts
+docs/            Supplementary docs (boot assets, daemon lifecycle, data dirs)
 ```
 
 ## Code Standards
 
-- Run `cargo clippy -- -D warnings` and `cargo fmt` before committing -- zero warnings required
+- Run `make check` before committing -- zero warnings required (runs
+  `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --check`)
 - All code comments must be in English
 - `unsafe` blocks require a `// SAFETY:` comment explaining the invariant
 - Use `thiserror` for crate-specific errors, `anyhow` in CLI/API layers
@@ -91,6 +116,14 @@ work — the kernel kills the process on launch.
 
 ### Signing after build
 
+The Makefile auto-detects the signing identity from Keychain:
+
+```bash
+make sign-daemon
+```
+
+To sign manually (or to override the identity):
+
 ```bash
 codesign --force --options runtime \
     --entitlements bundle/arcbox.entitlements \
@@ -105,19 +138,13 @@ codesign --force --options runtime \
 security find-identity -v -p codesigning | grep "ArcBox"
 # Expected: "Developer ID Application: ArcBox, Inc. (422ACSY6Y5)"
 
-# 2. Confirm signing succeeds
-codesign --force --options runtime \
-    --entitlements bundle/arcbox.entitlements \
-    -s "Developer ID Application: ArcBox, Inc. (422ACSY6Y5)" \
-    target/debug/arcbox-daemon
-
-# 3. Confirm entitlements are embedded
+# 2. Confirm entitlements are embedded
 codesign -d --entitlements - target/debug/arcbox-daemon
 # Should list com.apple.security.virtualization, com.apple.vm.networking, etc.
 
-# 4. Confirm the daemon starts
-target/debug/arcbox-daemon
-# Should print "ArcBox daemon started" (Ctrl+C to stop)
+# 3. Confirm the daemon starts
+make run-daemon
+# Should print startup logs (Ctrl+C to stop)
 ```
 
 ### Troubleshooting
@@ -157,7 +184,7 @@ socket at `/var/run/arcbox-helper.sock`.
 ### Architecture
 
 ```
-arcbox-daemon / arcbox-cli
+arcbox-daemon / abctl
         │  tarpc (bincode over Unix socket)
         ▼
   arcbox-helper  (runs as root)
@@ -168,14 +195,12 @@ arcbox-daemon / arcbox-cli
         └── cli     → /usr/local/bin/{docker,...} symlinks
 ```
 
-### Production Registration (`arcbox install`)
+### Production Registration
 
 ```bash
-# Build
-cargo build --release -p arcbox-helper
-
-# Install (requires sudo — copies binary, installs plist, bootstraps launchd)
-sudo arcbox install
+# Build everything, then install (requires sudo)
+cargo build -p arcbox-cli -p arcbox-helper
+sudo ./target/debug/abctl _install
 ```
 
 This does three things:
@@ -206,19 +231,6 @@ make run-helper HELPER_SOCKET=/var/run/arcbox-helper.sock
 make run-daemon HELPER_SOCKET=/var/run/arcbox-helper.sock
 ```
 
-Or run manually without Make:
-
-```bash
-# Build
-cargo build -p arcbox-helper
-
-# Run with default /tmp socket
-sudo ARCBOX_HELPER_SOCKET=/tmp/arcbox-helper.sock target/debug/arcbox-helper
-
-# In another terminal, the daemon picks it up automatically via the script:
-./scripts/rebuild-run-daemon.sh
-```
-
 #### Key Development Details
 
 | Aspect | Behavior |
@@ -242,15 +254,6 @@ If you have the helper registered via launchd and want to test a new build:
 make reload-helper   # bootout → rebuild → copy → bootstrap
 ```
 
-Or do it manually:
-
-```bash
-cargo build -p arcbox-helper
-sudo launchctl bootout system/com.arcboxlabs.desktop.helper
-sudo cp target/debug/arcbox-helper /usr/local/libexec/arcbox-helper
-sudo launchctl bootstrap system /Library/LaunchDaemons/com.arcboxlabs.desktop.helper.plist
-```
-
 To do a fresh launchd install from scratch:
 
 ```bash
@@ -261,22 +264,14 @@ Or skip launchd entirely and use `make run-helper` as described above.
 
 ## Uninstall
 
+The CLI handles full uninstall — daemon, helper, launchd plists, sockets,
+symlinks, Docker context, and data:
+
 ```bash
-# Stop the daemon
-arcbox daemon stop
-
-# Restore Docker Desktop as default
-arcbox docker disable
-
-# Remove ArcBox files
-rm -rf ~/.arcbox
-rm /usr/local/bin/arcbox
-rm /usr/local/bin/arcbox-daemon
-
-# Remove the launchd service (if installed)
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/dev.arcbox.daemon.plist
-rm ~/Library/LaunchAgents/dev.arcbox.daemon.plist
+sudo abctl _uninstall
 ```
+
+Use `--keep-data` to preserve container data (`~/.arcbox/data`).
 
 ## License
 
