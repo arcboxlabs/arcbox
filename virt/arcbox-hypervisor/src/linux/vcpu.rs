@@ -295,10 +295,13 @@ impl KvmVcpu {
                         (self.vcpu_fd.kvm_run() as *const _ as *const u8)
                             .add(io.data_offset as usize)
                     };
+                    // SAFETY: data_ptr points into the kvm_run mmap region at
+                    // an offset determined by KVM. It may not be aligned for
+                    // u16/u32, so we use read_unaligned to avoid UB.
                     let data = match io.size {
                         1 => (unsafe { *data_ptr }) as u64,
-                        2 => (unsafe { *(data_ptr as *const u16) }) as u64,
-                        4 => (unsafe { *(data_ptr as *const u32) }) as u64,
+                        2 => (unsafe { std::ptr::read_unaligned(data_ptr as *const u16) }) as u64,
+                        4 => (unsafe { std::ptr::read_unaligned(data_ptr as *const u32) }) as u64,
                         _ => 0,
                     };
                     VcpuExit::IoOut {
