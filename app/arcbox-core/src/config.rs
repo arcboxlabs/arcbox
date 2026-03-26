@@ -36,8 +36,8 @@
 
 use arcbox_constants::ports::DOCKER_API_VSOCK_PORT;
 use figment::{
-    providers::{Env, Format, Serialized, Toml},
     Figment,
+    providers::{Env, Format, Serialized, Toml},
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

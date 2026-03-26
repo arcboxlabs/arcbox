@@ -188,22 +188,22 @@ mod tests {
         fn connect(
             &self,
         ) -> std::pin::Pin<
-            Box<
-                dyn std::future::Future<Output = Result<TokioIo<RawFdStream>>> + Send + '_,
-            >,
+            Box<dyn std::future::Future<Output = Result<TokioIo<RawFdStream>>> + Send + '_>,
         > {
             let addr = self.addr;
             Box::pin(async move {
-                let stream = tokio::net::TcpStream::connect(addr).await.map_err(|e| {
-                    DockerError::Server(format!("test connect failed: {e}"))
-                })?;
-                let fd = {
-                    use std::os::fd::AsRawFd;
-                    stream.as_raw_fd()
+                let stream = tokio::net::TcpStream::connect(addr)
+                    .await
+                    .map_err(|e| DockerError::Server(format!("test connect failed: {e}")))?;
+                let owned_fd = {
+                    use std::os::fd::FromRawFd;
+                    use std::os::fd::IntoRawFd;
+                    // Convert TcpStream → OwnedFd via raw fd round-trip.
+                    let raw = stream.into_std().unwrap().into_raw_fd();
+                    // SAFETY: we just extracted this fd from a valid TcpStream.
+                    unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) }
                 };
-                // Leak the TcpStream so the fd stays valid inside RawFdStream.
-                std::mem::forget(stream);
-                Ok(TokioIo::new(RawFdStream::new(fd)?))
+                Ok(TokioIo::new(RawFdStream::new(owned_fd)?))
             })
         }
     }

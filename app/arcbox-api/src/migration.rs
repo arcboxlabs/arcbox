@@ -19,10 +19,12 @@ use crate::grpc::SharedRuntime;
 /// Extension trait for obtaining the runtime from a deferred handle
 /// (duplicates the one in `grpc::mod` because that trait is `pub(super)`).
 trait SharedRuntimeReady {
+    #[allow(clippy::result_large_err)]
     fn ready(&self) -> Result<&std::sync::Arc<arcbox_core::Runtime>, Status>;
 }
 
 impl SharedRuntimeReady for SharedRuntime {
+    #[allow(clippy::result_large_err)]
     fn ready(&self) -> Result<&std::sync::Arc<arcbox_core::Runtime>, Status> {
         self.get()
             .ok_or_else(|| Status::unavailable("daemon is starting, runtime not ready yet"))
@@ -80,4 +82,3 @@ impl migration_service_server::MigrationService for MigrationServiceImpl {
         Ok(Response::new(Box::pin(stream)))
     }
 }
-

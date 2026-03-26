@@ -35,7 +35,6 @@ use arcbox_constants::cmdline::{
     DOCKER_DATA_DEVICE_KEY as DOCKER_DATA_DEVICE_CMDLINE_KEY, GUEST_DOCKER_VSOCK_PORT_KEY,
 };
 use arcbox_error::CommonError;
-use std::fmt::Write as _;
 use std::fs::OpenOptions;
 use std::io::Seek;
 use std::io::SeekFrom;

@@ -32,8 +32,6 @@ const DEFAULT_GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 64, 2);
 type InboundRulesMap = Arc<TokioRwLock<HashMap<String, Vec<(Ipv4Addr, u16, InboundProtocol)>>>>;
 const REQUIRED_RUNTIME_ASSETS: [&str; 4] =
     ["dockerd", "containerd", "containerd-shim-runc-v2", "runc"];
-#[cfg(target_os = "macos")]
-type InboundRuleMap = HashMap<String, Vec<(Ipv4Addr, u16, InboundProtocol)>>;
 
 /// Checks that a file exists and has at least one executable permission bit set.
 fn check_executable(path: &Path, context: &str) -> Result<()> {
@@ -183,7 +181,6 @@ impl Runtime {
         );
 
         let migration_manager = Arc::new(MigrationManager::new(config.docker.socket_path.clone()));
-
 
         Ok(Self {
             config,
