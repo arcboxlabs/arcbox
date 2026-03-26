@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.12](https://github.com/arcboxlabs/arcbox/compare/v0.3.11...v0.3.12) (2026-03-26)
+
+
+### Bug Fixes
+
+* address PR review comments ([866a0cc](https://github.com/arcboxlabs/arcbox/commit/866a0cc9828f26a9a0f0861cd582af6a8cf85c08))
+* address second round of review comments ([0b1b5b2](https://github.com/arcboxlabs/arcbox/commit/0b1b5b2c31d7c19bed154415be2a4d1cbd884200))
+* **core:** close serial FDs on VM stop instead of leaking via mem::forget ([33f3d5f](https://github.com/arcboxlabs/arcbox/commit/33f3d5f9765a677bc183d25564f9ff2ec324e25e))
+* **core:** propagate skip_stop_on_drop to DarwinVm and preserve network cleanup ([f1e84f0](https://github.com/arcboxlabs/arcbox/commit/f1e84f0202e5b93bb7bb24d8505a122d1d35eb36))
+* **docker:** forward all non-hop-by-hop headers to guest dockerd ([8b65f2d](https://github.com/arcboxlabs/arcbox/commit/8b65f2de2407872e73836ade0b78ab1325e92155))
+* **fs:** replace unaligned pointer casts with read_unaligned in FUSE dispatcher ([8cd1e45](https://github.com/arcboxlabs/arcbox/commit/8cd1e454067b24ef224976cf0355a9d01bfd0837))
+* **hypervisor:** use read_unaligned for KVM IO data access ([d20c484](https://github.com/arcboxlabs/arcbox/commit/d20c4840d598a20ea15e4df572499c2efaeb4b48))
+* **net:** correct ConnTrack expiry timer using process-wide epoch ([3c9edcb](https://github.com/arcboxlabs/arcbox/commit/3c9edcbcfa0564253ce9f073d7b20574fa3c1978))
+* **net:** correct MPMC ring CAS ordering to prevent data race ([8efd12f](https://github.com/arcboxlabs/arcbox/commit/8efd12f4df350e49d53f8b31912f849891d926ea))
+* **net:** replace ConnTrack fast cache raw pointers with Arc ([d5d52d6](https://github.com/arcboxlabs/arcbox/commit/d5d52d6313d344bbcf7236f1e00d1dcf37d6c4dc))
+* **net:** rewrite MPMC ring as Vyukov bounded queue with per-slot sequences ([2a65966](https://github.com/arcboxlabs/arcbox/commit/2a659661478750ae112376356f7fd02ad48222c6))
+* **vm-agent:** close master_fd on fork failure to prevent leak ([9f63bef](https://github.com/arcboxlabs/arcbox/commit/9f63befa7e832739c42bab5cb3eef915529c9ca9))
+* **vm-agent:** fix PTY master_fd double-close via ownership transfer ([f7a79b0](https://github.com/arcboxlabs/arcbox/commit/f7a79b055e991d8d5df7a6152b81d5511b2de76e))
+* **vm-agent:** import IntoRawFd trait for into_raw_fd() call ([971fdcb](https://github.com/arcboxlabs/arcbox/commit/971fdcbc3ed57fd44ed87c1ed20161e69098943a))
+* **vmm:** drop trigger_callback lock before invoking IRQ callback ([b35b14d](https://github.com/arcboxlabs/arcbox/commit/b35b14d4faac78797ae678a1b5701fc457d084e3))
+
 ## [0.3.11](https://github.com/arcboxlabs/arcbox/compare/v0.3.10...v0.3.11) (2026-03-26)
 
 
