@@ -8,9 +8,7 @@
 #![allow(unused_mut)]
 #![allow(clippy::all)]
 
-// ============================================================================
 // Datapath Integration Tests
-// ============================================================================
 
 mod datapath {
     use arcbox_net::datapath::ring::MpmcRing;
@@ -186,9 +184,7 @@ mod datapath {
     }
 }
 
-// ============================================================================
 // NAT Engine Integration Tests
-// ============================================================================
 
 mod nat_engine {
     use arcbox_net::nat_engine::checksum::incremental_checksum_update_32;
@@ -422,9 +418,7 @@ mod nat_engine {
     }
 }
 
-// ============================================================================
 // Concurrent Stress Tests
-// ============================================================================
 
 mod stress {
     use arcbox_net::datapath::ring::MpmcRing;
@@ -587,9 +581,7 @@ mod stress {
     }
 }
 
-// ============================================================================
 // Error Handling Tests
-// ============================================================================
 
 mod error_handling {
     use arcbox_net::nat_engine::{NatDirection, NatEngine, TranslateError};
@@ -654,9 +646,7 @@ mod error_handling {
     }
 }
 
-// ============================================================================
 // NetworkManager Tests
-// ============================================================================
 
 mod network_manager {
     use arcbox_net::{NetConfig, NetworkManager, NetworkMode};

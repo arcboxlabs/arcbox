@@ -27,9 +27,7 @@ use arcbox_hypervisor::{
     },
 };
 
-// ============================================================================
 // Basic Snapshot Tests
-// ============================================================================
 
 /// Test basic VM snapshot creation without devices.
 ///
@@ -310,9 +308,7 @@ fn test_vm_restore_vcpu_id_mismatch() {
     println!("vCPU ID mismatch detection test passed");
 }
 
-// ============================================================================
 // VmSnapshot Serialization Tests
-// ============================================================================
 
 /// Test VmSnapshot JSON serialization/deserialization.
 ///
@@ -460,9 +456,7 @@ fn test_snapshot_serialization_with_compression() {
     println!("Snapshot compression metadata serialization test passed");
 }
 
-// ============================================================================
 // Incremental Snapshot Tests
-// ============================================================================
 
 /// Test incremental snapshot with parent_id.
 ///
@@ -636,9 +630,7 @@ fn test_incremental_snapshot_chain() {
     println!("Incremental snapshot chain test passed");
 }
 
-// ============================================================================
 // Device Restore Tests
-// ============================================================================
 
 /// Test device configuration validation during restore.
 ///
@@ -694,9 +686,7 @@ fn test_device_restore_validation() {
     println!("Device restore validation test passed");
 }
 
-// ============================================================================
 // Memory Snapshot Tests
-// ============================================================================
 
 /// Test memory content preservation concept.
 ///
@@ -771,9 +761,7 @@ fn test_memory_snapshot_concept() {
     println!("Memory snapshot concept test passed");
 }
 
-// ============================================================================
 // Full VM Snapshot Integration Tests (Requires Privileges)
-// ============================================================================
 
 /// Test full VM snapshot creation flow.
 ///
@@ -828,9 +816,7 @@ fn test_snapshot_during_vm_execution() {
     println!("Snapshot during execution test requires privileged execution");
 }
 
-// ============================================================================
 // VcpuSnapshot Architecture Tests
-// ============================================================================
 
 /// Test VcpuSnapshot creation for x86_64 architecture.
 #[cfg(target_os = "macos")]
