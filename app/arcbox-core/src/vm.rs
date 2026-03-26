@@ -966,7 +966,7 @@ impl VmManager {
     /// Returns the vmnet bridge interface name for a running VM.
     ///
     /// After vmnet creates the shared interface, the system also creates a
-    /// bridge with a vmenet member. We resolve it via the MAC that vmnet
+    /// bridge with a vmnet member. We resolve it via the MAC that vmnet
     /// reported. Since vmnet has already started, the bridge is immediately
     /// present — no retry needed.
     #[cfg(all(target_os = "macos", feature = "vmnet"))]

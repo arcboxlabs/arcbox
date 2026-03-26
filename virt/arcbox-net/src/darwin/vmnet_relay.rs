@@ -61,7 +61,7 @@ impl VmnetRelay {
         // vmnet → guest: blocking thread
         let vmnet_read = Arc::clone(&self.vmnet);
         let cancel_read = self.cancel.clone();
-        let vmnet_to_guest = tokio::task::spawn_blocking(move || {
+        let mut vmnet_to_guest = tokio::task::spawn_blocking(move || {
             let mut buf = vec![0u8; MAX_FRAME_SIZE];
             loop {
                 if cancel_read.is_cancelled() {
@@ -70,7 +70,7 @@ impl VmnetRelay {
                 match vmnet_read.read_packet(&mut buf) {
                     Ok(0) => {
                         // No data available, brief yield.
-                        std::thread::sleep(std::time::Duration::from_micros(100));
+                        std::thread::sleep(std::time::Duration::from_millis(1));
                     }
                     Ok(n) => {
                         let fd = reader_fd.as_raw_fd();
@@ -152,8 +152,18 @@ impl VmnetRelay {
 
         tokio::select! {
             () = self.cancel.cancelled() => {}
-            _ = vmnet_to_guest => {}
+            _ = &mut vmnet_to_guest => {}
             () = guest_to_vmnet => {}
+        }
+
+        // Ensure the blocking thread exits regardless of which branch won.
+        self.cancel.cancel();
+        if let Err(e) = vmnet_to_guest.await {
+            if e.is_panic() {
+                tracing::error!("vmnet→guest blocking task panicked: {e}");
+            } else {
+                tracing::debug!("vmnet→guest blocking task join error: {e}");
+            }
         }
 
         Ok(())

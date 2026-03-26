@@ -902,8 +902,11 @@ impl VirtualMachine for DarwinVm {
             VirtioDeviceType::Net => {
                 let network_device = if let Some(fd) = device.net_fd {
                     // File-handle attachment: host owns the full network stack.
-                    NetworkDeviceConfiguration::file_handle(fd)
-                        .map_err(|e| HypervisorError::DeviceError(e.to_string()))?
+                    match device.mac_address.as_deref() {
+                        Some(mac) => NetworkDeviceConfiguration::file_handle_with_mac(fd, mac),
+                        None => NetworkDeviceConfiguration::file_handle(fd),
+                    }
+                    .map_err(|e| HypervisorError::DeviceError(e.to_string()))?
                 } else {
                     // Fallback to Apple's built-in NAT attachment.
                     match device.mac_address.as_deref() {
