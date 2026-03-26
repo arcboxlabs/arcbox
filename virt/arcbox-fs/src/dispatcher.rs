@@ -5,13 +5,12 @@
 //! raw FUSE protocol and the [`PassthroughFs`] implementation.
 
 // Allow casts and pointer operations for FUSE protocol binary compatibility.
-// cast_ptr_alignment: FUSE structs are cast from raw VirtIO queue bytes; the
-// VirtIO queue allocator guarantees the required alignment.
+// FUSE structs arriving from VirtIO queue memory may be unaligned, so all
+// deserialization uses `std::ptr::read_unaligned` instead of reference casts.
 #![allow(
     clippy::cast_sign_loss,
     clippy::cast_possible_wrap,
     clippy::cast_possible_truncation,
-    clippy::cast_ptr_alignment,
     clippy::ptr_as_ptr,
     clippy::borrow_as_ptr,
     clippy::significant_drop_tightening,
@@ -219,14 +218,16 @@ impl FuseDispatcher {
             return Err(FsError::Fuse("request too small".to_string()));
         }
 
-        let header = unsafe { &*(request.as_ptr() as *const FuseInHeader) };
+        // SAFETY: FuseInHeader is a packed FUSE protocol struct that may arrive at
+        // an unaligned offset from VirtIO queue memory; read_unaligned avoids UB.
+        let header = unsafe { std::ptr::read_unaligned(request.as_ptr() as *const FuseInHeader) };
         let body = &request[FuseInHeader::SIZE..];
 
         // Parse opcode
         let opcode = FuseOpcode::from_u32(header.opcode)
             .ok_or_else(|| FsError::Fuse(format!("unknown opcode: {}", header.opcode)))?;
 
-        let ctx = RequestContext::from(header);
+        let ctx = RequestContext::from(&header);
         let mut response = ResponseBuilder::new();
 
         // Dispatch to handler
@@ -282,7 +283,8 @@ impl FuseDispatcher {
             return;
         }
 
-        let init_in = unsafe { &*(body.as_ptr() as *const FuseInitIn) };
+        // SAFETY: FuseInitIn may sit at an unaligned offset in the VirtIO buffer.
+        let init_in = unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseInitIn) };
 
         // Check version compatibility
         if init_in.major < FUSE_KERNEL_VERSION {
@@ -327,7 +329,9 @@ impl FuseDispatcher {
 
     fn handle_forget(&self, ctx: &RequestContext, body: &[u8], response: &mut ResponseBuilder) {
         if body.len() >= size_of::<FuseForgetIn>() {
-            let forget_in = unsafe { &*(body.as_ptr() as *const FuseForgetIn) };
+            // SAFETY: FuseForgetIn may sit at an unaligned offset in the VirtIO buffer.
+            let forget_in =
+                unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseForgetIn) };
             self.fs.forget(ctx.nodeid, forget_in.nlookup);
         }
         // FORGET has no response
@@ -359,7 +363,8 @@ impl FuseDispatcher {
             return;
         }
 
-        let setattr_in = unsafe { &*(body.as_ptr() as *const FuseSetattrIn) };
+        // SAFETY: FuseSetattrIn may sit at an unaligned offset in the VirtIO buffer.
+        let setattr_in = unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseSetattrIn) };
 
         let mode = if setattr_in.valid & FATTR_MODE != 0 {
             Some(setattr_in.mode)
@@ -433,7 +438,8 @@ impl FuseDispatcher {
             return;
         }
 
-        let mknod_in = unsafe { &*(body.as_ptr() as *const FuseMknodIn) };
+        // SAFETY: FuseMknodIn may sit at an unaligned offset in the VirtIO buffer.
+        let mknod_in = unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseMknodIn) };
         let name = self.parse_name(&body[size_of::<FuseMknodIn>()..]);
 
         match self
@@ -454,7 +460,8 @@ impl FuseDispatcher {
             return;
         }
 
-        let mkdir_in = unsafe { &*(body.as_ptr() as *const FuseMkdirIn) };
+        // SAFETY: FuseMkdirIn may sit at an unaligned offset in the VirtIO buffer.
+        let mkdir_in = unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseMkdirIn) };
         let name = self.parse_name(&body[size_of::<FuseMkdirIn>()..]);
 
         match self.fs.mkdir(ctx.nodeid, name, mkdir_in.mode) {
@@ -494,7 +501,8 @@ impl FuseDispatcher {
             return;
         }
 
-        let link_in = unsafe { &*(body.as_ptr() as *const FuseLinkIn) };
+        // SAFETY: FuseLinkIn may sit at an unaligned offset in the VirtIO buffer.
+        let link_in = unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseLinkIn) };
         let name = self.parse_name(&body[size_of::<FuseLinkIn>()..]);
 
         match self.fs.link(link_in.oldnodeid, ctx.nodeid, name) {
@@ -512,7 +520,8 @@ impl FuseDispatcher {
             return;
         }
 
-        let create_in = unsafe { &*(body.as_ptr() as *const FuseCreateIn) };
+        // SAFETY: FuseCreateIn may sit at an unaligned offset in the VirtIO buffer.
+        let create_in = unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseCreateIn) };
         let name = self.parse_name(&body[size_of::<FuseCreateIn>()..]);
 
         match self
@@ -569,7 +578,8 @@ impl FuseDispatcher {
             return;
         }
 
-        let rename_in = unsafe { &*(body.as_ptr() as *const FuseRenameIn) };
+        // SAFETY: FuseRenameIn may sit at an unaligned offset in the VirtIO buffer.
+        let rename_in = unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseRenameIn) };
         let names = &body[size_of::<FuseRenameIn>()..];
 
         // Parse old_name\0new_name\0
@@ -601,7 +611,8 @@ impl FuseDispatcher {
             return;
         }
 
-        let open_in = unsafe { &*(body.as_ptr() as *const FuseOpenIn) };
+        // SAFETY: FuseOpenIn may sit at an unaligned offset in the VirtIO buffer.
+        let open_in = unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseOpenIn) };
 
         match self.fs.open(ctx.nodeid, open_in.flags) {
             Ok(handle) => {
@@ -622,7 +633,8 @@ impl FuseDispatcher {
             return;
         }
 
-        let read_in = unsafe { &*(body.as_ptr() as *const FuseReadIn) };
+        // SAFETY: FuseReadIn may sit at an unaligned offset in the VirtIO buffer.
+        let read_in = unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseReadIn) };
 
         match self.fs.read(read_in.fh, read_in.offset, read_in.size) {
             Ok(data) => response.write_bytes(ctx.unique, &data),
@@ -636,7 +648,8 @@ impl FuseDispatcher {
             return;
         }
 
-        let write_in = unsafe { &*(body.as_ptr() as *const FuseWriteIn) };
+        // SAFETY: FuseWriteIn may sit at an unaligned offset in the VirtIO buffer.
+        let write_in = unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseWriteIn) };
         let data = &body[size_of::<FuseWriteIn>()..];
 
         match self
@@ -660,7 +673,8 @@ impl FuseDispatcher {
             return;
         }
 
-        let release_in = unsafe { &*(body.as_ptr() as *const FuseReleaseIn) };
+        // SAFETY: FuseReleaseIn may sit at an unaligned offset in the VirtIO buffer.
+        let release_in = unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseReleaseIn) };
 
         match self.fs.release(release_in.fh) {
             Ok(()) => response.write_empty(ctx.unique),
@@ -674,7 +688,8 @@ impl FuseDispatcher {
             return;
         }
 
-        let flush_in = unsafe { &*(body.as_ptr() as *const FuseFlushIn) };
+        // SAFETY: FuseFlushIn may sit at an unaligned offset in the VirtIO buffer.
+        let flush_in = unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseFlushIn) };
 
         match self.fs.flush(flush_in.fh) {
             Ok(()) => response.write_empty(ctx.unique),
@@ -688,7 +703,8 @@ impl FuseDispatcher {
             return;
         }
 
-        let fsync_in = unsafe { &*(body.as_ptr() as *const FuseFsyncIn) };
+        // SAFETY: FuseFsyncIn may sit at an unaligned offset in the VirtIO buffer.
+        let fsync_in = unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseFsyncIn) };
         let datasync = fsync_in.fsync_flags & 1 != 0;
 
         match self.fs.fsync(fsync_in.fh, datasync) {
@@ -703,7 +719,8 @@ impl FuseDispatcher {
             return;
         }
 
-        let lseek_in = unsafe { &*(body.as_ptr() as *const FuseLseekIn) };
+        // SAFETY: FuseLseekIn may sit at an unaligned offset in the VirtIO buffer.
+        let lseek_in = unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseLseekIn) };
 
         match self
             .fs
@@ -723,7 +740,9 @@ impl FuseDispatcher {
             return;
         }
 
-        let fallocate_in = unsafe { &*(body.as_ptr() as *const FuseFallocateIn) };
+        // SAFETY: FuseFallocateIn may sit at an unaligned offset in the VirtIO buffer.
+        let fallocate_in =
+            unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseFallocateIn) };
 
         match self.fs.fallocate(
             fallocate_in.fh,
@@ -765,7 +784,8 @@ impl FuseDispatcher {
             return;
         }
 
-        let read_in = unsafe { &*(body.as_ptr() as *const FuseReadIn) };
+        // SAFETY: FuseReadIn may sit at an unaligned offset in the VirtIO buffer.
+        let read_in = unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseReadIn) };
 
         match self.fs.readdir(read_in.fh, read_in.offset) {
             Ok(entries) => {
@@ -819,7 +839,8 @@ impl FuseDispatcher {
             return;
         }
 
-        let release_in = unsafe { &*(body.as_ptr() as *const FuseReleaseIn) };
+        // SAFETY: FuseReleaseIn may sit at an unaligned offset in the VirtIO buffer.
+        let release_in = unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseReleaseIn) };
 
         match self.fs.releasedir(release_in.fh) {
             Ok(()) => response.write_empty(ctx.unique),
@@ -833,7 +854,8 @@ impl FuseDispatcher {
             return;
         }
 
-        let fsync_in = unsafe { &*(body.as_ptr() as *const FuseFsyncIn) };
+        // SAFETY: FuseFsyncIn may sit at an unaligned offset in the VirtIO buffer.
+        let fsync_in = unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseFsyncIn) };
         let datasync = fsync_in.fsync_flags & 1 != 0;
 
         match self.fs.fsyncdir(fsync_in.fh, datasync) {
@@ -852,7 +874,9 @@ impl FuseDispatcher {
             return;
         }
 
-        let getxattr_in = unsafe { &*(body.as_ptr() as *const FuseGetxattrIn) };
+        // SAFETY: FuseGetxattrIn may sit at an unaligned offset in the VirtIO buffer.
+        let getxattr_in =
+            unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseGetxattrIn) };
         let name = self.parse_name(&body[size_of::<FuseGetxattrIn>()..]);
 
         match self.fs.getxattr(ctx.nodeid, name, getxattr_in.size) {
@@ -878,7 +902,9 @@ impl FuseDispatcher {
             return;
         }
 
-        let setxattr_in = unsafe { &*(body.as_ptr() as *const FuseSetxattrIn) };
+        // SAFETY: FuseSetxattrIn may sit at an unaligned offset in the VirtIO buffer.
+        let setxattr_in =
+            unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseSetxattrIn) };
         let rest = &body[size_of::<FuseSetxattrIn>()..];
 
         // Parse name\0value
@@ -929,7 +955,8 @@ impl FuseDispatcher {
             return;
         }
 
-        let access_in = unsafe { &*(body.as_ptr() as *const FuseAccessIn) };
+        // SAFETY: FuseAccessIn may sit at an unaligned offset in the VirtIO buffer.
+        let access_in = unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseAccessIn) };
 
         match self.fs.access(ctx.nodeid, access_in.mask) {
             Ok(()) => response.write_empty(ctx.unique),
@@ -1013,7 +1040,8 @@ mod tests {
 
     fn parse_response_header(response: &[u8]) -> FuseOutHeader {
         assert!(response.len() >= FuseOutHeader::SIZE);
-        unsafe { *(response.as_ptr() as *const FuseOutHeader) }
+        // SAFETY: FuseOutHeader may sit at an unaligned offset in the response buffer.
+        unsafe { std::ptr::read_unaligned(response.as_ptr() as *const FuseOutHeader) }
     }
 
     #[test]
@@ -1140,8 +1168,11 @@ mod tests {
         assert_eq!(header.error, 0);
 
         // Extract inode from entry response
+        // SAFETY: FuseEntryOut may sit at an unaligned offset in the response buffer.
         let entry = unsafe {
-            &*((response.as_ptr() as *const u8).add(FuseOutHeader::SIZE) as *const FuseEntryOut)
+            std::ptr::read_unaligned(
+                (response.as_ptr() as *const u8).add(FuseOutHeader::SIZE) as *const FuseEntryOut
+            )
         };
         let inode = entry.nodeid;
 
@@ -1164,8 +1195,11 @@ mod tests {
         assert_eq!(header.error, 0);
 
         // Extract file handle
+        // SAFETY: FuseOpenOut may sit at an unaligned offset in the response buffer.
         let open_out = unsafe {
-            &*((response.as_ptr() as *const u8).add(FuseOutHeader::SIZE) as *const FuseOpenOut)
+            std::ptr::read_unaligned(
+                (response.as_ptr() as *const u8).add(FuseOutHeader::SIZE) as *const FuseOpenOut
+            )
         };
         let fh = open_out.fh;
 
@@ -1292,8 +1326,11 @@ mod tests {
         let header = parse_response_header(&response);
         assert_eq!(header.error, 0);
 
+        // SAFETY: FuseOpenOut may sit at an unaligned offset in the response buffer.
         let open_out = unsafe {
-            &*((response.as_ptr() as *const u8).add(FuseOutHeader::SIZE) as *const FuseOpenOut)
+            std::ptr::read_unaligned(
+                (response.as_ptr() as *const u8).add(FuseOutHeader::SIZE) as *const FuseOpenOut
+            )
         };
         let fh = open_out.fh;
 
