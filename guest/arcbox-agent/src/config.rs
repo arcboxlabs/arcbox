@@ -39,7 +39,6 @@ fn guest_defaults() -> VmmConfig {
             socket_timeout_secs: None,
         },
         network: NetworkConfig {
-            bridge: "arcbox-sb0".into(),
             cidr: "172.20.0.0/16".into(),
             gateway: "172.20.0.1".into(),
             dns: vec!["1.1.1.1".into(), "8.8.8.8".into()],

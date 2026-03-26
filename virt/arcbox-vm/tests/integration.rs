@@ -63,7 +63,7 @@ fn tap_lifecycle_via_network_manager() {
     use arcbox_vm::network::NetworkManager;
 
     // Third octet 10 → TAP name vmtap10<x>, distinct from the other TAP test.
-    let mgr = NetworkManager::new("", "10.0.10.0/28", "10.0.10.1", vec![]).unwrap();
+    let mgr = NetworkManager::new("10.0.10.0/28", "10.0.10.1", vec![]).unwrap();
     let alloc = mgr.allocate("itg-tap-lifecycle").unwrap();
 
     assert!(
@@ -95,7 +95,7 @@ fn network_ip_returns_to_pool_with_tap() {
     use arcbox_vm::network::NetworkManager;
 
     // Third octet 11 → TAP name vmtap11<x>, distinct from the other TAP test.
-    let mgr = NetworkManager::new("", "10.0.11.0/28", "10.0.11.1", vec![]).unwrap();
+    let mgr = NetworkManager::new("10.0.11.0/28", "10.0.11.1", vec![]).unwrap();
 
     let a1 = mgr.allocate("itg-pool-vm-1").unwrap();
     let first_ip = a1.ip_address;
@@ -126,7 +126,7 @@ fn tap_has_point_to_point_peer_address() {
         return;
     }
 
-    let mgr = NetworkManager::new("", "10.0.12.0/28", "10.0.12.1", vec![]).unwrap();
+    let mgr = NetworkManager::new("10.0.12.0/28", "10.0.12.1", vec![]).unwrap();
     let alloc = mgr.allocate("itg-ptp-1").unwrap();
 
     // TAP should have the peer address configured.
@@ -168,7 +168,7 @@ fn multiple_taps_are_isolated() {
         return;
     }
 
-    let mgr = NetworkManager::new("", "10.0.13.0/28", "10.0.13.1", vec![]).unwrap();
+    let mgr = NetworkManager::new("10.0.13.0/28", "10.0.13.1", vec![]).unwrap();
     let a1 = mgr.allocate("itg-iso-1").unwrap();
     let a2 = mgr.allocate("itg-iso-2").unwrap();
 

@@ -153,7 +153,7 @@ impl UdpProxy {
                         match msg {
                             Some(data) => {
                                 if let Err(e) = socket.send(&data).await {
-                                    tracing::debug!("UDP proxy: send failed: {e}");
+                                    tracing::trace!("UDP proxy: send failed: {e}");
                                     break;
                                 }
                             }
@@ -224,10 +224,10 @@ impl IcmpProxy {
         cancel: tokio_util::sync::CancellationToken,
     ) {
         if self.disabled.load(Ordering::Relaxed) {
-            tracing::debug!("ICMP proxy: disabled, dropping frame");
+            tracing::trace!("ICMP proxy: disabled, dropping frame");
             return;
         }
-        tracing::info!("ICMP proxy: received frame ({} bytes)", frame.len());
+        tracing::trace!("ICMP proxy: received frame ({} bytes)", frame.len());
 
         let ip_start = ETH_HEADER_LEN;
         let ihl = ((frame[ip_start] & 0x0F) as usize) * 4;
