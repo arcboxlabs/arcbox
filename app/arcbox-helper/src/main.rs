@@ -7,12 +7,15 @@
 mod server;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(arg) = std::env::args().nth(1) {
+    let mut idle_exit = false;
+
+    for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "--help" | "-h" => {
                 eprintln!(
-                    "arcbox-helper {}\nPrivileged helper daemon for host mutations (routes, DNS, sockets)",
-                    env!("CARGO_PKG_VERSION")
+                    "arcbox-helper {}\nPrivileged helper daemon for host mutations (routes, DNS, sockets)\n\nOptions:\n  --idle-exit  Exit after {}s with no active connections",
+                    env!("CARGO_PKG_VERSION"),
+                    server::IDLE_TIMEOUT.as_secs(),
                 );
                 return Ok(());
             }
@@ -20,7 +23,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("arcbox-helper {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
-            _ => {}
+            "--idle-exit" => idle_exit = true,
+            other => {
+                eprintln!("unknown argument: {other}");
+                eprintln!("run with --help for usage");
+                std::process::exit(1);
+            }
         }
     }
 
@@ -36,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(server::run());
+        .block_on(server::run(idle_exit));
 
     log_guard.flush();
     result
