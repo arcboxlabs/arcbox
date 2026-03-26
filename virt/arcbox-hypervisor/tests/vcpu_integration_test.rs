@@ -19,7 +19,9 @@ use arcbox_hypervisor::{
     types::{CpuArch, VcpuExit},
 };
 
+// ============================================================================
 // VM-vCPU Integration Tests
+// ============================================================================
 
 /// Test that vCPUs can be created from a VM.
 #[cfg(target_os = "macos")]
@@ -266,7 +268,9 @@ fn test_multiple_vcpu_run_independent() {
     println!("Multiple vCPU run() calls are independent");
 }
 
+// ============================================================================
 // vCPU Threading Tests
+// ============================================================================
 
 /// Test that vCPU can be moved to another thread.
 #[cfg(target_os = "macos")]
@@ -404,7 +408,9 @@ fn test_vcpu_running_flag_cross_thread() {
     println!("vCPU running flag is correctly shared across threads");
 }
 
+// ============================================================================
 // I/O and MMIO Tests (No-op on Darwin)
+// ============================================================================
 
 /// Test that I/O result setting is a no-op but doesn't error.
 #[cfg(target_os = "macos")]
@@ -441,7 +447,9 @@ fn test_vcpu_io_result_noop_integration() {
     println!("I/O and MMIO result setting correctly succeeds (no-op on Darwin)");
 }
 
+// ============================================================================
 // Memory Access Tests
+// ============================================================================
 
 /// Test that vCPU can access VM memory through the memory() method.
 #[cfg(target_os = "macos")]

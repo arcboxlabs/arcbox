@@ -33,7 +33,9 @@ async fn create_test_runtime() -> (Arc<Runtime>, Arc<VsockConnector>, TempDir) {
     (runtime, connector, tmp_dir)
 }
 
+// ============================================================================
 // System API Tests
+// ============================================================================
 
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
@@ -102,7 +104,9 @@ async fn test_info() {
     assert!(json.get("ServerVersion").is_some());
 }
 
+// ============================================================================
 // Container API Tests
+// ============================================================================
 
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
@@ -375,7 +379,9 @@ async fn test_wait_container_invalid_condition_returns_bad_request() {
     ));
 }
 
+// ============================================================================
 // Exec API Tests
+// ============================================================================
 
 /// Test exec creation in a container.
 ///
@@ -447,7 +453,9 @@ async fn test_exec_create() {
     assert!(json.get("Id").is_some());
 }
 
+// ============================================================================
 // Network API Tests
+// ============================================================================
 
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
@@ -506,7 +514,9 @@ async fn test_create_network() {
     assert!(json.get("Id").is_some());
 }
 
+// ============================================================================
 // Volume API Tests
+// ============================================================================
 
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
@@ -633,7 +643,9 @@ async fn test_volume_lifecycle() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+// ============================================================================
 // Image API Tests
+// ============================================================================
 
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
@@ -659,7 +671,9 @@ async fn test_list_images() {
     assert!(json.is_array());
 }
 
+// ============================================================================
 // Versioned API Tests
+// ============================================================================
 
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
@@ -699,7 +713,9 @@ async fn test_older_api_version() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+// ============================================================================
 // Additional Container Operation Tests
+// ============================================================================
 
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd"]
@@ -845,7 +861,9 @@ async fn test_container_changes_not_found() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+// ============================================================================
 // E2E Smoke Tests (require running daemon + Docker CLI)
+// ============================================================================
 
 #[tokio::test]
 #[ignore = "requires running daemon with guest dockerd and docker CLI"]

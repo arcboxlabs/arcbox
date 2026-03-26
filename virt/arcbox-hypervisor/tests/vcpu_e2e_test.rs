@@ -50,7 +50,9 @@ fn initramfs_available() -> bool {
     initrd_path.exists()
 }
 
+// ============================================================================
 // E2E Tests: vCPU with VM Lifecycle
+// ============================================================================
 
 /// Test vCPU behavior during VM creation and destruction.
 #[cfg(target_os = "macos")]
@@ -307,7 +309,9 @@ fn test_vcpu_vm_state_awareness() {
     println!("vCPU correctly handles non-running VM state");
 }
 
+// ============================================================================
 // E2E Tests: With Kernel (requires kernel file)
+// ============================================================================
 
 /// Test vCPU execution with a real kernel.
 ///
@@ -504,7 +508,9 @@ fn test_vcpu_pause_resume() {
     println!("Pause/resume test completed");
 }
 
+// ============================================================================
 // Stress Tests
+// ============================================================================
 
 /// Stress test: Create and destroy many VMs with vCPUs.
 #[cfg(target_os = "macos")]
