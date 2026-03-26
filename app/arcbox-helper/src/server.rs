@@ -14,12 +14,13 @@ use tokio_util::sync::CancellationToken;
 use futures::prelude::*;
 use tarpc::server::{BaseChannel, Channel};
 use tarpc::tokio_serde::formats::Bincode;
+use tokio::task::JoinSet;
 
 use arcbox_helper::HelperService as _;
 use handler::HelperServer;
 
 /// Exit after this many seconds with zero active connections.
-const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Check interval for the idle watchdog.
 const IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
@@ -105,12 +106,20 @@ async fn accept_loop(
         let transport = tarpc::serde_transport::new(codec.new_framed(conn), Bincode::default());
 
         tokio::spawn(async move {
+            let mut in_flight = JoinSet::new();
+
             BaseChannel::with_defaults(transport)
                 .execute(HelperServer.serve())
-                .for_each(|resp| async {
-                    tokio::spawn(resp);
+                .for_each(|resp| {
+                    in_flight.spawn(resp);
+                    futures::future::ready(())
                 })
                 .await;
+
+            // Wait for all in-flight responses to complete before marking
+            // the connection as idle, so idle_watchdog never kills the
+            // process while work is still running.
+            while in_flight.join_next().await.is_some() {}
 
             tracker_clone.disconnect();
         });

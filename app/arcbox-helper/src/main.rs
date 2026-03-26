@@ -13,8 +13,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match arg.as_str() {
             "--help" | "-h" => {
                 eprintln!(
-                    "arcbox-helper {}\nPrivileged helper daemon for host mutations (routes, DNS, sockets)\n\nOptions:\n  --idle-exit  Exit after 30s with no active connections",
-                    env!("CARGO_PKG_VERSION")
+                    "arcbox-helper {}\nPrivileged helper daemon for host mutations (routes, DNS, sockets)\n\nOptions:\n  --idle-exit  Exit after {}s with no active connections",
+                    env!("CARGO_PKG_VERSION"),
+                    server::IDLE_TIMEOUT.as_secs(),
                 );
                 return Ok(());
             }
@@ -23,7 +24,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             "--idle-exit" => idle_exit = true,
-            _ => {}
+            other => {
+                eprintln!("unknown argument: {other}");
+                eprintln!("run with --help for usage");
+                std::process::exit(1);
+            }
         }
     }
 
