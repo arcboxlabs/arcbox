@@ -7,7 +7,7 @@ use super::{GuestConnector, HANDSHAKE_TIMEOUT};
 use crate::error::{DockerError, Result};
 use arcbox_error::CommonError;
 use axum::body::Body;
-use axum::http::{HeaderMap, HeaderValue, Method, Request, Response, Uri, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, Uri, header};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::client::conn::http1;
@@ -21,12 +21,17 @@ use hyper::client::conn::http1;
 /// Per RFC 7230 §6.1, hop-by-hop headers include the fixed set plus any
 /// header names listed in the `Connection` header's value.
 fn forward_client_headers(from: &HeaderMap, to: &mut HeaderMap) {
+    use std::collections::HashSet;
+
     // Collect header names nominated by the Connection header (RFC 7230 §6.1).
-    let mut connection_tokens: Vec<String> = Vec::new();
+    // HeaderName is already lowercase, so we can compare directly.
+    let mut connection_nominated: HashSet<HeaderName> = HashSet::new();
     if let Some(conn) = from.get(header::CONNECTION) {
         if let Ok(s) = conn.to_str() {
             for token in s.split(',') {
-                connection_tokens.push(token.trim().to_ascii_lowercase());
+                if let Ok(name) = HeaderName::from_bytes(token.trim().as_bytes()) {
+                    connection_nominated.insert(name);
+                }
             }
         }
     }
@@ -47,8 +52,8 @@ fn forward_client_headers(from: &HeaderMap, to: &mut HeaderMap) {
             continue;
         }
 
-        // Skip headers nominated by the Connection header.
-        if connection_tokens.contains(&name.as_str().to_ascii_lowercase()) {
+        // Skip headers nominated by the Connection header (O(1) lookup).
+        if connection_nominated.contains(name) {
             continue;
         }
 
