@@ -56,6 +56,13 @@ impl MigrationManager {
             .await
             .map_err(map_migration_error)?;
 
+        if !plan.unsupported_resources.is_empty() {
+            return Err(CoreError::config(format!(
+                "source contains unsupported resources: {}",
+                plan.unsupported_resources.join(", ")
+            )));
+        }
+
         let plan_id = Uuid::new_v4().to_string();
         self.prepared.write().await.insert(
             plan_id.clone(),
@@ -65,7 +72,7 @@ impl MigrationManager {
             },
         );
 
-        let mut warnings = plan.unsupported_resources.clone();
+        let mut warnings = Vec::new();
         warnings.extend(plan.blockers.iter().map(|blocker| {
             format!(
                 "volume '{}' is attached to running source containers: {}",
@@ -82,7 +89,9 @@ impl MigrationManager {
             volume_count: u32::try_from(plan.volumes.len()).unwrap_or(u32::MAX),
             network_count: u32::try_from(plan.networks.len()).unwrap_or(u32::MAX),
             container_count: u32::try_from(plan.containers.len()).unwrap_or(u32::MAX),
-            replacements_required: !plan.replacements.is_empty() || !plan.blockers.is_empty(),
+            // Only indicates actual ArcBox resource replacements; blockers
+            // are surfaced via `warnings`.
+            replacements_required: !plan.replacements.is_empty(),
             warnings,
         })
     }
@@ -99,13 +108,6 @@ impl MigrationManager {
             .get(&request.plan_id)
             .cloned()
             .ok_or_else(|| CoreError::not_found(format!("migration plan {}", request.plan_id)))?;
-
-        if !prepared.plan.unsupported_resources.is_empty() {
-            return Err(CoreError::invalid_state(format!(
-                "migration plan contains unsupported resources: {}",
-                prepared.plan.unsupported_resources.join(", ")
-            )));
-        }
 
         let requires_confirmation =
             !prepared.plan.replacements.is_empty() || !prepared.plan.blockers.is_empty();

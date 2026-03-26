@@ -483,9 +483,12 @@ message PrepareMigrationResponse {
     uint32 network_count = 6;
     // Number of containers included in the plan.
     uint32 container_count = 7;
-    // Whether the plan requires replacing existing ArcBox resources.
+    // Whether the plan would replace existing ArcBox resources (images, volumes,
+    // networks, or containers that already exist on the target). When true,
+    // RunMigrationRequest.allow_replacements must be set to confirm.
     bool replacements_required = 8;
-    // Non-fatal warnings discovered during preparation.
+    // Non-fatal warnings discovered during preparation (for example, volume
+    // blockers that will require stopping running source containers).
     repeated string warnings = 9;
 }
 

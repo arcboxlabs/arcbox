@@ -18,24 +18,24 @@ This crate provides a thin command-line interface for ArcBox machine management 
 
 ```bash
 # Machine (VM) operations
-arcbox machine create myvm
-arcbox machine start myvm
-arcbox machine list
-arcbox machine stop myvm
+abctl machine create myvm
+abctl machine start myvm
+abctl machine list
+abctl machine stop myvm
 
 # Runtime migration
-arcbox migrate from docker-desktop
-arcbox migrate from orbstack --source-socket ~/.orbstack/run/docker.sock --yes
+abctl migrate from docker-desktop
+abctl migrate from orbstack --source-socket ~/.orbstack/run/docker.sock --yes
 
 # Daemon management
-arcbox daemon start              # Start daemon in background
-arcbox daemon stop               # Stop daemon
-arcbox info                      # System info
-arcbox version                   # Version info
+abctl daemon start              # Start daemon in background
+abctl daemon stop               # Stop daemon
+abctl info                      # System info
+abctl version                   # Version info
 
 # Docker context integration
-arcbox docker enable             # Set ArcBox as Docker context
-arcbox docker disable            # Reset to default context
+abctl docker enable             # Set ArcBox as Docker context
+abctl docker disable            # Reset to default context
 
 # Run containers through Docker CLI
 docker run hello-world

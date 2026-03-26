@@ -11,7 +11,9 @@ use tempfile::TempDir;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::{Child, Command};
 
-const HELPER_IMAGE_REFERENCE: &str = "arcbox-migration-helper:latest";
+use crate::helper_image::helper_image_reference;
+
+const HELPER_IMAGE_REFERENCE: &str = helper_image_reference();
 
 /// Docker CLI runner bound to a Unix socket.
 #[derive(Clone)]
@@ -163,7 +165,9 @@ impl DockerCliRunner {
         if config.enable_ipv6 {
             args.push("--ipv6".to_string());
         }
-        let _ = config.attachable;
+        if config.attachable {
+            args.push("--attachable".to_string());
+        }
         for (key, value) in &config.labels {
             args.push("--label".to_string());
             args.push(format!("{key}={value}"));

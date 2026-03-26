@@ -98,8 +98,20 @@ pub async fn proxy_streaming_upload(
         }
     };
 
-    let uploaded_bytes = join_upload_pump(body_pump).await?;
-    tracing::debug!(uploaded_bytes, "completed Docker upload body pump");
+    // Once response headers are available from guest dockerd, a pump failure
+    // (e.g. receiver dropped because the guest closed the request body early)
+    // should not prevent returning the response to the client.
+    match join_upload_pump(body_pump).await {
+        Ok(uploaded_bytes) => {
+            tracing::debug!(uploaded_bytes, "completed Docker upload body pump");
+        }
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                "upload body pump ended with error after response headers; treating as non-fatal"
+            );
+        }
+    }
 
     let (parts, incoming) = response.into_parts();
     Ok(axum::http::Response::from_parts(parts, Body::new(incoming)))

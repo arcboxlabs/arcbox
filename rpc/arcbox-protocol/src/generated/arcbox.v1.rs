@@ -2158,10 +2158,13 @@ pub struct PrepareMigrationResponse {
     /// Number of containers included in the plan.
     #[prost(uint32, tag = "7")]
     pub container_count: u32,
-    /// Whether the plan requires replacing existing ArcBox resources.
+    /// Whether the plan would replace existing ArcBox resources (images, volumes,
+    /// networks, or containers that already exist on the target). When true,
+    /// RunMigrationRequest.allow_replacements must be set to confirm.
     #[prost(bool, tag = "8")]
     pub replacements_required: bool,
-    /// Non-fatal warnings discovered during preparation.
+    /// Non-fatal warnings discovered during preparation (for example, volume
+    /// blockers that will require stopping running source containers).
     #[prost(string, repeated, tag = "9")]
     pub warnings: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
