@@ -276,13 +276,23 @@ impl<T> std::fmt::Debug for LockFreeRing<T> {
     }
 }
 
-/// Multi-producer multi-consumer ring buffer.
+/// A slot in the MPMC ring, holding data and a per-slot sequence counter
+/// for Vyukov-style synchronization between producers and consumers.
+struct MpmcSlot<T> {
+    seq: AtomicUsize,
+    data: UnsafeCell<MaybeUninit<T>>,
+}
+
+/// Multi-producer multi-consumer ring buffer (Vyukov bounded MPMC queue).
 ///
-/// Uses compare-and-swap operations for thread-safe access from multiple
-/// producers and consumers. Slower than SPSC but more flexible.
+/// Uses per-slot sequence counters to synchronize producers and consumers.
+/// A producer may only write a slot once its sequence matches the expected
+/// head value, and a consumer may only read once the sequence shows the
+/// write is complete. This eliminates the race where a consumer observes
+/// an advanced head but the slot has not been written yet.
 pub struct MpmcRing<T> {
-    /// Ring buffer storage.
-    buffer: Box<[UnsafeCell<MaybeUninit<T>>]>,
+    /// Ring buffer storage with per-slot sequence counters.
+    buffer: Box<[MpmcSlot<T>]>,
     /// Capacity (always power of 2).
     capacity: usize,
     /// Capacity mask.
@@ -305,8 +315,14 @@ impl<T: Copy> MpmcRing<T> {
         let capacity = next_power_of_two(capacity);
         let mask = capacity - 1;
 
-        let buffer: Vec<UnsafeCell<MaybeUninit<T>>> = (0..capacity)
-            .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
+        // Initialize each slot's sequence counter to its index. This is the
+        // Vyukov convention: seq == pos means the slot is ready for a producer
+        // whose head == pos.
+        let buffer: Vec<MpmcSlot<T>> = (0..capacity)
+            .map(|i| MpmcSlot {
+                seq: AtomicUsize::new(i),
+                data: UnsafeCell::new(MaybeUninit::uninit()),
+            })
             .collect();
 
         Self {
@@ -341,65 +357,91 @@ impl<T: Copy> MpmcRing<T> {
         self.len() == 0
     }
 
-    /// Enqueues an item using CAS.
+    /// Enqueues an item (Vyukov bounded MPMC algorithm).
+    ///
+    /// Returns `Err(item)` if the queue is full.
     pub fn enqueue(&self, item: T) -> Result<(), T> {
         let mut head = self.head.0.load(Ordering::Relaxed);
 
         loop {
-            let tail = self.tail.0.load(Ordering::Acquire);
+            let slot = &self.buffer[head & self.mask];
+            let seq = slot.seq.load(Ordering::Acquire);
 
-            if head.wrapping_sub(tail) >= self.capacity {
-                return Err(item);
-            }
+            #[allow(clippy::cast_possible_wrap)]
+            let diff = (seq as isize).wrapping_sub(head as isize);
 
-            match self.head.0.compare_exchange_weak(
-                head,
-                head.wrapping_add(1),
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    let idx = head & self.mask;
-                    unsafe {
-                        (*self.buffer[idx].get()).write(item);
+            match diff.cmp(&0) {
+                std::cmp::Ordering::Equal => {
+                    // Slot is ready for writing at this head position.
+                    match self.head.0.compare_exchange_weak(
+                        head,
+                        head.wrapping_add(1),
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => {
+                            // SAFETY: We won the CAS, so we exclusively own this slot.
+                            unsafe { (*slot.data.get()).write(item) };
+                            // Signal consumers that this slot is filled.
+                            slot.seq.store(head.wrapping_add(1), Ordering::Release);
+                            return Ok(());
+                        }
+                        Err(h) => head = h,
                     }
-                    return Ok(());
                 }
-                Err(h) => {
-                    head = h;
-                    std::hint::spin_loop();
+                std::cmp::Ordering::Less => {
+                    // Queue is full.
+                    return Err(item);
+                }
+                std::cmp::Ordering::Greater => {
+                    // Another producer claimed this slot, reload head.
+                    head = self.head.0.load(Ordering::Relaxed);
                 }
             }
         }
     }
 
-    /// Dequeues an item using CAS.
+    /// Dequeues an item (Vyukov bounded MPMC algorithm).
+    ///
+    /// Returns `None` if the queue is empty.
     pub fn dequeue(&self) -> Option<T> {
         let mut tail = self.tail.0.load(Ordering::Relaxed);
 
         loop {
-            let head = self.head.0.load(Ordering::Acquire);
+            let slot = &self.buffer[tail & self.mask];
+            let seq = slot.seq.load(Ordering::Acquire);
 
-            if tail == head {
-                return None;
-            }
+            #[allow(clippy::cast_possible_wrap)]
+            let diff = (seq as isize).wrapping_sub(tail.wrapping_add(1) as isize);
 
-            // CAS first to claim ownership of this slot, then read.
-            // Reading before CAS would cause double-read/double-free on failure.
-            match self.tail.0.compare_exchange_weak(
-                tail,
-                tail.wrapping_add(1),
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    let idx = tail & self.mask;
-                    // SAFETY: We won the CAS, so we exclusively own this slot.
-                    return Some(unsafe { (*self.buffer[idx].get()).assume_init_read() });
+            match diff.cmp(&0) {
+                std::cmp::Ordering::Equal => {
+                    // Slot has been written by a producer and is ready for reading.
+                    match self.tail.0.compare_exchange_weak(
+                        tail,
+                        tail.wrapping_add(1),
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => {
+                            // SAFETY: The producer has finished writing (seq confirms it)
+                            // and we won the CAS, so we exclusively own this slot.
+                            let item = unsafe { (*slot.data.get()).assume_init_read() };
+                            // Signal producers that this slot is free for reuse.
+                            slot.seq
+                                .store(tail.wrapping_add(self.capacity), Ordering::Release);
+                            return Some(item);
+                        }
+                        Err(t) => tail = t,
+                    }
                 }
-                Err(t) => {
-                    tail = t;
-                    std::hint::spin_loop();
+                std::cmp::Ordering::Less => {
+                    // Queue is empty.
+                    return None;
+                }
+                std::cmp::Ordering::Greater => {
+                    // Another consumer claimed this slot, reload tail.
+                    tail = self.tail.0.load(Ordering::Relaxed);
                 }
             }
         }
