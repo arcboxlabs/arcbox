@@ -283,7 +283,7 @@ async fn refresh_managed_kubeconfig(home: &Path) -> Result<()> {
     let response = client
         .get_kubeconfig(Request::new(KubernetesKubeconfigRequest {}))
         .await
-        .context("failed to get ArcBox kubeconfig; run 'arcbox k8s start' first")?
+        .context("failed to get ArcBox kubeconfig; run 'abctl k8s start' first")?
         .into_inner();
 
     let managed = managed_kubeconfig_path(home);
