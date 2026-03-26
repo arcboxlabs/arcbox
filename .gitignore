@@ -1,4 +1,6 @@
 /target
+*.profraw
+*.profdata
 
 # macOS
 .DS_Store
@@ -18,4 +20,7 @@ tests/resources/boot-assets-arm64-*
 # Claude Code (track skills symlink, ignore everything else)
 .claude/*
 !.claude/skills
+
+# Scratch notes
 perf-issue.md
+issues.net.md
