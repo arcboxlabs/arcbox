@@ -223,7 +223,7 @@ fn check_helper() -> CheckResult {
     }
 
     // Check binary exists in expected location.
-    let helper_path = "/Applications/ArcBox Desktop.app/Contents/Library/HelperTools/ArcBoxHelper";
+    let helper_path = "/Applications/ArcBox.app/Contents/Library/HelperTools/ArcBoxHelper";
     if std::path::Path::new(helper_path).exists() {
         CheckResult::Pass("running".into())
     } else {

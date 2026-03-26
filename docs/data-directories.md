@@ -5,7 +5,7 @@ manages at runtime. Paths are grouped by location and annotated with the
 component responsible for creating them.
 
 **Components**: daemon (`arcbox-daemon`), cli (`abctl`), helper (`arcbox-helper`),
-desktop (`ArcBox Desktop.app`), agent (`arcbox-agent`, runs inside the guest VM),
+desktop (`ArcBox.app`), agent (`arcbox-agent`, runs inside the guest VM),
 launchd (macOS system).
 
 ---
@@ -202,7 +202,7 @@ assets to `~/.arcbox/`. Detection logic: `app/arcbox-daemon/src/startup.rs`
 (`find_bundle_contents`).
 
 ```
-ArcBox Desktop.app/Contents/
+ArcBox.app/Contents/
 ├── Helpers/
 │   └── com.arcboxlabs.desktop.daemon     # Daemon binary
 ├── MacOS/
