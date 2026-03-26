@@ -225,8 +225,7 @@ async fn docker_get(path: &str) -> anyhow::Result<serde_json::Value> {
     let body_start = buf
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
-        .map(|p| p + 4)
-        .unwrap_or(0);
+        .map_or(0, |p| p + 4);
     let body = &buf[body_start..];
 
     Ok(serde_json::from_slice(body)?)
