@@ -60,7 +60,6 @@ fn try_config(data_dir: &str) -> Option<VmmConfig> {
             socket_timeout_secs: Some(15),
         },
         network: NetworkConfig {
-            bridge: String::new(),
             cidr: "172.99.0.0/24".into(),
             gateway: "172.99.0.1".into(),
             dns: vec![],

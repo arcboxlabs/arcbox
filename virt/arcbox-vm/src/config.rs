@@ -315,11 +315,9 @@ pub struct FirecrackerConfig {
     pub socket_timeout_secs: Option<u64>,
 }
 
-/// Network bridge and IP-pool settings.
+/// Network IP-pool settings for sandbox TAP interfaces.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfig {
-    /// Linux bridge interface name for VM uplinks.
-    pub bridge: String,
     /// IP CIDR pool from which guest addresses are allocated.
     pub cidr: String,
     /// Default gateway advertised to guests.
@@ -362,7 +360,6 @@ impl Default for VmmConfig {
                 socket_timeout_secs: None,
             },
             network: NetworkConfig {
-                bridge: "fcvmm0".into(),
                 cidr: "172.20.0.0/16".into(),
                 gateway: "172.20.0.1".into(),
                 dns: vec!["1.1.1.1".into(), "8.8.8.8".into()],

@@ -127,6 +127,7 @@ fn api_routes() -> Router<AppState> {
         .route("/exec/{id}/json", get(handlers::exec_inspect))
         .route("/images/json", get(handlers::list_images))
         .route("/images/create", post(handlers::pull_image))
+        .route("/images/load", post(handlers::load_image))
         .route("/images/{id}/json", get(handlers::inspect_image))
         .route("/images/{id}", delete(handlers::remove_image))
         .route("/images/{id}/tag", post(handlers::tag_image))

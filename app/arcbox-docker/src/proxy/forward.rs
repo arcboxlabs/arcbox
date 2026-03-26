@@ -7,10 +7,62 @@ use super::{GuestConnector, HANDSHAKE_TIMEOUT};
 use crate::error::{DockerError, Result};
 use arcbox_error::CommonError;
 use axum::body::Body;
-use axum::http::{HeaderMap, HeaderValue, Method, Request, Response, Uri, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, Uri, header};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::client::conn::http1;
+
+/// Forwards all non-hop-by-hop headers from the client request to the guest request.
+///
+/// This ensures registry auth (`X-Registry-Auth`, `X-Registry-Config`),
+/// content negotiation (`Accept`), and other semantically significant
+/// headers are preserved when proxying to the guest dockerd.
+///
+/// Per RFC 7230 §6.1, hop-by-hop headers include the fixed set plus any
+/// header names listed in the `Connection` header's value.
+/// Builds a forwarded header map suitable for proxying to guest dockerd.
+///
+/// Strips hop-by-hop headers (per RFC 7230 §6.1), the `Host` header, the
+/// `Connection` header and any headers listed in `Connection`. When
+/// `strip_expect` is true, also strips `Expect` (used by the upload proxy
+/// so we own `100-continue` handling).
+pub(super) fn forwarded_request_headers(headers: &HeaderMap, strip_expect: bool) -> HeaderMap {
+    let connection_tokens = headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .filter_map(|token| token.trim().parse::<HeaderName>().ok())
+        .collect::<Vec<_>>();
+
+    let mut forwarded = HeaderMap::new();
+    for (name, value) in headers {
+        if name == header::HOST
+            || name == header::CONNECTION
+            || (strip_expect && name == header::EXPECT)
+            || is_hop_by_hop_header(name)
+            || connection_tokens.iter().any(|token| token == name)
+        {
+            continue;
+        }
+        forwarded.append(name.clone(), value.clone());
+    }
+    forwarded
+}
+
+fn is_hop_by_hop_header(name: &HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "proxy-connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
+}
 
 /// Forward an HTTP request to guest dockerd and return the response.
 ///
@@ -54,14 +106,10 @@ pub async fn proxy_to_guest(
         .body(Full::new(body))
         .map_err(|e| DockerError::Server(format!("failed to build guest request: {e}")))?;
 
-    // Forward content-type so the guest dockerd can parse JSON bodies.
-    if let Some(ct) = headers.get(header::CONTENT_TYPE) {
-        req.headers_mut().insert(header::CONTENT_TYPE, ct.clone());
-    }
+    req.headers_mut()
+        .extend(forwarded_request_headers(headers, false));
     req.headers_mut()
         .insert(header::HOST, HeaderValue::from_static("localhost"));
-    req.headers_mut()
-        .insert(header::CONNECTION, HeaderValue::from_static("close"));
 
     let response = sender
         .send_request(req)
@@ -109,7 +157,7 @@ pub async fn proxy_to_guest_stream(
         .path_and_query()
         .map_or("/", hyper::http::uri::PathAndQuery::as_str);
     let method = req.method().clone();
-    let content_type = req.headers().get(header::CONTENT_TYPE).cloned();
+    let forwarded_headers = forwarded_request_headers(req.headers(), false);
     let body = req.into_body();
 
     let mut guest_req = hyper::Request::builder()
@@ -118,15 +166,10 @@ pub async fn proxy_to_guest_stream(
         .body(body)
         .map_err(|e| DockerError::Server(format!("failed to build guest request: {e}")))?;
 
-    if let Some(ct) = content_type {
-        guest_req.headers_mut().insert(header::CONTENT_TYPE, ct);
-    }
+    guest_req.headers_mut().extend(forwarded_headers);
     guest_req
         .headers_mut()
         .insert(header::HOST, HeaderValue::from_static("localhost"));
-    guest_req
-        .headers_mut()
-        .insert(header::CONNECTION, HeaderValue::from_static("close"));
 
     let response = sender
         .send_request(guest_req)

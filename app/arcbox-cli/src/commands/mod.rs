@@ -5,6 +5,7 @@
 //!
 //! - Daemon lifecycle management
 //! - Machine management
+//! - Runtime migration
 //! - Boot asset management
 //! - Docker CLI integration
 //! - DNS resolver management
@@ -12,6 +13,38 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
+
+/// Resolves the gRPC socket path from environment or default location.
+///
+/// Shared by machine, sandbox, and migrate command modules.
+pub fn resolve_grpc_socket_path() -> PathBuf {
+    if let Ok(path) = std::env::var("ARCBOX_GRPC_SOCKET") {
+        return PathBuf::from(path);
+    }
+
+    if let Ok(path) = std::env::var("ARCBOX_SOCKET") {
+        let docker_socket = PathBuf::from(path);
+        if let Some(parent) = docker_socket.parent() {
+            let preferred = parent.join("arcbox-grpc.sock");
+            if preferred.exists() {
+                return preferred;
+            }
+
+            let legacy = parent.join("arcbox.sock");
+            if legacy.exists() {
+                return legacy;
+            }
+
+            return preferred;
+        }
+    }
+
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".arcbox")
+        .join(arcbox_constants::paths::host::RUN)
+        .join("arcbox.sock")
+}
 
 pub mod boot;
 pub mod daemon;
@@ -24,6 +57,7 @@ pub mod install;
 pub mod kubernetes;
 pub mod logs;
 pub mod machine;
+pub mod migrate;
 pub mod sandbox;
 pub mod setup;
 #[cfg(target_os = "macos")]
@@ -73,6 +107,10 @@ pub enum Commands {
     /// Manage Linux machines
     #[command(subcommand)]
     Machine(machine::MachineCommands),
+
+    /// Import workloads from Docker Desktop or OrbStack
+    #[command(subcommand)]
+    Migrate(migrate::MigrateCommands),
 
     /// Manage sandboxes inside a machine
     #[command(subcommand)]

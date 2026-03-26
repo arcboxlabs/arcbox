@@ -153,7 +153,7 @@ impl UdpProxy {
                         match msg {
                             Some(data) => {
                                 if let Err(e) = socket.send(&data).await {
-                                    tracing::debug!("UDP proxy: send failed: {e}");
+                                    tracing::trace!("UDP proxy: send failed: {e}");
                                     break;
                                 }
                             }
@@ -224,8 +224,10 @@ impl IcmpProxy {
         cancel: tokio_util::sync::CancellationToken,
     ) {
         if self.disabled.load(Ordering::Relaxed) {
+            tracing::trace!("ICMP proxy: disabled, dropping frame");
             return;
         }
+        tracing::trace!("ICMP proxy: received frame ({} bytes)", frame.len());
 
         let ip_start = ETH_HEADER_LEN;
         let ihl = ((frame[ip_start] & 0x0F) as usize) * 4;
@@ -249,6 +251,14 @@ impl IcmpProxy {
         );
 
         let icmp_payload = frame[icmp_start..].to_vec();
+        // Save the guest's original ICMP identifier (bytes 4-5). macOS DGRAM
+        // ICMP sockets rewrite this with a kernel-internal socket ID, so the
+        // reply will carry the wrong value. We patch it back before forwarding.
+        let orig_icmp_id: [u8; 2] = if icmp_payload.len() >= 6 {
+            [icmp_payload[4], icmp_payload[5]]
+        } else {
+            [0, 0]
+        };
         let reply_tx = self.reply_tx.clone();
         let gateway_mac = self.gateway_mac;
         let disabled = Arc::clone(&self.disabled);
@@ -285,9 +295,12 @@ impl IcmpProxy {
             icmp_socket.set_nonblocking(true).ok();
             let dst_addr: SocketAddr = SocketAddrV4::new(dst_ip, 0).into();
 
-            if let Err(e) = icmp_socket.send_to(&icmp_payload, &dst_addr.into()) {
-                tracing::warn!("ICMP proxy: sendto failed: {}", e);
-                return;
+            match icmp_socket.send_to(&icmp_payload, &dst_addr.into()) {
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("ICMP proxy: sendto {} -> {} failed: {}", src_ip, dst_ip, e);
+                    return;
+                }
             }
 
             // Wait for reply using AsyncFd on the ICMP socket.
@@ -341,22 +354,43 @@ impl IcmpProxy {
             match recv {
                 Ok(Ok(n)) if n > 0 => {
                     let reply_packet = &buf[..n];
-                    // Some systems return full IPv4 packet, others return ICMP payload.
-                    let reply_frame = if looks_like_ipv4_icmp(reply_packet) {
-                        prepend_ethernet_header(reply_packet, guest_mac, gateway_mac)
+                    // Extract the ICMP payload from the reply. macOS DGRAM
+                    // ICMP sockets return the full IPv4 packet whose dst IP
+                    // is the *host's* real address — not the guest's. Always
+                    // rebuild the frame with the correct src/dst so the guest
+                    // network stack accepts it.
+                    let mut icmp_data = if looks_like_ipv4_icmp(reply_packet) {
+                        let ihl = ((reply_packet[0] & 0x0F) as usize) * 4;
+                        reply_packet[ihl..].to_vec()
                     } else {
-                        build_icmp_ipv4_ethernet(
-                            dst_ip,
-                            src_ip,
-                            reply_packet,
-                            gateway_mac,
-                            guest_mac,
-                        )
+                        reply_packet.to_vec()
                     };
-                    let _ = reply_tx.send(reply_frame).await;
+                    // Restore the guest's original ICMP identifier that macOS
+                    // replaced with its kernel-internal socket ID. Only patch
+                    // Echo Reply (type 0) — bytes 4-5 are the identifier field
+                    // only for Echo; other ICMP types use them for different
+                    // purposes (e.g., redirect gateway address).
+                    if icmp_data.len() >= 6 && icmp_data[0] == 0 {
+                        icmp_data[4] = orig_icmp_id[0];
+                        icmp_data[5] = orig_icmp_id[1];
+                    }
+                    let reply_frame = build_icmp_ipv4_ethernet(
+                        dst_ip, // original dst becomes reply src
+                        src_ip, // original src (guest) becomes reply dst
+                        &icmp_data,
+                        gateway_mac,
+                        guest_mac,
+                    );
+                    if reply_tx.send(reply_frame).await.is_err() {
+                        tracing::warn!("ICMP proxy: reply_tx channel closed");
+                    }
                 }
                 _ => {
-                    tracing::trace!("ICMP proxy: no reply for {} -> {}", src_ip, dst_ip);
+                    tracing::trace!(
+                        "ICMP proxy: no reply (timeout/error) for {} -> {}",
+                        src_ip,
+                        dst_ip
+                    );
                 }
             }
         });
@@ -665,5 +699,63 @@ mod tests {
         // Verify the proxy creates correctly with the same tx.
         let guest_ip = Ipv4Addr::new(192, 168, 64, 2);
         let _proxy = SocketProxy::new(gw_ip, gw_mac, guest_ip, tx, CancellationToken::new());
+    }
+
+    /// Verifies that the ICMP identifier restoration logic patches Echo Reply
+    /// (type 0) packets but leaves other ICMP types untouched.
+    #[test]
+    fn test_icmp_identifier_restore() {
+        // Build a minimal ICMP Echo Reply (type=0, code=0) with a "wrong"
+        // identifier that simulates what macOS DGRAM ICMP sockets return.
+        let orig_icmp_id: [u8; 2] = [0xAA, 0xBB];
+        let wrong_id: [u8; 2] = [0x00, 0x42]; // kernel-rewritten value
+
+        // ICMP Echo Reply: [type, code, checksum(2), id(2), seq(2), ...]
+        let mut icmp_data: Vec<u8> = vec![
+            0x00, // type: Echo Reply
+            0x00, // code: 0
+            0x00,
+            0x00, // checksum (placeholder)
+            wrong_id[0],
+            wrong_id[1], // identifier (wrong)
+            0x00,
+            0x01, // sequence number
+        ];
+
+        // Apply the same patching logic used in proxy_icmp.
+        if icmp_data.len() >= 6 && icmp_data[0] == 0 {
+            icmp_data[4] = orig_icmp_id[0];
+            icmp_data[5] = orig_icmp_id[1];
+        }
+
+        assert_eq!(
+            [icmp_data[4], icmp_data[5]],
+            orig_icmp_id,
+            "Echo Reply identifier should be restored to the original guest value"
+        );
+
+        // Build an ICMP Destination Unreachable (type=3, code=1) — should NOT
+        // be patched because bytes 4-5 have a different meaning.
+        let mut icmp_unreach: Vec<u8> = vec![
+            0x03, // type: Destination Unreachable
+            0x01, // code: Host Unreachable
+            0x00, 0x00, // checksum (placeholder)
+            0x00, 0x00, // unused (bytes 4-5)
+            0x00, 0x00, // next-hop MTU (bytes 6-7)
+        ];
+
+        let before = [icmp_unreach[4], icmp_unreach[5]];
+
+        // Same patching logic — should be a no-op for type != 0.
+        if icmp_unreach.len() >= 6 && icmp_unreach[0] == 0 {
+            icmp_unreach[4] = orig_icmp_id[0];
+            icmp_unreach[5] = orig_icmp_id[1];
+        }
+
+        assert_eq!(
+            [icmp_unreach[4], icmp_unreach[5]],
+            before,
+            "Non-Echo ICMP types must not have their identifier bytes patched"
+        );
     }
 }

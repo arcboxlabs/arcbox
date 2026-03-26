@@ -1155,15 +1155,14 @@ impl VmLifecycleManager {
 
     /// Forces VM termination.
     ///
+    /// Does not take `transition_lock` — force stop must succeed even when
+    /// a graceful shutdown holds the lock (blocked in a sync VM stop call).
+    ///
     /// # Errors
     /// Returns an error if the VM cannot be terminated.
     pub async fn force_stop(&self) -> Result<()> {
-        let _lock = self.transition_lock.lock().await;
-
-        // Stop health monitor
         self.health_monitor.stop();
 
-        // Force stop by removing and recreating
         let _ = self.machine_manager.remove(DEFAULT_MACHINE_NAME, true);
 
         *self.state.write().await = VmLifecycleState::NotExist;
@@ -1380,25 +1379,25 @@ mod tests {
         // First failure: retry
         match policy.handle_failure("test error") {
             RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_millis(100)),
-            _ => panic!("expected RetryAfter"),
+            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
         }
 
         // Second failure: retry
         match policy.handle_failure("test error") {
             RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_millis(100)),
-            _ => panic!("expected RetryAfter"),
+            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
         }
 
         // Third failure: retry
         match policy.handle_failure("test error") {
             RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_millis(100)),
-            _ => panic!("expected RetryAfter"),
+            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
         }
 
         // Fourth failure: give up
         match policy.handle_failure("test error") {
             RecoveryAction::GiveUp(_) => {}
-            _ => panic!("expected GiveUp"),
+            RecoveryAction::RetryAfter(_) => panic!("expected GiveUp"),
         }
     }
 
@@ -1415,37 +1414,37 @@ mod tests {
         // First failure: 100ms
         match policy.handle_failure("test") {
             RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_millis(100)),
-            _ => panic!("expected RetryAfter"),
+            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
         }
 
         // Second failure: 200ms
         match policy.handle_failure("test") {
             RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_millis(200)),
-            _ => panic!("expected RetryAfter"),
+            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
         }
 
         // Third failure: 400ms
         match policy.handle_failure("test") {
             RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_millis(400)),
-            _ => panic!("expected RetryAfter"),
+            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
         }
 
         // Fourth failure: 800ms
         match policy.handle_failure("test") {
             RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_millis(800)),
-            _ => panic!("expected RetryAfter"),
+            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
         }
 
         // Fifth failure: capped at 1000ms
         match policy.handle_failure("test") {
             RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_secs(1)),
-            _ => panic!("expected RetryAfter"),
+            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
         }
 
         // Sixth failure: give up
         match policy.handle_failure("test") {
             RecoveryAction::GiveUp(_) => {}
-            _ => panic!("expected GiveUp"),
+            RecoveryAction::RetryAfter(_) => panic!("expected GiveUp"),
         }
     }
 

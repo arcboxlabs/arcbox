@@ -521,6 +521,15 @@ impl Vmm {
         Ok(())
     }
 
+    /// Marks the inner `DarwinVm` to skip its `stop()` call on drop.
+    pub(super) fn mark_managed_vm_skip_stop(&mut self) {
+        if let Some(ref mut managed_vm) = self.managed_vm {
+            if let Some(vm) = managed_vm.downcast_mut::<DarwinVm>() {
+                vm.set_skip_stop_on_drop();
+            }
+        }
+    }
+
     /// Cancels the custom file-handle network datapath and releases VZ-side fd.
     pub(super) fn stop_network(&mut self) {
         if let Some(cancel) = self.net_cancel.take() {

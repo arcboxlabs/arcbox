@@ -3,23 +3,25 @@
 //! gRPC service implementations for `ArcBox`.
 //!
 //! This crate hosts service implementations consumed by the `arcbox-daemon`
-//! binary. It provides machine and sandbox gRPC services.
+//! binary. It provides machine, sandbox, migration, and system gRPC services.
 
 pub mod error;
 // tonic::Status is ~176 bytes — every gRPC method returns Result<_, Status>,
 // so this lint is unavoidable throughout the module tree.
 #[allow(clippy::result_large_err)]
 pub mod grpc;
+pub mod migration;
 pub mod system;
 
 // Re-export gRPC service types from arcbox-grpc for convenience.
 pub use arcbox_grpc::v1::{
     kubernetes_service_client, kubernetes_service_server, machine_service_client,
-    machine_service_server,
+    machine_service_server, migration_service_client, migration_service_server,
 };
 pub use arcbox_grpc::{
-    IconService, IconServiceServer, SandboxService, SandboxServiceServer, SandboxSnapshotService,
-    SandboxSnapshotServiceServer, SystemService, SystemServiceServer,
+    IconService, IconServiceServer, MigrationService, MigrationServiceServer, SandboxService,
+    SandboxServiceServer, SandboxSnapshotService, SandboxSnapshotServiceServer, SystemService,
+    SystemServiceServer,
 };
 
 pub use arcbox_protocol::v1::setup_status::Phase as SetupPhase;
@@ -28,4 +30,5 @@ pub use grpc::{
     IconServiceImpl, KubernetesServiceImpl, MachineServiceImpl, SandboxServiceImpl,
     SandboxSnapshotServiceImpl, SharedRuntime,
 };
+pub use migration::MigrationServiceImpl;
 pub use system::{SetupState, SystemServiceImpl};

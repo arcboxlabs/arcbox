@@ -276,13 +276,23 @@ impl<T> std::fmt::Debug for LockFreeRing<T> {
     }
 }
 
-/// Multi-producer multi-consumer ring buffer.
+/// A slot in the MPMC ring, holding data and a per-slot sequence counter
+/// for Vyukov-style synchronization between producers and consumers.
+struct MpmcSlot<T> {
+    seq: AtomicUsize,
+    data: UnsafeCell<MaybeUninit<T>>,
+}
+
+/// Multi-producer multi-consumer ring buffer (Vyukov bounded MPMC queue).
 ///
-/// Uses compare-and-swap operations for thread-safe access from multiple
-/// producers and consumers. Slower than SPSC but more flexible.
+/// Uses per-slot sequence counters to synchronize producers and consumers.
+/// A producer may only write a slot once its sequence matches the expected
+/// head value, and a consumer may only read once the sequence shows the
+/// write is complete. This eliminates the race where a consumer observes
+/// an advanced head but the slot has not been written yet.
 pub struct MpmcRing<T> {
-    /// Ring buffer storage.
-    buffer: Box<[UnsafeCell<MaybeUninit<T>>]>,
+    /// Ring buffer storage with per-slot sequence counters.
+    buffer: Box<[MpmcSlot<T>]>,
     /// Capacity (always power of 2).
     capacity: usize,
     /// Capacity mask.
@@ -305,8 +315,14 @@ impl<T: Copy> MpmcRing<T> {
         let capacity = next_power_of_two(capacity);
         let mask = capacity - 1;
 
-        let buffer: Vec<UnsafeCell<MaybeUninit<T>>> = (0..capacity)
-            .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
+        // Initialize each slot's sequence counter to its index. This is the
+        // Vyukov convention: seq == pos means the slot is ready for a producer
+        // whose head == pos.
+        let buffer: Vec<MpmcSlot<T>> = (0..capacity)
+            .map(|i| MpmcSlot {
+                seq: AtomicUsize::new(i),
+                data: UnsafeCell::new(MaybeUninit::uninit()),
+            })
             .collect();
 
         Self {
@@ -341,62 +357,91 @@ impl<T: Copy> MpmcRing<T> {
         self.len() == 0
     }
 
-    /// Enqueues an item using CAS.
+    /// Enqueues an item (Vyukov bounded MPMC algorithm).
+    ///
+    /// Returns `Err(item)` if the queue is full.
     pub fn enqueue(&self, item: T) -> Result<(), T> {
         let mut head = self.head.0.load(Ordering::Relaxed);
 
         loop {
-            let tail = self.tail.0.load(Ordering::Acquire);
+            let slot = &self.buffer[head & self.mask];
+            let seq = slot.seq.load(Ordering::Acquire);
 
-            if head.wrapping_sub(tail) >= self.capacity {
-                return Err(item);
-            }
+            #[allow(clippy::cast_possible_wrap)]
+            let diff = (seq as isize).wrapping_sub(head as isize);
 
-            match self.head.0.compare_exchange_weak(
-                head,
-                head.wrapping_add(1),
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    let idx = head & self.mask;
-                    unsafe {
-                        (*self.buffer[idx].get()).write(item);
+            match diff.cmp(&0) {
+                std::cmp::Ordering::Equal => {
+                    // Slot is ready for writing at this head position.
+                    match self.head.0.compare_exchange_weak(
+                        head,
+                        head.wrapping_add(1),
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => {
+                            // SAFETY: We won the CAS, so we exclusively own this slot.
+                            unsafe { (*slot.data.get()).write(item) };
+                            // Signal consumers that this slot is filled.
+                            slot.seq.store(head.wrapping_add(1), Ordering::Release);
+                            return Ok(());
+                        }
+                        Err(h) => head = h,
                     }
-                    return Ok(());
                 }
-                Err(h) => {
-                    head = h;
-                    std::hint::spin_loop();
+                std::cmp::Ordering::Less => {
+                    // Queue is full.
+                    return Err(item);
+                }
+                std::cmp::Ordering::Greater => {
+                    // Another producer claimed this slot, reload head.
+                    head = self.head.0.load(Ordering::Relaxed);
                 }
             }
         }
     }
 
-    /// Dequeues an item using CAS.
+    /// Dequeues an item (Vyukov bounded MPMC algorithm).
+    ///
+    /// Returns `None` if the queue is empty.
     pub fn dequeue(&self) -> Option<T> {
         let mut tail = self.tail.0.load(Ordering::Relaxed);
 
         loop {
-            let head = self.head.0.load(Ordering::Acquire);
+            let slot = &self.buffer[tail & self.mask];
+            let seq = slot.seq.load(Ordering::Acquire);
 
-            if tail == head {
-                return None;
-            }
+            #[allow(clippy::cast_possible_wrap)]
+            let diff = (seq as isize).wrapping_sub(tail.wrapping_add(1) as isize);
 
-            let idx = tail & self.mask;
-            let item = unsafe { (*self.buffer[idx].get()).assume_init_read() };
-
-            match self.tail.0.compare_exchange_weak(
-                tail,
-                tail.wrapping_add(1),
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return Some(item),
-                Err(t) => {
-                    tail = t;
-                    std::hint::spin_loop();
+            match diff.cmp(&0) {
+                std::cmp::Ordering::Equal => {
+                    // Slot has been written by a producer and is ready for reading.
+                    match self.tail.0.compare_exchange_weak(
+                        tail,
+                        tail.wrapping_add(1),
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => {
+                            // SAFETY: The producer has finished writing (seq confirms it)
+                            // and we won the CAS, so we exclusively own this slot.
+                            let item = unsafe { (*slot.data.get()).assume_init_read() };
+                            // Signal producers that this slot is free for reuse.
+                            slot.seq
+                                .store(tail.wrapping_add(self.capacity), Ordering::Release);
+                            return Some(item);
+                        }
+                        Err(t) => tail = t,
+                    }
+                }
+                std::cmp::Ordering::Less => {
+                    // Queue is empty.
+                    return None;
+                }
+                std::cmp::Ordering::Greater => {
+                    // Another consumer claimed this slot, reload tail.
+                    tail = self.tail.0.load(Ordering::Relaxed);
                 }
             }
         }
@@ -543,5 +588,88 @@ mod tests {
         assert_eq!(ring.dequeue(), Some(1));
         assert_eq!(ring.dequeue(), Some(2));
         assert_eq!(ring.dequeue(), None);
+    }
+
+    /// Multi-threaded stress test: multiple producers and consumers racing on
+    /// the same ring. Validates that every enqueued value is dequeued exactly
+    /// once (no duplicates, no lost items).
+    #[test]
+    fn test_mpmc_stress() {
+        use std::sync::atomic::AtomicBool;
+
+        const PRODUCERS: usize = 4;
+        const CONSUMERS: usize = 4;
+        const ITEMS_PER_PRODUCER: usize = 10_000;
+        const TOTAL: usize = PRODUCERS * ITEMS_PER_PRODUCER;
+
+        let ring = Arc::new(MpmcRing::<usize>::new(256));
+        let producers_done = Arc::new(AtomicBool::new(false));
+
+        // Spawn producers — each pushes a disjoint range of values.
+        let mut producer_handles = Vec::new();
+        for p in 0..PRODUCERS {
+            let ring = Arc::clone(&ring);
+            producer_handles.push(thread::spawn(move || {
+                let base = p * ITEMS_PER_PRODUCER;
+                for i in 0..ITEMS_PER_PRODUCER {
+                    while ring.enqueue(base + i).is_err() {
+                        std::hint::spin_loop();
+                    }
+                }
+            }));
+        }
+
+        // Spawn consumers — each drains until producers are done and ring is empty.
+        let consumer_handles: Vec<_> = (0..CONSUMERS)
+            .map(|_| {
+                let ring = Arc::clone(&ring);
+                let done = Arc::clone(&producers_done);
+                thread::spawn(move || {
+                    let mut collected = Vec::new();
+                    loop {
+                        match ring.dequeue() {
+                            Some(v) => collected.push(v),
+                            None => {
+                                if done.load(Ordering::Acquire) {
+                                    // Final drain after producers signaled done.
+                                    while let Some(v) = ring.dequeue() {
+                                        collected.push(v);
+                                    }
+                                    break;
+                                }
+                                std::hint::spin_loop();
+                            }
+                        }
+                    }
+                    collected
+                })
+            })
+            .collect();
+
+        // Wait for all producers to finish, then signal consumers.
+        for h in producer_handles {
+            h.join().unwrap();
+        }
+        producers_done.store(true, Ordering::Release);
+
+        // Collect all consumed values.
+        let mut all: Vec<usize> = consumer_handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect();
+
+        // Drain anything still in the ring (consumers may have exited early).
+        while let Some(v) = ring.dequeue() {
+            all.push(v);
+        }
+
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(
+            all.len(),
+            TOTAL,
+            "expected {TOTAL} unique items, got {} (duplicates or lost items)",
+            all.len()
+        );
     }
 }

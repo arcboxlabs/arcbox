@@ -427,8 +427,8 @@ mod tests {
         std::fs::create_dir_all(&version_dir).unwrap();
 
         let config = BootAssetConfig {
-            cache_dir: cache_dir.clone(),
-            version: version.clone(),
+            version,
+            cache_dir,
             ..Default::default()
         };
         let provider = BootAssetProvider::with_config(config).unwrap();

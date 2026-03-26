@@ -2217,6 +2217,99 @@ pub struct VolumeUsage {
     #[prost(int64, tag = "2")]
     pub ref_count: i64,
 }
+/// Request to prepare a migration.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PrepareMigrationRequest {
+    /// Stable source runtime identifier (for example, "docker-desktop" or "orbstack").
+    #[prost(string, tag = "1")]
+    pub source_kind: ::prost::alloc::string::String,
+    /// Optional override for the source Docker-compatible socket path.
+    #[prost(string, tag = "2")]
+    pub source_socket_path: ::prost::alloc::string::String,
+    /// Allow prepare to include replace actions in the plan.
+    #[prost(bool, tag = "3")]
+    pub allow_replacements: bool,
+}
+/// Prepared migration summary.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PrepareMigrationResponse {
+    /// Opaque identifier for the prepared plan.
+    #[prost(string, tag = "1")]
+    pub plan_id: ::prost::alloc::string::String,
+    /// Source runtime identifier used for the plan.
+    #[prost(string, tag = "2")]
+    pub source_kind: ::prost::alloc::string::String,
+    /// Resolved source socket path used for the plan.
+    #[prost(string, tag = "3")]
+    pub source_socket_path: ::prost::alloc::string::String,
+    /// Number of images included in the plan.
+    #[prost(uint32, tag = "4")]
+    pub image_count: u32,
+    /// Number of volumes included in the plan.
+    #[prost(uint32, tag = "5")]
+    pub volume_count: u32,
+    /// Number of networks included in the plan.
+    #[prost(uint32, tag = "6")]
+    pub network_count: u32,
+    /// Number of containers included in the plan.
+    #[prost(uint32, tag = "7")]
+    pub container_count: u32,
+    /// Whether the plan would replace existing ArcBox resources (images, volumes,
+    /// networks, or containers that already exist on the target). When true,
+    /// RunMigrationRequest.allow_replacements must be set to confirm.
+    #[prost(bool, tag = "8")]
+    pub replacements_required: bool,
+    /// Non-fatal warnings discovered during preparation (for example, volume
+    /// blockers that will require stopping running source containers).
+    #[prost(string, repeated, tag = "9")]
+    pub warnings: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// Request to run a prepared migration.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RunMigrationRequest {
+    /// Opaque identifier returned by PrepareMigration.
+    #[prost(string, tag = "1")]
+    pub plan_id: ::prost::alloc::string::String,
+    /// Confirms that the caller accepts any replace actions in the plan.
+    #[prost(bool, tag = "2")]
+    pub allow_replacements: bool,
+}
+/// Streaming migration progress event.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RunMigrationEvent {
+    /// Opaque identifier of the plan being executed.
+    #[prost(string, tag = "1")]
+    pub plan_id: ::prost::alloc::string::String,
+    /// High-level execution phase (for example, "prepare", "images", or "containers").
+    #[prost(string, tag = "2")]
+    pub phase: ::prost::alloc::string::String,
+    /// Optional resource name currently being processed.
+    #[prost(string, tag = "3")]
+    pub resource: ::prost::alloc::string::String,
+    /// Human-readable progress detail.
+    #[prost(string, tag = "4")]
+    pub message: ::prost::alloc::string::String,
+    /// Number of completed work items in the current phase.
+    #[prost(uint32, tag = "5")]
+    pub completed: u32,
+    /// Total work items expected in the current phase.
+    #[prost(uint32, tag = "6")]
+    pub total: u32,
+    /// Indicates that no more events will follow for this run.
+    #[prost(bool, tag = "7")]
+    pub done: bool,
+    /// Indicates whether the run completed successfully.
+    #[prost(bool, tag = "8")]
+    pub success: bool,
+}
 /// Shell input for interactive sessions.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
