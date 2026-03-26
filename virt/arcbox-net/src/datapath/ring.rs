@@ -228,18 +228,6 @@ impl<T> LockFreeRing<T> {
         count
     }
 
-    /// Tries to enqueue an item, returning immediately if full.
-    #[inline]
-    pub fn try_enqueue(&self, item: T) -> Result<(), T> {
-        self.enqueue(item)
-    }
-
-    /// Tries to dequeue an item, returning immediately if empty.
-    #[inline]
-    pub fn try_dequeue(&self) -> Option<T> {
-        self.dequeue()
-    }
-
     /// Peeks at the next item to be dequeued without removing it.
     ///
     /// # Safety
@@ -308,7 +296,7 @@ pub struct MpmcRing<T> {
 unsafe impl<T: Send> Send for MpmcRing<T> {}
 unsafe impl<T: Send> Sync for MpmcRing<T> {}
 
-impl<T> MpmcRing<T> {
+impl<T: Copy> MpmcRing<T> {
     /// Creates a new MPMC ring buffer.
     #[must_use]
     pub fn new(capacity: usize) -> Self {
@@ -415,11 +403,8 @@ impl<T> MpmcRing<T> {
     }
 }
 
-impl<T> Drop for MpmcRing<T> {
-    fn drop(&mut self) {
-        while self.dequeue().is_some() {}
-    }
-}
+// No Drop impl needed: T: Copy guarantees no destructors, and
+// Box<[UnsafeCell<MaybeUninit<T>>]> frees the buffer memory.
 
 #[cfg(test)]
 mod tests {
