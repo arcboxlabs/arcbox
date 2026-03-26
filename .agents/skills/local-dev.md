@@ -96,7 +96,7 @@ Only `arcbox-daemon` needs Developer ID signing. The other binaries:
 
 ### DNS port 5553 already in use
 
-ArcBox Desktop's daemon binds 5553. Dev daemon fails silently.
+ArcBox's daemon binds 5553. Dev daemon fails silently.
 
 ```bash
 lsof -i :5553

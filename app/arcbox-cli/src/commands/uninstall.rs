@@ -38,8 +38,7 @@ pub async fn execute(args: UninstallArgs) -> Result<()> {
     } else {
         println!("  • Remove ALL app data (~/.arcbox) including containers");
     }
-    println!("  • Remove app (/Applications/ArcBox Desktop.app)");
-    println!("  • Reset login item approvals (System Settings)   [sudo]");
+    println!("  • Remove app (/Applications/ArcBox.app)");
     println!();
 
     if !args.yes {
@@ -61,7 +60,7 @@ pub async fn execute(args: UninstallArgs) -> Result<()> {
     }
 
     let mut step = 0u32;
-    let total = 10u32;
+    let total = 9u32;
 
     macro_rules! step {
         ($label:expr, $body:expr) => {
@@ -79,10 +78,11 @@ pub async fn execute(args: UninstallArgs) -> Result<()> {
         };
     }
 
-    // 1. Quit the app.
-    step!("Quitting ArcBox Desktop...", {
+    // 1. Quit the app (triggers SMAppService.unregister() via the app's
+    //    termination handler, clearing the BTM / Login Items entry).
+    step!("Quitting ArcBox...", {
         let _ = Command::new("osascript")
-            .args(["-e", r#"quit app "ArcBox Desktop""#])
+            .args(["-e", r#"quit app "ArcBox""#])
             .output();
         // Wait for app to quit and daemon to stop.
         std::thread::sleep(std::time::Duration::from_secs(3));
@@ -105,6 +105,9 @@ pub async fn execute(args: UninstallArgs) -> Result<()> {
         let _ = Command::new("pkill")
             .args(["-f", "com.apple.Virtualization.VirtualMachine"])
             .output();
+        // Remove the daemon launchd plist.
+        let plist = home.join("Library/LaunchAgents/com.arcboxlabs.desktop.daemon.plist");
+        let _ = std::fs::remove_file(plist);
     });
 
     // 3. Stop and remove helper.
@@ -207,15 +210,7 @@ pub async fn execute(args: UninstallArgs) -> Result<()> {
 
     // 9. Remove app bundle.
     step!("Removing app...", {
-        let _ = std::fs::remove_dir_all("/Applications/ArcBox Desktop.app");
-    });
-
-    // 10. Reset login item approvals (SMAppService / BTM database).
-    //     This clears the "Allow in the Background" toggles in System
-    //     Settings → General → Login Items for both the daemon and helper,
-    //     so a reinstall starts with a clean approval state.
-    step!("Resetting login item approvals...   [sudo]", {
-        let _ = Command::new("sudo").args(["sfltool", "resetbtm"]).output();
+        let _ = std::fs::remove_dir_all("/Applications/ArcBox.app");
     });
 
     println!("\nArcBox has been uninstalled.");

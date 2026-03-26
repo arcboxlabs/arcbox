@@ -10,8 +10,8 @@ use tracing::info;
 
 /// Returns the `Contents/` directory if the daemon is running inside an app bundle.
 ///
-/// Layout: `ArcBox Desktop.app/Contents/Helpers/com.arcboxlabs.desktop.daemon`
-/// → returns `ArcBox Desktop.app/Contents/`
+/// Layout: `ArcBox.app/Contents/Helpers/com.arcboxlabs.desktop.daemon`
+/// → returns `ArcBox.app/Contents/`
 pub fn find_bundle_contents() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     // exe = .../Contents/Helpers/com.arcboxlabs.desktop.daemon

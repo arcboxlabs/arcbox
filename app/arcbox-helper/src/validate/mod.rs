@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn valid_cli_targets() {
         assert!(
-            "/Applications/ArcBox Desktop.app/Contents/MacOS/xbin/docker"
+            "/Applications/ArcBox.app/Contents/MacOS/xbin/docker"
                 .parse::<CliTarget>()
                 .is_ok()
         );
