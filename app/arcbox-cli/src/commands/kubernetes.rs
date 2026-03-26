@@ -1,9 +1,6 @@
 //! Kubernetes integration and lifecycle commands.
 
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::task::{Context as TaskContext, Poll};
 
 use anyhow::{Context, Result, bail};
 use arcbox_docker_tools::{HostToolManager, ToolGroup, parse_tools_for_group};
@@ -13,11 +10,10 @@ use arcbox_protocol::v1::{
     KubernetesStatusRequest, KubernetesStopRequest,
 };
 use clap::Subcommand;
-use hyper_util::rt::TokioIo;
-use tokio::net::UnixStream;
 use tonic::Request;
-use tonic::codegen::{Service, http::Uri};
 use tonic::transport::{Channel, Endpoint};
+
+use super::machine::UnixConnector;
 
 /// Embedded `assets.lock` (same copy used by Docker/Kubernetes host tools).
 const LOCK_TOML: &str = include_str!("../../../../assets.lock");
@@ -62,64 +58,8 @@ pub async fn execute(cmd: KubernetesCommands) -> Result<()> {
     }
 }
 
-fn resolve_grpc_socket_path() -> PathBuf {
-    if let Ok(path) = std::env::var("ARCBOX_GRPC_SOCKET") {
-        return PathBuf::from(path);
-    }
-
-    if let Ok(path) = std::env::var("ARCBOX_SOCKET") {
-        let docker_socket = PathBuf::from(path);
-        if let Some(parent) = docker_socket.parent() {
-            let preferred = parent.join("arcbox-grpc.sock");
-            if preferred.exists() {
-                return preferred;
-            }
-
-            let legacy = parent.join("arcbox.sock");
-            if legacy.exists() {
-                return legacy;
-            }
-
-            return preferred;
-        }
-    }
-
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".arcbox")
-        .join("arcbox.sock")
-}
-
-struct UnixConnector {
-    socket_path: PathBuf,
-}
-
-impl UnixConnector {
-    fn new(socket_path: PathBuf) -> Self {
-        Self { socket_path }
-    }
-}
-
-impl Service<Uri> for UnixConnector {
-    type Response = TokioIo<UnixStream>;
-    type Error = std::io::Error;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-
-    fn poll_ready(&mut self, _cx: &mut TaskContext<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, _: Uri) -> Self::Future {
-        let socket_path = self.socket_path.clone();
-        Box::pin(async move {
-            let stream = UnixStream::connect(socket_path).await?;
-            Ok(TokioIo::new(stream))
-        })
-    }
-}
-
 async fn kubernetes_client() -> Result<KubernetesServiceClient<Channel>> {
-    let socket_path = resolve_grpc_socket_path();
+    let socket_path = super::resolve_grpc_socket_path();
     let channel = Endpoint::from_static("http://[::]:50051")
         .connect_with_connector(UnixConnector::new(socket_path.clone()))
         .await
