@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.15](https://github.com/arcboxlabs/arcbox/compare/v0.3.14...v0.3.15) (2026-03-26)
+
+
+### Features
+
+* add native k3s support to ArcBox ([#44](https://github.com/arcboxlabs/arcbox/issues/44)) ([f268d88](https://github.com/arcboxlabs/arcbox/commit/f268d8839b28ea9e72e51953d3c798668c1c0e4f))
+
 ## [0.3.14](https://github.com/arcboxlabs/arcbox/compare/v0.3.13...v0.3.14) (2026-03-26)
 
 
