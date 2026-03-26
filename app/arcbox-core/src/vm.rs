@@ -428,11 +428,13 @@ impl VmManager {
 
         match stop_result {
             Ok(true) => {
-                if let Some(vmm) = entry.vmm.take() {
+                if let Some(mut vmm) = entry.vmm.take() {
                     // The guest has already halted via ACPI, but Vmm::Drop
                     // would call the hypervisor stop path which can crash on
-                    // macOS. Leak the handle just like force_stop_without_hypervisor.
-                    std::mem::forget(vmm);
+                    // macOS. Skip the hypervisor teardown but still drop
+                    // normally to close FDs and free resources.
+                    vmm.set_skip_hypervisor_stop();
+                    drop(vmm);
                 }
                 entry.info.state = VmState::Stopped;
                 tracing::info!("Gracefully stopped VM {}", id);
@@ -473,10 +475,11 @@ impl VmManager {
 
         entry.info.state = VmState::Stopping;
 
-        if let Some(vmm) = entry.vmm.take() {
-            // Intentionally leak the VMM object to avoid triggering a crashy
-            // shutdown path in some macOS Virtualization.framework setups.
-            std::mem::forget(vmm);
+        if let Some(mut vmm) = entry.vmm.take() {
+            // Skip the hypervisor teardown (can crash on macOS) but still
+            // run Drop to close serial FDs, network FDs, and free resources.
+            vmm.set_skip_hypervisor_stop();
+            drop(vmm);
         }
 
         entry.info.state = VmState::Stopped;

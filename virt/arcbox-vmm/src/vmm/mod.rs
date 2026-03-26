@@ -192,6 +192,10 @@ pub struct Vmm {
     event_loop: Option<EventLoop>,
     /// Whether using managed execution mode (e.g., Darwin Virtualization.framework).
     managed_execution: bool,
+    /// When true, Drop will skip calling into the hypervisor stop path.
+    /// Used when the guest has already halted (e.g. ACPI shutdown) and the
+    /// hypervisor teardown would crash. FDs and other resources are still freed.
+    skip_hypervisor_stop: bool,
     /// Type-erased VM handle for managed execution mode.
     /// Stored to keep the VM alive and for lifecycle control.
     managed_vm: Option<ManagedVm>,
@@ -263,6 +267,7 @@ impl Vmm {
             irq_chip: None,
             event_loop: None,
             managed_execution: false,
+            skip_hypervisor_stop: false,
             managed_vm: None,
             #[cfg(target_os = "macos")]
             net_cancel: None,
@@ -913,9 +918,23 @@ fn placeholder_vcpu_snapshots(vcpu_count: u32) -> Vec<arcbox_hypervisor::VcpuSna
     }
 }
 
+impl Vmm {
+    /// Marks this VMM to skip the hypervisor stop path on drop.
+    ///
+    /// FDs, network resources, and other owned state are still cleaned up
+    /// normally. Only the Virtualization.framework stop call is skipped,
+    /// which can crash when the guest has already halted via ACPI.
+    pub fn set_skip_hypervisor_stop(&mut self) {
+        self.skip_hypervisor_stop = true;
+    }
+}
+
 impl Drop for Vmm {
     fn drop(&mut self) {
-        if self.state != VmmState::Stopped && self.state != VmmState::Created {
+        if !self.skip_hypervisor_stop
+            && self.state != VmmState::Stopped
+            && self.state != VmmState::Created
+        {
             let _ = self.stop();
         }
     }
