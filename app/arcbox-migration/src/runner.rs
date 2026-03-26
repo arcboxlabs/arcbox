@@ -313,12 +313,15 @@ impl DockerCliRunner {
         let mut dest = tokio::fs::File::create(&path).await?;
         let stdout_task =
             tokio::spawn(async move { tokio::io::copy(&mut stdout, &mut dest).await.map(|_| ()) });
-        let stderr_task = take_stderr(child.stderr.take());
+        // Drain stderr concurrently to prevent pipe buffer deadlocks.
+        let stderr_task = tokio::spawn(take_stderr(child.stderr.take()));
         let status = child.wait().await?;
         stdout_task
             .await
             .map_err(|e| MigrationError::Docker(format!("docker cp copy task failed: {e}")))??;
-        let stderr = stderr_task.await?;
+        let stderr = stderr_task
+            .await
+            .map_err(|e| MigrationError::Docker(format!("docker cp stderr task failed: {e}")))??;
         if !status.success() {
             return Err(MigrationError::Docker(format!(
                 "docker container cp failed: {}",
@@ -356,12 +359,15 @@ impl DockerCliRunner {
             tokio::io::copy(&mut source, &mut stdin).await?;
             stdin.shutdown().await
         });
-        let stderr_task = take_stderr(child.stderr.take());
+        // Drain stderr concurrently to prevent pipe buffer deadlocks.
+        let stderr_task = tokio::spawn(take_stderr(child.stderr.take()));
         let status = child.wait().await?;
         write_task
             .await
             .map_err(|e| MigrationError::Docker(format!("docker cp write task failed: {e}")))??;
-        let stderr = stderr_task.await?;
+        let stderr = stderr_task
+            .await
+            .map_err(|e| MigrationError::Docker(format!("docker cp stderr task failed: {e}")))??;
         if !status.success() {
             return Err(MigrationError::Docker(format!(
                 "docker container cp failed: {}",
