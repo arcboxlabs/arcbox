@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.14](https://github.com/arcboxlabs/arcbox/compare/v0.3.13...v0.3.14) (2026-03-26)
+
+
+### Features
+
+* **migration:** add local runtime migration flow and fix Docker image load proxying ([#55](https://github.com/arcboxlabs/arcbox/issues/55)) ([03ecf14](https://github.com/arcboxlabs/arcbox/commit/03ecf1493be953d61d2526708fa91b6f3c325fee))
+
+
+### Bug Fixes
+
+* **daemon:** add visible ^C feedback and double-^C force quit ([#127](https://github.com/arcboxlabs/arcbox/issues/127)) ([bd8e7f0](https://github.com/arcboxlabs/arcbox/commit/bd8e7f0b1e7efd7748d45097501eb2dbacfe26b1))
+
 ## [0.3.13](https://github.com/arcboxlabs/arcbox/compare/v0.3.12...v0.3.13) (2026-03-26)
 
 
