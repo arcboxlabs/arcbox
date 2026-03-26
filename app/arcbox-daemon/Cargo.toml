@@ -1,5 +1,6 @@
 [package]
 name = "arcbox-daemon"
+publish = false
 description = "ArcBox daemon process"
 version.workspace = true
 edition.workspace = true
@@ -16,6 +17,8 @@ path = "src/main.rs"
 arcbox-api = { workspace = true }
 arcbox-core = { workspace = true }
 arcbox-docker = { workspace = true }
+arcbox-helper = { workspace = true }
+async-trait = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { version = "0.1", features = ["net"] }
@@ -24,18 +27,25 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 sentry = { workspace = true }
+arcbox-logging = { workspace = true, features = ["sentry"] }
 dirs = { workspace = true }
 libc = { workspace = true }
+arcbox-constants = { workspace = true }
 arcbox-net = { workspace = true }
 serde_json.workspace = true
 axum.workspace = true
 bytes.workspace = true
 http-body-util = "0.1"
-arcbox-constants = { version = "0.1.2", path = "../../common/arcbox-constants" }
 tokio-util = "0.7"
+arcbox-docker-tools.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 macos-resolver = { workspace = true }
+libproc = { workspace = true }
+
+[features]
+default = []
+vmnet = ["arcbox-core/vmnet"]
 
 [lints]
 workspace = true

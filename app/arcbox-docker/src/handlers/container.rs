@@ -20,8 +20,6 @@ crate::handlers::proxy_handler!(container_stats);
 crate::handlers::proxy_handler!(container_changes);
 crate::handlers::proxy_handler!(prune_containers);
 crate::handlers::proxy_handler!(create_container);
-crate::handlers::proxy_handler!(kill_container);
-crate::handlers::proxy_handler!(restart_container);
 
 /// Extract container ID from URI path.
 ///
@@ -95,6 +93,62 @@ pub async fn stop_container(
     Ok(response)
 }
 
+/// Kill a container and tear down its port forwarding + DNS.
+///
+/// # Errors
+///
+/// Returns an error if VM readiness fails or proxying to guest dockerd fails.
+pub async fn kill_container(
+    State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
+    req: Request<Body>,
+) -> Result<Response> {
+    // Resolve canonical ID before proxy — kill with --rm triggers auto-remove.
+    let canonical = resolve_canonical_from_uri(&state, &uri).await;
+
+    let response = proxy(&state, &uri, req).await?;
+
+    // Docker kill returns 204 on success.
+    if response.status().as_u16() == 204 {
+        if let Some(canonical) = canonical {
+            state.runtime.stop_port_forwarding_by_id(&canonical).await;
+            state.runtime.deregister_dns_by_id(&canonical).await;
+        }
+    }
+
+    Ok(response)
+}
+
+/// Restart a container and refresh its DNS entry.
+///
+/// # Errors
+///
+/// Returns an error if VM readiness fails or proxying to guest dockerd fails.
+pub async fn restart_container(
+    State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
+    req: Request<Body>,
+) -> Result<Response> {
+    let response = proxy(&state, &uri, req).await?;
+
+    // Docker restart returns 204 on success. Refresh DNS (container may get
+    // a new IP) with a single inspect call for both canonical ID and DNS info.
+    // Port forwarding targets the guest VM and survives container restarts.
+    if response.status().as_u16() == 204 {
+        if let Some(id) = extract_container_id(&uri) {
+            let _ = state.runtime.ensure_vm_ready().await;
+            if let Some(body_bytes) = inspect_container_body(&state, &id).await {
+                let canonical = canonical_id_or_fallback(&id, &body_bytes);
+                if let Some((name, ip)) = extract_container_dns_info(&body_bytes) {
+                    state.runtime.register_dns(&canonical, &name, ip).await;
+                }
+            }
+        }
+    }
+
+    Ok(response)
+}
+
 /// Remove a container and tear down its port forwarding + DNS.
 ///
 /// # Errors
@@ -126,6 +180,11 @@ pub async fn remove_container(
 /// Shares a single inspect call for both port forwarding and DNS setup.
 async fn setup_container_networking(state: &AppState, container_id: &str) {
     let Some(body_bytes) = inspect_container_body(state, container_id).await else {
+        tracing::warn!(
+            container_id,
+            "Failed to inspect container for networking setup; \
+             port forwarding and DNS will not be configured"
+        );
         return;
     };
 
@@ -146,7 +205,7 @@ async fn setup_container_networking(state: &AppState, container_id: &str) {
 async fn inspect_container_body(state: &AppState, container_id: &str) -> Option<Bytes> {
     let inspect_path = format!("/containers/{container_id}/json");
     let inspect_resp = match proxy_to_guest(
-        &state.runtime,
+        state.connector.as_ref(),
         Method::GET,
         &inspect_path,
         &HeaderMap::new(),
@@ -323,8 +382,13 @@ fn canonical_id_or_fallback(container_id: &str, inspect_json: &[u8]) -> String {
 /// canonical full ID. Returns `None` (with a warning) when canonical
 /// resolution fails, so callers skip teardown rather than using a
 /// potentially wrong key (name/short-id).
+///
+/// Ensures VM readiness first, since [`resolve_canonical_id`] uses
+/// `proxy_to_guest` directly (which does not call `ensure_vm_ready`).
 async fn resolve_canonical_from_uri(state: &AppState, uri: &Uri) -> Option<String> {
     let id = extract_container_id(uri)?;
+    // Ensure the VM is reachable before attempting the inspect call.
+    let _ = state.runtime.ensure_vm_ready().await;
     match resolve_canonical_id(state, &id).await {
         Some(canonical) => Some(canonical),
         None => {
@@ -342,7 +406,7 @@ async fn resolve_canonical_from_uri(state: &AppState, uri: &Uri) -> Option<Strin
 async fn resolve_canonical_id(state: &AppState, id: &str) -> Option<String> {
     let inspect_path = format!("/containers/{id}/json");
     let resp = proxy_to_guest(
-        &state.runtime,
+        state.connector.as_ref(),
         Method::GET,
         &inspect_path,
         &HeaderMap::new(),

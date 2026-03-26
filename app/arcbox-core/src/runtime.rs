@@ -28,6 +28,11 @@ use tokio::sync::RwLock as TokioRwLock;
 /// Default guest VM IP address in NAT network (used by PortForwarder fallback).
 #[cfg(not(target_os = "macos"))]
 const DEFAULT_GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 64, 2);
+
+/// Inbound port-forwarding rules per container: maps container ID to a list of
+/// `(guest_ip, host_port, protocol)` tuples registered for that container.
+#[cfg(target_os = "macos")]
+type InboundRulesMap = Arc<TokioRwLock<HashMap<String, Vec<(Ipv4Addr, u16, InboundProtocol)>>>>;
 const REQUIRED_RUNTIME_ASSETS: [&str; 5] = [
     "dockerd",
     "containerd",
@@ -68,7 +73,10 @@ fn ensure_guest_binaries(data_dir: &Path) -> Result<()> {
     let agent_path = data_dir.join("bin/arcbox-agent");
     check_executable(
         &agent_path,
-        "agent binary not found; run 'arcbox boot prefetch' or build with: cargo build -p arcbox-agent --target <triple>",
+        &format!(
+            "agent binary not found at {}; run 'abctl boot prefetch' to download it",
+            agent_path.display()
+        ),
     )?;
 
     let runtime_dir = data_dir.join("runtime/bin");
@@ -76,7 +84,8 @@ fn ensure_guest_binaries(data_dir: &Path) -> Result<()> {
         check_executable(
             &runtime_dir.join(name),
             &format!(
-                "runtime binary '{name}' not found; run 'arcbox boot prefetch' to download runtime assets"
+                "runtime binary '{name}' not found at {}; run 'abctl boot prefetch' to download runtime assets",
+                runtime_dir.join(name).display()
             ),
         )?;
     }
@@ -131,7 +140,7 @@ pub struct Runtime {
     inbound_listener: Arc<TokioRwLock<Option<InboundListenerManager>>>,
     /// Tracks which inbound rules belong to each container for cleanup (macOS).
     #[cfg(target_os = "macos")]
-    inbound_rules: Arc<TokioRwLock<HashMap<String, Vec<(Ipv4Addr, u16, InboundProtocol)>>>>,
+    inbound_rules: InboundRulesMap,
     /// Port forwarders for each container (non-macOS fallback).
     #[cfg(not(target_os = "macos"))]
     port_forwarders: Arc<TokioRwLock<HashMap<String, PortForwarder>>>,
@@ -174,9 +183,17 @@ impl Runtime {
         let event_bus = EventBus::new();
         let snapshot_dir = config.data_dir.join("snapshots");
         let vm_manager = Arc::new(VmManager::new(snapshot_dir));
+        let network_manager = Arc::new(NetworkManager::new(arcbox_net::NetConfig::default()));
+
+        // Share the host-side DNS hosts table with the VMM so both
+        // the host DnsService and the VMM-side datapath DnsForwarder
+        // resolve from the same table.
+        let shared_dns_table = Some(network_manager.local_hosts_table());
+
         let machine_manager = Arc::new(MachineManager::new(
             Arc::clone(&vm_manager),
             config.data_dir.clone(),
+            shared_dns_table,
         ));
 
         // Create VM lifecycle manager with the machine manager.
@@ -192,8 +209,6 @@ impl Runtime {
             Arc::clone(&machine_manager),
             DEFAULT_MACHINE_NAME,
         );
-
-        let network_manager = Arc::new(NetworkManager::new(arcbox_net::NetConfig::default()));
 
         Ok(Self {
             config,

@@ -14,18 +14,18 @@
 //!
 //! [vm]
 //! cpus = 4
-//! memory_mb = 4096
+//! # memory_mb = 8192  # default: half of host RAM (512–16384)
 //!
 //! [machine]
 //! disk_gb = 50
 //! default_distro = "ubuntu"
 //!
 //! [network]
-//! subnet = "192.168.64.0/24"
+//! subnet = "10.0.2.0/24"
 //! dns = ["8.8.8.8", "8.8.4.4"]
 //!
 //! [docker]
-//! socket_path = "~/.arcbox/docker.sock"
+//! socket_path = "~/.arcbox/run/docker.sock"
 //!
 //! [container]
 //! guest_docker_vsock_port = 2375
@@ -91,6 +91,7 @@ impl Config {
     /// # Errors
     ///
     /// Returns an error if configuration cannot be loaded.
+    #[allow(clippy::result_large_err)]
     pub fn load() -> Result<Self, figment::Error> {
         Figment::new()
             .merge(Serialized::defaults(Self::default()))
@@ -105,6 +106,7 @@ impl Config {
     /// # Errors
     ///
     /// Returns an error if the file cannot be read or parsed.
+    #[allow(clippy::result_large_err)]
     pub fn load_from(path: impl AsRef<std::path::Path>) -> Result<Self, figment::Error> {
         Figment::new()
             .merge(Serialized::defaults(Self::default()))
@@ -113,28 +115,52 @@ impl Config {
             .extract()
     }
 
-    /// Returns the path to the images directory.
+    /// Returns the path to the persistent data directory (`data/`).
+    #[must_use]
+    pub fn data_subdir(&self) -> PathBuf {
+        self.data_dir.join(arcbox_constants::paths::host::DATA)
+    }
+
+    /// Returns the path to the images directory (`data/images/`).
     #[must_use]
     pub fn images_dir(&self) -> PathBuf {
-        self.data_dir.join("images")
+        self.data_subdir().join("images")
     }
 
-    /// Returns the path to the containers directory.
+    /// Returns the path to the containers directory (`data/containers/`).
     #[must_use]
     pub fn containers_dir(&self) -> PathBuf {
-        self.data_dir.join("containers")
+        self.data_subdir().join("containers")
     }
 
-    /// Returns the path to the machines directory.
+    /// Returns the path to the machines directory (`data/machines/`).
     #[must_use]
     pub fn machines_dir(&self) -> PathBuf {
-        self.data_dir.join("machines")
+        self.data_subdir().join("machines")
     }
 
-    /// Returns the path to the volumes directory.
+    /// Returns the path to the volumes directory (`data/volumes/`).
     #[must_use]
     pub fn volumes_dir(&self) -> PathBuf {
-        self.data_dir.join("volumes")
+        self.data_subdir().join("volumes")
+    }
+
+    /// Returns the path to the runtime state directory (`run/`).
+    #[must_use]
+    pub fn run_dir(&self) -> PathBuf {
+        self.data_dir.join(arcbox_constants::paths::host::RUN)
+    }
+
+    /// Returns the path to the log directory (`log/`).
+    #[must_use]
+    pub fn log_dir(&self) -> PathBuf {
+        self.data_dir.join(arcbox_constants::paths::host::LOG)
+    }
+
+    /// Returns the path to the persistent Docker data image (`data/docker.img`).
+    #[must_use]
+    pub fn docker_img_path(&self) -> PathBuf {
+        self.data_subdir().join("docker.img")
     }
 }
 
@@ -154,7 +180,7 @@ impl Default for VmDefaults {
     fn default() -> Self {
         Self {
             cpus: 4,
-            memory_mb: 4096,
+            memory_mb: arcbox_hypervisor::default_vm_memory_size() / (1024 * 1024),
             kernel_path: None,
         }
     }
@@ -204,7 +230,7 @@ pub struct NetworkConfig {
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
-            subnet: "192.168.64.0/24".to_string(),
+            subnet: "10.0.2.0/24".to_string(),
             gateway: None,
             dns: vec!["8.8.8.8".to_string(), "8.8.4.4".to_string()],
             ipv6: false,
@@ -255,6 +281,7 @@ fn default_docker_socket_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(".arcbox")
+        .join(arcbox_constants::paths::host::RUN)
         .join("docker.sock")
 }
 
@@ -324,7 +351,11 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.vm.cpus, 4);
-        assert_eq!(config.vm.memory_mb, 4096);
+        // Default memory is half of host RAM, clamped to [512, 16384] MB.
+        let expected_mb = arcbox_hypervisor::default_vm_memory_size() / (1024 * 1024);
+        assert_eq!(config.vm.memory_mb, expected_mb);
+        assert!(config.vm.memory_mb >= 512);
+        assert!(config.vm.memory_mb <= 16384);
         assert_eq!(config.machine.disk_gb, 50);
         assert!(config.docker.enabled);
         assert_eq!(
@@ -336,9 +367,12 @@ mod tests {
     #[test]
     fn test_config_paths() {
         let config = Config::default();
-        assert!(config.images_dir().ends_with("images"));
-        assert!(config.containers_dir().ends_with("containers"));
-        assert!(config.machines_dir().ends_with("machines"));
-        assert!(config.volumes_dir().ends_with("volumes"));
+        assert!(config.images_dir().ends_with("data/images"));
+        assert!(config.containers_dir().ends_with("data/containers"));
+        assert!(config.machines_dir().ends_with("data/machines"));
+        assert!(config.volumes_dir().ends_with("data/volumes"));
+        assert!(config.run_dir().ends_with("run"));
+        assert!(config.log_dir().ends_with("log"));
+        assert!(config.docker_img_path().ends_with("data/docker.img"));
     }
 }

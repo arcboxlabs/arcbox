@@ -1,0 +1,41 @@
+[package]
+name = "arcbox-net"
+description = "High-performance network stack for ArcBox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+arcbox-dhcp = { workspace = true }
+arcbox-error = { workspace = true }
+arcbox-virtio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }
+nix = { workspace = true }
+libc = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+ipnetwork = "0.20"
+hashbrown = "0.14"
+crossbeam-utils = "0.8"
+socket2 = { version = "0.5", features = ["all"] }
+tokio-util = "0.7"
+smoltcp = { version = "0.12.0", default-features = false, features = ["std", "alloc", "log", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-tcp-cubic"] }
+arcbox-dns = { workspace = true }
+serde_json.workspace = true
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[features]
+default = []
+vmnet = []
+
+[lints]
+workspace = true

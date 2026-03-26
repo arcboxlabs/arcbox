@@ -18,10 +18,16 @@ pub mod daemon;
 #[cfg(target_os = "macos")]
 pub mod dns;
 pub mod docker;
+pub mod doctor;
+#[cfg(target_os = "macos")]
+pub mod install;
 pub mod kubernetes;
+pub mod logs;
 pub mod machine;
 pub mod sandbox;
 pub mod setup;
+#[cfg(target_os = "macos")]
+pub mod uninstall;
 pub mod version;
 
 /// ArcBox - High-performance container and VM runtime
@@ -92,9 +98,25 @@ pub enum Commands {
     /// Manage the ArcBox daemon
     Daemon(daemon::DaemonArgs),
 
+    /// View component logs
+    Logs(logs::LogsArgs),
+
     /// Manage CLI shell integration (PATH, completions)
     #[command(subcommand)]
     Setup(setup::SetupCommands),
+
+    /// Run diagnostic checks on the ArcBox runtime
+    Doctor,
+
+    /// Internal: install helper + register daemon (used by brew/DMG installers)
+    #[cfg(target_os = "macos")]
+    #[command(name = "_install", hide = true)]
+    Install(install::InstallArgs),
+
+    /// Internal: uninstall helper + deregister daemon (used by brew/DMG installers)
+    #[cfg(target_os = "macos")]
+    #[command(name = "_uninstall", hide = true)]
+    Uninstall(uninstall::UninstallArgs),
 
     /// Display system-wide information
     Info,

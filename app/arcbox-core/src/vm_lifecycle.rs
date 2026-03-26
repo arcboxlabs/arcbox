@@ -223,7 +223,7 @@ impl Default for VmLifecycleConfig {
 pub struct DefaultVmConfig {
     /// Number of vCPUs (default: host cores / 2, min: 2).
     pub cpus: u32,
-    /// Memory in MB (default: 2048).
+    /// Memory in MB (default: half of host RAM, clamped to 512–16384).
     pub memory_mb: u64,
     /// Disk size in GB (default: 50).
     pub disk_gb: u64,
@@ -243,7 +243,7 @@ impl Default for DefaultVmConfig {
 
         Self {
             cpus: (host_cpus / 2).max(2),
-            memory_mb: 2048,
+            memory_mb: arcbox_hypervisor::default_vm_memory_size() / (1024 * 1024),
             disk_gb: 50,
             kernel: None,
             cmdline: None,
@@ -721,6 +721,38 @@ impl VmLifecycleManager {
                     self.event_bus.publish(Event::MachineStarted {
                         name: DEFAULT_MACHINE_NAME.to_string(),
                     });
+
+                    // Install host route for container subnets via bridge NIC.
+                    // Non-blocking: retries transient failures (helper not ready,
+                    // bridge FDB not populated) but does not gate VM readiness.
+                    #[cfg(all(target_os = "macos", feature = "vmnet"))]
+                    if let Some(bridge) =
+                        self.machine_manager.vmnet_bridge_name(DEFAULT_MACHINE_NAME)
+                    {
+                        // vmnet path: bridge name is known instantly, only need
+                        // helper retry (1-2 attempts for XPC readiness).
+                        drop(tokio::spawn(async move {
+                            if let Err(e) =
+                                crate::route_reconciler::ensure_route_for_bridge(&bridge).await
+                            {
+                                tracing::warn!(error = %e, "failed to install container route (vmnet)");
+                            }
+                        }));
+                    }
+
+                    #[cfg(all(target_os = "macos", not(feature = "vmnet")))]
+                    if let Some(mac) = self.machine_manager.bridge_mac(DEFAULT_MACHINE_NAME) {
+                        // Non-vmnet path: scan kernel FDB to discover bridge
+                        // (retries up to ~10s for FDB learning).
+                        drop(tokio::spawn(async move {
+                            if let Err(e) =
+                                crate::route_reconciler::ensure_route_with_retry(&mac).await
+                            {
+                                tracing::warn!(error = %e, "failed to install container route");
+                            }
+                        }));
+                    }
+
                     return Ok(());
                 }
                 Err(e) => {
@@ -811,7 +843,8 @@ impl VmLifecycleManager {
                 .any(|token| token.starts_with(GUEST_DOCKER_VSOCK_PORT_KEY))
             {
                 cmdline.push(' ');
-                cmdline.push_str(&format!("{GUEST_DOCKER_VSOCK_PORT_KEY}{port}"));
+                cmdline.push_str(GUEST_DOCKER_VSOCK_PORT_KEY);
+                cmdline.push_str(&port.to_string());
             }
         }
 
@@ -822,7 +855,10 @@ impl VmLifecycleManager {
         }];
 
         // Attach persistent Docker data disk.
-        let docker_data_image = self.data_dir.join(DOCKER_DATA_IMAGE_NAME);
+        let docker_data_image = self
+            .data_dir
+            .join(arcbox_constants::paths::host::DATA)
+            .join(DOCKER_DATA_IMAGE_NAME);
         Self::ensure_sparse_block_image(&docker_data_image, DOCKER_DATA_IMAGE_SIZE_BYTES)?;
 
         let docker_data_guest_device = Self::virtio_block_device_path(block_devices.len())?;
@@ -899,29 +935,11 @@ impl VmLifecycleManager {
                             self.health_monitor.record_success();
                             #[cfg(target_os = "macos")]
                             {
-                                let machine_manager = Arc::clone(&self.machine_manager);
-                                tokio::spawn(async move {
-                                    loop {
-                                        match machine_manager
-                                            .read_console_output(DEFAULT_MACHINE_NAME)
-                                        {
-                                            Ok(output) => {
-                                                let trimmed = output.trim_matches('\0');
-                                                if !trimmed.is_empty() {
-                                                    tracing::info!(
-                                                        "Guest console (runtime): {}",
-                                                        trimmed.trim_end()
-                                                    );
-                                                }
-                                            }
-                                            Err(e) => {
-                                                tracing::debug!("Console read loop stopped: {}", e);
-                                                break;
-                                            }
-                                        }
-                                        tokio::time::sleep(Duration::from_millis(200)).await;
-                                    }
-                                });
+                                // Spawn a single adaptive read loop for both serial ports.
+                                // Uses exponential backoff (100ms active → 1600ms idle)
+                                // to minimize wakeups when no output is being produced.
+                                let mm = Arc::clone(&self.machine_manager);
+                                tokio::spawn(serial_read_adaptive(mm));
                             }
                             return Ok(());
                         }
@@ -1188,6 +1206,121 @@ const fn is_not_found_error(err: &CoreError) -> bool {
 }
 
 // =============================================================================
+// Serial port read loops
+// =============================================================================
+
+/// Base polling interval (ms) when serial output is actively being produced.
+#[cfg(target_os = "macos")]
+const SERIAL_ACTIVE_INTERVAL_MS: u64 = 100;
+
+/// Maximum number of doublings for idle backoff (100ms → 1600ms).
+#[cfg(target_os = "macos")]
+const SERIAL_MAX_IDLE_SHIFT: u32 = 4;
+
+/// Adaptive serial read loop for both hvc0 (console) and hvc1 (agent log).
+///
+/// Merges the two previously independent 200ms polling loops into a single
+/// loop with exponential backoff: 100ms when active, doubling up to 1600ms
+/// when idle. This reduces daemon wakeups from ~10/s to ~1/s at idle.
+#[cfg(target_os = "macos")]
+async fn serial_read_adaptive(machine_manager: Arc<MachineManager>) {
+    const MAX_LINE_BUF: usize = 64 * 1024;
+
+    let mut console_buf = String::new();
+    let mut agent_buf = String::new();
+    let mut idle_streak: u32 = 0;
+
+    loop {
+        let mut had_output = false;
+
+        // Read hvc0 (console)
+        if let Ok(output) = machine_manager.read_console_output(DEFAULT_MACHINE_NAME) {
+            if process_serial_output(&mut console_buf, &output, "Guest", true, MAX_LINE_BUF) {
+                had_output = true;
+            }
+        } else {
+            // Console read failed — VM likely stopped
+            flush_line_buf(&mut console_buf, "Guest", true);
+            flush_line_buf(&mut agent_buf, "Agent", false);
+            tracing::debug!("Serial read loop stopped: console read failed");
+            break;
+        }
+
+        // Read hvc1 (agent log)
+        if let Ok(output) = machine_manager.read_agent_log_output(DEFAULT_MACHINE_NAME) {
+            if process_serial_output(&mut agent_buf, &output, "Agent", false, MAX_LINE_BUF) {
+                had_output = true;
+            }
+        }
+        // Agent log failure is non-fatal — console may still work.
+
+        if had_output {
+            idle_streak = 0;
+        } else {
+            idle_streak = idle_streak.saturating_add(1);
+        }
+
+        // Adaptive delay: 100ms when active, doubling up to 1600ms when idle.
+        let delay_ms = SERIAL_ACTIVE_INTERVAL_MS * (1u64 << idle_streak.min(SERIAL_MAX_IDLE_SHIFT));
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+    }
+}
+
+/// Process raw serial output into line-buffered log messages.
+///
+/// Returns `true` if any non-empty output was received.
+#[cfg(target_os = "macos")]
+fn process_serial_output(
+    line_buf: &mut String,
+    output: &str,
+    label: &str,
+    level_info: bool,
+    max_buf: usize,
+) -> bool {
+    let trimmed = output.trim_matches('\0');
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    line_buf.push_str(trimmed);
+
+    if line_buf.len() > max_buf {
+        tracing::warn!("{label}: line buffer overflow, flushing");
+        line_buf.clear();
+        return true;
+    }
+
+    while let Some(pos) = line_buf.find('\n') {
+        let line = line_buf[..pos].trim_end().to_owned();
+        line_buf.drain(..=pos);
+        if line.is_empty() {
+            continue;
+        }
+        if level_info {
+            tracing::info!("{label}: {line}");
+        } else {
+            tracing::debug!("{label}: {line}");
+        }
+    }
+
+    true
+}
+
+/// Flush any remaining partial line from a serial buffer.
+#[cfg(target_os = "macos")]
+fn flush_line_buf(line_buf: &mut String, label: &str, level_info: bool) {
+    let trailing = line_buf.trim().to_owned();
+    if !trailing.is_empty() {
+        if level_info {
+            tracing::info!("{label}: {trailing}");
+        } else {
+            tracing::debug!("{label}: {trailing}");
+        }
+    }
+    line_buf.clear();
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -1232,7 +1365,11 @@ mod tests {
     fn test_default_vm_config() {
         let config = DefaultVmConfig::default();
         assert!(config.cpus >= 2);
-        assert_eq!(config.memory_mb, 2048);
+        // Default memory is half of host RAM, clamped to [512, 16384] MB.
+        let expected_mb = arcbox_hypervisor::default_vm_memory_size() / (1024 * 1024);
+        assert_eq!(config.memory_mb, expected_mb);
+        assert!(config.memory_mb >= 512);
+        assert!(config.memory_mb <= 16384);
         assert_eq!(config.disk_gb, 50);
     }
 

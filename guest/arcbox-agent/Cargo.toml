@@ -1,5 +1,6 @@
 [package]
 name = "arcbox-agent"
+publish = false
 description = "Guest agent for ArcBox VMs"
 version.workspace = true
 edition.workspace = true
@@ -19,10 +20,11 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-nix = { workspace = true, features = ["mount", "process", "sched", "signal", "feature", "term", "ioctl"] }
+nix = { workspace = true, features = ["mount", "process", "resource", "sched", "signal", "feature", "term", "ioctl"] }
 libc = { workspace = true }
 prost = { workspace = true }
 uuid = { workspace = true }
@@ -38,6 +40,7 @@ tokio-util = "0.7"
 flate2 = "1"
 tar = "0.4"
 num_cpus = "1"
+arcbox-dns = { workspace = true }
 
 # vsock and arcbox-vm are Linux-only
 [target.'cfg(target_os = "linux")'.dependencies]

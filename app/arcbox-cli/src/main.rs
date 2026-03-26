@@ -67,7 +67,13 @@ fn main() -> Result<()> {
                 #[cfg(target_os = "macos")]
                 Commands::Dns(cmd) => commands::dns::execute(cmd).await,
                 Commands::Daemon(args) => commands::daemon::execute(args).await,
+                Commands::Logs(args) => commands::logs::execute(args).await,
                 Commands::Setup(cmd) => commands::setup::execute(cmd, cli.format).await,
+                Commands::Doctor => commands::doctor::execute().await,
+                #[cfg(target_os = "macos")]
+                Commands::Install(args) => commands::install::execute(args).await,
+                #[cfg(target_os = "macos")]
+                Commands::Uninstall(args) => commands::uninstall::execute(args).await,
                 Commands::Info => execute_info().await,
                 Commands::Version => commands::version::execute().await,
             }

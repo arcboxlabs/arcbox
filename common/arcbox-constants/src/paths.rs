@@ -35,3 +35,59 @@ pub const K3S_CNI_BIN_DIR: &str = "/var/lib/rancher/k3s/data/cni";
 /// Directory where runtime binaries (containerd, dockerd, runc, …) are
 /// accessed via VirtioFS live execution.
 pub const ARCBOX_RUNTIME_BIN_DIR: &str = "/arcbox/runtime/bin";
+
+/// Host-side privileged paths (require root to write).
+pub mod privileged {
+    /// Installed helper binary path.
+    pub const HELPER_BINARY: &str = "/usr/local/libexec/arcbox-helper";
+    /// Helper launchd plist path.
+    pub const HELPER_PLIST: &str = "/Library/LaunchDaemons/com.arcboxlabs.desktop.helper.plist";
+    /// Helper socket-activation socket path.
+    pub const HELPER_SOCKET: &str = "/var/run/arcbox-helper.sock";
+    /// Docker socket symlink path.
+    pub const DOCKER_SOCKET: &str = "/var/run/docker.sock";
+}
+
+/// launchd service labels.
+pub mod labels {
+    /// Daemon (user-level LaunchAgent).
+    pub const DAEMON: &str = "com.arcboxlabs.desktop.daemon";
+    /// Helper (system-level LaunchDaemon).
+    pub const HELPER: &str = "com.arcboxlabs.desktop.helper";
+}
+
+/// Docker CLI tool names managed by the helper's cli_link.
+pub const DOCKER_CLI_TOOLS: &[&str] = &[
+    "docker",
+    "docker-buildx",
+    "docker-compose",
+    "docker-credential-osxkeychain",
+];
+
+/// Host-side subdirectory names within `~/.arcbox/`.
+pub mod host {
+    /// Runtime state (sockets, PID files, ephemeral markers).
+    pub const RUN: &str = "run";
+    /// Centralized log directory.
+    pub const LOG: &str = "log";
+    /// Persistent data aggregation (images, containers, volumes, …).
+    pub const DATA: &str = "data";
+
+    /// Log file names (written by each component's tracing-appender).
+    pub const DAEMON_LOG: &str = "daemon.log";
+    pub const AGENT_LOG: &str = "agent.log";
+}
+
+/// Privileged log directory (root-owned, for arcbox-helper).
+pub mod privileged_log {
+    /// Directory for helper logs (root-writable).
+    pub const HELPER_LOG_DIR: &str = "/var/log/arcbox";
+    /// Helper log file name.
+    pub const HELPER_LOG: &str = "helper.log";
+}
+
+/// Guest-side subdirectory names within `/arcbox/`.
+pub mod guest {
+    /// Log directory inside the VirtioFS mount.
+    pub const LOG: &str = "log";
+}

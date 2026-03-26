@@ -37,6 +37,25 @@ impl From<std::io::Error> for ApiError {
     }
 }
 
+impl From<ApiError> for tonic::Status {
+    fn from(err: ApiError) -> Self {
+        let message = err.to_string();
+        match &err {
+            ApiError::Common(common) => match common {
+                CommonError::Config(_) => Self::invalid_argument(message),
+                CommonError::NotFound(_) => Self::not_found(message),
+                CommonError::AlreadyExists(_) => Self::already_exists(message),
+                CommonError::InvalidState(_) => Self::failed_precondition(message),
+                CommonError::Timeout(_) => Self::deadline_exceeded(message),
+                CommonError::PermissionDenied(_) => Self::permission_denied(message),
+                _ => Self::internal(message),
+            },
+            ApiError::Grpc(_) => Self::unavailable(message),
+            _ => Self::internal(message),
+        }
+    }
+}
+
 impl ApiError {
     /// Creates a new configuration error.
     #[must_use]

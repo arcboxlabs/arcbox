@@ -283,15 +283,15 @@ impl DockerContextManager {
 
     /// Enables `ArcBox` Docker integration.
     ///
-    /// Creates the context if it doesn't exist and sets it as default.
+    /// Always creates or updates the context to ensure the socket path is current,
+    /// then sets it as default. This handles upgrades where the socket path changes
+    /// (e.g. `~/.arcbox/docker.sock` → `~/.arcbox/run/docker.sock`).
     ///
     /// # Errors
     ///
     /// Returns an error if the integration cannot be enabled.
     pub fn enable(&self) -> Result<()> {
-        if !self.context_exists() {
-            self.create_context()?;
-        }
+        self.create_context()?;
         self.set_default()?;
         Ok(())
     }
@@ -320,10 +320,6 @@ impl DockerContextManager {
             socket_exists: self.socket_path.exists(),
         }
     }
-
-    // ========================================================================
-    // Private helpers
-    // ========================================================================
 
     /// Computes SHA256 hash of context name for directory name.
     fn context_hash(name: &str) -> String {
@@ -603,10 +599,6 @@ mod tests {
         assert!(config["auths"].is_object());
     }
 
-    // ========================================================================
-    // Edge Case Tests
-    // ========================================================================
-
     #[test]
     fn test_create_context_is_idempotent() {
         let temp_dir = tempdir().unwrap();
@@ -718,10 +710,6 @@ mod tests {
         );
     }
 
-    // ========================================================================
-    // Error Handling Tests
-    // ========================================================================
-
     #[test]
     fn test_set_default_fails_without_context() {
         let temp_dir = tempdir().unwrap();
@@ -787,10 +775,6 @@ mod tests {
         manager.enable().unwrap();
         assert!(manager.is_default().unwrap());
     }
-
-    // ========================================================================
-    // Docker Compatibility Tests
-    // ========================================================================
 
     #[test]
     fn test_context_meta_json_format() {
@@ -862,10 +846,6 @@ mod tests {
         let meta_path = hashed_dir.join("meta.json");
         assert!(meta_path.exists());
     }
-
-    // ========================================================================
-    // Real-world Scenario Tests
-    // ========================================================================
 
     #[test]
     fn test_full_lifecycle() {

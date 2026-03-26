@@ -1,0 +1,27 @@
+[package]
+name = "arcbox-logging"
+publish = false
+description = "Shared logging infrastructure: tracing init, size-based rotation, JSON + human-readable output"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+parking_lot = "0.12"
+sentry = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+default = []
+sentry = ["dep:sentry"]
+
+[lints]
+workspace = true

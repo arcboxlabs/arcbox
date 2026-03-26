@@ -1,0 +1,38 @@
+[package]
+name = "arcbox-helper"
+publish = false
+description = "Privileged helper daemon for host mutations (routes, DNS, sockets)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "arcbox_helper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "arcbox-helper"
+path = "src/main.rs"
+
+[dependencies]
+tarpc = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+libc = { workspace = true }
+arcbox-constants.workspace = true
+arcbox-logging.workspace = true
+tracing = { workspace = true }
+tokio-util = "0.7"
+ipnetwork = "0.21.1"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros"] }
+
+[lints]
+workspace = true

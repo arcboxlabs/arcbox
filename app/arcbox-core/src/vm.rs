@@ -42,6 +42,29 @@ impl std::fmt::Display for VmId {
     }
 }
 
+/// Derives a stable locally-administered MAC address for the macOS bridge NIC.
+#[must_use]
+pub fn bridge_nic_mac_for_vm_id(vm_id: &VmId) -> String {
+    let hex: String = vm_id
+        .as_str()
+        .chars()
+        .filter(|ch| ch.is_ascii_hexdigit())
+        .collect();
+
+    let mut bytes = [0_u8; 6];
+    bytes[0] = 0x02;
+
+    for (index, chunk) in hex.as_bytes().chunks(2).take(5).enumerate() {
+        let text = std::str::from_utf8(chunk).unwrap_or("00");
+        bytes[index + 1] = u8::from_str_radix(text, 16).unwrap_or(0);
+    }
+
+    format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]
+    )
+}
+
 /// VM state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VmState {
@@ -272,6 +295,7 @@ impl VmManager {
                     read_only: bd.read_only,
                 })
                 .collect(),
+            bridge_nic_mac: Some(bridge_nic_mac_for_vm_id(&entry.info.id)),
         }
     }
 
@@ -280,7 +304,11 @@ impl VmManager {
     /// # Errors
     ///
     /// Returns an error if the VM cannot be started.
-    pub fn start(&self, id: &VmId) -> Result<()> {
+    pub fn start(
+        &self,
+        id: &VmId,
+        shared_dns_hosts: Option<std::sync::Arc<arcbox_dns::LocalHostsTable>>,
+    ) -> Result<()> {
         let mut vms = self
             .vms
             .write()
@@ -309,6 +337,15 @@ impl VmManager {
                 return Err(CoreError::Vm(e.to_string()));
             }
         };
+
+        // Share the host DNS hosts table with the VMM-side DnsForwarder.
+        #[cfg(target_os = "macos")]
+        if let Some(table) = shared_dns_hosts {
+            vmm.set_shared_dns_hosts(table);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = shared_dns_hosts;
+
         if let Err(e) = vmm.start() {
             entry.info.state = VmState::Created;
             return Err(CoreError::Vm(e.to_string()));
@@ -789,9 +826,33 @@ impl VmManager {
             .map_err(|e| CoreError::Vm(format!("read console failed: {e}")))
     }
 
-    // ========================================================================
-    // Memory Balloon Control
-    // ========================================================================
+    /// Reads agent log output (hvc1) from a running VM (macOS only).
+    #[cfg(target_os = "macos")]
+    pub fn read_agent_log_output(&self, id: &VmId) -> Result<String> {
+        let vms = self
+            .vms
+            .read()
+            .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?;
+
+        let entry = vms
+            .get(id)
+            .ok_or_else(|| CoreError::not_found(id.to_string()))?;
+
+        if entry.info.state != VmState::Running {
+            return Err(CoreError::invalid_state(format!(
+                "cannot read agent log: VM is {:?}",
+                entry.info.state
+            )));
+        }
+
+        let vmm = entry
+            .vmm
+            .as_ref()
+            .ok_or_else(|| CoreError::Vm("VMM not initialized".to_string()))?;
+
+        vmm.read_agent_log_output()
+            .map_err(|e| CoreError::Vm(format!("read agent log failed: {e}")))
+    }
 
     /// Sets the target memory size for the balloon device on a running VM.
     ///
@@ -898,6 +959,23 @@ impl VmManager {
         entry.vmm.as_mut()?.take_inbound_listener_manager()
     }
 
+    /// Returns the vmnet bridge interface name for a running VM.
+    ///
+    /// After vmnet creates the shared interface, the system also creates a
+    /// bridge with a vmnet member. We resolve it via the MAC that vmnet
+    /// reported. Since vmnet has already started, the bridge is immediately
+    /// present — no retry needed.
+    #[cfg(all(target_os = "macos", feature = "vmnet"))]
+    pub fn vmnet_bridge_name(&self, id: &VmId) -> Option<String> {
+        let vms = self.vms.read().ok()?;
+        let entry = vms.get(id)?;
+        let vmm = entry.vmm.as_ref()?;
+        let info = vmm.vmnet_interface_info()?;
+        let mac_str = arcbox_net::darwin::format_mac(&info.mac);
+        let bridge = crate::bridge_discovery::resolve_bridge_by_mac(&mac_str)?;
+        Some(bridge.name)
+    }
+
     #[cfg(test)]
     pub(crate) fn guest_cid_for_test(&self, id: &VmId) -> Option<u32> {
         self.vms
@@ -952,6 +1030,18 @@ mod tests {
         let vm_id = manager.create(config).unwrap();
         let vmm_config = manager.build_vmm_config_for_test(&vm_id).unwrap();
         assert_eq!(vmm_config.guest_cid, Some(9));
+        assert_eq!(
+            vmm_config.bridge_nic_mac,
+            Some(bridge_nic_mac_for_vm_id(&vm_id))
+        );
+    }
+
+    #[test]
+    fn test_bridge_nic_mac_is_stable_and_locally_administered() {
+        let vm_id = VmId("00112233-4455-6677-8899-aabbccddeeff".to_string());
+        let mac = bridge_nic_mac_for_vm_id(&vm_id);
+
+        assert_eq!(mac, "02:00:11:22:33:44");
     }
 
     #[test]
@@ -959,7 +1049,7 @@ mod tests {
         let (manager, _dir) = test_vm_manager();
         let vm_id = manager.create(VmConfig::default()).unwrap();
 
-        let _ = manager.start(&vm_id);
+        let _ = manager.start(&vm_id, None);
         let info = manager.get(&vm_id).expect("vm should still exist");
         assert_eq!(info.state, VmState::Created);
     }

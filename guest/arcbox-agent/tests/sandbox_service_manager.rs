@@ -57,12 +57,12 @@ fn test_config() -> VmmConfig {
 }
 
 async fn cleanup_sandbox(service: &SandboxService, sandbox_id: &str) {
-    let remove_payload = RemoveSandboxRequest {
+    let payload = RemoveSandboxRequest {
         id: sandbox_id.to_string(),
         force: true,
     }
     .encode_to_vec();
-    let _ = service.remove(&remove_payload).await;
+    let _ = service.remove(&payload).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -25,13 +25,15 @@ The project is in **alpha**. Breaking changes (internal or user-facing) are acce
 
 ## Project Structure
 
-- `common/` — shared error types
-- `hypervisor/` — Virtualization.framework bindings, cross-platform hypervisor traits, VMM, VirtIO devices
-- `services/` — filesystem (VirtioFS), networking (NAT/DHCP/DNS), container state, OCI image/runtime
-- `comm/` — protobuf definitions, gRPC services, vsock/unix transport
+- `common/` — shared error types, constants, asset utilities
+- `virt/` — Virtualization.framework bindings, cross-platform hypervisor traits, VMM, VirtIO devices, VirtioFS, networking (NAT/DHCP/DNS)
+- `rpc/` — protobuf definitions, gRPC services, vsock/unix transport
+- `runtime/` — container state, OCI image/runtime
 - `app/` — core orchestration, API server, Docker Engine API compat, thin CLI (`arcbox`), daemon binary (`arcbox-daemon`), facade crate
 - `guest/` — in-VM agent (cross-compiled for Linux)
 - `tests/` — test resources and fixture build scripts
+- `.agents/skills/` — shared Claude Code skills (symlinked from `.claude/skills/`)
+- `docs/` — supplementary documentation (boot assets, daemon lifecycle)
 
 ## Planning
 
@@ -46,11 +48,20 @@ When asked to plan, the plan must be fully resolved before implementation begins
 - Use `thiserror` for crate-specific errors, `anyhow` in CLI/API layers
 - Hot paths: prefer lock-free / `RwLock` over `Arc<Mutex<T>>`, use `#[repr(C, align(64))]` to avoid false sharing
 - Performance-critical paths (VirtioFS, network stack, VirtIO devices) are all custom-built, not vendored
+- Prefer extension traits over free helper functions when the operation is specific to a type (e.g. `request.machine_id()?` not `extract_machine_id(&request)?`; `self.runtime.ready()?` not `get_runtime(&self.runtime)?`).
+- Prefer `From`/`Into` trait chains for error conversion. Don't write manual mapping helpers like `core_to_status()` — instead, implement `From<LocalError> for ForeignType` (using a crate-local error type to satisfy the orphan rule) and let `.map_err(LocalError::from)?` drive the conversion.
+- **Section dividers (`// ===...`) mean the file should be split.** If you find or are about to add a `// ====` section divider, that is the signal that the file contains multiple distinct implementations and must be refactored into a module directory (`foo/mod.rs` + one file per logical unit). Do not add new section dividers to keep a monolithic file — split immediately. Shared types and trait extensions go in `mod.rs`.
 - Prefer refactoring over layered, patchy fixes. Code changes must be coherent, not duct-taped on.
 - No hacky workarounds. If a workaround is truly unavoidable, pause and get user approval first.
 - When the right choice is obvious, make the decision — don't ask unnecessary questions. But when a plan or request is blocked or infeasible, surface the blocker with enough context for the user to decide the path forward.
 - If a request appears to conflict with these guidelines, double-check intent with the user before proceeding.
 - When project conventions or processes change, this file (`CLAUDE.md`/`AGENTS.md`) must be updated promptly. All changes to this file require human approval.
+
+## Architecture Principles
+
+- **Resource ownership**: each component manages its own resources. Servers own their sockets (remove-before-bind), the daemon owns its lock file. Never centralize cleanup of resources owned by other components — it creates ordering dependencies and race conditions.
+- **Daemon ↔ CLI contract**: `arcbox-daemon` and `arcbox-cli` share a contract via `daemon.lock` (flock-based liveness) and socket paths. When changing daemon internals (lock mechanism, socket paths, startup protocol), always check and update the CLI's matching logic.
+- **Daemon startup order is load-bearing**: the 5-phase sequence (`init_early` → `acquire_lock` → `start_grpc` → `wait_for_resources` → `init_runtime`) has specific ordering constraints. gRPC must start before slow phases so desktop clients can connect. The lock must be acquired before gRPC so the old daemon's sockets are freed. Changes to startup ordering require careful analysis of these dependencies. See `docs/daemon-lifecycle.md`.
 
 ## Testing
 
@@ -70,8 +81,14 @@ When asked to plan, the plan must be fully resolved before implementation begins
 
 ## macOS Development
 
-- Virtualization.framework requires entitlement signing: `codesign --entitlements tests/resources/entitlements.plist --force -s - arcbox-daemon`
-- Without signing, you get "Virtualization not available" errors
+- Virtualization.framework requires Developer ID signing after every build (ad-hoc `-s -` will NOT work — restricted entitlements cause the binary to be killed on launch):
+  ```bash
+  codesign --force --options runtime \
+      --entitlements bundle/arcbox.entitlements \
+      -s "Developer ID Application: ArcBox, Inc. (422ACSY6Y5)" \
+      target/debug/arcbox-daemon
+  ```
+- Requires Developer ID certificate (`.p12`) + provisioning profile (`.provisionprofile`). See `CONTRIBUTING.md` "Code Signing" section for setup.
 - Requires Xcode Command Line Tools
 - Some tasks require a running daemon. Start it in a background terminal: `arcbox daemon start`
 

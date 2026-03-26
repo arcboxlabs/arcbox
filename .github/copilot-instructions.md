@@ -6,7 +6,7 @@ ArcBox is a pure-Rust, high-performance container and VM runtime targeting macOS
 
 **Three-tier structure:**
 
-- **Core layer** (`common/`, `hypervisor/`, `services/`, `comm/`, `app/`): MIT/Apache-2.0 licensed foundation
+- **Core layer** (`common/`, `virt/`, `rpc/`, `runtime/`, `app/`): MIT/Apache-2.0 licensed foundation
 - **Pro layer** (`pro/`): BSL-1.1 licensed enhanced features (smart caching, snapshots, advanced networking)
 - **Guest components** (`guest/arcbox-agent`): Runs inside VMs, cross-compiled to Linux ARM64/x86_64
 
@@ -35,9 +35,9 @@ arcbox-hypervisor / arcbox-vz (platform virtualization)
 - Uses Apple's Virtualization.framework (not KVM)
 - **All VM-related binaries require code signing:**
   ```bash
-  codesign --entitlements tests/resources/entitlements.plist --force -s - arcbox-daemon
+  codesign --entitlements bundle/arcbox.entitlements --force -s - arcbox-daemon
   ```
-  Required for: examples, tests touching hypervisor. See [entitlements.plist](tests/resources/entitlements.plist)
+  Required for: examples, tests touching hypervisor. See [arcbox.entitlements](bundle/arcbox.entitlements)
 - `mode_t` types (e.g., `libc::S_IFMT`) are `u16` (Linux: `u32`). Use `u32::from()` for cross-platform compatibility
 - No `fallocate` - use `ftruncate` instead
 - xattr APIs have different argument order than Linux
@@ -106,10 +106,10 @@ cargo build -p arcbox-agent --target aarch64-unknown-linux-musl --release
 **Implementation patterns:**
 
 1. **Zero-copy datapath:** `arcbox-net` packet-path code avoids unnecessary copies
-2. **Lock-free where it matters:** SPSC queue in `services/arcbox-net/src/datapath/ring.rs`
+2. **Lock-free where it matters:** SPSC queue in `virt/arcbox-net/src/datapath/ring.rs`
 3. **Cache alignment:** use `#[repr(C, align(64))]` for hot structures
 4. **Batch operations:** avoid per-descriptor overhead in VirtIO queues
-5. **Negative caching:** `arcbox-fs` caches missing lookups (see `services/arcbox-fs/src/cache.rs`)
+5. **Negative caching:** `arcbox-fs` caches missing lookups (see `virt/arcbox-fs/src/cache.rs`)
 
 ## Key Files & Patterns
 
@@ -118,19 +118,19 @@ cargo build -p arcbox-agent --target aarch64-unknown-linux-musl --release
 - Central orchestrator wiring `MachineManager`, `VmLifecycleManager`, container backend, networking, and port-forward state
 - Shared managers/state are held behind `Arc` for async task coordination
 
-**VirtIO device pattern** (`hypervisor/arcbox-virtio/src/*.rs`):
+**VirtIO device pattern** (`virt/arcbox-virtio/src/*.rs`):
 
 - `pop_avail()` to get descriptor chains from guest
 - Process I/O (zero-copy where possible)
 - `push_used()` to return completed descriptors
 
-**Filesystem passthrough** (`services/arcbox-fs/src/passthrough.rs`):
+**Filesystem passthrough** (`virt/arcbox-fs/src/passthrough.rs`):
 
 - Maps guest paths -> host paths via inode/path tables
 - Uses platform-specific syscall branches (`#[cfg(target_os = "...")]`)
 - Uses negative caching to avoid repeated misses
 
-**Hypervisor abstraction** (`hypervisor/arcbox-hypervisor/src/traits.rs`):
+**Hypervisor abstraction** (`virt/arcbox-hypervisor/src/traits.rs`):
 
 - Core traits: `Hypervisor`, `VirtualMachine`, `Vcpu`, `GuestMemory`
 - Platform implementations in `darwin/` (Virtualization.framework) and `linux/` (KVM)
@@ -161,12 +161,12 @@ RUST_BACKTRACE=1                      # Enable backtraces
 ## Documentation References
 
 - Main [CLAUDE.md](../CLAUDE.md): project overview, architecture, commands
-- Crate-level READMEs in `app/`, `hypervisor/`, `services/`, `comm/`
+- Crate-level READMEs in `app/`, `virt/`, `rpc/`, `runtime/`
 - Boot assets ownership and boundaries: [docs/boot-assets.md](../docs/boot-assets.md)
 
 ## Licensing & Structure
 
-- Core (`common/`, `hypervisor/`, `services/`, `comm/`, `app/`) + Guest: **MIT OR Apache-2.0**
+- Core (`common/`, `virt/`, `rpc/`, `runtime/`, `app/`) + Guest: **MIT OR Apache-2.0**
 - Pro (`pro/`): **BSL-1.1** - production use requires license after 4 years
 - Enterprise (separate repos): Proprietary (desktop app, SSO, K8s integration)
 - When adding files to core directories or `guest/`, include dual-license headers

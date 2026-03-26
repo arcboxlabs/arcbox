@@ -16,9 +16,21 @@ use arcbox_vm::config::{DefaultVmConfig, FirecrackerConfig, GrpcConfig, NetworkC
 fn guest_defaults() -> VmmConfig {
     VmmConfig {
         firecracker: FirecrackerConfig {
-            binary: "/usr/local/bin/firecracker".into(),
+            binary: "/arcbox/bin/firecracker".into(),
+            // TODO: re-enable jailer once /srv/jailer exists in EROFS rootfs.
+            // jailer: Some(JailerConfig {
+            //     binary: "/arcbox/bin/jailer".into(),
+            //     uid: 0,
+            //     gid: 0,
+            //     chroot_base_dir: None,
+            //     netns: None,
+            //     new_pid_ns: false,
+            //     cgroup_version: None,
+            //     parent_cgroup: None,
+            //     resource_limits: vec![],
+            // }),
             jailer: None,
-            data_dir: "/var/lib/arcbox/sandboxes".into(),
+            data_dir: "/var/lib/arcbox".into(),
             log_level: None,
             no_seccomp: false,
             seccomp_filter: None,
@@ -28,8 +40,8 @@ fn guest_defaults() -> VmmConfig {
         },
         network: NetworkConfig {
             bridge: "arcbox-sb0".into(),
-            cidr: "10.88.0.0/16".into(),
-            gateway: "10.88.0.1".into(),
+            cidr: "172.20.0.0/16".into(),
+            gateway: "172.20.0.1".into(),
             dns: vec!["1.1.1.1".into(), "8.8.8.8".into()],
         },
         grpc: GrpcConfig {
@@ -39,9 +51,9 @@ fn guest_defaults() -> VmmConfig {
         defaults: DefaultVmConfig {
             vcpus: 1,
             memory_mib: 512,
-            kernel: "/var/lib/arcbox/kernel/vmlinux".into(),
-            rootfs: "/var/lib/arcbox/images/sandbox.ext4".into(),
-            boot_args: "console=ttyS0 reboot=k panic=1 pci=off".into(),
+            kernel: "/arcbox/bin/vmlinux".into(),
+            rootfs: "/arcbox/bin/sandbox.ext4".into(),
+            boot_args: "console=ttyS0 reboot=k panic=1 pci=off init=/sbin/vm-agent".into(),
         },
     }
 }

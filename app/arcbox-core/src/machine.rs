@@ -38,7 +38,7 @@ mod tests {
     /// Creates a test MachineManager.
     fn test_machine_manager(data_dir: &std::path::Path) -> MachineManager {
         let vm_manager = Arc::new(VmManager::new(data_dir.join("snapshots")));
-        MachineManager::new(vm_manager, data_dir.to_path_buf())
+        MachineManager::new(vm_manager, data_dir.to_path_buf(), None)
     }
 
     #[tokio::test]
@@ -105,9 +105,9 @@ mod tests {
             "::1".to_string(),
             "fe80::1".to_string(),
             "2001:db8::10".to_string(),
-            "192.168.64.2".to_string(),
+            "10.0.2.2".to_string(),
         ];
-        assert_eq!(select_routable_ip(&ips), Some("192.168.64.2".to_string()));
+        assert_eq!(select_routable_ip(&ips), Some("10.0.2.2".to_string()));
     }
 
     #[test]
@@ -206,12 +206,18 @@ pub struct MachineManager {
     data_dir: PathBuf,
     /// Machine-specific directory (`data_dir/machines`/).
     machines_dir: PathBuf,
+    /// Shared DNS hosts table from NetworkManager, passed to VMM on start.
+    shared_dns_hosts: Option<std::sync::Arc<arcbox_dns::LocalHostsTable>>,
 }
 
 impl MachineManager {
     /// Creates a new machine manager.
     #[must_use]
-    pub fn new(vm_manager: Arc<VmManager>, data_dir: PathBuf) -> Self {
+    pub fn new(
+        vm_manager: Arc<VmManager>,
+        data_dir: PathBuf,
+        shared_dns_hosts: Option<std::sync::Arc<arcbox_dns::LocalHostsTable>>,
+    ) -> Self {
         let machines_dir = data_dir.join("machines");
         let persistence = MachinePersistence::new(&machines_dir);
 
@@ -272,6 +278,7 @@ impl MachineManager {
             persistence,
             data_dir,
             machines_dir,
+            shared_dns_hosts,
         }
     }
 
@@ -376,7 +383,8 @@ impl MachineManager {
             .is_some();
 
         // Start underlying VM
-        self.vm_manager.start(&vm_id)?;
+        self.vm_manager
+            .start(&vm_id, self.shared_dns_hosts.clone())?;
 
         // Update machine state
         {
@@ -547,6 +555,23 @@ impl MachineManager {
         &self.vm_manager
     }
 
+    /// Returns the vmnet bridge interface name for a machine's VM.
+    ///
+    /// Only available when the `vmnet` feature is enabled and the VM is running.
+    #[cfg(all(target_os = "macos", feature = "vmnet"))]
+    pub fn vmnet_bridge_name(&self, name: &str) -> Option<String> {
+        let machines = self.machines.read().ok()?;
+        let machine = machines.get(name)?;
+        self.vm_manager.vmnet_bridge_name(&machine.vm_id)
+    }
+
+    /// Returns the bridge NIC MAC address for a machine's VM.
+    pub fn bridge_mac(&self, name: &str) -> Option<String> {
+        let machines = self.machines.read().ok()?;
+        let machine = machines.get(name)?;
+        Some(crate::vm::bridge_nic_mac_for_vm_id(&machine.vm_id))
+    }
+
     /// Gets the vsock CID for a running machine.
     #[must_use]
     pub fn get_cid(&self, name: &str) -> Option<u32> {
@@ -664,6 +689,27 @@ impl MachineManager {
         }
 
         self.vm_manager.read_console_output(&machine.vm_id)
+    }
+
+    /// Reads agent log output (hvc1) for a running machine (macOS only).
+    #[cfg(target_os = "macos")]
+    pub fn read_agent_log_output(&self, name: &str) -> Result<String> {
+        let machines = self
+            .machines
+            .read()
+            .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
+
+        let machine = machines
+            .get(name)
+            .ok_or_else(|| CoreError::not_found(name.to_string()))?;
+
+        if machine.state != MachineState::Running {
+            return Err(CoreError::invalid_state(format!(
+                "machine '{name}' is not running"
+            )));
+        }
+
+        self.vm_manager.read_agent_log_output(&machine.vm_id)
     }
 
     /// Stops a machine.

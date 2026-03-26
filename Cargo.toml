@@ -6,41 +6,45 @@ members = [
     # ============================================
     "common/arcbox-constants",
     "common/arcbox-error",
-    "crates/arcbox-asset",
-    "crates/arcbox-docker-tools",
+    "common/arcbox-dns",
+    "common/arcbox-asset",
+    "common/arcbox-logging",
 
     # ============================================
-    # L1-2: Hypervisor (MIT OR Apache-2.0)
+    # L1-3: Virtualization (MIT OR Apache-2.0)
     # ============================================
-    "hypervisor/arcbox-vz",
-    "hypervisor/arcbox-hypervisor",
-    "hypervisor/arcbox-vmm",
-    "hypervisor/arcbox-virtio",
-    "hypervisor/arcbox-vm",
+    "virt/arcbox-vz",
+    "virt/arcbox-hypervisor",
+    "virt/arcbox-vmm",
+    "virt/arcbox-virtio",
+    "virt/arcbox-vm",
+    "virt/arcbox-fs",
+    "virt/arcbox-net",
+    "virt/arcbox-dhcp",
 
     # ============================================
-    # L3: Services (MIT OR Apache-2.0)
+    # L4: RPC (MIT OR Apache-2.0)
     # ============================================
-    "services/arcbox-fs",
-    "services/arcbox-net",
-    "services/arcbox-container",
-    "services/arcbox-oci",
+    "rpc/arcbox-protocol",
+    "rpc/arcbox-grpc",
+    "rpc/arcbox-transport",
 
     # ============================================
-    # L4: Communication (MIT OR Apache-2.0)
+    # L5: Runtime (MIT OR Apache-2.0)
     # ============================================
-    "comm/arcbox-protocol",
-    "comm/arcbox-grpc",
-    "comm/arcbox-transport",
+    "runtime/arcbox-container",
+    "runtime/arcbox-oci",
 
     # ============================================
-    # L5-6: Application (MIT OR Apache-2.0)
+    # L6-7: Application (MIT OR Apache-2.0)
     # ============================================
     "app/arcbox-core",
     "app/arcbox-api",
     "app/arcbox-docker",
+    "app/arcbox-docker-tools",
     "app/arcbox-cli",
     "app/arcbox-daemon",
+    "app/arcbox-helper",
     "app/arcbox",
 
     # ============================================
@@ -49,22 +53,13 @@ members = [
     "guest/arcbox-agent",
 ]
 
-# ============================================
-# Enterprise Layer (Proprietary, separate repos)
-# ============================================
-# Located in arcboxd org private repositories:
-#   - arcboxd/arcbox-desktop   (GPUI desktop app)
-#   - arcboxd/arcbox-sso       (SSO/LDAP integration)
-#   - arcboxd/arcbox-audit     (Audit logging)
-#   - arcboxd/arcbox-k8s       (Kubernetes integration)
-
 [workspace.package]
-version = "0.1.4"
+version = "0.3.11" # x-release-please-version
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/AprilNEA/arcbox"
-authors = ["AprilNEA <dev@aprilnea.me> (https://aprilnea.me)"]
+repository = "https://github.com/arcboxlabs/arcbox"
+authors = ["ArcBox Labs <team@arcbox.dev>", "AprilNEA <dev@aprilnea.me> (https://aprilnea.me)"]
 
 [workspace.dependencies]
 # Async runtime
@@ -80,7 +75,8 @@ serde_json = "1"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
 
 # Error reporting
 sentry = { version = "0.46", default-features = false, features = [
@@ -104,15 +100,14 @@ prost = "0.13"
 tonic-build = "0.12"
 prost-build = "0.13"
 
-# ttrpc (high-performance RPC)
-ttrpc = "0.8"
-ttrpc-codegen = "0.5"
-
 # HTTP server (Docker REST API)
 axum = { version = "0.8", features = ["macros"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 hyper = { version = "1", features = ["full"] }
+
+# RPC (privileged helper)
+tarpc = { version = "0.37", features = ["serde-transport", "unix", "serde-transport-bincode"] }
 
 # Async utilities
 futures = "0.3"
@@ -150,6 +145,7 @@ hostname = "0.4"
 # Nix (Unix APIs)
 nix = { version = "0.29", features = [
     "fs",
+    "net",
     "process",
     "socket",
     "ioctl",
@@ -162,36 +158,42 @@ nix = { version = "0.29", features = [
 # libc
 libc = "0.2"
 
-arcbox-asset = { version = "0.1.4", path = "crates/arcbox-asset", features = ["download"] }
-arcbox-docker-tools = { version = "0.1.4", path = "crates/arcbox-docker-tools" }
+# macOS bridge FDB (forwarding database) access via private ioctls
+ifbridge = "0.1"
+
+# Process identity (pidpath, bsdinfo)
+libproc = "0.14"
+
+arcbox-asset = { version = "0.3.11", path = "common/arcbox-asset", features = ["download"] } # x-release-please-version
+arcbox-docker-tools = { version = "0.3.11", path = "app/arcbox-docker-tools" } # x-release-please-version
 
 # External crates
-arcbox-boot = { version = "0.3", features = ["download"] }
+arcbox-boot = { version = "0.5.1", features = ["download"] }
 macos-resolver = "0.2.0"
 
 fc-sdk = "0.2.3"
 
-# Internal crates (Core layer)
-arcbox-constants = { version = "0.1.4", path = "common/arcbox-constants" }
-arcbox-error = { version = "0.1.4", path = "common/arcbox-error" }
-arcbox-vz = { version = "0.1.4", path = "hypervisor/arcbox-vz" }
-arcbox-hypervisor = { version = "0.1.4", path = "hypervisor/arcbox-hypervisor" }
-arcbox-vmm = { version = "0.1.4", path = "hypervisor/arcbox-vmm" }
-arcbox-virtio = { version = "0.1.4", path = "hypervisor/arcbox-virtio" }
-arcbox-vm = { version = "0.1.4", path = "hypervisor/arcbox-vm" }
-arcbox-fs = { version = "0.1.4", path = "services/arcbox-fs" }
-arcbox-net = { version = "0.1.4", path = "services/arcbox-net" }
-arcbox-container = { version = "0.1.4", path = "services/arcbox-container" }
-arcbox-oci = { version = "0.1.4", path = "services/arcbox-oci" }
-arcbox-protocol = { version = "0.1.4", path = "comm/arcbox-protocol" }
-arcbox-grpc = { version = "0.1.4", path = "comm/arcbox-grpc" }
-arcbox-transport = { version = "0.1.4", path = "comm/arcbox-transport" }
-arcbox-docker = { version = "0.1.4", path = "app/arcbox-docker" }
-arcbox-core = { version = "0.1.4", path = "app/arcbox-core" }
-arcbox-api = { version = "0.1.4", path = "app/arcbox-api" }
-arcbox-cli = { version = "0.1.4", path = "app/arcbox-cli" }
-arcbox-agent = { version = "0.1.4", path = "guest/arcbox-agent" }
-arcbox = { version = "0.1.4", path = "app/arcbox" }
+# Internal crates
+arcbox-constants = { version = "0.3.11", path = "common/arcbox-constants" } # x-release-please-version
+arcbox-dns = { version = "0.3.11", path = "common/arcbox-dns" } # x-release-please-version
+arcbox-error = { version = "0.3.11", path = "common/arcbox-error" } # x-release-please-version
+arcbox-vz = { version = "0.3.11", path = "virt/arcbox-vz" } # x-release-please-version
+arcbox-hypervisor = { version = "0.3.11", path = "virt/arcbox-hypervisor" } # x-release-please-version
+arcbox-vmm = { version = "0.3.11", path = "virt/arcbox-vmm" } # x-release-please-version
+arcbox-virtio = { version = "0.3.11", path = "virt/arcbox-virtio" } # x-release-please-version
+arcbox-vm = { version = "0.3.11", path = "virt/arcbox-vm" } # x-release-please-version
+arcbox-fs = { version = "0.3.11", path = "virt/arcbox-fs" } # x-release-please-version
+arcbox-net = { version = "0.3.11", path = "virt/arcbox-net" } # x-release-please-version
+arcbox-dhcp = { version = "0.3.11", path = "virt/arcbox-dhcp" } # x-release-please-version
+arcbox-container = { version = "0.3.11", path = "runtime/arcbox-container" } # x-release-please-version
+arcbox-protocol = { version = "0.3.11", path = "rpc/arcbox-protocol" } # x-release-please-version
+arcbox-grpc = { version = "0.3.11", path = "rpc/arcbox-grpc" } # x-release-please-version
+arcbox-transport = { version = "0.3.11", path = "rpc/arcbox-transport" } # x-release-please-version
+arcbox-docker = { version = "0.3.11", path = "app/arcbox-docker" } # x-release-please-version
+arcbox-helper = { version = "0.3.11", path = "app/arcbox-helper" } # x-release-please-version
+arcbox-core = { version = "0.3.11", path = "app/arcbox-core" } # x-release-please-version
+arcbox-api = { version = "0.3.11", path = "app/arcbox-api" } # x-release-please-version
+arcbox-logging = { version = "0.3.11", path = "common/arcbox-logging", default-features = false } # x-release-please-version
 
 # Test infrastructure
 tempfile = "3"

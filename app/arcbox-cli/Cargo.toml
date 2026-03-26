@@ -1,5 +1,6 @@
 [package]
 name = "arcbox-cli"
+publish = false
 description = "Command-line interface for ArcBox"
 version.workspace = true
 edition.workspace = true
@@ -25,6 +26,10 @@ arcbox-core = { workspace = true }
 arcbox-docker = { workspace = true }
 arcbox-grpc = { workspace = true }
 arcbox-protocol = { workspace = true }
+arcbox-constants = { workspace = true }
+arcbox-docker-tools = { workspace = true }
+arcbox-asset = { workspace = true }
+
 tonic = { workspace = true }
 hyper-util = "0.1"
 clap = { workspace = true }
@@ -38,10 +43,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 dirs = { workspace = true }
 crossterm = { workspace = true }
-libc.workspace = true
+libc = { workspace = true }
 humantime = "2.3.0"
-arcbox-docker-tools = { version = "0.1.2", path = "../../crates/arcbox-docker-tools" }
-arcbox-asset = { version = "0.1.2", path = "../../crates/arcbox-asset", features = ["download"] }
+tokio-stream.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 macos-resolver = { workspace = true }
@@ -51,7 +55,12 @@ default = []
 
 [dev-dependencies]
 tempfile = "3.14"
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util"] }
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+] }
 
 [lints]
 workspace = true

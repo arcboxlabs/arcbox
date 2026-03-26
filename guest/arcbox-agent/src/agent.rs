@@ -13,6 +13,7 @@ use arcbox_constants::ports::AGENT_PORT;
 pub mod ensure_runtime {
     use std::sync::OnceLock;
 
+    // STATUS_STARTED is used in the linux-only runtime start path and tests.
     #[allow(unused_imports)]
     pub use arcbox_constants::status::{
         RUNTIME_FAILED as STATUS_FAILED, RUNTIME_REUSED as STATUS_REUSED,
@@ -176,7 +177,6 @@ pub mod ensure_runtime {
                     // Release lock before waiting.
                     drop(state);
                     notified.await;
-                    continue;
                 }
                 RuntimeState::NotStarted => {
                     // Should not happen, but treat as failed.
@@ -593,7 +593,6 @@ mod linux {
                 match listener.accept().await {
                     Ok((stream, peer_addr)) => {
                         tracing::info!("Accepted connection from {:?}", peer_addr);
-                        eprintln!("[AGENT] Accepted connection from {:?}", peer_addr);
                         tokio::spawn(async move {
                             if let Err(e) = handle_connection(stream).await {
                                 tracing::error!("Connection error: {}", e);
@@ -787,7 +786,7 @@ mod linux {
         payload: &[u8],
     ) -> anyhow::Result<()>
     where
-        S: tokio::io::AsyncWrite + Unpin,
+        S: AsyncRead + AsyncWrite + Unpin,
     {
         let svc = match sandbox_service() {
             Some(s) => Arc::clone(s),
@@ -814,7 +813,7 @@ mod linux {
                     .await?;
                 }
                 Err(e) => {
-                    send_sandbox_error(stream, trace_id, 500, &e).await?;
+                    send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
                 }
             },
             MessageType::SandboxStopRequest => match svc.stop(payload).await {
@@ -822,7 +821,7 @@ mod linux {
                     write_message(stream, MessageType::SandboxStopResponse, trace_id, &[]).await?;
                 }
                 Err(e) => {
-                    send_sandbox_error(stream, trace_id, 500, &e).await?;
+                    send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
                 }
             },
             MessageType::SandboxRemoveRequest => match svc.remove(payload).await {
@@ -831,7 +830,7 @@ mod linux {
                         .await?;
                 }
                 Err(e) => {
-                    send_sandbox_error(stream, trace_id, 500, &e).await?;
+                    send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
                 }
             },
             MessageType::SandboxInspectRequest => match svc.inspect(payload) {
@@ -846,7 +845,7 @@ mod linux {
                     .await?;
                 }
                 Err(e) => {
-                    send_sandbox_error(stream, trace_id, 500, &e).await?;
+                    send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
                 }
             },
             MessageType::SandboxListRequest => match svc.list(payload) {
@@ -861,27 +860,26 @@ mod linux {
                     .await?;
                 }
                 Err(e) => {
-                    send_sandbox_error(stream, trace_id, 500, &e).await?;
+                    send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
                 }
             },
             // -----------------------------------------------------------------
             // Streaming: Run
             // -----------------------------------------------------------------
             MessageType::SandboxRunRequest => {
-                handle_sandbox_run(stream, &svc, trace_id, payload).await?;
+                svc.handle_run(stream, trace_id, payload).await?;
             }
             // -----------------------------------------------------------------
             // Streaming: Events
             // -----------------------------------------------------------------
             MessageType::SandboxEventsRequest => {
-                handle_sandbox_events(stream, &svc, trace_id, payload).await?;
+                svc.handle_events(stream, trace_id, payload).await?;
             }
             // -----------------------------------------------------------------
-            // Exec: not yet implemented
+            // Streaming: Exec
             // -----------------------------------------------------------------
             MessageType::SandboxExecRequest => {
-                send_sandbox_error(stream, trace_id, 501, "SandboxExec not yet implemented")
-                    .await?;
+                svc.handle_exec(stream, trace_id, payload).await?;
             }
             // -----------------------------------------------------------------
             // Snapshots
@@ -898,7 +896,7 @@ mod linux {
                     .await?;
                 }
                 Err(e) => {
-                    send_sandbox_error(stream, trace_id, 500, &e).await?;
+                    send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
                 }
             },
             MessageType::SandboxRestoreRequest => match svc.restore(payload).await {
@@ -913,7 +911,7 @@ mod linux {
                     .await?;
                 }
                 Err(e) => {
-                    send_sandbox_error(stream, trace_id, 500, &e).await?;
+                    send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
                 }
             },
             MessageType::SandboxListSnapshotsRequest => match svc.list_snapshots(payload) {
@@ -928,7 +926,7 @@ mod linux {
                     .await?;
                 }
                 Err(e) => {
-                    send_sandbox_error(stream, trace_id, 500, &e).await?;
+                    send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
                 }
             },
             MessageType::SandboxDeleteSnapshotRequest => match svc.delete_snapshot(payload) {
@@ -942,63 +940,13 @@ mod linux {
                     .await?;
                 }
                 Err(e) => {
-                    send_sandbox_error(stream, trace_id, 500, &e).await?;
+                    send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
                 }
             },
             _ => {
                 send_sandbox_error(stream, trace_id, 400, "unrecognised sandbox message type")
                     .await?;
             }
-        }
-
-        Ok(())
-    }
-
-    /// Stream `SandboxRunOutput` frames from `SandboxService::run`.
-    async fn handle_sandbox_run<S>(
-        stream: &mut S,
-        svc: &SandboxService,
-        trace_id: &str,
-        payload: &[u8],
-    ) -> anyhow::Result<()>
-    where
-        S: tokio::io::AsyncWrite + Unpin,
-    {
-        let mut rx = match svc.run(payload).await {
-            Ok(r) => r,
-            Err(e) => {
-                send_sandbox_error(stream, trace_id, 500, &e).await?;
-                return Ok(());
-            }
-        };
-
-        while let Some(encoded) = rx.recv().await {
-            write_message(stream, MessageType::SandboxRunOutput, trace_id, &encoded).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Stream `SandboxEvent` frames from `SandboxService::subscribe_events`.
-    async fn handle_sandbox_events<S>(
-        stream: &mut S,
-        svc: &SandboxService,
-        trace_id: &str,
-        payload: &[u8],
-    ) -> anyhow::Result<()>
-    where
-        S: tokio::io::AsyncWrite + Unpin,
-    {
-        let mut rx = match svc.subscribe_events(payload) {
-            Ok(r) => r,
-            Err(e) => {
-                send_sandbox_error(stream, trace_id, 500, &e).await?;
-                return Ok(());
-            }
-        };
-
-        while let Some(encoded) = rx.recv().await {
-            write_message(stream, MessageType::SandboxEvent, trace_id, &encoded).await?;
         }
 
         Ok(())
@@ -1047,25 +995,36 @@ mod linux {
         }
     }
 
+    /// Sets CLOCK_REALTIME from the given timestamp (seconds since UNIX epoch).
+    ///
+    /// Idempotent — safe to call more than once. Returns `true` if the clock
+    /// was set successfully.
+    fn sync_clock_from_host(timestamp_secs: i64) -> bool {
+        if timestamp_secs <= 0 {
+            return false;
+        }
+        let ts = libc::timespec {
+            tv_sec: timestamp_secs,
+            tv_nsec: 0,
+        };
+        // SAFETY: `ts` points to a valid initialized timespec for this call,
+        // and CLOCK_REALTIME is a valid clock ID on Linux guests.
+        let ret = unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &ts) };
+        if ret != 0 {
+            tracing::warn!(
+                timestamp_secs,
+                error = %std::io::Error::last_os_error(),
+                "failed to set clock from host"
+            );
+            return false;
+        }
+        true
+    }
+
     /// Handles a Ping request.
     fn handle_ping(req: arcbox_protocol::agent::PingRequest) -> RpcResponse {
         tracing::debug!("Ping request: {:?}", req.message);
-        if req.timestamp_secs > 0 {
-            let ts = libc::timespec {
-                tv_sec: req.timestamp_secs,
-                tv_nsec: 0,
-            };
-            // SAFETY: `ts` points to a valid initialized timespec for this call,
-            // and CLOCK_REALTIME is a valid clock ID on Linux guests.
-            let ret = unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &ts) };
-            if ret != 0 {
-                tracing::warn!(
-                    timestamp_secs = req.timestamp_secs,
-                    error = %std::io::Error::last_os_error(),
-                    "failed to set clock from host ping"
-                );
-            }
-        }
+        sync_clock_from_host(req.timestamp_secs);
         RpcResponse::Ping(PingResponse {
             message: if req.message.is_empty() {
                 "pong".to_string()
@@ -1872,32 +1831,51 @@ mod linux {
             }
         }
 
-        // Sync system clock via NTP before spawning containerd/dockerd.
-        // The VM guest clock starts at epoch (1970-01-01) because VZ framework's
-        // virtualised RTC is not automatically read by the Alpine kernel on boot.
-        // Without a correct clock, TLS certificate verification fails with
-        // "x509: certificate is not yet valid".
-        // busybox ntpd -q performs a one-shot adjustment and exits.
-        let ntp = std::process::Command::new(busybox)
-            .args(["ntpd", "-q", "-n", "-p", "pool.ntp.org"])
-            .status();
-        match ntp {
-            Ok(s) if s.success() => notes.push("ntp synced".to_string()),
-            Ok(s) => notes.push(format!("ntp exit={}", s.code().unwrap_or(-1))),
-            Err(e) => notes.push(format!("ntp failed({})", e)),
+        // Clock guard: if the wall clock is still near epoch, the host Ping
+        // (which carries the real timestamp) hasn't arrived yet. Set it to a
+        // known-safe minimum so TLS validation in dockerd/containerd doesn't
+        // fail with "certificate is not yet valid". The next Ping overwrites
+        // this with the real host time.
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let min_epoch = option_env!("SOURCE_DATE_EPOCH")
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0)
+            .max(MIN_SANE_EPOCH);
+        if now_secs < min_epoch {
+            if sync_clock_from_host(min_epoch as i64) {
+                notes.push("clock guard: set to minimum sane time (pre-ping fallback)".to_string());
+            } else {
+                notes.push("clock guard: failed to set clock (pre-ping fallback)".to_string());
+            }
         }
 
         notes
     }
 
+    /// Minimum "sane" UNIX timestamp for TLS certificate validation.
+    ///
+    /// Chosen to be old enough that it's always in the past, but recent
+    /// enough that TLS certificates issued after 2020 pass validation.
+    /// 2020-01-01T00:00:00Z
+    const MIN_SANE_EPOCH: u64 = 1_577_836_800;
+
     /// Redirects daemon stdout/stderr to a log file so crashes are diagnosable.
     ///
-    /// Prefers `/arcbox/` (VirtioFS mount, visible from host as `~/.arcbox/`)
+    /// Prefers `/arcbox/log/` (VirtioFS mount, visible from host as `~/.arcbox/log/`)
     /// so that logs survive guest restarts and are accessible without exec.
     /// Falls back to `/tmp/` (guest tmpfs) if VirtioFS is not mounted.
     fn daemon_log_file(name: &str) -> Stdio {
-        let arcbox_path = format!("/arcbox/{}.log", name);
+        let log_dir = format!("/arcbox/{}", arcbox_constants::paths::guest::LOG);
+        let arcbox_path = format!("{}/{}.log", log_dir, name);
         let tmp_log_path = format!("/tmp/{}.log", name);
+
+        // Ensure the log directory exists inside the VirtioFS share.
+        if Path::new("/arcbox").exists() {
+            let _ = std::fs::create_dir_all(&log_dir);
+        }
 
         let log_path = if Path::new("/arcbox").exists() {
             &arcbox_path
@@ -1912,7 +1890,7 @@ mod linux {
         {
             Ok(f) => f.into(),
             Err(_) => {
-                // Fallback to /tmp/ if /arcbox/ write fails.
+                // Fallback to /tmp/ if /arcbox/log/ write fails.
                 match std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)

@@ -1,0 +1,99 @@
+name: Release Please
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          token: ${{ steps.app-token.outputs.token }}
+
+      # After release-please creates/updates the PR, regenerate Cargo.lock
+      # so the release tag can build with --locked.
+      - name: Update Cargo.lock on release PR
+        if: steps.release.outputs.pr
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          PR_BRANCH=$(echo '${{ steps.release.outputs.pr }}' | jq -r '.headBranchName')
+          git clone --depth 1 --branch "$PR_BRANCH" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" /tmp/release-pr
+          cd /tmp/release-pr
+          cargo update --workspace
+          if git diff --quiet Cargo.lock; then
+            echo "Cargo.lock already up to date"
+            exit 0
+          fi
+          git config user.name "arcbox-labs[bot]"
+          git config user.email "254083426+arcbox-labs[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "chore: update Cargo.lock for release"
+          git push
+
+  # Update arcbox-desktop version file when a new release is created.
+  update-desktop:
+    name: Update arcbox-desktop
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+          repositories: arcbox-desktop
+
+      - name: Update arcbox-desktop version
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          TAG="${{ needs.release-please.outputs.tag_name }}"
+          BRANCH="chore/bump-arcbox-${TAG}"
+
+          git clone --depth 1 \
+            "https://x-access-token:${GH_TOKEN}@github.com/arcboxlabs/arcbox-desktop.git" \
+            /tmp/arcbox-desktop
+          cd /tmp/arcbox-desktop
+          git config user.name "arcbox-labs[bot]"
+          git config user.email "254083426+arcbox-labs[bot]@users.noreply.github.com"
+
+          CURRENT=$(cat arcbox.version | tr -d '[:space:]')
+          if [ "$CURRENT" = "$TAG" ]; then
+            echo "arcbox-desktop already at $TAG, skipping."
+            exit 0
+          fi
+
+          git checkout -b "$BRANCH"
+          echo "$TAG" > arcbox.version
+          git add arcbox.version
+          git commit -m "chore: bump arcbox version to ${TAG}"
+          git push origin "$BRANCH"
+
+          gh pr create \
+            --repo arcboxlabs/arcbox-desktop \
+            --base master \
+            --head "$BRANCH" \
+            --title "chore: bump arcbox version to ${TAG}" \
+            --body "Automated update from [arcbox ${TAG}](https://github.com/arcboxlabs/arcbox/releases/tag/${TAG})."

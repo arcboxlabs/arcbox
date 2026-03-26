@@ -6,14 +6,41 @@
 
 use std::sync::Arc;
 
+use arcbox_constants::wire::MessageType;
 use arcbox_protocol::sandbox_v1;
 use arcbox_vm::{
-    CheckpointInfo, CheckpointSummary, RestoreSandboxSpec, SandboxEvent as VmSandboxEvent,
-    SandboxInfo, SandboxManager, SandboxMountSpec, SandboxNetworkSpec, SandboxSpec, SandboxSummary,
-    VmmConfig,
+    CheckpointInfo, CheckpointSummary, ExecInputMsg, RestoreSandboxSpec,
+    SandboxEvent as VmSandboxEvent, SandboxInfo, SandboxManager, SandboxMountSpec,
+    SandboxNetworkSpec, SandboxSpec, SandboxSummary, VmmConfig,
 };
 use prost::Message;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
+
+use crate::error::SandboxError;
+use crate::rpc::{ErrorResponse, read_message, write_message};
+
+/// Drain a single trailing `SandboxExecInput` frame after exec completes.
+///
+/// The client may send a final EOF frame after the command exits.  We read
+/// it here using the framing protocol so we only discard complete frames.
+/// Only `SandboxExecInput` frames are discarded; any other message type
+/// causes an immediate return.
+///
+/// This is safe because exec sessions are one-shot: the host consumes its
+/// `AgentClient` via `into_split()`, so the vsock connection is never
+/// reused for subsequent requests.
+async fn drain_trailing_input<S: AsyncRead + Unpin>(stream: &mut S) {
+    use tokio::time::{Duration, timeout};
+    let _ = timeout(Duration::from_millis(100), async {
+        if let Ok((msg_type, _, _)) = read_message(stream).await {
+            if msg_type != MessageType::SandboxExecInput {
+                tracing::warn!(?msg_type, "unexpected trailing message after exec");
+            }
+        }
+    })
+    .await;
+}
 
 // =============================================================================
 // SandboxService
@@ -41,15 +68,16 @@ impl SandboxService {
     pub async fn create(
         &self,
         payload: &[u8],
-    ) -> Result<sandbox_v1::CreateSandboxResponse, String> {
+    ) -> Result<sandbox_v1::CreateSandboxResponse, SandboxError> {
         let req = sandbox_v1::CreateSandboxRequest::decode(payload)
-            .map_err(|e| format!("decode error: {e}"))?;
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
         let spec = proto_to_spec(req);
         let (id, ip_address) = self
             .manager
             .create_sandbox(spec)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| SandboxError::Internal(e.to_string()))?;
+        register_sandbox_dns(&id, &ip_address);
         Ok(sandbox_v1::CreateSandboxResponse {
             id,
             ip_address,
@@ -58,40 +86,44 @@ impl SandboxService {
     }
 
     /// Stop a sandbox.
-    pub async fn stop(&self, payload: &[u8]) -> Result<(), String> {
+    pub async fn stop(&self, payload: &[u8]) -> Result<(), SandboxError> {
         let req = sandbox_v1::StopSandboxRequest::decode(payload)
-            .map_err(|e| format!("decode error: {e}"))?;
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
         self.manager
             .stop_sandbox(&req.id, req.timeout_seconds)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| SandboxError::Internal(e.to_string()))?;
+        deregister_sandbox_dns(&req.id);
+        Ok(())
     }
 
     /// Remove a sandbox.
-    pub async fn remove(&self, payload: &[u8]) -> Result<(), String> {
+    pub async fn remove(&self, payload: &[u8]) -> Result<(), SandboxError> {
         let req = sandbox_v1::RemoveSandboxRequest::decode(payload)
-            .map_err(|e| format!("decode error: {e}"))?;
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
         self.manager
             .remove_sandbox(&req.id, req.force)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| SandboxError::Internal(e.to_string()))?;
+        deregister_sandbox_dns(&req.id);
+        Ok(())
     }
 
     /// Inspect a sandbox.
-    pub fn inspect(&self, payload: &[u8]) -> Result<sandbox_v1::SandboxInfo, String> {
+    pub fn inspect(&self, payload: &[u8]) -> Result<sandbox_v1::SandboxInfo, SandboxError> {
         let req = sandbox_v1::InspectSandboxRequest::decode(payload)
-            .map_err(|e| format!("decode error: {e}"))?;
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
         let info = self
             .manager
             .inspect_sandbox(&req.id)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| SandboxError::Internal(e.to_string()))?;
         Ok(vm_info_to_proto(info))
     }
 
     /// List sandboxes.
-    pub fn list(&self, payload: &[u8]) -> Result<sandbox_v1::ListSandboxesResponse, String> {
+    pub fn list(&self, payload: &[u8]) -> Result<sandbox_v1::ListSandboxesResponse, SandboxError> {
         let req = sandbox_v1::ListSandboxesRequest::decode(payload)
-            .map_err(|e| format!("decode error: {e}"))?;
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
         let state_filter = if req.state.is_empty() {
             None
         } else {
@@ -108,10 +140,12 @@ impl SandboxService {
     // =========================================================================
 
     /// Run a command in a sandbox.  Returns a channel of encoded [`RunOutput`] payloads.
-    pub async fn run(&self, payload: &[u8]) -> Result<mpsc::UnboundedReceiver<Vec<u8>>, String> {
-        let req =
-            sandbox_v1::RunRequest::decode(payload).map_err(|e| format!("decode error: {e}"))?;
-
+    pub async fn run(
+        &self,
+        payload: &[u8],
+    ) -> Result<mpsc::UnboundedReceiver<Vec<u8>>, SandboxError> {
+        let req = sandbox_v1::RunRequest::decode(payload)
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
         let tty_size = None; // RunRequest has no tty_size field; use default.
 
         let mut rx = self
@@ -127,7 +161,7 @@ impl SandboxService {
                 req.timeout_seconds,
             )
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| SandboxError::Internal(e.to_string()))?;
 
         let (tx, out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         tokio::spawn(async move {
@@ -166,14 +200,240 @@ impl SandboxService {
         Ok(out_rx)
     }
 
+    /// Start an interactive exec session.
+    ///
+    /// Returns `(input_sender, output_receiver)`:
+    /// - Send [`ExecInputMsg`]s into `input_sender` to forward stdin / EOF to
+    ///   the running process.
+    /// - Read pre-encoded [`sandbox_v1::ExecOutput`] payloads from
+    ///   `output_receiver`.  The final payload has `done == true`.
+    pub async fn exec(
+        &self,
+        payload: &[u8],
+    ) -> Result<(mpsc::Sender<ExecInputMsg>, mpsc::UnboundedReceiver<Vec<u8>>), SandboxError> {
+        let req = sandbox_v1::ExecRequest::decode(payload)
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
+
+        let tty_size = req
+            .tty_size
+            .map(|s| {
+                let width = u16::try_from(s.width)
+                    .map_err(|_| SandboxError::Decode(format!("invalid tty width {}", s.width)))?;
+                let height = u16::try_from(s.height).map_err(|_| {
+                    SandboxError::Decode(format!("invalid tty height {}", s.height))
+                })?;
+                Ok::<_, SandboxError>((width, height))
+            })
+            .transpose()?;
+
+        let (in_tx, mut out_rx) = self
+            .manager
+            .exec_in_sandbox(
+                &req.id,
+                req.cmd,
+                req.env,
+                req.working_dir,
+                req.user,
+                req.tty,
+                tty_size,
+                req.timeout_seconds,
+            )
+            .await
+            .map_err(|e| SandboxError::Internal(e.to_string()))?;
+
+        let (tx, out_stream_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        tokio::spawn(async move {
+            while let Some(result) = out_rx.recv().await {
+                let chunk = match result {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let done_msg = sandbox_v1::ExecOutput {
+                            stream: "exit".into(),
+                            data: Vec::new(),
+                            exit_code: 1,
+                            done: true,
+                        };
+                        tracing::warn!(error = %e, "exec_in_sandbox stream error");
+                        let _ = tx.send(done_msg.encode_to_vec());
+                        break;
+                    }
+                };
+                let is_done = chunk.stream == "exit";
+                let msg = sandbox_v1::ExecOutput {
+                    stream: chunk.stream,
+                    data: chunk.data,
+                    exit_code: chunk.exit_code,
+                    done: is_done,
+                };
+                if tx.send(msg.encode_to_vec()).is_err() {
+                    break;
+                }
+                if is_done {
+                    break;
+                }
+            }
+        });
+
+        Ok((in_tx, out_stream_rx))
+    }
+
+    /// Bridge a `SandboxExecRequest` between the host vsock stream and the
+    /// vm-agent.
+    ///
+    /// The host sends [`MessageType::SandboxExecInput`] frames carrying raw
+    /// stdin bytes; an empty payload signals EOF on stdin.  The agent forwards
+    /// [`MessageType::SandboxExecOutput`] frames (stdout / stderr / exit) back
+    /// to the host until the process terminates.
+    pub async fn handle_exec<S>(
+        &self,
+        stream: &mut S,
+        trace_id: &str,
+        payload: &[u8],
+    ) -> anyhow::Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let (in_tx, mut out_rx) = match self.exec(payload).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                let err = ErrorResponse::new(e.status_code(), &e.to_string());
+                write_message(stream, MessageType::Error, trace_id, &err.encode()).await?;
+                return Ok(());
+            }
+        };
+
+        // Split the stream so reads and writes operate independently.
+        // The input reader may be cancelled mid-frame by tokio::select!
+        // when the output side finishes first; this is safe because this
+        // connection is not reused for subsequent requests.
+        {
+            let (mut rh, mut wh) = tokio::io::split(&mut *stream);
+
+            let input_fut = async {
+                loop {
+                    match read_message(&mut rh).await {
+                        Err(_) => {
+                            let _ = in_tx.send(ExecInputMsg::Eof).await;
+                            break;
+                        }
+                        Ok((MessageType::SandboxExecInput, _, data)) => {
+                            let msg = if data.is_empty() {
+                                ExecInputMsg::Eof
+                            } else {
+                                ExecInputMsg::Stdin(data)
+                            };
+                            if in_tx.send(msg).await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok(_) => break,
+                    }
+                }
+            };
+
+            let trace_id_owned = trace_id.to_owned();
+            let output_fut = async {
+                while let Some(encoded) = out_rx.recv().await {
+                    let done = sandbox_v1::ExecOutput::decode(encoded.as_slice())
+                        .map(|m| m.done)
+                        .unwrap_or(false);
+                    write_message(
+                        &mut wh,
+                        MessageType::SandboxExecOutput,
+                        &trace_id_owned,
+                        &encoded,
+                    )
+                    .await?;
+                    if done {
+                        break;
+                    }
+                }
+                Ok::<_, anyhow::Error>(())
+            };
+
+            tokio::pin!(input_fut);
+            tokio::pin!(output_fut);
+
+            // Run both concurrently.  When output finishes (process exited),
+            // the input reader is cancelled — this is safe because the host
+            // consumes its AgentClient (via into_split) for exec sessions, so
+            // this vsock connection is never reused for further requests.
+            tokio::select! {
+                () = &mut input_fut => {
+                    // Host disconnected first; drain remaining output.
+                    output_fut.await?;
+                }
+                result = &mut output_fut => {
+                    result?;
+                }
+            }
+        }
+        // Split halves are dropped here; `stream` is usable again.
+        drain_trailing_input(stream).await;
+
+        Ok(())
+    }
+
+    /// Stream `SandboxRunOutput` frames from [`SandboxService::run`].
+    pub async fn handle_run<S>(
+        &self,
+        stream: &mut S,
+        trace_id: &str,
+        payload: &[u8],
+    ) -> anyhow::Result<()>
+    where
+        S: AsyncWrite + Unpin,
+    {
+        let mut rx = match self.run(payload).await {
+            Ok(r) => r,
+            Err(e) => {
+                let err = ErrorResponse::new(e.status_code(), &e.to_string());
+                write_message(stream, MessageType::Error, trace_id, &err.encode()).await?;
+                return Ok(());
+            }
+        };
+
+        while let Some(encoded) = rx.recv().await {
+            write_message(stream, MessageType::SandboxRunOutput, trace_id, &encoded).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Stream `SandboxEvent` frames from [`SandboxService::subscribe_events`].
+    pub async fn handle_events<S>(
+        &self,
+        stream: &mut S,
+        trace_id: &str,
+        payload: &[u8],
+    ) -> anyhow::Result<()>
+    where
+        S: AsyncWrite + Unpin,
+    {
+        let mut rx = match self.subscribe_events(payload) {
+            Ok(r) => r,
+            Err(e) => {
+                let err = ErrorResponse::new(e.status_code(), &e.to_string());
+                write_message(stream, MessageType::Error, trace_id, &err.encode()).await?;
+                return Ok(());
+            }
+        };
+
+        while let Some(encoded) = rx.recv().await {
+            write_message(stream, MessageType::SandboxEvent, trace_id, &encoded).await?;
+        }
+
+        Ok(())
+    }
+
     /// Subscribe to sandbox lifecycle events.  Returns a channel of encoded
     /// [`SandboxEvent`] payloads.
     pub fn subscribe_events(
         &self,
         payload: &[u8],
-    ) -> Result<mpsc::UnboundedReceiver<Vec<u8>>, String> {
+    ) -> Result<mpsc::UnboundedReceiver<Vec<u8>>, SandboxError> {
         let req = sandbox_v1::SandboxEventsRequest::decode(payload)
-            .map_err(|e| format!("decode error: {e}"))?;
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
         let filter_id = req.id.clone();
         let filter_action = req.action.clone();
 
@@ -217,21 +477,24 @@ impl SandboxService {
     pub async fn checkpoint(
         &self,
         payload: &[u8],
-    ) -> Result<sandbox_v1::CheckpointResponse, String> {
+    ) -> Result<sandbox_v1::CheckpointResponse, SandboxError> {
         let req = sandbox_v1::CheckpointRequest::decode(payload)
-            .map_err(|e| format!("decode error: {e}"))?;
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
         let info = self
             .manager
             .checkpoint_sandbox(&req.sandbox_id, req.name)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| SandboxError::Internal(e.to_string()))?;
         Ok(checkpoint_to_proto(info))
     }
 
     /// Restore a sandbox from a snapshot.
-    pub async fn restore(&self, payload: &[u8]) -> Result<sandbox_v1::RestoreResponse, String> {
+    pub async fn restore(
+        &self,
+        payload: &[u8],
+    ) -> Result<sandbox_v1::RestoreResponse, SandboxError> {
         let req = sandbox_v1::RestoreRequest::decode(payload)
-            .map_err(|e| format!("decode error: {e}"))?;
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
         let spec = RestoreSandboxSpec {
             id: if req.id.is_empty() {
                 None
@@ -247,7 +510,8 @@ impl SandboxService {
             .manager
             .restore_sandbox(spec)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| SandboxError::Internal(e.to_string()))?;
+        register_sandbox_dns(&id, &ip_address);
         Ok(sandbox_v1::RestoreResponse { id, ip_address })
     }
 
@@ -255,9 +519,9 @@ impl SandboxService {
     pub fn list_snapshots(
         &self,
         payload: &[u8],
-    ) -> Result<sandbox_v1::ListSnapshotsResponse, String> {
+    ) -> Result<sandbox_v1::ListSnapshotsResponse, SandboxError> {
         let req = sandbox_v1::ListSnapshotsRequest::decode(payload)
-            .map_err(|e| format!("decode error: {e}"))?;
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
         let filter = if req.sandbox_id.is_empty() {
             None
         } else {
@@ -266,7 +530,7 @@ impl SandboxService {
         let summaries = self
             .manager
             .list_checkpoints(filter)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| SandboxError::Internal(e.to_string()))?;
         Ok(sandbox_v1::ListSnapshotsResponse {
             snapshots: summaries
                 .into_iter()
@@ -275,13 +539,50 @@ impl SandboxService {
         })
     }
 
+    /// Return the IP address of a sandbox, or an error if not found.
+    pub fn sandbox_ip(&self, sandbox_id: &str) -> Result<std::net::Ipv4Addr, SandboxError> {
+        let info = self
+            .manager
+            .inspect_sandbox(&sandbox_id.to_string())
+            .map_err(|e| SandboxError::Internal(e.to_string()))?;
+        info.network
+            .and_then(|n| n.ip_address.parse().ok())
+            .ok_or_else(|| {
+                SandboxError::Internal(format!("sandbox '{sandbox_id}' has no network allocation"))
+            })
+    }
+
     /// Delete a snapshot.
-    pub fn delete_snapshot(&self, payload: &[u8]) -> Result<(), String> {
+    pub fn delete_snapshot(&self, payload: &[u8]) -> Result<(), SandboxError> {
         let req = sandbox_v1::DeleteSnapshotRequest::decode(payload)
-            .map_err(|e| format!("decode error: {e}"))?;
+            .map_err(|e| SandboxError::Decode(e.to_string()))?;
         self.manager
             .delete_checkpoint(&req.snapshot_id)
-            .map_err(|e| e.to_string())
+            .map_err(|e| SandboxError::Internal(e.to_string()))
+    }
+}
+
+// =============================================================================
+// DNS registration helpers
+// =============================================================================
+
+/// Register a sandbox in the guest DNS server registry.
+fn register_sandbox_dns(id: &str, ip: &str) {
+    let Ok(ipv4) = ip.parse::<std::net::Ipv4Addr>() else {
+        tracing::warn!(id, ip, "invalid sandbox IP for DNS registration");
+        return;
+    };
+    let registry = crate::dns_server::sandbox_registry();
+    if let Ok(mut map) = registry.write() {
+        map.insert(id.to_lowercase(), ipv4);
+    }
+}
+
+/// Deregister a sandbox from the guest DNS server registry.
+fn deregister_sandbox_dns(id: &str) {
+    let registry = crate::dns_server::sandbox_registry();
+    if let Ok(mut map) = registry.write() {
+        map.remove(&id.to_lowercase());
     }
 }
 
