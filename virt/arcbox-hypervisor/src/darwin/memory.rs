@@ -21,10 +21,6 @@ use crate::{
     types::DirtyPageInfo,
 };
 
-// ============================================================================
-// Memory Allocation (using mmap directly)
-// ============================================================================
-
 /// Allocates guest memory using mmap.
 ///
 /// This is a low-level operation that allocates anonymous memory pages

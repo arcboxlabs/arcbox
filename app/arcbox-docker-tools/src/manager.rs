@@ -344,10 +344,6 @@ impl DockerToolManager {
     }
 }
 
-// =============================================================================
-// Helpers
-// =============================================================================
-
 /// Mark a file as executable (0o755).
 #[cfg(unix)]
 async fn mark_executable(path: &Path) -> Result<(), DockerToolError> {

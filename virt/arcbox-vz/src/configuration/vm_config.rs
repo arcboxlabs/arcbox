@@ -14,10 +14,6 @@ use std::ptr;
 
 use super::{BootLoader, Platform};
 
-// ============================================================================
-// VM Configuration
-// ============================================================================
-
 /// Configuration for creating a virtual machine.
 ///
 /// Use the builder methods to configure the VM, then call `build()` to

@@ -126,10 +126,6 @@ impl Drop for SerialPortConfiguration {
     }
 }
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
 fn create_serial_port_attachment(
     read_handle: *mut AnyObject,
     write_handle: *mut AnyObject,

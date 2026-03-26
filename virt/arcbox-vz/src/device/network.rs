@@ -117,10 +117,6 @@ impl Drop for NetworkDeviceConfiguration {
     }
 }
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
 fn create_file_handle_attachment(file_handle: *mut AnyObject) -> VZResult<*mut AnyObject> {
     // SAFETY: ObjC alloc/init on valid VZFileHandleNetworkDeviceAttachment. ObjC exceptions are caught to prevent abort.
     unsafe {

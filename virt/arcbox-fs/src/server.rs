@@ -163,10 +163,6 @@ impl FsServer {
     }
 }
 
-// ============================================================================
-// FuseRequestHandler Implementation
-// ============================================================================
-
 impl FuseRequestHandler for FsServer {
     fn handle_request(&self, request: &[u8]) -> arcbox_virtio::Result<Vec<u8>> {
         self.handle_request(request)
