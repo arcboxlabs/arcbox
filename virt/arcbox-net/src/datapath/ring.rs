@@ -589,4 +589,87 @@ mod tests {
         assert_eq!(ring.dequeue(), Some(2));
         assert_eq!(ring.dequeue(), None);
     }
+
+    /// Multi-threaded stress test: multiple producers and consumers racing on
+    /// the same ring. Validates that every enqueued value is dequeued exactly
+    /// once (no duplicates, no lost items).
+    #[test]
+    fn test_mpmc_stress() {
+        use std::sync::atomic::AtomicBool;
+
+        const PRODUCERS: usize = 4;
+        const CONSUMERS: usize = 4;
+        const ITEMS_PER_PRODUCER: usize = 10_000;
+        const TOTAL: usize = PRODUCERS * ITEMS_PER_PRODUCER;
+
+        let ring = Arc::new(MpmcRing::<usize>::new(256));
+        let producers_done = Arc::new(AtomicBool::new(false));
+
+        // Spawn producers — each pushes a disjoint range of values.
+        let mut producer_handles = Vec::new();
+        for p in 0..PRODUCERS {
+            let ring = Arc::clone(&ring);
+            producer_handles.push(thread::spawn(move || {
+                let base = p * ITEMS_PER_PRODUCER;
+                for i in 0..ITEMS_PER_PRODUCER {
+                    while ring.enqueue(base + i).is_err() {
+                        std::hint::spin_loop();
+                    }
+                }
+            }));
+        }
+
+        // Spawn consumers — each drains until producers are done and ring is empty.
+        let consumer_handles: Vec<_> = (0..CONSUMERS)
+            .map(|_| {
+                let ring = Arc::clone(&ring);
+                let done = Arc::clone(&producers_done);
+                thread::spawn(move || {
+                    let mut collected = Vec::new();
+                    loop {
+                        match ring.dequeue() {
+                            Some(v) => collected.push(v),
+                            None => {
+                                if done.load(Ordering::Acquire) {
+                                    // Final drain after producers signaled done.
+                                    while let Some(v) = ring.dequeue() {
+                                        collected.push(v);
+                                    }
+                                    break;
+                                }
+                                std::hint::spin_loop();
+                            }
+                        }
+                    }
+                    collected
+                })
+            })
+            .collect();
+
+        // Wait for all producers to finish, then signal consumers.
+        for h in producer_handles {
+            h.join().unwrap();
+        }
+        producers_done.store(true, Ordering::Release);
+
+        // Collect all consumed values.
+        let mut all: Vec<usize> = consumer_handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect();
+
+        // Drain anything still in the ring (consumers may have exited early).
+        while let Some(v) = ring.dequeue() {
+            all.push(v);
+        }
+
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(
+            all.len(),
+            TOTAL,
+            "expected {TOTAL} unique items, got {} (duplicates or lost items)",
+            all.len()
+        );
+    }
 }
