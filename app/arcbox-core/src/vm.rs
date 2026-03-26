@@ -430,14 +430,19 @@ impl VmManager {
             .request_stop(timeout)
             .map_err(|e| CoreError::Vm(e.to_string()));
 
-        // Re-acquire to update final state.
+        // Re-acquire to update final state. The entry may have been removed
+        // by a concurrent force_stop while the lock was released — if so,
+        // leak the Vmm to avoid the macOS Vmm::Drop crash and return Ok
+        // since the force path already handled teardown.
         let mut vms = self
             .vms
             .write()
             .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?;
-        let entry = vms
-            .get_mut(id)
-            .ok_or_else(|| CoreError::not_found(id.to_string()))?;
+        let Some(entry) = vms.get_mut(id) else {
+            tracing::warn!("VM {id} removed during graceful stop (concurrent force stop)");
+            std::mem::forget(vmm);
+            return Ok(stop_result.unwrap_or(false));
+        };
 
         match stop_result {
             Ok(true) => {
