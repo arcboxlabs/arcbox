@@ -4,8 +4,8 @@
 //! using Swiss Tables (hashbrown) for O(1) lookups.
 
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 /// Process-wide monotonic epoch for ConnTrack timestamps.
@@ -240,30 +240,28 @@ impl std::fmt::Debug for ConnTrackEntry {
 /// Fast path cache entry.
 ///
 /// Stores recently used connections for O(1) lookup by hash.
+/// Uses `Arc` to share ownership with the main entries table,
+/// preventing use-after-free when entries are removed.
 #[derive(Debug)]
 pub struct FastCacheEntry {
     /// Hash of the key.
     pub key_hash: u64,
     /// The connection tracking key.
     pub key: ConnTrackKey,
-    /// Pointer to the full entry.
-    pub entry_ptr: *const ConnTrackEntry,
+    /// Shared reference to the full entry.
+    pub entry: Arc<ConnTrackEntry>,
     /// Hit count.
     pub hits: u32,
 }
 
-// Safety: FastCacheEntry is only accessed with proper synchronization.
-unsafe impl Send for FastCacheEntry {}
-unsafe impl Sync for FastCacheEntry {}
-
 impl FastCacheEntry {
     /// Creates a new cache entry.
     #[must_use]
-    pub fn new(key: ConnTrackKey, entry_ptr: *const ConnTrackEntry) -> Self {
+    pub fn new(key: ConnTrackKey, entry: Arc<ConnTrackEntry>) -> Self {
         Self {
             key_hash: key.fast_hash(),
             key,
-            entry_ptr,
+            entry,
             hits: 0,
         }
     }
@@ -302,7 +300,7 @@ impl PortAllocator {
 /// High-performance connection tracking table.
 pub struct ConnTrackTable {
     /// Connection entries (outbound key -> entry).
-    entries: HashMap<ConnTrackKey, Box<ConnTrackEntry>>,
+    entries: HashMap<ConnTrackKey, Arc<ConnTrackEntry>>,
     /// Reverse lookup (NAT'd key -> original key).
     reverse: HashMap<ConnTrackKey, ConnTrackKey>,
     /// Fast path cache.
@@ -362,7 +360,7 @@ impl ConnTrackTable {
     /// Looks up a connection by key.
     ///
     /// Returns the entry if found.
-    pub fn lookup(&mut self, key: &ConnTrackKey) -> Option<&ConnTrackEntry> {
+    pub fn lookup(&mut self, key: &ConnTrackKey) -> Option<Arc<ConnTrackEntry>> {
         self.stats.lookups.0.fetch_add(1, Ordering::Relaxed);
 
         // Try fast path first
@@ -372,8 +370,7 @@ impl ConnTrackTable {
         if let Some(ref cache_entry) = self.fast_cache[cache_idx] {
             if cache_entry.key_hash == hash && cache_entry.key == *key {
                 self.stats.fast_hits.0.fetch_add(1, Ordering::Relaxed);
-                // Safety: The pointer is valid as long as the entry exists.
-                return Some(unsafe { &*cache_entry.entry_ptr });
+                return Some(Arc::clone(&cache_entry.entry));
             }
         }
 
@@ -381,18 +378,16 @@ impl ConnTrackTable {
         self.stats.slow_lookups.0.fetch_add(1, Ordering::Relaxed);
 
         if let Some(entry) = self.entries.get(key) {
-            // Update fast cache
-            let entry_ptr = std::ptr::from_ref::<ConnTrackEntry>(entry.as_ref());
-            self.fast_cache[cache_idx] = Some(FastCacheEntry::new(*key, entry_ptr));
-            return Some(entry);
+            let entry_clone = Arc::clone(entry);
+            self.fast_cache[cache_idx] = Some(FastCacheEntry::new(*key, Arc::clone(&entry_clone)));
+            return Some(entry_clone);
         }
 
         None
     }
 
     /// Looks up a connection by NAT'd address (reverse lookup).
-    pub fn lookup_reverse(&mut self, nat_key: &ConnTrackKey) -> Option<&ConnTrackEntry> {
-        // Clone the key to avoid borrow conflict with lookup().
+    pub fn lookup_reverse(&mut self, nat_key: &ConnTrackKey) -> Option<Arc<ConnTrackEntry>> {
         let orig_key = self.reverse.get(nat_key).copied()?;
         self.lookup(&orig_key)
     }
@@ -400,7 +395,7 @@ impl ConnTrackTable {
     /// Creates or gets an existing connection entry.
     ///
     /// If the connection doesn't exist, creates a new SNAT entry.
-    pub fn get_or_create(&mut self, key: ConnTrackKey) -> &ConnTrackEntry {
+    pub fn get_or_create(&mut self, key: ConnTrackKey) -> Arc<ConnTrackEntry> {
         // Check if exists
         if self.entries.contains_key(&key) {
             return self.lookup(&key).unwrap();
@@ -410,7 +405,7 @@ impl ConnTrackTable {
         let nat_port = self.port_alloc.allocate();
         let nat_src = SocketAddrV4::new(self.external_ip, nat_port);
 
-        let entry = Box::new(ConnTrackEntry::new_snat(
+        let entry = Arc::new(ConnTrackEntry::new_snat(
             SocketAddrV4::new(key.src_ip, key.src_port),
             SocketAddrV4::new(key.dst_ip, key.dst_port),
             nat_src,
@@ -427,17 +422,16 @@ impl ConnTrackTable {
         );
 
         self.reverse.insert(reverse_key, key);
+        let entry_clone = Arc::clone(&entry);
         self.entries.insert(key, entry);
         self.stats.created.0.fetch_add(1, Ordering::Relaxed);
 
         // Update fast cache
-        let entry_ref = self.entries.get(&key).unwrap();
-        let entry_ptr = std::ptr::from_ref::<ConnTrackEntry>(entry_ref.as_ref());
         let hash = key.fast_hash();
         let cache_idx = (hash as usize) & self.fast_cache_mask;
-        self.fast_cache[cache_idx] = Some(FastCacheEntry::new(key, entry_ptr));
+        self.fast_cache[cache_idx] = Some(FastCacheEntry::new(key, Arc::clone(&entry_clone)));
 
-        entry_ref
+        entry_clone
     }
 
     /// Removes expired entries.
