@@ -15,6 +15,7 @@ boot-assets/
 boot-assets-arm64-*.tar.gz*
 tests/resources/boot-assets-*
 tests/resources/boot-assets-arm64-*
-# Claude Code settings (user-specific)
-.claude/
+# Claude Code (track skills symlink, ignore everything else)
+.claude/*
+!.claude/skills
 perf-issue.md
