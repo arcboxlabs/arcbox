@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.11](https://github.com/arcboxlabs/arcbox/compare/v0.3.10...v0.3.11) (2026-03-26)
+
+
+### Bug Fixes
+
+* **cli:** remove sfltool resetbtm, fix plist leak, rename app to ArcBox ([#123](https://github.com/arcboxlabs/arcbox/issues/123)) ([e22d3f8](https://github.com/arcboxlabs/arcbox/commit/e22d3f81c1a3eb03f78d00d4d8be427562d0a282))
+* **net:** add Copy bound to MpmcRing to prevent soundness hole ([#124](https://github.com/arcboxlabs/arcbox/issues/124)) ([4e18408](https://github.com/arcboxlabs/arcbox/commit/4e18408f0bf922c7166967a1126f274e8a1bd566))
+
+
+### Code Refactoring
+
+* replace test section dividers with mod blocks ([#121](https://github.com/arcboxlabs/arcbox/issues/121)) ([bfb7a5b](https://github.com/arcboxlabs/arcbox/commit/bfb7a5b38e33021f9e89942d22734d287b391406))
+
 ## [0.3.10](https://github.com/arcboxlabs/arcbox/compare/v0.3.9...v0.3.10) (2026-03-26)
 
 
