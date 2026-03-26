@@ -12,6 +12,30 @@ use bytes::Bytes;
 use http_body_util::Full;
 use hyper::client::conn::http1;
 
+/// Forwards all non-hop-by-hop headers from the client request to the guest request.
+///
+/// This ensures registry auth (`X-Registry-Auth`, `X-Registry-Config`),
+/// content negotiation (`Accept`), and other semantically significant
+/// headers are preserved when proxying to the guest dockerd.
+fn forward_client_headers(from: &HeaderMap, to: &mut HeaderMap) {
+    for (name, value) in from {
+        // Skip hop-by-hop headers (RFC 7230 §6.1) and Host (overridden later).
+        if name == header::CONNECTION
+            || name.as_str() == "keep-alive"
+            || name == header::PROXY_AUTHENTICATE
+            || name == header::PROXY_AUTHORIZATION
+            || name == header::TE
+            || name == header::TRAILER
+            || name == header::TRANSFER_ENCODING
+            || name == header::UPGRADE
+            || name == header::HOST
+        {
+            continue;
+        }
+        to.insert(name.clone(), value.clone());
+    }
+}
+
 /// Forward an HTTP request to guest dockerd and return the response.
 ///
 /// Opens a new HTTP/1.1 connection over vsock for each request. The response
@@ -54,10 +78,9 @@ pub async fn proxy_to_guest(
         .body(Full::new(body))
         .map_err(|e| DockerError::Server(format!("failed to build guest request: {e}")))?;
 
-    // Forward content-type so the guest dockerd can parse JSON bodies.
-    if let Some(ct) = headers.get(header::CONTENT_TYPE) {
-        req.headers_mut().insert(header::CONTENT_TYPE, ct.clone());
-    }
+    // Forward all non-hop-by-hop headers so registry auth, content negotiation,
+    // and other semantics are preserved when proxying to guest dockerd.
+    forward_client_headers(headers, req.headers_mut());
     req.headers_mut()
         .insert(header::HOST, HeaderValue::from_static("localhost"));
     req.headers_mut()
@@ -109,7 +132,7 @@ pub async fn proxy_to_guest_stream(
         .path_and_query()
         .map_or("/", hyper::http::uri::PathAndQuery::as_str);
     let method = req.method().clone();
-    let content_type = req.headers().get(header::CONTENT_TYPE).cloned();
+    let client_headers = req.headers().clone();
     let body = req.into_body();
 
     let mut guest_req = hyper::Request::builder()
@@ -118,9 +141,8 @@ pub async fn proxy_to_guest_stream(
         .body(body)
         .map_err(|e| DockerError::Server(format!("failed to build guest request: {e}")))?;
 
-    if let Some(ct) = content_type {
-        guest_req.headers_mut().insert(header::CONTENT_TYPE, ct);
-    }
+    // Forward all non-hop-by-hop headers (registry auth, content negotiation, etc.).
+    forward_client_headers(&client_headers, guest_req.headers_mut());
     guest_req
         .headers_mut()
         .insert(header::HOST, HeaderValue::from_static("localhost"));
