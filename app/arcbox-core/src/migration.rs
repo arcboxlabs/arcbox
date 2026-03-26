@@ -137,7 +137,11 @@ impl MigrationManager {
 
         tokio::spawn(async move {
             let mut emit = |progress: MigrationProgress| {
-                let event = progress_to_event(&plan_id, progress, false, false);
+                // Intermediate events: done=false, success is not meaningful
+                // yet so we leave it as true (not-failed-yet) to avoid
+                // misleading clients that check `success` without gating on
+                // `done`.
+                let event = progress_to_event(&plan_id, progress, false, true);
                 let _ = tx.send(Ok(event));
             };
 

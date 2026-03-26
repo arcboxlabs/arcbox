@@ -74,37 +74,8 @@ impl MigrationSourceKind {
     }
 }
 
-fn resolve_grpc_socket_path() -> PathBuf {
-    if let Ok(path) = std::env::var("ARCBOX_GRPC_SOCKET") {
-        return PathBuf::from(path);
-    }
-
-    if let Ok(path) = std::env::var("ARCBOX_SOCKET") {
-        let docker_socket = PathBuf::from(path);
-        if let Some(parent) = docker_socket.parent() {
-            let preferred = parent.join("arcbox-grpc.sock");
-            if preferred.exists() {
-                return preferred;
-            }
-
-            let legacy = parent.join("arcbox.sock");
-            if legacy.exists() {
-                return legacy;
-            }
-
-            return preferred;
-        }
-    }
-
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".arcbox")
-        .join(arcbox_constants::paths::host::RUN)
-        .join("arcbox.sock")
-}
-
 async fn migration_client() -> Result<MigrationServiceClient<Channel>> {
-    let socket_path = resolve_grpc_socket_path();
+    let socket_path = super::resolve_grpc_socket_path();
 
     let channel = Endpoint::from_static("http://[::]:50051")
         .connect_with_connector(UnixConnector::new(socket_path.clone()))
@@ -172,7 +143,10 @@ async fn execute_source(source_kind: MigrationSourceKind, args: MigrateSourceArg
     let mut stream = client
         .run_migration(tonic::Request::new(RunMigrationRequest {
             plan_id: prepare.plan_id.clone(),
-            allow_replacements: prepare.replacements_required,
+            // We only reach this point after the user has explicitly confirmed
+            // (either via interactive prompt or --yes), so allow both
+            // replacements and stopping blocker containers.
+            allow_replacements: true,
         }))
         .await
         .context("Failed to start migration")?
