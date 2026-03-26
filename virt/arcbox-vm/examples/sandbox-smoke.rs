@@ -61,9 +61,7 @@ async fn main() -> anyhow::Result<()> {
 
     let manager = SandboxManager::new(config).context("SandboxManager::new")?;
 
-    // =========================================================================
     // Phase 1 — Core lifecycle
-    // =========================================================================
     println!("\n=== Phase 1: Core lifecycle ===");
 
     let mut events = manager.subscribe_events();
@@ -102,7 +100,6 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // =========================================================================
     // Phase N — Network verification (always, no guest agent required)
     //
     // Checks:
@@ -110,7 +107,6 @@ async fn main() -> anyhow::Result<()> {
     //   N.2  TAP interface appears on the host after create.
     //   N.3  A second sandbox receives a different IP (pool uniqueness).
     //   N.4  TAP interface disappears from the host after remove.
-    // =========================================================================
     println!("\n=== Phase N: Network verification ===");
 
     // N.1 — IP must be within the configured CIDR.
@@ -181,10 +177,8 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // =========================================================================
     // Phase 2 — Command execution + guest-side network checks
     //           (requires guest agent + vsock in rootfs)
-    // =========================================================================
     if run_phase2 {
         println!("\n=== Phase 2: Command execution ===");
 
@@ -256,9 +250,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // =========================================================================
     // Phase 3 — Checkpoint
-    // =========================================================================
     let mut snapshot_id_opt: Option<String> = None;
     if run_phase3 {
         println!("\n=== Phase 3: Checkpoint ===");
@@ -271,9 +263,7 @@ async fn main() -> anyhow::Result<()> {
         snapshot_id_opt = Some(ck.snapshot_id);
     }
 
-    // =========================================================================
     // Phase 1 cleanup
-    // =========================================================================
     manager
         .stop_sandbox(&id, 30)
         .await
@@ -285,9 +275,7 @@ async fn main() -> anyhow::Result<()> {
         .context("remove_sandbox")?;
     println!("  [remove] done");
 
-    // =========================================================================
     // Phase 3 (cont) — Restore
-    // =========================================================================
     if let Some(snapshot_id) = snapshot_id_opt {
         println!("\n=== Phase 3 (cont): Restore ===");
 
@@ -332,9 +320,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-// =============================================================================
 // Helpers
-// =============================================================================
 
 /// Run a command inside a sandbox and return its stdout as a `String`.
 ///
