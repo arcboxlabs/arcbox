@@ -95,6 +95,9 @@ pub struct DarwinVm {
     /// The balloon device configuration is stored here during VM setup
     /// and added to the VZ configuration in `finalize_configuration()`.
     balloon_configured: bool,
+    /// When true, `Drop` will skip calling `self.stop()`. Used when the
+    /// guest has already halted and the VF stop path would crash.
+    pub skip_stop_on_drop: bool,
 }
 
 // Safety: The VZ handles are properly synchronized and only accessed
@@ -181,6 +184,7 @@ impl DarwinVm {
             device_configs: Vec::new(),
             vsock_irq_fd: RwLock::new(None),
             balloon_configured: false,
+            skip_stop_on_drop: false,
         })
     }
 
@@ -1344,8 +1348,9 @@ impl VirtualMachine for DarwinVm {
 
 impl Drop for DarwinVm {
     fn drop(&mut self) {
-        // Stop VM if running
-        if self.is_running() {
+        // Stop VM if running, unless the caller has already handled shutdown
+        // and set skip_stop_on_drop to avoid crashing the VF stop path.
+        if self.is_running() && !self.skip_stop_on_drop {
             let _ = self.stop();
         }
 
