@@ -40,10 +40,6 @@ pub use generated::arcbox_v1 as v1;
 // Re-export the sandbox.v1 generated module.
 pub use generated::sandbox_v1;
 
-// =============================================================================
-// Backward compatible module re-exports
-// =============================================================================
-
 /// Common types (from common.proto).
 ///
 /// Re-exports all types for backward compatibility.
@@ -134,10 +130,6 @@ pub mod api {
     pub use super::v1::{ShellInput, ShellOutput, TerminalSize};
 }
 
-// =============================================================================
-// Convenient crate-level re-exports
-// =============================================================================
-
 // Common types
 pub use v1::{Empty, KeyValue, Mount, PortBinding, ResourceLimits, Timestamp};
 
@@ -197,10 +189,6 @@ pub use v1::{
 
 // API types - Shell
 pub use v1::{ShellInput, ShellOutput, TerminalSize};
-
-// =============================================================================
-// Backward compatibility type aliases at crate level
-// =============================================================================
 
 /// Backward compatibility: Ping request (alias for `AgentPingRequest`).
 pub type PingRequest = AgentPingRequest;

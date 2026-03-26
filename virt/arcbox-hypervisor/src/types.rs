@@ -469,10 +469,6 @@ pub enum VirtioDeviceType {
     Gpu,
 }
 
-// ============================================================================
-// Memory Balloon Types
-// ============================================================================
-
 /// Memory balloon statistics.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BalloonStats {
@@ -531,10 +527,6 @@ impl VirtioDeviceConfig {
         }
     }
 }
-
-// ============================================================================
-// Snapshot Types
-// ============================================================================
 
 /// ARM64 register state for snapshots.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

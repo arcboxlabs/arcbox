@@ -5,19 +5,11 @@ use crate::ffi::{get_class, release};
 use crate::{msg_send, msg_send_bool, msg_send_void_bool};
 use objc2::runtime::{AnyObject, Bool};
 
-// ============================================================================
-// Platform Trait
-// ============================================================================
-
 /// Trait for platform configurations.
 pub trait Platform {
     /// Returns the underlying Objective-C object pointer.
     fn as_ptr(&self) -> *mut AnyObject;
 }
-
-// ============================================================================
-// Generic Platform
-// ============================================================================
 
 /// A generic platform configuration for Linux VMs.
 ///

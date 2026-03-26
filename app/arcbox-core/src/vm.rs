@@ -854,10 +854,6 @@ impl VmManager {
             .map_err(|e| CoreError::Vm(format!("read agent log failed: {e}")))
     }
 
-    // ========================================================================
-    // Memory Balloon Control
-    // ========================================================================
-
     /// Sets the target memory size for the balloon device on a running VM.
     ///
     /// The balloon device will inflate or deflate to reach the target:

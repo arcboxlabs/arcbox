@@ -6,19 +6,11 @@ use crate::{msg_send, msg_send_void};
 use objc2::runtime::AnyObject;
 use std::path::Path;
 
-// ============================================================================
-// Boot Loader Trait
-// ============================================================================
-
 /// Trait for boot loader configurations.
 pub trait BootLoader {
     /// Returns the underlying Objective-C object pointer.
     fn as_ptr(&self) -> *mut AnyObject;
 }
-
-// ============================================================================
-// Linux Boot Loader
-// ============================================================================
 
 /// A boot loader for Linux kernels.
 ///

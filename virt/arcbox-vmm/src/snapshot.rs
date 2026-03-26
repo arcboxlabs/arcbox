@@ -1051,10 +1051,6 @@ pub enum SnapshotError {
     CompressionError(String),
 }
 
-// ============================================================================
-// Compression Functions
-// ============================================================================
-
 /// Compresses data with LZ4 and writes to file.
 fn compress_and_write(path: &Path, data: &[u8]) -> Result<(), SnapshotError> {
     let file = File::create(path)?;

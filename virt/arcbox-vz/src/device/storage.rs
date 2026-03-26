@@ -73,10 +73,6 @@ impl Drop for StorageDeviceConfiguration {
     }
 }
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
 fn create_disk_attachment(path: &str, read_only: bool) -> VZResult<*mut AnyObject> {
     // SAFETY: ObjC alloc/init on valid VZDiskImageStorageDeviceAttachment class. NSURL from validated path. Error out-parameter is checked.
     unsafe {
