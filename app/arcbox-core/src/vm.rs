@@ -432,15 +432,21 @@ impl VmManager {
 
         // Re-acquire to update final state. The entry may have been removed
         // by a concurrent force_stop while the lock was released — if so,
-        // leak the Vmm to avoid the macOS Vmm::Drop crash and return Ok
-        // since the force path already handled teardown.
+        // safely drop the Vmm (skipping the macOS VF stop path) and return
+        // Ok since the force path already handled teardown.
         let mut vms = self
             .vms
             .write()
             .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?;
         let Some(entry) = vms.get_mut(id) else {
             tracing::warn!("VM {id} removed during graceful stop (concurrent force stop)");
-            std::mem::forget(vmm);
+            // Force path already handled teardown. Skip the macOS VF stop
+            // path (could crash) but still drop to release FDs/resources.
+            #[allow(unused_mut)]
+            let mut vmm = vmm;
+            #[cfg(target_os = "macos")]
+            vmm.set_skip_hypervisor_stop();
+            drop(vmm);
             return Ok(stop_result.unwrap_or(false));
         };
 
@@ -459,15 +465,26 @@ impl VmManager {
                 tracing::info!("Gracefully stopped VM {}", id);
                 Ok(true)
             }
-            Ok(false) => {
-                entry.vmm = Some(vmm);
-                entry.info.state = VmState::Running;
-                Ok(false)
-            }
-            Err(e) => {
-                entry.vmm = Some(vmm);
-                entry.info.state = VmState::Running;
-                Err(e)
+            Ok(false) | Err(_) => {
+                // Only restore if no concurrent stop changed the state while
+                // the lock was released. If state is no longer Stopping, a
+                // concurrent stop() already handled teardown — drop the VMM
+                // safely instead of resurrecting the VM.
+                if entry.info.state == VmState::Stopping {
+                    entry.vmm = Some(vmm);
+                    entry.info.state = VmState::Running;
+                } else {
+                    tracing::warn!(
+                        "VM {id} state changed to {:?} during graceful stop, not restoring",
+                        entry.info.state
+                    );
+                    #[allow(unused_mut)]
+                    let mut vmm = vmm;
+                    #[cfg(target_os = "macos")]
+                    vmm.set_skip_hypervisor_stop();
+                    drop(vmm);
+                }
+                stop_result.map(|_| false)
             }
         }
     }
