@@ -4,8 +4,13 @@
 //! using Swiss Tables (hashbrown) for O(1) lookups.
 
 use std::net::{Ipv4Addr, SocketAddrV4};
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
+
+/// Process-wide monotonic epoch for ConnTrack timestamps.
+/// All timestamps are seconds elapsed since this epoch (process start).
+static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 use hashbrown::HashMap;
 
@@ -147,7 +152,7 @@ impl ConnTrackEntry {
         nat_src: SocketAddrV4,
         protocol: u8,
     ) -> Self {
-        let now = Instant::now().elapsed().as_secs() as u32;
+        let now = EPOCH.elapsed().as_secs() as u32;
         Self {
             orig_src,
             orig_dst,
@@ -166,7 +171,7 @@ impl ConnTrackEntry {
     /// Updates the last seen timestamp.
     #[inline]
     pub fn touch(&self) {
-        let now = Instant::now().elapsed().as_secs() as u32;
+        let now = EPOCH.elapsed().as_secs() as u32;
         self.last_seen.store(now, Ordering::Relaxed);
     }
 
@@ -182,7 +187,7 @@ impl ConnTrackEntry {
     #[inline]
     #[must_use]
     pub fn is_expired(&self, timeout_secs: u32) -> bool {
-        let now = Instant::now().elapsed().as_secs() as u32;
+        let now = EPOCH.elapsed().as_secs() as u32;
         let last = self.last_seen.load(Ordering::Relaxed);
         now.saturating_sub(last) > timeout_secs
     }
