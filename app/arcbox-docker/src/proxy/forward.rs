@@ -20,46 +20,48 @@ use hyper::client::conn::http1;
 ///
 /// Per RFC 7230 §6.1, hop-by-hop headers include the fixed set plus any
 /// header names listed in the `Connection` header's value.
-fn forward_client_headers(from: &HeaderMap, to: &mut HeaderMap) {
-    use std::collections::HashSet;
+/// Builds a forwarded header map suitable for proxying to guest dockerd.
+///
+/// Strips hop-by-hop headers (per RFC 7230 §6.1), the `Host` header, the
+/// `Connection` header and any headers listed in `Connection`. When
+/// `strip_expect` is true, also strips `Expect` (used by the upload proxy
+/// so we own `100-continue` handling).
+pub(super) fn forwarded_request_headers(headers: &HeaderMap, strip_expect: bool) -> HeaderMap {
+    let connection_tokens = headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .filter_map(|token| token.trim().parse::<HeaderName>().ok())
+        .collect::<Vec<_>>();
 
-    // Collect header names nominated by the Connection header (RFC 7230 §6.1).
-    // HeaderName is already lowercase, so we can compare directly.
-    let mut connection_nominated: HashSet<HeaderName> = HashSet::new();
-    if let Some(conn) = from.get(header::CONNECTION) {
-        if let Ok(s) = conn.to_str() {
-            for token in s.split(',') {
-                if let Ok(name) = HeaderName::from_bytes(token.trim().as_bytes()) {
-                    connection_nominated.insert(name);
-                }
-            }
-        }
-    }
-
-    for (name, value) in from {
-        // Skip fixed hop-by-hop headers and Host (overridden later).
-        if name == header::CONNECTION
-            || name.as_str() == "keep-alive"
-            || name.as_str() == "proxy-connection"
-            || name == header::PROXY_AUTHENTICATE
-            || name == header::PROXY_AUTHORIZATION
-            || name == header::TE
-            || name == header::TRAILER
-            || name == header::TRANSFER_ENCODING
-            || name == header::UPGRADE
-            || name == header::HOST
+    let mut forwarded = HeaderMap::new();
+    for (name, value) in headers {
+        if name == header::HOST
+            || name == header::CONNECTION
+            || (strip_expect && name == header::EXPECT)
+            || is_hop_by_hop_header(name)
+            || connection_tokens.iter().any(|token| token == name)
         {
             continue;
         }
-
-        // Skip headers nominated by the Connection header (O(1) lookup).
-        if connection_nominated.contains(name) {
-            continue;
-        }
-
-        // Use append to preserve multi-valued headers (e.g. multiple Accept).
-        to.append(name.clone(), value.clone());
+        forwarded.append(name.clone(), value.clone());
     }
+    forwarded
+}
+
+fn is_hop_by_hop_header(name: &HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "proxy-connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
 }
 
 /// Forward an HTTP request to guest dockerd and return the response.
@@ -104,9 +106,8 @@ pub async fn proxy_to_guest(
         .body(Full::new(body))
         .map_err(|e| DockerError::Server(format!("failed to build guest request: {e}")))?;
 
-    // Forward all non-hop-by-hop headers so registry auth, content negotiation,
-    // and other semantics are preserved when proxying to guest dockerd.
-    forward_client_headers(headers, req.headers_mut());
+    req.headers_mut()
+        .extend(forwarded_request_headers(headers, false));
     req.headers_mut()
         .insert(header::HOST, HeaderValue::from_static("localhost"));
 
@@ -156,7 +157,7 @@ pub async fn proxy_to_guest_stream(
         .path_and_query()
         .map_or("/", hyper::http::uri::PathAndQuery::as_str);
     let method = req.method().clone();
-    let client_headers = req.headers().clone();
+    let forwarded_headers = forwarded_request_headers(req.headers(), false);
     let body = req.into_body();
 
     let mut guest_req = hyper::Request::builder()
@@ -165,8 +166,7 @@ pub async fn proxy_to_guest_stream(
         .body(body)
         .map_err(|e| DockerError::Server(format!("failed to build guest request: {e}")))?;
 
-    // Forward all non-hop-by-hop headers (registry auth, content negotiation, etc.).
-    forward_client_headers(&client_headers, guest_req.headers_mut());
+    guest_req.headers_mut().extend(forwarded_headers);
     guest_req
         .headers_mut()
         .insert(header::HOST, HeaderValue::from_static("localhost"));
@@ -178,47 +178,4 @@ pub async fn proxy_to_guest_stream(
 
     let (parts, incoming) = response.into_parts();
     Ok(Response::from_parts(parts, Body::new(incoming)))
-}
-
-/// Builds a forwarded header map suitable for proxying to guest dockerd.
-///
-/// Strips hop-by-hop headers, the `Host` header, the `Connection` header and
-/// any headers listed in `Connection`. When `strip_expect` is true, also strips
-/// `Expect` (used by the upload proxy so we own `100-continue` handling).
-pub(super) fn forwarded_request_headers(headers: &HeaderMap, strip_expect: bool) -> HeaderMap {
-    let connection_tokens = headers
-        .get_all(header::CONNECTION)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .filter_map(|token| token.trim().parse::<HeaderName>().ok())
-        .collect::<Vec<_>>();
-
-    let mut forwarded = HeaderMap::new();
-    for (name, value) in headers {
-        if name == header::HOST
-            || name == header::CONNECTION
-            || (strip_expect && name == header::EXPECT)
-            || is_hop_by_hop_header(name)
-            || connection_tokens.iter().any(|token| token == name)
-        {
-            continue;
-        }
-        forwarded.append(name.clone(), value.clone());
-    }
-    forwarded
-}
-
-fn is_hop_by_hop_header(name: &HeaderName) -> bool {
-    matches!(
-        name.as_str(),
-        "proxy-connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailer"
-            | "transfer-encoding"
-            | "upgrade"
-    )
 }
