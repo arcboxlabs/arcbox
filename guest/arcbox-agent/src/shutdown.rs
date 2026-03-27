@@ -58,7 +58,7 @@ mod platform {
             let mut status: i32 = 0;
             // SAFETY: waitpid(-1, ..., WNOHANG) is safe to call from PID 1.
             // It returns 0 when no children have exited, -1/ECHILD when none remain.
-            let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+            let pid = unsafe { libc::waitpid(-1, &raw mut status, libc::WNOHANG) };
             if pid <= 0 {
                 if pid == -1 {
                     let err = std::io::Error::last_os_error();

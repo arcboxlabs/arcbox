@@ -539,10 +539,10 @@ impl VmManager {
             };
         }
 
-        // Read and discard the response — we only care that it arrived.
+        // Read the response — we only care that it arrived, not its content.
         let mut buf = [0u8; 256];
         // SAFETY: fd is a valid connected fd, buf is a valid mutable slice.
-        unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
+        let _ = unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
 
         // SAFETY: closing a valid fd.
         unsafe { libc::close(fd) };

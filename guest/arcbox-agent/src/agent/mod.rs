@@ -820,7 +820,9 @@ mod linux {
     /// returns.
     fn handle_shutdown(req: arcbox_protocol::agent::ShutdownRequest) -> RpcResponse {
         let grace = if req.timeout_seconds == 0 {
-            Duration::from_secs(8)
+            Duration::from_secs(u64::from(
+                arcbox_constants::timeouts::GUEST_SHUTDOWN_GRACE_SECS,
+            ))
         } else {
             Duration::from_secs(u64::from(req.timeout_seconds))
         };
