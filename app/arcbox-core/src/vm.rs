@@ -388,7 +388,9 @@ impl VmManager {
     pub fn graceful_stop(&self, id: &VmId, timeout: Duration) -> Result<bool> {
         // Phase 1: Send shutdown RPC while VM is still Running and VMM is in
         // the entry. connect_vsock requires Running state.
-        if let Err(e) = self.send_shutdown_rpc(id, timeout.as_secs() as u32) {
+        if let Err(e) =
+            self.send_shutdown_rpc(id, arcbox_constants::timeouts::GUEST_SHUTDOWN_GRACE_SECS)
+        {
             tracing::warn!("Shutdown RPC failed for VM {id}: {e}, cannot gracefully stop");
             return Ok(false);
         }
