@@ -404,7 +404,10 @@ impl VmManager {
                 .get_mut(id)
                 .ok_or_else(|| CoreError::not_found(id.to_string()))?;
 
-            if !matches!(entry.info.state, MachineState::Running | MachineState::Stopping) {
+            if !matches!(
+                entry.info.state,
+                MachineState::Running | MachineState::Stopping
+            ) {
                 return Err(CoreError::invalid_state(format!(
                     "cannot stop VM in state {:?}",
                     entry.info.state

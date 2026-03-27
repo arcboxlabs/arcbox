@@ -1677,7 +1677,7 @@ pub struct KubernetesKubeconfigResponse {
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct ShutdownRequest {
     /// Grace period in seconds for processes to exit after SIGTERM.
-    /// 0 means use the agent's default (8 seconds).
+    /// 0 means use the agent's default (currently 25 seconds).
     #[prost(uint32, tag = "1")]
     pub timeout_seconds: u32,
 }

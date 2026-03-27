@@ -384,4 +384,18 @@ mod tests {
             _ => panic!("Expected Ping request"),
         }
     }
+
+    #[test]
+    fn test_parse_request_shutdown() {
+        let req = ShutdownRequest {
+            timeout_seconds: 10,
+        };
+        let payload = req.encode_to_vec();
+
+        let parsed = parse_request(MessageType::ShutdownRequest, &payload).unwrap();
+        match parsed {
+            RpcRequest::Shutdown(s) => assert_eq!(s.timeout_seconds, 10),
+            _ => panic!("Expected Shutdown request"),
+        }
+    }
 }

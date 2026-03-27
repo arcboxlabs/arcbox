@@ -47,7 +47,12 @@ mod platform {
         unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF) };
 
         // Should not reach here — reboot does not return on success.
-        tracing::error!("Shutdown: reboot(POWER_OFF) returned unexpectedly");
+        // Terminate PID 1 so the kernel doesn't continue running a
+        // half-shutdown guest with all processes already killed.
+        tracing::error!("Shutdown: reboot(POWER_OFF) returned unexpectedly, forcing exit");
+        // SAFETY: _exit terminates the process immediately. All other
+        // processes are already dead (SIGKILL'd above).
+        unsafe { libc::_exit(1) };
     }
 
     /// Reaps children via `waitpid(-1, WNOHANG)` until none remain or
