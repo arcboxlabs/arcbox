@@ -98,7 +98,7 @@ pub mod agent {
         KubernetesStartResponse, KubernetesStatusRequest, KubernetesStatusResponse,
         KubernetesStopRequest, KubernetesStopResponse, PortBindingsChanged, PortBindingsRemoved,
         RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse,
-        ServiceStatus, SystemInfo,
+        ServiceStatus, ShutdownRequest, ShutdownResponse, SystemInfo,
     };
 
     // Backward compatibility type aliases (short names without Agent prefix).
@@ -186,7 +186,7 @@ pub use v1::{
     KubernetesStartResponse, KubernetesStatusRequest, KubernetesStatusResponse,
     KubernetesStopRequest, KubernetesStopResponse, PortBindingsChanged, PortBindingsRemoved,
     RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse,
-    ServiceStatus, SystemInfo,
+    ServiceStatus, ShutdownRequest, ShutdownResponse, SystemInfo,
 };
 
 // API types - Network

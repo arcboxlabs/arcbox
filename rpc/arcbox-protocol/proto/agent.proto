@@ -36,6 +36,10 @@ service AgentService {
 
     // Returns kubeconfig content exported from the guest cluster.
     rpc GetKubeconfig(KubernetesKubeconfigRequest) returns (KubernetesKubeconfigResponse);
+
+    // Requests graceful guest shutdown. The agent responds immediately,
+    // then performs orderly process teardown and powers off the VM.
+    rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
 }
 
 // Ping request.
@@ -202,4 +206,17 @@ message KubernetesKubeconfigResponse {
     string context_name = 2;
     // API endpoint embedded in the exported kubeconfig.
     string endpoint = 3;
+}
+
+// Graceful shutdown request from host.
+message ShutdownRequest {
+    // Grace period in seconds for processes to exit after SIGTERM.
+    // 0 means use the agent's default (8 seconds).
+    uint32 timeout_seconds = 1;
+}
+
+// Shutdown acknowledgement. Sent before the agent begins teardown.
+message ShutdownResponse {
+    // Always true when the agent accepts the request.
+    bool accepted = 1;
 }

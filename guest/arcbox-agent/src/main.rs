@@ -18,6 +18,7 @@ mod supervisor;
 mod error;
 
 mod rpc;
+mod shutdown;
 
 // Mount module uses Linux-specific syscalls (mount/umount).
 #[cfg(target_os = "linux")]

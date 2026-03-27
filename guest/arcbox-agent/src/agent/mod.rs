@@ -808,7 +808,29 @@ mod linux {
             RpcRequest::KubernetesKubeconfig(req) => {
                 RequestResult::Single(handle_kubernetes_kubeconfig(req).await)
             }
+            RpcRequest::Shutdown(req) => RequestResult::Single(handle_shutdown(req)),
         }
+    }
+
+    /// Handles a Shutdown request.
+    ///
+    /// Responds immediately so the host receives the ack, then spawns the
+    /// shutdown sequence in a background OS thread (not a tokio task) because
+    /// [`crate::shutdown::poweroff`] calls blocking libc functions and never
+    /// returns.
+    fn handle_shutdown(req: arcbox_protocol::agent::ShutdownRequest) -> RpcResponse {
+        let grace = if req.timeout_seconds == 0 {
+            Duration::from_secs(8)
+        } else {
+            Duration::from_secs(u64::from(req.timeout_seconds))
+        };
+        tracing::info!(grace_secs = grace.as_secs(), "Shutdown requested by host");
+        std::thread::spawn(move || {
+            // Brief delay so the response frame flushes over vsock.
+            std::thread::sleep(Duration::from_millis(100));
+            crate::shutdown::poweroff(grace);
+        });
+        RpcResponse::Shutdown(arcbox_protocol::agent::ShutdownResponse { accepted: true })
     }
 
     /// Sets CLOCK_REALTIME from the given timestamp (seconds since UNIX epoch).

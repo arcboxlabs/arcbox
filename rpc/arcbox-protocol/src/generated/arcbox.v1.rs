@@ -1671,6 +1671,25 @@ pub struct KubernetesKubeconfigResponse {
     #[prost(string, tag = "3")]
     pub endpoint: ::prost::alloc::string::String,
 }
+/// Graceful shutdown request from host.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct ShutdownRequest {
+    /// Grace period in seconds for processes to exit after SIGTERM.
+    /// 0 means use the agent's default (8 seconds).
+    #[prost(uint32, tag = "1")]
+    pub timeout_seconds: u32,
+}
+/// Shutdown acknowledgement. Sent before the agent begins teardown.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct ShutdownResponse {
+    /// Always true when the agent accepts the request.
+    #[prost(bool, tag = "1")]
+    pub accepted: bool,
+}
 /// Request to create a network.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

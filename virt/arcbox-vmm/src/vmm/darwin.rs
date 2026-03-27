@@ -533,11 +533,13 @@ impl Vmm {
         }
     }
 
-    /// Requests graceful guest shutdown via ACPI and waits for it to stop.
+    /// Waits for the guest VM to reach the Stopped state.
     ///
-    /// Returns `Ok(true)` if the VM stopped, `Ok(false)` on timeout or when
-    /// graceful stop is unavailable.
-    pub fn request_stop(&self, timeout: Duration) -> Result<bool> {
+    /// The actual shutdown is initiated by the vsock shutdown RPC at the
+    /// `VmManager` layer. This method only polls the hypervisor state.
+    ///
+    /// Returns `Ok(true)` if the VM stopped within `timeout`, `Ok(false)` on timeout.
+    pub fn wait_for_stopped(&self, timeout: Duration) -> Result<bool> {
         if self.state != VmmState::Running {
             return Ok(false);
         }
@@ -547,8 +549,7 @@ impl Vmm {
             .as_ref()
             .ok_or_else(|| VmmError::invalid_state("no DarwinVm".to_string()))?;
 
-        vm.request_stop_and_wait(timeout)
-            .map_err(VmmError::Hypervisor)
+        vm.wait_for_stopped(timeout).map_err(VmmError::Hypervisor)
     }
 
     /// Connects to a vsock port on the guest VM.
