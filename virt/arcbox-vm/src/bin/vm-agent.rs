@@ -710,8 +710,19 @@ mod agent {
         let _ = std::os::unix::fs::symlink("/dev/pts/ptmx", "/dev/ptmx");
     }
 
+    /// Write `/etc/resolv.conf` pointing at the sandbox gateway so that
+    /// userspace DNS resolution works.  The gateway runs inside the host
+    /// VM where the datapath `DnsForwarder` handles queries.
+    fn setup_dns() {
+        match std::fs::write("/etc/resolv.conf", "nameserver 172.20.0.1\n") {
+            Ok(()) => eprintln!("vmm-guest-agent: wrote /etc/resolv.conf"),
+            Err(e) => eprintln!("vmm-guest-agent: failed to write /etc/resolv.conf: {e}"),
+        }
+    }
+
     pub fn run() {
         mount_filesystems();
+        setup_dns();
         eprintln!(
             "vmm-guest-agent: listening on vsock ports {AGENT_PORT} (exec), {FILE_PORT} (file I/O)"
         );
