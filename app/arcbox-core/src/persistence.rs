@@ -7,6 +7,7 @@ use crate::machine::{MachineInfo, MachineState};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 
 /// Persisted machine data.
@@ -138,6 +139,29 @@ impl From<&MachineInfo> for PersistedMachine {
     }
 }
 
+/// Writes `data` to `path` atomically via write-to-temp-then-rename.
+///
+/// A crash during the write leaves either the old file or the new file
+/// intact — never a truncated/partial file.
+fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| CoreError::Machine("config path has no parent directory".to_string()))?;
+
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    tmp.write_all(data)?;
+    tmp.flush()?;
+    tmp.persist(path).map_err(|e| {
+        CoreError::Machine(format!(
+            "failed to persist temp file to {}: {}",
+            path.display(),
+            e
+        ))
+    })?;
+
+    Ok(())
+}
+
 /// Machine persistence manager.
 pub struct MachinePersistence {
     /// Base directory for machine configs.
@@ -175,7 +199,7 @@ impl MachinePersistence {
         let content = toml::to_string_pretty(&persisted)
             .map_err(|e| CoreError::Machine(format!("Failed to serialize config: {e}")))?;
 
-        fs::write(self.config_path(&machine.name), content)?;
+        atomic_write(&self.config_path(&machine.name), content.as_bytes())?;
 
         tracing::debug!("Saved machine config: {}", machine.name);
         Ok(())
@@ -268,7 +292,7 @@ impl MachinePersistence {
         let content = toml::to_string_pretty(&machine)
             .map_err(|e| CoreError::Machine(format!("Failed to serialize config: {e}")))?;
 
-        fs::write(self.config_path(name), content)?;
+        atomic_write(&self.config_path(name), content.as_bytes())?;
 
         Ok(())
     }
