@@ -30,9 +30,6 @@ impl Vmm {
 
         let mut vm = hypervisor.create_vm(vm_config)?;
 
-        // KVM uses manual execution mode
-        self.managed_execution = false;
-
         // Add VirtioFS devices for shared directories
         for shared_dir in &self.config.shared_dirs {
             let device_config = VirtioDeviceConfig::filesystem(
@@ -135,7 +132,7 @@ impl Vmm {
         self.event_loop = Some(event_loop);
 
         // Store VM for lifecycle management (also keeps Arc alive for callback)
-        self.managed_vm = Some(Box::new(vm_arc));
+        self.linux_vm = Some(vm_arc);
 
         Ok(())
     }
@@ -214,11 +211,9 @@ impl Vmm {
     pub(super) fn capture_snapshot_linux(
         &self,
     ) -> Option<Result<crate::snapshot::VmSnapshotContext>> {
-        use arcbox_hypervisor::linux::KvmVm;
         use arcbox_hypervisor::traits::{GuestMemory, VirtualMachine};
 
-        let managed_vm = self.managed_vm.as_ref()?;
-        let vm_arc = managed_vm.downcast_ref::<Arc<std::sync::Mutex<KvmVm>>>()?;
+        let vm_arc = self.linux_vm.as_ref()?;
         let vm = match vm_arc.lock() {
             Ok(v) => v,
             Err(_) => {
@@ -274,11 +269,9 @@ impl Vmm {
         &mut self,
         restore_data: &crate::snapshot::VmRestoreData,
     ) -> Option<Result<()>> {
-        use arcbox_hypervisor::linux::KvmVm;
         use arcbox_hypervisor::traits::{GuestMemory, VirtualMachine};
 
-        let managed_vm = self.managed_vm.as_ref()?;
-        let vm_arc = managed_vm.downcast_ref::<Arc<std::sync::Mutex<KvmVm>>>()?;
+        let vm_arc = self.linux_vm.as_ref()?;
         let mut vm = match vm_arc.lock() {
             Ok(v) => v,
             Err(_) => {

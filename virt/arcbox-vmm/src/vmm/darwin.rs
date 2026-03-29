@@ -21,9 +21,10 @@ impl Vmm {
         let vm_config = self.config.to_vm_config();
         let mut vm = hypervisor.create_vm(vm_config)?;
 
-        // Check if this is managed execution
-        self.managed_execution = vm.is_managed_execution();
-        tracing::info!("Using managed execution mode: {}", self.managed_execution);
+        tracing::info!(
+            "Using managed execution mode: {}",
+            vm.is_managed_execution()
+        );
 
         // Add VirtioFS devices for shared directories
         for shared_dir in &self.config.shared_dirs {
@@ -169,17 +170,9 @@ impl Vmm {
         self.irq_chip = Some(irq_chip);
         self.event_loop = Some(event_loop);
 
-        // For managed execution, we don't create vCPU threads
-        // Instead, store the VM for lifecycle management
-        if self.managed_execution {
-            tracing::debug!("Managed execution: skipping vCPU thread creation");
-            self.managed_vm = Some(Box::new(vm));
-        } else {
-            // This shouldn't happen on Darwin, but handle it anyway
-            let vcpu_manager = VcpuManager::new(self.config.vcpu_count);
-            // Note: Darwin vCPUs are placeholders, but we add them anyway
-            self.vcpu_manager = Some(vcpu_manager);
-        }
+        // Darwin uses managed execution — store the typed VM handle directly.
+        tracing::debug!("Managed execution: skipping vCPU thread creation");
+        self.darwin_vm = Some(vm);
 
         Ok(())
     }
@@ -481,52 +474,42 @@ impl Vmm {
         ))
     }
 
-    /// Starts the managed VM.
-    pub(super) fn start_managed_vm(&mut self) -> Result<()> {
-        if let Some(ref mut managed_vm) = self.managed_vm {
-            if let Some(vm) = managed_vm.downcast_mut::<DarwinVm>() {
-                vm.start().map_err(VmmError::Hypervisor)?;
-            }
+    /// Starts the Darwin VM.
+    pub(super) fn start_darwin_vm(&mut self) -> Result<()> {
+        if let Some(ref mut vm) = self.darwin_vm {
+            vm.start().map_err(VmmError::Hypervisor)?;
         }
         Ok(())
     }
 
-    /// Pauses the managed VM.
-    pub(super) fn pause_managed_vm(&mut self) -> Result<()> {
-        if let Some(ref mut managed_vm) = self.managed_vm {
-            if let Some(vm) = managed_vm.downcast_mut::<DarwinVm>() {
-                vm.pause().map_err(VmmError::Hypervisor)?;
-            }
+    /// Pauses the Darwin VM.
+    pub(super) fn pause_darwin_vm(&mut self) -> Result<()> {
+        if let Some(ref mut vm) = self.darwin_vm {
+            vm.pause().map_err(VmmError::Hypervisor)?;
         }
         Ok(())
     }
 
-    /// Resumes the managed VM.
-    pub(super) fn resume_managed_vm(&mut self) -> Result<()> {
-        if let Some(ref mut managed_vm) = self.managed_vm {
-            if let Some(vm) = managed_vm.downcast_mut::<DarwinVm>() {
-                vm.resume().map_err(VmmError::Hypervisor)?;
-            }
+    /// Resumes the Darwin VM.
+    pub(super) fn resume_darwin_vm(&mut self) -> Result<()> {
+        if let Some(ref mut vm) = self.darwin_vm {
+            vm.resume().map_err(VmmError::Hypervisor)?;
         }
         Ok(())
     }
 
-    /// Stops the managed VM.
-    pub(super) fn stop_managed_vm(&mut self) -> Result<()> {
-        if let Some(ref mut managed_vm) = self.managed_vm {
-            if let Some(vm) = managed_vm.downcast_mut::<DarwinVm>() {
-                vm.stop().map_err(VmmError::Hypervisor)?;
-            }
+    /// Stops the Darwin VM.
+    pub(super) fn stop_darwin_vm(&mut self) -> Result<()> {
+        if let Some(ref mut vm) = self.darwin_vm {
+            vm.stop().map_err(VmmError::Hypervisor)?;
         }
         Ok(())
     }
 
     /// Marks the inner `DarwinVm` to skip its `stop()` call on drop.
-    pub(super) fn mark_managed_vm_skip_stop(&mut self) {
-        if let Some(ref mut managed_vm) = self.managed_vm {
-            if let Some(vm) = managed_vm.downcast_mut::<DarwinVm>() {
-                vm.set_skip_stop_on_drop();
-            }
+    pub(super) fn mark_darwin_vm_skip_stop(&mut self) {
+        if let Some(ref mut vm) = self.darwin_vm {
+            vm.set_skip_stop_on_drop();
         }
     }
 
@@ -560,10 +543,9 @@ impl Vmm {
         }
 
         let vm = self
-            .managed_vm
+            .darwin_vm
             .as_ref()
-            .and_then(|managed_vm| managed_vm.downcast_ref::<DarwinVm>())
-            .ok_or_else(|| VmmError::invalid_state("no managed DarwinVm".to_string()))?;
+            .ok_or_else(|| VmmError::invalid_state("no DarwinVm".to_string()))?;
 
         vm.request_stop_and_wait(timeout)
             .map_err(VmmError::Hypervisor)
@@ -578,34 +560,27 @@ impl Vmm {
             )));
         }
 
-        if let Some(ref managed_vm) = self.managed_vm {
-            if let Some(vm) = managed_vm.downcast_ref::<DarwinVm>() {
-                return vm.connect_vsock(port).map_err(VmmError::Hypervisor);
-            }
-        }
+        let vm = self
+            .darwin_vm
+            .as_ref()
+            .ok_or_else(|| VmmError::invalid_state("no DarwinVm".to_string()))?;
 
-        Err(VmmError::invalid_state(
-            "vsock not available in manual execution mode".to_string(),
-        ))
+        vm.connect_vsock(port).map_err(VmmError::Hypervisor)
     }
 
-    /// Reads console output (hvc0) from a managed VM.
+    /// Reads console output (hvc0) from the VM.
     pub fn read_console_output(&self) -> Result<String> {
-        if let Some(ref managed_vm) = self.managed_vm {
-            if let Some(vm) = managed_vm.downcast_ref::<DarwinVm>() {
-                return vm.read_console_output().map_err(VmmError::Hypervisor);
-            }
+        if let Some(ref vm) = self.darwin_vm {
+            return vm.read_console_output().map_err(VmmError::Hypervisor);
         }
 
         Ok(String::new())
     }
 
-    /// Reads agent log output (hvc1) from a managed VM.
+    /// Reads agent log output (hvc1) from the VM.
     pub fn read_agent_log_output(&self) -> Result<String> {
-        if let Some(ref managed_vm) = self.managed_vm {
-            if let Some(vm) = managed_vm.downcast_ref::<DarwinVm>() {
-                return vm.read_agent_log_output().map_err(VmmError::Hypervisor);
-            }
+        if let Some(ref vm) = self.darwin_vm {
+            return vm.read_agent_log_output().map_err(VmmError::Hypervisor);
         }
 
         Ok(String::new())
@@ -624,17 +599,13 @@ impl Vmm {
             )));
         }
 
-        if let Some(ref managed_vm) = self.managed_vm {
-            if let Some(vm) = managed_vm.downcast_ref::<DarwinVm>() {
-                return vm
-                    .set_balloon_target_memory(target_bytes)
-                    .map_err(VmmError::Hypervisor);
-            }
-        }
+        let vm = self
+            .darwin_vm
+            .as_ref()
+            .ok_or_else(|| VmmError::invalid_state("no DarwinVm".to_string()))?;
 
-        Err(VmmError::invalid_state(
-            "balloon not available in manual execution mode".to_string(),
-        ))
+        vm.set_balloon_target_memory(target_bytes)
+            .map_err(VmmError::Hypervisor)
     }
 
     /// Gets the current target memory size from the balloon device.
@@ -647,13 +618,9 @@ impl Vmm {
             return 0;
         }
 
-        if let Some(ref managed_vm) = self.managed_vm {
-            if let Some(vm) = managed_vm.downcast_ref::<DarwinVm>() {
-                return vm.get_balloon_target_memory();
-            }
-        }
-
-        0
+        self.darwin_vm
+            .as_ref()
+            .map_or(0, DarwinVm::get_balloon_target_memory)
     }
 
     /// Gets balloon statistics.
@@ -691,8 +658,7 @@ impl Vmm {
     ) -> Option<Result<crate::snapshot::VmSnapshotContext>> {
         use arcbox_hypervisor::traits::{GuestMemory, VirtualMachine};
 
-        let managed_vm = self.managed_vm.as_ref()?;
-        let vm = managed_vm.downcast_ref::<DarwinVm>()?;
+        let vm = self.darwin_vm.as_ref()?;
 
         let device_snapshots = match vm.snapshot_devices() {
             Ok(s) => s,
@@ -742,8 +708,7 @@ impl Vmm {
     ) -> Option<Result<()>> {
         use arcbox_hypervisor::traits::{GuestMemory, VirtualMachine};
 
-        let managed_vm = self.managed_vm.as_mut()?;
-        let vm = managed_vm.downcast_mut::<DarwinVm>()?;
+        let vm = self.darwin_vm.as_mut()?;
 
         if let Err(e) = vm.restore_devices(restore_data.device_snapshots()) {
             return Some(Err(e.into()));

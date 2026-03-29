@@ -7,7 +7,6 @@
 //! - `darwin`: macOS (Virtualization.framework) managed execution
 //! - `linux`: Linux (KVM) manual execution
 
-use std::any::Any;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,6 +18,7 @@ use crate::error::{Result, VmmError};
 use crate::event::EventLoop;
 use crate::irq::{Gsi, IrqChip, IrqTriggerCallback};
 use crate::memory::MemoryManager;
+#[cfg(target_os = "linux")]
 use crate::vcpu::VcpuManager;
 
 use arcbox_hypervisor::VirtioDeviceConfig;
@@ -28,9 +28,6 @@ use arcbox_hypervisor::VmConfig;
 mod darwin;
 #[cfg(target_os = "linux")]
 mod linux;
-
-/// Type-erased VM handle for managed execution mode.
-type ManagedVm = Box<dyn Any + Send + Sync>;
 
 /// Shared directory configuration for `VirtioFS`.
 #[derive(Debug, Clone)]
@@ -180,7 +177,8 @@ pub struct Vmm {
     state: VmmState,
     /// Running flag for graceful shutdown.
     running: Arc<AtomicBool>,
-    /// vCPU manager (for manual execution mode).
+    /// vCPU manager (Linux only — KVM uses manual execution).
+    #[cfg(target_os = "linux")]
     vcpu_manager: Option<VcpuManager>,
     /// Memory manager.
     memory_manager: Option<MemoryManager>,
@@ -190,15 +188,16 @@ pub struct Vmm {
     irq_chip: Option<Arc<IrqChip>>,
     /// Event loop.
     event_loop: Option<EventLoop>,
-    /// Whether using managed execution mode (e.g., Darwin Virtualization.framework).
-    managed_execution: bool,
     /// When true, Drop will skip calling into the hypervisor stop path.
     /// Used when the guest has already halted (e.g. ACPI shutdown) and the
     /// hypervisor teardown would crash. FDs and other resources are still freed.
     skip_hypervisor_stop: bool,
-    /// Type-erased VM handle for managed execution mode.
-    /// Stored to keep the VM alive and for lifecycle control.
-    managed_vm: Option<ManagedVm>,
+    /// Typed VM handle — Virtualization.framework managed VM.
+    #[cfg(target_os = "macos")]
+    darwin_vm: Option<arcbox_hypervisor::darwin::DarwinVm>,
+    /// Typed VM handle — KVM VM (Arc for sharing with IRQ callback).
+    #[cfg(target_os = "linux")]
+    linux_vm: Option<Arc<std::sync::Mutex<arcbox_hypervisor::linux::KvmVm>>>,
     /// Cancellation token for the network datapath task (Darwin only).
     #[cfg(target_os = "macos")]
     net_cancel: Option<tokio_util::sync::CancellationToken>,
@@ -261,14 +260,17 @@ impl Vmm {
             config,
             state: VmmState::Created,
             running: Arc::new(AtomicBool::new(false)),
+            #[cfg(target_os = "linux")]
             vcpu_manager: None,
             memory_manager: None,
             device_manager: None,
             irq_chip: None,
             event_loop: None,
-            managed_execution: false,
             skip_hypervisor_stop: false,
-            managed_vm: None,
+            #[cfg(target_os = "macos")]
+            darwin_vm: None,
+            #[cfg(target_os = "linux")]
+            linux_vm: None,
             #[cfg(target_os = "macos")]
             net_cancel: None,
             #[cfg(target_os = "macos")]
@@ -378,14 +380,14 @@ impl Vmm {
 
         tracing::info!("Starting VMM");
 
-        if self.managed_execution {
-            // For managed execution, start the VM directly
-            #[cfg(target_os = "macos")]
-            {
-                self.start_managed_vm()?;
-            }
-        } else {
-            // For manual execution, start vCPU threads
+        // Darwin: start the managed VM directly via Virtualization.framework.
+        // Linux: start vCPU threads for manual execution.
+        #[cfg(target_os = "macos")]
+        {
+            self.start_darwin_vm()?;
+        }
+        #[cfg(target_os = "linux")]
+        {
             if let Some(ref mut vcpu_manager) = self.vcpu_manager {
                 vcpu_manager.start()?;
             }
@@ -418,12 +420,12 @@ impl Vmm {
 
         tracing::info!("Pausing VMM");
 
-        if self.managed_execution {
-            #[cfg(target_os = "macos")]
-            {
-                self.pause_managed_vm()?;
-            }
-        } else if let Some(ref mut vcpu_manager) = self.vcpu_manager {
+        #[cfg(target_os = "macos")]
+        {
+            self.pause_darwin_vm()?;
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(ref mut vcpu_manager) = self.vcpu_manager {
             vcpu_manager.pause()?;
         }
 
@@ -447,12 +449,12 @@ impl Vmm {
 
         tracing::info!("Resuming VMM");
 
-        if self.managed_execution {
-            #[cfg(target_os = "macos")]
-            {
-                self.resume_managed_vm()?;
-            }
-        } else if let Some(ref mut vcpu_manager) = self.vcpu_manager {
+        #[cfg(target_os = "macos")]
+        {
+            self.resume_darwin_vm()?;
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(ref mut vcpu_manager) = self.vcpu_manager {
             vcpu_manager.resume()?;
         }
 
@@ -480,14 +482,14 @@ impl Vmm {
             event_loop.stop();
         }
 
-        // Stop managed VM before canceling the custom file-handle datapath.
+        // Darwin: stop the managed VM before canceling the network datapath.
+        // Linux: stop vCPU threads.
         #[cfg(target_os = "macos")]
-        if self.managed_execution {
-            self.stop_managed_vm()?;
+        {
+            self.stop_darwin_vm()?;
         }
-
-        // Stop vCPU threads (Linux always, macOS only in non-managed mode)
-        if !self.managed_execution {
+        #[cfg(target_os = "linux")]
+        {
             if let Some(ref mut vcpu_manager) = self.vcpu_manager {
                 vcpu_manager.stop()?;
             }
@@ -932,7 +934,7 @@ impl Vmm {
     #[cfg(target_os = "macos")]
     pub fn set_skip_hypervisor_stop(&mut self) {
         self.skip_hypervisor_stop = true;
-        self.mark_managed_vm_skip_stop();
+        self.mark_darwin_vm_skip_stop();
     }
 }
 
