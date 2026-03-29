@@ -319,12 +319,7 @@ fn build_daemon_args(args: &DaemonArgs) -> Vec<OsString> {
 }
 
 fn resolve_data_dir(data_dir: Option<&PathBuf>) -> PathBuf {
-    data_dir.cloned().unwrap_or_else(|| {
-        dirs::home_dir().map_or_else(
-            || PathBuf::from("/var/lib/arcbox"),
-            |home| home.join(".arcbox"),
-        )
-    })
+    arcbox_constants::paths::HostLayout::resolve(data_dir.map(PathBuf::as_path)).data_dir
 }
 
 fn read_lock_file(lock_file: &Path) -> Result<Option<i32>> {

@@ -9,6 +9,10 @@ repository.workspace = true
 authors.workspace = true
 description = "Shared protocol and runtime constants for ArcBox"
 
+[features]
+default = []
+std = []
+
 [dependencies]
 
 [lints]

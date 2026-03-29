@@ -126,10 +126,10 @@ async fn run(args: DaemonArgs) -> Result<()> {
     ctx.setup_state.set_phase(SetupPhase::Ready, "Daemon ready");
 
     println!("ArcBox daemon started");
-    println!("  Docker API: {}", ctx.socket_path.display());
-    println!("  gRPC API:   {}", ctx.grpc_socket.display());
+    println!("  Docker API: {}", ctx.layout.docker_socket.display());
+    println!("  gRPC API:   {}", ctx.layout.grpc_socket.display());
     println!("  DNS:        127.0.0.1:{}", ctx.dns_port);
-    println!("  Data:       {}", ctx.data_dir.display());
+    println!("  Data:       {}", ctx.layout.data_dir.display());
     println!();
     println!("Use 'arcbox docker enable' to configure Docker CLI integration.");
     println!("Press Ctrl+C to stop.");

@@ -33,7 +33,7 @@ pub async fn start_grpc(
     ctx: &DaemonContext,
     shared_runtime: SharedRuntime,
 ) -> Result<tokio::task::JoinHandle<()>> {
-    let socket_path = &ctx.grpc_socket;
+    let socket_path = &ctx.layout.grpc_socket;
     let _ = std::fs::remove_file(socket_path);
 
     if let Some(parent) = socket_path.parent() {
@@ -103,7 +103,7 @@ pub async fn start_services(
     // Docker API server.
     let docker_server = DockerApiServer::new(
         ServerConfig {
-            socket_path: ctx.socket_path.clone(),
+            socket_path: ctx.layout.docker_socket.clone(),
         },
         Arc::clone(runtime),
     );
@@ -117,7 +117,7 @@ pub async fn start_services(
 
     // Docker CLI integration (optional).
     if ctx.docker_integration {
-        match DockerContextManager::new(ctx.socket_path.clone()) {
+        match DockerContextManager::new(ctx.layout.docker_socket.clone()) {
             Ok(ctx_manager) => {
                 if let Err(e) = ctx_manager.enable() {
                     warn!("Failed to enable Docker integration: {}", e);

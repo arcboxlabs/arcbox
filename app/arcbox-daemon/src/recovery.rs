@@ -46,7 +46,7 @@ pub async fn run(ctx: &DaemonContext) {
         port: ctx.dns_port,
     };
     let socket_task = self_setup::DockerSocket {
-        target: ctx.socket_path.clone(),
+        target: ctx.layout.docker_socket.clone(),
     };
 
     // Create /usr/local/bin/ symlinks for Docker CLI tools if running from
@@ -79,7 +79,7 @@ pub async fn run(ctx: &DaemonContext) {
 
     // Docker CLI tools installation (non-blocking, best-effort).
     if ctx.docker_integration {
-        let data_dir = ctx.data_dir.clone();
+        let data_dir = ctx.layout.data_dir.clone();
         let setup_state = Arc::clone(&ctx.setup_state);
         tokio::spawn(async move {
             match ensure_docker_tools(&data_dir).await {

@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use arcbox_api::{SetupPhase, SetupState};
+use arcbox_constants::paths::HostLayout;
 use arcbox_core::{Config, Runtime, VmLifecycleConfig};
 use macos_resolver::to_env_prefix;
 use tokio_util::sync::CancellationToken;
@@ -30,27 +31,27 @@ const DEFAULT_DNS_DOMAIN: &str = "arcbox.local";
 pub async fn init_early(args: DaemonArgs) -> Result<DaemonContext> {
     let setup_state = Arc::new(SetupState::new());
 
-    let data_dir = resolve_data_dir(args.data_dir.as_ref());
-    let run_dir = data_dir.join(arcbox_constants::paths::host::RUN);
-    let log_dir = data_dir.join(arcbox_constants::paths::host::LOG);
-    let data_subdir = data_dir.join(arcbox_constants::paths::host::DATA);
-    std::fs::create_dir_all(&data_dir).context("Failed to create data directory")?;
-    std::fs::create_dir_all(&run_dir).context("Failed to create run directory")?;
-    std::fs::create_dir_all(&log_dir).context("Failed to create log directory")?;
-    std::fs::create_dir_all(&data_subdir).context("Failed to create persistent data directory")?;
+    let mut layout = HostLayout::resolve(args.data_dir.as_deref());
 
-    let socket_path = args.socket.unwrap_or_else(|| run_dir.join("docker.sock"));
-    let grpc_socket = args
-        .grpc_socket
-        .unwrap_or_else(|| run_dir.join("arcbox.sock"));
+    // CLI overrides for socket paths.
+    if let Some(socket) = args.socket {
+        layout.docker_socket = socket;
+    }
+    if let Some(grpc) = args.grpc_socket {
+        layout.grpc_socket = grpc;
+    }
+
+    std::fs::create_dir_all(&layout.data_dir).context("Failed to create data directory")?;
+    std::fs::create_dir_all(&layout.run_dir).context("Failed to create run directory")?;
+    std::fs::create_dir_all(&layout.log_dir).context("Failed to create log directory")?;
+    std::fs::create_dir_all(&layout.data_subdir)
+        .context("Failed to create persistent data directory")?;
 
     let dns_domain = dns_domain();
     let dns_port = dns_port();
 
     Ok(DaemonContext {
-        data_dir,
-        socket_path,
-        grpc_socket,
+        layout,
         daemon_lock: None,
         shared_runtime: Arc::new(std::sync::OnceLock::new()),
         setup_state,
@@ -73,7 +74,7 @@ pub async fn init_early(args: DaemonArgs) -> Result<DaemonContext> {
 /// before `start_grpc` because the old daemon may still be listening
 /// on the same socket paths.
 pub async fn acquire_lock(ctx: &mut DaemonContext) -> Result<()> {
-    let run_dir = ctx.data_dir.join(arcbox_constants::paths::host::RUN);
+    let run_dir = ctx.layout.run_dir.clone();
     let lock = tokio::task::spawn_blocking(move || DaemonLock::acquire(&run_dir))
         .await
         .context("lock task panicked")?
@@ -91,8 +92,7 @@ pub async fn acquire_lock(ctx: &mut DaemonContext) -> Result<()> {
 /// On non-macOS this is a no-op (no XPC helpers).
 #[cfg(target_os = "macos")]
 pub async fn wait_for_resources(ctx: &DaemonContext) -> Result<()> {
-    let data_subdir = ctx.data_dir.join(arcbox_constants::paths::host::DATA);
-    let docker_img = data_subdir.join("docker.img");
+    let docker_img = ctx.layout.data_subdir.join("docker.img");
 
     if !docker_img.exists() {
         return Ok(());
@@ -124,7 +124,7 @@ pub async fn wait_for_resources(_ctx: &DaemonContext) -> Result<()> {
 /// can observe DOWNLOADING_ASSETS → ASSETS_READY progression.
 pub async fn init_runtime(ctx: &DaemonContext) -> Result<()> {
     let mut config = Config {
-        data_dir: ctx.data_dir.clone(),
+        data_dir: ctx.layout.data_dir.clone(),
         ..Default::default()
     };
     if let Some(port) = ctx.vm_args.guest_docker_vsock_port {
@@ -145,7 +145,7 @@ pub async fn init_runtime(ctx: &DaemonContext) -> Result<()> {
     // Seed boot assets from app bundle if available, otherwise download.
     // Run on a blocking thread to avoid stalling the async runtime during
     // large file copies (kernel + rootfs + runtime binaries).
-    let data_dir = ctx.data_dir.clone();
+    let data_dir = ctx.layout.data_dir.clone();
     tokio::task::spawn_blocking(move || {
         assets::seed_from_bundle(&data_dir);
         assets::ensure_agent_binary(&data_dir)
@@ -153,7 +153,7 @@ pub async fn init_runtime(ctx: &DaemonContext) -> Result<()> {
     .await
     .context("seed task panicked")?
     .context("seed failed")?;
-    assets::ensure_boot_assets(&ctx.data_dir, &ctx.setup_state).await?;
+    assets::ensure_boot_assets(&ctx.layout.data_dir, &ctx.setup_state).await?;
     ctx.setup_state
         .set_phase(SetupPhase::AssetsReady, "Boot assets ready");
 
@@ -166,7 +166,7 @@ pub async fn init_runtime(ctx: &DaemonContext) -> Result<()> {
         .await
         .context("Failed to initialize runtime")?;
     info!(
-        data_dir = %ctx.data_dir.display(),
+        data_dir = %ctx.layout.data_dir.display(),
         guest_docker_vsock_port = selected_guest_docker_port,
         "Runtime initialized"
     );
@@ -181,13 +181,12 @@ pub async fn init_runtime(ctx: &DaemonContext) -> Result<()> {
     Ok(())
 }
 
+/// Resolve the data directory from an optional override.
+///
+/// Re-exported for use by `main.rs` (logging setup runs before
+/// `init_early`, so it needs the path independently).
 pub fn resolve_data_dir(data_dir: Option<&PathBuf>) -> PathBuf {
-    data_dir.cloned().unwrap_or_else(|| {
-        dirs::home_dir().map_or_else(
-            || PathBuf::from("/var/lib/arcbox"),
-            |home| home.join(".arcbox"),
-        )
-    })
+    HostLayout::resolve(data_dir.map(PathBuf::as_path)).data_dir
 }
 
 fn dns_port() -> u16 {
