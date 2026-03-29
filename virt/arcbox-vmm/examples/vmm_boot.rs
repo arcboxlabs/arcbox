@@ -19,20 +19,20 @@ fn main() {
     let initrd_path = PathBuf::from("tests/resources/initramfs-arm64");
 
     if !kernel_path.exists() {
-        eprintln!("Error: Kernel not found at {:?}", kernel_path);
+        eprintln!("Error: Kernel not found at {}", kernel_path.display());
         eprintln!("Please run from the arcbox root directory");
         std::process::exit(1);
     }
 
     if !initrd_path.exists() {
-        eprintln!("Warning: Initrd not found at {:?}", initrd_path);
+        eprintln!("Warning: Initrd not found at {}", initrd_path.display());
     }
 
     // Create VMM configuration
     let config = arcbox_vmm::VmmConfig {
         vcpu_count: 2,
         memory_size: 512 * 1024 * 1024, // 512MB
-        kernel_path: kernel_path.clone(),
+        kernel_path,
         kernel_cmdline: "console=hvc0 earlycon root=/dev/ram0 rdinit=/bin/sh".to_string(),
         initrd_path: if initrd_path.exists() {
             Some(initrd_path)
@@ -52,7 +52,7 @@ fn main() {
     };
 
     println!("VMM Configuration:");
-    println!("  Kernel: {:?}", config.kernel_path);
+    println!("  Kernel: {}", config.kernel_path.display());
     println!("  Initrd: {:?}", config.initrd_path);
     println!("  vCPUs: {}", config.vcpu_count);
     println!("  Memory: {} MB", config.memory_size / (1024 * 1024));
