@@ -11,9 +11,10 @@ description = "Shared protocol and runtime constants for ArcBox"
 
 [features]
 default = []
-std = []
+std = ["dep:dirs"]
 
 [dependencies]
+dirs = { workspace = true, optional = true }
 
 [lints]
 workspace = true

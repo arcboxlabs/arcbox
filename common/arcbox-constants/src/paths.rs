@@ -148,14 +148,17 @@ impl HostLayout {
     }
 }
 
-/// Default data directory: `$HOME/.arcbox`, or `/var/lib/arcbox` when
-/// `$HOME` is not set.
+/// Default data directory: `~/.arcbox`, falling back to `/var/lib/arcbox`
+/// when the home directory cannot be resolved.
+///
+/// Uses `dirs::home_dir()` which handles edge cases (launchd, sudo,
+/// non-interactive shells) that raw `$HOME` does not.
 #[cfg(feature = "std")]
 #[must_use]
 pub fn default_data_dir() -> std::path::PathBuf {
-    std::env::var_os("HOME").map_or_else(
+    dirs::home_dir().map_or_else(
         || std::path::PathBuf::from("/var/lib/arcbox"),
-        |home| std::path::PathBuf::from(home).join(".arcbox"),
+        |home| home.join(".arcbox"),
     )
 }
 
@@ -171,4 +174,57 @@ pub mod privileged_log {
 pub mod guest {
     /// Log directory inside the VirtioFS mount.
     pub const LOG: &str = "log";
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn host_layout_new_derives_all_paths() {
+        let layout = HostLayout::new(PathBuf::from("/tmp/arcbox"));
+        assert_eq!(layout.run_dir, PathBuf::from("/tmp/arcbox/run"));
+        assert_eq!(layout.log_dir, PathBuf::from("/tmp/arcbox/log"));
+        assert_eq!(layout.data_subdir, PathBuf::from("/tmp/arcbox/data"));
+        assert_eq!(
+            layout.docker_socket,
+            PathBuf::from("/tmp/arcbox/run/docker.sock")
+        );
+        assert_eq!(
+            layout.grpc_socket,
+            PathBuf::from("/tmp/arcbox/run/arcbox.sock")
+        );
+        assert_eq!(
+            layout.lock_file,
+            PathBuf::from("/tmp/arcbox/run/daemon.lock")
+        );
+        assert_eq!(
+            layout.daemon_log,
+            PathBuf::from("/tmp/arcbox/log/daemon.log")
+        );
+    }
+
+    #[test]
+    fn host_layout_resolve_uses_explicit_dir() {
+        let dir = PathBuf::from("/custom/dir");
+        let layout = HostLayout::resolve(Some(&dir));
+        assert_eq!(layout.data_dir, dir);
+    }
+
+    #[test]
+    fn host_layout_resolve_uses_default_when_none() {
+        let layout = HostLayout::resolve(None);
+        assert_eq!(layout.data_dir, default_data_dir());
+    }
+
+    #[test]
+    fn default_data_dir_returns_home_based_path() {
+        // When HOME is set (normal dev environment), the path should
+        // end with ".arcbox" under the home directory.
+        if dirs::home_dir().is_some() {
+            let dir = default_data_dir();
+            assert!(dir.ends_with(".arcbox"));
+        }
+    }
 }
