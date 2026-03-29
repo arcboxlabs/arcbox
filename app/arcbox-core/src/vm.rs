@@ -586,7 +586,7 @@ impl VmManager {
         self.snapshot_manager
             .create_vm_with_context(id.as_str(), options, context)
             .await
-            .map_err(|e| CoreError::Vm(format!("snapshot create failed: {e}")))
+            .map_err(CoreError::from)
     }
 
     /// Lists snapshots for a VM, newest first.
@@ -606,7 +606,7 @@ impl VmManager {
         self.snapshot_manager
             .delete(snapshot_id)
             .await
-            .map_err(|e| CoreError::Vm(format!("snapshot delete failed: {e}")))
+            .map_err(CoreError::from)
     }
 
     /// Prunes old snapshots for a VM, keeping only `keep` most recent snapshots.
@@ -631,7 +631,7 @@ impl VmManager {
             self.snapshot_manager
                 .delete(&snapshot.id)
                 .await
-                .map_err(|e| CoreError::Vm(format!("snapshot prune failed: {e}")))?;
+                .map_err(CoreError::from)?;
             deleted.push(snapshot.id);
         }
 
@@ -667,14 +667,14 @@ impl VmManager {
         self.snapshot_manager
             .restore(snapshot_id)
             .await
-            .map_err(|e| CoreError::Vm(format!("snapshot restore failed: {e}")))?;
+            .map_err(CoreError::from)?;
 
         let restore_data = self
             .snapshot_manager
             .take_restore_data(snapshot_id)
             .ok_or_else(|| {
-                CoreError::Vm(format!(
-                    "snapshot {snapshot_id} restore data is unavailable after restore"
+                CoreError::invalid_state(format!(
+                    "snapshot {snapshot_id} restore data unavailable after restore"
                 ))
             })?;
 

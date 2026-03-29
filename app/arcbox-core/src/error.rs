@@ -17,6 +17,10 @@ pub enum CoreError {
     #[error("VMM error: {0}")]
     Vmm(#[from] arcbox_vmm::VmmError),
 
+    /// Snapshot error.
+    #[error("snapshot error: {0}")]
+    Snapshot(#[from] arcbox_vmm::SnapshotError),
+
     /// VM management error (registry, lifecycle).
     #[error("VM error: {0}")]
     Vm(String),
@@ -24,6 +28,10 @@ pub enum CoreError {
     /// Machine error.
     #[error("machine error: {0}")]
     Machine(String),
+
+    /// Persistence serialization/deserialization error.
+    #[error("persistence error: {0}")]
+    Persistence(#[from] toml::de::Error),
 
     /// An internal RwLock was poisoned by a panicking thread.
     #[error("internal lock poisoned")]

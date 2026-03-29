@@ -147,18 +147,12 @@ impl From<&MachineInfo> for PersistedMachine {
 fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<()> {
     let dir = path
         .parent()
-        .ok_or_else(|| CoreError::Machine("config path has no parent directory".to_string()))?;
+        .ok_or_else(|| CoreError::config("config path has no parent directory"))?;
 
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
     tmp.write_all(data)?;
     tmp.flush()?;
-    tmp.persist(path).map_err(|e| {
-        CoreError::Machine(format!(
-            "failed to persist temp file to {}: {}",
-            path.display(),
-            e
-        ))
-    })?;
+    tmp.persist(path).map_err(|e| e.error)?;
 
     Ok(())
 }
@@ -198,7 +192,7 @@ impl MachinePersistence {
 
         let persisted = PersistedMachine::from(machine);
         let content = toml::to_string_pretty(&persisted)
-            .map_err(|e| CoreError::Machine(format!("Failed to serialize config: {e}")))?;
+            .map_err(|e| CoreError::config(format!("failed to serialize config: {e}")))?;
 
         atomic_write(&self.config_path(&machine.name), content.as_bytes())?;
 
@@ -216,8 +210,7 @@ impl MachinePersistence {
         let content = fs::read_to_string(&path)
             .map_err(|e| CoreError::not_found(format!("Machine config not found: {e}")))?;
 
-        toml::from_str(&content)
-            .map_err(|e| CoreError::Machine(format!("Failed to parse config: {e}")))
+        toml::from_str(&content).map_err(CoreError::from)
     }
 
     /// Lists all saved machines.
@@ -291,7 +284,7 @@ impl MachinePersistence {
         mutate(&mut machine);
 
         let content = toml::to_string_pretty(&machine)
-            .map_err(|e| CoreError::Machine(format!("Failed to serialize config: {e}")))?;
+            .map_err(|e| CoreError::config(format!("failed to serialize config: {e}")))?;
 
         atomic_write(&self.config_path(name), content.as_bytes())?;
 
