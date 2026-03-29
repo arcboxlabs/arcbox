@@ -118,9 +118,15 @@ async fn run(args: DaemonArgs) -> Result<()> {
     // Progress is visible to gRPC clients via WatchSetupStatus.
     startup::init_runtime(&ctx).await?;
 
+    // runtime() is guaranteed to be Some after init_runtime succeeds.
+    let runtime = ctx
+        .runtime()
+        .expect("runtime must be set after init_runtime")
+        .clone();
+
     // Phase 3: start remaining services that require the runtime.
-    let handles = services::start_services(&ctx, grpc).await?;
-    recovery::run(&ctx).await;
+    let handles = services::start_services(&ctx, &runtime, grpc).await?;
+    recovery::run(&ctx, &runtime).await;
 
     check_resolver_installed(&ctx.dns_domain);
     ctx.setup_state.set_phase(SetupPhase::Ready, "Daemon ready");

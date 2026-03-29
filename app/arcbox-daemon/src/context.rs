@@ -27,11 +27,9 @@ pub struct DaemonContext {
 }
 
 impl DaemonContext {
-    /// Returns the runtime. Panics if called before `init_runtime`.
-    pub fn runtime(&self) -> &Arc<Runtime> {
-        self.shared_runtime
-            .get()
-            .expect("runtime not initialized — called before init_runtime?")
+    /// Returns the runtime if it has been initialized.
+    pub fn runtime(&self) -> Option<&Arc<Runtime>> {
+        self.shared_runtime.get()
     }
 }
 

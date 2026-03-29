@@ -15,6 +15,7 @@ use arcbox_api::{
     SystemServiceServer, kubernetes_service_server::KubernetesServiceServer,
     machine_service_server::MachineServiceServer,
 };
+use arcbox_core::Runtime;
 use arcbox_docker::{DockerApiServer, DockerContextManager, ServerConfig};
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
@@ -82,16 +83,15 @@ pub async fn start_grpc(
 /// Called after `init_runtime()` — the runtime must be available.
 pub async fn start_services(
     ctx: &DaemonContext,
+    runtime: &Arc<Runtime>,
     grpc: tokio::task::JoinHandle<()>,
 ) -> Result<ServiceHandles> {
-    let runtime = ctx.runtime();
-
     // DNS service.
     let dns_service = DnsService::bind(Arc::clone(runtime.network_manager()), ctx.dns_port)
         .await
         .context("Failed to start DNS service")?;
 
-    register_host_dns(ctx);
+    register_host_dns(runtime);
 
     let dns_shutdown = ctx.shutdown.clone();
     let dns = tokio::spawn(async move {
@@ -146,8 +146,7 @@ pub async fn start_services(
 // Helpers
 // =============================================================================
 
-fn register_host_dns(ctx: &DaemonContext) {
-    let runtime = ctx.runtime();
+fn register_host_dns(runtime: &Arc<Runtime>) {
     let network_cfg = &runtime.config().network;
     let gateway_ip = network_cfg
         .gateway
