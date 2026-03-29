@@ -208,7 +208,7 @@ impl VmManager {
 
         self.vms
             .write()
-            .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?
+            .map_err(|_| CoreError::LockPoisoned)?
             .insert(id.clone(), entry);
 
         tracing::info!("Created VM {}", id);
@@ -221,10 +221,7 @@ impl VmManager {
     ///
     /// Returns an error if the VM is running or not found.
     pub fn set_guest_cid(&self, id: &VmId, guest_cid: u32) -> Result<()> {
-        let mut vms = self
-            .vms
-            .write()
-            .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?;
+        let mut vms = self.vms.write().map_err(|_| CoreError::LockPoisoned)?;
 
         let entry = vms
             .get_mut(id)
@@ -298,10 +295,7 @@ impl VmManager {
         id: &VmId,
         shared_dns_hosts: Option<std::sync::Arc<arcbox_dns::LocalHostsTable>>,
     ) -> Result<()> {
-        let mut vms = self
-            .vms
-            .write()
-            .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?;
+        let mut vms = self.vms.write().map_err(|_| CoreError::LockPoisoned)?;
 
         let entry = vms
             .get_mut(id)
@@ -323,7 +317,7 @@ impl VmManager {
             Ok(vmm) => vmm,
             Err(e) => {
                 entry.info.state = MachineState::Created;
-                return Err(CoreError::Vm(e.to_string()));
+                return Err(e.into());
             }
         };
 
@@ -337,7 +331,7 @@ impl VmManager {
 
         if let Err(e) = vmm.start() {
             entry.info.state = MachineState::Created;
-            return Err(CoreError::Vm(e.to_string()));
+            return Err(e.into());
         }
 
         entry.vmm = Some(vmm);
@@ -353,10 +347,7 @@ impl VmManager {
     ///
     /// Returns an error if the VM cannot be stopped.
     pub fn stop(&self, id: &VmId) -> Result<()> {
-        let mut vms = self
-            .vms
-            .write()
-            .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?;
+        let mut vms = self.vms.write().map_err(|_| CoreError::LockPoisoned)?;
 
         let entry = vms
             .get_mut(id)
@@ -376,7 +367,7 @@ impl VmManager {
 
         // Stop the VMM
         if let Some(ref mut vmm) = entry.vmm {
-            vmm.stop().map_err(|e| CoreError::Vm(e.to_string()))?;
+            vmm.stop()?;
         }
 
         entry.vmm = None;
@@ -394,10 +385,7 @@ impl VmManager {
         // Take the Vmm out under write lock so the blocking request_stop()
         // call below doesn't hold the lock for up to `timeout`.
         let vmm = {
-            let mut vms = self
-                .vms
-                .write()
-                .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?;
+            let mut vms = self.vms.write().map_err(|_| CoreError::LockPoisoned)?;
 
             let entry = vms
                 .get_mut(id)
@@ -414,22 +402,17 @@ impl VmManager {
             entry
                 .vmm
                 .take()
-                .ok_or_else(|| CoreError::Vm("VMM not initialized".to_string()))?
+                .ok_or_else(|| CoreError::invalid_state("VMM not initialized"))?
         };
 
         // No lock held — this may block for the full timeout duration.
-        let stop_result = vmm
-            .request_stop(timeout)
-            .map_err(|e| CoreError::Vm(e.to_string()));
+        let stop_result = vmm.request_stop(timeout).map_err(CoreError::from);
 
         // Re-acquire to update final state. The entry may have been removed
         // by a concurrent force_stop while the lock was released — if so,
         // safely drop the Vmm (skipping the macOS VF stop path) and return
         // Ok since the force path already handled teardown.
-        let mut vms = self
-            .vms
-            .write()
-            .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?;
+        let mut vms = self.vms.write().map_err(|_| CoreError::LockPoisoned)?;
         let Some(entry) = vms.get_mut(id) else {
             tracing::warn!("VM {id} removed during graceful stop (concurrent force stop)");
             // Force path already handled teardown. Skip the macOS VF stop
@@ -487,10 +470,7 @@ impl VmManager {
     /// terminate the daemon process unexpectedly.
     #[cfg(target_os = "macos")]
     pub fn force_stop_without_hypervisor(&self, id: &VmId) -> Result<()> {
-        let mut vms = self
-            .vms
-            .write()
-            .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?;
+        let mut vms = self.vms.write().map_err(|_| CoreError::LockPoisoned)?;
 
         let entry = vms
             .get_mut(id)
@@ -524,17 +504,14 @@ impl VmManager {
     ///
     /// Returns an error if the VM cannot be paused.
     pub fn pause(&self, id: &VmId) -> Result<()> {
-        let mut vms = self
-            .vms
-            .write()
-            .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?;
+        let mut vms = self.vms.write().map_err(|_| CoreError::LockPoisoned)?;
 
         let entry = vms
             .get_mut(id)
             .ok_or_else(|| CoreError::not_found(id.to_string()))?;
 
         if let Some(ref mut vmm) = entry.vmm {
-            vmm.pause().map_err(|e| CoreError::Vm(e.to_string()))?;
+            vmm.pause()?;
         }
 
         Ok(())
@@ -546,17 +523,14 @@ impl VmManager {
     ///
     /// Returns an error if the VM cannot be resumed.
     pub fn resume(&self, id: &VmId) -> Result<()> {
-        let mut vms = self
-            .vms
-            .write()
-            .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?;
+        let mut vms = self.vms.write().map_err(|_| CoreError::LockPoisoned)?;
 
         let entry = vms
             .get_mut(id)
             .ok_or_else(|| CoreError::not_found(id.to_string()))?;
 
         if let Some(ref mut vmm) = entry.vmm {
-            vmm.resume().map_err(|e| CoreError::Vm(e.to_string()))?;
+            vmm.resume()?;
         }
 
         Ok(())
@@ -575,10 +549,7 @@ impl VmManager {
     ) -> Result<SnapshotInfo> {
         let pause_vm = options.pause_vm;
         let context = {
-            let mut vms = self
-                .vms
-                .write()
-                .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?;
+            let mut vms = self.vms.write().map_err(|_| CoreError::LockPoisoned)?;
 
             let entry = vms
                 .get_mut(id)
@@ -594,23 +565,19 @@ impl VmManager {
             let vmm = entry
                 .vmm
                 .as_mut()
-                .ok_or_else(|| CoreError::Vm("VMM not initialized".to_string()))?;
+                .ok_or_else(|| CoreError::invalid_state("VMM not initialized"))?;
 
             let resume_after_capture = if pause_vm && vmm.state() == VmmState::Running {
-                vmm.pause().map_err(|e| CoreError::Vm(e.to_string()))?;
+                vmm.pause()?;
                 true
             } else {
                 false
             };
 
-            let capture_result = vmm
-                .capture_snapshot_context()
-                .map_err(|e| CoreError::Vm(e.to_string()));
+            let capture_result = vmm.capture_snapshot_context().map_err(CoreError::from);
 
             if resume_after_capture {
-                vmm.resume().map_err(|e| {
-                    CoreError::Vm(format!("failed to resume VM after snapshot capture: {e}"))
-                })?;
+                vmm.resume()?;
             }
 
             capture_result?
@@ -711,10 +678,7 @@ impl VmManager {
                 ))
             })?;
 
-        let mut vms = self
-            .vms
-            .write()
-            .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?;
+        let mut vms = self.vms.write().map_err(|_| CoreError::LockPoisoned)?;
 
         let entry = vms
             .get_mut(id)
@@ -730,25 +694,22 @@ impl VmManager {
         let vmm = entry
             .vmm
             .as_mut()
-            .ok_or_else(|| CoreError::Vm("VMM not initialized".to_string()))?;
+            .ok_or_else(|| CoreError::invalid_state("VMM not initialized"))?;
 
         // Pause the VM before applying snapshot state so guest CPUs don't
         // execute while memory and device state are being overwritten.
         let was_running = vmm.state() == VmmState::Running;
         if was_running {
-            vmm.pause()
-                .map_err(|e| CoreError::Vm(format!("failed to pause VM for restore: {e}")))?;
+            vmm.pause()?;
         }
 
         let apply_result = vmm.restore_from_snapshot_data(&restore_data);
 
         if was_running {
-            vmm.resume()
-                .map_err(|e| CoreError::Vm(format!("failed to resume VM after restore: {e}")))?;
+            vmm.resume()?;
         }
 
-        apply_result
-            .map_err(|e| CoreError::Vm(format!("failed to apply snapshot {snapshot_id}: {e}")))
+        apply_result.map_err(CoreError::from)
     }
 
     /// Gets VM information.
@@ -772,10 +733,7 @@ impl VmManager {
     ///
     /// Returns an error if the VM cannot be removed.
     pub fn remove(&self, id: &VmId) -> Result<()> {
-        let mut vms = self
-            .vms
-            .write()
-            .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?;
+        let mut vms = self.vms.write().map_err(|_| CoreError::LockPoisoned)?;
 
         let entry = vms
             .get(id)
@@ -807,10 +765,7 @@ impl VmManager {
     /// # Errors
     /// Returns an error if the VM is not found, not running, or connection fails.
     pub fn connect_vsock(&self, id: &VmId, port: u32) -> Result<std::os::unix::io::RawFd> {
-        let vms = self
-            .vms
-            .read()
-            .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?;
+        let vms = self.vms.read().map_err(|_| CoreError::LockPoisoned)?;
 
         let entry = vms
             .get(id)
@@ -826,19 +781,15 @@ impl VmManager {
         let vmm = entry
             .vmm
             .as_ref()
-            .ok_or_else(|| CoreError::Vm("VMM not initialized".to_string()))?;
+            .ok_or_else(|| CoreError::invalid_state("VMM not initialized"))?;
 
-        vmm.connect_vsock(port)
-            .map_err(|e| CoreError::Vm(format!("vsock connect failed: {e}")))
+        vmm.connect_vsock(port).map_err(CoreError::from)
     }
 
     /// Reads serial console output from a running VM (macOS only).
     #[cfg(target_os = "macos")]
     pub fn read_console_output(&self, id: &VmId) -> Result<String> {
-        let vms = self
-            .vms
-            .read()
-            .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?;
+        let vms = self.vms.read().map_err(|_| CoreError::LockPoisoned)?;
 
         let entry = vms
             .get(id)
@@ -854,19 +805,15 @@ impl VmManager {
         let vmm = entry
             .vmm
             .as_ref()
-            .ok_or_else(|| CoreError::Vm("VMM not initialized".to_string()))?;
+            .ok_or_else(|| CoreError::invalid_state("VMM not initialized"))?;
 
-        vmm.read_console_output()
-            .map_err(|e| CoreError::Vm(format!("read console failed: {e}")))
+        vmm.read_console_output().map_err(CoreError::from)
     }
 
     /// Reads agent log output (hvc1) from a running VM (macOS only).
     #[cfg(target_os = "macos")]
     pub fn read_agent_log_output(&self, id: &VmId) -> Result<String> {
-        let vms = self
-            .vms
-            .read()
-            .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?;
+        let vms = self.vms.read().map_err(|_| CoreError::LockPoisoned)?;
 
         let entry = vms
             .get(id)
@@ -882,10 +829,9 @@ impl VmManager {
         let vmm = entry
             .vmm
             .as_ref()
-            .ok_or_else(|| CoreError::Vm("VMM not initialized".to_string()))?;
+            .ok_or_else(|| CoreError::invalid_state("VMM not initialized"))?;
 
-        vmm.read_agent_log_output()
-            .map_err(|e| CoreError::Vm(format!("read agent log failed: {e}")))
+        vmm.read_agent_log_output().map_err(CoreError::from)
     }
 
     /// Sets the target memory size for the balloon device on a running VM.
@@ -902,10 +848,7 @@ impl VmManager {
     /// Returns an error if the VM is not found, not running, or balloon operation fails.
     #[cfg(target_os = "macos")]
     pub fn set_balloon_target(&self, id: &VmId, target_bytes: u64) -> Result<()> {
-        let vms = self
-            .vms
-            .read()
-            .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?;
+        let vms = self.vms.read().map_err(|_| CoreError::LockPoisoned)?;
 
         let entry = vms
             .get(id)
@@ -921,10 +864,10 @@ impl VmManager {
         let vmm = entry
             .vmm
             .as_ref()
-            .ok_or_else(|| CoreError::Vm("VMM not initialized".to_string()))?;
+            .ok_or_else(|| CoreError::invalid_state("VMM not initialized"))?;
 
         vmm.set_balloon_target(target_bytes)
-            .map_err(|e| CoreError::Vm(format!("set balloon target failed: {e}")))
+            .map_err(CoreError::from)
     }
 
     /// Gets the current target memory size from the balloon device.
@@ -954,10 +897,7 @@ impl VmManager {
     /// Returns current balloon stats including target, current, and configured memory sizes.
     #[cfg(target_os = "macos")]
     pub fn get_balloon_stats(&self, id: &VmId) -> Result<arcbox_hypervisor::BalloonStats> {
-        let vms = self
-            .vms
-            .read()
-            .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?;
+        let vms = self.vms.read().map_err(|_| CoreError::LockPoisoned)?;
 
         let entry = vms
             .get(id)
@@ -973,7 +913,7 @@ impl VmManager {
         let vmm = entry
             .vmm
             .as_ref()
-            .ok_or_else(|| CoreError::Vm("VMM not initialized".to_string()))?;
+            .ok_or_else(|| CoreError::invalid_state("VMM not initialized"))?;
 
         Ok(vmm.get_balloon_stats())
     }
@@ -1021,10 +961,7 @@ impl VmManager {
 
     #[cfg(test)]
     pub(crate) fn build_vmm_config_for_test(&self, id: &VmId) -> Result<VmmConfig> {
-        let vms = self
-            .vms
-            .read()
-            .map_err(|_| CoreError::Vm("lock poisoned".to_string()))?;
+        let vms = self.vms.read().map_err(|_| CoreError::LockPoisoned)?;
         let entry = vms
             .get(id)
             .ok_or_else(|| CoreError::not_found(id.to_string()))?;
