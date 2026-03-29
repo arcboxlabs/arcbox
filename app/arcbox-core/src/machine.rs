@@ -275,17 +275,17 @@ impl MachineManager {
                     created_at: persisted.created_at,
                 };
                 machines.insert(persisted.name.clone(), info);
+            }
 
-                // Persist the corrected state so the file matches reality.
-                if needs_recovery {
-                    if let Err(e) = persistence.update_state(&persisted.name, MachineState::Stopped)
-                    {
-                        tracing::warn!(
-                            "Failed to persist corrected state for '{}': {}",
-                            persisted.name,
-                            e
-                        );
-                    }
+            // Persist the corrected state regardless of whether VM recreation
+            // succeeded — a stale Running on disk must not survive reload.
+            if needs_recovery {
+                if let Err(e) = persistence.update_state(&persisted.name, MachineState::Stopped) {
+                    tracing::warn!(
+                        "Failed to persist corrected state for '{}': {}",
+                        persisted.name,
+                        e
+                    );
                 }
             }
         }
@@ -914,13 +914,9 @@ impl MachineManager {
         machines.remove(name);
 
         // Remove persisted config (removes entire machine directory including SSH keys).
-        if let Err(e) = self.persistence.remove(name) {
-            tracing::warn!(
-                "Failed to remove persisted config for machine '{}': {}",
-                name,
-                e
-            );
-        }
+        // This must succeed — if it doesn't, the machine will reappear on daemon
+        // restart even though VM and in-memory state are already gone.
+        self.persistence.remove(name)?;
 
         tracing::info!("Removed machine '{}'", name);
         Ok(())
