@@ -402,9 +402,13 @@ impl MachineManager {
             }
         }
 
-        // Update persisted state
-        let _ = self.persistence.update_state(name, MachineState::Running);
-        let _ = self.persistence.update_ip(name, None);
+        // Update persisted state (single read-modify-write)
+        if let Err(e) = self.persistence.update(name, |m| {
+            m.state = MachineState::Running.into();
+            m.ip_address = None;
+        }) {
+            tracing::warn!("Failed to persist state for machine '{}': {}", name, e);
+        }
 
         // For machine VMs, wait for agent readiness and discover IP.
         if is_machine_vm {
@@ -456,7 +460,13 @@ impl MachineManager {
                                             machine.ip_address = Some(ip.clone());
                                         }
                                     }
-                                    let _ = self.persistence.update_ip(name, Some(&ip));
+                                    if let Err(e) = self.persistence.update_ip(name, Some(&ip)) {
+                                        tracing::warn!(
+                                            "Failed to persist IP for machine '{}': {}",
+                                            name,
+                                            e
+                                        );
+                                    }
 
                                     tracing::info!(
                                         "Machine '{}' ready with IP {} (attempt {})",
@@ -744,7 +754,13 @@ impl MachineManager {
         machine.cid = None;
 
         // Update persisted state
-        let _ = self.persistence.update_state(name, MachineState::Stopped);
+        if let Err(e) = self.persistence.update_state(name, MachineState::Stopped) {
+            tracing::warn!(
+                "Failed to persist stopped state for machine '{}': {}",
+                name,
+                e
+            );
+        }
 
         Ok(())
     }
@@ -787,7 +803,13 @@ impl MachineManager {
                 machine.state = MachineState::Stopped;
                 machine.cid = None;
 
-                let _ = self.persistence.update_state(name, MachineState::Stopped);
+                if let Err(e) = self.persistence.update_state(name, MachineState::Stopped) {
+                    tracing::warn!(
+                        "Failed to persist stopped state for machine '{}': {}",
+                        name,
+                        e
+                    );
+                }
                 Ok(true)
             }
             Ok(false) => {
@@ -872,7 +894,13 @@ impl MachineManager {
         machines.remove(name);
 
         // Remove persisted config (removes entire machine directory including SSH keys).
-        let _ = self.persistence.remove(name);
+        if let Err(e) = self.persistence.remove(name) {
+            tracing::warn!(
+                "Failed to remove persisted config for machine '{}': {}",
+                name,
+                e
+            );
+        }
 
         tracing::info!("Removed machine '{}'", name);
         Ok(())

@@ -239,15 +239,9 @@ impl MachinePersistence {
     ///
     /// Returns an error if the state cannot be updated.
     pub fn update_state(&self, name: &str, state: MachineState) -> Result<()> {
-        let mut machine = self.load(name)?;
-        machine.state = state.into();
-
-        let content = toml::to_string_pretty(&machine)
-            .map_err(|e| CoreError::Machine(format!("Failed to serialize config: {e}")))?;
-
-        fs::write(self.config_path(name), content)?;
-
-        Ok(())
+        self.update(name, |machine| {
+            machine.state = state.into();
+        })
     }
 
     /// Updates the IP address of a persisted machine.
@@ -256,8 +250,20 @@ impl MachinePersistence {
     ///
     /// Returns an error if the IP cannot be updated.
     pub fn update_ip(&self, name: &str, ip: Option<&str>) -> Result<()> {
+        self.update(name, |machine| {
+            machine.ip_address = ip.map(ToString::to_string);
+        })
+    }
+
+    /// Applies a mutation to a persisted machine config in a single
+    /// load→mutate→write cycle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the config cannot be loaded or written.
+    pub fn update(&self, name: &str, mutate: impl FnOnce(&mut PersistedMachine)) -> Result<()> {
         let mut machine = self.load(name)?;
-        machine.ip_address = ip.map(ToString::to_string);
+        mutate(&mut machine);
 
         let content = toml::to_string_pretty(&machine)
             .map_err(|e| CoreError::Machine(format!("Failed to serialize config: {e}")))?;
@@ -375,5 +381,44 @@ mod tests {
 
         persistence.remove("test-vm").unwrap();
         assert!(persistence.load("test-vm").is_err());
+    }
+
+    #[test]
+    fn test_update_batches_mutations() {
+        let temp = TempDir::new().unwrap();
+        let persistence = MachinePersistence::new(temp.path());
+
+        let info = MachineInfo {
+            name: "test-vm".to_string(),
+            state: MachineState::Created,
+            vm_id: VmId::new(),
+            cpus: 2,
+            memory_mb: 2048,
+            disk_gb: 20,
+            kernel: None,
+            cmdline: None,
+            block_devices: Vec::new(),
+            distro: None,
+            distro_version: None,
+            disk_path: None,
+            ssh_key_path: None,
+            ip_address: None,
+            cid: None,
+            created_at: Utc::now(),
+        };
+
+        persistence.save(&info).unwrap();
+
+        // Single update call sets both state and IP.
+        persistence
+            .update("test-vm", |m| {
+                m.state = PersistedState::Running;
+                m.ip_address = Some("10.0.2.15".to_string());
+            })
+            .unwrap();
+
+        let loaded = persistence.load("test-vm").unwrap();
+        assert_eq!(loaded.state, PersistedState::Running);
+        assert_eq!(loaded.ip_address.as_deref(), Some("10.0.2.15"));
     }
 }
