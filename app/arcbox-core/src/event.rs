@@ -13,6 +13,8 @@ pub enum Event {
     MachineCreated { name: String },
     /// Machine started.
     MachineStarted { name: String },
+    /// Machine entered idle state (still running, reduced resources).
+    MachineIdle { name: String },
     /// Machine stopped.
     MachineStopped { name: String },
 }
