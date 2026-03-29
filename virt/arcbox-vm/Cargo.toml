@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description       = "Firecracker-based sandbox VMM — orchestration, state, networking, and checkpoints."
+description       = "Guest-side Firecracker sandbox manager (frozen; see arcbox-vmm for host VMM)."
 
 [[bin]]
 name = "vmm-guest-agent"

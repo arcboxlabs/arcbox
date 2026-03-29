@@ -1,12 +1,19 @@
 //! # arcbox-vmm
 //!
-//! Virtual Machine Monitor (VMM) for `ArcBox`.
+//! Host-side Virtual Machine Monitor (VMM) for `ArcBox`.
 //!
-//! This crate provides high-level VM management on top of the hypervisor
-//! abstraction layer:
+//! This is the **primary** VM stack, used by `arcbox-core` to boot and manage
+//! the Linux guest.  Platform-specific backends live in submodules:
 //!
-//! - [`VmBuilder`]: Fluent API for VM configuration
+//! - **macOS**: Virtualization.framework (managed execution)
+//! - **Linux**: KVM (manual vCPU execution)
+//!
+//! For the guest-side Firecracker sandbox stack, see `arcbox-vm`.
+//!
+//! # Key types
+//!
 //! - [`Vmm`]: VM lifecycle/state and device orchestration
+//! - [`VmBuilder`]: Fluent API for VM configuration
 //! - [`VcpuManager`]: Manages vCPU threads and execution
 //! - [`MemoryManager`]: Memory allocation and mapping
 //! - [`DeviceManager`]: Device registration and I/O handling
