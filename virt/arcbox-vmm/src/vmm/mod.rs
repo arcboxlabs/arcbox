@@ -921,16 +921,11 @@ fn placeholder_vcpu_snapshots(vcpu_count: u32) -> Vec<arcbox_hypervisor::VcpuSna
 }
 
 impl Vmm {
-    /// Marks this VMM to skip the hypervisor stop path on drop.
-    ///
-    /// FDs, network resources, and other owned state are still cleaned up
-    /// normally. Only the Virtualization.framework stop call is skipped,
-    /// which can crash when the guest has already halted via ACPI.
     /// Marks this VMM to skip the Virtualization.framework stop path on drop.
     ///
     /// macOS-only: the VF stop call can crash when the guest has already
     /// halted via ACPI. FDs and network resources are still cleaned up.
-    /// Must only be called for managed-execution VMs after ACPI shutdown.
+    /// Must only be called after ACPI shutdown.
     #[cfg(target_os = "macos")]
     pub fn set_skip_hypervisor_stop(&mut self) {
         self.skip_hypervisor_stop = true;
