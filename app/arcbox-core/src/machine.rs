@@ -235,6 +235,14 @@ impl MachineManager {
         // Load persisted machines
         let mut machines = HashMap::new();
         for persisted in persistence.load_all() {
+            let needs_recovery = persisted.state.needs_recovery();
+            if needs_recovery {
+                tracing::warn!(
+                    "Machine '{}' was running when daemon stopped — marking as stopped",
+                    persisted.name
+                );
+            }
+
             // Reconstruct VmConfig from persisted data.
             let vm_config = VmConfig {
                 cpus: persisted.cpus,
@@ -266,7 +274,19 @@ impl MachineManager {
                     ip_address: persisted.ip_address.clone(),
                     created_at: persisted.created_at,
                 };
-                machines.insert(persisted.name, info);
+                machines.insert(persisted.name.clone(), info);
+
+                // Persist the corrected state so the file matches reality.
+                if needs_recovery {
+                    if let Err(e) = persistence.update_state(&persisted.name, MachineState::Stopped)
+                    {
+                        tracing::warn!(
+                            "Failed to persist corrected state for '{}': {}",
+                            persisted.name,
+                            e
+                        );
+                    }
+                }
             }
         }
 
