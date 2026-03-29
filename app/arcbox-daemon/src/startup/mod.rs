@@ -19,16 +19,17 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::DaemonArgs;
-use crate::context::{DaemonContext, VmArgs};
+use crate::context::{DaemonContext, EarlyContext, VmArgs};
 
 const DNS_PREFIX: &str = "arcbox";
 const DEFAULT_DNS_DOMAIN: &str = "arcbox.local";
 
 /// Phase 1: directories, config, sockets. No runtime, no lock yet.
 ///
-/// Returns a context sufficient to start the gRPC SystemService so
-/// clients can observe the full startup progression.
-pub async fn init_early(args: DaemonArgs) -> Result<DaemonContext> {
+/// Returns an [`EarlyContext`] sufficient to start the gRPC
+/// SystemService so clients can observe the full startup progression.
+/// Call [`acquire_lock`] next to obtain a [`DaemonContext`].
+pub async fn init_early(args: DaemonArgs) -> Result<EarlyContext> {
     let setup_state = Arc::new(SetupState::new());
 
     let mut layout = HostLayout::resolve(args.data_dir.as_deref());
@@ -50,9 +51,8 @@ pub async fn init_early(args: DaemonArgs) -> Result<DaemonContext> {
     let dns_domain = dns_domain();
     let dns_port = dns_port();
 
-    Ok(DaemonContext {
+    Ok(EarlyContext {
         layout,
-        daemon_lock: None,
         shared_runtime: Arc::new(std::sync::OnceLock::new()),
         setup_state,
         shutdown: CancellationToken::new(),
@@ -66,21 +66,30 @@ pub async fn init_early(args: DaemonArgs) -> Result<DaemonContext> {
     })
 }
 
-/// Acquire the daemon lock, terminating any stale daemon.
+/// Acquire the daemon lock, consuming the [`EarlyContext`].
 ///
 /// Fast when no stale daemon exists. If a stale daemon holds the lock,
 /// sends SIGTERM (with 30 s grace period and SIGKILL fallback), then
 /// blocks on `flock(LOCK_EX)` until the lock is released. Must run
 /// before `start_grpc` because the old daemon may still be listening
 /// on the same socket paths.
-pub async fn acquire_lock(ctx: &mut DaemonContext) -> Result<()> {
-    let run_dir = ctx.layout.run_dir.clone();
-    let lock = tokio::task::spawn_blocking(move || DaemonLock::acquire(&run_dir))
+pub async fn acquire_lock(early: EarlyContext) -> Result<DaemonContext> {
+    let lock_file = early.layout.lock_file.clone();
+    let lock = tokio::task::spawn_blocking(move || DaemonLock::acquire(&lock_file))
         .await
         .context("lock task panicked")?
         .context("failed to acquire daemon lock")?;
-    ctx.daemon_lock = Some(lock);
-    Ok(())
+    Ok(DaemonContext {
+        layout: early.layout,
+        daemon_lock: lock,
+        shared_runtime: early.shared_runtime,
+        setup_state: early.setup_state,
+        shutdown: early.shutdown,
+        dns_domain: early.dns_domain,
+        dns_port: early.dns_port,
+        docker_integration: early.docker_integration,
+        vm_args: early.vm_args,
+    })
 }
 
 /// Wait for residual resource holders (e.g. docker.img) to release.
@@ -122,7 +131,8 @@ pub async fn wait_for_resources(_ctx: &DaemonContext) -> Result<()> {
 ///
 /// Called after gRPC SystemService is already listening so clients
 /// can observe DOWNLOADING_ASSETS → ASSETS_READY progression.
-pub async fn init_runtime(ctx: &DaemonContext) -> Result<()> {
+/// Returns the initialized runtime.
+pub async fn init_runtime(ctx: &DaemonContext) -> Result<Arc<Runtime>> {
     let mut config = Config {
         data_dir: ctx.layout.data_dir.clone(),
         ..Default::default()
@@ -176,9 +186,9 @@ pub async fn init_runtime(ctx: &DaemonContext) -> Result<()> {
     }
 
     ctx.shared_runtime
-        .set(runtime)
+        .set(Arc::clone(&runtime))
         .map_err(|_| anyhow::anyhow!("init_runtime called twice"))?;
-    Ok(())
+    Ok(runtime)
 }
 
 /// Resolve the data directory from an optional override.

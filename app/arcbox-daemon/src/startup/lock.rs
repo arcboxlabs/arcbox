@@ -9,9 +9,9 @@ use super::cleanup::{is_arcbox_daemon, terminate_stale_daemon};
 
 /// Exclusive file lock held for the daemon's lifetime.
 ///
-/// Uses `flock(LOCK_EX)` on `daemon.lock` so liveness is tracked by the
-/// kernel — the lock is released automatically on process exit or crash.
-/// The file also stores the current PID for diagnostics and signalling.
+/// Uses `flock(LOCK_EX)` so liveness is tracked by the kernel — the lock
+/// is released automatically on process exit or crash.  The file also
+/// stores the current PID for diagnostics and signalling.
 pub struct DaemonLock {
     _file: std::fs::File,
 }
@@ -25,17 +25,15 @@ impl DaemonLock {
     ///
     /// This is a blocking operation and should be called from
     /// `spawn_blocking`.
-    pub fn acquire(run_dir: &Path) -> Result<Self> {
+    pub fn acquire(lock_path: &Path) -> Result<Self> {
         use std::io::{Seek, Write};
-
-        let lock_path = run_dir.join("daemon.lock");
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
-            .open(&lock_path)
-            .context("Failed to open daemon.lock")?;
+            .open(lock_path)
+            .context("Failed to open daemon lock")?;
 
         // Try non-blocking lock first.
         if try_flock_exclusive(&file) {

@@ -94,13 +94,14 @@ async fn run(args: DaemonArgs) -> Result<()> {
     info!("Starting ArcBox daemon...");
 
     // Phase 1: directories, config, sockets — no runtime yet.
-    let mut ctx = startup::init_early(args).await?;
+    let early = startup::init_early(args).await?;
 
     // Acquire exclusive daemon lock. Terminates any stale daemon that
     // still holds the lock (up to ~30 s SIGTERM wait). Must complete
     // before start_grpc because the old daemon may be listening on the
-    // same socket paths.
-    startup::acquire_lock(&mut ctx).await?;
+    // same socket paths. Consumes EarlyContext, producing a
+    // DaemonContext with a guaranteed lock.
+    let ctx = startup::acquire_lock(early).await?;
 
     // Start gRPC with all services. Machine/Sandbox return UNAVAILABLE
     // until runtime is ready. SystemService works immediately so clients
@@ -116,13 +117,7 @@ async fn run(args: DaemonArgs) -> Result<()> {
 
     // Phase 2: seed/download boot assets, build runtime, start VM.
     // Progress is visible to gRPC clients via WatchSetupStatus.
-    startup::init_runtime(&ctx).await?;
-
-    // runtime() is guaranteed to be Some after init_runtime succeeds.
-    let runtime = ctx
-        .runtime()
-        .expect("runtime must be set after init_runtime")
-        .clone();
+    let runtime = startup::init_runtime(&ctx).await?;
 
     // Phase 3: start remaining services that require the runtime.
     let handles = services::start_services(&ctx, &runtime, grpc).await?;
