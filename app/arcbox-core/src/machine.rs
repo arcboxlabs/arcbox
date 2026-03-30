@@ -235,6 +235,14 @@ impl MachineManager {
         // Load persisted machines
         let mut machines = HashMap::new();
         for persisted in persistence.load_all() {
+            let needs_recovery = persisted.state.needs_recovery();
+            if needs_recovery {
+                tracing::warn!(
+                    "Machine '{}' was running when daemon stopped — marking as stopped",
+                    persisted.name
+                );
+            }
+
             // Reconstruct VmConfig from persisted data.
             let vm_config = VmConfig {
                 cpus: persisted.cpus,
@@ -266,7 +274,19 @@ impl MachineManager {
                     ip_address: persisted.ip_address.clone(),
                     created_at: persisted.created_at,
                 };
-                machines.insert(persisted.name, info);
+                machines.insert(persisted.name.clone(), info);
+            }
+
+            // Persist the corrected state regardless of whether VM recreation
+            // succeeded — a stale Running on disk must not survive reload.
+            if needs_recovery {
+                if let Err(e) = persistence.update_state(&persisted.name, MachineState::Stopped) {
+                    tracing::warn!(
+                        "Failed to persist corrected state for '{}': {}",
+                        persisted.name,
+                        e
+                    );
+                }
             }
         }
 
@@ -402,9 +422,13 @@ impl MachineManager {
             }
         }
 
-        // Update persisted state
-        let _ = self.persistence.update_state(name, MachineState::Running);
-        let _ = self.persistence.update_ip(name, None);
+        // Update persisted state (single read-modify-write)
+        if let Err(e) = self.persistence.update(name, |m| {
+            m.state = MachineState::Running.into();
+            m.ip_address = None;
+        }) {
+            tracing::warn!("Failed to persist state for machine '{}': {}", name, e);
+        }
 
         // For machine VMs, wait for agent readiness and discover IP.
         if is_machine_vm {
@@ -456,7 +480,13 @@ impl MachineManager {
                                             machine.ip_address = Some(ip.clone());
                                         }
                                     }
-                                    let _ = self.persistence.update_ip(name, Some(&ip));
+                                    if let Err(e) = self.persistence.update_ip(name, Some(&ip)) {
+                                        tracing::warn!(
+                                            "Failed to persist IP for machine '{}': {}",
+                                            name,
+                                            e
+                                        );
+                                    }
 
                                     tracing::info!(
                                         "Machine '{}' ready with IP {} (attempt {})",
@@ -744,7 +774,13 @@ impl MachineManager {
         machine.cid = None;
 
         // Update persisted state
-        let _ = self.persistence.update_state(name, MachineState::Stopped);
+        if let Err(e) = self.persistence.update_state(name, MachineState::Stopped) {
+            tracing::warn!(
+                "Failed to persist stopped state for machine '{}': {}",
+                name,
+                e
+            );
+        }
 
         Ok(())
     }
@@ -787,7 +823,13 @@ impl MachineManager {
                 machine.state = MachineState::Stopped;
                 machine.cid = None;
 
-                let _ = self.persistence.update_state(name, MachineState::Stopped);
+                if let Err(e) = self.persistence.update_state(name, MachineState::Stopped) {
+                    tracing::warn!(
+                        "Failed to persist stopped state for machine '{}': {}",
+                        name,
+                        e
+                    );
+                }
                 Ok(true)
             }
             Ok(false) => {
@@ -872,7 +914,9 @@ impl MachineManager {
         machines.remove(name);
 
         // Remove persisted config (removes entire machine directory including SSH keys).
-        let _ = self.persistence.remove(name);
+        // This must succeed — if it doesn't, the machine will reappear on daemon
+        // restart even though VM and in-memory state are already gone.
+        self.persistence.remove(name)?;
 
         tracing::info!("Removed machine '{}'", name);
         Ok(())

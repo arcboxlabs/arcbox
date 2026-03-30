@@ -41,13 +41,13 @@ arcbox-dns = { workspace = true }
 arcbox-helper = { workspace = true }
 arcbox-migration = { path = "../arcbox-migration" }
 libc = { workspace = true }
+tempfile = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 ifbridge = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-tempfile = "3"
 
 [features]
 default = []

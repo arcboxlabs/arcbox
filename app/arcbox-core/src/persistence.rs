@@ -7,6 +7,7 @@ use crate::machine::{MachineInfo, MachineState};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 
 /// Persisted machine data.
@@ -138,6 +139,30 @@ impl From<&MachineInfo> for PersistedMachine {
     }
 }
 
+/// Writes `data` to `path` atomically via write-to-temp-then-rename.
+///
+/// A process crash or panic during the write leaves either the old file
+/// or the new file intact — never a truncated/partial file.  This does
+/// **not** call `fsync`; durability across power loss is not guaranteed.
+fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| CoreError::Machine("config path has no parent directory".to_string()))?;
+
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    tmp.write_all(data)?;
+    tmp.flush()?;
+    tmp.persist(path).map_err(|e| {
+        CoreError::Machine(format!(
+            "failed to persist temp file to {}: {}",
+            path.display(),
+            e
+        ))
+    })?;
+
+    Ok(())
+}
+
 /// Machine persistence manager.
 pub struct MachinePersistence {
     /// Base directory for machine configs.
@@ -175,7 +200,7 @@ impl MachinePersistence {
         let content = toml::to_string_pretty(&persisted)
             .map_err(|e| CoreError::Machine(format!("Failed to serialize config: {e}")))?;
 
-        fs::write(self.config_path(&machine.name), content)?;
+        atomic_write(&self.config_path(&machine.name), content.as_bytes())?;
 
         tracing::debug!("Saved machine config: {}", machine.name);
         Ok(())
@@ -239,15 +264,9 @@ impl MachinePersistence {
     ///
     /// Returns an error if the state cannot be updated.
     pub fn update_state(&self, name: &str, state: MachineState) -> Result<()> {
-        let mut machine = self.load(name)?;
-        machine.state = state.into();
-
-        let content = toml::to_string_pretty(&machine)
-            .map_err(|e| CoreError::Machine(format!("Failed to serialize config: {e}")))?;
-
-        fs::write(self.config_path(name), content)?;
-
-        Ok(())
+        self.update(name, |machine| {
+            machine.state = state.into();
+        })
     }
 
     /// Updates the IP address of a persisted machine.
@@ -256,13 +275,25 @@ impl MachinePersistence {
     ///
     /// Returns an error if the IP cannot be updated.
     pub fn update_ip(&self, name: &str, ip: Option<&str>) -> Result<()> {
+        self.update(name, |machine| {
+            machine.ip_address = ip.map(ToString::to_string);
+        })
+    }
+
+    /// Applies a mutation to a persisted machine config in a single
+    /// load→mutate→write cycle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the config cannot be loaded or written.
+    pub fn update(&self, name: &str, mutate: impl FnOnce(&mut PersistedMachine)) -> Result<()> {
         let mut machine = self.load(name)?;
-        machine.ip_address = ip.map(ToString::to_string);
+        mutate(&mut machine);
 
         let content = toml::to_string_pretty(&machine)
             .map_err(|e| CoreError::Machine(format!("Failed to serialize config: {e}")))?;
 
-        fs::write(self.config_path(name), content)?;
+        atomic_write(&self.config_path(name), content.as_bytes())?;
 
         Ok(())
     }
@@ -375,5 +406,94 @@ mod tests {
 
         persistence.remove("test-vm").unwrap();
         assert!(persistence.load("test-vm").is_err());
+    }
+
+    #[test]
+    fn test_update_batches_mutations() {
+        let temp = TempDir::new().unwrap();
+        let persistence = MachinePersistence::new(temp.path());
+
+        let info = MachineInfo {
+            name: "test-vm".to_string(),
+            state: MachineState::Created,
+            vm_id: VmId::new(),
+            cpus: 2,
+            memory_mb: 2048,
+            disk_gb: 20,
+            kernel: None,
+            cmdline: None,
+            block_devices: Vec::new(),
+            distro: None,
+            distro_version: None,
+            disk_path: None,
+            ssh_key_path: None,
+            ip_address: None,
+            cid: None,
+            created_at: Utc::now(),
+        };
+
+        persistence.save(&info).unwrap();
+
+        // Single update call sets both state and IP.
+        persistence
+            .update("test-vm", |m| {
+                m.state = PersistedState::Running;
+                m.ip_address = Some("10.0.2.15".to_string());
+            })
+            .unwrap();
+
+        let loaded = persistence.load("test-vm").unwrap();
+        assert_eq!(loaded.state, PersistedState::Running);
+        assert_eq!(loaded.ip_address.as_deref(), Some("10.0.2.15"));
+    }
+
+    #[test]
+    fn test_needs_recovery_detects_interrupted_running() {
+        assert!(PersistedState::Running.needs_recovery());
+        assert!(!PersistedState::Stopped.needs_recovery());
+        assert!(!PersistedState::Created.needs_recovery());
+    }
+
+    #[test]
+    fn test_persisted_running_maps_to_stopped_on_reload() {
+        let temp = TempDir::new().unwrap();
+        let persistence = MachinePersistence::new(temp.path());
+
+        let info = MachineInfo {
+            name: "crash-vm".to_string(),
+            state: MachineState::Running,
+            vm_id: VmId::new(),
+            cpus: 2,
+            memory_mb: 2048,
+            disk_gb: 20,
+            kernel: None,
+            cmdline: None,
+            block_devices: Vec::new(),
+            distro: None,
+            distro_version: None,
+            disk_path: None,
+            ssh_key_path: None,
+            ip_address: Some("10.0.2.15".to_string()),
+            cid: None,
+            created_at: Utc::now(),
+        };
+        persistence.save(&info).unwrap();
+
+        // Simulate daemon restart: load and check recovery flag.
+        let loaded = persistence.load("crash-vm").unwrap();
+        assert_eq!(loaded.state, PersistedState::Running);
+        assert!(loaded.state.needs_recovery());
+
+        // After recovery, MachineState maps Running → Stopped.
+        let state: MachineState = loaded.state.into();
+        assert_eq!(state, MachineState::Stopped);
+
+        // Correcting the persisted state should stick.
+        persistence
+            .update_state("crash-vm", MachineState::Stopped)
+            .unwrap();
+        let reloaded = persistence.load("crash-vm").unwrap();
+        assert_eq!(reloaded.state, PersistedState::Stopped);
+        assert!(!reloaded.state.needs_recovery());
     }
 }
