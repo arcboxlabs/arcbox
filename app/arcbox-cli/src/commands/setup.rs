@@ -162,7 +162,8 @@ async fn install(format: OutputFormat) -> Result<()> {
                 }))?
             );
         }
-        OutputFormat::Table | OutputFormat::Quiet => {
+        OutputFormat::Quiet => {}
+        OutputFormat::Table => {
             println!("ArcBox CLI Setup");
             println!("================");
             println!();
@@ -213,7 +214,8 @@ async fn uninstall(format: OutputFormat) -> Result<()> {
                 }))?
             );
         }
-        OutputFormat::Table | OutputFormat::Quiet => {
+        OutputFormat::Quiet => {}
+        OutputFormat::Table => {
             println!("ArcBox CLI shell integration removed.");
             if let Some(ref p) = removed_from {
                 println!("  Cleaned profile: {}", p.display());
@@ -290,7 +292,8 @@ async fn status(format: OutputFormat) -> Result<()> {
             };
             println!("{}", serde_json::to_string(&output)?);
         }
-        OutputFormat::Table | OutputFormat::Quiet => {
+        OutputFormat::Quiet => {}
+        OutputFormat::Table => {
             println!("ArcBox CLI Setup Status");
             println!("=======================");
             println!();
