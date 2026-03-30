@@ -152,7 +152,12 @@ fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<()> {
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
     tmp.write_all(data)?;
     tmp.flush()?;
-    tmp.persist(path).map_err(|e| e.error)?;
+    tmp.persist(path).map_err(|e| {
+        std::io::Error::new(
+            e.error.kind(),
+            format!("failed to persist to '{}': {}", path.display(), e.error),
+        )
+    })?;
 
     Ok(())
 }
