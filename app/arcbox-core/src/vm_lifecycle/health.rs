@@ -7,11 +7,12 @@ use tokio_util::sync::CancellationToken;
 
 /// Health monitor for VM.
 ///
-/// Continuously monitors VM health via agent ping.
-/// Reports failures after consecutive failures exceed threshold.
-#[allow(dead_code)]
+/// Tracks consecutive health-check failures and signals when the
+/// threshold is exceeded.  The monitoring loop itself is not yet
+/// implemented — `interval` is stored for future use.
 pub struct HealthMonitor {
-    /// Health check interval.
+    /// Health check interval (reserved for the future monitoring loop).
+    #[allow(dead_code)]
     interval: Duration,
     /// Maximum consecutive failures before reporting unhealthy.
     max_failures: u32,

@@ -67,7 +67,8 @@ impl RecoveryPolicy {
         let delay = match &self.backoff {
             BackoffStrategy::Fixed(d) => *d,
             BackoffStrategy::Exponential { initial, max } => {
-                let delay = *initial * 2u32.pow(retries);
+                let multiplier = 1u32.checked_shl(retries).unwrap_or(u32::MAX);
+                let delay = initial.saturating_mul(multiplier);
                 delay.min(*max)
             }
         };
