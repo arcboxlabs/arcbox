@@ -377,13 +377,48 @@ impl VmManager {
         Ok(())
     }
 
-    /// Attempts graceful VM shutdown via guest ACPI stop request.
+    /// Attempts graceful VM shutdown via vsock shutdown RPC.
+    ///
+    /// Sends a shutdown command to the guest agent, then waits for the VM to
+    /// reach the Stopped state (triggered by PSCI SYSTEM_OFF after the guest
+    /// completes its teardown).
     ///
     /// Returns `Ok(true)` if the VM stopped, `Ok(false)` if graceful shutdown
-    /// timed out or is unavailable.
+    /// timed out or the agent was unreachable.
     pub fn graceful_stop(&self, id: &VmId, timeout: Duration) -> Result<bool> {
-        // Take the Vmm out under write lock so the blocking request_stop()
-        // call below doesn't hold the lock for up to `timeout`.
+        // Pre-check: determine whether to send the shutdown RPC based on
+        // current state. Only Running VMs accept vsock connections.
+        let should_send_rpc = {
+            let vms = self.vms.read().map_err(|_| CoreError::LockPoisoned)?;
+            let entry = vms
+                .get(id)
+                .ok_or_else(|| CoreError::not_found(id.to_string()))?;
+            match entry.info.state {
+                MachineState::Running => true,
+                MachineState::Stopping => false,
+                MachineState::Stopped => return Ok(true),
+                other => {
+                    return Err(CoreError::invalid_state(format!(
+                        "cannot stop VM in state {:?}",
+                        other
+                    )));
+                }
+            }
+        };
+
+        // Phase 1: Send shutdown RPC while VM is still Running and VMM is in
+        // the entry. connect_vsock requires Running state.
+        if should_send_rpc {
+            if let Err(e) =
+                self.send_shutdown_rpc(id, arcbox_constants::timeouts::GUEST_SHUTDOWN_GRACE_SECS)
+            {
+                tracing::warn!("Shutdown RPC failed for VM {id}: {e}, cannot gracefully stop");
+                return Ok(false);
+            }
+        }
+
+        // Phase 2: Take VMM out under write lock so the blocking wait below
+        // doesn't hold the lock for up to `timeout`.
         let vmm = {
             let mut vms = self.vms.write().map_err(|_| CoreError::LockPoisoned)?;
 
@@ -391,7 +426,13 @@ impl VmManager {
                 .get_mut(id)
                 .ok_or_else(|| CoreError::not_found(id.to_string()))?;
 
-            if entry.info.state != MachineState::Running {
+            if !matches!(
+                entry.info.state,
+                MachineState::Running | MachineState::Stopping
+            ) {
+                if entry.info.state == MachineState::Stopped {
+                    return Ok(true);
+                }
                 return Err(CoreError::invalid_state(format!(
                     "cannot stop VM in state {:?}",
                     entry.info.state
@@ -405,8 +446,8 @@ impl VmManager {
                 .ok_or_else(|| CoreError::invalid_state("VMM not initialized"))?
         };
 
-        // No lock held — this may block for the full timeout duration.
-        let stop_result = vmm.request_stop(timeout).map_err(CoreError::from);
+        // Phase 3: Wait for VM to reach Stopped state (PSCI will trigger this).
+        let stop_result = vmm.wait_for_stopped(timeout).map_err(CoreError::from);
 
         // Re-acquire to update final state. The entry may have been removed
         // by a concurrent force_stop while the lock was released — if so,
@@ -462,6 +503,80 @@ impl VmManager {
                 stop_result.map(|_| false)
             }
         }
+    }
+
+    /// Sends a shutdown RPC to the guest agent over vsock.
+    ///
+    /// Uses synchronous I/O on the raw vsock fd so this can be called from
+    /// a non-async context. The response is read but its content is not
+    /// checked — what matters is that the agent accepted the request and
+    /// will power off the VM via PSCI.
+    fn send_shutdown_rpc(&self, id: &VmId, timeout_seconds: u32) -> Result<()> {
+        use arcbox_constants::ports::AGENT_PORT;
+        use arcbox_constants::wire::MessageType;
+        use prost::Message;
+
+        let fd = self.connect_vsock(id, AGENT_PORT)?;
+
+        // Build the shutdown request wire frame.
+        let req = arcbox_protocol::ShutdownRequest { timeout_seconds };
+        let payload = req.encode_to_vec();
+        let frame = crate::AgentClient::build_message(MessageType::ShutdownRequest, "", &payload);
+
+        // Send the request frame.
+        let written = {
+            let ptr = frame.as_ref().as_ptr().cast::<libc::c_void>();
+            let len = frame.len();
+            // SAFETY: fd is a valid connected vsock fd from connect_vsock.
+            // ptr/len describe a valid byte slice.
+            let n = unsafe { libc::write(fd, ptr, len) };
+            if n < 0 {
+                // SAFETY: closing a valid fd.
+                unsafe { libc::close(fd) };
+                return Err(CoreError::Vm(format!(
+                    "vsock write failed: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            n as usize
+        };
+        if written != frame.len() {
+            // SAFETY: closing a valid fd.
+            unsafe { libc::close(fd) };
+            return Err(CoreError::Vm("vsock short write".to_string()));
+        }
+
+        // Wait for the response with a 2s timeout.
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: pfd is a valid, initialized pollfd struct; fd is a valid connected fd.
+        let poll_ret = unsafe { libc::poll(&raw mut pfd, 1, 2000) };
+        if poll_ret <= 0 {
+            // SAFETY: closing a valid fd.
+            unsafe { libc::close(fd) };
+            return if poll_ret == 0 {
+                Err(CoreError::Vm("shutdown RPC response timed out".to_string()))
+            } else {
+                Err(CoreError::Vm(format!(
+                    "vsock poll failed: {}",
+                    std::io::Error::last_os_error()
+                )))
+            };
+        }
+
+        // Read the response — we only care that it arrived, not its content.
+        let mut buf = [0u8; 256];
+        // SAFETY: fd is a valid connected fd, buf is a valid mutable slice.
+        let _ = unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
+
+        // SAFETY: closing a valid fd.
+        unsafe { libc::close(fd) };
+
+        tracing::info!("Shutdown RPC sent to VM {id}");
+        Ok(())
     }
 
     /// Marks a running VM as stopped without invoking hypervisor stop.

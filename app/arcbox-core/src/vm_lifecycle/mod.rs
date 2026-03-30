@@ -949,10 +949,10 @@ impl VmLifecycleManager {
         self.health_monitor.stop();
 
         // Stop the machine (graceful first, then force-stop fallback).
-        let stop_result = match self
-            .machine_manager
-            .graceful_stop(DEFAULT_MACHINE_NAME, Duration::from_secs(30))
-        {
+        let stop_result = match self.machine_manager.graceful_stop(
+            DEFAULT_MACHINE_NAME,
+            Duration::from_secs(arcbox_constants::timeouts::HOST_SHUTDOWN_TIMEOUT_SECS),
+        ) {
             Ok(true) => Ok(()),
             Ok(false) => {
                 tracing::warn!(

@@ -137,8 +137,8 @@ impl Vmm {
         Ok(())
     }
 
-    /// Requests graceful stop on Linux (not yet supported).
-    pub fn request_stop(&self, _timeout: Duration) -> Result<bool> {
+    /// Waits for the guest VM to reach the Stopped state (not yet supported on Linux).
+    pub fn wait_for_stopped(&self, _timeout: Duration) -> Result<bool> {
         Ok(false)
     }
 

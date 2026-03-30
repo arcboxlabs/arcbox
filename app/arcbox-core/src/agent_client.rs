@@ -120,7 +120,7 @@ impl AgentClient {
     /// | Length (4B BE) | Type (4B BE)   | TraceLen (2B BE) | TraceID bytes  | Payload
     /// +----------------+----------------+------------------+----------------+
     /// ```
-    fn build_message(msg_type: MessageType, trace_id: &str, payload: &[u8]) -> Bytes {
+    pub(crate) fn build_message(msg_type: MessageType, trace_id: &str, payload: &[u8]) -> Bytes {
         let trace_bytes = trace_id.as_bytes();
         let trace_len = trace_bytes.len().min(u16::MAX as usize);
         // Length = type(4) + trace_len_field(2) + trace_bytes + payload

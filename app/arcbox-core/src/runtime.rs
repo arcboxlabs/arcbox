@@ -482,10 +482,10 @@ impl Runtime {
         for machine in machines {
             if machine.state == MachineState::Running && machine.name != DEFAULT_MACHINE_NAME {
                 tracing::debug!("Stopping machine {}", machine.name);
-                let stopped_gracefully = match self
-                    .machine_manager
-                    .graceful_stop(&machine.name, Duration::from_secs(30))
-                {
+                let stopped_gracefully = match self.machine_manager.graceful_stop(
+                    &machine.name,
+                    Duration::from_secs(arcbox_constants::timeouts::HOST_SHUTDOWN_TIMEOUT_SECS),
+                ) {
                     Ok(true) => true,
                     Ok(false) => {
                         tracing::warn!(

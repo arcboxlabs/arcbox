@@ -24,6 +24,7 @@ pub enum MessageType {
     KubernetesDeleteRequest = 0x0007,
     KubernetesStatusRequest = 0x0008,
     KubernetesKubeconfigRequest = 0x0009,
+    ShutdownRequest = 0x000A,
 
     // Sandbox CRUD request types (0x0020 - 0x0024).
     SandboxCreateRequest = 0x0020,
@@ -56,6 +57,7 @@ pub enum MessageType {
     KubernetesDeleteResponse = 0x1007,
     KubernetesStatusResponse = 0x1008,
     KubernetesKubeconfigResponse = 0x1009,
+    ShutdownResponse = 0x100A,
     PortBindingsChanged = 0x1030,
     PortBindingsRemoved = 0x1031,
 
@@ -96,6 +98,7 @@ impl MessageType {
             0x0007 => Some(Self::KubernetesDeleteRequest),
             0x0008 => Some(Self::KubernetesStatusRequest),
             0x0009 => Some(Self::KubernetesKubeconfigRequest),
+            0x000A => Some(Self::ShutdownRequest),
             // Sandbox CRUD requests.
             0x0020 => Some(Self::SandboxCreateRequest),
             0x0021 => Some(Self::SandboxStopRequest),
@@ -122,6 +125,7 @@ impl MessageType {
             0x1007 => Some(Self::KubernetesDeleteResponse),
             0x1008 => Some(Self::KubernetesStatusResponse),
             0x1009 => Some(Self::KubernetesKubeconfigResponse),
+            0x100A => Some(Self::ShutdownResponse),
             0x1030 => Some(Self::PortBindingsChanged),
             0x1031 => Some(Self::PortBindingsRemoved),
             // Sandbox CRUD responses.
@@ -196,6 +200,7 @@ mod tests {
             (0x0007, MessageType::KubernetesDeleteRequest),
             (0x0008, MessageType::KubernetesStatusRequest),
             (0x0009, MessageType::KubernetesKubeconfigRequest),
+            (0x000A, MessageType::ShutdownRequest),
             (0x1001, MessageType::PingResponse),
             (0x1002, MessageType::GetSystemInfoResponse),
             (0x1003, MessageType::EnsureRuntimeResponse),
@@ -205,6 +210,7 @@ mod tests {
             (0x1007, MessageType::KubernetesDeleteResponse),
             (0x1008, MessageType::KubernetesStatusResponse),
             (0x1009, MessageType::KubernetesKubeconfigResponse),
+            (0x100A, MessageType::ShutdownResponse),
             (0x1030, MessageType::PortBindingsChanged),
             (0x1031, MessageType::PortBindingsRemoved),
             (0x0000, MessageType::Empty),

@@ -24,9 +24,10 @@ pub async fn run(ctx: DaemonContext, mut handles: ServiceHandles) -> Result<()> 
 
     drain(&mut handles).await;
 
-    // runtime.shutdown() calls graceful_stop() which blocks synchronously,
-    // so it must run in a separate task — otherwise select! can't poll the
-    // signal branch while the blocking call holds the current task.
+    // runtime.shutdown() calls graceful_stop() which sends a vsock shutdown
+    // RPC and blocks waiting for the VM to stop. It must run in a separate
+    // task — otherwise select! can't poll the signal branch while the
+    // blocking call holds the current task.
     let forced = if let Some(runtime) = ctx.shared_runtime.get() {
         let runtime = runtime.clone();
         let shutdown_task = tokio::spawn(async move { runtime.shutdown().await });
@@ -62,8 +63,8 @@ pub async fn run(ctx: DaemonContext, mut handles: ServiceHandles) -> Result<()> 
     info!("ArcBox daemon stopped");
 
     if forced {
-        // The spawned graceful shutdown task is still blocked in the sync
-        // request_stop() call (no locks held, but still occupies a tokio
+        // The spawned graceful shutdown task may still be blocked waiting
+        // for the VM to stop (no locks held, but still occupies a tokio
         // worker thread). process::exit avoids hanging in runtime drop.
         std::process::exit(0);
     }

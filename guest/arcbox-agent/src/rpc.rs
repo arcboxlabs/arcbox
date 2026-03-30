@@ -19,7 +19,7 @@ use arcbox_protocol::agent::{
     KubernetesStatusRequest, KubernetesStatusResponse, KubernetesStopRequest,
     KubernetesStopResponse, PingRequest, PingResponse, PortBindingsChanged, PortBindingsRemoved,
     RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse,
-    SystemInfo,
+    ShutdownRequest, ShutdownResponse, SystemInfo,
 };
 
 /// Agent version string.
@@ -76,6 +76,7 @@ pub enum RpcRequest {
     DeleteKubernetes(KubernetesDeleteRequest),
     KubernetesStatus(KubernetesStatusRequest),
     KubernetesKubeconfig(KubernetesKubeconfigRequest),
+    Shutdown(ShutdownRequest),
 }
 
 /// RPC response envelope.
@@ -90,6 +91,7 @@ pub enum RpcResponse {
     KubernetesDelete(KubernetesDeleteResponse),
     KubernetesStatus(KubernetesStatusResponse),
     KubernetesKubeconfig(KubernetesKubeconfigResponse),
+    Shutdown(ShutdownResponse),
     Empty,
     PortBindingsChanged(PortBindingsChanged),
     PortBindingsRemoved(PortBindingsRemoved),
@@ -109,6 +111,7 @@ impl RpcResponse {
             Self::KubernetesDelete(_) => MessageType::KubernetesDeleteResponse,
             Self::KubernetesStatus(_) => MessageType::KubernetesStatusResponse,
             Self::KubernetesKubeconfig(_) => MessageType::KubernetesKubeconfigResponse,
+            Self::Shutdown(_) => MessageType::ShutdownResponse,
             Self::Empty => MessageType::Empty,
             Self::PortBindingsChanged(_) => MessageType::PortBindingsChanged,
             Self::PortBindingsRemoved(_) => MessageType::PortBindingsRemoved,
@@ -128,6 +131,7 @@ impl RpcResponse {
             Self::KubernetesDelete(msg) => msg.encode_to_vec(),
             Self::KubernetesStatus(msg) => msg.encode_to_vec(),
             Self::KubernetesKubeconfig(msg) => msg.encode_to_vec(),
+            Self::Shutdown(msg) => msg.encode_to_vec(),
             Self::Empty => Empty::default().encode_to_vec(),
             Self::PortBindingsChanged(msg) => msg.encode_to_vec(),
             Self::PortBindingsRemoved(msg) => msg.encode_to_vec(),
@@ -291,6 +295,10 @@ pub fn parse_request(msg_type: MessageType, payload: &[u8]) -> Result<RpcRequest
             let req = KubernetesKubeconfigRequest::decode(payload)?;
             Ok(RpcRequest::KubernetesKubeconfig(req))
         }
+        MessageType::ShutdownRequest => {
+            let req = ShutdownRequest::decode(payload)?;
+            Ok(RpcRequest::Shutdown(req))
+        }
         _ => anyhow::bail!("unexpected message type: {:?}", msg_type),
     }
 }
@@ -374,6 +382,20 @@ mod tests {
         match parsed {
             RpcRequest::Ping(p) => assert_eq!(p.message, "ping"),
             _ => panic!("Expected Ping request"),
+        }
+    }
+
+    #[test]
+    fn test_parse_request_shutdown() {
+        let req = ShutdownRequest {
+            timeout_seconds: 10,
+        };
+        let payload = req.encode_to_vec();
+
+        let parsed = parse_request(MessageType::ShutdownRequest, &payload).unwrap();
+        match parsed {
+            RpcRequest::Shutdown(s) => assert_eq!(s.timeout_seconds, 10),
+            _ => panic!("Expected Shutdown request"),
         }
     }
 }

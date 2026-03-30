@@ -121,14 +121,6 @@ impl VirtualMachine {
         unsafe { msg_send_bool!(self.inner, canResume).as_bool() }
     }
 
-    /// Returns whether a stop can be requested.
-    #[must_use]
-    pub fn can_request_stop(&self) -> bool {
-        self.queue
-            // SAFETY: Sending canRequestStop to a valid VZVirtualMachine on its dispatch queue.
-            .sync(|| unsafe { msg_send_bool!(self.inner, canRequestStop).as_bool() })
-    }
-
     /// Starts the virtual machine.
     ///
     /// This is an async operation that completes when the VM reaches
@@ -438,30 +430,6 @@ impl VirtualMachine {
         }
 
         Ok(())
-    }
-
-    /// Requests the guest OS to stop.
-    ///
-    /// This sends a request to the guest OS to stop gracefully.
-    /// The guest may ignore this request.
-    pub fn request_stop(&self) -> VZResult<()> {
-        if !self.can_request_stop() {
-            return Err(VZError::InvalidState {
-                expected: "can_request_stop=true".into(),
-                actual: format!("state={:?}", self.state()),
-            });
-        }
-
-        // SAFETY: Sending requestStopWithError: to a valid VZVirtualMachine on its dispatch queue.
-        self.queue.sync(|| unsafe {
-            let mut error: *mut AnyObject = std::ptr::null_mut();
-            let result = msg_send_bool!(self.inner, requestStopWithError: &mut error);
-            if result.as_bool() {
-                Ok(())
-            } else {
-                Err(extract_nserror(error))
-            }
-        })
     }
 
     /// Returns the socket devices configured on this VM.

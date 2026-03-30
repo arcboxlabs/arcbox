@@ -331,33 +331,14 @@ impl DarwinVm {
         }
     }
 
-    /// Sends ACPI power button to guest and waits for shutdown.
+    /// Waits for the VM to reach the Stopped state within `timeout`.
     ///
-    /// Returns `Ok(true)` if the VM reached `Stopped`, `Ok(false)` if graceful
-    /// shutdown is unsupported or did not complete within `timeout`.
-    pub fn request_stop_and_wait(&self, timeout: Duration) -> Result<bool, HypervisorError> {
-        let vm = self
-            .vz_vm
-            .as_ref()
-            .ok_or_else(|| HypervisorError::VmError("No VZ VM instance".to_string()))?;
-
-        if !vm.can_request_stop() {
-            tracing::debug!("VM {} cannot request graceful stop", self.id);
-            return Ok(false);
-        }
-
-        vm.request_stop()
-            .map_err(|e| HypervisorError::VmError(format!("Failed to request VM stop: {e}")))?;
-
+    /// Returns `Ok(true)` if stopped, `Ok(false)` on timeout.
+    pub fn wait_for_stopped(&self, timeout: Duration) -> Result<bool, HypervisorError> {
         match self.wait_for_state(VirtualMachineState::Stopped, timeout) {
             Ok(()) => Ok(true),
             Err(e) => {
-                tracing::warn!(
-                    "VM {} did not stop gracefully within {:?}: {}",
-                    self.id,
-                    timeout,
-                    e
-                );
+                tracing::warn!("VM {} did not stop within {:?}: {}", self.id, timeout, e);
                 Ok(false)
             }
         }
@@ -1151,10 +1132,11 @@ impl VirtualMachine for DarwinVm {
                         }
                     }
                 } else {
-                    // No runtime available, try graceful request_stop
-                    if let Err(e) = vm.request_stop() {
-                        tracing::warn!("VM {} request_stop failed: {}", self.id, e);
-                    }
+                    // Guest shutdown is handled by the vsock shutdown RPC at
+                    // the VmManager layer. Without a tokio runtime we cannot
+                    // call the async VZ stop — the VM will be force-stopped
+                    // by process exit.
+                    tracing::debug!("VM {} no tokio runtime for async stop", self.id);
                 }
 
                 // Wait for VM to reach Stopped state
