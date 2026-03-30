@@ -78,7 +78,7 @@ async fn cleanup(ctx: &DaemonContext) {
     }
 
     if ctx.docker_integration {
-        if let Ok(ctx_manager) = DockerContextManager::new(ctx.socket_path.clone()) {
+        if let Ok(ctx_manager) = DockerContextManager::new(ctx.layout.docker_socket.clone()) {
             let _ = ctx_manager.disable();
         }
     }
@@ -87,7 +87,7 @@ async fn cleanup(ctx: &DaemonContext) {
 }
 
 fn remove_sockets(ctx: &DaemonContext) {
-    for path in [&ctx.socket_path, &ctx.grpc_socket] {
+    for path in [&ctx.layout.docker_socket, &ctx.layout.grpc_socket] {
         if let Err(e) = std::fs::remove_file(path) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 warn!("Failed to remove socket {}: {}", path.display(), e);

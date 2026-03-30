@@ -192,13 +192,6 @@ fn file_inode(_file: &std::fs::File) -> u64 {
     0
 }
 
-// NOTE: duplicated from daemon/startup.rs — kept in sync manually because
-// arcbox-constants has zero dependencies (adding `dirs` would break that).
 fn resolve_data_dir(data_dir: Option<&PathBuf>) -> PathBuf {
-    data_dir.cloned().unwrap_or_else(|| {
-        dirs::home_dir().map_or_else(
-            || PathBuf::from("/var/lib/arcbox"),
-            |home| home.join(".arcbox"),
-        )
-    })
+    arcbox_constants::paths::HostLayout::resolve(data_dir.map(PathBuf::as_path)).data_dir
 }

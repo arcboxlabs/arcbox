@@ -15,6 +15,7 @@ use arcbox_api::{
     SystemServiceServer, kubernetes_service_server::KubernetesServiceServer,
     machine_service_server::MachineServiceServer,
 };
+use arcbox_core::Runtime;
 use arcbox_docker::{DockerApiServer, DockerContextManager, ServerConfig};
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
@@ -33,7 +34,7 @@ pub async fn start_grpc(
     ctx: &DaemonContext,
     shared_runtime: SharedRuntime,
 ) -> Result<tokio::task::JoinHandle<()>> {
-    let socket_path = &ctx.grpc_socket;
+    let socket_path = &ctx.layout.grpc_socket;
     let _ = std::fs::remove_file(socket_path);
 
     if let Some(parent) = socket_path.parent() {
@@ -82,16 +83,15 @@ pub async fn start_grpc(
 /// Called after `init_runtime()` — the runtime must be available.
 pub async fn start_services(
     ctx: &DaemonContext,
+    runtime: &Arc<Runtime>,
     grpc: tokio::task::JoinHandle<()>,
 ) -> Result<ServiceHandles> {
-    let runtime = ctx.runtime();
-
     // DNS service.
     let dns_service = DnsService::bind(Arc::clone(runtime.network_manager()), ctx.dns_port)
         .await
         .context("Failed to start DNS service")?;
 
-    register_host_dns(ctx);
+    register_host_dns(runtime);
 
     let dns_shutdown = ctx.shutdown.clone();
     let dns = tokio::spawn(async move {
@@ -103,7 +103,7 @@ pub async fn start_services(
     // Docker API server.
     let docker_server = DockerApiServer::new(
         ServerConfig {
-            socket_path: ctx.socket_path.clone(),
+            socket_path: ctx.layout.docker_socket.clone(),
         },
         Arc::clone(runtime),
     );
@@ -117,7 +117,7 @@ pub async fn start_services(
 
     // Docker CLI integration (optional).
     if ctx.docker_integration {
-        match DockerContextManager::new(ctx.socket_path.clone()) {
+        match DockerContextManager::new(ctx.layout.docker_socket.clone()) {
             Ok(ctx_manager) => {
                 if let Err(e) = ctx_manager.enable() {
                     warn!("Failed to enable Docker integration: {}", e);
@@ -146,8 +146,7 @@ pub async fn start_services(
 // Helpers
 // =============================================================================
 
-fn register_host_dns(ctx: &DaemonContext) {
-    let runtime = ctx.runtime();
+fn register_host_dns(runtime: &Arc<Runtime>) {
     let network_cfg = &runtime.config().network;
     let gateway_ip = network_cfg
         .gateway

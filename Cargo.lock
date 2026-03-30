@@ -242,6 +242,9 @@ dependencies = [
 [[package]]
 name = "arcbox-constants"
 version = "0.3.15"
+dependencies = [
+ "dirs",
+]
 
 [[package]]
 name = "arcbox-container"

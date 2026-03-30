@@ -94,13 +94,14 @@ async fn run(args: DaemonArgs) -> Result<()> {
     info!("Starting ArcBox daemon...");
 
     // Phase 1: directories, config, sockets — no runtime yet.
-    let mut ctx = startup::init_early(args).await?;
+    let early = startup::init_early(args).await?;
 
     // Acquire exclusive daemon lock. Terminates any stale daemon that
     // still holds the lock (up to ~30 s SIGTERM wait). Must complete
     // before start_grpc because the old daemon may be listening on the
-    // same socket paths.
-    startup::acquire_lock(&mut ctx).await?;
+    // same socket paths. Consumes EarlyContext, producing a
+    // DaemonContext with a guaranteed lock.
+    let ctx = startup::acquire_lock(early).await?;
 
     // Start gRPC with all services. Machine/Sandbox return UNAVAILABLE
     // until runtime is ready. SystemService works immediately so clients
@@ -116,20 +117,20 @@ async fn run(args: DaemonArgs) -> Result<()> {
 
     // Phase 2: seed/download boot assets, build runtime, start VM.
     // Progress is visible to gRPC clients via WatchSetupStatus.
-    startup::init_runtime(&ctx).await?;
+    let runtime = startup::init_runtime(&ctx).await?;
 
     // Phase 3: start remaining services that require the runtime.
-    let handles = services::start_services(&ctx, grpc).await?;
-    recovery::run(&ctx).await;
+    let handles = services::start_services(&ctx, &runtime, grpc).await?;
+    recovery::run(&ctx, &runtime).await;
 
     check_resolver_installed(&ctx.dns_domain);
     ctx.setup_state.set_phase(SetupPhase::Ready, "Daemon ready");
 
     println!("ArcBox daemon started");
-    println!("  Docker API: {}", ctx.socket_path.display());
-    println!("  gRPC API:   {}", ctx.grpc_socket.display());
+    println!("  Docker API: {}", ctx.layout.docker_socket.display());
+    println!("  gRPC API:   {}", ctx.layout.grpc_socket.display());
     println!("  DNS:        127.0.0.1:{}", ctx.dns_port);
-    println!("  Data:       {}", ctx.data_dir.display());
+    println!("  Data:       {}", ctx.layout.data_dir.display());
     println!();
     println!("Use 'arcbox docker enable' to configure Docker CLI integration.");
     println!("Press Ctrl+C to stop.");

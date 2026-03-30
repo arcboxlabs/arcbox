@@ -1,23 +1,33 @@
 //! Shared daemon state threaded through all lifecycle phases.
+//!
+//! The startup sequence produces progressively richer context types:
+//!
+//! ```text
+//! init_early()   → EarlyContext      (no lock, no runtime)
+//! acquire_lock() → DaemonContext     (lock held, no runtime yet)
+//! init_runtime() → Arc<Runtime>      (also fills SharedRuntime for gRPC)
+//! ```
+//!
+//! This encoding makes it a compile error to access the daemon lock
+//! before it has been acquired, or to skip the lock phase entirely.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use arcbox_api::{SetupState, SharedRuntime};
-use arcbox_core::Runtime;
+use arcbox_constants::paths::HostLayout;
 use tokio_util::sync::CancellationToken;
 
 use crate::startup::DaemonLock;
 
-/// Daemon-wide context created during startup, passed to all phases.
-pub struct DaemonContext {
-    pub data_dir: PathBuf,
-    pub socket_path: PathBuf,
-    pub grpc_socket: PathBuf,
-    /// Exclusive lock held for the daemon's lifetime. `None` until
-    /// [`startup::acquire_lock`] succeeds.
-    pub daemon_lock: Option<DaemonLock>,
-    /// Shared with gRPC services. Empty after `init_early`, filled by `init_runtime`.
+/// Pre-lock context returned by [`startup::init_early`].
+///
+/// Contains everything needed to start the gRPC SystemService (so
+/// clients can observe progress), but the daemon lock has not been
+/// acquired yet. Consumed by [`startup::acquire_lock`] to produce
+/// a [`DaemonContext`].
+pub struct EarlyContext {
+    pub layout: HostLayout,
     pub shared_runtime: SharedRuntime,
     pub setup_state: Arc<SetupState>,
     pub shutdown: CancellationToken,
@@ -27,13 +37,24 @@ pub struct DaemonContext {
     pub vm_args: VmArgs,
 }
 
-impl DaemonContext {
-    /// Returns the runtime. Panics if called before `init_runtime`.
-    pub fn runtime(&self) -> &Arc<Runtime> {
-        self.shared_runtime
-            .get()
-            .expect("runtime not initialized — called before init_runtime?")
-    }
+/// Daemon-wide context available after the exclusive lock is held.
+///
+/// `daemon_lock` is guaranteed to be valid — there is no construction
+/// path that skips lock acquisition.
+pub struct DaemonContext {
+    pub layout: HostLayout,
+    /// Exclusive lock held for the daemon's lifetime.
+    /// Held via RAII — the flock is released when this value drops.
+    #[allow(dead_code)] // held for drop semantics
+    pub daemon_lock: DaemonLock,
+    /// Shared with gRPC services. Empty after `acquire_lock`, filled by `init_runtime`.
+    pub shared_runtime: SharedRuntime,
+    pub setup_state: Arc<SetupState>,
+    pub shutdown: CancellationToken,
+    pub dns_domain: String,
+    pub dns_port: u16,
+    pub docker_integration: bool,
+    pub vm_args: VmArgs,
 }
 
 /// VM-related CLI arguments, deferred until `init_runtime`.

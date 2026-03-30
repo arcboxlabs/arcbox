@@ -175,7 +175,7 @@ macos-resolver = "0.2.0"
 fc-sdk = "0.2.3"
 
 # Internal crates
-arcbox-constants = { version = "0.3.15", path = "common/arcbox-constants" } # x-release-please-version
+arcbox-constants = { version = "0.3.15", path = "common/arcbox-constants", features = ["std"] } # x-release-please-version
 arcbox-dns = { version = "0.3.15", path = "common/arcbox-dns" } # x-release-please-version
 arcbox-error = { version = "0.3.15", path = "common/arcbox-error" } # x-release-please-version
 arcbox-vz = { version = "0.3.15", path = "virt/arcbox-vz" } # x-release-please-version

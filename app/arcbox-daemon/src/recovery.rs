@@ -16,18 +16,14 @@ use crate::self_setup::SetupTask as _;
 /// - Recovers DNS and port forwarding for containers that survived a daemon restart
 /// - Re-installs the container subnet route (cold-start reconcile)
 /// - Installs DNS resolver and Docker socket via helper (best-effort)
-pub async fn run(ctx: &DaemonContext) {
-    recover_container_networking(ctx.runtime(), &ctx.setup_state).await;
+pub async fn run(ctx: &DaemonContext, runtime: &Arc<Runtime>) {
+    recover_container_networking(runtime, &ctx.setup_state).await;
 
     // Cold-start route reconcile (non-blocking).
     #[cfg(target_os = "macos")]
     {
         use arcbox_core::DEFAULT_MACHINE_NAME;
-        if let Some(mac) = ctx
-            .runtime()
-            .machine_manager()
-            .bridge_mac(DEFAULT_MACHINE_NAME)
-        {
+        if let Some(mac) = runtime.machine_manager().bridge_mac(DEFAULT_MACHINE_NAME) {
             let setup_state = Arc::clone(&ctx.setup_state);
             drop(tokio::spawn(async move {
                 match arcbox_core::route_reconciler::ensure_route_with_retry(&mac).await {
@@ -46,7 +42,7 @@ pub async fn run(ctx: &DaemonContext) {
         port: ctx.dns_port,
     };
     let socket_task = self_setup::DockerSocket {
-        target: ctx.socket_path.clone(),
+        target: ctx.layout.docker_socket.clone(),
     };
 
     // Create /usr/local/bin/ symlinks for Docker CLI tools if running from
@@ -79,7 +75,7 @@ pub async fn run(ctx: &DaemonContext) {
 
     // Docker CLI tools installation (non-blocking, best-effort).
     if ctx.docker_integration {
-        let data_dir = ctx.data_dir.clone();
+        let data_dir = ctx.layout.data_dir.clone();
         let setup_state = Arc::clone(&ctx.setup_state);
         tokio::spawn(async move {
             match ensure_docker_tools(&data_dir).await {

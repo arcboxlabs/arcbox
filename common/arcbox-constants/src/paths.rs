@@ -76,6 +76,90 @@ pub mod host {
     /// Log file names (written by each component's tracing-appender).
     pub const DAEMON_LOG: &str = "daemon.log";
     pub const AGENT_LOG: &str = "agent.log";
+
+    /// Default daemon lock file name (inside `RUN`).
+    pub const DAEMON_LOCK: &str = "daemon.lock";
+    /// Default Docker API socket name (inside `RUN`).
+    pub const DOCKER_SOCKET: &str = "docker.sock";
+    /// Default gRPC API socket name (inside `RUN`).
+    pub const GRPC_SOCKET: &str = "arcbox.sock";
+}
+
+/// Resolved host-side directory layout.
+///
+/// Single source of truth for every path derived from the ArcBox data
+/// directory (`~/.arcbox` by default). Both the daemon and CLI should
+/// construct a `HostLayout` once and pass it around instead of
+/// recalculating paths independently.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone)]
+pub struct HostLayout {
+    /// Root data directory (e.g. `~/.arcbox`).
+    pub data_dir: std::path::PathBuf,
+    /// `<data_dir>/run` — sockets, PID file, lock.
+    pub run_dir: std::path::PathBuf,
+    /// `<data_dir>/log` — daemon and agent logs.
+    pub log_dir: std::path::PathBuf,
+    /// `<data_dir>/data` — persistent VM/container data.
+    pub data_subdir: std::path::PathBuf,
+    /// `<run_dir>/docker.sock`
+    pub docker_socket: std::path::PathBuf,
+    /// `<run_dir>/arcbox.sock`
+    pub grpc_socket: std::path::PathBuf,
+    /// `<run_dir>/daemon.lock`
+    pub lock_file: std::path::PathBuf,
+    /// `<log_dir>/daemon.log`
+    pub daemon_log: std::path::PathBuf,
+}
+
+#[cfg(feature = "std")]
+impl HostLayout {
+    /// Build a layout from an explicit data directory.
+    #[must_use]
+    pub fn new(data_dir: std::path::PathBuf) -> Self {
+        let run_dir = data_dir.join(host::RUN);
+        let log_dir = data_dir.join(host::LOG);
+        let data_subdir = data_dir.join(host::DATA);
+        let docker_socket = run_dir.join(host::DOCKER_SOCKET);
+        let grpc_socket = run_dir.join(host::GRPC_SOCKET);
+        let lock_file = run_dir.join(host::DAEMON_LOCK);
+        let daemon_log = log_dir.join(host::DAEMON_LOG);
+        Self {
+            data_dir,
+            run_dir,
+            log_dir,
+            data_subdir,
+            docker_socket,
+            grpc_socket,
+            lock_file,
+            daemon_log,
+        }
+    }
+
+    /// Resolve the data directory from an optional override, falling
+    /// back to `~/.arcbox` (or `/var/lib/arcbox` when `$HOME` is unset).
+    #[must_use]
+    pub fn resolve(data_dir: Option<&std::path::Path>) -> Self {
+        let data_dir = match data_dir {
+            Some(d) => d.to_path_buf(),
+            None => default_data_dir(),
+        };
+        Self::new(data_dir)
+    }
+}
+
+/// Default data directory: `~/.arcbox`, falling back to `/var/lib/arcbox`
+/// when the home directory cannot be resolved.
+///
+/// Uses `dirs::home_dir()` which handles edge cases (launchd, sudo,
+/// non-interactive shells) that raw `$HOME` does not.
+#[cfg(feature = "std")]
+#[must_use]
+pub fn default_data_dir() -> std::path::PathBuf {
+    dirs::home_dir().map_or_else(
+        || std::path::PathBuf::from("/var/lib/arcbox"),
+        |home| home.join(".arcbox"),
+    )
 }
 
 /// Privileged log directory (root-owned, for arcbox-helper).
@@ -90,4 +174,57 @@ pub mod privileged_log {
 pub mod guest {
     /// Log directory inside the VirtioFS mount.
     pub const LOG: &str = "log";
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn host_layout_new_derives_all_paths() {
+        let layout = HostLayout::new(PathBuf::from("/tmp/arcbox"));
+        assert_eq!(layout.run_dir, PathBuf::from("/tmp/arcbox/run"));
+        assert_eq!(layout.log_dir, PathBuf::from("/tmp/arcbox/log"));
+        assert_eq!(layout.data_subdir, PathBuf::from("/tmp/arcbox/data"));
+        assert_eq!(
+            layout.docker_socket,
+            PathBuf::from("/tmp/arcbox/run/docker.sock")
+        );
+        assert_eq!(
+            layout.grpc_socket,
+            PathBuf::from("/tmp/arcbox/run/arcbox.sock")
+        );
+        assert_eq!(
+            layout.lock_file,
+            PathBuf::from("/tmp/arcbox/run/daemon.lock")
+        );
+        assert_eq!(
+            layout.daemon_log,
+            PathBuf::from("/tmp/arcbox/log/daemon.log")
+        );
+    }
+
+    #[test]
+    fn host_layout_resolve_uses_explicit_dir() {
+        let dir = PathBuf::from("/custom/dir");
+        let layout = HostLayout::resolve(Some(&dir));
+        assert_eq!(layout.data_dir, dir);
+    }
+
+    #[test]
+    fn host_layout_resolve_uses_default_when_none() {
+        let layout = HostLayout::resolve(None);
+        assert_eq!(layout.data_dir, default_data_dir());
+    }
+
+    #[test]
+    fn default_data_dir_returns_home_based_path() {
+        // When HOME is set (normal dev environment), the path should
+        // end with ".arcbox" under the home directory.
+        if dirs::home_dir().is_some() {
+            let dir = default_data_dir();
+            assert!(dir.ends_with(".arcbox"));
+        }
+    }
 }

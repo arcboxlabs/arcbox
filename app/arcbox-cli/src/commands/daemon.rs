@@ -8,6 +8,7 @@
 
 use super::machine::UnixConnector;
 use anyhow::{Context, Result, bail};
+use arcbox_constants::paths::HostLayout;
 use clap::{Args, ValueEnum};
 use humantime::format_duration;
 use std::ffi::OsString;
@@ -106,20 +107,16 @@ fn exec_foreground(args: &DaemonArgs) -> Result<()> {
 }
 
 async fn execute_stop(args: &DaemonArgs) -> Result<()> {
-    let data_dir = resolve_data_dir(args.data_dir.as_ref());
-    let run_dir = data_dir.join(arcbox_constants::paths::host::RUN);
-    let lock_file = run_dir.join("daemon.lock");
-    let grpc_socket = args
-        .grpc_socket
-        .clone()
-        .unwrap_or_else(|| run_dir.join("arcbox.sock"));
+    let layout = resolve_layout(args);
+    let lock_file = &layout.lock_file;
+    let grpc_socket = &layout.grpc_socket;
 
-    if !daemon_is_alive(&lock_file) {
+    if !daemon_is_alive(lock_file) {
         println!("Daemon is not running");
         return Ok(());
     }
 
-    let Some(pid) = read_lock_file(&lock_file)? else {
+    let Some(pid) = read_lock_file(lock_file)? else {
         bail!("Daemon is alive (lock held) but lock file has no valid PID");
     };
 
@@ -129,7 +126,7 @@ async fn execute_stop(args: &DaemonArgs) -> Result<()> {
     let timeout_window = Duration::from_secs(40);
     let deadline = Instant::now() + timeout_window;
     loop {
-        let still_alive = daemon_is_alive(&lock_file);
+        let still_alive = daemon_is_alive(lock_file);
         let grpc_socket_removed = !grpc_socket.exists();
         if !still_alive && grpc_socket_removed {
             println!("ArcBox daemon stopped");
@@ -150,27 +147,20 @@ async fn execute_stop(args: &DaemonArgs) -> Result<()> {
 }
 
 async fn execute_status(args: &DaemonArgs) -> Result<()> {
-    let data_dir = resolve_data_dir(args.data_dir.as_ref());
-    let run_dir = data_dir.join(arcbox_constants::paths::host::RUN);
-    let lock_file = run_dir.join("daemon.lock");
-    let docker_socket = args
-        .socket
-        .clone()
-        .unwrap_or_else(|| run_dir.join("docker.sock"));
-    let grpc_socket = args
-        .grpc_socket
-        .clone()
-        .unwrap_or_else(|| run_dir.join("arcbox.sock"));
+    let layout = resolve_layout(args);
+    let lock_file = &layout.lock_file;
+    let docker_socket = &layout.docker_socket;
+    let grpc_socket = &layout.grpc_socket;
 
-    let running = daemon_is_alive(&lock_file);
+    let running = daemon_is_alive(lock_file);
     let pid = if running {
-        read_lock_file(&lock_file)?
+        read_lock_file(lock_file)?
     } else {
         None
     };
     let status = if running { "running" } else { "stopped" };
     let uptime = if running {
-        lock_file_uptime(&lock_file).map_or_else(
+        lock_file_uptime(lock_file).map_or_else(
             || "unknown".to_string(),
             |duration| format_duration(duration).to_string(),
         )
@@ -178,7 +168,7 @@ async fn execute_status(args: &DaemonArgs) -> Result<()> {
         "n/a".to_string()
     };
     let grpc_responsive = if running {
-        grpc_daemon_is_responsive(&grpc_socket).await
+        grpc_daemon_is_responsive(grpc_socket).await
     } else {
         false
     };
@@ -219,17 +209,13 @@ fn lock_file_uptime(lock_file: &Path) -> Option<Duration> {
 }
 
 fn spawn_background(args: &DaemonArgs) -> Result<()> {
-    let data_dir = resolve_data_dir(args.data_dir.as_ref());
-    let run_dir = data_dir.join(arcbox_constants::paths::host::RUN);
-    let log_dir = data_dir.join(arcbox_constants::paths::host::LOG);
-    let lock_file = run_dir.join("daemon.lock");
-    let log_path = log_dir.join(arcbox_constants::paths::host::DAEMON_LOG);
+    let layout = resolve_layout(args);
 
-    std::fs::create_dir_all(&run_dir).context("Failed to create daemon run directory")?;
-    std::fs::create_dir_all(&log_dir).context("Failed to create daemon log directory")?;
+    std::fs::create_dir_all(&layout.run_dir).context("Failed to create daemon run directory")?;
+    std::fs::create_dir_all(&layout.log_dir).context("Failed to create daemon log directory")?;
 
-    if daemon_is_alive(&lock_file) {
-        let pid = read_lock_file(&lock_file)?;
+    if daemon_is_alive(&layout.lock_file) {
+        let pid = read_lock_file(&layout.lock_file)?;
         let pid_str = pid.map_or_else(|| "unknown".to_string(), |p| p.to_string());
         bail!("Daemon already running (PID {pid_str})");
     }
@@ -253,12 +239,13 @@ fn spawn_background(args: &DaemonArgs) -> Result<()> {
             )
         })?;
 
-    std::fs::write(&lock_file, format!("{}\n", child.id()))
-        .context("Failed to write daemon lock file")?;
+    // The daemon acquires the flock and writes its own PID into
+    // daemon.lock (see startup::lock::DaemonLock::acquire). The CLI
+    // must not write to the lock file — it is the daemon's resource.
 
     println!("ArcBox daemon started (PID {})", child.id());
-    println!("  Lock file: {}", lock_file.display());
-    println!("  Logs:     {}", log_path.display());
+    println!("  Lock file: {}", layout.lock_file.display());
+    println!("  Logs:     {}", layout.daemon_log.display());
     Ok(())
 }
 
@@ -318,13 +305,15 @@ fn build_daemon_args(args: &DaemonArgs) -> Vec<OsString> {
     daemon_args
 }
 
-fn resolve_data_dir(data_dir: Option<&PathBuf>) -> PathBuf {
-    data_dir.cloned().unwrap_or_else(|| {
-        dirs::home_dir().map_or_else(
-            || PathBuf::from("/var/lib/arcbox"),
-            |home| home.join(".arcbox"),
-        )
-    })
+fn resolve_layout(args: &DaemonArgs) -> HostLayout {
+    let mut layout = HostLayout::resolve(args.data_dir.as_deref());
+    if let Some(socket) = &args.socket {
+        layout.docker_socket.clone_from(socket);
+    }
+    if let Some(grpc) = &args.grpc_socket {
+        layout.grpc_socket.clone_from(grpc);
+    }
+    layout
 }
 
 fn read_lock_file(lock_file: &Path) -> Result<Option<i32>> {
