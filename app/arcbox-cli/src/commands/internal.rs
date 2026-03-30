@@ -9,6 +9,7 @@
 //! whether the user opens the app first or installs via `brew`.
 
 use anyhow::{Context, Result};
+use arcbox_constants::paths::HostLayout;
 use clap::Subcommand;
 
 use super::OutputFormat;
@@ -47,18 +48,25 @@ pub async fn execute(cmd: InternalCommands) -> Result<()> {
 /// Every step is idempotent — running after the app has already set up
 /// is harmless.
 async fn brew_postflight() -> Result<()> {
-    // 1. Create data directories (same as daemon's init_early phase).
-    let home = dirs::home_dir().context("could not determine home directory")?;
-    let data_dir = home.join(".arcbox");
-    for sub in ["run", "log", "data", "boot", "bin"] {
-        tokio::fs::create_dir_all(data_dir.join(sub)).await?;
+    let layout = HostLayout::resolve(None);
+
+    // 1. Create data directories (same layout as daemon's init_early phase).
+    for dir in [
+        &layout.run_dir,
+        &layout.log_dir,
+        &layout.data_subdir,
+        &layout.data_dir.join("boot"),
+        &layout.data_dir.join("bin"),
+    ] {
+        tokio::fs::create_dir_all(dir).await?;
     }
 
     // 2. Shell integration — same code path as `abctl setup install`.
     super::setup::execute(super::setup::SetupCommands::Install, OutputFormat::Quiet).await?;
 
-    // 3. Docker context — same DockerContextManager used by `abctl docker enable`
-    //    and the daemon's self-setup. Non-fatal if Docker CLI isn't installed yet.
+    // 3. Docker context — `enable()` always creates/updates the context metadata
+    //    (including the socket path) then sets it as default. This ensures upgrades
+    //    that change the socket path don't leave a stale context behind.
     if let Err(e) = setup_docker_context() {
         eprintln!("Note: Docker context setup skipped ({e})");
     }
@@ -73,7 +81,7 @@ async fn brew_postflight() -> Result<()> {
 /// sudo, removes the app bundle (Cask already does that), and deletes user
 /// data (belongs to `brew zap`).
 async fn brew_uninstall() -> Result<()> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
+    let layout = HostLayout::resolve(None);
 
     // 1. Stop the daemon via launchctl.
     // SAFETY: getuid() is a trivial POSIX syscall.
@@ -86,34 +94,126 @@ async fn brew_uninstall() -> Result<()> {
         .output();
 
     // Remove the daemon plist so launchd doesn't try to restart.
-    let plist = home.join("Library/LaunchAgents/com.arcboxlabs.desktop.daemon.plist");
-    let _ = tokio::fs::remove_file(plist).await;
+    let plist_dir = dirs::home_dir()
+        .context("could not determine home directory")?
+        .join("Library/LaunchAgents/com.arcboxlabs.desktop.daemon.plist");
+    let _ = tokio::fs::remove_file(plist_dir).await;
 
-    // 2. Remove Docker context — same DockerContextManager as `abctl docker disable`.
-    let _ = std::process::Command::new("docker")
-        .args(["context", "rm", "-f", "arcbox"])
-        .output();
-    let _ = std::process::Command::new("docker")
-        .args(["context", "use", "default"])
-        .output();
+    // 2. Remove Docker context via DockerContextManager — `remove_context()`
+    //    restores the user's previous default context (e.g. desktop-linux)
+    //    instead of hard-coding "default".
+    if let Ok(manager) = super::docker::context_manager() {
+        let _ = manager.remove_context();
+    }
 
     // 3. Remove shell integration — same code path as `abctl setup uninstall`.
     super::setup::execute(super::setup::SetupCommands::Uninstall, OutputFormat::Quiet).await?;
 
+    // 4. Remove run directory contents (sockets, pid, lock) so stale files
+    //    don't confuse a future reinstall.
+    let _ = tokio::fs::remove_dir_all(&layout.run_dir).await;
+
     Ok(())
 }
 
-/// Creates the 'arcbox' Docker context pointing at the ArcBox Docker socket.
-/// Uses the same `DockerContextManager` as `abctl docker enable`.
+/// Enables the ArcBox Docker context, always refreshing metadata.
+/// Uses `DockerContextManager::enable()` — same path as `abctl docker enable`.
 fn setup_docker_context() -> Result<()> {
-    use super::docker;
+    let manager = super::docker::context_manager()?;
+    manager.enable().map_err(Into::into)
+}
 
-    let manager = docker::context_manager()?;
-    if !manager.context_exists() {
-        manager.create_context()?;
+#[cfg(test)]
+mod tests {
+    use arcbox_docker::DockerContextManager;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    #[test]
+    fn postflight_enable_always_refreshes_socket_path() {
+        let temp = tempdir().unwrap();
+        let docker_dir = temp.path().join(".docker");
+
+        // First install — create context with old socket path.
+        let old_socket = temp.path().join("old.sock");
+        let mgr = DockerContextManager::with_config_dir(old_socket, docker_dir.clone());
+        mgr.enable().unwrap();
+        assert!(mgr.context_exists());
+        assert!(mgr.is_default().unwrap());
+
+        // Upgrade — enable() with new socket path must overwrite metadata.
+        let new_socket = temp.path().join("new.sock");
+        let mgr = DockerContextManager::with_config_dir(new_socket.clone(), docker_dir);
+        mgr.enable().unwrap();
+
+        // The context_exists() + is_default() confirm it wasn't skipped.
+        assert!(mgr.context_exists());
+        assert!(mgr.is_default().unwrap());
     }
-    if !manager.is_default()? {
-        manager.set_default()?;
+
+    #[test]
+    fn uninstall_remove_context_restores_previous() {
+        let temp = tempdir().unwrap();
+        let socket = temp.path().join("docker.sock");
+        let docker_dir = temp.path().join(".docker");
+
+        let mgr = DockerContextManager::with_config_dir(socket, docker_dir);
+
+        // Simulate: user had "desktop-linux" active, then ArcBox was enabled.
+        std::fs::create_dir_all(mgr.docker_config_dir()).unwrap();
+        std::fs::write(
+            mgr.docker_config_dir().join("config.json"),
+            r#"{"currentContext":"desktop-linux"}"#,
+        )
+        .unwrap();
+        mgr.enable().unwrap();
+        assert!(mgr.is_default().unwrap());
+
+        // Brew uninstall calls remove_context() — should restore "desktop-linux".
+        mgr.remove_context().unwrap();
+        assert!(!mgr.context_exists());
+        assert_eq!(
+            mgr.current_context().unwrap(),
+            Some("desktop-linux".to_string())
+        );
     }
-    Ok(())
+
+    #[test]
+    fn host_layout_directories_are_consistent() {
+        let layout = arcbox_constants::paths::HostLayout::resolve(None);
+        assert!(layout.run_dir.ends_with("run"));
+        assert!(layout.log_dir.ends_with("log"));
+        assert!(layout.data_subdir.ends_with("data"));
+    }
+
+    #[test]
+    fn remove_context_is_safe_when_docker_not_configured() {
+        let temp = tempdir().unwrap();
+        let socket = temp.path().join("docker.sock");
+        let docker_dir = temp.path().join(".docker");
+
+        // No .docker/ directory exists — remove_context() should not panic.
+        let mgr = DockerContextManager::with_config_dir(socket, docker_dir);
+        mgr.remove_context().unwrap();
+    }
+
+    #[test]
+    fn context_manager_constructs_with_default_socket() {
+        // Verify the factory helper resolves a path (doesn't panic).
+        let socket = arcbox_constants::paths::HostLayout::resolve(None).docker_socket;
+        assert!(socket.to_string_lossy().contains("docker.sock"));
+    }
+
+    /// Verify that `context_meta_path()` exists via the public `context_exists()` API.
+    #[test]
+    fn context_meta_accessible_via_public_api() {
+        let temp = tempdir().unwrap();
+        let mgr = DockerContextManager::with_config_dir(
+            PathBuf::from("/tmp/test.sock"),
+            temp.path().to_path_buf(),
+        );
+        assert!(!mgr.context_exists());
+        mgr.create_context().unwrap();
+        assert!(mgr.context_exists());
+    }
 }

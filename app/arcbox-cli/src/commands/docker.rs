@@ -63,7 +63,7 @@ pub async fn execute(cmd: DockerCommands, format: OutputFormat) -> Result<()> {
     }
 }
 
-pub fn context_manager() -> Result<DockerContextManager> {
+pub(super) fn context_manager() -> Result<DockerContextManager> {
     DockerContextManager::new(default_socket_path())
         .context("Failed to initialize Docker context manager")
 }
