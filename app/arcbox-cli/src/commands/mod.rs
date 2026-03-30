@@ -50,6 +50,8 @@ pub mod docker;
 pub mod doctor;
 #[cfg(target_os = "macos")]
 pub mod install;
+#[cfg(target_os = "macos")]
+pub mod internal;
 pub mod kubernetes;
 pub mod logs;
 pub mod machine;
@@ -151,6 +153,11 @@ pub enum Commands {
     #[cfg(target_os = "macos")]
     #[command(name = "_uninstall", hide = true)]
     Uninstall(uninstall::UninstallArgs),
+
+    /// Internal: package manager hooks (brew postflight/uninstall)
+    #[cfg(target_os = "macos")]
+    #[command(name = "_internal", hide = true, subcommand)]
+    Internal(internal::InternalCommands),
 
     /// Display system-wide information
     Info,
