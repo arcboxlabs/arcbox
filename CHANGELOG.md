@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.16](https://github.com/arcboxlabs/arcbox/compare/v0.3.15...v0.3.16) (2026-03-30)
+
+
+### Bug Fixes
+
+* **core:** persistence reliability — atomic writes, error visibility, recovery ([#140](https://github.com/arcboxlabs/arcbox/issues/140)) ([9eef749](https://github.com/arcboxlabs/arcbox/commit/9eef749836e05344f108d1d6c4fac6aa34464974))
+
+
+### Code Refactoring
+
+* **core,agent:** split vm_lifecycle and agent into module directories (T3) ([#138](https://github.com/arcboxlabs/arcbox/issues/138)) ([30593b2](https://github.com/arcboxlabs/arcbox/commit/30593b2b9b744ac525ed19fdae276acc74b23de2))
+* **core:** lifecycle state dedup and event semantics (T2) ([#137](https://github.com/arcboxlabs/arcbox/issues/137)) ([c7e2ec7](https://github.com/arcboxlabs/arcbox/commit/c7e2ec76184b93a020256b49706d3d74fb170e80))
+* **core:** T7 phase 1 — typed error variants for VMM, snapshot, persistence, lock poisoned ([#141](https://github.com/arcboxlabs/arcbox/issues/141)) ([cdedea7](https://github.com/arcboxlabs/arcbox/commit/cdedea7bec5181a73050c287a85e8ffb31e44c26))
+* **daemon:** typed startup phases and HostLayout dedup (T1, T4) ([#136](https://github.com/arcboxlabs/arcbox/issues/136)) ([335602b](https://github.com/arcboxlabs/arcbox/commit/335602b55fa7446c9e986c16bb6f40f67ee8fd28))
+* **virt:** T5 — VM convergence: freeze arcbox-vm, typed platform fields ([#139](https://github.com/arcboxlabs/arcbox/issues/139)) ([e35bfe7](https://github.com/arcboxlabs/arcbox/commit/e35bfe70631040077bc1c6647c5aad783a95a019))
+
 ## [0.3.15](https://github.com/arcboxlabs/arcbox/compare/v0.3.14...v0.3.15) (2026-03-26)
 
 
