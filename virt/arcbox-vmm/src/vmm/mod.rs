@@ -7,6 +7,7 @@
 //! - `darwin`: macOS (Virtualization.framework) managed execution
 //! - `linux`: Linux (KVM) manual execution
 
+#[cfg(target_os = "macos")]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::Arc;
