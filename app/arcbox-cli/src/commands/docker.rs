@@ -64,8 +64,8 @@ pub async fn execute(cmd: DockerCommands, format: OutputFormat) -> Result<()> {
 }
 
 pub(super) fn context_manager() -> Result<DockerContextManager> {
-    DockerContextManager::new(default_socket_path())
-        .context("Failed to initialize Docker context manager")
+    let socket = arcbox_constants::paths::HostLayout::resolve(None).docker_socket;
+    DockerContextManager::new(socket).context("Failed to initialize Docker context manager")
 }
 
 // =============================================================================
@@ -466,13 +466,4 @@ fn execute_status(manager: &DockerContextManager) {
         println!("Status: Not configured");
         println!("        Run 'arcbox docker enable' to set up");
     }
-}
-
-/// Returns the default socket path for the Docker-compatible API.
-fn default_socket_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".arcbox")
-        .join(arcbox_constants::paths::host::RUN)
-        .join("docker.sock")
 }

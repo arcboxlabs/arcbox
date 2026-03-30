@@ -9,7 +9,7 @@
 //! whether the user opens the app first or installs via `brew`.
 
 use anyhow::{Context, Result};
-use arcbox_constants::paths::HostLayout;
+use arcbox_constants::paths::{HostLayout, labels};
 use clap::Subcommand;
 
 use super::OutputFormat;
@@ -83,21 +83,24 @@ async fn brew_postflight() -> Result<()> {
 async fn brew_uninstall() -> Result<()> {
     let layout = HostLayout::resolve(None);
 
-    // 1. Stop the daemon via launchctl.
+    // 1. Stop the daemon via launchctl, then best-effort pkill fallback.
     // SAFETY: getuid() is a trivial POSIX syscall.
     let uid = unsafe { libc::getuid() };
     let _ = std::process::Command::new("launchctl")
-        .args([
-            "bootout",
-            &format!("gui/{uid}/com.arcboxlabs.desktop.daemon"),
-        ])
+        .args(["bootout", &format!("gui/{uid}/{}", labels::DAEMON)])
         .output();
+    // bootout may not immediately stop an already-running process.
+    // Mirror the `_uninstall` flow with a pkill fallback + short wait.
+    let _ = std::process::Command::new("pkill")
+        .args(["-f", labels::DAEMON])
+        .status();
+    std::thread::sleep(std::time::Duration::from_millis(200));
 
     // Remove the daemon plist so launchd doesn't try to restart.
-    let plist_dir = dirs::home_dir()
+    let plist_path = dirs::home_dir()
         .context("could not determine home directory")?
-        .join("Library/LaunchAgents/com.arcboxlabs.desktop.daemon.plist");
-    let _ = tokio::fs::remove_file(plist_dir).await;
+        .join(format!("Library/LaunchAgents/{}.plist", labels::DAEMON));
+    let _ = tokio::fs::remove_file(plist_path).await;
 
     // 2. Remove Docker context via DockerContextManager — `remove_context()`
     //    restores the user's previous default context (e.g. desktop-linux)
@@ -143,12 +146,22 @@ mod tests {
 
         // Upgrade — enable() with new socket path must overwrite metadata.
         let new_socket = temp.path().join("new.sock");
-        let mgr = DockerContextManager::with_config_dir(new_socket.clone(), docker_dir);
+        let mgr = DockerContextManager::with_config_dir(new_socket.clone(), docker_dir.clone());
         mgr.enable().unwrap();
 
-        // The context_exists() + is_default() confirm it wasn't skipped.
         assert!(mgr.context_exists());
         assert!(mgr.is_default().unwrap());
+
+        // Verify meta.json actually references the new socket path.
+        let meta_json = std::fs::read_dir(docker_dir.join("contexts/meta"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find_map(|e| std::fs::read_to_string(e.path().join("meta.json")).ok())
+            .expect("meta.json not found");
+        assert!(
+            meta_json.contains(&new_socket.to_string_lossy().to_string()),
+            "meta.json should reference new socket path, got: {meta_json}"
+        );
     }
 
     #[test]
