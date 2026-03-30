@@ -59,13 +59,29 @@ fn default_created_at() -> DateTime<Utc> {
 }
 
 /// Persisted machine state.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+///
+/// Records the last known state when the daemon wrote the config.
+/// On reload, [`MachineState::from`] maps this to the *current* state
+/// (e.g. `Running` → `Stopped` because the VM process is gone).
+/// Use [`Self::needs_recovery`] to distinguish a clean stop from a
+/// crash/daemon restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum PersistedState {
     #[default]
     Created,
     Running,
     Stopped,
+}
+
+impl PersistedState {
+    /// Returns `true` if the machine was running when the daemon last
+    /// persisted state — meaning it was interrupted and may need recovery
+    /// (e.g. networking re-registration, container reconciliation).
+    #[must_use]
+    pub const fn needs_recovery(self) -> bool {
+        matches!(self, Self::Running)
+    }
 }
 
 impl From<MachineState> for PersistedState {
@@ -79,10 +95,16 @@ impl From<MachineState> for PersistedState {
 }
 
 impl From<PersistedState> for MachineState {
+    /// Maps persisted state to current machine state on reload.
+    ///
+    /// A machine persisted as `Running` is mapped to `Stopped` because
+    /// the VM process is no longer alive after a daemon restart. Use
+    /// [`PersistedState::needs_recovery`] to detect this case and
+    /// trigger recovery logic.
     fn from(state: PersistedState) -> Self {
         match state {
             PersistedState::Created => Self::Created,
-            PersistedState::Running => Self::Stopped, // Assume stopped on restart
+            PersistedState::Running => Self::Stopped,
             PersistedState::Stopped => Self::Stopped,
         }
     }

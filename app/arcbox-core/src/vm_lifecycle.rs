@@ -1087,7 +1087,7 @@ impl VmLifecycleManager {
                     *this.state.write().await = VmLifecycleState::Idle;
                     this.shrink_balloon();
                     tracing::info!("VM entered idle state after {}s of inactivity", idle_secs);
-                    this.event_bus.publish(Event::MachineStopped {
+                    this.event_bus.publish(Event::MachineIdle {
                         name: DEFAULT_MACHINE_NAME.to_string(),
                     });
                 }

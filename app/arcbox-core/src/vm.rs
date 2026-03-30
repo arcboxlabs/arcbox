@@ -1,6 +1,7 @@
 //! Virtual machine management.
 
 use crate::error::{CoreError, Result};
+use crate::machine::MachineState;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::RwLock;
@@ -65,28 +66,13 @@ pub fn bridge_nic_mac_for_vm_id(vm_id: &VmId) -> String {
     )
 }
 
-/// VM state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VmState {
-    /// VM created but not started.
-    Created,
-    /// VM is starting.
-    Starting,
-    /// VM is running.
-    Running,
-    /// VM is stopping.
-    Stopping,
-    /// VM is stopped.
-    Stopped,
-}
-
 /// VM information.
 #[derive(Debug, Clone)]
 pub struct VmInfo {
     /// VM ID.
     pub id: VmId,
     /// VM state.
-    pub state: VmState,
+    pub state: MachineState,
     /// Number of CPUs.
     pub cpus: u32,
     /// Memory in MB.
@@ -209,7 +195,7 @@ impl VmManager {
         let id = VmId::new();
         let info = VmInfo {
             id: id.clone(),
-            state: VmState::Created,
+            state: MachineState::Created,
             cpus: config.cpus,
             memory_mb: config.memory_mb,
         };
@@ -244,7 +230,10 @@ impl VmManager {
             .get_mut(id)
             .ok_or_else(|| CoreError::not_found(id.to_string()))?;
 
-        if matches!(entry.info.state, VmState::Running | VmState::Starting) {
+        if matches!(
+            entry.info.state,
+            MachineState::Running | MachineState::Starting
+        ) {
             return Err(CoreError::invalid_state(format!(
                 "cannot set guest_cid while VM is {:?}",
                 entry.info.state
@@ -318,14 +307,14 @@ impl VmManager {
             .get_mut(id)
             .ok_or_else(|| CoreError::not_found(id.to_string()))?;
 
-        if entry.info.state != VmState::Created && entry.info.state != VmState::Stopped {
+        if entry.info.state != MachineState::Created && entry.info.state != MachineState::Stopped {
             return Err(CoreError::invalid_state(format!(
                 "cannot start VM in state {:?}",
                 entry.info.state
             )));
         }
 
-        entry.info.state = VmState::Starting;
+        entry.info.state = MachineState::Starting;
 
         let vmm_config = Self::build_vmm_config(entry);
 
@@ -333,7 +322,7 @@ impl VmManager {
         let mut vmm = match Vmm::new(vmm_config) {
             Ok(vmm) => vmm,
             Err(e) => {
-                entry.info.state = VmState::Created;
+                entry.info.state = MachineState::Created;
                 return Err(CoreError::Vm(e.to_string()));
             }
         };
@@ -347,12 +336,12 @@ impl VmManager {
         let _ = shared_dns_hosts;
 
         if let Err(e) = vmm.start() {
-            entry.info.state = VmState::Created;
+            entry.info.state = MachineState::Created;
             return Err(CoreError::Vm(e.to_string()));
         }
 
         entry.vmm = Some(vmm);
-        entry.info.state = VmState::Running;
+        entry.info.state = MachineState::Running;
 
         tracing::info!("Started VM {}", id);
         Ok(())
@@ -373,14 +362,17 @@ impl VmManager {
             .get_mut(id)
             .ok_or_else(|| CoreError::not_found(id.to_string()))?;
 
-        if !matches!(entry.info.state, VmState::Running | VmState::Stopping) {
+        if !matches!(
+            entry.info.state,
+            MachineState::Running | MachineState::Stopping
+        ) {
             return Err(CoreError::invalid_state(format!(
                 "cannot stop VM in state {:?}",
                 entry.info.state
             )));
         }
 
-        entry.info.state = VmState::Stopping;
+        entry.info.state = MachineState::Stopping;
 
         // Stop the VMM
         if let Some(ref mut vmm) = entry.vmm {
@@ -388,7 +380,7 @@ impl VmManager {
         }
 
         entry.vmm = None;
-        entry.info.state = VmState::Stopped;
+        entry.info.state = MachineState::Stopped;
 
         tracing::info!("Stopped VM {}", id);
         Ok(())
@@ -411,14 +403,14 @@ impl VmManager {
                 .get_mut(id)
                 .ok_or_else(|| CoreError::not_found(id.to_string()))?;
 
-            if entry.info.state != VmState::Running {
+            if entry.info.state != MachineState::Running {
                 return Err(CoreError::invalid_state(format!(
                     "cannot stop VM in state {:?}",
                     entry.info.state
                 )));
             }
 
-            entry.info.state = VmState::Stopping;
+            entry.info.state = MachineState::Stopping;
             entry
                 .vmm
                 .take()
@@ -461,7 +453,7 @@ impl VmManager {
                 #[cfg(target_os = "macos")]
                 vmm.set_skip_hypervisor_stop();
                 drop(vmm);
-                entry.info.state = VmState::Stopped;
+                entry.info.state = MachineState::Stopped;
                 tracing::info!("Gracefully stopped VM {}", id);
                 Ok(true)
             }
@@ -470,9 +462,9 @@ impl VmManager {
                 // the lock was released. If state is no longer Stopping, a
                 // concurrent stop() already handled teardown — drop the VMM
                 // safely instead of resurrecting the VM.
-                if entry.info.state == VmState::Stopping {
+                if entry.info.state == MachineState::Stopping {
                     entry.vmm = Some(vmm);
-                    entry.info.state = VmState::Running;
+                    entry.info.state = MachineState::Running;
                 } else {
                     tracing::warn!(
                         "VM {id} state changed to {:?} during graceful stop, not restoring",
@@ -504,14 +496,14 @@ impl VmManager {
             .get_mut(id)
             .ok_or_else(|| CoreError::not_found(id.to_string()))?;
 
-        if entry.info.state != VmState::Running {
+        if entry.info.state != MachineState::Running {
             return Err(CoreError::invalid_state(format!(
                 "cannot force stop VM in state {:?}",
                 entry.info.state
             )));
         }
 
-        entry.info.state = VmState::Stopping;
+        entry.info.state = MachineState::Stopping;
 
         if let Some(mut vmm) = entry.vmm.take() {
             // On macOS the VF stop path can crash. Skip it but still drop
@@ -521,7 +513,7 @@ impl VmManager {
             drop(vmm);
         }
 
-        entry.info.state = VmState::Stopped;
+        entry.info.state = MachineState::Stopped;
         tracing::warn!("Force-stopped VM {} without hypervisor stop", id);
         Ok(())
     }
@@ -592,7 +584,7 @@ impl VmManager {
                 .get_mut(id)
                 .ok_or_else(|| CoreError::not_found(id.to_string()))?;
 
-            if entry.info.state != VmState::Running {
+            if entry.info.state != MachineState::Running {
                 return Err(CoreError::invalid_state(format!(
                     "cannot snapshot VM in state {:?}",
                     entry.info.state
@@ -728,7 +720,7 @@ impl VmManager {
             .get_mut(id)
             .ok_or_else(|| CoreError::not_found(id.to_string()))?;
 
-        if entry.info.state != VmState::Running {
+        if entry.info.state != MachineState::Running {
             return Err(CoreError::invalid_state(format!(
                 "cannot restore VM in state {:?}",
                 entry.info.state
@@ -789,7 +781,7 @@ impl VmManager {
             .get(id)
             .ok_or_else(|| CoreError::not_found(id.to_string()))?;
 
-        if entry.info.state == VmState::Running {
+        if entry.info.state == MachineState::Running {
             return Err(CoreError::invalid_state(
                 "cannot remove running VM".to_string(),
             ));
@@ -824,7 +816,7 @@ impl VmManager {
             .get(id)
             .ok_or_else(|| CoreError::not_found(id.to_string()))?;
 
-        if entry.info.state != VmState::Running {
+        if entry.info.state != MachineState::Running {
             return Err(CoreError::invalid_state(format!(
                 "cannot connect vsock: VM is {:?}",
                 entry.info.state
@@ -852,7 +844,7 @@ impl VmManager {
             .get(id)
             .ok_or_else(|| CoreError::not_found(id.to_string()))?;
 
-        if entry.info.state != VmState::Running {
+        if entry.info.state != MachineState::Running {
             return Err(CoreError::invalid_state(format!(
                 "cannot read console output: VM is {:?}",
                 entry.info.state
@@ -880,7 +872,7 @@ impl VmManager {
             .get(id)
             .ok_or_else(|| CoreError::not_found(id.to_string()))?;
 
-        if entry.info.state != VmState::Running {
+        if entry.info.state != MachineState::Running {
             return Err(CoreError::invalid_state(format!(
                 "cannot read agent log: VM is {:?}",
                 entry.info.state
@@ -919,7 +911,7 @@ impl VmManager {
             .get(id)
             .ok_or_else(|| CoreError::not_found(id.to_string()))?;
 
-        if entry.info.state != VmState::Running {
+        if entry.info.state != MachineState::Running {
             return Err(CoreError::invalid_state(format!(
                 "cannot set balloon target: VM is {:?}",
                 entry.info.state
@@ -950,7 +942,7 @@ impl VmManager {
             return 0;
         };
 
-        if entry.info.state != VmState::Running {
+        if entry.info.state != MachineState::Running {
             return 0;
         }
 
@@ -971,7 +963,7 @@ impl VmManager {
             .get(id)
             .ok_or_else(|| CoreError::not_found(id.to_string()))?;
 
-        if entry.info.state != VmState::Running {
+        if entry.info.state != MachineState::Running {
             return Err(CoreError::invalid_state(format!(
                 "cannot get balloon stats: VM is {:?}",
                 entry.info.state
@@ -1097,6 +1089,6 @@ mod tests {
 
         let _ = manager.start(&vm_id, None);
         let info = manager.get(&vm_id).expect("vm should still exist");
-        assert_eq!(info.state, VmState::Created);
+        assert_eq!(info.state, MachineState::Created);
     }
 }
