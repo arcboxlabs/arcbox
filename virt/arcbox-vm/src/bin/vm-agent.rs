@@ -60,7 +60,7 @@ mod agent {
     const MSG_EXIT: u8 = 0x12;
 
     // File I/O channel (vsock:53) — imported from the shared proto module.
-    use arcbox_vm::KernelIpParam;
+    use arcbox_vm::boot_proto::KernelIpParam;
     use arcbox_vm::file_io::proto::{
         FILE_ACK, FILE_DATA, FILE_DONE, FILE_ERR, FILE_PORT, FILE_READ_REQ, FILE_WRITE_REQ,
         MAX_FILE_SIZE,
