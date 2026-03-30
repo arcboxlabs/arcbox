@@ -60,6 +60,9 @@ mod platform {
     fn wait_for_children(timeout: Duration) {
         let deadline = Instant::now() + timeout;
         loop {
+            if Instant::now() >= deadline {
+                return;
+            }
             let mut status: i32 = 0;
             // SAFETY: waitpid(-1, ..., WNOHANG) is safe to call from PID 1.
             // It returns 0 when no children have exited, -1/ECHILD when none remain.
@@ -71,9 +74,6 @@ mod platform {
                         tracing::debug!("Shutdown: no more children");
                         return;
                     }
-                }
-                if Instant::now() >= deadline {
-                    return;
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }

@@ -386,13 +386,35 @@ impl VmManager {
     /// Returns `Ok(true)` if the VM stopped, `Ok(false)` if graceful shutdown
     /// timed out or the agent was unreachable.
     pub fn graceful_stop(&self, id: &VmId, timeout: Duration) -> Result<bool> {
+        // Pre-check: determine whether to send the shutdown RPC based on
+        // current state. Only Running VMs accept vsock connections.
+        let should_send_rpc = {
+            let vms = self.vms.read().map_err(|_| CoreError::LockPoisoned)?;
+            let entry = vms
+                .get(id)
+                .ok_or_else(|| CoreError::not_found(id.to_string()))?;
+            match entry.info.state {
+                MachineState::Running => true,
+                MachineState::Stopping => false,
+                MachineState::Stopped => return Ok(true),
+                other => {
+                    return Err(CoreError::invalid_state(format!(
+                        "cannot stop VM in state {:?}",
+                        other
+                    )));
+                }
+            }
+        };
+
         // Phase 1: Send shutdown RPC while VM is still Running and VMM is in
         // the entry. connect_vsock requires Running state.
-        if let Err(e) =
-            self.send_shutdown_rpc(id, arcbox_constants::timeouts::GUEST_SHUTDOWN_GRACE_SECS)
-        {
-            tracing::warn!("Shutdown RPC failed for VM {id}: {e}, cannot gracefully stop");
-            return Ok(false);
+        if should_send_rpc {
+            if let Err(e) =
+                self.send_shutdown_rpc(id, arcbox_constants::timeouts::GUEST_SHUTDOWN_GRACE_SECS)
+            {
+                tracing::warn!("Shutdown RPC failed for VM {id}: {e}, cannot gracefully stop");
+                return Ok(false);
+            }
         }
 
         // Phase 2: Take VMM out under write lock so the blocking wait below
@@ -408,6 +430,9 @@ impl VmManager {
                 entry.info.state,
                 MachineState::Running | MachineState::Stopping
             ) {
+                if entry.info.state == MachineState::Stopped {
+                    return Ok(true);
+                }
                 return Err(CoreError::invalid_state(format!(
                     "cannot stop VM in state {:?}",
                     entry.info.state
