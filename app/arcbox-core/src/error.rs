@@ -29,7 +29,7 @@ pub enum CoreError {
     #[error("machine error: {0}")]
     Machine(String),
 
-    /// Persistence serialization/deserialization error.
+    /// Persistence deserialization error.
     #[error("persistence error: {0}")]
     Persistence(#[from] toml::de::Error),
 
