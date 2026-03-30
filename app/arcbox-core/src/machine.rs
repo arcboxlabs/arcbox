@@ -318,7 +318,7 @@ impl MachineManager {
         if self
             .machines
             .read()
-            .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?
+            .map_err(|_| CoreError::LockPoisoned)?
             .contains_key(&config.name)
         {
             return Err(CoreError::already_exists(config.name));
@@ -376,7 +376,7 @@ impl MachineManager {
 
         self.machines
             .write()
-            .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?
+            .map_err(|_| CoreError::LockPoisoned)?
             .insert(config.name.clone(), info);
 
         Ok(config.name)
@@ -397,7 +397,7 @@ impl MachineManager {
         let is_machine_vm = self
             .machines
             .read()
-            .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?
+            .map_err(|_| CoreError::LockPoisoned)?
             .get(name)
             .and_then(|m| m.distro.as_ref())
             .is_some();
@@ -408,10 +408,7 @@ impl MachineManager {
 
         // Update machine state
         {
-            let mut machines = self
-                .machines
-                .write()
-                .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
+            let mut machines = self.machines.write().map_err(|_| CoreError::LockPoisoned)?;
 
             if let Some(machine) = machines.get_mut(name) {
                 machine.state = MachineState::Running;
@@ -473,9 +470,10 @@ impl MachineManager {
                             Ok(info) => {
                                 if let Some(ip) = select_routable_ip(&info.ip_addresses) {
                                     {
-                                        let mut machines = self.machines.write().map_err(|_| {
-                                            CoreError::Machine("lock poisoned".to_string())
-                                        })?;
+                                        let mut machines = self
+                                            .machines
+                                            .write()
+                                            .map_err(|_| CoreError::LockPoisoned)?;
                                         if let Some(machine) = machines.get_mut(name) {
                                             machine.ip_address = Some(ip.clone());
                                         }
@@ -543,10 +541,7 @@ impl MachineManager {
 
     fn assign_cid_for_start(&self, name: &str) -> Result<(VmId, u32)> {
         let (vm_id, running_count) = {
-            let machines = self
-                .machines
-                .read()
-                .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
+            let machines = self.machines.read().map_err(|_| CoreError::LockPoisoned)?;
 
             let machine = machines
                 .get(name)
@@ -620,7 +615,7 @@ impl MachineManager {
         use crate::agent_client::AgentClient;
         let cid = self
             .get_cid(name)
-            .ok_or_else(|| CoreError::Machine("CID not assigned".to_string()))?;
+            .ok_or_else(|| CoreError::invalid_state("CID not assigned"))?;
         let fd = self.connect_vsock_port(name, AGENT_PORT)?;
 
         AgentClient::from_fd(cid, fd)
@@ -631,10 +626,7 @@ impl MachineManager {
     /// This is a generic helper used by agent and guest runtime proxy paths.
     #[cfg(target_os = "macos")]
     pub fn connect_vsock_port(&self, name: &str, port: u32) -> Result<std::os::unix::io::RawFd> {
-        let machines = self
-            .machines
-            .read()
-            .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
+        let machines = self.machines.read().map_err(|_| CoreError::LockPoisoned)?;
 
         let machine = machines
             .get(name)
@@ -654,10 +646,7 @@ impl MachineManager {
     pub fn connect_agent(&self, name: &str) -> Result<crate::agent_client::AgentClient> {
         use crate::agent_client::AgentClient;
 
-        let machines = self
-            .machines
-            .read()
-            .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
+        let machines = self.machines.read().map_err(|_| CoreError::LockPoisoned)?;
 
         let machine = machines
             .get(name)
@@ -672,7 +661,7 @@ impl MachineManager {
 
         let cid = machine
             .cid
-            .ok_or_else(|| CoreError::Machine("CID not assigned".to_string()))?;
+            .ok_or_else(|| CoreError::invalid_state("CID not assigned"))?;
 
         // On Linux, AgentClient connects directly via AF_VSOCK
         Ok(AgentClient::new(cid))
@@ -681,10 +670,7 @@ impl MachineManager {
     /// Connects to a vsock port on a running machine (Linux).
     #[cfg(target_os = "linux")]
     pub fn connect_vsock_port(&self, name: &str, port: u32) -> Result<std::os::unix::io::RawFd> {
-        let machines = self
-            .machines
-            .read()
-            .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
+        let machines = self.machines.read().map_err(|_| CoreError::LockPoisoned)?;
 
         let machine = machines
             .get(name)
@@ -703,10 +689,7 @@ impl MachineManager {
     /// Reads serial console output for a running machine (macOS only).
     #[cfg(target_os = "macos")]
     pub fn read_console_output(&self, name: &str) -> Result<String> {
-        let machines = self
-            .machines
-            .read()
-            .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
+        let machines = self.machines.read().map_err(|_| CoreError::LockPoisoned)?;
 
         let machine = machines
             .get(name)
@@ -724,10 +707,7 @@ impl MachineManager {
     /// Reads agent log output (hvc1) for a running machine (macOS only).
     #[cfg(target_os = "macos")]
     pub fn read_agent_log_output(&self, name: &str) -> Result<String> {
-        let machines = self
-            .machines
-            .read()
-            .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
+        let machines = self.machines.read().map_err(|_| CoreError::LockPoisoned)?;
 
         let machine = machines
             .get(name)
@@ -748,10 +728,7 @@ impl MachineManager {
     ///
     /// Returns an error if the machine cannot be stopped.
     pub fn stop(&self, name: &str) -> Result<()> {
-        let mut machines = self
-            .machines
-            .write()
-            .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
+        let mut machines = self.machines.write().map_err(|_| CoreError::LockPoisoned)?;
 
         let machine = machines
             .get_mut(name)
@@ -791,10 +768,7 @@ impl MachineManager {
     /// shutdown timed out or is unavailable.
     pub fn graceful_stop(&self, name: &str, timeout: Duration) -> Result<bool> {
         let vm_id = {
-            let mut machines = self
-                .machines
-                .write()
-                .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
+            let mut machines = self.machines.write().map_err(|_| CoreError::LockPoisoned)?;
 
             let machine = machines
                 .get_mut(name)
@@ -812,10 +786,7 @@ impl MachineManager {
 
         match self.vm_manager.graceful_stop(&vm_id, timeout) {
             Ok(true) => {
-                let mut machines = self
-                    .machines
-                    .write()
-                    .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
+                let mut machines = self.machines.write().map_err(|_| CoreError::LockPoisoned)?;
 
                 let machine = machines
                     .get_mut(name)
@@ -872,10 +843,7 @@ impl MachineManager {
     ///
     /// Returns an error if the machine cannot be removed.
     pub fn remove(&self, name: &str, force: bool) -> Result<()> {
-        let mut machines = self
-            .machines
-            .write()
-            .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
+        let mut machines = self.machines.write().map_err(|_| CoreError::LockPoisoned)?;
 
         let machine = machines
             .get(name)
@@ -893,10 +861,7 @@ impl MachineManager {
             let vm_id = machine.vm_id.clone();
             drop(machines); // Release lock before stopping
             self.vm_manager.stop(&vm_id)?;
-            machines = self
-                .machines
-                .write()
-                .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
+            machines = self.machines.write().map_err(|_| CoreError::LockPoisoned)?;
         }
 
         // Get VM ID before removing from map.
@@ -950,10 +915,7 @@ impl MachineManager {
     /// # Note
     /// This is intended for unit testing only and should not be used in production.
     pub fn register_mock_machine(&self, name: &str, cid: u32) -> Result<()> {
-        let mut machines = self
-            .machines
-            .write()
-            .map_err(|_| CoreError::Machine("lock poisoned".to_string()))?;
+        let mut machines = self.machines.write().map_err(|_| CoreError::LockPoisoned)?;
 
         if machines.contains_key(name) {
             return Ok(()); // Already registered

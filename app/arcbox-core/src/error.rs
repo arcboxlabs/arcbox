@@ -13,13 +13,29 @@ pub enum CoreError {
     #[error(transparent)]
     Common(#[from] CommonError),
 
-    /// VM error.
+    /// VMM-layer error (hypervisor, devices, boot).
+    #[error("VMM error: {0}")]
+    Vmm(#[from] arcbox_vmm::VmmError),
+
+    /// Snapshot error.
+    #[error("snapshot error: {0}")]
+    Snapshot(#[from] arcbox_vmm::SnapshotError),
+
+    /// VM management error (registry, lifecycle).
     #[error("VM error: {0}")]
     Vm(String),
 
     /// Machine error.
     #[error("machine error: {0}")]
     Machine(String),
+
+    /// Persistence deserialization error.
+    #[error("persistence error: {0}")]
+    Persistence(#[from] toml::de::Error),
+
+    /// An internal RwLock was poisoned by a panicking thread.
+    #[error("internal lock poisoned")]
+    LockPoisoned,
 
     /// Filesystem error.
     #[error("filesystem error: {0}")]
