@@ -8,6 +8,7 @@
 //! - [`SnapshotCatalog`] — checkpoint tracking
 //! - [`VmmConfig`] / [`SandboxSpec`] — configuration types
 
+pub mod boot_proto;
 pub mod config;
 pub mod error;
 pub mod file_io;
@@ -22,6 +23,7 @@ pub mod vsock;
 pub mod instance;
 pub mod manager;
 
+pub use boot_proto::KernelIpParam;
 pub use config::{DefaultVmConfig, FirecrackerConfig, GrpcConfig, NetworkConfig, VmmConfig};
 pub use error::{Result, VmmError};
 pub use network::{NetworkAllocation, NetworkManager};
