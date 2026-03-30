@@ -711,11 +711,37 @@ mod agent {
     }
 
     /// Write `/etc/resolv.conf` pointing at the sandbox gateway so that
-    /// userspace DNS resolution works.  The gateway runs inside the host
-    /// VM where the datapath `DnsForwarder` handles queries.
+    /// userspace DNS resolution works.  The gateway IP is extracted from
+    /// the kernel `ip=` boot parameter so it tracks the configured value
+    /// rather than assuming a hardcoded default.
+    ///
+    /// Skipped when the `ip=` parameter is absent (e.g. `network: none`
+    /// sandboxes or custom rootfs with their own resolver config).
     fn setup_dns() {
-        match std::fs::write("/etc/resolv.conf", "nameserver 172.20.0.1\n") {
-            Ok(()) => eprintln!("vmm-guest-agent: wrote /etc/resolv.conf"),
+        let cmdline = match std::fs::read_to_string("/proc/cmdline") {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("vmm-guest-agent: failed to read /proc/cmdline: {e}");
+                return;
+            }
+        };
+
+        // Kernel ip= format: ip=<client>:<server>:<gateway>:<netmask>::<dev>:<autoconf>
+        let gateway = cmdline.split_whitespace().find_map(|param| {
+            let value = param.strip_prefix("ip=")?;
+            let fields: Vec<&str> = value.split(':').collect();
+            let gw = fields.get(2).copied().unwrap_or("");
+            if gw.is_empty() { None } else { Some(gw.to_string()) }
+        });
+
+        let Some(gateway) = gateway else {
+            eprintln!("vmm-guest-agent: no ip= parameter in cmdline, skipping DNS setup");
+            return;
+        };
+
+        let content = format!("nameserver {gateway}\n");
+        match std::fs::write("/etc/resolv.conf", &content) {
+            Ok(()) => eprintln!("vmm-guest-agent: wrote /etc/resolv.conf (nameserver {gateway})"),
             Err(e) => eprintln!("vmm-guest-agent: failed to write /etc/resolv.conf: {e}"),
         }
     }
