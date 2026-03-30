@@ -22,6 +22,7 @@ use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use crate::boot_proto::KernelIpParam;
 use crate::config::VmmConfig;
 use crate::error::{Result, VmmError};
 use crate::network::{NetworkAllocation, NetworkManager};
@@ -1394,18 +1395,18 @@ async fn do_boot(
         .ok_or_else(|| VmmError::Config("vcpus must be > 0".into()))?;
 
     // Append static IP configuration to boot args so the kernel configures
-    // eth0 before init runs.  Format: ip=<client>:<server>:<gw>:<mask>::<dev>:off
+    // eth0 before init runs.  The guest-side vm-agent parses this back via
+    // `KernelIpParam::from_str` to derive the DNS nameserver.
     let boot_args = if let Some(net) = net_alloc {
         if spec.boot_args.contains("ip=") {
             spec.boot_args.clone()
         } else {
-            format!(
-                "{} ip={}::{}:{}::eth0:off",
-                spec.boot_args,
-                net.ip_address,
-                net.gateway,
-                net.netmask(),
-            )
+            let ip_param = KernelIpParam {
+                client: net.ip_address,
+                gateway: net.gateway,
+                netmask: net.netmask(),
+            };
+            format!("{} {ip_param}", spec.boot_args)
         }
     } else {
         spec.boot_args.clone()

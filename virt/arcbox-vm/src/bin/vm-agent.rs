@@ -60,6 +60,7 @@ mod agent {
     const MSG_EXIT: u8 = 0x12;
 
     // File I/O channel (vsock:53) — imported from the shared proto module.
+    use arcbox_vm::boot_proto::KernelIpParam;
     use arcbox_vm::file_io::proto::{
         FILE_ACK, FILE_DATA, FILE_DONE, FILE_ERR, FILE_PORT, FILE_READ_REQ, FILE_WRITE_REQ,
         MAX_FILE_SIZE,
@@ -710,8 +711,49 @@ mod agent {
         let _ = std::os::unix::fs::symlink("/dev/pts/ptmx", "/dev/ptmx");
     }
 
+    /// Find a whitespace-delimited token in `/proc/cmdline` that starts
+    /// with the given prefix (e.g. `"ip="` matches `ip=172.20.0.2::...`).
+    fn cmdline_token(prefix: &str) -> Option<String> {
+        let cmdline = std::fs::read_to_string("/proc/cmdline").ok()?;
+        cmdline
+            .split_whitespace()
+            .find(|t| t.starts_with(prefix))
+            .map(str::to_string)
+    }
+
+    /// Write `/etc/resolv.conf` pointing at the sandbox gateway so that
+    /// glibc DNS resolution works.  The gateway address hosts the guest
+    /// DNS server (`0.0.0.0:53`) which handles container/sandbox name
+    /// resolution before forwarding upstream.
+    ///
+    /// Skipped when the `ip=` parameter is absent (e.g. `network: none`
+    /// sandboxes or custom rootfs with their own resolver config).
+    fn setup_dns() {
+        let Some(token) = cmdline_token("ip=") else {
+            eprintln!("vmm-guest-agent: no ip= parameter in cmdline, skipping DNS setup");
+            return;
+        };
+        let ip_param = match token.parse::<KernelIpParam>() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("vmm-guest-agent: invalid ip= parameter: {e}");
+                return;
+            }
+        };
+
+        let content = format!("nameserver {}\n", ip_param.gateway);
+        match std::fs::write("/etc/resolv.conf", &content) {
+            Ok(()) => eprintln!(
+                "vmm-guest-agent: wrote /etc/resolv.conf (nameserver {})",
+                ip_param.gateway
+            ),
+            Err(e) => eprintln!("vmm-guest-agent: failed to write /etc/resolv.conf: {e}"),
+        }
+    }
+
     pub fn run() {
         mount_filesystems();
+        setup_dns();
         eprintln!(
             "vmm-guest-agent: listening on vsock ports {AGENT_PORT} (exec), {FILE_PORT} (file I/O)"
         );
