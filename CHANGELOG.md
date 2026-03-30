@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.17](https://github.com/arcboxlabs/arcbox/compare/v0.3.16...v0.3.17) (2026-03-30)
+
+
+### Features
+
+* **cli:** add _internal subcommand for Homebrew Cask hooks ([#143](https://github.com/arcboxlabs/arcbox/issues/143)) ([f903352](https://github.com/arcboxlabs/arcbox/commit/f90335280a22fafb688265b447b2a1504f09dd82))
+* replace dead ACPI/GPIO shutdown with vsock RPC ([#133](https://github.com/arcboxlabs/arcbox/issues/133)) ([6de29c3](https://github.com/arcboxlabs/arcbox/commit/6de29c3ccf567480f90085323ac13fd8286d34e7))
+
+
+### Bug Fixes
+
+* **sandbox:** enable DNS resolution inside sandboxes ([#135](https://github.com/arcboxlabs/arcbox/issues/135)) ([e7565df](https://github.com/arcboxlabs/arcbox/commit/e7565dfa42101edf343d00b7690794016daef094))
+
 ## [0.3.16](https://github.com/arcboxlabs/arcbox/compare/v0.3.15...v0.3.16) (2026-03-30)
 
 
