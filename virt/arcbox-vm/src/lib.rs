@@ -1,6 +1,27 @@
-//! `arcbox-vm` — sandbox orchestration, state, networking, and checkpoints.
+//! `arcbox-vm` — guest-side Firecracker sandbox orchestration.
 //!
-//! This crate is the heart of the Firecracker VMM daemon.  It exposes:
+//! # Scope
+//!
+//! This crate runs **inside** the Linux guest VM, managing nested Firecracker
+//! microVMs for workload isolation (sandboxes).  It is consumed exclusively by
+//! `arcbox-agent`.
+//!
+//! The **host-side** VMM that boots the guest is [`arcbox-vmm`], which sits on
+//! top of `arcbox-hypervisor` (Virtualization.framework on macOS, KVM on
+//! Linux).  These two crates serve fundamentally different layers and should
+//! not be confused:
+//!
+//! | Crate | Runs on | Purpose | Backend |
+//! |-------|---------|---------|---------|
+//! | `arcbox-vmm` | host | boot + manage the guest VM | Virtualization.framework / KVM |
+//! | `arcbox-vm` | guest | nested sandbox microVMs | Firecracker (`fc-sdk`) |
+//!
+//! # Status: **frozen**
+//!
+//! New features should go into `arcbox-vmm` / `arcbox-hypervisor`.  This
+//! crate receives bug-fixes and sandbox-specific work only.
+//!
+//! # Public API
 //!
 //! - [`SandboxManager`] — top-level sandbox orchestrator
 //! - [`SandboxInstance`] / [`SandboxState`] — per-sandbox runtime state
