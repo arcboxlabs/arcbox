@@ -27,6 +27,11 @@
 //!              └─────────────────┘
 //! ```
 
+mod health;
+mod recovery;
+#[cfg(target_os = "macos")]
+mod serial;
+
 use crate::boot_assets::BootAssetProvider;
 use crate::error::{CoreError, Result};
 use crate::event::{Event, EventBus};
@@ -40,14 +45,9 @@ use std::io::Seek;
 use std::io::SeekFrom;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
-use tokio_util::sync::CancellationToken;
-
-// =============================================================================
-// Constants
-// =============================================================================
 
 /// Default machine name used for container operations.
 pub const DEFAULT_MACHINE_NAME: &str = "default";
@@ -75,10 +75,6 @@ const BALLOON_SHRINK_DELAY_SECS: u64 = 10;
 const DOCKER_DATA_IMAGE_NAME: &str = "docker.img";
 /// Persistent guest dockerd data image size (64 GiB sparse file).
 const DOCKER_DATA_IMAGE_SIZE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
-// =============================================================================
-// VM Lifecycle State
-// =============================================================================
-
 /// Extended VM lifecycle state.
 ///
 /// This extends the basic `MachineState` with additional states
@@ -177,10 +173,6 @@ pub enum VmEvent {
     Retry,
 }
 
-// =============================================================================
-// Configuration
-// =============================================================================
-
 /// VM lifecycle configuration.
 #[derive(Debug, Clone)]
 pub struct VmLifecycleConfig {
@@ -254,162 +246,8 @@ impl Default for DefaultVmConfig {
 
 // Note: BootAssetProvider and BootAssets are now in crate::boot_assets module.
 
-// =============================================================================
-// Health Monitor
-// =============================================================================
-
-/// Health monitor for VM.
-///
-/// Continuously monitors VM health via agent ping.
-/// Reports failures after consecutive failures exceed threshold.
-#[allow(dead_code)]
-pub struct HealthMonitor {
-    /// Health check interval.
-    interval: Duration,
-    /// Maximum consecutive failures before reporting unhealthy.
-    max_failures: u32,
-    /// Current failure count.
-    failures: AtomicU32,
-    /// Shutdown signal.
-    shutdown: CancellationToken,
-}
-
-impl HealthMonitor {
-    /// Creates a new health monitor.
-    #[must_use]
-    pub fn new(interval: Duration, max_failures: u32) -> Self {
-        Self {
-            interval,
-            max_failures,
-            failures: AtomicU32::new(0),
-            shutdown: CancellationToken::new(),
-        }
-    }
-
-    /// Returns the shutdown token for stopping the monitor.
-    pub fn shutdown_token(&self) -> CancellationToken {
-        self.shutdown.clone()
-    }
-
-    /// Resets the failure counter.
-    pub fn reset(&self) {
-        self.failures.store(0, Ordering::SeqCst);
-    }
-
-    /// Returns true if the VM is considered healthy.
-    pub fn is_healthy(&self) -> bool {
-        self.failures.load(Ordering::SeqCst) < self.max_failures
-    }
-
-    /// Records a successful health check.
-    pub fn record_success(&self) {
-        self.failures.store(0, Ordering::SeqCst);
-    }
-
-    /// Records a failed health check.
-    ///
-    /// Returns true if the failure threshold has been exceeded.
-    pub fn record_failure(&self) -> bool {
-        let failures = self.failures.fetch_add(1, Ordering::SeqCst) + 1;
-        failures >= self.max_failures
-    }
-
-    /// Stops the health monitor.
-    pub fn stop(&self) {
-        self.shutdown.cancel();
-    }
-}
-
-// =============================================================================
-// Recovery Policy
-// =============================================================================
-
-/// Backoff strategy for recovery retries.
-#[derive(Debug, Clone)]
-pub enum BackoffStrategy {
-    /// Fixed delay between retries.
-    Fixed(Duration),
-    /// Exponential backoff with maximum.
-    Exponential {
-        /// Initial delay.
-        initial: Duration,
-        /// Maximum delay.
-        max: Duration,
-    },
-}
-
-impl Default for BackoffStrategy {
-    fn default() -> Self {
-        Self::Exponential {
-            initial: Duration::from_millis(500),
-            max: Duration::from_secs(10),
-        }
-    }
-}
-
-/// Recovery action after failure.
-#[derive(Debug)]
-pub enum RecoveryAction {
-    /// Retry after the specified delay.
-    RetryAfter(Duration),
-    /// Give up and report the error.
-    GiveUp(String),
-}
-
-/// Recovery policy for VM failures.
-pub struct RecoveryPolicy {
-    /// Maximum retry attempts.
-    max_retries: u32,
-    /// Backoff strategy.
-    backoff: BackoffStrategy,
-    /// Current retry count.
-    retries: AtomicU32,
-}
-
-impl RecoveryPolicy {
-    /// Creates a new recovery policy.
-    #[must_use]
-    pub const fn new(max_retries: u32, backoff: BackoffStrategy) -> Self {
-        Self {
-            max_retries,
-            backoff,
-            retries: AtomicU32::new(0),
-        }
-    }
-
-    /// Handles a failure and returns the recovery action.
-    pub fn handle_failure(&self, error: &str) -> RecoveryAction {
-        let retries = self.retries.fetch_add(1, Ordering::SeqCst);
-
-        if retries >= self.max_retries {
-            return RecoveryAction::GiveUp(error.to_string());
-        }
-
-        let delay = match &self.backoff {
-            BackoffStrategy::Fixed(d) => *d,
-            BackoffStrategy::Exponential { initial, max } => {
-                let delay = *initial * 2u32.pow(retries);
-                delay.min(*max)
-            }
-        };
-
-        RecoveryAction::RetryAfter(delay)
-    }
-
-    /// Resets the retry counter.
-    pub fn reset(&self) {
-        self.retries.store(0, Ordering::SeqCst);
-    }
-
-    /// Returns the current retry count.
-    pub fn retry_count(&self) -> u32 {
-        self.retries.load(Ordering::SeqCst)
-    }
-}
-
-// =============================================================================
-// VM Lifecycle Manager
-// =============================================================================
+pub use health::HealthMonitor;
+pub use recovery::{BackoffStrategy, RecoveryAction, RecoveryPolicy};
 
 /// VM lifecycle manager.
 ///
@@ -939,7 +777,7 @@ impl VmLifecycleManager {
                                 // Uses exponential backoff (100ms active → 1600ms idle)
                                 // to minimize wakeups when no output is being produced.
                                 let mm = Arc::clone(&self.machine_manager);
-                                tokio::spawn(serial_read_adaptive(mm));
+                                tokio::spawn(serial::serial_read_adaptive(mm));
                             }
                             return Ok(());
                         }
@@ -958,10 +796,6 @@ impl VmLifecycleManager {
 
         Err(CoreError::Vm("timeout waiting for agent".to_string()))
     }
-
-    // =========================================================================
-    // Activity tracking & balloon control (Phase 2.1)
-    // =========================================================================
 
     /// Records activity, updating the last-activity timestamp.
     fn record_activity(&self) {
@@ -1204,125 +1038,6 @@ const fn is_not_found_error(err: &CoreError) -> bool {
     matches!(err, CoreError::Common(CommonError::NotFound(_)))
 }
 
-// =============================================================================
-// Serial port read loops
-// =============================================================================
-
-/// Base polling interval (ms) when serial output is actively being produced.
-#[cfg(target_os = "macos")]
-const SERIAL_ACTIVE_INTERVAL_MS: u64 = 100;
-
-/// Maximum number of doublings for idle backoff (100ms → 1600ms).
-#[cfg(target_os = "macos")]
-const SERIAL_MAX_IDLE_SHIFT: u32 = 4;
-
-/// Adaptive serial read loop for both hvc0 (console) and hvc1 (agent log).
-///
-/// Merges the two previously independent 200ms polling loops into a single
-/// loop with exponential backoff: 100ms when active, doubling up to 1600ms
-/// when idle. This reduces daemon wakeups from ~10/s to ~1/s at idle.
-#[cfg(target_os = "macos")]
-async fn serial_read_adaptive(machine_manager: Arc<MachineManager>) {
-    const MAX_LINE_BUF: usize = 64 * 1024;
-
-    let mut console_buf = String::new();
-    let mut agent_buf = String::new();
-    let mut idle_streak: u32 = 0;
-
-    loop {
-        let mut had_output = false;
-
-        // Read hvc0 (console)
-        if let Ok(output) = machine_manager.read_console_output(DEFAULT_MACHINE_NAME) {
-            if process_serial_output(&mut console_buf, &output, "Guest", true, MAX_LINE_BUF) {
-                had_output = true;
-            }
-        } else {
-            // Console read failed — VM likely stopped
-            flush_line_buf(&mut console_buf, "Guest", true);
-            flush_line_buf(&mut agent_buf, "Agent", false);
-            tracing::debug!("Serial read loop stopped: console read failed");
-            break;
-        }
-
-        // Read hvc1 (agent log)
-        if let Ok(output) = machine_manager.read_agent_log_output(DEFAULT_MACHINE_NAME) {
-            if process_serial_output(&mut agent_buf, &output, "Agent", false, MAX_LINE_BUF) {
-                had_output = true;
-            }
-        }
-        // Agent log failure is non-fatal — console may still work.
-
-        if had_output {
-            idle_streak = 0;
-        } else {
-            idle_streak = idle_streak.saturating_add(1);
-        }
-
-        // Adaptive delay: 100ms when active, doubling up to 1600ms when idle.
-        let delay_ms = SERIAL_ACTIVE_INTERVAL_MS * (1u64 << idle_streak.min(SERIAL_MAX_IDLE_SHIFT));
-        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-    }
-}
-
-/// Process raw serial output into line-buffered log messages.
-///
-/// Returns `true` if any non-empty output was received.
-#[cfg(target_os = "macos")]
-fn process_serial_output(
-    line_buf: &mut String,
-    output: &str,
-    label: &str,
-    level_info: bool,
-    max_buf: usize,
-) -> bool {
-    let trimmed = output.trim_matches('\0');
-    if trimmed.is_empty() {
-        return false;
-    }
-
-    line_buf.push_str(trimmed);
-
-    if line_buf.len() > max_buf {
-        tracing::warn!("{label}: line buffer overflow, flushing");
-        line_buf.clear();
-        return true;
-    }
-
-    while let Some(pos) = line_buf.find('\n') {
-        let line = line_buf[..pos].trim_end().to_owned();
-        line_buf.drain(..=pos);
-        if line.is_empty() {
-            continue;
-        }
-        if level_info {
-            tracing::info!("{label}: {line}");
-        } else {
-            tracing::debug!("{label}: {line}");
-        }
-    }
-
-    true
-}
-
-/// Flush any remaining partial line from a serial buffer.
-#[cfg(target_os = "macos")]
-fn flush_line_buf(line_buf: &mut String, label: &str, level_info: bool) {
-    let trailing = line_buf.trim().to_owned();
-    if !trailing.is_empty() {
-        if level_info {
-            tracing::info!("{label}: {trailing}");
-        } else {
-            tracing::debug!("{label}: {trailing}");
-        }
-    }
-    line_buf.clear();
-}
-
-// =============================================================================
-// Tests
-// =============================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1370,135 +1085,5 @@ mod tests {
         assert!(config.memory_mb >= 512);
         assert!(config.memory_mb <= 16384);
         assert_eq!(config.disk_gb, 50);
-    }
-
-    #[test]
-    fn test_recovery_policy_fixed_backoff() {
-        let policy = RecoveryPolicy::new(3, BackoffStrategy::Fixed(Duration::from_millis(100)));
-
-        // First failure: retry
-        match policy.handle_failure("test error") {
-            RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_millis(100)),
-            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
-        }
-
-        // Second failure: retry
-        match policy.handle_failure("test error") {
-            RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_millis(100)),
-            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
-        }
-
-        // Third failure: retry
-        match policy.handle_failure("test error") {
-            RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_millis(100)),
-            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
-        }
-
-        // Fourth failure: give up
-        match policy.handle_failure("test error") {
-            RecoveryAction::GiveUp(_) => {}
-            RecoveryAction::RetryAfter(_) => panic!("expected GiveUp"),
-        }
-    }
-
-    #[test]
-    fn test_recovery_policy_exponential_backoff() {
-        let policy = RecoveryPolicy::new(
-            5,
-            BackoffStrategy::Exponential {
-                initial: Duration::from_millis(100),
-                max: Duration::from_secs(1),
-            },
-        );
-
-        // First failure: 100ms
-        match policy.handle_failure("test") {
-            RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_millis(100)),
-            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
-        }
-
-        // Second failure: 200ms
-        match policy.handle_failure("test") {
-            RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_millis(200)),
-            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
-        }
-
-        // Third failure: 400ms
-        match policy.handle_failure("test") {
-            RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_millis(400)),
-            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
-        }
-
-        // Fourth failure: 800ms
-        match policy.handle_failure("test") {
-            RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_millis(800)),
-            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
-        }
-
-        // Fifth failure: capped at 1000ms
-        match policy.handle_failure("test") {
-            RecoveryAction::RetryAfter(d) => assert_eq!(d, Duration::from_secs(1)),
-            RecoveryAction::GiveUp(_) => panic!("expected RetryAfter"),
-        }
-
-        // Sixth failure: give up
-        match policy.handle_failure("test") {
-            RecoveryAction::GiveUp(_) => {}
-            RecoveryAction::RetryAfter(_) => panic!("expected GiveUp"),
-        }
-    }
-
-    #[test]
-    fn test_recovery_policy_reset() {
-        let policy = RecoveryPolicy::new(2, BackoffStrategy::Fixed(Duration::from_millis(100)));
-
-        // First failure
-        let _ = policy.handle_failure("test");
-        assert_eq!(policy.retry_count(), 1);
-
-        // Reset
-        policy.reset();
-        assert_eq!(policy.retry_count(), 0);
-    }
-
-    #[test]
-    fn test_health_monitor() {
-        let monitor = HealthMonitor::new(Duration::from_secs(5), 3);
-
-        assert!(monitor.is_healthy());
-
-        // First failure
-        assert!(!monitor.record_failure());
-        assert!(monitor.is_healthy());
-
-        // Second failure
-        assert!(!monitor.record_failure());
-        assert!(monitor.is_healthy());
-
-        // Third failure - threshold exceeded
-        assert!(monitor.record_failure());
-        assert!(!monitor.is_healthy());
-
-        // Reset
-        monitor.reset();
-        assert!(monitor.is_healthy());
-    }
-
-    #[test]
-    fn test_health_monitor_success_resets() {
-        let monitor = HealthMonitor::new(Duration::from_secs(5), 3);
-
-        // Two failures
-        monitor.record_failure();
-        monitor.record_failure();
-
-        // Success resets
-        monitor.record_success();
-        assert!(monitor.is_healthy());
-
-        // Need 3 more failures to exceed threshold
-        assert!(!monitor.record_failure());
-        assert!(!monitor.record_failure());
-        assert!(monitor.record_failure());
     }
 }
