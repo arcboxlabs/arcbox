@@ -141,8 +141,9 @@ impl From<&MachineInfo> for PersistedMachine {
 
 /// Writes `data` to `path` atomically via write-to-temp-then-rename.
 ///
-/// A crash during the write leaves either the old file or the new file
-/// intact — never a truncated/partial file.
+/// A process crash or panic during the write leaves either the old file
+/// or the new file intact — never a truncated/partial file.  This does
+/// **not** call `fsync`; durability across power loss is not guaranteed.
 fn atomic_write(path: &std::path::Path, data: &[u8]) -> Result<()> {
     let dir = path
         .parent()
