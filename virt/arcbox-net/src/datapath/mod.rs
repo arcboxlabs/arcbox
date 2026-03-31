@@ -32,7 +32,7 @@ pub mod ring;
 pub mod stats;
 
 pub use packet::{PacketMetadata, Protocol, ZeroCopyPacket};
-pub use pool::{PacketBuffer, PacketPool};
+pub use pool::{PacketBuffer, PacketPool, PacketRef};
 pub use ring::LockFreeRing;
 pub use stats::DatapathStats;
 

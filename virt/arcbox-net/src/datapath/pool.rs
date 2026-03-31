@@ -4,6 +4,8 @@
 //! runtime memory allocation in the hot path.
 
 use std::cell::UnsafeCell;
+use std::mem::ManuallyDrop;
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use crate::error::{NetError, Result};
@@ -161,6 +163,77 @@ impl std::fmt::Debug for PacketBuffer {
     }
 }
 
+/// Owned handle to a [`PacketBuffer`] allocated from a [`PacketPool`].
+///
+/// Provides `Deref`/`DerefMut` access to the underlying buffer and
+/// automatically returns it to the pool on drop. Use [`into_index`](Self::into_index)
+/// when the buffer must be handed off by index (e.g. to a ring buffer)
+/// without triggering the auto-free.
+pub struct PacketRef<'pool> {
+    pool: &'pool PacketPool,
+    idx: u32,
+}
+
+impl PacketRef<'_> {
+    /// Returns the buffer's index in the pool.
+    #[inline]
+    #[must_use]
+    pub fn index(&self) -> u32 {
+        self.idx
+    }
+
+    /// Consumes the handle and returns the raw buffer index **without**
+    /// freeing the buffer back to the pool.
+    ///
+    /// The caller is responsible for eventually freeing the buffer
+    /// (e.g. via [`PacketPool::free_by_index`]).
+    #[inline]
+    #[must_use]
+    pub fn into_index(self) -> u32 {
+        let md = ManuallyDrop::new(self);
+        md.idx
+    }
+}
+
+impl Deref for PacketRef<'_> {
+    type Target = PacketBuffer;
+
+    #[inline]
+    fn deref(&self) -> &PacketBuffer {
+        // SAFETY: The CAS in `alloc` guarantees this buffer is not on the
+        // free-list, and only one `PacketRef` exists per index at a time,
+        // so no other code holds a mutable reference.
+        unsafe { &*self.pool.buffers[self.idx as usize].get() }
+    }
+}
+
+impl DerefMut for PacketRef<'_> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut PacketBuffer {
+        // SAFETY: `&mut self` guarantees we are the sole accessor of this
+        // `PacketRef`, and the CAS in `alloc` guarantees the buffer is not
+        // on the free-list.
+        unsafe { &mut *self.pool.buffers[self.idx as usize].get() }
+    }
+}
+
+impl Drop for PacketRef<'_> {
+    fn drop(&mut self) {
+        // SAFETY: The buffer at `self.idx` belongs to `self.pool` and is
+        // not on the free-list (guaranteed by the allocation protocol).
+        unsafe { self.pool.free_by_index(self.idx) };
+    }
+}
+
+impl std::fmt::Debug for PacketRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PacketRef")
+            .field("idx", &self.idx)
+            .field("buffer", &**self)
+            .finish()
+    }
+}
+
 /// Free list entry for the packet pool.
 #[repr(C)]
 struct FreeListEntry {
@@ -255,9 +328,10 @@ impl PacketPool {
 
     /// Allocates a buffer from the pool.
     ///
-    /// Returns `None` if the pool is empty.
-    #[allow(clippy::mut_from_ref)]
-    pub fn alloc(&self) -> Option<&mut PacketBuffer> {
+    /// Returns `None` if the pool is empty. The returned [`PacketRef`]
+    /// auto-frees the buffer on drop; use [`PacketRef::into_index`] to
+    /// transfer ownership by index without auto-freeing.
+    pub fn alloc(&self) -> Option<PacketRef<'_>> {
         loop {
             let head = self.free_head.0.load(Ordering::Acquire);
             if head == u32::MAX {
@@ -275,11 +349,17 @@ impl PacketPool {
             {
                 self.free_count.0.fetch_sub(1, Ordering::AcqRel);
 
-                // Safety: We have exclusive access to this buffer now via CAS success.
-                // UnsafeCell::get() returns *mut T which is the correct way to get mutable access.
-                let buffer = unsafe { &mut *self.buffers[head as usize].get() };
-                buffer.refcount.store(1, Ordering::Release);
-                return Some(buffer);
+                // SAFETY: CAS success guarantees this buffer was removed from
+                // the free-list, so no other thread can access it.
+                unsafe {
+                    (*self.buffers[head as usize].get())
+                        .refcount
+                        .store(1, Ordering::Release);
+                };
+                return Some(PacketRef {
+                    pool: self,
+                    idx: head,
+                });
             }
             // CAS failed, retry
             std::hint::spin_loop();
@@ -324,12 +404,12 @@ impl PacketPool {
     /// # Errors
     ///
     /// Returns an error if the pool is empty or data is too large.
-    pub fn alloc_with_data(&self, data: &[u8]) -> Result<&mut PacketBuffer> {
-        let buffer = self
+    pub fn alloc_with_data(&self, data: &[u8]) -> Result<PacketRef<'_>> {
+        let mut pkt = self
             .alloc()
             .ok_or_else(|| NetError::PacketPool("pool exhausted".to_string()))?;
-        buffer.copy_from_slice(data)?;
-        Ok(buffer)
+        pkt.copy_from_slice(data)?;
+        Ok(pkt)
     }
 
     /// Returns a buffer to the pool.
@@ -370,9 +450,9 @@ impl PacketPool {
     pub unsafe fn free_by_index(&self, idx: u32) {
         debug_assert!((idx as usize) < self.capacity);
 
-        // Safety: caller guarantees buffer is not in use per function contract.
-        // UnsafeCell::get() is the correct way to get mutable access.
+        // SAFETY: Caller guarantees the buffer is not in use elsewhere.
         let buffer = unsafe { &mut *self.buffers[idx as usize].get() };
+        // SAFETY: Same precondition forwarded from caller.
         unsafe { self.free(buffer) };
     }
 
@@ -384,7 +464,7 @@ impl PacketPool {
     #[must_use]
     pub unsafe fn get(&self, idx: u32) -> &PacketBuffer {
         debug_assert!((idx as usize) < self.capacity);
-        // Safety: caller guarantees buffer is allocated.
+        // SAFETY: Caller guarantees the buffer at `idx` is allocated.
         unsafe { &*self.buffers[idx as usize].get() }
     }
 
@@ -392,13 +472,12 @@ impl PacketPool {
     ///
     /// # Safety
     ///
-    /// The caller must ensure the buffer is allocated and have exclusive access.
+    /// The caller must ensure the buffer is allocated and has exclusive access.
     #[must_use]
-    #[allow(clippy::mut_from_ref)]
+    #[allow(clippy::mut_from_ref)] // Soundness relies on caller-guaranteed exclusivity; this is an inherently unsafe operation
     pub unsafe fn get_mut(&self, idx: u32) -> &mut PacketBuffer {
         debug_assert!((idx as usize) < self.capacity);
-        // Safety: caller guarantees exclusive access per function contract.
-        // UnsafeCell::get() is the correct way to get mutable access.
+        // SAFETY: Caller guarantees exclusive access per function contract.
         unsafe { &mut *self.buffers[idx as usize].get() }
     }
 
@@ -453,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pool_alloc_free() {
+    fn test_pool_alloc_drop() {
         let pool = PacketPool::new(10).unwrap();
 
         // Allocate a buffer
@@ -464,15 +543,32 @@ mod tests {
 
         let idx = buf.index();
 
-        // Free the buffer
-        unsafe { pool.free(buf) };
+        // Drop auto-frees the buffer back to the pool.
+        drop(buf);
         assert_eq!(pool.free_count(), 10);
         assert_eq!(pool.allocated_count(), 0);
 
-        // The buffer should be reusable
+        // The buffer should be reusable (LIFO).
         let buf2 = pool.alloc().unwrap();
-        // Might get the same buffer back (LIFO)
         assert_eq!(buf2.index(), idx);
+    }
+
+    #[test]
+    fn test_packet_ref_into_index() {
+        let pool = PacketPool::new(4).unwrap();
+
+        let buf = pool.alloc().unwrap();
+        let idx = buf.index();
+
+        // into_index consumes the ref without freeing.
+        let extracted = buf.into_index();
+        assert_eq!(extracted, idx);
+        // Buffer is still allocated (not returned to pool).
+        assert_eq!(pool.free_count(), 3);
+
+        // Manual free via index.
+        unsafe { pool.free_by_index(extracted) };
+        assert_eq!(pool.free_count(), 4);
     }
 
     #[test]
@@ -490,7 +586,7 @@ mod tests {
     #[test]
     fn test_buffer_copy() {
         let pool = PacketPool::new(1).unwrap();
-        let buf = pool.alloc().unwrap();
+        let mut buf = pool.alloc().unwrap();
 
         let data = [1u8, 2, 3, 4, 5];
         buf.copy_from_slice(&data).unwrap();
