@@ -6,7 +6,7 @@
 use std::cell::UnsafeCell;
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::error::{NetError, Result};
 
@@ -234,23 +234,75 @@ impl std::fmt::Debug for PacketRef<'_> {
     }
 }
 
+/// Sentinel index meaning "free list is empty".
+const EMPTY_IDX: u32 = u32::MAX;
+
+/// ABA-safe tagged head for the lock-free Treiber stack.
+///
+/// Packs `(index: u32, tag: u32)` into a single `AtomicU64`. The tag
+/// increments on every successful CAS, preventing the ABA problem where
+/// a recycled index matches a stale snapshot.
+struct TaggedHead(AtomicU64);
+
+impl TaggedHead {
+    fn new(idx: u32) -> Self {
+        Self(AtomicU64::new(Self::pack(idx, 0)))
+    }
+
+    #[inline]
+    fn pack(idx: u32, tag: u32) -> u64 {
+        (u64::from(tag) << 32) | u64::from(idx)
+    }
+
+    #[inline]
+    fn unpack(val: u64) -> (u32, u32) {
+        (val as u32, (val >> 32) as u32)
+    }
+
+    #[inline]
+    fn load(&self, order: Ordering) -> (u32, u32) {
+        Self::unpack(self.0.load(order))
+    }
+
+    /// CAS with automatic tag bump. Returns `true` on success.
+    #[inline]
+    fn compare_exchange_weak(
+        &self,
+        old_idx: u32,
+        old_tag: u32,
+        new_idx: u32,
+        success: Ordering,
+        failure: Ordering,
+    ) -> bool {
+        let old = Self::pack(old_idx, old_tag);
+        let new = Self::pack(new_idx, old_tag.wrapping_add(1));
+        self.0
+            .compare_exchange_weak(old, new, success, failure)
+            .is_ok()
+    }
+}
+
 /// Free list entry for the packet pool.
 #[repr(C)]
 struct FreeListEntry {
-    /// Index of the next free buffer, or u32::MAX if none.
+    /// Index of the next free buffer, or `EMPTY_IDX` if none.
     next: AtomicU32,
 }
 
 /// Pre-allocated packet buffer pool.
 ///
-/// Uses a lock-free free list for allocation and deallocation.
+/// Uses a lock-free Treiber stack (free list) for allocation and
+/// deallocation. The head is an ABA-safe tagged pointer (`AtomicU64`)
+/// that pairs the index with a monotonic tag to prevent the classic
+/// Treiber stack ABA bug.
+///
 /// All buffers are pre-allocated at construction time to avoid
 /// runtime memory allocation in the hot path.
 pub struct PacketPool {
     /// Pre-allocated buffers wrapped in UnsafeCell for interior mutability.
     buffers: Box<[UnsafeCell<PacketBuffer>]>,
-    /// Free list head index (u32::MAX means empty).
-    free_head: CachePadded<AtomicU32>,
+    /// ABA-safe free list head (tagged index + counter).
+    free_head: CachePadded<TaggedHead>,
     /// Free list entries (one per buffer).
     free_list: Box<[FreeListEntry]>,
     /// Number of free buffers.
@@ -279,7 +331,7 @@ impl PacketPool {
                 let next = if i + 1 < capacity {
                     (i + 1) as u32
                 } else {
-                    u32::MAX
+                    EMPTY_IDX
                 };
                 FreeListEntry {
                     next: AtomicU32::new(next),
@@ -289,7 +341,7 @@ impl PacketPool {
 
         Ok(Self {
             buffers: buffers.into_boxed_slice(),
-            free_head: CachePadded::new(AtomicU32::new(0)),
+            free_head: CachePadded::new(TaggedHead::new(0)),
             free_list: free_list.into_boxed_slice(),
             free_count: CachePadded::new(AtomicUsize::new(capacity)),
             capacity,
@@ -333,20 +385,22 @@ impl PacketPool {
     /// transfer ownership by index without auto-freeing.
     pub fn alloc(&self) -> Option<PacketRef<'_>> {
         loop {
-            let head = self.free_head.0.load(Ordering::Acquire);
-            if head == u32::MAX {
+            let (head, tag) = self.free_head.0.load(Ordering::Acquire);
+            if head == EMPTY_IDX {
                 return None; // Pool is empty
             }
 
             let next = self.free_list[head as usize].next.load(Ordering::Acquire);
 
-            // Try to update the head
-            if self
-                .free_head
-                .0
-                .compare_exchange_weak(head, next, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
+            // Tagged CAS prevents ABA: even if `head` is recycled back to the
+            // same index, the tag will have changed, causing the CAS to fail.
+            if self.free_head.0.compare_exchange_weak(
+                head,
+                tag,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
                 self.free_count.0.fetch_sub(1, Ordering::AcqRel);
 
                 // SAFETY: CAS success guarantees this buffer was removed from
@@ -371,22 +425,22 @@ impl PacketPool {
     /// Returns `None` if the pool is empty.
     pub fn alloc_index(&self) -> Option<u32> {
         loop {
-            let head = self.free_head.0.load(Ordering::Acquire);
-            if head == u32::MAX {
+            let (head, tag) = self.free_head.0.load(Ordering::Acquire);
+            if head == EMPTY_IDX {
                 return None; // Pool is empty
             }
 
             let next = self.free_list[head as usize].next.load(Ordering::Acquire);
 
-            // Try to update the head
-            if self
-                .free_head
-                .0
-                .compare_exchange_weak(head, next, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
+            if self.free_head.0.compare_exchange_weak(
+                head,
+                tag,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
                 self.free_count.0.fetch_sub(1, Ordering::AcqRel);
-                // Safety: We have exclusive access via CAS success.
+                // SAFETY: CAS success guarantees exclusive access.
                 unsafe {
                     (*self.buffers[head as usize].get())
                         .refcount
@@ -428,17 +482,18 @@ impl PacketPool {
         buffer.reset();
 
         loop {
-            let head = self.free_head.0.load(Ordering::Acquire);
+            let (head, tag) = self.free_head.0.load(Ordering::Acquire);
             self.free_list[idx as usize]
                 .next
                 .store(head, Ordering::Release);
 
-            if self
-                .free_head
-                .0
-                .compare_exchange_weak(head, idx, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
+            if self.free_head.0.compare_exchange_weak(
+                head,
+                tag,
+                idx,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
                 self.free_count.0.fetch_add(1, Ordering::AcqRel);
                 return;
             }
