@@ -28,6 +28,8 @@
 //! remove(net).unwrap();
 //! ```
 
+#![cfg(target_os = "macos")]
+
 pub mod msg;
 pub(crate) mod sockaddr;
 
@@ -191,26 +193,21 @@ pub fn add(net: Ipv4Net, iface: &str) -> Result<(), String> {
     let dst = sockaddr::make_dst(net);
     let mask = sockaddr::make_netmask(net);
     let gw = sockaddr::make_gateway_dl(iface)
-        .map_err(|e| format!("failed to resolve interface '{iface}': {e}"))?;
+        .map_err(|e| format!("RTM_ADD {net} via {iface}: failed to resolve interface: {e}"))?;
 
     let add_msg = msg::build_msg(msg::MsgType::Add, &dst, Some(&gw), &mask)
-        .map_err(|e| format!("failed to build RTM_ADD message: {e}"))?;
+        .map_err(|e| format!("RTM_ADD {net} via {iface}: failed to build message: {e}"))?;
 
-    match msg::route_send(&add_msg) {
-        Ok(reply) if reply.errno == 0 => {
+    match msg::route_write(&add_msg) {
+        Ok(()) => {
             tracing::debug!(iface, net = %net, "route added");
             Ok(())
         }
-        Ok(reply) if reply.errno == libc::EEXIST => {
-            tracing::debug!(iface, net = %net, "route exists, replacing via RTM_CHANGE");
-            send_change(net, &dst, &gw, &mask)
-        }
-        Ok(reply) => Err(errno_to_string(reply.errno)),
         Err(e) if e.raw_os_error() == Some(libc::EEXIST) => {
-            tracing::debug!(iface, net = %net, "route exists (write errno), replacing");
-            send_change(net, &dst, &gw, &mask)
+            tracing::debug!(iface, net = %net, "route exists, replacing via RTM_CHANGE");
+            send_change(net, iface, &dst, &gw, &mask)
         }
-        Err(e) => Err(format!("RTM_ADD failed: {e}")),
+        Err(e) => Err(format!("RTM_ADD {net} via {iface}: {e}")),
     }
 }
 
@@ -228,26 +225,27 @@ pub fn remove(net: Ipv4Net) -> Result<(), String> {
     let mask = sockaddr::make_netmask(net);
 
     let del_msg = msg::build_msg(msg::MsgType::Delete, &dst, None, &mask)
-        .map_err(|e| format!("failed to build RTM_DELETE message: {e}"))?;
+        .map_err(|e| format!("RTM_DELETE {net}: failed to build message: {e}"))?;
 
-    match msg::route_send(&del_msg) {
-        Ok(reply) if reply.errno == 0 => {
+    match msg::route_write(&del_msg) {
+        Ok(()) => {
             tracing::debug!(net = %net, "route removed");
             Ok(())
         }
-        Ok(reply) if reply.errno == libc::ESRCH => {
+        Err(e) if e.raw_os_error() == Some(libc::ESRCH) => {
             tracing::debug!(net = %net, "route already absent");
             Ok(())
         }
-        Ok(reply) => Err(errno_to_string(reply.errno)),
-        Err(e) if e.raw_os_error() == Some(libc::ESRCH) => Ok(()),
-        Err(e) => Err(format!("RTM_DELETE failed: {e}")),
+        Err(e) => Err(format!("RTM_DELETE {net}: {e}")),
     }
 }
 
 /// Queries the routing table for a subnet route.
 ///
 /// Returns `Some(RouteInfo)` if a matching route exists, `None` if absent.
+///
+/// Unlike mutations, this reads the kernel reply (matched by seq/pid)
+/// to extract interface index and flags.
 ///
 /// # Errors
 ///
@@ -258,17 +256,15 @@ pub fn get(net: Ipv4Net) -> Result<Option<RouteInfo>, String> {
     let mask = sockaddr::make_netmask(net);
 
     let get_msg = msg::build_msg(msg::MsgType::Get, &dst, None, &mask)
-        .map_err(|e| format!("failed to build RTM_GET message: {e}"))?;
+        .map_err(|e| format!("RTM_GET {net}: failed to build message: {e}"))?;
 
-    match msg::route_send(&get_msg) {
-        Ok(reply) if reply.errno == 0 => Ok(Some(RouteInfo {
+    match msg::route_query(&get_msg) {
+        Ok(reply) => Ok(Some(RouteInfo {
             ifindex: reply.ifindex,
             flags: reply.flags,
         })),
-        Ok(reply) if reply.errno == libc::ESRCH => Ok(None),
-        Ok(reply) => Err(errno_to_string(reply.errno)),
         Err(e) if e.raw_os_error() == Some(libc::ESRCH) => Ok(None),
-        Err(e) => Err(format!("RTM_GET failed: {e}")),
+        Err(e) => Err(format!("RTM_GET {net}: {e}")),
     }
 }
 
@@ -277,23 +273,16 @@ pub fn get(net: Ipv4Net) -> Result<Option<RouteInfo>, String> {
 /// Sends an RTM_CHANGE message — extracted to eliminate duplication in [`add`].
 fn send_change(
     net: Ipv4Net,
+    iface: &str,
     dst: &libc::sockaddr_in,
     gw: &libc::sockaddr_dl,
     mask: &libc::sockaddr_in,
 ) -> Result<(), String> {
     let change_msg = msg::build_msg(msg::MsgType::Change, dst, Some(gw), mask)
-        .map_err(|e| format!("failed to build RTM_CHANGE message: {e}"))?;
-    let reply = msg::route_send(&change_msg).map_err(|e| format!("RTM_CHANGE failed: {e}"))?;
-    if reply.errno == 0 {
-        tracing::debug!(net = %net, "route replaced");
-        Ok(())
-    } else {
-        Err(errno_to_string(reply.errno))
-    }
-}
-
-fn errno_to_string(errno: i32) -> String {
-    std::io::Error::from_raw_os_error(errno).to_string()
+        .map_err(|e| format!("RTM_CHANGE {net} via {iface}: failed to build message: {e}"))?;
+    msg::route_write(&change_msg).map_err(|e| format!("RTM_CHANGE {net} via {iface}: {e}"))?;
+    tracing::debug!(net = %net, "route replaced");
+    Ok(())
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
