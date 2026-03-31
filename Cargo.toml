@@ -9,6 +9,7 @@ members = [
     "common/arcbox-dns",
     "common/arcbox-asset",
     "common/arcbox-logging",
+    "common/arcbox-route",
 
     # ============================================
     # L1-3: Virtualization (MIT OR Apache-2.0)

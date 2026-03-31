@@ -437,6 +437,7 @@ version = "0.3.17"
 dependencies = [
  "arcbox-constants",
  "arcbox-logging",
+ "arcbox-route",
  "futures",
  "ipnetwork 0.21.1",
  "libc",
@@ -546,6 +547,14 @@ dependencies = [
  "thiserror",
  "tonic",
  "tonic-build",
+]
+
+[[package]]
+name = "arcbox-route"
+version = "0.3.16"
+dependencies = [
+ "libc",
+ "tracing",
 ]
 
 [[package]]
