@@ -414,10 +414,14 @@ impl PacketPool {
 
     /// Returns a buffer to the pool.
     ///
+    /// Prefer dropping a [`PacketRef`] or calling [`free_by_index`](Self::free_by_index)
+    /// instead of using this method directly.
+    ///
     /// # Safety
     ///
-    /// The buffer must belong to this pool and not be in use elsewhere.
-    pub unsafe fn free(&self, buffer: &mut PacketBuffer) {
+    /// The buffer must belong to this pool and not be in use elsewhere
+    /// (no live [`PacketRef`] or `&mut PacketBuffer` for the same index).
+    pub(crate) unsafe fn free(&self, buffer: &mut PacketBuffer) {
         let idx = buffer.index;
         debug_assert!((idx as usize) < self.capacity);
 
@@ -472,7 +476,9 @@ impl PacketPool {
     ///
     /// # Safety
     ///
-    /// The caller must ensure the buffer is allocated and has exclusive access.
+    /// The caller must ensure the buffer is allocated, has exclusive access,
+    /// **and no [`PacketRef`] exists for the same index**. Violating this
+    /// creates aliasing `&mut` references, which is instant UB.
     #[must_use]
     #[allow(clippy::mut_from_ref)] // Soundness relies on caller-guaranteed exclusivity; this is an inherently unsafe operation
     pub unsafe fn get_mut(&self, idx: u32) -> &mut PacketBuffer {
@@ -512,6 +518,14 @@ impl std::fmt::Debug for PacketPool {
 // Safety: The pool uses atomic operations for synchronization.
 unsafe impl Send for PacketPool {}
 unsafe impl Sync for PacketPool {}
+
+// Compile-time assertion: PacketRef must be Send (buffers are handed off
+// between threads via ring buffers) and need not be Sync (no shared access).
+#[allow(dead_code)]
+const _ASSERT_PACKET_REF_SEND: () = {
+    const fn assert_send<T: Send>() {}
+    assert_send::<PacketRef<'_>>();
+};
 
 #[cfg(test)]
 mod tests {
@@ -618,5 +632,70 @@ mod tests {
         for idx in &indices[..5] {
             assert!(*idx < 5);
         }
+    }
+
+    #[test]
+    fn test_concurrent_alloc_drop() {
+        use std::sync::Arc;
+
+        let pool = Arc::new(PacketPool::new(64).unwrap());
+        let iterations = 1000;
+        let threads = 4;
+
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                let pool = Arc::clone(&pool);
+                std::thread::spawn(move || {
+                    for _ in 0..iterations {
+                        // Allocate a buffer, write to it, then drop (auto-free).
+                        if let Some(mut pkt) = pool.alloc() {
+                            pkt.set_len(4);
+                            pkt.as_full_mut_slice()[..4].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+                            assert_eq!(pkt.as_slice(), &[0xDE, 0xAD, 0xBE, 0xEF]);
+                            // pkt dropped here — returned to pool
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // All buffers should be returned to the pool.
+        assert_eq!(pool.free_count(), 64);
+        assert_eq!(pool.allocated_count(), 0);
+    }
+
+    #[test]
+    fn test_concurrent_alloc_into_index_free() {
+        use std::sync::Arc;
+
+        let pool = Arc::new(PacketPool::new(32).unwrap());
+        let iterations = 500;
+        let threads = 4;
+
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                let pool = Arc::clone(&pool);
+                std::thread::spawn(move || {
+                    for _ in 0..iterations {
+                        if let Some(pkt) = pool.alloc() {
+                            // Simulate ring buffer handoff: into_index, then manual free.
+                            let idx = pkt.into_index();
+                            assert!(idx < 32);
+                            unsafe { pool.free_by_index(idx) };
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(pool.free_count(), 32);
     }
 }
