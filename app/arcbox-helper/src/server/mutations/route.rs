@@ -11,7 +11,7 @@ use arcbox_helper::validate::{BridgeIface, Subnet};
 /// Adds a route for `subnet` via `iface`.
 ///
 /// Invokes `/sbin/route -n add -net <subnet> -interface <iface>`.
-/// Idempotent: returns Ok if the route already exists.
+/// If the route already exists (possibly pointing elsewhere), it is replaced.
 pub fn add(subnet: &Subnet, iface: &BridgeIface) -> Result<(), String> {
     let output = Command::new("/sbin/route")
         .args([
@@ -31,7 +31,25 @@ pub fn add(subnet: &Subnet, iface: &BridgeIface) -> Result<(), String> {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     if stderr.contains("File exists") {
-        return Ok(());
+        // Route exists but may point to wrong gateway/interface — replace it.
+        let _ = Command::new("/sbin/route")
+            .args(["-n", "delete", "-net", &subnet.to_string()])
+            .output();
+        let retry = Command::new("/sbin/route")
+            .args([
+                "-n",
+                "add",
+                "-net",
+                &subnet.to_string(),
+                "-interface",
+                iface.as_str(),
+            ])
+            .output()
+            .map_err(|e| format!("failed to re-add route: {e}"))?;
+        if retry.status.success() {
+            return Ok(());
+        }
+        return Err(String::from_utf8_lossy(&retry.stderr).trim().to_string());
     }
 
     Err(stderr.trim().to_string())
