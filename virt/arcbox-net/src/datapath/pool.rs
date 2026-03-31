@@ -4,11 +4,14 @@
 //! runtime memory allocation in the hot path.
 
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::mem::ManuallyDrop;
+use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::error::{NetError, Result};
 
-use super::{CachePadded, DEFAULT_POOL_CAPACITY, MAX_PACKET_SIZE};
+use super::ring::MpmcRing;
+use super::{DEFAULT_POOL_CAPACITY, MAX_PACKET_SIZE};
 
 /// A single packet buffer with header space.
 #[repr(C, align(64))]
@@ -161,27 +164,91 @@ impl std::fmt::Debug for PacketBuffer {
     }
 }
 
-/// Free list entry for the packet pool.
-#[repr(C)]
-struct FreeListEntry {
-    /// Index of the next free buffer, or u32::MAX if none.
-    next: AtomicU32,
+/// Owned handle to a [`PacketBuffer`] allocated from a [`PacketPool`].
+///
+/// Provides `Deref`/`DerefMut` access to the underlying buffer and
+/// automatically returns it to the pool on drop. Use [`into_index`](Self::into_index)
+/// when the buffer must be handed off by index (e.g. to a ring buffer)
+/// without triggering the auto-free.
+pub struct PacketRef<'pool> {
+    pool: &'pool PacketPool,
+    idx: u32,
+}
+
+impl PacketRef<'_> {
+    /// Returns the buffer's index in the pool.
+    #[inline]
+    #[must_use]
+    pub fn index(&self) -> u32 {
+        self.idx
+    }
+
+    /// Consumes the handle and returns the raw buffer index **without**
+    /// freeing the buffer back to the pool.
+    ///
+    /// The caller is responsible for eventually freeing the buffer
+    /// (e.g. via [`PacketPool::free_by_index`]).
+    #[inline]
+    #[must_use]
+    pub fn into_index(self) -> u32 {
+        let md = ManuallyDrop::new(self);
+        md.idx
+    }
+}
+
+impl Deref for PacketRef<'_> {
+    type Target = PacketBuffer;
+
+    #[inline]
+    fn deref(&self) -> &PacketBuffer {
+        // SAFETY: The CAS in `alloc` guarantees this buffer is not on the
+        // free-list, and only one `PacketRef` exists per index at a time,
+        // so no other code holds a mutable reference.
+        unsafe { &*self.pool.buffers[self.idx as usize].get() }
+    }
+}
+
+impl DerefMut for PacketRef<'_> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut PacketBuffer {
+        // SAFETY: `&mut self` guarantees we are the sole accessor of this
+        // `PacketRef`, and the CAS in `alloc` guarantees the buffer is not
+        // on the free-list.
+        unsafe { &mut *self.pool.buffers[self.idx as usize].get() }
+    }
+}
+
+impl Drop for PacketRef<'_> {
+    fn drop(&mut self) {
+        // SAFETY: The buffer at `self.idx` belongs to `self.pool` and is
+        // not on the free-list (guaranteed by the allocation protocol).
+        unsafe { self.pool.free_by_index(self.idx) };
+    }
+}
+
+impl std::fmt::Debug for PacketRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PacketRef")
+            .field("idx", &self.idx)
+            .field("buffer", &**self)
+            .finish()
+    }
 }
 
 /// Pre-allocated packet buffer pool.
 ///
-/// Uses a lock-free free list for allocation and deallocation.
+/// Uses an [`MpmcRing`] of free indices for lock-free allocation and
+/// deallocation. The Vyukov bounded MPMC algorithm used by `MpmcRing`
+/// provides ABA safety via per-slot sequence numbers, so no custom
+/// tagged pointers or Treiber stacks are needed.
+///
 /// All buffers are pre-allocated at construction time to avoid
 /// runtime memory allocation in the hot path.
 pub struct PacketPool {
     /// Pre-allocated buffers wrapped in UnsafeCell for interior mutability.
     buffers: Box<[UnsafeCell<PacketBuffer>]>,
-    /// Free list head index (u32::MAX means empty).
-    free_head: CachePadded<AtomicU32>,
-    /// Free list entries (one per buffer).
-    free_list: Box<[FreeListEntry]>,
-    /// Number of free buffers.
-    free_count: CachePadded<AtomicUsize>,
+    /// Lock-free queue of free buffer indices (ABA-safe via Vyukov seq numbers).
+    free_indices: MpmcRing<u32>,
     /// Total capacity.
     capacity: usize,
 }
@@ -195,30 +262,19 @@ impl PacketPool {
     pub fn new(capacity: usize) -> Result<Self> {
         let capacity = capacity.max(1);
 
-        // Pre-allocate buffers wrapped in UnsafeCell
         let buffers: Vec<UnsafeCell<PacketBuffer>> = (0..capacity)
             .map(|i| UnsafeCell::new(PacketBuffer::new(i as u32)))
             .collect();
 
-        // Initialize free list - all buffers are initially free
-        let free_list: Vec<FreeListEntry> = (0..capacity)
-            .map(|i| {
-                let next = if i + 1 < capacity {
-                    (i + 1) as u32
-                } else {
-                    u32::MAX
-                };
-                FreeListEntry {
-                    next: AtomicU32::new(next),
-                }
-            })
-            .collect();
+        // Seed the free-index ring with all buffer indices.
+        let free_indices = MpmcRing::new(capacity);
+        for i in 0..capacity {
+            let _ = free_indices.enqueue(i as u32);
+        }
 
         Ok(Self {
             buffers: buffers.into_boxed_slice(),
-            free_head: CachePadded::new(AtomicU32::new(0)),
-            free_list: free_list.into_boxed_slice(),
-            free_count: CachePadded::new(AtomicUsize::new(capacity)),
+            free_indices,
             capacity,
         })
     }
@@ -243,80 +299,44 @@ impl PacketPool {
     #[inline]
     #[must_use]
     pub fn free_count(&self) -> usize {
-        self.free_count.0.load(Ordering::Acquire)
+        self.free_indices.len()
     }
 
     /// Returns the number of allocated buffers.
     #[inline]
     #[must_use]
     pub fn allocated_count(&self) -> usize {
-        self.capacity - self.free_count()
+        self.capacity - self.free_indices.len()
     }
 
     /// Allocates a buffer from the pool.
     ///
-    /// Returns `None` if the pool is empty.
-    #[allow(clippy::mut_from_ref)]
-    pub fn alloc(&self) -> Option<&mut PacketBuffer> {
-        loop {
-            let head = self.free_head.0.load(Ordering::Acquire);
-            if head == u32::MAX {
-                return None; // Pool is empty
-            }
-
-            let next = self.free_list[head as usize].next.load(Ordering::Acquire);
-
-            // Try to update the head
-            if self
-                .free_head
-                .0
-                .compare_exchange_weak(head, next, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                self.free_count.0.fetch_sub(1, Ordering::AcqRel);
-
-                // Safety: We have exclusive access to this buffer now via CAS success.
-                // UnsafeCell::get() returns *mut T which is the correct way to get mutable access.
-                let buffer = unsafe { &mut *self.buffers[head as usize].get() };
-                buffer.refcount.store(1, Ordering::Release);
-                return Some(buffer);
-            }
-            // CAS failed, retry
-            std::hint::spin_loop();
+    /// Returns `None` if the pool is empty. The returned [`PacketRef`]
+    /// auto-frees the buffer on drop; use [`PacketRef::into_index`] to
+    /// transfer ownership by index without auto-freeing.
+    pub fn alloc(&self) -> Option<PacketRef<'_>> {
+        let idx = self.free_indices.dequeue()?;
+        // SAFETY: `idx` was on the free list, so no other thread has access.
+        unsafe {
+            (*self.buffers[idx as usize].get())
+                .refcount
+                .store(1, Ordering::Release);
         }
+        Some(PacketRef { pool: self, idx })
     }
 
     /// Allocates a buffer and returns its index.
     ///
     /// Returns `None` if the pool is empty.
     pub fn alloc_index(&self) -> Option<u32> {
-        loop {
-            let head = self.free_head.0.load(Ordering::Acquire);
-            if head == u32::MAX {
-                return None; // Pool is empty
-            }
-
-            let next = self.free_list[head as usize].next.load(Ordering::Acquire);
-
-            // Try to update the head
-            if self
-                .free_head
-                .0
-                .compare_exchange_weak(head, next, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                self.free_count.0.fetch_sub(1, Ordering::AcqRel);
-                // Safety: We have exclusive access via CAS success.
-                unsafe {
-                    (*self.buffers[head as usize].get())
-                        .refcount
-                        .store(1, Ordering::Release);
-                };
-                return Some(head);
-            }
-            // CAS failed, retry
-            std::hint::spin_loop();
+        let idx = self.free_indices.dequeue()?;
+        // SAFETY: `idx` was on the free list, so no other thread has access.
+        unsafe {
+            (*self.buffers[idx as usize].get())
+                .refcount
+                .store(1, Ordering::Release);
         }
+        Some(idx)
     }
 
     /// Allocates a buffer and initializes it with data.
@@ -324,42 +344,30 @@ impl PacketPool {
     /// # Errors
     ///
     /// Returns an error if the pool is empty or data is too large.
-    pub fn alloc_with_data(&self, data: &[u8]) -> Result<&mut PacketBuffer> {
-        let buffer = self
+    pub fn alloc_with_data(&self, data: &[u8]) -> Result<PacketRef<'_>> {
+        let mut pkt = self
             .alloc()
             .ok_or_else(|| NetError::PacketPool("pool exhausted".to_string()))?;
-        buffer.copy_from_slice(data)?;
-        Ok(buffer)
+        pkt.copy_from_slice(data)?;
+        Ok(pkt)
     }
 
     /// Returns a buffer to the pool.
     ///
+    /// Prefer dropping a [`PacketRef`] or calling [`free_by_index`](Self::free_by_index)
+    /// instead of using this method directly.
+    ///
     /// # Safety
     ///
-    /// The buffer must belong to this pool and not be in use elsewhere.
-    pub unsafe fn free(&self, buffer: &mut PacketBuffer) {
+    /// The buffer must belong to this pool and not be in use elsewhere
+    /// (no live [`PacketRef`] or `&mut PacketBuffer` for the same index).
+    pub(crate) unsafe fn free(&self, buffer: &mut PacketBuffer) {
         let idx = buffer.index;
         debug_assert!((idx as usize) < self.capacity);
-
         buffer.reset();
-
-        loop {
-            let head = self.free_head.0.load(Ordering::Acquire);
-            self.free_list[idx as usize]
-                .next
-                .store(head, Ordering::Release);
-
-            if self
-                .free_head
-                .0
-                .compare_exchange_weak(head, idx, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                self.free_count.0.fetch_add(1, Ordering::AcqRel);
-                return;
-            }
-            std::hint::spin_loop();
-        }
+        // MpmcRing::enqueue cannot fail here: the ring was sized to hold all
+        // indices, and each index is returned at most once.
+        let _ = self.free_indices.enqueue(idx);
     }
 
     /// Returns a buffer to the pool by index.
@@ -370,9 +378,9 @@ impl PacketPool {
     pub unsafe fn free_by_index(&self, idx: u32) {
         debug_assert!((idx as usize) < self.capacity);
 
-        // Safety: caller guarantees buffer is not in use per function contract.
-        // UnsafeCell::get() is the correct way to get mutable access.
+        // SAFETY: Caller guarantees the buffer is not in use elsewhere.
         let buffer = unsafe { &mut *self.buffers[idx as usize].get() };
+        // SAFETY: Same precondition forwarded from caller.
         unsafe { self.free(buffer) };
     }
 
@@ -384,7 +392,7 @@ impl PacketPool {
     #[must_use]
     pub unsafe fn get(&self, idx: u32) -> &PacketBuffer {
         debug_assert!((idx as usize) < self.capacity);
-        // Safety: caller guarantees buffer is allocated.
+        // SAFETY: Caller guarantees the buffer at `idx` is allocated.
         unsafe { &*self.buffers[idx as usize].get() }
     }
 
@@ -392,13 +400,14 @@ impl PacketPool {
     ///
     /// # Safety
     ///
-    /// The caller must ensure the buffer is allocated and have exclusive access.
+    /// The caller must ensure the buffer is allocated, has exclusive access,
+    /// **and no [`PacketRef`] exists for the same index**. Violating this
+    /// creates aliasing `&mut` references, which is instant UB.
     #[must_use]
-    #[allow(clippy::mut_from_ref)]
+    #[allow(clippy::mut_from_ref)] // Soundness relies on caller-guaranteed exclusivity; this is an inherently unsafe operation
     pub unsafe fn get_mut(&self, idx: u32) -> &mut PacketBuffer {
         debug_assert!((idx as usize) < self.capacity);
-        // Safety: caller guarantees exclusive access per function contract.
-        // UnsafeCell::get() is the correct way to get mutable access.
+        // SAFETY: Caller guarantees exclusive access per function contract.
         unsafe { &mut *self.buffers[idx as usize].get() }
     }
 
@@ -419,7 +428,7 @@ impl PacketPool {
     }
 }
 
-#[allow(clippy::missing_fields_in_debug)] // buffers/free_list omitted intentionally (large arrays, not useful in debug output)
+#[allow(clippy::missing_fields_in_debug)] // buffers omitted intentionally (large array, not useful in debug output)
 impl std::fmt::Debug for PacketPool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PacketPool")
@@ -433,6 +442,14 @@ impl std::fmt::Debug for PacketPool {
 // Safety: The pool uses atomic operations for synchronization.
 unsafe impl Send for PacketPool {}
 unsafe impl Sync for PacketPool {}
+
+// Compile-time assertion: PacketRef must be Send (buffers are handed off
+// between threads via ring buffers) and need not be Sync (no shared access).
+#[allow(dead_code)]
+const _ASSERT_PACKET_REF_SEND: () = {
+    const fn assert_send<T: Send>() {}
+    assert_send::<PacketRef<'_>>();
+};
 
 #[cfg(test)]
 mod tests {
@@ -453,26 +470,41 @@ mod tests {
     }
 
     #[test]
-    fn test_pool_alloc_free() {
+    fn test_pool_alloc_drop() {
         let pool = PacketPool::new(10).unwrap();
 
-        // Allocate a buffer
+        // Allocate a buffer.
         let buf = pool.alloc().unwrap();
         assert_eq!(buf.refcount(), 1);
         assert_eq!(pool.free_count(), 9);
         assert_eq!(pool.allocated_count(), 1);
 
-        let idx = buf.index();
-
-        // Free the buffer
-        unsafe { pool.free(buf) };
+        // Drop auto-frees the buffer back to the pool.
+        drop(buf);
         assert_eq!(pool.free_count(), 10);
         assert_eq!(pool.allocated_count(), 0);
 
-        // The buffer should be reusable
+        // The buffer should be reusable (FIFO — not necessarily the same index).
         let buf2 = pool.alloc().unwrap();
-        // Might get the same buffer back (LIFO)
-        assert_eq!(buf2.index(), idx);
+        assert!(buf2.index() < 10);
+    }
+
+    #[test]
+    fn test_packet_ref_into_index() {
+        let pool = PacketPool::new(4).unwrap();
+
+        let buf = pool.alloc().unwrap();
+        let idx = buf.index();
+
+        // into_index consumes the ref without freeing.
+        let extracted = buf.into_index();
+        assert_eq!(extracted, idx);
+        // Buffer is still allocated (not returned to pool).
+        assert_eq!(pool.free_count(), 3);
+
+        // Manual free via index.
+        unsafe { pool.free_by_index(extracted) };
+        assert_eq!(pool.free_count(), 4);
     }
 
     #[test]
@@ -490,7 +522,7 @@ mod tests {
     #[test]
     fn test_buffer_copy() {
         let pool = PacketPool::new(1).unwrap();
-        let buf = pool.alloc().unwrap();
+        let mut buf = pool.alloc().unwrap();
 
         let data = [1u8, 2, 3, 4, 5];
         buf.copy_from_slice(&data).unwrap();
@@ -522,5 +554,70 @@ mod tests {
         for idx in &indices[..5] {
             assert!(*idx < 5);
         }
+    }
+
+    #[test]
+    fn test_concurrent_alloc_drop() {
+        use std::sync::Arc;
+
+        let pool = Arc::new(PacketPool::new(64).unwrap());
+        let iterations = 1000;
+        let threads = 4;
+
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                let pool = Arc::clone(&pool);
+                std::thread::spawn(move || {
+                    for _ in 0..iterations {
+                        // Allocate a buffer, write to it, then drop (auto-free).
+                        if let Some(mut pkt) = pool.alloc() {
+                            pkt.set_len(4);
+                            pkt.as_full_mut_slice()[..4].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+                            assert_eq!(pkt.as_slice(), &[0xDE, 0xAD, 0xBE, 0xEF]);
+                            // pkt dropped here — returned to pool
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // All buffers should be returned to the pool.
+        assert_eq!(pool.free_count(), 64);
+        assert_eq!(pool.allocated_count(), 0);
+    }
+
+    #[test]
+    fn test_concurrent_alloc_into_index_free() {
+        use std::sync::Arc;
+
+        let pool = Arc::new(PacketPool::new(32).unwrap());
+        let iterations = 500;
+        let threads = 4;
+
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                let pool = Arc::clone(&pool);
+                std::thread::spawn(move || {
+                    for _ in 0..iterations {
+                        if let Some(pkt) = pool.alloc() {
+                            // Simulate ring buffer handoff: into_index, then manual free.
+                            let idx = pkt.into_index();
+                            assert!(idx < 32);
+                            unsafe { pool.free_by_index(idx) };
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(pool.free_count(), 32);
     }
 }
