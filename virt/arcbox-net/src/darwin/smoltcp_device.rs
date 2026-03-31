@@ -137,6 +137,44 @@ impl SmoltcpDevice {
         self.rx_queue.push_back(frame);
     }
 
+    /// Seeds smoltcp's neighbor cache with a `gateway_ip → guest_mac` mapping.
+    ///
+    /// smoltcp's default route points to `gateway_ip` (its own interface IP) to
+    /// satisfy the `any_ip` acceptance check.  When sending TCP replies to
+    /// sandbox IPs (outside the /24 subnet), smoltcp resolves the next-hop via
+    /// ARP — but nobody answers ARP for its own IP, so replies are never sent.
+    ///
+    /// This method injects a synthetic ARP reply that teaches smoltcp
+    /// "gateway_ip lives at guest_mac", so reply frames carry the guest VM's
+    /// MAC as the Ethernet destination.  The guest kernel then forwards them
+    /// to the correct sandbox via the TAP interface.
+    ///
+    /// See [ABX-278] for the full problem description.
+    pub fn seed_gateway_neighbor(
+        &mut self,
+        gateway_ip: Ipv4Addr,
+        gateway_mac: [u8; 6],
+        guest_mac: [u8; 6],
+    ) {
+        let gw = gateway_ip.octets();
+        let mut frame = Vec::with_capacity(42);
+        // Ethernet: dst=gateway (smoltcp), src=guest
+        frame.extend_from_slice(&gateway_mac);
+        frame.extend_from_slice(&guest_mac);
+        frame.extend_from_slice(&[0x08, 0x06]); // EtherType: ARP
+        // ARP payload
+        frame.extend_from_slice(&[0x00, 0x01]); // Hardware type: Ethernet
+        frame.extend_from_slice(&[0x08, 0x00]); // Protocol type: IPv4
+        frame.push(6); // Hardware address length
+        frame.push(4); // Protocol address length
+        frame.extend_from_slice(&[0x00, 0x02]); // Operation: Reply
+        frame.extend_from_slice(&guest_mac); // Sender hardware address
+        frame.extend_from_slice(&gw); // Sender protocol address
+        frame.extend_from_slice(&gateway_mac); // Target hardware address
+        frame.extend_from_slice(&gw); // Target protocol address
+        self.rx_queue.push_back(frame);
+    }
+
     /// Takes all intercepted frames, leaving the internal buffer empty.
     pub fn take_intercepted(&mut self) -> Vec<InterceptedFrame> {
         std::mem::take(&mut self.intercepted)
@@ -651,5 +689,43 @@ mod tests {
             "Non-SYN TCP should go to rx_queue"
         );
         assert!(device.gated_syns.is_empty());
+    }
+
+    #[test]
+    fn seed_gateway_neighbor_injects_arp_reply() {
+        let gateway_ip = Ipv4Addr::new(10, 0, 2, 1);
+        let gateway_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01];
+        let guest_mac = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
+
+        let mut device = SmoltcpDevice::new(0, gateway_ip);
+        assert!(device.rx_queue.is_empty());
+
+        device.seed_gateway_neighbor(gateway_ip, gateway_mac, guest_mac);
+
+        assert_eq!(device.rx_queue.len(), 1);
+        let frame = &device.rx_queue[0];
+        assert_eq!(frame.len(), 42, "ARP frame should be 42 bytes");
+        // Ethernet header
+        assert_eq!(&frame[0..6], &gateway_mac, "Ethernet dst should be gateway");
+        assert_eq!(&frame[6..12], &guest_mac, "Ethernet src should be guest");
+        assert_eq!(&frame[12..14], &[0x08, 0x06], "EtherType should be ARP");
+        // ARP payload
+        assert_eq!(&frame[20..22], &[0x00, 0x02], "ARP opcode should be Reply");
+        assert_eq!(&frame[22..28], &guest_mac, "ARP sender MAC should be guest");
+        assert_eq!(
+            &frame[28..32],
+            &[10, 0, 2, 1],
+            "ARP sender IP should be gateway"
+        );
+        assert_eq!(
+            &frame[32..38],
+            &gateway_mac,
+            "ARP target MAC should be gateway"
+        );
+        assert_eq!(
+            &frame[38..42],
+            &[10, 0, 2, 1],
+            "ARP target IP should be gateway"
+        );
     }
 }

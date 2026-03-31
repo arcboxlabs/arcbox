@@ -171,8 +171,9 @@ impl NetworkDatapath {
         // which is required for the TCP listen pool.
         iface.set_any_ip(true);
 
-        // Add a default route so smoltcp can send TCP replies (SYN-ACK, etc.)
-        // to the guest for connections to arbitrary external IPs.
+        // Default route via gateway_ip (self).  smoltcp's any_ip acceptance
+        // check requires `has_ip_addr(next_hop)` to be true, so the route
+        // MUST point to an interface-owned address.
         iface
             .routes_mut()
             .add_default_ipv4_route(gateway_ip)
@@ -259,11 +260,19 @@ impl NetworkDatapath {
                 // Guest → Host: read frames, classify, and dispatch.
                 readable = guest_async.readable() => {
                     let mut guard = readable?;
+                    let prev_mac = guest_mac;
                     // Drain all available frames from the FD, classifying each.
                     device.drain_guest_fd(&mut guest_mac);
                     // We drained until WouldBlock; clear readiness to avoid
                     // spinning on the biased readable arm.
                     guard.clear_ready();
+
+                    // Seed smoltcp neighbor cache as soon as guest MAC is learned.
+                    if prev_mac.is_none() {
+                        if let Some(gmac) = guest_mac {
+                            device.seed_gateway_neighbor(gateway_ip, gateway_mac, gmac);
+                        }
+                    }
 
                     // Process intercepted frames (DHCP, DNS, UDP, ICMP).
                     let intercepted = device.take_intercepted();
@@ -351,6 +360,11 @@ impl NetworkDatapath {
 
                 _ = maintenance.tick() => {
                     socket_proxy.maintenance();
+                    // Refresh the gateway → guest_mac neighbor cache entry
+                    // before it expires (ENTRY_LIFETIME = 60s, tick = 30s).
+                    if let Some(gmac) = guest_mac {
+                        device.seed_gateway_neighbor(gateway_ip, gateway_mac, gmac);
+                    }
                 }
             }
 
