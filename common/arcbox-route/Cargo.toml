@@ -1,0 +1,17 @@
+[package]
+name = "arcbox-route"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "PF_ROUTE routing socket API for macOS route management"
+
+[dependencies]
+libc = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true
