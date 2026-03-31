@@ -6,11 +6,12 @@
 use std::cell::UnsafeCell;
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::error::{NetError, Result};
 
-use super::{CachePadded, DEFAULT_POOL_CAPACITY, MAX_PACKET_SIZE};
+use super::ring::MpmcRing;
+use super::{DEFAULT_POOL_CAPACITY, MAX_PACKET_SIZE};
 
 /// A single packet buffer with header space.
 #[repr(C, align(64))]
@@ -234,79 +235,20 @@ impl std::fmt::Debug for PacketRef<'_> {
     }
 }
 
-/// Sentinel index meaning "free list is empty".
-const EMPTY_IDX: u32 = u32::MAX;
-
-/// ABA-safe tagged head for the lock-free Treiber stack.
-///
-/// Packs `(index: u32, tag: u32)` into a single `AtomicU64`. The tag
-/// increments on every successful CAS, preventing the ABA problem where
-/// a recycled index matches a stale snapshot.
-struct TaggedHead(AtomicU64);
-
-impl TaggedHead {
-    fn new(idx: u32) -> Self {
-        Self(AtomicU64::new(Self::pack(idx, 0)))
-    }
-
-    #[inline]
-    fn pack(idx: u32, tag: u32) -> u64 {
-        (u64::from(tag) << 32) | u64::from(idx)
-    }
-
-    #[inline]
-    fn unpack(val: u64) -> (u32, u32) {
-        (val as u32, (val >> 32) as u32)
-    }
-
-    #[inline]
-    fn load(&self, order: Ordering) -> (u32, u32) {
-        Self::unpack(self.0.load(order))
-    }
-
-    /// CAS with automatic tag bump. Returns `true` on success.
-    #[inline]
-    fn compare_exchange_weak(
-        &self,
-        old_idx: u32,
-        old_tag: u32,
-        new_idx: u32,
-        success: Ordering,
-        failure: Ordering,
-    ) -> bool {
-        let old = Self::pack(old_idx, old_tag);
-        let new = Self::pack(new_idx, old_tag.wrapping_add(1));
-        self.0
-            .compare_exchange_weak(old, new, success, failure)
-            .is_ok()
-    }
-}
-
-/// Free list entry for the packet pool.
-#[repr(C)]
-struct FreeListEntry {
-    /// Index of the next free buffer, or `EMPTY_IDX` if none.
-    next: AtomicU32,
-}
-
 /// Pre-allocated packet buffer pool.
 ///
-/// Uses a lock-free Treiber stack (free list) for allocation and
-/// deallocation. The head is an ABA-safe tagged pointer (`AtomicU64`)
-/// that pairs the index with a monotonic tag to prevent the classic
-/// Treiber stack ABA bug.
+/// Uses an [`MpmcRing`] of free indices for lock-free allocation and
+/// deallocation. The Vyukov bounded MPMC algorithm used by `MpmcRing`
+/// provides ABA safety via per-slot sequence numbers, so no custom
+/// tagged pointers or Treiber stacks are needed.
 ///
 /// All buffers are pre-allocated at construction time to avoid
 /// runtime memory allocation in the hot path.
 pub struct PacketPool {
     /// Pre-allocated buffers wrapped in UnsafeCell for interior mutability.
     buffers: Box<[UnsafeCell<PacketBuffer>]>,
-    /// ABA-safe free list head (tagged index + counter).
-    free_head: CachePadded<TaggedHead>,
-    /// Free list entries (one per buffer).
-    free_list: Box<[FreeListEntry]>,
-    /// Number of free buffers.
-    free_count: CachePadded<AtomicUsize>,
+    /// Lock-free queue of free buffer indices (ABA-safe via Vyukov seq numbers).
+    free_indices: MpmcRing<u32>,
     /// Total capacity.
     capacity: usize,
 }
@@ -320,30 +262,19 @@ impl PacketPool {
     pub fn new(capacity: usize) -> Result<Self> {
         let capacity = capacity.max(1);
 
-        // Pre-allocate buffers wrapped in UnsafeCell
         let buffers: Vec<UnsafeCell<PacketBuffer>> = (0..capacity)
             .map(|i| UnsafeCell::new(PacketBuffer::new(i as u32)))
             .collect();
 
-        // Initialize free list - all buffers are initially free
-        let free_list: Vec<FreeListEntry> = (0..capacity)
-            .map(|i| {
-                let next = if i + 1 < capacity {
-                    (i + 1) as u32
-                } else {
-                    EMPTY_IDX
-                };
-                FreeListEntry {
-                    next: AtomicU32::new(next),
-                }
-            })
-            .collect();
+        // Seed the free-index ring with all buffer indices.
+        let free_indices = MpmcRing::new(capacity);
+        for i in 0..capacity {
+            let _ = free_indices.enqueue(i as u32);
+        }
 
         Ok(Self {
             buffers: buffers.into_boxed_slice(),
-            free_head: CachePadded::new(TaggedHead::new(0)),
-            free_list: free_list.into_boxed_slice(),
-            free_count: CachePadded::new(AtomicUsize::new(capacity)),
+            free_indices,
             capacity,
         })
     }
@@ -368,14 +299,14 @@ impl PacketPool {
     #[inline]
     #[must_use]
     pub fn free_count(&self) -> usize {
-        self.free_count.0.load(Ordering::Acquire)
+        self.free_indices.len()
     }
 
     /// Returns the number of allocated buffers.
     #[inline]
     #[must_use]
     pub fn allocated_count(&self) -> usize {
-        self.capacity - self.free_count()
+        self.capacity - self.free_indices.len()
     }
 
     /// Allocates a buffer from the pool.
@@ -384,73 +315,28 @@ impl PacketPool {
     /// auto-frees the buffer on drop; use [`PacketRef::into_index`] to
     /// transfer ownership by index without auto-freeing.
     pub fn alloc(&self) -> Option<PacketRef<'_>> {
-        loop {
-            let (head, tag) = self.free_head.0.load(Ordering::Acquire);
-            if head == EMPTY_IDX {
-                return None; // Pool is empty
-            }
-
-            let next = self.free_list[head as usize].next.load(Ordering::Acquire);
-
-            // Tagged CAS prevents ABA: even if `head` is recycled back to the
-            // same index, the tag will have changed, causing the CAS to fail.
-            if self.free_head.0.compare_exchange_weak(
-                head,
-                tag,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                self.free_count.0.fetch_sub(1, Ordering::AcqRel);
-
-                // SAFETY: CAS success guarantees this buffer was removed from
-                // the free-list, so no other thread can access it.
-                unsafe {
-                    (*self.buffers[head as usize].get())
-                        .refcount
-                        .store(1, Ordering::Release);
-                };
-                return Some(PacketRef {
-                    pool: self,
-                    idx: head,
-                });
-            }
-            // CAS failed, retry
-            std::hint::spin_loop();
+        let idx = self.free_indices.dequeue()?;
+        // SAFETY: `idx` was on the free list, so no other thread has access.
+        unsafe {
+            (*self.buffers[idx as usize].get())
+                .refcount
+                .store(1, Ordering::Release);
         }
+        Some(PacketRef { pool: self, idx })
     }
 
     /// Allocates a buffer and returns its index.
     ///
     /// Returns `None` if the pool is empty.
     pub fn alloc_index(&self) -> Option<u32> {
-        loop {
-            let (head, tag) = self.free_head.0.load(Ordering::Acquire);
-            if head == EMPTY_IDX {
-                return None; // Pool is empty
-            }
-
-            let next = self.free_list[head as usize].next.load(Ordering::Acquire);
-
-            if self.free_head.0.compare_exchange_weak(
-                head,
-                tag,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                self.free_count.0.fetch_sub(1, Ordering::AcqRel);
-                // SAFETY: CAS success guarantees exclusive access.
-                unsafe {
-                    (*self.buffers[head as usize].get())
-                        .refcount
-                        .store(1, Ordering::Release);
-                };
-                return Some(head);
-            }
-            // CAS failed, retry
-            std::hint::spin_loop();
+        let idx = self.free_indices.dequeue()?;
+        // SAFETY: `idx` was on the free list, so no other thread has access.
+        unsafe {
+            (*self.buffers[idx as usize].get())
+                .refcount
+                .store(1, Ordering::Release);
         }
+        Some(idx)
     }
 
     /// Allocates a buffer and initializes it with data.
@@ -478,27 +364,10 @@ impl PacketPool {
     pub(crate) unsafe fn free(&self, buffer: &mut PacketBuffer) {
         let idx = buffer.index;
         debug_assert!((idx as usize) < self.capacity);
-
         buffer.reset();
-
-        loop {
-            let (head, tag) = self.free_head.0.load(Ordering::Acquire);
-            self.free_list[idx as usize]
-                .next
-                .store(head, Ordering::Release);
-
-            if self.free_head.0.compare_exchange_weak(
-                head,
-                tag,
-                idx,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                self.free_count.0.fetch_add(1, Ordering::AcqRel);
-                return;
-            }
-            std::hint::spin_loop();
-        }
+        // MpmcRing::enqueue cannot fail here: the ring was sized to hold all
+        // indices, and each index is returned at most once.
+        let _ = self.free_indices.enqueue(idx);
     }
 
     /// Returns a buffer to the pool by index.
@@ -559,7 +428,7 @@ impl PacketPool {
     }
 }
 
-#[allow(clippy::missing_fields_in_debug)] // buffers/free_list omitted intentionally (large arrays, not useful in debug output)
+#[allow(clippy::missing_fields_in_debug)] // buffers omitted intentionally (large array, not useful in debug output)
 impl std::fmt::Debug for PacketPool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PacketPool")
@@ -604,22 +473,20 @@ mod tests {
     fn test_pool_alloc_drop() {
         let pool = PacketPool::new(10).unwrap();
 
-        // Allocate a buffer
+        // Allocate a buffer.
         let buf = pool.alloc().unwrap();
         assert_eq!(buf.refcount(), 1);
         assert_eq!(pool.free_count(), 9);
         assert_eq!(pool.allocated_count(), 1);
-
-        let idx = buf.index();
 
         // Drop auto-frees the buffer back to the pool.
         drop(buf);
         assert_eq!(pool.free_count(), 10);
         assert_eq!(pool.allocated_count(), 0);
 
-        // The buffer should be reusable (LIFO).
+        // The buffer should be reusable (FIFO — not necessarily the same index).
         let buf2 = pool.alloc().unwrap();
-        assert_eq!(buf2.index(), idx);
+        assert!(buf2.index() < 10);
     }
 
     #[test]
