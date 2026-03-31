@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.18](https://github.com/arcboxlabs/arcbox/compare/v0.3.17...v0.3.18) (2026-03-31)
+
+
+### Features
+
+* **route:** replace /sbin/route with PF_ROUTE routing socket ([#145](https://github.com/arcboxlabs/arcbox/issues/145)) ([b4cd605](https://github.com/arcboxlabs/arcbox/commit/b4cd6057579d5dc8ebe81d7ffb9617b163503d44))
+
+
+### Bug Fixes
+
+* **net:** enable sandbox TCP by seeding smoltcp neighbor cache (ABX-278) ([#144](https://github.com/arcboxlabs/arcbox/issues/144)) ([a7c570f](https://github.com/arcboxlabs/arcbox/commit/a7c570f7cf2e2c1bac8df991dd363c5113767b78))
+
 ## [0.3.17](https://github.com/arcboxlabs/arcbox/compare/v0.3.16...v0.3.17) (2026-03-30)
 
 
