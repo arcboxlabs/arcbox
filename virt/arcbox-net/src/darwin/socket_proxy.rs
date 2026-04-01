@@ -42,14 +42,18 @@ struct UdpProxy {
     flows: HashMap<(Ipv4Addr, u16, Ipv4Addr, u16), UdpFlow>,
     reply_tx: mpsc::Sender<Vec<u8>>,
     gateway_mac: [u8; 6],
+    /// Gateway IP — connections to this IP are translated to loopback
+    /// so they reach host services (host.docker.internal support).
+    gateway_ip: Ipv4Addr,
 }
 
 impl UdpProxy {
-    fn new(reply_tx: mpsc::Sender<Vec<u8>>, gateway_mac: [u8; 6]) -> Self {
+    fn new(reply_tx: mpsc::Sender<Vec<u8>>, gateway_mac: [u8; 6], gateway_ip: Ipv4Addr) -> Self {
         Self {
             flows: HashMap::new(),
             reply_tx,
             gateway_mac,
+            gateway_ip,
         }
     }
 
@@ -120,6 +124,12 @@ impl UdpProxy {
 
         let reply_tx = self.reply_tx.clone();
         let gateway_mac = self.gateway_mac;
+        // Translate gateway IP to loopback so host services are reachable.
+        let connect_ip = if dst_ip == self.gateway_ip {
+            Ipv4Addr::LOCALHOST
+        } else {
+            dst_ip
+        };
 
         tokio::spawn(async move {
             let socket = match UdpSocket::bind("0.0.0.0:0").await {
@@ -131,7 +141,7 @@ impl UdpProxy {
             };
 
             if let Err(e) = socket
-                .connect(SocketAddr::V4(SocketAddrV4::new(dst_ip, dst_port)))
+                .connect(SocketAddr::V4(SocketAddrV4::new(connect_ip, dst_port)))
                 .await
             {
                 tracing::warn!("UDP proxy: failed to connect: {}", e);
@@ -527,7 +537,7 @@ impl SocketProxy {
         );
         Self {
             icmp: IcmpProxy::new(reply_tx.clone(), gateway_mac),
-            udp: UdpProxy::new(reply_tx.clone(), gateway_mac),
+            udp: UdpProxy::new(reply_tx.clone(), gateway_mac, gateway_ip),
             inbound,
             reply_tx,
             cancel,
@@ -659,7 +669,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(16);
         let gw_ip = Ipv4Addr::new(192, 168, 64, 1);
         let gw_mac = [0x02, 0xAB, 0xCD, 0x00, 0x00, 0x01];
-        let mut proxy = UdpProxy::new(tx, gw_mac);
+        let mut proxy = UdpProxy::new(tx, gw_mac, gw_ip);
 
         // Insert a flow that is already expired.
         let key = (
