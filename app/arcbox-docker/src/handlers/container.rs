@@ -293,11 +293,26 @@ async fn setup_port_forwarding_from_inspect(
     }
 }
 
+/// Strips the trailing replica number from a compose container name.
+///
+/// `myproject-web-1` → `myproject-web`, `myproject_web_1` → `myproject_web`.
+fn strip_replica_suffix(name: &str) -> &str {
+    for sep in ['-', '_'] {
+        if let Some(pos) = name.rfind(sep) {
+            if !name[pos + 1..].is_empty() && name[pos + 1..].chars().all(|c| c.is_ascii_digit()) {
+                return &name[..pos];
+            }
+        }
+    }
+    name
+}
+
 /// Extracts DNS aliases and IP address from Docker inspect JSON.
 ///
 /// For compose containers (with `com.docker.compose.project` and
 /// `com.docker.compose.service` labels), returns hierarchical aliases:
-/// `["service.project", "container.project"]`.
+/// `["service.project", "name.project"]` (with the replica suffix stripped
+/// from the container name).
 ///
 /// For plain containers, returns `["container_name"]`.
 ///
@@ -337,7 +352,8 @@ pub fn extract_container_dns_info(inspect_json: &[u8]) -> Option<(Vec<String>, I
             match (project, service) {
                 (Some(proj), Some(svc)) => {
                     let service_alias = format!("{svc}.{proj}");
-                    let container_alias = format!("{name}.{proj}");
+                    let base = strip_replica_suffix(&name);
+                    let container_alias = format!("{base}.{proj}");
                     if service_alias == container_alias {
                         vec![service_alias]
                     } else {
@@ -577,7 +593,7 @@ mod tests {
         });
         let bytes = serde_json::to_vec(&json).unwrap();
         let (aliases, ip) = extract_container_dns_info(&bytes).unwrap();
-        assert_eq!(aliases, vec!["web.myproject", "myproject-web-1.myproject"]);
+        assert_eq!(aliases, vec!["web.myproject", "myproject-web.myproject"]);
         assert_eq!(ip, "172.17.0.2".parse::<IpAddr>().unwrap());
     }
 

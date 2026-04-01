@@ -49,7 +49,11 @@ pub fn collect_aliases(container_name: &str, compose: Option<&ComposeInfo>) -> V
     match compose {
         Some(info) => {
             let service_alias = format!("{}.{}", info.service, info.project);
-            let container_alias = format!("{}.{}", container_name, info.project);
+            // Strip the trailing replica number (e.g. `-1`) from the
+            // container name so that `myproject-web-1` becomes
+            // `myproject-web.myproject.arcbox.local`.
+            let base = strip_replica_suffix(container_name);
+            let container_alias = format!("{base}.{}", info.project);
             if service_alias == container_alias {
                 vec![service_alias]
             } else {
@@ -58,6 +62,22 @@ pub fn collect_aliases(container_name: &str, compose: Option<&ComposeInfo>) -> V
         }
         None => vec![container_name.to_string()],
     }
+}
+
+/// Strips the trailing replica number from a compose container name.
+///
+/// `myproject-web-1` → `myproject-web`, `myproject_web_1` → `myproject_web`.
+/// Returns the name unchanged if it doesn't end with a separator + digits.
+fn strip_replica_suffix(name: &str) -> &str {
+    // Try hyphen (compose v2) then underscore (compose v1).
+    for sep in ['-', '_'] {
+        if let Some(pos) = name.rfind(sep) {
+            if name[pos + 1..].chars().all(|c| c.is_ascii_digit()) && !name[pos + 1..].is_empty() {
+                return &name[..pos];
+            }
+        }
+    }
+    name
 }
 
 #[cfg(test)]
@@ -75,7 +95,7 @@ mod tests {
     fn compose_container_aliases() {
         let info = compose("myproject", "web");
         let aliases = collect_aliases("myproject-web-1", Some(&info));
-        assert_eq!(aliases, vec!["web.myproject", "myproject-web-1.myproject"]);
+        assert_eq!(aliases, vec!["web.myproject", "myproject-web.myproject"]);
     }
 
     #[test]
@@ -84,7 +104,7 @@ mod tests {
         let aliases = collect_aliases("myproject-api-server-2", Some(&info));
         assert_eq!(
             aliases,
-            vec!["api-server.myproject", "myproject-api-server-2.myproject"]
+            vec!["api-server.myproject", "myproject-api-server.myproject"]
         );
     }
 
@@ -92,7 +112,7 @@ mod tests {
     fn compose_v1_underscore() {
         let info = compose("myproject", "web");
         let aliases = collect_aliases("myproject_web_1", Some(&info));
-        assert_eq!(aliases, vec!["web.myproject", "myproject_web_1.myproject"]);
+        assert_eq!(aliases, vec!["web.myproject", "myproject_web.myproject"]);
     }
 
     #[test]
