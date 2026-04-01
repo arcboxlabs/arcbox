@@ -115,6 +115,14 @@ pub struct CreateSandboxRequest {
     /// SSH public key injected via MMDS (empty = no SSH).
     #[prost(string, optional, tag = "15")]
     pub ssh_public_key: ::core::option::Option<::prost::alloc::string::String>,
+    /// --- Rootfs type ---
+    /// How to interpret the rootfs field:
+    ///    ""/"ext4" (default) — rootfs is a path to an ext4 image, use directly.
+    ///    "dockerfile"        — rootfs is a guest-visible path to a docker save
+    ///                          tarball; the agent converts it to ext4, injects
+    ///                          vm-agent, and boots.
+    #[prost(string, tag = "16")]
+    pub rootfs_type: ::prost::alloc::string::String,
 }
 /// Response to CreateSandbox.
 /// Returned immediately; the sandbox may still be booting (state "starting").
