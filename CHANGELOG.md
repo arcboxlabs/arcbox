@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.19](https://github.com/arcboxlabs/arcbox/compare/v0.3.18...v0.3.19) (2026-04-01)
+
+
+### Features
+
+* **dns:** hierarchical compose DNS names matching OrbStack scheme ([#156](https://github.com/arcboxlabs/arcbox/issues/156)) ([6c54184](https://github.com/arcboxlabs/arcbox/commit/6c541840da4c7e4be468f911a80af04222508299))
+* **net:** support host.docker.internal DNS and gateway-to-localhost translation ([#157](https://github.com/arcboxlabs/arcbox/issues/157)) ([925897d](https://github.com/arcboxlabs/arcbox/commit/925897d563716745acc24d98870345b0162888a3))
+
+
+### Bug Fixes
+
+* **net:** replace aliasing UB in PacketPool::alloc with owned PacketRef wrapper ([#147](https://github.com/arcboxlabs/arcbox/issues/147)) ([43a2947](https://github.com/arcboxlabs/arcbox/commit/43a2947c7ebcd3faf3dc7bfd99be9b43b915c88f))
+
 ## [0.3.18](https://github.com/arcboxlabs/arcbox/compare/v0.3.17...v0.3.18) (2026-03-31)
 
 
