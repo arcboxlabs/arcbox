@@ -805,14 +805,25 @@ impl Runtime {
         );
     }
 
-    /// Removes all DNS entries for a container by its canonical ID.
+    /// Removes DNS entries for a container by its canonical ID.
+    ///
+    /// Shared aliases (e.g. compose service-level names used by multiple
+    /// replicas) are only removed from the network manager when no other
+    /// container still references them.
     pub async fn deregister_dns_by_id(&self, container_id: &str) {
-        let Some(hostnames) = self.dns_entries.write().await.remove(container_id) else {
+        let mut entries = self.dns_entries.write().await;
+        let Some(hostnames) = entries.remove(container_id) else {
             return;
         };
+
+        // Only deregister hostnames not referenced by any remaining container.
         for hostname in &hostnames {
-            self.network_manager.deregister_dns(hostname);
+            let still_in_use = entries.values().any(|names| names.contains(hostname));
+            if !still_in_use {
+                self.network_manager.deregister_dns(hostname);
+            }
         }
+        drop(entries);
         tracing::info!(container_id, ?hostnames, "DNS entries deregistered");
     }
 

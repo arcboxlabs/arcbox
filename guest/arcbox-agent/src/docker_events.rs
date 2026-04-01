@@ -139,18 +139,20 @@ async fn handle_event(dns: &GuestDnsServer, json_str: &str) -> anyhow::Result<()
             register_container_by_id(dns, id).await?;
         }
         "die" | "destroy" => {
-            // Deregister all names we might have registered.
+            // Deregister this container's ownership of all its aliases.
+            // Shared aliases (compose service names) are only removed from
+            // DNS when no other replica still references them.
             let attrs = &event["Actor"]["Attributes"];
             let name = attrs["name"].as_str().unwrap_or_default();
             if !name.is_empty() {
                 let compose = attrs.as_object().and_then(crate::dns::extract_compose_info);
                 for alias in crate::dns::collect_aliases(name, compose.as_ref()) {
-                    dns.deregister_container(&alias).await;
+                    dns.deregister_container(&alias, name).await;
                 }
             }
         }
         "rename" => {
-            // Deregister old name, register under new name.
+            // Deregister old name's ownership, register under new name.
             let attrs = &event["Actor"]["Attributes"];
             let old_name = attrs["oldName"]
                 .as_str()
@@ -159,7 +161,7 @@ async fn handle_event(dns: &GuestDnsServer, json_str: &str) -> anyhow::Result<()
             if !old_name.is_empty() {
                 let compose = attrs.as_object().and_then(crate::dns::extract_compose_info);
                 for alias in crate::dns::collect_aliases(old_name, compose.as_ref()) {
-                    dns.deregister_container(&alias).await;
+                    dns.deregister_container(&alias, old_name).await;
                 }
             }
             register_container_by_id(dns, id).await?;
@@ -200,9 +202,11 @@ async fn register_container_by_id(dns: &GuestDnsServer, id: &str) -> anyhow::Res
         .and_then(crate::dns::extract_compose_info);
 
     // Register the container name and any compose aliases.
+    // The container name is the owner — shared aliases (like compose
+    // service names) are ref-counted per owner in the DNS server.
     let aliases = crate::dns::collect_aliases(name, compose.as_ref());
     for alias in &aliases {
-        dns.register_container(alias, ip).await;
+        dns.register_container(alias, name, ip).await;
     }
 
     tracing::debug!(name, %ip, aliases = ?aliases, "registered container DNS");
