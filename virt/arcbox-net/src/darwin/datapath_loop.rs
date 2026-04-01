@@ -183,7 +183,7 @@ impl NetworkDatapath {
         let mut sockets = SocketSet::new(vec![]);
 
         // TCP bridge: manages smoltcp TCP socket pool and host connections.
-        let mut tcp_bridge = TcpBridge::new();
+        let mut tcp_bridge = TcpBridge::new(gateway_ip);
 
         // Enable proxy-aware connections: detect host VPN/proxy environment
         // and share the DNS resolution log so TcpBridge can map IPs to domains.

@@ -153,16 +153,14 @@ pub struct TcpBridge {
     dns_log: Option<super::dns_log::DnsResolutionLog>,
     /// Detected proxy environment on the host.
     proxy_env: Option<super::proxy_detect::ProxyEnvironment>,
-}
-
-impl Default for TcpBridge {
-    fn default() -> Self {
-        Self::new()
-    }
+    /// Gateway IP used by the guest. Connections targeting this IP are
+    /// translated to `127.0.0.1` so they reach the host's loopback
+    /// (enables `host.docker.internal` support).
+    gateway_ip: Ipv4Addr,
 }
 
 impl TcpBridge {
-    pub fn new() -> Self {
+    pub fn new(gateway_ip: Ipv4Addr) -> Self {
         Self {
             connections: HashMap::new(),
             listening_ports: HashSet::new(),
@@ -172,6 +170,7 @@ impl TcpBridge {
             pre_connected: HashMap::new(),
             dns_log: None,
             proxy_env: None,
+            gateway_ip,
         }
     }
 
@@ -333,16 +332,28 @@ impl TcpBridge {
                 continue;
             }
 
-            let dst_addr = SocketAddr::V4(SocketAddrV4::new(syn.dst_ip, syn.dst_port));
+            // Connections to the gateway IP are destined for the host itself
+            // (e.g. host.docker.internal). Translate to loopback so the
+            // host-side connect reaches services on 127.0.0.1 / 0.0.0.0.
+            let connect_ip = if syn.dst_ip == self.gateway_ip {
+                Ipv4Addr::LOCALHOST
+            } else {
+                syn.dst_ip
+            };
+            let dst_addr = SocketAddr::V4(SocketAddrV4::new(connect_ip, syn.dst_port));
 
             let (result_tx, result_rx) = oneshot::channel();
 
             // Resolve domain name from DNS log (if available) for proxy-aware connects.
             let domain = self.dns_log.as_ref().and_then(|log| log.lookup(syn.dst_ip));
 
-            // Determine connect strategy: proxy tunnel or direct.
-            let proxy_target =
-                self.resolve_proxy_target(syn.dst_ip, syn.dst_port, domain.as_deref());
+            // Gateway-destined flows (host.docker.internal) always connect
+            // directly to loopback — never route through a proxy.
+            let proxy_target = if syn.dst_ip == self.gateway_ip {
+                None
+            } else {
+                self.resolve_proxy_target(syn.dst_ip, syn.dst_port, domain.as_deref())
+            };
 
             // Spawn host connect task.
             tokio::spawn(async move {
@@ -1334,7 +1345,7 @@ mod tests {
     fn ensure_listen_sockets_creates_on_demand() {
         let mut device = SmoltcpDevice::new(0, GW_IP);
         let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
-        let mut bridge = TcpBridge::new();
+        let mut bridge = TcpBridge::new(GW_IP);
 
         let syns = vec![
             TcpSynInfo {
@@ -1367,7 +1378,7 @@ mod tests {
     fn ensure_listen_sockets_deduplicates() {
         let mut device = SmoltcpDevice::new(0, GW_IP);
         let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
-        let mut bridge = TcpBridge::new();
+        let mut bridge = TcpBridge::new(GW_IP);
 
         let syns = vec![TcpSynInfo {
             dst_port: 443,
@@ -1387,7 +1398,7 @@ mod tests {
     fn smoltcp_accepts_syn_with_listen_socket() {
         let mut device = SmoltcpDevice::new(0, GW_IP);
         let (mut iface, mut sockets) = make_iface_and_sockets(&mut device);
-        let mut bridge = TcpBridge::new();
+        let mut bridge = TcpBridge::new(GW_IP);
 
         // Ensure a listen socket for port 443.
         let syns = vec![TcpSynInfo {
@@ -1443,7 +1454,7 @@ mod tests {
 
     #[test]
     fn bridge_active_count_starts_at_zero() {
-        let bridge = TcpBridge::new();
+        let bridge = TcpBridge::new(GW_IP);
         assert_eq!(bridge.active_count(), 0);
     }
 
@@ -1464,7 +1475,7 @@ mod tests {
         let (_h2g_tx, h2g_rx) = mpsc::channel::<Vec<u8>>(4);
         let (g2h_tx, _g2h_rx) = mpsc::channel::<Vec<u8>>(4);
 
-        let mut bridge = TcpBridge::new();
+        let mut bridge = TcpBridge::new(GW_IP);
         let remote: SocketAddr = "1.1.1.1:443".parse().unwrap();
 
         // Manually construct a connection with pending data larger than
@@ -1507,7 +1518,7 @@ mod tests {
         let (_h2g_tx, h2g_rx) = mpsc::channel::<Vec<u8>>(4);
         let (g2h_tx, _g2h_rx) = mpsc::channel::<Vec<u8>>(4);
 
-        let mut bridge = TcpBridge::new();
+        let mut bridge = TcpBridge::new(GW_IP);
         let remote: SocketAddr = "1.1.1.1:443".parse().unwrap();
 
         // Simulate: host EOF received but there's still pending data.
@@ -1539,7 +1550,7 @@ mod tests {
     fn cleanup_removes_stale_port_handles() {
         let mut device = SmoltcpDevice::new(0, GW_IP);
         let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
-        let mut bridge = TcpBridge::new();
+        let mut bridge = TcpBridge::new(GW_IP);
 
         // Create a listen socket for port 443.
         let syns = vec![TcpSynInfo {
@@ -1597,7 +1608,7 @@ mod tests {
         let (_h2g_tx, h2g_rx) = mpsc::channel::<Vec<u8>>(4);
         let (g2h_tx, mut g2h_rx) = mpsc::channel::<Vec<u8>>(4);
 
-        let mut bridge = TcpBridge::new();
+        let mut bridge = TcpBridge::new(GW_IP);
         let remote: SocketAddr = "1.1.1.1:443".parse().unwrap();
 
         bridge.connections.insert(
@@ -1636,7 +1647,7 @@ mod tests {
     async fn initiate_inbound_creates_connecting_socket() {
         let mut device = SmoltcpDevice::new(0, GW_IP);
         let (mut iface, mut sockets) = make_iface_and_sockets(&mut device);
-        let mut bridge = TcpBridge::new();
+        let mut bridge = TcpBridge::new(GW_IP);
 
         // Create a pair of connected TcpStreams for the host-side stream.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1668,7 +1679,7 @@ mod tests {
     async fn syn_gate_connect_success_injects_syn() {
         let mut device = SmoltcpDevice::new(0, GW_IP);
         let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
-        let mut bridge = TcpBridge::new();
+        let mut bridge = TcpBridge::new(GW_IP);
 
         // Start a local TCP listener so the connect succeeds.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1714,11 +1725,51 @@ mod tests {
         assert!(bridge.listening_ports.contains(&addr.port()));
     }
 
+    /// Verifies that a SYN destined for the gateway IP is translated to
+    /// loopback and successfully connects to a local listener.
+    #[tokio::test]
+    async fn syn_gate_gateway_ip_translates_to_loopback() {
+        let mut device = SmoltcpDevice::new(0, GW_IP);
+        let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
+        let mut bridge = TcpBridge::new(GW_IP);
+
+        // Start a local TCP listener on loopback.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        // Build a SYN targeting the gateway IP (not loopback).
+        let syn = make_syn_frame(GW_IP, port);
+        let syn_info = TcpSynInfo {
+            dst_port: port,
+            src_ip: GUEST_IP,
+            src_port: 54321,
+            dst_ip: GW_IP,
+            syn_seq: 2000,
+            frame: syn,
+        };
+
+        bridge.gate_syns(&[syn_info], GW_MAC);
+        assert_eq!(bridge.pending_syns.len(), 1);
+
+        // The bridge should translate GW_IP → 127.0.0.1 and connect.
+        let _accepted = listener.accept().await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let rst_frames = bridge.poll_pending_syns(&mut device, &mut sockets, GW_MAC);
+        assert!(
+            rst_frames.is_empty(),
+            "Gateway IP connect should succeed via loopback translation"
+        );
+        assert!(bridge.pending_syns.is_empty());
+        assert_eq!(bridge.pre_connected.len(), 1);
+    }
+
     #[tokio::test]
     async fn syn_gate_connect_failure_sends_rst() {
         let mut device = SmoltcpDevice::new(0, GW_IP);
         let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
-        let mut bridge = TcpBridge::new();
+        let mut bridge = TcpBridge::new(GW_IP);
 
         // Use a port that's definitely not listening (connection refused).
         let syn = make_syn_frame(Ipv4Addr::LOCALHOST, 1);
@@ -1764,7 +1815,7 @@ mod tests {
 
     #[tokio::test]
     async fn syn_gate_retransmit_dedup() {
-        let mut bridge = TcpBridge::new();
+        let mut bridge = TcpBridge::new(GW_IP);
 
         let syn = make_syn_frame(Ipv4Addr::new(1, 1, 1, 1), 443);
         let syn_info = TcpSynInfo {
@@ -1808,7 +1859,7 @@ mod tests {
     async fn pre_connected_expires_after_ttl() {
         let mut device = SmoltcpDevice::new(0, GW_IP);
         let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
-        let mut bridge = TcpBridge::new();
+        let mut bridge = TcpBridge::new(GW_IP);
 
         let key = SynFlowKey {
             src_ip: GUEST_IP,
@@ -1848,7 +1899,7 @@ mod tests {
 
     #[tokio::test]
     async fn pre_connected_same_isn_retransmit_dedup() {
-        let mut bridge = TcpBridge::new();
+        let mut bridge = TcpBridge::new(GW_IP);
 
         let key = SynFlowKey {
             src_ip: GUEST_IP,
@@ -1898,7 +1949,7 @@ mod tests {
 
     #[tokio::test]
     async fn pre_connected_different_isn_evicts_stale_stream() {
-        let mut bridge = TcpBridge::new();
+        let mut bridge = TcpBridge::new(GW_IP);
 
         let key = SynFlowKey {
             src_ip: GUEST_IP,
@@ -1951,7 +2002,7 @@ mod tests {
     fn prune_excess_listen_sockets_keeps_one() {
         let mut device = SmoltcpDevice::new(0, GW_IP);
         let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
-        let mut bridge = TcpBridge::new();
+        let mut bridge = TcpBridge::new(GW_IP);
 
         // Simulate what happens when multiple SYNs to port 443 complete:
         // create_listen_socket is called multiple times for the same port.
@@ -1984,7 +2035,7 @@ mod tests {
     async fn concurrent_syns_same_port_no_rst() {
         let mut device = SmoltcpDevice::new(0, GW_IP);
         let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
-        let mut bridge = TcpBridge::new();
+        let mut bridge = TcpBridge::new(GW_IP);
 
         // Single listener — both SYNs connect to the same (ip, port).
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
