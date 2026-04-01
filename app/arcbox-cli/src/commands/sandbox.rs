@@ -243,16 +243,46 @@ fn parse_labels(raw: &[String]) -> Result<HashMap<String, String>> {
     Ok(map)
 }
 
+/// Detect whether a file is an ext4 image or a Dockerfile.
+///
+/// Checks for the ext4 superblock magic (`0xEF53`) at offset 0x438.
+fn is_ext4(path: &str) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    use std::io::{Read, Seek, SeekFrom};
+    let mut magic = [0u8; 2];
+    file.seek(SeekFrom::Start(0x438)).is_ok()
+        && file.read_exact(&mut magic).is_ok()
+        && magic == [0x53, 0xEF]
+}
+
 async fn execute_create(args: CreateArgs) -> Result<()> {
     let channel = sandbox_channel().await?;
     let mut client = SandboxServiceClient::new(channel);
 
     let labels = parse_labels(&args.label)?;
+
+    // Resolve rootfs: if it's a Dockerfile, build the image on the host via
+    // Docker, export as a tarball, and tell the agent to convert it to ext4
+    // with vm-agent injected inside the guest.
+    let (rootfs, rootfs_type) = match &args.rootfs {
+        Some(path) if !path.is_empty() && !is_ext4(path) => {
+            let (guest_path, rtype) = arcbox_cli::rootfs_builder::build_and_export(path)
+                .await
+                .context("Failed to build Docker image from Dockerfile")?;
+            (guest_path, rtype)
+        }
+        Some(path) => (path.clone(), String::new()),
+        None => (String::new(), String::new()),
+    };
+
     let req = CreateSandboxRequest {
         id: args.id.unwrap_or_default(),
         labels,
         kernel: args.kernel.unwrap_or_default(),
-        rootfs: args.rootfs.unwrap_or_default(),
+        rootfs,
+        rootfs_type,
         limits: Some(ResourceLimits {
             vcpus: args.cpus,
             memory_mib: args.memory,

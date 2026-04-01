@@ -65,13 +65,25 @@ impl SandboxService {
     // =========================================================================
 
     /// Create a sandbox.
+    ///
+    /// When `rootfs_type` is `"dockerfile"`, `rootfs` is a path to a `docker save`
+    /// tarball. The agent converts it to ext4 via `oci2rootfs` and injects
+    /// `vm-agent` before booting.
     pub async fn create(
         &self,
         payload: &[u8],
     ) -> Result<sandbox_v1::CreateSandboxResponse, SandboxError> {
         let req = sandbox_v1::CreateSandboxRequest::decode(payload)
             .map_err(|e| SandboxError::Decode(e.to_string()))?;
-        let spec = proto_to_spec(req);
+        let mut spec = proto_to_spec(req);
+
+        if spec.rootfs_type == "dockerfile" {
+            let ext4_path = crate::rootfs_builder::convert_tar_to_rootfs(&spec.rootfs)
+                .await
+                .map_err(|e| SandboxError::Internal(format!("rootfs build failed: {e}")))?;
+            spec.rootfs = ext4_path;
+        }
+
         let (id, ip_address) = self
             .manager
             .create_sandbox(spec)
@@ -623,6 +635,7 @@ fn proto_to_spec(req: sandbox_v1::CreateSandboxRequest) -> SandboxSpec {
         network: SandboxNetworkSpec { mode: network.mode },
         ttl_seconds: req.ttl_seconds,
         ssh_public_key: req.ssh_public_key,
+        rootfs_type: req.rootfs_type,
     }
 }
 

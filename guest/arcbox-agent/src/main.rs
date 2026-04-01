@@ -28,6 +28,8 @@ mod mount;
 #[cfg(target_os = "linux")]
 mod config;
 #[cfg(target_os = "linux")]
+mod rootfs_builder;
+#[cfg(target_os = "linux")]
 mod sandbox;
 
 // DNS: legacy /etc/hosts management (being replaced by dns_server).
