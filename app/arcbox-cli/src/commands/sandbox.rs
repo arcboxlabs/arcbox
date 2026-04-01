@@ -243,38 +243,32 @@ fn parse_labels(raw: &[String]) -> Result<HashMap<String, String>> {
     Ok(map)
 }
 
-/// Detect whether a file is an ext4 image or a Dockerfile.
-///
-/// Checks for the ext4 superblock magic (`0xEF53`) at offset 0x438.
-fn is_ext4(path: &str) -> bool {
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
-    };
-    use std::io::{Read, Seek, SeekFrom};
-    let mut magic = [0u8; 2];
-    file.seek(SeekFrom::Start(0x438)).is_ok()
-        && file.read_exact(&mut magic).is_ok()
-        && magic == [0x53, 0xEF]
-}
-
 async fn execute_create(args: CreateArgs) -> Result<()> {
     let channel = sandbox_channel().await?;
     let mut client = SandboxServiceClient::new(channel);
 
     let labels = parse_labels(&args.label)?;
 
-    // Resolve rootfs: if it's a Dockerfile, build the image on the host via
-    // Docker, export as a tarball, and tell the agent to convert it to ext4
-    // with vm-agent injected inside the guest.
+    // Resolve rootfs: detect ext4 (use directly), Dockerfile (build+convert),
+    // or reject unrecognised formats.
     let (rootfs, rootfs_type) = match &args.rootfs {
-        Some(path) if !path.is_empty() && !is_ext4(path) => {
-            let (guest_path, rtype) = arcbox_cli::rootfs_builder::build_and_export(path)
-                .await
-                .context("Failed to build Docker image from Dockerfile")?;
-            (guest_path, rtype)
+        Some(path) if !path.is_empty() => {
+            let p = std::path::Path::new(path);
+            if arcbox_cli::rootfs_builder::has_ext4_magic(p) {
+                (path.clone(), String::new())
+            } else if arcbox_cli::rootfs_builder::looks_like_dockerfile(p) {
+                let (guest_path, rtype) = arcbox_cli::rootfs_builder::build_and_export(path)
+                    .await
+                    .context("Failed to build Docker image from Dockerfile")?;
+                (guest_path, rtype)
+            } else {
+                anyhow::bail!(
+                    "unrecognised rootfs format: {path}\n\
+                     Expected an ext4 image or a Dockerfile (starting with FROM)"
+                );
+            }
         }
-        Some(path) => (path.clone(), String::new()),
-        None => (String::new(), String::new()),
+        _ => (String::new(), String::new()),
     };
 
     let req = CreateSandboxRequest {

@@ -82,6 +82,7 @@ impl SandboxService {
                 .await
                 .map_err(|e| SandboxError::Internal(format!("rootfs build failed: {e}")))?;
             spec.rootfs = ext4_path;
+            spec.rootfs_type.clear();
         }
 
         let (id, ip_address) = self
