@@ -768,4 +768,70 @@ mod tests {
             "Non-Echo ICMP types must not have their identifier bytes patched"
         );
     }
+
+    /// Builds a minimal Ethernet + IPv4 + UDP frame.
+    fn make_udp_frame(
+        src_ip: Ipv4Addr,
+        dst_ip: Ipv4Addr,
+        src_port: u16,
+        dst_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let udp_len = 8 + payload.len();
+        let ip_total = 20 + udp_len;
+        let mut frame = vec![0u8; ETH_HEADER_LEN + ip_total];
+
+        // Ethernet: EtherType = IPv4
+        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+        let ip = ETH_HEADER_LEN;
+        // IPv4: version=4, IHL=5, total length, protocol=17 (UDP)
+        frame[ip] = 0x45;
+        frame[ip + 2..ip + 4].copy_from_slice(&(ip_total as u16).to_be_bytes());
+        frame[ip + 8] = 64; // TTL
+        frame[ip + 9] = 17; // UDP
+        frame[ip + 12..ip + 16].copy_from_slice(&src_ip.octets());
+        frame[ip + 16..ip + 20].copy_from_slice(&dst_ip.octets());
+
+        let l4 = ip + 20;
+        frame[l4..l4 + 2].copy_from_slice(&src_port.to_be_bytes());
+        frame[l4 + 2..l4 + 4].copy_from_slice(&dst_port.to_be_bytes());
+        frame[l4 + 4..l4 + 6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        frame[l4 + 8..l4 + 8 + payload.len()].copy_from_slice(payload);
+        frame
+    }
+
+    /// Verifies that a UDP packet destined for the gateway IP is delivered
+    /// to a loopback listener via the gateway→localhost translation.
+    #[tokio::test]
+    async fn test_udp_proxy_gateway_translates_to_loopback() {
+        let (reply_tx, _reply_rx) = mpsc::channel(64);
+        let gw_ip = Ipv4Addr::new(10, 0, 2, 1);
+        let gw_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+        let mut proxy = UdpProxy::new(reply_tx, gw_mac, gw_ip);
+
+        // Bind a UDP listener on loopback.
+        let listener = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let payload = b"hello-host";
+        let frame = make_udp_frame(
+            Ipv4Addr::new(10, 0, 2, 15),
+            gw_ip, // targeting gateway, should be translated to 127.0.0.1
+            9999,
+            port,
+            payload,
+        );
+        let guest_mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x99];
+
+        proxy.proxy_udp(&frame, guest_mac, CancellationToken::new());
+
+        // The proxy spawns a task — give it time to send.
+        let mut buf = [0u8; 64];
+        let len = tokio::time::timeout(std::time::Duration::from_secs(2), listener.recv(&mut buf))
+            .await
+            .expect("timed out waiting for UDP packet")
+            .expect("recv failed");
+
+        assert_eq!(&buf[..len], payload);
+    }
 }

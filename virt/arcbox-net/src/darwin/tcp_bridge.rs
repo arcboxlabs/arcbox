@@ -347,9 +347,13 @@ impl TcpBridge {
             // Resolve domain name from DNS log (if available) for proxy-aware connects.
             let domain = self.dns_log.as_ref().and_then(|log| log.lookup(syn.dst_ip));
 
-            // Determine connect strategy: proxy tunnel or direct.
-            let proxy_target =
-                self.resolve_proxy_target(syn.dst_ip, syn.dst_port, domain.as_deref());
+            // Gateway-destined flows (host.docker.internal) always connect
+            // directly to loopback — never route through a proxy.
+            let proxy_target = if syn.dst_ip == self.gateway_ip {
+                None
+            } else {
+                self.resolve_proxy_target(syn.dst_ip, syn.dst_port, domain.as_deref())
+            };
 
             // Spawn host connect task.
             tokio::spawn(async move {
@@ -1719,6 +1723,46 @@ mod tests {
         assert_eq!(device.take_tx_pending().len(), 0); // TX is separate
         // A listen socket should have been created for the port.
         assert!(bridge.listening_ports.contains(&addr.port()));
+    }
+
+    /// Verifies that a SYN destined for the gateway IP is translated to
+    /// loopback and successfully connects to a local listener.
+    #[tokio::test]
+    async fn syn_gate_gateway_ip_translates_to_loopback() {
+        let mut device = SmoltcpDevice::new(0, GW_IP);
+        let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
+        let mut bridge = TcpBridge::new(GW_IP);
+
+        // Start a local TCP listener on loopback.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        // Build a SYN targeting the gateway IP (not loopback).
+        let syn = make_syn_frame(GW_IP, port);
+        let syn_info = TcpSynInfo {
+            dst_port: port,
+            src_ip: GUEST_IP,
+            src_port: 54321,
+            dst_ip: GW_IP,
+            syn_seq: 2000,
+            frame: syn,
+        };
+
+        bridge.gate_syns(&[syn_info], GW_MAC);
+        assert_eq!(bridge.pending_syns.len(), 1);
+
+        // The bridge should translate GW_IP → 127.0.0.1 and connect.
+        let _accepted = listener.accept().await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let rst_frames = bridge.poll_pending_syns(&mut device, &mut sockets, GW_MAC);
+        assert!(
+            rst_frames.is_empty(),
+            "Gateway IP connect should succeed via loopback translation"
+        );
+        assert!(bridge.pending_syns.is_empty());
+        assert_eq!(bridge.pre_connected.len(), 1);
     }
 
     #[tokio::test]
