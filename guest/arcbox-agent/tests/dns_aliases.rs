@@ -10,10 +10,10 @@ fn compose(project: &str, service: &str) -> ComposeInfo {
 }
 
 #[test]
-fn compose_v2_hierarchical_aliases() {
+fn compose_v2_hierarchical_plus_flat() {
     let info = compose("myproject", "web");
     let aliases = collect_aliases("myproject-web-1", Some(&info));
-    assert_eq!(aliases, vec!["web.myproject", "myproject-web.myproject"]);
+    assert_eq!(aliases, vec!["web.myproject", "myproject-web-1"]);
 }
 
 #[test]
@@ -22,7 +22,7 @@ fn compose_v2_multi_segment_service() {
     let aliases = collect_aliases("myproject-api-server-2", Some(&info));
     assert_eq!(
         aliases,
-        vec!["api-server.myproject", "myproject-api-server.myproject"]
+        vec!["api-server.myproject", "myproject-api-server-2"]
     );
 }
 
@@ -30,7 +30,7 @@ fn compose_v2_multi_segment_service() {
 fn compose_v1_underscore() {
     let info = compose("myproject", "web");
     let aliases = collect_aliases("myproject_web_1", Some(&info));
-    assert_eq!(aliases, vec!["web.myproject", "myproject_web.myproject"]);
+    assert_eq!(aliases, vec!["web.myproject", "myproject_web_1"]);
 }
 
 #[test]
