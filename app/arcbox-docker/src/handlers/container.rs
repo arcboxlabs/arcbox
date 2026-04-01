@@ -139,8 +139,8 @@ pub async fn restart_container(
             let _ = state.runtime.ensure_vm_ready().await;
             if let Some(body_bytes) = inspect_container_body(&state, &id).await {
                 let canonical = canonical_id_or_fallback(&id, &body_bytes);
-                if let Some((name, ip)) = extract_container_dns_info(&body_bytes) {
-                    state.runtime.register_dns(&canonical, &name, ip).await;
+                if let Some((aliases, ip)) = extract_container_dns_info(&body_bytes) {
+                    state.runtime.register_dns(&canonical, &aliases, ip).await;
                 }
             }
         }
@@ -196,8 +196,11 @@ async fn setup_container_networking(state: &AppState, container_id: &str) {
     setup_port_forwarding_from_inspect(state, &canonical_id, &body_bytes).await;
 
     // DNS registration.
-    if let Some((name, ip)) = extract_container_dns_info(&body_bytes) {
-        state.runtime.register_dns(&canonical_id, &name, ip).await;
+    if let Some((aliases, ip)) = extract_container_dns_info(&body_bytes) {
+        state
+            .runtime
+            .register_dns(&canonical_id, &aliases, ip)
+            .await;
     }
 }
 
@@ -290,11 +293,17 @@ async fn setup_port_forwarding_from_inspect(
     }
 }
 
-/// Extracts container name and IP address from Docker inspect JSON.
+/// Extracts DNS aliases and IP address from Docker inspect JSON.
 ///
-/// Returns `(name, ip)` where `name` is the container name without leading `/`.
+/// For compose containers (with `com.docker.compose.project` and
+/// `com.docker.compose.service` labels), returns:
+/// `["service.project", "container_name"]` — a hierarchical service alias
+/// plus the flat container name.
+///
+/// For plain containers, returns `["container_name"]`.
+///
 /// Falls back through `/NetworkSettings/IPAddress` → per-network IPs.
-pub fn extract_container_dns_info(inspect_json: &[u8]) -> Option<(String, IpAddr)> {
+pub fn extract_container_dns_info(inspect_json: &[u8]) -> Option<(Vec<String>, IpAddr)> {
     let v: serde_json::Value = serde_json::from_slice(inspect_json).ok()?;
     let name = v.get("Name")?.as_str()?.trim_start_matches('/').to_string();
 
@@ -315,7 +324,29 @@ pub fn extract_container_dns_info(inspect_json: &[u8]) -> Option<(String, IpAddr
                 .find_map(|net| net.get("IPAddress")?.as_str().filter(|s| !s.is_empty()))
         })?;
 
-    Some((name, ip_str.parse().ok()?))
+    // Build DNS aliases from compose labels when available.
+    let aliases = match v.pointer("/Config/Labels").and_then(|l| l.as_object()) {
+        Some(labels) => {
+            let project = labels
+                .get("com.docker.compose.project")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
+            let service = labels
+                .get("com.docker.compose.service")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
+            match (project, service) {
+                // Compose: service-level hierarchical + flat container name.
+                (Some(proj), Some(svc)) => {
+                    vec![format!("{svc}.{proj}"), name]
+                }
+                _ => vec![name],
+            }
+        }
+        None => vec![name],
+    };
+
+    Some((aliases, ip_str.parse().ok()?))
 }
 
 /// Rename a container and update its DNS entry.
@@ -343,8 +374,8 @@ pub async fn rename_container(
             // 2. Inspect (using canonical ID which survives rename) to get
             //    new name + IP, then register.
             if let Some(body_bytes) = inspect_container_body(&state, canonical).await {
-                if let Some((new_name, ip)) = extract_container_dns_info(&body_bytes) {
-                    state.runtime.register_dns(canonical, &new_name, ip).await;
+                if let Some((aliases, ip)) = extract_container_dns_info(&body_bytes) {
+                    state.runtime.register_dns(canonical, &aliases, ip).await;
                 }
             }
         }
@@ -509,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_container_dns_info_basic() {
+    fn test_extract_container_dns_info_plain() {
         let json = serde_json::json!({
             "Id": "abc123",
             "Name": "/my-nginx",
@@ -519,8 +550,30 @@ mod tests {
             }
         });
         let bytes = serde_json::to_vec(&json).unwrap();
-        let (name, ip) = extract_container_dns_info(&bytes).unwrap();
-        assert_eq!(name, "my-nginx");
+        let (aliases, ip) = extract_container_dns_info(&bytes).unwrap();
+        assert_eq!(aliases, vec!["my-nginx"]);
+        assert_eq!(ip, "172.17.0.2".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn test_extract_container_dns_info_compose() {
+        let json = serde_json::json!({
+            "Id": "abc123",
+            "Name": "/myproject-web-1",
+            "Config": {
+                "Labels": {
+                    "com.docker.compose.project": "myproject",
+                    "com.docker.compose.service": "web"
+                }
+            },
+            "NetworkSettings": {
+                "IPAddress": "172.17.0.2",
+                "Networks": {}
+            }
+        });
+        let bytes = serde_json::to_vec(&json).unwrap();
+        let (aliases, ip) = extract_container_dns_info(&bytes).unwrap();
+        assert_eq!(aliases, vec!["web.myproject", "myproject-web-1"]);
         assert_eq!(ip, "172.17.0.2".parse::<IpAddr>().unwrap());
     }
 
@@ -539,8 +592,8 @@ mod tests {
             }
         });
         let bytes = serde_json::to_vec(&json).unwrap();
-        let (name, ip) = extract_container_dns_info(&bytes).unwrap();
-        assert_eq!(name, "web-app");
+        let (aliases, ip) = extract_container_dns_info(&bytes).unwrap();
+        assert_eq!(aliases, vec!["web-app"]);
         assert_eq!(ip, "172.18.0.3".parse::<IpAddr>().unwrap());
     }
 
