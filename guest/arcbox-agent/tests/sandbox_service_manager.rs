@@ -86,6 +86,7 @@ async fn sandbox_service_calls_sandbox_manager() {
         }),
         ttl_seconds: 0,
         ssh_public_key: None,
+        rootfs_type: String::new(),
     };
     let create_payload = create_req.encode_to_vec();
     let created = service

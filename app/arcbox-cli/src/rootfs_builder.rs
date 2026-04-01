@@ -48,7 +48,7 @@ pub async fn build_and_export(dockerfile_path: &str) -> Result<(String, String)>
 
     let context_dir = dockerfile
         .parent()
-        .unwrap_or(Path::new("."))
+        .unwrap_or_else(|| Path::new("."))
         .to_string_lossy()
         .to_string();
 
