@@ -144,6 +144,12 @@ pub struct VmConfig {
     /// The balloon device allows dynamic memory management by inflating
     /// (reclaiming memory from guest) or deflating (returning memory).
     pub balloon: bool,
+    /// Enable Rosetta x86_64 translation (Apple Silicon only).
+    ///
+    /// When enabled, the VM exposes a VirtioFS share containing Apple's
+    /// Rosetta binary and registers it via binfmt_misc in the guest.
+    /// This allows near-native execution of x86_64 Linux binaries.
+    pub rosetta: bool,
 }
 
 impl Default for VmConfig {
@@ -159,6 +165,7 @@ impl Default for VmConfig {
             vsock: true,
             guest_cid: None,
             balloon: true, // Enable balloon by default
+            rosetta: cfg!(all(target_os = "macos", target_arch = "aarch64")),
         }
     }
 }
@@ -264,7 +271,7 @@ impl VmManager {
                 .unwrap_or_default(),
             kernel_cmdline: entry.config.cmdline.clone().unwrap_or_default(),
             initrd_path: None,
-            enable_rosetta: false,
+            enable_rosetta: entry.config.rosetta,
             serial_console: true,
             virtio_console: true,
             shared_dirs,
