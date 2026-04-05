@@ -1,11 +1,14 @@
-//! Build a Docker image from a Dockerfile and export it as a tarball.
+//! Resolve Docker images to guest-visible overlay2 layer paths.
 //!
-//! Runs `docker build` and `docker save` on the host via the ArcBox Docker
-//! context. The tarball is written to `~/.arcbox/bin/` so it is visible to
-//! the guest VM at `/arcbox/bin/` via VirtioFS. The guest agent then handles
-//! the ext4 conversion and vm-agent injection.
+//! For `--from-dockerfile`, runs `docker build` via the ArcBox Docker context
+//! (proxied to guest dockerd), then inspects the image to get the overlay2
+//! layer directory. For `--from-image`, inspects an existing image directly.
+//!
+//! The returned path is a guest-internal filesystem path (under Docker's
+//! overlay2 storage) that the guest agent passes to `oci2rootfs` for ext4
+//! conversion.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
@@ -13,14 +16,6 @@ use tokio::process::Command;
 
 /// Docker context name used for ArcBox Docker API.
 const DOCKER_CONTEXT: &str = "arcbox";
-
-/// Host-side output directory (VirtioFS-shared with guest as /arcbox/bin/).
-fn output_dir() -> Result<PathBuf> {
-    let dir = dirs::home_dir()
-        .context("cannot determine home directory")?
-        .join(".arcbox/bin");
-    Ok(dir)
-}
 
 /// Check if a file has a valid ext4 superblock magic.
 pub fn has_ext4_magic(path: &Path) -> bool {
@@ -48,12 +43,9 @@ pub fn looks_like_dockerfile(path: &Path) -> bool {
         .is_some_and(|line| line.trim().to_ascii_uppercase().starts_with("FROM "))
 }
 
-/// Build a Docker image from a Dockerfile and export it via `docker save`.
-///
-/// Returns `(guest_path, rootfs_type)`:
-/// - Cache hit:  `("/arcbox/bin/rootfs-<hash>.ext4", "")` — ready to boot.
-/// - Cache miss: `("/arcbox/bin/arcbox-save-<hash>.tar", "dockerfile")` — agent converts.
-pub async fn build_and_export(dockerfile_path: &str) -> Result<(String, String)> {
+/// Build a Docker image from a Dockerfile and return its guest-visible
+/// overlay2 layer directory path.
+pub async fn resolve_from_dockerfile(dockerfile_path: &str) -> Result<String> {
     let dockerfile = Path::new(dockerfile_path);
     if !dockerfile.exists() {
         bail!("Dockerfile not found: {dockerfile_path}");
@@ -69,22 +61,7 @@ pub async fn build_and_export(dockerfile_path: &str) -> Result<(String, String)>
         .await
         .context("failed to read Dockerfile")?;
     let hash = cache_key(&content);
-
-    let out = output_dir()?;
-    tokio::fs::create_dir_all(&out).await?;
-
-    // Check if the ext4 is already cached (skip build+save+convert).
-    // Validate the cached file has ext4 magic to avoid using corrupt artifacts.
-    let cached_ext4 = out.join(format!("rootfs-{hash}.ext4"));
-    if cached_ext4.exists() && has_ext4_magic(&cached_ext4) {
-        eprintln!("Using cached rootfs");
-        return Ok((format!("/arcbox/bin/rootfs-{hash}.ext4"), String::new()));
-    }
-
     let tag = format!("arcbox-sandbox:{hash}");
-    let tar_filename = format!("arcbox-save-{hash}.tar");
-    let tar_host_path = out.join(&tar_filename);
-    let tar_guest_path = format!("/arcbox/bin/{tar_filename}");
 
     let context_dir = dockerfile
         .parent()
@@ -113,27 +90,53 @@ pub async fn build_and_export(dockerfile_path: &str) -> Result<(String, String)>
         bail!("docker build failed:\n{stderr}");
     }
 
-    // docker save
-    eprintln!("Exporting image...");
+    inspect_layer_path(&tag).await
+}
+
+/// Get the guest-visible overlay2 layer directory for an existing Docker image.
+pub async fn resolve_from_image(image_ref: &str) -> Result<String> {
+    inspect_layer_path(image_ref).await
+}
+
+/// Query the overlay2 layer directory for an image via `docker inspect`.
+///
+/// Returns the chain-id directory (parent of UpperDir) so that `oci2rootfs`
+/// can resolve the full layer chain.
+async fn inspect_layer_path(image_ref: &str) -> Result<String> {
     let output = Command::new("docker")
         .args([
             "--context",
             DOCKER_CONTEXT,
-            "save",
-            &tag,
-            "-o",
-            &tar_host_path.to_string_lossy(),
+            "inspect",
+            "--format",
+            "{{.GraphDriver.Data.UpperDir}}",
+            image_ref,
         ])
         .output()
         .await
-        .context("failed to spawn docker save")?;
+        .context("failed to spawn docker inspect")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("docker save failed:\n{stderr}");
+        bail!("docker inspect failed (is the image present?):\n{stderr}");
     }
 
-    eprintln!("Image exported to {}", tar_host_path.display());
-    Ok((tar_guest_path, "dockerfile".to_string()))
+    let upper_dir = String::from_utf8(output.stdout)
+        .context("docker inspect returned non-UTF-8 output")?
+        .trim()
+        .to_string();
+
+    if upper_dir.is_empty() {
+        bail!("docker inspect returned empty UpperDir for {image_ref}");
+    }
+
+    // oci2rootfs expects the chain-id directory (contains diff/, link, lower),
+    // not the diff/ subdirectory itself.
+    let layer_dir = upper_dir
+        .strip_suffix("/diff")
+        .unwrap_or(&upper_dir)
+        .to_string();
+
+    Ok(layer_dir)
 }
 
 /// Full SHA-256 hex digest of content.

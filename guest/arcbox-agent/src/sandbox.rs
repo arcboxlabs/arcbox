@@ -66,9 +66,9 @@ impl SandboxService {
 
     /// Create a sandbox.
     ///
-    /// When `rootfs_type` is `"dockerfile"`, `rootfs` is a path to a `docker save`
-    /// tarball. The agent converts it to ext4 via `oci2rootfs` and injects
-    /// `vm-agent` before booting.
+    /// When the rootfs path points to a directory (overlay2 layer), the agent
+    /// converts it to ext4 via `oci2rootfs` and injects `vm-agent` before
+    /// booting. Ext4 images are used directly.
     pub async fn create(
         &self,
         payload: &[u8],
@@ -77,12 +77,12 @@ impl SandboxService {
             .map_err(|e| SandboxError::Decode(e.to_string()))?;
         let mut spec = proto_to_spec(req);
 
-        if spec.rootfs_type == "dockerfile" {
-            let ext4_path = crate::rootfs_builder::convert_tar_to_rootfs(&spec.rootfs)
+        // Auto-detect: directory → overlay2 layer needing conversion.
+        if !spec.rootfs.is_empty() && std::path::Path::new(&spec.rootfs).is_dir() {
+            let ext4_path = crate::rootfs_builder::convert_layer_to_rootfs(&spec.rootfs)
                 .await
                 .map_err(|e| SandboxError::Internal(format!("rootfs build failed: {e}")))?;
             spec.rootfs = ext4_path;
-            spec.rootfs_type.clear();
         }
 
         let (id, ip_address) = self
@@ -636,7 +636,6 @@ fn proto_to_spec(req: sandbox_v1::CreateSandboxRequest) -> SandboxSpec {
         network: SandboxNetworkSpec { mode: network.mode },
         ttl_seconds: req.ttl_seconds,
         ssh_public_key: req.ssh_public_key,
-        rootfs_type: req.rootfs_type,
     }
 }
 

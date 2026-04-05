@@ -1,14 +1,8 @@
-//! Convert a `docker save` tarball to a bootable ext4 rootfs.
+//! Convert a Docker overlay2 layer directory to a bootable ext4 rootfs.
 //!
-//! Runs entirely inside the guest VM. The tarball is visible via VirtioFS
-//! at `/arcbox/bin/`. Steps:
-//!
-//! 1. Validate the tarball path is under the expected directory.
-//! 2. Extract the tar to a temp directory.
-//! 3. Run `oci2rootfs` to produce an ext4 image.
-//! 4. Inject `/sbin/vm-agent` into the ext4 via loop mount.
-//! 5. Atomically rename into the cache path.
-//! 6. Clean up and return the ext4 path.
+//! Runs `oci2rootfs` on the overlay2 layer path, then injects `/sbin/vm-agent`
+//! into the resulting ext4 via loop mount. Cached ext4 images are reused to
+//! avoid redundant conversions.
 
 use std::path::Path;
 
@@ -16,161 +10,82 @@ use anyhow::{Context, Result, bail};
 use tokio::process::Command;
 use uuid::Uuid;
 
-/// Path to the `oci2rootfs` binary (Linux aarch64, on VirtioFS).
+/// Path to the `oci2rootfs` binary (on VirtioFS).
 const OCI2ROOTFS_BIN: &str = "/arcbox/bin/oci2rootfs";
 
-/// Path to the `vm-agent` binary (trusted, inside guest).
+/// Path to the `vm-agent` binary (on VirtioFS).
 const VM_AGENT_BIN: &str = "/arcbox/bin/vm-agent";
 
 /// Directory for cached rootfs images.
 const ROOTFS_CACHE_DIR: &str = "/arcbox/bin";
 
-/// Expected prefix for tarball filenames.
-const TAR_PREFIX: &str = "arcbox-save-";
+/// Check if a file has a valid ext4 superblock magic (0x53EF at offset 0x438).
+pub fn has_ext4_magic(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut magic = [0u8; 2];
+    file.seek(SeekFrom::Start(0x438)).is_ok()
+        && file.read_exact(&mut magic).is_ok()
+        && magic == [0x53, 0xEF]
+}
 
-/// Convert a `docker save` tarball to a bootable ext4 rootfs.
+/// Convert an overlay2 layer directory to a bootable ext4 rootfs.
 ///
-/// `tar_path` is a guest-visible path (e.g. `/arcbox/bin/arcbox-save-<hash>.tar`).
-/// Returns the path to the generated ext4 image.
-pub async fn convert_tar_to_rootfs(tar_path: &str) -> Result<String> {
-    // Validate path is under the expected directory.
-    validate_tar_path(tar_path)?;
-
-    if !Path::new(tar_path).exists() {
-        bail!("docker save tarball not found: {tar_path}");
+/// `layer_path` is a guest-visible overlay2 chain-id directory
+/// (e.g. `/var/lib/docker/overlay2/<chain-id>`).
+/// Returns the path to the generated (or cached) ext4 image.
+pub async fn convert_layer_to_rootfs(layer_path: &str) -> Result<String> {
+    if !Path::new(layer_path).exists() {
+        bail!("layer path not found: {layer_path}");
     }
 
-    // Extract hash from filename. Reject unexpected names.
-    let hash = extract_hash(tar_path)?;
+    // Cache key derived from the layer path (overlay2 chain-id directories
+    // are content-addressed, so the path is a stable identifier).
+    let hash = path_hash(layer_path);
     let ext4_path = format!("{ROOTFS_CACHE_DIR}/rootfs-{hash}.ext4");
 
-    // Use a unique request ID for temp paths to avoid concurrent collisions.
+    // Check cache.
+    if Path::new(&ext4_path).exists() && has_ext4_magic(Path::new(&ext4_path)) {
+        tracing::info!(path = %ext4_path, "using cached rootfs");
+        return Ok(ext4_path);
+    }
+
     let req_id = Uuid::new_v4().to_string();
-
-    // Extract tar to a unique temp directory (cleaned up via scope guard).
-    let oci_dir = format!("/tmp/arcbox-rootfs-{req_id}-oci");
-    let _oci_guard = TempDirGuard(&oci_dir);
-    extract_tar(tar_path, &oci_dir).await?;
-
-    // Determine ext4 size from extracted content.
-    let content_size = dir_size_recursive(&oci_dir).await;
-    let ext4_size = (content_size * 3 / 2).max(256 * 1024 * 1024); // 1.5x, min 256MB
-
-    // Convert to ext4 — write to temp file first, rename atomically on success.
     let ext4_tmp = format!("{ROOTFS_CACHE_DIR}/.rootfs-{req_id}.ext4.tmp");
-    tracing::info!(ext4 = %ext4_path, size = ext4_size, "converting tar to ext4");
-    oci_to_ext4(&oci_dir, &ext4_tmp, ext4_size).await?;
+
+    // Run oci2rootfs.
+    tracing::info!(layer = %layer_path, ext4 = %ext4_path, "converting overlay2 layer to ext4");
+    run_oci2rootfs(layer_path, &ext4_tmp).await?;
 
     // Inject vm-agent.
     tracing::info!("injecting vm-agent into rootfs");
     inject_vm_agent(&ext4_tmp, &req_id).await?;
 
-    // Atomic rename into cache path.
+    // Atomic rename into cache.
     tokio::fs::rename(&ext4_tmp, &ext4_path)
         .await
         .context("failed to rename ext4 into cache")?;
-
-    // Cleanup tarball.
-    let _ = tokio::fs::remove_file(tar_path).await;
 
     tracing::info!(path = %ext4_path, "rootfs ready");
     Ok(ext4_path)
 }
 
-/// Validate that the tar path is under the expected shared directory.
-fn validate_tar_path(tar_path: &str) -> Result<()> {
-    let path = Path::new(tar_path);
-
-    // Must be under /arcbox/bin/.
-    if !tar_path.starts_with(ROOTFS_CACHE_DIR) {
-        bail!("tarball path must be under {ROOTFS_CACHE_DIR}, got: {tar_path}");
-    }
-
-    // Reject path traversal.
-    if path
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        bail!("tarball path contains path traversal: {tar_path}");
-    }
-
-    Ok(())
-}
-
-/// Extract the hash from a tarball filename like `arcbox-save-<hash>.tar`.
-fn extract_hash(tar_path: &str) -> Result<String> {
-    Path::new(tar_path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .and_then(|s| s.strip_prefix(TAR_PREFIX))
-        .map(String::from)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "unexpected tarball name: {tar_path} \
-                 (expected pattern: {TAR_PREFIX}<hash>.tar)"
-            )
-        })
-}
-
-async fn extract_tar(tar_path: &str, dest: &str) -> Result<()> {
-    tokio::fs::create_dir_all(dest).await?;
-    let output = Command::new("/bin/busybox")
-        .args(["tar", "-xf", tar_path, "-C", dest])
-        .output()
-        .await
-        .context("failed to extract tar")?;
-
-    if !output.status.success() {
-        bail!(
-            "tar extract failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    Ok(())
-}
-
-/// Recursively compute total file size of a directory tree.
-async fn dir_size_recursive(path: &str) -> u64 {
-    async fn walk(path: &Path) -> u64 {
-        let Ok(meta) = tokio::fs::symlink_metadata(path).await else {
-            return 0;
-        };
-
-        if meta.is_file() {
-            return meta.len();
-        }
-
-        if meta.is_dir() {
-            let Ok(mut dir) = tokio::fs::read_dir(path).await else {
-                return 0;
-            };
-            let mut total = 0u64;
-            while let Ok(Some(entry)) = dir.next_entry().await {
-                total += Box::pin(walk(&entry.path())).await;
-            }
-            return total;
-        }
-
-        0
-    }
-
-    let size = walk(Path::new(path)).await;
-    if size > 0 { size } else { 512 * 1024 * 1024 }
-}
-
-async fn oci_to_ext4(oci_dir: &str, ext4_path: &str, size: u64) -> Result<()> {
+/// Run `oci2rootfs` on an overlay2 layer directory.
+async fn run_oci2rootfs(layer_path: &str, output: &str) -> Result<()> {
     if !Path::new(OCI2ROOTFS_BIN).exists() {
         bail!("oci2rootfs not found at {OCI2ROOTFS_BIN}");
     }
 
-    let output = Command::new(OCI2ROOTFS_BIN)
-        .args([oci_dir, "--output", ext4_path, "--size", &size.to_string()])
+    let result = Command::new(OCI2ROOTFS_BIN)
+        .args([layer_path, "--output", output])
         .output()
         .await
         .context("failed to spawn oci2rootfs")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !result.status.success() {
+        let stderr = String::from_utf8_lossy(&result.stderr);
         bail!("oci2rootfs failed: {stderr}");
     }
     Ok(())
@@ -223,13 +138,12 @@ async fn inject_vm_agent(ext4_path: &str, req_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Scope guard that removes a temporary directory on drop.
-struct TempDirGuard<'a>(&'a str);
-
-impl Drop for TempDirGuard<'_> {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(self.0);
-    }
+/// Derive a stable cache key from the layer path.
+fn path_hash(path: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 #[cfg(test)]
@@ -237,37 +151,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_hash_valid() {
-        let hash = extract_hash("/arcbox/bin/arcbox-save-abc123.tar").unwrap();
-        assert_eq!(hash, "abc123");
+    fn test_has_ext4_magic_nonexistent() {
+        assert!(!has_ext4_magic(Path::new("/nonexistent")));
     }
 
     #[test]
-    fn test_extract_hash_full_sha256() {
-        let h = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        let path = format!("/arcbox/bin/arcbox-save-{h}.tar");
-        let hash = extract_hash(&path).unwrap();
-        assert_eq!(hash, h);
+    fn test_path_hash_deterministic() {
+        let a = path_hash("/var/lib/docker/overlay2/abc123");
+        let b = path_hash("/var/lib/docker/overlay2/abc123");
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 16);
     }
 
     #[test]
-    fn test_extract_hash_rejects_bad_name() {
-        assert!(extract_hash("/arcbox/bin/random.tar").is_err());
-        assert!(extract_hash("/arcbox/bin/arcbox-save-.tar").is_err());
-    }
-
-    #[test]
-    fn test_validate_tar_path_ok() {
-        assert!(validate_tar_path("/arcbox/bin/arcbox-save-abc.tar").is_ok());
-    }
-
-    #[test]
-    fn test_validate_tar_path_rejects_outside() {
-        assert!(validate_tar_path("/tmp/arcbox-save-abc.tar").is_err());
-    }
-
-    #[test]
-    fn test_validate_tar_path_rejects_traversal() {
-        assert!(validate_tar_path("/arcbox/bin/../etc/passwd").is_err());
+    fn test_path_hash_different() {
+        let a = path_hash("/var/lib/docker/overlay2/abc123");
+        let b = path_hash("/var/lib/docker/overlay2/def456");
+        assert_ne!(a, b);
     }
 }

@@ -131,8 +131,6 @@ fn api_routes() -> Router<AppState> {
         .route("/images/{id}/json", get(handlers::inspect_image))
         .route("/images/{id}", delete(handlers::remove_image))
         .route("/images/{id}/tag", post(handlers::tag_image))
-        .route("/images/{id}/get", get(handlers::get_image))
-        .route("/images/get", get(handlers::get_images))
         .route("/networks", get(handlers::list_networks))
         .route("/networks/create", post(handlers::create_network))
         .route("/networks/{id}", get(handlers::inspect_network))

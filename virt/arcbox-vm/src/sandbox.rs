@@ -126,8 +126,6 @@ pub struct SandboxSpec {
     pub ttl_seconds: u32,
     /// SSH public key injected via MMDS (None = no SSH setup).
     pub ssh_public_key: Option<String>,
-    /// Rootfs type: `""` / `"ext4"` (use directly) or `"dockerfile"` (tar to convert).
-    pub rootfs_type: String,
 }
 
 /// Parameters to restore a sandbox from a checkpoint.

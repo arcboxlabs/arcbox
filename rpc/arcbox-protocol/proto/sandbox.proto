@@ -180,13 +180,7 @@ message CreateSandboxRequest {
     // SSH public key injected via MMDS (empty = no SSH).
     optional string ssh_public_key = 15;
 
-    // --- Rootfs type ---
-    // How to interpret the rootfs field:
-    //   ""/"ext4" (default) — rootfs is a path to an ext4 image, use directly.
-    //   "dockerfile"        — rootfs is a guest-visible path to a docker save
-    //                         tarball; the agent converts it to ext4, injects
-    //                         vm-agent, and boots.
-    string rootfs_type = 16;
+    reserved 16;
 }
 
 // Response to CreateSandbox.

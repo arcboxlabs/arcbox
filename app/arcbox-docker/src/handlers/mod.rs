@@ -84,10 +84,7 @@ pub use container::{
 };
 pub use events::events;
 pub use exec::{exec_create, exec_inspect, exec_resize, exec_start};
-pub use image::{
-    get_image, get_images, inspect_image, list_images, load_image, pull_image, remove_image,
-    tag_image,
-};
+pub use image::{inspect_image, list_images, load_image, pull_image, remove_image, tag_image};
 pub use network::{create_network, inspect_network, list_networks, remove_network};
 pub use system::{get_info, get_version, ping};
 pub use volume::{create_volume, inspect_volume, list_volumes, prune_volumes, remove_volume};
