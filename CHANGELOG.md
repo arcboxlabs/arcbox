@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.20](https://github.com/arcboxlabs/arcbox/compare/v0.3.19...v0.3.20) (2026-04-05)
+
+
+### Bug Fixes
+
+* find_bundle_contents walks up to main app Contents ([c9ec890](https://github.com/arcboxlabs/arcbox/commit/c9ec890e66c111271d7c9f3923801652b5011208))
+* **net:** spin-retry pool free to prevent silent buffer leak ([fe57f0a](https://github.com/arcboxlabs/arcbox/commit/fe57f0aca510e8897b806bd6dba878e33d9ee27b))
+
 ## [0.3.19](https://github.com/arcboxlabs/arcbox/compare/v0.3.18...v0.3.19) (2026-04-01)
 
 
