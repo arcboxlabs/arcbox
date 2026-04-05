@@ -141,7 +141,7 @@ async fn install(format: OutputFormat) -> Result<()> {
 
     // 2b. Symlink Docker CLI tools → ~/.arcbox/bin/ if available.
     //     Tools may be in the app bundle (xbin/) or ~/.arcbox/runtime/bin/.
-    let docker_tools_linked = link_docker_tools(&exe, &bin).await;
+    let docker_tools_linked = link_docker_tools_to_user_bin(&exe, &bin).await;
 
     // 3. Write shell init scripts.
     write_shell_init_scripts(&shell).await?;
@@ -536,45 +536,24 @@ async fn remove_profile_injection(shell: ShellKind) -> Result<Option<PathBuf>> {
     Ok(Some(path))
 }
 
-// =============================================================================
-// Docker tool symlinks
-// =============================================================================
-
-use arcbox_constants::paths::DOCKER_CLI_TOOLS;
-
-/// Symlink Docker CLI tools into `~/.arcbox/bin/` so they are on PATH.
+/// Links Docker tools into `~/.arcbox/bin/` (path 2, user-space, no root).
 ///
-/// This is **path 2** of two independent Docker CLI discovery mechanisms:
+/// Unlike the system-wide paths 1 & 3 which use `safe_link` with ownership
+/// checks, this writes to `~/.arcbox/bin/` which is ArcBox-owned, so
+/// `create_or_update_symlink` (unconditional replace) is safe.
 ///
-///   1. `/usr/local/bin/docker` → `.app/Contents/MacOS/xbin/docker`
-///      Created by the daemon via the privileged helper (requires root).
-///      See `arcbox-daemon/src/self_setup/cli_tools.rs`.
-///
-///   2. `~/.arcbox/bin/docker` → `xbin/docker` or `~/.arcbox/runtime/bin/docker`
-///      Created here by `abctl setup install` (no root required).
-///      Works via `~/.arcbox/bin` being on PATH (injected into shell profile).
-///
-/// Both paths are idempotent and can coexist. Path 1 takes precedence
-/// because `/usr/local/bin` is typically earlier in PATH than `~/.arcbox/bin`.
-///
-/// Searches two source locations in priority order:
-///   1. App bundle `Contents/MacOS/xbin/` (signed, matches the app version)
-///   2. `~/.arcbox/runtime/bin/` (downloaded by the daemon on first start)
-///
-/// Returns the number of tools successfully linked.
-async fn link_docker_tools(abctl_exe: &Path, user_bin: &Path) -> usize {
-    let mut linked = 0;
-
-    // Candidate source directories for Docker CLI tools.
+/// Searches xbin (app bundle) first, then `~/.arcbox/runtime/bin/` (daemon).
+async fn link_docker_tools_to_user_bin(abctl_exe: &Path, user_bin: &Path) -> usize {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
-    // 1. App bundle xbin: abctl lives at Contents/MacOS/bin/abctl,
-    //    xbin is at Contents/MacOS/xbin/.
-    if let Some(bin_dir) = abctl_exe.parent() {
-        let xbin = bin_dir.parent().map(|p| p.join("xbin"));
-        if let Some(ref xbin) = xbin {
+    // 1. App bundle xbin (reuses shared detection logic).
+    if let Some(xbin) = super::symlink::detect_bundle_xbin() {
+        candidates.push(xbin);
+    } else if let Some(bin_dir) = abctl_exe.parent() {
+        // Fallback: derive from exe path (e.g. Homebrew layout).
+        if let Some(xbin) = bin_dir.parent().map(|p| p.join("xbin")) {
             if xbin.is_dir() {
-                candidates.push(xbin.clone());
+                candidates.push(xbin);
             }
         }
     }
@@ -587,7 +566,8 @@ async fn link_docker_tools(abctl_exe: &Path, user_bin: &Path) -> usize {
         }
     }
 
-    for tool_name in DOCKER_CLI_TOOLS {
+    let mut linked = 0usize;
+    for tool_name in arcbox_constants::paths::DOCKER_CLI_TOOLS {
         let link = user_bin.join(tool_name);
 
         // Skip if already a valid symlink pointing to an existing target.
@@ -602,7 +582,6 @@ async fn link_docker_tools(abctl_exe: &Path, user_bin: &Path) -> usize {
             }
         }
 
-        // Find the first candidate that has this tool.
         for src_dir in &candidates {
             let src = src_dir.join(tool_name);
             if src.is_file() {

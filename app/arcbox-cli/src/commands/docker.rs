@@ -3,7 +3,7 @@
 //! Manages the integration between Docker CLI and ArcBox by controlling
 //! Docker contexts and installing bundled Docker CLI tools.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -122,7 +122,7 @@ async fn execute_setup(format: OutputFormat) -> Result<()> {
     let arch = arcbox_asset::current_arch().to_string();
     let mut manager = HostToolManager::new(tools, &arch, runtime_bin.clone());
 
-    if let Some(xbin) = detect_bundle_xbin() {
+    if let Some(xbin) = super::symlink::detect_bundle_xbin() {
         if matches!(format, OutputFormat::Table | OutputFormat::Quiet) {
             println!("Using Docker tools from app bundle: {}", xbin.display());
         }
@@ -363,19 +363,6 @@ async fn create_or_update_symlink(target: &Path, link: &Path) -> Result<()> {
     })?;
 
     Ok(())
-}
-
-/// Detect the `xbin/` directory inside an app bundle.
-///
-/// When `abctl` is running from `Contents/MacOS/bin/abctl`, the xbin directory
-/// is at `Contents/MacOS/xbin/`. Returns `Some(path)` if the directory exists.
-fn detect_bundle_xbin() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    // exe = …/Contents/MacOS/bin/abctl
-    // parent = …/Contents/MacOS/bin/
-    // parent.parent = …/Contents/MacOS/
-    let xbin = exe.parent()?.parent()?.join("xbin");
-    xbin.is_dir().then_some(xbin)
 }
 
 // =============================================================================
