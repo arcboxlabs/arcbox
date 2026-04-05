@@ -139,6 +139,10 @@ async fn install(format: OutputFormat) -> Result<()> {
         create_or_update_symlink(&placeholder_exe, &placeholder_symlink).await?;
     }
 
+    // 2b. Symlink Docker CLI tools → ~/.arcbox/bin/ if available.
+    //     Tools may be in the app bundle (xbin/) or ~/.arcbox/runtime/bin/.
+    let docker_tools_linked = link_docker_tools(&exe, &bin).await;
+
     // 3. Write shell init scripts.
     write_shell_init_scripts(&shell).await?;
 
@@ -156,6 +160,7 @@ async fn install(format: OutputFormat) -> Result<()> {
                 serde_json::to_string(&serde_json::json!({
                     "installed": true,
                     "bin": symlink_path.display().to_string(),
+                    "docker_tools": docker_tools_linked,
                     "shell_init": shell.display().to_string(),
                     "completions": comp.display().to_string(),
                     "profile": profile_path.as_ref().map(|p| p.display().to_string()),
@@ -172,6 +177,12 @@ async fn install(format: OutputFormat) -> Result<()> {
                 symlink_path.display(),
                 exe.display()
             );
+            if docker_tools_linked > 0 {
+                println!(
+                    "  Docker:      {docker_tools_linked} tools linked to {}",
+                    bin.display()
+                );
+            }
             println!("  Shell init:  {}", shell.display());
             println!("  Completions: {}", comp.display());
             if let Some(ref p) = profile_path {
@@ -523,6 +534,87 @@ async fn remove_profile_injection(shell: ShellKind) -> Result<Option<PathBuf>> {
     tokio::fs::write(&path, result).await?;
 
     Ok(Some(path))
+}
+
+// =============================================================================
+// Docker tool symlinks
+// =============================================================================
+
+use arcbox_constants::paths::DOCKER_CLI_TOOLS;
+
+/// Symlink Docker CLI tools into `~/.arcbox/bin/` so they are on PATH.
+///
+/// This is **path 2** of two independent Docker CLI discovery mechanisms:
+///
+///   1. `/usr/local/bin/docker` → `.app/Contents/MacOS/xbin/docker`
+///      Created by the daemon via the privileged helper (requires root).
+///      See `arcbox-daemon/src/self_setup/cli_tools.rs`.
+///
+///   2. `~/.arcbox/bin/docker` → `xbin/docker` or `~/.arcbox/runtime/bin/docker`
+///      Created here by `abctl setup install` (no root required).
+///      Works via `~/.arcbox/bin` being on PATH (injected into shell profile).
+///
+/// Both paths are idempotent and can coexist. Path 1 takes precedence
+/// because `/usr/local/bin` is typically earlier in PATH than `~/.arcbox/bin`.
+///
+/// Searches two source locations in priority order:
+///   1. App bundle `Contents/MacOS/xbin/` (signed, matches the app version)
+///   2. `~/.arcbox/runtime/bin/` (downloaded by the daemon on first start)
+///
+/// Returns the number of tools successfully linked.
+async fn link_docker_tools(abctl_exe: &Path, user_bin: &Path) -> usize {
+    let mut linked = 0;
+
+    // Candidate source directories for Docker CLI tools.
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // 1. App bundle xbin: abctl lives at Contents/MacOS/bin/abctl,
+    //    xbin is at Contents/MacOS/xbin/.
+    if let Some(bin_dir) = abctl_exe.parent() {
+        let xbin = bin_dir.parent().map(|p| p.join("xbin"));
+        if let Some(ref xbin) = xbin {
+            if xbin.is_dir() {
+                candidates.push(xbin.clone());
+            }
+        }
+    }
+
+    // 2. Runtime bin: ~/.arcbox/runtime/bin/ (populated by daemon).
+    if let Some(home) = dirs::home_dir() {
+        let runtime_bin = home.join(".arcbox/runtime/bin");
+        if runtime_bin.is_dir() {
+            candidates.push(runtime_bin);
+        }
+    }
+
+    for tool_name in DOCKER_CLI_TOOLS {
+        let link = user_bin.join(tool_name);
+
+        // Skip if already a valid symlink pointing to an existing target.
+        if let Ok(meta) = tokio::fs::symlink_metadata(&link).await {
+            if meta.file_type().is_symlink() {
+                if let Ok(target) = tokio::fs::read_link(&link).await {
+                    if target.exists() {
+                        linked += 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Find the first candidate that has this tool.
+        for src_dir in &candidates {
+            let src = src_dir.join(tool_name);
+            if src.is_file() {
+                if create_or_update_symlink(&src, &link).await.is_ok() {
+                    linked += 1;
+                }
+                break;
+            }
+        }
+    }
+
+    linked
 }
 
 // =============================================================================

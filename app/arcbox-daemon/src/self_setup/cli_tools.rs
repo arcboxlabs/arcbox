@@ -1,4 +1,17 @@
 //! Creates `/usr/local/bin/` symlinks for Docker CLI tools bundled in the app.
+//!
+//! This is **path 1** of two independent Docker CLI discovery mechanisms:
+//!
+//!   1. `/usr/local/bin/docker` → `.app/Contents/MacOS/xbin/docker`
+//!      Created here by the daemon via the privileged helper (requires root).
+//!      Works system-wide for all users and shells without PATH changes.
+//!
+//!   2. `~/.arcbox/bin/docker` → `xbin/docker` or `~/.arcbox/runtime/bin/docker`
+//!      Created by `abctl setup install` (no root required).
+//!      Works via `~/.arcbox/bin` being on PATH (injected into shell profile).
+//!
+//! Both paths are idempotent and can coexist. Path 1 takes precedence
+//! because `/usr/local/bin` is typically earlier in PATH than `~/.arcbox/bin`.
 
 use std::path::PathBuf;
 
