@@ -10,10 +10,11 @@ use std::sync::{
 use std::time::Duration;
 
 use arcbox_vz::{
-    EntropyDeviceConfiguration, GenericPlatform, LinuxBootLoader, MemoryBalloonDeviceConfiguration,
-    NetworkDeviceConfiguration, SerialPortConfiguration, SharedDirectory, SingleDirectoryShare,
-    SocketDeviceConfiguration, StorageDeviceConfiguration, VirtioFileSystemDeviceConfiguration,
-    VirtualMachineConfiguration, VirtualMachineState,
+    EntropyDeviceConfiguration, GenericPlatform, LinuxBootLoader, LinuxRosettaDirectoryShare,
+    MemoryBalloonDeviceConfiguration, NetworkDeviceConfiguration, RosettaAvailability,
+    SerialPortConfiguration, SharedDirectory, SingleDirectoryShare, SocketDeviceConfiguration,
+    StorageDeviceConfiguration, VirtioFileSystemDeviceConfiguration, VirtualMachineConfiguration,
+    VirtualMachineState,
 };
 
 use crate::{
@@ -799,6 +800,50 @@ impl DarwinVm {
     #[must_use]
     pub const fn configured_memory_size(&self) -> u64 {
         self.config.memory_size
+    }
+
+    /// Adds a Rosetta x86_64 translation directory share to the VM.
+    ///
+    /// Exposes Apple's Rosetta binary as a VirtioFS share (tag: "rosetta").
+    /// The guest mounts this and registers the binary via binfmt_misc to
+    /// transparently run x86_64 ELF binaries at near-native speed.
+    ///
+    /// No-op (with warning) if Rosetta is not available on the host.
+    pub fn add_rosetta_share(&mut self) -> Result<(), HypervisorError> {
+        let availability = LinuxRosettaDirectoryShare::availability();
+        match availability {
+            RosettaAvailability::NotSupported => {
+                tracing::warn!("Rosetta not supported on this platform (Intel Mac or macOS < 13)");
+                return Ok(());
+            }
+            RosettaAvailability::NotInstalled => {
+                tracing::warn!(
+                    "Rosetta not installed — run `softwareupdate --install-rosetta` to enable x86_64 support"
+                );
+                return Ok(());
+            }
+            RosettaAvailability::Supported => {}
+        }
+
+        let vz_config = self
+            .vz_config
+            .as_mut()
+            .ok_or_else(|| HypervisorError::VmStateError {
+                expected: "Created (config available)".to_string(),
+                actual: "config already consumed".to_string(),
+            })?;
+
+        let rosetta_share = LinuxRosettaDirectoryShare::new().map_err(|e| {
+            HypervisorError::DeviceError(format!("failed to create Rosetta directory share: {e}"))
+        })?;
+
+        let mut fs_device = VirtioFileSystemDeviceConfiguration::new("rosetta")
+            .map_err(|e| HypervisorError::DeviceError(e.to_string()))?;
+        fs_device.set_share(rosetta_share);
+        vz_config.add_directory_share(fs_device);
+
+        tracing::info!("Added Rosetta x86_64 translation share (tag: rosetta)");
+        Ok(())
     }
 }
 

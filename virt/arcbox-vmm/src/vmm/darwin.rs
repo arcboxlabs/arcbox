@@ -42,6 +42,11 @@ impl Vmm {
             );
         }
 
+        // Add Rosetta x86_64 translation share if enabled.
+        if self.config.enable_rosetta {
+            vm.add_rosetta_share()?;
+        }
+
         // Add block devices
         for block_dev in &self.config.block_devices {
             let device_config =

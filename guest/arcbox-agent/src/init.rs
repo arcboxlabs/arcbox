@@ -66,6 +66,12 @@ mod platform {
         // Optional host /Users share (non-fatal if not configured).
         mount_virtiofs_optional("users", "/Users");
 
+        // Rosetta x86_64 translation (Apple Silicon only).
+        // The host attaches a VirtioFS share containing the Rosetta binary.
+        // We mount it and register via binfmt_misc so x86_64 ELF binaries
+        // are transparently translated at near-native speed.
+        setup_rosetta();
+
         tracing::info!("PID 1 system initialization complete");
     }
 
@@ -183,6 +189,70 @@ mod platform {
         ) {
             // debug, not warn — this share is optional.
             tracing::debug!(tag, mountpoint, error = %e, "virtiofs share not available");
+        }
+    }
+
+    /// Mounts the Rosetta VirtioFS share and registers binfmt_misc for x86_64.
+    ///
+    /// This is a best-effort operation — if the host did not attach a Rosetta
+    /// share (Intel Mac, Rosetta not installed, or config disabled), the
+    /// VirtioFS mount fails silently and we skip registration.
+    fn setup_rosetta() {
+        const ROSETTA_MOUNT: &str = "/media/rosetta";
+        const ROSETTA_TAG: &str = "rosetta";
+        const ROSETTA_BINARY: &str = "/media/rosetta/rosetta";
+
+        // Mount the Rosetta VirtioFS share.
+        mkdir_p(ROSETTA_MOUNT);
+        if let Err(e) = mount(
+            Some(ROSETTA_TAG),
+            ROSETTA_MOUNT,
+            Some("virtiofs"),
+            MsFlags::MS_RDONLY,
+            None::<&str>,
+        ) {
+            tracing::debug!(error = %e, "Rosetta VirtioFS share not available — x86_64 translation disabled");
+            return;
+        }
+
+        // Verify the Rosetta binary exists in the share.
+        if !Path::new(ROSETTA_BINARY).exists() {
+            tracing::warn!("Rosetta share mounted but binary not found at {ROSETTA_BINARY}");
+            return;
+        }
+
+        // Mount binfmt_misc if not already mounted.
+        if !Path::new("/proc/sys/fs/binfmt_misc/status").exists() {
+            mkdir_p("/proc/sys/fs/binfmt_misc");
+            if let Err(e) = mount(
+                Some("binfmt_misc"),
+                "/proc/sys/fs/binfmt_misc",
+                Some("binfmt_misc"),
+                MsFlags::empty(),
+                None::<&str>,
+            ) {
+                tracing::warn!(error = %e, "failed to mount binfmt_misc — Rosetta registration skipped");
+                return;
+            }
+        }
+
+        // Register Rosetta as the x86_64 ELF interpreter.
+        //
+        // Magic: 20-byte x86_64 ELF header (EI_CLASS=64, e_machine=EM_X86_64).
+        // Mask: allows both ET_EXEC (0x02) and ET_DYN (0x03) via 0xfe on byte 16.
+        // Flags: C = credentials from binary, F = fix-binary (keep fd open across
+        //        mount namespaces so containers can use Rosetta without mounting it).
+        let registration = format!(
+            ":rosetta:M::\\x7fELF\\x02\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x02\\x00\\x3e\\x00:\\xff\\xff\\xff\\xff\\xff\\xfe\\xfe\\x00\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xfe\\xff\\xff\\xff:{ROSETTA_BINARY}:CF"
+        );
+
+        match fs::write("/proc/sys/fs/binfmt_misc/register", registration.as_bytes()) {
+            Ok(()) => {
+                tracing::info!("Rosetta x86_64 translation registered via binfmt_misc");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to register Rosetta binfmt_misc handler");
+            }
         }
     }
 
