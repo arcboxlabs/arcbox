@@ -125,7 +125,10 @@ pub fn is_streaming_upload_request(method: &Method, uri: &Uri) -> bool {
     }
 
     let path = uri.path();
-    path == "/images/load" || path.ends_with("/images/load")
+    path == "/images/load"
+        || path.ends_with("/images/load")
+        || path == "/build"
+        || path.ends_with("/build")
 }
 
 async fn pump_upload_body(
