@@ -202,17 +202,19 @@ mod platform {
         const ROSETTA_TAG: &str = "rosetta";
         const ROSETTA_BINARY: &str = "/media/rosetta/rosetta";
 
-        // Mount the Rosetta VirtioFS share.
-        mkdir_p(ROSETTA_MOUNT);
-        if let Err(e) = mount(
-            Some(ROSETTA_TAG),
-            ROSETTA_MOUNT,
-            Some("virtiofs"),
-            MsFlags::MS_RDONLY,
-            None::<&str>,
-        ) {
-            tracing::debug!(error = %e, "Rosetta VirtioFS share not available — x86_64 translation disabled");
-            return;
+        // Mount the Rosetta VirtioFS share (skip if already mounted).
+        if !crate::mount::is_mounted(ROSETTA_MOUNT) {
+            mkdir_p(ROSETTA_MOUNT);
+            if let Err(e) = mount(
+                Some(ROSETTA_TAG),
+                ROSETTA_MOUNT,
+                Some("virtiofs"),
+                MsFlags::MS_RDONLY,
+                None::<&str>,
+            ) {
+                tracing::debug!(error = %e, "Rosetta VirtioFS share not available — x86_64 translation disabled");
+                return;
+            }
         }
 
         // Verify the Rosetta binary exists in the share.
@@ -234,6 +236,12 @@ mod platform {
                 tracing::warn!(error = %e, "failed to mount binfmt_misc — Rosetta registration skipped");
                 return;
             }
+        }
+
+        // Skip if already registered (idempotent re-entry).
+        if Path::new("/proc/sys/fs/binfmt_misc/rosetta").exists() {
+            tracing::debug!("Rosetta binfmt_misc handler already registered");
+            return;
         }
 
         // Register Rosetta as the x86_64 ELF interpreter.

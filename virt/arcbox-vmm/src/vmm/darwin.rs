@@ -42,9 +42,13 @@ impl Vmm {
             );
         }
 
-        // Add Rosetta x86_64 translation share if enabled.
+        // Add Rosetta x86_64 translation share if enabled (best-effort).
         if self.config.enable_rosetta {
-            vm.add_rosetta_share()?;
+            if let Err(e) = vm.add_rosetta_share() {
+                tracing::warn!(
+                    "Rosetta share setup failed, continuing without x86_64 translation: {e}"
+                );
+            }
         }
 
         // Add block devices

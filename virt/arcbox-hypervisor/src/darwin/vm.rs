@@ -833,12 +833,21 @@ impl DarwinVm {
                 actual: "config already consumed".to_string(),
             })?;
 
-        let rosetta_share = LinuxRosettaDirectoryShare::new().map_err(|e| {
-            HypervisorError::DeviceError(format!("failed to create Rosetta directory share: {e}"))
-        })?;
+        let rosetta_share = match LinuxRosettaDirectoryShare::new() {
+            Ok(share) => share,
+            Err(e) => {
+                tracing::warn!("Failed to create Rosetta directory share: {e}");
+                return Ok(());
+            }
+        };
 
-        let mut fs_device = VirtioFileSystemDeviceConfiguration::new("rosetta")
-            .map_err(|e| HypervisorError::DeviceError(e.to_string()))?;
+        let mut fs_device = match VirtioFileSystemDeviceConfiguration::new("rosetta") {
+            Ok(device) => device,
+            Err(e) => {
+                tracing::warn!("Failed to create Rosetta VirtioFS device: {e}");
+                return Ok(());
+            }
+        };
         fs_device.set_share(rosetta_share);
         vz_config.add_directory_share(fs_device);
 

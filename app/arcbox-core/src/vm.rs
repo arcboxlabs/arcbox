@@ -165,7 +165,7 @@ impl Default for VmConfig {
             vsock: true,
             guest_cid: None,
             balloon: true, // Enable balloon by default
-            rosetta: cfg!(target_arch = "aarch64"),
+            rosetta: cfg!(all(target_os = "macos", target_arch = "aarch64")),
         }
     }
 }
