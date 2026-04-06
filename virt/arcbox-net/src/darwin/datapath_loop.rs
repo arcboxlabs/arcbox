@@ -44,15 +44,13 @@ use crate::ethernet::{ETH_HEADER_LEN, build_udp_ip_ethernet};
 
 /// Hard cap on write_queue depth. Frames beyond this are dropped to prevent
 /// unbounded memory growth when the guest FD is blocked (VM paused, VZ socket
-/// buffer full). The reply_rx channel (capacity 256) is always polled so DNS
-/// tasks don't block, but the write_queue acts as the final memory bound.
-const WRITE_QUEUE_HARD_CAP: usize = 2048;
+/// buffer full). Increased from 2048 to 8192 to match 8 MB socket buffers.
+const WRITE_QUEUE_HARD_CAP: usize = 8192;
 
 /// smoltcp poll interval. Controls how often the TCP/IP stack is polled for
 /// retransmissions, ARP cache aging, and connection state transitions.
-/// 250ms is a good balance between responsiveness and wakeup reduction.
-/// (Was 100ms — reduced from 10 Hz to 4 Hz to save ~6 wakeups/s.)
-const SMOLTCP_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Reduced from 250ms (4 Hz) to 50ms (20 Hz) for faster window updates.
+const SMOLTCP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Wraps an `OwnedFd` so it can be registered with `AsyncFd`.
 struct FdWrapper(OwnedFd);

@@ -43,21 +43,24 @@ use crate::darwin::smoltcp_device::{SmoltcpDevice, TcpSynInfo};
 use crate::ethernet::ETH_HEADER_LEN;
 use crate::nat_engine::checksum;
 
-/// Size of each smoltcp socket's rx/tx buffer. 256 KiB enables window scaling
-/// and provides enough headroom for high-bandwidth transfers.
-const SOCKET_BUF_SIZE: usize = 256 * 1024;
+/// Size of each smoltcp socket's rx/tx buffer. 512 KiB enables larger TCP
+/// windows and reduces stalls from smoltcp backpressure on high-bandwidth
+/// transfers (doubled from 256 KiB).
+const SOCKET_BUF_SIZE: usize = 512 * 1024;
 
 /// Number of pre-allocated listen sockets per port is 1 (created on demand).
 /// Additional connections to the same port reuse the socket after it returns
 /// to Closed state.
 ///
 /// Maximum segments the host→guest channel can buffer. Provides backpressure
-/// when smoltcp's tx buffer is full.
-const HOST_TO_GUEST_CHANNEL: usize = 64;
+/// when smoltcp's tx buffer is full. Worst-case memory per connection is
+/// `512 × avg_read_size` — in practice reads average 4-16 KiB (not the full
+/// 256 KiB buffer), so real usage is ~2-8 MiB per flow under sustained load.
+const HOST_TO_GUEST_CHANNEL: usize = 512;
 
 /// Maximum payload chunks the guest→host channel can buffer. Backpressure
 /// propagates through smoltcp's flow control when the host socket is slow.
-const GUEST_TO_HOST_CHANNEL: usize = 64;
+const GUEST_TO_HOST_CHANNEL: usize = 512;
 
 /// Start of the inbound ephemeral port range.
 const INBOUND_EPHEMERAL_START: u16 = 61000;
@@ -1129,7 +1132,7 @@ async fn host_conn_task(
     let read_task = {
         let h2g_tx = h2g_tx.clone();
         tokio::spawn(async move {
-            let mut buf = vec![0u8; 32768];
+            let mut buf = vec![0u8; 262_144];
             loop {
                 match reader.read(&mut buf).await {
                     Ok(0) => {
@@ -1190,7 +1193,7 @@ async fn inbound_host_relay(
         let h2g_tx = h2g_tx.clone();
         let peer = peer.clone();
         tokio::spawn(async move {
-            let mut buf = vec![0u8; 32768];
+            let mut buf = vec![0u8; 262_144];
             loop {
                 match reader.read(&mut buf).await {
                     Ok(0) => {
