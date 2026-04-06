@@ -233,17 +233,22 @@ impl SmoltcpDevice {
         mut try_intercept: impl FnMut(&[u8]) -> Option<Vec<u8>>,
     ) -> Vec<Vec<u8>> {
         let mut ack_frames = Vec::new();
-        let mut kept = std::collections::VecDeque::new();
 
-        while let Some(frame) = self.rx_queue.pop_front() {
-            if let Some(ack) = try_intercept(&frame) {
-                ack_frames.push(ack);
+        // Filter in-place: swap-remove intercepted frames to avoid rebuilding
+        // the VecDeque. We iterate backwards so removal doesn't shift indices.
+        let mut i = 0;
+        while i < self.rx_queue.len() {
+            if let Some(ack) = try_intercept(&self.rx_queue[i]) {
+                if !ack.is_empty() {
+                    ack_frames.push(ack);
+                }
+                self.rx_queue.remove(i);
+                // Don't increment i — next element shifted into current slot.
             } else {
-                kept.push_back(frame);
+                i += 1;
             }
         }
 
-        self.rx_queue = kept;
         ack_frames
     }
 

@@ -305,25 +305,30 @@ impl TcpBridge {
             return None; // Fall through to smoltcp for teardown.
         }
 
-        // Extract payload.
+        // Extract payload using IPv4 total_length to exclude Ethernet padding.
+        let ip_total_len = u16::from_be_bytes([frame[ip_start + 2], frame[ip_start + 3]]) as usize;
+        let ip_end = ip_start + ip_total_len;
         let tcp_data_offset = ((frame[l4_start + 12] >> 4) as usize) * 4;
         let payload_start = l4_start + tcp_data_offset;
-        let payload_len = if payload_start < frame.len() {
-            frame.len() - payload_start
-        } else {
-            0
-        };
+        let payload_end = ip_end.min(frame.len());
+        let payload_len = payload_end.saturating_sub(payload_start);
 
         // Write payload to host stream (if any).
         if payload_len > 0 {
             use std::io::Write;
-            let payload = &frame[payload_start..];
+            let payload = &frame[payload_start..payload_start + payload_len];
             match conn.stream.write(payload) {
                 Ok(n) => {
                     conn.last_ack = conn.last_ack.wrapping_add(n as u32);
                     tracing::trace!(
                         "Fast path TX: {src_ip}:{src_port}→{dst_ip}:{dst_port} {n} bytes"
                     );
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // Non-blocking stream not ready. Don't ACK — guest will
+                    // retransmit. Don't remove the connection.
+                    tracing::trace!("Fast path TX: WouldBlock, guest will retransmit");
+                    return Some(Vec::new()); // Signal interception but no ACK frame.
                 }
                 Err(e) => {
                     tracing::warn!("Fast path TX write error: {e}");
@@ -387,23 +392,33 @@ impl TcpBridge {
                     to_remove.push(*key);
                 }
                 Ok(n) => {
-                    // Build data frame.
-                    let data_frame = crate::ethernet::build_tcp_data_frame(
-                        &crate::ethernet::TcpFrameParams {
-                            src_ip: conn.remote_ip,
-                            dst_ip: conn.guest_ip,
-                            src_port: conn.remote_port,
-                            dst_port: conn.guest_port,
-                            seq: conn.our_seq,
-                            ack: conn.last_ack,
-                            window: 65535,
-                            src_mac: gw_mac,
-                            dst_mac: guest_mac,
-                        },
-                        &conn.read_buf[..n],
-                    );
-                    conn.our_seq = conn.our_seq.wrapping_add(n as u32);
-                    frames.push(data_frame);
+                    // Segment into MSS-sized chunks to stay within MTU.
+                    // MSS = MTU - IP(20) - TCP(20). Use 3960 for MTU 4000,
+                    // 1460 for MTU 1500. Conservative default: 3960.
+                    const MSS: usize = 3960;
+                    let data = &conn.read_buf[..n];
+                    let mut offset = 0;
+                    while offset < data.len() {
+                        let chunk_end = (offset + MSS).min(data.len());
+                        let chunk = &data[offset..chunk_end];
+                        let data_frame = crate::ethernet::build_tcp_data_frame(
+                            &crate::ethernet::TcpFrameParams {
+                                src_ip: conn.remote_ip,
+                                dst_ip: conn.guest_ip,
+                                src_port: conn.remote_port,
+                                dst_port: conn.guest_port,
+                                seq: conn.our_seq,
+                                ack: conn.last_ack,
+                                window: 65535,
+                                src_mac: gw_mac,
+                                dst_mac: guest_mac,
+                            },
+                            chunk,
+                        );
+                        conn.our_seq = conn.our_seq.wrapping_add(chunk.len() as u32);
+                        frames.push(data_frame);
+                        offset = chunk_end;
+                    }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     // No data available — expected for non-blocking.
