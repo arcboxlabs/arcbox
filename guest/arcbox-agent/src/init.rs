@@ -665,13 +665,17 @@ const NOFILE_LIMIT: u64 = 1_048_576;
 /// Returns the Docker daemon.json content as a string.
 ///
 /// Extracted as a pure function so the output contract (DNS + default
-/// ulimits) is testable independently of the filesystem and platform.
+/// ulimits + containerd image store) is testable independently of the
+/// filesystem and platform.
 #[cfg(any(target_os = "linux", test))]
 fn docker_daemon_json() -> String {
     serde_json::json!({
         "dns": ["10.0.2.1"],
         "default-ulimits": {
             "nofile": { "Name": "nofile", "Soft": NOFILE_LIMIT, "Hard": NOFILE_LIMIT }
+        },
+        "features": {
+            "containerd-snapshotter": true
         }
     })
     .to_string()
@@ -704,5 +708,12 @@ mod tests {
         let json = docker_daemon_json();
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         assert_eq!(v["dns"][0], "10.0.2.1");
+    }
+
+    #[test]
+    fn daemon_json_enables_containerd_snapshotter() {
+        let json = docker_daemon_json();
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(v["features"]["containerd-snapshotter"], true);
     }
 }

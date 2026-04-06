@@ -234,7 +234,7 @@ mod linux {
                     "-t",
                     "btrfs",
                     "-o",
-                    "compress=zstd:3",
+                    "compress=zstd:3,discard=async",
                     &device,
                     BTRFS_TEMP_MOUNT,
                 ])
@@ -282,7 +282,7 @@ mod linux {
             if let Err(e) = std::fs::create_dir_all(target) {
                 return Err(format!("failed to create {}: {}", target, e));
             }
-            let opts = format!("compress=zstd:3,subvol={}", subvol);
+            let opts = format!("compress=zstd:3,discard=async,subvol={}", subvol);
             match std::process::Command::new("/bin/busybox")
                 .args(["mount", "-t", "btrfs", "-o", &opts, &device, target])
                 .status()
