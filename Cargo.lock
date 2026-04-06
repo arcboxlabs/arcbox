@@ -395,6 +395,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "arcbox-e2e-smoke"
+version = "0.3.20"
+dependencies = [
+ "dirs",
+ "libc",
+ "tokio",
+]
+
+[[package]]
 name = "arcbox-error"
 version = "0.3.20"
 dependencies = [

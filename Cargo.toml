@@ -53,6 +53,11 @@ members = [
     # Guest Components (MIT OR Apache-2.0)
     # ============================================
     "guest/arcbox-agent",
+
+    # ============================================
+    # E2E Tests
+    # ============================================
+    "tests/e2e-smoke",
 ]
 
 [workspace.package]
