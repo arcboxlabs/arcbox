@@ -58,6 +58,7 @@ pub mod machine;
 pub mod migrate;
 pub mod sandbox;
 pub mod setup;
+pub mod symlink;
 #[cfg(target_os = "macos")]
 pub mod uninstall;
 pub mod version;

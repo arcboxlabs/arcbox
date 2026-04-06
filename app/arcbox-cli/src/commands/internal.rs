@@ -8,6 +8,8 @@
 //! app's first-launch setup, so the result is identical regardless of
 //! whether the user opens the app first or installs via `brew`.
 
+use std::path::Path;
+
 use anyhow::{Context, Result};
 use arcbox_constants::paths::{HostLayout, labels};
 use clap::Subcommand;
@@ -71,6 +73,11 @@ async fn brew_postflight() -> Result<()> {
         eprintln!("Note: Docker context setup skipped ({e})");
     }
 
+    // 4. Docker CLI tool symlinks — link each bundled tool into /usr/local/bin/
+    //    so `docker`, `docker-compose`, etc. are available immediately after
+    //    `brew install`, without requiring the user to open the app first.
+    link_docker_tools(Path::new("/usr/local/bin"));
+
     Ok(())
 }
 
@@ -112,7 +119,12 @@ async fn brew_uninstall() -> Result<()> {
     // 3. Remove shell integration — same code path as `abctl setup uninstall`.
     super::setup::execute(super::setup::SetupCommands::Uninstall, OutputFormat::Quiet).await?;
 
-    // 4. Remove run directory contents (sockets, pid, lock) so stale files
+    // 4. Remove Docker CLI tool symlinks created by brew-postflight.
+    //    Only removes links that point into an ArcBox app bundle — never
+    //    touches symlinks owned by Docker Desktop or other tools.
+    unlink_docker_tools(Path::new("/usr/local/bin"));
+
+    // 5. Remove run directory contents (sockets, pid, lock) so stale files
     //    don't confuse a future reinstall.
     let _ = tokio::fs::remove_dir_all(&layout.run_dir).await;
 
@@ -124,6 +136,44 @@ async fn brew_uninstall() -> Result<()> {
 fn setup_docker_context() -> Result<()> {
     let manager = super::docker::context_manager()?;
     manager.enable().map_err(Into::into)
+}
+
+// =============================================================================
+// Docker CLI tool symlinks (path 3)
+// =============================================================================
+
+/// Creates `{bin_dir}/{name}` → `{xbin}/{name}` symlinks for each tool in
+/// `DOCKER_CLI_TOOLS`. Non-fatal: logs a note and continues on any error.
+///
+/// This is **path 3** of the Docker CLI discovery mechanisms (see module docs).
+///
+/// `bin_dir` is injectable so tests can use a tempdir instead of `/usr/local/bin`.
+///
+/// Safety rules (mirrors helper's `cli::link`):
+/// - Skips tools whose binary is absent from the bundle.
+/// - Skips if the existing link already points to the correct target (idempotent).
+/// - Only replaces existing symlinks that point into an ArcBox bundle
+///   (`.app/Contents/MacOS/xbin/`). Never touches non-ArcBox-owned links.
+/// - Skips without error if the path exists but is not a symlink (e.g. regular file).
+fn link_docker_tools(bin_dir: &Path) {
+    let Some(xbin) = super::symlink::detect_bundle_xbin() else {
+        eprintln!("Note: Docker CLI tools not linked (xbin directory not found in app bundle)");
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(bin_dir) {
+        eprintln!("Note: Could not create {}: {e}", bin_dir.display());
+        return;
+    }
+    super::symlink::link_all_docker_tools(&xbin, bin_dir);
+}
+
+/// Removes `{bin_dir}/{name}` for each tool in `DOCKER_CLI_TOOLS`, but only
+/// if the symlink points into an ArcBox app bundle.
+///
+/// `bin_dir` is injectable so tests can use a tempdir instead of `/usr/local/bin`.
+/// Idempotent: no-op when links are absent or owned by another tool.
+fn unlink_docker_tools(bin_dir: &Path) {
+    super::symlink::unlink_all_docker_tools(bin_dir);
 }
 
 #[cfg(test)]

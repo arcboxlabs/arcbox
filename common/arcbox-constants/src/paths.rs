@@ -64,6 +64,16 @@ pub const DOCKER_CLI_TOOLS: &[&str] = &[
     "docker-credential-osxkeychain",
 ];
 
+/// Returns true if a symlink target looks like it belongs to an ArcBox app bundle.
+///
+/// Used by multiple subsystems (privileged helper, brew hooks, setup install)
+/// to decide whether an existing `/usr/local/bin/` symlink can be safely replaced.
+pub fn is_arcbox_owned(target: &std::path::Path) -> bool {
+    target
+        .to_string_lossy()
+        .contains(".app/Contents/MacOS/xbin/")
+}
+
 /// Host-side subdirectory names within `~/.arcbox/`.
 pub mod host {
     /// Runtime state (sockets, PID files, ephemeral markers).
