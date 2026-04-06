@@ -289,6 +289,9 @@ impl NetworkDatapath {
                         enqueue_or_write(&guest_async, FrameBuf::from(ack), &mut write_queue);
                     }
 
+                    // Clean up smoltcp sockets for newly promoted fast-path conns.
+                    tcp_bridge.cleanup_promoted(&mut sockets);
+
                     // Process intercepted frames (DHCP, DNS, UDP, ICMP).
                     let intercepted = device.take_intercepted();
                     for intercepted_frame in &intercepted {

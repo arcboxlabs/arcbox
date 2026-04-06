@@ -133,12 +133,6 @@ struct BridgedConn {
     host_disconnected: bool,
     /// Leftover bytes from a partial `send_slice` that need to be retried.
     pending_send: Option<Vec<u8>>,
-    /// Host stream held for fast-path promotion. When set, the relay task
-    /// has NOT been spawned — the stream is waiting for the socket to reach
-    /// ESTABLISHED before being promoted to `FastPathConn`.
-    held_stream: Option<tokio::net::TcpStream>,
-    /// Four-tuple key for fast-path lookup (set when held_stream is present).
-    flow_key: Option<SynFlowKey>,
 }
 
 /// Manages TCP connections bridged between the smoltcp socket pool and host
@@ -167,8 +161,20 @@ pub struct TcpBridge {
     /// (enables `host.docker.internal` support).
     gateway_ip: Ipv4Addr,
     /// Fast-path connections that bypass smoltcp for data transfer.
-    /// Keyed by (guest_src_ip, guest_src_port, dest_ip, dest_port).
     fast_path_conns: HashMap<SynFlowKey, FastPathConn>,
+    /// Pre-connected streams held for fast-path promotion. Stored when
+    /// a pre-connected stream arrives; consumed when the first data frame
+    /// triggers promotion in try_fast_path_intercept().
+    held_streams: HashMap<SynFlowKey, tokio::net::TcpStream>,
+    /// Socket handles for held-stream connections (maps flow key → handle).
+    /// Used by relay_all to check ESTABLISHED state without needing a BridgedConn.
+    held_handles: HashMap<SynFlowKey, SocketHandle>,
+    /// Connections that reached ESTABLISHED and are ready for fast-path
+    /// promotion on the next data frame.
+    fast_path_ready: HashSet<SynFlowKey>,
+    /// Sockets to remove after promotion. Filled by try_fast_path_intercept,
+    /// drained by the datapath loop after drain_fast_path.
+    pub promoted_cleanup: Vec<SynFlowKey>,
     /// Gateway MAC for constructing fast-path frames to the guest.
     fast_path_gateway_mac: [u8; 6],
     /// Guest MAC for constructing fast-path frames to the guest.
@@ -212,6 +218,10 @@ impl TcpBridge {
             proxy_env: None,
             gateway_ip,
             fast_path_conns: HashMap::new(),
+            held_streams: HashMap::new(),
+            held_handles: HashMap::new(),
+            fast_path_ready: HashSet::new(),
+            promoted_cleanup: Vec::new(),
             fast_path_gateway_mac: [0; 6],
             fast_path_guest_mac: None,
         }
@@ -267,6 +277,65 @@ impl TcpBridge {
             dst_ip,
             dst_port,
         };
+
+        // Check if this flow is ready for fast-path promotion (first data frame
+        // after ESTABLISHED). Promote inline before smoltcp sees the frame.
+        if self.fast_path_ready.contains(&key) {
+            let tcp_data_offset = ((frame[l4_start + 12] >> 4) as usize) * 4;
+            let payload_start = l4_start + tcp_data_offset;
+            let has_payload = payload_start < frame.len() && {
+                let ip_total =
+                    u16::from_be_bytes([frame[ip_start + 2], frame[ip_start + 3]]) as usize;
+                ip_start + ip_total > payload_start
+            };
+
+            // Only promote on data-bearing frames (not pure ACKs).
+            if has_payload {
+                if let Some(stream) = self.held_streams.remove(&key) {
+                    self.fast_path_ready.remove(&key);
+                    // SEQ/ACK from this frame: guest_ack = what guest expects as
+                    // our SEQ; guest_seq = guest's current byte offset.
+                    let guest_seq = u32::from_be_bytes([
+                        frame[l4_start + 4],
+                        frame[l4_start + 5],
+                        frame[l4_start + 6],
+                        frame[l4_start + 7],
+                    ]);
+                    let guest_ack = u32::from_be_bytes([
+                        frame[l4_start + 8],
+                        frame[l4_start + 9],
+                        frame[l4_start + 10],
+                        frame[l4_start + 11],
+                    ]);
+                    match stream.into_std() {
+                        Ok(std_stream) => {
+                            self.promote_to_fast_path(key, std_stream, guest_ack, guest_seq);
+                            tracing::info!(
+                                "Fast path: promoted on first data frame {}:{} → {}:{} seq={} ack={}",
+                                src_ip,
+                                src_port,
+                                dst_ip,
+                                dst_port,
+                                guest_ack,
+                                guest_seq
+                            );
+                            // Mark for cleanup: remove smoltcp socket + BridgedConn
+                            // so the relay task dies and the socket stops processing.
+                            self.promoted_cleanup.push(key);
+                            // Fall through to handle this frame via the now-active
+                            // fast_path_conns entry below.
+                        }
+                        Err(e) => {
+                            tracing::error!("Fast path: into_std failed: {e}");
+                            return None;
+                        }
+                    }
+                }
+            } else {
+                // Pure ACK during ready state — let smoltcp handle it.
+                return None;
+            }
+        }
 
         let conn = self.fast_path_conns.get_mut(&key)?;
 
@@ -503,6 +572,33 @@ impl TcpBridge {
                 host_eof: false,
             },
         );
+    }
+
+    /// Removes smoltcp sockets and BridgedConns for recently promoted
+    /// fast-path connections. Must be called after drain_fast_path().
+    pub fn cleanup_promoted(&mut self, sockets: &mut SocketSet<'_>) {
+        for key in self.promoted_cleanup.drain(..) {
+            // Use held_handles to find the socket directly.
+            let handle = self.held_handles.remove(&key);
+            if let Some(h) = handle {
+                // Remove BridgedConn if it exists (outbound path has one).
+                self.connections.remove(&h);
+                // Remove the smoltcp socket.
+                sockets.remove(h);
+                // Clean port_handles to prevent stale handle access.
+                for handles in self.port_handles.values_mut() {
+                    handles.retain(|ph| *ph != h);
+                }
+                self.port_handles.retain(|_, handles| !handles.is_empty());
+                tracing::debug!(
+                    "Fast path: cleaned up for {}:{} → {}:{}",
+                    key.src_ip,
+                    key.src_port,
+                    key.dst_ip,
+                    key.dst_port
+                );
+            }
+        }
     }
 
     /// Returns the number of active fast-path connections.
@@ -927,12 +1023,11 @@ impl TcpBridge {
 
         let handle = sockets.add(sock);
 
+        // Inbound connections: host initiates data first, so fast-path promotion
+        // (which triggers on the first guest data frame) doesn't work well.
+        // Use the normal relay path for inbound connections.
         let (h2g_tx, h2g_rx) = mpsc::channel::<Vec<u8>>(HOST_TO_GUEST_CHANNEL);
         let (g2h_tx, g2h_rx) = mpsc::channel::<Vec<u8>>(GUEST_TO_HOST_CHANNEL);
-
-        // Spawn a task that relays between the already-connected host TcpStream
-        // and the channels. Same pattern as host_conn_task but the stream is
-        // already connected.
         tokio::spawn(inbound_host_relay(stream, h2g_tx, g2h_rx));
 
         let guest_addr = SocketAddr::V4(SocketAddrV4::new(guest_ip, container_port));
@@ -947,8 +1042,6 @@ impl TcpBridge {
                 host_eof: false,
                 host_disconnected: false,
                 pending_send: None,
-                held_stream: None,
-                flow_key: None,
             },
         );
 
@@ -1001,11 +1094,6 @@ impl TcpBridge {
                 }
 
                 let sock = sockets.get_mut::<tcp::Socket>(handle);
-                if !sock.is_active() {
-                    continue;
-                }
-
-                // Socket accepted a SYN — extract the remote endpoint.
                 let Some(remote_ep) = sock.remote_endpoint() else {
                     continue;
                 };
@@ -1031,52 +1119,41 @@ impl TcpBridge {
                     dst_port: local_ep.port,
                 };
 
+                // Create channels for host↔guest data bridging.
+                let (h2g_tx, h2g_rx) = mpsc::channel::<Vec<u8>>(HOST_TO_GUEST_CHANNEL);
+                let (g2h_tx, g2h_rx) = mpsc::channel::<Vec<u8>>(GUEST_TO_HOST_CHANNEL);
+
                 // Try to use a pre-connected stream from the SYN gate.
-                // If available, hold it for fast-path promotion once ESTABLISHED.
-                // Otherwise, fall back to the normal channel-based relay.
                 if let Some(pre) = self.pre_connected.remove(&flow_key) {
                     tracing::debug!(
-                        "TCP bridge: holding pre-connected stream for fast-path: guest:{remote_addr} → {dest_addr}"
+                        "TCP bridge: pre-connected stream for guest:{remote_addr} → {dest_addr} (fast-path candidate)"
                     );
-                    // Create dummy channels (unused — fast path will take over).
-                    let (_h2g_tx, h2g_rx) = mpsc::channel::<Vec<u8>>(1);
-                    let (g2h_tx, _g2h_rx) = mpsc::channel::<Vec<u8>>(1);
-                    self.connections.insert(
-                        handle,
-                        BridgedConn {
-                            handle,
-                            remote: dest_addr,
-                            host_to_guest_rx: h2g_rx,
-                            guest_to_host_tx: Some(g2h_tx),
-                            host_eof: false,
-                            host_disconnected: false,
-                            pending_send: None,
-                            held_stream: Some(pre.stream),
-                            flow_key: Some(flow_key),
-                        },
-                    );
+                    // Store the pre-connected stream for fast-path promotion.
+                    // A separate relay connection handles the handshake period.
+                    // When fast path activates (on first data frame after
+                    // ESTABLISHED), the relay channels are dropped and the
+                    // pre-connected stream takes over via FastPathConn.
+                    self.held_streams.insert(flow_key, pre.stream);
+                    self.held_handles.insert(flow_key, handle);
                 } else {
                     tracing::debug!(
                         "TCP bridge: no pre-connected stream, spawning connect for guest:{remote_addr} → {dest_addr}"
                     );
-                    let (h2g_tx, h2g_rx) = mpsc::channel::<Vec<u8>>(HOST_TO_GUEST_CHANNEL);
-                    let (g2h_tx, g2h_rx) = mpsc::channel::<Vec<u8>>(GUEST_TO_HOST_CHANNEL);
-                    tokio::spawn(host_conn_task(dest_addr, h2g_tx, g2h_rx));
-                    self.connections.insert(
-                        handle,
-                        BridgedConn {
-                            handle,
-                            remote: dest_addr,
-                            host_to_guest_rx: h2g_rx,
-                            guest_to_host_tx: Some(g2h_tx),
-                            host_eof: false,
-                            host_disconnected: false,
-                            pending_send: None,
-                            held_stream: None,
-                            flow_key: None,
-                        },
-                    );
                 }
+                tokio::spawn(host_conn_task(dest_addr, h2g_tx, g2h_rx));
+
+                self.connections.insert(
+                    handle,
+                    BridgedConn {
+                        handle,
+                        remote: dest_addr,
+                        host_to_guest_rx: h2g_rx,
+                        guest_to_host_tx: Some(g2h_tx),
+                        host_eof: false,
+                        host_disconnected: false,
+                        pending_send: None,
+                    },
+                );
 
                 // This port's listen socket is now occupied. Remove from
                 // listening_ports and schedule a replacement.
@@ -1116,48 +1193,29 @@ impl TcpBridge {
     }
 
     /// Relays data between smoltcp sockets and host TcpStreams for all active
-    /// connections. Promotes held-stream connections to fast path when ESTABLISHED.
+    /// connections. Marks held-stream connections as fast-path ready when
+    /// ESTABLISHED — actual promotion happens in try_fast_path_intercept()
+    /// when the first data frame arrives (ensuring smoltcp data isn't lost).
     fn relay_all(&mut self, sockets: &mut SocketSet<'_>) {
-        // Check for connections ready to promote to fast path.
-        let mut to_promote = Vec::new();
-        for (handle, conn) in &self.connections {
-            if conn.held_stream.is_some() {
-                let sock = sockets.get::<tcp::Socket>(*handle);
-                if sock.state() == tcp::State::Established {
-                    to_promote.push(*handle);
-                }
+        // Check held_streams: if the corresponding smoltcp socket is ESTABLISHED,
+        // mark the flow as ready for fast-path activation.
+        let mut newly_ready = Vec::new();
+        for (key, &handle) in &self.held_handles {
+            // Check if the smoltcp socket has reached ESTABLISHED.
+            let sock = sockets.get::<tcp::Socket>(handle);
+            if sock.state() == tcp::State::Established {
+                newly_ready.push(*key);
             }
         }
-        for handle in to_promote {
-            if let Some(mut conn) = self.connections.remove(&handle) {
-                if let (Some(stream), Some(flow_key)) = (conn.held_stream.take(), conn.flow_key) {
-                    // smoltcp doesn't expose SEQ/ACK publicly. We initialize
-                    // with zeros — the first guest data frame's SEQ and ACK
-                    // fields will tell us the correct values, and
-                    // try_fast_path_intercept() will sync on first use.
-                    let our_seq = 0u32;
-                    let last_ack = 0u32;
-
-                    // Close the smoltcp socket — fast path takes over.
-                    sockets.get_mut::<tcp::Socket>(handle).abort();
-                    sockets.remove(handle);
-
-                    // Convert tokio stream to std for non-blocking sync I/O.
-                    match stream.into_std() {
-                        Ok(std_stream) => {
-                            self.promote_to_fast_path(flow_key, std_stream, our_seq, last_ack);
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                "Fast path: failed to convert tokio TcpStream to std: {e}. \
-                                 Connection lost (smoltcp socket already removed)."
-                            );
-                            // Both smoltcp socket and BridgedConn are gone. The host
-                            // stream will be dropped here. Guest will see a timeout.
-                        }
-                    }
-                }
-            }
+        for key in newly_ready {
+            self.fast_path_ready.insert(key);
+            tracing::info!(
+                "Fast path: ready for {}:{} → {}:{} (will activate on first data frame)",
+                key.src_ip,
+                key.src_port,
+                key.dst_ip,
+                key.dst_port
+            );
         }
 
         for conn in self.connections.values_mut() {
@@ -1888,8 +1946,6 @@ mod tests {
                 host_eof: false,
                 host_disconnected: false,
                 pending_send: Some(vec![0xAA; 32]),
-                held_stream: None,
-                flow_key: None,
             },
         );
 
@@ -1932,8 +1988,6 @@ mod tests {
                 host_eof: true,
                 host_disconnected: false,
                 pending_send: Some(vec![0xBB; 10]),
-                held_stream: None,
-                flow_key: None,
             },
         );
 
@@ -1985,8 +2039,6 @@ mod tests {
                 host_eof: false,
                 host_disconnected: false,
                 pending_send: None,
-                held_stream: None,
-                flow_key: None,
             },
         );
 
@@ -2025,8 +2077,6 @@ mod tests {
                 host_eof: false,
                 host_disconnected: false,
                 pending_send: None,
-                held_stream: None,
-                flow_key: None,
             },
         );
 
@@ -2071,8 +2121,8 @@ mod tests {
         );
 
         // The socket should be in SynSent state (attempting connect to guest).
-        let (handle, conn) = bridge.connections.iter().next().unwrap();
-        let sock = sockets.get_mut::<tcp::Socket>(*handle);
+        let (&handle, conn) = bridge.connections.iter().next().unwrap();
+        let sock = sockets.get_mut::<tcp::Socket>(handle);
         assert!(
             sock.is_open(),
             "Socket should be open after connect; state={:?}",
