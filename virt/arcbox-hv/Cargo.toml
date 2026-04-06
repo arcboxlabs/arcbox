@@ -1,0 +1,17 @@
+[package]
+name = "arcbox-hv"
+version = "0.3.20" # x-release-please-version
+edition = "2024"
+description = "Safe Rust bindings for Apple Hypervisor.framework (ARM64)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+
+[lints]
+workspace = true
