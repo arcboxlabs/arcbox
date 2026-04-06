@@ -323,6 +323,210 @@ impl Vmm {
 }
 
 // ---------------------------------------------------------------------------
+// vCPU run loop
+// ---------------------------------------------------------------------------
+
+/// ARM64 register IDs (matching Hypervisor.framework constants).
+mod reg {
+    pub const X0: u32 = 0;
+    pub const PC: u32 = 31;
+    pub const CPSR: u32 = 34;
+}
+
+/// CPSR value: EL1h with DAIF masked (all interrupts masked at boot).
+const CPSR_EL1H: u64 = 0x3C5;
+
+/// Runs a single vCPU in a loop, dispatching MMIO traps to the device manager.
+///
+/// This function is intended to be called from a dedicated thread per vCPU.
+/// `HvVcpu` is `!Send`, so it must be created inside this function on the
+/// thread that will run it.
+///
+/// # Arguments
+///
+/// * `vcpu_id` — Logical vCPU index (0-based, for logging).
+/// * `kernel_entry` — Guest IPA of the kernel entry point.
+/// * `fdt_addr` — Guest IPA of the flattened device tree.
+/// * `device_manager` — Shared device manager for MMIO dispatch.
+/// * `running` — Shared flag; the loop exits when this is set to `false`.
+#[allow(dead_code)] // Will be called from start_darwin_hv() in Phase 4
+fn vcpu_run_loop(
+    vcpu_id: u32,
+    kernel_entry: u64,
+    fdt_addr: u64,
+    device_manager: Arc<crate::device::DeviceManager>,
+    running: Arc<std::sync::atomic::AtomicBool>,
+) {
+    use arcbox_hv::{ExceptionClass, HvVcpu, VcpuExit};
+    use std::sync::atomic::Ordering;
+
+    let vcpu = match HvVcpu::new() {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("vCPU {vcpu_id}: creation failed: {e}");
+            return;
+        }
+    };
+
+    // Set initial register state for ARM64 Linux boot protocol:
+    //   PC  = kernel entry point
+    //   X0  = physical address of FDT
+    //   CPSR = EL1h, DAIF masked
+    if let Err(e) = vcpu.set_reg(reg::PC, kernel_entry) {
+        tracing::error!("vCPU {vcpu_id}: set PC failed: {e}");
+        return;
+    }
+    if let Err(e) = vcpu.set_reg(reg::X0, fdt_addr) {
+        tracing::error!("vCPU {vcpu_id}: set X0 failed: {e}");
+        return;
+    }
+    if let Err(e) = vcpu.set_reg(reg::CPSR, CPSR_EL1H) {
+        tracing::error!("vCPU {vcpu_id}: set CPSR failed: {e}");
+        return;
+    }
+
+    tracing::info!(
+        "vCPU {vcpu_id}: starting at PC={:#x}, FDT={:#x}",
+        kernel_entry,
+        fdt_addr
+    );
+
+    loop {
+        if !running.load(Ordering::Relaxed) {
+            tracing::info!("vCPU {vcpu_id}: shutdown requested");
+            break;
+        }
+
+        let exit = match vcpu.run() {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!("vCPU {vcpu_id}: run failed: {e}");
+                running.store(false, Ordering::SeqCst);
+                break;
+            }
+        };
+
+        match exit {
+            VcpuExit::Exception {
+                class: ExceptionClass::DataAbort(ref mmio),
+                ..
+            } => {
+                if mmio.is_write {
+                    // Guest writing to MMIO: read the value from the register.
+                    let value = match vcpu.get_reg(u32::from(mmio.register)) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::error!(
+                                "vCPU {vcpu_id}: get_reg(X{}) failed: {e}",
+                                mmio.register
+                            );
+                            continue;
+                        }
+                    };
+                    if let Err(e) = device_manager.handle_mmio_write(
+                        mmio.address,
+                        mmio.access_size as usize,
+                        value,
+                    ) {
+                        tracing::warn!(
+                            "vCPU {vcpu_id}: MMIO write {:#x} failed: {e}",
+                            mmio.address
+                        );
+                    }
+                } else {
+                    // Guest reading from MMIO: emulate and inject result.
+                    let value = match device_manager
+                        .handle_mmio_read(mmio.address, mmio.access_size as usize)
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!(
+                                "vCPU {vcpu_id}: MMIO read {:#x} failed: {e}",
+                                mmio.address
+                            );
+                            0 // Return 0 for unknown reads.
+                        }
+                    };
+                    if let Err(e) = vcpu.set_reg(u32::from(mmio.register), value) {
+                        tracing::error!("vCPU {vcpu_id}: set_reg(X{}) failed: {e}", mmio.register);
+                    }
+                }
+            }
+
+            VcpuExit::Exception {
+                class: ExceptionClass::WaitForInterrupt,
+                ..
+            } => {
+                // Guest is idle. In a production VMM we would block on an
+                // eventfd/kqueue until an interrupt is pending. For now, yield.
+                std::thread::yield_now();
+            }
+
+            VcpuExit::Exception {
+                class: ExceptionClass::HypercallHvc(imm),
+                ..
+            } => {
+                tracing::debug!("vCPU {vcpu_id}: HVC #{imm}");
+                // PSCI calls (power state coordination) come through HVC.
+                // PSCI_SYSTEM_OFF = 0x8400_0008, PSCI_SYSTEM_RESET = 0x8400_0009
+                let func_id = match vcpu.get_reg(reg::X0) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                match func_id {
+                    0x8400_0008 => {
+                        tracing::info!("vCPU {vcpu_id}: PSCI SYSTEM_OFF");
+                        running.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                    0x8400_0009 => {
+                        tracing::info!("vCPU {vcpu_id}: PSCI SYSTEM_RESET");
+                        running.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                    _ => {
+                        tracing::debug!("vCPU {vcpu_id}: unhandled PSCI func {func_id:#x}");
+                        // Return NOT_SUPPORTED (-1) in X0.
+                        let _ = vcpu.set_reg(reg::X0, u64::MAX);
+                    }
+                }
+            }
+
+            VcpuExit::Exception {
+                class: ExceptionClass::SmcCall(_),
+                ..
+            } => {
+                // SMC calls at EL1 are forwarded as HVC on Apple silicon.
+                // Return NOT_SUPPORTED.
+                let _ = vcpu.set_reg(reg::X0, u64::MAX);
+            }
+
+            VcpuExit::VtimerActivated => {
+                // Virtual timer fired. Unmask it so the guest sees the interrupt.
+                let _ = vcpu.set_vtimer_mask(false);
+            }
+
+            VcpuExit::Canceled => {
+                tracing::info!("vCPU {vcpu_id}: canceled");
+                break;
+            }
+
+            VcpuExit::Exception {
+                class: ref other, ..
+            } => {
+                tracing::warn!("vCPU {vcpu_id}: unhandled exception: {other:?}");
+            }
+
+            VcpuExit::Unknown(reason) => {
+                tracing::warn!("vCPU {vcpu_id}: unknown exit reason {reason}");
+            }
+        }
+    }
+
+    tracing::info!("vCPU {vcpu_id}: exited");
+}
+
+// ---------------------------------------------------------------------------
 // FDT helpers for the custom VMM path
 // ---------------------------------------------------------------------------
 
