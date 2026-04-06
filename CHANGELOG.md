@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.21](https://github.com/arcboxlabs/arcbox/compare/v0.3.20...v0.3.21) (2026-04-06)
+
+
+### Features
+
+* bump Docker toolchain to 29.3.1 and add VirtioFS cache=always ([#164](https://github.com/arcboxlabs/arcbox/issues/164)) ([f53dc24](https://github.com/arcboxlabs/arcbox/commit/f53dc24b2c0b8103c03fd976c4a2b87aad46f724))
+* **cli:** link Docker tools in abctl setup install ([2b552cd](https://github.com/arcboxlabs/arcbox/commit/2b552cd9bacb1ef5caa95ca541dff61c38c9e016))
+* **docker:** add explicit /build, /build/prune, and /session routes ([#163](https://github.com/arcboxlabs/arcbox/issues/163)) ([b0039a3](https://github.com/arcboxlabs/arcbox/commit/b0039a33755d98238b3fd377854efe6ee17ade39))
+* **guest:** enable multi-platform builds and persistent build cache ([#162](https://github.com/arcboxlabs/arcbox/issues/162)) ([f748d7d](https://github.com/arcboxlabs/arcbox/commit/f748d7d724656ea3cf9c607563b980e3261034ab))
+* **virt:** integrate Rosetta x86_64 translation for Apple Silicon VMs ([#160](https://github.com/arcboxlabs/arcbox/issues/160)) ([63d6e78](https://github.com/arcboxlabs/arcbox/commit/63d6e784016e40dc344c91a6035a65591f684d6e))
+
+
+### Bug Fixes
+
+* **cli:** link and unlink docker CLI tools in brew hooks ([#148](https://github.com/arcboxlabs/arcbox/issues/148)) ([c6c0266](https://github.com/arcboxlabs/arcbox/commit/c6c0266b94af0fdd549b03b04d9c2dc9addf9ffa))
+* **cli:** link Docker tools in brew hooks + shared symlink module ([c6c0266](https://github.com/arcboxlabs/arcbox/commit/c6c0266b94af0fdd549b03b04d9c2dc9addf9ffa))
+
 ## [0.3.20](https://github.com/arcboxlabs/arcbox/compare/v0.3.19...v0.3.20) (2026-04-05)
 
 

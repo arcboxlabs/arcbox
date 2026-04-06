@@ -1,4 +1,9 @@
 //! Parser for the `[[tools]]` section of `assets.lock`.
+//!
+//! These tool entries pin both the **host-side CLI** binaries (installed to
+//! `~/.arcbox/runtime/bin/`) and the **guest-side daemon** binaries (exposed
+//! via VirtioFS to the VM). A single lockfile ensures the Docker CLI and guest
+//! dockerd are always at the same version — no version-skew concerns on upgrade.
 
 use std::collections::HashMap;
 
@@ -78,7 +83,7 @@ cdn = "https://boot.arcboxcdn.com"
 [[tools]]
 name = "docker"
 group = "docker"
-version = "27.5.1"
+version = "29.3.1"
 arch.arm64.sha256 = "aaa"
 arch.x86_64.sha256 = "bbb"
 
@@ -91,7 +96,7 @@ arch.arm64.sha256 = "ccc"
 [[tools]]
 name = "kubectl"
 group = "kubernetes"
-version = "1.34.3"
+version = "1.35.3"
 arch.arm64.sha256 = "ddd"
 "#;
 
@@ -101,7 +106,7 @@ arch.arm64.sha256 = "ddd"
         assert_eq!(tools.len(), 3);
         assert_eq!(tools[0].name, "docker");
         assert_eq!(tools[0].group, ToolGroup::Docker);
-        assert_eq!(tools[0].version, "27.5.1");
+        assert_eq!(tools[0].version, "29.3.1");
         assert_eq!(tools[0].sha256_for_arch("arm64"), Some("aaa"));
         assert_eq!(tools[0].sha256_for_arch("x86_64"), Some("bbb"));
         assert_eq!(tools[1].sha256_for_arch("x86_64"), None);
