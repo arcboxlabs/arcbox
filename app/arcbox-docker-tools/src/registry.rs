@@ -91,19 +91,19 @@ mod tests {
 
     #[test]
     fn docker_url_arm64() {
-        let url = download_url("docker", "28.5.2", "arm64");
+        let url = download_url("docker", "29.3.1", "arm64");
         assert_eq!(
             url,
-            "https://download.docker.com/mac/static/stable/aarch64/docker-28.5.2.tgz"
+            "https://download.docker.com/mac/static/stable/aarch64/docker-29.3.1.tgz"
         );
     }
 
     #[test]
     fn docker_url_x86() {
-        let url = download_url("docker", "28.5.2", "x86_64");
+        let url = download_url("docker", "29.3.1", "x86_64");
         assert_eq!(
             url,
-            "https://download.docker.com/mac/static/stable/x86_64/docker-28.5.2.tgz"
+            "https://download.docker.com/mac/static/stable/x86_64/docker-29.3.1.tgz"
         );
     }
 
@@ -134,10 +134,10 @@ mod tests {
 
     #[test]
     fn kubectl_url_arm64() {
-        let url = download_url("kubectl", "1.34.3", "arm64");
+        let url = download_url("kubectl", "1.35.3", "arm64");
         assert_eq!(
             url,
-            "https://dl.k8s.io/release/v1.34.3/bin/darwin/arm64/kubectl"
+            "https://dl.k8s.io/release/v1.35.3/bin/darwin/arm64/kubectl"
         );
     }
 }
