@@ -106,15 +106,19 @@ pub struct SmoltcpDevice {
 }
 
 impl SmoltcpDevice {
-    /// Default pool capacity: 4096 buffers. Sized for burst absorption at
-    /// ~300K frames/sec (10 Gbps / 4000-byte MTU) with ~13 ms of headroom.
+    /// Pool capacity: 4096 buffers. Each buffer is `MAX_PACKET_SIZE` (64 KiB)
+    /// in the pool, so total resident = ~256 MiB. This is acceptable because:
+    /// - One pool per VM (not per connection)
+    /// - Idle pages are compressed by macOS memory compressor
+    /// - Smaller pools increase heap fallback frequency, defeating the purpose
+    /// - At ~300K frames/sec (10 Gbps / 4000 MTU), 4096 gives ~13 ms burst headroom
     const POOL_CAPACITY: usize = 4096;
 
     /// Creates a new device for the given socketpair FD.
     ///
     /// `mtu` should match the VZ device's configured MTU. Use
-    /// [`ENHANCED_ETHERNET_MTU`] (4000) when VZ `setMaximumTransmissionUnit:`
-    /// succeeded, or [`DEFAULT_ETHERNET_MTU`] (1500) otherwise.
+    /// `ENHANCED_ETHERNET_MTU` (4000) when VZ `setMaximumTransmissionUnit:`
+    /// succeeded, or 1500 otherwise.
     pub fn new(fd: RawFd, gateway_ip: Ipv4Addr, mtu: usize) -> Self {
         // PacketPool::new only fails on zero capacity, which POOL_CAPACITY is not.
         let pool = Arc::new(PacketPool::new(Self::POOL_CAPACITY).expect("pool allocation"));
