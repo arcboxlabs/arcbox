@@ -560,11 +560,7 @@ impl Default for FuseInitOut {
             major: FUSE_KERNEL_VERSION,
             minor: FUSE_KERNEL_MINOR_VERSION,
             max_readahead: 128 * 1024,
-            flags: FUSE_ASYNC_READ
-                | FUSE_BIG_WRITES
-                | FUSE_WRITEBACK_CACHE
-                | FUSE_DO_READDIRPLUS
-                | FUSE_READDIRPLUS_AUTO,
+            flags: FUSE_ASYNC_READ | FUSE_BIG_WRITES | FUSE_WRITEBACK_CACHE,
             max_background: 16,
             congestion_threshold: 12,
             max_write: 128 * 1024,
@@ -678,29 +674,6 @@ impl FuseDirent {
     #[must_use]
     pub const fn size(namelen: usize) -> usize {
         // Header size + name length, rounded up to 8-byte boundary
-        let base = size_of::<Self>() + namelen;
-        (base + 7) & !7
-    }
-}
-
-/// Directory entry for readdirplus (entry attributes + dirent).
-///
-/// Eliminates separate lookup calls per entry — the guest kernel gets both
-/// the directory entry and its full attributes in a single round-trip.
-#[derive(Debug, Clone, Copy)]
-#[repr(C)]
-pub struct FuseDirentplus {
-    /// Full entry attributes (same as a lookup response).
-    pub entry_out: FuseEntryOut,
-    /// Directory entry.
-    pub dirent: FuseDirent,
-    // Followed by name[namelen] (not null-terminated, but padded to 8-byte boundary)
-}
-
-impl FuseDirentplus {
-    /// Returns the total size of this entry including the name.
-    #[must_use]
-    pub const fn size(namelen: usize) -> usize {
         let base = size_of::<Self>() + namelen;
         (base + 7) & !7
     }
