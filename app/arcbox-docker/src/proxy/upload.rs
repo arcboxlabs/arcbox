@@ -309,6 +309,35 @@ mod tests {
     }
 
     #[test]
+    fn detects_build_upload_requests() {
+        // Unversioned /build
+        assert!(is_streaming_upload_request(
+            &Method::POST,
+            &Uri::from_static("/build")
+        ));
+        // Versioned /build
+        assert!(is_streaming_upload_request(
+            &Method::POST,
+            &Uri::from_static("/v1.47/build")
+        ));
+        // With query parameters
+        assert!(is_streaming_upload_request(
+            &Method::POST,
+            &Uri::from_static("/v1.47/build?t=myimage:latest&dockerfile=Dockerfile")
+        ));
+        // GET should not match
+        assert!(!is_streaming_upload_request(
+            &Method::GET,
+            &Uri::from_static("/build")
+        ));
+        // /build/prune is NOT a streaming upload — it goes through the standard proxy
+        assert!(!is_streaming_upload_request(
+            &Method::POST,
+            &Uri::from_static("/build/prune")
+        ));
+    }
+
+    #[test]
     fn forwarded_headers_preserve_end_to_end_fields() {
         let mut headers = HeaderMap::new();
         headers.insert(
