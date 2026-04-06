@@ -38,6 +38,7 @@ use crate::darwin::inbound_relay::InboundCommand;
 use crate::darwin::smoltcp_device::{InterceptedKind, SmoltcpDevice};
 use crate::darwin::socket_proxy::SocketProxy;
 use crate::darwin::tcp_bridge::TcpBridge;
+use crate::datapath::FrameBuf;
 use crate::dhcp::DhcpServer;
 use crate::dns::DnsForwarder;
 use crate::ethernet::{ETH_HEADER_LEN, build_udp_ip_ethernet};
@@ -197,7 +198,7 @@ impl NetworkDatapath {
 
         // Write queue: buffers frames that couldn't be written to the guest FD
         // due to EWOULDBLOCK. Drained when the FD becomes writable again.
-        let mut write_queue: VecDeque<Vec<u8>> = VecDeque::new();
+        let mut write_queue: VecDeque<FrameBuf> = VecDeque::new();
 
         // Unified timer wheel for flow timeout management (1s tick).
         // Replaces per-flow tokio::time::timeout() objects with a single
@@ -297,7 +298,7 @@ impl NetworkDatapath {
                     if !gated_syns.is_empty() {
                         let rst_frames = tcp_bridge.gate_syns(&gated_syns, gateway_mac);
                         for rst in rst_frames {
-                            enqueue_or_write(&guest_async, rst, &mut write_queue);
+                            enqueue_or_write(&guest_async, FrameBuf::from(rst), &mut write_queue);
                         }
                     }
 
@@ -307,7 +308,7 @@ impl NetworkDatapath {
                 // Always poll — the bounded channel (256) provides natural backpressure
                 // to spawned tasks. Gating on write_queue depth starved DNS replies.
                 Some(reply_frame) = reply_rx.recv() => {
-                    enqueue_or_write(&guest_async, reply_frame, &mut write_queue);
+                    enqueue_or_write(&guest_async, FrameBuf::from(reply_frame), &mut write_queue);
                 }
 
                 // Inbound commands from InboundListenerManager.
@@ -374,7 +375,7 @@ impl NetworkDatapath {
             //    device rx_queue and create listen sockets, or produce RST frames.
             let rst_frames = tcp_bridge.poll_pending_syns(&mut device, &mut sockets, gateway_mac);
             for rst in rst_frames {
-                enqueue_or_write(&guest_async, rst, &mut write_queue);
+                enqueue_or_write(&guest_async, FrameBuf::from(rst), &mut write_queue);
             }
 
             // 1.5. Drain inbound listener commands so `cmd_rx.recv()` cannot be
@@ -430,7 +431,7 @@ impl NetworkDatapath {
 fn handle_intercepted_frame(
     intercepted: &crate::darwin::smoltcp_device::InterceptedFrame,
     guest_async: &AsyncFd<FdWrapper>,
-    write_queue: &mut VecDeque<Vec<u8>>,
+    write_queue: &mut VecDeque<FrameBuf>,
     socket_proxy: &mut SocketProxy,
     dhcp_server: &mut DhcpServer,
     dns_forwarder: &DnsForwarder,
@@ -510,7 +511,7 @@ fn process_inbound_cmd(
 fn handle_dhcp(
     frame: &[u8],
     guest_async: &AsyncFd<FdWrapper>,
-    write_queue: &mut VecDeque<Vec<u8>>,
+    write_queue: &mut VecDeque<FrameBuf>,
     dhcp_server: &mut DhcpServer,
     gateway_ip: Ipv4Addr,
     gateway_mac: [u8; 6],
@@ -539,7 +540,7 @@ fn handle_dhcp(
                 guest_mac,
             );
             tracing::info!("Sending DHCP reply frame: {} bytes", reply_frame.len());
-            enqueue_or_write(guest_async, reply_frame, write_queue);
+            enqueue_or_write(guest_async, FrameBuf::from(reply_frame), write_queue);
         }
         Ok(None) => {
             tracing::info!("DHCP: no response needed");
@@ -760,11 +761,13 @@ const DRAIN_CMD_BATCH: usize = 64;
 fn drain_reply_rx(
     reply_rx: &mut mpsc::Receiver<Vec<u8>>,
     guest_async: &AsyncFd<FdWrapper>,
-    write_queue: &mut VecDeque<Vec<u8>>,
+    write_queue: &mut VecDeque<FrameBuf>,
 ) {
     for _ in 0..DRAIN_REPLY_BATCH {
         match reply_rx.try_recv() {
-            Ok(reply_frame) => enqueue_or_write(guest_async, reply_frame, write_queue),
+            Ok(reply_frame) => {
+                enqueue_or_write(guest_async, FrameBuf::from(reply_frame), write_queue);
+            }
             Err(_) => break,
         }
     }
@@ -808,8 +811,8 @@ fn drain_cmd_rx(
 /// preserve ordering.
 fn enqueue_or_write(
     guest_async: &AsyncFd<FdWrapper>,
-    frame: Vec<u8>,
-    write_queue: &mut VecDeque<Vec<u8>>,
+    frame: FrameBuf,
+    write_queue: &mut VecDeque<FrameBuf>,
 ) {
     if !write_queue.is_empty() {
         if write_queue.len() < WRITE_QUEUE_HARD_CAP {
@@ -973,14 +976,18 @@ mod tests {
         let guest_async = AsyncFd::new(FdWrapper(a)).unwrap();
 
         let mut queue = VecDeque::new();
-        let frame = b"direct write frame".to_vec();
-        enqueue_or_write(&guest_async, frame.clone(), &mut queue);
+        let frame_data = b"direct write frame";
+        enqueue_or_write(
+            &guest_async,
+            FrameBuf::from(frame_data.to_vec()),
+            &mut queue,
+        );
 
         assert!(queue.is_empty(), "Queue should be empty after direct write");
 
         let mut buf = [0u8; 128];
         let n = fd_read(b.as_raw_fd(), &mut buf).unwrap();
-        assert_eq!(&buf[..n], frame.as_slice());
+        assert_eq!(&buf[..n], frame_data.as_slice());
     }
 
     #[tokio::test]
@@ -989,14 +996,17 @@ mod tests {
         set_nonblocking(a.as_raw_fd()).unwrap();
         let guest_async = AsyncFd::new(FdWrapper(a)).unwrap();
 
-        let mut queue = VecDeque::new();
-        queue.push_back(b"already queued".to_vec());
+        let mut queue: VecDeque<FrameBuf> = VecDeque::new();
+        queue.push_back(FrameBuf::from(b"already queued".to_vec()));
 
-        let frame = b"new frame".to_vec();
-        enqueue_or_write(&guest_async, frame.clone(), &mut queue);
+        enqueue_or_write(
+            &guest_async,
+            FrameBuf::from(b"new frame".to_vec()),
+            &mut queue,
+        );
 
         assert_eq!(queue.len(), 2);
-        assert_eq!(queue[1], frame);
+        assert_eq!(&queue[1][..], b"new frame");
     }
 
     #[test]
