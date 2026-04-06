@@ -8,8 +8,8 @@ Outputs a Markdown summary to stdout.  Exit code 0 = updates applied,
 exit code 2 = already up to date, exit code 1 = error.
 
 Usage:
-    python3 .github/scripts/check-tool-updates.py          # uses GH_TOKEN env
-    GH_TOKEN=ghp_xxx python3 .github/scripts/check-tool-updates.py
+    python3 scripts/check-tool-updates.py          # uses GH_TOKEN env
+    GH_TOKEN=ghp_xxx python3 scripts/check-tool-updates.py
 """
 
 from __future__ import annotations
@@ -20,6 +20,9 @@ import os
 import re
 import sys
 import urllib.request
+
+# Network timeout in seconds (per request, not total).
+HTTP_TIMEOUT = 60
 
 if sys.version_info < (3, 11):
     sys.exit("Python 3.11+ required (tomllib)")
@@ -84,7 +87,7 @@ def gh_api(path: str) -> dict:
             **({"Authorization": f"Bearer {token}"} if token else {}),
         },
     )
-    with urllib.request.urlopen(req) as resp:
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
         return json.loads(resp.read())
 
 
@@ -92,7 +95,9 @@ def latest_version(tool: dict) -> str:
     """Fetch the latest stable version for a tool."""
     if tool["repo"] is None:
         # kubectl: plain text endpoint
-        with urllib.request.urlopen("https://dl.k8s.io/release/stable.txt") as resp:
+        with urllib.request.urlopen(
+            "https://dl.k8s.io/release/stable.txt", timeout=HTTP_TIMEOUT
+        ) as resp:
             return resp.read().decode().strip().lstrip("v")
     data = gh_api(f"repos/{tool['repo']}/releases/latest")
     return data["tag_name"].lstrip("v")
@@ -102,7 +107,7 @@ def sha256_url(url: str) -> str:
     """Download a URL and return its SHA-256 hex digest."""
     req = urllib.request.Request(url)
     h = hashlib.sha256()
-    with urllib.request.urlopen(req) as resp:
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
         while chunk := resp.read(1 << 16):
             h.update(chunk)
     return h.hexdigest()
