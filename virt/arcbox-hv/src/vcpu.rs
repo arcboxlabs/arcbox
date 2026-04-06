@@ -6,6 +6,7 @@
 
 use std::marker::PhantomData;
 use std::ptr;
+use std::rc::Rc;
 
 use tracing::trace;
 
@@ -23,8 +24,8 @@ pub struct HvVcpu {
     /// Pointer to the framework-managed exit info structure.
     /// Valid for the lifetime of the vCPU.
     exit_info: *const ffi::HvVcpuExitInfo,
-    /// Prevent `Send` — `*const ()` is `!Send`.
-    _not_send: PhantomData<*const ()>,
+    /// Prevent `Send` — `Rc<()>` is genuinely `!Send`.
+    _not_send: PhantomData<Rc<()>>,
 }
 
 impl HvVcpu {
@@ -61,6 +62,9 @@ impl HvVcpu {
         // SAFETY: The vCPU was created on this thread and `self.id` is valid.
         error::check(unsafe { ffi::hv_vcpu_run(self.id) })?;
 
+        if self.exit_info.is_null() {
+            return Err(crate::error::HvError::Error);
+        }
         // SAFETY: `exit_info` was set by `hv_vcpu_create` and remains valid
         // for the lifetime of the vCPU. The framework populates it after each
         // run. We only read from it — no mutation.
@@ -123,21 +127,6 @@ impl HvVcpu {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Verify that HvVcpu is !Send (cannot be moved across threads).
-    /// PhantomData<*const ()> opts out of Send.
-    #[test]
-    fn vcpu_is_not_send() {
-        fn assert_not_send<T>() {
-            // If HvVcpu ever becomes Send, this will still compile but the
-            // runtime check below catches it.
-        }
-        assert_not_send::<HvVcpu>();
-        // The real enforcement: *const () is !Send, so PhantomData<*const ()>
-        // makes the containing struct !Send. We can't assert negative trait
-        // bounds on stable, but we verify the marker field exists by construction.
-        let _marker: PhantomData<*const ()> = PhantomData;
-    }
 
     /// Requires `com.apple.security.hypervisor` entitlement.
     #[test]

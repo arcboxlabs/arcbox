@@ -117,6 +117,10 @@ impl Gic {
         }
         // SAFETY: data points to `size` bytes allocated by the framework.
         let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, size) }.to_vec();
+        // TODO: The ownership semantics of hv_gic_get_state's output buffer are
+        // undocumented. If the framework expects the caller to free it, this leaks.
+        // In practice, Apple's C APIs typically use malloc-allocated buffers that
+        // should be freed with free(). Add libc::free() once ownership is confirmed.
         Ok(bytes)
     }
 

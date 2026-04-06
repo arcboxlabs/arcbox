@@ -80,7 +80,10 @@ pub struct MmioInfo {
     pub access_size: u8,
     /// The ARM general-purpose register (Xt) used.
     pub register: u8,
-    /// For writes: the value the guest wrote. For reads: zero (VMM fills it).
+    /// For writes, always `0` — the syndrome does not carry the written data.
+    /// The VMM must call `HvVcpu::get_reg(self.register)` to read the value
+    /// the guest intended to write. For reads, the VMM writes the emulated
+    /// value back via `HvVcpu::set_reg(self.register, value)`.
     pub value: u64,
     /// Whether the loaded value should be sign-extended.
     pub sign_extend: bool,
@@ -139,16 +142,15 @@ fn parse_exception(syndrome: u64, exc: &ffi::HvVcpuExitException) -> ExceptionCl
             ExceptionClass::SmcCall(imm16)
         }
         EC_SYS_REG => {
-            // ISS encoding for MSR/MRS (ARMv8-A D13.2.37):
-            //   [21]    = direction (0 = read/MRS, 1 = write/MSR)
-            //   [20:19] = Op0  (bits 20:19 of ISS)
-            //   [18:16] = Op2
-            //   [15:12] = CRn
-            //   [11:8]  = Rt
-            //   [7:4]   = CRm
-            //   [3:1]   = Op1
-            //   [0]     = direction duplicate (same as bit 21 in practice)
-            let is_write = (syndrome & 1) == 0; // 0 = write (MSR), 1 = read (MRS)
+            // ARM ESR_EL2 ISS encoding for system register access (EC=0x18):
+            //   bit[0]     = Direction: 0 = MSR (guest writes sysreg), 1 = MRS (guest reads sysreg)
+            //   bit[4:1]   = CRm
+            //   bit[9:5]   = Rt (target GP register)
+            //   bit[13:10] = CRn
+            //   bit[16:14] = Op1
+            //   bit[19:17] = Op2
+            //   bit[21:20] = Op0
+            let is_write = (syndrome & 1) == 0; // Direction=0 → MSR → write to sysreg
             let crm = ((syndrome >> 1) & 0xf) as u8;
             let rt = ((syndrome >> 5) & 0x1f) as u8;
             let crn = ((syndrome >> 10) & 0xf) as u8;
@@ -457,6 +459,46 @@ mod tests {
                 assert!(is_write); // MSR = write
                 assert_eq!(rt, 5);
                 // Verify crn/crm/op1/op2 are correctly extracted
+                assert_eq!(crn, 1);
+                assert_eq!(crm, 0);
+                assert_eq!(op1, 0);
+                assert_eq!(op2, 0);
+            }
+            other => panic!("expected SystemRegister, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_system_register_mrs() {
+        // Encode MRS (read) for SCTLR_EL1: Op0=3 Op1=0 CRn=1 CRm=0 Op2=0, Rt=7
+        // ISS: direction=1 (read) at bit 0
+        let iss: u64 = (3 << 20) | (0 << 17) | (1 << 10) | (7 << 5) | (0 << 1) | 1;
+        let syndrome = (u64::from(EC_SYS_REG) << 26) | iss;
+        let info = ffi::HvVcpuExitInfo {
+            reason: ffi::HV_EXIT_REASON_EXCEPTION,
+            exception: ffi::HvVcpuExitException {
+                syndrome,
+                virtual_address: 0,
+                physical_address: 0,
+            },
+        };
+        match parse_exit(&info) {
+            VcpuExit::Exception {
+                class:
+                    ExceptionClass::SystemRegister {
+                        op0,
+                        op1,
+                        crn,
+                        crm,
+                        op2,
+                        is_write,
+                        rt,
+                    },
+                ..
+            } => {
+                assert_eq!(op0, 3);
+                assert!(!is_write); // MRS = read
+                assert_eq!(rt, 7);
                 assert_eq!(crn, 1);
                 assert_eq!(crm, 0);
                 assert_eq!(op1, 0);

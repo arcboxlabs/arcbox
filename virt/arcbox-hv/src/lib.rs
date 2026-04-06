@@ -2,12 +2,9 @@
 //!
 //! Provides VM creation, vCPU management, memory mapping, GICv3 interrupt
 //! control, and exit handling for building custom VMMs on macOS.
-
-#[cfg(not(target_os = "macos"))]
-compile_error!("arcbox-hv only supports macOS");
-
-#[cfg(not(target_arch = "aarch64"))]
-compile_error!("arcbox-hv only supports ARM64");
+//!
+//! On unsupported platforms this crate compiles to an empty library.
+#![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 
 mod error;
 mod exit;

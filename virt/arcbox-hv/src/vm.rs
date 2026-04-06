@@ -39,12 +39,11 @@ impl HvVm {
     ///
     /// Available since macOS 13.0.
     pub fn with_ipa_size(ipa_bits: u32) -> HvResult<Self> {
-        // SAFETY: hv_vm_config_create returns an opaque config object.
         let config = unsafe { ffi::hv_vm_config_create() };
         if config.is_null() {
             return Err(crate::error::HvError::NoResources);
         }
-        // SAFETY: config is a valid pointer from hv_vm_config_create.
+        // Note: config is a framework-managed object; no explicit free needed.
         error::check(unsafe { ffi::hv_vm_config_set_ipa_size(config, ipa_bits) })?;
         error::check(unsafe { ffi::hv_vm_create(config) })?;
         debug!(ipa_bits, "hypervisor VM created");
