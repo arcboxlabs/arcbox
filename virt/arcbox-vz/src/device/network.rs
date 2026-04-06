@@ -2,9 +2,20 @@
 
 use crate::error::{VZError, VZResult};
 use crate::ffi::{file_handle_for_fd, get_class, nsstring, release};
-use crate::{msg_send, msg_send_void};
+use crate::{msg_send, msg_send_void, msg_send_void_u64};
 use objc2::runtime::AnyObject;
 use std::os::unix::io::RawFd;
+
+/// MTU configured on VZ network devices.
+///
+/// 4000 is chosen based on macOS XNU internals: the kernel has a 4096-byte
+/// internal threshold above which performance degrades for loopback/utun paths.
+/// Surge uses 4000, Shadowrocket/Quantumult X use 4064 (4096 - 32 for headers).
+/// We round to 4000 to stay safely under the threshold.
+///
+/// This reduces frame count by ~2.7x vs the default 1500, directly reducing
+/// per-frame overhead through the entire smoltcp datapath.
+const VZ_NETWORK_MTU: u64 = 4000;
 
 /// Configuration for a `VirtIO` network device.
 pub struct NetworkDeviceConfiguration {
@@ -87,6 +98,12 @@ impl NetworkDeviceConfiguration {
             }
 
             msg_send_void!(obj, setAttachment: attachment);
+
+            // Set MTU to reduce frame count through the datapath (~2.7x fewer
+            // frames vs default 1500). Available since macOS 14 (Sonoma).
+            // On older macOS versions, the selector simply doesn't exist and
+            // the message is silently ignored (standard ObjC behavior).
+            msg_send_void_u64!(obj, setMaximumTransmissionUnit: VZ_NETWORK_MTU);
 
             let mac = match mac_address {
                 Some(mac_address) => create_mac_address(mac_address)?,

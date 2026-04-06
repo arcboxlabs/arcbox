@@ -25,7 +25,12 @@ use smoltcp::time::Instant;
 use crate::ethernet::ETH_HEADER_LEN;
 
 /// MTU for the Ethernet medium (excludes Ethernet header).
-const ETHERNET_MTU: usize = 1500;
+///
+/// Set to 4000 to match the VZ framework `maximumTransmissionUnit` config.
+/// This reduces frame count by ~2.7x vs 1500, cutting per-frame overhead
+/// through the entire datapath (classification, smoltcp state machine,
+/// channel relay, write queue).
+const ETHERNET_MTU: usize = 4000;
 
 /// Maximum Ethernet frame size we handle.
 const MAX_FRAME_SIZE: usize = 65535;
