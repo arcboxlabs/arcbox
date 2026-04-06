@@ -1121,13 +1121,19 @@ impl TcpBridge {
                     sockets.remove(handle);
 
                     // Convert tokio stream to std for non-blocking sync I/O.
-                    let std_stream = stream.into_std().unwrap_or_else(|_| {
-                        // Fallback: this shouldn't happen.
-                        tracing::error!("Fast path: failed to convert tokio TcpStream to std");
-                        std::net::TcpStream::connect("127.0.0.1:1").unwrap()
-                    });
-
-                    self.promote_to_fast_path(flow_key, std_stream, our_seq, last_ack);
+                    match stream.into_std() {
+                        Ok(std_stream) => {
+                            self.promote_to_fast_path(flow_key, std_stream, our_seq, last_ack);
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Fast path: failed to convert tokio TcpStream to std: {e}. \
+                                 Connection will fall back to smoltcp relay."
+                            );
+                            // Don't promote — connection was already removed from
+                            // self.connections above, so it will be cleaned up.
+                        }
+                    }
                 }
             }
         }

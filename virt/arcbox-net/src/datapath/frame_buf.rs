@@ -131,12 +131,13 @@ impl std::fmt::Debug for FrameBuf {
     }
 }
 
-// FrameBuf is Send because:
-// - Pooled: Arc<PacketPool> is Send, and pool.get()/free_by_index() are thread-safe.
-// - Heap: Vec<u8> is Send.
-// SAFETY: PacketPool is Send + Sync, and we hold exclusive ownership of the
-// buffer slot (guaranteed by the alloc/free protocol).
-unsafe impl Send for FrameBuf {}
+// Compile-time assertion: FrameBuf must be Send (passed through channels).
+// Arc<PacketPool> is Send (PacketPool is Send+Sync), Vec<u8> is Send,
+// so FrameBuf derives Send automatically — no unsafe impl needed.
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    assert_send::<FrameBuf>();
+};
 
 #[cfg(test)]
 mod tests {
