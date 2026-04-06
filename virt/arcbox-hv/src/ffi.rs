@@ -185,7 +185,14 @@ unsafe extern "C" {
     pub fn hv_vcpu_set_trap_debug_exceptions(vcpu: hv_vcpu_t, enable: bool) -> hv_return_t;
     pub fn hv_vcpu_set_trap_debug_reg_accesses(vcpu: hv_vcpu_t, enable: bool) -> hv_return_t;
 
-    // GICv3 (macOS 15+)
+}
+
+// GICv3 APIs (macOS 15+). Gated behind the `gic` cargo feature because
+// they require a macOS 15+ SDK to link. Without the feature, the rest
+// of the crate (VM, vCPU, memory, exit parsing) compiles on macOS 11+.
+#[cfg(feature = "gic")]
+#[link(name = "Hypervisor", kind = "framework")]
+unsafe extern "C" {
     pub fn hv_gic_create(config: *mut c_void) -> hv_return_t;
     pub fn hv_gic_reset() -> hv_return_t;
     pub fn hv_gic_set_spi(intid: u32, level: bool) -> hv_return_t;

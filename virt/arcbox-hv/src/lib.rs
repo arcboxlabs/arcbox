@@ -12,6 +12,7 @@ compile_error!("arcbox-hv only supports ARM64");
 mod error;
 mod exit;
 mod ffi;
+#[cfg(feature = "gic")]
 mod gic;
 mod memory;
 mod vcpu;
@@ -19,6 +20,7 @@ mod vm;
 
 pub use error::{HvError, HvResult};
 pub use exit::{ExceptionClass, MmioInfo, VcpuExit};
+#[cfg(feature = "gic")]
 pub use gic::Gic;
 pub use memory::MemoryPermission;
 pub use vcpu::HvVcpu;

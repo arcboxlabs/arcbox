@@ -128,3 +128,63 @@ impl Gic {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// M0 risk gate: verify hv_gic_create works on this macOS version.
+    /// If this test fails, the entire HV backend approach needs revision.
+    #[test]
+    #[ignore]
+    fn gic_create_succeeds() {
+        let _vm = crate::HvVm::new().expect("VM create failed");
+        let gic = Gic::new().expect("hv_gic_create failed — is macOS 15+?");
+        drop(gic);
+    }
+
+    #[test]
+    #[ignore]
+    fn gic_set_spi_does_not_error() {
+        let _vm = crate::HvVm::new().expect("VM create failed");
+        let gic = Gic::new().expect("GIC create failed");
+        // SPI 32 is the first usable SPI.
+        gic.set_spi(32, true).expect("set_spi assert failed");
+        gic.set_spi(32, false).expect("set_spi deassert failed");
+    }
+
+    #[test]
+    #[ignore]
+    fn gic_distributor_base_is_nonzero() {
+        let _vm = crate::HvVm::new().expect("VM create failed");
+        let gic = Gic::new().expect("GIC create failed");
+        let base = gic
+            .get_distributor_base()
+            .expect("get_distributor_base failed");
+        assert_ne!(base, 0, "GICD base should be nonzero");
+    }
+
+    #[test]
+    #[ignore]
+    fn gic_redistributor_base_requires_vcpu() {
+        let _vm = crate::HvVm::new().expect("VM create failed");
+        let gic = Gic::new().expect("GIC create failed");
+        let vcpu = crate::HvVcpu::new().expect("vCPU create failed");
+        let base = gic
+            .get_redistributor_base(vcpu.id())
+            .expect("get_redistributor_base failed");
+        assert_ne!(base, 0, "GICR base should be nonzero");
+    }
+
+    #[test]
+    #[ignore]
+    fn gic_save_and_restore_state() {
+        let _vm = crate::HvVm::new().expect("VM create failed");
+        let gic = Gic::new().expect("GIC create failed");
+        let _vcpu = crate::HvVcpu::new().expect("vCPU create failed");
+
+        let state = gic.save_state().expect("save_state failed");
+        assert!(!state.is_empty(), "saved GIC state should not be empty");
+        gic.restore_state(&state).expect("restore_state failed");
+    }
+}

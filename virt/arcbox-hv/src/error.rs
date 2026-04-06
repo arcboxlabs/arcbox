@@ -70,6 +70,10 @@ mod tests {
         assert_eq!(check(HV_ERROR), Err(HvError::Error));
         assert_eq!(check(HV_BUSY), Err(HvError::Busy));
         assert_eq!(check(HV_BAD_ARGUMENT), Err(HvError::BadArgument));
+        assert_eq!(
+            check(HV_ILLEGAL_GUEST_STATE),
+            Err(HvError::IllegalGuestState)
+        );
         assert_eq!(check(HV_NO_RESOURCES), Err(HvError::NoResources));
         assert_eq!(check(HV_NO_DEVICE), Err(HvError::NoDevice));
         assert_eq!(check(HV_DENIED), Err(HvError::Denied));

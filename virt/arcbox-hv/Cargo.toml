@@ -5,6 +5,12 @@ edition = "2024"
 description = "Safe Rust bindings for Apple Hypervisor.framework (ARM64)"
 license = "MIT OR Apache-2.0"
 
+[features]
+## Enable GICv3 APIs (hv_gic_*). Requires macOS 15+ SDK to link.
+## Without this feature, the `Gic` type is not available but the rest
+## of the crate (VM, vCPU, memory, exit parsing) works on macOS 11+.
+gic = []
+
 [dependencies]
 thiserror = "2"
 tracing = "0.1"

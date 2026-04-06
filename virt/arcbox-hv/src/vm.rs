@@ -87,6 +87,52 @@ impl HvVm {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Requires `com.apple.security.hypervisor` entitlement.
+    /// Run with: `cargo test -p arcbox-hv -- --ignored`
+    #[test]
+    #[ignore]
+    fn create_and_destroy_vm() {
+        let vm = HvVm::new().expect("hv_vm_create failed — is the entitlement set?");
+        drop(vm);
+    }
+
+    #[test]
+    #[ignore]
+    fn double_create_returns_busy() {
+        let _vm1 = HvVm::new().expect("first VM create failed");
+        let result = HvVm::new();
+        assert!(
+            result.is_err(),
+            "second VM create should fail with Busy or Error"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn map_and_unmap_memory() {
+        let vm = HvVm::new().expect("VM create failed");
+        let size = 4096;
+        let layout = std::alloc::Layout::from_size_align(size, 4096).unwrap();
+        // SAFETY: Layout is valid and non-zero.
+        let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+        assert!(!ptr.is_null());
+
+        // SAFETY: ptr is a valid 4KB-aligned allocation.
+        unsafe {
+            vm.map_memory(ptr, 0x4000_0000, size, MemoryPermission::READ_WRITE)
+                .expect("map failed");
+        }
+        vm.unmap_memory(0x4000_0000, size).expect("unmap failed");
+
+        // SAFETY: ptr was allocated with layout.
+        unsafe { std::alloc::dealloc(ptr, layout) };
+    }
+}
+
 impl Drop for HvVm {
     fn drop(&mut self) {
         // SAFETY: Destroying the VM is always valid when one exists. We own

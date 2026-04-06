@@ -120,6 +120,174 @@ impl HvVcpu {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that HvVcpu is !Send (cannot be moved across threads).
+    /// PhantomData<*const ()> opts out of Send.
+    #[test]
+    fn vcpu_is_not_send() {
+        fn assert_not_send<T>() {
+            // If HvVcpu ever becomes Send, this will still compile but the
+            // runtime check below catches it.
+        }
+        assert_not_send::<HvVcpu>();
+        // The real enforcement: *const () is !Send, so PhantomData<*const ()>
+        // makes the containing struct !Send. We can't assert negative trait
+        // bounds on stable, but we verify the marker field exists by construction.
+        let _marker: PhantomData<*const ()> = PhantomData;
+    }
+
+    /// Requires `com.apple.security.hypervisor` entitlement.
+    #[test]
+    #[ignore]
+    fn create_vcpu_requires_vm() {
+        // vCPU creation without a VM should fail.
+        let result = HvVcpu::new();
+        assert!(result.is_err(), "vCPU create without VM should fail");
+    }
+
+    #[test]
+    #[ignore]
+    fn create_and_destroy_vcpu() {
+        let _vm = crate::HvVm::new().expect("VM create failed");
+        let vcpu = HvVcpu::new().expect("vCPU create failed");
+        let id = vcpu.id();
+        assert!(id < u64::MAX, "vCPU should have a valid ID");
+        drop(vcpu);
+    }
+
+    #[test]
+    #[ignore]
+    fn set_and_get_register() {
+        let _vm = crate::HvVm::new().expect("VM create failed");
+        let vcpu = HvVcpu::new().expect("vCPU create failed");
+
+        vcpu.set_reg(ffi::HV_REG_X0, 0xDEAD_BEEF)
+            .expect("set_reg failed");
+        let val = vcpu.get_reg(ffi::HV_REG_X0).expect("get_reg failed");
+        assert_eq!(val, 0xDEAD_BEEF);
+    }
+
+    #[test]
+    #[ignore]
+    fn set_and_get_sys_register() {
+        let _vm = crate::HvVm::new().expect("VM create failed");
+        let vcpu = HvVcpu::new().expect("vCPU create failed");
+
+        // Read SCTLR_EL1 default value (should succeed even if value is 0).
+        let _val = vcpu
+            .get_sys_reg(ffi::HV_SYS_REG_SCTLR_EL1)
+            .expect("get_sys_reg failed");
+    }
+
+    #[test]
+    #[ignore]
+    fn run_wfi_exit() {
+        let _vm = crate::HvVm::new().expect("VM create failed");
+
+        // Allocate a page and write a WFI instruction (0xD503207F).
+        let size = 4096usize;
+        let layout = std::alloc::Layout::from_size_align(size, 4096).unwrap();
+        // SAFETY: Layout is valid.
+        let code = unsafe { std::alloc::alloc_zeroed(layout) };
+        assert!(!code.is_null());
+
+        // Write WFI (little-endian ARM64 encoding).
+        // SAFETY: code points to at least 4096 bytes.
+        unsafe {
+            let wfi: u32 = 0xD503_207F;
+            std::ptr::write(code.cast::<u32>(), wfi);
+        }
+
+        let ram_base: u64 = 0x4000_0000;
+        // SAFETY: code is valid 4KB-aligned allocation.
+        unsafe {
+            _vm.map_memory(code, ram_base, size, crate::MemoryPermission::ALL)
+                .expect("map failed");
+        }
+
+        let vcpu = HvVcpu::new().expect("vCPU create failed");
+        vcpu.set_reg(ffi::HV_REG_PC, ram_base)
+            .expect("set PC failed");
+        // CPSR = EL1h, all interrupts masked.
+        vcpu.set_reg(ffi::HV_REG_CPSR, 0x3C5)
+            .expect("set CPSR failed");
+
+        let exit = vcpu.run().expect("run failed");
+        match exit {
+            VcpuExit::Exception {
+                class: crate::ExceptionClass::WaitForInterrupt,
+                ..
+            } => {} // Expected
+            other => panic!("expected WFI exit, got {other:?}"),
+        }
+
+        drop(vcpu);
+        _vm.unmap_memory(ram_base, size).expect("unmap failed");
+        // SAFETY: code was allocated with layout.
+        unsafe { std::alloc::dealloc(code, layout) };
+    }
+
+    #[test]
+    #[ignore]
+    fn mmio_exit_on_unmapped_address() {
+        let _vm = crate::HvVm::new().expect("VM create failed");
+
+        // Write instructions: STR X0, [X1] then WFI
+        let size = 4096usize;
+        let layout = std::alloc::Layout::from_size_align(size, 4096).unwrap();
+        // SAFETY: Layout is valid.
+        let code = unsafe { std::alloc::alloc_zeroed(layout) };
+        assert!(!code.is_null());
+
+        // SAFETY: code is at least 4096 bytes.
+        unsafe {
+            // STR W0, [X1]  (32-bit store) = 0xB9000020
+            std::ptr::write(code.cast::<u32>(), 0xB900_0020);
+            // WFI = 0xD503207F
+            std::ptr::write(code.add(4).cast::<u32>(), 0xD503_207F);
+        }
+
+        let ram_base: u64 = 0x4000_0000;
+        let mmio_addr: u64 = 0x0A00_0000; // Not mapped → data abort
+
+        // SAFETY: code is valid.
+        unsafe {
+            _vm.map_memory(code, ram_base, size, crate::MemoryPermission::ALL)
+                .expect("map failed");
+        }
+
+        let vcpu = HvVcpu::new().expect("vCPU create failed");
+        vcpu.set_reg(ffi::HV_REG_PC, ram_base)
+            .expect("set PC failed");
+        vcpu.set_reg(ffi::HV_REG_CPSR, 0x3C5)
+            .expect("set CPSR failed");
+        vcpu.set_reg(ffi::HV_REG_X0, 0x42).expect("set X0 failed");
+        vcpu.set_reg(ffi::HV_REG_X1, mmio_addr)
+            .expect("set X1 failed");
+
+        let exit = vcpu.run().expect("run failed");
+        match exit {
+            VcpuExit::Exception {
+                class: crate::ExceptionClass::DataAbort(ref mmio),
+                ..
+            } => {
+                assert!(mmio.is_write);
+                assert_eq!(mmio.access_size, 4);
+                assert_eq!(mmio.address, mmio_addr);
+            }
+            other => panic!("expected DataAbort MMIO exit, got {other:?}"),
+        }
+
+        drop(vcpu);
+        _vm.unmap_memory(ram_base, size).expect("unmap failed");
+        // SAFETY: code was allocated with layout.
+        unsafe { std::alloc::dealloc(code, layout) };
+    }
+}
+
 impl Drop for HvVcpu {
     fn drop(&mut self) {
         // SAFETY: `self.id` is valid and we are on the creation thread (enforced

@@ -417,4 +417,122 @@ mod tests {
             other => panic!("expected SoftwareBreakpoint, got {other:?}"),
         }
     }
+
+    #[test]
+    fn parse_system_register_msr() {
+        // Encode MSR (write) for SCTLR_EL1: Op0=3 Op1=0 CRn=1 CRm=0 Op2=0, Rt=5
+        // ISS: direction=0 (write) at bit 0
+        //   bit [20:19] = Op0 = 3   → 0b11 << 19
+        //   bit [18:16] = Op2 = 0   → 0
+        //   bit [15:12] = CRn = 1   → 0b0001 << 12
+        //   bit [11:8]  = nothing (reserved)
+        //   bit [9:5]   = Rt = 5    → 5 << 5
+        //   bit [4:1]   = CRm = 0   → 0
+        //   bit [0]     = direction: 0 = write (MSR)
+        let iss: u64 = (3 << 20) | (0 << 17) | (1 << 10) | (5 << 5) | (0 << 1) | 0;
+        let syndrome = (u64::from(EC_SYS_REG) << 26) | iss;
+        let info = ffi::HvVcpuExitInfo {
+            reason: ffi::HV_EXIT_REASON_EXCEPTION,
+            exception: ffi::HvVcpuExitException {
+                syndrome,
+                virtual_address: 0,
+                physical_address: 0,
+            },
+        };
+        match parse_exit(&info) {
+            VcpuExit::Exception {
+                class:
+                    ExceptionClass::SystemRegister {
+                        op0,
+                        op1,
+                        crn,
+                        crm,
+                        op2,
+                        is_write,
+                        rt,
+                    },
+                ..
+            } => {
+                assert_eq!(op0, 3);
+                assert!(is_write); // MSR = write
+                assert_eq!(rt, 5);
+                // Verify crn/crm/op1/op2 are correctly extracted
+                assert_eq!(crn, 1);
+                assert_eq!(crm, 0);
+                assert_eq!(op1, 0);
+                assert_eq!(op2, 0);
+            }
+            other => panic!("expected SystemRegister, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_data_abort_8byte() {
+        // SAS=3 → 8-byte access
+        let syndrome = data_abort_syndrome(EC_DATA_ABORT_LOWER, 3, false, 0, false);
+        let info = ffi::HvVcpuExitInfo {
+            reason: ffi::HV_EXIT_REASON_EXCEPTION,
+            exception: ffi::HvVcpuExitException {
+                syndrome,
+                virtual_address: 0,
+                physical_address: 0x0a00_0100,
+            },
+        };
+        match parse_exit(&info) {
+            VcpuExit::Exception {
+                class: ExceptionClass::DataAbort(mmio),
+                ..
+            } => {
+                assert_eq!(mmio.access_size, 8);
+                assert!(!mmio.is_write);
+            }
+            other => panic!("expected DataAbort, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_data_abort_register_31_xzr() {
+        // Register 31 = XZR (zero register) on reads, SP on some contexts
+        let syndrome = data_abort_syndrome(EC_DATA_ABORT_LOWER, 2, true, 31, false);
+        let info = ffi::HvVcpuExitInfo {
+            reason: ffi::HV_EXIT_REASON_EXCEPTION,
+            exception: ffi::HvVcpuExitException {
+                syndrome,
+                virtual_address: 0,
+                physical_address: 0,
+            },
+        };
+        match parse_exit(&info) {
+            VcpuExit::Exception {
+                class: ExceptionClass::DataAbort(mmio),
+                ..
+            } => {
+                assert_eq!(mmio.register, 31);
+            }
+            other => panic!("expected DataAbort, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_unhandled_ec_falls_through() {
+        // EC=0x2F is not a known exception class
+        let syndrome = u64::from(0x2Fu8) << 26;
+        let info = ffi::HvVcpuExitInfo {
+            reason: ffi::HV_EXIT_REASON_EXCEPTION,
+            exception: ffi::HvVcpuExitException {
+                syndrome,
+                virtual_address: 0,
+                physical_address: 0,
+            },
+        };
+        match parse_exit(&info) {
+            VcpuExit::Exception {
+                class: ExceptionClass::Other(ec),
+                ..
+            } => {
+                assert_eq!(ec, 0x2f);
+            }
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
 }
