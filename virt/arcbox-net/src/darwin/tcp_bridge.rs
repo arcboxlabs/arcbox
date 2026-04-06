@@ -79,9 +79,9 @@ const SYN_GATE_CONNECT_TIMEOUT_SECS: u64 = 5;
 /// window, the stream is dropped.
 const PRE_CONNECTED_TTL_SECS: u64 = 10;
 
-/// Full four-tuple key for deduplicating SYN gate entries.
+/// Full four-tuple key for deduplicating SYN gate entries and fast-path lookup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct SynFlowKey {
+pub struct SynFlowKey {
     src_ip: Ipv4Addr,
     src_port: u16,
     dst_ip: Ipv4Addr,
@@ -160,6 +160,37 @@ pub struct TcpBridge {
     /// translated to `127.0.0.1` so they reach the host's loopback
     /// (enables `host.docker.internal` support).
     gateway_ip: Ipv4Addr,
+    /// Fast-path connections that bypass smoltcp for data transfer.
+    /// Keyed by (guest_src_ip, guest_src_port, dest_ip, dest_port).
+    fast_path_conns: HashMap<SynFlowKey, FastPathConn>,
+    /// Gateway MAC for constructing fast-path frames to the guest.
+    fast_path_gateway_mac: [u8; 6],
+    /// Guest MAC for constructing fast-path frames to the guest.
+    fast_path_guest_mac: Option<[u8; 6]>,
+}
+
+/// A TCP connection promoted to the fast path — bypasses smoltcp entirely
+/// for data transfer. smoltcp handled the initial 3-way handshake; data
+/// frames are now intercepted at `classify_ipv4` and relayed directly.
+struct FastPathConn {
+    /// Host-side TCP stream (std blocking — used from the sync datapath loop).
+    stream: std::net::TcpStream,
+    /// Our SEQ number for frames sent TO guest.
+    our_seq: u32,
+    /// Last ACK we sent to guest (= next SEQ we expect FROM guest).
+    last_ack: u32,
+    /// Remote IP as seen by the guest.
+    remote_ip: Ipv4Addr,
+    /// Guest IP.
+    guest_ip: Ipv4Addr,
+    /// Remote port as seen by the guest.
+    remote_port: u16,
+    /// Guest port.
+    guest_port: u16,
+    /// Read buffer for host → guest data (reused across polls).
+    read_buf: Vec<u8>,
+    /// True if host stream has reached EOF.
+    host_eof: bool,
 }
 
 impl TcpBridge {
@@ -174,7 +205,241 @@ impl TcpBridge {
             dns_log: None,
             proxy_env: None,
             gateway_ip,
+            fast_path_conns: HashMap::new(),
+            fast_path_gateway_mac: [0; 6],
+            fast_path_guest_mac: None,
         }
+    }
+
+    /// Updates the MAC addresses used for fast-path frame construction.
+    pub fn set_fast_path_macs(&mut self, gateway_mac: [u8; 6], guest_mac: [u8; 6]) {
+        self.fast_path_gateway_mac = gateway_mac;
+        self.fast_path_guest_mac = Some(guest_mac);
+    }
+
+    /// Checks if a TCP frame matches a fast-path connection.
+    ///
+    /// Called from `classify_ipv4` before the frame reaches smoltcp.
+    /// Returns `Some(ack_frame)` if the frame was handled (payload written
+    /// to host stream, ACK generated), or `None` if not a fast-path match.
+    pub fn try_fast_path_intercept(&mut self, frame: &[u8]) -> Option<Vec<u8>> {
+        if frame.len() < ETH_HEADER_LEN + 40 {
+            return None; // Too short for ETH + IP + TCP minimum
+        }
+
+        let ip_start = ETH_HEADER_LEN;
+        let protocol = frame[ip_start + 9];
+        if protocol != 6 {
+            return None; // Not TCP
+        }
+
+        let ihl = ((frame[ip_start] & 0x0F) as usize) * 4;
+        let l4_start = ip_start + ihl;
+        if frame.len() < l4_start + 20 {
+            return None;
+        }
+
+        let src_ip = Ipv4Addr::new(
+            frame[ip_start + 12],
+            frame[ip_start + 13],
+            frame[ip_start + 14],
+            frame[ip_start + 15],
+        );
+        let dst_ip = Ipv4Addr::new(
+            frame[ip_start + 16],
+            frame[ip_start + 17],
+            frame[ip_start + 18],
+            frame[ip_start + 19],
+        );
+        let src_port = u16::from_be_bytes([frame[l4_start], frame[l4_start + 1]]);
+        let dst_port = u16::from_be_bytes([frame[l4_start + 2], frame[l4_start + 3]]);
+        let flags = frame[l4_start + 13];
+
+        let key = SynFlowKey {
+            src_ip,
+            src_port,
+            dst_ip,
+            dst_port,
+        };
+
+        let conn = self.fast_path_conns.get_mut(&key)?;
+
+        // FIN or RST → teardown, let smoltcp handle it.
+        if flags & 0x01 != 0 || flags & 0x04 != 0 {
+            tracing::debug!(
+                "Fast path: FIN/RST on {src_ip}:{src_port} → {dst_ip}:{dst_port}, removing"
+            );
+            self.fast_path_conns.remove(&key);
+            return None; // Fall through to smoltcp for teardown.
+        }
+
+        // Extract payload.
+        let tcp_data_offset = ((frame[l4_start + 12] >> 4) as usize) * 4;
+        let payload_start = l4_start + tcp_data_offset;
+        let payload_len = if payload_start < frame.len() {
+            frame.len() - payload_start
+        } else {
+            0
+        };
+
+        // Write payload to host stream (if any).
+        if payload_len > 0 {
+            use std::io::Write;
+            let payload = &frame[payload_start..];
+            match conn.stream.write(payload) {
+                Ok(n) => {
+                    conn.last_ack = conn.last_ack.wrapping_add(n as u32);
+                    tracing::trace!(
+                        "Fast path TX: {src_ip}:{src_port}→{dst_ip}:{dst_port} {n} bytes"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("Fast path TX write error: {e}");
+                    self.fast_path_conns.remove(&key);
+                    return None;
+                }
+            }
+        }
+
+        // Generate ACK frame back to guest.
+        let guest_mac = self.fast_path_guest_mac.unwrap_or([0xFF; 6]);
+        let ack = crate::ethernet::build_tcp_ack_frame(&crate::ethernet::TcpFrameParams {
+            src_ip: conn.remote_ip,
+            dst_ip: conn.guest_ip,
+            src_port: conn.remote_port,
+            dst_port: conn.guest_port,
+            seq: conn.our_seq,
+            ack: conn.last_ack,
+            window: 65535,
+            src_mac: self.fast_path_gateway_mac,
+            dst_mac: guest_mac,
+        });
+
+        Some(ack)
+    }
+
+    /// Polls fast-path host streams for readable data and generates frames
+    /// to inject into the guest.
+    ///
+    /// Returns frames to be written to the guest FD via `enqueue_or_write`.
+    pub fn poll_fast_path(&mut self) -> Vec<Vec<u8>> {
+        let mut frames = Vec::new();
+        let mut to_remove = Vec::new();
+        let guest_mac = self.fast_path_guest_mac.unwrap_or([0xFF; 6]);
+        let gw_mac = self.fast_path_gateway_mac;
+
+        for (key, conn) in &mut self.fast_path_conns {
+            if conn.host_eof {
+                continue;
+            }
+
+            use std::io::Read;
+            match conn.stream.read(&mut conn.read_buf) {
+                Ok(0) => {
+                    // Host EOF — send FIN to guest.
+                    conn.host_eof = true;
+                    let fin =
+                        crate::ethernet::build_tcp_fin_frame(&crate::ethernet::TcpFrameParams {
+                            src_ip: conn.remote_ip,
+                            dst_ip: conn.guest_ip,
+                            src_port: conn.remote_port,
+                            dst_port: conn.guest_port,
+                            seq: conn.our_seq,
+                            ack: conn.last_ack,
+                            window: 65535,
+                            src_mac: gw_mac,
+                            dst_mac: guest_mac,
+                        });
+                    conn.our_seq = conn.our_seq.wrapping_add(1); // FIN consumes 1 SEQ
+                    frames.push(fin);
+                    to_remove.push(*key);
+                }
+                Ok(n) => {
+                    // Build data frame.
+                    let data_frame = crate::ethernet::build_tcp_data_frame(
+                        &crate::ethernet::TcpFrameParams {
+                            src_ip: conn.remote_ip,
+                            dst_ip: conn.guest_ip,
+                            src_port: conn.remote_port,
+                            dst_port: conn.guest_port,
+                            seq: conn.our_seq,
+                            ack: conn.last_ack,
+                            window: 65535,
+                            src_mac: gw_mac,
+                            dst_mac: guest_mac,
+                        },
+                        &conn.read_buf[..n],
+                    );
+                    conn.our_seq = conn.our_seq.wrapping_add(n as u32);
+                    frames.push(data_frame);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // No data available — expected for non-blocking.
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Fast path RX error {}:{} → {}:{}: {e}",
+                        conn.remote_ip,
+                        conn.remote_port,
+                        conn.guest_ip,
+                        conn.guest_port
+                    );
+                    to_remove.push(*key);
+                }
+            }
+        }
+
+        for key in to_remove {
+            self.fast_path_conns.remove(&key);
+        }
+
+        frames
+    }
+
+    /// Promotes a connection to the fast path.
+    ///
+    /// Called when a smoltcp connection reaches ESTABLISHED and has a
+    /// pre-connected host stream. The connection is removed from smoltcp
+    /// and data transfer bypasses the TCP state machine entirely.
+    pub fn promote_to_fast_path(
+        &mut self,
+        key: SynFlowKey,
+        stream: std::net::TcpStream,
+        our_seq: u32,
+        last_ack: u32,
+    ) {
+        // Set non-blocking for polling in the event loop.
+        stream.set_nonblocking(true).ok();
+        stream.set_nodelay(true).ok();
+
+        tracing::info!(
+            "Fast path: promoted {}:{} → {}:{} (seq={our_seq}, ack={last_ack})",
+            key.src_ip,
+            key.src_port,
+            key.dst_ip,
+            key.dst_port,
+        );
+
+        self.fast_path_conns.insert(
+            key,
+            FastPathConn {
+                stream,
+                our_seq,
+                last_ack,
+                remote_ip: key.dst_ip,
+                guest_ip: key.src_ip,
+                remote_port: key.dst_port,
+                guest_port: key.src_port,
+                read_buf: vec![0u8; 32768],
+                host_eof: false,
+            },
+        );
+    }
+
+    /// Returns the number of active fast-path connections.
+    #[must_use]
+    pub fn fast_path_count(&self) -> usize {
+        self.fast_path_conns.len()
     }
 
     /// Determines whether to connect via a proxy tunnel for the given destination.
