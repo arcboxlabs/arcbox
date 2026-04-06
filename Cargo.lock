@@ -623,6 +623,7 @@ version = "0.3.20"
 dependencies = [
  "arcbox-dns",
  "arcbox-error",
+ "arcbox-hv",
  "arcbox-hypervisor",
  "arcbox-net",
  "arcbox-virtio",

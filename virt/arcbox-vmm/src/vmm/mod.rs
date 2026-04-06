@@ -27,6 +27,8 @@ use arcbox_hypervisor::VmConfig;
 
 #[cfg(target_os = "macos")]
 mod darwin;
+#[cfg(target_os = "macos")]
+mod darwin_hv;
 #[cfg(target_os = "linux")]
 mod linux;
 
