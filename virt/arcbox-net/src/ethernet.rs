@@ -483,6 +483,61 @@ pub fn build_tcp_rst_frame(p: &TcpFrameParams) -> Vec<u8> {
     frame
 }
 
+/// Builds a TCP SYN-ACK frame for the 3-way handshake (no smoltcp).
+///
+/// Options: MSS + Window Scale + SACK Permitted (12 bytes, matching smoltcp).
+/// `p.seq` = our ISN, `p.ack` = guest ISN + 1.
+#[must_use]
+pub fn build_tcp_syn_ack_frame(p: &TcpFrameParams, mss: u16, wscale: u8) -> Vec<u8> {
+    let tcp_hdr_len = 32; // 20 + 12 bytes options
+    let ip_total_len = 20 + tcp_hdr_len;
+    let frame_len = ETH_HEADER_LEN + ip_total_len;
+    let mut frame = vec![0u8; frame_len];
+
+    frame[0..6].copy_from_slice(&p.dst_mac);
+    frame[6..12].copy_from_slice(&p.src_mac);
+    frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+
+    let ip = ETH_HEADER_LEN;
+    frame[ip] = 0x45;
+    frame[ip + 2..ip + 4].copy_from_slice(&(ip_total_len as u16).to_be_bytes());
+    frame[ip + 6..ip + 8].copy_from_slice(&0x4000u16.to_be_bytes());
+    frame[ip + 8] = 64;
+    frame[ip + 9] = 6;
+    frame[ip + 12..ip + 16].copy_from_slice(&p.src_ip.octets());
+    frame[ip + 16..ip + 20].copy_from_slice(&p.dst_ip.octets());
+    let ip_cksum = ipv4_header_checksum(&frame[ip..ip + 20]);
+    frame[ip + 10..ip + 12].copy_from_slice(&ip_cksum.to_be_bytes());
+
+    let tcp = ip + 20;
+    frame[tcp..tcp + 2].copy_from_slice(&p.src_port.to_be_bytes());
+    frame[tcp + 2..tcp + 4].copy_from_slice(&p.dst_port.to_be_bytes());
+    frame[tcp + 4..tcp + 8].copy_from_slice(&p.seq.to_be_bytes());
+    frame[tcp + 8..tcp + 12].copy_from_slice(&p.ack.to_be_bytes());
+    frame[tcp + 12] = 0x80; // Data offset: 8 (32 bytes)
+    frame[tcp + 13] = 0x12; // SYN | ACK
+    frame[tcp + 14..tcp + 16].copy_from_slice(&p.window.to_be_bytes());
+    // MSS
+    frame[tcp + 20] = 2;
+    frame[tcp + 21] = 4;
+    frame[tcp + 22..tcp + 24].copy_from_slice(&mss.to_be_bytes());
+    // Window Scale
+    frame[tcp + 24] = 3;
+    frame[tcp + 25] = 3;
+    frame[tcp + 26] = wscale;
+    // SACK Permitted
+    frame[tcp + 27] = 4;
+    frame[tcp + 28] = 2;
+    // NOP padding
+    frame[tcp + 29] = 0;
+    frame[tcp + 30] = 0;
+    frame[tcp + 31] = 0;
+
+    let tcp_cksum = tcp_checksum(p.src_ip, p.dst_ip, &frame[tcp..]);
+    frame[tcp + 16..tcp + 18].copy_from_slice(&tcp_cksum.to_be_bytes());
+    frame
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

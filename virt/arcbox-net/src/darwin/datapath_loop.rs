@@ -410,6 +410,11 @@ impl NetworkDatapath {
                 guest_mac,
             );
 
+            // Drain SYN frames from initiate_inbound.
+            for frame in tcp_bridge.pending_outbound_frames.drain(..) {
+                enqueue_or_write(&guest_async, FrameBuf::from(frame), &mut write_queue);
+            }
+
             // 2. smoltcp poll: processes injected SYN frames (from gate) +
             //    retransmissions + ACKs.
             let ts = smoltcp::time::Instant::now();
@@ -425,7 +430,8 @@ impl NetworkDatapath {
 
             // 5. Poll fast-path host streams for inbound data and inject
             //    constructed frames directly to guest (bypasses smoltcp).
-            for frame in tcp_bridge.poll_fast_path() {
+            let fp_frames = tcp_bridge.poll_fast_path();
+            for frame in fp_frames {
                 enqueue_or_write(&guest_async, FrameBuf::from(frame), &mut write_queue);
             }
 
@@ -501,15 +507,15 @@ fn handle_intercepted_frame(
 
 /// Processes one inbound command from `InboundListenerManager`.
 ///
-/// TCP accepted streams are bridged via smoltcp active-connect; UDP datagrams
+/// TCP accepted streams are bridged via direct SYN; UDP datagrams
 /// are routed through the socket proxy inbound path.
 #[allow(clippy::too_many_arguments)]
 fn process_inbound_cmd(
     cmd: InboundCommand,
     tcp_bridge: &mut TcpBridge,
     socket_proxy: &mut SocketProxy,
-    iface: &mut Interface,
-    sockets: &mut SocketSet<'_>,
+    _iface: &mut Interface,
+    _sockets: &mut SocketSet<'_>,
     guest_ip: Ipv4Addr,
     gateway_ip: Ipv4Addr,
     guest_mac: Option<[u8; 6]>,
@@ -523,7 +529,11 @@ fn process_inbound_cmd(
                 host_port,
                 stream.peer_addr().ok(),
             );
-            tcp_bridge.initiate_inbound(host_port, stream, guest_ip, gateway_ip, iface, sockets);
+            let syn = tcp_bridge.initiate_inbound(host_port, stream, guest_ip, gateway_ip);
+            // SYN frame is returned to caller for injection via enqueue_or_write.
+            // We can't write directly here because we don't have guest_async/write_queue.
+            // Store in tcp_bridge for later draining.
+            tcp_bridge.pending_outbound_frames.push(syn);
         }
         cmd @ InboundCommand::UdpReceived { .. } => {
             let mac = guest_mac.unwrap_or([0xFF; 6]);

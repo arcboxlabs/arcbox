@@ -24,3 +24,4 @@ tests/resources/boot-assets-arm64-*
 # Scratch notes
 perf-issue.md
 issues.net.md
+docs/audit.md
