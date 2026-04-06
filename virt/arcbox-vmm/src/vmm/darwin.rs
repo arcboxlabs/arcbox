@@ -337,6 +337,12 @@ impl Vmm {
 
         // 5. Build the datapath and spawn it on the tokio runtime.
 
+        // Use the enhanced MTU (4000) that we configured on the VZ device.
+        // On macOS < 14 where the setter is unavailable, the VZ device stays
+        // at 1500 and smoltcp will also use 1500 (the VZ side logs which case
+        // applied). Since we target macOS 14+ as P0, this is the common path.
+        let net_mtu = arcbox_net::darwin::smoltcp_device::ENHANCED_ETHERNET_MTU;
+
         let datapath = NetworkDatapath::new(
             host_fd,
             socket_proxy,
@@ -348,6 +354,7 @@ impl Vmm {
             guest_ip,
             gateway_mac,
             cancel,
+            net_mtu,
         );
 
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {

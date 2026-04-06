@@ -15,11 +15,15 @@ use std::os::unix::io::RawFd;
 ///
 /// This reduces frame count by ~2.7x vs the default 1500, directly reducing
 /// per-frame overhead through the entire smoltcp datapath.
-const VZ_NETWORK_MTU: u64 = 4000;
+/// The enhanced MTU value set on VZ network devices when the selector is
+/// available (macOS 14+). Exported so the VMM can pass it to the datapath.
+pub const VZ_NETWORK_MTU: u64 = 4000;
 
 /// Configuration for a `VirtIO` network device.
 pub struct NetworkDeviceConfiguration {
     inner: *mut AnyObject,
+    /// Actual MTU that was configured (4000 if setter succeeded, 1500 otherwise).
+    mtu: usize,
 }
 
 // SAFETY: Inner ObjC pointer is only used via msg_send! which dispatches to the ObjC runtime.
@@ -101,9 +105,37 @@ impl NetworkDeviceConfiguration {
 
             // Set MTU to reduce frame count through the datapath (~2.7x fewer
             // frames vs default 1500). Available since macOS 14 (Sonoma).
-            // On older macOS versions, the selector simply doesn't exist and
-            // the message is silently ignored (standard ObjC behavior).
-            msg_send_void_u64!(obj, setMaximumTransmissionUnit: VZ_NETWORK_MTU);
+            // On older macOS, the selector doesn't exist — we must check
+            // respondsToSelector: to avoid an unrecognized-selector crash.
+            // Check if the VZ config class supports the MTU setter (macOS 14+).
+            // msg_send_bool! doesn't support Sel arguments, so we dispatch manually.
+            let mtu_sel = objc2::sel!(setMaximumTransmissionUnit:);
+            let responds: bool = {
+                let check_sel = objc2::sel!(respondsToSelector:);
+                let func: unsafe extern "C" fn(
+                    *const objc2::runtime::AnyObject,
+                    objc2::runtime::Sel,
+                    objc2::runtime::Sel,
+                ) -> objc2::runtime::Bool = std::mem::transmute(
+                    crate::ffi::runtime::objc_msgSend as *const std::ffi::c_void,
+                );
+                func(
+                    obj as *const _ as *const objc2::runtime::AnyObject,
+                    check_sel,
+                    mtu_sel,
+                )
+                .as_bool()
+            };
+            let mtu = if responds {
+                msg_send_void_u64!(obj, setMaximumTransmissionUnit: VZ_NETWORK_MTU);
+                tracing::info!("VZ network MTU set to {VZ_NETWORK_MTU}");
+                VZ_NETWORK_MTU as usize
+            } else {
+                tracing::info!(
+                    "VZ network MTU setter unavailable (macOS < 14), using default 1500"
+                );
+                1500
+            };
 
             let mac = match mac_address {
                 Some(mac_address) => create_mac_address(mac_address)?,
@@ -113,8 +145,14 @@ impl NetworkDeviceConfiguration {
                 msg_send_void!(obj, setMACAddress: mac);
             }
 
-            Ok(Self { inner: obj })
+            Ok(Self { inner: obj, mtu })
         }
+    }
+
+    /// Returns the actual MTU that was configured (4000 or 1500).
+    #[must_use]
+    pub fn mtu(&self) -> usize {
+        self.mtu
     }
 
     /// Consumes the configuration and returns the raw pointer.

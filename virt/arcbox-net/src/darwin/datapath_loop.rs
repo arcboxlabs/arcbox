@@ -89,6 +89,8 @@ pub struct NetworkDatapath {
     pub guest_ip: Ipv4Addr,
     /// Cancellation token for graceful shutdown.
     pub cancel: CancellationToken,
+    /// Negotiated MTU (from VZ `setMaximumTransmissionUnit:` result).
+    pub mtu: usize,
 }
 
 impl NetworkDatapath {
@@ -109,6 +111,7 @@ impl NetworkDatapath {
         guest_ip: Ipv4Addr,
         gateway_mac: [u8; 6],
         cancel: CancellationToken,
+        mtu: usize,
     ) -> Self {
         Self {
             guest_fd,
@@ -122,6 +125,7 @@ impl NetworkDatapath {
             gateway_ip,
             guest_ip,
             cancel,
+            mtu,
         }
     }
 
@@ -146,13 +150,14 @@ impl NetworkDatapath {
             gateway_ip,
             guest_ip,
             cancel,
+            mtu,
         } = self;
 
         // Set guest_fd to non-blocking for AsyncFd.
         set_nonblocking(guest_fd.as_raw_fd())?;
 
         // Create the smoltcp device wrapping the guest socketpair FD.
-        let mut device = SmoltcpDevice::new(guest_fd.as_raw_fd(), gateway_ip);
+        let mut device = SmoltcpDevice::new(guest_fd.as_raw_fd(), gateway_ip, mtu);
 
         // Create the smoltcp Interface with the gateway's MAC and IP.
         let hw_addr = EthernetAddress(gateway_mac);
@@ -1045,7 +1050,7 @@ mod tests {
         let guest_mac_addr = [0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
 
         // Create smoltcp device and interface.
-        let mut device = SmoltcpDevice::new(host_fd.as_raw_fd(), gateway_ip);
+        let mut device = SmoltcpDevice::new(host_fd.as_raw_fd(), gateway_ip, 1500);
         let hw_addr = EthernetAddress(gateway_mac);
         let config = Config::new(hw_addr.into());
         let mut iface = Interface::new(config, &mut device, smoltcp::time::Instant::now());

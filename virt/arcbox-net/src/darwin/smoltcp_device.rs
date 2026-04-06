@@ -27,13 +27,14 @@ use crate::datapath::FrameBuf;
 use crate::datapath::pool::PacketPool;
 use crate::ethernet::ETH_HEADER_LEN;
 
-/// MTU for the Ethernet medium (excludes Ethernet header).
-///
-/// Set to 4000 to match the VZ framework `maximumTransmissionUnit` config.
-/// This reduces frame count by ~2.7x vs 1500, cutting per-frame overhead
-/// through the entire datapath (classification, smoltcp state machine,
-/// channel relay, write queue).
-const ETHERNET_MTU: usize = 4000;
+/// Default Ethernet MTU (excludes Ethernet header).
+/// Used as fallback when VZ `setMaximumTransmissionUnit:` is unavailable.
+#[cfg(test)]
+const DEFAULT_ETHERNET_MTU: usize = 1500;
+
+/// Enhanced MTU for VZ framework with `maximumTransmissionUnit` (macOS 14+).
+/// Reduces frame count by ~2.7x vs 1500.
+pub const ENHANCED_ETHERNET_MTU: usize = 4000;
 
 /// Maximum Ethernet frame size we handle.
 const MAX_FRAME_SIZE: usize = 65535;
@@ -99,6 +100,9 @@ pub struct SmoltcpDevice {
     read_buf: Vec<u8>,
     /// Pre-allocated packet pool for zero-alloc frame ownership.
     pool: Arc<PacketPool>,
+    /// Negotiated MTU (excludes Ethernet header). Set at construction time
+    /// based on whether the VZ `maximumTransmissionUnit` setter succeeded.
+    mtu: usize,
 }
 
 impl SmoltcpDevice {
@@ -107,7 +111,11 @@ impl SmoltcpDevice {
     const POOL_CAPACITY: usize = 4096;
 
     /// Creates a new device for the given socketpair FD.
-    pub fn new(fd: RawFd, gateway_ip: Ipv4Addr) -> Self {
+    ///
+    /// `mtu` should match the VZ device's configured MTU. Use
+    /// [`ENHANCED_ETHERNET_MTU`] (4000) when VZ `setMaximumTransmissionUnit:`
+    /// succeeded, or [`DEFAULT_ETHERNET_MTU`] (1500) otherwise.
+    pub fn new(fd: RawFd, gateway_ip: Ipv4Addr, mtu: usize) -> Self {
         // PacketPool::new only fails on zero capacity, which POOL_CAPACITY is not.
         let pool = Arc::new(PacketPool::new(Self::POOL_CAPACITY).expect("pool allocation"));
         Self {
@@ -119,6 +127,7 @@ impl SmoltcpDevice {
             gated_syns: Vec::new(),
             read_buf: vec![0u8; MAX_FRAME_SIZE],
             pool,
+            mtu,
         }
     }
 
@@ -356,7 +365,7 @@ impl Device for SmoltcpDevice {
     fn capabilities(&self) -> DeviceCapabilities {
         let mut caps = DeviceCapabilities::default();
         caps.medium = Medium::Ethernet;
-        caps.max_transmission_unit = ETHERNET_MTU;
+        caps.max_transmission_unit = self.mtu;
         caps.max_burst_size = Some(32);
         caps
     }
@@ -523,7 +532,7 @@ mod tests {
     #[test]
     fn classify_arp_goes_to_rx_queue() {
         let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
-        let mut device = SmoltcpDevice::new(0, gateway_ip);
+        let mut device = SmoltcpDevice::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
         let mut guest_mac = None;
 
         device.classify_frame(FrameBuf::from(make_arp_frame()), &mut guest_mac);
@@ -535,7 +544,7 @@ mod tests {
     #[test]
     fn classify_tcp_goes_to_rx_queue() {
         let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
-        let mut device = SmoltcpDevice::new(0, gateway_ip);
+        let mut device = SmoltcpDevice::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
         let mut guest_mac = None;
 
         device.classify_frame(FrameBuf::from(make_tcp_frame()), &mut guest_mac);
@@ -547,7 +556,7 @@ mod tests {
     #[test]
     fn classify_dhcp_intercepted() {
         let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
-        let mut device = SmoltcpDevice::new(0, gateway_ip);
+        let mut device = SmoltcpDevice::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
         let mut guest_mac = None;
 
         device.classify_frame(
@@ -563,7 +572,7 @@ mod tests {
     #[test]
     fn classify_dns_to_gateway_intercepted() {
         let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
-        let mut device = SmoltcpDevice::new(0, gateway_ip);
+        let mut device = SmoltcpDevice::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
         let mut guest_mac = None;
 
         device.classify_frame(
@@ -579,7 +588,7 @@ mod tests {
     #[test]
     fn classify_dns_to_external_is_udp() {
         let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
-        let mut device = SmoltcpDevice::new(0, gateway_ip);
+        let mut device = SmoltcpDevice::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
         let mut guest_mac = None;
 
         // DNS to 8.8.8.8 is regular UDP, not intercepted as DNS.
@@ -596,7 +605,7 @@ mod tests {
     #[test]
     fn classify_icmp_intercepted() {
         let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
-        let mut device = SmoltcpDevice::new(0, gateway_ip);
+        let mut device = SmoltcpDevice::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
         let mut guest_mac = None;
 
         device.classify_frame(FrameBuf::from(make_icmp_frame()), &mut guest_mac);
@@ -609,7 +618,7 @@ mod tests {
     #[test]
     fn classify_regular_udp_intercepted() {
         let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
-        let mut device = SmoltcpDevice::new(0, gateway_ip);
+        let mut device = SmoltcpDevice::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
         let mut guest_mac = None;
 
         device.classify_frame(
@@ -629,7 +638,7 @@ mod tests {
         set_nonblocking(host_fd.as_raw_fd());
 
         let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
-        let mut device = SmoltcpDevice::new(host_fd.as_raw_fd(), gateway_ip);
+        let mut device = SmoltcpDevice::new(host_fd.as_raw_fd(), gateway_ip, DEFAULT_ETHERNET_MTU);
         let mut guest_mac = None;
 
         // Write an ARP frame and a UDP frame via the guest side.
@@ -646,7 +655,7 @@ mod tests {
     #[test]
     fn tx_token_collects_frames() {
         let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
-        let mut device = SmoltcpDevice::new(0, gateway_ip);
+        let mut device = SmoltcpDevice::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
 
         let token = device.transmit(Instant::from_millis(0)).unwrap();
         token.consume(42, |buf| {
@@ -676,7 +685,7 @@ mod tests {
     #[test]
     fn classify_tcp_syn_is_gated() {
         let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
-        let mut device = SmoltcpDevice::new(0, gateway_ip);
+        let mut device = SmoltcpDevice::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
         let mut guest_mac = None;
 
         // Build a TCP SYN frame (flags = 0x02).
@@ -704,7 +713,7 @@ mod tests {
     #[test]
     fn classify_tcp_non_syn_goes_to_rx_queue() {
         let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
-        let mut device = SmoltcpDevice::new(0, gateway_ip);
+        let mut device = SmoltcpDevice::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
         let mut guest_mac = None;
 
         // Build a TCP ACK frame (flags = 0x10).
@@ -729,7 +738,7 @@ mod tests {
         let gateway_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01];
         let guest_mac = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
 
-        let mut device = SmoltcpDevice::new(0, gateway_ip);
+        let mut device = SmoltcpDevice::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
         assert!(device.rx_queue.is_empty());
 
         device.seed_gateway_neighbor(gateway_ip, gateway_mac, guest_mac);
