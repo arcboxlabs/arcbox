@@ -453,6 +453,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "arcbox-hv"
+version = "0.3.20"
+dependencies = [
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "arcbox-hypervisor"
 version = "0.3.21"
 dependencies = [
