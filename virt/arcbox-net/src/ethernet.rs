@@ -290,6 +290,199 @@ fn udp_checksum(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, udp_segment: &[u8]) -> u16 {
     if result == 0 { 0xFFFF } else { result }
 }
 
+/// Computes the TCP checksum over the pseudo-header + TCP segment.
+pub fn tcp_checksum(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, tcp_segment: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+
+    // Pseudo-header: src_ip(4) + dst_ip(4) + zero(1) + proto(1) + tcp_len(2)
+    let src = src_ip.octets();
+    let dst = dst_ip.octets();
+    sum += u32::from(u16::from_be_bytes([src[0], src[1]]));
+    sum += u32::from(u16::from_be_bytes([src[2], src[3]]));
+    sum += u32::from(u16::from_be_bytes([dst[0], dst[1]]));
+    sum += u32::from(u16::from_be_bytes([dst[2], dst[3]]));
+    sum += 6u32; // Protocol: TCP
+    sum += tcp_segment.len() as u32;
+
+    // TCP segment, treating checksum field (offset 16-17) as 0.
+    let mut i = 0;
+    while i + 1 < tcp_segment.len() {
+        if i != 16 {
+            sum += u32::from(u16::from_be_bytes([tcp_segment[i], tcp_segment[i + 1]]));
+        }
+        i += 2;
+    }
+    if i < tcp_segment.len() {
+        sum += u32::from(tcp_segment[i]) << 8;
+    }
+
+    while sum > 0xFFFF {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !sum as u16
+}
+
+/// Parameters for constructing TCP frames on the fast path.
+#[derive(Debug, Clone, Copy)]
+pub struct TcpFrameParams {
+    pub src_ip: Ipv4Addr,
+    pub dst_ip: Ipv4Addr,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub seq: u32,
+    pub ack: u32,
+    pub window: u16,
+    pub src_mac: [u8; 6],
+    pub dst_mac: [u8; 6],
+}
+
+/// Builds a TCP ACK frame (no payload) to acknowledge data from the guest.
+///
+/// Used by the TCP fast path to ACK guest data segments without going
+/// through smoltcp's TCP state machine.
+#[must_use]
+pub fn build_tcp_ack_frame(p: &TcpFrameParams) -> Vec<u8> {
+    let TcpFrameParams {
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+        seq,
+        ack,
+        window,
+        src_mac,
+        dst_mac,
+    } = *p;
+    // ACK frame: ETH(14) + IP(20) + TCP(20) = 54 bytes, no payload.
+    let tcp_hdr_len = 20;
+    let ip_total_len = 20 + tcp_hdr_len;
+    let frame_len = ETH_HEADER_LEN + ip_total_len;
+    let mut frame = vec![0u8; frame_len];
+
+    // -- Ethernet header --
+    frame[0..6].copy_from_slice(&dst_mac);
+    frame[6..12].copy_from_slice(&src_mac);
+    frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+
+    // -- IPv4 header --
+    let ip = ETH_HEADER_LEN;
+    frame[ip] = 0x45; // Version 4, IHL 5
+    frame[ip + 2..ip + 4].copy_from_slice(&(ip_total_len as u16).to_be_bytes());
+    frame[ip + 6..ip + 8].copy_from_slice(&0x4000u16.to_be_bytes()); // Don't Fragment
+    frame[ip + 8] = 64; // TTL
+    frame[ip + 9] = 6; // Protocol: TCP
+    frame[ip + 12..ip + 16].copy_from_slice(&src_ip.octets());
+    frame[ip + 16..ip + 20].copy_from_slice(&dst_ip.octets());
+    let ip_cksum = ipv4_header_checksum(&frame[ip..ip + 20]);
+    frame[ip + 10..ip + 12].copy_from_slice(&ip_cksum.to_be_bytes());
+
+    // -- TCP header (20 bytes, no options) --
+    let tcp = ip + 20;
+    frame[tcp..tcp + 2].copy_from_slice(&src_port.to_be_bytes());
+    frame[tcp + 2..tcp + 4].copy_from_slice(&dst_port.to_be_bytes());
+    frame[tcp + 4..tcp + 8].copy_from_slice(&seq.to_be_bytes());
+    frame[tcp + 8..tcp + 12].copy_from_slice(&ack.to_be_bytes());
+    frame[tcp + 12] = 0x50; // Data offset: 5 (20 bytes), no options
+    frame[tcp + 13] = 0x10; // Flags: ACK
+    frame[tcp + 14..tcp + 16].copy_from_slice(&window.to_be_bytes());
+    let tcp_cksum = tcp_checksum(src_ip, dst_ip, &frame[tcp..]);
+    frame[tcp + 16..tcp + 18].copy_from_slice(&tcp_cksum.to_be_bytes());
+
+    frame
+}
+
+/// Builds a TCP data frame carrying payload from the host to the guest.
+///
+/// Used by the TCP fast path to inject host TcpStream data into the guest
+/// without going through smoltcp's TCP state machine.
+#[must_use]
+pub fn build_tcp_data_frame(p: &TcpFrameParams, payload: &[u8]) -> Vec<u8> {
+    let TcpFrameParams {
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+        seq,
+        ack,
+        window,
+        src_mac,
+        dst_mac,
+    } = *p;
+
+    let tcp_hdr_len = 20;
+    let tcp_total_len = tcp_hdr_len + payload.len();
+    let ip_total_len = 20 + tcp_total_len;
+    let frame_len = ETH_HEADER_LEN + ip_total_len;
+    let mut frame = vec![0u8; frame_len];
+
+    // -- Ethernet header --
+    frame[0..6].copy_from_slice(&dst_mac);
+    frame[6..12].copy_from_slice(&src_mac);
+    frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+
+    // -- IPv4 header --
+    let ip = ETH_HEADER_LEN;
+    frame[ip] = 0x45;
+    frame[ip + 2..ip + 4].copy_from_slice(&(ip_total_len as u16).to_be_bytes());
+    frame[ip + 6..ip + 8].copy_from_slice(&0x4000u16.to_be_bytes()); // DF
+    frame[ip + 8] = 64; // TTL
+    frame[ip + 9] = 6; // TCP
+    frame[ip + 12..ip + 16].copy_from_slice(&src_ip.octets());
+    frame[ip + 16..ip + 20].copy_from_slice(&dst_ip.octets());
+    let ip_cksum = ipv4_header_checksum(&frame[ip..ip + 20]);
+    frame[ip + 10..ip + 12].copy_from_slice(&ip_cksum.to_be_bytes());
+
+    // -- TCP header --
+    let tcp = ip + 20;
+    frame[tcp..tcp + 2].copy_from_slice(&src_port.to_be_bytes());
+    frame[tcp + 2..tcp + 4].copy_from_slice(&dst_port.to_be_bytes());
+    frame[tcp + 4..tcp + 8].copy_from_slice(&seq.to_be_bytes());
+    frame[tcp + 8..tcp + 12].copy_from_slice(&ack.to_be_bytes());
+    frame[tcp + 12] = 0x50; // Data offset: 5
+    frame[tcp + 13] = 0x18; // Flags: ACK | PSH
+    frame[tcp + 14..tcp + 16].copy_from_slice(&window.to_be_bytes());
+
+    // -- Payload --
+    frame[tcp + 20..].copy_from_slice(payload);
+
+    // TCP checksum over header + payload.
+    let tcp_cksum = tcp_checksum(src_ip, dst_ip, &frame[tcp..]);
+    frame[tcp + 16..tcp + 18].copy_from_slice(&tcp_cksum.to_be_bytes());
+
+    frame
+}
+
+/// Builds a TCP FIN+ACK frame for connection teardown.
+#[must_use]
+pub fn build_tcp_fin_frame(p: &TcpFrameParams) -> Vec<u8> {
+    let mut ack_params = *p;
+    ack_params.window = 65535;
+    let mut frame = build_tcp_ack_frame(&ack_params);
+    // Change flags from ACK to FIN|ACK.
+    let tcp = ETH_HEADER_LEN + 20;
+    frame[tcp + 13] = 0x11; // FIN | ACK
+    // Recompute TCP checksum.
+    frame[tcp + 16..tcp + 18].copy_from_slice(&[0, 0]);
+    let tcp_cksum = tcp_checksum(p.src_ip, p.dst_ip, &frame[tcp..]);
+    frame[tcp + 16..tcp + 18].copy_from_slice(&tcp_cksum.to_be_bytes());
+    frame
+}
+
+/// Builds a TCP RST frame for connection abort.
+#[must_use]
+pub fn build_tcp_rst_frame(p: &TcpFrameParams) -> Vec<u8> {
+    let mut rst_params = *p;
+    rst_params.window = 0;
+    let mut frame = build_tcp_ack_frame(&rst_params);
+    // Change flags from ACK to RST|ACK.
+    let tcp = ETH_HEADER_LEN + 20;
+    frame[tcp + 13] = 0x14; // RST | ACK
+    frame[tcp + 16..tcp + 18].copy_from_slice(&[0, 0]);
+    let tcp_cksum = tcp_checksum(p.src_ip, p.dst_ip, &frame[tcp..]);
+    frame[tcp + 16..tcp + 18].copy_from_slice(&tcp_cksum.to_be_bytes());
+    frame
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,5 +646,91 @@ mod tests {
         // Verify UDP checksum is non-zero
         let udp_cksum = u16::from_be_bytes([udp[6], udp[7]]);
         assert_ne!(udp_cksum, 0);
+    }
+
+    fn make_tcp_params(
+        src_ip: [u8; 4],
+        dst_ip: [u8; 4],
+        src_port: u16,
+        dst_port: u16,
+        seq: u32,
+        ack: u32,
+    ) -> TcpFrameParams {
+        TcpFrameParams {
+            src_ip: Ipv4Addr::from(src_ip),
+            dst_ip: Ipv4Addr::from(dst_ip),
+            src_port,
+            dst_port,
+            seq,
+            ack,
+            window: 65535,
+            src_mac: [0x02, 0xAB, 0xCD, 0x00, 0x00, 0x01],
+            dst_mac: [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
+        }
+    }
+
+    /// Verify checksum: zero the field, recompute, compare to stored.
+    fn verify_tcp_checksum(frame: &[u8], src_ip: Ipv4Addr, dst_ip: Ipv4Addr) {
+        let tcp = 34;
+        let stored = u16::from_be_bytes([frame[tcp + 16], frame[tcp + 17]]);
+        assert_ne!(stored, 0);
+        let mut v = frame.to_vec();
+        v[tcp + 16] = 0;
+        v[tcp + 17] = 0;
+        assert_eq!(tcp_checksum(src_ip, dst_ip, &v[tcp..]), stored);
+    }
+
+    #[test]
+    fn test_tcp_ack_frame_structure() {
+        let p = make_tcp_params([1, 1, 1, 1], [10, 0, 2, 2], 443, 12345, 1000, 2000);
+        let frame = build_tcp_ack_frame(&p);
+
+        assert_eq!(frame.len(), 54);
+        assert_eq!(&frame[0..6], &p.dst_mac);
+        assert_eq!(&frame[6..12], &p.src_mac);
+        assert_eq!(frame[14 + 9], 6); // TCP protocol
+
+        let tcp = 34;
+        assert_eq!(u16::from_be_bytes([frame[tcp], frame[tcp + 1]]), 443);
+        assert_eq!(u16::from_be_bytes([frame[tcp + 2], frame[tcp + 3]]), 12345);
+        assert_eq!(frame[tcp + 13], 0x10); // ACK flag
+        verify_tcp_checksum(&frame, p.src_ip, p.dst_ip);
+    }
+
+    #[test]
+    fn test_tcp_data_frame_payload() {
+        let p = make_tcp_params([1, 1, 1, 1], [10, 0, 2, 2], 80, 54321, 5000, 6000);
+        let payload = b"Hello, world!";
+        let frame = build_tcp_data_frame(&p, payload);
+
+        assert_eq!(frame.len(), 54 + payload.len());
+        assert_eq!(&frame[54..], payload.as_slice());
+        assert_eq!(frame[34 + 13], 0x18); // ACK|PSH
+        verify_tcp_checksum(&frame, p.src_ip, p.dst_ip);
+    }
+
+    #[test]
+    fn test_tcp_fin_frame_flags() {
+        let p = make_tcp_params([10, 0, 2, 1], [10, 0, 2, 2], 80, 1234, 100, 200);
+        let frame = build_tcp_fin_frame(&p);
+        assert_eq!(frame.len(), 54);
+        assert_eq!(frame[34 + 13], 0x11); // FIN | ACK
+        verify_tcp_checksum(&frame, p.src_ip, p.dst_ip);
+    }
+
+    #[test]
+    fn test_tcp_rst_frame_flags() {
+        let p = make_tcp_params([10, 0, 2, 1], [10, 0, 2, 2], 80, 1234, 100, 200);
+        let frame = build_tcp_rst_frame(&p);
+        assert_eq!(frame.len(), 54);
+        assert_eq!(frame[34 + 13], 0x14); // RST | ACK
+        verify_tcp_checksum(&frame, p.src_ip, p.dst_ip);
+    }
+
+    #[test]
+    fn test_tcp_checksum_standalone() {
+        let p = make_tcp_params([192, 168, 1, 1], [192, 168, 1, 2], 80, 443, 0, 0);
+        let frame = build_tcp_ack_frame(&p);
+        verify_tcp_checksum(&frame, p.src_ip, p.dst_ip);
     }
 }

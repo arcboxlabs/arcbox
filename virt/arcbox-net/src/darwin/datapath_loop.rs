@@ -275,7 +275,18 @@ impl NetworkDatapath {
                     if prev_mac.is_none() {
                         if let Some(gmac) = guest_mac {
                             device.seed_gateway_neighbor(gateway_ip, gateway_mac, gmac);
+                            tcp_bridge.set_fast_path_macs(gateway_mac, gmac);
                         }
+                    }
+
+                    // Fast-path intercept: extract TCP data frames for established
+                    // fast-path connections BEFORE smoltcp sees them. This avoids
+                    // smoltcp's per-segment TCP state machine overhead.
+                    let fast_acks = device.drain_fast_path(|frame_data| {
+                        tcp_bridge.try_fast_path_intercept(frame_data)
+                    });
+                    for ack in fast_acks {
+                        enqueue_or_write(&guest_async, FrameBuf::from(ack), &mut write_queue);
                     }
 
                     // Process intercepted frames (DHCP, DNS, UDP, ICMP).
@@ -409,7 +420,13 @@ impl NetworkDatapath {
             let ts = smoltcp::time::Instant::now();
             iface.poll(ts, &mut device, &mut sockets);
 
-            // 5. Flush TX frames to guest.
+            // 5. Poll fast-path host streams for inbound data and inject
+            //    constructed frames directly to guest (bypasses smoltcp).
+            for frame in tcp_bridge.poll_fast_path() {
+                enqueue_or_write(&guest_async, FrameBuf::from(frame), &mut write_queue);
+            }
+
+            // 6. Flush TX frames to guest (from smoltcp).
             for frame in device.take_tx_pending() {
                 enqueue_or_write(&guest_async, frame, &mut write_queue);
             }
