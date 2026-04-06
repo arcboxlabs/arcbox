@@ -23,8 +23,8 @@ use std::sync::Arc;
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::time::Instant;
 
-use crate::datapath::FrameBuf;
 use crate::datapath::pool::PacketPool;
+use crate::datapath::FrameBuf;
 use crate::ethernet::ETH_HEADER_LEN;
 
 /// Default Ethernet MTU (excludes Ethernet header).
@@ -192,7 +192,7 @@ impl SmoltcpDevice {
         frame.extend_from_slice(&gateway_mac);
         frame.extend_from_slice(&guest_mac);
         frame.extend_from_slice(&[0x08, 0x06]); // EtherType: ARP
-        // ARP payload
+                                                // ARP payload
         frame.extend_from_slice(&[0x00, 0x01]); // Hardware type: Ethernet
         frame.extend_from_slice(&[0x08, 0x00]); // Protocol type: IPv4
         frame.push(6); // Hardware address length
@@ -486,7 +486,7 @@ mod tests {
         frame[0..6].copy_from_slice(&[0x02, 0x00, 0x00, 0x00, 0x00, 0x01]);
         frame[6..12].copy_from_slice(&guest_mac);
         frame[12..14].copy_from_slice(&[0x08, 0x00]); // IPv4
-        // IPv4 header
+                                                      // IPv4 header
         let ip = ETH_HEADER_LEN;
         frame[ip] = 0x45;
         frame[ip + 2..ip + 4].copy_from_slice(&40u16.to_be_bytes());
@@ -697,7 +697,7 @@ mod tests {
         let ip = ETH_HEADER_LEN;
         let l4 = ip + 20;
         frame[l4 + 13] = 0x02; // SYN flag
-        // Set src port = 12345, dst port = 443
+                               // Set src port = 12345, dst port = 443
         frame[l4..l4 + 2].copy_from_slice(&12345u16.to_be_bytes());
         frame[l4 + 2..l4 + 4].copy_from_slice(&443u16.to_be_bytes());
         // Set seq = 1000
