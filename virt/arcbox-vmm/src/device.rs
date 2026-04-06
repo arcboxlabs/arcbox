@@ -15,6 +15,11 @@ use crate::error::{Result, VmmError};
 use crate::irq::{Irq, IrqChip};
 use crate::memory::MemoryManager;
 
+/// Callback type for injecting interrupts into the VM.
+///
+/// Parameters: (irq_number, assert_level).
+type IrqCallback = Arc<dyn Fn(u32, bool) -> Result<()> + Send + Sync>;
+
 /// Device identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DeviceId(u32);
@@ -342,11 +347,28 @@ struct RegisteredDevice {
 }
 
 /// Manages devices attached to the VM.
+///
+/// # Safety
+///
+/// The `guest_ram_base` pointer is valid for the lifetime of the VM and
+/// synchronized through the vCPU exit/enter barrier. Access is serialized
+/// by the MMIO write handler which runs on the vCPU thread.
+// SAFETY: guest_ram_base is only set once via set_guest_memory and
+// accessed under the MMIO handler path which runs on the owning vCPU thread.
+unsafe impl Send for DeviceManager {}
+unsafe impl Sync for DeviceManager {}
+
 pub struct DeviceManager {
     devices: HashMap<DeviceId, RegisteredDevice>,
     next_id: u32,
     /// MMIO address to device mapping.
     mmio_map: HashMap<u64, DeviceId>,
+    /// Guest RAM base pointer for GPA→HVA translation (HV backend only).
+    guest_ram_base: Option<*mut u8>,
+    /// Guest RAM size.
+    guest_ram_size: usize,
+    /// IRQ trigger callback for injecting interrupts.
+    irq_callback: Option<IrqCallback>,
 }
 
 impl DeviceManager {
@@ -357,7 +379,54 @@ impl DeviceManager {
             devices: HashMap::new(),
             next_id: 0,
             mmio_map: HashMap::new(),
+            guest_ram_base: None,
+            guest_ram_size: 0,
+            irq_callback: None,
         }
+    }
+
+    /// Sets the guest memory reference for VirtQueue processing.
+    ///
+    /// # Safety
+    ///
+    /// The pointer must remain valid for the lifetime of the DeviceManager.
+    pub unsafe fn set_guest_memory(&mut self, base: *mut u8, size: usize) {
+        self.guest_ram_base = Some(base);
+        self.guest_ram_size = size;
+    }
+
+    /// Sets the IRQ trigger callback.
+    pub fn set_irq_callback(&mut self, callback: IrqCallback) {
+        self.irq_callback = Some(callback);
+    }
+
+    /// Builds a GuestMemoryVirtQueue from the current MMIO state for a device.
+    ///
+    /// Will be called by device-specific queue processing handlers once
+    /// individual VirtIO device processing is wired up.
+    #[allow(dead_code)]
+    fn build_guest_queue(
+        &self,
+        mmio_state: &VirtioMmioState,
+        queue_idx: u16,
+    ) -> Option<arcbox_virtio::queue_guest::GuestMemoryVirtQueue> {
+        let qi = queue_idx as usize;
+        if qi >= 8 || !mmio_state.queue_ready[qi] {
+            return None;
+        }
+        let ram_base = self.guest_ram_base?;
+        // SAFETY: ram_base validity is guaranteed by set_guest_memory caller.
+        Some(unsafe {
+            arcbox_virtio::queue_guest::GuestMemoryVirtQueue::new(
+                queue_idx,
+                mmio_state.queue_num[qi],
+                mmio_state.queue_desc[qi],
+                mmio_state.queue_driver[qi],
+                mmio_state.queue_device[qi],
+                ram_base,
+                self.guest_ram_size,
+            )
+        })
     }
 
     /// Registers a new device.
@@ -738,8 +807,27 @@ impl DeviceManager {
                     }
                 }
                 virtio_mmio::regs::QUEUE_NOTIFY => {
-                    // Guest notified a queue - this would trigger async processing
-                    tracing::trace!("Device {} queue {} notified", device_id.0, value32);
+                    let queue_idx = value32 as u16;
+                    tracing::trace!("Device {} queue {} notified", device_id.0, queue_idx);
+
+                    // Inject interrupt if device has processed something
+                    if let Some(irq) = device.info.irq {
+                        if let Some(state) = &device.mmio_state {
+                            let mut s = state.write().map_err(|e| {
+                                VmmError::Device(format!("Failed to lock device state: {e}"))
+                            })?;
+                            s.trigger_interrupt(1); // VIRTIO_MMIO_INT_VRING
+                        }
+                        // Signal the GIC
+                        if let Some(ref callback) = self.irq_callback {
+                            if let Err(e) = callback(irq, true) {
+                                tracing::warn!(
+                                    "IRQ injection for device {} failed: {e}",
+                                    device_id.0
+                                );
+                            }
+                        }
+                    }
                 }
                 _ => {}
             }

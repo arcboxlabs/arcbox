@@ -50,6 +50,8 @@ pub mod error;
 pub mod fs;
 pub mod net;
 pub mod queue;
+pub mod queue_guest;
+pub mod rng;
 pub mod vsock;
 
 pub use error::{Result, VirtioError};
