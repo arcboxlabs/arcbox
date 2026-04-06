@@ -337,10 +337,15 @@ impl Vmm {
 
         // 5. Build the datapath and spawn it on the tokio runtime.
 
-        // Use the enhanced MTU (4000) that we configured on the VZ device.
-        // On macOS < 14 where the setter is unavailable, the VZ device stays
-        // at 1500 and smoltcp will also use 1500 (the VZ side logs which case
-        // applied). Since we target macOS 14+ as P0, this is the common path.
+        // NOTE(MTU): Hardcoded to 4000 intentionally — our platform target is
+        // macOS 14+ Apple Silicon (P0) where VZ's setMaximumTransmissionUnit:
+        // always succeeds. On macOS <14 the VZ setter is skipped via
+        // respondsToSelector: (see arcbox-vz/device/network.rs), and the VZ
+        // device stays at 1500 while smoltcp gets 4000. This mismatch would
+        // cause frames >1500 to be dropped — acceptable since macOS <14 is not
+        // a supported target. If macOS <13 support is ever needed, plumb the
+        // actual MTU from NetworkDeviceConfiguration::mtu() through the
+        // hypervisor abstraction layer.
         let net_mtu = arcbox_net::darwin::smoltcp_device::ENHANCED_ETHERNET_MTU;
 
         let datapath = NetworkDatapath::new(
