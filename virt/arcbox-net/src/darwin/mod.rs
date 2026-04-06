@@ -48,6 +48,7 @@ pub mod proxy_tunnel;
 pub mod smoltcp_device;
 pub mod socket_proxy;
 pub mod tcp_bridge;
+pub mod tso_backend;
 pub mod tun;
 pub mod vmnet;
 pub mod vmnet_ffi;
