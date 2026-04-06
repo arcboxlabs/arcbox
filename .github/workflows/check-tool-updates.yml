@@ -31,110 +31,15 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          set -euo pipefail
-
-          LOCKFILE="assets.lock"
-          UPDATES=""
-
-          # --------------- helpers ---------------
-
-          current_ver() {
-            awk -v t="$1" '
-              /^\[\[tools\]\]/ { b=1; n=""; next }
-              b && /^name/     { gsub(/"/, "", $3); n=$3 }
-              b && /^version/ && n==t { gsub(/"/, "", $3); print $3; exit }
-            ' "$LOCKFILE"
-          }
-
-          gh_latest() {
-            gh api "repos/$1/releases/latest" --jq '.tag_name | ltrimstr("v")'
-          }
-
-          sha_url() {
-            curl -fsSL --retry 3 "$1" | sha256sum | awk '{print $1}'
-          }
-
-          # Update version + checksums for a tool in assets.lock.
-          # Usage: update_entry <name> <version> <arm64_sha> <x86_sha>
-          update_entry() {
-            python3 -c "
-          import re, sys
-          name, ver, arm, x86 = sys.argv[1:5]
-          text = open('assets.lock').read()
-          pat = (
-              r'(\[\[tools\]\]\nname = \"' + re.escape(name) + r'\"\ngroup = \"[^\"]+\"\n)'
-              r'version = \"[^\"]+\"\n'
-              r'arch\.arm64\.sha256 = \"[^\"]+\"\n'
-              r'arch\.x86_64\.sha256 = \"[^\"]+\"'
-          )
-          repl = rf'\g<1>version = \"{ver}\"\narch.arm64.sha256 = \"{arm}\"\narch.x86_64.sha256 = \"{x86}\"'
-          text, n = re.subn(pat, repl, text)
-          if n != 1:
-              print(f'ERROR: expected 1 replacement for {name}, got {n}', file=sys.stderr)
-              sys.exit(1)
-          open('assets.lock', 'w').write(text)
-          " "$1" "$2" "$3" "$4"
-          }
-
-          # --------------- check each tool ---------------
-
-          check_tool() {
-            local name="$1" cur="$2" new="$3" arm_url="$4" x86_url="$5"
-            if [ "$cur" = "$new" ]; then
-              echo "  $name: $cur (up to date)"
-              return
-            fi
-            echo "  $name: $cur → $new  (downloading checksums…)"
-            local arm_sha x86_sha
-            arm_sha=$(sha_url "$arm_url")
-            x86_sha=$(sha_url "$x86_url")
-            update_entry "$name" "$new" "$arm_sha" "$x86_sha"
-            UPDATES="${UPDATES}- \`${name}\`: ${cur} → ${new}\n"
-          }
-
-          # Docker CLI / dockerd
-          CUR=$(current_ver docker)
-          NEW=$(gh_latest moby/moby)
-          check_tool docker "$CUR" "$NEW" \
-            "https://download.docker.com/mac/static/stable/aarch64/docker-${NEW}.tgz" \
-            "https://download.docker.com/mac/static/stable/x86_64/docker-${NEW}.tgz"
-
-          # Buildx
-          CUR=$(current_ver docker-buildx)
-          NEW=$(gh_latest docker/buildx)
-          check_tool docker-buildx "$CUR" "$NEW" \
-            "https://github.com/docker/buildx/releases/download/v${NEW}/buildx-v${NEW}.darwin-arm64" \
-            "https://github.com/docker/buildx/releases/download/v${NEW}/buildx-v${NEW}.darwin-amd64"
-
-          # Compose
-          CUR=$(current_ver docker-compose)
-          NEW=$(gh_latest docker/compose)
-          check_tool docker-compose "$CUR" "$NEW" \
-            "https://github.com/docker/compose/releases/download/v${NEW}/docker-compose-darwin-aarch64" \
-            "https://github.com/docker/compose/releases/download/v${NEW}/docker-compose-darwin-x86_64"
-
-          # Credential helper
-          CUR=$(current_ver docker-credential-osxkeychain)
-          NEW=$(gh_latest docker/docker-credential-helpers)
-          check_tool docker-credential-osxkeychain "$CUR" "$NEW" \
-            "https://github.com/docker/docker-credential-helpers/releases/download/v${NEW}/docker-credential-osxkeychain-v${NEW}.darwin-arm64" \
-            "https://github.com/docker/docker-credential-helpers/releases/download/v${NEW}/docker-credential-osxkeychain-v${NEW}.darwin-amd64"
-
-          # kubectl
-          CUR=$(current_ver kubectl)
-          NEW=$(curl -fsSL https://dl.k8s.io/release/stable.txt | sed 's/^v//')
-          check_tool kubectl "$CUR" "$NEW" \
-            "https://dl.k8s.io/release/v${NEW}/bin/darwin/arm64/kubectl" \
-            "https://dl.k8s.io/release/v${NEW}/bin/darwin/amd64/kubectl"
-
-          # --------------- output ---------------
-
-          if [ -n "$UPDATES" ]; then
+          if python3 scripts/check-tool-updates.py > /tmp/updates.txt; then
             echo "has_updates=true" >> "$GITHUB_OUTPUT"
-            printf '%b' "$UPDATES" > /tmp/updates.txt
           else
-            echo "has_updates=false" >> "$GITHUB_OUTPUT"
-            echo "All tools are up to date."
+            exit_code=$?
+            if [ $exit_code -eq 2 ]; then
+              echo "has_updates=false" >> "$GITHUB_OUTPUT"
+            else
+              exit $exit_code
+            fi
           fi
 
       - name: Create pull request
@@ -149,7 +54,6 @@ jobs:
           git add assets.lock
           git commit -m "chore(tools): bump Docker toolchain to latest stable versions"
           git push -u origin "$BRANCH"
-
           gh pr create \
             --title "chore(tools): bump Docker toolchain to latest stable versions" \
-            --body "$(printf '## Summary\n\n%s\nChecksums verified by downloading binaries and computing SHA-256.\n\n> Auto-generated by `check-tool-updates` workflow.' "$(cat /tmp/updates.txt)")"
+            --body "$(printf '## Summary\n\n%s\n\nChecksums verified by downloading binaries and computing SHA-256.\n\n> Auto-generated by `check-tool-updates` workflow.' "$(cat /tmp/updates.txt)")"
