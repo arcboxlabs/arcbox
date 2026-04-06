@@ -111,7 +111,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "arcbox"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "arcbox-container",
  "arcbox-core",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-agent"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "anyhow",
  "arcbox-constants",
@@ -161,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-api"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "arcbox-core",
  "arcbox-docker",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-asset"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -210,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-cli"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "anyhow",
  "arcbox-asset",
@@ -224,6 +224,7 @@ dependencies = [
  "clap_complete",
  "crossterm",
  "dirs",
+ "hex",
  "humantime",
  "hyper-util",
  "libc",
@@ -231,6 +232,7 @@ dependencies = [
  "sentry",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -241,14 +243,14 @@ dependencies = [
 
 [[package]]
 name = "arcbox-constants"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "dirs",
 ]
 
 [[package]]
 name = "arcbox-container"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "arcbox-error",
  "async-trait",
@@ -262,7 +264,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-core"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "arcbox-boot",
  "arcbox-constants",
@@ -301,7 +303,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-daemon"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "anyhow",
  "arcbox-api",
@@ -333,7 +335,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-dhcp"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "thiserror",
  "tracing",
@@ -341,14 +343,14 @@ dependencies = [
 
 [[package]]
 name = "arcbox-dns"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "arcbox-docker"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "arcbox-core",
  "arcbox-error",
@@ -380,7 +382,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-docker-tools"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "arcbox-asset",
  "flate2",
@@ -396,14 +398,14 @@ dependencies = [
 
 [[package]]
 name = "arcbox-error"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "arcbox-fs"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "arcbox-error",
  "arcbox-virtio",
@@ -419,7 +421,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-grpc"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "arcbox-protocol",
  "prost",
@@ -433,7 +435,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-helper"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "arcbox-constants",
  "arcbox-logging",
@@ -460,7 +462,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-hypervisor"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "arcbox-error",
  "arcbox-vz",
@@ -480,7 +482,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-logging"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "parking_lot",
  "sentry",
@@ -492,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-migration"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "dirs",
  "serde",
@@ -505,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-net"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "arcbox-dhcp",
  "arcbox-dns",
@@ -531,7 +533,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-oci"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "arcbox-error",
  "chrono",
@@ -546,7 +548,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-protocol"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "prost",
  "prost-build",
@@ -559,7 +561,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-route"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "libc",
  "tracing",
@@ -567,7 +569,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-transport"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "arcbox-constants",
  "arcbox-error",
@@ -583,7 +585,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-virtio"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "arcbox-error",
  "arcbox-hypervisor",
@@ -599,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-vm"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "anyhow",
  "chrono",
@@ -619,7 +621,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-vmm"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "arcbox-dns",
  "arcbox-error",
@@ -644,7 +646,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-vz"
-version = "0.3.20"
+version = "0.3.21"
 dependencies = [
  "libc",
  "objc2",
