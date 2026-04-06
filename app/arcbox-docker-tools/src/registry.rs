@@ -91,38 +91,38 @@ mod tests {
 
     #[test]
     fn docker_url_arm64() {
-        let url = download_url("docker", "27.5.1", "arm64");
+        let url = download_url("docker", "28.5.2", "arm64");
         assert_eq!(
             url,
-            "https://download.docker.com/mac/static/stable/aarch64/docker-27.5.1.tgz"
+            "https://download.docker.com/mac/static/stable/aarch64/docker-28.5.2.tgz"
         );
     }
 
     #[test]
     fn docker_url_x86() {
-        let url = download_url("docker", "27.5.1", "x86_64");
+        let url = download_url("docker", "28.5.2", "x86_64");
         assert_eq!(
             url,
-            "https://download.docker.com/mac/static/stable/x86_64/docker-27.5.1.tgz"
+            "https://download.docker.com/mac/static/stable/x86_64/docker-28.5.2.tgz"
         );
     }
 
     #[test]
     fn buildx_url() {
-        let url = download_url("docker-buildx", "0.21.1", "arm64");
-        assert!(url.contains("buildx-v0.21.1.darwin-arm64"));
+        let url = download_url("docker-buildx", "0.33.0", "arm64");
+        assert!(url.contains("buildx-v0.33.0.darwin-arm64"));
     }
 
     #[test]
     fn compose_url() {
-        let url = download_url("docker-compose", "2.33.1", "arm64");
+        let url = download_url("docker-compose", "5.1.1", "arm64");
         assert!(url.contains("docker-compose-darwin-aarch64"));
     }
 
     #[test]
     fn credential_url() {
-        let url = download_url("docker-credential-osxkeychain", "0.9.1", "x86_64");
-        assert!(url.contains("docker-credential-osxkeychain-v0.9.1.darwin-amd64"));
+        let url = download_url("docker-credential-osxkeychain", "0.9.5", "x86_64");
+        assert!(url.contains("docker-credential-osxkeychain-v0.9.5.darwin-amd64"));
     }
 
     #[test]
