@@ -21,10 +21,10 @@ use crate::error::{FsError, Result};
 use crate::fuse::{
     FATTR_ATIME, FATTR_GID, FATTR_MODE, FATTR_MTIME, FATTR_SIZE, FATTR_UID,
     FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION, FuseAccessIn, FuseAttr, FuseAttrOut,
-    FuseCreateIn, FuseDirent, FuseEntryOut, FuseFallocateIn, FuseFlushIn, FuseForgetIn,
-    FuseFsyncIn, FuseGetxattrIn, FuseGetxattrOut, FuseInHeader, FuseInitIn, FuseInitOut,
-    FuseLinkIn, FuseLseekIn, FuseLseekOut, FuseMkdirIn, FuseMknodIn, FuseOpcode, FuseOpenIn,
-    FuseOpenOut, FuseOutHeader, FuseReadIn, FuseReleaseIn, FuseRenameIn, FuseSetattrIn,
+    FuseCreateIn, FuseDirent, FuseDirentplus, FuseEntryOut, FuseFallocateIn, FuseFlushIn,
+    FuseForgetIn, FuseFsyncIn, FuseGetxattrIn, FuseGetxattrOut, FuseInHeader, FuseInitIn,
+    FuseInitOut, FuseLinkIn, FuseLseekIn, FuseLseekOut, FuseMkdirIn, FuseMknodIn, FuseOpcode,
+    FuseOpenIn, FuseOpenOut, FuseOutHeader, FuseReadIn, FuseReleaseIn, FuseRenameIn, FuseSetattrIn,
     FuseSetxattrIn, FuseStatfsOut, FuseWriteIn, FuseWriteOut,
 };
 use crate::passthrough::PassthroughFs;
@@ -255,6 +255,7 @@ impl FuseDispatcher {
             FuseOpcode::Flush => self.handle_flush(&ctx, body, &mut response),
             FuseOpcode::Opendir => self.handle_opendir(&ctx, body, &mut response),
             FuseOpcode::Readdir => self.handle_readdir(&ctx, body, &mut response),
+            FuseOpcode::Readdirplus => self.handle_readdirplus(&ctx, body, &mut response),
             FuseOpcode::Releasedir => self.handle_releasedir(&ctx, body, &mut response),
             FuseOpcode::Fsyncdir => self.handle_fsyncdir(&ctx, body, &mut response),
             FuseOpcode::Access => self.handle_access(&ctx, body, &mut response),
@@ -828,6 +829,85 @@ impl FuseDispatcher {
                 }
 
                 response.write_bytes(ctx.unique, &dirent_buf);
+            }
+            Err(e) => response.write_error(ctx.unique, e.to_errno()),
+        }
+    }
+
+    /// Handles READDIRPLUS — returns directory entries with full attributes.
+    ///
+    /// Each entry includes a `FuseEntryOut` (lookup result) alongside the dirent,
+    /// eliminating separate lookup round-trips per entry. Entries whose attributes
+    /// cannot be resolved are silently skipped (the kernel will issue individual
+    /// lookups for them).
+    fn handle_readdirplus(
+        &self,
+        ctx: &RequestContext,
+        body: &[u8],
+        response: &mut ResponseBuilder,
+    ) {
+        if body.len() < size_of::<FuseReadIn>() {
+            response.write_error(ctx.unique, libc::EINVAL);
+            return;
+        }
+
+        // SAFETY: FuseReadIn may sit at an unaligned offset in the VirtIO buffer.
+        let read_in = unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseReadIn) };
+
+        match self.fs.readdir(read_in.fh, read_in.offset) {
+            Ok(entries) => {
+                let mut buf = Vec::new();
+                let mut offset = read_in.offset + 1;
+
+                for entry in entries {
+                    let name_bytes = entry.name.as_bytes();
+                    let entry_size = FuseDirentplus::size(name_bytes.len());
+
+                    if buf.len() + entry_size > read_in.size as usize {
+                        break;
+                    }
+
+                    // Look up full attributes for the entry. On failure, skip
+                    // the entry — the kernel falls back to a separate lookup.
+                    let entry_out = match self.fs.lookup(ctx.nodeid, OsStr::from_bytes(name_bytes))
+                    {
+                        Ok((inode, attr)) => self.make_entry_out(inode, &attr),
+                        Err(_) => {
+                            offset += 1;
+                            continue;
+                        }
+                    };
+
+                    let dirent = FuseDirent {
+                        ino: entry.ino,
+                        off: offset,
+                        namelen: name_bytes.len() as u32,
+                        typ: entry.file_type.to_dirent_type(),
+                    };
+
+                    let direntplus = FuseDirentplus { entry_out, dirent };
+
+                    // Write direntplus header.
+                    // SAFETY: FuseDirentplus is #[repr(C)] with no padding holes.
+                    let header_bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            std::ptr::from_ref::<FuseDirentplus>(&direntplus) as *const u8,
+                            size_of::<FuseDirentplus>(),
+                        )
+                    };
+                    buf.extend_from_slice(header_bytes);
+
+                    // Write name.
+                    buf.extend_from_slice(name_bytes);
+
+                    // Pad to 8-byte boundary.
+                    let padding = entry_size - size_of::<FuseDirentplus>() - name_bytes.len();
+                    buf.extend(std::iter::repeat_n(0u8, padding));
+
+                    offset += 1;
+                }
+
+                response.write_bytes(ctx.unique, &buf);
             }
             Err(e) => response.write_error(ctx.unique, e.to_errno()),
         }
