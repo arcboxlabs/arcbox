@@ -1346,7 +1346,7 @@ mod tests {
 
     #[test]
     fn ensure_listen_sockets_creates_on_demand() {
-        let mut device = SmoltcpDevice::new(0, GW_IP);
+        let mut device = SmoltcpDevice::new(0, GW_IP, 1500);
         let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
         let mut bridge = TcpBridge::new(GW_IP);
 
@@ -1379,7 +1379,7 @@ mod tests {
 
     #[test]
     fn ensure_listen_sockets_deduplicates() {
-        let mut device = SmoltcpDevice::new(0, GW_IP);
+        let mut device = SmoltcpDevice::new(0, GW_IP, 1500);
         let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
         let mut bridge = TcpBridge::new(GW_IP);
 
@@ -1399,7 +1399,7 @@ mod tests {
 
     #[test]
     fn smoltcp_accepts_syn_with_listen_socket() {
-        let mut device = SmoltcpDevice::new(0, GW_IP);
+        let mut device = SmoltcpDevice::new(0, GW_IP, 1500);
         let (mut iface, mut sockets) = make_iface_and_sockets(&mut device);
         let mut bridge = TcpBridge::new(GW_IP);
 
@@ -1463,7 +1463,7 @@ mod tests {
 
     #[test]
     fn partial_send_preserves_remainder() {
-        let mut device = SmoltcpDevice::new(0, GW_IP);
+        let mut device = SmoltcpDevice::new(0, GW_IP, 1500);
         let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
 
         // Create a socket with a tiny tx buffer to force partial sends.
@@ -1510,7 +1510,7 @@ mod tests {
 
     #[test]
     fn host_eof_waits_for_pending_send() {
-        let mut device = SmoltcpDevice::new(0, GW_IP);
+        let mut device = SmoltcpDevice::new(0, GW_IP, 1500);
         let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
 
         let rx_buf = tcp::SocketBuffer::new(vec![0u8; 64]);
@@ -1551,7 +1551,7 @@ mod tests {
 
     #[test]
     fn cleanup_removes_stale_port_handles() {
-        let mut device = SmoltcpDevice::new(0, GW_IP);
+        let mut device = SmoltcpDevice::new(0, GW_IP, 1500);
         let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
         let mut bridge = TcpBridge::new(GW_IP);
 
@@ -1600,7 +1600,7 @@ mod tests {
 
     #[test]
     fn guest_eof_drops_sender() {
-        let mut device = SmoltcpDevice::new(0, GW_IP);
+        let mut device = SmoltcpDevice::new(0, GW_IP, 1500);
         let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
 
         let rx_buf = tcp::SocketBuffer::new(vec![0u8; 64]);
@@ -1648,7 +1648,7 @@ mod tests {
 
     #[tokio::test]
     async fn initiate_inbound_creates_connecting_socket() {
-        let mut device = SmoltcpDevice::new(0, GW_IP);
+        let mut device = SmoltcpDevice::new(0, GW_IP, 1500);
         let (mut iface, mut sockets) = make_iface_and_sockets(&mut device);
         let mut bridge = TcpBridge::new(GW_IP);
 
@@ -1680,7 +1680,7 @@ mod tests {
 
     #[tokio::test]
     async fn syn_gate_connect_success_injects_syn() {
-        let mut device = SmoltcpDevice::new(0, GW_IP);
+        let mut device = SmoltcpDevice::new(0, GW_IP, 1500);
         let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
         let mut bridge = TcpBridge::new(GW_IP);
 
@@ -1732,7 +1732,7 @@ mod tests {
     /// loopback and successfully connects to a local listener.
     #[tokio::test]
     async fn syn_gate_gateway_ip_translates_to_loopback() {
-        let mut device = SmoltcpDevice::new(0, GW_IP);
+        let mut device = SmoltcpDevice::new(0, GW_IP, 1500);
         let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
         let mut bridge = TcpBridge::new(GW_IP);
 
@@ -1770,7 +1770,7 @@ mod tests {
 
     #[tokio::test]
     async fn syn_gate_connect_failure_sends_rst() {
-        let mut device = SmoltcpDevice::new(0, GW_IP);
+        let mut device = SmoltcpDevice::new(0, GW_IP, 1500);
         let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
         let mut bridge = TcpBridge::new(GW_IP);
 
@@ -1860,7 +1860,7 @@ mod tests {
 
     #[tokio::test]
     async fn pre_connected_expires_after_ttl() {
-        let mut device = SmoltcpDevice::new(0, GW_IP);
+        let mut device = SmoltcpDevice::new(0, GW_IP, 1500);
         let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
         let mut bridge = TcpBridge::new(GW_IP);
 
@@ -2003,7 +2003,7 @@ mod tests {
 
     #[test]
     fn prune_excess_listen_sockets_keeps_one() {
-        let mut device = SmoltcpDevice::new(0, GW_IP);
+        let mut device = SmoltcpDevice::new(0, GW_IP, 1500);
         let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
         let mut bridge = TcpBridge::new(GW_IP);
 
@@ -2036,7 +2036,7 @@ mod tests {
     /// smoltcp doesn't RST the extras.
     #[tokio::test]
     async fn concurrent_syns_same_port_no_rst() {
-        let mut device = SmoltcpDevice::new(0, GW_IP);
+        let mut device = SmoltcpDevice::new(0, GW_IP, 1500);
         let (_iface, mut sockets) = make_iface_and_sockets(&mut device);
         let mut bridge = TcpBridge::new(GW_IP);
 
