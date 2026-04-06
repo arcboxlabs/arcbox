@@ -220,6 +220,33 @@ impl SmoltcpDevice {
         std::mem::take(&mut self.gated_syns)
     }
 
+    /// Filters fast-path TCP data frames from `rx_queue` before smoltcp sees them.
+    ///
+    /// For each frame in `rx_queue`, calls `try_intercept` with a reference to
+    /// the frame data. If the callback returns `Some(ack_frame)`, the frame is
+    /// removed from the queue and the ACK is collected for injection to the guest.
+    ///
+    /// Frames that are not intercepted (callback returns `None`) remain in the
+    /// queue for smoltcp to process normally.
+    pub fn drain_fast_path(
+        &mut self,
+        mut try_intercept: impl FnMut(&[u8]) -> Option<Vec<u8>>,
+    ) -> Vec<Vec<u8>> {
+        let mut ack_frames = Vec::new();
+        let mut kept = std::collections::VecDeque::new();
+
+        while let Some(frame) = self.rx_queue.pop_front() {
+            if let Some(ack) = try_intercept(&frame) {
+                ack_frames.push(ack);
+            } else {
+                kept.push_back(frame);
+            }
+        }
+
+        self.rx_queue = kept;
+        ack_frames
+    }
+
     /// Classifies a frame and routes it to the appropriate queue.
     fn classify_frame(&mut self, frame: FrameBuf, guest_mac: &mut Option<[u8; 6]>) {
         if frame.len() < ETH_HEADER_LEN {
