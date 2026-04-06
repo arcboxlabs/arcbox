@@ -70,4 +70,61 @@ impl Gic {
         error::check(unsafe { ffi::hv_gic_get_redistributor_base(vcpu_id, &raw mut addr) })?;
         Ok(addr)
     }
+
+    /// Returns the size of the GIC distributor MMIO region.
+    pub fn get_distributor_size(&self) -> HvResult<u64> {
+        let mut size: u64 = 0;
+        // SAFETY: A GIC has been created.
+        error::check(unsafe { ffi::hv_gic_get_distributor_size(&raw mut size) })?;
+        Ok(size)
+    }
+
+    /// Returns the size of the GIC redistributor region (total, all vCPUs).
+    pub fn get_redistributor_region_size(&self) -> HvResult<u64> {
+        let mut size: u64 = 0;
+        // SAFETY: A GIC has been created.
+        error::check(unsafe { ffi::hv_gic_get_redistributor_region_size(&raw mut size) })?;
+        Ok(size)
+    }
+
+    /// Returns the base address of the MSI (Message Signaled Interrupt) region.
+    pub fn get_msi_region_base(&self) -> HvResult<u64> {
+        let mut addr: u64 = 0;
+        // SAFETY: A GIC has been created.
+        error::check(unsafe { ffi::hv_gic_get_msi_region_base(&raw mut addr) })?;
+        Ok(addr)
+    }
+
+    /// Returns the size of the MSI region.
+    pub fn get_msi_region_size(&self) -> HvResult<u64> {
+        let mut size: u64 = 0;
+        // SAFETY: A GIC has been created.
+        error::check(unsafe { ffi::hv_gic_get_msi_region_size(&raw mut size) })?;
+        Ok(size)
+    }
+
+    /// Saves the entire GIC state for snapshot/restore.
+    ///
+    /// Returns a byte buffer containing the opaque GIC state. Use
+    /// [`restore_state`](Self::restore_state) to reload it.
+    pub fn save_state(&self) -> HvResult<Vec<u8>> {
+        let mut data: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut size: usize = 0;
+        // SAFETY: A GIC has been created. The framework allocates the buffer.
+        error::check(unsafe { ffi::hv_gic_get_state(&raw mut data, &raw mut size) })?;
+        if data.is_null() || size == 0 {
+            return Ok(Vec::new());
+        }
+        // SAFETY: data points to `size` bytes allocated by the framework.
+        let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, size) }.to_vec();
+        Ok(bytes)
+    }
+
+    /// Restores GIC state from a previously saved snapshot.
+    pub fn restore_state(&self, state: &[u8]) -> HvResult<()> {
+        // SAFETY: `state` is a valid byte slice from a prior save_state.
+        error::check(unsafe {
+            ffi::hv_gic_set_state(state.as_ptr().cast::<std::ffi::c_void>(), state.len())
+        })
+    }
 }

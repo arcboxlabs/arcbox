@@ -167,10 +167,34 @@ unsafe extern "C" {
     ) -> hv_return_t;
     pub fn hv_vcpu_set_vtimer_mask(vcpu: hv_vcpu_t, masked: bool) -> hv_return_t;
 
+    // VM configuration (macOS 13+)
+    pub fn hv_vm_config_create() -> *mut c_void;
+    pub fn hv_vm_config_get_ipa_size(config: *mut c_void, ipa_size: *mut u32) -> hv_return_t;
+    pub fn hv_vm_config_set_ipa_size(config: *mut c_void, ipa_size: u32) -> hv_return_t;
+
+    // vCPU configuration
+    pub fn hv_vcpu_config_create() -> *mut c_void;
+    pub fn hv_vcpu_config_get_feature_reg(
+        config: *mut c_void,
+        feature_reg: u16,
+        value: *mut u64,
+    ) -> hv_return_t;
+    pub fn hv_vcpu_get_exec_time(vcpu: hv_vcpu_t, time: *mut u64) -> hv_return_t;
+
+    // vCPU debug traps
+    pub fn hv_vcpu_set_trap_debug_exceptions(vcpu: hv_vcpu_t, enable: bool) -> hv_return_t;
+    pub fn hv_vcpu_set_trap_debug_reg_accesses(vcpu: hv_vcpu_t, enable: bool) -> hv_return_t;
+
     // GICv3 (macOS 15+)
     pub fn hv_gic_create(config: *mut c_void) -> hv_return_t;
     pub fn hv_gic_reset() -> hv_return_t;
     pub fn hv_gic_set_spi(intid: u32, level: bool) -> hv_return_t;
     pub fn hv_gic_get_distributor_base(addr: *mut u64) -> hv_return_t;
+    pub fn hv_gic_get_distributor_size(size: *mut u64) -> hv_return_t;
     pub fn hv_gic_get_redistributor_base(vcpu: hv_vcpu_t, addr: *mut u64) -> hv_return_t;
+    pub fn hv_gic_get_redistributor_region_size(size: *mut u64) -> hv_return_t;
+    pub fn hv_gic_get_msi_region_base(addr: *mut u64) -> hv_return_t;
+    pub fn hv_gic_get_msi_region_size(size: *mut u64) -> hv_return_t;
+    pub fn hv_gic_get_state(data: *mut *mut c_void, size: *mut usize) -> hv_return_t;
+    pub fn hv_gic_set_state(data: *const c_void, size: usize) -> hv_return_t;
 }

@@ -11,8 +11,11 @@ const EC_WFI_WFE: u8 = 0x01;
 const EC_HVC: u8 = 0x16;
 const EC_SMC: u8 = 0x17;
 const EC_SYS_REG: u8 = 0x18;
+const EC_INSN_ABORT_LOWER: u8 = 0x20;
+const EC_INSN_ABORT_SAME: u8 = 0x21;
 const EC_DATA_ABORT_LOWER: u8 = 0x24;
 const EC_DATA_ABORT_SAME: u8 = 0x25;
+const EC_SOFTWARE_BREAKPOINT: u8 = 0x3c;
 
 /// High-level representation of a vCPU exit.
 #[derive(Debug)]
@@ -35,6 +38,15 @@ pub enum VcpuExit {
 pub enum ExceptionClass {
     /// Data abort — the guest accessed an unmapped IPA (MMIO).
     DataAbort(MmioInfo),
+    /// Instruction abort — the guest tried to execute from an unmapped/faulting IPA.
+    InstructionAbort {
+        /// Guest physical address of the faulting instruction.
+        address: u64,
+        /// Instruction Fault Status Code (IFSC, bits [5:0]).
+        fault_code: u8,
+    },
+    /// Software breakpoint (BRK #imm16).
+    SoftwareBreakpoint(u16),
     /// WFI / WFE — the guest is idle.
     WaitForInterrupt,
     /// HVC #imm16 — hypercall from the guest.
@@ -108,6 +120,14 @@ fn parse_exception(syndrome: u64, exc: &ffi::HvVcpuExitException) -> ExceptionCl
                 value: 0,
                 sign_extend,
             })
+        }
+        EC_INSN_ABORT_LOWER | EC_INSN_ABORT_SAME => ExceptionClass::InstructionAbort {
+            address: exc.physical_address,
+            fault_code: (syndrome & 0x3f) as u8,
+        },
+        EC_SOFTWARE_BREAKPOINT => {
+            let imm16 = (syndrome & 0xffff) as u16;
+            ExceptionClass::SoftwareBreakpoint(imm16)
         }
         EC_WFI_WFE => ExceptionClass::WaitForInterrupt,
         EC_HVC => {
@@ -345,6 +365,56 @@ mod tests {
                 }
                 other => panic!("expected DataAbort for SAS={sas}, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn parse_instruction_abort() {
+        // IFSC = 0x04 (translation fault, level 0)
+        let syndrome = (u64::from(EC_INSN_ABORT_LOWER) << 26) | 0x04;
+        let info = ffi::HvVcpuExitInfo {
+            reason: ffi::HV_EXIT_REASON_EXCEPTION,
+            exception: ffi::HvVcpuExitException {
+                syndrome,
+                virtual_address: 0,
+                physical_address: 0x4000_0000,
+            },
+        };
+        match parse_exit(&info) {
+            VcpuExit::Exception {
+                class:
+                    ExceptionClass::InstructionAbort {
+                        address,
+                        fault_code,
+                    },
+                ..
+            } => {
+                assert_eq!(address, 0x4000_0000);
+                assert_eq!(fault_code, 0x04);
+            }
+            other => panic!("expected InstructionAbort, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_software_breakpoint() {
+        let syndrome = (u64::from(EC_SOFTWARE_BREAKPOINT) << 26) | 0x42;
+        let info = ffi::HvVcpuExitInfo {
+            reason: ffi::HV_EXIT_REASON_EXCEPTION,
+            exception: ffi::HvVcpuExitException {
+                syndrome,
+                virtual_address: 0,
+                physical_address: 0,
+            },
+        };
+        match parse_exit(&info) {
+            VcpuExit::Exception {
+                class: ExceptionClass::SoftwareBreakpoint(imm),
+                ..
+            } => {
+                assert_eq!(imm, 0x42);
+            }
+            other => panic!("expected SoftwareBreakpoint, got {other:?}"),
         }
     }
 }

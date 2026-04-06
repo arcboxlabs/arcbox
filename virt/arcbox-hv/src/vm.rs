@@ -20,7 +20,7 @@ pub struct HvVm {
 }
 
 impl HvVm {
-    /// Creates a new VM.
+    /// Creates a new VM with default configuration (36-bit IPA, ~64 GB).
     ///
     /// Only one VM may exist per process — calling this while a VM is already
     /// alive returns [`HvError::Busy`].
@@ -28,7 +28,26 @@ impl HvVm {
         // SAFETY: `hv_vm_create(NULL)` creates a VM with default config.
         // The framework enforces single-VM-per-process internally.
         error::check(unsafe { ffi::hv_vm_create(ptr::null_mut()) })?;
-        debug!("hypervisor VM created");
+        debug!("hypervisor VM created (default IPA size)");
+        Ok(Self { _private: () })
+    }
+
+    /// Creates a new VM with a custom IPA (Intermediate Physical Address) size.
+    ///
+    /// The default IPA size is 36 bits (~64 GB). For VMs needing more guest
+    /// physical address space (e.g. >32 GB RAM + MMIO), use 40 bits (~1 TB).
+    ///
+    /// Available since macOS 13.0.
+    pub fn with_ipa_size(ipa_bits: u32) -> HvResult<Self> {
+        // SAFETY: hv_vm_config_create returns an opaque config object.
+        let config = unsafe { ffi::hv_vm_config_create() };
+        if config.is_null() {
+            return Err(crate::error::HvError::NoResources);
+        }
+        // SAFETY: config is a valid pointer from hv_vm_config_create.
+        error::check(unsafe { ffi::hv_vm_config_set_ipa_size(config, ipa_bits) })?;
+        error::check(unsafe { ffi::hv_vm_create(config) })?;
+        debug!(ipa_bits, "hypervisor VM created");
         Ok(Self { _private: () })
     }
 

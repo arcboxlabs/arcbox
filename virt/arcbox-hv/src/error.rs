@@ -9,6 +9,8 @@ pub enum HvError {
     Busy,
     #[error("bad argument")]
     BadArgument,
+    #[error("illegal guest state")]
+    IllegalGuestState,
     #[error("no resources available")]
     NoResources,
     #[error("no device found")]
@@ -29,6 +31,7 @@ const HV_SUCCESS: hv_return_t = 0;
 const HV_ERROR: hv_return_t = 0xfae9_4001_u32.cast_signed();
 const HV_BUSY: hv_return_t = 0xfae9_4002_u32.cast_signed();
 const HV_BAD_ARGUMENT: hv_return_t = 0xfae9_4003_u32.cast_signed();
+const HV_ILLEGAL_GUEST_STATE: hv_return_t = 0xfae9_4004_u32.cast_signed();
 const HV_NO_RESOURCES: hv_return_t = 0xfae9_4005_u32.cast_signed();
 const HV_NO_DEVICE: hv_return_t = 0xfae9_4006_u32.cast_signed();
 const HV_DENIED: hv_return_t = 0xfae9_4007_u32.cast_signed();
@@ -44,6 +47,7 @@ pub fn check(status: hv_return_t) -> HvResult<()> {
         HV_ERROR => Err(HvError::Error),
         HV_BUSY => Err(HvError::Busy),
         HV_BAD_ARGUMENT => Err(HvError::BadArgument),
+        HV_ILLEGAL_GUEST_STATE => Err(HvError::IllegalGuestState),
         HV_NO_RESOURCES => Err(HvError::NoResources),
         HV_NO_DEVICE => Err(HvError::NoDevice),
         HV_DENIED => Err(HvError::Denied),
