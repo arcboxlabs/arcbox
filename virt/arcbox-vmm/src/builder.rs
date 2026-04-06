@@ -311,6 +311,7 @@ impl VmBuilder {
                 })
                 .collect(),
             bridge_nic_mac: None,
+            use_custom_vmm: false,
         };
 
         tracing::info!(

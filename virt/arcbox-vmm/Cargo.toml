@@ -26,6 +26,7 @@ tokio-util = "0.7"
 lz4_flex = "0.11"
 libc.workspace = true
 arcbox-dns = { workspace = true }
+arcbox-hv = { version = "0.3.20", path = "../arcbox-hv" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
@@ -34,6 +35,7 @@ tempfile = "3"
 [features]
 default = []
 criu = []
+gic = ["arcbox-hv/gic"]
 vmnet = ["arcbox-net/vmnet"]
 
 [lints]

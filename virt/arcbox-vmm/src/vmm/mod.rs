@@ -27,6 +27,8 @@ use arcbox_hypervisor::VmConfig;
 
 #[cfg(target_os = "macos")]
 mod darwin;
+#[cfg(target_os = "macos")]
+mod darwin_hv;
 #[cfg(target_os = "linux")]
 mod linux;
 
@@ -87,6 +89,12 @@ pub struct VmmConfig {
     pub block_devices: Vec<BlockDeviceConfig>,
     /// Optional MAC address for the bridge NAT NIC on macOS.
     pub bridge_nic_mac: Option<String>,
+    /// Use the custom Hypervisor.framework VMM instead of VZ framework.
+    ///
+    /// This enables custom VirtIO device emulation with TSO support for
+    /// higher network throughput. Experimental — requires macOS 15+ for
+    /// GIC and `com.apple.security.hypervisor` entitlement.
+    pub use_custom_vmm: bool,
 }
 
 impl Default for VmmConfig {
@@ -107,6 +115,7 @@ impl Default for VmmConfig {
             balloon: true, // Enable balloon by default for memory optimization
             block_devices: Vec::new(),
             bridge_nic_mac: None,
+            use_custom_vmm: false,
         }
     }
 }
@@ -349,7 +358,12 @@ impl Vmm {
         // Platform-specific initialization
         #[cfg(target_os = "macos")]
         {
-            self.initialize_darwin()?;
+            if self.config.use_custom_vmm {
+                tracing::info!("Using custom Hypervisor.framework VMM (experimental)");
+                self.initialize_darwin_hv()?;
+            } else {
+                self.initialize_darwin()?;
+            }
         }
 
         #[cfg(target_os = "linux")]

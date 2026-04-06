@@ -625,6 +625,7 @@ version = "0.3.21"
 dependencies = [
  "arcbox-dns",
  "arcbox-error",
+ "arcbox-hv",
  "arcbox-hypervisor",
  "arcbox-net",
  "arcbox-virtio",

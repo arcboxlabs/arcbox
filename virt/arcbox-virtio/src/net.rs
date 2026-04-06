@@ -163,11 +163,32 @@ pub trait NetBackend: Send + Sync {
     /// Sends a packet.
     fn send(&mut self, packet: &NetPacket) -> std::io::Result<usize>;
 
+    /// Sends a TSO/GSO packet.
+    ///
+    /// Called when the guest emits a packet with `gso_type != GSO_NONE`.
+    /// The packet contains a large payload that the guest expects the device
+    /// to segment (or relay as-is if the host stack handles it).
+    ///
+    /// The default implementation ignores the GSO header and forwards the
+    /// packet via `send()`. Backends that can exploit TSO (e.g. writing
+    /// directly to a host `TcpStream`) should override this.
+    fn send_tso(&mut self, packet: &NetPacket) -> std::io::Result<usize> {
+        self.send(packet)
+    }
+
     /// Receives a packet.
     fn recv(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
 
     /// Returns whether packets are available to receive.
     fn has_data(&self) -> bool;
+
+    /// Returns whether this backend supports TSO offload.
+    ///
+    /// When true, the device advertises `GUEST_TSO4/6` and `HOST_TSO4/6`
+    /// features to the guest, and routes TSO packets through `send_tso()`.
+    fn supports_tso(&self) -> bool {
+        false
+    }
 }
 
 /// Loopback network backend for testing.
@@ -607,6 +628,27 @@ impl VirtioNet {
         }
     }
 
+    /// Enables TSO/GSO feature advertisement.
+    ///
+    /// Call this after construction when the backend supports TSO offload.
+    /// The guest driver will then negotiate TSO and emit large segments
+    /// instead of MTU-sized packets, reducing per-packet overhead by ~45x.
+    pub fn enable_tso_features(&mut self) {
+        self.features |= Self::FEATURE_GUEST_TSO4
+            | Self::FEATURE_GUEST_TSO6
+            | Self::FEATURE_HOST_TSO4
+            | Self::FEATURE_HOST_TSO6
+            | Self::FEATURE_GUEST_ECN
+            | Self::FEATURE_HOST_ECN;
+    }
+
+    /// Returns whether TSO was negotiated with the guest.
+    #[must_use]
+    pub fn tso_negotiated(&self) -> bool {
+        self.acked_features & Self::FEATURE_GUEST_TSO4 != 0
+            || self.acked_features & Self::FEATURE_GUEST_TSO6 != 0
+    }
+
     /// Creates a new network device with loopback backend.
     #[must_use]
     pub fn with_loopback() -> Self {
@@ -679,9 +721,23 @@ impl VirtioNet {
             let mut backend = backend
                 .lock()
                 .map_err(|e| VirtioError::Io(format!("Failed to lock backend: {e}")))?;
-            backend
-                .send(&packet)
-                .map_err(|e| VirtioError::Io(format!("Send failed: {e}")))?;
+
+            let is_tso = header.gso_type != VirtioNetHeader::GSO_NONE && header.gso_size > 0;
+            if is_tso {
+                tracing::trace!(
+                    "Net TX TSO: {} bytes, gso_type={}, gso_size={}",
+                    packet.data.len(),
+                    header.gso_type,
+                    header.gso_size
+                );
+                backend
+                    .send_tso(&packet)
+                    .map_err(|e| VirtioError::Io(format!("TSO send failed: {e}")))?;
+            } else {
+                backend
+                    .send(&packet)
+                    .map_err(|e| VirtioError::Io(format!("Send failed: {e}")))?;
+            }
         }
 
         tracing::trace!("Net TX: {} bytes", packet.data.len());
@@ -790,16 +846,30 @@ impl VirtioNet {
         Ok(received)
     }
 
+    /// Ethernet (14) + IPv4 (20) + TCP (20) header length.
+    const ETH_IP_TCP_HDR_LEN: u16 = 54;
+
+    /// Default MSS for TSO segments (standard Ethernet MTU minus headers).
+    const DEFAULT_TSO_MSS: u16 = 1460;
+
     /// Inject packets from `rx_buffer` into the guest RX virtqueue.
     ///
     /// Drains as many packets as possible from the buffer into guest-provided
     /// descriptors. Returns completions for batch notification.
     /// TODO(ABX-208): Caller should use `push_used_batch()` for single interrupt.
     ///
+    /// When `HOST_TSO4/6` was negotiated and a packet exceeds the MTU, the
+    /// header is stamped with GSO metadata so the guest kernel can handle
+    /// segmentation — a single virtqueue push replaces ~45 small pushes.
+    ///
     /// # Errors
     ///
     /// Returns an error if the RX queue is not ready.
     pub fn inject_rx_batch(&mut self, memory: &mut [u8]) -> Result<Vec<(u16, u32)>> {
+        let host_tso4 = self.acked_features & Self::FEATURE_HOST_TSO4 != 0;
+        let host_tso6 = self.acked_features & Self::FEATURE_HOST_TSO6 != 0;
+        let mtu = self.config.mtu as usize;
+
         let queue = self
             .rx_queue
             .as_mut()
@@ -807,7 +877,21 @@ impl VirtioNet {
 
         let mut completions = Vec::new();
 
-        while let Some(packet) = self.rx_buffer.pop_front() {
+        while let Some(mut packet) = self.rx_buffer.pop_front() {
+            // If the packet is larger than MTU and TSO was negotiated, stamp
+            // the virtio-net header so the guest kernel segments it.
+            if packet.data.len() > mtu && packet.header.gso_type == VirtioNetHeader::GSO_NONE {
+                if host_tso4 {
+                    packet.header.gso_type = VirtioNetHeader::GSO_TCPV4;
+                    packet.header.gso_size = Self::DEFAULT_TSO_MSS;
+                    packet.header.hdr_len = Self::ETH_IP_TCP_HDR_LEN;
+                } else if host_tso6 {
+                    packet.header.gso_type = VirtioNetHeader::GSO_TCPV6;
+                    packet.header.gso_size = Self::DEFAULT_TSO_MSS;
+                    packet.header.hdr_len = Self::ETH_IP_TCP_HDR_LEN;
+                }
+            }
+
             match queue.pop_avail() {
                 Some((head_idx, chain)) => {
                     // Build full frame: virtio-net header + ethernet data
@@ -1624,5 +1708,135 @@ mod tests {
 
         let cloned = packet.clone();
         assert_eq!(cloned.data, packet.data);
+    }
+
+    // ==========================================================================
+    // TSO Feature Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_enable_tso_features() {
+        let mut net = VirtioNet::new(NetConfig::default());
+        let base = net.features();
+
+        // TSO not advertised by default.
+        assert_eq!(base & VirtioNet::FEATURE_GUEST_TSO4, 0);
+        assert_eq!(base & VirtioNet::FEATURE_HOST_TSO4, 0);
+
+        net.enable_tso_features();
+        let tso = net.features();
+        assert_ne!(tso & VirtioNet::FEATURE_GUEST_TSO4, 0);
+        assert_ne!(tso & VirtioNet::FEATURE_GUEST_TSO6, 0);
+        assert_ne!(tso & VirtioNet::FEATURE_HOST_TSO4, 0);
+        assert_ne!(tso & VirtioNet::FEATURE_HOST_TSO6, 0);
+        assert_ne!(tso & VirtioNet::FEATURE_GUEST_ECN, 0);
+        assert_ne!(tso & VirtioNet::FEATURE_HOST_ECN, 0);
+    }
+
+    #[test]
+    fn test_tso_negotiated() {
+        let mut net = VirtioNet::new(NetConfig::default());
+        net.enable_tso_features();
+        assert!(!net.tso_negotiated());
+
+        // Guest acks TSO4.
+        net.ack_features(
+            VirtioNet::FEATURE_MAC
+                | VirtioNet::FEATURE_GUEST_TSO4
+                | VirtioNet::FEATURE_VERSION_1
+                | crate::queue::VIRTIO_F_EVENT_IDX,
+        );
+        assert!(net.tso_negotiated());
+    }
+
+    #[test]
+    fn test_handle_tx_routes_tso_to_send_tso() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // Backend that tracks whether send_tso was called.
+        struct TsoTracker {
+            tso_called: Arc<AtomicBool>,
+        }
+        impl NetBackend for TsoTracker {
+            fn send(&mut self, _packet: &NetPacket) -> std::io::Result<usize> {
+                Ok(0)
+            }
+            fn send_tso(&mut self, _packet: &NetPacket) -> std::io::Result<usize> {
+                self.tso_called.store(true, Ordering::Relaxed);
+                Ok(0)
+            }
+            fn recv(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                Ok(0)
+            }
+            fn has_data(&self) -> bool {
+                false
+            }
+            fn supports_tso(&self) -> bool {
+                true
+            }
+        }
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let tracker = TsoTracker {
+            tso_called: flag.clone(),
+        };
+
+        let mut net = VirtioNet::new(NetConfig::default());
+        net.enable_tso_features();
+        net.set_backend(Arc::new(Mutex::new(tracker)));
+
+        // Build a TSO TX packet: 12-byte header + payload.
+        let mut data = vec![0u8; VirtioNetHeader::SIZE + 4000];
+        data[1] = VirtioNetHeader::GSO_TCPV4; // gso_type
+        data[4..6].copy_from_slice(&1460u16.to_le_bytes()); // gso_size
+
+        net.handle_tx(&data).unwrap();
+        assert!(
+            flag.load(Ordering::Relaxed),
+            "send_tso should be called for TSO packets"
+        );
+    }
+
+    #[test]
+    fn test_handle_tx_normal_packet_uses_send() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct SendTracker {
+            send_called: Arc<AtomicBool>,
+        }
+        impl NetBackend for SendTracker {
+            fn send(&mut self, _packet: &NetPacket) -> std::io::Result<usize> {
+                self.send_called.store(true, Ordering::Relaxed);
+                Ok(0)
+            }
+            fn recv(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                Ok(0)
+            }
+            fn has_data(&self) -> bool {
+                false
+            }
+        }
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let tracker = SendTracker {
+            send_called: flag.clone(),
+        };
+
+        let mut net = VirtioNet::new(NetConfig::default());
+        net.set_backend(Arc::new(Mutex::new(tracker)));
+
+        // Normal packet: gso_type=0, gso_size=0
+        let data = vec![0u8; VirtioNetHeader::SIZE + 100];
+        net.handle_tx(&data).unwrap();
+        assert!(
+            flag.load(Ordering::Relaxed),
+            "send should be called for normal packets"
+        );
+    }
+
+    #[test]
+    fn test_loopback_supports_tso_default_false() {
+        let backend = LoopbackBackend::new();
+        assert!(!backend.supports_tso());
     }
 }

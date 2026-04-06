@@ -271,8 +271,9 @@ impl Vmm {
         let host_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
 
         // Set a large socket buffer for the VZ side to avoid drops.
+        // 8 MB accommodates burst traffic (increased from 2 MB).
         // SAFETY: setsockopt with valid fd and parameters.
-        let buf_size: libc::c_int = 2 * 1024 * 1024;
+        let buf_size: libc::c_int = 8 * 1024 * 1024;
         unsafe {
             if libc::setsockopt(
                 vz_fd.as_raw_fd(),
@@ -307,8 +308,8 @@ impl Vmm {
         self.net_cancel = Some(cancel.clone());
 
         // 3. Create the socket proxy, reply channel, and inbound command channel.
-        let (reply_tx, reply_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
-        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(64);
+        let (reply_tx, reply_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(256);
         let socket_proxy =
             SocketProxy::new(gateway_ip, gateway_mac, guest_ip, reply_tx, cancel.clone());
 
@@ -422,8 +423,8 @@ impl Vmm {
         // SAFETY: fds are valid from socketpair.
         let relay_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
 
-        // Set large buffers on the VZ side.
-        let buf_size: libc::c_int = 2 * 1024 * 1024;
+        // Set large buffers on the VZ side (8 MB, matching primary NIC).
+        let buf_size: libc::c_int = 8 * 1024 * 1024;
         // SAFETY: setsockopt with valid fd and parameters.
         unsafe {
             if libc::setsockopt(
