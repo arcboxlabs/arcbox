@@ -234,8 +234,9 @@ impl SmoltcpDevice {
     ) -> Vec<Vec<u8>> {
         let mut ack_frames = Vec::new();
 
-        // Filter in-place: swap-remove intercepted frames to avoid rebuilding
-        // the VecDeque. We iterate backwards so removal doesn't shift indices.
+        // Filter in-place: remove intercepted frames via forward iteration.
+        // VecDeque::remove(i) is O(n) but fast-path connections are few and
+        // most frames pass through unintercepted, so removals are rare.
         let mut i = 0;
         while i < self.rx_queue.len() {
             if let Some(ack) = try_intercept(&self.rx_queue[i]) {

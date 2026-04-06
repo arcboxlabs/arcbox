@@ -343,7 +343,7 @@ impl Vmm {
         // respondsToSelector: (see arcbox-vz/device/network.rs), and the VZ
         // device stays at 1500 while smoltcp gets 4000. This mismatch would
         // cause frames >1500 to be dropped — acceptable since macOS <14 is not
-        // a supported target. If macOS <13 support is ever needed, plumb the
+        // a supported target. If macOS <14 support is ever needed, plumb the
         // actual MTU from NetworkDeviceConfiguration::mtu() through the
         // hypervisor abstraction layer.
         let net_mtu = arcbox_net::darwin::smoltcp_device::ENHANCED_ETHERNET_MTU;

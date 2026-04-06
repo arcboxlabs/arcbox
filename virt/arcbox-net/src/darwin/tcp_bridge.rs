@@ -296,13 +296,33 @@ impl TcpBridge {
             );
         }
 
-        // FIN or RST → teardown, let smoltcp handle it.
-        if flags & 0x01 != 0 || flags & 0x04 != 0 {
-            tracing::debug!(
-                "Fast path: FIN/RST on {src_ip}:{src_port} → {dst_ip}:{dst_port}, removing"
-            );
+        // FIN or RST → handle teardown ourselves (smoltcp socket was removed
+        // on promotion, so falling through would leave the frame unhandled).
+        if flags & 0x04 != 0 {
+            // RST: close host stream immediately, no response needed.
+            tracing::debug!("Fast path: RST from guest {src_ip}:{src_port}→{dst_ip}:{dst_port}");
             self.fast_path_conns.remove(&key);
-            return None; // Fall through to smoltcp for teardown.
+            return Some(Vec::new()); // Intercepted, no reply frame.
+        }
+        if flags & 0x01 != 0 {
+            // FIN: close host stream and send FIN+ACK back to guest.
+            tracing::debug!("Fast path: FIN from guest {src_ip}:{src_port}→{dst_ip}:{dst_port}");
+            // FIN consumes 1 sequence number.
+            conn.last_ack = conn.last_ack.wrapping_add(1);
+            let guest_mac = self.fast_path_guest_mac.unwrap_or([0xFF; 6]);
+            let fin_ack = crate::ethernet::build_tcp_fin_frame(&crate::ethernet::TcpFrameParams {
+                src_ip: conn.remote_ip,
+                dst_ip: conn.guest_ip,
+                src_port: conn.remote_port,
+                dst_port: conn.guest_port,
+                seq: conn.our_seq,
+                ack: conn.last_ack,
+                window: 65535,
+                src_mac: self.fast_path_gateway_mac,
+                dst_mac: guest_mac,
+            });
+            self.fast_path_conns.remove(&key);
+            return Some(fin_ack);
         }
 
         // Extract payload using IPv4 total_length to exclude Ethernet padding.
@@ -389,7 +409,9 @@ impl TcpBridge {
                         });
                     conn.our_seq = conn.our_seq.wrapping_add(1); // FIN consumes 1 SEQ
                     frames.push(fin);
-                    to_remove.push(*key);
+                    // Don't remove yet — keep the entry so the guest's FIN-ACK
+                    // response is handled by try_fast_path_intercept (which will
+                    // see the FIN flag and clean up).
                 }
                 Ok(n) => {
                     // Segment into MSS-sized chunks to stay within MTU.
@@ -1128,10 +1150,10 @@ impl TcpBridge {
                         Err(e) => {
                             tracing::error!(
                                 "Fast path: failed to convert tokio TcpStream to std: {e}. \
-                                 Connection will fall back to smoltcp relay."
+                                 Connection lost (smoltcp socket already removed)."
                             );
-                            // Don't promote — connection was already removed from
-                            // self.connections above, so it will be cleaned up.
+                            // Both smoltcp socket and BridgedConn are gone. The host
+                            // stream will be dropped here. Guest will see a timeout.
                         }
                     }
                 }
