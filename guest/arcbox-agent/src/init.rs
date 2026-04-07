@@ -312,8 +312,8 @@ mod platform {
 
         // Default values per cache index — (size, coherency_line_size, number_of_sets).
         const DEFAULTS: &[(&str, &str, &str)] = &[
-            ("64K", "64", "256"),   // index0: L1 Data
-            ("64K", "64", "256"),   // index1: L1 Instruction
+            ("64K", "64", "256"),    // index0: L1 Data
+            ("64K", "64", "256"),    // index1: L1 Instruction
             ("1024K", "64", "2048"), // index2: L2 Unified
         ];
 
@@ -327,7 +327,13 @@ mod platform {
             mkdir_p(&fixup_dir);
 
             // Copy existing files from sysfs into the fixup directory.
-            for name in &["level", "type", "shared_cpu_map", "shared_cpu_list", "uevent"] {
+            for name in &[
+                "level",
+                "type",
+                "shared_cpu_map",
+                "shared_cpu_list",
+                "uevent",
+            ] {
                 let src = format!("{sysfs_dir}/{name}");
                 if let Ok(content) = fs::read_to_string(&src) {
                     let _ = fs::write(format!("{fixup_dir}/{name}"), content);
@@ -336,8 +342,14 @@ mod platform {
 
             // Write the missing attributes.
             let _ = fs::write(format!("{fixup_dir}/size"), format!("{size}\n"));
-            let _ = fs::write(format!("{fixup_dir}/coherency_line_size"), format!("{line_size}\n"));
-            let _ = fs::write(format!("{fixup_dir}/number_of_sets"), format!("{num_sets}\n"));
+            let _ = fs::write(
+                format!("{fixup_dir}/coherency_line_size"),
+                format!("{line_size}\n"),
+            );
+            let _ = fs::write(
+                format!("{fixup_dir}/number_of_sets"),
+                format!("{num_sets}\n"),
+            );
 
             // Bind-mount the completed directory over the sysfs entry.
             if let Err(e) = mount(
