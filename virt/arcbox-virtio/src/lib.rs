@@ -180,8 +180,9 @@ pub trait VirtioDevice: Send + Sync {
 /// Configuration for a single virtqueue, as set by the guest driver via
 /// MMIO transport writes.
 ///
-/// All addresses are guest physical addresses (GPAs) into the flat memory
-/// slice passed to [`VirtioDevice::process_queue`].
+/// All addresses are guest physical addresses (GPAs). The `memory` slice
+/// passed to [`VirtioDevice::process_queue`] starts at `gpa_base`, so
+/// devices must subtract `gpa_base` to convert a GPA to a slice index.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct QueueConfig {
     /// Guest physical address of the descriptor table.
@@ -194,6 +195,9 @@ pub struct QueueConfig {
     pub size: u16,
     /// Whether the queue is ready.
     pub ready: bool,
+    /// GPA of the start of the guest memory slice. Devices must subtract
+    /// this from descriptor addresses to get slice offsets.
+    pub gpa_base: u64,
 }
 
 #[cfg(test)]

@@ -365,6 +365,9 @@ pub struct DeviceManager {
     guest_ram_base: Option<*mut u8>,
     /// Size of guest physical memory in bytes.
     guest_ram_size: usize,
+    /// GPA where the guest RAM region starts (e.g. 0x40000000).
+    /// Used to translate descriptor GPAs to memory slice offsets.
+    guest_ram_gpa: u64,
     /// IRQ trigger callback for injecting interrupts into the guest.
     irq_callback: Option<DeviceIrqCallback>,
 }
@@ -384,6 +387,7 @@ impl DeviceManager {
             mmio_map: HashMap::new(),
             guest_ram_base: None,
             guest_ram_size: 0,
+            guest_ram_gpa: 0,
             irq_callback: None,
         }
     }
@@ -394,9 +398,10 @@ impl DeviceManager {
     ///
     /// `base` must point to a valid allocation of at least `size` bytes that
     /// remains valid for the lifetime of the `DeviceManager`.
-    pub unsafe fn set_guest_memory(&mut self, base: *mut u8, size: usize) {
+    pub unsafe fn set_guest_memory(&mut self, base: *mut u8, size: usize, gpa_base: u64) {
         self.guest_ram_base = Some(base);
         self.guest_ram_size = size;
+        self.guest_ram_gpa = gpa_base;
     }
 
     /// Sets the callback used to inject interrupts into the guest.
@@ -806,6 +811,7 @@ impl DeviceManager {
                                     used_addr: mmio_state.queue_device[qi],
                                     size: mmio_state.queue_num[qi],
                                     ready: mmio_state.queue_ready[qi],
+                                    gpa_base: self.guest_ram_gpa,
                                 }
                             } else {
                                 QueueConfig::default()
@@ -815,10 +821,22 @@ impl DeviceManager {
                         if let (Some(ram_base), ram_size) =
                             (self.guest_ram_base, self.guest_ram_size)
                         {
-                            // SAFETY: ram_base is valid for ram_size bytes per
-                            // the contract of set_guest_memory().
-                            let guest_mem =
-                                unsafe { std::slice::from_raw_parts_mut(ram_base, ram_size) };
+                            // Build a guest memory slice that can be indexed by GPA directly.
+                            // The host pointer corresponds to GPA `guest_ram_gpa`, so we
+                            // offset it back so that index 0 = GPA 0. This lets device code
+                            // use `desc.addr as usize` (which is a GPA) without translation.
+                            //
+                            // SAFETY: ram_base is valid for ram_size bytes. We extend the
+                            // slice to cover [GPA 0 .. GPA guest_ram_gpa + ram_size] by
+                            // adjusting the base pointer. Accesses below guest_ram_gpa are
+                            // invalid but device descriptors always point within RAM.
+                            let gpa_base = self.guest_ram_gpa as usize;
+                            let guest_mem = unsafe {
+                                std::slice::from_raw_parts_mut(
+                                    ram_base.sub(gpa_base),
+                                    gpa_base + ram_size,
+                                )
+                            };
 
                             let mut dev = virtio_dev.lock().map_err(|e| {
                                 VmmError::Device(format!("Failed to lock device: {e}"))

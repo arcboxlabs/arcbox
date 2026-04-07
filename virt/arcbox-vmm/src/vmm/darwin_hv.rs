@@ -457,7 +457,7 @@ impl Vmm {
             // SAFETY: guest_mem is stored in the Vmm struct and outlives the
             // DeviceManager, so the pointer remains valid.
             unsafe {
-                device_manager.set_guest_memory(host_ptr, ram_size);
+                device_manager.set_guest_memory(host_ptr, ram_size, RAM_BASE_IPA);
             }
         }
 
