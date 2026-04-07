@@ -648,6 +648,7 @@ dependencies = [
  "uuid",
  "vm-fdt",
  "vm-memory",
+ "vm-superio",
 ]
 
 [[package]]
@@ -4779,6 +4780,12 @@ dependencies = [
  "thiserror",
  "winapi",
 ]
+
+[[package]]
+name = "vm-superio"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69c376a9b84afdf97bddd2628096cf3554208b2a676cf06b4532e0f433a54e02"
 
 [[package]]
 name = "vsock"

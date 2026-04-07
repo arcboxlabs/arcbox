@@ -56,7 +56,7 @@ fn main() {
         vcpu_count: 2,
         memory_size: 2 * 1024 * 1024 * 1024, // 2 GB
         kernel_path,
-        kernel_cmdline: "console=ttyAMA0 earlycon=pl011,0x09000000 loglevel=7 panic=-1".to_string(),
+        kernel_cmdline: "console=ttyAMA0 earlycon=pl011,0x0b000000 loglevel=7 panic=-1".to_string(),
         initrd_path,
         enable_rosetta: false,
         serial_console: true,

@@ -198,8 +198,9 @@ pub(super) struct Pl011 {
     output: Vec<u8>,
 }
 
-/// PL011 MMIO base address (matches the FDT uart@9000000 node).
-const PL011_BASE: u64 = 0x0900_0000;
+/// PL011 MMIO base address. Placed at 0x0B00_0000 to avoid the GIC
+/// redistributor region (0x080A_0000 + 32 MB = 0x0A0A_0000).
+const PL011_BASE: u64 = 0x0B00_0000;
 /// PL011 MMIO region size.
 const PL011_SIZE: u64 = 0x1000;
 
@@ -627,7 +628,7 @@ impl Vmm {
             let chosen = fdt.begin_node("chosen").map_err(fdt_err)?;
             fdt.property_string("bootargs", &self.config.kernel_cmdline)
                 .map_err(fdt_err)?;
-            fdt.property_string("stdout-path", "/pl011@9000000")
+            fdt.property_string("stdout-path", "/pl011@b000000")
                 .map_err(fdt_err)?;
             if let Some((initrd_start, initrd_size)) = initrd_info {
                 fdt.property_u64("linux,initrd-start", initrd_start)
@@ -709,7 +710,7 @@ impl Vmm {
             fdt.end_node(intc).map_err(fdt_err)?;
 
             // PL011 UART
-            let uart = fdt.begin_node("pl011@9000000").map_err(fdt_err)?;
+            let uart = fdt.begin_node("pl011@b000000").map_err(fdt_err)?;
             fdt.property_string("compatible", "arm,pl011")
                 .map_err(fdt_err)?;
             let mut uart_reg = Vec::new();
@@ -1569,9 +1570,25 @@ mod tests {
     }
 
     #[test]
-    fn test_virtio_mmio_base_does_not_overlap_pl011() {
-        // PL011 occupies 0x0900_0000..0x0900_1000.
-        // VirtIO MMIO starts at 0x0A00_0000.
-        assert!(VIRTIO_MMIO_BASE >= PL011_BASE + PL011_SIZE);
+    fn test_mmio_regions_do_not_overlap() {
+        // GIC redistributor ends at 0x080A_0000 + 0x200_0000 = 0x0A0A_0000.
+        // VirtIO MMIO starts at VIRTIO_MMIO_BASE (0x0A00_0000) — may overlap
+        // with GICR tail, but HV.framework handles GIC internally.
+        // PL011 is at 0x0B00_0000, after both GIC and VirtIO regions.
+        let gicr_end = GIC_REDIST_ADDR + GIC_REDIST_SIZE;
+        assert!(PL011_BASE >= gicr_end, "PL011 must be outside GIC region");
+        assert!(
+            PL011_BASE + PL011_SIZE <= RAM_BASE_IPA,
+            "PL011 must be below guest RAM"
+        );
+        // PL011 and VirtIO MMIO must not overlap.
+        let pl011_range = PL011_BASE..PL011_BASE + PL011_SIZE;
+        let virtio_start = VIRTIO_MMIO_BASE;
+        let virtio_end = VIRTIO_MMIO_BASE + VIRTIO_MMIO_MAX_DEVICES * 0x1000;
+        assert!(
+            !pl011_range.contains(&virtio_start) && PL011_BASE >= virtio_end
+                || PL011_BASE + PL011_SIZE <= virtio_start,
+            "PL011 and VirtIO MMIO regions overlap"
+        );
     }
 }
