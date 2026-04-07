@@ -979,16 +979,33 @@ impl DeviceManager {
         hdr[28..30].copy_from_slice(&1u16.to_le_bytes()); // type = STREAM
         hdr[30..32].copy_from_slice(&1u16.to_le_bytes()); // op = REQUEST
         hdr[36..40].copy_from_slice(&(64 * 1024u32).to_le_bytes()); // buf_alloc
+        // Only inject OP_REQUEST once per port. Subsequent calls from
+        // daemon retry loop are no-ops — the first injection is enough.
+        // We track injected ports in vsock_connected_ports (ports that have
+        // received OP_RESPONSE are "connected"; ports with pending REQUEST
+        // are not yet in the set but we check pending_vsock_connects).
+        let already_pending = self
+            .pending_vsock_connects
+            .lock()
+            .map(|p| p.iter().any(|&(p, _)| p == port))
+            .unwrap_or(false);
+        let already_connected = self
+            .vsock_connected_ports
+            .lock()
+            .map(|s| s.contains(&port))
+            .unwrap_or(false);
+
+        if already_pending || already_connected {
+            return true; // Already in progress or done.
+        }
+
         tracing::info!("Vsock: injecting OP_REQUEST for port {port}");
         if self.inject_vsock_rx_raw(&hdr) {
             true
         } else {
-            // Device not ready yet — queue for later.
             tracing::info!("Vsock: device not ready, queueing OP_REQUEST for port {port}");
             if let Ok(mut pending) = self.pending_vsock_connects.lock() {
-                if !pending.iter().any(|&(p, _)| p == port) {
-                    pending.push((port, guest_cid));
-                }
+                pending.push((port, guest_cid));
             }
             false
         }
@@ -1033,12 +1050,11 @@ impl DeviceManager {
         let used_idx_off = used_addr + 2;
         let used_idx =
             u16::from_le_bytes([guest_mem[used_idx_off], guest_mem[used_idx_off + 1]]) as usize;
-        tracing::info!(
-            "inject_vsock_rx_raw: avail_idx={} used_idx={} q_size={} desc_addr={:#x}",
+        tracing::trace!(
+            "inject_vsock_rx_raw: avail_idx={} used_idx={} q_size={}",
             avail_idx,
             used_idx,
             q_size,
-            desc_addr,
         );
 
         if avail_idx == used_idx {
@@ -1286,7 +1302,7 @@ impl DeviceManager {
         // Release the fds lock before proceeding.
         drop(fds);
 
-        tracing::info!("poll_vsock_rx: reaching TX poll section, injected={injected}");
+        // TX poll: drain vsock TX queue for guest→host responses.
         // Also drain vsock TX queue (queue 1) for pending guest→host responses.
         // Guest may have put OP_RESPONSE/OP_RST in the TX queue without kicking
         // (avail_event suppression or batched processing).
