@@ -27,6 +27,7 @@ use crate::config::VmmConfig;
 use crate::error::{Result, VmmError};
 use crate::network::{NetworkAllocation, NetworkManager};
 use crate::snapshot::SnapshotCatalog;
+use crate::snapshot_cow::{CowHandle, CowManager};
 use crate::spawn::{spawn_direct, spawn_jailer};
 use crate::vsock::{self, ExecInputMsg, OutputChunk, StartCommand};
 
@@ -178,6 +179,8 @@ pub struct SandboxInstance {
     pub last_exit_code: Option<i32>,
     /// Human-readable error (only set when state == `Failed`).
     pub error: Option<String>,
+    /// dm-snapshot CoW handle (present when snapshot-based rootfs is active).
+    pub cow_handle: Option<CowHandle>,
 }
 
 impl SandboxInstance {
@@ -202,6 +205,7 @@ impl SandboxInstance {
             last_exited_at: None,
             last_exit_code: None,
             error: None,
+            cow_handle: None,
         }
     }
 
@@ -315,6 +319,7 @@ pub struct SandboxManager {
     snapshots: Arc<SnapshotCatalog>,
     config: Arc<VmmConfig>,
     events_tx: broadcast::Sender<SandboxEvent>,
+    cow_manager: Arc<CowManager>,
 }
 
 impl SandboxManager {
@@ -327,6 +332,10 @@ impl SandboxManager {
         )?);
         let snapshots = Arc::new(SnapshotCatalog::new(&config.firecracker.data_dir));
         let (events_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        let cow_manager = Arc::new(
+            CowManager::new(&config.firecracker.data_dir)
+                .map_err(|e| VmmError::Config(format!("CowManager init: {e}")))?,
+        );
 
         Ok(Self {
             instances: Arc::new(RwLock::new(HashMap::new())),
@@ -334,6 +343,7 @@ impl SandboxManager {
             snapshots,
             config: Arc::new(config),
             events_tx,
+            cow_manager,
         })
     }
 
@@ -427,6 +437,7 @@ impl SandboxManager {
             let network = Arc::clone(&self.network);
             let config = Arc::clone(&self.config);
             let events_tx = self.events_tx.clone();
+            let cow_manager = Arc::clone(&self.cow_manager);
             let id_clone = id.clone();
             let spec_clone = spec.clone();
             let net_alloc_clone = net_alloc;
@@ -440,6 +451,7 @@ impl SandboxManager {
                     network,
                     config,
                     events_tx,
+                    cow_manager,
                 )
                 .await;
             });
@@ -451,11 +463,15 @@ impl SandboxManager {
             let network = Arc::clone(&self.network);
             let events_tx = self.events_tx.clone();
             let config2 = Arc::clone(&self.config);
+            let cow2 = Arc::clone(&self.cow_manager);
             let id2 = id.clone();
             let ttl = spec.ttl_seconds;
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(ttl as u64)).await;
-                remove_sandbox_impl(&id2, true, &instances, &network, &events_tx, &config2).await;
+                remove_sandbox_impl(
+                    &id2, true, &instances, &network, &events_tx, &config2, &cow2,
+                )
+                .await;
             });
         }
 
@@ -544,6 +560,7 @@ impl SandboxManager {
             &self.network,
             &self.events_tx,
             &self.config,
+            &self.cow_manager,
         )
         .await;
         info!(sandbox_id = %id, "sandbox removed");
@@ -1136,11 +1153,15 @@ impl SandboxManager {
             let network = Arc::clone(&self.network);
             let events_tx = self.events_tx.clone();
             let config2 = Arc::clone(&self.config);
+            let cow2 = Arc::clone(&self.cow_manager);
             let id2 = new_id.clone();
             let ttl = spec.ttl_seconds;
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(ttl as u64)).await;
-                remove_sandbox_impl(&id2, true, &instances, &network, &events_tx, &config2).await;
+                remove_sandbox_impl(
+                    &id2, true, &instances, &network, &events_tx, &config2, &cow2,
+                )
+                .await;
             });
         }
 
@@ -1241,9 +1262,19 @@ async fn boot_sandbox(
     network: Arc<NetworkManager>,
     config: Arc<VmmConfig>,
     events_tx: broadcast::Sender<SandboxEvent>,
+    cow_manager: Arc<CowManager>,
 ) {
-    match do_boot(&id, &spec, net_alloc.as_ref(), &vm_dir, &config).await {
-        Ok((process, vm, vsock_uds_path)) => {
+    match do_boot(
+        &id,
+        &spec,
+        net_alloc.as_ref(),
+        &vm_dir,
+        &config,
+        &cow_manager,
+    )
+    .await
+    {
+        Ok((process, vm, vsock_uds_path, cow_handle)) => {
             let ready_at = Utc::now();
 
             let value = instances.read().unwrap().get(&id).cloned();
@@ -1257,6 +1288,7 @@ async fn boot_sandbox(
                 inst.process = Some(process);
                 inst.vm = Some(vm);
                 inst.vsock_uds_path = Some(vsock_uds_path);
+                inst.cow_handle = cow_handle;
                 inst.state = SandboxState::Ready;
                 inst.ready_at = Some(ready_at);
             }
@@ -1332,15 +1364,23 @@ async fn stage_files_for_jailer(
 
 /// Perform the actual Firecracker boot: spawn process, configure, start VM.
 ///
-/// Returns `(FirecrackerProcess, Arc<Vm>, vsock_uds_path)` on success.
-/// `vsock_uds_path` is the host-side absolute path to the vsock UDS socket.
+/// Returns `(FirecrackerProcess, Arc<Vm>, vsock_uds_path, Option<CowHandle>)`
+/// on success.  The `CowHandle` is `Some` when dm-snapshot CoW is active
+/// (direct mode only in Phase 1).
+#[allow(clippy::type_complexity)]
 async fn do_boot(
     id: &str,
     spec: &SandboxSpec,
     net_alloc: Option<&NetworkAllocation>,
     vm_dir: &Path,
     config: &VmmConfig,
-) -> Result<(fc_sdk::FirecrackerProcess, Arc<fc_sdk::Vm>, PathBuf)> {
+    cow_manager: &CowManager,
+) -> Result<(
+    fc_sdk::FirecrackerProcess,
+    Arc<fc_sdk::Vm>,
+    PathBuf,
+    Option<CowHandle>,
+)> {
     let log_path = vm_dir.join("firecracker.log");
     let metrics_path = vm_dir.join("firecracker.metrics");
     // socket_path is used only for the direct (non-jailer) mode spawn.
@@ -1371,22 +1411,39 @@ async fn do_boot(
     // In jailer mode the files must exist inside the chroot, and paths passed
     // to the FC API are relative to the chroot root.  In direct mode the
     // host-absolute paths from the spec are used as-is.
-    let (kernel_path, rootfs_path, vsock_fc_path, vsock_host_path) =
+    let (kernel_path, rootfs_path, vsock_fc_path, vsock_host_path, cow_handle) =
         if let Some(ref jc) = fc_cfg.jailer {
+            // Jailer mode: full copy into chroot (dm-snapshot deferred to Phase 2).
             let base = jc.chroot_base_dir.as_deref().unwrap_or("/srv/jailer");
             let cr = chroot_root(&fc_cfg.binary, base, id);
             let (k, r) =
                 stage_files_for_jailer(&cr, &spec.kernel, &spec.rootfs, jc.uid, jc.gid).await?;
             // FC creates the vsock socket at this path inside the chroot.
             let vsock_host = cr.join("run/firecracker.vsock");
-            (k, r, "/run/firecracker.vsock".to_string(), vsock_host)
+            (k, r, "/run/firecracker.vsock".to_string(), vsock_host, None)
         } else {
+            // Direct mode: try dm-snapshot CoW, fall back to using rootfs directly.
+            let (rootfs, cow) = match cow_manager.setup(id, &spec.rootfs).await {
+                Ok(handle) => {
+                    let path = handle.dm_device.clone();
+                    (path, Some(handle))
+                }
+                Err(e) => {
+                    warn!(
+                        sandbox_id = %id,
+                        error = %e,
+                        "dm-snapshot unavailable, using rootfs directly"
+                    );
+                    (spec.rootfs.clone(), None)
+                }
+            };
             let vsock_path = vm_dir.join("firecracker.vsock");
             (
                 spec.kernel.clone(),
-                spec.rootfs.clone(),
+                rootfs,
                 vsock_path.to_str().unwrap().to_owned(),
                 vsock_path,
+                cow,
             )
         };
 
@@ -1461,8 +1518,17 @@ async fn do_boot(
         vsock_id: None,
     });
 
-    let vm = Arc::new(builder.start().await.map_err(VmmError::from)?);
-    Ok((process, vm, vsock_host_path))
+    let vm = match builder.start().await {
+        Ok(v) => Arc::new(v),
+        Err(e) => {
+            // Clean up dm-snapshot if boot fails after setup.
+            if let Some(ref handle) = cow_handle {
+                let _ = cow_manager.teardown(handle).await;
+            }
+            return Err(VmmError::from(e));
+        }
+    };
+    Ok((process, vm, vsock_host_path, cow_handle))
 }
 
 // =============================================================================
@@ -1478,6 +1544,7 @@ async fn remove_sandbox_impl(
     network: &Arc<NetworkManager>,
     events_tx: &broadcast::Sender<SandboxEvent>,
     config: &Arc<VmmConfig>,
+    cow_manager: &Arc<CowManager>,
 ) {
     let entry = instances.read().unwrap().get(id).cloned();
     let Some(arc) = entry else {
@@ -1506,6 +1573,18 @@ async fn remove_sandbox_impl(
     if let Some(ref mut proc) = fc_process {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), proc.wait()).await;
     }
+
+    // Teardown dm-snapshot CoW device (must happen after FC process exits
+    // because Firecracker holds the block device open).
+    {
+        let cow_handle = arc.lock().unwrap().cow_handle.take();
+        if let Some(ref handle) = cow_handle
+            && let Err(e) = cow_manager.teardown(handle).await
+        {
+            warn!(sandbox_id = %id, error = %e, "dm-snapshot teardown failed");
+        }
+    }
+
     // Release network resources (destroys TAP via ioctl).
     {
         let inst = arc.lock().unwrap();
