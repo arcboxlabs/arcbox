@@ -468,7 +468,8 @@ impl Vmm {
             )?;
         }
 
-        // VirtioFS shared directories
+        // VirtioFS shared directories — create FsServer handler for each share
+        // so the device can process FUSE requests from the guest.
         for dir in &self.config.shared_dirs {
             let fs_config = arcbox_virtio::fs::FsConfig {
                 tag: dir.tag.clone(),
@@ -476,7 +477,21 @@ impl Vmm {
                 queue_size: 1024,
                 shared_dir: dir.host_path.to_string_lossy().into_owned(),
             };
-            let fs_dev = arcbox_virtio::fs::VirtioFs::new(fs_config);
+
+            // Create and start the filesystem server (passthrough to host directory).
+            let server_config = arcbox_fs::FsConfig {
+                tag: dir.tag.clone(),
+                source: dir.host_path.to_string_lossy().into_owned(),
+                ..arcbox_fs::FsConfig::default()
+            };
+            let mut server = arcbox_fs::FsServer::new(server_config);
+            server
+                .start()
+                .map_err(|e| VmmError::Device(format!("FsServer start failed: {e}")))?;
+            let handler: std::sync::Arc<dyn arcbox_virtio::fs::FuseRequestHandler> =
+                std::sync::Arc::new(server);
+
+            let fs_dev = arcbox_virtio::fs::VirtioFs::with_handler(fs_config, handler);
             let name = format!("virtiofs-{}", dir.tag);
             device_manager.register_virtio_device(
                 DeviceType::VirtioFs,
