@@ -257,7 +257,14 @@ impl VirtioMmioState {
                     self.driver_features,
                 );
             }
-            regs::DRIVER_FEATURES_SEL => self.driver_features_sel = value,
+            regs::DRIVER_FEATURES_SEL => {
+                tracing::debug!(
+                    "MMIO: DRIVER_FEATURES_SEL = {:#x} (was {:#x})",
+                    value,
+                    self.driver_features_sel,
+                );
+                self.driver_features_sel = value;
+            }
             regs::QUEUE_SEL => self.queue_sel = value,
             regs::QUEUE_NUM => {
                 if (self.queue_sel as usize) < 8 {

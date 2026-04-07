@@ -1086,14 +1086,19 @@ fn vcpu_run_loop(
                     };
                     if uart_match {
                         if mmio.is_write {
-                            let value = match vcpu.get_reg(u32::from(mmio.register)) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    tracing::error!(
-                                        "vCPU {vcpu_id}: get_reg(X{}) failed: {e}",
-                                        mmio.register
-                                    );
-                                    0
+                            // ARM64: register 31 = XZR (zero), not SP.
+                            let value = if mmio.register == 31 {
+                                0u64
+                            } else {
+                                match vcpu.get_reg(u32::from(mmio.register)) {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "vCPU {vcpu_id}: get_reg(X{}) failed: {e}",
+                                            mmio.register
+                                        );
+                                        0
+                                    }
                                 }
                             };
                             pl011.lock().unwrap().write(
@@ -1122,19 +1127,35 @@ fn vcpu_run_loop(
                 if !handled_by_pl011 {
                     // Dispatch to DeviceManager for VirtIO MMIO devices.
                     if mmio.is_write {
-                        let value = match vcpu.get_reg(u32::from(mmio.register)) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                tracing::error!(
-                                    "vCPU {vcpu_id}: get_reg(X{}) failed: {e}",
-                                    mmio.register
-                                );
-                                // Advance PC even on register read failure.
-                                let pc = vcpu.get_reg(reg::PC).unwrap_or(0);
-                                let _ = vcpu.set_reg(reg::PC, pc + 4);
-                                continue;
+                        // ARM64: register 31 in a load/store is XZR (zero register),
+                        // not SP. HV.framework's get_reg(31) returns SP, so we must
+                        // handle XZR explicitly.
+                        let value = if mmio.register == 31 {
+                            0u64
+                        } else {
+                            match vcpu.get_reg(u32::from(mmio.register)) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    tracing::error!(
+                                        "vCPU {vcpu_id}: get_reg(X{}) failed: {e}",
+                                        mmio.register
+                                    );
+                                    let pc = vcpu.get_reg(reg::PC).unwrap_or(0);
+                                    let _ = vcpu.set_reg(reg::PC, pc + 4);
+                                    continue;
+                                }
                             }
                         };
+                        tracing::trace!(
+                            "MMIO write: addr={:#x} offset={:#x} X{}={:#x} size={}",
+                            mmio.address,
+                            mmio.address.saturating_sub(
+                                mmio.address & !0xFFF // base = addr & ~0xFFF
+                            ),
+                            mmio.register,
+                            value,
+                            mmio.access_size,
+                        );
                         if let Err(e) = device_manager.handle_mmio_write(
                             mmio.address,
                             mmio.access_size as usize,

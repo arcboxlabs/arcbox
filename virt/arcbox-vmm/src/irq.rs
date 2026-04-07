@@ -349,8 +349,10 @@ impl IrqChip {
             return Err(crate::error::VmmError::Irq("IRQ exhausted".to_string()));
         }
 
-        // Default: map IRQ N to GSI N for legacy compatibility
-        let gsi = irq % MAX_GSIS;
+        // Map IRQ N to GSI N directly. On ARM64 GIC, SPI numbers map 1:1
+        // to GSI (the GIC supports up to 1020 SPIs). The old `% MAX_GSIS`
+        // was for x86 IOAPIC compatibility and broke ARM64 interrupt delivery.
+        let gsi = irq;
         let config = IrqConfig {
             gsi,
             trigger_mode: TriggerMode::Edge,
