@@ -20,7 +20,7 @@ use std::sync::Arc;
 use arcbox_hv::{HvVm, MemoryPermission};
 
 use crate::boot::arm64;
-use crate::device::DeviceTreeEntry;
+use crate::device::{DeviceTreeEntry, DeviceType};
 use crate::error::{Result, VmmError};
 use crate::fdt::{FdtConfig, generate_fdt};
 use crate::irq::IrqChip;
@@ -43,6 +43,8 @@ const VIRTIO_MMIO_SIZE: u64 = 0x200;
 const VIRTIO_MMIO_MAX_DEVICES: u64 = 32;
 
 /// First SPI interrupt number for VirtIO devices (GIC SPI numbering).
+/// Retained for unit tests; the live path now uses IrqChip::allocate_irq().
+#[allow(dead_code)]
 const VIRTIO_IRQ_BASE: u32 = 48;
 
 /// Guest RAM is mapped starting at IPA 0.
@@ -211,6 +213,9 @@ const PSCI_SYSTEM_RESET: u64 = 0x8400_0009;
 // ---------------------------------------------------------------------------
 
 /// Device slot tracking for MMIO address and IRQ assignment.
+///
+/// Retained for unit tests; the live path uses DeviceManager registration.
+#[allow(dead_code)]
 struct DeviceSlot {
     /// MMIO base address in guest IPA.
     mmio_base: u64,
@@ -223,6 +228,9 @@ struct DeviceSlot {
 }
 
 /// Collect information needed to generate FDT entries for VirtIO devices.
+///
+/// Retained for unit tests; the live path uses `device_manager.device_tree_entries()`.
+#[allow(dead_code)]
 fn build_device_tree_entries(slots: &[DeviceSlot]) -> Vec<DeviceTreeEntry> {
     slots
         .iter()
@@ -236,6 +244,9 @@ fn build_device_tree_entries(slots: &[DeviceSlot]) -> Vec<DeviceTreeEntry> {
 }
 
 /// Allocate the next MMIO device slot.
+///
+/// Retained for unit tests; the live path uses `memory_manager.allocate_mmio()`.
+#[allow(dead_code)]
 fn allocate_device_slot(index: u64, name: impl Into<String>) -> Result<DeviceSlot> {
     if index >= VIRTIO_MMIO_MAX_DEVICES {
         return Err(VmmError::Device("too many VirtIO MMIO devices".to_string()));
@@ -323,54 +334,132 @@ impl Vmm {
             tracing::debug!("IRQ callback wired to hardware GIC");
         }
 
-        // --- 6. Allocate VirtIO device slots ---
-        let mut device_slots: Vec<DeviceSlot> = Vec::new();
-        let mut slot_index: u64 = 0;
+        // --- 6. Initialize managers ---
+        // Use a custom MMIO base matching the ARM64 VirtIO MMIO layout so
+        // that device addresses in the FDT match what the allocator assigns.
+        // MMIO allocator aligns each slot to 4 KB, so reserve enough space
+        // for the maximum number of devices at page granularity.
+        let mmio_region_size = VIRTIO_MMIO_MAX_DEVICES * 0x1000;
+        let mut memory_manager = MemoryManager::with_mmio_base(VIRTIO_MMIO_BASE, mmio_region_size);
+        memory_manager.initialize(self.config.memory_size)?;
 
-        // Console (serial)
+        let mut device_manager = DeviceManager::new();
+
+        // Provide guest memory access so the QUEUE_NOTIFY handler can read
+        // descriptors and write completions directly in guest RAM.
+        // SAFETY: guest_ram will be leaked below (std::mem::forget) so the
+        // pointer remains valid for the lifetime of the DeviceManager.
+        unsafe {
+            device_manager.set_guest_memory(guest_ram.as_ptr(), ram_size);
+        }
+
+        // Wire IRQ callback so device completions trigger GIC interrupts.
+        {
+            let irq_chip_clone = Arc::clone(&irq_chip);
+            let callback: crate::device::DeviceIrqCallback = Arc::new(move |irq, level| {
+                irq_chip_clone
+                    .trigger_irq(irq)
+                    .map_err(|e| VmmError::Irq(format!("trigger_irq({irq}, {level}): {e}")))
+            });
+            device_manager.set_irq_callback(callback);
+        }
+
+        // --- 7. Register actual VirtIO device instances ---
+
+        // Console
         if self.config.serial_console || self.config.virtio_console {
-            device_slots.push(allocate_device_slot(slot_index, "virtio-console")?);
-            slot_index += 1;
+            let console = arcbox_virtio::console::VirtioConsole::new(
+                arcbox_virtio::console::ConsoleConfig::default(),
+            );
+            device_manager.register_virtio_device(
+                DeviceType::VirtioConsole,
+                "virtio-console",
+                console,
+                &mut memory_manager,
+                &irq_chip,
+            )?;
         }
 
         // VirtioFS shared directories
         for dir in &self.config.shared_dirs {
-            device_slots.push(allocate_device_slot(
-                slot_index,
-                format!("virtiofs-{}", dir.tag),
-            )?);
-            slot_index += 1;
+            let fs_config = arcbox_virtio::fs::FsConfig {
+                tag: dir.tag.clone(),
+                num_queues: 1,
+                queue_size: 1024,
+                shared_dir: dir.host_path.to_string_lossy().into_owned(),
+            };
+            let fs_dev = arcbox_virtio::fs::VirtioFs::new(fs_config);
+            let name = format!("virtiofs-{}", dir.tag);
+            device_manager.register_virtio_device(
+                DeviceType::VirtioFs,
+                name,
+                fs_dev,
+                &mut memory_manager,
+                &irq_chip,
+            )?;
         }
 
         // Block devices
-        for (i, _) in self.config.block_devices.iter().enumerate() {
-            device_slots.push(allocate_device_slot(slot_index, format!("virtio-blk-{i}"))?);
-            slot_index += 1;
+        for block_dev in &self.config.block_devices {
+            let blk =
+                arcbox_virtio::blk::VirtioBlock::from_path(&block_dev.path, block_dev.read_only)
+                    .map_err(|e| VmmError::Device(format!("block device: {e}")))?;
+            let name = format!("virtio-blk-{}", block_dev.path.display());
+            device_manager.register_virtio_device(
+                DeviceType::VirtioBlock,
+                name,
+                blk,
+                &mut memory_manager,
+                &irq_chip,
+            )?;
         }
 
         // Network (TSO-enabled)
         if self.config.networking {
-            device_slots.push(allocate_device_slot(slot_index, "virtio-net")?);
-            slot_index += 1;
+            let net_config = arcbox_virtio::net::NetConfig {
+                mac: arcbox_virtio::net::NetConfig::random_mac(),
+                ..Default::default()
+            };
+            let mut net_dev = arcbox_virtio::net::VirtioNet::new(net_config);
+            // Enable TSO for the custom VMM path — this is the whole point of
+            // using Hypervisor.framework instead of VZ framework.
+            net_dev.enable_tso_features();
+            device_manager.register_virtio_device(
+                DeviceType::VirtioNet,
+                "virtio-net",
+                net_dev,
+                &mut memory_manager,
+                &irq_chip,
+            )?;
         }
 
         // Vsock
         if self.config.vsock {
-            device_slots.push(allocate_device_slot(slot_index, "virtio-vsock")?);
-            // slot_index += 1; // Last device, no increment needed.
+            let vsock_config = arcbox_virtio::vsock::VsockConfig {
+                guest_cid: self.config.guest_cid.unwrap_or(3) as u64,
+            };
+            let vsock_dev = arcbox_virtio::vsock::VirtioVsock::new(vsock_config);
+            device_manager.register_virtio_device(
+                DeviceType::VirtioVsock,
+                "virtio-vsock",
+                vsock_dev,
+                &mut memory_manager,
+                &irq_chip,
+            )?;
         }
 
-        for slot in &device_slots {
+        for dev_info in device_manager.iter() {
             tracing::info!(
-                "VirtIO slot: {} @ {:#x} IRQ {}",
-                slot.name,
-                slot.mmio_base,
-                slot.irq
+                "VirtIO device: {} ({:?}) @ MMIO {:#x} IRQ {:?}",
+                dev_info.name,
+                dev_info.device_type,
+                dev_info.mmio_base.unwrap_or(0),
+                dev_info.irq
             );
         }
 
-        // --- 7. Generate FDT ---
-        let fdt_entries = build_device_tree_entries(&device_slots);
+        // --- 8. Generate FDT ---
+        let fdt_entries = device_manager.device_tree_entries();
         let fdt_config = build_hv_fdt_config(&self.config, &fdt_entries)?;
         let fdt_blob = generate_fdt(&fdt_config)?;
 
@@ -403,11 +492,7 @@ impl Vmm {
             load_initrd_into_ram(ram, initrd_path)?;
         }
 
-        // --- 9. Initialize managers ---
-        let mut memory_manager = MemoryManager::new();
-        memory_manager.initialize(self.config.memory_size)?;
-
-        let device_manager = DeviceManager::new();
+        // --- 10. Store managers ---
         let event_loop = crate::event::EventLoop::new()?;
 
         // Store managers (VM and GuestRam ownership will be moved to vCPU

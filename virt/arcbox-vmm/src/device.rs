@@ -9,16 +9,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
-use arcbox_virtio::{DeviceStatus, VirtioDevice};
+use arcbox_virtio::{DeviceStatus, QueueConfig, VirtioDevice};
 
 use crate::error::{Result, VmmError};
 use crate::irq::{Irq, IrqChip};
 use crate::memory::MemoryManager;
-
-/// Callback type for injecting interrupts into the VM.
-///
-/// Parameters: (irq_number, assert_level).
-type IrqCallback = Arc<dyn Fn(u32, bool) -> Result<()> + Send + Sync>;
 
 /// Device identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -346,30 +341,27 @@ struct RegisteredDevice {
     virtio_device: Option<Arc<Mutex<dyn VirtioDevice>>>,
 }
 
-/// Manages devices attached to the VM.
-///
-/// # Safety
-///
-/// The `guest_ram_base` pointer is valid for the lifetime of the VM and
-/// synchronized through the vCPU exit/enter barrier. Access is serialized
-/// by the MMIO write handler which runs on the vCPU thread.
-// SAFETY: guest_ram_base is only set once via set_guest_memory and
-// accessed under the MMIO handler path which runs on the owning vCPU thread.
-unsafe impl Send for DeviceManager {}
-unsafe impl Sync for DeviceManager {}
+/// IRQ trigger callback type for device-initiated interrupts.
+pub type DeviceIrqCallback = Arc<dyn Fn(Irq, bool) -> Result<()> + Send + Sync>;
 
+/// Manages devices attached to the VM.
 pub struct DeviceManager {
     devices: HashMap<DeviceId, RegisteredDevice>,
     next_id: u32,
     /// MMIO address to device mapping.
     mmio_map: HashMap<u64, DeviceId>,
-    /// Guest RAM base pointer for GPA→HVA translation (HV backend only).
+    /// Base pointer to guest physical memory (set by custom HV path).
     guest_ram_base: Option<*mut u8>,
-    /// Guest RAM size.
+    /// Size of guest physical memory in bytes.
     guest_ram_size: usize,
-    /// IRQ trigger callback for injecting interrupts.
-    irq_callback: Option<IrqCallback>,
+    /// IRQ trigger callback for injecting interrupts into the guest.
+    irq_callback: Option<DeviceIrqCallback>,
 }
+
+// SAFETY: guest_ram_base points to memory that is valid for the lifetime of the
+// DeviceManager and is accessed exclusively through synchronized vCPU/device paths.
+unsafe impl Send for DeviceManager {}
+unsafe impl Sync for DeviceManager {}
 
 impl DeviceManager {
     /// Creates a new device manager.
@@ -385,48 +377,20 @@ impl DeviceManager {
         }
     }
 
-    /// Sets the guest memory reference for VirtQueue processing.
+    /// Provides guest physical memory access for queue processing.
     ///
     /// # Safety
     ///
-    /// The pointer must remain valid for the lifetime of the DeviceManager.
+    /// `base` must point to a valid allocation of at least `size` bytes that
+    /// remains valid for the lifetime of the `DeviceManager`.
     pub unsafe fn set_guest_memory(&mut self, base: *mut u8, size: usize) {
         self.guest_ram_base = Some(base);
         self.guest_ram_size = size;
     }
 
-    /// Sets the IRQ trigger callback.
-    pub fn set_irq_callback(&mut self, callback: IrqCallback) {
+    /// Sets the callback used to inject interrupts into the guest.
+    pub fn set_irq_callback(&mut self, callback: DeviceIrqCallback) {
         self.irq_callback = Some(callback);
-    }
-
-    /// Builds a GuestMemoryVirtQueue from the current MMIO state for a device.
-    ///
-    /// Will be called by device-specific queue processing handlers once
-    /// individual VirtIO device processing is wired up.
-    #[allow(dead_code)]
-    fn build_guest_queue(
-        &self,
-        mmio_state: &VirtioMmioState,
-        queue_idx: u16,
-    ) -> Option<arcbox_virtio::queue_guest::GuestMemoryVirtQueue> {
-        let qi = queue_idx as usize;
-        if qi >= 8 || !mmio_state.queue_ready[qi] {
-            return None;
-        }
-        let ram_base = self.guest_ram_base?;
-        // SAFETY: ram_base validity is guaranteed by set_guest_memory caller.
-        Some(unsafe {
-            arcbox_virtio::queue_guest::GuestMemoryVirtQueue::new(
-                queue_idx,
-                mmio_state.queue_num[qi],
-                mmio_state.queue_desc[qi],
-                mmio_state.queue_driver[qi],
-                mmio_state.queue_device[qi],
-                ram_base,
-                self.guest_ram_size,
-            )
-        })
     }
 
     /// Registers a new device.
@@ -808,25 +772,87 @@ impl DeviceManager {
                 }
                 virtio_mmio::regs::QUEUE_NOTIFY => {
                     let queue_idx = value32 as u16;
-                    tracing::trace!("Device {} queue {} notified", device_id.0, queue_idx);
 
-                    // Inject interrupt if device has processed something
-                    if let Some(irq) = device.info.irq {
-                        if let Some(state) = &device.mmio_state {
-                            let mut s = state.write().map_err(|e| {
-                                VmmError::Device(format!("Failed to lock device state: {e}"))
+                    if let Some(virtio_dev) = &device.virtio_device {
+                        // Build QueueConfig from current MMIO state for the
+                        // notified queue index.
+                        let qcfg = {
+                            let mmio_state = state.read().map_err(|e| {
+                                VmmError::Device(format!("Failed to lock state: {e}"))
                             })?;
-                            s.trigger_interrupt(1); // VIRTIO_MMIO_INT_VRING
-                        }
-                        // Signal the GIC
-                        if let Some(ref callback) = self.irq_callback {
-                            if let Err(e) = callback(irq, true) {
-                                tracing::warn!(
-                                    "IRQ injection for device {} failed: {e}",
-                                    device_id.0
-                                );
+                            let qi = queue_idx as usize;
+                            if qi < 8 {
+                                QueueConfig {
+                                    desc_addr: mmio_state.queue_desc[qi],
+                                    avail_addr: mmio_state.queue_driver[qi],
+                                    used_addr: mmio_state.queue_device[qi],
+                                    size: mmio_state.queue_num[qi],
+                                    ready: mmio_state.queue_ready[qi],
+                                }
+                            } else {
+                                QueueConfig::default()
                             }
+                        };
+
+                        if let (Some(ram_base), ram_size) =
+                            (self.guest_ram_base, self.guest_ram_size)
+                        {
+                            // SAFETY: ram_base is valid for ram_size bytes per
+                            // the contract of set_guest_memory().
+                            let guest_mem =
+                                unsafe { std::slice::from_raw_parts_mut(ram_base, ram_size) };
+
+                            let mut dev = virtio_dev.lock().map_err(|e| {
+                                VmmError::Device(format!("Failed to lock device: {e}"))
+                            })?;
+
+                            match dev.process_queue(queue_idx, guest_mem, &qcfg) {
+                                Ok(completions) if !completions.is_empty() => {
+                                    tracing::trace!(
+                                        "Device {} queue {} processed {} completions",
+                                        device_id.0,
+                                        queue_idx,
+                                        completions.len()
+                                    );
+                                    // Inject interrupt to signal used ring updates.
+                                    if let Some(irq) = device.info.irq {
+                                        {
+                                            let mut s = state.write().map_err(|e| {
+                                                VmmError::Device(format!(
+                                                    "Failed to lock state: {e}"
+                                                ))
+                                            })?;
+                                            s.trigger_interrupt(1); // VIRTIO_MMIO_INT_VRING
+                                        }
+                                        if let Some(ref callback) = self.irq_callback {
+                                            let _ = callback(irq, true);
+                                        }
+                                    }
+                                }
+                                Ok(_) => {
+                                    // No completions, no interrupt needed.
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Device {} queue {} error: {e}",
+                                        device_id.0,
+                                        queue_idx
+                                    );
+                                }
+                            }
+                        } else {
+                            tracing::trace!(
+                                "Device {} queue {} notified but no guest memory set",
+                                device_id.0,
+                                queue_idx
+                            );
                         }
+                    } else {
+                        tracing::trace!(
+                            "Device {} queue {} notified (no device impl)",
+                            device_id.0,
+                            queue_idx
+                        );
                     }
                 }
                 _ => {}
@@ -880,6 +906,18 @@ impl Default for DeviceManager {
         Self::new()
     }
 }
+
+// Verify that DeviceManager can still be shared across threads despite
+// containing a raw pointer (Send + Sync are implemented above).
+#[cfg(test)]
+const _: () = {
+    fn assert_send<T: Send>() {}
+    fn assert_sync<T: Send>() {}
+    fn _check() {
+        assert_send::<DeviceManager>();
+        assert_sync::<DeviceManager>();
+    }
+};
 
 #[cfg(test)]
 mod tests {

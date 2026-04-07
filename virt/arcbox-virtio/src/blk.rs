@@ -523,6 +523,8 @@ pub struct VirtioBlock {
     queue: Option<VirtQueue>,
     /// Device ID string.
     device_id: String,
+    /// Last-seen available ring index for guest-memory queue processing.
+    last_avail_idx: u16,
 }
 
 impl VirtioBlock {
@@ -579,6 +581,7 @@ impl VirtioBlock {
             file: None,
             queue: None,
             device_id,
+            last_avail_idx: 0,
         }
     }
 
@@ -883,7 +886,120 @@ impl VirtioDevice for VirtioBlock {
     fn reset(&mut self) {
         self.acked_features = 0;
         self.queue = None;
+        self.last_avail_idx = 0;
         // Keep file handle open for quick reactivation
+    }
+
+    fn process_queue(
+        &mut self,
+        _queue_idx: u16,
+        memory: &mut [u8],
+        queue_config: &crate::QueueConfig,
+    ) -> Result<Vec<(u16, u32)>> {
+        if !queue_config.ready || queue_config.size == 0 {
+            return Ok(Vec::new());
+        }
+
+        let desc_table_addr = queue_config.desc_addr as usize;
+        let avail_addr = queue_config.avail_addr as usize;
+        let used_addr = queue_config.used_addr as usize;
+        let q_size = queue_config.size as usize;
+
+        // Read the avail ring index (offset 2 in the avail ring).
+        if avail_addr + 4 + 2 * q_size > memory.len() {
+            return Err(VirtioError::InvalidQueue("avail ring out of bounds".into()));
+        }
+        let avail_idx = u16::from_le_bytes([memory[avail_addr + 2], memory[avail_addr + 3]]);
+
+        // Read the last-seen index from the used ring (we store it inline
+        // using a field on self, initialised to 0 on activate/reset).
+        let last_avail = self.last_avail_idx;
+
+        let mut completions = Vec::new();
+
+        let mut current_avail = last_avail;
+        while current_avail != avail_idx {
+            let ring_offset = avail_addr + 4 + 2 * ((current_avail as usize) % q_size);
+            let head_idx =
+                u16::from_le_bytes([memory[ring_offset], memory[ring_offset + 1]]) as usize;
+
+            // Walk the descriptor chain starting at head_idx.
+            let mut descriptors = Vec::new();
+            let mut idx = head_idx;
+            loop {
+                let desc_offset = desc_table_addr + idx * 16;
+                if desc_offset + 16 > memory.len() {
+                    return Err(VirtioError::InvalidQueue("descriptor out of bounds".into()));
+                }
+                let addr =
+                    u64::from_le_bytes(memory[desc_offset..desc_offset + 8].try_into().unwrap());
+                let len = u32::from_le_bytes(
+                    memory[desc_offset + 8..desc_offset + 12]
+                        .try_into()
+                        .unwrap(),
+                );
+                let flags = u16::from_le_bytes(
+                    memory[desc_offset + 12..desc_offset + 14]
+                        .try_into()
+                        .unwrap(),
+                );
+                let next = u16::from_le_bytes(
+                    memory[desc_offset + 14..desc_offset + 16]
+                        .try_into()
+                        .unwrap(),
+                );
+
+                descriptors.push(Descriptor {
+                    addr,
+                    len,
+                    flags,
+                    next,
+                });
+
+                if flags & crate::queue::flags::NEXT == 0 {
+                    break;
+                }
+                idx = next as usize;
+                if idx >= q_size {
+                    return Err(VirtioError::InvalidQueue(
+                        "descriptor next index out of bounds".into(),
+                    ));
+                }
+            }
+
+            // Process the descriptor chain using existing block I/O logic.
+            let (bytes, status) = self.process_descriptor_chain(&descriptors, memory)?;
+
+            // Write the status byte into the last writable descriptor.
+            if let Some(last_wr) = descriptors.iter().rev().find(|d| d.is_write_only()) {
+                let status_offset = last_wr.addr as usize + last_wr.len as usize - 1;
+                if status_offset < memory.len() {
+                    memory[status_offset] = status as u8;
+                }
+            }
+
+            // Push completion into the used ring.
+            let used_idx_offset = used_addr + 2;
+            let used_idx =
+                u16::from_le_bytes([memory[used_idx_offset], memory[used_idx_offset + 1]]);
+            let used_ring_entry = used_addr + 4 + ((used_idx as usize) % q_size) * 8;
+            if used_ring_entry + 8 <= memory.len() {
+                memory[used_ring_entry..used_ring_entry + 4]
+                    .copy_from_slice(&(head_idx as u32).to_le_bytes());
+                memory[used_ring_entry + 4..used_ring_entry + 8]
+                    .copy_from_slice(&(bytes as u32).to_le_bytes());
+                // Increment used index.
+                let new_used_idx = used_idx.wrapping_add(1);
+                memory[used_idx_offset..used_idx_offset + 2]
+                    .copy_from_slice(&new_used_idx.to_le_bytes());
+            }
+
+            completions.push((head_idx as u16, bytes as u32));
+            current_avail = current_avail.wrapping_add(1);
+        }
+
+        self.last_avail_idx = current_avail;
+        Ok(completions)
     }
 }
 

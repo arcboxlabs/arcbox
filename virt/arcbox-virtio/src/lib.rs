@@ -148,4 +148,44 @@ pub trait VirtioDevice: Send + Sync {
 
     /// Resets the device.
     fn reset(&mut self);
+
+    /// Processes pending buffers in the specified queue.
+    ///
+    /// `memory` is the entire guest physical memory as a mutable byte slice.
+    /// `queue_config` provides the guest physical addresses of the virtqueue
+    /// rings so the device can read descriptors directly from guest memory.
+    ///
+    /// Returns a list of `(descriptor_head_index, bytes_written)` completions,
+    /// or an empty vec if no processing occurred.
+    ///
+    /// The default implementation does nothing. Devices that support
+    /// queue-based processing (blk, fs, net, vsock) should override this.
+    fn process_queue(
+        &mut self,
+        queue_idx: u16,
+        memory: &mut [u8],
+        queue_config: &QueueConfig,
+    ) -> Result<Vec<(u16, u32)>> {
+        let _ = (queue_idx, memory, queue_config);
+        Ok(Vec::new())
+    }
+}
+
+/// Configuration for a single virtqueue, as set by the guest driver via
+/// MMIO transport writes.
+///
+/// All addresses are guest physical addresses (GPAs) into the flat memory
+/// slice passed to [`VirtioDevice::process_queue`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct QueueConfig {
+    /// Guest physical address of the descriptor table.
+    pub desc_addr: u64,
+    /// Guest physical address of the available (driver) ring.
+    pub avail_addr: u64,
+    /// Guest physical address of the used (device) ring.
+    pub used_addr: u64,
+    /// Queue size (number of descriptors).
+    pub size: u16,
+    /// Whether the queue is ready.
+    pub ready: bool,
 }

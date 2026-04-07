@@ -860,6 +860,27 @@ impl VirtioDevice for VirtioFs {
 
         tracing::debug!("VirtIO-FS device reset: tag='{}'", self.config.tag);
     }
+
+    fn process_queue(
+        &mut self,
+        queue_idx: u16,
+        memory: &mut [u8],
+        _queue_config: &crate::QueueConfig,
+    ) -> Result<Vec<(u16, u32)>> {
+        // Queue 0 is the hiprio/notification queue; actual request queues
+        // start at index 1 per the VirtIO-FS spec. Translate accordingly.
+        if queue_idx == 0 {
+            // hiprio queue — nothing to do for now
+            return Ok(Vec::new());
+        }
+
+        let internal_idx = (queue_idx - 1) as usize;
+
+        // Call the inherent process_queue method (not the trait method).
+        // The inherent method takes `usize` while the trait method takes `u16`,
+        // so Rust disambiguates correctly.
+        Self::process_queue(self, internal_idx, memory)
+    }
 }
 
 #[cfg(test)]
