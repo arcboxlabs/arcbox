@@ -46,6 +46,7 @@ libproc = { workspace = true }
 [features]
 default = []
 vmnet = ["arcbox-core/vmnet"]
+gic = ["arcbox-core/gic"]
 
 [lints]
 workspace = true
