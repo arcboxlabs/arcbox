@@ -756,6 +756,117 @@ impl VirtioDevice for VirtioConsole {
             port.output_buffer.clear();
         }
     }
+
+    fn process_queue(
+        &mut self,
+        queue_idx: u16,
+        memory: &mut [u8],
+        queue_config: &crate::QueueConfig,
+    ) -> Result<Vec<(u16, u32)>> {
+        // Queue 0 = RX (host→guest), Queue 1 = TX (guest→host).
+        // We only handle TX here — extract guest output from descriptors.
+        if queue_idx != 1 {
+            return Ok(Vec::new());
+        }
+
+        if !queue_config.ready || queue_config.size == 0 {
+            return Ok(Vec::new());
+        }
+
+        let desc_addr = queue_config.desc_addr as usize;
+        let avail_addr = queue_config.avail_addr as usize;
+        let used_addr = queue_config.used_addr as usize;
+        let queue_size = queue_config.size as usize;
+
+        // Read avail index.
+        if avail_addr + 4 > memory.len() {
+            return Ok(Vec::new());
+        }
+        let avail_idx =
+            u16::from_le_bytes([memory[avail_addr + 2], memory[avail_addr + 3]]) as usize;
+
+        // Read used index.
+        if used_addr + 4 > memory.len() {
+            return Ok(Vec::new());
+        }
+        let used_idx_ref = &memory[used_addr + 2..used_addr + 4];
+        let mut used_idx = u16::from_le_bytes([used_idx_ref[0], used_idx_ref[1]]) as usize;
+
+        let mut completions = Vec::new();
+
+        // Process available descriptors.
+        while used_idx != avail_idx {
+            let avail_ring_off = avail_addr + 4 + (used_idx % queue_size) * 2;
+            if avail_ring_off + 2 > memory.len() {
+                break;
+            }
+            let head_idx = u16::from_le_bytes([memory[avail_ring_off], memory[avail_ring_off + 1]]);
+
+            // Walk descriptor chain, extract TX data.
+            let mut idx = head_idx as usize;
+            let mut total_len = 0u32;
+            for _ in 0..queue_size {
+                let d_off = desc_addr + idx * 16;
+                if d_off + 16 > memory.len() {
+                    break;
+                }
+                let addr = u64::from_le_bytes(memory[d_off..d_off + 8].try_into().unwrap());
+                let len = u32::from_le_bytes(memory[d_off + 8..d_off + 12].try_into().unwrap());
+                let flags = u16::from_le_bytes(memory[d_off + 12..d_off + 14].try_into().unwrap());
+                let next = u16::from_le_bytes(memory[d_off + 14..d_off + 16].try_into().unwrap());
+
+                let is_write = flags & 2 != 0; // VIRTQ_DESC_F_WRITE
+                if !is_write {
+                    // Read-only descriptor = data FROM guest (TX output).
+                    let start = addr as usize;
+                    let end = start + len as usize;
+                    if end <= memory.len() {
+                        let data = &memory[start..end];
+                        // Emit to host serial log.
+                        if let Some(port) = self.ports.first_mut() {
+                            port.output_buffer.extend(data.iter().copied());
+                            // Flush on newline.
+                            while let Some(pos) =
+                                port.output_buffer.iter().position(|&b| b == b'\n')
+                            {
+                                let line: Vec<u8> = port.output_buffer.drain(..=pos).collect();
+                                if let Ok(s) = std::str::from_utf8(&line) {
+                                    tracing::info!(target: "guest_console", "{}", s.trim_end());
+                                }
+                            }
+                        }
+                        total_len += len;
+                    }
+                }
+
+                if flags & 1 == 0 {
+                    break; // No NEXT
+                }
+                idx = next as usize;
+            }
+
+            // Write used ring entry.
+            let used_ring_off = used_addr + 4 + (used_idx % queue_size) * 8;
+            if used_ring_off + 8 <= memory.len() {
+                memory[used_ring_off..used_ring_off + 4]
+                    .copy_from_slice(&(head_idx as u32).to_le_bytes());
+                memory[used_ring_off + 4..used_ring_off + 8]
+                    .copy_from_slice(&total_len.to_le_bytes());
+            }
+
+            used_idx += 1;
+            completions.push((head_idx, total_len));
+        }
+
+        // Update used index.
+        if !completions.is_empty() {
+            let new_used = (used_idx as u16).to_le_bytes();
+            memory[used_addr + 2] = new_used[0];
+            memory[used_addr + 3] = new_used[1];
+        }
+
+        Ok(completions)
+    }
 }
 
 #[cfg(test)]
