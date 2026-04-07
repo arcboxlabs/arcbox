@@ -16,7 +16,7 @@ pub struct VirtioRng {
 
 impl VirtioRng {
     /// VirtIO 1.0 feature.
-    pub const FEATURE_VERSION_1: u64 = 1 << 32;
+    pub const FEATURE_VERSION_1: u64 = 1 << virtio_bindings::virtio_config::VIRTIO_F_VERSION_1;
 
     /// Creates a new VirtIO entropy device.
     pub fn new() -> Self {

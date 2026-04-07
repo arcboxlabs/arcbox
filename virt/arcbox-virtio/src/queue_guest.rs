@@ -58,12 +58,12 @@ pub struct VirtqDesc {
 impl VirtqDesc {
     /// Whether this descriptor is writable by the device.
     pub fn is_write(&self) -> bool {
-        self.flags & 0x2 != 0 // VIRTQ_DESC_F_WRITE
+        self.flags & crate::queue::flags::WRITE != 0
     }
 
     /// Whether there is a next descriptor in the chain.
     pub fn has_next(&self) -> bool {
-        self.flags & 0x1 != 0 // VIRTQ_DESC_F_NEXT
+        self.flags & crate::queue::flags::NEXT != 0
     }
 }
 
@@ -507,7 +507,7 @@ mod tests {
         let mem = TestGuestMemory::new();
 
         // Chain: desc 0 -> desc 1 -> desc 2
-        let next_flag: u16 = 0x1; // VIRTQ_DESC_F_NEXT
+        let next_flag = crate::queue::flags::NEXT;
         mem.write_descriptor(0, DATA_BUFFER_GPA, 128, next_flag, 1);
         mem.write_descriptor(1, DATA_BUFFER_GPA + 128, 256, next_flag, 2);
         mem.write_descriptor(2, DATA_BUFFER_GPA + 384, 512, 0, 0);
@@ -536,7 +536,7 @@ mod tests {
         let mem = TestGuestMemory::new();
 
         // Descriptor with WRITE flag (device-writable buffer)
-        let write_flag: u16 = 0x2; // VIRTQ_DESC_F_WRITE
+        let write_flag = crate::queue::flags::WRITE;
         mem.write_descriptor(0, DATA_BUFFER_GPA, 1024, write_flag, 0);
 
         mem.set_avail_ring_entry(0, 0);
@@ -854,7 +854,7 @@ mod tests {
         let mem = TestGuestMemory::new();
 
         // Create a loop: desc 0 -> desc 1 -> desc 0
-        let next_flag: u16 = 0x1;
+        let next_flag = crate::queue::flags::NEXT;
         mem.write_descriptor(0, DATA_BUFFER_GPA, 64, next_flag, 1);
         mem.write_descriptor(1, DATA_BUFFER_GPA + 64, 64, next_flag, 0);
 

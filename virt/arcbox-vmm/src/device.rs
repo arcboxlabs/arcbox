@@ -71,65 +71,76 @@ pub struct DeviceInfo {
 
 /// `VirtIO` MMIO transport registers.
 ///
-/// Based on `VirtIO` 1.1 specification.
+/// Based on `VirtIO` 1.1 specification. Register offsets are sourced from
+/// `virtio_bindings::virtio_mmio`.
 pub mod virtio_mmio {
-    /// Magic value ("virt").
+    use arcbox_virtio::virtio_bindings::virtio_mmio as vmmio;
+
+    /// Magic value ("virt"). Not a register offset -- this is the *value*
+    /// returned when the guest reads the MagicValue register.
     pub const MAGIC_VALUE: u32 = 0x74726976;
-    /// `VirtIO` version (legacy: 1, modern: 2).
+    /// `VirtIO` version (legacy: 1, modern: 2). Runtime value, not an offset.
     pub const VERSION: u32 = 2;
-    /// Vendor ID.
+    /// Vendor ID. Runtime value, not an offset.
     pub const VENDOR_ID: u32 = 0x554D4551; // "QEMU"
 
-    /// Register offsets.
+    /// Interrupt reason: used buffer notification.
+    pub const INT_VRING: u32 = vmmio::VIRTIO_MMIO_INT_VRING;
+    /// Interrupt reason: configuration change.
+    pub const INT_CONFIG: u32 = vmmio::VIRTIO_MMIO_INT_CONFIG;
+
+    /// Register offsets sourced from `virtio_bindings::virtio_mmio`.
     pub mod regs {
+        use super::vmmio;
+
         /// Magic value.
-        pub const MAGIC: u64 = 0x000;
+        pub const MAGIC: u64 = vmmio::VIRTIO_MMIO_MAGIC_VALUE as u64;
         /// Version.
-        pub const VERSION: u64 = 0x004;
+        pub const VERSION: u64 = vmmio::VIRTIO_MMIO_VERSION as u64;
         /// Device type.
-        pub const DEVICE_ID: u64 = 0x008;
+        pub const DEVICE_ID: u64 = vmmio::VIRTIO_MMIO_DEVICE_ID as u64;
         /// Vendor ID.
-        pub const VENDOR_ID: u64 = 0x00c;
+        pub const VENDOR_ID: u64 = vmmio::VIRTIO_MMIO_VENDOR_ID as u64;
         /// Device features.
-        pub const DEVICE_FEATURES: u64 = 0x010;
+        pub const DEVICE_FEATURES: u64 = vmmio::VIRTIO_MMIO_DEVICE_FEATURES as u64;
         /// Device features selector.
-        pub const DEVICE_FEATURES_SEL: u64 = 0x014;
+        pub const DEVICE_FEATURES_SEL: u64 = vmmio::VIRTIO_MMIO_DEVICE_FEATURES_SEL as u64;
         /// Driver features.
-        pub const DRIVER_FEATURES: u64 = 0x020;
+        pub const DRIVER_FEATURES: u64 = vmmio::VIRTIO_MMIO_DRIVER_FEATURES as u64;
         /// Driver features selector.
-        pub const DRIVER_FEATURES_SEL: u64 = 0x024;
+        pub const DRIVER_FEATURES_SEL: u64 = vmmio::VIRTIO_MMIO_DRIVER_FEATURES_SEL as u64;
         /// Queue selector.
-        pub const QUEUE_SEL: u64 = 0x030;
+        pub const QUEUE_SEL: u64 = vmmio::VIRTIO_MMIO_QUEUE_SEL as u64;
         /// Queue size (max).
-        pub const QUEUE_NUM_MAX: u64 = 0x034;
+        pub const QUEUE_NUM_MAX: u64 = vmmio::VIRTIO_MMIO_QUEUE_NUM_MAX as u64;
         /// Queue size.
-        pub const QUEUE_NUM: u64 = 0x038;
+        pub const QUEUE_NUM: u64 = vmmio::VIRTIO_MMIO_QUEUE_NUM as u64;
         /// Queue ready.
-        pub const QUEUE_READY: u64 = 0x044;
+        pub const QUEUE_READY: u64 = vmmio::VIRTIO_MMIO_QUEUE_READY as u64;
         /// Queue notify.
-        pub const QUEUE_NOTIFY: u64 = 0x050;
+        pub const QUEUE_NOTIFY: u64 = vmmio::VIRTIO_MMIO_QUEUE_NOTIFY as u64;
         /// Interrupt status.
-        pub const INTERRUPT_STATUS: u64 = 0x060;
+        pub const INTERRUPT_STATUS: u64 = vmmio::VIRTIO_MMIO_INTERRUPT_STATUS as u64;
         /// Interrupt acknowledge.
-        pub const INTERRUPT_ACK: u64 = 0x064;
+        pub const INTERRUPT_ACK: u64 = vmmio::VIRTIO_MMIO_INTERRUPT_ACK as u64;
         /// Device status.
-        pub const STATUS: u64 = 0x070;
+        pub const STATUS: u64 = vmmio::VIRTIO_MMIO_STATUS as u64;
         /// Queue descriptor low.
-        pub const QUEUE_DESC_LOW: u64 = 0x080;
+        pub const QUEUE_DESC_LOW: u64 = vmmio::VIRTIO_MMIO_QUEUE_DESC_LOW as u64;
         /// Queue descriptor high.
-        pub const QUEUE_DESC_HIGH: u64 = 0x084;
+        pub const QUEUE_DESC_HIGH: u64 = vmmio::VIRTIO_MMIO_QUEUE_DESC_HIGH as u64;
         /// Queue driver low.
-        pub const QUEUE_DRIVER_LOW: u64 = 0x090;
+        pub const QUEUE_DRIVER_LOW: u64 = vmmio::VIRTIO_MMIO_QUEUE_AVAIL_LOW as u64;
         /// Queue driver high.
-        pub const QUEUE_DRIVER_HIGH: u64 = 0x094;
+        pub const QUEUE_DRIVER_HIGH: u64 = vmmio::VIRTIO_MMIO_QUEUE_AVAIL_HIGH as u64;
         /// Queue device low.
-        pub const QUEUE_DEVICE_LOW: u64 = 0x0a0;
+        pub const QUEUE_DEVICE_LOW: u64 = vmmio::VIRTIO_MMIO_QUEUE_USED_LOW as u64;
         /// Queue device high.
-        pub const QUEUE_DEVICE_HIGH: u64 = 0x0a4;
+        pub const QUEUE_DEVICE_HIGH: u64 = vmmio::VIRTIO_MMIO_QUEUE_USED_HIGH as u64;
         /// Config generation.
-        pub const CONFIG_GENERATION: u64 = 0x0fc;
+        pub const CONFIG_GENERATION: u64 = vmmio::VIRTIO_MMIO_CONFIG_GENERATION as u64;
         /// Config space starts here.
-        pub const CONFIG: u64 = 0x100;
+        pub const CONFIG: u64 = vmmio::VIRTIO_MMIO_CONFIG as u64;
     }
 
     /// MMIO region size.
@@ -822,7 +833,7 @@ impl DeviceManager {
                                                     "Failed to lock state: {e}"
                                                 ))
                                             })?;
-                                            s.trigger_interrupt(1); // VIRTIO_MMIO_INT_VRING
+                                            s.trigger_interrupt(virtio_mmio::INT_VRING);
                                         }
                                         if let Some(ref callback) = self.irq_callback {
                                             let _ = callback(irq, true);

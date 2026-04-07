@@ -431,34 +431,37 @@ impl Default for BlockConfig {
 }
 
 /// `VirtIO` block request types.
+///
+/// Values sourced from `virtio_bindings::virtio_blk::VIRTIO_BLK_T_*`.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockRequestType {
     /// Read request.
-    In = 0,
+    In = virtio_bindings::virtio_blk::VIRTIO_BLK_T_IN,
     /// Write request.
-    Out = 1,
+    Out = virtio_bindings::virtio_blk::VIRTIO_BLK_T_OUT,
     /// Flush request.
-    Flush = 4,
+    Flush = virtio_bindings::virtio_blk::VIRTIO_BLK_T_FLUSH,
     /// Get device ID.
-    GetId = 8,
+    GetId = virtio_bindings::virtio_blk::VIRTIO_BLK_T_GET_ID,
     /// Discard request.
-    Discard = 11,
+    Discard = virtio_bindings::virtio_blk::VIRTIO_BLK_T_DISCARD,
     /// Write zeroes request.
-    WriteZeroes = 13,
+    WriteZeroes = virtio_bindings::virtio_blk::VIRTIO_BLK_T_WRITE_ZEROES,
 }
 
 impl TryFrom<u32> for BlockRequestType {
     type Error = VirtioError;
 
     fn try_from(value: u32) -> std::result::Result<Self, Self::Error> {
+        use virtio_bindings::virtio_blk;
         match value {
-            0 => Ok(Self::In),
-            1 => Ok(Self::Out),
-            4 => Ok(Self::Flush),
-            8 => Ok(Self::GetId),
-            11 => Ok(Self::Discard),
-            13 => Ok(Self::WriteZeroes),
+            virtio_blk::VIRTIO_BLK_T_IN => Ok(Self::In),
+            virtio_blk::VIRTIO_BLK_T_OUT => Ok(Self::Out),
+            virtio_blk::VIRTIO_BLK_T_FLUSH => Ok(Self::Flush),
+            virtio_blk::VIRTIO_BLK_T_GET_ID => Ok(Self::GetId),
+            virtio_blk::VIRTIO_BLK_T_DISCARD => Ok(Self::Discard),
+            virtio_blk::VIRTIO_BLK_T_WRITE_ZEROES => Ok(Self::WriteZeroes),
             _ => Err(VirtioError::InvalidOperation(format!(
                 "Unknown block request type: {value}"
             ))),
@@ -467,15 +470,17 @@ impl TryFrom<u32> for BlockRequestType {
 }
 
 /// `VirtIO` block request status.
+///
+/// Values sourced from `virtio_bindings::virtio_blk::VIRTIO_BLK_S_*`.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]
 pub enum BlockStatus {
     /// Success.
-    Ok = 0,
+    Ok = virtio_bindings::virtio_blk::VIRTIO_BLK_S_OK as u8,
     /// I/O error.
-    IoErr = 1,
+    IoErr = virtio_bindings::virtio_blk::VIRTIO_BLK_S_IOERR as u8,
     /// Unsupported operation.
-    Unsupp = 2,
+    Unsupp = virtio_bindings::virtio_blk::VIRTIO_BLK_S_UNSUPP as u8,
 }
 
 /// `VirtIO` block request header.
@@ -528,28 +533,32 @@ pub struct VirtioBlock {
 }
 
 impl VirtioBlock {
+    // Feature bits sourced from `virtio_bindings::virtio_blk`.
+    // The crate exports bit *positions*, so we shift 1 left by that position.
+
     /// Feature: Maximum segment size.
-    pub const FEATURE_SIZE_MAX: u64 = 1 << 1;
+    pub const FEATURE_SIZE_MAX: u64 = 1 << virtio_bindings::virtio_blk::VIRTIO_BLK_F_SIZE_MAX;
     /// Feature: Maximum number of segments.
-    pub const FEATURE_SEG_MAX: u64 = 1 << 2;
+    pub const FEATURE_SEG_MAX: u64 = 1 << virtio_bindings::virtio_blk::VIRTIO_BLK_F_SEG_MAX;
     /// Feature: Disk geometry.
-    pub const FEATURE_GEOMETRY: u64 = 1 << 4;
+    pub const FEATURE_GEOMETRY: u64 = 1 << virtio_bindings::virtio_blk::VIRTIO_BLK_F_GEOMETRY;
     /// Feature: Read-only.
-    pub const FEATURE_RO: u64 = 1 << 5;
+    pub const FEATURE_RO: u64 = 1 << virtio_bindings::virtio_blk::VIRTIO_BLK_F_RO;
     /// Feature: Block size.
-    pub const FEATURE_BLK_SIZE: u64 = 1 << 6;
+    pub const FEATURE_BLK_SIZE: u64 = 1 << virtio_bindings::virtio_blk::VIRTIO_BLK_F_BLK_SIZE;
     /// Feature: Flush command.
-    pub const FEATURE_FLUSH: u64 = 1 << 9;
+    pub const FEATURE_FLUSH: u64 = 1 << virtio_bindings::virtio_blk::VIRTIO_BLK_F_FLUSH;
     /// Feature: Topology.
-    pub const FEATURE_TOPOLOGY: u64 = 1 << 10;
+    pub const FEATURE_TOPOLOGY: u64 = 1 << virtio_bindings::virtio_blk::VIRTIO_BLK_F_TOPOLOGY;
     /// Feature: Configuration writeback.
-    pub const FEATURE_CONFIG_WCE: u64 = 1 << 11;
+    pub const FEATURE_CONFIG_WCE: u64 = 1 << virtio_bindings::virtio_blk::VIRTIO_BLK_F_CONFIG_WCE;
     /// Feature: Discard command.
-    pub const FEATURE_DISCARD: u64 = 1 << 13;
+    pub const FEATURE_DISCARD: u64 = 1 << virtio_bindings::virtio_blk::VIRTIO_BLK_F_DISCARD;
     /// Feature: Write zeroes command.
-    pub const FEATURE_WRITE_ZEROES: u64 = 1 << 14;
+    pub const FEATURE_WRITE_ZEROES: u64 =
+        1 << virtio_bindings::virtio_blk::VIRTIO_BLK_F_WRITE_ZEROES;
     /// `VirtIO` 1.0 feature.
-    pub const FEATURE_VERSION_1: u64 = 1 << 32;
+    pub const FEATURE_VERSION_1: u64 = 1 << virtio_bindings::virtio_config::VIRTIO_F_VERSION_1;
 
     /// Creates a new block device.
     #[must_use]

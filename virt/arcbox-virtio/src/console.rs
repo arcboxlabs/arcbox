@@ -506,7 +506,7 @@ impl VirtioConsole {
     /// Feature: Emergency write.
     pub const FEATURE_EMERG_WRITE: u64 = 1 << 2;
     /// `VirtIO` 1.0 feature.
-    pub const FEATURE_VERSION_1: u64 = 1 << 32;
+    pub const FEATURE_VERSION_1: u64 = 1 << virtio_bindings::virtio_config::VIRTIO_F_VERSION_1;
 
     /// Creates a new console device.
     #[must_use]

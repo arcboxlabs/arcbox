@@ -54,6 +54,9 @@ pub mod queue_guest;
 pub mod rng;
 pub mod vsock;
 
+// Re-export commonly used virtio constants from virtio-bindings.
+pub use virtio_bindings;
+
 pub use error::{Result, VirtioError};
 pub use queue::{AvailRing, Descriptor, UsedRing, VirtQueue};
 
@@ -80,22 +83,25 @@ pub enum VirtioDeviceId {
 }
 
 /// `VirtIO` device status flags.
+///
+/// Values sourced from `virtio_bindings::virtio_config`.
 #[derive(Debug, Clone, Copy)]
 pub struct DeviceStatus(u8);
 
 impl DeviceStatus {
     /// Device acknowledged.
-    pub const ACKNOWLEDGE: u8 = 1;
+    pub const ACKNOWLEDGE: u8 = virtio_bindings::virtio_config::VIRTIO_CONFIG_S_ACKNOWLEDGE as u8;
     /// Driver loaded.
-    pub const DRIVER: u8 = 2;
+    pub const DRIVER: u8 = virtio_bindings::virtio_config::VIRTIO_CONFIG_S_DRIVER as u8;
     /// Driver is ready.
-    pub const DRIVER_OK: u8 = 4;
+    pub const DRIVER_OK: u8 = virtio_bindings::virtio_config::VIRTIO_CONFIG_S_DRIVER_OK as u8;
     /// Feature negotiation complete.
-    pub const FEATURES_OK: u8 = 8;
+    pub const FEATURES_OK: u8 = virtio_bindings::virtio_config::VIRTIO_CONFIG_S_FEATURES_OK as u8;
     /// Device needs reset.
-    pub const DEVICE_NEEDS_RESET: u8 = 64;
+    pub const DEVICE_NEEDS_RESET: u8 =
+        virtio_bindings::virtio_config::VIRTIO_CONFIG_S_NEEDS_RESET as u8;
     /// Driver failed.
-    pub const FAILED: u8 = 128;
+    pub const FAILED: u8 = virtio_bindings::virtio_config::VIRTIO_CONFIG_S_FAILED as u8;
 
     /// Creates a new device status.
     #[must_use]
@@ -188,4 +194,60 @@ pub struct QueueConfig {
     pub size: u16,
     /// Whether the queue is ready.
     pub ready: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use virtio_bindings::virtio_config;
+    use virtio_bindings::virtio_ids;
+
+    /// Verify that our `VirtioDeviceId` enum values match the canonical
+    /// constants from the `virtio-bindings` crate (linux kernel headers).
+    #[test]
+    fn device_id_values_match_virtio_bindings() {
+        assert_eq!(VirtioDeviceId::Net as u32, virtio_ids::VIRTIO_ID_NET);
+        assert_eq!(VirtioDeviceId::Block as u32, virtio_ids::VIRTIO_ID_BLOCK);
+        assert_eq!(
+            VirtioDeviceId::Console as u32,
+            virtio_ids::VIRTIO_ID_CONSOLE
+        );
+        assert_eq!(VirtioDeviceId::Rng as u32, virtio_ids::VIRTIO_ID_RNG);
+        assert_eq!(
+            VirtioDeviceId::Balloon as u32,
+            virtio_ids::VIRTIO_ID_BALLOON
+        );
+        assert_eq!(VirtioDeviceId::Scsi as u32, virtio_ids::VIRTIO_ID_SCSI);
+        assert_eq!(VirtioDeviceId::Fs as u32, virtio_ids::VIRTIO_ID_FS);
+        assert_eq!(VirtioDeviceId::Vsock as u32, virtio_ids::VIRTIO_ID_VSOCK);
+    }
+
+    /// Verify that our `DeviceStatus` constants match the canonical values.
+    #[test]
+    fn device_status_values_match_virtio_bindings() {
+        assert_eq!(
+            DeviceStatus::ACKNOWLEDGE as u32,
+            virtio_config::VIRTIO_CONFIG_S_ACKNOWLEDGE
+        );
+        assert_eq!(
+            DeviceStatus::DRIVER as u32,
+            virtio_config::VIRTIO_CONFIG_S_DRIVER
+        );
+        assert_eq!(
+            DeviceStatus::DRIVER_OK as u32,
+            virtio_config::VIRTIO_CONFIG_S_DRIVER_OK
+        );
+        assert_eq!(
+            DeviceStatus::FEATURES_OK as u32,
+            virtio_config::VIRTIO_CONFIG_S_FEATURES_OK
+        );
+        assert_eq!(
+            DeviceStatus::DEVICE_NEEDS_RESET as u32,
+            virtio_config::VIRTIO_CONFIG_S_NEEDS_RESET
+        );
+        assert_eq!(
+            DeviceStatus::FAILED as u32,
+            virtio_config::VIRTIO_CONFIG_S_FAILED
+        );
+    }
 }

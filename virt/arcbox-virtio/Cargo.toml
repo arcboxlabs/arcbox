@@ -18,6 +18,7 @@ bytes = { workspace = true }
 libc = { workspace = true }
 async-trait = "0.1"
 rayon = "1.11.0"
+virtio-bindings = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

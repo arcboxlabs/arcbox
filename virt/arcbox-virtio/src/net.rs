@@ -79,20 +79,20 @@ impl VirtioNetHeader {
     pub const SIZE: usize = 12;
 
     /// No GSO.
-    pub const GSO_NONE: u8 = 0;
+    pub const GSO_NONE: u8 = virtio_bindings::virtio_net::VIRTIO_NET_HDR_GSO_NONE as u8;
     /// TCP/IPv4 GSO.
-    pub const GSO_TCPV4: u8 = 1;
+    pub const GSO_TCPV4: u8 = virtio_bindings::virtio_net::VIRTIO_NET_HDR_GSO_TCPV4 as u8;
     /// UDP GSO.
-    pub const GSO_UDP: u8 = 3;
+    pub const GSO_UDP: u8 = virtio_bindings::virtio_net::VIRTIO_NET_HDR_GSO_UDP as u8;
     /// TCP/IPv6 GSO.
-    pub const GSO_TCPV6: u8 = 4;
+    pub const GSO_TCPV6: u8 = virtio_bindings::virtio_net::VIRTIO_NET_HDR_GSO_TCPV6 as u8;
     /// ECN flag.
-    pub const GSO_ECN: u8 = 0x80;
+    pub const GSO_ECN: u8 = virtio_bindings::virtio_net::VIRTIO_NET_HDR_GSO_ECN as u8;
 
     /// Header needs checksum.
-    pub const FLAG_NEEDS_CSUM: u8 = 1;
+    pub const FLAG_NEEDS_CSUM: u8 = virtio_bindings::virtio_net::VIRTIO_NET_HDR_F_NEEDS_CSUM as u8;
     /// Data is valid.
-    pub const FLAG_DATA_VALID: u8 = 2;
+    pub const FLAG_DATA_VALID: u8 = virtio_bindings::virtio_net::VIRTIO_NET_HDR_F_DATA_VALID as u8;
 
     /// Creates a new header.
     #[must_use]
@@ -564,42 +564,46 @@ pub struct VirtioNet {
 }
 
 impl VirtioNet {
+    // Feature bits sourced from `virtio_bindings::virtio_net`.
+    // The crate exports bit *positions* (e.g. VIRTIO_NET_F_CSUM = 0), so
+    // we shift 1 left by that position to get the feature mask.
+
     /// Feature: Checksum offload.
-    pub const FEATURE_CSUM: u64 = 1 << 0;
+    pub const FEATURE_CSUM: u64 = 1 << virtio_bindings::virtio_net::VIRTIO_NET_F_CSUM;
     /// Feature: Guest checksum offload.
-    pub const FEATURE_GUEST_CSUM: u64 = 1 << 1;
+    pub const FEATURE_GUEST_CSUM: u64 = 1 << virtio_bindings::virtio_net::VIRTIO_NET_F_GUEST_CSUM;
     /// Feature: Control virtqueue.
-    pub const FEATURE_CTRL_VQ: u64 = 1 << 17;
+    pub const FEATURE_CTRL_VQ: u64 = 1 << virtio_bindings::virtio_net::VIRTIO_NET_F_CTRL_VQ;
     /// Feature: MTU.
-    pub const FEATURE_MTU: u64 = 1 << 3;
+    pub const FEATURE_MTU: u64 = 1 << virtio_bindings::virtio_net::VIRTIO_NET_F_MTU;
     /// Feature: MAC address.
-    pub const FEATURE_MAC: u64 = 1 << 5;
+    pub const FEATURE_MAC: u64 = 1 << virtio_bindings::virtio_net::VIRTIO_NET_F_MAC;
     /// Feature: GSO.
-    pub const FEATURE_GSO: u64 = 1 << 6;
+    pub const FEATURE_GSO: u64 = 1 << virtio_bindings::virtio_net::VIRTIO_NET_F_GSO;
     /// Feature: Guest TSO4.
-    pub const FEATURE_GUEST_TSO4: u64 = 1 << 7;
+    pub const FEATURE_GUEST_TSO4: u64 = 1 << virtio_bindings::virtio_net::VIRTIO_NET_F_GUEST_TSO4;
     /// Feature: Guest TSO6.
-    pub const FEATURE_GUEST_TSO6: u64 = 1 << 8;
+    pub const FEATURE_GUEST_TSO6: u64 = 1 << virtio_bindings::virtio_net::VIRTIO_NET_F_GUEST_TSO6;
     /// Feature: Guest ECN.
-    pub const FEATURE_GUEST_ECN: u64 = 1 << 9;
+    pub const FEATURE_GUEST_ECN: u64 = 1 << virtio_bindings::virtio_net::VIRTIO_NET_F_GUEST_ECN;
     /// Feature: Guest UFO.
-    pub const FEATURE_GUEST_UFO: u64 = 1 << 10;
+    pub const FEATURE_GUEST_UFO: u64 = 1 << virtio_bindings::virtio_net::VIRTIO_NET_F_GUEST_UFO;
     /// Feature: Host TSO4.
-    pub const FEATURE_HOST_TSO4: u64 = 1 << 11;
+    pub const FEATURE_HOST_TSO4: u64 = 1 << virtio_bindings::virtio_net::VIRTIO_NET_F_HOST_TSO4;
     /// Feature: Host TSO6.
-    pub const FEATURE_HOST_TSO6: u64 = 1 << 12;
+    pub const FEATURE_HOST_TSO6: u64 = 1 << virtio_bindings::virtio_net::VIRTIO_NET_F_HOST_TSO6;
     /// Feature: Host ECN.
-    pub const FEATURE_HOST_ECN: u64 = 1 << 13;
+    pub const FEATURE_HOST_ECN: u64 = 1 << virtio_bindings::virtio_net::VIRTIO_NET_F_HOST_ECN;
     /// Feature: Host UFO.
-    pub const FEATURE_HOST_UFO: u64 = 1 << 14;
+    pub const FEATURE_HOST_UFO: u64 = 1 << virtio_bindings::virtio_net::VIRTIO_NET_F_HOST_UFO;
     /// Feature: Merge RX buffers.
-    pub const FEATURE_MRG_RXBUF: u64 = 1 << 15;
+    pub const FEATURE_MRG_RXBUF: u64 = 1 << virtio_bindings::virtio_net::VIRTIO_NET_F_MRG_RXBUF;
     /// Feature: Status.
-    pub const FEATURE_STATUS: u64 = 1 << 16;
+    pub const FEATURE_STATUS: u64 = 1 << virtio_bindings::virtio_net::VIRTIO_NET_F_STATUS;
     /// Feature: Multiple queues.
-    pub const FEATURE_MQ: u64 = 1 << 22;
+    pub const FEATURE_MQ: u64 = 1 << virtio_bindings::virtio_net::VIRTIO_NET_F_MQ;
     /// `VirtIO` 1.0 feature.
-    pub const FEATURE_VERSION_1: u64 = 1 << 32;
+    pub const FEATURE_VERSION_1: u64 = 1 << virtio_bindings::virtio_config::VIRTIO_F_VERSION_1;
 
     /// Creates a new network device.
     #[must_use]
