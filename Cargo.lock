@@ -633,7 +633,6 @@ dependencies = [
  "arcbox-virtio",
  "bytes",
  "chrono",
- "flate2",
  "futures",
  "libc",
  "linux-loader",

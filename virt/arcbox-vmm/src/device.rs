@@ -250,21 +250,8 @@ impl VirtioMmioState {
                     self.driver_features =
                         (self.driver_features & 0x0000_0000_FFFF_FFFF) | (u64::from(value) << 32);
                 }
-                tracing::debug!(
-                    "MMIO: DRIVER_FEATURES sel={} val={:#x} => driver_features={:#x}",
-                    self.driver_features_sel,
-                    value,
-                    self.driver_features,
-                );
             }
-            regs::DRIVER_FEATURES_SEL => {
-                tracing::debug!(
-                    "MMIO: DRIVER_FEATURES_SEL = {:#x} (was {:#x})",
-                    value,
-                    self.driver_features_sel,
-                );
-                self.driver_features_sel = value;
-            }
+            regs::DRIVER_FEATURES_SEL => self.driver_features_sel = value,
             regs::QUEUE_SEL => self.queue_sel = value,
             regs::QUEUE_NUM => {
                 if (self.queue_sel as usize) < 8 {
@@ -801,13 +788,6 @@ impl DeviceManager {
                 }
                 virtio_mmio::regs::QUEUE_NOTIFY => {
                     let queue_idx = value32 as u16;
-                    tracing::debug!(
-                        "Device {} queue {} QUEUE_NOTIFY (has_dev={}, has_mem={})",
-                        device_id.0,
-                        queue_idx,
-                        device.virtio_device.is_some(),
-                        self.guest_ram_base.is_some(),
-                    );
 
                     if let Some(virtio_dev) = &device.virtio_device {
                         // Build QueueConfig from current MMIO state for the

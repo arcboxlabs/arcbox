@@ -349,9 +349,10 @@ impl IrqChip {
             return Err(crate::error::VmmError::Irq("IRQ exhausted".to_string()));
         }
 
-        // Map IRQ N to GSI N directly. On ARM64 GIC, SPI numbers map 1:1
-        // to GSI (the GIC supports up to 1020 SPIs). The old `% MAX_GSIS`
-        // was for x86 IOAPIC compatibility and broke ARM64 interrupt delivery.
+        // Map IRQ N to GSI N directly. On ARM64 GIC the callback receives the
+        // raw SPI INTID which must equal the IRQ number. On x86/KVM the kernel
+        // IOAPIC handles GSI routing internally so 1:1 mapping is also correct
+        // (KVM_IRQFD routes by GSI, and our IRQs start well within IOAPIC range).
         let gsi = irq;
         let config = IrqConfig {
             gsi,

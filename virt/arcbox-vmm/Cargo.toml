@@ -31,7 +31,6 @@ vm-memory = { version = "0.17", features = ["backend-mmap"] }
 linux-loader = { version = "0.13", features = ["elf", "pe"] }
 vm-fdt = "0.3"
 vm-superio = "0.8"
-flate2 = "1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

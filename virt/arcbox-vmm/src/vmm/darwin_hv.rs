@@ -205,19 +205,9 @@ const PL011_BASE: u64 = 0x0B00_0000;
 /// PL011 MMIO region size.
 const PL011_SIZE: u64 = 0x1000;
 
-// PL011 register offsets.
+// PL011 register offsets (only those we emulate).
 const PL011_DR: u64 = 0x000; // Data Register
 const PL011_FR: u64 = 0x018; // Flag Register
-#[allow(dead_code)]
-const PL011_IBRD: u64 = 0x024; // Integer Baud Rate
-#[allow(dead_code)]
-const PL011_FBRD: u64 = 0x028; // Fractional Baud Rate
-#[allow(dead_code)]
-const PL011_LCR_H: u64 = 0x02C; // Line Control
-#[allow(dead_code)]
-const PL011_CR: u64 = 0x030; // Control Register
-#[allow(dead_code)]
-const PL011_IMSC: u64 = 0x038; // Interrupt Mask
 
 impl Pl011 {
     /// Creates a new PL011 UART emulator.

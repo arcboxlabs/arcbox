@@ -213,19 +213,19 @@ Standard ARM64 VM layout. All addresses are GPA (IPA in Apple terminology).
 
 ```
 0x0000_0000 ─ 0x07FF_FFFF   Reserved (128 MB)
-0x0800_0000 ─ 0x080F_FFFF   GIC Distributor (GICD)    [64 KB from hv_gic]
-0x080A_0000 ─ 0x09FF_FFFF   GIC Redistributor (GICR)  [up to 32 MB]
-0x0900_0000 ─ 0x0900_0FFF   PL011 UART (serial)       [4 KB]
-0x0900_1000 ─ 0x09FF_FFFF   Reserved for platform devices
-0x0A00_0000 ─ 0x0A00_FFFF   VirtIO MMIO devices       [32 slots x 512B]
-0x0A01_0000 ─ 0x3FFF_FFFF   Reserved for future MMIO
+0x0800_0000 ─ 0x080F_FFFF   GIC Distributor (GICD)    [64 KB]
+0x080A_0000 ─ 0x0A09_FFFF   GIC Redistributor (GICR)  [32 MB]
+              ← GICR region absorbs MMIO in 0x0900_0000..0x0A0A_0000
+0x0B00_0000 ─ 0x0B00_0FFF   PL011 UART (serial)       [4 KB]
+0x0C00_0000 ─ 0x0C00_FFFF   VirtIO MMIO devices       [32 slots x 4KB]
+0x0C01_0000 ─ 0x3FFF_FFFF   Reserved for future MMIO
 0x4000_0000 ─ END           Guest RAM                  [configurable]
 ```
 
-Kernel and initrd are loaded at offsets within the RAM region:
-- Kernel: `RAM_BASE + text_offset` (from Image header, typically 0)
-- Initrd: `RAM_BASE + kernel_size` (page aligned)
-- FDT: Top of RAM or after initrd (linux-loader decides placement)
+Production boot uses kernel + rootfs.erofs (virtio-blk), no initramfs:
+- Kernel: `RAM_BASE + text_offset` (from Image header via linux-loader)
+- rootfs.erofs: virtio-blk /dev/vda (read-only)
+- FDT: End of RAM, page-aligned backward
 
 ### 4.3 Boot Sequence
 
