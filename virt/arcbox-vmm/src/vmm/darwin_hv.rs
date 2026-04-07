@@ -816,6 +816,8 @@ impl Vmm {
                 .take()
                 .ok_or_else(|| VmmError::config("device manager not initialized".to_string()))?,
         );
+        // Store a shared reference for connect_vsock_hv to use after start.
+        self.hv_device_manager = Some(Arc::clone(&device_manager));
         let running = self.running.clone();
         let vcpu_count = self.config.vcpu_count;
         let pl011 = Arc::new(std::sync::Mutex::new(Pl011::new()));
@@ -983,10 +985,13 @@ impl Vmm {
 
         // Register the fd in the shared vsock host fds map so
         // VirtioVsock's process_queue can forward data.
-        if let Some(ref device_manager) = self.device_manager {
-            if let Ok(mut fds_map) = device_manager.vsock_host_fds().lock() {
+        if let Some(ref dm) = self.hv_device_manager {
+            if let Ok(mut fds_map) = dm.vsock_host_fds().lock() {
                 fds_map.insert(port, internal_raw_fd);
             }
+            // Inject OP_REQUEST into guest RX queue to initiate the connection.
+            let guest_cid = self.config.guest_cid.unwrap_or(3) as u64;
+            dm.inject_vsock_connect(port, guest_cid);
         }
         // Forget OwnedFd so the fd stays open.
         std::mem::forget(internal_fd);
@@ -1123,6 +1128,24 @@ fn vcpu_run_loop(
         if !running.load(Ordering::Relaxed) {
             tracing::info!("vCPU {vcpu_id}: shutdown requested");
             break;
+        }
+
+        // Poll vsock host fds for pending connect requests and incoming data.
+        // Only BSP (vCPU 0) handles vsock polling to avoid contention.
+        if vcpu_id == 0 && device_manager.poll_vsock_rx() {
+            for dev in device_manager.iter() {
+                if dev.device_type == crate::device::DeviceType::VirtioVsock {
+                    if let Some(irq) = dev.irq {
+                        if let Some(state) = device_manager.get_mmio_state(dev.id) {
+                            if let Ok(mut s) = state.write() {
+                                s.trigger_interrupt(1);
+                            }
+                        }
+                        device_manager.trigger_irq_callback(irq, true);
+                    }
+                    break;
+                }
+            }
         }
 
         let exit = match vcpu.run() {

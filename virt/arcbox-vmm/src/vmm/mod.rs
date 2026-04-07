@@ -288,6 +288,10 @@ pub struct Vmm {
     /// Resolved backend choice for this VM instance.
     #[cfg(target_os = "macos")]
     resolved_backend: Option<ResolvedBackend>,
+    /// Shared DeviceManager reference for HV backend (set during start_darwin_hv).
+    /// Used by connect_vsock_hv to inject OP_REQUEST packets after VM starts.
+    #[cfg(target_os = "macos")]
+    hv_device_manager: Option<std::sync::Arc<DeviceManager>>,
 }
 
 impl Vmm {
@@ -371,6 +375,8 @@ impl Vmm {
             hv_gic: None,
             #[cfg(target_os = "macos")]
             resolved_backend: None,
+            #[cfg(target_os = "macos")]
+            hv_device_manager: None,
         })
     }
 

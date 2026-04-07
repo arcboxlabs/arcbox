@@ -373,6 +373,8 @@ pub struct DeviceManager {
     /// Vsock host connection fds, keyed by guest port.
     /// Set by connect_vsock_hv, read by vsock process_queue.
     vsock_host_fds: std::sync::Arc<std::sync::Mutex<HashMap<u32, std::os::unix::io::RawFd>>>,
+    /// Pending vsock connect requests (port, guest_cid) to inject when device is ready.
+    pending_vsock_connects: std::sync::Arc<std::sync::Mutex<Vec<(u32, u64)>>>,
 }
 
 // SAFETY: guest_ram_base points to memory that is valid for the lifetime of the
@@ -393,6 +395,7 @@ impl DeviceManager {
             guest_ram_gpa: 0,
             irq_callback: None,
             vsock_host_fds: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            pending_vsock_connects: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -944,11 +947,153 @@ impl DeviceManager {
 
     /// Polls host vsock fds for incoming data and injects into guest RX queue.
     ///
+    /// Injects a vsock OP_REQUEST into the guest RX queue to initiate a connection.
+    /// If the device isn't ready yet, queues the request for later injection
+    /// during poll_vsock_rx.
+    pub fn inject_vsock_connect(&self, port: u32, guest_cid: u64) -> bool {
+        let mut hdr = [0u8; 44];
+        hdr[0..8].copy_from_slice(&2u64.to_le_bytes()); // src_cid = HOST (2)
+        hdr[8..16].copy_from_slice(&guest_cid.to_le_bytes());
+        hdr[16..20].copy_from_slice(&port.to_le_bytes()); // src_port
+        hdr[20..24].copy_from_slice(&port.to_le_bytes()); // dst_port
+        hdr[28..30].copy_from_slice(&1u16.to_le_bytes()); // type = STREAM
+        hdr[30..32].copy_from_slice(&1u16.to_le_bytes()); // op = REQUEST
+        hdr[36..40].copy_from_slice(&(64 * 1024u32).to_le_bytes()); // buf_alloc
+        tracing::info!("Vsock: injecting OP_REQUEST for port {port}");
+        if self.inject_vsock_rx_raw(&hdr) {
+            true
+        } else {
+            // Device not ready yet — queue for later.
+            tracing::info!("Vsock: device not ready, queueing OP_REQUEST for port {port}");
+            if let Ok(mut pending) = self.pending_vsock_connects.lock() {
+                pending.push((port, guest_cid));
+            }
+            false
+        }
+    }
+
+    /// Injects a raw packet into the vsock RX queue (queue 0).
+    fn inject_vsock_rx_raw(&self, packet: &[u8]) -> bool {
+        let (Some(ram_base), ram_size) = (self.guest_ram_base, self.guest_ram_size) else {
+            return false;
+        };
+        let gpa_base = self.guest_ram_gpa as usize;
+
+        let mmio_arc = self
+            .devices
+            .values()
+            .find(|d| d.info.device_type == DeviceType::VirtioVsock)
+            .and_then(|d| d.mmio_state.as_ref());
+        let Some(mmio_arc) = mmio_arc else {
+            return false;
+        };
+        let Ok(mmio) = mmio_arc.read() else {
+            return false;
+        };
+
+        let qi = 0usize;
+        if qi >= 8 || !mmio.queue_ready[qi] || mmio.queue_num[qi] == 0 {
+            return false;
+        }
+        let desc_addr = mmio.queue_desc[qi] as usize;
+        let avail_addr = mmio.queue_driver[qi] as usize;
+        let used_addr = mmio.queue_device[qi] as usize;
+        let q_size = mmio.queue_num[qi] as usize;
+
+        let guest_mem =
+            unsafe { std::slice::from_raw_parts_mut(ram_base.sub(gpa_base), gpa_base + ram_size) };
+
+        if avail_addr + 4 > guest_mem.len() {
+            return false;
+        }
+        let avail_idx =
+            u16::from_le_bytes([guest_mem[avail_addr + 2], guest_mem[avail_addr + 3]]) as usize;
+        let used_idx_off = used_addr + 2;
+        let used_idx =
+            u16::from_le_bytes([guest_mem[used_idx_off], guest_mem[used_idx_off + 1]]) as usize;
+
+        if avail_idx == used_idx {
+            return false;
+        }
+
+        let ring_off = avail_addr + 4 + 2 * (used_idx % q_size);
+        if ring_off + 2 > guest_mem.len() {
+            return false;
+        }
+        let head_idx = u16::from_le_bytes([guest_mem[ring_off], guest_mem[ring_off + 1]]) as usize;
+
+        let mut written = 0;
+        let mut idx = head_idx;
+        for _ in 0..q_size {
+            let d_off = desc_addr + idx * 16;
+            if d_off + 16 > guest_mem.len() {
+                break;
+            }
+            let addr = u64::from_le_bytes(guest_mem[d_off..d_off + 8].try_into().unwrap()) as usize;
+            let len =
+                u32::from_le_bytes(guest_mem[d_off + 8..d_off + 12].try_into().unwrap()) as usize;
+            let flags = u16::from_le_bytes(guest_mem[d_off + 12..d_off + 14].try_into().unwrap());
+            let next = u16::from_le_bytes(guest_mem[d_off + 14..d_off + 16].try_into().unwrap());
+
+            if flags & 2 != 0 && addr + len <= guest_mem.len() {
+                let remaining = packet.len() - written;
+                let to_write = remaining.min(len);
+                guest_mem[addr..addr + to_write]
+                    .copy_from_slice(&packet[written..written + to_write]);
+                written += to_write;
+            }
+            if flags & 1 == 0 || written >= packet.len() {
+                break;
+            }
+            idx = next as usize;
+        }
+
+        let used_entry = used_addr + 4 + (used_idx % q_size) * 8;
+        if used_entry + 8 <= guest_mem.len() {
+            guest_mem[used_entry..used_entry + 4].copy_from_slice(&(head_idx as u32).to_le_bytes());
+            guest_mem[used_entry + 4..used_entry + 8]
+                .copy_from_slice(&(written as u32).to_le_bytes());
+            std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+            let new_used = (used_idx + 1) as u16;
+            guest_mem[used_idx_off..used_idx_off + 2].copy_from_slice(&new_used.to_le_bytes());
+        }
+        true
+    }
+
     /// Called from the vCPU run loop during WFI (guest idle). Returns true
     /// if any data was injected (caller should trigger interrupt).
     pub fn poll_vsock_rx(&self) -> bool {
+        // Process any pending connect requests first.
+        let pending: Vec<(u32, u64)> = {
+            if let Ok(mut p) = self.pending_vsock_connects.lock() {
+                std::mem::take(&mut *p)
+            } else {
+                Vec::new()
+            }
+        };
+        let mut injected = false;
+        for (port, guest_cid) in pending {
+            let mut hdr = [0u8; 44];
+            hdr[0..8].copy_from_slice(&2u64.to_le_bytes());
+            hdr[8..16].copy_from_slice(&guest_cid.to_le_bytes());
+            hdr[16..20].copy_from_slice(&port.to_le_bytes());
+            hdr[20..24].copy_from_slice(&port.to_le_bytes());
+            hdr[28..30].copy_from_slice(&1u16.to_le_bytes());
+            hdr[30..32].copy_from_slice(&1u16.to_le_bytes()); // OP_REQUEST
+            hdr[36..40].copy_from_slice(&(64 * 1024u32).to_le_bytes());
+            if self.inject_vsock_rx_raw(&hdr) {
+                tracing::info!("Vsock: deferred OP_REQUEST injected for port {port}");
+                injected = true;
+            } else {
+                // Still not ready — re-queue.
+                if let Ok(mut p) = self.pending_vsock_connects.lock() {
+                    p.push((port, guest_cid));
+                }
+            }
+        }
+
         let (Some(ram_base), ram_size) = (self.guest_ram_base, self.guest_ram_size) else {
-            return false;
+            return injected;
         };
         let gpa_base = self.guest_ram_gpa as usize;
 
@@ -957,7 +1102,7 @@ impl DeviceManager {
             Err(_) => return false,
         };
         if fds.is_empty() {
-            return false;
+            return injected;
         }
 
         // Find the vsock device's RX queue (queue 0) MMIO state.
