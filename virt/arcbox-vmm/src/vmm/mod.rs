@@ -245,6 +245,27 @@ pub struct Vmm {
     /// Shared DNS hosts table from NetworkManager.
     #[cfg(target_os = "macos")]
     shared_dns_hosts: Option<std::sync::Arc<arcbox_dns::LocalHostsTable>>,
+    /// Kernel entry address for the custom HV VMM path (stored during
+    /// `initialize_darwin_hv`, consumed by `start_darwin_hv`).
+    #[cfg(target_os = "macos")]
+    hv_kernel_entry: Option<u64>,
+    /// FDT load address for the custom HV VMM path.
+    #[cfg(target_os = "macos")]
+    hv_fdt_addr: Option<u64>,
+    /// vCPU thread join handles for the custom HV VMM path.
+    #[cfg(target_os = "macos")]
+    hv_vcpu_threads: Vec<std::thread::JoinHandle<()>>,
+    /// Shared vCPU thread handle registry for WFI unparking (custom HV).
+    #[cfg(target_os = "macos")]
+    hv_vcpu_thread_handles: Option<std::sync::Arc<std::sync::Mutex<Vec<std::thread::Thread>>>>,
+    /// PSCI CPU_ON channel senders for secondary vCPUs (custom HV).
+    #[cfg(target_os = "macos")]
+    #[allow(clippy::type_complexity)]
+    hv_cpu_on_senders: Option<
+        std::sync::Arc<
+            std::sync::Mutex<Vec<Option<std::sync::mpsc::Sender<darwin_hv::CpuOnRequest>>>>,
+        >,
+    >,
     /// vmnet bridge interface for the bridge NIC (`vmnet` feature only).
     #[cfg(all(target_os = "macos", feature = "vmnet"))]
     vmnet_bridge: Option<std::sync::Arc<arcbox_net::darwin::Vmnet>>,
@@ -263,15 +284,6 @@ pub struct Vmm {
     /// GICv3 handle (custom VMM path, macOS 15+).
     #[cfg(all(target_os = "macos", feature = "gic"))]
     hv_gic: Option<std::sync::Arc<arcbox_hv::Gic>>,
-    /// Running flag for HV vCPU threads.
-    #[cfg(target_os = "macos")]
-    hv_running: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    /// vCPU thread join handles (HV backend).
-    #[cfg(target_os = "macos")]
-    hv_vcpu_threads: Vec<std::thread::JoinHandle<()>>,
-    /// FDT address in guest memory (HV backend).
-    #[cfg(target_os = "macos")]
-    hv_fdt_addr: u64,
     /// Resolved backend choice for this VM instance.
     #[cfg(target_os = "macos")]
     resolved_backend: Option<ResolvedBackend>,
@@ -334,6 +346,16 @@ impl Vmm {
             inbound_listener_manager: None,
             #[cfg(target_os = "macos")]
             shared_dns_hosts: None,
+            #[cfg(target_os = "macos")]
+            hv_kernel_entry: None,
+            #[cfg(target_os = "macos")]
+            hv_fdt_addr: None,
+            #[cfg(target_os = "macos")]
+            hv_vcpu_threads: Vec::new(),
+            #[cfg(target_os = "macos")]
+            hv_vcpu_thread_handles: None,
+            #[cfg(target_os = "macos")]
+            hv_cpu_on_senders: None,
             #[cfg(all(target_os = "macos", feature = "vmnet"))]
             vmnet_bridge: None,
             #[cfg(all(target_os = "macos", feature = "vmnet"))]
@@ -346,12 +368,6 @@ impl Vmm {
             hv_guest_ram: None,
             #[cfg(all(target_os = "macos", feature = "gic"))]
             hv_gic: None,
-            #[cfg(target_os = "macos")]
-            hv_running: None,
-            #[cfg(target_os = "macos")]
-            hv_vcpu_threads: Vec::new(),
-            #[cfg(target_os = "macos")]
-            hv_fdt_addr: 0,
             #[cfg(target_os = "macos")]
             resolved_backend: None,
         })

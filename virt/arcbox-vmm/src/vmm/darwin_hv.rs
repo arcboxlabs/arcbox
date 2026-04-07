@@ -15,7 +15,8 @@
 //!   (macOS 15+); device interrupts are injected via `Gic::set_spi()`.
 
 use std::alloc::{Layout, alloc_zeroed, dealloc};
-use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, mpsc};
 
 use arcbox_hv::{HvVm, MemoryPermission};
 
@@ -28,6 +29,52 @@ use crate::irq::IrqChip;
 use crate::irq::{Gsi, IrqTriggerCallback};
 
 use super::*;
+
+// ---------------------------------------------------------------------------
+// PSCI function IDs (SMC Calling Convention)
+// ---------------------------------------------------------------------------
+
+/// PSCI CPU_ON (64-bit): power up a secondary CPU.
+const PSCI_CPU_ON_64: u64 = 0xC400_0003;
+
+/// PSCI SYSTEM_OFF: shut the system down.
+const PSCI_SYSTEM_OFF: u64 = 0x8400_0008;
+
+/// PSCI SYSTEM_RESET: reset the system.
+const PSCI_SYSTEM_RESET: u64 = 0x8400_0009;
+
+/// PSCI PSCI_VERSION: return PSCI version.
+const PSCI_VERSION: u64 = 0x8400_0000;
+
+/// PSCI return code: success.
+const PSCI_SUCCESS: u64 = 0;
+
+/// PSCI return code: the target CPU is already on (-4 in two's complement).
+const PSCI_ALREADY_ON: u64 = (-4_i64) as u64;
+
+/// Request to power on a secondary vCPU via PSCI CPU_ON.
+#[allow(dead_code)] // Fields read by secondary vCPU threads / future diagnostics
+pub struct CpuOnRequest {
+    /// Target MPIDR (CPU affinity identifier).
+    pub target_cpu: u64,
+    /// Guest IPA where the secondary CPU begins executing.
+    pub entry_point: u64,
+    /// Value passed as X0 to the secondary CPU.
+    pub context_id: u64,
+}
+
+/// Shared state for secondary vCPU wake-up channels.
+///
+/// Index `i` corresponds to vCPU `i` (0-based). The BSP (vCPU 0) does not
+/// have an entry. Each `Option<Sender>` is `take()`-n exactly once when the
+/// guest calls PSCI CPU_ON for that vCPU, preventing double-start.
+type CpuOnSenders = Arc<Mutex<Vec<Option<mpsc::Sender<CpuOnRequest>>>>>;
+
+/// Shared registry of vCPU thread handles for WFI unparking.
+///
+/// When a GIC interrupt is injected, the IRQ callback iterates this list
+/// and calls `unpark()` on every thread so that WFI-parked vCPUs wake up.
+type VcpuThreadHandles = Arc<Mutex<Vec<std::thread::Thread>>>;
 
 /// Page size on ARM64.
 const PAGE_SIZE: usize = 4096;
@@ -192,23 +239,6 @@ impl Pl011 {
 }
 
 // ---------------------------------------------------------------------------
-// PSCI constants
-// ---------------------------------------------------------------------------
-
-/// PSCI VERSION (returns v1.1).
-const PSCI_VERSION: u64 = 0x8400_0000;
-/// PSCI CPU_ON (64-bit variant).
-const PSCI_CPU_ON_64: u64 = 0xC400_0003;
-/// PSCI CPU_OFF.
-const PSCI_CPU_OFF: u64 = 0x8400_0002;
-/// PSCI AFFINITY_INFO (64-bit variant).
-const PSCI_AFFINITY_INFO_64: u64 = 0xC400_0004;
-/// PSCI SYSTEM_OFF.
-const PSCI_SYSTEM_OFF: u64 = 0x8400_0008;
-/// PSCI SYSTEM_RESET.
-const PSCI_SYSTEM_RESET: u64 = 0x8400_0009;
-
-// ---------------------------------------------------------------------------
 // Device slot tracking
 // ---------------------------------------------------------------------------
 
@@ -316,9 +346,14 @@ impl Vmm {
         // --- 5. Set up IRQ chip with GIC callback ---
         let irq_chip = Arc::new(IrqChip::new()?);
 
+        // Shared registry for vCPU thread handles — the IRQ callback uses
+        // this to unpark WFI-blocked vCPU threads when an interrupt fires.
+        let vcpu_thread_handles: VcpuThreadHandles = Arc::new(Mutex::new(Vec::new()));
+
         #[cfg(feature = "gic")]
         if let Some(ref gic_ref) = gic {
             let gic_weak = Arc::downgrade(gic_ref);
+            let threads_weak = Arc::downgrade(&vcpu_thread_handles);
             let callback: IrqTriggerCallback = Box::new(move |gsi: Gsi, level: bool| {
                 if let Some(g) = gic_weak.upgrade() {
                     g.set_spi(gsi, level).map_err(|e| {
@@ -328,10 +363,22 @@ impl Vmm {
                 } else {
                     tracing::warn!("GIC: dropped, cannot inject SPI {gsi}");
                 }
+                // Wake any WFI-parked vCPU threads so they can service the
+                // interrupt. Only unpark on assertion (level=true) to avoid
+                // spurious wakeups on de-assertion.
+                if level {
+                    if let Some(handles) = threads_weak.upgrade() {
+                        if let Ok(handles) = handles.lock() {
+                            for t in handles.iter() {
+                                t.unpark();
+                            }
+                        }
+                    }
+                }
                 Ok(())
             });
             irq_chip.set_trigger_callback(Arc::new(callback));
-            tracing::debug!("IRQ callback wired to hardware GIC");
+            tracing::debug!("IRQ callback wired to hardware GIC (with WFI unpark)");
         }
 
         // --- 6. Initialize managers ---
@@ -509,56 +556,140 @@ impl Vmm {
         {
             self.hv_gic = gic;
         }
-        self.hv_fdt_addr = fdt_addr;
+        self.hv_kernel_entry = Some(arm64::KERNEL_LOAD_ADDR);
+        self.hv_fdt_addr = Some(fdt_addr);
+        self.hv_vcpu_thread_handles = Some(vcpu_thread_handles);
 
         tracing::info!("Custom Hypervisor.framework VMM initialized");
         Ok(())
     }
 
-    /// Starts the HV backend by spawning vCPU threads.
+    /// Starts the custom HV VMM by spawning vCPU threads.
+    ///
+    /// The BSP (vCPU 0) runs immediately. Secondary vCPUs (1..N) are spawned
+    /// in a "parked" state and wait on a channel for a PSCI CPU_ON request
+    /// from the BSP before entering their run loop.
     pub(super) fn start_darwin_hv(&mut self) -> Result<()> {
-        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        self.hv_running = Some(running.clone());
+        let kernel_entry = self
+            .hv_kernel_entry
+            .ok_or_else(|| VmmError::config("HV kernel entry not set".to_string()))?;
+        let fdt_addr = self
+            .hv_fdt_addr
+            .ok_or_else(|| VmmError::config("HV FDT address not set".to_string()))?;
 
         let device_manager = Arc::new(
             self.device_manager
                 .take()
-                .ok_or_else(|| VmmError::invalid_state("no device manager"))?,
+                .ok_or_else(|| VmmError::config("device manager not initialized".to_string()))?,
         );
-
-        let kernel_entry = arm64::KERNEL_LOAD_ADDR;
-        let fdt_addr = self.hv_fdt_addr;
+        let running = self.running.clone();
+        let vcpu_count = self.config.vcpu_count;
         let pl011 = Arc::new(std::sync::Mutex::new(Pl011::new()));
 
-        // Spawn BSP (vCPU 0).
-        let t = std::thread::Builder::new()
-            .name("hv-vcpu-0".into())
-            .spawn(move || vcpu_run_loop(0, kernel_entry, fdt_addr, device_manager, running, pl011))
-            .map_err(|e| VmmError::Vcpu(format!("spawn vcpu-0: {e}")))?;
-        self.hv_vcpu_threads.push(t);
+        let vcpu_thread_handles = self
+            .hv_vcpu_thread_handles
+            .clone()
+            .unwrap_or_else(|| Arc::new(Mutex::new(Vec::new())));
 
-        self.state = VmmState::Running;
-        tracing::info!("Custom VMM started with {} vCPU(s)", self.config.vcpu_count);
+        // --- Set up PSCI CPU_ON channels for secondary vCPUs ---
+        let cpu_on_senders: Option<CpuOnSenders> = if vcpu_count > 1 {
+            let mut senders_vec: Vec<Option<mpsc::Sender<CpuOnRequest>>> = Vec::new();
+            senders_vec.push(None); // Slot 0 = BSP
+
+            for i in 1..vcpu_count {
+                let (tx, rx) = mpsc::channel::<CpuOnRequest>();
+                senders_vec.push(Some(tx));
+
+                let r = running.clone();
+                let dm = device_manager.clone();
+                let th = vcpu_thread_handles.clone();
+                let uart = pl011.clone();
+                let senders_placeholder: Option<CpuOnSenders> = None;
+
+                let t = std::thread::Builder::new()
+                    .name(format!("hv-vcpu-{i}"))
+                    .spawn(move || match rx.recv() {
+                        Ok(req) => {
+                            tracing::info!(
+                                "vCPU {i}: received CPU_ON, starting at {:#x}",
+                                req.entry_point
+                            );
+                            vcpu_run_loop(
+                                i,
+                                req.entry_point,
+                                req.context_id,
+                                dm,
+                                r,
+                                uart,
+                                senders_placeholder,
+                                th,
+                            );
+                        }
+                        Err(_) => {
+                            tracing::debug!("vCPU {i}: channel closed, never started");
+                        }
+                    })
+                    .map_err(|e| VmmError::Vcpu(format!("spawn vcpu-{i}: {e}")))?;
+                self.hv_vcpu_threads.push(t);
+            }
+
+            let senders = Arc::new(Mutex::new(senders_vec));
+            self.hv_cpu_on_senders = Some(senders.clone());
+            Some(senders)
+        } else {
+            None
+        };
+
+        // --- Spawn BSP (vCPU 0) ---
+        {
+            let t = std::thread::Builder::new()
+                .name("hv-vcpu-0".to_string())
+                .spawn(move || {
+                    vcpu_run_loop(
+                        0,
+                        kernel_entry,
+                        fdt_addr,
+                        device_manager,
+                        running,
+                        pl011,
+                        cpu_on_senders,
+                        vcpu_thread_handles,
+                    );
+                })
+                .map_err(|e| VmmError::Vcpu(format!("spawn vcpu-0: {e}")))?;
+            self.hv_vcpu_threads.push(t);
+        }
+
+        tracing::info!(
+            "Custom HV VMM started: {} vCPU(s) (BSP running, {} secondary parked)",
+            vcpu_count,
+            vcpu_count.saturating_sub(1)
+        );
         Ok(())
     }
 
     /// Stops the HV backend by signaling vCPU threads and cleaning up resources.
-    #[allow(clippy::unnecessary_wraps)] // Signature matches stop_darwin_vm() for dispatch.
+    #[allow(clippy::unnecessary_wraps)]
     pub(super) fn stop_darwin_hv(&mut self) -> Result<()> {
         // Signal all vCPU threads to exit.
-        if let Some(running) = &self.hv_running {
-            running.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.running
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+
+        // Force-exit all vCPUs from their run loops.
+        if let Some(ref vm) = self.hv_vm {
+            if let Err(e) = vm.exit_all_vcpus() {
+                tracing::warn!("hv_vcpus_exit failed: {e}");
+            }
         }
 
-        // Join all vCPU threads (they will exit on next run() iteration).
+        // Join all vCPU threads.
         for t in self.hv_vcpu_threads.drain(..) {
             if let Err(e) = t.join() {
                 tracing::warn!("vCPU thread join failed: {e:?}");
             }
         }
 
-        // Cleanup in correct order: GIC -> VM -> RAM.
-        // The GIC is destroyed with the VM, but we drop our Arc reference first.
+        // Cleanup in correct order: GIC → VM → RAM.
         #[cfg(feature = "gic")]
         {
             self.hv_gic.take();
@@ -566,7 +697,6 @@ impl Vmm {
         self.hv_vm.take();
         self.hv_guest_ram.take();
 
-        self.state = VmmState::Stopped;
         tracing::info!("Custom VMM stopped");
         Ok(())
     }
@@ -580,6 +710,7 @@ impl Vmm {
 mod reg {
     pub use arcbox_hv::reg::{
         HV_REG_CPSR as CPSR, HV_REG_PC as PC, HV_REG_X0 as X0, HV_REG_X1 as X1, HV_REG_X2 as X2,
+        HV_REG_X3 as X3,
     };
 }
 
@@ -595,21 +726,39 @@ const CPSR_EL1H: u64 = 0x3C5;
 /// # Arguments
 ///
 /// * `vcpu_id` — Logical vCPU index (0-based, for logging).
-/// * `kernel_entry` — Guest IPA of the kernel entry point.
-/// * `fdt_addr` — Guest IPA of the flattened device tree.
+/// * `entry_addr` — Guest IPA where execution begins. For the BSP this is
+///   the kernel entry point; for a secondary vCPU it is the address passed
+///   in PSCI CPU_ON.
+/// * `x0_value` — Initial value of X0. For the BSP this is the FDT address;
+///   for a secondary vCPU it is the context_id from PSCI CPU_ON.
 /// * `device_manager` — Shared device manager for MMIO dispatch.
 /// * `running` — Shared flag; the loop exits when this is set to `false`.
 /// * `pl011` — Shared PL011 UART emulator for early console output.
+/// * `cpu_on_senders` — Channel senders for waking secondary vCPUs via
+///   PSCI CPU_ON. `None` when the VM has only one vCPU.
+/// * `vcpu_thread_handles` — Registry of vCPU thread handles used by the
+///   IRQ callback to unpark WFI-blocked threads.
+#[allow(clippy::too_many_arguments)]
 fn vcpu_run_loop(
     vcpu_id: u32,
-    kernel_entry: u64,
-    fdt_addr: u64,
+    entry_addr: u64,
+    x0_value: u64,
     device_manager: Arc<crate::device::DeviceManager>,
-    running: Arc<std::sync::atomic::AtomicBool>,
+    running: Arc<AtomicBool>,
     pl011: Arc<std::sync::Mutex<Pl011>>,
+    cpu_on_senders: Option<CpuOnSenders>,
+    vcpu_thread_handles: VcpuThreadHandles,
 ) {
     use arcbox_hv::{ExceptionClass, HvVcpu, VcpuExit};
     use std::sync::atomic::Ordering;
+
+    // Register this thread's handle so the IRQ callback can unpark us.
+    {
+        let mut handles = vcpu_thread_handles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        handles.push(std::thread::current());
+    }
 
     let vcpu = match HvVcpu::new() {
         Ok(v) => v,
@@ -620,14 +769,14 @@ fn vcpu_run_loop(
     };
 
     // Set initial register state for ARM64 Linux boot protocol:
-    //   PC  = kernel entry point
-    //   X0  = physical address of FDT
+    //   PC   = entry address (kernel entry for BSP, PSCI entry for secondary)
+    //   X0   = parameter (FDT address for BSP, context_id for secondary)
     //   CPSR = EL1h, DAIF masked
-    if let Err(e) = vcpu.set_reg(reg::PC, kernel_entry) {
+    if let Err(e) = vcpu.set_reg(reg::PC, entry_addr) {
         tracing::error!("vCPU {vcpu_id}: set PC failed: {e}");
         return;
     }
-    if let Err(e) = vcpu.set_reg(reg::X0, fdt_addr) {
+    if let Err(e) = vcpu.set_reg(reg::X0, x0_value) {
         tracing::error!("vCPU {vcpu_id}: set X0 failed: {e}");
         return;
     }
@@ -637,9 +786,9 @@ fn vcpu_run_loop(
     }
 
     tracing::info!(
-        "vCPU {vcpu_id}: starting at PC={:#x}, FDT={:#x}",
-        kernel_entry,
-        fdt_addr
+        "vCPU {vcpu_id}: starting at PC={:#x}, X0={:#x}",
+        entry_addr,
+        x0_value
     );
 
     loop {
@@ -761,9 +910,13 @@ fn vcpu_run_loop(
                 class: ExceptionClass::WaitForInterrupt,
                 ..
             } => {
-                // Guest is idle. In a production VMM we would block on an
-                // eventfd/kqueue until an interrupt is pending. For now, yield.
-                std::thread::yield_now();
+                // Guest executed WFI — it is idle and waiting for an interrupt.
+                // Park the thread with a timeout instead of busy-spinning.
+                // The IRQ callback (GIC set_spi) calls unpark() on all vCPU
+                // threads, so we wake promptly when an interrupt fires.
+                // The 1ms timeout prevents missed-wakeup deadlocks while still
+                // saving significant CPU compared to yield_now().
+                std::thread::park_timeout(std::time::Duration::from_millis(1));
             }
 
             VcpuExit::Exception {
@@ -776,55 +929,9 @@ fn vcpu_run_loop(
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-                match func_id {
-                    PSCI_SYSTEM_OFF => {
-                        tracing::info!("vCPU {vcpu_id}: PSCI SYSTEM_OFF");
-                        running.store(false, Ordering::SeqCst);
-                        break;
-                    }
-                    PSCI_SYSTEM_RESET => {
-                        tracing::info!("vCPU {vcpu_id}: PSCI SYSTEM_RESET");
-                        running.store(false, Ordering::SeqCst);
-                        break;
-                    }
-                    PSCI_VERSION => {
-                        // Return PSCI v1.1.
-                        let _ = vcpu.set_reg(reg::X0, 0x0001_0001);
-                        // Advance PC past the HVC instruction.
-                        let pc = vcpu.get_reg(reg::PC).unwrap_or(0);
-                        let _ = vcpu.set_reg(reg::PC, pc + 4);
-                    }
-                    PSCI_CPU_ON_64 => {
-                        let target = vcpu.get_reg(reg::X1).unwrap_or(0);
-                        let entry = vcpu.get_reg(reg::X2).unwrap_or(0);
-                        tracing::info!(
-                            "vCPU {vcpu_id}: PSCI CPU_ON target={target:#x} entry={entry:#x}"
-                        );
-                        // TODO: Actually spawn secondary vCPU thread.
-                        let _ = vcpu.set_reg(reg::X0, 0); // PSCI_SUCCESS
-                        // Advance PC past the HVC instruction.
-                        let pc = vcpu.get_reg(reg::PC).unwrap_or(0);
-                        let _ = vcpu.set_reg(reg::PC, pc + 4);
-                    }
-                    PSCI_CPU_OFF => {
-                        tracing::info!("vCPU {vcpu_id}: PSCI CPU_OFF");
-                        break; // Exit this vCPU's run loop.
-                    }
-                    PSCI_AFFINITY_INFO_64 => {
-                        // Report target CPU as OFF.
-                        let _ = vcpu.set_reg(reg::X0, 2);
-                        // Advance PC past the HVC instruction.
-                        let pc = vcpu.get_reg(reg::PC).unwrap_or(0);
-                        let _ = vcpu.set_reg(reg::PC, pc + 4);
-                    }
-                    _ => {
-                        tracing::debug!("vCPU {vcpu_id}: unhandled PSCI func {func_id:#x}");
-                        // Return NOT_SUPPORTED (-1) in X0.
-                        let _ = vcpu.set_reg(reg::X0, u64::MAX);
-                        // Advance PC past the HVC instruction.
-                        let pc = vcpu.get_reg(reg::PC).unwrap_or(0);
-                        let _ = vcpu.set_reg(reg::PC, pc + 4);
-                    }
+                handle_psci(vcpu_id, func_id, &vcpu, &running, cpu_on_senders.as_ref());
+                if !running.load(Ordering::Relaxed) {
+                    break;
                 }
             }
 
@@ -832,12 +939,15 @@ fn vcpu_run_loop(
                 class: ExceptionClass::SmcCall(_),
                 ..
             } => {
-                // SMC calls at EL1 are forwarded as HVC on Apple silicon.
-                // Return NOT_SUPPORTED.
-                let _ = vcpu.set_reg(reg::X0, u64::MAX);
-                // Advance PC past the SMC instruction.
-                let pc = vcpu.get_reg(reg::PC).unwrap_or(0);
-                let _ = vcpu.set_reg(reg::PC, pc + 4);
+                // Some guests route PSCI through SMC instead of HVC.
+                let func_id = match vcpu.get_reg(reg::X0) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                handle_psci(vcpu_id, func_id, &vcpu, &running, cpu_on_senders.as_ref());
+                if !running.load(Ordering::Relaxed) {
+                    break;
+                }
             }
 
             VcpuExit::VtimerActivated => {
@@ -866,6 +976,96 @@ fn vcpu_run_loop(
     pl011.lock().unwrap().flush();
 
     tracing::info!("vCPU {vcpu_id}: exited");
+}
+
+/// Handles PSCI function calls from a vCPU (HVC/SMC conduit).
+///
+/// Reads registers X1–X3 as needed and writes the return value into X0.
+/// For SYSTEM_OFF / SYSTEM_RESET, sets `running` to `false` so the caller
+/// can break out of its run loop.
+fn handle_psci(
+    vcpu_id: u32,
+    func_id: u64,
+    vcpu: &arcbox_hv::HvVcpu,
+    running: &Arc<AtomicBool>,
+    cpu_on_senders: Option<&CpuOnSenders>,
+) {
+    use std::sync::atomic::Ordering;
+
+    match func_id {
+        PSCI_VERSION => {
+            // Return PSCI v1.0 (major=1, minor=0).
+            let _ = vcpu.set_reg(reg::X0, 1 << 16);
+        }
+
+        PSCI_SYSTEM_OFF => {
+            tracing::info!("vCPU {vcpu_id}: PSCI SYSTEM_OFF");
+            running.store(false, Ordering::SeqCst);
+        }
+
+        PSCI_SYSTEM_RESET => {
+            tracing::info!("vCPU {vcpu_id}: PSCI SYSTEM_RESET");
+            running.store(false, Ordering::SeqCst);
+        }
+
+        PSCI_CPU_ON_64 => {
+            let target_mpidr = vcpu.get_reg(reg::X1).unwrap_or(0);
+            let entry_point = vcpu.get_reg(reg::X2).unwrap_or(0);
+            let context_id = vcpu.get_reg(reg::X3).unwrap_or(0);
+
+            // Extract CPU index from MPIDR Aff0 field (simple linear topology).
+            let target_cpu = (target_mpidr & 0xFF) as usize;
+
+            if let Some(senders) = cpu_on_senders {
+                let mut senders_guard = senders
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+                // Take the sender so it can only be used once (CPU_ON is
+                // idempotent in the PSCI spec — a second call for the same
+                // target returns ALREADY_ON).
+                if let Some(sender) = senders_guard.get_mut(target_cpu).and_then(|s| s.take()) {
+                    match sender.send(CpuOnRequest {
+                        target_cpu: target_mpidr,
+                        entry_point,
+                        context_id,
+                    }) {
+                        Ok(()) => {
+                            tracing::info!(
+                                "vCPU {vcpu_id}: PSCI CPU_ON target={target_cpu} \
+                                 entry={entry_point:#x} ctx={context_id:#x}"
+                            );
+                            let _ = vcpu.set_reg(reg::X0, PSCI_SUCCESS);
+                        }
+                        Err(_) => {
+                            // Receiver gone — secondary thread exited before
+                            // we could send. Treat as ALREADY_ON.
+                            tracing::warn!(
+                                "vCPU {vcpu_id}: PSCI CPU_ON target={target_cpu} \
+                                 channel closed"
+                            );
+                            let _ = vcpu.set_reg(reg::X0, PSCI_ALREADY_ON);
+                        }
+                    }
+                } else {
+                    // No sender for this CPU — either already started or
+                    // invalid target.
+                    tracing::debug!("vCPU {vcpu_id}: PSCI CPU_ON target={target_cpu} already on");
+                    let _ = vcpu.set_reg(reg::X0, PSCI_ALREADY_ON);
+                }
+            } else {
+                // Single-vCPU VM — CPU_ON is not supported.
+                tracing::debug!("vCPU {vcpu_id}: PSCI CPU_ON ignored (single-vCPU VM)");
+                let _ = vcpu.set_reg(reg::X0, u64::MAX); // NOT_SUPPORTED
+            }
+        }
+
+        _ => {
+            tracing::debug!("vCPU {vcpu_id}: unhandled PSCI func {func_id:#x}");
+            // Return NOT_SUPPORTED (-1) in X0.
+            let _ = vcpu.set_reg(reg::X0, u64::MAX);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
