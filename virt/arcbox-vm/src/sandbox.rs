@@ -1327,6 +1327,80 @@ fn chroot_root(fc_binary: &str, chroot_base_dir: &str, id: &str) -> PathBuf {
         .join("root")
 }
 
+/// Copy kernel into the jailer chroot and set ownership.
+///
+/// Returns the chroot-relative kernel path (e.g. `"/vmlinux"`).
+async fn stage_kernel_for_jailer(
+    chroot_root: &Path,
+    kernel_src: &str,
+    uid: u32,
+    gid: u32,
+) -> Result<String> {
+    tokio::fs::create_dir_all(chroot_root)
+        .await
+        .map_err(VmmError::Io)?;
+    let kernel_dst = chroot_root.join("vmlinux");
+    tokio::fs::copy(kernel_src, &kernel_dst)
+        .await
+        .map_err(VmmError::Io)?;
+    chown(
+        &kernel_dst,
+        Some(Uid::from_raw(uid)),
+        Some(Gid::from_raw(gid)),
+    )
+    .map_err(|e| VmmError::Process(format!("chown kernel: {e}")))?;
+    Ok("/vmlinux".to_string())
+}
+
+/// Copy rootfs into the jailer chroot and set ownership.
+///
+/// Returns the chroot-relative rootfs path (e.g. `"/rootfs.ext4"`).
+async fn stage_rootfs_copy_for_jailer(
+    chroot_root: &Path,
+    rootfs_src: &str,
+    uid: u32,
+    gid: u32,
+) -> Result<String> {
+    tokio::fs::create_dir_all(chroot_root)
+        .await
+        .map_err(VmmError::Io)?;
+    let rootfs_dst = chroot_root.join("rootfs.ext4");
+    tokio::fs::copy(rootfs_src, &rootfs_dst)
+        .await
+        .map_err(VmmError::Io)?;
+    chown(
+        &rootfs_dst,
+        Some(Uid::from_raw(uid)),
+        Some(Gid::from_raw(gid)),
+    )
+    .map_err(|e| VmmError::Process(format!("chown rootfs: {e}")))?;
+    Ok("/rootfs.ext4".to_string())
+}
+
+/// Create a block device node in the jailer chroot pointing to a dm device.
+///
+/// Returns the chroot-relative rootfs path (`"/rootfs.ext4"`).
+async fn stage_rootfs_device_for_jailer(
+    chroot_root: &Path,
+    dm_device: &str,
+    uid: u32,
+    gid: u32,
+) -> Result<String> {
+    tokio::fs::create_dir_all(chroot_root)
+        .await
+        .map_err(VmmError::Io)?;
+    let (major, minor) = crate::snapshot_cow::device_major_minor(dm_device).await?;
+    let node_path = chroot_root.join("rootfs.ext4");
+    crate::snapshot_cow::mknod_blkdev(&node_path, major, minor).await?;
+    chown(
+        &node_path,
+        Some(Uid::from_raw(uid)),
+        Some(Gid::from_raw(gid)),
+    )
+    .map_err(|e| VmmError::Process(format!("chown rootfs device: {e}")))?;
+    Ok("/rootfs.ext4".to_string())
+}
+
 /// Copy kernel and rootfs into the jailer chroot and set ownership.
 ///
 /// Returns `(kernel_guest_path, rootfs_guest_path)` — paths relative to the
@@ -1338,28 +1412,9 @@ async fn stage_files_for_jailer(
     uid: u32,
     gid: u32,
 ) -> Result<(String, String)> {
-    tokio::fs::create_dir_all(chroot_root)
-        .await
-        .map_err(VmmError::Io)?;
-
-    let kernel_dst = chroot_root.join("vmlinux");
-    let rootfs_dst = chroot_root.join("rootfs.ext4");
-
-    tokio::fs::copy(kernel_src, &kernel_dst)
-        .await
-        .map_err(VmmError::Io)?;
-    tokio::fs::copy(rootfs_src, &rootfs_dst)
-        .await
-        .map_err(VmmError::Io)?;
-
-    let uid = Uid::from_raw(uid);
-    let gid = Gid::from_raw(gid);
-    chown(&kernel_dst, Some(uid), Some(gid))
-        .map_err(|e| VmmError::Process(format!("chown kernel: {e}")))?;
-    chown(&rootfs_dst, Some(uid), Some(gid))
-        .map_err(|e| VmmError::Process(format!("chown rootfs: {e}")))?;
-
-    Ok(("/vmlinux".to_string(), "/rootfs.ext4".to_string()))
+    let k = stage_kernel_for_jailer(chroot_root, kernel_src, uid, gid).await?;
+    let r = stage_rootfs_copy_for_jailer(chroot_root, rootfs_src, uid, gid).await?;
+    Ok((k, r))
 }
 
 /// Perform the actual Firecracker boot: spawn process, configure, start VM.
@@ -1413,14 +1468,48 @@ async fn do_boot(
     // host-absolute paths from the spec are used as-is.
     let (kernel_path, rootfs_path, vsock_fc_path, vsock_host_path, cow_handle) =
         if let Some(ref jc) = fc_cfg.jailer {
-            // Jailer mode: full copy into chroot (dm-snapshot deferred to Phase 2).
+            // Jailer mode: stage kernel + rootfs into chroot.
             let base = jc.chroot_base_dir.as_deref().unwrap_or("/srv/jailer");
             let cr = chroot_root(&fc_cfg.binary, base, id);
-            let (k, r) =
-                stage_files_for_jailer(&cr, &spec.kernel, &spec.rootfs, jc.uid, jc.gid).await?;
-            // FC creates the vsock socket at this path inside the chroot.
+
+            // Kernel is always copied (small, ~16MB).
+            let k = stage_kernel_for_jailer(&cr, &spec.kernel, jc.uid, jc.gid).await?;
+
+            // Rootfs: try dm-snapshot + mknod, fall back to full copy.
+            let (r, cow) = match cow_manager.setup(id, &spec.rootfs).await {
+                Ok(handle) => {
+                    match stage_rootfs_device_for_jailer(&cr, &handle.dm_device, jc.uid, jc.gid)
+                        .await
+                    {
+                        Ok(path) => (path, Some(handle)),
+                        Err(e) => {
+                            debug!(
+                                sandbox_id = %id,
+                                error = %e,
+                                "mknod failed, falling back to rootfs copy"
+                            );
+                            let _ = cow_manager.teardown(&handle).await;
+                            let path =
+                                stage_rootfs_copy_for_jailer(&cr, &spec.rootfs, jc.uid, jc.gid)
+                                    .await?;
+                            (path, None)
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug!(
+                        sandbox_id = %id,
+                        error = %e,
+                        "dm-snapshot unavailable, copying rootfs into chroot"
+                    );
+                    let path =
+                        stage_rootfs_copy_for_jailer(&cr, &spec.rootfs, jc.uid, jc.gid).await?;
+                    (path, None)
+                }
+            };
+
             let vsock_host = cr.join("run/firecracker.vsock");
-            (k, r, "/run/firecracker.vsock".to_string(), vsock_host, None)
+            (k, r, "/run/firecracker.vsock".to_string(), vsock_host, cow)
         } else {
             // Direct mode: try dm-snapshot CoW, fall back to using rootfs directly.
             let (rootfs, cow) = match cow_manager.setup(id, &spec.rootfs).await {

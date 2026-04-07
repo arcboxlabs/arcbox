@@ -543,6 +543,56 @@ async fn create_sparse_file(path: &Path, size: u64) -> Result<()> {
     .map_err(|e| VmmError::DeviceMapper(format!("spawn_blocking join: {e}")))?
 }
 
+/// Get the `(major, minor)` device numbers for a block device.
+///
+/// Uses `busybox stat -c '%t %T'` which prints major and minor in hex.
+pub async fn device_major_minor(path: &str) -> Result<(u32, u32)> {
+    let mut cmd = Command::new(BUSYBOX);
+    cmd.args(["stat", "-c", "%t %T", path]);
+    let output = run_cmd(cmd).await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(VmmError::DeviceMapper(format!("stat {path}: {stderr}")));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parts: Vec<&str> = stdout.split_whitespace().collect();
+    if parts.len() != 2 {
+        return Err(VmmError::DeviceMapper(format!(
+            "unexpected stat output for {path}: {stdout}"
+        )));
+    }
+    let major = u32::from_str_radix(parts[0], 16)
+        .map_err(|e| VmmError::DeviceMapper(format!("parse major: {e}")))?;
+    let minor = u32::from_str_radix(parts[1], 16)
+        .map_err(|e| VmmError::DeviceMapper(format!("parse minor: {e}")))?;
+    Ok((major, minor))
+}
+
+/// Create a block device node at `node_path` pointing to `(major, minor)`.
+pub async fn mknod_blkdev(node_path: &Path, major: u32, minor: u32) -> Result<()> {
+    let path_str = node_path
+        .to_str()
+        .ok_or_else(|| VmmError::DeviceMapper("non-UTF-8 node path".into()))?;
+    let mut cmd = Command::new(BUSYBOX);
+    cmd.args([
+        "mknod",
+        path_str,
+        "b",
+        &major.to_string(),
+        &minor.to_string(),
+    ]);
+    let output = run_cmd(cmd).await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(VmmError::DeviceMapper(format!(
+            "mknod {path_str}: {stderr}"
+        )));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
