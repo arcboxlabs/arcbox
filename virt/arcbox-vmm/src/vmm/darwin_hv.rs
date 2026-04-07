@@ -989,26 +989,12 @@ impl Vmm {
                 fds_map.insert(port, internal_raw_fd);
             }
 
-            // Retry OP_REQUEST injection until guest accepts (OP_RESPONSE).
-            // Guest agent may not be listening yet, so we retry with delay.
+            // Queue an OP_REQUEST. It will be injected by poll_vsock_rx
+            // when the device is ready and RX descriptors are available.
+            // The daemon's wait_for_agent retry loop handles the case where
+            // the guest agent hasn't started listening yet.
             let guest_cid = self.config.guest_cid.unwrap_or(3) as u64;
-            let connected_ports = dm.vsock_connected_ports();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-
-            while std::time::Instant::now() < deadline {
-                // Check if already connected (from a previous OP_RESPONSE).
-                if connected_ports
-                    .lock()
-                    .map(|s| s.contains(&port))
-                    .unwrap_or(false)
-                {
-                    break;
-                }
-                // Inject OP_REQUEST (may be queued if device not ready).
-                dm.inject_vsock_connect(port, guest_cid);
-                // Wait for vCPU to process TX queue and potentially deliver OP_RESPONSE.
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
+            dm.inject_vsock_connect(port, guest_cid);
         }
         // Forget OwnedFd so the fd stays open.
         std::mem::forget(internal_fd);

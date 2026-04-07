@@ -1030,16 +1030,16 @@ impl DeviceManager {
         }
         let avail_idx =
             u16::from_le_bytes([guest_mem[avail_addr + 2], guest_mem[avail_addr + 3]]) as usize;
-        tracing::info!(
-            "inject_vsock_rx_raw: avail_addr={:#x} used_addr={:#x} avail_idx={} used_idx=? q_size={}",
-            avail_addr,
-            used_addr,
-            avail_idx,
-            q_size,
-        );
         let used_idx_off = used_addr + 2;
         let used_idx =
             u16::from_le_bytes([guest_mem[used_idx_off], guest_mem[used_idx_off + 1]]) as usize;
+        tracing::info!(
+            "inject_vsock_rx_raw: avail_idx={} used_idx={} q_size={} desc_addr={:#x}",
+            avail_idx,
+            used_idx,
+            q_size,
+            desc_addr,
+        );
 
         if avail_idx == used_idx {
             return false;
