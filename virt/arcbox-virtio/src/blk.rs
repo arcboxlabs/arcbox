@@ -1009,12 +1009,22 @@ impl VirtioDevice for VirtioBlock {
                     .copy_from_slice(&(head_idx as u32).to_le_bytes());
                 memory[used_ring_entry + 4..used_ring_entry + 8]
                     .copy_from_slice(&(bytes as u32).to_le_bytes());
+                // Write barrier: ensure ring entry is visible before idx update.
+                // ARM64 weak memory ordering requires this for correct guest observation.
+                std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
                 // Increment used index.
                 let new_used_idx = used_idx.wrapping_add(1);
                 memory[used_idx_offset..used_idx_offset + 2]
                     .copy_from_slice(&new_used_idx.to_le_bytes());
             }
 
+            tracing::debug!(
+                "virtio-blk: completion head={} bytes={} status={:?} used_idx={}",
+                head_idx,
+                bytes,
+                status,
+                u16::from_le_bytes([memory[used_addr + 2], memory[used_addr + 3]]),
+            );
             completions.push((head_idx as u16, bytes as u32));
             current_avail = current_avail.wrapping_add(1);
         }

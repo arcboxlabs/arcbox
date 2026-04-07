@@ -748,7 +748,9 @@ impl Vmm {
                 dev_reg.extend_from_slice(&entry.reg_base.to_be_bytes());
                 dev_reg.extend_from_slice(&entry.reg_size.to_be_bytes());
                 fdt.property("reg", &dev_reg).map_err(fdt_err)?;
-                fdt.property_array_u32("interrupts", &[0, entry.irq, 1])
+                // GIC SPI numbering: FDT SPI number = INTID - 32.
+                // hv_gic_set_spi uses INTID directly (starting at 32).
+                fdt.property_array_u32("interrupts", &[0, entry.irq.saturating_sub(32), 1])
                     .map_err(fdt_err)?; // SPI, edge
                 fdt.property_null("dma-coherent").map_err(fdt_err)?;
                 fdt.end_node(node).map_err(fdt_err)?;
