@@ -32,7 +32,11 @@ mod platform {
         // Writable layers on top of read-only EROFS.
         mount_tmpfs("/tmp");
         mount_tmpfs("/run");
-        mount_tmpfs("/var");
+        // /var needs device nodes for the Firecracker jailer chroot:
+        // the jailer mknods a block device for the rootfs inside
+        // /var/lib/arcbox/jailer/, which requires the filesystem to
+        // allow device access (no `nodev`).
+        mount_tmpfs_dev("/var");
         mount_tmpfs("/etc");
 
         // Populate /etc with files containerd/dockerd expect.
@@ -59,6 +63,13 @@ mod platform {
         mount_cgroup2();
         mount_devpts();
         mount_shm();
+
+        // Virtualization.framework does not expose complete CPU cache topology
+        // in sysfs — `size`, `coherency_line_size`, and `number_of_sets` are
+        // missing. The Firecracker jailer reads these files before chrooting
+        // and panics when they are absent. Synthesise them via bind mounts so
+        // that jailer mode works inside this VM.
+        ensure_cpu_cache_topology();
 
         // Network.
         setup_networking();
@@ -124,6 +135,25 @@ mod platform {
             None::<&str>,
         ) {
             tracing::warn!(target, error = %e, "failed to mount tmpfs");
+        }
+    }
+
+    /// Like [`mount_tmpfs`] but without `nodev`, allowing device nodes to be
+    /// opened on this filesystem. Used for `/var` where the Firecracker jailer
+    /// creates block device nodes via `mknod` inside its chroot.
+    fn mount_tmpfs_dev(target: &str) {
+        if crate::mount::is_mounted(target) {
+            return;
+        }
+        mkdir_p(target);
+        if let Err(e) = mount(
+            Some("tmpfs"),
+            target,
+            Some("tmpfs"),
+            MsFlags::MS_NOSUID,
+            None::<&str>,
+        ) {
+            tracing::warn!(target, error = %e, "failed to mount tmpfs (dev)");
         }
     }
 
@@ -262,6 +292,78 @@ mod platform {
                 tracing::warn!(error = %e, "failed to register Rosetta binfmt_misc handler");
             }
         }
+    }
+
+    /// Synthesises missing CPU cache sysfs attributes via bind mounts.
+    ///
+    /// Virtualization.framework exposes `level`, `type`, and `shared_cpu_map`
+    /// for each cache index but omits `size`, `coherency_line_size`, and
+    /// `number_of_sets`. The Firecracker jailer hard-panics when these files
+    /// are absent, so we fill them in with reasonable ARM64 defaults.
+    fn ensure_cpu_cache_topology() {
+        const CACHE_BASE: &str = "/sys/devices/system/cpu/cpu0/cache";
+        const FIXUP_BASE: &str = "/run/arcbox/cache-fixup";
+
+        // If the first missing file already exists, nothing to do (either the
+        // hypervisor exposes full topology or a previous run already fixed up).
+        if Path::new(&format!("{CACHE_BASE}/index0/size")).exists() {
+            return;
+        }
+
+        // Default values per cache index — (size, coherency_line_size, number_of_sets).
+        const DEFAULTS: &[(&str, &str, &str)] = &[
+            ("64K", "64", "256"),    // index0: L1 Data
+            ("64K", "64", "256"),    // index1: L1 Instruction
+            ("1024K", "64", "2048"), // index2: L2 Unified
+        ];
+
+        for (idx, &(size, line_size, num_sets)) in DEFAULTS.iter().enumerate() {
+            let sysfs_dir = format!("{CACHE_BASE}/index{idx}");
+            if !Path::new(&sysfs_dir).exists() {
+                break;
+            }
+
+            let fixup_dir = format!("{FIXUP_BASE}/index{idx}");
+            mkdir_p(&fixup_dir);
+
+            // Copy existing files from sysfs into the fixup directory.
+            for name in &[
+                "level",
+                "type",
+                "shared_cpu_map",
+                "shared_cpu_list",
+                "uevent",
+            ] {
+                let src = format!("{sysfs_dir}/{name}");
+                if let Ok(content) = fs::read_to_string(&src) {
+                    let _ = fs::write(format!("{fixup_dir}/{name}"), content);
+                }
+            }
+
+            // Write the missing attributes.
+            let _ = fs::write(format!("{fixup_dir}/size"), format!("{size}\n"));
+            let _ = fs::write(
+                format!("{fixup_dir}/coherency_line_size"),
+                format!("{line_size}\n"),
+            );
+            let _ = fs::write(
+                format!("{fixup_dir}/number_of_sets"),
+                format!("{num_sets}\n"),
+            );
+
+            // Bind-mount the completed directory over the sysfs entry.
+            if let Err(e) = mount(
+                Some(&fixup_dir as &str),
+                sysfs_dir.as_str(),
+                None::<&str>,
+                MsFlags::MS_BIND,
+                None::<&str>,
+            ) {
+                tracing::warn!(index = idx, error = %e, "failed to bind-mount cache fixup");
+            }
+        }
+
+        tracing::info!("CPU cache topology fixup applied for Firecracker jailer");
     }
 
     fn setup_networking() {
