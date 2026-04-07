@@ -453,10 +453,12 @@ pub struct VirtioFs {
     session: FuseSession,
     /// Request handler (provided by arcbox-fs).
     handler: Option<Arc<dyn FuseRequestHandler>>,
-    /// Request queues for FUSE traffic.
+    /// Request queues for FUSE traffic (host-side, used by tests).
     request_queues: Vec<VirtQueue>,
     /// Whether the device is activated.
     activated: bool,
+    /// Last processed avail index for request queue 1 (guest-memory path).
+    last_avail_idx_q1: usize,
 }
 
 impl VirtioFs {
@@ -482,6 +484,7 @@ impl VirtioFs {
             handler: None,
             request_queues: Vec::new(),
             activated: false,
+            last_avail_idx_q1: 0,
         }
     }
 
@@ -496,6 +499,7 @@ impl VirtioFs {
             handler: Some(handler),
             request_queues: Vec::new(),
             activated: false,
+            last_avail_idx_q1: 0,
         }
     }
 
@@ -867,21 +871,128 @@ impl VirtioDevice for VirtioFs {
         &mut self,
         queue_idx: u16,
         memory: &mut [u8],
-        _queue_config: &crate::QueueConfig,
+        queue_config: &crate::QueueConfig,
     ) -> Result<Vec<(u16, u32)>> {
-        // Queue 0 is the hiprio/notification queue; actual request queues
-        // start at index 1 per the VirtIO-FS spec. Translate accordingly.
+        // Queue 0 is the hiprio/notification queue — nothing to do for now.
         if queue_idx == 0 {
-            // hiprio queue — nothing to do for now
             return Ok(Vec::new());
         }
 
-        let internal_idx = (queue_idx - 1) as usize;
+        if !queue_config.ready || queue_config.size == 0 {
+            return Ok(Vec::new());
+        }
 
-        // Call the inherent process_queue method (not the trait method).
-        // The inherent method takes `usize` while the trait method takes `u16`,
-        // so Rust disambiguates correctly.
-        Self::process_queue(self, internal_idx, memory)
+        // Read descriptors directly from guest memory (not the internal VirtQueue).
+        let desc_addr = queue_config.desc_addr as usize;
+        let avail_addr = queue_config.avail_addr as usize;
+        let used_addr = queue_config.used_addr as usize;
+        let q_size = queue_config.size as usize;
+
+        if avail_addr + 4 > memory.len() {
+            return Ok(Vec::new());
+        }
+        let avail_idx =
+            u16::from_le_bytes([memory[avail_addr + 2], memory[avail_addr + 3]]) as usize;
+
+        // Track last processed index per queue. Use a simple field for queue 1.
+        let last_avail = self.last_avail_idx_q1;
+        let mut current_avail = last_avail;
+        let mut completions = Vec::new();
+
+        while current_avail != avail_idx {
+            let ring_off = avail_addr + 4 + 2 * (current_avail % q_size);
+            if ring_off + 2 > memory.len() {
+                break;
+            }
+            let head_idx = u16::from_le_bytes([memory[ring_off], memory[ring_off + 1]]) as usize;
+
+            // Walk descriptor chain: collect request data (read-only) and
+            // response buffer locations (write-only).
+            let mut request_data = Vec::new();
+            let mut write_bufs: Vec<(usize, usize)> = Vec::new();
+            let mut idx = head_idx;
+            for _ in 0..q_size {
+                let d_off = desc_addr + idx * 16;
+                if d_off + 16 > memory.len() {
+                    break;
+                }
+                let addr =
+                    u64::from_le_bytes(memory[d_off..d_off + 8].try_into().unwrap()) as usize;
+                let len =
+                    u32::from_le_bytes(memory[d_off + 8..d_off + 12].try_into().unwrap()) as usize;
+                let flags = u16::from_le_bytes(memory[d_off + 12..d_off + 14].try_into().unwrap());
+                let next = u16::from_le_bytes(memory[d_off + 14..d_off + 16].try_into().unwrap());
+
+                if flags & crate::queue::flags::WRITE != 0 {
+                    write_bufs.push((addr, len));
+                } else if addr + len <= memory.len() {
+                    request_data.extend_from_slice(&memory[addr..addr + len]);
+                }
+
+                if flags & crate::queue::flags::NEXT == 0 {
+                    break;
+                }
+                idx = next as usize;
+            }
+
+            // Process the FUSE request.
+            let response = match self.process_request(&request_data) {
+                Ok(resp) => resp,
+                Err(e) => {
+                    tracing::warn!("VirtioFS FUSE request error: {e}");
+                    // Return EIO for the unique id from the request header.
+                    let unique = if request_data.len() >= 16 {
+                        u64::from_le_bytes(request_data[8..16].try_into().unwrap())
+                    } else {
+                        0
+                    };
+                    FuseResponse::error(unique, libc::EIO).into_data()
+                }
+            };
+
+            // Write response into the write-only descriptors.
+            let mut resp_offset = 0;
+            for &(buf_addr, buf_len) in &write_bufs {
+                let remaining = response.len() - resp_offset;
+                if remaining == 0 {
+                    break;
+                }
+                let to_write = remaining.min(buf_len);
+                if buf_addr + to_write <= memory.len() {
+                    memory[buf_addr..buf_addr + to_write]
+                        .copy_from_slice(&response[resp_offset..resp_offset + to_write]);
+                }
+                resp_offset += to_write;
+            }
+
+            // Update used ring.
+            let used_idx_off = used_addr + 2;
+            let used_idx = u16::from_le_bytes([memory[used_idx_off], memory[used_idx_off + 1]]);
+            let used_entry = used_addr + 4 + ((used_idx as usize) % q_size) * 8;
+            if used_entry + 8 <= memory.len() {
+                memory[used_entry..used_entry + 4]
+                    .copy_from_slice(&(head_idx as u32).to_le_bytes());
+                memory[used_entry + 4..used_entry + 8]
+                    .copy_from_slice(&(response.len() as u32).to_le_bytes());
+                std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+                let new_used = used_idx.wrapping_add(1);
+                memory[used_idx_off..used_idx_off + 2].copy_from_slice(&new_used.to_le_bytes());
+            }
+
+            // Update avail_event for EVENT_IDX notification.
+            let avail_event_off = used_addr + 4 + 8 * q_size;
+            if avail_event_off + 2 <= memory.len() {
+                let ae = ((current_avail + 1) as u16).to_le_bytes();
+                memory[avail_event_off] = ae[0];
+                memory[avail_event_off + 1] = ae[1];
+            }
+
+            completions.push((head_idx as u16, response.len() as u32));
+            current_avail += 1;
+        }
+
+        self.last_avail_idx_q1 = current_avail;
+        Ok(completions)
     }
 }
 
