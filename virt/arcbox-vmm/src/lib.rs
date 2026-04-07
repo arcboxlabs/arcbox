@@ -82,4 +82,4 @@ pub use snapshot::{
     SnapshotTargetType, VmRestoreData, VmSnapshotContext,
 };
 pub use vcpu::{DeviceManagerExitHandler, ExitHandler, VcpuManager};
-pub use vmm::{SharedDirConfig, Vmm, VmmConfig, VmmState};
+pub use vmm::{ResolvedBackend, SharedDirConfig, VmBackend, Vmm, VmmConfig, VmmState};

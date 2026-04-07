@@ -289,7 +289,7 @@ impl VmManager {
                 })
                 .collect(),
             bridge_nic_mac: Some(bridge_nic_mac_for_vm_id(&entry.info.id)),
-            use_custom_vmm: false,
+            backend: arcbox_vmm::VmBackend::default(),
         }
     }
 

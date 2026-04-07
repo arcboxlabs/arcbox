@@ -33,7 +33,8 @@ use super::*;
 const PAGE_SIZE: usize = 4096;
 
 /// Base address for VirtIO MMIO device region.
-const VIRTIO_MMIO_BASE: u64 = 0x0900_0000;
+/// Starts at 0x0A00_0000 to avoid conflict with PL011 UART at 0x0900_0000.
+const VIRTIO_MMIO_BASE: u64 = 0x0A00_0000;
 
 /// Size of each VirtIO MMIO device region.
 const VIRTIO_MMIO_SIZE: u64 = 0x200;
@@ -47,8 +48,12 @@ const VIRTIO_IRQ_BASE: u32 = 48;
 /// Guest RAM is mapped starting at IPA 0.
 const RAM_BASE_IPA: u64 = 0;
 
+/// Type alias for `GuestRam` used by the parent `Vmm` struct to hold the
+/// guest RAM allocation (HV backend).
+pub(super) type HvGuestRam = GuestRam;
+
 /// Holds a page-aligned host allocation that backs guest RAM.
-struct GuestRam {
+pub(super) struct GuestRam {
     ptr: *mut u8,
     layout: Layout,
 }
@@ -102,6 +107,109 @@ impl Drop for GuestRam {
     }
 }
 
+// ---------------------------------------------------------------------------
+// PL011 UART emulation
+// ---------------------------------------------------------------------------
+
+/// Minimal PL011 UART emulator for early boot console output.
+///
+/// Only implements enough to capture kernel boot messages. The FDT already
+/// has a PL011 node at 0x0900_0000 — this emulator handles the data path
+/// so early `earlycon` output reaches the host log.
+pub(super) struct Pl011 {
+    /// Accumulated output buffer (line buffered).
+    output: Vec<u8>,
+}
+
+/// PL011 MMIO base address (matches the FDT uart@9000000 node).
+const PL011_BASE: u64 = 0x0900_0000;
+/// PL011 MMIO region size.
+const PL011_SIZE: u64 = 0x1000;
+
+// PL011 register offsets.
+const PL011_DR: u64 = 0x000; // Data Register
+const PL011_FR: u64 = 0x018; // Flag Register
+#[allow(dead_code)]
+const PL011_IBRD: u64 = 0x024; // Integer Baud Rate
+#[allow(dead_code)]
+const PL011_FBRD: u64 = 0x028; // Fractional Baud Rate
+#[allow(dead_code)]
+const PL011_LCR_H: u64 = 0x02C; // Line Control
+#[allow(dead_code)]
+const PL011_CR: u64 = 0x030; // Control Register
+#[allow(dead_code)]
+const PL011_IMSC: u64 = 0x038; // Interrupt Mask
+
+impl Pl011 {
+    /// Creates a new PL011 UART emulator.
+    pub fn new() -> Self {
+        Self { output: Vec::new() }
+    }
+
+    /// Returns `true` if `addr` falls within the PL011 MMIO range.
+    pub fn contains(&self, addr: u64) -> bool {
+        (PL011_BASE..PL011_BASE + PL011_SIZE).contains(&addr)
+    }
+
+    /// Handles an MMIO read from the PL011 region.
+    pub fn read(&self, addr: u64, _size: usize) -> u64 {
+        let offset = addr - PL011_BASE;
+        match offset {
+            // Flag Register: TX FIFO never full, RX FIFO always empty.
+            PL011_FR => 0,
+            _ => 0,
+        }
+    }
+
+    /// Handles an MMIO write to the PL011 region.
+    pub fn write(&mut self, addr: u64, _size: usize, value: u64) {
+        let offset = addr - PL011_BASE;
+        if offset == PL011_DR {
+            let byte = (value & 0xFF) as u8;
+            self.output.push(byte);
+            // Emit to host log when we get a newline.
+            if byte == b'\n' {
+                if let Ok(line) = std::str::from_utf8(&self.output) {
+                    tracing::info!(target: "guest_serial", "{}", line.trim_end());
+                }
+                self.output.clear();
+            }
+        }
+        // Ignore writes to control registers — we only care about data.
+    }
+
+    /// Flush any remaining partial-line output.
+    pub fn flush(&mut self) {
+        if !self.output.is_empty() {
+            if let Ok(line) = std::str::from_utf8(&self.output) {
+                tracing::info!(target: "guest_serial", "{}", line.trim_end());
+            }
+            self.output.clear();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PSCI constants
+// ---------------------------------------------------------------------------
+
+/// PSCI VERSION (returns v1.1).
+const PSCI_VERSION: u64 = 0x8400_0000;
+/// PSCI CPU_ON (64-bit variant).
+const PSCI_CPU_ON_64: u64 = 0xC400_0003;
+/// PSCI CPU_OFF.
+const PSCI_CPU_OFF: u64 = 0x8400_0002;
+/// PSCI AFFINITY_INFO (64-bit variant).
+const PSCI_AFFINITY_INFO_64: u64 = 0xC400_0004;
+/// PSCI SYSTEM_OFF.
+const PSCI_SYSTEM_OFF: u64 = 0x8400_0008;
+/// PSCI SYSTEM_RESET.
+const PSCI_SYSTEM_RESET: u64 = 0x8400_0009;
+
+// ---------------------------------------------------------------------------
+// Device slot tracking
+// ---------------------------------------------------------------------------
+
 /// Device slot tracking for MMIO address and IRQ assignment.
 struct DeviceSlot {
     /// MMIO base address in guest IPA.
@@ -147,7 +255,6 @@ impl Vmm {
     /// It creates a VM via `arcbox-hv`, allocates guest RAM, sets up GIC,
     /// registers VirtIO devices, generates an FDT, and prepares vCPU state
     /// for boot.
-    #[allow(dead_code)] // Will be wired in Phase 4
     pub(super) fn initialize_darwin_hv(&mut self) -> Result<()> {
         tracing::info!("Initializing custom VMM via Hypervisor.framework");
 
@@ -310,14 +417,72 @@ impl Vmm {
         self.irq_chip = Some(irq_chip);
         self.event_loop = Some(event_loop);
 
-        // TODO(Phase 2b): Store HvVm, GuestRam, GIC, and device slots for
-        // the vCPU run loop. This requires adding fields to Vmm (Phase 4).
-        // For now, leak the VM to keep it alive — will be fixed when
-        // Vmm struct gets the darwin_hv fields.
-        std::mem::forget(vm);
-        std::mem::forget(guest_ram);
+        // Store HV-specific state in the Vmm struct for lifecycle management.
+        self.hv_vm = Some(vm);
+        self.hv_guest_ram = Some(Box::new(guest_ram));
+        #[cfg(feature = "gic")]
+        {
+            self.hv_gic = gic;
+        }
+        self.hv_fdt_addr = fdt_addr;
 
         tracing::info!("Custom Hypervisor.framework VMM initialized");
+        Ok(())
+    }
+
+    /// Starts the HV backend by spawning vCPU threads.
+    pub(super) fn start_darwin_hv(&mut self) -> Result<()> {
+        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        self.hv_running = Some(running.clone());
+
+        let device_manager = Arc::new(
+            self.device_manager
+                .take()
+                .ok_or_else(|| VmmError::invalid_state("no device manager"))?,
+        );
+
+        let kernel_entry = arm64::KERNEL_LOAD_ADDR;
+        let fdt_addr = self.hv_fdt_addr;
+        let pl011 = Arc::new(std::sync::Mutex::new(Pl011::new()));
+
+        // Spawn BSP (vCPU 0).
+        let t = std::thread::Builder::new()
+            .name("hv-vcpu-0".into())
+            .spawn(move || vcpu_run_loop(0, kernel_entry, fdt_addr, device_manager, running, pl011))
+            .map_err(|e| VmmError::Vcpu(format!("spawn vcpu-0: {e}")))?;
+        self.hv_vcpu_threads.push(t);
+
+        self.state = VmmState::Running;
+        tracing::info!("Custom VMM started with {} vCPU(s)", self.config.vcpu_count);
+        Ok(())
+    }
+
+    /// Stops the HV backend by signaling vCPU threads and cleaning up resources.
+    #[allow(clippy::unnecessary_wraps)] // Signature matches stop_darwin_vm() for dispatch.
+    pub(super) fn stop_darwin_hv(&mut self) -> Result<()> {
+        // Signal all vCPU threads to exit.
+        if let Some(running) = &self.hv_running {
+            running.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        // Join all vCPU threads (they will exit on next run() iteration).
+        for t in self.hv_vcpu_threads.drain(..) {
+            if let Err(e) = t.join() {
+                tracing::warn!("vCPU thread join failed: {e:?}");
+            }
+        }
+
+        // Cleanup in correct order: GIC -> VM -> RAM.
+        // The GIC is destroyed with the VM, but we drop our Arc reference first.
+        #[cfg(feature = "gic")]
+        {
+            self.hv_gic.take();
+        }
+        self.hv_vm.take();
+        self.hv_guest_ram.take();
+
+        self.state = VmmState::Stopped;
+        tracing::info!("Custom VMM stopped");
         Ok(())
     }
 }
@@ -328,7 +493,9 @@ impl Vmm {
 
 /// ARM64 register IDs re-exported from arcbox-hv.
 mod reg {
-    pub use arcbox_hv::reg::{HV_REG_CPSR as CPSR, HV_REG_PC as PC, HV_REG_X0 as X0};
+    pub use arcbox_hv::reg::{
+        HV_REG_CPSR as CPSR, HV_REG_PC as PC, HV_REG_X0 as X0, HV_REG_X1 as X1, HV_REG_X2 as X2,
+    };
 }
 
 /// CPSR value: EL1h with DAIF masked (all interrupts masked at boot).
@@ -347,13 +514,14 @@ const CPSR_EL1H: u64 = 0x3C5;
 /// * `fdt_addr` — Guest IPA of the flattened device tree.
 /// * `device_manager` — Shared device manager for MMIO dispatch.
 /// * `running` — Shared flag; the loop exits when this is set to `false`.
-#[allow(dead_code)] // Will be called from start_darwin_hv() in Phase 4
+/// * `pl011` — Shared PL011 UART emulator for early console output.
 fn vcpu_run_loop(
     vcpu_id: u32,
     kernel_entry: u64,
     fdt_addr: u64,
     device_manager: Arc<crate::device::DeviceManager>,
     running: Arc<std::sync::atomic::AtomicBool>,
+    pl011: Arc<std::sync::Mutex<Pl011>>,
 ) {
     use arcbox_hv::{ExceptionClass, HvVcpu, VcpuExit};
     use std::sync::atomic::Ordering;
@@ -409,46 +577,99 @@ fn vcpu_run_loop(
                 class: ExceptionClass::DataAbort(ref mmio),
                 ..
             } => {
-                if mmio.is_write {
-                    // Guest writing to MMIO: read the value from the register.
-                    let value = match vcpu.get_reg(u32::from(mmio.register)) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::error!(
-                                "vCPU {vcpu_id}: get_reg(X{}) failed: {e}",
-                                mmio.register
-                            );
-                            continue;
-                        }
+                // Check PL011 UART region first, then fall through to DeviceManager.
+                let handled_by_pl011 = {
+                    let uart_match = {
+                        let guard = pl011.lock().unwrap();
+                        guard.contains(mmio.address)
                     };
-                    if let Err(e) = device_manager.handle_mmio_write(
-                        mmio.address,
-                        mmio.access_size as usize,
-                        value,
-                    ) {
-                        tracing::warn!(
-                            "vCPU {vcpu_id}: MMIO write {:#x} failed: {e}",
-                            mmio.address
-                        );
+                    if uart_match {
+                        if mmio.is_write {
+                            let value = match vcpu.get_reg(u32::from(mmio.register)) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    tracing::error!(
+                                        "vCPU {vcpu_id}: get_reg(X{}) failed: {e}",
+                                        mmio.register
+                                    );
+                                    0
+                                }
+                            };
+                            pl011.lock().unwrap().write(
+                                mmio.address,
+                                mmio.access_size as usize,
+                                value,
+                            );
+                        } else {
+                            let value = pl011
+                                .lock()
+                                .unwrap()
+                                .read(mmio.address, mmio.access_size as usize);
+                            if let Err(e) = vcpu.set_reg(u32::from(mmio.register), value) {
+                                tracing::error!(
+                                    "vCPU {vcpu_id}: set_reg(X{}) failed: {e}",
+                                    mmio.register
+                                );
+                            }
+                        }
+                        true
+                    } else {
+                        false
                     }
-                } else {
-                    // Guest reading from MMIO: emulate and inject result.
-                    let value = match device_manager
-                        .handle_mmio_read(mmio.address, mmio.access_size as usize)
-                    {
-                        Ok(v) => v,
-                        Err(e) => {
+                };
+
+                if !handled_by_pl011 {
+                    // Dispatch to DeviceManager for VirtIO MMIO devices.
+                    if mmio.is_write {
+                        let value = match vcpu.get_reg(u32::from(mmio.register)) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::error!(
+                                    "vCPU {vcpu_id}: get_reg(X{}) failed: {e}",
+                                    mmio.register
+                                );
+                                // Advance PC even on register read failure.
+                                let pc = vcpu.get_reg(reg::PC).unwrap_or(0);
+                                let _ = vcpu.set_reg(reg::PC, pc + 4);
+                                continue;
+                            }
+                        };
+                        if let Err(e) = device_manager.handle_mmio_write(
+                            mmio.address,
+                            mmio.access_size as usize,
+                            value,
+                        ) {
                             tracing::warn!(
-                                "vCPU {vcpu_id}: MMIO read {:#x} failed: {e}",
+                                "vCPU {vcpu_id}: MMIO write {:#x} failed: {e}",
                                 mmio.address
                             );
-                            0 // Return 0 for unknown reads.
                         }
-                    };
-                    if let Err(e) = vcpu.set_reg(u32::from(mmio.register), value) {
-                        tracing::error!("vCPU {vcpu_id}: set_reg(X{}) failed: {e}", mmio.register);
+                    } else {
+                        let value = match device_manager
+                            .handle_mmio_read(mmio.address, mmio.access_size as usize)
+                        {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "vCPU {vcpu_id}: MMIO read {:#x} failed: {e}",
+                                    mmio.address
+                                );
+                                0 // Return 0 for unknown reads.
+                            }
+                        };
+                        if let Err(e) = vcpu.set_reg(u32::from(mmio.register), value) {
+                            tracing::error!(
+                                "vCPU {vcpu_id}: set_reg(X{}) failed: {e}",
+                                mmio.register
+                            );
+                        }
                     }
                 }
+
+                // Advance PC past the trapped instruction (ARM64 = fixed 4 bytes).
+                // Hypervisor.framework does NOT auto-advance PC on data aborts.
+                let pc = vcpu.get_reg(reg::PC).unwrap_or(0);
+                let _ = vcpu.set_reg(reg::PC, pc + 4);
             }
 
             VcpuExit::Exception {
@@ -466,26 +687,58 @@ fn vcpu_run_loop(
             } => {
                 tracing::debug!("vCPU {vcpu_id}: HVC #{imm}");
                 // PSCI calls (power state coordination) come through HVC.
-                // PSCI_SYSTEM_OFF = 0x8400_0008, PSCI_SYSTEM_RESET = 0x8400_0009
                 let func_id = match vcpu.get_reg(reg::X0) {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
                 match func_id {
-                    0x8400_0008 => {
+                    PSCI_SYSTEM_OFF => {
                         tracing::info!("vCPU {vcpu_id}: PSCI SYSTEM_OFF");
                         running.store(false, Ordering::SeqCst);
                         break;
                     }
-                    0x8400_0009 => {
+                    PSCI_SYSTEM_RESET => {
                         tracing::info!("vCPU {vcpu_id}: PSCI SYSTEM_RESET");
                         running.store(false, Ordering::SeqCst);
                         break;
+                    }
+                    PSCI_VERSION => {
+                        // Return PSCI v1.1.
+                        let _ = vcpu.set_reg(reg::X0, 0x0001_0001);
+                        // Advance PC past the HVC instruction.
+                        let pc = vcpu.get_reg(reg::PC).unwrap_or(0);
+                        let _ = vcpu.set_reg(reg::PC, pc + 4);
+                    }
+                    PSCI_CPU_ON_64 => {
+                        let target = vcpu.get_reg(reg::X1).unwrap_or(0);
+                        let entry = vcpu.get_reg(reg::X2).unwrap_or(0);
+                        tracing::info!(
+                            "vCPU {vcpu_id}: PSCI CPU_ON target={target:#x} entry={entry:#x}"
+                        );
+                        // TODO: Actually spawn secondary vCPU thread.
+                        let _ = vcpu.set_reg(reg::X0, 0); // PSCI_SUCCESS
+                        // Advance PC past the HVC instruction.
+                        let pc = vcpu.get_reg(reg::PC).unwrap_or(0);
+                        let _ = vcpu.set_reg(reg::PC, pc + 4);
+                    }
+                    PSCI_CPU_OFF => {
+                        tracing::info!("vCPU {vcpu_id}: PSCI CPU_OFF");
+                        break; // Exit this vCPU's run loop.
+                    }
+                    PSCI_AFFINITY_INFO_64 => {
+                        // Report target CPU as OFF.
+                        let _ = vcpu.set_reg(reg::X0, 2);
+                        // Advance PC past the HVC instruction.
+                        let pc = vcpu.get_reg(reg::PC).unwrap_or(0);
+                        let _ = vcpu.set_reg(reg::PC, pc + 4);
                     }
                     _ => {
                         tracing::debug!("vCPU {vcpu_id}: unhandled PSCI func {func_id:#x}");
                         // Return NOT_SUPPORTED (-1) in X0.
                         let _ = vcpu.set_reg(reg::X0, u64::MAX);
+                        // Advance PC past the HVC instruction.
+                        let pc = vcpu.get_reg(reg::PC).unwrap_or(0);
+                        let _ = vcpu.set_reg(reg::PC, pc + 4);
                     }
                 }
             }
@@ -497,6 +750,9 @@ fn vcpu_run_loop(
                 // SMC calls at EL1 are forwarded as HVC on Apple silicon.
                 // Return NOT_SUPPORTED.
                 let _ = vcpu.set_reg(reg::X0, u64::MAX);
+                // Advance PC past the SMC instruction.
+                let pc = vcpu.get_reg(reg::PC).unwrap_or(0);
+                let _ = vcpu.set_reg(reg::PC, pc + 4);
             }
 
             VcpuExit::VtimerActivated => {
@@ -520,6 +776,9 @@ fn vcpu_run_loop(
             }
         }
     }
+
+    // Flush any remaining UART output.
+    pl011.lock().unwrap().flush();
 
     tracing::info!("vCPU {vcpu_id}: exited");
 }
@@ -728,5 +987,50 @@ mod tests {
         slice[4095] = 0xCD;
         assert_eq!(slice[0], 0xAB);
         assert_eq!(slice[4095], 0xCD);
+    }
+
+    #[test]
+    fn test_pl011_contains() {
+        let uart = Pl011::new();
+        assert!(uart.contains(PL011_BASE));
+        assert!(uart.contains(PL011_BASE + PL011_DR));
+        assert!(uart.contains(PL011_BASE + PL011_SIZE - 1));
+        assert!(!uart.contains(PL011_BASE + PL011_SIZE));
+        assert!(!uart.contains(VIRTIO_MMIO_BASE));
+    }
+
+    #[test]
+    fn test_pl011_write_and_flush() {
+        let mut uart = Pl011::new();
+        // Write "Hi\n" byte by byte.
+        uart.write(PL011_BASE + PL011_DR, 1, b'H' as u64);
+        uart.write(PL011_BASE + PL011_DR, 1, b'i' as u64);
+        assert_eq!(uart.output.len(), 2);
+        // Newline flushes the buffer.
+        uart.write(PL011_BASE + PL011_DR, 1, b'\n' as u64);
+        assert!(uart.output.is_empty());
+    }
+
+    #[test]
+    fn test_pl011_read_flags() {
+        let uart = Pl011::new();
+        // Flag register should always return 0 (TX FIFO not full).
+        assert_eq!(uart.read(PL011_BASE + PL011_FR, 4), 0);
+    }
+
+    #[test]
+    fn test_pl011_flush_partial() {
+        let mut uart = Pl011::new();
+        uart.write(PL011_BASE + PL011_DR, 1, b'X' as u64);
+        assert_eq!(uart.output.len(), 1);
+        uart.flush();
+        assert!(uart.output.is_empty());
+    }
+
+    #[test]
+    fn test_virtio_mmio_base_does_not_overlap_pl011() {
+        // PL011 occupies 0x0900_0000..0x0900_1000.
+        // VirtIO MMIO starts at 0x0A00_0000.
+        assert!(VIRTIO_MMIO_BASE >= PL011_BASE + PL011_SIZE);
     }
 }

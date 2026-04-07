@@ -89,12 +89,12 @@ pub struct VmmConfig {
     pub block_devices: Vec<BlockDeviceConfig>,
     /// Optional MAC address for the bridge NAT NIC on macOS.
     pub bridge_nic_mac: Option<String>,
-    /// Use the custom Hypervisor.framework VMM instead of VZ framework.
+    /// VM backend selection (macOS only).
     ///
-    /// This enables custom VirtIO device emulation with TSO support for
-    /// higher network throughput. Experimental — requires macOS 15+ for
-    /// GIC and `com.apple.security.hypervisor` entitlement.
-    pub use_custom_vmm: bool,
+    /// Controls whether to use Hypervisor.framework (custom VMM with TSO
+    /// support) or Virtualization.framework (managed execution). Requires
+    /// macOS 15+ for HV backend. See [`VmBackend`] for details.
+    pub backend: VmBackend,
 }
 
 impl Default for VmmConfig {
@@ -115,7 +115,7 @@ impl Default for VmmConfig {
             balloon: true, // Enable balloon by default for memory optimization
             block_devices: Vec::new(),
             bridge_nic_mac: None,
-            use_custom_vmm: false,
+            backend: VmBackend::default(),
         }
     }
 }
@@ -136,6 +136,30 @@ impl VmmConfig {
 
         builder.build()
     }
+}
+
+/// VM backend selection for macOS.
+///
+/// Controls whether the VMM uses Apple's Virtualization.framework (managed
+/// execution) or Hypervisor.framework (custom VMM with manual execution).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VmBackend {
+    /// Auto-select: HV for native ARM64, VZ when Rosetta is needed.
+    #[default]
+    Auto,
+    /// Force Hypervisor.framework (custom VMM). Requires macOS 15+.
+    Hv,
+    /// Force Virtualization.framework (managed execution).
+    Vz,
+}
+
+/// Resolved backend after evaluating platform constraints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedBackend {
+    /// Hypervisor.framework (custom VMM with manual vCPU execution).
+    Hv,
+    /// Virtualization.framework (managed execution by Apple's runtime).
+    Vz,
 }
 
 /// VMM state.
@@ -230,6 +254,27 @@ pub struct Vmm {
     /// VZ-side fd for the vmnet bridge NIC attachment.
     #[cfg(all(target_os = "macos", feature = "vmnet"))]
     vmnet_bridge_fd: Option<OwnedFd>,
+    /// Hypervisor.framework VM handle (custom VMM path).
+    #[cfg(target_os = "macos")]
+    hv_vm: Option<arcbox_hv::HvVm>,
+    /// Guest RAM backing allocation (custom VMM path).
+    #[cfg(target_os = "macos")]
+    hv_guest_ram: Option<Box<darwin_hv::HvGuestRam>>,
+    /// GICv3 handle (custom VMM path, macOS 15+).
+    #[cfg(all(target_os = "macos", feature = "gic"))]
+    hv_gic: Option<std::sync::Arc<arcbox_hv::Gic>>,
+    /// Running flag for HV vCPU threads.
+    #[cfg(target_os = "macos")]
+    hv_running: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// vCPU thread join handles (HV backend).
+    #[cfg(target_os = "macos")]
+    hv_vcpu_threads: Vec<std::thread::JoinHandle<()>>,
+    /// FDT address in guest memory (HV backend).
+    #[cfg(target_os = "macos")]
+    hv_fdt_addr: u64,
+    /// Resolved backend choice for this VM instance.
+    #[cfg(target_os = "macos")]
+    resolved_backend: Option<ResolvedBackend>,
 }
 
 impl Vmm {
@@ -295,6 +340,20 @@ impl Vmm {
             vmnet_relay_cancel: None,
             #[cfg(all(target_os = "macos", feature = "vmnet"))]
             vmnet_bridge_fd: None,
+            #[cfg(target_os = "macos")]
+            hv_vm: None,
+            #[cfg(target_os = "macos")]
+            hv_guest_ram: None,
+            #[cfg(all(target_os = "macos", feature = "gic"))]
+            hv_gic: None,
+            #[cfg(target_os = "macos")]
+            hv_running: None,
+            #[cfg(target_os = "macos")]
+            hv_vcpu_threads: Vec::new(),
+            #[cfg(target_os = "macos")]
+            hv_fdt_addr: 0,
+            #[cfg(target_os = "macos")]
+            resolved_backend: None,
         })
     }
 
@@ -358,12 +417,17 @@ impl Vmm {
         // Platform-specific initialization
         #[cfg(target_os = "macos")]
         {
-            if self.config.use_custom_vmm {
-                tracing::info!("Using custom Hypervisor.framework VMM (experimental)");
-                self.initialize_darwin_hv()?;
-            } else {
-                self.initialize_darwin()?;
+            let resolved = resolve_backend(&self.config);
+            tracing::info!(
+                "VM backend resolved: {:?} (requested: {:?})",
+                resolved,
+                self.config.backend
+            );
+            match resolved {
+                ResolvedBackend::Hv => self.initialize_darwin_hv()?,
+                ResolvedBackend::Vz => self.initialize_darwin()?,
             }
+            self.resolved_backend = Some(resolved);
         }
 
         #[cfg(target_os = "linux")]
@@ -395,11 +459,14 @@ impl Vmm {
 
         tracing::info!("Starting VMM");
 
-        // Darwin: start the managed VM directly via Virtualization.framework.
+        // Darwin: dispatch to the resolved backend.
         // Linux: start vCPU threads for manual execution.
         #[cfg(target_os = "macos")]
         {
-            self.start_darwin_vm()?;
+            match self.resolved_backend {
+                Some(ResolvedBackend::Hv) => self.start_darwin_hv()?,
+                Some(ResolvedBackend::Vz) | None => self.start_darwin_vm()?,
+            }
         }
         #[cfg(target_os = "linux")]
         {
@@ -497,11 +564,14 @@ impl Vmm {
             event_loop.stop();
         }
 
-        // Darwin: stop the managed VM before canceling the network datapath.
+        // Darwin: stop the resolved backend before canceling the network datapath.
         // Linux: stop vCPU threads.
         #[cfg(target_os = "macos")]
         {
-            self.stop_darwin_vm()?;
+            match self.resolved_backend {
+                Some(ResolvedBackend::Hv) => self.stop_darwin_hv()?,
+                Some(ResolvedBackend::Vz) | None => self.stop_darwin_vm()?,
+            }
         }
         #[cfg(target_os = "linux")]
         {
@@ -906,6 +976,22 @@ impl Vmm {
                 );
             }
         }
+    }
+}
+
+/// Resolves the backend selection based on platform constraints.
+///
+/// When `Auto` is selected, Rosetta requires VZ (Hypervisor.framework cannot
+/// translate x86_64 instructions). Otherwise, default to VZ until the HV
+/// backend is fully validated.
+#[cfg(target_os = "macos")]
+fn resolve_backend(config: &VmmConfig) -> ResolvedBackend {
+    match config.backend {
+        VmBackend::Vz => ResolvedBackend::Vz,
+        VmBackend::Hv => ResolvedBackend::Hv,
+        // Auto: default to VZ until HV is fully validated.
+        // Rosetta explicitly requires VZ (HV cannot emulate x86_64).
+        VmBackend::Auto => ResolvedBackend::Vz,
     }
 }
 
