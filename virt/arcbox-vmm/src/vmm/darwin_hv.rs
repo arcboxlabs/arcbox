@@ -14,6 +14,7 @@
 //! - GICv3 is provided by Hypervisor.framework's hardware emulation
 //!   (macOS 15+); device interrupts are injected via `Gic::set_spi()`.
 
+#[cfg(test)]
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, mpsc};
@@ -26,7 +27,9 @@ use vm_memory::{
 };
 
 use crate::boot::arm64;
-use crate::device::{DeviceTreeEntry, DeviceType};
+#[cfg(test)]
+use crate::device::DeviceTreeEntry;
+use crate::device::DeviceType;
 use crate::error::{Result, VmmError};
 #[allow(unused_imports)] // Used by retained VZ-path / test helpers below.
 use crate::fdt::{FdtConfig, generate_fdt};
@@ -59,10 +62,11 @@ const PSCI_SUCCESS: u64 = 0;
 const PSCI_ALREADY_ON: u64 = (-4_i64) as u64;
 
 /// Request to power on a secondary vCPU via PSCI CPU_ON.
-#[allow(dead_code)] // Fields read by secondary vCPU threads / future diagnostics
+/// Fields are written by the BSP and read by the secondary vCPU thread.
 pub struct CpuOnRequest {
-    /// Target MPIDR (CPU affinity identifier).
-    pub target_cpu: u64,
+    /// Target MPIDR (CPU affinity identifier). Logged for diagnostics;
+    /// the actual target is determined by channel routing in start_darwin_hv.
+    pub _target_cpu: u64,
     /// Guest IPA where the secondary CPU begins executing.
     pub entry_point: u64,
     /// Value passed as X0 to the secondary CPU.
@@ -83,8 +87,7 @@ type CpuOnSenders = Arc<Mutex<Vec<Option<mpsc::Sender<CpuOnRequest>>>>>;
 type VcpuThreadHandles = Arc<Mutex<Vec<std::thread::Thread>>>;
 
 /// Page size on ARM64.
-/// Retained for the GuestRam allocator used by VZ path / tests.
-#[allow(dead_code)]
+#[cfg(test)]
 const PAGE_SIZE: usize = 4096;
 
 /// Base address for VirtIO MMIO device region.
@@ -93,14 +96,14 @@ const PAGE_SIZE: usize = 4096;
 const VIRTIO_MMIO_BASE: u64 = 0x0C00_0000;
 
 /// Size of each VirtIO MMIO device region.
+#[cfg(test)]
 const VIRTIO_MMIO_SIZE: u64 = 0x200;
 
 /// Maximum number of VirtIO MMIO devices.
 const VIRTIO_MMIO_MAX_DEVICES: u64 = 32;
 
 /// First SPI interrupt number for VirtIO devices (GIC SPI numbering).
-/// Retained for unit tests; the live path now uses IrqChip::allocate_irq().
-#[allow(dead_code)]
+#[cfg(test)]
 const VIRTIO_IRQ_BASE: u32 = 48;
 
 /// Guest RAM is mapped starting at IPA 0.
@@ -122,25 +125,20 @@ const GIC_REDIST_SIZE: u64 = 0x200_0000;
 pub(super) type HvGuestMem = GuestMemoryMmap;
 
 /// Type alias for `GuestRam` used by the parent `Vmm` struct to hold the
-/// guest RAM allocation (HV backend).
-/// Retained for tests and potential future use by the VZ path.
-#[allow(dead_code)]
-pub(super) type HvGuestRam = GuestRam;
-
 /// Holds a page-aligned host allocation that backs guest RAM.
-/// Retained for VZ path / tests; the HV path now uses GuestMemoryMmap.
-#[allow(dead_code)]
-pub(super) struct GuestRam {
+/// Superseded by GuestMemoryMmap in the live boot path; retained for tests.
+#[cfg(test)]
+struct GuestRam {
     ptr: *mut u8,
     layout: Layout,
 }
 
-// SAFETY: The allocation is owned exclusively and accessed via synchronized
-// vCPU threads + device manager behind Arc<Mutex>. No aliasing.
+#[cfg(test)]
 unsafe impl Send for GuestRam {}
+#[cfg(test)]
 unsafe impl Sync for GuestRam {}
 
-#[allow(dead_code)]
+#[cfg(test)]
 impl GuestRam {
     /// Allocates page-aligned zeroed memory for guest RAM.
     fn new(size: usize) -> Result<Self> {
@@ -171,13 +169,12 @@ impl GuestRam {
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.layout.size()) }
     }
 
-    /// Returns the size in bytes.
-    #[allow(dead_code)] // Used once vCPU run loop is wired (Phase 2b).
     fn size(&self) -> usize {
         self.layout.size()
     }
 }
 
+#[cfg(test)]
 impl Drop for GuestRam {
     fn drop(&mut self) {
         // SAFETY: ptr was allocated with this layout by alloc_zeroed.
@@ -263,9 +260,8 @@ impl Pl011 {
 // ---------------------------------------------------------------------------
 
 /// Device slot tracking for MMIO address and IRQ assignment.
-///
-/// Retained for unit tests; the live path uses DeviceManager registration.
-#[allow(dead_code)]
+/// Superseded by DeviceManager::register_virtio_device(); retained for tests.
+#[cfg(test)]
 struct DeviceSlot {
     /// MMIO base address in guest IPA.
     mmio_base: u64,
@@ -277,10 +273,7 @@ struct DeviceSlot {
     name: String,
 }
 
-/// Collect information needed to generate FDT entries for VirtIO devices.
-///
-/// Retained for unit tests; the live path uses `device_manager.device_tree_entries()`.
-#[allow(dead_code)]
+#[cfg(test)]
 fn build_device_tree_entries(slots: &[DeviceSlot]) -> Vec<DeviceTreeEntry> {
     slots
         .iter()
@@ -293,10 +286,7 @@ fn build_device_tree_entries(slots: &[DeviceSlot]) -> Vec<DeviceTreeEntry> {
         .collect()
 }
 
-/// Allocate the next MMIO device slot.
-///
-/// Retained for unit tests; the live path uses `memory_manager.allocate_mmio()`.
-#[allow(dead_code)]
+#[cfg(test)]
 fn allocate_device_slot(index: u64, name: impl Into<String>) -> Result<DeviceSlot> {
     if index >= VIRTIO_MMIO_MAX_DEVICES {
         return Err(VmmError::Device("too many VirtIO MMIO devices".to_string()));
@@ -1306,7 +1296,7 @@ fn handle_psci(
                 // target returns ALREADY_ON).
                 if let Some(sender) = senders_guard.get_mut(target_cpu).and_then(|s| s.take()) {
                     match sender.send(CpuOnRequest {
-                        target_cpu: target_mpidr,
+                        _target_cpu: target_mpidr,
                         entry_point,
                         context_id,
                     }) {
@@ -1349,10 +1339,11 @@ fn handle_psci(
 }
 
 // ---------------------------------------------------------------------------
-// FDT helpers for the custom VMM path (retained for tests / VZ path)
+// Legacy helpers — superseded by linux-loader + vm-fdt in initialize_darwin_hv().
+// Retained only for unit tests below.
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn build_hv_fdt_config(
     config: &VmmConfig,
     virtio_devices: &[DeviceTreeEntry],
@@ -1377,7 +1368,7 @@ fn build_hv_fdt_config(
     Ok(fdt_config)
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn choose_fdt_addr_hv(memory_size: u64, fdt_size: usize) -> Result<u64> {
     let fdt_size = fdt_size as u64;
     let gib: u64 = 1024 * 1024 * 1024;
@@ -1397,12 +1388,9 @@ fn choose_fdt_addr_hv(memory_size: u64, fdt_size: usize) -> Result<u64> {
     Ok(preferred)
 }
 
-// ---------------------------------------------------------------------------
-// Kernel / initrd loading (retained for tests / VZ path)
-// ---------------------------------------------------------------------------
-
 /// Loads the kernel Image into guest RAM at the ARM64 load address.
-#[allow(dead_code)]
+/// Superseded by linux-loader PE::load(); retained for tests.
+#[cfg(test)]
 fn load_kernel_into_ram(ram: &mut [u8], kernel_path: &std::path::Path) -> Result<()> {
     use std::io::Read;
 
@@ -1438,7 +1426,8 @@ fn load_kernel_into_ram(ram: &mut [u8], kernel_path: &std::path::Path) -> Result
 }
 
 /// Loads the initrd into guest RAM at the ARM64 load address.
-#[allow(dead_code)]
+/// Superseded by vm-memory write_slice(); retained for tests.
+#[cfg(test)]
 fn load_initrd_into_ram(ram: &mut [u8], initrd_path: &std::path::Path) -> Result<()> {
     use std::io::Read;
 
