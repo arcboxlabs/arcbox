@@ -413,6 +413,13 @@ impl DeviceManager {
         self.irq_callback = Some(callback);
     }
 
+    /// Triggers an IRQ through the configured callback (if set).
+    pub fn trigger_irq_callback(&self, irq: Irq, level: bool) {
+        if let Some(ref cb) = self.irq_callback {
+            let _ = cb(irq, level);
+        }
+    }
+
     /// Returns a clone of the vsock host fds map for external access.
     pub fn vsock_host_fds(
         &self,
@@ -933,6 +940,167 @@ impl DeviceManager {
                 }
             })
             .collect()
+    }
+
+    /// Polls host vsock fds for incoming data and injects into guest RX queue.
+    ///
+    /// Called from the vCPU run loop during WFI (guest idle). Returns true
+    /// if any data was injected (caller should trigger interrupt).
+    pub fn poll_vsock_rx(&self) -> bool {
+        let (Some(ram_base), ram_size) = (self.guest_ram_base, self.guest_ram_size) else {
+            return false;
+        };
+        let gpa_base = self.guest_ram_gpa as usize;
+
+        let fds = match self.vsock_host_fds.lock() {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        if fds.is_empty() {
+            return false;
+        }
+
+        // Find the vsock device's RX queue (queue 0) MMIO state.
+        let mut vsock_device_id = None;
+        for (id, dev) in &self.devices {
+            if dev.info.device_type == DeviceType::VirtioVsock {
+                vsock_device_id = Some(*id);
+                break;
+            }
+        }
+        let Some(dev_id) = vsock_device_id else {
+            return false;
+        };
+        let Some(device) = self.devices.get(&dev_id) else {
+            return false;
+        };
+        let Some(ref mmio_state) = device.mmio_state else {
+            return false;
+        };
+        let Ok(mmio) = mmio_state.read() else {
+            return false;
+        };
+
+        // RX queue is queue index 0 for vsock.
+        let qi = 0usize;
+        if qi >= 8 || !mmio.queue_ready[qi] || mmio.queue_num[qi] == 0 {
+            return false;
+        }
+
+        let desc_addr = mmio.queue_desc[qi] as usize;
+        let avail_addr = mmio.queue_driver[qi] as usize;
+        let used_addr = mmio.queue_device[qi] as usize;
+        let q_size = mmio.queue_num[qi] as usize;
+
+        // Build guest memory slice (same GPA-to-index trick as QUEUE_NOTIFY handler).
+        let guest_mem =
+            unsafe { std::slice::from_raw_parts_mut(ram_base.sub(gpa_base), gpa_base + ram_size) };
+
+        if avail_addr + 4 > guest_mem.len() {
+            return false;
+        }
+        let avail_idx =
+            u16::from_le_bytes([guest_mem[avail_addr + 2], guest_mem[avail_addr + 3]]) as usize;
+        let used_idx_off = used_addr + 2;
+        let mut used_idx =
+            u16::from_le_bytes([guest_mem[used_idx_off], guest_mem[used_idx_off + 1]]) as usize;
+
+        // Check: are there available RX descriptors? If avail == used, no space.
+        if avail_idx == used_idx {
+            return false;
+        }
+
+        let mut injected = false;
+
+        for (&port, &fd) in fds.iter() {
+            // Try non-blocking read from host fd.
+            let mut buf = [0u8; 4096];
+            let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
+            if n <= 0 {
+                continue; // No data or error.
+            }
+            let data = &buf[..n as usize];
+
+            // Build vsock header (44 bytes): host→guest, OP_RW.
+            let mut hdr_bytes = [0u8; 44];
+            // src_cid = HOST_CID (2)
+            hdr_bytes[0..8].copy_from_slice(&2u64.to_le_bytes());
+            // dst_cid = guest_cid (read from config — use 3 as default)
+            hdr_bytes[8..16].copy_from_slice(&3u64.to_le_bytes());
+            // src_port = port
+            hdr_bytes[16..20].copy_from_slice(&port.to_le_bytes());
+            // dst_port = 1024 (agent port, but guest sees it as src_port of its connection)
+            hdr_bytes[20..24].copy_from_slice(&port.to_le_bytes());
+            // len = payload length
+            hdr_bytes[24..28].copy_from_slice(&(data.len() as u32).to_le_bytes());
+            // type = VIRTIO_VSOCK_TYPE_STREAM (1)
+            hdr_bytes[28..30].copy_from_slice(&1u16.to_le_bytes());
+            // op = OP_RW (5)
+            hdr_bytes[30..32].copy_from_slice(&5u16.to_le_bytes());
+            // buf_alloc, fwd_cnt = 0 for now
+            let packet = [&hdr_bytes[..], data].concat();
+
+            // Find an available RX descriptor.
+            if used_idx >= avail_idx {
+                break; // No more space.
+            }
+            let ring_off = avail_addr + 4 + 2 * (used_idx % q_size);
+            if ring_off + 2 > guest_mem.len() {
+                break;
+            }
+            let head_idx =
+                u16::from_le_bytes([guest_mem[ring_off], guest_mem[ring_off + 1]]) as usize;
+
+            // Write packet into write-only descriptors.
+            let mut written = 0;
+            let mut idx = head_idx;
+            for _ in 0..q_size {
+                let d_off = desc_addr + idx * 16;
+                if d_off + 16 > guest_mem.len() {
+                    break;
+                }
+                let addr =
+                    u64::from_le_bytes(guest_mem[d_off..d_off + 8].try_into().unwrap()) as usize;
+                let len = u32::from_le_bytes(guest_mem[d_off + 8..d_off + 12].try_into().unwrap())
+                    as usize;
+                let flags =
+                    u16::from_le_bytes(guest_mem[d_off + 12..d_off + 14].try_into().unwrap());
+                let next =
+                    u16::from_le_bytes(guest_mem[d_off + 14..d_off + 16].try_into().unwrap());
+
+                // RX descriptors should be write-only (device writes to guest).
+                if flags & 2 != 0 && addr + len <= guest_mem.len() {
+                    let remaining = packet.len() - written;
+                    let to_write = remaining.min(len);
+                    guest_mem[addr..addr + to_write]
+                        .copy_from_slice(&packet[written..written + to_write]);
+                    written += to_write;
+                }
+
+                if flags & 1 == 0 || written >= packet.len() {
+                    break;
+                }
+                idx = next as usize;
+            }
+
+            // Update used ring.
+            let used_entry = used_addr + 4 + (used_idx % q_size) * 8;
+            if used_entry + 8 <= guest_mem.len() {
+                guest_mem[used_entry..used_entry + 4]
+                    .copy_from_slice(&(head_idx as u32).to_le_bytes());
+                guest_mem[used_entry + 4..used_entry + 8]
+                    .copy_from_slice(&(written as u32).to_le_bytes());
+                std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+                used_idx += 1;
+                guest_mem[used_idx_off..used_idx_off + 2]
+                    .copy_from_slice(&(used_idx as u16).to_le_bytes());
+            }
+
+            injected = true;
+            tracing::trace!("Vsock RX: injected {} bytes for port {}", written, port);
+        }
+
+        injected
     }
 }
 

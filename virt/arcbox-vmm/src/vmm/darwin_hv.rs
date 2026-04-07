@@ -1260,11 +1260,30 @@ fn vcpu_run_loop(
                 ..
             } => {
                 // Guest executed WFI — it is idle and waiting for an interrupt.
-                // Park the thread with a timeout instead of busy-spinning.
-                // The IRQ callback (GIC set_spi) calls unpark() on all vCPU
-                // threads, so we wake promptly when an interrupt fires.
-                // The 1ms timeout prevents missed-wakeup deadlocks while still
-                // saving significant CPU compared to yield_now().
+                // Before parking, poll vsock host fds for incoming data.
+                // If data arrives, inject into RX queue and trigger interrupt
+                // so the guest wakes up to process it.
+                if device_manager.poll_vsock_rx() {
+                    // Find vsock device IRQ and trigger it.
+                    for dev in device_manager.iter() {
+                        if dev.device_type == crate::device::DeviceType::VirtioVsock {
+                            if let Some(irq) = dev.irq {
+                                // Set interrupt status on MMIO state.
+                                if let Some(state) = device_manager.get_mmio_state(dev.id) {
+                                    if let Ok(mut s) = state.write() {
+                                        s.trigger_interrupt(1); // INT_VRING
+                                    }
+                                }
+                                // Fire GIC SPI via IRQ callback.
+                                device_manager.trigger_irq_callback(irq, true);
+                            }
+                            break;
+                        }
+                    }
+                    // Don't park — re-enter run loop immediately.
+                    continue;
+                }
+                // No vsock data — park with timeout.
                 std::thread::park_timeout(std::time::Duration::from_millis(1));
             }
 
