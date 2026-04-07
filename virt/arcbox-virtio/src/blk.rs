@@ -977,7 +977,19 @@ impl VirtioDevice for VirtioBlock {
             }
 
             // Process the descriptor chain using existing block I/O logic.
-            let (bytes, status) = self.process_descriptor_chain(&descriptors, memory)?;
+            tracing::debug!(
+                "virtio-blk: processing chain head={} descs={} first_addr={:#x}",
+                head_idx,
+                descriptors.len(),
+                descriptors.first().map_or(0, |d| d.addr),
+            );
+            let (bytes, status) = match self.process_descriptor_chain(&descriptors, memory) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("virtio-blk: process_descriptor_chain error: {e}");
+                    return Err(e);
+                }
+            };
 
             // Write the status byte into the last writable descriptor.
             if let Some(last_wr) = descriptors.iter().rev().find(|d| d.is_write_only()) {

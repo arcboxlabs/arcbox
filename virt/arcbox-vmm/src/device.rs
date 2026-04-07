@@ -250,6 +250,12 @@ impl VirtioMmioState {
                     self.driver_features =
                         (self.driver_features & 0x0000_0000_FFFF_FFFF) | (u64::from(value) << 32);
                 }
+                tracing::debug!(
+                    "MMIO: DRIVER_FEATURES sel={} val={:#x} => driver_features={:#x}",
+                    self.driver_features_sel,
+                    value,
+                    self.driver_features,
+                );
             }
             regs::DRIVER_FEATURES_SEL => self.driver_features_sel = value,
             regs::QUEUE_SEL => self.queue_sel = value,

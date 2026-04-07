@@ -40,15 +40,8 @@ fn main() {
 
     // --- Locate boot assets ---
     let kernel_path = find_kernel();
-    let initrd_path = find_initrd();
 
     println!("[assets] kernel: {}", kernel_path.display());
-    println!(
-        "[assets] initrd: {}",
-        initrd_path
-            .as_ref()
-            .map_or("none".to_string(), |p| p.display().to_string())
-    );
     println!();
 
     // --- Create a temporary directory for VirtioFS share ---
@@ -57,13 +50,18 @@ fn main() {
     // Write a dummy agent log so init script doesn't fail on missing file.
     std::fs::write(arcbox_share.join("agent.log"), "").ok();
 
-    // --- VM configuration ---
+    // --- Locate rootfs block device ---
+    let rootfs_path = find_rootfs();
+
+    // --- VM configuration (matches production VZ path) ---
     let config = arcbox_vmm::VmmConfig {
         vcpu_count: 2,
         memory_size: 2 * 1024 * 1024 * 1024, // 2 GB
         kernel_path,
-        kernel_cmdline: "console=hvc0 earlycon=pl011,0x0b000000 loglevel=7 panic=-1".to_string(),
-        initrd_path,
+        kernel_cmdline:
+            "console=hvc0 root=/dev/vda ro rootfstype=erofs earlycon=pl011,0x0b000000 loglevel=7 panic=-1"
+                .to_string(),
+        initrd_path: None, // No initramfs — boot from rootfs block device
         enable_rosetta: false,
         serial_console: true,
         virtio_console: true,
@@ -76,12 +74,16 @@ fn main() {
         vsock: true,
         guest_cid: Some(3),
         balloon: false,
-        block_devices: Vec::new(),
+        block_devices: vec![arcbox_vmm::BlockDeviceConfig {
+            path: rootfs_path.clone(),
+            read_only: true,
+        }],
         bridge_nic_mac: None,
         backend: arcbox_vmm::VmBackend::Hv, // Force HV backend
     };
 
     println!("[config] backend: HV (Hypervisor.framework)");
+    println!("[config] rootfs: {}", rootfs_path.display());
     println!("[config] vCPUs: {}", config.vcpu_count);
     println!("[config] memory: {} MB", config.memory_size / (1024 * 1024));
     println!("[config] cmdline: {}", config.kernel_cmdline);
@@ -172,11 +174,9 @@ fn main() {
 }
 
 fn find_kernel() -> PathBuf {
-    // Try multiple locations
     let candidates = [
         PathBuf::from("boot-assets/dev/kernel"),
-        PathBuf::from("tests/resources/Image-arm64"),
-        dirs(),
+        home_asset("kernel"),
     ];
     for p in &candidates {
         if p.exists() {
@@ -190,22 +190,26 @@ fn find_kernel() -> PathBuf {
     std::process::exit(1);
 }
 
-fn find_initrd() -> Option<PathBuf> {
+fn find_rootfs() -> PathBuf {
     let candidates = [
-        PathBuf::from("boot-assets/dev/initramfs.cpio.gz"),
-        PathBuf::from("tests/resources/initramfs-arm64"),
+        PathBuf::from("boot-assets/dev/rootfs.erofs"),
+        home_asset("rootfs.erofs"),
     ];
     for p in &candidates {
         if p.exists() {
-            return Some(p.clone());
+            return p.clone();
         }
     }
-    None
+    eprintln!("ERROR: No rootfs found. Tried:");
+    for p in &candidates {
+        eprintln!("  - {}", p.display());
+    }
+    std::process::exit(1);
 }
 
-fn dirs() -> PathBuf {
+fn home_asset(name: &str) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(format!("{home}/.arcbox/boot/0.5.1/kernel"))
+    PathBuf::from(format!("{home}/.arcbox/boot/0.5.1/{name}"))
 }
 
 fn ctrlc_handler(running: Arc<AtomicBool>) {
