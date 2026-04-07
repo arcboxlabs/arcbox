@@ -337,6 +337,12 @@ impl SandboxManager {
                 .map_err(|e| VmmError::Config(format!("CowManager init: {e}")))?,
         );
 
+        // Ensure the jailer chroot base directory exists.
+        if let Some(ref jc) = config.firecracker.jailer {
+            let base = jc.chroot_base_dir.as_deref().unwrap_or("/srv/jailer");
+            std::fs::create_dir_all(base).map_err(VmmError::Io)?;
+        }
+
         Ok(Self {
             instances: Arc::new(RwLock::new(HashMap::new())),
             network,
