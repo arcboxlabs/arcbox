@@ -994,7 +994,22 @@ impl Vmm {
             // The daemon's wait_for_agent retry loop handles the case where
             // the guest agent hasn't started listening yet.
             let guest_cid = self.config.guest_cid.unwrap_or(3) as u64;
-            dm.inject_vsock_connect(port, guest_cid);
+            if dm.inject_vsock_connect(port, guest_cid) {
+                // Trigger IRQ so guest processes the RX queue.
+                for dev in dm.iter() {
+                    if dev.device_type == crate::device::DeviceType::VirtioVsock {
+                        if let Some(irq) = dev.irq {
+                            if let Some(state) = dm.get_mmio_state(dev.id) {
+                                if let Ok(mut s) = state.write() {
+                                    s.trigger_interrupt(1);
+                                }
+                            }
+                            dm.trigger_irq_callback(irq, true);
+                        }
+                        break;
+                    }
+                }
+            }
         }
         // Forget OwnedFd so the fd stays open.
         std::mem::forget(internal_fd);
@@ -1145,6 +1160,7 @@ fn vcpu_run_loop(
                             }
                         }
                         device_manager.trigger_irq_callback(irq, true);
+                        tracing::info!("Vsock RX: triggered IRQ {irq} after poll_vsock_rx");
                     }
                     break;
                 }

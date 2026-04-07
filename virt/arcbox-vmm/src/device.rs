@@ -972,10 +972,13 @@ impl DeviceManager {
     /// during poll_vsock_rx.
     pub fn inject_vsock_connect(&self, port: u32, guest_cid: u64) -> bool {
         let mut hdr = [0u8; 44];
+        // src_port = ephemeral host port (must differ from dst_port).
+        // Use a high port number to avoid collision with well-known ports.
+        let src_port = 50000 + port;
         hdr[0..8].copy_from_slice(&2u64.to_le_bytes()); // src_cid = HOST (2)
         hdr[8..16].copy_from_slice(&guest_cid.to_le_bytes());
-        hdr[16..20].copy_from_slice(&port.to_le_bytes()); // src_port
-        hdr[20..24].copy_from_slice(&port.to_le_bytes()); // dst_port
+        hdr[16..20].copy_from_slice(&src_port.to_le_bytes()); // src_port (ephemeral)
+        hdr[20..24].copy_from_slice(&port.to_le_bytes()); // dst_port = agent port
         hdr[28..30].copy_from_slice(&1u16.to_le_bytes()); // type = STREAM
         hdr[30..32].copy_from_slice(&1u16.to_le_bytes()); // op = REQUEST
         hdr[36..40].copy_from_slice(&(64 * 1024u32).to_le_bytes()); // buf_alloc
@@ -1119,10 +1122,11 @@ impl DeviceManager {
         };
         let mut injected = false;
         for (port, guest_cid) in pending {
+            let src_port = 50000 + port;
             let mut hdr = [0u8; 44];
             hdr[0..8].copy_from_slice(&2u64.to_le_bytes());
             hdr[8..16].copy_from_slice(&guest_cid.to_le_bytes());
-            hdr[16..20].copy_from_slice(&port.to_le_bytes());
+            hdr[16..20].copy_from_slice(&src_port.to_le_bytes());
             hdr[20..24].copy_from_slice(&port.to_le_bytes());
             hdr[28..30].copy_from_slice(&1u16.to_le_bytes());
             hdr[30..32].copy_from_slice(&1u16.to_le_bytes()); // OP_REQUEST
