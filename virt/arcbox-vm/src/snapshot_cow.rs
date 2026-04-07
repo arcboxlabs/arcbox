@@ -235,18 +235,29 @@ impl CowManager {
         let dmsetup = self.dmsetup_bin.as_deref().unwrap_or("dmsetup");
 
         // 1. Remove dm device.
-        if let Err(e) = dmsetup_remove(dmsetup, &handle.dm_name).await {
-            warn!(dm = %handle.dm_name, error = %e, "failed to remove dm device");
+        let dm_removed = dmsetup_remove(dmsetup, &handle.dm_name).await.is_ok();
+        if !dm_removed {
+            warn!(dm = %handle.dm_name, "failed to remove dm device");
         }
 
         // 2. Detach COW loop device.
-        if let Err(e) = losetup_detach(BUSYBOX, &handle.cow_loop).await {
-            warn!(loop_dev = %handle.cow_loop, error = %e, "failed to detach cow loop");
+        let loop_detached = losetup_detach(BUSYBOX, &handle.cow_loop).await.is_ok();
+        if !loop_detached {
+            warn!(loop_dev = %handle.cow_loop, "failed to detach cow loop");
         }
 
-        // 3. Delete COW sparse file.
-        if let Err(e) = std::fs::remove_file(&handle.cow_file) {
-            warn!(file = %handle.cow_file.display(), error = %e, "failed to remove cow file");
+        // 3. Delete COW sparse file only after both dm and loop are released.
+        //    Unlinking while still referenced would delay space reclamation
+        //    until the last kernel reference drops.
+        if dm_removed && loop_detached {
+            if let Err(e) = std::fs::remove_file(&handle.cow_file) {
+                warn!(file = %handle.cow_file.display(), error = %e, "failed to remove cow file");
+            }
+        } else {
+            warn!(
+                file = %handle.cow_file.display(),
+                "skipping cow file removal — backing resources not fully released"
+            );
         }
 
         // 4. Release template refcount.

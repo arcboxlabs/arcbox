@@ -19,7 +19,7 @@ use fc_sdk::VmBuilder;
 use fc_sdk::types::{BootSource, Drive, NetworkInterface, Vsock};
 use nix::unistd::{Gid, Uid, chown};
 use tokio::sync::broadcast;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::boot_proto::KernelIpParam;
@@ -1429,7 +1429,7 @@ async fn do_boot(
                     (path, Some(handle))
                 }
                 Err(e) => {
-                    warn!(
+                    debug!(
                         sandbox_id = %id,
                         error = %e,
                         "dm-snapshot unavailable, using rootfs directly"
