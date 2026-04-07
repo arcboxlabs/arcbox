@@ -326,11 +326,9 @@ impl Vmm {
 // vCPU run loop
 // ---------------------------------------------------------------------------
 
-/// ARM64 register IDs (matching Hypervisor.framework constants).
+/// ARM64 register IDs re-exported from arcbox-hv.
 mod reg {
-    pub const X0: u32 = 0;
-    pub const PC: u32 = 31;
-    pub const CPSR: u32 = 34;
+    pub use arcbox_hv::reg::{HV_REG_CPSR as CPSR, HV_REG_PC as PC, HV_REG_X0 as X0};
 }
 
 /// CPSR value: EL1h with DAIF masked (all interrupts masked at boot).
