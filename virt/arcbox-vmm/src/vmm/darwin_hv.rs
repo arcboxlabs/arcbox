@@ -88,8 +88,9 @@ type VcpuThreadHandles = Arc<Mutex<Vec<std::thread::Thread>>>;
 const PAGE_SIZE: usize = 4096;
 
 /// Base address for VirtIO MMIO device region.
-/// Starts at 0x0A00_0000 to avoid conflict with PL011 UART at 0x0900_0000.
-const VIRTIO_MMIO_BASE: u64 = 0x0A00_0000;
+/// Starts at 0x0C00_0000 to avoid the GIC redistributor region
+/// (GICR ends at 0x080A_0000 + 32 MB = 0x0A0A_0000) and PL011 UART (0x0B00_0000).
+const VIRTIO_MMIO_BASE: u64 = 0x0C00_0000;
 
 /// Size of each VirtIO MMIO device region.
 const VIRTIO_MMIO_SIZE: u64 = 0x200;
@@ -104,7 +105,7 @@ const VIRTIO_IRQ_BASE: u32 = 48;
 
 /// Guest RAM is mapped starting at IPA 0.
 /// Guest RAM is mapped at 1 GiB to leave the lower address space for
-/// GIC (0x0800_0000), PL011 (0x0900_0000) and VirtIO MMIO (0x0A00_0000).
+/// GIC (0x0800_0000), PL011 (0x0B00_0000) and VirtIO MMIO (0x0C00_0000).
 const RAM_BASE_IPA: u64 = 0x4000_0000;
 
 /// GIC distributor base address.
@@ -587,22 +588,35 @@ impl Vmm {
         );
 
         // --- 9. Load initrd via vm-memory ---
+        // Pass the initrd as-is to guest memory. The Linux kernel has built-in
+        // decompression for gzip/xz/lz4/zstd compressed initramfs archives.
         let initrd_info: Option<(u64, u64)> = if let Some(ref initrd_path) = self.config.initrd_path
         {
             let initrd_data = std::fs::read(initrd_path)
                 .map_err(|e| VmmError::config(format!("cannot read initrd: {e}")))?;
 
-            // Place initrd after kernel end, page-aligned.
-            let initrd_addr = GuestAddress((kernel_result.kernel_end + 0xFFF) & !0xFFF);
+            // Place initrd well after the kernel to avoid corruption during
+            // early boot memory setup. Use a fixed high address within RAM.
+            // RAM: 0x40000000..0xC0000000, place initrd at 0x48000000 (128MB from RAM base).
+            let initrd_addr = GuestAddress(RAM_BASE_IPA + 0x0800_0000);
 
             guest_mem
                 .write_slice(&initrd_data, initrd_addr)
                 .map_err(|e| VmmError::Memory(format!("failed to write initrd: {e}")))?;
 
+            // Verify initrd was written correctly by reading back the first bytes.
+            let mut verify = [0u8; 4];
+            guest_mem
+                .read_slice(&mut verify, initrd_addr)
+                .map_err(|e| VmmError::Memory(format!("initrd verify read failed: {e}")))?;
             tracing::info!(
-                "Initrd loaded: addr={:#x}, size={} bytes",
+                "Initrd loaded: addr={:#x}, size={} bytes, magic={:02x}{:02x}{:02x}{:02x}",
                 initrd_addr.raw_value(),
-                initrd_data.len()
+                initrd_data.len(),
+                verify[0],
+                verify[1],
+                verify[2],
+                verify[3],
             );
 
             Some((initrd_addr.raw_value(), initrd_data.len() as u64))
