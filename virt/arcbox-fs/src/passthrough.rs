@@ -242,6 +242,7 @@ impl PassthroughFs {
             Some(NegativeCache::new(NegativeCacheConfig {
                 max_entries: config.negative_cache_max_entries,
                 timeout: config.negative_cache_timeout,
+                adaptive_ttl: Some(crate::cache::AdaptiveTtlConfig::default()),
             }))
         } else {
             None

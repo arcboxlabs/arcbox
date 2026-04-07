@@ -92,10 +92,10 @@ impl FsServer {
             .map_err(|e| FsError::not_found(format!("Failed to initialize filesystem: {}", e)))?;
         let fs = Arc::new(fs);
 
-        // Initialize dispatcher
+        // Initialize dispatcher using cache profile timeouts
         let dispatcher_config = DispatcherConfig {
-            entry_timeout: self.config.cache_timeout,
-            attr_timeout: self.config.cache_timeout,
+            entry_timeout: self.config.cache_profile.entry_timeout().as_secs(),
+            attr_timeout: self.config.cache_profile.attr_timeout().as_secs(),
         };
         let dispatcher = FuseDispatcher::new(Arc::clone(&fs), dispatcher_config);
 
@@ -190,6 +190,7 @@ impl FuseRequestHandler for FsServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CacheProfile;
     use tempfile::TempDir;
 
     #[test]
@@ -200,6 +201,7 @@ mod tests {
             source: temp.path().to_string_lossy().to_string(),
             num_threads: 1,
             writeback_cache: false,
+            cache_profile: CacheProfile::Dynamic,
             cache_timeout: 1,
             negative_cache_ttl: 1,
         };
@@ -233,6 +235,7 @@ mod tests {
             source: temp.path().to_string_lossy().to_string(),
             num_threads: 1,
             writeback_cache: false,
+            cache_profile: CacheProfile::Dynamic,
             cache_timeout: 1,
             negative_cache_ttl: 1,
         };
@@ -279,6 +282,7 @@ mod tests {
             source: "/tmp".to_string(),
             num_threads: 1,
             writeback_cache: false,
+            cache_profile: CacheProfile::Dynamic,
             cache_timeout: 1,
             negative_cache_ttl: 1,
         };
