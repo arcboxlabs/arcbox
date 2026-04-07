@@ -858,11 +858,20 @@ impl VirtioDevice for VirtioConsole {
             completions.push((head_idx, total_len));
         }
 
-        // Update used index.
+        // Update used index and avail_event.
         if !completions.is_empty() {
+            std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
             let new_used = (used_idx as u16).to_le_bytes();
             memory[used_addr + 2] = new_used[0];
             memory[used_addr + 3] = new_used[1];
+
+            // Set avail_event = current avail_idx so driver notifies on next request.
+            let avail_event_off = used_addr + 4 + 8 * queue_size;
+            if avail_event_off + 2 <= memory.len() {
+                let ae = (avail_idx as u16).to_le_bytes();
+                memory[avail_event_off] = ae[0];
+                memory[avail_event_off + 1] = ae[1];
+            }
         }
 
         Ok(completions)

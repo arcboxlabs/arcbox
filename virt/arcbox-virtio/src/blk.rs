@@ -1011,6 +1011,20 @@ impl VirtioDevice for VirtioBlock {
         }
 
         self.last_avail_idx = current_avail;
+
+        // When VIRTIO_F_EVENT_IDX is negotiated, update the avail_event field
+        // in the used ring. This tells the driver "notify me when avail idx
+        // reaches this value". Setting it to current_avail means "notify me
+        // immediately on the next request".
+        // avail_event is at used_ring + 4 + 8 * queue_size.
+        if !completions.is_empty() {
+            let avail_event_offset = used_addr + 4 + 8 * q_size;
+            if avail_event_offset + 2 <= memory.len() {
+                memory[avail_event_offset..avail_event_offset + 2]
+                    .copy_from_slice(&current_avail.to_le_bytes());
+            }
+        }
+
         Ok(completions)
     }
 }

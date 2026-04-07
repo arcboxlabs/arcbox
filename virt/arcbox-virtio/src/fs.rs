@@ -476,7 +476,7 @@ impl VirtioFs {
     pub fn new(config: FsConfig) -> Self {
         Self {
             config,
-            features: crate::queue::VIRTIO_F_EVENT_IDX | Self::FEATURE_VERSION_1,
+            features: Self::FEATURE_VERSION_1,
             acked_features: 0,
             session: FuseSession::new(),
             handler: None,
@@ -490,7 +490,7 @@ impl VirtioFs {
     pub fn with_handler(config: FsConfig, handler: Arc<dyn FuseRequestHandler>) -> Self {
         Self {
             config,
-            features: crate::queue::VIRTIO_F_EVENT_IDX | Self::FEATURE_VERSION_1,
+            features: Self::FEATURE_VERSION_1,
             acked_features: 0,
             session: FuseSession::new(),
             handler: Some(handler),
@@ -951,8 +951,11 @@ mod tests {
     #[test]
     fn test_fs_features() {
         let fs = VirtioFs::new(FsConfig::default());
-        // Default advertises EVENT_IDX
-        assert_ne!(fs.features() & crate::queue::VIRTIO_F_EVENT_IDX, 0);
+        // Default advertises VERSION_1
+        assert_ne!(
+            fs.features() & (1 << virtio_bindings::virtio_config::VIRTIO_F_VERSION_1),
+            0
+        );
     }
 
     #[test]

@@ -648,6 +648,13 @@ impl DeviceManager {
                     })?;
                     let mut data = vec![0u8; size];
                     dev.read_config(config_offset, &mut data);
+                    tracing::trace!(
+                        "Config read: device={} offset={:#x} size={} data={:?}",
+                        device_id.0,
+                        config_offset,
+                        size,
+                        &data[..size.min(8)]
+                    );
                     return Ok(match size {
                         1 => u64::from(data[0]),
                         2 => u64::from(u16::from_le_bytes([data[0], data[1]])),
