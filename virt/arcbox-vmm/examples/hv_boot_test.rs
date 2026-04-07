@@ -51,6 +51,12 @@ fn main() {
     );
     println!();
 
+    // --- Create a temporary directory for VirtioFS share ---
+    let arcbox_share = std::env::temp_dir().join("arcbox-hv-test-share");
+    std::fs::create_dir_all(&arcbox_share).ok();
+    // Write a dummy agent log so init script doesn't fail on missing file.
+    std::fs::write(arcbox_share.join("agent.log"), "").ok();
+
     // --- VM configuration ---
     let config = arcbox_vmm::VmmConfig {
         vcpu_count: 2,
@@ -60,11 +66,15 @@ fn main() {
         initrd_path,
         enable_rosetta: false,
         serial_console: true,
-        virtio_console: false, // Use PL011 for this test
-        shared_dirs: Vec::new(),
+        virtio_console: true,
+        shared_dirs: vec![arcbox_vmm::SharedDirConfig {
+            host_path: arcbox_share.clone(),
+            tag: "arcbox".to_string(),
+            read_only: false,
+        }],
         networking: false,
-        vsock: false,
-        guest_cid: None,
+        vsock: true,
+        guest_cid: Some(3),
         balloon: false,
         block_devices: Vec::new(),
         bridge_nic_mac: None,

@@ -462,6 +462,8 @@ pub struct VirtioFs {
 impl VirtioFs {
     /// Feature: Notification.
     pub const FEATURE_NOTIFICATION: u64 = 1 << 0;
+    /// VirtIO version 1 compliance (required for modern MMIO transport).
+    pub const FEATURE_VERSION_1: u64 = 1 << virtio_bindings::virtio_config::VIRTIO_F_VERSION_1;
 
     /// FUSE opcode for INIT.
     const FUSE_INIT: u32 = 26;
@@ -474,7 +476,7 @@ impl VirtioFs {
     pub fn new(config: FsConfig) -> Self {
         Self {
             config,
-            features: crate::queue::VIRTIO_F_EVENT_IDX,
+            features: crate::queue::VIRTIO_F_EVENT_IDX | Self::FEATURE_VERSION_1,
             acked_features: 0,
             session: FuseSession::new(),
             handler: None,
@@ -488,7 +490,7 @@ impl VirtioFs {
     pub fn with_handler(config: FsConfig, handler: Arc<dyn FuseRequestHandler>) -> Self {
         Self {
             config,
-            features: crate::queue::VIRTIO_F_EVENT_IDX,
+            features: crate::queue::VIRTIO_F_EVENT_IDX | Self::FEATURE_VERSION_1,
             acked_features: 0,
             session: FuseSession::new(),
             handler: Some(handler),

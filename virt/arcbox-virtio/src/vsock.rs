@@ -57,6 +57,8 @@ impl VirtioVsock {
     pub const FEATURE_STREAM: u64 = 1 << 0;
     /// Feature: Seqpacket socket.
     pub const FEATURE_SEQPACKET: u64 = 1 << 1;
+    /// VirtIO version 1 compliance (required for modern MMIO transport).
+    pub const FEATURE_VERSION_1: u64 = 1 << virtio_bindings::virtio_config::VIRTIO_F_VERSION_1;
 
     /// Well-known CID for host.
     pub const HOST_CID: u64 = 2;
@@ -68,7 +70,9 @@ impl VirtioVsock {
     pub fn new(config: VsockConfig) -> Self {
         Self {
             config,
-            features: Self::FEATURE_STREAM | crate::queue::VIRTIO_F_EVENT_IDX,
+            features: Self::FEATURE_STREAM
+                | Self::FEATURE_VERSION_1
+                | crate::queue::VIRTIO_F_EVENT_IDX,
             acked_features: 0,
             backend: None,
             connections: RwLock::new(HashMap::new()),
@@ -83,7 +87,9 @@ impl VirtioVsock {
     pub fn with_backend<B: VsockBackend + 'static>(config: VsockConfig, backend: B) -> Self {
         Self {
             config,
-            features: Self::FEATURE_STREAM | crate::queue::VIRTIO_F_EVENT_IDX,
+            features: Self::FEATURE_STREAM
+                | Self::FEATURE_VERSION_1
+                | crate::queue::VIRTIO_F_EVENT_IDX,
             acked_features: 0,
             backend: Some(Arc::new(Mutex::new(backend))),
             connections: RwLock::new(HashMap::new()),
