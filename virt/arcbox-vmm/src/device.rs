@@ -783,6 +783,13 @@ impl DeviceManager {
                 }
                 virtio_mmio::regs::QUEUE_NOTIFY => {
                     let queue_idx = value32 as u16;
+                    tracing::debug!(
+                        "Device {} queue {} QUEUE_NOTIFY (has_dev={}, has_mem={})",
+                        device_id.0,
+                        queue_idx,
+                        device.virtio_device.is_some(),
+                        self.guest_ram_base.is_some(),
+                    );
 
                     if let Some(virtio_dev) = &device.virtio_device {
                         // Build QueueConfig from current MMIO state for the
