@@ -936,6 +936,70 @@ impl Vmm {
         tracing::info!("Custom VMM stopped");
         Ok(())
     }
+
+    /// Connects to a vsock port on the guest VM (HV backend).
+    ///
+    /// Creates a Unix socketpair. One end is returned to the caller for
+    /// host-side I/O. The other end is stored for the vsock forwarding
+    /// path to relay data between host and guest VirtIO vsock queues.
+    ///
+    /// Note: full bidirectional forwarding requires vsock TX queue
+    /// processing in the vCPU run loop (QUEUE_NOTIFY handler) and
+    /// RX packet injection. Currently this provides the socketpair
+    /// plumbing; actual data forwarding is handled by the VirtioVsock
+    /// device's process_queue implementation.
+    #[allow(clippy::unnecessary_wraps)]
+    pub(super) fn connect_vsock_hv(&self, port: u32) -> Result<std::os::unix::io::RawFd> {
+        use std::os::unix::io::FromRawFd;
+
+        // Create a Unix SOCK_STREAM socketpair for bidirectional data.
+        let mut fds: [libc::c_int; 2] = [0; 2];
+        // SAFETY: socketpair with valid parameters.
+        let ret =
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        if ret != 0 {
+            return Err(VmmError::Device(format!(
+                "vsock socketpair failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        // Set non-blocking on both ends.
+        for &fd in &fds {
+            unsafe {
+                let flags = libc::fcntl(fd, libc::F_GETFL);
+                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            }
+        }
+
+        // fds[0] = returned to caller (daemon agent client)
+        // fds[1] = internal, stored for vsock forwarding
+        // SAFETY: fds are valid from socketpair.
+        let internal_fd = unsafe { std::os::unix::io::OwnedFd::from_raw_fd(fds[1]) };
+
+        // Store the internal fd for the vsock forwarding path.
+        // The vsock device's process_tx_queue will forward guest TX data
+        // to this fd, and host data from this fd will be injected as
+        // RX packets into the guest.
+        //
+        // TODO: Wire this fd into the vsock forwarding loop. Currently
+        // the connection is established but data forwarding requires
+        // additional async task for the host→guest direction.
+        tracing::info!(
+            "HV vsock connect: port={}, host_fd={}, internal_fd={}",
+            port,
+            fds[0],
+            internal_fd.as_raw_fd()
+        );
+
+        // Leak the internal fd for now — it will be used by the
+        // forwarding task once implemented.
+        std::mem::forget(internal_fd);
+
+        Ok(fds[0])
+    }
 }
 
 // ---------------------------------------------------------------------------

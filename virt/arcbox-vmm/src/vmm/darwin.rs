@@ -583,12 +583,16 @@ impl Vmm {
             )));
         }
 
-        let vm = self
-            .darwin_vm
-            .as_ref()
-            .ok_or_else(|| VmmError::invalid_state("no DarwinVm".to_string()))?;
-
-        vm.connect_vsock(port).map_err(VmmError::Hypervisor)
+        match self.resolved_backend {
+            Some(ResolvedBackend::Hv) => self.connect_vsock_hv(port),
+            _ => {
+                let vm = self
+                    .darwin_vm
+                    .as_ref()
+                    .ok_or_else(|| VmmError::invalid_state("no DarwinVm".to_string()))?;
+                vm.connect_vsock(port).map_err(VmmError::Hypervisor)
+            }
+        }
     }
 
     /// Reads console output (hvc0) from the VM.
