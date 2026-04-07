@@ -95,7 +95,9 @@ const VIRTIO_MMIO_MAX_DEVICES: u64 = 32;
 const VIRTIO_IRQ_BASE: u32 = 48;
 
 /// Guest RAM is mapped starting at IPA 0.
-const RAM_BASE_IPA: u64 = 0;
+/// Guest RAM is mapped at 1 GiB to leave the lower address space for
+/// GIC (0x0800_0000), PL011 (0x0900_0000) and VirtIO MMIO (0x0A00_0000).
+const RAM_BASE_IPA: u64 = 0x4000_0000;
 
 /// Type alias for `GuestRam` used by the parent `Vmm` struct to hold the
 /// guest RAM allocation (HV backend).
@@ -332,12 +334,17 @@ impl Vmm {
         // --- 4. Initialize GIC (macOS 15+) ---
         #[cfg(feature = "gic")]
         let gic = {
-            let g = arcbox_hv::Gic::new()
+            let gic_config = arcbox_hv::GicConfig {
+                distributor_base: 0x0800_0000,
+                redistributor_base: 0x080A_0000,
+            };
+            let g = arcbox_hv::Gic::new(gic_config)
                 .map_err(|e| VmmError::Device(format!("GIC initialization failed: {e}")))?;
-            let dist_base = g
-                .get_distributor_base()
-                .map_err(|e| VmmError::Device(format!("GIC distributor base: {e}")))?;
-            tracing::info!("GICv3 initialized: distributor @ {:#x}", dist_base);
+            tracing::info!(
+                "GICv3 initialized: GICD @ {:#x}, GICR @ {:#x}",
+                g.distributor_base(),
+                g.redistributor_base(),
+            );
             Some(Arc::new(g))
         };
         #[cfg(not(feature = "gic"))]
@@ -556,8 +563,9 @@ impl Vmm {
         {
             self.hv_gic = gic;
         }
-        self.hv_kernel_entry = Some(arm64::KERNEL_LOAD_ADDR);
-        self.hv_fdt_addr = Some(fdt_addr);
+        self.hv_kernel_entry = Some(RAM_BASE_IPA + arm64::KERNEL_LOAD_ADDR);
+        // fdt_addr is a RAM-internal offset; convert to GPA for vCPU register.
+        self.hv_fdt_addr = Some(RAM_BASE_IPA + fdt_addr);
         self.hv_vcpu_thread_handles = Some(vcpu_thread_handles);
 
         tracing::info!("Custom Hypervisor.framework VMM initialized");
@@ -1089,7 +1097,7 @@ fn build_hv_fdt_config(
         let size = std::fs::metadata(initrd)
             .map_err(|e| VmmError::config(format!("cannot stat initrd: {e}")))?
             .len();
-        fdt_config.initrd_addr = Some(arm64::INITRD_LOAD_ADDR);
+        fdt_config.initrd_addr = Some(RAM_BASE_IPA + arm64::INITRD_LOAD_ADDR);
         fdt_config.initrd_size = Some(size);
     }
 
