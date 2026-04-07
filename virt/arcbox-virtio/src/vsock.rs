@@ -50,6 +50,14 @@ pub struct VirtioVsock {
     tx_queue: Option<VirtQueue>,
     /// Queue 2: Event (control events).
     event_queue: Option<VirtQueue>,
+    /// Host-side connection fds keyed by (src_port, dst_port).
+    /// Used by the guest-memory process_queue path to forward data
+    /// between host sockets and guest vsock queues.
+    host_connections: HashMap<u32, std::os::unix::io::RawFd>,
+    /// Last processed avail index for TX queue (guest-memory path).
+    last_avail_idx_tx: usize,
+    /// Last processed avail index for RX queue (guest-memory path).
+    last_avail_idx_rx: usize,
 }
 
 impl VirtioVsock {
@@ -79,6 +87,9 @@ impl VirtioVsock {
             rx_queue: None,
             tx_queue: None,
             event_queue: None,
+            host_connections: HashMap::new(),
+            last_avail_idx_tx: 0,
+            last_avail_idx_rx: 0,
         }
     }
 
@@ -96,6 +107,9 @@ impl VirtioVsock {
             rx_queue: None,
             tx_queue: None,
             event_queue: None,
+            host_connections: HashMap::new(),
+            last_avail_idx_tx: 0,
+            last_avail_idx_rx: 0,
         }
     }
 
@@ -224,6 +238,73 @@ impl VirtioVsock {
     /// # Errors
     ///
     /// Returns an error if the TX queue is not ready or packet processing fails.
+    /// Handles a TX packet from the guest, forwarding data to host fds.
+    fn handle_tx_packet_with_fds(
+        &self,
+        hdr: &VsockHeader,
+        payload: &[u8],
+        host_fds: Option<&HashMap<u32, std::os::unix::io::RawFd>>,
+    ) {
+        // Copy packed fields to locals to avoid unaligned references.
+        let src_cid = { hdr.src_cid };
+        let src_port = { hdr.src_port };
+        let dst_cid = { hdr.dst_cid };
+        let dst_port = { hdr.dst_port };
+
+        match hdr.operation() {
+            Some(VsockOp::Request) => {
+                tracing::debug!(
+                    "Vsock TX: OP_REQUEST src={}:{} dst={}:{}",
+                    src_cid,
+                    src_port,
+                    dst_cid,
+                    dst_port,
+                );
+            }
+            Some(VsockOp::Rw) => {
+                if let Some(fds) = host_fds {
+                    if let Some(&fd) = fds.get(&dst_port) {
+                        if !payload.is_empty() {
+                            // SAFETY: fd is a valid connected socket.
+                            let written = unsafe {
+                                libc::write(
+                                    fd,
+                                    payload.as_ptr().cast::<libc::c_void>(),
+                                    payload.len(),
+                                )
+                            };
+                            if written > 0 {
+                                tracing::trace!(
+                                    "Vsock TX: OP_RW port {} -> fd {fd}, {} bytes",
+                                    dst_port,
+                                    written,
+                                );
+                            } else if written < 0 {
+                                tracing::warn!(
+                                    "Vsock: write to fd {fd} failed: {}",
+                                    std::io::Error::last_os_error()
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            Some(VsockOp::Shutdown | VsockOp::Rst) => {
+                tracing::debug!("Vsock TX: connection closed for port {dst_port}");
+            }
+            Some(VsockOp::CreditUpdate | VsockOp::CreditRequest) => {}
+            _ => {}
+        }
+    }
+
+    /// Registers a host-side fd for a guest vsock port.
+    /// When the guest sends data to this port, it will be written to the fd.
+    /// When the fd has data, it will be injected into the guest RX queue.
+    pub fn add_host_connection(&mut self, guest_port: u32, fd: std::os::unix::io::RawFd) {
+        tracing::info!("Vsock: host connection for guest port {guest_port} -> fd {fd}");
+        self.host_connections.insert(guest_port, fd);
+    }
+
     pub fn process_tx_queue(&mut self, memory: &mut [u8]) -> Result<Vec<(u16, u32)>> {
         // Phase 1: Collect raw descriptor data from the TX queue.
         let mut raw_packets: Vec<(u16, Vec<u8>)> = Vec::new();
@@ -553,6 +634,110 @@ impl VirtioDevice for VirtioVsock {
         self.rx_queue = None;
         self.tx_queue = None;
         self.event_queue = None;
+        self.last_avail_idx_tx = 0;
+        self.last_avail_idx_rx = 0;
+    }
+
+    fn process_queue(
+        &mut self,
+        queue_idx: u16,
+        memory: &mut [u8],
+        queue_config: &crate::QueueConfig,
+    ) -> Result<Vec<(u16, u32)>> {
+        // Queue 0 = RX (host→guest), Queue 1 = TX (guest→host), Queue 2 = Event.
+        // We handle TX here: extract vsock packets, forward data to host fds.
+        // We also try to inject pending RX data from host fds.
+        if queue_idx != 1 || !queue_config.ready || queue_config.size == 0 {
+            return Ok(Vec::new());
+        }
+
+        let desc_addr = queue_config.desc_addr as usize;
+        let avail_addr = queue_config.avail_addr as usize;
+        let used_addr = queue_config.used_addr as usize;
+        let q_size = queue_config.size as usize;
+
+        if avail_addr + 4 > memory.len() {
+            return Ok(Vec::new());
+        }
+        let avail_idx =
+            u16::from_le_bytes([memory[avail_addr + 2], memory[avail_addr + 3]]) as usize;
+
+        let mut current_avail = self.last_avail_idx_tx;
+        let mut completions = Vec::new();
+
+        while current_avail != avail_idx {
+            let ring_off = avail_addr + 4 + 2 * (current_avail % q_size);
+            if ring_off + 2 > memory.len() {
+                break;
+            }
+            let head_idx = u16::from_le_bytes([memory[ring_off], memory[ring_off + 1]]) as usize;
+
+            // Walk descriptor chain to extract vsock packet.
+            let mut packet_data = Vec::new();
+            let mut idx = head_idx;
+            for _ in 0..q_size {
+                let d_off = desc_addr + idx * 16;
+                if d_off + 16 > memory.len() {
+                    break;
+                }
+                let addr =
+                    u64::from_le_bytes(memory[d_off..d_off + 8].try_into().unwrap()) as usize;
+                let len =
+                    u32::from_le_bytes(memory[d_off + 8..d_off + 12].try_into().unwrap()) as usize;
+                let flags = u16::from_le_bytes(memory[d_off + 12..d_off + 14].try_into().unwrap());
+                let next = u16::from_le_bytes(memory[d_off + 14..d_off + 16].try_into().unwrap());
+
+                // TX descriptors are read-only (guest→host data).
+                if flags & crate::queue::flags::WRITE == 0 && addr + len <= memory.len() {
+                    packet_data.extend_from_slice(&memory[addr..addr + len]);
+                }
+
+                if flags & crate::queue::flags::NEXT == 0 {
+                    break;
+                }
+                idx = next as usize;
+            }
+
+            // Parse vsock header (44 bytes) and forward via host fds.
+            if packet_data.len() >= VsockHeader::SIZE {
+                if let Some(hdr) = VsockHeader::from_bytes(&packet_data[..VsockHeader::SIZE]) {
+                    let payload = &packet_data[VsockHeader::SIZE..];
+                    let host_fds = queue_config
+                        .vsock_host_fds
+                        .as_ref()
+                        .and_then(|m| m.lock().ok());
+                    self.handle_tx_packet_with_fds(&hdr, payload, host_fds.as_deref());
+                }
+            }
+
+            // Update used ring.
+            let used_idx_off = used_addr + 2;
+            let used_idx = u16::from_le_bytes([memory[used_idx_off], memory[used_idx_off + 1]]);
+            let used_entry = used_addr + 4 + ((used_idx as usize) % q_size) * 8;
+            if used_entry + 8 <= memory.len() {
+                memory[used_entry..used_entry + 4]
+                    .copy_from_slice(&(head_idx as u32).to_le_bytes());
+                memory[used_entry + 4..used_entry + 8]
+                    .copy_from_slice(&(packet_data.len() as u32).to_le_bytes());
+                std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+                let new_used = used_idx.wrapping_add(1);
+                memory[used_idx_off..used_idx_off + 2].copy_from_slice(&new_used.to_le_bytes());
+            }
+
+            // Update avail_event.
+            let avail_event_off = used_addr + 4 + 8 * q_size;
+            if avail_event_off + 2 <= memory.len() {
+                let ae = ((current_avail + 1) as u16).to_le_bytes();
+                memory[avail_event_off] = ae[0];
+                memory[avail_event_off + 1] = ae[1];
+            }
+
+            completions.push((head_idx as u16, packet_data.len() as u32));
+            current_avail += 1;
+        }
+
+        self.last_avail_idx_tx = current_avail;
+        Ok(completions)
     }
 }
 

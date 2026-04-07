@@ -979,24 +979,24 @@ impl Vmm {
         // SAFETY: fds are valid from socketpair.
         let internal_fd = unsafe { std::os::unix::io::OwnedFd::from_raw_fd(fds[1]) };
 
-        // Store the internal fd for the vsock forwarding path.
-        // The vsock device's process_tx_queue will forward guest TX data
-        // to this fd, and host data from this fd will be injected as
-        // RX packets into the guest.
-        //
-        // TODO: Wire this fd into the vsock forwarding loop. Currently
-        // the connection is established but data forwarding requires
-        // additional async task for the host→guest direction.
+        let internal_raw_fd = internal_fd.as_raw_fd();
+
+        // Register the fd in the shared vsock host fds map so
+        // VirtioVsock's process_queue can forward data.
+        if let Some(ref device_manager) = self.device_manager {
+            if let Ok(mut fds_map) = device_manager.vsock_host_fds().lock() {
+                fds_map.insert(port, internal_raw_fd);
+            }
+        }
+        // Forget OwnedFd so the fd stays open.
+        std::mem::forget(internal_fd);
+
         tracing::info!(
             "HV vsock connect: port={}, host_fd={}, internal_fd={}",
             port,
             fds[0],
-            internal_fd.as_raw_fd()
+            internal_raw_fd,
         );
-
-        // Leak the internal fd for now — it will be used by the
-        // forwarding task once implemented.
-        std::mem::forget(internal_fd);
 
         Ok(fds[0])
     }

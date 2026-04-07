@@ -370,6 +370,9 @@ pub struct DeviceManager {
     guest_ram_gpa: u64,
     /// IRQ trigger callback for injecting interrupts into the guest.
     irq_callback: Option<DeviceIrqCallback>,
+    /// Vsock host connection fds, keyed by guest port.
+    /// Set by connect_vsock_hv, read by vsock process_queue.
+    vsock_host_fds: std::sync::Arc<std::sync::Mutex<HashMap<u32, std::os::unix::io::RawFd>>>,
 }
 
 // SAFETY: guest_ram_base points to memory that is valid for the lifetime of the
@@ -389,6 +392,7 @@ impl DeviceManager {
             guest_ram_size: 0,
             guest_ram_gpa: 0,
             irq_callback: None,
+            vsock_host_fds: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -407,6 +411,13 @@ impl DeviceManager {
     /// Sets the callback used to inject interrupts into the guest.
     pub fn set_irq_callback(&mut self, callback: DeviceIrqCallback) {
         self.irq_callback = Some(callback);
+    }
+
+    /// Returns a clone of the vsock host fds map for external access.
+    pub fn vsock_host_fds(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<HashMap<u32, std::os::unix::io::RawFd>>> {
+        self.vsock_host_fds.clone()
     }
 
     /// Registers a new device.
@@ -812,6 +823,7 @@ impl DeviceManager {
                                     size: mmio_state.queue_num[qi],
                                     ready: mmio_state.queue_ready[qi],
                                     gpa_base: self.guest_ram_gpa,
+                                    vsock_host_fds: Some(self.vsock_host_fds.clone()),
                                 }
                             } else {
                                 QueueConfig::default()

@@ -183,7 +183,7 @@ pub trait VirtioDevice: Send + Sync {
 /// All addresses are guest physical addresses (GPAs). The `memory` slice
 /// passed to [`VirtioDevice::process_queue`] starts at `gpa_base`, so
 /// devices must subtract `gpa_base` to convert a GPA to a slice index.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct QueueConfig {
     /// Guest physical address of the descriptor table.
     pub desc_addr: u64,
@@ -198,6 +198,11 @@ pub struct QueueConfig {
     /// GPA of the start of the guest memory slice. Devices must subtract
     /// this from descriptor addresses to get slice offsets.
     pub gpa_base: u64,
+    /// Vsock host connection fds (port → fd). Shared with DeviceManager.
+    /// Only used by VirtioVsock; None for other devices.
+    pub vsock_host_fds: Option<
+        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u32, std::os::unix::io::RawFd>>>,
+    >,
 }
 
 #[cfg(test)]
