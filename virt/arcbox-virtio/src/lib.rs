@@ -203,6 +203,9 @@ pub struct QueueConfig {
     pub vsock_host_fds: Option<
         std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u32, std::os::unix::io::RawFd>>>,
     >,
+    /// Vsock ports where connections are established.
+    pub vsock_connected_ports:
+        Option<std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u32>>>>,
 }
 
 #[cfg(test)]

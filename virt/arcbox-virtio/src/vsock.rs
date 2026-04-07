@@ -244,6 +244,7 @@ impl VirtioVsock {
         hdr: &VsockHeader,
         payload: &[u8],
         host_fds: Option<&HashMap<u32, std::os::unix::io::RawFd>>,
+        connected_ports: Option<&std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u32>>>>,
     ) {
         // Copy packed fields to locals to avoid unaligned references.
         let src_cid = { hdr.src_cid };
@@ -260,6 +261,16 @@ impl VirtioVsock {
                     dst_cid,
                     dst_port,
                 );
+            }
+            Some(VsockOp::Response) => {
+                tracing::info!(
+                    "Vsock TX: OP_RESPONSE — connection established for port {src_port}"
+                );
+                if let Some(cp) = connected_ports {
+                    if let Ok(mut set) = cp.lock() {
+                        set.insert(src_port);
+                    }
+                }
             }
             Some(VsockOp::Rw) => {
                 if let Some(fds) = host_fds {
@@ -706,7 +717,12 @@ impl VirtioDevice for VirtioVsock {
                         .vsock_host_fds
                         .as_ref()
                         .and_then(|m| m.lock().ok());
-                    self.handle_tx_packet_with_fds(&hdr, payload, host_fds.as_deref());
+                    self.handle_tx_packet_with_fds(
+                        &hdr,
+                        payload,
+                        host_fds.as_deref(),
+                        queue_config.vsock_connected_ports.as_ref(),
+                    );
                 }
             }
 

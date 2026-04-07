@@ -375,6 +375,8 @@ pub struct DeviceManager {
     vsock_host_fds: std::sync::Arc<std::sync::Mutex<HashMap<u32, std::os::unix::io::RawFd>>>,
     /// Pending vsock connect requests (port, guest_cid) to inject when device is ready.
     pending_vsock_connects: std::sync::Arc<std::sync::Mutex<Vec<(u32, u64)>>>,
+    /// Vsock ports where OP_RESPONSE has been received (connection established).
+    vsock_connected_ports: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u32>>>,
 }
 
 // SAFETY: guest_ram_base points to memory that is valid for the lifetime of the
@@ -396,6 +398,9 @@ impl DeviceManager {
             irq_callback: None,
             vsock_host_fds: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             pending_vsock_connects: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            vsock_connected_ports: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
         }
     }
 
@@ -414,6 +419,20 @@ impl DeviceManager {
     /// Sets the callback used to inject interrupts into the guest.
     pub fn set_irq_callback(&mut self, callback: DeviceIrqCallback) {
         self.irq_callback = Some(callback);
+    }
+
+    /// Returns the set of vsock ports where connections are established.
+    pub fn vsock_connected_ports(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u32>>> {
+        self.vsock_connected_ports.clone()
+    }
+
+    /// Marks a vsock port as connected (OP_RESPONSE received).
+    pub fn mark_vsock_connected(&self, port: u32) {
+        if let Ok(mut ports) = self.vsock_connected_ports.lock() {
+            ports.insert(port);
+        }
     }
 
     /// Triggers an IRQ through the configured callback (if set).
@@ -834,6 +853,7 @@ impl DeviceManager {
                                     ready: mmio_state.queue_ready[qi],
                                     gpa_base: self.guest_ram_gpa,
                                     vsock_host_fds: Some(self.vsock_host_fds.clone()),
+                                    vsock_connected_ports: Some(self.vsock_connected_ports.clone()),
                                 }
                             } else {
                                 QueueConfig::default()
@@ -966,7 +986,9 @@ impl DeviceManager {
             // Device not ready yet — queue for later.
             tracing::info!("Vsock: device not ready, queueing OP_REQUEST for port {port}");
             if let Ok(mut pending) = self.pending_vsock_connects.lock() {
-                pending.push((port, guest_cid));
+                if !pending.iter().any(|&(p, _)| p == port) {
+                    pending.push((port, guest_cid));
+                }
             }
             false
         }
@@ -1008,6 +1030,13 @@ impl DeviceManager {
         }
         let avail_idx =
             u16::from_le_bytes([guest_mem[avail_addr + 2], guest_mem[avail_addr + 3]]) as usize;
+        tracing::info!(
+            "inject_vsock_rx_raw: avail_addr={:#x} used_addr={:#x} avail_idx={} used_idx=? q_size={}",
+            avail_addr,
+            used_addr,
+            avail_idx,
+            q_size,
+        );
         let used_idx_off = used_addr + 2;
         let used_idx =
             u16::from_le_bytes([guest_mem[used_idx_off], guest_mem[used_idx_off + 1]]) as usize;
@@ -1157,7 +1186,17 @@ impl DeviceManager {
 
         let mut injected = false;
 
+        let connected = self
+            .vsock_connected_ports
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default();
+
         for (&port, &fd) in fds.iter() {
+            // Only forward data for established connections.
+            if !connected.contains(&port) {
+                continue;
+            }
             // Try non-blocking read from host fd.
             let mut buf = [0u8; 4096];
             let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };

@@ -59,7 +59,7 @@ fn main() {
         memory_size: 2 * 1024 * 1024 * 1024, // 2 GB
         kernel_path,
         kernel_cmdline:
-            "console=hvc0 root=/dev/vda ro rootfstype=erofs earlycon=pl011,0x0b000000 loglevel=7 panic=10"
+            "console=hvc0 root=/dev/vda ro rootfstype=erofs earlycon=pl011,0x0b000000 loglevel=7 panic=10 iommu.passthrough=1"
                 .to_string(),
         initrd_path: None, // No initramfs — boot from rootfs block device
         enable_rosetta: false,

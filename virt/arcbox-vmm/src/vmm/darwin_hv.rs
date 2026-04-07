@@ -983,15 +983,32 @@ impl Vmm {
 
         let internal_raw_fd = internal_fd.as_raw_fd();
 
-        // Register the fd in the shared vsock host fds map so
-        // VirtioVsock's process_queue can forward data.
+        // Register the fd and wait for connection to be established.
         if let Some(ref dm) = self.hv_device_manager {
             if let Ok(mut fds_map) = dm.vsock_host_fds().lock() {
                 fds_map.insert(port, internal_raw_fd);
             }
-            // Inject OP_REQUEST into guest RX queue to initiate the connection.
+
+            // Retry OP_REQUEST injection until guest accepts (OP_RESPONSE).
+            // Guest agent may not be listening yet, so we retry with delay.
             let guest_cid = self.config.guest_cid.unwrap_or(3) as u64;
-            dm.inject_vsock_connect(port, guest_cid);
+            let connected_ports = dm.vsock_connected_ports();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+
+            while std::time::Instant::now() < deadline {
+                // Check if already connected (from a previous OP_RESPONSE).
+                if connected_ports
+                    .lock()
+                    .map(|s| s.contains(&port))
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+                // Inject OP_REQUEST (may be queued if device not ready).
+                dm.inject_vsock_connect(port, guest_cid);
+                // Wait for vCPU to process TX queue and potentially deliver OP_RESPONSE.
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
         }
         // Forget OwnedFd so the fd stays open.
         std::mem::forget(internal_fd);
