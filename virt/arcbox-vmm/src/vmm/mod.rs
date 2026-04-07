@@ -278,9 +278,10 @@ pub struct Vmm {
     /// Hypervisor.framework VM handle (custom VMM path).
     #[cfg(target_os = "macos")]
     hv_vm: Option<arcbox_hv::HvVm>,
-    /// Guest RAM backing allocation (custom VMM path).
+    /// Guest memory backing (vm-memory mmap, custom VMM path).
+    /// Must outlive `hv_vm` since the mapped memory must remain valid.
     #[cfg(target_os = "macos")]
-    hv_guest_ram: Option<Box<darwin_hv::HvGuestRam>>,
+    hv_guest_mem: Option<darwin_hv::HvGuestMem>,
     /// GICv3 handle (custom VMM path, macOS 15+).
     #[cfg(all(target_os = "macos", feature = "gic"))]
     hv_gic: Option<std::sync::Arc<arcbox_hv::Gic>>,
@@ -365,7 +366,7 @@ impl Vmm {
             #[cfg(target_os = "macos")]
             hv_vm: None,
             #[cfg(target_os = "macos")]
-            hv_guest_ram: None,
+            hv_guest_mem: None,
             #[cfg(all(target_os = "macos", feature = "gic"))]
             hv_gic: None,
             #[cfg(target_os = "macos")]

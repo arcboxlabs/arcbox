@@ -83,6 +83,7 @@ pub const HV_REG_CPSR: u32 = 34;
 // Encoding: (op0 << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2
 // ---------------------------------------------------------------------------
 
+pub const HV_SYS_REG_MPIDR_EL1: u16 = 0xc005;
 pub const HV_SYS_REG_SCTLR_EL1: u16 = 0xc080;
 pub const HV_SYS_REG_TTBR0_EL1: u16 = 0xc100;
 pub const HV_SYS_REG_TTBR1_EL1: u16 = 0xc108;

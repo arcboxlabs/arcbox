@@ -19,10 +19,16 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, mpsc};
 
 use arcbox_hv::{HvVm, MemoryPermission};
+use linux_loader::loader::{KernelLoader as LinuxKernelLoader, pe::PE};
+use vm_fdt::FdtWriter;
+use vm_memory::{
+    Address, Bytes, GuestAddress, GuestMemory as VmGuestMemory, GuestMemoryMmap, GuestMemoryRegion,
+};
 
 use crate::boot::arm64;
 use crate::device::{DeviceTreeEntry, DeviceType};
 use crate::error::{Result, VmmError};
+#[allow(unused_imports)] // Used by retained VZ-path / test helpers below.
 use crate::fdt::{FdtConfig, generate_fdt};
 use crate::irq::IrqChip;
 #[cfg(feature = "gic")]
@@ -77,6 +83,8 @@ type CpuOnSenders = Arc<Mutex<Vec<Option<mpsc::Sender<CpuOnRequest>>>>>;
 type VcpuThreadHandles = Arc<Mutex<Vec<std::thread::Thread>>>;
 
 /// Page size on ARM64.
+/// Retained for the GuestRam allocator used by VZ path / tests.
+#[allow(dead_code)]
 const PAGE_SIZE: usize = 4096;
 
 /// Base address for VirtIO MMIO device region.
@@ -99,11 +107,28 @@ const VIRTIO_IRQ_BASE: u32 = 48;
 /// GIC (0x0800_0000), PL011 (0x0900_0000) and VirtIO MMIO (0x0A00_0000).
 const RAM_BASE_IPA: u64 = 0x4000_0000;
 
+/// GIC distributor base address.
+const GIC_DIST_ADDR: u64 = 0x0800_0000;
+/// GIC distributor region size (64 KB from hv_gic_get_distributor_size).
+const GIC_DIST_SIZE: u64 = 0x1_0000;
+/// GIC redistributor base address.
+const GIC_REDIST_ADDR: u64 = 0x080A_0000;
+/// GIC redistributor region size (32 MB, enough for max vCPUs).
+const GIC_REDIST_SIZE: u64 = 0x200_0000;
+
+/// Type alias for the guest memory backing used by the parent `Vmm` struct
+/// (HV backend). Now backed by `vm-memory`'s mmap abstraction.
+pub(super) type HvGuestMem = GuestMemoryMmap;
+
 /// Type alias for `GuestRam` used by the parent `Vmm` struct to hold the
 /// guest RAM allocation (HV backend).
+/// Retained for tests and potential future use by the VZ path.
+#[allow(dead_code)]
 pub(super) type HvGuestRam = GuestRam;
 
 /// Holds a page-aligned host allocation that backs guest RAM.
+/// Retained for VZ path / tests; the HV path now uses GuestMemoryMmap.
+#[allow(dead_code)]
 pub(super) struct GuestRam {
     ptr: *mut u8,
     layout: Layout,
@@ -114,6 +139,7 @@ pub(super) struct GuestRam {
 unsafe impl Send for GuestRam {}
 unsafe impl Sync for GuestRam {}
 
+#[allow(dead_code)]
 impl GuestRam {
     /// Allocates page-aligned zeroed memory for guest RAM.
     fn new(size: usize) -> Result<Self> {
@@ -291,6 +317,11 @@ fn allocate_device_slot(index: u64, name: impl Into<String>) -> Result<DeviceSlo
     })
 }
 
+/// Convert a `vm_fdt::Error` into our `VmmError`.
+fn fdt_err(e: vm_fdt::Error) -> VmmError {
+    VmmError::Memory(format!("FDT error: {e}"))
+}
+
 impl Vmm {
     /// Custom VMM initialization using Hypervisor.framework (manual execution).
     ///
@@ -303,9 +334,15 @@ impl Vmm {
 
         let ram_size = self.config.memory_size as usize;
 
-        // --- 1. Allocate guest RAM on the host ---
-        let mut guest_ram = GuestRam::new(ram_size)?;
-        tracing::debug!("Allocated {} MB guest RAM", ram_size / (1024 * 1024));
+        // --- 1. Allocate guest RAM via vm-memory's mmap abstraction ---
+        // This allocates anonymous memory and provides type-safe GPA access.
+        let guest_mem =
+            GuestMemoryMmap::<()>::from_ranges(&[(GuestAddress(RAM_BASE_IPA), ram_size)])
+                .map_err(|e| VmmError::Memory(format!("guest memory allocation failed: {e}")))?;
+        tracing::debug!(
+            "Allocated {} MB guest RAM via vm-memory",
+            ram_size / (1024 * 1024)
+        );
 
         // --- 2. Create Hypervisor.framework VM ---
         // Use 40-bit IPA for up to ~1 TB guest physical address space,
@@ -313,23 +350,29 @@ impl Vmm {
         let vm = HvVm::with_ipa_size(40)
             .map_err(|e| VmmError::Device(format!("hv_vm_create failed: {e}")))?;
 
-        // --- 3. Map guest RAM into IPA ---
-        // SAFETY: guest_ram.as_ptr() points to a valid page-aligned allocation
-        // of exactly ram_size bytes. The mapping lives as long as the VM.
-        unsafe {
-            vm.map_memory(
-                guest_ram.as_ptr(),
-                RAM_BASE_IPA,
-                ram_size,
-                MemoryPermission::READ_WRITE | MemoryPermission::EXEC,
-            )
-            .map_err(|e| VmmError::Memory(format!("failed to map guest RAM: {e}")))?;
+        // --- 3. Map guest RAM into HV IPA space ---
+        // Get the host virtual address for the mmap'd region and map it
+        // into the guest's physical address space via Hypervisor.framework.
+        for region in guest_mem.iter() {
+            let host_ptr = region.as_ptr();
+            let guest_addr = region.start_addr().raw_value();
+            let size = region.len() as usize;
+            unsafe {
+                vm.map_memory(
+                    host_ptr,
+                    guest_addr,
+                    size,
+                    MemoryPermission::READ_WRITE | MemoryPermission::EXEC,
+                )
+                .map_err(|e| VmmError::Memory(format!("hv_vm_map failed: {e}")))?;
+            }
+            tracing::debug!(
+                "Mapped guest RAM: IPA {:#x}..{:#x} (host={:p})",
+                guest_addr,
+                guest_addr + size as u64,
+                host_ptr,
+            );
         }
-        tracing::debug!(
-            "Mapped guest RAM: IPA {:#x}..{:#x}",
-            RAM_BASE_IPA,
-            ram_size as u64
-        );
 
         // --- 4. Initialize GIC (macOS 15+) ---
         #[cfg(feature = "gic")]
@@ -401,10 +444,19 @@ impl Vmm {
 
         // Provide guest memory access so the QUEUE_NOTIFY handler can read
         // descriptors and write completions directly in guest RAM.
-        // SAFETY: guest_ram will be leaked below (std::mem::forget) so the
-        // pointer remains valid for the lifetime of the DeviceManager.
-        unsafe {
-            device_manager.set_guest_memory(guest_ram.as_ptr(), ram_size);
+        // Get host pointer from the GuestMemoryMmap region for DeviceManager's
+        // raw access path.
+        {
+            let region = guest_mem
+                .iter()
+                .next()
+                .ok_or_else(|| VmmError::Memory("no guest memory regions".into()))?;
+            let host_ptr = region.as_ptr();
+            // SAFETY: guest_mem is stored in the Vmm struct and outlives the
+            // DeviceManager, so the pointer remains valid.
+            unsafe {
+                device_manager.set_guest_memory(host_ptr, ram_size);
+            }
         }
 
         // Wire IRQ callback so device completions trigger GIC interrupts.
@@ -512,60 +564,222 @@ impl Vmm {
             );
         }
 
-        // --- 8. Generate FDT ---
+        // --- 8. Load kernel via linux-loader PE loader ---
+        let mut kernel_file = std::fs::File::open(&self.config.kernel_path)
+            .map_err(|e| VmmError::config(format!("cannot open kernel: {e}")))?;
+
+        // PE::load writes the kernel image directly into GuestMemoryMmap.
+        // The kernel_offset must be 2 MB aligned (ARM64 boot protocol).
+        let kernel_result = PE::load(
+            &guest_mem,
+            Some(GuestAddress(RAM_BASE_IPA)),
+            &mut kernel_file,
+            None,
+        )
+        .map_err(|e| VmmError::config(format!("kernel loading failed: {e}")))?;
+
+        let kernel_entry = kernel_result.kernel_load.raw_value();
+        tracing::info!(
+            "Kernel loaded via linux-loader: entry={:#x}, end={:#x}",
+            kernel_entry,
+            kernel_result.kernel_end,
+        );
+
+        // --- 9. Load initrd via vm-memory ---
+        let initrd_info: Option<(u64, u64)> = if let Some(ref initrd_path) = self.config.initrd_path
+        {
+            let initrd_data = std::fs::read(initrd_path)
+                .map_err(|e| VmmError::config(format!("cannot read initrd: {e}")))?;
+
+            // Place initrd after kernel end, page-aligned.
+            let initrd_addr = GuestAddress((kernel_result.kernel_end + 0xFFF) & !0xFFF);
+
+            guest_mem
+                .write_slice(&initrd_data, initrd_addr)
+                .map_err(|e| VmmError::Memory(format!("failed to write initrd: {e}")))?;
+
+            tracing::info!(
+                "Initrd loaded: addr={:#x}, size={} bytes",
+                initrd_addr.raw_value(),
+                initrd_data.len()
+            );
+
+            Some((initrd_addr.raw_value(), initrd_data.len() as u64))
+        } else {
+            None
+        };
+
+        // --- 10. Generate FDT via vm-fdt ---
         let fdt_entries = device_manager.device_tree_entries();
-        let fdt_config = build_hv_fdt_config(&self.config, &fdt_entries)?;
-        let fdt_blob = generate_fdt(&fdt_config)?;
+
+        let fdt_blob = {
+            let mut fdt = FdtWriter::new().map_err(fdt_err)?;
+
+            // Root node
+            let root = fdt.begin_node("").map_err(fdt_err)?;
+            fdt.property_string("compatible", "linux,dummy-virt")
+                .map_err(fdt_err)?;
+            fdt.property_u32("#address-cells", 2).map_err(fdt_err)?;
+            fdt.property_u32("#size-cells", 2).map_err(fdt_err)?;
+            fdt.property_u32("interrupt-parent", 1).map_err(fdt_err)?; // GIC phandle
+
+            // Chosen node
+            let chosen = fdt.begin_node("chosen").map_err(fdt_err)?;
+            fdt.property_string("bootargs", &self.config.kernel_cmdline)
+                .map_err(fdt_err)?;
+            fdt.property_string("stdout-path", "/pl011@9000000")
+                .map_err(fdt_err)?;
+            if let Some((initrd_start, initrd_size)) = initrd_info {
+                fdt.property_u64("linux,initrd-start", initrd_start)
+                    .map_err(fdt_err)?;
+                fdt.property_u64("linux,initrd-end", initrd_start + initrd_size)
+                    .map_err(fdt_err)?;
+            }
+            fdt.end_node(chosen).map_err(fdt_err)?;
+
+            // Memory node
+            let mem_node = fdt
+                .begin_node(&format!("memory@{RAM_BASE_IPA:x}"))
+                .map_err(fdt_err)?;
+            fdt.property_string("device_type", "memory")
+                .map_err(fdt_err)?;
+            let mut reg = Vec::new();
+            reg.extend_from_slice(&RAM_BASE_IPA.to_be_bytes());
+            reg.extend_from_slice(&(ram_size as u64).to_be_bytes());
+            fdt.property("reg", &reg).map_err(fdt_err)?;
+            fdt.end_node(mem_node).map_err(fdt_err)?;
+
+            // CPUs
+            let cpus = fdt.begin_node("cpus").map_err(fdt_err)?;
+            fdt.property_u32("#address-cells", 1).map_err(fdt_err)?;
+            fdt.property_u32("#size-cells", 0).map_err(fdt_err)?;
+            for i in 0..self.config.vcpu_count {
+                let cpu = fdt.begin_node(&format!("cpu@{i}")).map_err(fdt_err)?;
+                fdt.property_string("device_type", "cpu").map_err(fdt_err)?;
+                fdt.property_string("compatible", "arm,arm-v8")
+                    .map_err(fdt_err)?;
+                fdt.property_string("enable-method", "psci")
+                    .map_err(fdt_err)?;
+                fdt.property_u32("reg", i).map_err(fdt_err)?;
+                fdt.end_node(cpu).map_err(fdt_err)?;
+            }
+            fdt.end_node(cpus).map_err(fdt_err)?;
+
+            // Timer
+            let timer = fdt.begin_node("timer").map_err(fdt_err)?;
+            fdt.property_string("compatible", "arm,armv8-timer")
+                .map_err(fdt_err)?;
+            fdt.property_null("always-on").map_err(fdt_err)?;
+            // PPI interrupts: secure phys, non-secure phys, virt, hyp
+            fdt.property_array_u32(
+                "interrupts",
+                &[
+                    1, 13, 0x304, // Secure phys timer
+                    1, 14, 0x304, // Non-secure phys timer
+                    1, 11, 0x304, // Virtual timer
+                    1, 10, 0x304, // Hyperphysical timer
+                ],
+            )
+            .map_err(fdt_err)?;
+            fdt.end_node(timer).map_err(fdt_err)?;
+
+            // PSCI
+            let psci = fdt.begin_node("psci").map_err(fdt_err)?;
+            fdt.property_string("compatible", "arm,psci-1.0")
+                .map_err(fdt_err)?;
+            fdt.property_string("method", "hvc").map_err(fdt_err)?;
+            fdt.end_node(psci).map_err(fdt_err)?;
+
+            // GIC v3
+            let intc = fdt
+                .begin_node(&format!("intc@{GIC_DIST_ADDR:x}"))
+                .map_err(fdt_err)?;
+            fdt.property_string("compatible", "arm,gic-v3")
+                .map_err(fdt_err)?;
+            fdt.property_u32("#interrupt-cells", 3).map_err(fdt_err)?;
+            fdt.property_null("interrupt-controller").map_err(fdt_err)?;
+            fdt.property_phandle(1).map_err(fdt_err)?;
+            // reg: distributor base+size, redistributor base+size
+            let mut gic_reg = Vec::new();
+            gic_reg.extend_from_slice(&GIC_DIST_ADDR.to_be_bytes());
+            gic_reg.extend_from_slice(&GIC_DIST_SIZE.to_be_bytes());
+            gic_reg.extend_from_slice(&GIC_REDIST_ADDR.to_be_bytes());
+            gic_reg.extend_from_slice(&GIC_REDIST_SIZE.to_be_bytes());
+            fdt.property("reg", &gic_reg).map_err(fdt_err)?;
+            fdt.end_node(intc).map_err(fdt_err)?;
+
+            // PL011 UART
+            let uart = fdt.begin_node("pl011@9000000").map_err(fdt_err)?;
+            fdt.property_string("compatible", "arm,pl011")
+                .map_err(fdt_err)?;
+            let mut uart_reg = Vec::new();
+            uart_reg.extend_from_slice(&PL011_BASE.to_be_bytes());
+            uart_reg.extend_from_slice(&PL011_SIZE.to_be_bytes());
+            fdt.property("reg", &uart_reg).map_err(fdt_err)?;
+            fdt.property_array_u32("interrupts", &[0, 1, 4])
+                .map_err(fdt_err)?; // SPI 1, level
+            fdt.property_u32("clock-frequency", 24_000_000)
+                .map_err(fdt_err)?;
+            fdt.end_node(uart).map_err(fdt_err)?;
+
+            // VirtIO MMIO devices from DeviceManager
+            for entry in &fdt_entries {
+                let node = fdt
+                    .begin_node(&format!("virtio_mmio@{:x}", entry.reg_base))
+                    .map_err(fdt_err)?;
+                fdt.property_string("compatible", &entry.compatible)
+                    .map_err(fdt_err)?;
+                let mut dev_reg = Vec::new();
+                dev_reg.extend_from_slice(&entry.reg_base.to_be_bytes());
+                dev_reg.extend_from_slice(&entry.reg_size.to_be_bytes());
+                fdt.property("reg", &dev_reg).map_err(fdt_err)?;
+                fdt.property_array_u32("interrupts", &[0, entry.irq, 1])
+                    .map_err(fdt_err)?; // SPI, edge
+                fdt.property_null("dma-coherent").map_err(fdt_err)?;
+                fdt.end_node(node).map_err(fdt_err)?;
+            }
+
+            fdt.end_node(root).map_err(fdt_err)?;
+            fdt.finish().map_err(fdt_err)?
+        };
 
         if fdt_blob.len() > arm64::FDT_MAX_SIZE {
             return Err(VmmError::Memory("generated FDT exceeds 2 MB limit".into()));
         }
 
-        let fdt_addr = choose_fdt_addr_hv(self.config.memory_size, fdt_blob.len())?;
-
-        // Write FDT into guest RAM (VM not running yet, exclusive access).
-        let ram = guest_ram.as_mut_slice();
-        let fdt_start = fdt_addr as usize;
-        let fdt_end = fdt_start + fdt_blob.len();
-        if fdt_end > ram.len() {
-            return Err(VmmError::Memory("FDT does not fit in guest RAM".into()));
-        }
-        ram[fdt_start..fdt_end].copy_from_slice(&fdt_blob);
+        // Place FDT at end of RAM, page-aligned backward.
+        let fdt_addr =
+            GuestAddress((RAM_BASE_IPA + ram_size as u64 - fdt_blob.len() as u64) & !0xFFF);
+        guest_mem
+            .write_slice(&fdt_blob, fdt_addr)
+            .map_err(|e| VmmError::Memory(format!("failed to write FDT: {e}")))?;
 
         tracing::info!(
             "FDT written: addr={:#x}, size={} bytes, devices={}",
-            fdt_addr,
+            fdt_addr.raw_value(),
             fdt_blob.len(),
             fdt_entries.len()
         );
 
-        // --- 8. Load kernel + initrd into guest RAM ---
-        load_kernel_into_ram(ram, &self.config.kernel_path)?;
-
-        if let Some(ref initrd_path) = self.config.initrd_path {
-            load_initrd_into_ram(ram, initrd_path)?;
-        }
-
-        // --- 10. Store managers ---
+        // --- 11. Store managers ---
         let event_loop = crate::event::EventLoop::new()?;
 
-        // Store managers (VM and GuestRam ownership will be moved to vCPU
-        // threads in the start path — for now, store enough state to start).
         self.memory_manager = Some(memory_manager);
         self.device_manager = Some(device_manager);
         self.irq_chip = Some(irq_chip);
         self.event_loop = Some(event_loop);
 
         // Store HV-specific state in the Vmm struct for lifecycle management.
+        // GuestMemoryMmap must outlive the HvVm since the mapped memory must
+        // remain valid for the entire VM lifetime.
         self.hv_vm = Some(vm);
-        self.hv_guest_ram = Some(Box::new(guest_ram));
+        self.hv_guest_mem = Some(guest_mem);
         #[cfg(feature = "gic")]
         {
             self.hv_gic = gic;
         }
-        self.hv_kernel_entry = Some(RAM_BASE_IPA + arm64::KERNEL_LOAD_ADDR);
-        // fdt_addr is a RAM-internal offset; convert to GPA for vCPU register.
-        self.hv_fdt_addr = Some(RAM_BASE_IPA + fdt_addr);
+        self.hv_kernel_entry = Some(kernel_entry);
+        self.hv_fdt_addr = Some(fdt_addr.raw_value());
         self.hv_vcpu_thread_handles = Some(vcpu_thread_handles);
 
         tracing::info!("Custom Hypervisor.framework VMM initialized");
@@ -697,13 +911,15 @@ impl Vmm {
             }
         }
 
-        // Cleanup in correct order: GIC → VM → RAM.
+        // Cleanup in correct order: GIC → VM → guest memory.
+        // Guest memory must be dropped after the VM so the mapped pages
+        // remain valid until hv_vm_destroy completes.
         #[cfg(feature = "gic")]
         {
             self.hv_gic.take();
         }
         self.hv_vm.take();
-        self.hv_guest_ram.take();
+        self.hv_guest_mem.take();
 
         tracing::info!("Custom VMM stopped");
         Ok(())
@@ -779,6 +995,7 @@ fn vcpu_run_loop(
     // Set initial register state for ARM64 Linux boot protocol:
     //   PC   = entry address (kernel entry for BSP, PSCI entry for secondary)
     //   X0   = parameter (FDT address for BSP, context_id for secondary)
+    //   X1-X3 = 0 (reserved per ARM64 boot protocol)
     //   CPSR = EL1h, DAIF masked
     if let Err(e) = vcpu.set_reg(reg::PC, entry_addr) {
         tracing::error!("vCPU {vcpu_id}: set PC failed: {e}");
@@ -788,15 +1005,42 @@ fn vcpu_run_loop(
         tracing::error!("vCPU {vcpu_id}: set X0 failed: {e}");
         return;
     }
+    let _ = vcpu.set_reg(reg::X1, 0);
+    let _ = vcpu.set_reg(reg::X2, 0);
+    let _ = vcpu.set_reg(reg::X3, 0);
     if let Err(e) = vcpu.set_reg(reg::CPSR, CPSR_EL1H) {
         tracing::error!("vCPU {vcpu_id}: set CPSR failed: {e}");
         return;
     }
 
+    // ARM64 boot protocol: MMU must be off, caches can be on or off.
+    // Set SCTLR_EL1 to safe reset value: MMU off, alignment check off,
+    // data/instruction caches off, endianness LE.
+    //
+    // Bits: RES1 bits (11, 20, 22, 23, 28, 29) must be set per ARMv8.
+    // SCTLR_EL1 reset value with MMU=0, C=0, I=0, A=0.
+    const SCTLR_EL1_RESET: u64 = (1 << 11) // RES1
+        | (1 << 20) // RES1
+        | (1 << 22) // RES1
+        | (1 << 23) // RES1
+        | (1 << 28) // RES1
+        | (1 << 29); // RES1
+    if let Err(e) = vcpu.set_sys_reg(arcbox_hv::sys_reg::HV_SYS_REG_SCTLR_EL1, SCTLR_EL1_RESET) {
+        tracing::warn!("vCPU {vcpu_id}: set SCTLR_EL1 failed: {e}");
+    }
+
+    // Set MPIDR_EL1 for this vCPU (used by GIC affinity routing).
+    // Simple layout: Aff0 = vcpu_id, all other affinity fields 0.
+    let mpidr = u64::from(vcpu_id) & 0xFF;
+    if let Err(e) = vcpu.set_sys_reg(arcbox_hv::sys_reg::HV_SYS_REG_MPIDR_EL1, mpidr) {
+        tracing::warn!("vCPU {vcpu_id}: set MPIDR failed (may not be writable): {e}");
+    }
+
     tracing::info!(
-        "vCPU {vcpu_id}: starting at PC={:#x}, X0={:#x}",
+        "vCPU {vcpu_id}: starting at PC={:#x}, X0={:#x}, SCTLR={:#x}",
         entry_addr,
-        x0_value
+        x0_value,
+        SCTLR_EL1_RESET,
     );
 
     loop {
@@ -1077,9 +1321,10 @@ fn handle_psci(
 }
 
 // ---------------------------------------------------------------------------
-// FDT helpers for the custom VMM path
+// FDT helpers for the custom VMM path (retained for tests / VZ path)
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 fn build_hv_fdt_config(
     config: &VmmConfig,
     virtio_devices: &[DeviceTreeEntry],
@@ -1104,6 +1349,7 @@ fn build_hv_fdt_config(
     Ok(fdt_config)
 }
 
+#[allow(dead_code)]
 fn choose_fdt_addr_hv(memory_size: u64, fdt_size: usize) -> Result<u64> {
     let fdt_size = fdt_size as u64;
     let gib: u64 = 1024 * 1024 * 1024;
@@ -1124,10 +1370,11 @@ fn choose_fdt_addr_hv(memory_size: u64, fdt_size: usize) -> Result<u64> {
 }
 
 // ---------------------------------------------------------------------------
-// Kernel / initrd loading
+// Kernel / initrd loading (retained for tests / VZ path)
 // ---------------------------------------------------------------------------
 
 /// Loads the kernel Image into guest RAM at the ARM64 load address.
+#[allow(dead_code)]
 fn load_kernel_into_ram(ram: &mut [u8], kernel_path: &std::path::Path) -> Result<()> {
     use std::io::Read;
 
@@ -1163,6 +1410,7 @@ fn load_kernel_into_ram(ram: &mut [u8], kernel_path: &std::path::Path) -> Result
 }
 
 /// Loads the initrd into guest RAM at the ARM64 load address.
+#[allow(dead_code)]
 fn load_initrd_into_ram(ram: &mut [u8], initrd_path: &std::path::Path) -> Result<()> {
     use std::io::Read;
 
