@@ -1502,6 +1502,15 @@ impl Vmm {
             fds[0],
         );
 
+        // Inject the OP_REQUEST directly into the guest RX virtqueue using
+        // the low-level inject_vsock_rx_raw path. This avoids poll_vsock_rx
+        // (which acquires vsock_connections mutex and can race with the vCPU
+        // thread). inject_vsock_connect dequeues the REQUEST from backend_rxq
+        // so the vCPU's poll_vsock_rx won't duplicate it.
+        if dm.inject_vsock_connect(conn_id, guest_cid) {
+            dm.raise_interrupt_for(crate::device::DeviceType::VirtioVsock, 1);
+        }
+
         Ok((fds[0], connect_rx))
     }
 }

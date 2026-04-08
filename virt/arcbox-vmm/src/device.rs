@@ -1301,22 +1301,55 @@ impl DeviceManager {
     /// and pushed to `backend_rxq`. This method tries to fill an RX descriptor
     /// now. If the device isn't ready, the pending op stays in `backend_rxq`
     /// for deferred processing by `poll_vsock_rx`.
-    /// Signals that a new vsock connection was enqueued in the manager.
+    /// Injects the OP_REQUEST for a newly allocated vsock connection directly
+    /// into the guest RX virtqueue.
     ///
-    /// This is a no-op from the DeviceManager side — `allocate()` already
-    /// pushed the `RxOps::REQUEST` into `backend_rxq`. The vCPU BSP thread's
-    /// `poll_vsock_rx` (called before every `vcpu.run()`) drains that queue
-    /// and injects the OP_REQUEST into the guest RX virtqueue.
+    /// This uses `inject_vsock_rx_raw` (low-level direct guest memory write)
+    /// instead of going through `poll_vsock_rx`, so it does NOT acquire the
+    /// `vsock_connections` mutex and cannot deadlock with the vCPU thread.
     ///
-    /// **Thread safety**: this method is safe to call from any thread because
-    /// it does NOT touch guest memory, virtqueues, or MMIO state. All
-    /// guest-visible operations are performed exclusively by the vCPU BSP
-    /// thread through `poll_vsock_rx`.
-    pub fn notify_vsock_connect(&self) {
-        // Nothing to do — the BSP poll loop picks up backend_rxq entries
-        // automatically. We intentionally do NOT call poll_vsock_rx here
-        // because that function accesses guest memory and virtqueue state,
-        // which must only happen on the vCPU thread.
+    /// **Thread safety**: writes to guest memory are safe because the vCPU is
+    /// either (a) inside `hv_vcpu_run` (guest code doesn't touch RX used ring
+    /// while the device hasn't signaled) or (b) in the BSP poll loop which
+    /// only touches RX descriptors through `poll_vsock_rx` (mutual exclusion
+    /// by the GIL-like BSP poll structure). The `inject_vsock_rx_raw` method
+    /// uses `fence(Release)` to ensure descriptor data is visible before the
+    /// used_idx update.
+    pub fn inject_vsock_connect(
+        &self,
+        id: crate::vsock_manager::VsockConnectionId,
+        guest_cid: u64,
+    ) -> bool {
+        use arcbox_virtio::vsock::{VsockAddr, VsockHeader, VsockOp};
+
+        let hdr = VsockHeader::new(
+            VsockAddr::host(id.host_port),
+            VsockAddr::new(guest_cid, id.guest_port),
+            VsockOp::Request,
+        );
+
+        // Try direct injection first. If it succeeds, drain the REQUEST
+        // from backend_rxq to prevent poll_vsock_rx from duplicating it.
+        // If it fails (device not ready yet), leave everything in place —
+        // poll_vsock_rx will pick it up on the next vCPU poll cycle when
+        // the guest has activated the vsock device and provided RX descriptors.
+        if self.inject_vsock_rx_raw(&hdr.to_bytes()) {
+            if let Ok(mut mgr) = self.vsock_connections.lock() {
+                mgr.backend_rxq.retain(|qid| *qid != id);
+                if let Some(conn) = mgr.get_mut(&id) {
+                    conn.rx_queue.dequeue(); // Remove the REQUEST we just injected.
+                }
+            }
+            true
+        } else {
+            tracing::info!(
+                "vsock inject_vsock_connect: device not ready, deferring OP_REQUEST \
+                 for guest_port={} to poll_vsock_rx",
+                id.guest_port,
+            );
+            // Leave REQUEST in backend_rxq for poll_vsock_rx to handle later.
+            false
+        }
     }
 
     /// Injects a raw packet into the vsock RX queue (queue 0).
@@ -1529,8 +1562,10 @@ impl DeviceManager {
     }
 
     /// Injects a raw packet into the vsock RX queue (queue 0).
-    /// Legacy entry point — prefer `write_to_rx_descriptor` for new code.
-    #[allow(dead_code)]
+    ///
+    /// Directly writes to guest memory and updates the used ring. Safe to call
+    /// from the daemon thread — does NOT acquire `vsock_connections` mutex.
+    /// Used by `inject_vsock_connect` for immediate OP_REQUEST delivery.
     fn inject_vsock_rx_raw(&self, packet: &[u8]) -> bool {
         let (Some(ram_base), ram_size) = (self.guest_ram_base, self.guest_ram_size) else {
             return false;
@@ -1978,6 +2013,14 @@ impl DeviceManager {
         }
 
         // Process backend_rxq: pop connections, fill RX descriptors.
+        //
+        // IMPORTANT: If we break out of this loop because RX descriptors are
+        // exhausted (avail_idx == used_idx) while backend_rxq still has entries,
+        // those entries remain in the queue for the next poll cycle. However,
+        // the guest won't refill RX descriptors until its rx_work runs, which
+        // requires an interrupt. We set `injected = true` in that case so the
+        // caller triggers INT_VRING, waking the guest's virtio_vsock_rx_fill.
+        let mut rxq_starved = false;
         loop {
             // Check available RX descriptors.
             let avail_idx =
@@ -1987,7 +2030,15 @@ impl DeviceManager {
                 u16::from_le_bytes([guest_mem[used_idx_off], guest_mem[used_idx_off + 1]]) as usize;
 
             if avail_idx == used_idx {
-                break; // No available RX descriptors.
+                // No RX descriptors available. If backend_rxq still has pending
+                // entries, mark as starved so we trigger an interrupt to make
+                // the guest refill its RX queue.
+                if let Ok(mgr) = self.vsock_connections.lock() {
+                    if !mgr.backend_rxq.is_empty() {
+                        rxq_starved = true;
+                    }
+                }
+                break;
             }
 
             // Pop next connection from backend_rxq.
@@ -2172,6 +2223,14 @@ impl DeviceManager {
                     }
                 }
             }
+        }
+
+        // If backend_rxq still has entries but we couldn't inject because
+        // the guest's RX vring is full, signal an interrupt. This wakes the
+        // guest's virtio_vsock rx_work → rx_fill, replenishing descriptors.
+        // On the next poll cycle we'll retry the stalled backend_rxq entries.
+        if rxq_starved {
+            injected = true;
         }
 
         // ------------------------------------------------------------------
