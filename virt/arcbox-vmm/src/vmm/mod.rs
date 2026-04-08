@@ -304,6 +304,9 @@ pub struct Vmm {
     /// Block I/O worker thread handles for join on shutdown.
     #[cfg(target_os = "macos")]
     hv_blk_worker_threads: Vec<std::thread::JoinHandle<()>>,
+    /// HVC fast path: device_idx → (raw_fd, blk_size). Shared with vCPU threads.
+    #[cfg(target_os = "macos")]
+    hvc_blk_fds: Arc<Vec<(i32, u32)>>,
 }
 
 impl Vmm {
@@ -395,6 +398,8 @@ impl Vmm {
             hv_blk_devices: Vec::new(),
             #[cfg(target_os = "macos")]
             hv_blk_worker_threads: Vec::new(),
+            #[cfg(target_os = "macos")]
+            hvc_blk_fds: Arc::new(Vec::new()),
         })
     }
 

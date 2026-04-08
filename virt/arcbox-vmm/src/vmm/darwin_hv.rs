@@ -44,6 +44,23 @@ use super::*;
 // PSCI function IDs (SMC Calling Convention)
 // ---------------------------------------------------------------------------
 
+// =========================================================================
+// ArcBox HVC function IDs (vendor-specific SMCCC range 0xC200_XXXX)
+// =========================================================================
+
+/// HVC fast path: synchronous block read (≤4KB).
+/// X1 = device_idx, X2 = sector, X3 = buffer GPA, X4 = byte length.
+/// Returns X0 = bytes read (>0) or negative errno.
+const ARCBOX_HVC_BLK_READ: u64 = 0xC200_0001;
+
+/// HVC probe: returns number of block devices available for fast path.
+/// No arguments. Returns X0 = num_devices.
+const ARCBOX_HVC_PROBE: u64 = 0xC200_0000;
+
+// =========================================================================
+// PSCI function IDs
+// =========================================================================
+
 /// PSCI CPU_ON (64-bit): power up a secondary CPU.
 const PSCI_CPU_ON_64: u64 = 0xC400_0003;
 
@@ -540,6 +557,17 @@ impl Vmm {
             }
         }
 
+        // Build HVC fast-path fd table from all block devices.
+        // device_idx 0 = first block device (vda), 1 = second (vdb), etc.
+        {
+            let fds: Vec<(i32, u32)> = self
+                .hv_blk_devices
+                .iter()
+                .map(|(_, raw_fd, blk_size, _, _, _)| (*raw_fd, *blk_size))
+                .collect();
+            self.hvc_blk_fds = Arc::new(fds);
+        }
+
         // Network (TSO-enabled) with custom socket-proxy datapath.
         // Creates a SOCK_DGRAM socketpair: one end feeds the VirtioNet device
         // (via DeviceManager TX/RX bridging), the other end goes to the same
@@ -976,6 +1004,7 @@ impl Vmm {
                 let dm = device_manager.clone();
                 let th = vcpu_thread_handles.clone();
                 let uart = pl011.clone();
+                let hvc_fds_clone = self.hvc_blk_fds.clone();
                 let senders_placeholder: Option<CpuOnSenders> = None;
 
                 let t = std::thread::Builder::new()
@@ -995,6 +1024,7 @@ impl Vmm {
                                 uart,
                                 senders_placeholder,
                                 th,
+                                hvc_fds_clone,
                             );
                         }
                         Err(_) => {
@@ -1013,6 +1043,7 @@ impl Vmm {
         };
 
         // --- Spawn BSP (vCPU 0) ---
+        let hvc_blk_fds = self.hvc_blk_fds.clone();
         {
             let t = std::thread::Builder::new()
                 .name("hv-vcpu-0".to_string())
@@ -1026,6 +1057,7 @@ impl Vmm {
                         pl011,
                         cpu_on_senders,
                         vcpu_thread_handles,
+                        hvc_blk_fds,
                     );
                 })
                 .map_err(|e| VmmError::Vcpu(format!("spawn vcpu-0: {e}")))?;
@@ -1320,6 +1352,7 @@ fn vcpu_run_loop(
     pl011: Arc<std::sync::Mutex<Pl011>>,
     cpu_on_senders: Option<CpuOnSenders>,
     vcpu_thread_handles: VcpuThreadHandles,
+    hvc_blk_fds: Arc<Vec<(i32, u32)>>,
 ) {
     use arcbox_hv::{ExceptionClass, HvVcpu, VcpuExit};
     use std::sync::atomic::Ordering;
@@ -1571,15 +1604,31 @@ fn vcpu_run_loop(
                 class: ExceptionClass::HypercallHvc(imm),
                 ..
             } => {
-                tracing::debug!("vCPU {vcpu_id}: HVC #{imm}");
-                // PSCI calls (power state coordination) come through HVC.
                 let func_id = match vcpu.get_reg(reg::X0) {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-                handle_psci(vcpu_id, func_id, &vcpu, &running, cpu_on_senders.as_ref());
-                if !running.load(Ordering::Relaxed) {
-                    break;
+
+                match func_id {
+                    ARCBOX_HVC_PROBE => {
+                        // Return number of block devices available for fast path.
+                        let _ = vcpu.set_reg(reg::X0, hvc_blk_fds.len() as u64);
+                        let pc = vcpu.get_reg(reg::PC).unwrap_or(0);
+                        let _ = vcpu.set_reg(reg::PC, pc + 4);
+                    }
+                    ARCBOX_HVC_BLK_READ => {
+                        let result = handle_hvc_blk_read(&vcpu, &hvc_blk_fds, &device_manager);
+                        let _ = vcpu.set_reg(reg::X0, result);
+                        let pc = vcpu.get_reg(reg::PC).unwrap_or(0);
+                        let _ = vcpu.set_reg(reg::PC, pc + 4);
+                    }
+                    _ => {
+                        // PSCI and other standard calls.
+                        handle_psci(vcpu_id, func_id, &vcpu, &running, cpu_on_senders.as_ref());
+                        if !running.load(Ordering::Relaxed) {
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -1628,6 +1677,67 @@ fn vcpu_run_loop(
 
 /// Handles PSCI function calls from a vCPU (HVC/SMC conduit).
 ///
+/// HVC fast path: synchronous block read.
+///
+/// Reads X1=device_idx, X2=sector, X3=buffer_gpa, X4=byte_length.
+/// Performs pread directly into guest memory and returns bytes read.
+/// Returns negative errno on failure.
+fn handle_hvc_blk_read(
+    vcpu: &arcbox_hv::HvVcpu,
+    hvc_blk_fds: &[(i32, u32)],
+    device_manager: &crate::device::DeviceManager,
+) -> u64 {
+    let Ok(device_idx) = vcpu.get_reg(arcbox_hv::reg::HV_REG_X1) else {
+        return (-libc::EINVAL as i64) as u64;
+    };
+    let Ok(sector) = vcpu.get_reg(arcbox_hv::reg::HV_REG_X2) else {
+        return (-libc::EINVAL as i64) as u64;
+    };
+    let Ok(buffer_gpa) = vcpu.get_reg(arcbox_hv::reg::HV_REG_X3) else {
+        return (-libc::EINVAL as i64) as u64;
+    };
+    let Ok(byte_len) = vcpu.get_reg(arcbox_hv::reg::HV_REG_X4) else {
+        return (-libc::EINVAL as i64) as u64;
+    };
+
+    // Bounds check.
+    let byte_len = byte_len as usize;
+    if byte_len == 0 || byte_len > 4096 {
+        return (-libc::EINVAL as i64) as u64;
+    }
+
+    // Look up device fd.
+    let Some(&(raw_fd, blk_size)) = hvc_blk_fds.get(device_idx as usize) else {
+        return (-libc::ENODEV as i64) as u64;
+    };
+
+    // Get guest memory pointer.
+    let Some(ram_base) = device_manager.guest_ram_base_ptr() else {
+        return (-libc::EFAULT as i64) as u64;
+    };
+    let gpa_base = device_manager.guest_ram_gpa() as usize;
+    let ram_size = device_manager.guest_ram_size();
+    let gpa = buffer_gpa as usize;
+
+    // Validate GPA is within guest RAM.
+    if gpa < gpa_base || gpa + byte_len > gpa_base + ram_size {
+        return (-libc::EFAULT as i64) as u64;
+    }
+
+    // Calculate host pointer for the GPA.
+    let host_ptr = unsafe { ram_base.add(gpa - gpa_base) };
+
+    // Synchronous pread into guest memory.
+    #[allow(clippy::cast_possible_wrap)]
+    let offset = (sector * u64::from(blk_size)) as libc::off_t;
+    let n = unsafe { libc::pread(raw_fd, host_ptr.cast(), byte_len, offset) };
+    if n < 0 {
+        let errno = unsafe { *libc::__error() }; // macOS errno
+        return (-errno as i64) as u64;
+    }
+    n as u64
+}
+
 /// Reads registers X1–X3 as needed and writes the return value into X0.
 /// For SYSTEM_OFF / SYSTEM_RESET, sets `running` to `false` so the caller
 /// can break out of its run loop.
