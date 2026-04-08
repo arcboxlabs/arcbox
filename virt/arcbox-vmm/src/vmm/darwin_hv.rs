@@ -540,9 +540,13 @@ impl Vmm {
         }
 
         // VirtioFS shared directories — create FsServer handler for each share.
-        // Attach DAX mapper so guest can mmap host files directly.
+        // Each VirtioFS device gets its own DAX window slice so devm_request_mem_region
+        // doesn't collide. Total DAX space is split equally among shares.
+        let num_shares = self.config.shared_dirs.len().max(1) as u64;
+        let per_share_dax = (crate::dax::DAX_WINDOW_SIZE / num_shares) & !0xFFF; // page-aligned
         let dax_mapper: std::sync::Arc<dyn arcbox_fs::DaxMapper> =
             std::sync::Arc::new(crate::dax::HvDaxMapper::new(dax_base));
+        let mut dax_offset: u64 = 0;
 
         for dir in &self.config.shared_dirs {
             let fs_config = arcbox_virtio::fs::FsConfig {
@@ -578,22 +582,22 @@ impl Vmm {
                 &irq_chip,
             )?;
 
-            // Configure SHM region (DAX window) on this VirtioFS device's MMIO state.
+            // Configure per-device SHM region (non-overlapping DAX window slice).
+            let this_dax_base = dax_base + dax_offset;
             if let Some(dev) = device_manager.get_registered_device(fs_device_id) {
                 if let Some(ref mmio_arc) = dev.mmio_state {
                     if let Ok(mut state) = mmio_arc.write() {
-                        state
-                            .shm_regions
-                            .push((dax_base, crate::dax::DAX_WINDOW_SIZE));
+                        state.shm_regions.push((this_dax_base, per_share_dax));
                         tracing::info!(
                             "VirtioFS '{}': DAX window at IPA {:#x}, size {}MB",
                             dir.tag,
-                            dax_base,
-                            crate::dax::DAX_WINDOW_SIZE / (1024 * 1024),
+                            this_dax_base,
+                            per_share_dax / (1024 * 1024),
                         );
                     }
                 }
             }
+            dax_offset += per_share_dax;
         }
 
         // Block devices — capture raw_fd for async I/O worker.
