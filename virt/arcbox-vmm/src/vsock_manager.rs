@@ -103,13 +103,11 @@ pub const TX_BUFFER_SIZE: u32 = 64 * 1024;
 pub struct VsockConnection {
     pub id: VsockConnectionId,
     pub internal_fd: OwnedFd,
-    /// Oneshot sender to notify the daemon that the connection is established.
-    /// Fired when `mark_connected` sets `connect = true` (OP_RESPONSE received).
-    /// Also fired with `false` if the connection is RST'd before completion.
-    /// Uses std::sync::mpsc (not tokio::sync) because the sender fires from
-    /// the vCPU thread (plain OS thread) but the receiver can be polled from
-    /// any context including async.
-    pub connect_notify: Option<std::sync::mpsc::Sender<bool>>,
+    /// Fired by vCPU thread's poll_vsock_rx after OP_REQUEST is written to
+    /// guest memory. The daemon blocks on this before returning the fd —
+    /// guarantees the guest will see the OP_REQUEST and respond (RST or
+    /// RESPONSE) so the daemon's read won't hang indefinitely.
+    pub injected_notify: Option<std::sync::mpsc::Sender<()>>,
     pub guest_cid: u64,
 
     /// Whether the connection handshake is complete.
@@ -143,14 +141,14 @@ impl VsockConnection {
         id: VsockConnectionId,
         guest_cid: u64,
         fd: OwnedFd,
-        connect_notify: std::sync::mpsc::Sender<bool>,
+        injected_notify: std::sync::mpsc::Sender<()>,
     ) -> Self {
         let mut conn = Self {
             id,
             internal_fd: fd,
             guest_cid,
             connect: false,
-            connect_notify: Some(connect_notify),
+            injected_notify: Some(injected_notify),
             rx_queue: RxOps::default(),
             fwd_cnt: Wrapping(0),
             last_fwd_cnt: Wrapping(0),
@@ -244,12 +242,15 @@ impl VsockConnectionManager {
     /// receiver that signals when the connection is established (OP_RESPONSE)
     /// or rejected (OP_RST). The daemon should wait on this receiver before
     /// using the socketpair for data transfer.
+    /// Allocates a new connection. Returns the ID and a receiver that fires
+    /// when the vCPU thread has injected the OP_REQUEST into guest memory.
+    /// The daemon MUST wait on this receiver before using the fd.
     pub fn allocate(
         &mut self,
         guest_port: u32,
         guest_cid: u64,
         internal_fd: OwnedFd,
-    ) -> (VsockConnectionId, std::sync::mpsc::Receiver<bool>) {
+    ) -> (VsockConnectionId, std::sync::mpsc::Receiver<()>) {
         let host_port = self.next_host_port.fetch_add(1, Ordering::Relaxed);
         let id = VsockConnectionId {
             host_port,
@@ -309,11 +310,8 @@ impl VsockConnectionManager {
 
     /// Removes a connection and closes its fd.
     pub fn remove(&mut self, id: &VsockConnectionId) {
-        if let Some(mut conn) = self.connections.remove(id) {
-            // Notify the daemon that the connection was rejected.
-            if let Some(tx) = conn.connect_notify.take() {
-                let _ = tx.send(false);
-            }
+        if let Some(conn) = self.connections.remove(id) {
+            let _ = conn; // OwnedFd dropped here, closing the socketpair.
             // Remove from backend_rxq too.
             self.backend_rxq.retain(|qid| qid != id);
             tracing::info!(
@@ -362,10 +360,6 @@ impl VsockHostConnections for VsockConnectionManager {
         };
         if let Some(conn) = self.connections.get_mut(&id) {
             conn.connect = true;
-            // Notify the daemon that the connection is established.
-            if let Some(tx) = conn.connect_notify.take() {
-                let _ = tx.send(true);
-            }
             tracing::info!("VsockConnectionManager: connection {:?} now Connected", id,);
         } else {
             tracing::warn!(

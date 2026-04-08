@@ -1328,18 +1328,36 @@ impl DeviceManager {
             VsockOp::Request,
         );
 
-        // The OP_REQUEST is already in backend_rxq (from allocate). The vCPU
-        // BSP thread's poll_vsock_rx will inject it on the next poll cycle.
+        // Try direct injection with retry. The vsock device may not be
+        // DRIVER_OK yet during early boot — poll until it is, up to 10s.
+        // This ensures the daemon's fd is usable immediately after return
+        // (guest will either RST or RESPONSE within one vCPU cycle).
         //
-        // We do NOT attempt direct injection here because:
-        // 1. The vsock device may not be DRIVER_OK yet (guest still booting)
-        // 2. Direct guest memory writes from the daemon thread can race with
-        //    the vCPU thread's MMIO handling
-        // 3. The poll_vsock_rx Phase 2 loop with rxq_starved interrupt ensures
-        //    deferred OP_REQUESTs are eventually delivered
-        //
-        // The caller should handle early-EOF (RST) gracefully via retry.
-        true
+        // We drain the REQUEST from backend_rxq on success to prevent
+        // poll_vsock_rx from injecting a duplicate.
+        for attempt in 0..1000 {
+            if self.inject_vsock_rx_raw(&hdr.to_bytes()) {
+                if let Ok(mut mgr) = self.vsock_connections.lock() {
+                    mgr.backend_rxq.retain(|qid| *qid != id);
+                    if let Some(conn) = mgr.get_mut(&id) {
+                        conn.rx_queue.dequeue();
+                    }
+                }
+                return true;
+            }
+            if attempt == 0 {
+                tracing::debug!(
+                    "vsock inject: device not ready, polling (guest_port={})",
+                    id.guest_port,
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        tracing::warn!(
+            "vsock inject: gave up after 10s (guest_port={}), leaving in backend_rxq",
+            id.guest_port,
+        );
+        false
     }
 
     /// Injects a raw packet into the vsock RX queue (queue 0).
@@ -2203,6 +2221,16 @@ impl DeviceManager {
 
             if written > 0 {
                 injected = true;
+
+                // Fire injected_notify for REQUEST ops — unblocks the daemon
+                // thread waiting in connect_vsock_hv.
+                if let Ok(mut mgr) = self.vsock_connections.lock() {
+                    if let Some(conn) = mgr.get_mut(&conn_id) {
+                        if let Some(tx) = conn.injected_notify.take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                }
             }
 
             // If connection still has pending ops, re-push to backend_rxq.

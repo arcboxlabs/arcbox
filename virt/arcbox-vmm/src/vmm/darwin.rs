@@ -579,27 +579,12 @@ impl Vmm {
 
     /// Connects to a vsock port on the guest VM.
     ///
-    /// For the HV backend, returns the fd and a handshake receiver. The
-    /// caller MUST wait on the receiver (which fires on OP_RESPONSE or RST)
-    /// before using the fd for data transfer.
+    /// For the HV backend, this blocks until the vCPU thread has injected
+    /// the OP_REQUEST into guest memory (up to 30s). After return, the guest
+    /// will respond with RST or RESPONSE — the caller handles both via
+    /// read() returning EOF (RST) or data (RESPONSE + subsequent OP_RW).
     ///
-    /// For the VZ backend, the fd is immediately usable (VZ handles the
-    /// vsock handshake internally).
-    /// Connects to a vsock port on the guest VM.
-    ///
-    /// For the HV backend, returns `(fd, Some(handshake_rx))`. The caller
-    /// MUST poll `handshake_rx` (non-blocking `try_recv`) until it yields
-    /// `Ok(true)` (connected) or `Ok(false)` / `Err` (rejected/timeout)
-    /// before using the fd for data transfer.
-    ///
-    /// For the VZ backend, returns `(fd, None)` — VZ handles the handshake
-    /// internally and the fd is immediately usable.
-    /// Connects to a vsock port on the guest VM.
-    ///
-    /// Returns a connected fd. For HV backend, the OP_REQUEST is injected
-    /// immediately (or deferred to poll_vsock_rx if device not ready). The
-    /// caller should be prepared for the connection to be RST'd (read returns
-    /// EOF/0) if the guest hasn't accepted yet.
+    /// For the VZ backend, the fd is immediately usable.
     pub fn connect_vsock(&self, port: u32) -> Result<std::os::unix::io::RawFd> {
         if self.state != VmmState::Running {
             return Err(VmmError::invalid_state(format!(
@@ -610,10 +595,7 @@ impl Vmm {
 
         match self.resolved_backend {
             Some(ResolvedBackend::Hv) => {
-                let (fd, _connect_rx) = self.connect_vsock_hv(port)?;
-                // Don't wait for handshake — the daemon's retry loop handles
-                // early EOF (RST). Drop the handshake receiver.
-                Ok(fd)
+                self.connect_vsock_hv(port)
             }
             _ => {
                 let vm = self

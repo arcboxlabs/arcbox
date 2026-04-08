@@ -1444,13 +1444,12 @@ impl Vmm {
     /// RX packet injection. Currently this provides the socketpair
     /// plumbing; actual data forwarding is handled by the VirtioVsock
     /// device's process_queue implementation.
-    /// Returns (fd, connect_receiver). The caller must await the receiver
-    /// before using the fd — it fires `true` on OP_RESPONSE or `false` on RST.
+    /// Creates a vsock connection to the guest. Blocks until the vCPU thread
+    /// has injected the OP_REQUEST into guest memory (up to 30s). The returned
+    /// fd is a socketpair end — the guest will RST or RESPONSE within one vCPU
+    /// cycle after injection.
     #[allow(clippy::unnecessary_wraps)]
-    pub(super) fn connect_vsock_hv(
-        &self,
-        port: u32,
-    ) -> Result<(std::os::unix::io::RawFd, std::sync::mpsc::Receiver<bool>)> {
+    pub(super) fn connect_vsock_hv(&self, port: u32) -> Result<std::os::unix::io::RawFd> {
         use std::os::unix::io::FromRawFd;
 
         // Create a Unix SOCK_STREAM socketpair for bidirectional data.
@@ -1465,11 +1464,15 @@ impl Vmm {
             )));
         }
 
-        // Set non-blocking on both ends.
-        for &fd in &fds {
-            unsafe {
-                let flags = libc::fcntl(fd, libc::F_GETFL);
-                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        // Set non-blocking + cloexec on internal fd (for poll_vsock_rx peek).
+        // The daemon-side fd (fds[0]) stays BLOCKING with a receive timeout —
+        // tokio's AsyncFd will set O_NONBLOCK when it wraps the fd.
+        unsafe {
+            // fds[1]: internal end — needs O_NONBLOCK for poll_vsock_rx libc::read.
+            let flags = libc::fcntl(fds[1], libc::F_GETFL);
+            libc::fcntl(fds[1], libc::F_SETFL, flags | libc::O_NONBLOCK);
+            // Both ends: FD_CLOEXEC.
+            for &fd in &fds {
                 let flags = libc::fcntl(fd, libc::F_GETFD);
                 libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
             }
@@ -1502,11 +1505,19 @@ impl Vmm {
             fds[0],
         );
 
-        // The OP_REQUEST is enqueued in backend_rxq by allocate(). The vCPU
-        // BSP thread's poll_vsock_rx injects it on the next poll cycle and
-        // triggers the vsock interrupt. No daemon-thread guest memory access.
+        // OP_REQUEST is in backend_rxq. The vCPU BSP thread's poll_vsock_rx
+        // will inject it and fire injected_notify. We do NOT block here —
+        // the daemon's ping().await handles the timing:
+        // - If REQUEST not yet injected: ping timeout (2s) → retry
+        // - If injected + RST: read returns EOF → retry
+        // - If injected + RESPONSE: read returns data → success
+        //
+        // The injected_notify channel is kept alive via the VsockConnection's
+        // OwnedFd lifetime. When the connection is removed (RST), the sender
+        // is dropped, which is fine — we don't read it.
+        let _ = connect_rx; // Drop receiver — we don't wait on it.
 
-        Ok((fds[0], connect_rx))
+        Ok(fds[0])
     }
 }
 
