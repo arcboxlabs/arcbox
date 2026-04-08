@@ -12,6 +12,8 @@ pub struct VirtioRng {
     features: u64,
     /// Whether the device has been activated.
     active: bool,
+    /// Last processed avail index for the request queue.
+    last_avail: usize,
 }
 
 impl VirtioRng {
@@ -23,6 +25,7 @@ impl VirtioRng {
         Self {
             features: Self::FEATURE_VERSION_1,
             active: false,
+            last_avail: 0,
         }
     }
 }
@@ -47,15 +50,13 @@ impl VirtioDevice for VirtioRng {
     }
 
     fn read_config(&self, _offset: u64, data: &mut [u8]) {
-        // RNG has no config space
+        // RNG has no config space.
         for b in data.iter_mut() {
             *b = 0;
         }
     }
 
-    fn write_config(&mut self, _offset: u64, _data: &[u8]) {
-        // No config space
-    }
+    fn write_config(&mut self, _offset: u64, _data: &[u8]) {}
 
     fn activate(&mut self) -> crate::Result<()> {
         self.active = true;
@@ -65,6 +66,90 @@ impl VirtioDevice for VirtioRng {
 
     fn reset(&mut self) {
         self.active = false;
+    }
+
+    fn process_queue(
+        &mut self,
+        queue_idx: u16,
+        memory: &mut [u8],
+        queue_config: &crate::QueueConfig,
+    ) -> crate::Result<Vec<(u16, u32)>> {
+        // Queue 0 is the only queue: guest provides empty write-only
+        // buffers, we fill them with random bytes.
+        if queue_idx != 0 || !queue_config.ready || queue_config.size == 0 {
+            return Ok(Vec::new());
+        }
+
+        let desc_addr = queue_config.desc_addr as usize;
+        let avail_addr = queue_config.avail_addr as usize;
+        let used_addr = queue_config.used_addr as usize;
+        let q_size = queue_config.size as usize;
+
+        if avail_addr + 4 > memory.len() {
+            return Ok(Vec::new());
+        }
+        let avail_idx =
+            u16::from_le_bytes([memory[avail_addr + 2], memory[avail_addr + 3]]) as usize;
+
+        let mut current = self.last_avail;
+        let mut completions = Vec::new();
+
+        while current != avail_idx {
+            let ring_off = avail_addr + 4 + 2 * (current % q_size);
+            if ring_off + 2 > memory.len() {
+                break;
+            }
+            let head_idx = u16::from_le_bytes([memory[ring_off], memory[ring_off + 1]]) as usize;
+
+            let mut filled = 0u32;
+            let mut idx = head_idx;
+            for _ in 0..q_size {
+                let d_off = desc_addr + idx * 16;
+                if d_off + 16 > memory.len() {
+                    break;
+                }
+                let addr =
+                    u64::from_le_bytes(memory[d_off..d_off + 8].try_into().unwrap()) as usize;
+                let len =
+                    u32::from_le_bytes(memory[d_off + 8..d_off + 12].try_into().unwrap()) as usize;
+                let flags = u16::from_le_bytes(memory[d_off + 12..d_off + 14].try_into().unwrap());
+                let next = u16::from_le_bytes(memory[d_off + 14..d_off + 16].try_into().unwrap());
+
+                // RNG buffers are write-only (device fills them).
+                if flags & 2 != 0 && addr + len <= memory.len() {
+                    // Fill with random bytes from host /dev/urandom.
+                    getrandom::getrandom(&mut memory[addr..addr + len]).unwrap_or_else(|_| {
+                        // Fallback: zero-fill (better than nothing).
+                        memory[addr..addr + len].fill(0);
+                    });
+                    filled += len as u32;
+                }
+
+                if flags & 1 == 0 {
+                    break;
+                }
+                idx = next as usize;
+            }
+
+            // Update used ring.
+            let used_idx_off = used_addr + 2;
+            let used_idx = u16::from_le_bytes([memory[used_idx_off], memory[used_idx_off + 1]]);
+            let used_entry = used_addr + 4 + ((used_idx as usize) % q_size) * 8;
+            if used_entry + 8 <= memory.len() {
+                memory[used_entry..used_entry + 4]
+                    .copy_from_slice(&(head_idx as u32).to_le_bytes());
+                memory[used_entry + 4..used_entry + 8].copy_from_slice(&filled.to_le_bytes());
+                std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+                let new_used = used_idx.wrapping_add(1);
+                memory[used_idx_off..used_idx_off + 2].copy_from_slice(&new_used.to_le_bytes());
+            }
+
+            completions.push((head_idx as u16, filled));
+            current += 1;
+        }
+
+        self.last_avail = current;
+        Ok(completions)
     }
 }
 

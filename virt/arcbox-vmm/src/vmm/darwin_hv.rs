@@ -16,6 +16,7 @@
 
 #[cfg(test)]
 use std::alloc::{Layout, alloc_zeroed, dealloc};
+use std::os::unix::io::{FromRawFd, OwnedFd};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -442,12 +443,21 @@ impl Vmm {
         }
 
         // Wire IRQ callback so device completions trigger GIC interrupts.
+        // For level-triggered SPIs, the callback must support both assert
+        // (level=true) and deassert (level=false) to keep the SPI in sync
+        // with the device's interrupt_status register.
         {
             let irq_chip_clone = Arc::clone(&irq_chip);
             let callback: crate::device::DeviceIrqCallback = Arc::new(move |irq, level| {
-                irq_chip_clone
-                    .trigger_irq(irq)
-                    .map_err(|e| VmmError::Irq(format!("trigger_irq({irq}, {level}): {e}")))
+                if level {
+                    irq_chip_clone
+                        .trigger_irq(irq)
+                        .map_err(|e| VmmError::Irq(format!("trigger_irq({irq}): {e}")))
+                } else {
+                    irq_chip_clone
+                        .deassert_irq(irq)
+                        .map_err(|e| VmmError::Irq(format!("deassert_irq({irq}): {e}")))
+                }
             });
             device_manager.set_irq_callback(callback);
         }
@@ -502,35 +512,61 @@ impl Vmm {
             )?;
         }
 
-        // Block devices
+        // Block devices — capture raw_fd for async I/O worker.
         for block_dev in &self.config.block_devices {
             let blk =
                 arcbox_virtio::blk::VirtioBlock::from_path(&block_dev.path, block_dev.read_only)
                     .map_err(|e| VmmError::Device(format!("block device: {e}")))?;
+            let raw_fd = blk.raw_fd().unwrap_or(-1);
+            let blk_size = blk.blk_size();
+            let read_only = blk.is_read_only();
+            let dev_id_str = blk.device_id_string().to_string();
             let name = format!("virtio-blk-{}", block_dev.path.display());
-            device_manager.register_virtio_device(
+            let device_id = device_manager.register_virtio_device(
                 DeviceType::VirtioBlock,
                 name,
                 blk,
                 &mut memory_manager,
                 &irq_chip,
             )?;
+            if raw_fd >= 0 {
+                self.hv_blk_devices
+                    .push((device_id, raw_fd, blk_size, read_only, dev_id_str));
+            }
         }
 
-        // Network (TSO-enabled)
+        // Network (TSO-enabled) with custom socket-proxy datapath.
+        // Creates a SOCK_DGRAM socketpair: one end feeds the VirtioNet device
+        // (via DeviceManager TX/RX bridging), the other end goes to the same
+        // NetworkDatapath used by the VZ path (DHCP, DNS, NAT, TCP proxy).
         if self.config.networking {
             let net_config = arcbox_virtio::net::NetConfig {
                 mac: arcbox_virtio::net::NetConfig::random_mac(),
                 ..Default::default()
             };
             let mut net_dev = arcbox_virtio::net::VirtioNet::new(net_config);
-            // Enable TSO for the custom VMM path — this is the whole point of
-            // using Hypervisor.framework instead of VZ framework.
             net_dev.enable_tso_features();
             device_manager.register_virtio_device(
                 DeviceType::VirtioNet,
                 "virtio-net",
                 net_dev,
+                &mut memory_manager,
+                &irq_chip,
+            )?;
+
+            // Set up the network datapath (reuses VZ path's entire stack).
+            self.create_hv_network_datapath(&mut device_manager)?;
+        }
+
+        // Entropy (RNG) — provides /dev/hwrng to the guest. Without this,
+        // the kernel's crng never initializes and dockerd blocks on
+        // /dev/urandom indefinitely.
+        {
+            let rng_dev = arcbox_virtio::rng::VirtioRng::new();
+            device_manager.register_virtio_device(
+                DeviceType::VirtioRng,
+                "virtio-rng",
+                rng_dev,
                 &mut memory_manager,
                 &irq_chip,
             )?;
@@ -745,7 +781,7 @@ impl Vmm {
                 fdt.property("reg", &dev_reg).map_err(fdt_err)?;
                 // GIC SPI numbering: FDT SPI number = INTID - 32.
                 // hv_gic_set_spi uses INTID directly (starting at 32).
-                fdt.property_array_u32("interrupts", &[0, entry.irq.saturating_sub(32), 1])
+                fdt.property_array_u32("interrupts", &[0, entry.irq.saturating_sub(32), 4])
                     .map_err(fdt_err)?; // SPI, edge
                 fdt.property_null("dma-coherent").map_err(fdt_err)?;
                 fdt.end_node(node).map_err(fdt_err)?;
@@ -811,11 +847,82 @@ impl Vmm {
             .hv_fdt_addr
             .ok_or_else(|| VmmError::config("HV FDT address not set".to_string()))?;
 
-        let device_manager = Arc::new(
+        let mut device_manager = Arc::new(
             self.device_manager
                 .take()
                 .ok_or_else(|| VmmError::config("device manager not initialized".to_string()))?,
         );
+
+        // Spawn async block I/O worker threads (one per block device).
+        // Uses device info captured during initialize_darwin_hv.
+        // Must happen before Arc is cloned to other threads.
+        {
+            let dm = Arc::get_mut(&mut device_manager).expect("single Arc ref");
+            let (guest_ptr, guest_len) = if let (Some(base), size, gpa) = (
+                dm.guest_ram_base_ptr(),
+                dm.guest_ram_size(),
+                dm.guest_ram_gpa(),
+            ) {
+                let gpa = gpa as usize;
+                (unsafe { base.sub(gpa) }, gpa + size)
+            } else {
+                (std::ptr::null_mut(), 0)
+            };
+
+            // Collect IRQ info for each block device before spawning workers.
+            let blk_infos = std::mem::take(&mut self.hv_blk_devices)
+                .into_iter()
+                .filter_map(|(dev_id, raw_fd, blk_size, read_only, dev_id_str)| {
+                    let dev = dm.get_registered_device(dev_id)?;
+                    let irq = dev.info.irq?;
+                    let mmio_state = dev.mmio_state.as_ref()?.clone();
+                    Some((
+                        dev_id, raw_fd, blk_size, read_only, dev_id_str, irq, mmio_state,
+                    ))
+                })
+                .collect::<Vec<_>>();
+
+            for (dev_id, raw_fd, blk_size, read_only, dev_id_str, irq, mmio_state) in blk_infos {
+                let (tx, rx) = std::sync::mpsc::channel::<crate::blk_worker::BlkWorkItem>();
+
+                // Queue config will be filled when the guest activates the device.
+                // For now use zeros — the worker only needs used_addr/avail_addr/queue_size
+                let worker_ctx = crate::blk_worker::BlkWorkerContext {
+                    guest_mem: unsafe {
+                        crate::blk_worker::GuestMemWriter::new(guest_ptr, guest_len)
+                    },
+                    raw_fd,
+                    blk_size,
+                    read_only,
+                    device_id: dev_id_str.clone(),
+                    mmio_state,
+                    irq_callback: dm.irq_callback_clone().unwrap_or_else(|| {
+                        Arc::new(|_: crate::irq::Irq, _: bool| -> crate::error::Result<()> {
+                            Ok(())
+                        })
+                    }),
+                    irq,
+                    running: self.running.clone(),
+                };
+
+                let thread_name = format!("blk-io-{}", dev_id_str);
+                match std::thread::Builder::new()
+                    .name(thread_name.clone())
+                    .spawn(move || {
+                        crate::blk_worker::blk_io_worker_loop(worker_ctx, rx);
+                    }) {
+                    Ok(t) => {
+                        self.hv_blk_worker_threads.push(t);
+                        dm.set_blk_worker(dev_id, tx);
+                        tracing::info!("Spawned async block I/O worker: {}", dev_id_str);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to spawn blk worker {}: {}", thread_name, e);
+                    }
+                }
+            }
+        }
+
         // Store a shared reference for connect_vsock_hv to use after start.
         self.hv_device_manager = Some(Arc::clone(&device_manager));
         let running = self.running.clone();
@@ -939,6 +1046,132 @@ impl Vmm {
         Ok(())
     }
 
+    /// Creates the network datapath for the HV backend.
+    ///
+    /// Sets up a SOCK_DGRAM socketpair. One end is registered with DeviceManager
+    /// for VirtioNet TX/RX bridging. The other end feeds NetworkDatapath (the
+    /// same stack used by VZ: DHCP, DNS, socket proxy, TCP bridge).
+    fn create_hv_network_datapath(
+        &mut self,
+        device_manager: &mut crate::device::DeviceManager,
+    ) -> Result<()> {
+        use arcbox_net::darwin::datapath_loop::NetworkDatapath;
+        use arcbox_net::darwin::inbound_relay::InboundListenerManager;
+        use arcbox_net::darwin::socket_proxy::SocketProxy;
+        use arcbox_net::dhcp::{DhcpConfig, DhcpServer};
+        use arcbox_net::dns::{DnsConfig, DnsForwarder};
+        use std::net::Ipv4Addr;
+
+        let gateway_ip = Ipv4Addr::new(10, 0, 2, 1);
+        let guest_ip = Ipv4Addr::new(10, 0, 2, 2);
+        let netmask = Ipv4Addr::new(255, 255, 255, 0);
+        let gateway_mac: [u8; 6] = [0x02, 0xAB, 0xCD, 0x00, 0x00, 0x01];
+
+        // 1. Create a SOCK_DGRAM socketpair for L2 Ethernet frame exchange.
+        let mut fds: [libc::c_int; 2] = [0; 2];
+        // SAFETY: socketpair with valid parameters.
+        let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
+        if ret != 0 {
+            return Err(VmmError::Device(format!(
+                "net socketpair failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        // fds[0] = HV side (DeviceManager reads/writes raw ethernet frames)
+        // fds[1] = datapath side (NetworkDatapath reads/writes)
+        let hv_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let host_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+
+        // Set large socket buffers and non-blocking on HV side.
+        unsafe {
+            let buf_size: libc::c_int = 8 * 1024 * 1024;
+            libc::setsockopt(
+                hv_fd.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&raw const buf_size).cast::<libc::c_void>(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+            libc::setsockopt(
+                hv_fd.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                (&raw const buf_size).cast::<libc::c_void>(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+            let flags = libc::fcntl(hv_fd.as_raw_fd(), libc::F_GETFL, 0);
+            libc::fcntl(hv_fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+
+        // Register the HV-side fd with DeviceManager for TX/RX bridging.
+        device_manager.set_net_host_fd(hv_fd.as_raw_fd());
+
+        // 2. Cancellation token.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        self.net_cancel = Some(cancel.clone());
+
+        // 3. Create socket proxy and channels.
+        let (reply_tx, reply_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(256);
+        let socket_proxy =
+            SocketProxy::new(gateway_ip, gateway_mac, guest_ip, reply_tx, cancel.clone());
+
+        self.inbound_listener_manager = Some(InboundListenerManager::new(cmd_tx));
+
+        // 4. Create DHCP + DNS.
+        let dhcp_config = DhcpConfig::new(gateway_ip, netmask)
+            .with_pool_range(guest_ip, Ipv4Addr::new(10, 0, 2, 254))
+            .with_dns_servers(vec![gateway_ip]);
+        let dhcp_server = DhcpServer::new(dhcp_config);
+
+        let dns_config = DnsConfig::new(gateway_ip);
+        let dns_forwarder = if let Some(ref shared_table) = self.shared_dns_hosts {
+            DnsForwarder::with_shared_hosts(dns_config, std::sync::Arc::clone(shared_table))
+        } else {
+            DnsForwarder::new(dns_config)
+        };
+
+        // 5. Build and spawn the datapath.
+        let net_mtu = arcbox_net::darwin::smoltcp_device::ENHANCED_ETHERNET_MTU;
+        let datapath = NetworkDatapath::new(
+            host_fd,
+            socket_proxy,
+            reply_rx,
+            cmd_rx,
+            dhcp_server,
+            dns_forwarder,
+            gateway_ip,
+            guest_ip,
+            gateway_mac,
+            cancel,
+            net_mtu,
+        );
+
+        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
+            VmmError::Device(format!(
+                "tokio runtime not available for network datapath: {e}"
+            ))
+        })?;
+
+        runtime.spawn(async move {
+            if let Err(e) = datapath.run().await {
+                tracing::error!("HV network datapath exited with error: {}", e);
+            }
+        });
+
+        // Keep the HV-side fd alive for VM lifetime.
+        self.hv_net_fd = Some(hv_fd);
+
+        tracing::info!(
+            "HV network datapath: gateway={}, guest={}, MTU={}",
+            gateway_ip,
+            guest_ip,
+            net_mtu,
+        );
+        Ok(())
+    }
+
     /// Connects to a vsock port on the guest VM (HV backend).
     ///
     /// Creates a Unix socketpair. One end is returned to the caller for
@@ -977,49 +1210,36 @@ impl Vmm {
         }
 
         // fds[0] = returned to caller (daemon agent client)
-        // fds[1] = internal, stored for vsock forwarding
+        // fds[1] = internal, owned by VsockConnectionManager
         // SAFETY: fds are valid from socketpair.
-        let internal_fd = unsafe { std::os::unix::io::OwnedFd::from_raw_fd(fds[1]) };
+        let internal_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
 
-        let internal_raw_fd = internal_fd.as_raw_fd();
-
-        // Register the fd and wait for connection to be established.
         if let Some(ref dm) = self.hv_device_manager {
-            if let Ok(mut fds_map) = dm.vsock_host_fds().lock() {
-                fds_map.insert(port, internal_raw_fd);
-            }
-
-            // Queue an OP_REQUEST. It will be injected by poll_vsock_rx
-            // when the device is ready and RX descriptors are available.
-            // The daemon's wait_for_agent retry loop handles the case where
-            // the guest agent hasn't started listening yet.
             let guest_cid = self.config.guest_cid.unwrap_or(3) as u64;
-            if dm.inject_vsock_connect(port, guest_cid) {
-                // Trigger IRQ so guest processes the RX queue.
-                for dev in dm.iter() {
-                    if dev.device_type == crate::device::DeviceType::VirtioVsock {
-                        if let Some(irq) = dev.irq {
-                            if let Some(state) = dm.get_mmio_state(dev.id) {
-                                if let Ok(mut s) = state.write() {
-                                    s.trigger_interrupt(1);
-                                }
-                            }
-                            dm.trigger_irq_callback(irq, true);
-                        }
-                        break;
-                    }
-                }
+
+            // Allocate a connection with a unique ephemeral host port.
+            // The manager takes ownership of internal_fd (no mem::forget needed).
+            let conn_id = {
+                let conns = dm.vsock_connections();
+                let mut mgr = conns
+                    .lock()
+                    .map_err(|e| VmmError::Device(format!("vsock manager lock failed: {e}")))?;
+                mgr.allocate(port, guest_cid, internal_fd)
+            };
+
+            tracing::info!(
+                "HV vsock connect: guest_port={}, host_port={}, host_fd={}",
+                port,
+                conn_id.host_port,
+                fds[0],
+            );
+
+            // Inject OP_REQUEST. If device isn't ready, the manager's
+            // pending list ensures deferred injection via poll_vsock_rx.
+            if dm.inject_vsock_connect(conn_id, guest_cid) {
+                dm.raise_interrupt_for(crate::device::DeviceType::VirtioVsock, 1);
             }
         }
-        // Forget OwnedFd so the fd stays open.
-        std::mem::forget(internal_fd);
-
-        tracing::info!(
-            "HV vsock connect: port={}, host_fd={}, internal_fd={}",
-            port,
-            fds[0],
-            internal_raw_fd,
-        );
 
         Ok(fds[0])
     }
@@ -1148,22 +1368,16 @@ fn vcpu_run_loop(
             break;
         }
 
-        // Poll vsock host fds for pending connect requests and incoming data.
-        // Only BSP (vCPU 0) handles vsock polling to avoid contention.
-        if vcpu_id == 0 && device_manager.poll_vsock_rx() {
-            for dev in device_manager.iter() {
-                if dev.device_type == crate::device::DeviceType::VirtioVsock {
-                    if let Some(irq) = dev.irq {
-                        if let Some(state) = device_manager.get_mmio_state(dev.id) {
-                            if let Ok(mut s) = state.write() {
-                                s.trigger_interrupt(1);
-                            }
-                        }
-                        device_manager.trigger_irq_callback(irq, true);
-                        tracing::info!("Vsock RX: triggered IRQ {irq} after poll_vsock_rx");
-                    }
-                    break;
-                }
+        // BSP (vCPU 0) handles all device polling to avoid lock contention.
+        if vcpu_id == 0 {
+            if device_manager.poll_vsock_rx() {
+                device_manager.raise_interrupt_for(
+                    crate::device::DeviceType::VirtioVsock,
+                    1, // INT_VRING
+                );
+            }
+            if device_manager.poll_net_rx() {
+                device_manager.raise_interrupt_for(crate::device::DeviceType::VirtioNet, 1);
             }
         }
 

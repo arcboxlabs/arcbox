@@ -60,6 +60,7 @@
 //!
 //! vm.run().await?;
 //! ```
+pub mod blk_worker;
 pub mod boot;
 pub mod builder;
 pub mod device;
@@ -71,6 +72,7 @@ pub mod memory;
 pub mod snapshot;
 pub mod vcpu;
 pub mod vmm;
+pub mod vsock_manager;
 
 pub use boot::{BootParams, KernelLoader, KernelType};
 pub use builder::{VmBuilder, VmInstance};

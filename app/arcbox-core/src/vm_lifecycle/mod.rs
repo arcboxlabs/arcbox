@@ -337,6 +337,44 @@ impl VmLifecycleManager {
         })?;
 
         if current_len.len() < size_bytes {
+            // Pre-allocate the image file on macOS (APFS). This eliminates
+            // host-side space allocation overhead on every guest write,
+            // preventing double-CoW amplification (Btrfs CoW + APFS CoW).
+            #[cfg(target_os = "macos")]
+            {
+                use std::os::unix::io::AsRawFd;
+                let fd = file.as_raw_fd();
+                // fstore_t: fst_flags, fst_posmode, fst_offset, fst_length, fst_bytesalloc
+                #[repr(C)]
+                struct FStore {
+                    fst_flags: u32,
+                    fst_posmode: i32,
+                    fst_offset: i64,
+                    fst_length: i64,
+                    fst_bytesalloc: i64,
+                }
+                const F_ALLOCATEALL: u32 = 0x00000004;
+                const F_PEOFPOSMODE: i32 = 3;
+                const F_PREALLOCATE: libc::c_int = 42;
+                let mut store = FStore {
+                    fst_flags: F_ALLOCATEALL,
+                    fst_posmode: F_PEOFPOSMODE,
+                    fst_offset: 0,
+                    fst_length: size_bytes as i64,
+                    fst_bytesalloc: 0,
+                };
+                // Best-effort: if pre-allocation fails (e.g. not enough disk
+                // space), fall through to ftruncate which creates a sparse file.
+                let ret = unsafe { libc::fcntl(fd, F_PREALLOCATE, &mut store) };
+                if ret == 0 {
+                    tracing::info!(
+                        path = %path.display(),
+                        allocated_bytes = store.fst_bytesalloc,
+                        "pre-allocated docker data image (APFS)"
+                    );
+                }
+            }
+
             file.set_len(size_bytes).map_err(|e| {
                 CoreError::config(format!(
                     "failed to resize block image '{}': {}",
@@ -344,7 +382,6 @@ impl VmLifecycleManager {
                     e
                 ))
             })?;
-            let _ = file.seek(SeekFrom::Start(size_bytes.saturating_sub(1)));
         }
 
         if !file_exists {

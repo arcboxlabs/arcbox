@@ -592,6 +592,7 @@ dependencies = [
  "arcbox-hypervisor",
  "async-trait",
  "bytes",
+ "getrandom 0.2.17",
  "libc",
  "rayon",
  "tempfile",

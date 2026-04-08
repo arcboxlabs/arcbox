@@ -108,6 +108,9 @@ impl ResponseBuilder {
 
     /// Writes an error response.
     pub fn write_error(&mut self, unique: u64, errno: i32) {
+        if errno != 0 {
+            tracing::debug!("FUSE: error response unique={} errno={}", unique, -errno);
+        }
         self.buffer.clear();
         let header = FuseOutHeader::error(unique, errno);
         self.write_struct(&header);
@@ -230,6 +233,13 @@ impl FuseDispatcher {
         let ctx = RequestContext::from(&header);
         let mut response = ResponseBuilder::new();
 
+        tracing::debug!(
+            "FUSE: {:?} nodeid={} unique={}",
+            opcode,
+            ctx.nodeid,
+            ctx.unique
+        );
+
         // Dispatch to handler
         match opcode {
             FuseOpcode::Init => self.handle_init(&ctx, body, &mut response),
@@ -266,7 +276,11 @@ impl FuseDispatcher {
             FuseOpcode::Lseek => self.handle_lseek(&ctx, body, &mut response),
             FuseOpcode::Fallocate => self.handle_fallocate(&ctx, body, &mut response),
             _ => {
-                // Unsupported operation
+                tracing::warn!(
+                    "FUSE: unsupported opcode {:?} ({}), returning ENOSYS",
+                    opcode,
+                    header.opcode
+                );
                 response.write_error(ctx.unique, libc::ENOSYS);
             }
         }

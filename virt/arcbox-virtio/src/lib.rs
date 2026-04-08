@@ -183,7 +183,7 @@ pub trait VirtioDevice: Send + Sync {
 /// All addresses are guest physical addresses (GPAs). The `memory` slice
 /// passed to [`VirtioDevice::process_queue`] starts at `gpa_base`, so
 /// devices must subtract `gpa_base` to convert a GPA to a slice index.
-#[derive(Debug, Clone, Default)]
+#[derive(Default)]
 pub struct QueueConfig {
     /// Guest physical address of the descriptor table.
     pub desc_addr: u64,
@@ -198,14 +198,24 @@ pub struct QueueConfig {
     /// GPA of the start of the guest memory slice. Devices must subtract
     /// this from descriptor addresses to get slice offsets.
     pub gpa_base: u64,
-    /// Vsock host connection fds (port → fd). Shared with DeviceManager.
-    /// Only used by VirtioVsock; None for other devices.
-    pub vsock_host_fds: Option<
-        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u32, std::os::unix::io::RawFd>>>,
-    >,
-    /// Vsock ports where connections are established.
-    pub vsock_connected_ports:
-        Option<std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u32>>>>,
+    /// Host-side vsock connection manager. Only used by VirtioVsock on the
+    /// HV backend; None for other devices and on the VZ backend.
+    pub vsock_connections:
+        Option<std::sync::Arc<std::sync::Mutex<dyn crate::vsock::VsockHostConnections>>>,
+}
+
+impl std::fmt::Debug for QueueConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QueueConfig")
+            .field("desc_addr", &self.desc_addr)
+            .field("avail_addr", &self.avail_addr)
+            .field("used_addr", &self.used_addr)
+            .field("size", &self.size)
+            .field("ready", &self.ready)
+            .field("gpa_base", &self.gpa_base)
+            .field("vsock_connections", &self.vsock_connections.is_some())
+            .finish()
+    }
 }
 
 #[cfg(test)]

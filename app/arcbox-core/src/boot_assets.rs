@@ -149,7 +149,7 @@ impl BootAssets {
     /// Default kernel command line for EROFS rootfs boot.
     #[must_use]
     pub fn default_cmdline() -> String {
-        "console=hvc0 root=/dev/vda ro rootfstype=erofs earlycon iommu.passthrough=1 iommu=off swiotlb=noforce".to_string()
+        "console=hvc0 root=/dev/vda ro rootfstype=erofs earlycon swiotlb=noforce".to_string()
     }
 }
 

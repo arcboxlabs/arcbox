@@ -9,7 +9,6 @@
 //! - Memory-mapped I/O for zero-copy operations
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -522,8 +521,10 @@ pub struct VirtioBlock {
     config: BlockConfig,
     features: u64,
     acked_features: u64,
-    /// Backing file handle.
+    /// Backing file handle (for flush/close).
     file: Option<Arc<RwLock<File>>>,
+    /// Raw fd for pread/pwrite — avoids seek+lock on every I/O.
+    raw_fd: Option<std::os::unix::io::RawFd>,
     /// Request queue.
     queue: Option<VirtQueue>,
     /// Device ID string.
@@ -588,6 +589,7 @@ impl VirtioBlock {
             features,
             acked_features: 0,
             file: None,
+            raw_fd: None,
             queue: None,
             device_id,
             last_avail_idx: 0,
@@ -621,7 +623,17 @@ impl VirtioBlock {
             read_only,
         };
 
+        use std::os::unix::io::AsRawFd;
+        let fd = file.as_raw_fd();
+
+        // Disable page cache on macOS for large disk images.
+        #[cfg(target_os = "macos")]
+        unsafe {
+            libc::fcntl(fd, libc::F_NOCACHE, 1);
+        }
+
         let mut device = Self::new(config);
+        device.raw_fd = Some(fd);
         device.file = Some(Arc::new(RwLock::new(file)));
 
         tracing::info!(
@@ -638,6 +650,30 @@ impl VirtioBlock {
     #[must_use]
     pub fn capacity_bytes(&self) -> u64 {
         self.config.capacity * u64::from(self.config.blk_size)
+    }
+
+    /// Returns the raw fd for pread/pwrite (if activated).
+    #[must_use]
+    pub fn raw_fd(&self) -> Option<std::os::unix::io::RawFd> {
+        self.raw_fd
+    }
+
+    /// Returns the block size in bytes.
+    #[must_use]
+    pub fn blk_size(&self) -> u32 {
+        self.config.blk_size
+    }
+
+    /// Returns true if the device is read-only.
+    #[must_use]
+    pub fn is_read_only(&self) -> bool {
+        self.config.read_only
+    }
+
+    /// Returns the device ID string.
+    #[must_use]
+    pub fn device_id_string(&self) -> &str {
+        &self.device_id
     }
 
     /// Handles a block request.
@@ -659,52 +695,56 @@ impl VirtioBlock {
         }
     }
 
+    /// Reads from disk using pread — no seek, no lock, position-independent.
     fn handle_read(&self, sector: u64, data: &mut [u8]) -> Result<usize> {
-        let file = self
-            .file
-            .as_ref()
+        let fd = self
+            .raw_fd
             .ok_or_else(|| VirtioError::NotReady("Block device not activated".into()))?;
 
-        let mut file = file
-            .write()
-            .map_err(|e| VirtioError::Io(format!("Failed to lock file: {e}")))?;
-
-        let offset = sector * u64::from(self.config.blk_size);
-        file.seek(SeekFrom::Start(offset))
-            .map_err(|e| VirtioError::Io(format!("Seek failed: {e}")))?;
-
-        let bytes_read = file
-            .read(data)
-            .map_err(|e| VirtioError::Io(format!("Read failed: {e}")))?;
-
-        tracing::trace!("Read {} bytes from sector {}", bytes_read, sector);
-        Ok(bytes_read)
+        #[allow(clippy::cast_possible_wrap)]
+        let offset = (sector * u64::from(self.config.blk_size)) as libc::off_t;
+        // SAFETY: fd is valid, data is a valid mutable buffer.
+        let n = unsafe {
+            libc::pread(
+                fd,
+                data.as_mut_ptr().cast::<libc::c_void>(),
+                data.len(),
+                offset,
+            )
+        };
+        if n < 0 {
+            return Err(VirtioError::Io(format!(
+                "pread failed at sector {}: {}",
+                sector,
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(n as usize)
     }
 
+    /// Writes to disk using pwrite — no seek, no lock, position-independent.
     fn handle_write(&self, sector: u64, data: &[u8]) -> Result<usize> {
         if self.config.read_only {
             return Err(VirtioError::InvalidOperation("Device is read-only".into()));
         }
 
-        let file = self
-            .file
-            .as_ref()
+        let fd = self
+            .raw_fd
             .ok_or_else(|| VirtioError::NotReady("Block device not activated".into()))?;
 
-        let mut file = file
-            .write()
-            .map_err(|e| VirtioError::Io(format!("Failed to lock file: {e}")))?;
-
-        let offset = sector * u64::from(self.config.blk_size);
-        file.seek(SeekFrom::Start(offset))
-            .map_err(|e| VirtioError::Io(format!("Seek failed: {e}")))?;
-
-        let bytes_written = file
-            .write(data)
-            .map_err(|e| VirtioError::Io(format!("Write failed: {e}")))?;
-
-        tracing::trace!("Wrote {} bytes to sector {}", bytes_written, sector);
-        Ok(bytes_written)
+        #[allow(clippy::cast_possible_wrap)]
+        let offset = (sector * u64::from(self.config.blk_size)) as libc::off_t;
+        // SAFETY: fd is valid, data is a valid buffer.
+        let n =
+            unsafe { libc::pwrite(fd, data.as_ptr().cast::<libc::c_void>(), data.len(), offset) };
+        if n < 0 {
+            return Err(VirtioError::Io(format!(
+                "pwrite failed at sector {}: {}",
+                sector,
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(n as usize)
     }
 
     fn handle_flush(&self) -> Result<usize> {
@@ -879,6 +919,15 @@ impl VirtioDevice for VirtioBlock {
                     ))
                 })?;
 
+            use std::os::unix::io::AsRawFd;
+            let fd = file.as_raw_fd();
+
+            // Note: F_NOCACHE is intentionally NOT set for data disks.
+            // Container metadata scanning benefits from page cache warmup.
+            // The pread/pwrite path (no seek, no RwLock) is the main
+            // performance win over the old seek+lock+read pattern.
+
+            self.raw_fd = Some(fd);
             self.file = Some(Arc::new(RwLock::new(file)));
         }
 

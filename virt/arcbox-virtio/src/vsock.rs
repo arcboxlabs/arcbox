@@ -243,14 +243,12 @@ impl VirtioVsock {
         &self,
         hdr: &VsockHeader,
         payload: &[u8],
-        host_fds: Option<&HashMap<u32, std::os::unix::io::RawFd>>,
-        connected_ports: Option<&std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u32>>>>,
+        connections: Option<&mut dyn VsockHostConnections>,
     ) {
-        // Copy packed fields to locals to avoid unaligned references.
-        let src_cid = { hdr.src_cid };
-        let src_port = { hdr.src_port };
-        let dst_cid = { hdr.dst_cid };
-        let dst_port = { hdr.dst_port };
+        let src_cid = hdr.src_cid;
+        let src_port = hdr.src_port;
+        let dst_cid = hdr.dst_cid;
+        let dst_port = hdr.dst_port;
 
         match hdr.operation() {
             Some(VsockOp::Request) => {
@@ -263,20 +261,23 @@ impl VirtioVsock {
                 );
             }
             Some(VsockOp::Response) => {
+                // Guest accepted a host-initiated connection.
+                // src_port = guest port, dst_port = host ephemeral port.
                 tracing::info!(
-                    "Vsock TX: OP_RESPONSE — connection established for port {src_port}"
+                    "Vsock TX: OP_RESPONSE — connection established (guest_port={}, host_port={})",
+                    src_port,
+                    dst_port,
                 );
-                if let Some(cp) = connected_ports {
-                    if let Ok(mut set) = cp.lock() {
-                        set.insert(src_port);
-                    }
+                if let Some(conns) = connections {
+                    conns.mark_connected(src_port, dst_port);
                 }
             }
             Some(VsockOp::Rw) => {
-                if let Some(fds) = host_fds {
-                    if let Some(&fd) = fds.get(&dst_port) {
+                // Guest sends data. src_port = guest port, dst_port = host port.
+                if let Some(conns) = &connections {
+                    if let Some(fd) = conns.fd_for(src_port, dst_port) {
                         if !payload.is_empty() {
-                            // SAFETY: fd is a valid connected socket.
+                            // SAFETY: fd is a valid connected socket from the manager.
                             let written = unsafe {
                                 libc::write(
                                     fd,
@@ -285,8 +286,9 @@ impl VirtioVsock {
                                 )
                             };
                             if written > 0 {
-                                tracing::trace!(
-                                    "Vsock TX: OP_RW port {} -> fd {fd}, {} bytes",
+                                tracing::debug!(
+                                    "Vsock TX: OP_RW guest_port={} host_port={} -> fd {fd}, {} bytes",
+                                    src_port,
                                     dst_port,
                                     written,
                                 );
@@ -297,11 +299,24 @@ impl VirtioVsock {
                                 );
                             }
                         }
+                    } else {
+                        tracing::warn!(
+                            "Vsock TX: OP_RW no host fd for guest_port={} host_port={}",
+                            src_port,
+                            dst_port,
+                        );
                     }
                 }
             }
             Some(VsockOp::Shutdown | VsockOp::Rst) => {
-                tracing::debug!("Vsock TX: connection closed for port {dst_port}");
+                tracing::debug!(
+                    "Vsock TX: connection closed guest_port={} host_port={}",
+                    src_port,
+                    dst_port,
+                );
+                if let Some(conns) = connections {
+                    conns.remove_connection(src_port, dst_port);
+                }
             }
             Some(VsockOp::CreditUpdate | VsockOp::CreditRequest) => {}
             _ => {}
@@ -712,18 +727,37 @@ impl VirtioDevice for VirtioVsock {
             // Parse vsock header (44 bytes) and forward via host fds.
             if packet_data.len() >= VsockHeader::SIZE {
                 if let Some(hdr) = VsockHeader::from_bytes(&packet_data[..VsockHeader::SIZE]) {
-                    let payload = &packet_data[VsockHeader::SIZE..];
-                    let host_fds = queue_config
-                        .vsock_host_fds
-                        .as_ref()
-                        .and_then(|m| m.lock().ok());
-                    self.handle_tx_packet_with_fds(
-                        &hdr,
-                        payload,
-                        host_fds.as_deref(),
-                        queue_config.vsock_connected_ports.as_ref(),
+                    let op_val = { hdr.op };
+                    let src_cid = { hdr.src_cid };
+                    let dst_cid = { hdr.dst_cid };
+                    let src_port = { hdr.src_port };
+                    let dst_port = { hdr.dst_port };
+                    tracing::info!(
+                        "Vsock TX: op={} src={}:{} dst={}:{} len={} (packet_data={} bytes)",
+                        op_val,
+                        src_cid,
+                        src_port,
+                        dst_cid,
+                        dst_port,
+                        { hdr.len },
+                        packet_data.len(),
                     );
+
+                    let payload = &packet_data[VsockHeader::SIZE..];
+                    if let Some(ref conns_arc) = queue_config.vsock_connections {
+                        if let Ok(mut conns) = conns_arc.lock() {
+                            self.handle_tx_packet_with_fds(&hdr, payload, Some(&mut *conns));
+                        }
+                    } else {
+                        self.handle_tx_packet_with_fds(&hdr, payload, None);
+                    }
                 }
+            } else {
+                tracing::warn!(
+                    "Vsock TX: packet too short ({} bytes < {} header), skipping",
+                    packet_data.len(),
+                    VsockHeader::SIZE,
+                );
             }
 
             // Update used ring.
@@ -755,6 +789,26 @@ impl VirtioDevice for VirtioVsock {
         self.last_avail_idx_tx = current_avail;
         Ok(completions)
     }
+}
+
+// ============================================================================
+// Host-Side Connection Management Trait
+// ============================================================================
+
+/// Abstracts host-side vsock connection tracking for the HV backend.
+///
+/// The VZ backend handles connections natively via Virtualization.framework.
+/// For the HV backend, a concrete `VsockConnectionManager` (in arcbox-vmm)
+/// implements this trait and is shared with VirtioVsock via QueueConfig.
+pub trait VsockHostConnections: Send + Sync {
+    /// Returns the host fd for a connection identified by (guest_port, host_port).
+    fn fd_for(&self, guest_port: u32, host_port: u32) -> Option<std::os::unix::io::RawFd>;
+
+    /// Marks a connection as established (called when OP_RESPONSE is received).
+    fn mark_connected(&mut self, guest_port: u32, host_port: u32);
+
+    /// Removes a connection and closes the associated fd (called on OP_RST).
+    fn remove_connection(&mut self, guest_port: u32, host_port: u32);
 }
 
 /// Vsock address.

@@ -292,6 +292,17 @@ pub struct Vmm {
     /// Used by connect_vsock_hv to inject OP_REQUEST packets after VM starts.
     #[cfg(target_os = "macos")]
     hv_device_manager: Option<std::sync::Arc<DeviceManager>>,
+    /// HV-side network fd. Paired with the NetworkDatapath fd.
+    /// Kept alive so the socketpair stays open while the VM runs.
+    #[cfg(target_os = "macos")]
+    hv_net_fd: Option<OwnedFd>,
+    /// Block device info captured during initialize for worker thread spawn.
+    /// (DeviceId, raw_fd, blk_size, read_only, device_id_string)
+    #[cfg(target_os = "macos")]
+    hv_blk_devices: Vec<(crate::device::DeviceId, i32, u32, bool, String)>,
+    /// Block I/O worker thread handles for join on shutdown.
+    #[cfg(target_os = "macos")]
+    hv_blk_worker_threads: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl Vmm {
@@ -377,6 +388,12 @@ impl Vmm {
             resolved_backend: None,
             #[cfg(target_os = "macos")]
             hv_device_manager: None,
+            #[cfg(target_os = "macos")]
+            hv_net_fd: None,
+            #[cfg(target_os = "macos")]
+            hv_blk_devices: Vec::new(),
+            #[cfg(target_os = "macos")]
+            hv_blk_worker_threads: Vec::new(),
         })
     }
 

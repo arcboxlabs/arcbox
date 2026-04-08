@@ -344,19 +344,26 @@ impl IrqChip {
     ///
     /// Returns an error if no IRQ is available.
     pub fn allocate_irq(&self) -> Result<Irq> {
+        self.allocate_irq_inner(TriggerMode::Edge)
+    }
+
+    /// Allocates an IRQ with level-triggered mode.
+    /// Used for VirtIO MMIO devices on ARM64 where the GIC SPI level must
+    /// track the device's interrupt_status register.
+    pub fn allocate_level_irq(&self) -> Result<Irq> {
+        self.allocate_irq_inner(TriggerMode::Level)
+    }
+
+    fn allocate_irq_inner(&self, trigger_mode: TriggerMode) -> Result<Irq> {
         let irq = self.next_irq.fetch_add(1, Ordering::SeqCst);
         if irq >= MAX_IRQS {
             return Err(crate::error::VmmError::Irq("IRQ exhausted".to_string()));
         }
 
-        // Map IRQ N to GSI N directly. On ARM64 GIC the callback receives the
-        // raw SPI INTID which must equal the IRQ number. On x86/KVM the kernel
-        // IOAPIC handles GSI routing internally so 1:1 mapping is also correct
-        // (KVM_IRQFD routes by GSI, and our IRQs start well within IOAPIC range).
         let gsi = irq;
         let config = IrqConfig {
             gsi,
-            trigger_mode: TriggerMode::Edge,
+            trigger_mode,
             asserted: false,
         };
 
