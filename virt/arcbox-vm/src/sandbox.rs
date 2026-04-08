@@ -1039,7 +1039,7 @@ impl SandboxManager {
         // In jailer mode the restored FC process also runs inside a chroot and
         // cannot access the catalog's host-absolute paths.  Copy the snapshot
         // files into the new sandbox's chroot and use chroot-relative paths.
-        let (effective_vmstate, effective_mem) = if let Some(ref jc) = fc_cfg.jailer {
+        let (effective_vmstate, effective_mem, cow_handle) = if let Some(ref jc) = fc_cfg.jailer {
             let base = jc.chroot_base_dir.as_deref().unwrap_or("/srv/jailer");
             let cr = chroot_root(&fc_cfg.binary, base, &new_id);
             let snap_in_chroot = cr.join("snapshots").join(&spec.snapshot_id);
@@ -1049,13 +1049,44 @@ impl SandboxManager {
             nix::unistd::chown(&snap_in_chroot, Some(uid), Some(gid))
                 .map_err(|e| VmmError::Process(format!("chown snap dir: {e}")))?;
 
-            // Stage kernel and rootfs into the new chroot (same layout as boot).
-            if let (Some(k), Some(r)) = (
-                snap_meta.kernel_path.as_deref(),
-                snap_meta.rootfs_path.as_deref(),
-            ) {
-                stage_files_for_jailer(&cr, k, r, jc.uid, jc.gid).await?;
+            // Stage kernel (always copy, ~16MB).
+            if let Some(k) = snap_meta.kernel_path.as_deref() {
+                stage_kernel_for_jailer(&cr, k, jc.uid, jc.gid).await?;
             }
+
+            // Stage rootfs: dm-snapshot + mknod, fallback to full copy.
+            let cow = if let Some(r) = snap_meta.rootfs_path.as_deref() {
+                match self.cow_manager.setup(&new_id, r).await {
+                    Ok(handle) => {
+                        match stage_rootfs_device_for_jailer(&cr, &handle.dm_device, jc.uid, jc.gid)
+                            .await
+                        {
+                            Ok(_) => Some(handle),
+                            Err(e) => {
+                                debug!(
+                                    sandbox_id = %new_id,
+                                    error = %e,
+                                    "mknod failed on restore, falling back to rootfs copy"
+                                );
+                                let _ = self.cow_manager.teardown(&handle).await;
+                                stage_rootfs_copy_for_jailer(&cr, r, jc.uid, jc.gid).await?;
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        debug!(
+                            sandbox_id = %new_id,
+                            error = %e,
+                            "dm-snapshot unavailable on restore, copying rootfs"
+                        );
+                        stage_rootfs_copy_for_jailer(&cr, r, jc.uid, jc.gid).await?;
+                        None
+                    }
+                }
+            } else {
+                None
+            };
 
             // Copy vmstate into chroot.
             let dst_vmstate = snap_in_chroot.join("vmstate");
@@ -1080,9 +1111,38 @@ impl SandboxManager {
             (
                 format!("/snapshots/{}/vmstate", spec.snapshot_id),
                 effective_mem,
+                cow,
             )
         } else {
-            (vmstate_str, mem_file)
+            // Direct mode: setup dm-snapshot for the restored sandbox.
+            // The vmstate references {original_vm_dir}/rootfs.link — create
+            // a new dm-snapshot and point that symlink to the new device.
+            let cow = if let Some(r) = snap_meta.rootfs_path.as_deref() {
+                match self.cow_manager.setup(&new_id, r).await {
+                    Ok(handle) => {
+                        let original_vm_dir = PathBuf::from(&fc_cfg.data_dir)
+                            .join("sandboxes")
+                            .join(&snap_meta.vm_id);
+                        let link_path = original_vm_dir.join("rootfs.link");
+                        let _ = std::fs::remove_file(&link_path);
+                        std::os::unix::fs::symlink(&handle.dm_device, &link_path)
+                            .map_err(VmmError::Io)?;
+                        Some(handle)
+                    }
+                    Err(e) => {
+                        debug!(
+                            sandbox_id = %new_id,
+                            error = %e,
+                            "dm-snapshot unavailable for restore"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            (vmstate_str, mem_file, cow)
         };
 
         // Build the restore parameters.
@@ -1143,6 +1203,7 @@ impl SandboxManager {
         instance.process = Some(process);
         instance.vm = Some(vm);
         instance.vsock_uds_path = Some(actual_vsock_path);
+        instance.cow_handle = cow_handle;
         instance.state = SandboxState::Ready;
         instance.ready_at = Some(Utc::now());
 
@@ -1407,22 +1468,6 @@ async fn stage_rootfs_device_for_jailer(
     Ok("/rootfs.ext4".to_string())
 }
 
-/// Copy kernel and rootfs into the jailer chroot and set ownership.
-///
-/// Returns `(kernel_guest_path, rootfs_guest_path)` — paths relative to the
-/// chroot root (e.g., `"/vmlinux"`, `"/rootfs.ext4"`).
-async fn stage_files_for_jailer(
-    chroot_root: &Path,
-    kernel_src: &str,
-    rootfs_src: &str,
-    uid: u32,
-    gid: u32,
-) -> Result<(String, String)> {
-    let k = stage_kernel_for_jailer(chroot_root, kernel_src, uid, gid).await?;
-    let r = stage_rootfs_copy_for_jailer(chroot_root, rootfs_src, uid, gid).await?;
-    Ok((k, r))
-}
-
 /// Perform the actual Firecracker boot: spawn process, configure, start VM.
 ///
 /// Returns `(FirecrackerProcess, Arc<Vm>, vsock_uds_path, Option<CowHandle>)`
@@ -1518,10 +1563,14 @@ async fn do_boot(
             (k, r, "/run/firecracker.vsock".to_string(), vsock_host, cow)
         } else {
             // Direct mode: try dm-snapshot CoW, fall back to using rootfs directly.
+            // When CoW is active, create a symlink indirection so the vmstate
+            // records a stable path that can be retargeted on restore.
             let (rootfs, cow) = match cow_manager.setup(id, &spec.rootfs).await {
                 Ok(handle) => {
-                    let path = handle.dm_device.clone();
-                    (path, Some(handle))
+                    let link_path = vm_dir.join("rootfs.link");
+                    std::os::unix::fs::symlink(&handle.dm_device, &link_path)
+                        .map_err(VmmError::Io)?;
+                    (link_path.to_str().unwrap().to_owned(), Some(handle))
                 }
                 Err(e) => {
                     debug!(
