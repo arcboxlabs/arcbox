@@ -191,30 +191,78 @@ pub fn blk_io_worker_loop(ctx: BlkWorkerContext, rx: std::sync::mpsc::Receiver<B
         let queue_size = first.queue_size;
         let old_used = read_used_idx(&ctx.guest_mem, used_addr);
 
-        // Process first item.
-        process_item(&ctx, &first);
-
-        // Batch drain: process any immediately available items.
-        let mut batch_count = 1u32;
-        while batch_count < 32 {
+        // Collect batch: first item + up to 31 more from try_recv.
+        let mut batch = Vec::with_capacity(32);
+        batch.push(first);
+        while batch.len() < 32 {
             match rx.try_recv() {
-                Ok(item) => {
-                    process_item(&ctx, &item);
-                    batch_count += 1;
-                }
+                Ok(item) => batch.push(item),
                 Err(_) => break,
             }
         }
 
+        // Sort by (request_type, sector) to enable merging.
+        // Flush/GetId items are processed first (low ordinal).
+        if batch.len() > 1 {
+            batch.sort_unstable_by(|a, b| {
+                let type_ord = |t: &BlkRequestType| match t {
+                    BlkRequestType::Flush => 0u8,
+                    BlkRequestType::GetId => 1,
+                    BlkRequestType::Read => 2,
+                    BlkRequestType::Write => 3,
+                };
+                type_ord(&a.request_type)
+                    .cmp(&type_ord(&b.request_type))
+                    .then(a.sector.cmp(&b.sector))
+            });
+        }
+
+        // Process sorted batch. Adjacent same-type items with contiguous
+        // sectors are merged into a single preadv/pwritev call.
+        let mut i = 0;
+        while i < batch.len() {
+            let item = &batch[i];
+
+            // Non-mergeable types: process individually.
+            if !matches!(
+                item.request_type,
+                BlkRequestType::Read | BlkRequestType::Write
+            ) {
+                process_item(&ctx, item);
+                i += 1;
+                continue;
+            }
+
+            // Find merge run: consecutive items with same type and
+            // contiguous sectors.
+            let mut end = i + 1;
+            while end < batch.len()
+                && batch[end].request_type == item.request_type
+                && batch[end].sector
+                    == batch[end - 1].sector
+                        + u64::from(batch[end - 1].total_data_len) / u64::from(ctx.blk_size)
+            {
+                end += 1;
+            }
+
+            if end == i + 1 {
+                // Single item, no merge possible.
+                process_item(&ctx, item);
+            } else {
+                // Merged run: build combined iovec from all items.
+                process_merged(&ctx, &batch[i..end]);
+            }
+            i = end;
+        }
+
         let new_used = read_used_idx(&ctx.guest_mem, used_addr);
 
-        // Trigger IRQ if the guest wants notification (EVENT_IDX).
         if should_notify(&ctx.guest_mem, avail_addr, queue_size, old_used, new_used) {
             trigger_irq(&ctx);
         }
 
-        if batch_count > 1 {
-            tracing::trace!("blk-io-worker: batch of {} completions", batch_count);
+        if batch.len() > 1 {
+            tracing::trace!("blk-io-worker: batch of {} items", batch.len());
         }
     }
 
@@ -271,63 +319,171 @@ fn process_item(ctx: &BlkWorkerContext, item: &BlkWorkItem) {
     );
 }
 
+/// Reads using preadv — single syscall for scatter-gather buffers.
 fn process_read(ctx: &BlkWorkerContext, item: &BlkWorkItem) -> u8 {
-    let mut current_sector = item.sector;
+    let mut iovecs: Vec<libc::iovec> = Vec::new();
     for &(gpa, len, is_write) in &item.buffers {
-        if !is_write {
-            continue; // Skip read-only descriptors in a read request.
-        }
-        // Skip 1-byte status descriptor.
-        if len <= 1 {
+        if !is_write || len <= 1 {
             continue;
         }
         let Some(buf) = ctx.guest_mem.slice_mut(gpa as usize, len as usize) else {
             tracing::warn!("blk read: GPA {:#x} len {} out of bounds", gpa, len);
-            return 1; // IOERR
+            return 1;
         };
-        #[allow(clippy::cast_possible_wrap)]
-        let offset = (current_sector * u64::from(ctx.blk_size)) as libc::off_t;
-        let n = unsafe { libc::pread(ctx.raw_fd, buf.as_mut_ptr().cast(), buf.len(), offset) };
-        if n < 0 {
-            tracing::warn!(
-                "blk pread failed at sector {}: {}",
-                current_sector,
-                std::io::Error::last_os_error()
-            );
-            return 1; // IOERR
-        }
-        current_sector += (n as u64) / u64::from(ctx.blk_size);
+        iovecs.push(libc::iovec {
+            iov_base: buf.as_mut_ptr().cast(),
+            iov_len: buf.len(),
+        });
     }
-    0 // OK
+    if iovecs.is_empty() {
+        return 0;
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    let offset = (item.sector * u64::from(ctx.blk_size)) as libc::off_t;
+    #[allow(clippy::cast_possible_truncation)]
+    let n = unsafe { libc::preadv(ctx.raw_fd, iovecs.as_ptr(), iovecs.len() as i32, offset) };
+    if n < 0 {
+        tracing::warn!(
+            "blk preadv failed at sector {}: {}",
+            item.sector,
+            std::io::Error::last_os_error()
+        );
+        return 1;
+    }
+    0
 }
 
+/// Writes using pwritev — single syscall for scatter-gather buffers.
 fn process_write(ctx: &BlkWorkerContext, item: &BlkWorkItem) -> u8 {
     if ctx.read_only {
-        return 1; // IOERR
+        return 1;
     }
-    let mut current_sector = item.sector;
+    let mut iovecs: Vec<libc::iovec> = Vec::new();
     for &(gpa, len, is_write) in &item.buffers {
         if is_write {
-            continue; // Skip write-only descriptors in a write request.
+            continue;
         }
         let Some(buf) = ctx.guest_mem.slice(gpa as usize, len as usize) else {
             tracing::warn!("blk write: GPA {:#x} len {} out of bounds", gpa, len);
             return 1;
         };
-        #[allow(clippy::cast_possible_wrap)]
-        let offset = (current_sector * u64::from(ctx.blk_size)) as libc::off_t;
-        let n = unsafe { libc::pwrite(ctx.raw_fd, buf.as_ptr().cast(), buf.len(), offset) };
-        if n < 0 {
-            tracing::warn!(
-                "blk pwrite failed at sector {}: {}",
-                current_sector,
-                std::io::Error::last_os_error()
-            );
-            return 1;
-        }
-        current_sector += (n as u64) / u64::from(ctx.blk_size);
+        iovecs.push(libc::iovec {
+            iov_base: buf.as_ptr() as *mut libc::c_void,
+            iov_len: buf.len(),
+        });
+    }
+    if iovecs.is_empty() {
+        return 0;
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    let offset = (item.sector * u64::from(ctx.blk_size)) as libc::off_t;
+    #[allow(clippy::cast_possible_truncation)]
+    let n = unsafe { libc::pwritev(ctx.raw_fd, iovecs.as_ptr(), iovecs.len() as i32, offset) };
+    if n < 0 {
+        tracing::warn!(
+            "blk pwritev failed at sector {}: {}",
+            item.sector,
+            std::io::Error::last_os_error()
+        );
+        return 1;
     }
     0
+}
+
+/// Processes a merged run of same-type items with contiguous sectors
+/// using a single preadv/pwritev syscall. Each item still gets its own
+/// used ring completion.
+fn process_merged(ctx: &BlkWorkerContext, items: &[BlkWorkItem]) {
+    let is_read = items[0].request_type == BlkRequestType::Read;
+    let start_sector = items[0].sector;
+
+    // Track in-flight for all items in the merge group.
+    ctx.flush_barrier
+        .in_flight
+        .fetch_add(items.len() as u32, Ordering::Relaxed);
+
+    // Build combined iovec from all items.
+    let mut iovecs: Vec<libc::iovec> = Vec::new();
+    for item in items {
+        for &(gpa, len, is_write_flag) in &item.buffers {
+            // For reads: use write-only descriptors. For writes: use read-only.
+            let want = if is_read {
+                is_write_flag
+            } else {
+                !is_write_flag
+            };
+            if !want || len <= 1 {
+                continue;
+            }
+            if is_read {
+                if let Some(buf) = ctx.guest_mem.slice_mut(gpa as usize, len as usize) {
+                    iovecs.push(libc::iovec {
+                        iov_base: buf.as_mut_ptr().cast(),
+                        iov_len: buf.len(),
+                    });
+                }
+            } else if let Some(buf) = ctx.guest_mem.slice(gpa as usize, len as usize) {
+                iovecs.push(libc::iovec {
+                    iov_base: buf.as_ptr() as *mut libc::c_void,
+                    iov_len: buf.len(),
+                });
+            }
+        }
+    }
+
+    // Single merged I/O syscall.
+    #[allow(clippy::cast_possible_wrap)]
+    let offset = (start_sector * u64::from(ctx.blk_size)) as libc::off_t;
+    #[allow(clippy::cast_possible_truncation)]
+    let n = if is_read {
+        unsafe { libc::preadv(ctx.raw_fd, iovecs.as_ptr(), iovecs.len() as i32, offset) }
+    } else {
+        unsafe { libc::pwritev(ctx.raw_fd, iovecs.as_ptr(), iovecs.len() as i32, offset) }
+    };
+
+    let status: u8 = if n < 0 {
+        tracing::warn!(
+            "blk merged {} failed at sector {}: {}",
+            if is_read { "preadv" } else { "pwritev" },
+            start_sector,
+            std::io::Error::last_os_error()
+        );
+        1
+    } else {
+        0
+    };
+
+    // Write individual used ring entries for each item.
+    for item in items {
+        ctx.guest_mem.write_byte(item.status_gpa as usize, status);
+        let total_bytes = if status == 0 {
+            item.total_data_len + 1
+        } else {
+            1
+        };
+        write_used_entry(
+            &ctx.guest_mem,
+            item.used_addr,
+            item.queue_size,
+            item.head_idx,
+            total_bytes,
+        );
+    }
+
+    ctx.flush_barrier
+        .in_flight
+        .fetch_sub(items.len() as u32, Ordering::Release);
+
+    tracing::trace!(
+        "blk merged {} items: sector {}..+{}, {} iovecs, {} bytes",
+        items.len(),
+        start_sector,
+        items.last().map_or(0, |i| i.sector
+            + u64::from(i.total_data_len) / u64::from(ctx.blk_size))
+            - start_sector,
+        iovecs.len(),
+        n,
+    );
 }
 
 fn process_flush(ctx: &BlkWorkerContext) -> u8 {
