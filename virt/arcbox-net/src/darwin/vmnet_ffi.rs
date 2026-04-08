@@ -161,7 +161,7 @@ unsafe extern "C" {
     /// # Returns
     /// vmnet interface handle, or NULL on failure.
     pub fn vmnet_start_interface(
-        interface_desc: CFDictionaryRef,
+        interface_desc: XpcObjectT, // xpc_object_t (NOT CFDictionaryRef)
         queue: DispatchQueue,
         handler: *const c_void, // Block
     ) -> VmnetInterfaceRef;
@@ -215,31 +215,32 @@ unsafe extern "C" {
     pub fn vmnet_copy_shared_interface_list() -> *mut c_void; // xpc_object_t
 }
 
-// vmnet configuration keys (CFString).
+// vmnet configuration keys.
+// These are `const char *` in vmnet/vmnet.h (C strings, NOT CFStrings).
 #[link(name = "vmnet", kind = "framework")]
 unsafe extern "C" {
     /// Operating mode key.
-    pub static vmnet_operation_mode_key: CFStringRef;
+    pub static vmnet_operation_mode_key: *const c_char;
     /// Shared interface name key (for bridged mode).
-    pub static vmnet_shared_interface_name_key: CFStringRef;
+    pub static vmnet_shared_interface_name_key: *const c_char;
     /// MAC address key.
-    pub static vmnet_mac_address_key: CFStringRef;
+    pub static vmnet_mac_address_key: *const c_char;
     /// Start address key (for shared mode DHCP range).
-    pub static vmnet_start_address_key: CFStringRef;
+    pub static vmnet_start_address_key: *const c_char;
     /// End address key (for shared mode DHCP range).
-    pub static vmnet_end_address_key: CFStringRef;
+    pub static vmnet_end_address_key: *const c_char;
     /// Subnet mask key.
-    pub static vmnet_subnet_mask_key: CFStringRef;
+    pub static vmnet_subnet_mask_key: *const c_char;
     /// Interface ID key (UUID for host mode isolation).
-    pub static vmnet_interface_id_key: CFStringRef;
+    pub static vmnet_interface_id_key: *const c_char;
     /// Enable isolation key (for host mode).
-    pub static vmnet_enable_isolation_key: CFStringRef;
+    pub static vmnet_enable_isolation_key: *const c_char;
     /// NAT66 prefix key.
-    pub static vmnet_nat66_prefix_key: CFStringRef;
+    pub static vmnet_nat66_prefix_key: *const c_char;
     /// Maximum transmission unit key.
-    pub static vmnet_mtu_key: CFStringRef;
+    pub static vmnet_mtu_key: *const c_char;
     /// Maximum packet size key (returned in interface_param).
-    pub static vmnet_max_packet_size_key: CFStringRef;
+    pub static vmnet_max_packet_size_key: *const c_char;
 }
 
 // Core Foundation functions.
@@ -311,8 +312,18 @@ pub type XpcObjectT = *mut c_void;
 #[cfg(feature = "vmnet")]
 #[link(name = "System")]
 unsafe extern "C" {
+    pub fn xpc_dictionary_create(
+        keys: *const *const c_char,
+        values: *const XpcObjectT,
+        count: usize,
+    ) -> XpcObjectT;
+    pub fn xpc_dictionary_set_uint64(dict: XpcObjectT, key: *const c_char, value: u64);
+    pub fn xpc_dictionary_set_string(dict: XpcObjectT, key: *const c_char, value: *const c_char);
+    pub fn xpc_dictionary_set_bool(dict: XpcObjectT, key: *const c_char, value: bool);
+    pub fn xpc_dictionary_set_value(dict: XpcObjectT, key: *const c_char, value: XpcObjectT);
     pub fn xpc_dictionary_get_string(dict: XpcObjectT, key: *const c_char) -> *const c_char;
     pub fn xpc_dictionary_get_uint64(dict: XpcObjectT, key: *const c_char) -> u64;
+    pub fn xpc_uuid_create(uuid: *const u8) -> XpcObjectT;
     pub fn xpc_retain(object: XpcObjectT) -> XpcObjectT;
     pub fn xpc_release(object: XpcObjectT);
 }

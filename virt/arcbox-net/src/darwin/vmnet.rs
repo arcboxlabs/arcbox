@@ -224,89 +224,67 @@ impl Vmnet {
             ));
         }
 
-        // Build configuration dictionary.
-        // Safety: Core Foundation functions are safe when used correctly.
-        let config_dict = unsafe {
-            let dict = create_vmnet_config_dict();
+        // Build XPC configuration dictionary.
+        // vmnet_start_interface requires xpc_object_t, NOT CFDictionaryRef.
+        let config_dict: *mut std::ffi::c_void = unsafe {
+            let dict = xpc_dictionary_create(ptr::null(), ptr::null(), 0);
             if dict.is_null() {
                 dispatch_release(queue.cast());
                 return Err(NetError::config(
-                    "failed to create config dictionary".to_string(),
+                    "failed to create xpc config dictionary".to_string(),
                 ));
             }
 
             // Set operating mode.
-            let mode_value: i64 = VmnetOperatingMode::from(config.mode) as i64;
-            let mode_num = cfnumber_from_i64(mode_value);
-            CFDictionarySetValue(dict, vmnet_operation_mode_key.cast(), mode_num.cast());
-            CFRelease(mode_num.cast());
+            let mode_value: u64 = VmnetOperatingMode::from(config.mode) as u64;
+            xpc_dictionary_set_uint64(dict, vmnet_operation_mode_key, mode_value);
 
             // Set MAC address if provided.
             if let Some(mac) = config.mac {
-                let mac_str = format!(
+                let mac_str = std::ffi::CString::new(format!(
                     "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-                );
-                let mac_cf = cfstring_from_str(&mac_str);
-                CFDictionarySetValue(dict, vmnet_mac_address_key.cast(), mac_cf.cast());
-                CFRelease(mac_cf.cast());
+                ))
+                .unwrap();
+                xpc_dictionary_set_string(dict, vmnet_mac_address_key, mac_str.as_ptr());
             }
 
             // Set MTU.
-            let mtu_value: i64 = i64::from(config.mtu);
-            let mtu_num = cfnumber_from_i64(mtu_value);
-            CFDictionarySetValue(dict, vmnet_mtu_key.cast(), mtu_num.cast());
-            CFRelease(mtu_num.cast());
+            xpc_dictionary_set_uint64(dict, vmnet_mtu_key, u64::from(config.mtu));
 
             // Mode-specific configuration.
             match config.mode {
                 VmnetMode::Shared => {
-                    // Set DHCP range if provided.
                     if let Some(start) = config.dhcp_start {
-                        let start_cf = cfstring_from_str(&start.to_string());
-                        CFDictionarySetValue(dict, vmnet_start_address_key.cast(), start_cf.cast());
-                        CFRelease(start_cf.cast());
+                        let s = std::ffi::CString::new(start.to_string()).unwrap();
+                        xpc_dictionary_set_string(dict, vmnet_start_address_key, s.as_ptr());
                     }
                     if let Some(end) = config.dhcp_end {
-                        let end_cf = cfstring_from_str(&end.to_string());
-                        CFDictionarySetValue(dict, vmnet_end_address_key.cast(), end_cf.cast());
-                        CFRelease(end_cf.cast());
+                        let s = std::ffi::CString::new(end.to_string()).unwrap();
+                        xpc_dictionary_set_string(dict, vmnet_end_address_key, s.as_ptr());
                     }
                     if let Some(mask) = config.subnet_mask {
-                        let mask_cf = cfstring_from_str(&mask.to_string());
-                        CFDictionarySetValue(dict, vmnet_subnet_mask_key.cast(), mask_cf.cast());
-                        CFRelease(mask_cf.cast());
+                        let s = std::ffi::CString::new(mask.to_string()).unwrap();
+                        xpc_dictionary_set_string(dict, vmnet_subnet_mask_key, s.as_ptr());
                     }
                 }
                 VmnetMode::HostOnly => {
-                    // Set isolation if enabled.
                     if config.isolated {
-                        CFDictionarySetValue(
-                            dict,
-                            vmnet_enable_isolation_key.cast(),
-                            kCFBooleanTrue,
-                        );
+                        xpc_dictionary_set_bool(dict, vmnet_enable_isolation_key, true);
 
                         // Generate unique interface ID for isolation.
-                        let uuid = CFUUIDCreate(kCFAllocatorDefault);
-                        let uuid_str = CFUUIDCreateString(kCFAllocatorDefault, uuid);
-                        CFDictionarySetValue(dict, vmnet_interface_id_key.cast(), uuid_str.cast());
-                        CFRelease(uuid_str.cast());
-                        CFRelease(uuid.cast());
+                        let uuid_bytes = uuid::Uuid::new_v4();
+                        let xpc_uuid = xpc_uuid_create(uuid_bytes.as_bytes().as_ptr());
+                        xpc_dictionary_set_value(dict, vmnet_interface_id_key, xpc_uuid);
+                        xpc_release(xpc_uuid);
                     }
                 }
                 VmnetMode::Bridged => {
-                    // Set bridge interface.
                     if let Some(ref iface) = config.bridge_interface {
-                        let iface_cf = cfstring_from_str(iface);
-                        CFDictionarySetValue(
-                            dict,
-                            vmnet_shared_interface_name_key.cast(),
-                            iface_cf.cast(),
-                        );
-                        CFRelease(iface_cf.cast());
+                        let s = std::ffi::CString::new(iface.as_str()).unwrap();
+                        xpc_dictionary_set_string(dict, vmnet_shared_interface_name_key, s.as_ptr());
                     } else {
-                        CFRelease(dict.cast_const());
+                        xpc_release(dict);
                         dispatch_release(queue.cast());
                         return Err(NetError::config(
                             "bridge mode requires interface name".to_string(),
@@ -345,7 +323,7 @@ impl Vmnet {
     /// enabled (requires `com.apple.vm.networking` entitlement or root).
     #[cfg(feature = "vmnet")]
     fn start_with_completion_handler(
-        config_dict: CFMutableDictionaryRef,
+        config_dict: XpcObjectT,
         queue: DispatchQueue,
         config: &VmnetConfig,
     ) -> Result<StartResult> {
@@ -355,7 +333,7 @@ impl Vmnet {
         let sema = unsafe { dispatch_semaphore_create(0) };
         if sema.is_null() {
             unsafe {
-                CFRelease(config_dict.cast_const());
+                xpc_release(config_dict);
                 dispatch_release(queue.cast());
             }
             return Err(NetError::config(
@@ -366,8 +344,8 @@ impl Vmnet {
         // SAFETY: create_vmnet_completion_block takes a valid semaphore.
         let block = unsafe { create_vmnet_completion_block(sema) };
 
-        // SAFETY: vmnet_start_interface with valid config, queue, and block.
-        let interface = unsafe { vmnet_start_interface(config_dict.cast_const(), queue, block) };
+        // SAFETY: vmnet_start_interface with valid XPC config, queue, and block.
+        let interface = unsafe { vmnet_start_interface(config_dict, queue, block) };
 
         // Wait for the completion handler to fire with a bounded timeout.
         // 10 seconds is generous; vmnet usually completes within milliseconds.
@@ -380,7 +358,7 @@ impl Vmnet {
             // the block now would cause a use-after-free when that happens.
             // A small leak is preferable to a crash. The dispatch queue is
             // also leaked to keep the handler's execution context valid.
-            unsafe { CFRelease(config_dict.cast_const()) };
+            unsafe { xpc_release(config_dict) };
             return Err(NetError::config(
                 "vmnet_start_interface timed out after 10s (completion handler never fired)"
                     .to_string(),
@@ -394,7 +372,7 @@ impl Vmnet {
         };
 
         // Release config dict now that vmnet has consumed it.
-        unsafe { CFRelease(config_dict.cast_const()) };
+        unsafe { xpc_release(config_dict) };
 
         if !status.is_success() || interface.is_null() {
             unsafe {
@@ -482,15 +460,15 @@ impl Vmnet {
     /// for max_packet_size since the completion handler is not invoked.
     #[cfg(not(feature = "vmnet"))]
     fn start_with_null_handler(
-        config_dict: CFMutableDictionaryRef,
+        config_dict: XpcObjectT,
         queue: DispatchQueue,
         config: &VmnetConfig,
     ) -> Result<StartResult> {
         // SAFETY: vmnet_start_interface with NULL handler operates synchronously.
         let interface =
-            unsafe { vmnet_start_interface(config_dict.cast_const(), queue, ptr::null()) };
+            unsafe { vmnet_start_interface(config_dict, queue, ptr::null()) };
 
-        unsafe { CFRelease(config_dict.cast_const()) };
+        unsafe { xpc_release(config_dict) };
 
         if interface.is_null() {
             unsafe { dispatch_release(queue.cast()) };
