@@ -1458,6 +1458,8 @@ async fn stage_rootfs_device_for_jailer(
         .map_err(VmmError::Io)?;
     let (major, minor) = crate::snapshot_cow::device_major_minor(dm_device).await?;
     let node_path = chroot_root.join("rootfs.ext4");
+    // Remove stale node from a previous crash to avoid EEXIST on mknod.
+    let _ = std::fs::remove_file(&node_path);
     crate::snapshot_cow::mknod_blkdev(&node_path, major, minor).await?;
     chown(
         &node_path,
@@ -1472,7 +1474,7 @@ async fn stage_rootfs_device_for_jailer(
 ///
 /// Returns `(FirecrackerProcess, Arc<Vm>, vsock_uds_path, Option<CowHandle>)`
 /// on success.  The `CowHandle` is `Some` when dm-snapshot CoW is active
-/// (direct mode only in Phase 1).
+/// (both direct mode and jailer mode).
 #[allow(clippy::type_complexity)]
 async fn do_boot(
     id: &str,
