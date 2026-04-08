@@ -1612,15 +1612,13 @@ fn vcpu_run_loop(
                 match func_id {
                     ARCBOX_HVC_PROBE => {
                         // Return number of block devices available for fast path.
+                        // NOTE: Hypervisor.framework auto-advances PC on HVC exit.
+                        // Do NOT manually advance PC — that would skip an instruction.
                         let _ = vcpu.set_reg(reg::X0, hvc_blk_fds.len() as u64);
-                        let pc = vcpu.get_reg(reg::PC).unwrap_or(0);
-                        let _ = vcpu.set_reg(reg::PC, pc + 4);
                     }
                     ARCBOX_HVC_BLK_READ => {
                         let result = handle_hvc_blk_read(&vcpu, &hvc_blk_fds, &device_manager);
                         let _ = vcpu.set_reg(reg::X0, result);
-                        let pc = vcpu.get_reg(reg::PC).unwrap_or(0);
-                        let _ = vcpu.set_reg(reg::PC, pc + 4);
                     }
                     _ => {
                         // PSCI and other standard calls.
