@@ -454,19 +454,13 @@ impl DeviceManager {
         self.devices.get(&id)
     }
 
-    /// Registers an async block I/O worker for a device.
+    /// Registers an async block I/O worker set for a device (one per queue).
     pub fn set_blk_worker(
         &mut self,
         device_id: DeviceId,
-        tx: std::sync::mpsc::Sender<crate::blk_worker::BlkWorkItem>,
+        handle: crate::blk_worker::BlkWorkerHandle,
     ) {
-        self.blk_workers.insert(
-            device_id,
-            crate::blk_worker::BlkWorkerHandle {
-                tx,
-                last_avail_idx: std::sync::atomic::AtomicU16::new(0),
-            },
-        );
+        self.blk_workers.insert(device_id, handle);
     }
 
     /// Returns a clone of the IRQ callback Arc (if set).
@@ -1004,7 +998,9 @@ impl DeviceManager {
                                 && self.blk_workers.contains_key(&device_id)
                             {
                                 tracing::trace!("blk async dispatch for device {}", device_id.0);
-                                match self.dispatch_blk_async(guest_mem, &qcfg, device_id) {
+                                match self
+                                    .dispatch_blk_async(guest_mem, &qcfg, device_id, queue_idx)
+                                {
                                     Ok(true) => {
                                         // Worker will handle completions and IRQ.
                                     }
@@ -1419,10 +1415,14 @@ impl DeviceManager {
         memory: &mut [u8],
         qcfg: &QueueConfig,
         device_id: DeviceId,
+        queue_idx: u16,
     ) -> Result<bool> {
         use crate::blk_worker::{BlkRequestType, BlkWorkItem};
 
-        let Some(worker) = self.blk_workers.get(&device_id) else {
+        let Some(handle) = self.blk_workers.get(&device_id) else {
+            return Ok(false);
+        };
+        let Some(worker) = handle.get_queue(queue_idx) else {
             return Ok(false);
         };
 

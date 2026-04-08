@@ -513,13 +513,17 @@ impl Vmm {
         }
 
         // Block devices — capture raw_fd for async I/O worker.
+        // Set num_queues = vcpu_count for multi-queue (one queue per vCPU).
+        let blk_num_queues = self.config.vcpu_count.max(1) as u16;
         for block_dev in &self.config.block_devices {
-            let blk =
+            let mut blk =
                 arcbox_virtio::blk::VirtioBlock::from_path(&block_dev.path, block_dev.read_only)
                     .map_err(|e| VmmError::Device(format!("block device: {e}")))?;
+            blk.set_num_queues(blk_num_queues);
             let raw_fd = blk.raw_fd().unwrap_or(-1);
             let blk_size = blk.blk_size();
             let read_only = blk.is_read_only();
+            let num_queues = blk.num_queues();
             let dev_id_str = blk.device_id_string().to_string();
             let name = format!("virtio-blk-{}", block_dev.path.display());
             let device_id = device_manager.register_virtio_device(
@@ -530,8 +534,9 @@ impl Vmm {
                 &irq_chip,
             )?;
             if raw_fd >= 0 {
-                self.hv_blk_devices
-                    .push((device_id, raw_fd, blk_size, read_only, dev_id_str));
+                self.hv_blk_devices.push((
+                    device_id, raw_fd, blk_size, read_only, dev_id_str, num_queues,
+                ));
             }
         }
 
@@ -872,53 +877,77 @@ impl Vmm {
             // Collect IRQ info for each block device before spawning workers.
             let blk_infos = std::mem::take(&mut self.hv_blk_devices)
                 .into_iter()
-                .filter_map(|(dev_id, raw_fd, blk_size, read_only, dev_id_str)| {
-                    let dev = dm.get_registered_device(dev_id)?;
-                    let irq = dev.info.irq?;
-                    let mmio_state = dev.mmio_state.as_ref()?.clone();
-                    Some((
-                        dev_id, raw_fd, blk_size, read_only, dev_id_str, irq, mmio_state,
-                    ))
-                })
+                .filter_map(
+                    |(dev_id, raw_fd, blk_size, read_only, dev_id_str, num_queues)| {
+                        let dev = dm.get_registered_device(dev_id)?;
+                        let irq = dev.info.irq?;
+                        let mmio_state = dev.mmio_state.as_ref()?.clone();
+                        Some((
+                            dev_id, raw_fd, blk_size, read_only, dev_id_str, num_queues, irq,
+                            mmio_state,
+                        ))
+                    },
+                )
                 .collect::<Vec<_>>();
 
-            for (dev_id, raw_fd, blk_size, read_only, dev_id_str, irq, mmio_state) in blk_infos {
-                let (tx, rx) = std::sync::mpsc::channel::<crate::blk_worker::BlkWorkItem>();
+            for (dev_id, raw_fd, blk_size, read_only, dev_id_str, num_queues, irq, mmio_state) in
+                blk_infos
+            {
+                let irq_cb = dm.irq_callback_clone().unwrap_or_else(|| {
+                    Arc::new(|_: crate::irq::Irq, _: bool| -> crate::error::Result<()> { Ok(()) })
+                });
+                let flush_barrier = Arc::new(crate::blk_worker::FlushBarrier::new());
+                let mut queue_workers = Vec::with_capacity(num_queues as usize);
 
-                // Queue config will be filled when the guest activates the device.
-                // For now use zeros — the worker only needs used_addr/avail_addr/queue_size
-                let worker_ctx = crate::blk_worker::BlkWorkerContext {
-                    guest_mem: unsafe {
-                        crate::blk_worker::GuestMemWriter::new(guest_ptr, guest_len)
-                    },
-                    raw_fd,
-                    blk_size,
-                    read_only,
-                    device_id: dev_id_str.clone(),
-                    mmio_state,
-                    irq_callback: dm.irq_callback_clone().unwrap_or_else(|| {
-                        Arc::new(|_: crate::irq::Irq, _: bool| -> crate::error::Result<()> {
-                            Ok(())
-                        })
-                    }),
-                    irq,
-                    running: self.running.clone(),
-                };
+                for qi in 0..num_queues {
+                    let (tx, rx) = std::sync::mpsc::channel::<crate::blk_worker::BlkWorkItem>();
 
-                let thread_name = format!("blk-io-{}", dev_id_str);
-                match std::thread::Builder::new()
-                    .name(thread_name.clone())
-                    .spawn(move || {
-                        crate::blk_worker::blk_io_worker_loop(worker_ctx, rx);
-                    }) {
-                    Ok(t) => {
-                        self.hv_blk_worker_threads.push(t);
-                        dm.set_blk_worker(dev_id, tx);
-                        tracing::info!("Spawned async block I/O worker: {}", dev_id_str);
+                    let worker_ctx = crate::blk_worker::BlkWorkerContext {
+                        guest_mem: unsafe {
+                            crate::blk_worker::GuestMemWriter::new(guest_ptr, guest_len)
+                        },
+                        raw_fd,
+                        blk_size,
+                        read_only,
+                        device_id: dev_id_str.clone(),
+                        mmio_state: mmio_state.clone(),
+                        irq_callback: irq_cb.clone(),
+                        irq,
+                        running: self.running.clone(),
+                        flush_barrier: flush_barrier.clone(),
+                    };
+
+                    let thread_name = format!("blk-io-{}-q{}", dev_id_str, qi);
+                    match std::thread::Builder::new()
+                        .name(thread_name.clone())
+                        .spawn(move || {
+                            crate::blk_worker::blk_io_worker_loop(worker_ctx, rx);
+                        }) {
+                        Ok(t) => {
+                            self.hv_blk_worker_threads.push(t);
+                            queue_workers.push(crate::blk_worker::BlkQueueWorker {
+                                tx,
+                                last_avail_idx: std::sync::atomic::AtomicU16::new(0),
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to spawn {}: {}", thread_name, e);
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!("Failed to spawn blk worker {}: {}", thread_name, e);
-                    }
+                }
+
+                if !queue_workers.is_empty() {
+                    dm.set_blk_worker(
+                        dev_id,
+                        crate::blk_worker::BlkWorkerHandle {
+                            queues: queue_workers,
+                        },
+                    );
+                    tracing::info!(
+                        "Spawned {} async block I/O workers for {}",
+                        num_queues,
+                        dev_id_str,
+                    );
                 }
             }
         }
@@ -1519,27 +1548,22 @@ fn vcpu_run_loop(
                 // Before parking, poll vsock host fds for incoming data.
                 // If data arrives, inject into RX queue and trigger interrupt
                 // so the guest wakes up to process it.
+                let mut wfi_has_work = false;
+
                 if device_manager.poll_vsock_rx() {
-                    // Find vsock device IRQ and trigger it.
-                    for dev in device_manager.iter() {
-                        if dev.device_type == crate::device::DeviceType::VirtioVsock {
-                            if let Some(irq) = dev.irq {
-                                // Set interrupt status on MMIO state.
-                                if let Some(state) = device_manager.get_mmio_state(dev.id) {
-                                    if let Ok(mut s) = state.write() {
-                                        s.trigger_interrupt(1); // INT_VRING
-                                    }
-                                }
-                                // Fire GIC SPI via IRQ callback.
-                                device_manager.trigger_irq_callback(irq, true);
-                            }
-                            break;
-                        }
-                    }
-                    // Don't park — re-enter run loop immediately.
-                    continue;
+                    device_manager.raise_interrupt_for(crate::device::DeviceType::VirtioVsock, 1);
+                    wfi_has_work = true;
                 }
-                // No vsock data — park with timeout.
+
+                if device_manager.poll_net_rx() {
+                    device_manager.raise_interrupt_for(crate::device::DeviceType::VirtioNet, 1);
+                    wfi_has_work = true;
+                }
+
+                if wfi_has_work {
+                    continue; // Re-enter run loop immediately.
+                }
+                // No pending data — park with timeout.
                 std::thread::park_timeout(std::time::Duration::from_millis(1));
             }
 

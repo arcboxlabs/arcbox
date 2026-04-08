@@ -5,7 +5,7 @@
 //! worker thread performs the actual pread/pwrite and writes completions
 //! directly to the guest's used ring, then triggers an IRQ.
 
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use crate::device::VirtioMmioState;
@@ -158,6 +158,8 @@ pub struct BlkWorkerContext {
     pub irq: Irq,
     /// VM shutdown flag.
     pub running: Arc<AtomicBool>,
+    /// Shared flush barrier for multi-queue flush synchronization.
+    pub flush_barrier: Arc<FlushBarrier>,
 }
 
 // SAFETY: All fields are either Send+Sync or raw pointers wrapped in
@@ -221,12 +223,33 @@ pub fn blk_io_worker_loop(ctx: BlkWorkerContext, rx: std::sync::mpsc::Receiver<B
 
 /// Processes a single block I/O work item.
 fn process_item(ctx: &BlkWorkerContext, item: &BlkWorkItem) {
+    let is_io = matches!(
+        item.request_type,
+        BlkRequestType::Read | BlkRequestType::Write
+    );
+
+    if is_io {
+        ctx.flush_barrier.in_flight.fetch_add(1, Ordering::Relaxed);
+    }
+
     let status = match item.request_type {
         BlkRequestType::Read => process_read(ctx, item),
         BlkRequestType::Write => process_write(ctx, item),
-        BlkRequestType::Flush => process_flush(ctx),
+        BlkRequestType::Flush => {
+            // Wait for all in-flight I/O across all queues to complete.
+            // This is a spin-wait; in practice flush is rare and in-flight
+            // drains quickly once no new I/O is submitted.
+            while ctx.flush_barrier.in_flight.load(Ordering::Acquire) > 0 {
+                std::hint::spin_loop();
+            }
+            process_flush(ctx)
+        }
         BlkRequestType::GetId => process_get_id(ctx, item),
     };
+
+    if is_io {
+        ctx.flush_barrier.in_flight.fetch_sub(1, Ordering::Release);
+    }
 
     // Write status byte.
     ctx.guest_mem.write_byte(item.status_gpa as usize, status);
@@ -388,8 +411,36 @@ fn trigger_irq(ctx: &BlkWorkerContext) {
 // Per-device async state (stored on DeviceManager)
 // ============================================================================
 
-/// Per-block-device async I/O state.
-pub struct BlkWorkerHandle {
+/// Per-queue I/O worker handle.
+pub struct BlkQueueWorker {
     pub tx: std::sync::mpsc::Sender<BlkWorkItem>,
     pub last_avail_idx: AtomicU16,
+}
+
+/// Per-block-device async I/O state. Holds one worker per queue.
+pub struct BlkWorkerHandle {
+    /// Workers indexed by queue_idx.
+    pub queues: Vec<BlkQueueWorker>,
+}
+
+impl BlkWorkerHandle {
+    /// Returns the worker for a given queue index, or None.
+    pub fn get_queue(&self, queue_idx: u16) -> Option<&BlkQueueWorker> {
+        self.queues.get(queue_idx as usize)
+    }
+}
+
+/// Shared flush barrier across all queues of a device.
+/// Used to implement VIRTIO_BLK_T_FLUSH correctly with multi-queue:
+/// flush must wait for all in-flight I/O across all queues to complete.
+pub struct FlushBarrier {
+    pub in_flight: AtomicU32,
+}
+
+impl FlushBarrier {
+    pub fn new() -> Self {
+        Self {
+            in_flight: AtomicU32::new(0),
+        }
+    }
 }

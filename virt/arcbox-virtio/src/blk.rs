@@ -416,6 +416,8 @@ pub struct BlockConfig {
     pub path: PathBuf,
     /// Read-only mode.
     pub read_only: bool,
+    /// Number of request queues (1 = single queue, >1 = multi-queue with F_MQ).
+    pub num_queues: u16,
 }
 
 impl Default for BlockConfig {
@@ -425,6 +427,7 @@ impl Default for BlockConfig {
             blk_size: 512,
             path: PathBuf::new(),
             read_only: false,
+            num_queues: 1,
         }
     }
 }
@@ -558,6 +561,8 @@ impl VirtioBlock {
     /// Feature: Write zeroes command.
     pub const FEATURE_WRITE_ZEROES: u64 =
         1 << virtio_bindings::virtio_blk::VIRTIO_BLK_F_WRITE_ZEROES;
+    /// Feature: Multiple request queues.
+    pub const FEATURE_MQ: u64 = 1 << virtio_bindings::virtio_blk::VIRTIO_BLK_F_MQ;
     /// `VirtIO` 1.0 feature.
     pub const FEATURE_VERSION_1: u64 = 1 << virtio_bindings::virtio_config::VIRTIO_F_VERSION_1;
 
@@ -573,6 +578,9 @@ impl VirtioBlock {
 
         if config.read_only {
             features |= Self::FEATURE_RO;
+        }
+        if config.num_queues > 1 {
+            features |= Self::FEATURE_MQ;
         }
 
         let device_id = format!(
@@ -621,6 +629,7 @@ impl VirtioBlock {
             blk_size: 512,
             path: path.clone(),
             read_only,
+            num_queues: 1,
         };
 
         use std::os::unix::io::AsRawFd;
@@ -674,6 +683,20 @@ impl VirtioBlock {
     #[must_use]
     pub fn device_id_string(&self) -> &str {
         &self.device_id
+    }
+
+    /// Returns the number of request queues.
+    #[must_use]
+    pub fn num_queues(&self) -> u16 {
+        self.config.num_queues
+    }
+
+    /// Sets the number of request queues (must call before activate).
+    pub fn set_num_queues(&mut self, n: u16) {
+        self.config.num_queues = n.max(1);
+        if self.config.num_queues > 1 {
+            self.features |= Self::FEATURE_MQ;
+        }
     }
 
     /// Handles a block request.
@@ -884,12 +907,22 @@ impl VirtioDevice for VirtioBlock {
         // offset 16: geometry (cylinders u16, heads u8, sectors u8)
         // offset 20: blk_size (u32)
         // offset 24: topology...
+        // VirtIO 1.1 config space layout:
+        // 0:  capacity (u64)
+        // 8:  size_max (u32)
+        // 12: seg_max (u32)
+        // 16: geometry (4 bytes)
+        // 20: blk_size (u32)
+        // 24: topology (10 bytes)
+        // 34: num_queues (u16, only with VIRTIO_BLK_F_MQ)
         let config_data = [
             self.config.capacity.to_le_bytes().as_slice(),
             &(1u32 << 12).to_le_bytes(), // size_max: 4KB
             &128u32.to_le_bytes(),       // seg_max: 128 segments
             &[0u8; 4],                   // geometry: not used
             &self.config.blk_size.to_le_bytes(),
+            &[0u8; 10], // topology: not used
+            &self.config.num_queues.to_le_bytes(),
         ]
         .concat();
 
