@@ -502,8 +502,11 @@ impl Vmm {
             )?;
         }
 
-        // VirtioFS shared directories — create FsServer handler for each share
-        // so the device can process FUSE requests from the guest.
+        // VirtioFS shared directories — create FsServer handler for each share.
+        // Attach DAX mapper so guest can mmap host files directly.
+        let dax_mapper: std::sync::Arc<dyn arcbox_fs::DaxMapper> =
+            std::sync::Arc::new(crate::dax::HvDaxMapper::new());
+
         for dir in &self.config.shared_dirs {
             let fs_config = arcbox_virtio::fs::FsConfig {
                 tag: dir.tag.clone(),
@@ -512,7 +515,6 @@ impl Vmm {
                 shared_dir: dir.host_path.to_string_lossy().into_owned(),
             };
 
-            // Create and start the filesystem server (passthrough to host directory).
             let server_config = arcbox_fs::FsConfig {
                 tag: dir.tag.clone(),
                 source: dir.host_path.to_string_lossy().into_owned(),
@@ -522,18 +524,39 @@ impl Vmm {
             server
                 .start()
                 .map_err(|e| VmmError::Device(format!("FsServer start failed: {e}")))?;
+
+            // Wire DAX mapper into the FUSE dispatcher.
+            server.set_dax_mapper(dax_mapper.clone());
+
             let handler: std::sync::Arc<dyn arcbox_virtio::fs::FuseRequestHandler> =
                 std::sync::Arc::new(server);
 
             let fs_dev = arcbox_virtio::fs::VirtioFs::with_handler(fs_config, handler);
             let name = format!("virtiofs-{}", dir.tag);
-            device_manager.register_virtio_device(
+            let fs_device_id = device_manager.register_virtio_device(
                 DeviceType::VirtioFs,
                 name,
                 fs_dev,
                 &mut memory_manager,
                 &irq_chip,
             )?;
+
+            // Configure SHM region (DAX window) on this VirtioFS device's MMIO state.
+            if let Some(dev) = device_manager.get_registered_device(fs_device_id) {
+                if let Some(ref mmio_arc) = dev.mmio_state {
+                    if let Ok(mut state) = mmio_arc.write() {
+                        state
+                            .shm_regions
+                            .push((crate::dax::DAX_WINDOW_BASE, crate::dax::DAX_WINDOW_SIZE));
+                        tracing::info!(
+                            "VirtioFS '{}': DAX window at IPA {:#x}, size {}MB",
+                            dir.tag,
+                            crate::dax::DAX_WINDOW_BASE,
+                            crate::dax::DAX_WINDOW_SIZE / (1024 * 1024),
+                        );
+                    }
+                }
+            }
         }
 
         // Block devices — capture raw_fd for async I/O worker.

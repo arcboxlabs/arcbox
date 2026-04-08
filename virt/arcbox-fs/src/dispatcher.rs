@@ -20,12 +20,12 @@
 use crate::error::{FsError, Result};
 use crate::fuse::{
     FATTR_ATIME, FATTR_GID, FATTR_MODE, FATTR_MTIME, FATTR_SIZE, FATTR_UID, FUSE_DO_READDIRPLUS,
-    FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION, FUSE_READDIRPLUS_AUTO, FuseAccessIn, FuseAttr,
-    FuseAttrOut, FuseCreateIn, FuseDirent, FuseEntryOut, FuseFallocateIn, FuseFlushIn,
-    FuseForgetIn, FuseFsyncIn, FuseGetxattrIn, FuseGetxattrOut, FuseInHeader, FuseInitIn,
-    FuseInitOut, FuseLinkIn, FuseLseekIn, FuseLseekOut, FuseMkdirIn, FuseMknodIn, FuseOpcode,
-    FuseOpenIn, FuseOpenOut, FuseOutHeader, FuseReadIn, FuseReleaseIn, FuseRenameIn, FuseSetattrIn,
-    FuseSetxattrIn, FuseStatfsOut, FuseWriteIn, FuseWriteOut,
+    FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION, FUSE_MAP_ALIGNMENT, FUSE_READDIRPLUS_AUTO,
+    FuseAccessIn, FuseAttr, FuseAttrOut, FuseCreateIn, FuseDirent, FuseEntryOut, FuseFallocateIn,
+    FuseFlushIn, FuseForgetIn, FuseFsyncIn, FuseGetxattrIn, FuseGetxattrOut, FuseInHeader,
+    FuseInitIn, FuseInitOut, FuseLinkIn, FuseLseekIn, FuseLseekOut, FuseMkdirIn, FuseMknodIn,
+    FuseOpcode, FuseOpenIn, FuseOpenOut, FuseOutHeader, FuseReadIn, FuseReleaseIn, FuseRenameIn,
+    FuseSetattrIn, FuseSetxattrIn, FuseStatfsOut, FuseWriteIn, FuseWriteOut,
 };
 use crate::passthrough::PassthroughFs;
 
@@ -329,13 +329,23 @@ impl FuseDispatcher {
             flags |= FUSE_READDIRPLUS_AUTO;
         }
 
-        let init_out = FuseInitOut {
+        // Negotiate DAX (direct host page mapping) if mapper is available.
+        let mut map_alignment = 0u32;
+        if self.dax_mapper.is_some() && init_in.flags & FUSE_MAP_ALIGNMENT != 0 {
+            flags |= FUSE_MAP_ALIGNMENT;
+            map_alignment = 12; // page shift: 2^12 = 4096
+            tracing::info!("FUSE DAX negotiated (map_alignment={})", map_alignment);
+        }
+
+        let mut init_out = FuseInitOut {
             major: FUSE_KERNEL_VERSION,
             minor: FUSE_KERNEL_MINOR_VERSION,
             max_readahead: init_in.max_readahead,
             flags,
             ..FuseInitOut::default()
         };
+        // map_alignment is at unused[0] per FUSE protocol spec.
+        init_out.unused[0] = map_alignment;
 
         self.initialized
             .store(true, std::sync::atomic::Ordering::SeqCst);

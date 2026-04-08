@@ -8,7 +8,7 @@
 
 mod error;
 mod exit;
-mod ffi;
+pub mod ffi;
 #[cfg(feature = "gic")]
 mod gic;
 mod memory;

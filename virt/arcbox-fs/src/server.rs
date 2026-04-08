@@ -71,6 +71,14 @@ impl FsServer {
         &self.config.source
     }
 
+    /// Sets the DAX mapper for direct host page mapping.
+    /// Must be called after `start()`.
+    pub fn set_dax_mapper(&mut self, mapper: Arc<dyn crate::DaxMapper>) {
+        if let Some(ref mut dispatcher) = self.dispatcher {
+            dispatcher.set_dax_mapper(mapper);
+        }
+    }
+
     /// Starts the server.
     ///
     /// Initializes the passthrough filesystem and FUSE dispatcher.
