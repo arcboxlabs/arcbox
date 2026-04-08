@@ -381,6 +381,43 @@ impl Vmm {
             );
         }
 
+        // --- 3b. Pre-map DAX window for VirtioFS DAX ---
+        // Placed immediately after guest RAM so devm_memremap_pages can
+        // register it as ZONE_DEVICE (must be above RAM, not in MMIO gap).
+        let dax_base = crate::dax::dax_window_base(RAM_BASE_IPA, ram_size as u64);
+        let dax_size = crate::dax::DAX_WINDOW_SIZE as usize;
+        {
+            let dax_ptr = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    dax_size,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
+                    -1,
+                    0,
+                )
+            };
+            if dax_ptr != libc::MAP_FAILED {
+                unsafe {
+                    vm.map_memory(
+                        dax_ptr.cast(),
+                        dax_base,
+                        dax_size,
+                        MemoryPermission::READ_WRITE,
+                    )
+                    .map_err(|e| VmmError::Memory(format!("DAX window hv_vm_map: {e}")))?;
+                }
+                tracing::info!(
+                    "DAX window pre-mapped: IPA {:#x}..{:#x} ({}MB)",
+                    dax_base,
+                    dax_base + dax_size as u64,
+                    dax_size / (1024 * 1024),
+                );
+            } else {
+                tracing::warn!("DAX window mmap failed, DAX disabled");
+            }
+        }
+
         // --- 4. Initialize GIC (macOS 15+) ---
         #[cfg(feature = "gic")]
         let gic = {
@@ -505,7 +542,7 @@ impl Vmm {
         // VirtioFS shared directories — create FsServer handler for each share.
         // Attach DAX mapper so guest can mmap host files directly.
         let dax_mapper: std::sync::Arc<dyn arcbox_fs::DaxMapper> =
-            std::sync::Arc::new(crate::dax::HvDaxMapper::new());
+            std::sync::Arc::new(crate::dax::HvDaxMapper::new(dax_base));
 
         for dir in &self.config.shared_dirs {
             let fs_config = arcbox_virtio::fs::FsConfig {
@@ -547,11 +584,11 @@ impl Vmm {
                     if let Ok(mut state) = mmio_arc.write() {
                         state
                             .shm_regions
-                            .push((crate::dax::DAX_WINDOW_BASE, crate::dax::DAX_WINDOW_SIZE));
+                            .push((dax_base, crate::dax::DAX_WINDOW_SIZE));
                         tracing::info!(
                             "VirtioFS '{}': DAX window at IPA {:#x}, size {}MB",
                             dir.tag,
-                            crate::dax::DAX_WINDOW_BASE,
+                            dax_base,
                             crate::dax::DAX_WINDOW_SIZE / (1024 * 1024),
                         );
                     }

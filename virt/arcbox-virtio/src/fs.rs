@@ -45,6 +45,7 @@ pub const FUSE_BIG_WRITES: u32 = 1 << 5;
 pub const FUSE_WRITEBACK_CACHE: u32 = 1 << 16;
 pub const FUSE_PARALLEL_DIROPS: u32 = 1 << 18;
 pub const FUSE_CACHE_SYMLINKS: u32 = 1 << 23;
+pub const FUSE_MAP_ALIGNMENT: u32 = 1 << 26;
 
 /// Default max readahead size (128 KB).
 pub const DEFAULT_MAX_READAHEAD: u32 = 128 * 1024;
@@ -241,6 +242,8 @@ pub struct FuseSession {
     max_write: u32,
     /// Maximum pages per request.
     max_pages: u16,
+    /// Whether DAX is enabled for this session.
+    dax_enabled: bool,
 }
 
 impl FuseSession {
@@ -251,10 +254,11 @@ impl FuseSession {
             initialized: AtomicBool::new(false),
             major: FUSE_KERNEL_VERSION,
             minor: FUSE_KERNEL_MINOR_VERSION,
-            flags: FUSE_ASYNC_READ | FUSE_BIG_WRITES | FUSE_WRITEBACK_CACHE,
+            flags: FUSE_ASYNC_READ | FUSE_BIG_WRITES | FUSE_WRITEBACK_CACHE | FUSE_MAP_ALIGNMENT,
             max_readahead: DEFAULT_MAX_READAHEAD,
             max_write: DEFAULT_MAX_WRITE,
             max_pages: DEFAULT_MAX_PAGES,
+            dax_enabled: false,
         }
     }
 
@@ -342,6 +346,10 @@ impl FuseSession {
         self.minor = FUSE_KERNEL_MINOR_VERSION;
         self.max_readahead = guest_max_readahead.min(DEFAULT_MAX_READAHEAD);
         self.flags &= guest_flags; // Only enable mutually supported flags
+        self.dax_enabled = self.flags & FUSE_MAP_ALIGNMENT != 0;
+        if self.dax_enabled {
+            tracing::info!("FUSE DAX negotiated");
+        }
 
         // Build FUSE_INIT response
         // Layout: major(4) + minor(4) + max_readahead(4) + flags(4) +
@@ -376,7 +384,10 @@ impl FuseSession {
         response.extend_from_slice(&1u32.to_le_bytes()); // time_gran (1 ns)
         response.extend_from_slice(&self.max_pages.to_le_bytes());
         response.extend_from_slice(&0u16.to_le_bytes()); // padding
-        response.extend_from_slice(&[0u8; 32]); // unused
+        // unused[0] = map_alignment (page shift, 12 = 4096 bytes).
+        let map_alignment: u32 = if self.dax_enabled { 12 } else { 0 };
+        response.extend_from_slice(&map_alignment.to_le_bytes());
+        response.extend_from_slice(&[0u8; 28]); // remaining unused
 
         self.initialized.store(true, Ordering::Release);
 
@@ -396,10 +407,11 @@ impl FuseSession {
         self.initialized.store(false, Ordering::Release);
         self.major = FUSE_KERNEL_VERSION;
         self.minor = FUSE_KERNEL_MINOR_VERSION;
-        self.flags = FUSE_ASYNC_READ | FUSE_BIG_WRITES | FUSE_WRITEBACK_CACHE;
+        self.flags = FUSE_ASYNC_READ | FUSE_BIG_WRITES | FUSE_WRITEBACK_CACHE | FUSE_MAP_ALIGNMENT;
         self.max_readahead = DEFAULT_MAX_READAHEAD;
         self.max_write = DEFAULT_MAX_WRITE;
         self.max_pages = DEFAULT_MAX_PAGES;
+        self.dax_enabled = false;
     }
 }
 

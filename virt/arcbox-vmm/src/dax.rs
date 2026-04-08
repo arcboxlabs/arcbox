@@ -6,9 +6,13 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-/// Base IPA of the DAX window in guest physical address space.
-/// Placed between MMIO devices (~0x0C00_8000) and RAM (0x4000_0000).
-pub const DAX_WINDOW_BASE: u64 = 0x1000_0000;
+/// Computes DAX window base IPA — placed immediately after guest RAM.
+/// Must be above RAM so `devm_memremap_pages` can register it as ZONE_DEVICE.
+pub fn dax_window_base(ram_base: u64, ram_size: u64) -> u64 {
+    // Page-align to 2MB boundary (huge page) for optimal TLB usage.
+    let after_ram = ram_base + ram_size;
+    (after_ram + 0x1F_FFFF) & !0x1F_FFFF
+}
 
 /// Size of the DAX window (256 MB).
 pub const DAX_WINDOW_SIZE: u64 = 256 * 1024 * 1024;
@@ -26,12 +30,15 @@ unsafe impl Send for DaxMapping {}
 /// DAX mapper backed by Hypervisor.framework global hv_vm_map/unmap.
 pub struct HvDaxMapper {
     mappings: Mutex<BTreeMap<u64, DaxMapping>>,
+    /// Base IPA of the DAX window (computed from RAM layout).
+    base_ipa: u64,
 }
 
 impl HvDaxMapper {
-    pub fn new() -> Self {
+    pub fn new(base_ipa: u64) -> Self {
         Self {
             mappings: Mutex::new(BTreeMap::new()),
+            base_ipa,
         }
     }
 }
@@ -77,7 +84,7 @@ impl arcbox_fs::DaxMapper for HvDaxMapper {
             return Err(unsafe { *libc::__error() });
         }
 
-        let guest_ipa = DAX_WINDOW_BASE + window_offset;
+        let guest_ipa = self.base_ipa + window_offset;
         let perm = if writable {
             arcbox_hv::MemoryPermission::READ | arcbox_hv::MemoryPermission::WRITE
         } else {
