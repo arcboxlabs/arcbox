@@ -649,7 +649,7 @@ impl Vmm {
             };
             let mut net_dev = arcbox_virtio::net::VirtioNet::new(net_config);
             net_dev.enable_tso_features();
-            device_manager.register_virtio_device(
+            let primary_net_id = device_manager.register_virtio_device(
                 DeviceType::VirtioNet,
                 "virtio-net",
                 net_dev,
@@ -658,7 +658,7 @@ impl Vmm {
             )?;
 
             // Set up the network datapath (reuses VZ path's entire stack).
-            self.create_hv_network_datapath(&mut device_manager)?;
+            self.create_hv_network_datapath(&mut device_manager, primary_net_id)?;
 
             // Bridge NIC (NIC2): vmnet for host→container L3 routing.
             #[cfg(feature = "vmnet")]
@@ -1197,6 +1197,7 @@ impl Vmm {
     fn create_hv_network_datapath(
         &mut self,
         device_manager: &mut crate::device::DeviceManager,
+        primary_net_id: crate::device::DeviceId,
     ) -> Result<()> {
         use arcbox_net::darwin::datapath_loop::NetworkDatapath;
         use arcbox_net::darwin::inbound_relay::InboundListenerManager;
@@ -1248,7 +1249,7 @@ impl Vmm {
         }
 
         // Register the HV-side fd with DeviceManager for TX/RX bridging.
-        device_manager.set_net_host_fd(hv_fd.as_raw_fd());
+        device_manager.set_net_host_fd(hv_fd.as_raw_fd(), primary_net_id);
 
         // 2. Cancellation token.
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -1638,7 +1639,9 @@ fn vcpu_run_loop(
                 );
             }
             if device_manager.poll_net_rx() {
-                device_manager.raise_interrupt_for(crate::device::DeviceType::VirtioNet, 1);
+                if let Some(nid) = device_manager.primary_net_device_id() {
+                    device_manager.raise_interrupt_for_device(nid, 1);
+                }
             }
             if device_manager.poll_bridge_rx() {
                 if let Some(bid) = device_manager.bridge_device_id() {

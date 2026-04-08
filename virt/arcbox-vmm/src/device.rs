@@ -412,6 +412,11 @@ pub struct DeviceManager {
     net_host_fd: Option<std::os::unix::io::RawFd>,
     /// Last processed avail index for VirtioNet TX queue (NIC1).
     net_last_avail_tx: std::sync::atomic::AtomicUsize,
+    /// DeviceId of the primary VirtioNet (NIC1) for targeted IRQ delivery.
+    /// Required because `raise_interrupt_for(DeviceType::VirtioNet)` uses
+    /// HashMap iteration which is non-deterministic — with two VirtioNet
+    /// devices it could match the bridge NIC instead of the primary NIC.
+    primary_net_device_id: Option<DeviceId>,
     /// Bridge host fd for HV path (NIC2 — vmnet bridge, container IP routing).
     /// Same semantics as `net_host_fd` but for the bridge NIC connected to vmnet.
     bridge_host_fd: Option<std::os::unix::io::RawFd>,
@@ -447,6 +452,7 @@ impl DeviceManager {
             irq_callback: None,
             net_host_fd: None,
             net_last_avail_tx: std::sync::atomic::AtomicUsize::new(0),
+            primary_net_device_id: None,
             bridge_host_fd: None,
             bridge_net_device_id: None,
             bridge_last_avail_tx: std::sync::atomic::AtomicUsize::new(0),
@@ -475,8 +481,14 @@ impl DeviceManager {
     }
 
     /// Sets the host-side network fd for HV path frame exchange (NIC1).
-    pub fn set_net_host_fd(&mut self, fd: std::os::unix::io::RawFd) {
+    pub fn set_net_host_fd(&mut self, fd: std::os::unix::io::RawFd, device_id: DeviceId) {
         self.net_host_fd = Some(fd);
+        self.primary_net_device_id = Some(device_id);
+    }
+
+    /// Returns the primary NIC device ID (for targeted IRQ delivery).
+    pub fn primary_net_device_id(&self) -> Option<DeviceId> {
+        self.primary_net_device_id
     }
 
     /// Sets the bridge NIC host fd and device ID (NIC2 — vmnet bridge).
@@ -1869,6 +1881,13 @@ impl DeviceManager {
                 .map(|mgr| mgr.connected_fds())
                 .unwrap_or_default();
 
+            if !connected_fds.is_empty() {
+                tracing::debug!(
+                    "vsock Phase 1: {} connected fds to peek",
+                    connected_fds.len(),
+                );
+            }
+
             for (conn_id, fd) in &connected_fds {
                 // Peek if there's data without consuming it.
                 let mut peek_buf = [0u8; 1];
@@ -1881,10 +1900,18 @@ impl DeviceManager {
                     )
                 };
                 if n > 0 {
+                    tracing::info!(
+                        "vsock Phase 1: data available on fd {} for {:?} — enqueue RW",
+                        fd, conn_id,
+                    );
                     if let Ok(mut mgr) = self.vsock_connections.lock() {
                         mgr.enqueue_rw(*conn_id);
                     }
                 } else if n == 0 {
+                    tracing::info!(
+                        "vsock Phase 1: EOF on fd {} for {:?} — enqueue RST",
+                        fd, conn_id,
+                    );
                     // Host stream closed — enqueue RST.
                     if let Ok(mut mgr) = self.vsock_connections.lock() {
                         mgr.enqueue_reset(*conn_id);
@@ -2190,11 +2217,15 @@ impl DeviceManager {
         };
         let gpa_base = self.guest_ram_gpa as usize;
 
-        // Find the VirtioNet device MMIO state.
+        // Find the primary VirtioNet device MMIO state (by stored ID, not
+        // HashMap scan, to avoid hitting the bridge NIC non-deterministically).
+        let primary_id = match self.primary_net_device_id {
+            Some(id) => id,
+            None => return false,
+        };
         let mmio_arc = self
             .devices
-            .values()
-            .find(|d| d.info.device_type == DeviceType::VirtioNet)
+            .get(&primary_id)
             .and_then(|d| d.mmio_state.as_ref());
         let Some(mmio_arc) = mmio_arc else {
             return false;
