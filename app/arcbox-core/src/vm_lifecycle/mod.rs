@@ -799,19 +799,11 @@ impl VmLifecycleManager {
             // (no guest memory access), but the async ping() RPC may hang if the
             // vsock data path has a race on the first few attempts after boot.
             // A 2s timeout prevents any single attempt from blocking the loop.
-            // connect_agent is async: it creates a socketpair, enqueues
-            // OP_REQUEST, then polls the handshake channel (try_recv + tokio
-            // sleep) without blocking the tokio worker thread.
-            match tokio::time::timeout(Duration::from_secs(10), async {
-                self.machine_manager
-                    .connect_agent_async(DEFAULT_MACHINE_NAME)
-                    .await
-            })
-            .await
-            {
-                Ok(Ok(mut agent)) => {
-                    // Handshake complete — connection is established. Ping to
-                    // verify agent RPC is responsive.
+            // connect_agent creates a socketpair + injects OP_REQUEST. If the
+            // guest hasn't started the agent yet, the connection will be RST'd
+            // and ping() returns early EOF. The retry loop handles this.
+            match self.machine_manager.connect_agent(DEFAULT_MACHINE_NAME) {
+                Ok(mut agent) => {
                     match tokio::time::timeout(Duration::from_secs(2), agent.ping()).await {
                         Ok(Ok(_response)) => {
                             tracing::info!("Agent is ready");
@@ -831,11 +823,8 @@ impl VmLifecycleManager {
                         }
                     }
                 }
-                Ok(Err(e)) => {
+                Err(e) => {
                     tracing::debug!("Agent connection failed: {}", e);
-                }
-                Err(_) => {
-                    tracing::debug!("Agent connect timed out (10s)");
                 }
             }
 

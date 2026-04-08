@@ -1328,28 +1328,18 @@ impl DeviceManager {
             VsockOp::Request,
         );
 
-        // Try direct injection first. If it succeeds, drain the REQUEST
-        // from backend_rxq to prevent poll_vsock_rx from duplicating it.
-        // If it fails (device not ready yet), leave everything in place —
-        // poll_vsock_rx will pick it up on the next vCPU poll cycle when
-        // the guest has activated the vsock device and provided RX descriptors.
-        if self.inject_vsock_rx_raw(&hdr.to_bytes()) {
-            if let Ok(mut mgr) = self.vsock_connections.lock() {
-                mgr.backend_rxq.retain(|qid| *qid != id);
-                if let Some(conn) = mgr.get_mut(&id) {
-                    conn.rx_queue.dequeue(); // Remove the REQUEST we just injected.
-                }
-            }
-            true
-        } else {
-            tracing::info!(
-                "vsock inject_vsock_connect: device not ready, deferring OP_REQUEST \
-                 for guest_port={} to poll_vsock_rx",
-                id.guest_port,
-            );
-            // Leave REQUEST in backend_rxq for poll_vsock_rx to handle later.
-            false
-        }
+        // The OP_REQUEST is already in backend_rxq (from allocate). The vCPU
+        // BSP thread's poll_vsock_rx will inject it on the next poll cycle.
+        //
+        // We do NOT attempt direct injection here because:
+        // 1. The vsock device may not be DRIVER_OK yet (guest still booting)
+        // 2. Direct guest memory writes from the daemon thread can race with
+        //    the vCPU thread's MMIO handling
+        // 3. The poll_vsock_rx Phase 2 loop with rxq_starved interrupt ensures
+        //    deferred OP_REQUESTs are eventually delivered
+        //
+        // The caller should handle early-EOF (RST) gracefully via retry.
+        true
     }
 
     /// Injects a raw packet into the vsock RX queue (queue 0).

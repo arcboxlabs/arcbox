@@ -594,10 +594,13 @@ impl Vmm {
     ///
     /// For the VZ backend, returns `(fd, None)` — VZ handles the handshake
     /// internally and the fd is immediately usable.
-    pub fn connect_vsock(
-        &self,
-        port: u32,
-    ) -> Result<(std::os::unix::io::RawFd, Option<std::sync::mpsc::Receiver<bool>>)> {
+    /// Connects to a vsock port on the guest VM.
+    ///
+    /// Returns a connected fd. For HV backend, the OP_REQUEST is injected
+    /// immediately (or deferred to poll_vsock_rx if device not ready). The
+    /// caller should be prepared for the connection to be RST'd (read returns
+    /// EOF/0) if the guest hasn't accepted yet.
+    pub fn connect_vsock(&self, port: u32) -> Result<std::os::unix::io::RawFd> {
         if self.state != VmmState::Running {
             return Err(VmmError::invalid_state(format!(
                 "cannot connect vsock: VMM is {:?}",
@@ -607,16 +610,17 @@ impl Vmm {
 
         match self.resolved_backend {
             Some(ResolvedBackend::Hv) => {
-                let (fd, rx) = self.connect_vsock_hv(port)?;
-                Ok((fd, Some(rx)))
+                let (fd, _connect_rx) = self.connect_vsock_hv(port)?;
+                // Don't wait for handshake — the daemon's retry loop handles
+                // early EOF (RST). Drop the handshake receiver.
+                Ok(fd)
             }
             _ => {
                 let vm = self
                     .darwin_vm
                     .as_ref()
                     .ok_or_else(|| VmmError::invalid_state("no DarwinVm".to_string()))?;
-                let fd = vm.connect_vsock(port).map_err(VmmError::Hypervisor)?;
-                Ok((fd, None))
+                vm.connect_vsock(port).map_err(VmmError::Hypervisor)
             }
         }
     }

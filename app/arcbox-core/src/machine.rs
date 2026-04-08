@@ -611,63 +611,12 @@ impl MachineManager {
     /// # Errors
     /// Returns an error if the machine is not found, not running, or connection fails.
     #[cfg(target_os = "macos")]
-    /// Connects to the agent on a running machine (sync version).
-    ///
-    /// Does NOT wait for the HV vsock handshake — the caller is responsible
-    /// for handling early-EOF if the connection is RST'd. For code that needs
-    /// guaranteed handshake completion, use `connect_agent_async`.
     pub fn connect_agent(&self, name: &str) -> Result<crate::agent_client::AgentClient> {
         use crate::agent_client::AgentClient;
         let cid = self
             .get_cid(name)
             .ok_or_else(|| CoreError::invalid_state("CID not assigned"))?;
         let fd = self.connect_vsock_port(name, AGENT_PORT)?;
-        AgentClient::from_fd(cid, fd)
-    }
-
-    /// Connects to the agent with async handshake wait (HV backend).
-    ///
-    /// For HV backend, waits for the vsock OP_RESPONSE before returning,
-    /// ensuring the fd is usable for RPC data transfer.
-    pub async fn connect_agent_async(&self, name: &str) -> Result<crate::agent_client::AgentClient> {
-        use crate::agent_client::AgentClient;
-        let cid = self
-            .get_cid(name)
-            .ok_or_else(|| CoreError::invalid_state("CID not assigned"))?;
-        let (fd, handshake_rx) = self.connect_vsock_port_with_handshake(name, AGENT_PORT)?;
-
-        // If there's a handshake receiver (HV backend), wait for it async.
-        if let Some(rx) = handshake_rx {
-            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
-            loop {
-                match rx.try_recv() {
-                    Ok(true) => break,
-                    Ok(false) => {
-                        unsafe { libc::close(fd) };
-                        return Err(CoreError::Machine(
-                            "vsock connect rejected (RST)".to_string(),
-                        ));
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        if tokio::time::Instant::now() >= deadline {
-                            unsafe { libc::close(fd) };
-                            return Err(CoreError::Machine(
-                                "vsock handshake timed out".to_string(),
-                            ));
-                        }
-                        // Yield to tokio — no thread blocking.
-                        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        unsafe { libc::close(fd) };
-                        return Err(CoreError::Machine(
-                            "vsock handshake channel closed".to_string(),
-                        ));
-                    }
-                }
-            }
-        }
-
         AgentClient::from_fd(cid, fd)
     }
 
@@ -691,31 +640,6 @@ impl MachineManager {
         self.vm_manager.connect_vsock(&machine.vm_id, port)
     }
 
-    /// Connects to a vsock port with async handshake wait (HV backend).
-    ///
-    /// Unlike `connect_vsock_port`, this waits for the vsock OP_RESPONSE
-    /// before returning. Used by `connect_agent` to ensure the agent
-    /// accepted the connection before sending RPC data.
-    pub fn connect_vsock_port_with_handshake(
-        &self,
-        name: &str,
-        port: u32,
-    ) -> Result<(std::os::unix::io::RawFd, Option<std::sync::mpsc::Receiver<bool>>)> {
-        let machines = self.machines.read().map_err(|_| CoreError::LockPoisoned)?;
-
-        let machine = machines
-            .get(name)
-            .ok_or_else(|| CoreError::not_found(name.to_string()))?;
-
-        if machine.state != MachineState::Running {
-            return Err(CoreError::invalid_state(format!(
-                "machine '{name}' is not running"
-            )));
-        }
-
-        self.vm_manager
-            .connect_vsock_with_handshake(&machine.vm_id, port)
-    }
 
     /// Connects to the agent on a running machine (Linux).
     #[cfg(target_os = "linux")]

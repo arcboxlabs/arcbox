@@ -887,13 +887,7 @@ impl VmManager {
     ///
     /// # Errors
     /// Returns an error if the VM is not found, not running, or connection fails.
-    /// Returns `(fd, handshake_rx)` for HV backend. Other callers that
-    /// don't need handshake confirmation use `connect_vsock_fd` instead.
-    pub fn connect_vsock_with_handshake(
-        &self,
-        id: &VmId,
-        port: u32,
-    ) -> Result<(std::os::unix::io::RawFd, Option<std::sync::mpsc::Receiver<bool>>)> {
+    pub fn connect_vsock(&self, id: &VmId, port: u32) -> Result<std::os::unix::io::RawFd> {
         let vms = self.vms.read().map_err(|_| CoreError::LockPoisoned)?;
 
         let entry = vms
@@ -913,13 +907,6 @@ impl VmManager {
             .ok_or_else(|| CoreError::invalid_state("VMM not initialized"))?;
 
         vmm.connect_vsock(port).map_err(CoreError::from)
-    }
-
-    /// Simple connect that returns just the fd (drops handshake receiver).
-    /// Used by shutdown RPC and other paths that don't need handshake wait.
-    pub fn connect_vsock(&self, id: &VmId, port: u32) -> Result<std::os::unix::io::RawFd> {
-        let (fd, _rx) = self.connect_vsock_with_handshake(id, port)?;
-        Ok(fd)
     }
 
     /// Reads serial console output from a running VM (macOS only).
