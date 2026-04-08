@@ -1068,7 +1068,7 @@ impl SandboxManager {
                                     error = %e,
                                     "mknod failed on restore, falling back to rootfs copy"
                                 );
-                                let _ = self.cow_manager.teardown(&handle).await;
+                                self.cow_manager.teardown(&handle).await;
                                 stage_rootfs_copy_for_jailer(&cr, r, jc.uid, jc.gid).await?;
                                 None
                             }
@@ -1539,7 +1539,7 @@ async fn do_boot(
                                 error = %e,
                                 "mknod failed, falling back to rootfs copy"
                             );
-                            let _ = cow_manager.teardown(&handle).await;
+                            cow_manager.teardown(&handle).await;
                             let path =
                                 stage_rootfs_copy_for_jailer(&cr, &spec.rootfs, jc.uid, jc.gid)
                                     .await?;
@@ -1667,7 +1667,7 @@ async fn do_boot(
         Err(e) => {
             // Clean up dm-snapshot if boot fails after setup.
             if let Some(ref handle) = cow_handle {
-                let _ = cow_manager.teardown(handle).await;
+                cow_manager.teardown(handle).await;
             }
             return Err(VmmError::from(e));
         }
@@ -1722,10 +1722,8 @@ async fn remove_sandbox_impl(
     // because Firecracker holds the block device open).
     {
         let cow_handle = arc.lock().unwrap().cow_handle.take();
-        if let Some(ref handle) = cow_handle
-            && let Err(e) = cow_manager.teardown(handle).await
-        {
-            warn!(sandbox_id = %id, error = %e, "dm-snapshot teardown failed");
+        if let Some(ref handle) = cow_handle {
+            cow_manager.teardown(handle).await;
         }
     }
 

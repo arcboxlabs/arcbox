@@ -178,7 +178,10 @@ impl CowManager {
 
         // --- 2. Create sparse COW file (O(1), no actual I/O) ---------------
         let cow_file = self.cow_dir.join(format!("arcbox-cow-{sandbox_id}.img"));
-        let cow_size = sectors * 512;
+        let cow_size = sectors.checked_mul(512).ok_or_else(|| {
+            self.release_template(&template);
+            VmmError::DeviceMapper(format!("sector count overflow: {sectors}"))
+        })?;
         if let Err(e) = create_sparse_file(&cow_file, cow_size).await {
             self.release_template(&template);
             return Err(e);
@@ -231,7 +234,7 @@ impl CowManager {
 
     /// Tear down a dm-snapshot.  Best-effort: each step logs errors but
     /// continues to the next so resources are not leaked.
-    pub async fn teardown(&self, handle: &CowHandle) -> Result<()> {
+    pub async fn teardown(&self, handle: &CowHandle) {
         let dmsetup = self.dmsetup_bin.as_deref().unwrap_or("dmsetup");
 
         // 1. Remove dm device.
@@ -264,7 +267,6 @@ impl CowManager {
         self.release_template(&handle.template_path);
 
         info!(sandbox = %handle.dm_name, "dm-snapshot teardown complete");
-        Ok(())
     }
 
     /// Synchronous version of [`cleanup_stale`](Self::cleanup_stale) for use
