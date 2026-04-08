@@ -32,12 +32,14 @@ mod platform {
         // Writable layers on top of read-only EROFS.
         mount_tmpfs("/tmp");
         mount_tmpfs("/run");
-        // /var needs device nodes for the Firecracker jailer chroot:
-        // the jailer mknods a block device for the rootfs inside
-        // /var/lib/arcbox/jailer/, which requires the filesystem to
-        // allow device access (no `nodev`).
-        mount_tmpfs_dev("/var");
+        mount_tmpfs("/var");
         mount_tmpfs("/etc");
+
+        // The Firecracker jailer mknods block device nodes inside its
+        // chroot under /var/lib/arcbox/jailer/.  Mount only that narrow
+        // subtree without `nodev` rather than the entire /var.
+        mkdir_p("/var/lib/arcbox/jailer");
+        mount_tmpfs_dev("/var/lib/arcbox/jailer");
 
         // Populate /etc with files containerd/dockerd expect.
         write_etc_resolv_conf();
