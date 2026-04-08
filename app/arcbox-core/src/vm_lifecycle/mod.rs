@@ -736,15 +736,9 @@ impl VmLifecycleManager {
             .join(DOCKER_DATA_IMAGE_NAME);
         Self::ensure_sparse_block_image(&docker_data_image, DOCKER_DATA_IMAGE_SIZE_BYTES)?;
 
-        let docker_data_guest_device = Self::virtio_block_device_path(block_devices.len())?;
-        if !cmdline
-            .split_whitespace()
-            .any(|token| token.starts_with(DOCKER_DATA_DEVICE_CMDLINE_KEY))
-        {
-            cmdline.push(' ');
-            cmdline.push_str(DOCKER_DATA_DEVICE_CMDLINE_KEY);
-            cmdline.push_str(&docker_data_guest_device);
-        }
+        // Don't inject docker_data_device into cmdline — let the agent
+        // auto-detect. It prefers /dev/arcboxhvc1 (HVC fast path) when
+        // available, falling back to /dev/vdb (VirtIO block).
 
         block_devices.push(crate::vm::BlockDeviceConfig {
             path: docker_data_image.to_string_lossy().to_string(),

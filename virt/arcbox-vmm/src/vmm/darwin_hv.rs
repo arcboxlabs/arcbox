@@ -48,14 +48,21 @@ use super::*;
 // ArcBox HVC function IDs (vendor-specific SMCCC range 0xC200_XXXX)
 // =========================================================================
 
-/// HVC fast path: synchronous block read (≤4KB).
-/// X1 = device_idx, X2 = sector, X3 = buffer GPA, X4 = byte length.
-/// Returns X0 = bytes read (>0) or negative errno.
-const ARCBOX_HVC_BLK_READ: u64 = 0xC200_0001;
-
 /// HVC probe: returns number of block devices available for fast path.
 /// No arguments. Returns X0 = num_devices.
 const ARCBOX_HVC_PROBE: u64 = 0xC200_0000;
+
+/// HVC block read. X1=dev_idx, X2=sector, X3=buffer_gpa, X4=byte_len.
+/// Returns X0 = bytes read (>0) or negative errno.
+const ARCBOX_HVC_BLK_READ: u64 = 0xC200_0001;
+
+/// HVC block write. X1=dev_idx, X2=sector, X3=buffer_gpa, X4=byte_len.
+/// Returns X0 = bytes written (>0) or negative errno.
+const ARCBOX_HVC_BLK_WRITE: u64 = 0xC200_0002;
+
+/// HVC block flush (fsync). X1=dev_idx.
+/// Returns X0 = 0 on success or negative errno.
+const ARCBOX_HVC_BLK_FLUSH: u64 = 0xC200_0003;
 
 // =========================================================================
 // PSCI function IDs
@@ -1617,7 +1624,15 @@ fn vcpu_run_loop(
                         let _ = vcpu.set_reg(reg::X0, hvc_blk_fds.len() as u64);
                     }
                     ARCBOX_HVC_BLK_READ => {
-                        let result = handle_hvc_blk_read(&vcpu, &hvc_blk_fds, &device_manager);
+                        let result = handle_hvc_blk_io(&vcpu, &hvc_blk_fds, &device_manager, false);
+                        let _ = vcpu.set_reg(reg::X0, result);
+                    }
+                    ARCBOX_HVC_BLK_WRITE => {
+                        let result = handle_hvc_blk_io(&vcpu, &hvc_blk_fds, &device_manager, true);
+                        let _ = vcpu.set_reg(reg::X0, result);
+                    }
+                    ARCBOX_HVC_BLK_FLUSH => {
+                        let result = handle_hvc_blk_flush(&vcpu, &hvc_blk_fds);
                         let _ = vcpu.set_reg(reg::X0, result);
                     }
                     _ => {
@@ -1680,10 +1695,14 @@ fn vcpu_run_loop(
 /// Reads X1=device_idx, X2=sector, X3=buffer_gpa, X4=byte_length.
 /// Performs pread directly into guest memory and returns bytes read.
 /// Returns negative errno on failure.
-fn handle_hvc_blk_read(
+/// HVC block read or write.
+/// X1=device_idx, X2=sector, X3=buffer_gpa, X4=byte_length.
+/// `is_write`: false=pread, true=pwrite.
+fn handle_hvc_blk_io(
     vcpu: &arcbox_hv::HvVcpu,
     hvc_blk_fds: &[(i32, u32)],
     device_manager: &crate::device::DeviceManager,
+    is_write: bool,
 ) -> u64 {
     let Ok(device_idx) = vcpu.get_reg(arcbox_hv::reg::HV_REG_X1) else {
         return (-libc::EINVAL as i64) as u64;
@@ -1698,18 +1717,15 @@ fn handle_hvc_blk_read(
         return (-libc::EINVAL as i64) as u64;
     };
 
-    // Bounds check.
     let byte_len = byte_len as usize;
-    if byte_len == 0 || byte_len > 4096 {
+    if byte_len == 0 {
         return (-libc::EINVAL as i64) as u64;
     }
 
-    // Look up device fd.
     let Some(&(raw_fd, blk_size)) = hvc_blk_fds.get(device_idx as usize) else {
         return (-libc::ENODEV as i64) as u64;
     };
 
-    // Get guest memory pointer.
     let Some(ram_base) = device_manager.guest_ram_base_ptr() else {
         return (-libc::EFAULT as i64) as u64;
     };
@@ -1717,23 +1733,41 @@ fn handle_hvc_blk_read(
     let ram_size = device_manager.guest_ram_size();
     let gpa = buffer_gpa as usize;
 
-    // Validate GPA is within guest RAM.
     if gpa < gpa_base || gpa + byte_len > gpa_base + ram_size {
         return (-libc::EFAULT as i64) as u64;
     }
 
-    // Calculate host pointer for the GPA.
     let host_ptr = unsafe { ram_base.add(gpa - gpa_base) };
 
-    // Synchronous pread into guest memory.
     #[allow(clippy::cast_possible_wrap)]
     let offset = (sector * u64::from(blk_size)) as libc::off_t;
-    let n = unsafe { libc::pread(raw_fd, host_ptr.cast(), byte_len, offset) };
+
+    let n = if is_write {
+        unsafe { libc::pwrite(raw_fd, host_ptr.cast(), byte_len, offset) }
+    } else {
+        unsafe { libc::pread(raw_fd, host_ptr.cast(), byte_len, offset) }
+    };
     if n < 0 {
-        let errno = unsafe { *libc::__error() }; // macOS errno
+        let errno = unsafe { *libc::__error() };
         return (-errno as i64) as u64;
     }
     n as u64
+}
+
+/// HVC block flush (fsync). X1=device_idx.
+fn handle_hvc_blk_flush(vcpu: &arcbox_hv::HvVcpu, hvc_blk_fds: &[(i32, u32)]) -> u64 {
+    let Ok(device_idx) = vcpu.get_reg(arcbox_hv::reg::HV_REG_X1) else {
+        return (-libc::EINVAL as i64) as u64;
+    };
+    let Some(&(raw_fd, _)) = hvc_blk_fds.get(device_idx as usize) else {
+        return (-libc::ENODEV as i64) as u64;
+    };
+    let ret = unsafe { libc::fsync(raw_fd) };
+    if ret < 0 {
+        let errno = unsafe { *libc::__error() };
+        return (-errno as i64) as u64;
+    }
+    0
 }
 
 /// Reads registers X1–X3 as needed and writes the return value into X0.

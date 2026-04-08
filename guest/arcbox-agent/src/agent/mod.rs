@@ -125,10 +125,23 @@ mod linux {
         DOCKER_API_VSOCK_PORT
     }
 
+    /// HVC fast-path block device for the data disk (device index 1 = vdb).
+    /// Falls back to the standard VirtIO block device if HVC device is absent.
+    const HVC_DATA_DEVICE: &str = "/dev/arcboxhvc1";
+
     fn docker_data_device() -> String {
-        cmdline_value(DOCKER_DATA_DEVICE_CMDLINE_KEY)
-            .filter(|v| !v.trim().is_empty())
-            .unwrap_or_else(|| DOCKER_DATA_DEVICE_DEFAULT.to_string())
+        // Prefer explicit kernel cmdline override.
+        if let Some(v) = cmdline_value(DOCKER_DATA_DEVICE_CMDLINE_KEY) {
+            if !v.trim().is_empty() {
+                return v;
+            }
+        }
+        // Use HVC fast-path device if available.
+        if Path::new(HVC_DATA_DEVICE).exists() {
+            tracing::info!("using HVC fast-path block device: {}", HVC_DATA_DEVICE);
+            return HVC_DATA_DEVICE.to_string();
+        }
+        DOCKER_DATA_DEVICE_DEFAULT.to_string()
     }
 
     fn kubernetes_api_vsock_port() -> u32 {
