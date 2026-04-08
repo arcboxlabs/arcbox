@@ -795,39 +795,47 @@ impl VmLifecycleManager {
             }
 
             // Try to connect to agent with a per-attempt timeout.
-            // Both connect_agent (synchronous vsock handshake) and ping (async
-            // RPC) are wrapped in a single 2s timeout. connect_agent internally
-            // calls poll_vsock_rx which may contend on the vsock_connections
-            // mutex with the vCPU thread, so it must not block the tokio runtime
-            // indefinitely.
-            let mm = Arc::clone(&self.machine_manager);
-            let connect_result = tokio::time::timeout(Duration::from_secs(2), async move {
-                let mut agent = tokio::task::spawn_blocking(move || {
-                    mm.connect_agent(DEFAULT_MACHINE_NAME)
-                })
-                .await
-                .map_err(|e| CoreError::Machine(format!("join error: {e}")))??;
-                agent.ping().await?;
-                Ok::<_, CoreError>(agent)
+            // connect_agent only creates a socketpair and enqueues an OP_REQUEST
+            // (no guest memory access), but the async ping() RPC may hang if the
+            // vsock data path has a race on the first few attempts after boot.
+            // A 2s timeout prevents any single attempt from blocking the loop.
+            // connect_agent is async: it creates a socketpair, enqueues
+            // OP_REQUEST, then polls the handshake channel (try_recv + tokio
+            // sleep) without blocking the tokio worker thread.
+            match tokio::time::timeout(Duration::from_secs(10), async {
+                self.machine_manager
+                    .connect_agent_async(DEFAULT_MACHINE_NAME)
+                    .await
             })
-            .await;
-
-            match connect_result {
-                Ok(Ok(_agent)) => {
-                    tracing::info!("Agent is ready");
-                    self.health_monitor.record_success();
-                    #[cfg(target_os = "macos")]
-                    {
-                        let mm = Arc::clone(&self.machine_manager);
-                        tokio::spawn(serial::serial_read_adaptive(mm));
+            .await
+            {
+                Ok(Ok(mut agent)) => {
+                    // Handshake complete — connection is established. Ping to
+                    // verify agent RPC is responsive.
+                    match tokio::time::timeout(Duration::from_secs(2), agent.ping()).await {
+                        Ok(Ok(_response)) => {
+                            tracing::info!("Agent is ready");
+                            self.health_monitor.record_success();
+                            #[cfg(target_os = "macos")]
+                            {
+                                let mm = Arc::clone(&self.machine_manager);
+                                tokio::spawn(serial::serial_read_adaptive(mm));
+                            }
+                            return Ok(());
+                        }
+                        Ok(Err(e)) => {
+                            tracing::debug!("Agent ping failed: {}", e);
+                        }
+                        Err(_) => {
+                            tracing::debug!("Agent ping timed out (2s)");
+                        }
                     }
-                    return Ok(());
                 }
                 Ok(Err(e)) => {
-                    tracing::debug!("Agent connect/ping failed: {}", e);
+                    tracing::debug!("Agent connection failed: {}", e);
                 }
                 Err(_) => {
-                    tracing::debug!("Agent connect/ping timed out (2s)");
+                    tracing::debug!("Agent connect timed out (10s)");
                 }
             }
 

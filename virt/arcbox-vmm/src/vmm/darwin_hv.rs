@@ -1444,8 +1444,13 @@ impl Vmm {
     /// RX packet injection. Currently this provides the socketpair
     /// plumbing; actual data forwarding is handled by the VirtioVsock
     /// device's process_queue implementation.
+    /// Returns (fd, connect_receiver). The caller must await the receiver
+    /// before using the fd — it fires `true` on OP_RESPONSE or `false` on RST.
     #[allow(clippy::unnecessary_wraps)]
-    pub(super) fn connect_vsock_hv(&self, port: u32) -> Result<std::os::unix::io::RawFd> {
+    pub(super) fn connect_vsock_hv(
+        &self,
+        port: u32,
+    ) -> Result<(std::os::unix::io::RawFd, std::sync::mpsc::Receiver<bool>)> {
         use std::os::unix::io::FromRawFd;
 
         // Create a Unix SOCK_STREAM socketpair for bidirectional data.
@@ -1475,34 +1480,29 @@ impl Vmm {
         // SAFETY: fds are valid from socketpair.
         let internal_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
 
-        if let Some(ref dm) = self.hv_device_manager {
-            let guest_cid = self.config.guest_cid.unwrap_or(3) as u64;
+        let dm = self
+            .hv_device_manager
+            .as_ref()
+            .ok_or_else(|| VmmError::Device("DeviceManager not initialized".to_string()))?;
 
-            // Allocate a connection with a unique ephemeral host port.
-            // The manager takes ownership of internal_fd (no mem::forget needed).
-            let conn_id = {
-                let conns = dm.vsock_connections();
-                let mut mgr = conns
-                    .lock()
-                    .map_err(|e| VmmError::Device(format!("vsock manager lock failed: {e}")))?;
-                mgr.allocate(port, guest_cid, internal_fd)
-            };
+        let guest_cid = self.config.guest_cid.unwrap_or(3) as u64;
 
-            tracing::info!(
-                "HV vsock connect: guest_port={}, host_port={}, host_fd={}",
-                port,
-                conn_id.host_port,
-                fds[0],
-            );
+        let (conn_id, connect_rx) = {
+            let conns = dm.vsock_connections();
+            let mut mgr = conns
+                .lock()
+                .map_err(|e| VmmError::Device(format!("vsock manager lock failed: {e}")))?;
+            mgr.allocate(port, guest_cid, internal_fd)
+        };
 
-            // Inject OP_REQUEST. If device isn't ready, the manager's
-            // pending list ensures deferred injection via poll_vsock_rx.
-            if dm.inject_vsock_connect(conn_id, guest_cid) {
-                dm.raise_interrupt_for(crate::device::DeviceType::VirtioVsock, 1);
-            }
-        }
+        tracing::info!(
+            "HV vsock connect: guest_port={}, host_port={}, host_fd={}",
+            port,
+            conn_id.host_port,
+            fds[0],
+        );
 
-        Ok(fds[0])
+        Ok((fds[0], connect_rx))
     }
 }
 

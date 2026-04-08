@@ -103,6 +103,13 @@ pub const TX_BUFFER_SIZE: u32 = 64 * 1024;
 pub struct VsockConnection {
     pub id: VsockConnectionId,
     pub internal_fd: OwnedFd,
+    /// Oneshot sender to notify the daemon that the connection is established.
+    /// Fired when `mark_connected` sets `connect = true` (OP_RESPONSE received).
+    /// Also fired with `false` if the connection is RST'd before completion.
+    /// Uses std::sync::mpsc (not tokio::sync) because the sender fires from
+    /// the vCPU thread (plain OS thread) but the receiver can be polled from
+    /// any context including async.
+    pub connect_notify: Option<std::sync::mpsc::Sender<bool>>,
     pub guest_cid: u64,
 
     /// Whether the connection handshake is complete.
@@ -132,12 +139,18 @@ pub struct VsockConnection {
 
 impl VsockConnection {
     /// Creates a new connection for a host-initiated connect (OP_REQUEST).
-    pub fn new_local_init(id: VsockConnectionId, guest_cid: u64, fd: OwnedFd) -> Self {
+    pub fn new_local_init(
+        id: VsockConnectionId,
+        guest_cid: u64,
+        fd: OwnedFd,
+        connect_notify: std::sync::mpsc::Sender<bool>,
+    ) -> Self {
         let mut conn = Self {
             id,
             internal_fd: fd,
             guest_cid,
             connect: false,
+            connect_notify: Some(connect_notify),
             rx_queue: RxOps::default(),
             fwd_cnt: Wrapping(0),
             last_fwd_cnt: Wrapping(0),
@@ -227,18 +240,23 @@ impl VsockConnectionManager {
     ///
     /// Enqueues `RxOps::REQUEST` and pushes to `backend_rxq` so the next
     /// `poll_vsock_rx` sends OP_REQUEST to the guest.
+    /// Allocates a new connection to `guest_port`, returning the ID and a
+    /// receiver that signals when the connection is established (OP_RESPONSE)
+    /// or rejected (OP_RST). The daemon should wait on this receiver before
+    /// using the socketpair for data transfer.
     pub fn allocate(
         &mut self,
         guest_port: u32,
         guest_cid: u64,
         internal_fd: OwnedFd,
-    ) -> VsockConnectionId {
+    ) -> (VsockConnectionId, std::sync::mpsc::Receiver<bool>) {
         let host_port = self.next_host_port.fetch_add(1, Ordering::Relaxed);
         let id = VsockConnectionId {
             host_port,
             guest_port,
         };
-        let conn = VsockConnection::new_local_init(id, guest_cid, internal_fd);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let conn = VsockConnection::new_local_init(id, guest_cid, internal_fd, tx);
         self.connections.insert(id, conn);
         // Signal that this connection has a pending RX op (OP_REQUEST).
         self.backend_rxq.push_back(id);
@@ -248,7 +266,7 @@ impl VsockConnectionManager {
             guest_port,
             host_port,
         );
-        id
+        (id, rx)
     }
 
     /// Returns a snapshot of all connected (id, raw_fd) pairs for polling.
@@ -291,7 +309,11 @@ impl VsockConnectionManager {
 
     /// Removes a connection and closes its fd.
     pub fn remove(&mut self, id: &VsockConnectionId) {
-        if self.connections.remove(id).is_some() {
+        if let Some(mut conn) = self.connections.remove(id) {
+            // Notify the daemon that the connection was rejected.
+            if let Some(tx) = conn.connect_notify.take() {
+                let _ = tx.send(false);
+            }
             // Remove from backend_rxq too.
             self.backend_rxq.retain(|qid| qid != id);
             tracing::info!(
@@ -340,6 +362,10 @@ impl VsockHostConnections for VsockConnectionManager {
         };
         if let Some(conn) = self.connections.get_mut(&id) {
             conn.connect = true;
+            // Notify the daemon that the connection is established.
+            if let Some(tx) = conn.connect_notify.take() {
+                let _ = tx.send(true);
+            }
             tracing::info!("VsockConnectionManager: connection {:?} now Connected", id,);
         } else {
             tracing::warn!(
@@ -453,8 +479,8 @@ mod tests {
         let (_, internal1) = make_socketpair();
         let (_, internal2) = make_socketpair();
 
-        let id1 = mgr.allocate(1024, 3, internal1);
-        let id2 = mgr.allocate(1024, 3, internal2);
+        let (id1, _rx1) = mgr.allocate(1024, 3, internal1);
+        let (id2, _rx2) = mgr.allocate(1024, 3, internal2);
 
         assert_ne!(id1.host_port, id2.host_port);
         assert_eq!(id1.guest_port, 1024);
@@ -466,7 +492,7 @@ mod tests {
     fn allocate_enqueues_request() {
         let mut mgr = VsockConnectionManager::new();
         let (_, internal) = make_socketpair();
-        let id = mgr.allocate(1024, 3, internal);
+        let (id, _rx) = mgr.allocate(1024, 3, internal);
 
         // Should be in backend_rxq.
         assert_eq!(mgr.backend_rxq.len(), 1);
@@ -484,8 +510,8 @@ mod tests {
         let (_, internal1) = make_socketpair();
         let (_, internal2) = make_socketpair();
 
-        let id1 = mgr.allocate(1024, 3, internal1);
-        let _id2 = mgr.allocate(1024, 3, internal2);
+        let (id1, _rx1) = mgr.allocate(1024, 3, internal1);
+        let (_id2, _rx2) = mgr.allocate(1024, 3, internal2);
 
         assert!(mgr.connected_fds().is_empty());
 
@@ -500,7 +526,7 @@ mod tests {
         let mut mgr = VsockConnectionManager::new();
         let (_, internal) = make_socketpair();
         let fd_raw = internal.as_raw_fd();
-        let id = mgr.allocate(1024, 3, internal);
+        let (id, _rx) = mgr.allocate(1024, 3, internal);
 
         mgr.mark_connected(id.guest_port, id.host_port);
         assert!(mgr.fd_for(1024, id.host_port).is_some());
@@ -518,7 +544,7 @@ mod tests {
     fn credit_flow_control() {
         let mut mgr = VsockConnectionManager::new();
         let (_, internal) = make_socketpair();
-        let id = mgr.allocate(1024, 3, internal);
+        let (id, _rx) = mgr.allocate(1024, 3, internal);
 
         // Simulate guest advertising 128KB buffer.
         let conn = mgr.get_mut(&id).unwrap();
@@ -538,7 +564,7 @@ mod tests {
     fn fwd_cnt_triggers_credit_update() {
         let mut mgr = VsockConnectionManager::new();
         let (_, internal) = make_socketpair();
-        let id = mgr.allocate(1024, 3, internal);
+        let (id, _rx) = mgr.allocate(1024, 3, internal);
 
         // Drain the initial REQUEST from rx_queue.
         let conn = mgr.get_mut(&id).unwrap();

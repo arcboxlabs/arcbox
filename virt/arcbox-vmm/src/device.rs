@@ -1301,18 +1301,22 @@ impl DeviceManager {
     /// and pushed to `backend_rxq`. This method tries to fill an RX descriptor
     /// now. If the device isn't ready, the pending op stays in `backend_rxq`
     /// for deferred processing by `poll_vsock_rx`.
-    pub fn inject_vsock_connect(
-        &self,
-        _id: crate::vsock_manager::VsockConnectionId,
-        _guest_cid: u64,
-    ) -> bool {
-        // Don't call poll_vsock_rx from the daemon thread — it contends with
-        // the vCPU thread's BSP poll loop on the vsock_connections mutex and
-        // can cause the daemon to block indefinitely. Instead, just return
-        // true to indicate the OP_REQUEST was enqueued. The vCPU thread's
-        // next poll_vsock_rx iteration (before every vcpu.run) will drain
-        // the backend_rxq and inject the OP_REQUEST into the guest RX queue.
-        true
+    /// Signals that a new vsock connection was enqueued in the manager.
+    ///
+    /// This is a no-op from the DeviceManager side — `allocate()` already
+    /// pushed the `RxOps::REQUEST` into `backend_rxq`. The vCPU BSP thread's
+    /// `poll_vsock_rx` (called before every `vcpu.run()`) drains that queue
+    /// and injects the OP_REQUEST into the guest RX virtqueue.
+    ///
+    /// **Thread safety**: this method is safe to call from any thread because
+    /// it does NOT touch guest memory, virtqueues, or MMIO state. All
+    /// guest-visible operations are performed exclusively by the vCPU BSP
+    /// thread through `poll_vsock_rx`.
+    pub fn notify_vsock_connect(&self) {
+        // Nothing to do — the BSP poll loop picks up backend_rxq entries
+        // automatically. We intentionally do NOT call poll_vsock_rx here
+        // because that function accesses guest memory and virtqueue state,
+        // which must only happen on the vCPU thread.
     }
 
     /// Injects a raw packet into the vsock RX queue (queue 0).
