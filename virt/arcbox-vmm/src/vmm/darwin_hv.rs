@@ -385,7 +385,7 @@ impl Vmm {
         // Placed immediately after guest RAM so devm_memremap_pages can
         // register it as ZONE_DEVICE (must be above RAM, not in MMIO gap).
         let dax_base = crate::dax::dax_window_base(RAM_BASE_IPA, ram_size as u64);
-        let dax_size = crate::dax::DAX_WINDOW_SIZE as usize;
+        let dax_size = crate::dax::dax_window_total(self.config.shared_dirs.len()) as usize;
         {
             let dax_ptr = unsafe {
                 libc::mmap(
@@ -542,8 +542,7 @@ impl Vmm {
         // VirtioFS shared directories — create FsServer handler for each share.
         // Each VirtioFS device gets its own DAX window slice so devm_request_mem_region
         // doesn't collide. Total DAX space is split equally among shares.
-        let num_shares = self.config.shared_dirs.len().max(1) as u64;
-        let per_share_dax = (crate::dax::DAX_WINDOW_SIZE / num_shares) & !0xFFF; // page-aligned
+        let per_share_dax = crate::dax::DAX_WINDOW_PER_SHARE;
         let dax_mapper: std::sync::Arc<dyn arcbox_fs::DaxMapper> =
             std::sync::Arc::new(crate::dax::HvDaxMapper::new(dax_base));
         let mut dax_offset: u64 = 0;

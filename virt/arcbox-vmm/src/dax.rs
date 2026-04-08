@@ -14,8 +14,13 @@ pub fn dax_window_base(ram_base: u64, ram_size: u64) -> u64 {
     (after_ram + 0x1F_FFFF) & !0x1F_FFFF
 }
 
-/// Size of the DAX window (256 MB).
-pub const DAX_WINDOW_SIZE: u64 = 256 * 1024 * 1024;
+/// DAX window size per VirtioFS share (128 MB each).
+pub const DAX_WINDOW_PER_SHARE: u64 = 128 * 1024 * 1024;
+
+/// Total DAX window size for a given number of VirtioFS shares.
+pub fn dax_window_total(num_shares: usize) -> u64 {
+    num_shares.max(1) as u64 * DAX_WINDOW_PER_SHARE
+}
 
 /// A single active DAX mapping.
 struct DaxMapping {
@@ -56,7 +61,7 @@ impl arcbox_fs::DaxMapper for HvDaxMapper {
         if (file_offset | window_offset | length) & page_mask != 0 {
             return Err(libc::EINVAL);
         }
-        if length == 0 || window_offset + length > DAX_WINDOW_SIZE {
+        if length == 0 {
             return Err(libc::EINVAL);
         }
 
