@@ -530,18 +530,29 @@ impl TcpBridge {
             return None;
         }
 
-        // Need a domain name to use proxy tunnel (can't send raw IP to CONNECT).
-        let host = domain?;
+        // Check fake-ip BEFORE requiring a domain name. Fake-IP destinations
+        // (198.18.0.0/15 from Surge/ClashX) always need proxy routing, even
+        // if the DNS log hasn't recorded the domain yet (race between DNS
+        // response and TCP SYN). Use the IP as fallback CONNECT target.
+        let is_fake = env.is_fake_ip(dst_ip);
+
+        // Resolve the host for the CONNECT/SOCKS5 tunnel target.
+        // For fake-IP without domain, fall back to the IP string — the proxy
+        // will resolve it on its end (Surge handles this correctly).
+        let host = match domain {
+            Some(d) => d.to_string(),
+            None if is_fake => dst_ip.to_string(),
+            None => return None,
+        };
 
         // Check bypass list.
-        if env.should_bypass(host) {
+        if env.should_bypass(&host) {
             return None;
         }
 
-        // Proxy fake-ip destinations (VPN virtual IPs that only the proxy can
-        // resolve) and traffic when an explicit system proxy is configured
-        // (corporate proxy environments).
-        let need_proxy = env.is_fake_ip(dst_ip)
+        // Proxy fake-ip destinations and traffic when an explicit system proxy
+        // is configured (corporate proxy environments).
+        let need_proxy = is_fake
             || env.http_proxy.is_some()
             || env.https_proxy.is_some()
             || env.socks_proxy.is_some();
@@ -554,17 +565,17 @@ impl TcpBridge {
         // then HTTP proxy as last resort.
         if let Some(ref socks) = env.socks_proxy {
             let authority = format!("{}:{}", socks.host, socks.port);
-            return Some((authority, host.to_string(), dst_port, "socks5"));
+            return Some((authority, host, dst_port, "socks5"));
         }
 
         if let Some(ref https) = env.https_proxy {
             let authority = format!("{}:{}", https.host, https.port);
-            return Some((authority, host.to_string(), dst_port, "http-connect"));
+            return Some((authority, host, dst_port, "http-connect"));
         }
 
         if let Some(ref http) = env.http_proxy {
             let authority = format!("{}:{}", http.host, http.port);
-            return Some((authority, host.to_string(), dst_port, "http-connect"));
+            return Some((authority, host, dst_port, "http-connect"));
         }
 
         None
