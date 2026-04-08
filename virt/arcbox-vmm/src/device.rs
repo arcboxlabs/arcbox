@@ -1306,9 +1306,13 @@ impl DeviceManager {
         _id: crate::vsock_manager::VsockConnectionId,
         _guest_cid: u64,
     ) -> bool {
-        // Try to immediately drain the backend_rxq for this connection.
-        // If the device isn't ready, poll_vsock_rx will handle it later.
-        self.poll_vsock_rx()
+        // Don't call poll_vsock_rx from the daemon thread — it contends with
+        // the vCPU thread's BSP poll loop on the vsock_connections mutex and
+        // can cause the daemon to block indefinitely. Instead, just return
+        // true to indicate the OP_REQUEST was enqueued. The vCPU thread's
+        // next poll_vsock_rx iteration (before every vcpu.run) will drain
+        // the backend_rxq and inject the OP_REQUEST into the guest RX queue.
+        true
     }
 
     /// Injects a raw packet into the vsock RX queue (queue 0).
@@ -1881,11 +1885,11 @@ impl DeviceManager {
                 .map(|mgr| mgr.connected_fds())
                 .unwrap_or_default();
 
-            if !connected_fds.is_empty() {
-                tracing::debug!(
-                    "vsock Phase 1: {} connected fds to peek",
-                    connected_fds.len(),
-                );
+            // Log at INFO once per unique count change to avoid spam.
+            static LAST_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let count = connected_fds.len();
+            if count != LAST_COUNT.swap(count, std::sync::atomic::Ordering::Relaxed) {
+                tracing::info!("vsock Phase 1: {} connected fds", count);
             }
 
             for (conn_id, fd) in &connected_fds {
