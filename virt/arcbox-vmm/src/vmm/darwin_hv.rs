@@ -659,6 +659,18 @@ impl Vmm {
 
             // Set up the network datapath (reuses VZ path's entire stack).
             self.create_hv_network_datapath(&mut device_manager)?;
+
+            // Bridge NIC (NIC2): vmnet for host→container L3 routing.
+            #[cfg(feature = "vmnet")]
+            {
+                if let Err(e) =
+                    self.create_hv_bridge_nic(&mut device_manager, &mut memory_manager, &irq_chip)
+                {
+                    tracing::warn!("vmnet bridge NIC failed (non-fatal): {e}");
+                    // Bridge NIC is optional — container IP routing won't work
+                    // but everything else (outbound, vsock, Docker API) is fine.
+                }
+            }
         }
 
         // Entropy (RNG) — provides /dev/hwrng to the guest. Without this,
@@ -1303,6 +1315,123 @@ impl Vmm {
         Ok(())
     }
 
+    /// Creates the bridge NIC (NIC2) backed by vmnet.framework for container
+    /// IP routing. The vmnet interface runs in Shared (NAT) mode, providing a
+    /// macOS bridge interface (e.g., bridge101) that the host route reconciler
+    /// can target with `route add 172.16.0.0/12 → bridge101`.
+    ///
+    /// Data path: vmnet ↔ VmnetRelay (async) ↔ socketpair ↔ DeviceManager ↔ Guest NIC2.
+    #[cfg(feature = "vmnet")]
+    fn create_hv_bridge_nic(
+        &mut self,
+        device_manager: &mut crate::device::DeviceManager,
+        memory_manager: &mut crate::memory::MemoryManager,
+        irq_chip: &crate::irq::IrqChip,
+    ) -> Result<()> {
+        use arcbox_net::darwin::vmnet::{Vmnet, VmnetConfig};
+        use arcbox_net::darwin::vmnet_relay::VmnetRelay;
+
+        // Parse MAC from config (stable per VM for bridge FDB lookup).
+        let config = if let Some(ref mac_str) = self.config.bridge_nic_mac {
+            let mac = arcbox_net::darwin::parse_mac(mac_str)
+                .map_err(|e| VmmError::Device(format!("invalid bridge NIC MAC: {e}")))?;
+            VmnetConfig::shared().with_mac(mac)
+        } else {
+            VmnetConfig::shared()
+        };
+
+        let vmnet = std::sync::Arc::new(
+            Vmnet::new(config).map_err(|e| VmmError::Device(format!("vmnet start failed: {e}")))?,
+        );
+
+        let info = vmnet
+            .interface_info()
+            .ok_or_else(|| VmmError::Device("vmnet interface_info unavailable".to_string()))?;
+
+        let vmnet_mac = info.mac;
+        tracing::info!(
+            mac = arcbox_net::darwin::format_mac(&vmnet_mac),
+            mtu = info.mtu,
+            "HV bridge NIC: vmnet interface created"
+        );
+
+        // Create socketpair for the relay (same pattern as NIC1).
+        let mut fds: [libc::c_int; 2] = [0; 2];
+        let ret =
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
+        if ret != 0 {
+            return Err(VmmError::Device(format!(
+                "socketpair for vmnet bridge failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        // fds[0] = HV side (DeviceManager reads/writes bridge frames)
+        // fds[1] = relay side (VmnetRelay forwards to vmnet)
+        let hv_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let relay_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+
+        // Set large buffers + non-blocking on HV side.
+        unsafe {
+            let buf_size: libc::c_int = 8 * 1024 * 1024;
+            libc::setsockopt(
+                hv_fd.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&raw const buf_size).cast::<libc::c_void>(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+            libc::setsockopt(
+                hv_fd.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                (&raw const buf_size).cast::<libc::c_void>(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+            let flags = libc::fcntl(hv_fd.as_raw_fd(), libc::F_GETFL, 0);
+            libc::fcntl(hv_fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+
+        // Register the bridge VirtioNet device with the vmnet MAC.
+        let net_config = arcbox_virtio::net::NetConfig {
+            mac: vmnet_mac,
+            ..Default::default()
+        };
+        let bridge_dev = arcbox_virtio::net::VirtioNet::new(net_config);
+        let bridge_device_id = device_manager.register_virtio_device(
+            crate::device::DeviceType::VirtioNet,
+            "virtio-net-bridge",
+            bridge_dev,
+            memory_manager,
+            irq_chip,
+        )?;
+
+        // Wire the bridge fd to the DeviceManager.
+        device_manager.set_bridge_host_fd(hv_fd.as_raw_fd(), bridge_device_id);
+
+        // Spawn vmnet relay task.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let relay = VmnetRelay::new(std::sync::Arc::clone(&vmnet), cancel.clone());
+
+        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
+            VmmError::Device(format!("tokio runtime not available for vmnet relay: {e}"))
+        })?;
+
+        runtime.spawn(async move {
+            if let Err(e) = relay.run(relay_fd).await {
+                tracing::error!("HV vmnet relay exited with error: {e}");
+            }
+        });
+
+        // Store state for cleanup (reuses the same Vmm fields as VZ path).
+        self.vmnet_bridge = Some(vmnet);
+        self.vmnet_relay_cancel = Some(cancel);
+        self.hv_bridge_net_fd = Some(hv_fd);
+
+        tracing::info!("HV bridge NIC (NIC2) ready: vmnet relay running");
+        Ok(())
+    }
+
     /// Connects to a vsock port on the guest VM (HV backend).
     ///
     /// Creates a Unix socketpair. One end is returned to the caller for
@@ -1511,6 +1640,11 @@ fn vcpu_run_loop(
             if device_manager.poll_net_rx() {
                 device_manager.raise_interrupt_for(crate::device::DeviceType::VirtioNet, 1);
             }
+            if device_manager.poll_bridge_rx() {
+                if let Some(bid) = device_manager.bridge_device_id() {
+                    device_manager.raise_interrupt_for_device(bid, 1);
+                }
+            }
         }
 
         let exit = match vcpu.run() {
@@ -1660,6 +1794,13 @@ fn vcpu_run_loop(
 
                 if device_manager.poll_net_rx() {
                     device_manager.raise_interrupt_for(crate::device::DeviceType::VirtioNet, 1);
+                    wfi_has_work = true;
+                }
+
+                if device_manager.poll_bridge_rx() {
+                    if let Some(bid) = device_manager.bridge_device_id() {
+                        device_manager.raise_interrupt_for_device(bid, 1);
+                    }
                     wfi_has_work = true;
                 }
 

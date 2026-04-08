@@ -406,11 +406,19 @@ pub struct DeviceManager {
     guest_ram_gpa: u64,
     /// IRQ trigger callback for injecting interrupts into the guest.
     irq_callback: Option<DeviceIrqCallback>,
-    /// Network host fd for HV path. Data read from this fd is injected into
-    /// the VirtioNet RX queue; data extracted from TX queue is written here.
+    /// Network host fd for HV path (NIC1 — primary, outbound traffic).
+    /// Data read from this fd is injected into the VirtioNet RX queue;
+    /// data extracted from TX queue is written here.
     net_host_fd: Option<std::os::unix::io::RawFd>,
-    /// Last processed avail index for VirtioNet TX queue.
+    /// Last processed avail index for VirtioNet TX queue (NIC1).
     net_last_avail_tx: std::sync::atomic::AtomicUsize,
+    /// Bridge host fd for HV path (NIC2 — vmnet bridge, container IP routing).
+    /// Same semantics as `net_host_fd` but for the bridge NIC connected to vmnet.
+    bridge_host_fd: Option<std::os::unix::io::RawFd>,
+    /// DeviceId of the bridge VirtioNet so QUEUE_NOTIFY can dispatch correctly.
+    bridge_net_device_id: Option<DeviceId>,
+    /// Last processed avail index for bridge VirtioNet TX queue (NIC2).
+    bridge_last_avail_tx: std::sync::atomic::AtomicUsize,
     /// Host-side vsock connection manager (HV backend only).
     vsock_connections:
         std::sync::Arc<std::sync::Mutex<crate::vsock_manager::VsockConnectionManager>>,
@@ -439,6 +447,9 @@ impl DeviceManager {
             irq_callback: None,
             net_host_fd: None,
             net_last_avail_tx: std::sync::atomic::AtomicUsize::new(0),
+            bridge_host_fd: None,
+            bridge_net_device_id: None,
+            bridge_last_avail_tx: std::sync::atomic::AtomicUsize::new(0),
             vsock_connections: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::vsock_manager::VsockConnectionManager::new(),
             )),
@@ -463,9 +474,15 @@ impl DeviceManager {
         self.irq_callback = Some(callback);
     }
 
-    /// Sets the host-side network fd for HV path frame exchange.
+    /// Sets the host-side network fd for HV path frame exchange (NIC1).
     pub fn set_net_host_fd(&mut self, fd: std::os::unix::io::RawFd) {
         self.net_host_fd = Some(fd);
+    }
+
+    /// Sets the bridge NIC host fd and device ID (NIC2 — vmnet bridge).
+    pub fn set_bridge_host_fd(&mut self, fd: std::os::unix::io::RawFd, device_id: DeviceId) {
+        self.bridge_host_fd = Some(fd);
+        self.bridge_net_device_id = Some(device_id);
     }
 
     /// Returns the guest RAM base pointer (for worker thread context).
@@ -770,6 +787,8 @@ impl DeviceManager {
 
     /// Sets interrupt_status and syncs the GIC SPI level for a device type.
     /// Used by the vCPU polling paths (vsock RX, net RX) after injecting data.
+    /// Note: matches the FIRST device of the given type. For bridge NIC, use
+    /// `raise_interrupt_for_device` with the specific device ID.
     pub fn raise_interrupt_for(&self, device_type: DeviceType, reason: u32) {
         for (id, dev) in &self.devices {
             if dev.info.device_type == device_type {
@@ -782,6 +801,24 @@ impl DeviceManager {
                 break;
             }
         }
+    }
+
+    /// Raises interrupt for a specific device ID. Used for the bridge NIC
+    /// which shares `DeviceType::VirtioNet` with the primary NIC.
+    pub fn raise_interrupt_for_device(&self, device_id: DeviceId, reason: u32) {
+        if let Some(dev) = self.devices.get(&device_id) {
+            if let Some(ref mmio_arc) = dev.mmio_state {
+                if let Ok(mut s) = mmio_arc.write() {
+                    s.trigger_interrupt(reason);
+                }
+            }
+            self.sync_irq_level(device_id);
+        }
+    }
+
+    /// Returns the bridge NIC device ID (if configured).
+    pub fn bridge_device_id(&self) -> Option<DeviceId> {
+        self.bridge_net_device_id
     }
 
     /// Finds device by MMIO address.
@@ -1051,11 +1088,19 @@ impl DeviceManager {
                             // VirtioNet TX (queue 1): extract ethernet frames
                             // from guest memory and write to the network host fd.
                             // This bypasses the generic process_queue.
+                            // Dispatch to correct fd: NIC1 (net_host_fd) or NIC2 (bridge).
                             else if device.info.device_type == DeviceType::VirtioNet
                                 && queue_idx == 1
-                                && self.net_host_fd.is_some()
+                                && (self.net_host_fd.is_some() || self.bridge_host_fd.is_some())
                             {
-                                let net_completions = self.handle_net_tx(guest_mem, &qcfg);
+                                let is_bridge = self
+                                    .bridge_net_device_id
+                                    .is_some_and(|bid| bid == device_id);
+                                let net_completions = if is_bridge {
+                                    self.handle_bridge_tx(guest_mem, &qcfg)
+                                } else {
+                                    self.handle_net_tx(guest_mem, &qcfg)
+                                };
                                 if !net_completions.is_empty() {
                                     // Update used ring for completed TX descriptors.
                                     let used_addr = qcfg.used_addr as usize;
@@ -2381,6 +2426,260 @@ impl DeviceManager {
                 }
             }
         }
+    }
+
+    // ========================================================================
+    // Bridge NIC (NIC2) — vmnet bridge for container IP routing
+    // ========================================================================
+
+    /// Extracts ethernet frames from bridge VirtioNet TX queue and writes
+    /// them to the bridge (vmnet) host fd. Mirrors `handle_net_tx`.
+    fn handle_bridge_tx(&self, memory: &[u8], qcfg: &QueueConfig) -> Vec<(u16, u32)> {
+        let Some(bridge_fd) = self.bridge_host_fd else {
+            return Vec::new();
+        };
+        if !qcfg.ready || qcfg.size == 0 {
+            return Vec::new();
+        }
+
+        let desc_addr = qcfg.desc_addr as usize;
+        let avail_addr = qcfg.avail_addr as usize;
+        let q_size = qcfg.size as usize;
+
+        if avail_addr + 4 > memory.len() {
+            return Vec::new();
+        }
+        let avail_idx =
+            u16::from_le_bytes([memory[avail_addr + 2], memory[avail_addr + 3]]) as usize;
+
+        let mut current_avail = self
+            .bridge_last_avail_tx
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let mut completions = Vec::new();
+
+        while current_avail != avail_idx {
+            let ring_off = avail_addr + 4 + 2 * (current_avail % q_size);
+            if ring_off + 2 > memory.len() {
+                break;
+            }
+            let head_idx = u16::from_le_bytes([memory[ring_off], memory[ring_off + 1]]) as usize;
+
+            let mut packet_data = Vec::new();
+            let mut idx = head_idx;
+            for _ in 0..q_size {
+                let d_off = desc_addr + idx * 16;
+                if d_off + 16 > memory.len() {
+                    break;
+                }
+                let addr =
+                    u64::from_le_bytes(memory[d_off..d_off + 8].try_into().unwrap()) as usize;
+                let len =
+                    u32::from_le_bytes(memory[d_off + 8..d_off + 12].try_into().unwrap()) as usize;
+                let flags = u16::from_le_bytes(memory[d_off + 12..d_off + 14].try_into().unwrap());
+                let next = u16::from_le_bytes(memory[d_off + 14..d_off + 16].try_into().unwrap());
+
+                if flags & 2 == 0 && addr + len <= memory.len() {
+                    packet_data.extend_from_slice(&memory[addr..addr + len]);
+                }
+                if flags & 1 == 0 {
+                    break;
+                }
+                idx = next as usize;
+            }
+
+            let total_len = packet_data.len() as u32;
+
+            // Skip 12-byte virtio-net header → raw ethernet frame → vmnet.
+            if packet_data.len() > 12 {
+                let frame = &packet_data[12..];
+                let n = unsafe {
+                    libc::write(bridge_fd, frame.as_ptr().cast::<libc::c_void>(), frame.len())
+                };
+                if n < 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.raw_os_error() != Some(libc::EAGAIN) {
+                        tracing::warn!("bridge TX write failed: {err}");
+                    }
+                }
+            }
+
+            completions.push((head_idx as u16, total_len));
+            current_avail += 1;
+        }
+
+        self.bridge_last_avail_tx
+            .store(current_avail, std::sync::atomic::Ordering::Relaxed);
+        completions
+    }
+
+    /// Polls the bridge (vmnet) host fd for incoming frames and injects them
+    /// into the bridge VirtioNet RX queue. Mirrors `poll_net_rx`.
+    pub fn poll_bridge_rx(&self) -> bool {
+        let Some(bridge_fd) = self.bridge_host_fd else {
+            return false;
+        };
+        let (Some(ram_base), ram_size) = (self.guest_ram_base, self.guest_ram_size) else {
+            return false;
+        };
+        let gpa_base = self.guest_ram_gpa as usize;
+        let guest_mem =
+            unsafe { std::slice::from_raw_parts_mut(ram_base.sub(gpa_base), gpa_base + ram_size) };
+
+        // Find the bridge VirtioNet device's MMIO state.
+        let bridge_device_id = match self.bridge_net_device_id {
+            Some(id) => id,
+            None => return false,
+        };
+        let device = match self.devices.get(&bridge_device_id) {
+            Some(d) => d,
+            None => return false,
+        };
+        let mmio_arc = match device.mmio_state.as_ref() {
+            Some(m) => m,
+            None => return false,
+        };
+        let Ok(mmio) = mmio_arc.read() else {
+            return false;
+        };
+
+        let qi = 0usize; // RX queue
+        if qi >= 8 || !mmio.queue_ready[qi] || mmio.queue_num[qi] == 0 {
+            return false;
+        }
+
+        let desc_addr = mmio.queue_desc[qi] as usize;
+        let avail_addr = mmio.queue_driver[qi] as usize;
+        let used_addr = mmio.queue_device[qi] as usize;
+        let q_size = mmio.queue_num[qi] as usize;
+        drop(mmio);
+
+        if avail_addr + 4 > guest_mem.len() {
+            return false;
+        }
+
+        let mut injected = false;
+
+        // Read up to 64 frames per poll (same as NIC1).
+        for _ in 0..64 {
+            let avail_idx =
+                u16::from_le_bytes([guest_mem[avail_addr + 2], guest_mem[avail_addr + 3]])
+                    as usize;
+            let used_idx_off = used_addr + 2;
+            let used_idx =
+                u16::from_le_bytes([guest_mem[used_idx_off], guest_mem[used_idx_off + 1]])
+                    as usize;
+
+            if avail_idx == used_idx {
+                break; // No RX descriptors available.
+            }
+
+            // Non-blocking read from bridge fd.
+            let mut buf = [0u8; 9216]; // MAX_FRAME_SIZE
+            let n = unsafe {
+                libc::recv(
+                    bridge_fd,
+                    buf.as_mut_ptr().cast::<libc::c_void>(),
+                    buf.len(),
+                    libc::MSG_DONTWAIT,
+                )
+            };
+            if n <= 0 {
+                break;
+            }
+            let frame = &buf[..n as usize];
+
+            // Prepend 12-byte virtio-net header (all zeros = no offload).
+            let virtio_hdr = [0u8; 12];
+            let total = virtio_hdr.len() + frame.len();
+
+            // Pop an available RX descriptor and write header + frame.
+            let ring_off = avail_addr + 4 + 2 * (used_idx % q_size);
+            if ring_off + 2 > guest_mem.len() {
+                break;
+            }
+            let head_idx =
+                u16::from_le_bytes([guest_mem[ring_off], guest_mem[ring_off + 1]]) as usize;
+
+            let mut written = 0;
+            let mut idx = head_idx;
+            for _ in 0..q_size {
+                let d_off = desc_addr + idx * 16;
+                if d_off + 16 > guest_mem.len() {
+                    break;
+                }
+                let addr =
+                    u64::from_le_bytes(guest_mem[d_off..d_off + 8].try_into().unwrap()) as usize;
+                let len =
+                    u32::from_le_bytes(guest_mem[d_off + 8..d_off + 12].try_into().unwrap())
+                        as usize;
+                let flags =
+                    u16::from_le_bytes(guest_mem[d_off + 12..d_off + 14].try_into().unwrap());
+                let next =
+                    u16::from_le_bytes(guest_mem[d_off + 14..d_off + 16].try_into().unwrap());
+
+                if flags & 2 != 0 && addr + len <= guest_mem.len() {
+                    // Write from [virtio_hdr | frame] combined.
+                    let remaining = total.saturating_sub(written);
+                    let to_write = remaining.min(len);
+                    if to_write > 0 {
+                        // Scatter from virtio_hdr then frame.
+                        let hdr_remaining = virtio_hdr.len().saturating_sub(written);
+                        if hdr_remaining > 0 {
+                            let hdr_write = hdr_remaining.min(to_write);
+                            guest_mem[addr..addr + hdr_write]
+                                .copy_from_slice(&virtio_hdr[written..written + hdr_write]);
+                            if to_write > hdr_write {
+                                let frame_write = to_write - hdr_write;
+                                guest_mem[addr + hdr_write..addr + hdr_write + frame_write]
+                                    .copy_from_slice(&frame[..frame_write]);
+                            }
+                        } else {
+                            let frame_off = written - virtio_hdr.len();
+                            guest_mem[addr..addr + to_write]
+                                .copy_from_slice(&frame[frame_off..frame_off + to_write]);
+                        }
+                        written += to_write;
+                    }
+                }
+
+                if flags & 1 == 0 || written >= total {
+                    break;
+                }
+                idx = next as usize;
+            }
+
+            if written == 0 {
+                continue;
+            }
+
+            // Update used ring.
+            let used_entry = used_addr + 4 + (used_idx % q_size) * 8;
+            if used_entry + 8 <= guest_mem.len() {
+                guest_mem[used_entry..used_entry + 4]
+                    .copy_from_slice(&(head_idx as u32).to_le_bytes());
+                guest_mem[used_entry + 4..used_entry + 8]
+                    .copy_from_slice(&(written as u32).to_le_bytes());
+                std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+                let new_used = (used_idx + 1) as u16;
+                guest_mem[used_idx_off..used_idx_off + 2]
+                    .copy_from_slice(&new_used.to_le_bytes());
+            }
+
+            injected = true;
+        }
+
+        // Write avail_event for EVENT_IDX.
+        if injected {
+            let avail_idx_now =
+                u16::from_le_bytes([guest_mem[avail_addr + 2], guest_mem[avail_addr + 3]]);
+            let avail_event_off = used_addr + 4 + q_size * 8;
+            if avail_event_off + 2 <= guest_mem.len() {
+                guest_mem[avail_event_off..avail_event_off + 2]
+                    .copy_from_slice(&avail_idx_now.to_le_bytes());
+            }
+        }
+
+        injected
     }
 }
 

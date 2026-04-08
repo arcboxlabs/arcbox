@@ -483,6 +483,9 @@ impl Vmm {
 
         tracing::info!("vmnet relay task spawned");
 
+        // Extract MAC string before moving vmnet (info borrows the Arc).
+        let mac_str = arcbox_net::darwin::format_mac(&info.mac);
+
         // Store state for cleanup.
         let vz_raw_fd = vz_fd.as_raw_fd();
         self.vmnet_bridge = Some(vmnet);
@@ -490,7 +493,6 @@ impl Vmm {
         self.vmnet_bridge_fd = Some(vz_fd);
 
         // Pass the vmnet MAC to the VZ-side NIC so bridge FDB lookups match.
-        let mac_str = arcbox_net::darwin::format_mac(&info.mac);
         Ok(VirtioDeviceConfig::network_file_handle_with_mac(
             vz_raw_fd, mac_str,
         ))
@@ -541,6 +543,7 @@ impl Vmm {
             cancel.cancel();
         }
         let _ = self.net_vz_fd.take();
+        let _ = self.hv_bridge_net_fd.take();
 
         // Stop vmnet relay and bridge interface.
         #[cfg(feature = "vmnet")]
