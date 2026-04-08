@@ -245,10 +245,13 @@ impl VirtioVsock {
         payload: &[u8],
         connections: Option<&mut dyn VsockHostConnections>,
     ) {
-        let src_cid = hdr.src_cid;
-        let src_port = hdr.src_port;
-        let dst_cid = hdr.dst_cid;
-        let dst_port = hdr.dst_port;
+        // Copy packed fields to locals to avoid unaligned reference UB.
+        let src_cid = { hdr.src_cid };
+        let dst_cid = { hdr.dst_cid };
+        let src_port = { hdr.src_port };
+        let dst_port = { hdr.dst_port };
+        let buf_alloc = { hdr.buf_alloc };
+        let fwd_cnt = { hdr.fwd_cnt };
 
         match hdr.operation() {
             Some(VsockOp::Request) => {
@@ -269,12 +272,14 @@ impl VirtioVsock {
                     dst_port,
                 );
                 if let Some(conns) = connections {
+                    conns.update_peer_credit(src_port, dst_port, buf_alloc, fwd_cnt);
                     conns.mark_connected(src_port, dst_port);
                 }
             }
             Some(VsockOp::Rw) => {
                 // Guest sends data. src_port = guest port, dst_port = host port.
-                if let Some(conns) = &connections {
+                if let Some(conns) = connections {
+                    conns.update_peer_credit(src_port, dst_port, buf_alloc, fwd_cnt);
                     if let Some(fd) = conns.fd_for(src_port, dst_port) {
                         if !payload.is_empty() {
                             // SAFETY: fd is a valid connected socket from the manager.
@@ -292,6 +297,8 @@ impl VirtioVsock {
                                     dst_port,
                                     written,
                                 );
+                                // Advance fwd_cnt — may trigger CreditUpdate.
+                                conns.advance_fwd_cnt(src_port, dst_port, written as u32);
                             } else if written < 0 {
                                 tracing::warn!(
                                     "Vsock: write to fd {fd} failed: {}",
@@ -318,7 +325,29 @@ impl VirtioVsock {
                     conns.remove_connection(src_port, dst_port);
                 }
             }
-            Some(VsockOp::CreditUpdate | VsockOp::CreditRequest) => {}
+            Some(VsockOp::CreditUpdate) => {
+                tracing::trace!(
+                    "Vsock TX: OP_CREDIT_UPDATE guest_port={} host_port={} buf_alloc={} fwd_cnt={}",
+                    src_port,
+                    dst_port,
+                    buf_alloc,
+                    fwd_cnt,
+                );
+                if let Some(conns) = connections {
+                    conns.update_peer_credit(src_port, dst_port, buf_alloc, fwd_cnt);
+                }
+            }
+            Some(VsockOp::CreditRequest) => {
+                tracing::trace!(
+                    "Vsock TX: OP_CREDIT_REQUEST guest_port={} host_port={}",
+                    src_port,
+                    dst_port,
+                );
+                if let Some(conns) = connections {
+                    conns.update_peer_credit(src_port, dst_port, buf_alloc, fwd_cnt);
+                    conns.enqueue_credit_update(src_port, dst_port);
+                }
+            }
             _ => {}
         }
     }
@@ -809,6 +838,26 @@ pub trait VsockHostConnections: Send + Sync {
 
     /// Removes a connection and closes the associated fd (called on OP_RST).
     fn remove_connection(&mut self, guest_port: u32, host_port: u32);
+
+    /// Updates peer credit state from an incoming guest packet.
+    /// Called for every TX packet to keep credit info in sync.
+    fn update_peer_credit(
+        &mut self,
+        _guest_port: u32,
+        _host_port: u32,
+        _buf_alloc: u32,
+        _fwd_cnt: u32,
+    ) {
+    }
+
+    /// Advances fwd_cnt after writing guest data to the host stream.
+    /// Returns `true` if the host has pending RX data as a result (CreditUpdate).
+    fn advance_fwd_cnt(&mut self, _guest_port: u32, _host_port: u32, _bytes: u32) -> bool {
+        false
+    }
+
+    /// Enqueues a CreditUpdate to be sent on the next RX fill.
+    fn enqueue_credit_update(&mut self, _guest_port: u32, _host_port: u32) {}
 }
 
 /// Vsock address.
@@ -906,7 +955,12 @@ pub struct VsockHeader {
 
 impl VsockHeader {
     /// Header size in bytes.
-    pub const SIZE: usize = std::mem::size_of::<Self>();
+    ///
+    /// The VirtIO vsock spec defines the header as exactly 44 bytes (packed).
+    /// We cannot use `mem::size_of::<Self>()` because Rust adds trailing padding
+    /// to satisfy the struct's 8-byte alignment (from u64 fields), yielding 48.
+    /// The guest kernel sends and expects exactly 44 bytes per header.
+    pub const SIZE: usize = 44;
 
     /// Creates a new header.
     #[must_use]
@@ -2254,5 +2308,251 @@ mod tests {
         // Close.
         backend.on_close(addr).unwrap();
         assert!(!backend.has_pending_data(addr));
+    }
+
+    // ==========================================================================
+    // Guest-Memory-Based process_queue (HV backend path) Tests
+    // ==========================================================================
+
+    /// Builds a simulated split virtqueue layout in a flat memory buffer.
+    /// Returns (desc_addr, avail_addr, used_addr, q_size).
+    ///
+    /// Layout:
+    ///   desc_table: `base` .. `base + q_size * 16`
+    ///   avail_ring: next 16-byte-aligned offset, size = 4 + 2*q_size + 2
+    ///   used_ring:  next 16-byte-aligned offset, size = 4 + 8*q_size + 2
+    fn setup_virtqueue_layout(
+        memory: &mut Vec<u8>,
+        base: usize,
+        q_size: usize,
+    ) -> (usize, usize, usize) {
+        let desc_addr = base;
+        let avail_addr = desc_addr + q_size * 16;
+        // Align to 16 bytes.
+        let avail_addr = (avail_addr + 15) & !15;
+        let avail_size = 4 + 2 * q_size + 2;
+        let used_addr = avail_addr + avail_size;
+        let used_addr = (used_addr + 15) & !15;
+        let used_size = 4 + 8 * q_size + 2;
+        let total = used_addr + used_size;
+        if memory.len() < total {
+            memory.resize(total, 0);
+        }
+        (desc_addr, avail_addr, used_addr)
+    }
+
+    /// Helper: write a descriptor to the descriptor table in guest memory.
+    fn write_descriptor(
+        memory: &mut [u8],
+        desc_addr: usize,
+        idx: usize,
+        addr: u64,
+        len: u32,
+        flags: u16,
+        next: u16,
+    ) {
+        let off = desc_addr + idx * 16;
+        memory[off..off + 8].copy_from_slice(&addr.to_le_bytes());
+        memory[off + 8..off + 12].copy_from_slice(&len.to_le_bytes());
+        memory[off + 12..off + 14].copy_from_slice(&flags.to_le_bytes());
+        memory[off + 14..off + 16].copy_from_slice(&next.to_le_bytes());
+    }
+
+    /// Helper: add a descriptor head to the avail ring and increment avail_idx.
+    fn avail_ring_push(memory: &mut [u8], avail_addr: usize, q_size: usize, head_idx: u16) {
+        let avail_idx =
+            u16::from_le_bytes([memory[avail_addr + 2], memory[avail_addr + 3]]) as usize;
+        let ring_off = avail_addr + 4 + 2 * (avail_idx % q_size);
+        memory[ring_off..ring_off + 2].copy_from_slice(&head_idx.to_le_bytes());
+        let new_idx = (avail_idx + 1) as u16;
+        memory[avail_addr + 2..avail_addr + 4].copy_from_slice(&new_idx.to_le_bytes());
+    }
+
+    /// Verifies that the guest-memory-based `process_queue` correctly parses
+    /// a 44-byte OP_RESPONSE packet from the TX virtqueue. This exercises the
+    /// exact code path used by the HV backend when the guest responds to
+    /// a host-initiated vsock connection.
+    #[test]
+    fn test_process_queue_guest_memory_op_response() {
+        let mut vsock = VirtioVsock::new(VsockConfig::default());
+        vsock.activate().unwrap();
+
+        let q_size = 16usize;
+        let mut memory = vec![0u8; 0x10000];
+
+        // Set up TX queue layout at offset 0x4000.
+        let (desc_addr, avail_addr, used_addr) =
+            setup_virtqueue_layout(&mut memory, 0x4000, q_size);
+
+        // Place an OP_RESPONSE packet at GPA 0x8000.
+        let pkt_addr = 0x8000usize;
+        let hdr = VsockHeader::new(
+            VsockAddr::new(3, 1024), // src: guest CID 3, port 1024
+            VsockAddr::host(50000),  // dst: host CID 2, port 50000
+            VsockOp::Response,
+        );
+        let hdr_bytes = hdr.to_bytes();
+        assert_eq!(
+            hdr_bytes.len(),
+            44,
+            "VsockHeader must serialize to 44 bytes"
+        );
+        memory[pkt_addr..pkt_addr + 44].copy_from_slice(&hdr_bytes[..44]);
+
+        // Set up descriptor: read-only, 44 bytes, pointing to pkt_addr.
+        write_descriptor(&mut memory, desc_addr, 0, pkt_addr as u64, 44, 0, 0);
+        // Push to avail ring.
+        avail_ring_push(&mut memory, avail_addr, q_size, 0);
+
+        // Build QueueConfig.
+        // Use a mock VsockHostConnections to capture the mark_connected call.
+        use std::sync::{Arc, Mutex};
+        struct MockConns {
+            connected: Vec<(u32, u32)>,
+            credit_updates: Vec<(u32, u32, u32, u32)>,
+        }
+        impl VsockHostConnections for MockConns {
+            fn fd_for(&self, _gp: u32, _hp: u32) -> Option<std::os::unix::io::RawFd> {
+                None
+            }
+            fn mark_connected(&mut self, gp: u32, hp: u32) {
+                self.connected.push((gp, hp));
+            }
+            fn remove_connection(&mut self, _gp: u32, _hp: u32) {}
+            fn update_peer_credit(&mut self, gp: u32, hp: u32, ba: u32, fc: u32) {
+                self.credit_updates.push((gp, hp, ba, fc));
+            }
+        }
+
+        let mock = Arc::new(Mutex::new(MockConns {
+            connected: Vec::new(),
+            credit_updates: Vec::new(),
+        }));
+
+        let qcfg = crate::QueueConfig {
+            desc_addr: desc_addr as u64,
+            avail_addr: avail_addr as u64,
+            used_addr: used_addr as u64,
+            size: q_size as u16,
+            ready: true,
+            gpa_base: 0,
+            vsock_connections: Some(mock.clone()),
+        };
+
+        let completions =
+            <VirtioVsock as VirtioDevice>::process_queue(&mut vsock, 1, &mut memory, &qcfg)
+                .unwrap();
+
+        // Should have processed 1 packet.
+        assert_eq!(
+            completions.len(),
+            1,
+            "Expected 1 completion for OP_RESPONSE"
+        );
+        assert_eq!(completions[0].0, 0, "head_idx should be 0");
+        assert_eq!(completions[0].1, 44, "written bytes should be 44");
+
+        // Verify mark_connected was called.
+        let mock_guard = mock.lock().unwrap();
+        assert_eq!(
+            mock_guard.connected.len(),
+            1,
+            "mark_connected should be called once for OP_RESPONSE"
+        );
+        assert_eq!(mock_guard.connected[0], (1024, 50000));
+
+        // Verify credit was updated.
+        assert_eq!(mock_guard.credit_updates.len(), 1);
+        assert_eq!(
+            mock_guard.credit_updates[0],
+            (1024, 50000, 64 * 1024, 0),
+            "peer credit should be synced from OP_RESPONSE header"
+        );
+    }
+
+    /// Verifies that a 44-byte OP_RST from guest is correctly parsed via
+    /// the guest-memory process_queue path.
+    #[test]
+    fn test_process_queue_guest_memory_op_rst() {
+        let mut vsock = VirtioVsock::new(VsockConfig::default());
+        vsock.activate().unwrap();
+
+        let q_size = 16usize;
+        let mut memory = vec![0u8; 0x10000];
+
+        let (desc_addr, avail_addr, used_addr) =
+            setup_virtqueue_layout(&mut memory, 0x4000, q_size);
+
+        // OP_RST packet at GPA 0x8000.
+        let pkt_addr = 0x8000usize;
+        let hdr = VsockHeader::new(
+            VsockAddr::new(3, 1024),
+            VsockAddr::host(50000),
+            VsockOp::Rst,
+        );
+        memory[pkt_addr..pkt_addr + 44].copy_from_slice(&hdr.to_bytes()[..44]);
+
+        write_descriptor(&mut memory, desc_addr, 0, pkt_addr as u64, 44, 0, 0);
+        avail_ring_push(&mut memory, avail_addr, q_size, 0);
+
+        use std::sync::{Arc, Mutex};
+        struct MockConns {
+            removed: Vec<(u32, u32)>,
+        }
+        impl VsockHostConnections for MockConns {
+            fn fd_for(&self, _: u32, _: u32) -> Option<std::os::unix::io::RawFd> {
+                None
+            }
+            fn mark_connected(&mut self, _: u32, _: u32) {}
+            fn remove_connection(&mut self, gp: u32, hp: u32) {
+                self.removed.push((gp, hp));
+            }
+        }
+        let mock = Arc::new(Mutex::new(MockConns {
+            removed: Vec::new(),
+        }));
+
+        let qcfg = crate::QueueConfig {
+            desc_addr: desc_addr as u64,
+            avail_addr: avail_addr as u64,
+            used_addr: used_addr as u64,
+            size: q_size as u16,
+            ready: true,
+            gpa_base: 0,
+            vsock_connections: Some(mock.clone()),
+        };
+
+        let completions =
+            <VirtioVsock as VirtioDevice>::process_queue(&mut vsock, 1, &mut memory, &qcfg)
+                .unwrap();
+        assert_eq!(completions.len(), 1);
+
+        let mock_guard = mock.lock().unwrap();
+        assert_eq!(mock_guard.removed.len(), 1);
+        assert_eq!(mock_guard.removed[0], (1024, 50000));
+    }
+
+    /// Verifies VsockHeader serialization produces exactly 44 bytes
+    /// and is correctly round-trippable.
+    #[test]
+    fn test_vsock_header_size_is_44() {
+        assert_eq!(VsockHeader::SIZE, 44);
+        let hdr = VsockHeader::new(
+            VsockAddr::host(50000),
+            VsockAddr::new(3, 1024),
+            VsockOp::Request,
+        );
+        let bytes = hdr.to_bytes();
+        assert_eq!(bytes.len(), 44);
+
+        // Verify round-trip.
+        let parsed = VsockHeader::from_bytes(&bytes).unwrap();
+        assert_eq!({ parsed.src_cid }, 2);
+        assert_eq!({ parsed.dst_cid }, 3);
+        assert_eq!({ parsed.src_port }, 50000);
+        assert_eq!({ parsed.dst_port }, 1024);
+        assert_eq!({ parsed.op }, VsockOp::Request as u16);
+        assert_eq!({ parsed.socket_type }, 1);
+        assert_eq!({ parsed.buf_alloc }, 64 * 1024);
     }
 }

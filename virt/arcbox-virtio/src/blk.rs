@@ -1128,6 +1128,7 @@ mod tests {
             blk_size: 512,
             path: PathBuf::from("/tmp/test.img"),
             read_only: false,
+            num_queues: 1,
         };
 
         let device = VirtioBlock::new(config);
@@ -1150,6 +1151,7 @@ mod tests {
             blk_size: 512,
             path: PathBuf::new(),
             read_only: true,
+            num_queues: 1,
         };
 
         let device = VirtioBlock::new(ro_config);
@@ -1410,6 +1412,7 @@ mod tests {
             blk_size: 512,
             path: PathBuf::new(),
             read_only: false,
+            num_queues: 1,
         };
 
         let device = VirtioBlock::new(config);
@@ -1482,6 +1485,7 @@ mod tests {
             blk_size: 512,
             path: PathBuf::new(),
             read_only: false,
+            num_queues: 1,
         };
 
         let device = VirtioBlock::new(config);
