@@ -48,6 +48,32 @@ pub use fuse::{FuseAttr, FuseInHeader, FuseOpcode, FuseOutHeader, StatFs};
 pub use passthrough::{DirEntry, FileType, PassthroughConfig, PassthroughFs};
 pub use server::FsServer;
 
+/// Trait for DAX (Direct Access) memory mapping between host files and guest IPA.
+///
+/// Implemented by the VMM to map/unmap host file pages into the guest's
+/// DAX window. The FUSE dispatcher calls this when handling
+/// `FUSE_SETUPMAPPING` / `FUSE_REMOVEMAPPING` requests.
+pub trait DaxMapper: Send + Sync {
+    /// Maps a host file region into the guest DAX window.
+    ///
+    /// - `host_fd`: file descriptor of the host file
+    /// - `file_offset`: byte offset within the file
+    /// - `window_offset`: byte offset within the DAX window
+    /// - `length`: mapping length in bytes (page-aligned)
+    /// - `writable`: whether the mapping is writable
+    fn setup_mapping(
+        &self,
+        host_fd: i32,
+        file_offset: u64,
+        window_offset: u64,
+        length: u64,
+        writable: bool,
+    ) -> std::result::Result<(), i32>;
+
+    /// Removes a mapping from the guest DAX window.
+    fn remove_mapping(&self, window_offset: u64, length: u64) -> std::result::Result<(), i32>;
+}
+
 /// Cache profile for a VirtioFS share.
 ///
 /// Controls the FUSE entry and attribute cache timeouts reported to the

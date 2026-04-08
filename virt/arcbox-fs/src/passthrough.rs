@@ -1002,6 +1002,13 @@ impl PassthroughFs {
         Ok(())
     }
 
+    /// Returns the raw fd for an open file handle (for DAX mapping).
+    pub fn get_file_raw_fd(&self, handle: u64) -> Option<std::os::unix::io::RawFd> {
+        use std::os::unix::io::AsRawFd;
+        let handles = self.handles.read().ok()?;
+        handles.get(&handle).map(|h| h.file.as_raw_fd())
+    }
+
     /// Seeks in a file (lseek).
     ///
     /// # Errors

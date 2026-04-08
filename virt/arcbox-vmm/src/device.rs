@@ -179,6 +179,10 @@ pub struct VirtioMmioState {
     pub interrupt_status: u32,
     /// Configuration generation.
     pub config_generation: u32,
+    /// SHM region selector (for DAX window discovery).
+    pub shm_sel: u32,
+    /// SHM regions: (base_ipa, length). Index = region ID.
+    pub shm_regions: Vec<(u64, u64)>,
 }
 
 impl VirtioMmioState {
@@ -200,6 +204,8 @@ impl VirtioMmioState {
             status: 0,
             interrupt_status: 0,
             config_generation: 0,
+            shm_sel: 0,
+            shm_regions: Vec::new(),
         }
     }
 
@@ -231,6 +237,32 @@ impl VirtioMmioState {
             regs::INTERRUPT_STATUS => self.interrupt_status,
             regs::STATUS => u32::from(self.status),
             regs::CONFIG_GENERATION => self.config_generation,
+            // SHM registers for DAX window discovery (VirtIO 1.2+).
+            0x0ac => self.shm_sel,
+            0x0b0 => {
+                // SHMLenLow
+                self.shm_regions
+                    .get(self.shm_sel as usize)
+                    .map_or(0, |r| r.1 as u32)
+            }
+            0x0b4 => {
+                // SHMLenHigh
+                self.shm_regions
+                    .get(self.shm_sel as usize)
+                    .map_or(0, |r| (r.1 >> 32) as u32)
+            }
+            0x0b8 => {
+                // SHMBaseLow
+                self.shm_regions
+                    .get(self.shm_sel as usize)
+                    .map_or(0, |r| r.0 as u32)
+            }
+            0x0bc => {
+                // SHMBaseHigh
+                self.shm_regions
+                    .get(self.shm_sel as usize)
+                    .map_or(0, |r| (r.0 >> 32) as u32)
+            }
             _ => {
                 tracing::trace!("VirtIO MMIO read unknown offset: {:#x}", offset);
                 0
@@ -255,6 +287,7 @@ impl VirtioMmioState {
             }
             regs::DRIVER_FEATURES_SEL => self.driver_features_sel = value,
             regs::QUEUE_SEL => self.queue_sel = value,
+            0x0ac => self.shm_sel = value, // SHMSel write
             regs::QUEUE_NUM => {
                 if (self.queue_sel as usize) < 8 {
                     self.queue_num[self.queue_sel as usize] = value as u16;

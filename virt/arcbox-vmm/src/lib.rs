@@ -63,6 +63,7 @@
 pub mod blk_worker;
 pub mod boot;
 pub mod builder;
+pub mod dax;
 pub mod device;
 pub mod error;
 pub mod event;

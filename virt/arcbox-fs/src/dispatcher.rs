@@ -197,6 +197,8 @@ pub struct FuseDispatcher {
     config: DispatcherConfig,
     /// Whether FUSE_INIT has been received.
     initialized: std::sync::atomic::AtomicBool,
+    /// Optional DAX mapper for direct host page mapping.
+    dax_mapper: Option<Arc<dyn crate::DaxMapper>>,
 }
 
 impl FuseDispatcher {
@@ -207,7 +209,13 @@ impl FuseDispatcher {
             fs,
             config,
             initialized: std::sync::atomic::AtomicBool::new(false),
+            dax_mapper: None,
         }
+    }
+
+    /// Sets the DAX mapper for direct host page mapping.
+    pub fn set_dax_mapper(&mut self, mapper: Arc<dyn crate::DaxMapper>) {
+        self.dax_mapper = Some(mapper);
     }
 
     /// Dispatches a FUSE request and returns the response.
@@ -275,6 +283,8 @@ impl FuseDispatcher {
             FuseOpcode::Removexattr => self.handle_removexattr(&ctx, body, &mut response),
             FuseOpcode::Lseek => self.handle_lseek(&ctx, body, &mut response),
             FuseOpcode::Fallocate => self.handle_fallocate(&ctx, body, &mut response),
+            FuseOpcode::SetupMapping => self.handle_setup_mapping(&ctx, body, &mut response),
+            FuseOpcode::RemoveMapping => self.handle_remove_mapping(&ctx, body, &mut response),
             _ => {
                 tracing::warn!(
                     "FUSE: unsupported opcode {:?} ({}), returning ENOSYS",
@@ -781,6 +791,87 @@ impl FuseDispatcher {
             Ok(()) => response.write_empty(ctx.unique),
             Err(e) => response.write_error(ctx.unique, e.to_errno()),
         }
+    }
+
+    // ========================================================================
+    // DAX Mapping Operations
+    // ========================================================================
+
+    fn handle_setup_mapping(
+        &self,
+        ctx: &RequestContext,
+        body: &[u8],
+        response: &mut ResponseBuilder,
+    ) {
+        use crate::fuse::FuseSetupMappingIn;
+
+        let Some(ref mapper) = self.dax_mapper else {
+            response.write_error(ctx.unique, libc::ENOSYS);
+            return;
+        };
+
+        if body.len() < std::mem::size_of::<FuseSetupMappingIn>() {
+            response.write_error(ctx.unique, libc::EINVAL);
+            return;
+        }
+
+        let req = unsafe { std::ptr::read_unaligned(body.as_ptr().cast::<FuseSetupMappingIn>()) };
+
+        // Get the host fd from the file handle.
+        let host_fd = match self.fs.get_file_raw_fd(req.fh) {
+            Some(fd) => fd,
+            None => {
+                response.write_error(ctx.unique, libc::EBADF);
+                return;
+            }
+        };
+
+        let writable = req.flags & crate::fuse::FUSE_SETUPMAPPING_FLAG_WRITE != 0;
+
+        match mapper.setup_mapping(host_fd, req.foffset, req.moffset, req.len, writable) {
+            Ok(()) => response.write_empty(ctx.unique),
+            Err(errno) => response.write_error(ctx.unique, errno),
+        }
+    }
+
+    fn handle_remove_mapping(
+        &self,
+        ctx: &RequestContext,
+        body: &[u8],
+        response: &mut ResponseBuilder,
+    ) {
+        use crate::fuse::{FuseRemoveMappingIn, FuseRemoveMappingOne};
+
+        let Some(ref mapper) = self.dax_mapper else {
+            response.write_error(ctx.unique, libc::ENOSYS);
+            return;
+        };
+
+        let hdr_size = std::mem::size_of::<FuseRemoveMappingIn>();
+        if body.len() < hdr_size {
+            response.write_error(ctx.unique, libc::EINVAL);
+            return;
+        }
+
+        let hdr = unsafe { std::ptr::read_unaligned(body.as_ptr().cast::<FuseRemoveMappingIn>()) };
+        let entry_size = std::mem::size_of::<FuseRemoveMappingOne>();
+        let entries = &body[hdr_size..];
+
+        for i in 0..hdr.count as usize {
+            let off = i * entry_size;
+            if off + entry_size > entries.len() {
+                break;
+            }
+            let entry = unsafe {
+                std::ptr::read_unaligned(entries[off..].as_ptr().cast::<FuseRemoveMappingOne>())
+            };
+            if let Err(errno) = mapper.remove_mapping(entry.moffset, entry.len) {
+                response.write_error(ctx.unique, errno);
+                return;
+            }
+        }
+
+        response.write_empty(ctx.unique);
     }
 
     // ========================================================================
