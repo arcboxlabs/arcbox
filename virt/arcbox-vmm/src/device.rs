@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::os::unix::io::AsRawFd;
 use std::sync::{Arc, Mutex, RwLock};
 
+use arcbox_net::nat_engine::checksum::{tcp_checksum, udp_checksum};
+use arcbox_virtio::net::VirtioNetHeader;
 use arcbox_virtio::{DeviceStatus, QueueConfig, VirtioDevice};
 
 use crate::error::{Result, VmmError};
@@ -2508,10 +2510,11 @@ impl DeviceManager {
             }
 
             let total_len = packet_data.len() as u32;
+            finalize_virtio_net_checksum(&mut packet_data);
 
-            // Skip the 12-byte virtio-net header to get the raw ethernet frame.
-            if packet_data.len() > 12 {
-                let frame = &packet_data[12..];
+            // Strip the virtio-net header after applying checksum offload.
+            if packet_data.len() > VirtioNetHeader::SIZE {
+                let frame = &packet_data[VirtioNetHeader::SIZE..];
                 // Write raw ethernet frame to the network datapath fd.
                 let n = unsafe {
                     libc::write(net_fd, frame.as_ptr().cast::<libc::c_void>(), frame.len())
@@ -2607,10 +2610,11 @@ impl DeviceManager {
             }
 
             let total_len = packet_data.len() as u32;
+            finalize_virtio_net_checksum(&mut packet_data);
 
-            // Skip 12-byte virtio-net header → raw ethernet frame → vmnet.
-            if packet_data.len() > 12 {
-                let frame = &packet_data[12..];
+            // Strip the virtio-net header after applying checksum offload.
+            if packet_data.len() > VirtioNetHeader::SIZE {
+                let frame = &packet_data[VirtioNetHeader::SIZE..];
                 let n = unsafe {
                     libc::write(
                         bridge_fd,
@@ -2802,6 +2806,82 @@ impl DeviceManager {
     }
 }
 
+/// Completes guest-requested checksum offload before forwarding the frame.
+fn finalize_virtio_net_checksum(packet_data: &mut [u8]) {
+    const ETH_HEADER_LEN: usize = 14;
+    const ETHERTYPE_IPV4: [u8; 2] = [0x08, 0x00];
+    const PROTOCOL_TCP: u8 = 6;
+    const PROTOCOL_UDP: u8 = 17;
+
+    if packet_data.len() <= VirtioNetHeader::SIZE {
+        return;
+    }
+
+    let Some(header) = VirtioNetHeader::from_bytes(&packet_data[..VirtioNetHeader::SIZE]) else {
+        return;
+    };
+    if header.flags & VirtioNetHeader::FLAG_NEEDS_CSUM == 0 {
+        return;
+    }
+
+    let frame = &mut packet_data[VirtioNetHeader::SIZE..];
+    if frame.len() < ETH_HEADER_LEN + 20 || frame[12..14] != ETHERTYPE_IPV4 {
+        return;
+    }
+
+    let ip_start = ETH_HEADER_LEN;
+    let version = frame[ip_start] >> 4;
+    let ihl = usize::from(frame[ip_start] & 0x0F) * 4;
+    if version != 4 || ihl < 20 || frame.len() < ip_start + ihl {
+        return;
+    }
+
+    let total_len = usize::from(u16::from_be_bytes([
+        frame[ip_start + 2],
+        frame[ip_start + 3],
+    ]));
+    if total_len < ihl || frame.len() < ip_start + total_len {
+        return;
+    }
+
+    let checksum_start = usize::from(header.csum_start);
+    let checksum_offset = usize::from(header.csum_offset);
+    let payload_end = ip_start + total_len;
+    let checksum_end = checksum_start
+        .checked_add(checksum_offset)
+        .and_then(|offset| offset.checked_add(2));
+    if checksum_start < ip_start + ihl || checksum_end.is_none_or(|end| end > payload_end) {
+        return;
+    }
+
+    let protocol = frame[ip_start + 9];
+    let src_ip = [
+        frame[ip_start + 12],
+        frame[ip_start + 13],
+        frame[ip_start + 14],
+        frame[ip_start + 15],
+    ];
+    let dst_ip = [
+        frame[ip_start + 16],
+        frame[ip_start + 17],
+        frame[ip_start + 18],
+        frame[ip_start + 19],
+    ];
+
+    let Some(checksum_start_offset) = checksum_start.checked_add(checksum_offset) else {
+        return;
+    };
+    frame[checksum_start_offset..checksum_start_offset + 2].fill(0);
+
+    let checksum = match protocol {
+        PROTOCOL_TCP => tcp_checksum(src_ip, dst_ip, &frame[checksum_start..payload_end]),
+        PROTOCOL_UDP => udp_checksum(src_ip, dst_ip, &frame[checksum_start..payload_end]),
+        _ => return,
+    };
+    frame[checksum_start_offset..checksum_start_offset + 2]
+        .copy_from_slice(&checksum.to_be_bytes());
+}
+
 /// Device tree entry for FDT generation.
 #[derive(Debug, Clone)]
 pub struct DeviceTreeEntry {
@@ -2836,6 +2916,10 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
+
+    use arcbox_net::ethernet::{TcpFrameParams, build_tcp_ack_frame, build_udp_ip_ethernet};
+    use arcbox_net::nat_engine::checksum::{tcp_checksum, udp_checksum};
 
     #[test]
     fn test_device_registration() {
@@ -2869,5 +2953,86 @@ mod tests {
         // Select high 32 bits
         state.write(virtio_mmio::regs::DEVICE_FEATURES_SEL, 1);
         assert_eq!(state.read(virtio_mmio::regs::DEVICE_FEATURES), 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn test_finalize_virtio_net_checksum_repairs_ipv4_tcp_frame() {
+        let params = TcpFrameParams {
+            src_ip: Ipv4Addr::new(10, 0, 2, 2),
+            dst_ip: Ipv4Addr::new(198, 18, 30, 95),
+            src_port: 36402,
+            dst_port: 443,
+            seq: 1234,
+            ack: 0,
+            window: 64240,
+            src_mac: [0x52, 0x54, 0xAB, 0xFA, 0x2A, 0x70],
+            dst_mac: [0x02, 0xAB, 0xCD, 0x00, 0x00, 0x01],
+        };
+        let mut frame = build_tcp_ack_frame(&params);
+        let tcp_start = 14 + 20;
+        frame[tcp_start + 13] = 0x02;
+        frame[tcp_start + 16..tcp_start + 18].fill(0);
+
+        let header = VirtioNetHeader {
+            flags: VirtioNetHeader::FLAG_NEEDS_CSUM,
+            gso_type: VirtioNetHeader::GSO_NONE,
+            hdr_len: 0,
+            gso_size: 0,
+            csum_start: tcp_start as u16,
+            csum_offset: 16,
+            num_buffers: 1,
+        };
+        let mut packet_data = header.to_bytes().to_vec();
+        packet_data.extend_from_slice(&frame);
+
+        finalize_virtio_net_checksum(&mut packet_data);
+
+        let frame = &packet_data[VirtioNetHeader::SIZE..];
+        let stored = u16::from_be_bytes([frame[tcp_start + 16], frame[tcp_start + 17]]);
+        let mut tcp_segment = frame[tcp_start..].to_vec();
+        tcp_segment[16..18].fill(0);
+
+        assert_ne!(stored, 0);
+        assert_eq!(
+            stored,
+            tcp_checksum(params.src_ip.octets(), params.dst_ip.octets(), &tcp_segment)
+        );
+    }
+
+    #[test]
+    fn test_finalize_virtio_net_checksum_repairs_ipv4_udp_frame() {
+        let src_ip = Ipv4Addr::new(10, 0, 2, 2);
+        let dst_ip = Ipv4Addr::new(10, 0, 2, 1);
+        let payload = b"hello dns";
+        let src_mac = [0x52, 0x54, 0xAB, 0xFA, 0x2A, 0x70];
+        let dst_mac = [0x02, 0xAB, 0xCD, 0x00, 0x00, 0x01];
+        let mut frame = build_udp_ip_ethernet(src_ip, dst_ip, 49152, 53, payload, src_mac, dst_mac);
+        let udp_start = 14 + 20;
+        frame[udp_start + 6..udp_start + 8].fill(0);
+
+        let header = VirtioNetHeader {
+            flags: VirtioNetHeader::FLAG_NEEDS_CSUM,
+            gso_type: VirtioNetHeader::GSO_NONE,
+            hdr_len: 0,
+            gso_size: 0,
+            csum_start: udp_start as u16,
+            csum_offset: 6,
+            num_buffers: 1,
+        };
+        let mut packet_data = header.to_bytes().to_vec();
+        packet_data.extend_from_slice(&frame);
+
+        finalize_virtio_net_checksum(&mut packet_data);
+
+        let frame = &packet_data[VirtioNetHeader::SIZE..];
+        let stored = u16::from_be_bytes([frame[udp_start + 6], frame[udp_start + 7]]);
+        let mut udp_datagram = frame[udp_start..].to_vec();
+        udp_datagram[6..8].fill(0);
+
+        assert_ne!(stored, 0);
+        assert_eq!(
+            stored,
+            udp_checksum(src_ip.octets(), dst_ip.octets(), &udp_datagram)
+        );
     }
 }

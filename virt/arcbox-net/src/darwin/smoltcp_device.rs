@@ -346,7 +346,12 @@ impl SmoltcpDevice {
                         tracing::info!(
                             "TCP SYN gated: {src_ip}:{src_port} → {dst_ip}:{dst_port} \
                              dst_mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} frame_len={}",
-                            frame[0], frame[1], frame[2], frame[3], frame[4], frame[5],
+                            frame[0],
+                            frame[1],
+                            frame[2],
+                            frame[3],
+                            frame[4],
+                            frame[5],
                             frame.len(),
                         );
                         // SYN frames are rare (once per connection) — converting to

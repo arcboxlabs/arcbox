@@ -648,11 +648,11 @@ impl TcpBridge {
             // Check for existing pending entry.
             if let Some(existing) = self.pending_syns.get(&key) {
                 if existing.syn_seq == syn.syn_seq {
-                    tracing::debug!("TCP SYN gate: retransmit dropped for {key:?}");
+                    tracing::info!("TCP SYN gate: retransmit dropped (pending) for {key:?}");
                     continue;
                 }
                 // Different ISN = new connection attempt, remove stale entry.
-                tracing::debug!("TCP SYN gate: ISN changed for {key:?}, replacing pending");
+                tracing::info!("TCP SYN gate: ISN changed for {key:?}, replacing pending");
                 self.pending_syns.remove(&key);
             }
 
@@ -660,12 +660,12 @@ impl TcpBridge {
             // on next poll), different ISN = guest retried with new connection.
             if let Some(pre) = self.pre_connected.get(&key) {
                 if pre.syn_seq == syn.syn_seq {
-                    tracing::debug!(
+                    tracing::info!(
                         "TCP SYN gate: retransmit dropped (pre-connected exists) for {key:?}"
                     );
                     continue;
                 }
-                tracing::debug!(
+                tracing::info!(
                     "TCP SYN gate: ISN changed for {key:?}, evicting stale pre-connected stream"
                 );
                 self.pre_connected.remove(&key);
@@ -702,6 +702,24 @@ impl TcpBridge {
             } else {
                 self.resolve_proxy_target(syn.dst_ip, syn.dst_port, domain.as_deref())
             };
+
+            if let Some((ref proxy_authority, ref host, port, ref proto)) = proxy_target {
+                tracing::info!(
+                    key = ?key,
+                    domain = domain.as_deref().unwrap_or("<unknown>"),
+                    proxy = %proxy_authority,
+                    target = %format!("{host}:{port}"),
+                    protocol = %proto,
+                    "TCP SYN gate: starting proxied host connect"
+                );
+            } else {
+                tracing::info!(
+                    key = ?key,
+                    domain = domain.as_deref().unwrap_or("<unknown>"),
+                    target = %dst_addr,
+                    "TCP SYN gate: starting direct host connect"
+                );
+            }
 
             // Spawn host connect task.
             tokio::spawn(async move {
@@ -742,15 +760,15 @@ impl TcpBridge {
 
                 let stream = match result {
                     Ok(Ok(s)) => {
-                        tracing::debug!("TCP SYN gate: connected to {dst_addr}");
+                        tracing::info!("TCP SYN gate: host connect succeeded for {key:?}");
                         Some(s)
                     }
                     Ok(Err(e)) => {
-                        tracing::debug!("TCP SYN gate: connect to {dst_addr} failed: {e}");
+                        tracing::info!("TCP SYN gate: host connect failed for {key:?}: {e}");
                         None
                     }
                     Err(_) => {
-                        tracing::debug!("TCP SYN gate: connect to {dst_addr} timed out");
+                        tracing::info!("TCP SYN gate: host connect timed out for {key:?}");
                         None
                     }
                 };
@@ -767,13 +785,7 @@ impl TcpBridge {
                 },
             );
 
-            tracing::debug!(
-                "TCP SYN gate: host connect started for {}:{} → {}:{}",
-                syn.src_ip,
-                syn.src_port,
-                syn.dst_ip,
-                syn.dst_port,
-            );
+            tracing::info!("TCP SYN gate: pending entry created for {key:?}");
         }
 
         rst_frames
@@ -858,12 +870,15 @@ impl TcpBridge {
                     tracing::debug!(
                         "TCP SYN gate: injected SYN + stored pre-connected stream for {key:?}"
                     );
+                    tracing::info!(
+                        "TCP SYN gate: injected SYN + stored pre-connected stream for {key:?}"
+                    );
                 }
                 None => {
                     // Build RST|ACK from the original SYN frame.
                     if let Some(rst) = build_rst_from_syn(&pending.frame, gateway_mac) {
                         rst_frames.push(rst);
-                        tracing::debug!("TCP SYN gate: sending RST for failed connect {key:?}");
+                        tracing::info!("TCP SYN gate: sending RST for failed connect {key:?}");
                     }
                 }
             }
@@ -872,7 +887,7 @@ impl TcpBridge {
         // Expire stale pre-connected streams.
         self.pre_connected.retain(|key, pre| {
             if pre.created.elapsed() > std::time::Duration::from_secs(PRE_CONNECTED_TTL_SECS) {
-                tracing::debug!("TCP SYN gate: pre-connected stream expired for {key:?}");
+                tracing::info!("TCP SYN gate: pre-connected stream expired for {key:?}");
                 false
             } else {
                 true

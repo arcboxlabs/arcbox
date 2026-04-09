@@ -78,8 +78,9 @@ serde_json = "1"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "tracing-log"] }
 tracing-appender = "0.2"
+tracing-log = "0.2"
 
 # Error reporting
 sentry = { version = "0.46", default-features = false, features = [
