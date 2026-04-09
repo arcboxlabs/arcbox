@@ -39,6 +39,9 @@ mod dns;
 mod dns_server;
 mod docker_events;
 
+// Vsock-based TCP port forwarding proxy.
+mod port_forward;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let is_pid1 = std::process::id() == 1;

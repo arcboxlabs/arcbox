@@ -481,6 +481,13 @@ mod linux {
                 }
             });
 
+            // Start vsock-based TCP port forwarding proxy.
+            tokio::spawn(async {
+                if let Err(e) = crate::port_forward::run().await {
+                    tracing::warn!("Port forward proxy exited: {}", e);
+                }
+            });
+
             let mut listener =
                 bind_vsock_listener_with_retry(AGENT_PORT, "agent rpc listener").await?;
 

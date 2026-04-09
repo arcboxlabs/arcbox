@@ -9,10 +9,10 @@ use crate::migration::MigrationManager;
 use crate::vm::VmManager;
 use crate::vm_lifecycle::{DEFAULT_MACHINE_NAME, VmLifecycleConfig, VmLifecycleManager};
 use arcbox_net::NetworkManager;
-#[cfg(target_os = "macos")]
-use arcbox_net::darwin::inbound_relay::{InboundListenerManager, InboundProtocol};
 #[cfg(not(target_os = "macos"))]
 use arcbox_net::port_forward::{PortForwardRule, PortForwarder};
+#[cfg(target_os = "macos")]
+use arcbox_port_forward::VsockPortForwarder;
 use arcbox_protocol::agent::{
     KubernetesDeleteResponse, KubernetesKubeconfigResponse, KubernetesStartResponse,
     KubernetesStatusResponse, KubernetesStopResponse, ServiceStatus,
@@ -30,10 +30,26 @@ use tokio::sync::RwLock as TokioRwLock;
 #[cfg(not(target_os = "macos"))]
 const DEFAULT_GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 64, 2);
 
-/// Inbound port-forwarding rules per container: maps container ID to a list of
-/// `(guest_ip, host_port, protocol)` tuples registered for that container.
+/// Per-container tracking: maps container ID to a list of host socket
+/// addresses that have active port forwarding rules.
 #[cfg(target_os = "macos")]
-type InboundRulesMap = Arc<TokioRwLock<HashMap<String, Vec<(Ipv4Addr, u16, InboundProtocol)>>>>;
+type PortForwardRulesMap = Arc<TokioRwLock<HashMap<String, Vec<std::net::SocketAddr>>>>;
+
+/// Adapts [`MachineManager`] to the [`VsockConnector`] trait for the
+/// vsock port forwarder. Connects to the default machine's vsock port.
+#[cfg(target_os = "macos")]
+struct MachineVsockConnector {
+    machine_manager: Arc<MachineManager>,
+}
+
+#[cfg(target_os = "macos")]
+impl arcbox_port_forward::VsockConnector for MachineVsockConnector {
+    fn connect(&self, guest_port: u32) -> std::result::Result<std::os::unix::io::RawFd, String> {
+        self.machine_manager
+            .connect_vsock_port(DEFAULT_MACHINE_NAME, guest_port)
+            .map_err(|e| e.to_string())
+    }
+}
 const REQUIRED_RUNTIME_ASSETS: [&str; 5] = [
     "dockerd",
     "containerd",
@@ -138,12 +154,12 @@ pub struct Runtime {
     network_manager: Arc<NetworkManager>,
     /// Host-side runtime migration manager.
     migration_manager: Arc<MigrationManager>,
-    /// Inbound listener manager for port forwarding via L2 frame injection (macOS).
+    /// Vsock-based TCP port forwarder (macOS).
     #[cfg(target_os = "macos")]
-    inbound_listener: Arc<TokioRwLock<Option<InboundListenerManager>>>,
-    /// Tracks which inbound rules belong to each container for cleanup (macOS).
+    vsock_forwarder: Arc<VsockPortForwarder>,
+    /// Tracks which port forward rules belong to each container (macOS).
     #[cfg(target_os = "macos")]
-    inbound_rules: InboundRulesMap,
+    port_forward_rules: PortForwardRulesMap,
     /// Port forwarders for each container (non-macOS fallback).
     #[cfg(not(target_os = "macos"))]
     port_forwarders: Arc<TokioRwLock<HashMap<String, PortForwarder>>>,
@@ -215,6 +231,11 @@ impl Runtime {
 
         let migration_manager = Arc::new(MigrationManager::new(config.docker.socket_path.clone()));
 
+        #[cfg(target_os = "macos")]
+        let vsock_forwarder = Arc::new(VsockPortForwarder::new(Arc::new(MachineVsockConnector {
+            machine_manager: Arc::clone(&machine_manager),
+        })));
+
         Ok(Self {
             config,
             event_bus,
@@ -225,9 +246,9 @@ impl Runtime {
             network_manager,
             migration_manager,
             #[cfg(target_os = "macos")]
-            inbound_listener: Arc::new(TokioRwLock::new(None)),
+            vsock_forwarder,
             #[cfg(target_os = "macos")]
-            inbound_rules: Arc::new(TokioRwLock::new(HashMap::new())),
+            port_forward_rules: Arc::new(TokioRwLock::new(HashMap::new())),
             #[cfg(not(target_os = "macos"))]
             port_forwarders: Arc::new(TokioRwLock::new(HashMap::new())),
             dns_entries: Arc::new(TokioRwLock::new(HashMap::new())),
@@ -614,52 +635,42 @@ impl Runtime {
         }
     }
 
-    /// macOS: add inbound rules via `InboundListenerManager`.
+    /// macOS: forward TCP ports via vsock pipe to the guest agent.
+    ///
+    /// Each accepted host TCP connection opens a vsock channel to the
+    /// guest port-forward proxy (port 1025), which connects to the
+    /// target and relays bidirectionally. No virtio-net frames, no
+    /// smoltcp, no header construction.
     #[cfg(target_os = "macos")]
     async fn start_port_forwarding_macos(
         &self,
-        machine_name: &str,
+        _machine_name: &str,
         container_id: &str,
         bindings: &[(String, u16, u16, String)],
     ) -> Result<()> {
-        // Keep the cached manager fresh across VM restarts.
-        {
-            let mut guard = self.inbound_listener.write().await;
-            if let Some(manager) = self
-                .machine_manager
-                .take_inbound_listener_manager(machine_name)
-            {
-                *guard = Some(manager);
-            }
-            if guard.is_none() {
-                return Err(CoreError::Machine(
-                    "inbound listener manager not available".to_string(),
-                ));
-            }
-        }
-
-        // Remove previously tracked listeners for this container before
+        // Remove previously tracked rules for this container before
         // applying new bindings, so stale ports do not leak.
-        let previous_rules = {
-            let mut rules = self.inbound_rules.write().await;
-            rules.remove(container_id)
-        };
-        if let Some(previous_rules) = previous_rules {
-            let mut guard = self.inbound_listener.write().await;
-            if let Some(manager) = guard.as_mut() {
-                for (host_ip, host_port, proto) in previous_rules {
-                    manager.remove_rule(host_ip, host_port, proto);
+        {
+            let previous = self.port_forward_rules.write().await.remove(container_id);
+            if let Some(addrs) = previous {
+                for addr in &addrs {
+                    self.vsock_forwarder.remove_rule(addr).await;
                 }
             }
         }
 
-        let mut added_rules = Vec::new();
+        let mut added = Vec::new();
 
         for (host_ip_str, host_port, container_port, protocol) in bindings {
-            let proto = match protocol.to_lowercase().as_str() {
-                "udp" => InboundProtocol::Udp,
-                _ => InboundProtocol::Tcp,
-            };
+            // UDP stays on the legacy L2 injection path for now.
+            if protocol.eq_ignore_ascii_case("udp") {
+                tracing::debug!(
+                    "Skipping UDP port forward {}:{} (vsock is TCP-only)",
+                    host_ip_str,
+                    host_port,
+                );
+                continue;
+            }
 
             let host_ip: Ipv4Addr = if host_ip_str.is_empty() || host_ip_str == "0.0.0.0" {
                 Ipv4Addr::UNSPECIFIED
@@ -667,7 +678,7 @@ impl Runtime {
                 ip
             } else {
                 tracing::warn!(
-                    "Skipping inbound rule: invalid HostIp '{}' for port {}:{}",
+                    "Skipping port forward: invalid HostIp '{}' for port {}:{}",
                     host_ip_str,
                     host_port,
                     protocol,
@@ -675,27 +686,33 @@ impl Runtime {
                 continue;
             };
 
-            let mut guard = self.inbound_listener.write().await;
-            let manager = guard.as_mut().expect("checked above");
-            if let Err(e) = manager
-                .add_rule(host_ip, *host_port, *container_port, proto)
+            let host_addr = std::net::SocketAddr::new(IpAddr::V4(host_ip), *host_port);
+
+            // The guest agent connects to 127.0.0.1:container_port inside
+            // the guest. Docker's published ports are reachable via iptables
+            // DNAT on the guest's loopback.
+            if let Err(e) = self
+                .vsock_forwarder
+                .add_rule(host_addr, Ipv4Addr::LOCALHOST, *container_port)
                 .await
             {
                 tracing::warn!(
-                    "Failed to bind inbound port {}:{}:{}: {}",
-                    host_ip_str,
-                    host_port,
-                    protocol,
+                    "Failed to bind port forward {}→{}:{}: {}",
+                    host_addr,
+                    Ipv4Addr::LOCALHOST,
+                    container_port,
                     e,
                 );
                 continue;
             }
-            added_rules.push((host_ip, *host_port, proto));
+            added.push(host_addr);
         }
 
-        if !added_rules.is_empty() {
-            let mut rules = self.inbound_rules.write().await;
-            rules.insert(container_id.to_string(), added_rules);
+        if !added.is_empty() {
+            self.port_forward_rules
+                .write()
+                .await
+                .insert(container_id.to_string(), added);
         }
 
         Ok(())
@@ -759,16 +776,10 @@ impl Runtime {
     pub async fn stop_port_forwarding_by_id(&self, container_id: &str) {
         #[cfg(target_os = "macos")]
         {
-            let rules = {
-                let mut guard = self.inbound_rules.write().await;
-                guard.remove(container_id)
-            };
-            if let Some(rules) = rules {
-                let mut guard = self.inbound_listener.write().await;
-                if let Some(manager) = guard.as_mut() {
-                    for (host_ip, host_port, proto) in rules {
-                        manager.remove_rule(host_ip, host_port, proto);
-                    }
+            let addrs = self.port_forward_rules.write().await.remove(container_id);
+            if let Some(addrs) = addrs {
+                for addr in &addrs {
+                    self.vsock_forwarder.remove_rule(addr).await;
                 }
                 tracing::debug!("Stopped port forwarding for container {}", container_id);
             }
@@ -831,13 +842,8 @@ impl Runtime {
     pub async fn stop_port_forwarding_all(&self) {
         #[cfg(target_os = "macos")]
         {
-            let mut guard = self.inbound_listener.write().await;
-            // Use take() so that the next start_port_forwarding_macos() call
-            // fetches a fresh manager from the VMM (with a live cmd_tx).
-            if let Some(mut manager) = guard.take() {
-                manager.stop_all();
-            }
-            self.inbound_rules.write().await.clear();
+            self.vsock_forwarder.stop_all().await;
+            self.port_forward_rules.write().await.clear();
         }
 
         #[cfg(not(target_os = "macos"))]

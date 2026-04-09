@@ -89,7 +89,11 @@ pub struct VsockConnectionId {
 // ============================================================================
 
 /// Default host-side TX buffer size (also advertised as `buf_alloc` to guest).
-pub const TX_BUFFER_SIZE: u32 = 64 * 1024;
+///
+/// Sized for high-throughput port forwarding over vsock. The guest can
+/// have up to this many bytes in-flight before needing a credit update.
+/// 1 MiB provides ~40 Gbps at sub-ms RTT without stalling on credits.
+pub const TX_BUFFER_SIZE: u32 = 1024 * 1024;
 
 /// A single host↔guest vsock connection.
 ///
@@ -569,8 +573,8 @@ mod tests {
         let conn = mgr.get_mut(&id).unwrap();
         conn.rx_queue.dequeue();
 
-        // Write 50KB (>3/4 of TX_BUFFER_SIZE=64KB) → should trigger CreditUpdate.
-        conn.advance_fwd_cnt(50 * 1024);
+        // Write >3/4 of TX_BUFFER_SIZE → should trigger CreditUpdate.
+        conn.advance_fwd_cnt(TX_BUFFER_SIZE * 3 / 4 + 1);
         assert_eq!(conn.rx_queue.peek(), RxOps::CREDIT_UPDATE);
     }
 }

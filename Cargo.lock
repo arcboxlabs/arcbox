@@ -275,6 +275,7 @@ dependencies = [
  "arcbox-hypervisor",
  "arcbox-migration",
  "arcbox-net",
+ "arcbox-port-forward",
  "arcbox-protocol",
  "arcbox-transport",
  "arcbox-virtio",
@@ -554,6 +555,17 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "arcbox-port-forward"
+version = "0.3.21"
+dependencies = [
+ "arcbox-constants",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
