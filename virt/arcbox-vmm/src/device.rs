@@ -437,6 +437,19 @@ pub struct DeviceManager {
     /// for block devices is dispatched to the worker instead of processing
     /// synchronously on the vCPU thread.
     blk_workers: HashMap<DeviceId, crate::blk_worker::BlkWorkerHandle>,
+    /// Net-io worker thread handle. Spawned once at DRIVER_OK for the
+    /// primary VirtioNet device. Joined on shutdown. Wrapped in Mutex
+    /// because the spawn happens inside `handle_mmio_write(&self)`.
+    net_rx_worker_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// IRQ callback for the net-io worker thread (cloned from irq_callback).
+    net_rx_irq_callback: Option<DeviceIrqCallback>,
+    /// Force-exit all vCPUs closure for the net-io worker thread.
+    net_rx_exit_vcpus: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// VM-wide running flag shared with worker threads.
+    running: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Primary NIC host fd, wrapped in Mutex so it can be taken from
+    /// the `&self` DRIVER_OK handler. Mirrors `net_host_fd` ownership.
+    net_host_fd_slot: Mutex<Option<i32>>,
 }
 
 // SAFETY: guest_ram_base points to memory that is valid for the lifetime of the
@@ -466,6 +479,11 @@ impl DeviceManager {
                 crate::vsock_manager::VsockConnectionManager::new(),
             )),
             blk_workers: HashMap::new(),
+            net_rx_worker_handle: Mutex::new(None),
+            net_rx_irq_callback: None,
+            net_rx_exit_vcpus: None,
+            running: None,
+            net_host_fd_slot: Mutex::new(None),
         }
     }
 
@@ -487,9 +505,15 @@ impl DeviceManager {
     }
 
     /// Sets the host-side network fd for HV path frame exchange (NIC1).
+    /// Also copies the fd into `net_host_fd_slot` so the DRIVER_OK handler
+    /// can take ownership for the net-io worker thread.
     pub fn set_net_host_fd(&mut self, fd: std::os::unix::io::RawFd, device_id: DeviceId) {
         self.net_host_fd = Some(fd);
         self.primary_net_device_id = Some(device_id);
+        *self
+            .net_host_fd_slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(fd);
     }
 
     /// Returns the primary NIC device ID (for targeted IRQ delivery).
@@ -530,6 +554,149 @@ impl DeviceManager {
         handle: crate::blk_worker::BlkWorkerHandle,
     ) {
         self.blk_workers.insert(device_id, handle);
+    }
+
+    /// Stores the hooks that the net-io worker thread needs for interrupt
+    /// injection and vCPU cancellation. Called once from `start_darwin_hv`
+    /// before the `DeviceManager` Arc is shared.
+    pub fn set_net_rx_hooks(
+        &mut self,
+        irq_callback: Arc<dyn Fn(crate::irq::Irq, bool) -> crate::error::Result<()> + Send + Sync>,
+        exit_vcpus: Arc<dyn Fn() + Send + Sync>,
+    ) {
+        self.net_rx_irq_callback = Some(irq_callback);
+        self.net_rx_exit_vcpus = Some(exit_vcpus);
+    }
+
+    /// Stores the VM-wide `running` flag so the DRIVER_OK handler can
+    /// pass it to the net-io worker context.
+    pub fn set_running(&mut self, running: Arc<std::sync::atomic::AtomicBool>) {
+        self.running = Some(running);
+    }
+
+    /// Returns the primary NIC host fd (without removing it).
+    /// The fd is shared: net-io thread reads, handle_net_tx writes.
+    fn get_net_host_fd_slot(&self) -> Option<i32> {
+        *self
+            .net_host_fd_slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Takes the net-io worker thread handle for join on shutdown.
+    pub fn take_net_rx_worker_handle(&self) -> Option<std::thread::JoinHandle<()>> {
+        self.net_rx_worker_handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    /// Spawns the net-io worker thread if `device_id` is the primary VirtioNet
+    /// and the worker has not already been spawned. Called from the DRIVER_OK
+    /// handler (which only has `&self`).
+    fn maybe_spawn_net_rx_worker(
+        &self,
+        device_id: DeviceId,
+        mmio_arc: &Arc<RwLock<VirtioMmioState>>,
+    ) {
+        // Only spawn for the primary VirtioNet device.
+        if self.primary_net_device_id != Some(device_id) {
+            return;
+        }
+        let device = match self.devices.get(&device_id) {
+            Some(d) if d.info.device_type == DeviceType::VirtioNet => d,
+            _ => return,
+        };
+
+        // Guard: only spawn once.
+        {
+            let guard = self
+                .net_rx_worker_handle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if guard.is_some() {
+                return;
+            }
+        }
+
+        let Some(net_fd) = self.get_net_host_fd_slot() else {
+            tracing::warn!("net-io: no host fd available for primary VirtioNet");
+            return;
+        };
+
+        let mmio = match mmio_arc.read() {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+
+        let qi = 0; // RX queue index.
+        let rx_queue = crate::net_rx_worker::RxQueueConfig {
+            desc_gpa: mmio.queue_desc[qi],
+            avail_gpa: mmio.queue_driver[qi],
+            used_gpa: mmio.queue_device[qi],
+            size: mmio.queue_num[qi],
+        };
+        drop(mmio);
+
+        let Some(guest_base) = self.guest_ram_base else {
+            tracing::warn!("net-io: guest_ram_base not set");
+            return;
+        };
+
+        // SAFETY: `guest_base` is the host mapping returned by
+        // Virtualization.framework, valid for `guest_ram_size` bytes
+        // for the lifetime of the VM.
+        let guest_mem = unsafe {
+            crate::blk_worker::GuestMemWriter::new(
+                guest_base,
+                self.guest_ram_size,
+                self.guest_ram_gpa as usize,
+            )
+        };
+
+        let Some(irq_callback) = self.net_rx_irq_callback.clone() else {
+            tracing::warn!("net-io: irq_callback not set");
+            return;
+        };
+        let Some(exit_vcpus) = self.net_rx_exit_vcpus.clone() else {
+            tracing::warn!("net-io: exit_vcpus not set");
+            return;
+        };
+        let Some(irq) = device.info.irq else {
+            tracing::warn!("net-io: device has no IRQ");
+            return;
+        };
+        let Some(running) = self.running.clone() else {
+            tracing::warn!("net-io: running flag not set");
+            return;
+        };
+
+        let ctx = crate::net_rx_worker::NetRxWorkerContext {
+            net_host_fd: net_fd,
+            guest_mem,
+            rx_queue,
+            mmio_state: mmio_arc.clone(),
+            irq_callback,
+            irq,
+            exit_vcpus,
+            running,
+        };
+
+        match std::thread::Builder::new()
+            .name("net-io".to_string())
+            .spawn(move || crate::net_rx_worker::net_rx_worker_loop(ctx))
+        {
+            Ok(handle) => {
+                *self
+                    .net_rx_worker_handle
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
+                tracing::info!("Spawned net-io worker thread for primary VirtioNet");
+            }
+            Err(e) => {
+                tracing::error!("Failed to spawn net-io worker thread: {e}");
+            }
+        }
     }
 
     /// Returns a clone of the IRQ callback Arc (if set).
@@ -1016,6 +1183,9 @@ impl DeviceManager {
                             })?;
                             tracing::info!("Device {} activated", device_id.0);
                         }
+
+                        // Spawn the net-io worker for the primary VirtioNet device.
+                        self.maybe_spawn_net_rx_worker(device_id, state);
                     }
 
                     // Handle device reset

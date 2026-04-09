@@ -1097,6 +1097,43 @@ impl Vmm {
             }
         }
 
+        // Wire net-io worker hooks before the Arc is shared.
+        // The net-io thread will be spawned later at DRIVER_OK time.
+        {
+            let dm = Arc::get_mut(&mut device_manager).expect("single Arc ref for net-rx hooks");
+
+            // Build IRQ callback for the net-io thread (same GIC + unpark logic).
+            #[cfg(feature = "gic")]
+            if let Some(ref gic_ref) = self.hv_gic {
+                let gic_clone = Arc::clone(gic_ref);
+                let threads_clone = self
+                    .hv_vcpu_thread_handles
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(Mutex::new(Vec::new())));
+                let net_irq_cb: crate::device::DeviceIrqCallback =
+                    Arc::new(move |gsi: crate::irq::Gsi, level: bool| {
+                        gic_clone.set_spi(gsi, level).map_err(|e| {
+                            VmmError::Irq(format!("GIC set_spi({gsi}, {level}) failed: {e}"))
+                        })?;
+                        if level {
+                            if let Ok(handles) = threads_clone.lock() {
+                                for t in handles.iter() {
+                                    t.unpark();
+                                }
+                            }
+                        }
+                        Ok(())
+                    });
+                // Force-exit all vCPUs closure (thread-safe global API).
+                let exit_fn: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {
+                    unsafe { arcbox_hv::ffi::hv_vcpus_exit(std::ptr::null(), 0) };
+                });
+                dm.set_net_rx_hooks(net_irq_cb, exit_fn);
+            }
+
+            dm.set_running(self.running.clone());
+        }
+
         // Store a shared reference for connect_vsock_hv to use after start.
         self.hv_device_manager = Some(Arc::clone(&device_manager));
         let running = self.running.clone();
@@ -1791,11 +1828,7 @@ fn vcpu_run_loop(
                     1, // INT_VRING
                 );
             }
-            if device_manager.poll_net_rx() {
-                if let Some(nid) = device_manager.primary_net_device_id() {
-                    device_manager.raise_interrupt_for_device(nid, 1);
-                }
-            }
+            // poll_net_rx removed — handled by net-io worker thread.
             if device_manager.poll_bridge_rx() {
                 if let Some(bid) = device_manager.bridge_device_id() {
                     device_manager.raise_interrupt_for_device(bid, 1);
@@ -1946,12 +1979,7 @@ fn vcpu_run_loop(
                     device_manager.raise_interrupt_for(crate::device::DeviceType::VirtioVsock, 1);
                 }
 
-                let wfi_has_net = device_manager.poll_net_rx();
-                if wfi_has_net {
-                    if let Some(nid) = device_manager.primary_net_device_id() {
-                        device_manager.raise_interrupt_for_device(nid, 1);
-                    }
-                }
+                // poll_net_rx removed — handled by net-io worker thread.
 
                 let wfi_has_bridge = device_manager.poll_bridge_rx();
                 if wfi_has_bridge {
@@ -1960,7 +1988,7 @@ fn vcpu_run_loop(
                     }
                 }
 
-                if wfi_has_vsock || wfi_has_net || wfi_has_bridge {
+                if wfi_has_vsock || wfi_has_bridge {
                     continue; // Re-enter run loop immediately.
                 }
                 // No pending data — park with timeout.
@@ -2026,7 +2054,11 @@ fn vcpu_run_loop(
             }
 
             VcpuExit::Canceled => {
-                tracing::info!("vCPU {vcpu_id}: canceled");
+                if running.load(Ordering::Relaxed) {
+                    // Woken by net-io thread for interrupt delivery.
+                    continue;
+                }
+                tracing::info!("vCPU {vcpu_id}: canceled (shutdown)");
                 break;
             }
 

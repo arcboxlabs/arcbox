@@ -115,7 +115,7 @@ impl GuestMemWriter {
         unsafe { Some(std::slice::from_raw_parts(self.ptr.add(off), len)) }
     }
 
-    fn read_u16(&self, gpa: usize) -> u16 {
+    pub(crate) fn read_u16(&self, gpa: usize) -> u16 {
         let Some(off) = self.gpa_to_offset(gpa, 2) else {
             return 0;
         };
@@ -126,7 +126,7 @@ impl GuestMemWriter {
         }
     }
 
-    fn write_u16(&self, gpa: usize, val: u16) {
+    pub(crate) fn write_u16(&self, gpa: usize, val: u16) {
         let Some(off) = self.gpa_to_offset(gpa, 2) else {
             return;
         };
@@ -139,7 +139,7 @@ impl GuestMemWriter {
         }
     }
 
-    fn write_u32(&self, gpa: usize, val: u32) {
+    pub(crate) fn write_u32(&self, gpa: usize, val: u32) {
         let Some(off) = self.gpa_to_offset(gpa, 4) else {
             return;
         };

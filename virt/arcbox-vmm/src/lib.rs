@@ -65,11 +65,14 @@ pub mod boot;
 pub mod builder;
 pub mod dax;
 pub mod device;
+// Intentionally not `pub` — only used by darwin_hv to spawn the worker.
 pub mod error;
 pub mod event;
 pub mod fdt;
 pub mod irq;
 pub mod memory;
+#[cfg(target_os = "macos")]
+pub(crate) mod net_rx_worker;
 pub mod snapshot;
 pub mod vcpu;
 pub mod vmm;
