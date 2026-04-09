@@ -36,13 +36,9 @@ use crate::boot_assets::BootAssetProvider;
 use crate::error::{CoreError, Result};
 use crate::event::{Event, EventBus};
 use crate::machine::{MachineConfig, MachineInfo, MachineManager, MachineState};
-use arcbox_constants::cmdline::{
-    DOCKER_DATA_DEVICE_KEY as DOCKER_DATA_DEVICE_CMDLINE_KEY, GUEST_DOCKER_VSOCK_PORT_KEY,
-};
+use arcbox_constants::cmdline::GUEST_DOCKER_VSOCK_PORT_KEY;
 use arcbox_error::CommonError;
 use std::fs::OpenOptions;
-use std::io::Seek;
-use std::io::SeekFrom;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -293,15 +289,6 @@ pub struct VmLifecycleManager {
 }
 
 impl VmLifecycleManager {
-    fn virtio_block_device_path(index: usize) -> Result<String> {
-        if index >= 26 {
-            return Err(CoreError::config(format!(
-                "too many block devices configured: {index}"
-            )));
-        }
-        Ok(format!("/dev/vd{}", (b'a' + index as u8) as char))
-    }
-
     fn ensure_sparse_block_image(path: &std::path::Path, size_bytes: u64) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -314,7 +301,7 @@ impl VmLifecycleManager {
         }
 
         let file_exists = path.exists();
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
@@ -346,6 +333,7 @@ impl VmLifecycleManager {
                 let fd = file.as_raw_fd();
                 // fstore_t: fst_flags, fst_posmode, fst_offset, fst_length, fst_bytesalloc
                 #[repr(C)]
+                #[allow(clippy::struct_field_names)] // mirrors macOS fstore_t C struct
                 struct FStore {
                     fst_flags: u32,
                     fst_posmode: i32,
@@ -360,6 +348,7 @@ impl VmLifecycleManager {
                     fst_flags: F_ALLOCATEALL,
                     fst_posmode: F_PEOFPOSMODE,
                     fst_offset: 0,
+                    #[allow(clippy::cast_possible_wrap)]
                     fst_length: size_bytes as i64,
                     fst_bytesalloc: 0,
                 };

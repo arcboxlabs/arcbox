@@ -340,7 +340,7 @@ fn process_read(ctx: &BlkWorkerContext, item: &BlkWorkItem) -> u8 {
     }
     #[allow(clippy::cast_possible_wrap)]
     let offset = (item.sector * u64::from(ctx.blk_size)) as libc::off_t;
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let n = unsafe { libc::preadv(ctx.raw_fd, iovecs.as_ptr(), iovecs.len() as i32, offset) };
     if n < 0 {
         tracing::warn!(
@@ -368,7 +368,7 @@ fn process_write(ctx: &BlkWorkerContext, item: &BlkWorkItem) -> u8 {
             return 1;
         };
         iovecs.push(libc::iovec {
-            iov_base: buf.as_ptr() as *mut libc::c_void,
+            iov_base: buf.as_ptr().cast_mut().cast(),
             iov_len: buf.len(),
         });
     }
@@ -377,7 +377,7 @@ fn process_write(ctx: &BlkWorkerContext, item: &BlkWorkItem) -> u8 {
     }
     #[allow(clippy::cast_possible_wrap)]
     let offset = (item.sector * u64::from(ctx.blk_size)) as libc::off_t;
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let n = unsafe { libc::pwritev(ctx.raw_fd, iovecs.as_ptr(), iovecs.len() as i32, offset) };
     if n < 0 {
         tracing::warn!(
@@ -424,7 +424,7 @@ fn process_merged(ctx: &BlkWorkerContext, items: &[BlkWorkItem]) {
                 }
             } else if let Some(buf) = ctx.guest_mem.slice(gpa as usize, len as usize) {
                 iovecs.push(libc::iovec {
-                    iov_base: buf.as_ptr() as *mut libc::c_void,
+                    iov_base: buf.as_ptr().cast_mut().cast(),
                     iov_len: buf.len(),
                 });
             }
@@ -434,7 +434,7 @@ fn process_merged(ctx: &BlkWorkerContext, items: &[BlkWorkItem]) {
     // Single merged I/O syscall.
     #[allow(clippy::cast_possible_wrap)]
     let offset = (start_sector * u64::from(ctx.blk_size)) as libc::off_t;
-    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let n = if is_read {
         unsafe { libc::preadv(ctx.raw_fd, iovecs.as_ptr(), iovecs.len() as i32, offset) }
     } else {
@@ -593,10 +593,16 @@ pub struct FlushBarrier {
     pub in_flight: AtomicU32,
 }
 
-impl FlushBarrier {
-    pub fn new() -> Self {
+impl Default for FlushBarrier {
+    fn default() -> Self {
         Self {
             in_flight: AtomicU32::new(0),
         }
+    }
+}
+
+impl FlushBarrier {
+    pub fn new() -> Self {
+        Self::default()
     }
 }

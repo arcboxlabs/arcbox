@@ -1520,6 +1520,7 @@ impl Vmm {
             mgr.allocate(port, guest_cid, internal_fd)
         };
 
+        #[allow(clippy::cast_possible_wrap)]
         let host_fd = Self::duplicate_client_vsock_fd(host_fd, conn_id.host_port as RawFd)
             .inspect_err(|_| {
                 if let Ok(mut mgr) = conns.lock() {
@@ -1832,26 +1833,24 @@ fn vcpu_run_loop(
                 // Before parking, poll vsock host fds for incoming data.
                 // If data arrives, inject into RX queue and trigger interrupt
                 // so the guest wakes up to process it.
-                let mut wfi_has_work = false;
-
-                if device_manager.poll_vsock_rx() {
+                let wfi_has_vsock = device_manager.poll_vsock_rx();
+                if wfi_has_vsock {
                     device_manager.raise_interrupt_for(crate::device::DeviceType::VirtioVsock, 1);
-                    wfi_has_work = true;
                 }
 
-                if device_manager.poll_net_rx() {
+                let wfi_has_net = device_manager.poll_net_rx();
+                if wfi_has_net {
                     device_manager.raise_interrupt_for(crate::device::DeviceType::VirtioNet, 1);
-                    wfi_has_work = true;
                 }
 
-                if device_manager.poll_bridge_rx() {
+                let wfi_has_bridge = device_manager.poll_bridge_rx();
+                if wfi_has_bridge {
                     if let Some(bid) = device_manager.bridge_device_id() {
                         device_manager.raise_interrupt_for_device(bid, 1);
                     }
-                    wfi_has_work = true;
                 }
 
-                if wfi_has_work {
+                if wfi_has_vsock || wfi_has_net || wfi_has_bridge {
                     continue; // Re-enter run loop immediately.
                 }
                 // No pending data — park with timeout.
@@ -1859,7 +1858,7 @@ fn vcpu_run_loop(
             }
 
             VcpuExit::Exception {
-                class: ExceptionClass::HypercallHvc(imm),
+                class: ExceptionClass::HypercallHvc(_imm),
                 ..
             } => {
                 let func_id = match vcpu.get_reg(reg::X0) {

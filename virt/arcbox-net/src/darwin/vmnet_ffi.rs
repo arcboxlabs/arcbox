@@ -306,10 +306,8 @@ unsafe extern "C" {
 // ============================================================================
 
 /// Opaque XPC object.
-#[cfg(feature = "vmnet")]
 pub type XpcObjectT = *mut c_void;
 
-#[cfg(feature = "vmnet")]
 #[link(name = "System")]
 unsafe extern "C" {
     pub fn xpc_dictionary_create(

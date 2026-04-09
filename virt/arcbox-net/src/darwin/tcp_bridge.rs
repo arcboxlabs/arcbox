@@ -43,6 +43,10 @@ use crate::darwin::smoltcp_device::{SmoltcpDevice, TcpSynInfo};
 use crate::ethernet::ETH_HEADER_LEN;
 use crate::nat_engine::checksum;
 
+const UNIX_DGRAM_MAX_FRAME_LEN: usize = 2048;
+const TCP_IPV4_ETH_OVERHEAD: usize = ETH_HEADER_LEN + 20 + 20;
+const FAST_PATH_GUEST_MSS: usize = UNIX_DGRAM_MAX_FRAME_LEN - TCP_IPV4_ETH_OVERHEAD;
+
 /// Size of each smoltcp socket's rx/tx buffer. 512 KiB enables larger TCP
 /// windows and reduces stalls from smoltcp backpressure on high-bandwidth
 /// transfers (doubled from 256 KiB).
@@ -414,14 +418,14 @@ impl TcpBridge {
                     // see the FIN flag and clean up).
                 }
                 Ok(n) => {
-                    // Segment into MSS-sized chunks to stay within MTU.
-                    // MSS = MTU - IP(20) - TCP(20). Use 3960 for MTU 4000,
-                    // 1460 for MTU 1500. Conservative default: 3960.
-                    const MSS: usize = 3960;
+                    // Guest RX uses an AF_UNIX/SOCK_DGRAM socketpair on macOS.
+                    // A single datagram larger than 2048 bytes fails with EMSGSIZE,
+                    // so fast-path TCP data must be segmented for that transport,
+                    // not for the virtio-net MTU.
                     let data = &conn.read_buf[..n];
                     let mut offset = 0;
                     while offset < data.len() {
-                        let chunk_end = (offset + MSS).min(data.len());
+                        let chunk_end = (offset + FAST_PATH_GUEST_MSS).min(data.len());
                         let chunk = &data[offset..chunk_end];
                         let data_frame = crate::ethernet::build_tcp_data_frame(
                             &crate::ethernet::TcpFrameParams {
@@ -703,7 +707,7 @@ impl TcpBridge {
                 self.resolve_proxy_target(syn.dst_ip, syn.dst_port, domain.as_deref())
             };
 
-            if let Some((ref proxy_authority, ref host, port, ref proto)) = proxy_target {
+            if let Some((ref proxy_authority, ref host, port, proto)) = proxy_target {
                 tracing::info!(
                     key = ?key,
                     domain = domain.as_deref().unwrap_or("<unknown>"),
@@ -1141,6 +1145,19 @@ impl TcpBridge {
         tracing::debug!("TCP bridge: replenished listen socket for port {port}");
     }
 
+    /// Removes a socket handle from the per-port bookkeeping tables.
+    fn remove_port_handle(&mut self, handle: SocketHandle) {
+        self.port_handles.retain(|port, handles| {
+            handles.retain(|h| *h != handle);
+            if handles.is_empty() {
+                self.listening_ports.remove(port);
+                false
+            } else {
+                true
+            }
+        });
+    }
+
     /// Relays data between smoltcp sockets and host TcpStreams for all active
     /// connections. Promotes held-stream connections to fast path when ESTABLISHED.
     fn relay_all(&mut self, sockets: &mut SocketSet<'_>) {
@@ -1166,6 +1183,7 @@ impl TcpBridge {
 
                     // Close the smoltcp socket — fast path takes over.
                     sockets.get_mut::<tcp::Socket>(handle).abort();
+                    self.remove_port_handle(handle);
                     sockets.remove(handle);
 
                     // Convert tokio stream to std for non-blocking sync I/O.
@@ -1188,6 +1206,13 @@ impl TcpBridge {
 
         for conn in self.connections.values_mut() {
             let sock = sockets.get_mut::<tcp::Socket>(conn.handle);
+
+            // Held-stream connections are waiting for fast-path promotion.
+            // They do not have relay tasks yet, so the placeholder channels
+            // must not participate in disconnect or EOF handling.
+            if conn.held_stream.is_some() {
+                continue;
+            }
 
             // Host → Guest: flush pending partial send first, then drain channel.
             while sock.can_send() {
@@ -1348,10 +1373,7 @@ impl TcpBridge {
 
         for handle in to_remove {
             self.connections.remove(&handle);
-            self.port_handles.retain(|_, handles| {
-                handles.retain(|h| *h != handle);
-                !handles.is_empty()
-            });
+            self.remove_port_handle(handle);
             sockets.remove(handle);
         }
 
@@ -1724,6 +1746,68 @@ mod tests {
         frame
     }
 
+    fn make_ack_from_syn_ack(syn_ack: &[u8]) -> Vec<u8> {
+        let ip_start = ETH_HEADER_LEN;
+        let tcp_start = ip_start + 20;
+
+        let guest_ip = Ipv4Addr::new(
+            syn_ack[ip_start + 16],
+            syn_ack[ip_start + 17],
+            syn_ack[ip_start + 18],
+            syn_ack[ip_start + 19],
+        );
+        let dst_ip = Ipv4Addr::new(
+            syn_ack[ip_start + 12],
+            syn_ack[ip_start + 13],
+            syn_ack[ip_start + 14],
+            syn_ack[ip_start + 15],
+        );
+        let guest_port = u16::from_be_bytes([syn_ack[tcp_start + 2], syn_ack[tcp_start + 3]]);
+        let dst_port = u16::from_be_bytes([syn_ack[tcp_start], syn_ack[tcp_start + 1]]);
+        let syn_ack_seq = u32::from_be_bytes([
+            syn_ack[tcp_start + 4],
+            syn_ack[tcp_start + 5],
+            syn_ack[tcp_start + 6],
+            syn_ack[tcp_start + 7],
+        ]);
+        let syn_ack_ack = u32::from_be_bytes([
+            syn_ack[tcp_start + 8],
+            syn_ack[tcp_start + 9],
+            syn_ack[tcp_start + 10],
+            syn_ack[tcp_start + 11],
+        ]);
+
+        let mut frame = vec![0u8; ETH_HEADER_LEN + 40];
+        frame[0..6].copy_from_slice(&GW_MAC);
+        frame[6..12].copy_from_slice(&GUEST_MAC);
+        frame[12..14].copy_from_slice(&[0x08, 0x00]);
+
+        frame[ip_start] = 0x45;
+        frame[ip_start + 2..ip_start + 4].copy_from_slice(&40u16.to_be_bytes());
+        frame[ip_start + 8] = 64;
+        frame[ip_start + 9] = 6;
+        frame[ip_start + 12..ip_start + 16].copy_from_slice(&guest_ip.octets());
+        frame[ip_start + 16..ip_start + 20].copy_from_slice(&dst_ip.octets());
+        let ip_cksum = ip_checksum(&frame[ip_start..ip_start + 20]);
+        frame[ip_start + 10..ip_start + 12].copy_from_slice(&ip_cksum.to_be_bytes());
+
+        frame[tcp_start..tcp_start + 2].copy_from_slice(&guest_port.to_be_bytes());
+        frame[tcp_start + 2..tcp_start + 4].copy_from_slice(&dst_port.to_be_bytes());
+        frame[tcp_start + 4..tcp_start + 8].copy_from_slice(&syn_ack_ack.to_be_bytes());
+        frame[tcp_start + 8..tcp_start + 12]
+            .copy_from_slice(&syn_ack_seq.wrapping_add(1).to_be_bytes());
+        frame[tcp_start + 12] = 0x50;
+        frame[tcp_start + 13] = 0x10; // ACK
+        frame[tcp_start + 14..tcp_start + 16].copy_from_slice(&65535u16.to_be_bytes());
+        let tcp_cksum = tcp_checksum(
+            &guest_ip.octets(),
+            &dst_ip.octets(),
+            &frame[tcp_start..ip_start + 40],
+        );
+        frame[tcp_start + 16..tcp_start + 18].copy_from_slice(&tcp_cksum.to_be_bytes());
+        frame
+    }
+
     fn ip_checksum(header: &[u8]) -> u16 {
         let mut sum: u32 = 0;
         let mut i = 0;
@@ -2003,6 +2087,185 @@ mod tests {
         assert!(
             conn.held_stream.is_some(),
             "accepted connection should hold the pre-connected stream for fast-path promotion"
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_all_does_not_abort_held_stream_during_handshake() {
+        let mut device = SmoltcpDevice::new(0, GW_IP, 1500);
+        let (mut iface, mut sockets) = make_iface_and_sockets(&mut device);
+        let mut bridge = TcpBridge::new(GW_IP);
+        let dst_ip = Ipv4Addr::new(198, 18, 30, 95);
+        let dst_port = 443;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connect = tokio::net::TcpStream::connect(addr);
+        let (stream, _accepted) = tokio::join!(connect, listener.accept());
+        let stream = stream.unwrap();
+
+        bridge.pre_connected.insert(
+            SynFlowKey {
+                src_ip: GUEST_IP,
+                src_port: 12345,
+                dst_ip,
+                dst_port,
+            },
+            PreConnected {
+                stream,
+                syn_seq: 1000,
+                created: StdInstant::now(),
+            },
+        );
+
+        assert!(bridge.create_listen_socket(dst_port, &mut sockets));
+
+        device.seed_guest_mac_neighbors(GW_IP, GUEST_IP, GW_MAC, GUEST_MAC);
+        iface.poll(smoltcp::time::Instant::now(), &mut device, &mut sockets);
+        let _ = device.take_tx_pending();
+
+        device.inject_rx(make_syn_frame(dst_ip, dst_port));
+        iface.poll(smoltcp::time::Instant::now(), &mut device, &mut sockets);
+
+        bridge.detect_new_connections(&mut sockets);
+
+        let handle = *bridge
+            .connections
+            .keys()
+            .next()
+            .expect("detect_new_connections should track the accepted socket");
+        assert_eq!(
+            sockets.get::<tcp::Socket>(handle).state(),
+            tcp::State::SynReceived
+        );
+
+        bridge.relay_all(&mut sockets);
+
+        assert_eq!(
+            sockets.get::<tcp::Socket>(handle).state(),
+            tcp::State::SynReceived,
+            "held-stream connection should remain in handshake until promotion"
+        );
+        assert!(
+            bridge.connections[&handle].held_stream.is_some(),
+            "held-stream should not be dropped before promotion"
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_all_promotion_removes_port_handle() {
+        let mut device = SmoltcpDevice::new(0, GW_IP, 1500);
+        let (mut iface, mut sockets) = make_iface_and_sockets(&mut device);
+        let mut bridge = TcpBridge::new(GW_IP);
+        let dst_ip = Ipv4Addr::new(198, 18, 30, 95);
+        let dst_port = 443;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connect = tokio::net::TcpStream::connect(addr);
+        let (stream, _accepted) = tokio::join!(connect, listener.accept());
+        let stream = stream.unwrap();
+
+        bridge.pre_connected.insert(
+            SynFlowKey {
+                src_ip: GUEST_IP,
+                src_port: 12345,
+                dst_ip,
+                dst_port,
+            },
+            PreConnected {
+                stream,
+                syn_seq: 1000,
+                created: StdInstant::now(),
+            },
+        );
+
+        assert!(bridge.create_listen_socket(dst_port, &mut sockets));
+
+        device.seed_guest_mac_neighbors(GW_IP, GUEST_IP, GW_MAC, GUEST_MAC);
+        iface.poll(smoltcp::time::Instant::now(), &mut device, &mut sockets);
+        let _ = device.take_tx_pending();
+
+        device.inject_rx(make_syn_frame(dst_ip, dst_port));
+        iface.poll(smoltcp::time::Instant::now(), &mut device, &mut sockets);
+        bridge.detect_new_connections(&mut sockets);
+
+        let syn_ack = device
+            .take_tx_pending()
+            .into_iter()
+            .find(|frame| {
+                if frame.len() < ETH_HEADER_LEN + 40 {
+                    return false;
+                }
+                let ip_start = ETH_HEADER_LEN;
+                let tcp_start = ip_start + 20;
+                frame[ip_start + 9] == 6 && frame[tcp_start + 13] == 0x12
+            })
+            .expect("smoltcp should emit a SYN-ACK for the gated SYN");
+
+        let handle = *bridge
+            .connections
+            .keys()
+            .next()
+            .expect("accepted connection should be tracked");
+        assert_eq!(
+            sockets.get::<tcp::Socket>(handle).state(),
+            tcp::State::SynReceived
+        );
+
+        device.inject_rx(make_ack_from_syn_ack(&syn_ack));
+        iface.poll(smoltcp::time::Instant::now(), &mut device, &mut sockets);
+        assert_eq!(
+            sockets.get::<tcp::Socket>(handle).state(),
+            tcp::State::Established
+        );
+
+        bridge.relay_all(&mut sockets);
+
+        assert!(
+            !bridge
+                .port_handles
+                .get(&dst_port)
+                .is_some_and(|handles| handles.contains(&handle)),
+            "promoted socket handle must be removed from per-port bookkeeping"
+        );
+
+        bridge.cleanup_closed(&mut sockets);
+    }
+
+    #[tokio::test]
+    async fn poll_fast_path_segments_frames_for_unix_dgram_limit() {
+        let mut bridge = TcpBridge::new(GW_IP);
+        bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connect = tokio::net::TcpStream::connect(addr);
+        let (client, accepted) = tokio::join!(connect, listener.accept());
+        let client = client.unwrap();
+        let (mut accepted, _) = accepted.unwrap();
+
+        let key = SynFlowKey {
+            src_ip: GUEST_IP,
+            src_port: 12345,
+            dst_ip: Ipv4Addr::new(198, 18, 30, 95),
+            dst_port: 443,
+        };
+        bridge.promote_to_fast_path(key, client.into_std().unwrap(), 1, 1);
+
+        let payload = vec![0xAB; FAST_PATH_GUEST_MSS * 2 + 128];
+        accepted.write_all(&payload).await.unwrap();
+
+        let frames = bridge.poll_fast_path();
+        assert!(
+            frames.len() >= 3,
+            "large host payload should be segmented into multiple guest frames"
+        );
+        assert!(
+            frames
+                .iter()
+                .all(|frame| frame.len() <= UNIX_DGRAM_MAX_FRAME_LEN),
+            "fast-path frames must respect the AF_UNIX/SOCK_DGRAM datagram limit"
         );
     }
 

@@ -128,6 +128,7 @@ impl VsockTransport {
     /// # Arguments
     /// * `fd` - A connected vsock file descriptor from the hypervisor
     /// * `addr` - The vsock address (for tracking purposes)
+    ///
     /// Creates a transport from a raw file descriptor (macOS).
     ///
     /// For HV backend, the fd is a Unix SOCK_STREAM socketpair end. We wrap
