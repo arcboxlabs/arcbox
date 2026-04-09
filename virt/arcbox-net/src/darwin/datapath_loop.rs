@@ -274,7 +274,12 @@ impl NetworkDatapath {
                     // Seed smoltcp neighbor cache as soon as guest MAC is learned.
                     if prev_mac.is_none() {
                         if let Some(gmac) = guest_mac {
-                            device.seed_gateway_neighbor(gateway_ip, gateway_mac, gmac);
+                            device.seed_guest_mac_neighbors(
+                                gateway_ip,
+                                guest_ip,
+                                gateway_mac,
+                                gmac,
+                            );
                             tcp_bridge.set_fast_path_macs(gateway_mac, gmac);
                         }
                     }
@@ -375,10 +380,10 @@ impl NetworkDatapath {
 
                 _ = maintenance.tick() => {
                     socket_proxy.maintenance();
-                    // Refresh the gateway → guest_mac neighbor cache entry
-                    // before it expires (ENTRY_LIFETIME = 60s, tick = 30s).
+                    // Refresh the synthetic guest-reachability ARP entries
+                    // before they expire (ENTRY_LIFETIME = 60s, tick = 30s).
                     if let Some(gmac) = guest_mac {
-                        device.seed_gateway_neighbor(gateway_ip, gateway_mac, gmac);
+                        device.seed_guest_mac_neighbors(gateway_ip, guest_ip, gateway_mac, gmac);
                     }
                 }
             }

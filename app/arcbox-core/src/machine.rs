@@ -466,43 +466,47 @@ impl MachineManager {
                 std::thread::sleep(std::time::Duration::from_millis(delay_ms));
 
                 match self.connect_agent(name) {
-                    Ok(mut agent) if agent.is_blocking() => {
-                        match agent.ping_blocking() {
-                            Ok(resp) => {
-                                tracing::debug!(
-                                    "Machine '{}' agent reachable (version: {}, attempt {})",
-                                    name, resp.version, attempt,
-                                );
-                                match agent.get_system_info_blocking() {
-                                    Ok(info) => {
-                                        if let Some(ip) = select_routable_ip(&info.ip_addresses) {
-                                            return Ok(ip);
-                                        }
-                                        tracing::trace!(
-                                            "Machine '{}' no routable IP yet (attempt {})",
-                                            name, attempt,
-                                        );
+                    Ok(mut agent) if agent.is_blocking() => match agent.ping_blocking() {
+                        Ok(resp) => {
+                            tracing::debug!(
+                                "Machine '{}' agent reachable (version: {}, attempt {})",
+                                name,
+                                resp.version,
+                                attempt,
+                            );
+                            match agent.get_system_info_blocking() {
+                                Ok(info) => {
+                                    if let Some(ip) = select_routable_ip(&info.ip_addresses) {
+                                        return Ok(ip);
                                     }
-                                    Err(e) => tracing::trace!(
-                                        "Machine '{}' get_system_info failed (attempt {attempt}): {e}",
+                                    tracing::trace!(
+                                        "Machine '{}' no routable IP yet (attempt {})",
                                         name,
-                                    ),
+                                        attempt,
+                                    );
                                 }
+                                Err(e) => tracing::trace!(
+                                    "Machine '{}' get_system_info failed (attempt {attempt}): {e}",
+                                    name,
+                                ),
                             }
-                            Err(e) => tracing::trace!(
-                                "Machine '{}' ping failed (attempt {attempt}): {e}", name,
-                            ),
                         }
-                    }
+                        Err(e) => tracing::trace!(
+                            "Machine '{}' ping failed (attempt {attempt}): {e}",
+                            name,
+                        ),
+                    },
                     Ok(_agent) => {
                         // Async transport (VZ/Linux) — skip in blocking context.
                         tracing::trace!(
                             "Machine '{}' async transport in blocking probe (attempt {})",
-                            name, attempt,
+                            name,
+                            attempt,
                         );
                     }
                     Err(e) => tracing::trace!(
-                        "Machine '{}' connect failed (attempt {attempt}): {e}", name,
+                        "Machine '{}' connect failed (attempt {attempt}): {e}",
+                        name,
                     ),
                 }
 

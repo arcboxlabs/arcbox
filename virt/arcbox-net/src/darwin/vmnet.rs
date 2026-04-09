@@ -353,7 +353,10 @@ impl Vmnet {
 
         // Wait for the completion handler to fire with a bounded timeout.
         // 10 seconds is generous; vmnet usually completes within milliseconds.
-        let timeout = unsafe { dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC as i64) };
+        let timeout_ns = 10_i64
+            .checked_mul(i64::try_from(NSEC_PER_SEC).expect("NSEC_PER_SEC fits in i64"))
+            .expect("vmnet start timeout fits in i64");
+        let timeout = unsafe { dispatch_time(DISPATCH_TIME_NOW, timeout_ns) };
         // SAFETY: Valid semaphore and computed timeout.
         let wait_result = unsafe { dispatch_semaphore_wait(sema, timeout) };
         if wait_result != 0 {

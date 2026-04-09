@@ -49,7 +49,10 @@ const BLOCKING_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 impl AgentTransport {
     /// Async send — only valid for `Async` variant. Streaming RPCs that
     /// consume `self` and spawn async tasks must go through the async path.
-    async fn async_send(&mut self, data: Bytes) -> std::result::Result<(), arcbox_transport::error::TransportError> {
+    async fn async_send(
+        &mut self,
+        data: Bytes,
+    ) -> std::result::Result<(), arcbox_transport::error::TransportError> {
         match self {
             Self::Async(t) => t.send(data).await,
             Self::Blocking(_) => Err(arcbox_transport::error::TransportError::Protocol(
@@ -59,7 +62,9 @@ impl AgentTransport {
     }
 
     /// Async recv — only valid for `Async` variant.
-    async fn async_recv(&mut self) -> std::result::Result<Bytes, arcbox_transport::error::TransportError> {
+    async fn async_recv(
+        &mut self,
+    ) -> std::result::Result<Bytes, arcbox_transport::error::TransportError> {
         match self {
             Self::Async(t) => t.recv().await,
             Self::Blocking(_) => Err(arcbox_transport::error::TransportError::Protocol(
@@ -289,9 +294,7 @@ impl AgentClient {
                 // Receive response.
                 t.recv()
                     .await
-                    .map_err(|e| {
-                        CoreError::Machine(format!("failed to receive response: {e}"))
-                    })?
+                    .map_err(|e| CoreError::Machine(format!("failed to receive response: {e}")))?
             }
             AgentTransport::Blocking(t) => {
                 // block_in_place tells the tokio multi-thread scheduler that
@@ -302,9 +305,7 @@ impl AgentClient {
                     t.send(&buf, deadline)
                         .map_err(|e| CoreError::Machine(format!("failed to send request: {e}")))?;
                     t.recv(deadline)
-                        .map_err(|e| {
-                            CoreError::Machine(format!("failed to receive response: {e}"))
-                        })
+                        .map_err(|e| CoreError::Machine(format!("failed to receive response: {e}")))
                 })?
             }
         };

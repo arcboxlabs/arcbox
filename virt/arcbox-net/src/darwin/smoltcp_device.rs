@@ -167,42 +167,59 @@ impl SmoltcpDevice {
         self.rx_queue.push_back(FrameBuf::from(frame));
     }
 
-    /// Seeds smoltcp's neighbor cache with a `gateway_ip → guest_mac` mapping.
+    fn inject_arp_reply(
+        &mut self,
+        sender_ip: Ipv4Addr,
+        sender_mac: [u8; 6],
+        target_ip: Ipv4Addr,
+        target_mac: [u8; 6],
+    ) {
+        let sender_ip = sender_ip.octets();
+        let target_ip = target_ip.octets();
+        let mut frame = Vec::with_capacity(42);
+        frame.extend_from_slice(&target_mac);
+        frame.extend_from_slice(&sender_mac);
+        frame.extend_from_slice(&[0x08, 0x06]); // EtherType: ARP
+        frame.extend_from_slice(&[0x00, 0x01]); // Hardware type: Ethernet
+        frame.extend_from_slice(&[0x08, 0x00]); // Protocol type: IPv4
+        frame.push(6);
+        frame.push(4);
+        frame.extend_from_slice(&[0x00, 0x02]); // Operation: Reply
+        frame.extend_from_slice(&sender_mac);
+        frame.extend_from_slice(&sender_ip);
+        frame.extend_from_slice(&target_mac);
+        frame.extend_from_slice(&target_ip);
+        self.rx_queue.push_back(FrameBuf::from(frame));
+    }
+
+    /// Seeds smoltcp's neighbor cache with gateway and guest IP → guest MAC
+    /// mappings.
     ///
-    /// smoltcp's default route points to `gateway_ip` (its own interface IP) to
-    /// satisfy the `any_ip` acceptance check.  When sending TCP replies to
-    /// sandbox IPs (outside the /24 subnet), smoltcp resolves the next-hop via
-    /// ARP — but nobody answers ARP for its own IP, so replies are never sent.
+    /// Two ARP replies are injected:
     ///
-    /// This method injects a synthetic ARP reply that teaches smoltcp
-    /// "gateway_ip lives at guest_mac", so reply frames carry the guest VM's
-    /// MAC as the Ethernet destination.  The guest kernel then forwards them
-    /// to the correct sandbox via the TAP interface.
+    /// 1. `gateway_ip → guest_mac`: smoltcp's default route points to
+    ///    `gateway_ip` (its own interface IP) to satisfy the `any_ip`
+    ///    acceptance check. When sending TCP replies to sandbox IPs (outside
+    ///    the /24 subnet), smoltcp resolves the next-hop via ARP — but
+    ///    nobody answers ARP for its own IP, so replies would never be sent.
+    ///    This mapping fixes that (see ABX-278).
     ///
-    /// See [ABX-278] for the full problem description.
-    pub fn seed_gateway_neighbor(
+    /// 2. `guest_ip → guest_mac`: for TCP connections to the guest IP itself
+    ///    (same /24 subnet), smoltcp does direct ARP lookup (no gateway hop).
+    ///    Without this, smoltcp sends ARP requests for the guest IP, which the
+    ///    guest kernel answers — but only after a round-trip delay that causes
+    ///    the SYN-ACK to be deferred. This breaks the TCP bridge's SYN gate
+    ///    timing, causing the pre-connected stream to expire before the
+    ///    three-way handshake completes.
+    pub fn seed_guest_mac_neighbors(
         &mut self,
         gateway_ip: Ipv4Addr,
+        guest_ip: Ipv4Addr,
         gateway_mac: [u8; 6],
         guest_mac: [u8; 6],
     ) {
-        let gw = gateway_ip.octets();
-        let mut frame = Vec::with_capacity(42);
-        // Ethernet: dst=gateway (smoltcp), src=guest
-        frame.extend_from_slice(&gateway_mac);
-        frame.extend_from_slice(&guest_mac);
-        frame.extend_from_slice(&[0x08, 0x06]); // EtherType: ARP
-        // ARP payload
-        frame.extend_from_slice(&[0x00, 0x01]); // Hardware type: Ethernet
-        frame.extend_from_slice(&[0x08, 0x00]); // Protocol type: IPv4
-        frame.push(6); // Hardware address length
-        frame.push(4); // Protocol address length
-        frame.extend_from_slice(&[0x00, 0x02]); // Operation: Reply
-        frame.extend_from_slice(&guest_mac); // Sender hardware address
-        frame.extend_from_slice(&gw); // Sender protocol address
-        frame.extend_from_slice(&gateway_mac); // Target hardware address
-        frame.extend_from_slice(&gw); // Target protocol address
-        self.rx_queue.push_back(FrameBuf::from(frame));
+        self.inject_arp_reply(gateway_ip, guest_mac, gateway_ip, gateway_mac);
+        self.inject_arp_reply(guest_ip, guest_mac, gateway_ip, gateway_mac);
     }
 
     /// Takes all intercepted frames, leaving the internal buffer empty.
@@ -326,7 +343,12 @@ impl SmoltcpDevice {
                             frame[l4_start + 6],
                             frame[l4_start + 7],
                         ]);
-                        tracing::debug!("TCP SYN gated: {src_ip}:{src_port} → {dst_ip}:{dst_port}");
+                        tracing::info!(
+                            "TCP SYN gated: {src_ip}:{src_port} → {dst_ip}:{dst_port} \
+                             dst_mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} frame_len={}",
+                            frame[0], frame[1], frame[2], frame[3], frame[4], frame[5],
+                            frame.len(),
+                        );
                         // SYN frames are rare (once per connection) — converting to
                         // Vec is negligible. TcpSynInfo.frame stays Vec<u8> because
                         // it's later injected back via inject_rx().
@@ -770,17 +792,19 @@ mod tests {
     }
 
     #[test]
-    fn seed_gateway_neighbor_injects_arp_reply() {
+    fn seed_guest_mac_neighbors_injects_arp_replies() {
         let gateway_ip = Ipv4Addr::new(10, 0, 2, 1);
+        let guest_ip = Ipv4Addr::new(10, 0, 2, 2);
         let gateway_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01];
         let guest_mac = [0x02, 0x11, 0x22, 0x33, 0x44, 0x55];
 
         let mut device = SmoltcpDevice::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
         assert!(device.rx_queue.is_empty());
 
-        device.seed_gateway_neighbor(gateway_ip, gateway_mac, guest_mac);
+        device.seed_guest_mac_neighbors(gateway_ip, guest_ip, gateway_mac, guest_mac);
 
-        assert_eq!(device.rx_queue.len(), 1);
+        // Two ARP replies: one for gateway_ip, one for guest_ip.
+        assert_eq!(device.rx_queue.len(), 2);
         let frame = &device.rx_queue[0];
         assert_eq!(frame.len(), 42, "ARP frame should be 42 bytes");
         // Ethernet header
@@ -804,6 +828,18 @@ mod tests {
             &frame[38..42],
             &[10, 0, 2, 1],
             "ARP target IP should be gateway"
+        );
+
+        let frame = &device.rx_queue[1];
+        assert_eq!(
+            &frame[28..32],
+            &guest_ip.octets(),
+            "Second sender IP should be guest"
+        );
+        assert_eq!(
+            &frame[38..42],
+            &gateway_ip.octets(),
+            "Second target IP should still be gateway so smoltcp accepts the reply"
         );
     }
 }

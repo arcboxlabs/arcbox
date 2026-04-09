@@ -1862,6 +1862,136 @@ mod tests {
     }
 
     #[test]
+    fn smoltcp_injected_syn_emits_syn_ack_frame() {
+        let mut device = SmoltcpDevice::new(0, GW_IP, 1500);
+        let (mut iface, mut sockets) = make_iface_and_sockets(&mut device);
+        let mut bridge = TcpBridge::new(GW_IP);
+        let dst_ip = Ipv4Addr::new(198, 18, 30, 95);
+
+        let syns = vec![TcpSynInfo {
+            dst_port: 443,
+            src_ip: GUEST_IP,
+            src_port: 12345,
+            dst_ip,
+            syn_seq: 1000,
+            frame: vec![],
+        }];
+        bridge.ensure_listen_sockets(&syns, &mut sockets);
+
+        device.seed_guest_mac_neighbors(GW_IP, GUEST_IP, GW_MAC, GUEST_MAC);
+        let ts = smoltcp::time::Instant::now();
+        iface.poll(ts, &mut device, &mut sockets);
+        let _ = device.take_tx_pending();
+
+        device.inject_rx(make_syn_frame(dst_ip, 443));
+        let ts = smoltcp::time::Instant::now();
+        iface.poll(ts, &mut device, &mut sockets);
+
+        let tx_frames = device.take_tx_pending();
+        assert!(
+            !tx_frames.is_empty(),
+            "Injected SYN should cause smoltcp to emit a SYN-ACK"
+        );
+
+        let syn_ack = tx_frames
+            .iter()
+            .find(|frame| {
+                if frame.len() < ETH_HEADER_LEN + 40 {
+                    return false;
+                }
+                let ip_start = ETH_HEADER_LEN;
+                let tcp_start = ip_start + 20;
+                frame[ip_start + 9] == 6 && frame[tcp_start + 13] == 0x12
+            })
+            .expect("Injected SYN should cause smoltcp to emit a TCP SYN-ACK frame");
+        let ip_start = ETH_HEADER_LEN;
+        let tcp_start = ip_start + 20;
+        assert_eq!(
+            Ipv4Addr::new(
+                syn_ack[ip_start + 12],
+                syn_ack[ip_start + 13],
+                syn_ack[ip_start + 14],
+                syn_ack[ip_start + 15]
+            ),
+            dst_ip,
+            "SYN-ACK should use the original destination IP as its source"
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_new_connections_consumes_pre_connected_stream_for_fake_ip() {
+        let mut device = SmoltcpDevice::new(0, GW_IP, 1500);
+        let (mut iface, mut sockets) = make_iface_and_sockets(&mut device);
+        let mut bridge = TcpBridge::new(GW_IP);
+        let dst_ip = Ipv4Addr::new(198, 18, 30, 95);
+        let dst_port = 443;
+
+        // Create any connected stream pair for the pre-connected placeholder.
+        // The host stream's real peer is irrelevant to smoltcp's flow matching;
+        // only the stored four-tuple matters here.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connect = tokio::net::TcpStream::connect(addr);
+        let (stream, _accepted) = tokio::join!(connect, listener.accept());
+        let stream = stream.unwrap();
+
+        let key = SynFlowKey {
+            src_ip: GUEST_IP,
+            src_port: 12345,
+            dst_ip,
+            dst_port,
+        };
+        bridge.pre_connected.insert(
+            key,
+            PreConnected {
+                stream,
+                syn_seq: 1000,
+                created: StdInstant::now(),
+            },
+        );
+
+        assert!(bridge.create_listen_socket(dst_port, &mut sockets));
+
+        device.seed_guest_mac_neighbors(GW_IP, GUEST_IP, GW_MAC, GUEST_MAC);
+        let ts = smoltcp::time::Instant::now();
+        iface.poll(ts, &mut device, &mut sockets);
+        let _ = device.take_tx_pending();
+
+        device.inject_rx(make_syn_frame(dst_ip, dst_port));
+        let ts = smoltcp::time::Instant::now();
+        iface.poll(ts, &mut device, &mut sockets);
+
+        let handle = bridge.port_handles[&dst_port][0];
+        let sock = sockets.get::<tcp::Socket>(handle);
+        let local_ep = sock
+            .local_endpoint()
+            .expect("accepted socket should have a local endpoint");
+        let remote_ep = sock
+            .remote_endpoint()
+            .expect("accepted socket should have a remote endpoint");
+        assert!(
+            sock.is_active(),
+            "accepted socket should be active before detect_new_connections; local={local_ep:?} remote={remote_ep:?}"
+        );
+
+        bridge.detect_new_connections(&mut sockets);
+
+        assert!(
+            bridge.pre_connected.is_empty(),
+            "detect_new_connections should consume the matching pre-connected stream for fake-IP local={local_ep:?} remote={remote_ep:?}"
+        );
+        let conn = bridge
+            .connections
+            .values()
+            .next()
+            .expect("accepted connection should be tracked");
+        assert!(
+            conn.held_stream.is_some(),
+            "accepted connection should hold the pre-connected stream for fast-path promotion"
+        );
+    }
+
+    #[test]
     fn bridge_active_count_starts_at_zero() {
         let bridge = TcpBridge::new(GW_IP);
         assert_eq!(bridge.active_count(), 0);
