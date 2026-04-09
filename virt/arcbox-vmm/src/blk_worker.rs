@@ -53,9 +53,15 @@ pub enum BlkRequestType {
 /// The pointer is valid for the lifetime of the VM. The worker only writes
 /// to device-owned descriptor buffers and the used ring — regions that the
 /// VirtIO spec guarantees the guest will not touch until completion.
+///
+/// All public methods accept guest physical addresses (GPAs) and translate
+/// them to slice offsets by subtracting `gpa_base`.
 pub struct GuestMemWriter {
     ptr: *mut u8,
     len: usize,
+    /// GPA of the start of guest RAM. Subtracted from every GPA argument
+    /// to obtain the host pointer offset within `ptr..ptr+len`.
+    gpa_base: usize,
 }
 
 // SAFETY: The pointer originates from a VM-lifetime mmap. The worker
@@ -68,58 +74,79 @@ unsafe impl Sync for GuestMemWriter {}
 impl GuestMemWriter {
     /// Creates a new writer from the DeviceManager's guest memory.
     ///
+    /// `ptr` must point to the host mapping of guest RAM, which starts
+    /// at GPA `gpa_base`. `len` is the size of that mapping in bytes.
+    ///
     /// # Safety
     /// `ptr` must be valid for `len` bytes for the lifetime of the VM.
-    pub unsafe fn new(ptr: *mut u8, len: usize) -> Self {
-        Self { ptr, len }
+    pub unsafe fn new(ptr: *mut u8, len: usize, gpa_base: usize) -> Self {
+        Self { ptr, len, gpa_base }
     }
 
-    #[allow(clippy::mut_from_ref)]
-    pub fn slice_mut(&self, gpa: usize, len: usize) -> Option<&mut [u8]> {
-        let end = gpa.checked_add(len)?;
+    /// Translates a GPA to a host pointer offset, returning `None` if the
+    /// GPA falls below `gpa_base` (invalid) or the range exceeds the
+    /// mapped region.
+    fn gpa_to_offset(&self, gpa: usize, access_len: usize) -> Option<usize> {
+        let off = gpa.checked_sub(self.gpa_base)?;
+        let end = off.checked_add(access_len)?;
         if end > self.len {
             return None;
         }
-        unsafe { Some(std::slice::from_raw_parts_mut(self.ptr.add(gpa), len)) }
+        Some(off)
+    }
+
+    /// Returns a mutable slice into guest memory at the given GPA range.
+    ///
+    /// # Safety
+    /// Caller must ensure no other reference (mutable or shared) to the
+    /// same GPA range exists for the lifetime of the returned slice.
+    /// In practice, VirtIO descriptor ownership guarantees this — each
+    /// descriptor buffer is exclusive to the device that owns it.
+    #[allow(clippy::mut_from_ref)] // intentional: unsafe fn documents the aliasing contract
+    pub unsafe fn slice_mut(&self, gpa: usize, len: usize) -> Option<&mut [u8]> {
+        let off = self.gpa_to_offset(gpa, len)?;
+        // SAFETY: `gpa_to_offset` validated bounds within the allocation.
+        unsafe { Some(std::slice::from_raw_parts_mut(self.ptr.add(off), len)) }
     }
 
     pub fn slice(&self, gpa: usize, len: usize) -> Option<&[u8]> {
-        let end = gpa.checked_add(len)?;
-        if end > self.len {
-            return None;
-        }
-        unsafe { Some(std::slice::from_raw_parts(self.ptr.add(gpa), len)) }
+        let off = self.gpa_to_offset(gpa, len)?;
+        // SAFETY: `gpa_to_offset` validated bounds within the allocation.
+        unsafe { Some(std::slice::from_raw_parts(self.ptr.add(off), len)) }
     }
 
-    fn read_u16(&self, offset: usize) -> u16 {
-        if offset + 2 > self.len {
+    fn read_u16(&self, gpa: usize) -> u16 {
+        let Some(off) = self.gpa_to_offset(gpa, 2) else {
             return 0;
-        }
+        };
+        // SAFETY: `gpa_to_offset` validated bounds within the allocation.
         unsafe {
-            let p = self.ptr.add(offset);
+            let p = self.ptr.add(off);
             u16::from_le_bytes([*p, *p.add(1)])
         }
     }
 
-    fn write_u16(&self, offset: usize, val: u16) {
-        if offset + 2 > self.len {
+    fn write_u16(&self, gpa: usize, val: u16) {
+        let Some(off) = self.gpa_to_offset(gpa, 2) else {
             return;
-        }
+        };
         let bytes = val.to_le_bytes();
+        // SAFETY: `gpa_to_offset` validated bounds within the allocation.
         unsafe {
-            let p = self.ptr.add(offset);
+            let p = self.ptr.add(off);
             *p = bytes[0];
             *p.add(1) = bytes[1];
         }
     }
 
-    fn write_u32(&self, offset: usize, val: u32) {
-        if offset + 4 > self.len {
+    fn write_u32(&self, gpa: usize, val: u32) {
+        let Some(off) = self.gpa_to_offset(gpa, 4) else {
             return;
-        }
+        };
         let bytes = val.to_le_bytes();
+        // SAFETY: `gpa_to_offset` validated bounds within the allocation.
         unsafe {
-            let p = self.ptr.add(offset);
+            let p = self.ptr.add(off);
             *p = bytes[0];
             *p.add(1) = bytes[1];
             *p.add(2) = bytes[2];
@@ -127,10 +154,12 @@ impl GuestMemWriter {
         }
     }
 
-    fn write_byte(&self, offset: usize, val: u8) {
-        if offset < self.len {
-            unsafe { *self.ptr.add(offset) = val };
-        }
+    fn write_byte(&self, gpa: usize, val: u8) {
+        let Some(off) = self.gpa_to_offset(gpa, 1) else {
+            return;
+        };
+        // SAFETY: `gpa_to_offset` validated bounds within the allocation.
+        unsafe { *self.ptr.add(off) = val };
     }
 }
 
@@ -140,7 +169,8 @@ impl GuestMemWriter {
 
 /// Shared context for the block I/O worker thread.
 pub struct BlkWorkerContext {
-    /// Guest memory (VM-lifetime pointer, offset so index 0 = GPA 0).
+    /// Guest memory (VM-lifetime pointer). GPA translation is handled
+    /// internally by `GuestMemWriter::gpa_to_offset`.
     pub guest_mem: GuestMemWriter,
     /// Raw fd for pread/pwrite (owned by VirtioBlock's File handle).
     pub raw_fd: i32,
@@ -326,7 +356,10 @@ fn process_read(ctx: &BlkWorkerContext, item: &BlkWorkItem) -> u8 {
         if !is_write || len <= 1 {
             continue;
         }
-        let Some(buf) = ctx.guest_mem.slice_mut(gpa as usize, len as usize) else {
+        // SAFETY: VirtIO descriptor buffers are device-owned — no concurrent access
+        // to the same GPA range from other workers or the guest.
+        let buf = unsafe { ctx.guest_mem.slice_mut(gpa as usize, len as usize) };
+        let Some(buf) = buf else {
             tracing::warn!("blk read: GPA {:#x} len {} out of bounds", gpa, len);
             return 1;
         };
@@ -416,7 +449,8 @@ fn process_merged(ctx: &BlkWorkerContext, items: &[BlkWorkItem]) {
                 continue;
             }
             if is_read {
-                if let Some(buf) = ctx.guest_mem.slice_mut(gpa as usize, len as usize) {
+                // SAFETY: VirtIO descriptor buffers are device-owned.
+                if let Some(buf) = unsafe { ctx.guest_mem.slice_mut(gpa as usize, len as usize) } {
                     iovecs.push(libc::iovec {
                         iov_base: buf.as_mut_ptr().cast(),
                         iov_len: buf.len(),
@@ -502,7 +536,9 @@ fn process_get_id(ctx: &BlkWorkerContext, item: &BlkWorkItem) -> u8 {
         if !is_write || len <= 1 {
             continue;
         }
-        if let Some(buf) = ctx.guest_mem.slice_mut(gpa as usize, len as usize) {
+        // SAFETY: VirtIO descriptor buffers are device-owned.
+        let buf = unsafe { ctx.guest_mem.slice_mut(gpa as usize, len as usize) };
+        if let Some(buf) = buf {
             let copy_len = id_bytes.len().min(buf.len());
             buf[..copy_len].copy_from_slice(&id_bytes[..copy_len]);
         }

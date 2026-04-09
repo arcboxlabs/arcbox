@@ -1064,22 +1064,16 @@ impl DeviceManager {
                         if let (Some(ram_base), ram_size) =
                             (self.guest_ram_base, self.guest_ram_size)
                         {
-                            // Build a guest memory slice that can be indexed by GPA directly.
-                            // The host pointer corresponds to GPA `guest_ram_gpa`, so we
-                            // offset it back so that index 0 = GPA 0. This lets device code
-                            // use `desc.addr as usize` (which is a GPA) without translation.
+                            // Build a guest memory slice covering the guest RAM region.
+                            // The host pointer `ram_base` maps to GPA `guest_ram_gpa`.
+                            // All GPA-based indices must subtract `gpa_base` to obtain
+                            // the correct offset within this slice.
                             //
-                            // SAFETY: ram_base is valid for ram_size bytes. We extend the
-                            // slice to cover [GPA 0 .. GPA guest_ram_gpa + ram_size] by
-                            // adjusting the base pointer. Accesses below guest_ram_gpa are
-                            // invalid but device descriptors always point within RAM.
+                            // SAFETY: `ram_base` is the host mapping returned by
+                            // Virtualization.framework and is valid for `ram_size` bytes.
                             let gpa_base = self.guest_ram_gpa as usize;
-                            let guest_mem = unsafe {
-                                std::slice::from_raw_parts_mut(
-                                    ram_base.sub(gpa_base),
-                                    gpa_base + ram_size,
-                                )
-                            };
+                            let guest_mem =
+                                unsafe { std::slice::from_raw_parts_mut(ram_base, ram_size) };
 
                             // VirtioBlock async path: dispatch to worker thread
                             // instead of blocking the vCPU with synchronous I/O.
@@ -1117,16 +1111,17 @@ impl DeviceManager {
                                 };
                                 if !net_completions.is_empty() {
                                     // Update used ring for completed TX descriptors.
-                                    let used_addr = qcfg.used_addr as usize;
+                                    // Translate GPAs to slice offsets by subtracting gpa_base.
+                                    let used_off = qcfg.used_addr as usize - gpa_base;
                                     let q_size = qcfg.size as usize;
-                                    let used_idx_off = used_addr + 2;
+                                    let used_idx_off = used_off + 2;
                                     let mut used_idx = u16::from_le_bytes([
                                         guest_mem[used_idx_off],
                                         guest_mem[used_idx_off + 1],
                                     ]);
                                     for &(head, len) in &net_completions {
                                         let entry =
-                                            used_addr + 4 + ((used_idx as usize) % q_size) * 8;
+                                            used_off + 4 + ((used_idx as usize) % q_size) * 8;
                                         if entry + 8 <= guest_mem.len() {
                                             guest_mem[entry..entry + 4]
                                                 .copy_from_slice(&(head as u32).to_le_bytes());
@@ -1145,11 +1140,12 @@ impl DeviceManager {
                                     // vring_need_event(avail_event, new, old) before
                                     // kicking. Setting avail_event = current avail_idx
                                     // ensures the guest kicks on the next submission.
+                                    let avail_off = qcfg.avail_addr as usize - gpa_base;
                                     let avail_idx = u16::from_le_bytes([
-                                        guest_mem[qcfg.avail_addr as usize + 2],
-                                        guest_mem[qcfg.avail_addr as usize + 3],
+                                        guest_mem[avail_off + 2],
+                                        guest_mem[avail_off + 3],
                                     ]);
-                                    let avail_event_off = used_addr + 4 + q_size * 8;
+                                    let avail_event_off = used_off + 4 + q_size * 8;
                                     if avail_event_off + 2 <= guest_mem.len() {
                                         guest_mem[avail_event_off..avail_event_off + 2]
                                             .copy_from_slice(&avail_idx.to_le_bytes());
@@ -1367,6 +1363,11 @@ impl DeviceManager {
     ///
     /// Pops one descriptor from the avail ring, walks the chain writing data,
     /// and updates the used ring. Returns number of bytes written (0 on failure).
+    ///
+    /// `desc_addr`, `avail_addr`, `used_addr` are already translated to slice
+    /// offsets (GPA minus `gpa_base`). `gpa_base` is needed to translate
+    /// descriptor buffer addresses which are raw GPAs in guest memory.
+    #[allow(clippy::too_many_arguments)]
     fn write_to_rx_descriptor(
         &self,
         guest_mem: &mut [u8],
@@ -1374,6 +1375,7 @@ impl DeviceManager {
         avail_addr: usize,
         used_addr: usize,
         q_size: usize,
+        gpa_base: usize,
         packet: &[u8],
     ) -> usize {
         let avail_idx =
@@ -1410,17 +1412,19 @@ impl DeviceManager {
             if d_off + 16 > guest_mem.len() {
                 break;
             }
-            let addr = u64::from_le_bytes(guest_mem[d_off..d_off + 8].try_into().unwrap()) as usize;
+            let addr_gpa =
+                u64::from_le_bytes(guest_mem[d_off..d_off + 8].try_into().unwrap()) as usize;
             let len =
                 u32::from_le_bytes(guest_mem[d_off + 8..d_off + 12].try_into().unwrap()) as usize;
             let flags = u16::from_le_bytes(guest_mem[d_off + 12..d_off + 14].try_into().unwrap());
             let next = u16::from_le_bytes(guest_mem[d_off + 14..d_off + 16].try_into().unwrap());
+            let addr = addr_gpa - gpa_base;
 
             desc_count += 1;
             tracing::trace!(
                 "  desc[{}]: addr={:#x} len={} flags={:#06x} (W={} N={}) next={}",
                 idx,
-                addr,
+                addr_gpa,
                 len,
                 flags,
                 flags & 2 != 0,
@@ -1439,7 +1443,7 @@ impl DeviceManager {
                     tracing::trace!(
                         "  → wrote {} bytes at GPA {:#x} (total={})",
                         to_write,
-                        addr,
+                        addr_gpa,
                         written,
                     );
                 }
@@ -1509,11 +1513,12 @@ impl DeviceManager {
             // Readback verification: read the header from guest memory.
             if desc_count >= 1 && written >= 44 {
                 let first_d_off = desc_addr + head_idx * 16;
-                let first_addr =
+                let first_gpa =
                     u64::from_le_bytes(guest_mem[first_d_off..first_d_off + 8].try_into().unwrap())
                         as usize;
-                if first_addr + 44 <= guest_mem.len() {
-                    let readback = &guest_mem[first_addr..first_addr + 44];
+                let first_off = first_gpa - gpa_base;
+                if first_off + 44 <= guest_mem.len() {
+                    let readback = &guest_mem[first_off..first_off + 44];
                     let rb_dst_cid = u64::from_le_bytes(readback[8..16].try_into().unwrap());
                     let rb_op = u16::from_le_bytes(readback[30..32].try_into().unwrap());
                     tracing::trace!(
@@ -1536,16 +1541,17 @@ impl DeviceManager {
             if let Ok(mmio) = mmio_arc.read() {
                 let txi = 1usize;
                 if txi < 8 && mmio.queue_ready[txi] && mmio.queue_num[txi] > 0 {
-                    let tx_avail_addr = mmio.queue_driver[txi] as usize;
-                    let tx_used_addr = mmio.queue_device[txi] as usize;
-                    if tx_avail_addr + 4 <= guest_mem.len() && tx_used_addr + 4 <= guest_mem.len() {
+                    // Translate TX queue GPAs to slice offsets.
+                    let tx_avail_off = mmio.queue_driver[txi] as usize - gpa_base;
+                    let tx_used_off = mmio.queue_device[txi] as usize - gpa_base;
+                    if tx_avail_off + 4 <= guest_mem.len() && tx_used_off + 4 <= guest_mem.len() {
                         let tx_avail = u16::from_le_bytes([
-                            guest_mem[tx_avail_addr + 2],
-                            guest_mem[tx_avail_addr + 3],
+                            guest_mem[tx_avail_off + 2],
+                            guest_mem[tx_avail_off + 3],
                         ]);
                         let tx_used = u16::from_le_bytes([
-                            guest_mem[tx_used_addr + 2],
-                            guest_mem[tx_used_addr + 3],
+                            guest_mem[tx_used_off + 2],
+                            guest_mem[tx_used_off + 3],
                         ]);
                         tracing::trace!(
                             "  TX queue state: avail_idx={} used_idx={} (delta={})",
@@ -1598,21 +1604,27 @@ impl DeviceManager {
         if qi >= 8 || !mmio.queue_ready[qi] || mmio.queue_num[qi] == 0 {
             return false;
         }
-        let desc_addr = mmio.queue_desc[qi] as usize;
-        let avail_addr = mmio.queue_driver[qi] as usize;
-        let used_addr = mmio.queue_device[qi] as usize;
+        let desc_gpa = mmio.queue_desc[qi] as usize;
+        let avail_gpa = mmio.queue_driver[qi] as usize;
+        let used_gpa = mmio.queue_device[qi] as usize;
         let q_size = mmio.queue_num[qi] as usize;
 
         tracing::debug!(
             "inject_vsock_rx_raw: desc_addr={:#x} avail_addr={:#x} used_addr={:#x} q_size={}",
-            desc_addr,
-            avail_addr,
-            used_addr,
+            desc_gpa,
+            avail_gpa,
+            used_gpa,
             q_size,
         );
 
-        let guest_mem =
-            unsafe { std::slice::from_raw_parts_mut(ram_base.sub(gpa_base), gpa_base + ram_size) };
+        // SAFETY: `ram_base` is the host mapping returned by
+        // Virtualization.framework and is valid for `ram_size` bytes.
+        let guest_mem = unsafe { std::slice::from_raw_parts_mut(ram_base, ram_size) };
+
+        // Translate GPAs to slice offsets by subtracting gpa_base.
+        let desc_addr = desc_gpa - gpa_base;
+        let avail_addr = avail_gpa - gpa_base;
+        let used_addr = used_gpa - gpa_base;
 
         if avail_addr + 4 > guest_mem.len() {
             return false;
@@ -1654,17 +1666,19 @@ impl DeviceManager {
                 );
                 break;
             }
-            let addr = u64::from_le_bytes(guest_mem[d_off..d_off + 8].try_into().unwrap()) as usize;
+            let addr_gpa =
+                u64::from_le_bytes(guest_mem[d_off..d_off + 8].try_into().unwrap()) as usize;
             let len =
                 u32::from_le_bytes(guest_mem[d_off + 8..d_off + 12].try_into().unwrap()) as usize;
             let flags = u16::from_le_bytes(guest_mem[d_off + 12..d_off + 14].try_into().unwrap());
             let next = u16::from_le_bytes(guest_mem[d_off + 14..d_off + 16].try_into().unwrap());
+            let addr = addr_gpa - gpa_base;
 
             desc_count += 1;
             tracing::debug!(
                 "inject_vsock_rx_raw: desc[{}] addr={:#x} len={} flags={:#06x} (WRITE={} NEXT={}) next={}",
                 idx,
-                addr,
+                addr_gpa,
                 len,
                 flags,
                 flags & 2 != 0,
@@ -1681,7 +1695,7 @@ impl DeviceManager {
                 tracing::debug!(
                     "inject_vsock_rx_raw: wrote {} bytes at GPA {:#x} (total written={})",
                     to_write,
-                    addr,
+                    addr_gpa,
                     written,
                 );
             } else if flags & 2 == 0 {
@@ -1694,7 +1708,7 @@ impl DeviceManager {
                 tracing::warn!(
                     "inject_vsock_rx_raw: descriptor {} addr+len ({:#x}+{}) exceeds guest memory ({:#x})",
                     idx,
-                    addr,
+                    addr_gpa,
                     len,
                     guest_mem.len(),
                 );
@@ -1742,16 +1756,17 @@ impl DeviceManager {
         if written >= 8 {
             let first_desc_off = desc_addr + head_idx * 16;
             if first_desc_off + 8 <= guest_mem.len() {
-                let verify_addr = u64::from_le_bytes(
+                let verify_gpa = u64::from_le_bytes(
                     guest_mem[first_desc_off..first_desc_off + 8]
                         .try_into()
                         .unwrap(),
                 ) as usize;
-                if verify_addr + 8 <= guest_mem.len() {
-                    let readback = &guest_mem[verify_addr..verify_addr + 8];
+                let verify_off = verify_gpa - gpa_base;
+                if verify_off + 8 <= guest_mem.len() {
+                    let readback = &guest_mem[verify_off..verify_off + 8];
                     tracing::debug!(
                         "inject_vsock_rx_raw: verify first 8 bytes at {:#x}: {:02x?}",
-                        verify_addr,
+                        verify_gpa,
                         readback,
                     );
                 }
@@ -1786,9 +1801,11 @@ impl DeviceManager {
             return Ok(false);
         }
 
-        let desc_addr = qcfg.desc_addr as usize;
-        let avail_addr = qcfg.avail_addr as usize;
-        let used_addr = qcfg.used_addr as usize;
+        // Translate GPAs to slice offsets by subtracting gpa_base.
+        let gpa_base = qcfg.gpa_base as usize;
+        let desc_addr = qcfg.desc_addr as usize - gpa_base;
+        let avail_addr = qcfg.avail_addr as usize - gpa_base;
+        let used_addr = qcfg.used_addr as usize - gpa_base;
         let q_size = qcfg.size as usize;
 
         if avail_addr + 4 > memory.len() {
@@ -1831,15 +1848,16 @@ impl DeviceManager {
 
                 if first_desc {
                     // First descriptor = block request header (16 bytes).
+                    // Translate GPA to slice offset for direct memory access.
                     first_desc = false;
                     if len >= 16 {
-                        let hdr_start = addr as usize;
-                        if hdr_start + 16 <= memory.len() {
+                        let hdr_off = addr as usize - gpa_base;
+                        if hdr_off + 16 <= memory.len() {
                             let req_type = u32::from_le_bytes(
-                                memory[hdr_start..hdr_start + 4].try_into().unwrap(),
+                                memory[hdr_off..hdr_off + 4].try_into().unwrap(),
                             );
                             sector = u64::from_le_bytes(
-                                memory[hdr_start + 8..hdr_start + 16].try_into().unwrap(),
+                                memory[hdr_off + 8..hdr_off + 16].try_into().unwrap(),
                             );
                             request_type = match req_type {
                                 0 => BlkRequestType::Read,
@@ -1921,8 +1939,9 @@ impl DeviceManager {
             return false;
         };
         let gpa_base = self.guest_ram_gpa as usize;
-        let guest_mem =
-            unsafe { std::slice::from_raw_parts_mut(ram_base.sub(gpa_base), gpa_base + ram_size) };
+        // SAFETY: `ram_base` is the host mapping returned by
+        // Virtualization.framework and is valid for `ram_size` bytes.
+        let guest_mem = unsafe { std::slice::from_raw_parts_mut(ram_base, ram_size) };
 
         // ------------------------------------------------------------------
         // Phase 1: Check connected streams for readable data → enqueue RW
@@ -1963,7 +1982,7 @@ impl DeviceManager {
                         mgr.enqueue_rw(*conn_id);
                     }
                 } else if n == 0 {
-                    tracing::info!(
+                    tracing::debug!(
                         "vsock Phase 1: EOF on fd {} for {:?} — enqueue RST",
                         fd,
                         conn_id,
@@ -1998,9 +2017,10 @@ impl DeviceManager {
             return false;
         }
 
-        let desc_addr = mmio.queue_desc[rxi] as usize;
-        let avail_addr = mmio.queue_driver[rxi] as usize;
-        let used_addr = mmio.queue_device[rxi] as usize;
+        // Translate GPAs to slice offsets by subtracting gpa_base.
+        let desc_addr = mmio.queue_desc[rxi] as usize - gpa_base;
+        let avail_addr = mmio.queue_driver[rxi] as usize - gpa_base;
+        let used_addr = mmio.queue_device[rxi] as usize - gpa_base;
         let q_size = mmio.queue_num[rxi] as usize;
 
         // Also grab TX queue config for Phase 3.
@@ -2099,7 +2119,7 @@ impl DeviceManager {
                                 VsockAddr::new(conn.guest_cid, conn_id.guest_port),
                                 VsockOp::Request,
                             );
-                            tracing::info!(
+                            tracing::debug!(
                                 "Vsock RX: sending OP_REQUEST guest_port={} host_port={}",
                                 conn_id.guest_port,
                                 conn_id.host_port,
@@ -2113,7 +2133,7 @@ impl DeviceManager {
                                 VsockAddr::new(conn.guest_cid, conn_id.guest_port),
                                 VsockOp::Response,
                             );
-                            tracing::info!(
+                            tracing::debug!(
                                 "Vsock RX: sending OP_RESPONSE guest_port={} host_port={}",
                                 conn_id.guest_port,
                                 conn_id.host_port,
@@ -2221,7 +2241,7 @@ impl DeviceManager {
 
             // Write the packet to an available RX descriptor.
             let written = self.write_to_rx_descriptor(
-                guest_mem, desc_addr, avail_addr, used_addr, q_size, &packet,
+                guest_mem, desc_addr, avail_addr, used_addr, q_size, gpa_base, &packet,
             );
 
             if written > 0 {
@@ -2329,15 +2349,17 @@ impl DeviceManager {
         if qi >= 8 || !mmio.queue_ready[qi] || mmio.queue_num[qi] == 0 {
             return false;
         }
-        let desc_addr = mmio.queue_desc[qi] as usize;
-        let avail_addr = mmio.queue_driver[qi] as usize;
-        let used_addr = mmio.queue_device[qi] as usize;
+        // Translate GPAs to slice offsets by subtracting gpa_base.
+        let desc_addr = mmio.queue_desc[qi] as usize - gpa_base;
+        let avail_addr = mmio.queue_driver[qi] as usize - gpa_base;
+        let used_addr = mmio.queue_device[qi] as usize - gpa_base;
         let q_size = mmio.queue_num[qi] as usize;
 
         drop(mmio); // Release lock before accessing guest memory.
 
-        let guest_mem =
-            unsafe { std::slice::from_raw_parts_mut(ram_base.sub(gpa_base), gpa_base + ram_size) };
+        // SAFETY: `ram_base` is the host mapping returned by
+        // Virtualization.framework and is valid for `ram_size` bytes.
+        let guest_mem = unsafe { std::slice::from_raw_parts_mut(ram_base, ram_size) };
 
         if avail_addr + 4 > guest_mem.len() {
             return false;
@@ -2392,7 +2414,7 @@ impl DeviceManager {
                 if d_off + 16 > guest_mem.len() {
                     break;
                 }
-                let addr =
+                let addr_gpa =
                     u64::from_le_bytes(guest_mem[d_off..d_off + 8].try_into().unwrap()) as usize;
                 let len = u32::from_le_bytes(guest_mem[d_off + 8..d_off + 12].try_into().unwrap())
                     as usize;
@@ -2400,6 +2422,7 @@ impl DeviceManager {
                     u16::from_le_bytes(guest_mem[d_off + 12..d_off + 14].try_into().unwrap());
                 let next =
                     u16::from_le_bytes(guest_mem[d_off + 14..d_off + 16].try_into().unwrap());
+                let addr = addr_gpa - gpa_base;
 
                 // RX descriptors are device-writable.
                 if flags & 2 != 0 && addr + len <= guest_mem.len() {
@@ -2461,8 +2484,10 @@ impl DeviceManager {
             return Vec::new();
         }
 
-        let desc_addr = qcfg.desc_addr as usize;
-        let avail_addr = qcfg.avail_addr as usize;
+        // Translate GPAs to slice offsets by subtracting gpa_base.
+        let gpa_base = qcfg.gpa_base as usize;
+        let desc_addr = qcfg.desc_addr as usize - gpa_base;
+        let avail_addr = qcfg.avail_addr as usize - gpa_base;
         let q_size = qcfg.size as usize;
 
         if avail_addr + 4 > memory.len() {
@@ -2491,8 +2516,9 @@ impl DeviceManager {
                 if d_off + 16 > memory.len() {
                     break;
                 }
-                let addr =
-                    u64::from_le_bytes(memory[d_off..d_off + 8].try_into().unwrap()) as usize;
+                let addr = u64::from_le_bytes(memory[d_off..d_off + 8].try_into().unwrap())
+                    as usize
+                    - gpa_base;
                 let len =
                     u32::from_le_bytes(memory[d_off + 8..d_off + 12].try_into().unwrap()) as usize;
                 let flags = u16::from_le_bytes(memory[d_off + 12..d_off + 14].try_into().unwrap());
@@ -2564,8 +2590,10 @@ impl DeviceManager {
             return Vec::new();
         }
 
-        let desc_addr = qcfg.desc_addr as usize;
-        let avail_addr = qcfg.avail_addr as usize;
+        // Translate GPAs to slice offsets by subtracting gpa_base.
+        let gpa_base = qcfg.gpa_base as usize;
+        let desc_addr = qcfg.desc_addr as usize - gpa_base;
+        let avail_addr = qcfg.avail_addr as usize - gpa_base;
         let q_size = qcfg.size as usize;
 
         if avail_addr + 4 > memory.len() {
@@ -2593,8 +2621,9 @@ impl DeviceManager {
                 if d_off + 16 > memory.len() {
                     break;
                 }
-                let addr =
-                    u64::from_le_bytes(memory[d_off..d_off + 8].try_into().unwrap()) as usize;
+                let addr = u64::from_le_bytes(memory[d_off..d_off + 8].try_into().unwrap())
+                    as usize
+                    - gpa_base;
                 let len =
                     u32::from_le_bytes(memory[d_off + 8..d_off + 12].try_into().unwrap()) as usize;
                 let flags = u16::from_le_bytes(memory[d_off + 12..d_off + 14].try_into().unwrap());
@@ -2649,8 +2678,9 @@ impl DeviceManager {
             return false;
         };
         let gpa_base = self.guest_ram_gpa as usize;
-        let guest_mem =
-            unsafe { std::slice::from_raw_parts_mut(ram_base.sub(gpa_base), gpa_base + ram_size) };
+        // SAFETY: `ram_base` is the host mapping returned by
+        // Virtualization.framework and is valid for `ram_size` bytes.
+        let guest_mem = unsafe { std::slice::from_raw_parts_mut(ram_base, ram_size) };
 
         // Find the bridge VirtioNet device's MMIO state.
         let bridge_device_id = match self.bridge_net_device_id {
@@ -2674,9 +2704,10 @@ impl DeviceManager {
             return false;
         }
 
-        let desc_addr = mmio.queue_desc[qi] as usize;
-        let avail_addr = mmio.queue_driver[qi] as usize;
-        let used_addr = mmio.queue_device[qi] as usize;
+        // Translate GPAs to slice offsets by subtracting gpa_base.
+        let desc_addr = mmio.queue_desc[qi] as usize - gpa_base;
+        let avail_addr = mmio.queue_driver[qi] as usize - gpa_base;
+        let used_addr = mmio.queue_device[qi] as usize - gpa_base;
         let q_size = mmio.queue_num[qi] as usize;
         drop(mmio);
 
@@ -2732,7 +2763,7 @@ impl DeviceManager {
                 if d_off + 16 > guest_mem.len() {
                     break;
                 }
-                let addr =
+                let addr_gpa =
                     u64::from_le_bytes(guest_mem[d_off..d_off + 8].try_into().unwrap()) as usize;
                 let len = u32::from_le_bytes(guest_mem[d_off + 8..d_off + 12].try_into().unwrap())
                     as usize;
@@ -2740,6 +2771,7 @@ impl DeviceManager {
                     u16::from_le_bytes(guest_mem[d_off + 12..d_off + 14].try_into().unwrap());
                 let next =
                     u16::from_le_bytes(guest_mem[d_off + 14..d_off + 16].try_into().unwrap());
+                let addr = addr_gpa - gpa_base;
 
                 if flags & 2 != 0 && addr + len <= guest_mem.len() {
                     // Write from [virtio_hdr | frame] combined.

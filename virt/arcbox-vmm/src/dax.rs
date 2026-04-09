@@ -37,13 +37,16 @@ pub struct HvDaxMapper {
     mappings: Mutex<BTreeMap<u64, DaxMapping>>,
     /// Base IPA of the DAX window (computed from RAM layout).
     base_ipa: u64,
+    /// Total DAX window size — mappings must stay within [0, window_size).
+    window_size: u64,
 }
 
 impl HvDaxMapper {
-    pub fn new(base_ipa: u64) -> Self {
+    pub fn new(base_ipa: u64, window_size: u64) -> Self {
         Self {
             mappings: Mutex::new(BTreeMap::new()),
             base_ipa,
+            window_size,
         }
     }
 }
@@ -63,6 +66,36 @@ impl arcbox_fs::DaxMapper for HvDaxMapper {
         }
         if length == 0 {
             return Err(libc::EINVAL);
+        }
+
+        // Bounds check: mapping must fit within the DAX window.
+        let end = window_offset.checked_add(length).ok_or(libc::EINVAL)?;
+        if end > self.window_size {
+            tracing::warn!(
+                "DAX setup_mapping out of bounds: offset={:#x} len={:#x} window_size={:#x}",
+                window_offset,
+                length,
+                self.window_size,
+            );
+            return Err(libc::EINVAL);
+        }
+
+        // Overlap check: no existing mapping may intersect [window_offset, end).
+        {
+            let mappings = self.mappings.lock().unwrap();
+            for (&existing_offset, existing) in &*mappings {
+                let existing_end = existing_offset + existing.length as u64;
+                if window_offset < existing_end && end > existing_offset {
+                    tracing::warn!(
+                        "DAX setup_mapping overlap: new [{:#x}..{:#x}) vs existing [{:#x}..{:#x})",
+                        window_offset,
+                        end,
+                        existing_offset,
+                        existing_end,
+                    );
+                    return Err(libc::EEXIST);
+                }
+            }
         }
 
         let prot = if writable {
@@ -86,7 +119,9 @@ impl arcbox_fs::DaxMapper for HvDaxMapper {
             )
         };
         if host_ptr == libc::MAP_FAILED {
-            return Err(unsafe { *libc::__error() });
+            return Err(std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO));
         }
 
         let guest_ipa = self.base_ipa + window_offset;
@@ -130,6 +165,18 @@ impl arcbox_fs::DaxMapper for HvDaxMapper {
         let Some(mapping) = mappings.remove(&window_offset) else {
             return Err(libc::ENOENT);
         };
+
+        // Validate that the requested length matches the stored mapping.
+        // Partial unmaps are not supported — return EINVAL and restore.
+        if length as usize != mapping.length {
+            tracing::warn!(
+                "DAX remove_mapping length mismatch: requested={:#x} stored={:#x}",
+                length,
+                mapping.length,
+            );
+            mappings.insert(window_offset, mapping);
+            return Err(libc::EINVAL);
+        }
 
         // Unmap from guest IPA.
         let ret = unsafe { arcbox_hv::ffi::hv_vm_unmap(mapping.guest_ipa, mapping.length) };

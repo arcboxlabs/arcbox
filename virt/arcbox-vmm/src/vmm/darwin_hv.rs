@@ -567,7 +567,7 @@ impl Vmm {
         // doesn't collide. Total DAX space is split equally among shares.
         let per_share_dax = crate::dax::DAX_WINDOW_PER_SHARE;
         let dax_mapper: std::sync::Arc<dyn arcbox_fs::DaxMapper> =
-            std::sync::Arc::new(crate::dax::HvDaxMapper::new(dax_base));
+            std::sync::Arc::new(crate::dax::HvDaxMapper::new(dax_base, dax_size as u64));
         let mut dax_offset: u64 = 0;
 
         for dir in &self.config.shared_dirs {
@@ -996,15 +996,14 @@ impl Vmm {
         // Must happen before Arc is cloned to other threads.
         {
             let dm = Arc::get_mut(&mut device_manager).expect("single Arc ref");
-            let (guest_ptr, guest_len) = if let (Some(base), size, gpa) = (
+            let (guest_ptr, guest_len, guest_gpa_base) = if let (Some(base), size, gpa) = (
                 dm.guest_ram_base_ptr(),
                 dm.guest_ram_size(),
                 dm.guest_ram_gpa(),
             ) {
-                let gpa = gpa as usize;
-                (unsafe { base.sub(gpa) }, gpa + size)
+                (base, size, gpa as usize)
             } else {
-                (std::ptr::null_mut(), 0)
+                (std::ptr::null_mut(), 0, 0)
             };
 
             // Collect IRQ info for each block device before spawning workers.
@@ -1036,8 +1035,15 @@ impl Vmm {
                     let (tx, rx) = std::sync::mpsc::channel::<crate::blk_worker::BlkWorkItem>();
 
                     let worker_ctx = crate::blk_worker::BlkWorkerContext {
+                        // SAFETY: `guest_ptr` is the host mapping returned by
+                        // Virtualization.framework, valid for `guest_len` bytes
+                        // for the lifetime of the VM.
                         guest_mem: unsafe {
-                            crate::blk_worker::GuestMemWriter::new(guest_ptr, guest_len)
+                            crate::blk_worker::GuestMemWriter::new(
+                                guest_ptr,
+                                guest_len,
+                                guest_gpa_base,
+                            )
                         },
                         raw_fd,
                         blk_size,

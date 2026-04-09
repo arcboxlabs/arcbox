@@ -991,9 +991,11 @@ impl VirtioDevice for VirtioBlock {
             return Ok(Vec::new());
         }
 
-        let desc_table_addr = queue_config.desc_addr as usize;
-        let avail_addr = queue_config.avail_addr as usize;
-        let used_addr = queue_config.used_addr as usize;
+        // Translate GPAs to slice offsets by subtracting gpa_base.
+        let gpa_base = queue_config.gpa_base as usize;
+        let desc_table_addr = queue_config.desc_addr as usize - gpa_base;
+        let avail_addr = queue_config.avail_addr as usize - gpa_base;
+        let used_addr = queue_config.used_addr as usize - gpa_base;
         let q_size = queue_config.size as usize;
 
         // Read the avail ring index (offset 2 in the avail ring).
@@ -1022,8 +1024,10 @@ impl VirtioDevice for VirtioBlock {
                 if desc_offset + 16 > memory.len() {
                     return Err(VirtioError::InvalidQueue("descriptor out of bounds".into()));
                 }
+                // Translate descriptor buffer GPA to slice offset.
                 let addr =
-                    u64::from_le_bytes(memory[desc_offset..desc_offset + 8].try_into().unwrap());
+                    u64::from_le_bytes(memory[desc_offset..desc_offset + 8].try_into().unwrap())
+                        - gpa_base as u64;
                 let len = u32::from_le_bytes(
                     memory[desc_offset + 8..desc_offset + 12]
                         .try_into()
