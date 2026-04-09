@@ -547,48 +547,8 @@ fn process_get_id(ctx: &BlkWorkerContext, item: &BlkWorkItem) -> u8 {
     0
 }
 
-// ============================================================================
-// Used Ring Operations
-// ============================================================================
-
-fn read_used_idx(guest_mem: &GuestMemWriter, used_addr: u64) -> u16 {
-    guest_mem.read_u16(used_addr as usize + 2)
-}
-
-fn write_used_entry(
-    guest_mem: &GuestMemWriter,
-    used_addr: u64,
-    queue_size: u16,
-    head_idx: u16,
-    total_bytes: u32,
-) {
-    let used_idx = read_used_idx(guest_mem, used_addr);
-    let entry_off = used_addr as usize + 4 + ((used_idx as usize) % (queue_size as usize)) * 8;
-    guest_mem.write_u32(entry_off, head_idx as u32);
-    guest_mem.write_u32(entry_off + 4, total_bytes);
-    std::sync::atomic::fence(Ordering::Release);
-    guest_mem.write_u16(used_addr as usize + 2, used_idx.wrapping_add(1));
-}
-
-// ============================================================================
-// IRQ
-// ============================================================================
-
-/// Checks whether the guest wants an interrupt (EVENT_IDX suppression).
-fn should_notify(
-    guest_mem: &GuestMemWriter,
-    avail_addr: u64,
-    queue_size: u16,
-    old_used: u16,
-    new_used: u16,
-) -> bool {
-    if old_used == new_used {
-        return false;
-    }
-    let used_event_off = avail_addr as usize + 4 + 2 * (queue_size as usize);
-    let used_event = guest_mem.read_u16(used_event_off);
-    new_used.wrapping_sub(used_event).wrapping_sub(1) < new_used.wrapping_sub(old_used)
-}
+// Shared VirtIO queue helpers — extracted to virtqueue_util.rs.
+use crate::virtqueue_util::{read_used_idx, should_notify, write_used_entry};
 
 fn trigger_irq(ctx: &BlkWorkerContext) {
     // Set interrupt_status on MMIO state.

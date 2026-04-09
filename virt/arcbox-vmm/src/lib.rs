@@ -75,6 +75,7 @@ pub mod memory;
 pub(crate) mod net_rx_worker;
 pub mod snapshot;
 pub mod vcpu;
+pub(crate) mod virtqueue_util;
 pub mod vmm;
 pub mod vsock_manager;
 

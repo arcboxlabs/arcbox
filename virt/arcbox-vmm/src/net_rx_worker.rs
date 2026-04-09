@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use crate::blk_worker::GuestMemWriter;
 use crate::device::VirtioMmioState;
 use crate::irq::Irq;
+use crate::virtqueue_util;
 
 /// Maximum frames to inject per kqueue wakeup before checking
 /// interrupt coalescing thresholds.
@@ -82,6 +83,21 @@ fn trigger_net_irq(ctx: &NetRxWorkerContext) {
     let _ = (ctx.irq_callback)(ctx.irq, true);
     // Force-exit vCPUs so they pick up the pending interrupt.
     (ctx.exit_vcpus)();
+}
+
+/// Conditionally triggers an interrupt based on EVENT_IDX suppression.
+/// Only fires set_spi + hv_vcpus_exit when the guest actually wants
+/// a notification (used_event crossed). Reduces VM exits significantly.
+fn maybe_notify(ctx: &NetRxWorkerContext, old_used: u16, new_used: u16) {
+    if virtqueue_util::should_notify(
+        &ctx.guest_mem,
+        ctx.rx_queue.avail_gpa,
+        ctx.rx_queue.size,
+        old_used,
+        new_used,
+    ) {
+        trigger_net_irq(ctx);
+    }
 }
 
 /// Injects a single frame into the guest RX queue.
@@ -237,6 +253,7 @@ pub fn net_rx_worker_loop(ctx: NetRxWorkerContext) {
     let mut used_idx = ctx.guest_mem.read_u16(ctx.rx_queue.used_gpa as usize + 2);
     let mut pending_frames: u16 = 0;
     let mut batch_start: Option<Instant> = None;
+    let mut old_used = used_idx;
 
     loop {
         if !ctx.running.load(Ordering::Relaxed) {
@@ -266,9 +283,7 @@ pub fn net_rx_worker_loop(ctx: NetRxWorkerContext) {
         if nev > 0 {
             // net_host_fd is readable — drain frames.
             let mut frame_buf = [0u8; 2048];
-            // old_used reserved for Phase 2 should_notify.
-            #[allow(unused_variables)]
-            let old_used = used_idx;
+            old_used = used_idx;
 
             for _ in 0..BATCH_SIZE {
                 let n = unsafe {
@@ -295,7 +310,7 @@ pub fn net_rx_worker_loop(ctx: NetRxWorkerContext) {
                     // avoid busy-spinning and starving the vCPU thread.
                     if pending_frames > 0 {
                         write_avail_event(&ctx, used_idx);
-                        trigger_net_irq(&ctx);
+                        maybe_notify(&ctx, old_used, used_idx);
                         pending_frames = 0;
                         batch_start = None;
                     }
@@ -306,11 +321,8 @@ pub fn net_rx_worker_loop(ctx: NetRxWorkerContext) {
 
                 // Check count threshold.
                 if pending_frames >= COALESCE_COUNT {
-                    tracing::trace!(
-                        "net-io: coalesce flush, {pending_frames} frames, used_idx={used_idx}"
-                    );
                     write_avail_event(&ctx, used_idx);
-                    trigger_net_irq(&ctx);
+                    maybe_notify(&ctx, old_used, used_idx);
                     pending_frames = 0;
                     batch_start = None;
                 }
@@ -322,7 +334,7 @@ pub fn net_rx_worker_loop(ctx: NetRxWorkerContext) {
             if let Some(start) = batch_start {
                 if start.elapsed() >= COALESCE_TIMEOUT {
                     write_avail_event(&ctx, used_idx);
-                    trigger_net_irq(&ctx);
+                    maybe_notify(&ctx, old_used, used_idx);
                     pending_frames = 0;
                     batch_start = None;
                 }
@@ -333,7 +345,7 @@ pub fn net_rx_worker_loop(ctx: NetRxWorkerContext) {
     // Flush any remaining pending frames on shutdown.
     if pending_frames > 0 {
         write_avail_event(&ctx, used_idx);
-        trigger_net_irq(&ctx);
+        trigger_net_irq(&ctx); // Always notify on shutdown.
     }
 
     unsafe { libc::close(kq) };
