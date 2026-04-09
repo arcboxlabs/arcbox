@@ -1396,7 +1396,7 @@ impl Vmm {
 
         // 5. Build and spawn the datapath.
         let net_mtu = arcbox_net::darwin::smoltcp_device::ENHANCED_ETHERNET_MTU;
-        let datapath = NetworkDatapath::new(
+        let mut datapath = NetworkDatapath::new(
             host_fd,
             socket_proxy,
             reply_rx,
@@ -1409,6 +1409,17 @@ impl Vmm {
             cancel,
             net_mtu,
         );
+
+        // Create bounded channel for RX frame injection. The datapath loop
+        // sends frames through the FrameSink; the RxInjectThread (spawned at
+        // DRIVER_OK) receives them and writes directly to guest memory.
+        let (frame_tx, frame_rx) = crossbeam_channel::bounded::<Vec<u8>>(4096);
+        let sink = std::sync::Arc::new(arcbox_net::direct_rx::ChannelFrameSink::new(frame_tx));
+        datapath.set_frame_sink(sink);
+
+        // Store the receiving half so DeviceManager can hand it to the
+        // RxInjectThread at DRIVER_OK time.
+        device_manager.set_rx_inject_channel(frame_rx);
 
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
             VmmError::Device(format!(

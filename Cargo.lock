@@ -516,6 +516,7 @@ dependencies = [
  "arcbox-virtio",
  "bytes",
  "chrono",
+ "crossbeam-channel",
  "crossbeam-utils",
  "hashbrown 0.14.5",
  "ipnetwork 0.20.0",
@@ -530,6 +531,14 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "arcbox-net-inject"
+version = "0.3.21"
+dependencies = [
+ "crossbeam-channel",
+ "tracing",
 ]
 
 [[package]]
@@ -632,9 +641,11 @@ dependencies = [
  "arcbox-hv",
  "arcbox-hypervisor",
  "arcbox-net",
+ "arcbox-net-inject",
  "arcbox-virtio",
  "bytes",
  "chrono",
+ "crossbeam-channel",
  "futures",
  "libc",
  "linux-loader",

@@ -450,6 +450,10 @@ pub struct DeviceManager {
     /// Primary NIC host fd, wrapped in Mutex so it can be taken from
     /// the `&self` DRIVER_OK handler. Mirrors `net_host_fd` ownership.
     net_host_fd_slot: Mutex<Option<i32>>,
+    /// Crossbeam channel receiving frames from the datapath loop for
+    /// direct guest memory injection. Set before DRIVER_OK; taken once
+    /// to construct the `RxInjectThread`.
+    rx_inject_channel: Mutex<Option<crossbeam_channel::Receiver<Vec<u8>>>>,
 }
 
 // SAFETY: guest_ram_base points to memory that is valid for the lifetime of the
@@ -484,6 +488,7 @@ impl DeviceManager {
             net_rx_exit_vcpus: None,
             running: None,
             net_host_fd_slot: Mutex::new(None),
+            rx_inject_channel: Mutex::new(None),
         }
     }
 
@@ -574,6 +579,15 @@ impl DeviceManager {
         self.running = Some(running);
     }
 
+    /// Stores the RX inject channel so the DRIVER_OK handler can take it
+    /// and spawn the `RxInjectThread`.
+    pub fn set_rx_inject_channel(&mut self, rx: crossbeam_channel::Receiver<Vec<u8>>) {
+        *self
+            .rx_inject_channel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(rx);
+    }
+
     /// Returns the primary NIC host fd (without removing it).
     /// The fd is shared: net-io thread reads, handle_net_tx writes.
     fn get_net_host_fd_slot(&self) -> Option<i32> {
@@ -594,6 +608,10 @@ impl DeviceManager {
     /// Spawns the net-io worker thread if `device_id` is the primary VirtioNet
     /// and the worker has not already been spawned. Called from the DRIVER_OK
     /// handler (which only has `&self`).
+    ///
+    /// Prefers the `RxInjectThread` path (channel-based, no socketpair reads)
+    /// when `rx_inject_channel` is set. Falls back to the legacy
+    /// `net_rx_worker` (kqueue on socketpair fd) for VZ backend compatibility.
     fn maybe_spawn_net_rx_worker(
         &self,
         device_id: DeviceId,
@@ -619,41 +637,16 @@ impl DeviceManager {
             }
         }
 
-        let Some(net_fd) = self.get_net_host_fd_slot() else {
-            tracing::warn!("net-io: no host fd available for primary VirtioNet");
-            return;
-        };
-
         let mmio = match mmio_arc.read() {
             Ok(m) => m,
             Err(_) => return,
         };
 
         let qi = 0; // RX queue index.
-        let rx_queue = crate::net_rx_worker::RxQueueConfig {
-            desc_gpa: mmio.queue_desc[qi],
-            avail_gpa: mmio.queue_driver[qi],
-            used_gpa: mmio.queue_device[qi],
-            size: mmio.queue_num[qi],
-        };
-        drop(mmio);
-
         let Some(guest_base) = self.guest_ram_base else {
             tracing::warn!("net-io: guest_ram_base not set");
             return;
         };
-
-        // SAFETY: `guest_base` is the host mapping returned by
-        // Virtualization.framework, valid for `guest_ram_size` bytes
-        // for the lifetime of the VM.
-        let guest_mem = unsafe {
-            crate::blk_worker::GuestMemWriter::new(
-                guest_base,
-                self.guest_ram_size,
-                self.guest_ram_gpa as usize,
-            )
-        };
-
         let Some(irq_callback) = self.net_rx_irq_callback.clone() else {
             tracing::warn!("net-io: irq_callback not set");
             return;
@@ -669,6 +662,106 @@ impl DeviceManager {
         let Some(running) = self.running.clone() else {
             tracing::warn!("net-io: running flag not set");
             return;
+        };
+
+        // Try the new RxInjectThread path (channel-based, HV backend).
+        let rx_channel = self
+            .rx_inject_channel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+
+        if let Some(rx_channel) = rx_channel {
+            // SAFETY: `guest_base` is the host mapping returned by
+            // Virtualization.framework, valid for `guest_ram_size` bytes
+            // for the lifetime of the VM.
+            let guest_mem = unsafe {
+                arcbox_net_inject::guest_mem::GuestMemWriter::new(
+                    guest_base,
+                    self.guest_ram_size,
+                    self.guest_ram_gpa as usize,
+                )
+            };
+
+            let queue = arcbox_net_inject::queue::RxQueueConfig {
+                desc_gpa: mmio.queue_desc[qi],
+                avail_gpa: mmio.queue_driver[qi],
+                used_gpa: mmio.queue_device[qi],
+                size: mmio.queue_num[qi],
+            };
+            drop(mmio);
+
+            // Wrap the VMM IRQ callback to match the inject crate's type.
+            let vmm_callback = irq_callback;
+            let inject_callback: Arc<arcbox_net_inject::irq::IrqCallback> =
+                Arc::new(move |gsi, level| {
+                    vmm_callback(gsi, level)
+                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+                });
+
+            let mmio_arc_clone = mmio_arc.clone();
+            let set_interrupt_status: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                if let Ok(mut s) = mmio_arc_clone.write() {
+                    s.trigger_interrupt(1); // INT_VRING
+                }
+            });
+
+            let inject_thread = arcbox_net_inject::inject::RxInjectThread {
+                rx: rx_channel,
+                guest_mem,
+                queue,
+                irq: arcbox_net_inject::irq::IrqHandle {
+                    callback: inject_callback,
+                    exit_vcpus,
+                    irq,
+                },
+                set_interrupt_status,
+                running,
+            };
+
+            match std::thread::Builder::new()
+                .name("rx-inject".to_string())
+                .spawn(move || inject_thread.run())
+            {
+                Ok(handle) => {
+                    *self
+                        .net_rx_worker_handle
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
+                    tracing::info!(
+                        "Spawned rx-inject thread for primary VirtioNet (channel-based)"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("Failed to spawn rx-inject thread: {e}");
+                }
+            }
+            return;
+        }
+
+        // Fallback: legacy net_rx_worker (kqueue on socketpair fd).
+        let Some(net_fd) = self.get_net_host_fd_slot() else {
+            tracing::warn!("net-io: no host fd available for primary VirtioNet");
+            return;
+        };
+
+        let rx_queue = crate::net_rx_worker::RxQueueConfig {
+            desc_gpa: mmio.queue_desc[qi],
+            avail_gpa: mmio.queue_driver[qi],
+            used_gpa: mmio.queue_device[qi],
+            size: mmio.queue_num[qi],
+        };
+        drop(mmio);
+
+        // SAFETY: `guest_base` is the host mapping returned by
+        // Virtualization.framework, valid for `guest_ram_size` bytes
+        // for the lifetime of the VM.
+        let guest_mem = unsafe {
+            crate::blk_worker::GuestMemWriter::new(
+                guest_base,
+                self.guest_ram_size,
+                self.guest_ram_gpa as usize,
+            )
         };
 
         let ctx = crate::net_rx_worker::NetRxWorkerContext {
@@ -691,7 +784,7 @@ impl DeviceManager {
                     .net_rx_worker_handle
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
-                tracing::info!("Spawned net-io worker thread for primary VirtioNet");
+                tracing::info!("Spawned net-io worker thread for primary VirtioNet (legacy)");
             }
             Err(e) => {
                 tracing::error!("Failed to spawn net-io worker thread: {e}");

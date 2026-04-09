@@ -32,6 +32,8 @@ linux-loader = { version = "0.13", features = ["elf", "pe"] }
 vm-fdt = "0.3"
 vm-superio = "0.8"
 arcbox-fs = { version = "0.3.21", path = "../arcbox-fs" }
+arcbox-net-inject = { version = "0.3.21", path = "../arcbox-net-inject" }
+crossbeam-channel = "0.5"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
