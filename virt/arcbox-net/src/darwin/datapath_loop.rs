@@ -203,6 +203,14 @@ impl NetworkDatapath {
         // TCP bridge: manages smoltcp TCP socket pool and host connections.
         let mut tcp_bridge = TcpBridge::new(gateway_ip);
 
+        // Enable large frame mode when using the channel-based FrameSink
+        // (no socketpair 2048-byte datagram limit). This sends entire
+        // read buffers (up to 32KB) as single frames, reducing per-frame
+        // overhead by 10-30x.
+        if frame_sink.is_some() {
+            tcp_bridge.enable_large_frames();
+        }
+
         // Enable proxy-aware connections: detect host VPN/proxy environment
         // and share the DNS resolution log so TcpBridge can map IPs to domains.
         let proxy_env = super::proxy_detect::ProxyEnvironment::detect();

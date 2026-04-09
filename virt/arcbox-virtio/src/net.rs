@@ -643,7 +643,8 @@ impl VirtioNet {
             | Self::FEATURE_HOST_TSO4
             | Self::FEATURE_HOST_TSO6
             | Self::FEATURE_GUEST_ECN
-            | Self::FEATURE_HOST_ECN;
+            | Self::FEATURE_HOST_ECN
+            | Self::FEATURE_MRG_RXBUF;
     }
 
     /// Returns whether TSO was negotiated with the guest.

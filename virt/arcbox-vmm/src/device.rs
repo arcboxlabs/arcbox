@@ -2720,8 +2720,10 @@ impl DeviceManager {
             }
             let frame = &frame_buf[..n as usize];
 
-            // Build packet: 12-byte virtio-net header (zeroed) + ethernet frame.
-            let virtio_net_hdr = [0u8; 12]; // GSO_NONE, no csum offload
+            // Build packet: 12-byte virtio-net header + ethernet frame.
+            // With MRG_RXBUF, num_buffers (bytes 10-11) must be 1.
+            let mut virtio_net_hdr = [0u8; 12];
+            virtio_net_hdr[10..12].copy_from_slice(&1u16.to_le_bytes());
             let total_len = virtio_net_hdr.len() + frame.len();
 
             // Pop an available RX descriptor.

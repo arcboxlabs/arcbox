@@ -177,6 +177,9 @@ pub struct TcpBridge {
     fast_path_gateway_mac: [u8; 6],
     /// Guest MAC for constructing fast-path frames to the guest.
     fast_path_guest_mac: Option<[u8; 6]>,
+    /// When true, send entire read buffers as single large frames (up to 32KB).
+    /// Enabled when the transport supports large frames (channel path, not socketpair).
+    large_frames_enabled: bool,
 }
 
 /// A TCP connection promoted to the fast path — bypasses smoltcp entirely
@@ -218,7 +221,14 @@ impl TcpBridge {
             fast_path_conns: HashMap::new(),
             fast_path_gateway_mac: [0; 6],
             fast_path_guest_mac: None,
+            large_frames_enabled: false,
         }
+    }
+
+    /// Enables large frame mode (no MSS segmentation).
+    /// Call when using the channel-based FrameSink path instead of socketpair.
+    pub fn enable_large_frames(&mut self) {
+        self.large_frames_enabled = true;
     }
 
     /// Updates the MAC addresses used for fast-path frame construction.
@@ -421,15 +431,17 @@ impl TcpBridge {
                     // see the FIN flag and clean up).
                 }
                 Ok(n) => {
-                    // Guest RX uses an AF_UNIX/SOCK_DGRAM socketpair on macOS.
-                    // A single datagram larger than 2048 bytes fails with EMSGSIZE,
-                    // so fast-path TCP data must be segmented for that transport,
-                    // not for the virtio-net MTU.
+                    // When using the channel-based FrameSink path (HV backend),
+                    // the inject thread handles scatter-gather across multiple
+                    // descriptors via MRG_RXBUF. Send the entire read as one
+                    // large frame — no need to segment at 1994 bytes.
+                    //
+                    // For the legacy socketpair path (VZ backend), segment at
+                    // FAST_PATH_GUEST_MSS to stay within the AF_UNIX SOCK_DGRAM
+                    // 2048-byte datagram limit.
                     let data = &conn.read_buf[..n];
-                    let mut offset = 0;
-                    while offset < data.len() {
-                        let chunk_end = (offset + FAST_PATH_GUEST_MSS).min(data.len());
-                        let chunk = &data[offset..chunk_end];
+                    if self.large_frames_enabled {
+                        // Large frame path: one frame per read (up to 32KB).
                         let data_frame = crate::ethernet::build_tcp_data_frame(
                             &crate::ethernet::TcpFrameParams {
                                 src_ip: conn.remote_ip,
@@ -442,11 +454,34 @@ impl TcpBridge {
                                 src_mac: gw_mac,
                                 dst_mac: guest_mac,
                             },
-                            chunk,
+                            data,
                         );
-                        conn.our_seq = conn.our_seq.wrapping_add(chunk.len() as u32);
+                        conn.our_seq = conn.our_seq.wrapping_add(data.len() as u32);
                         frames.push(data_frame);
-                        offset = chunk_end;
+                    } else {
+                        // Socketpair path: segment at FAST_PATH_GUEST_MSS.
+                        let mut offset = 0;
+                        while offset < data.len() {
+                            let chunk_end = (offset + FAST_PATH_GUEST_MSS).min(data.len());
+                            let chunk = &data[offset..chunk_end];
+                            let data_frame = crate::ethernet::build_tcp_data_frame(
+                                &crate::ethernet::TcpFrameParams {
+                                    src_ip: conn.remote_ip,
+                                    dst_ip: conn.guest_ip,
+                                    src_port: conn.remote_port,
+                                    dst_port: conn.guest_port,
+                                    seq: conn.our_seq,
+                                    ack: conn.last_ack,
+                                    window: 65535,
+                                    src_mac: gw_mac,
+                                    dst_mac: guest_mac,
+                                },
+                                chunk,
+                            );
+                            conn.our_seq = conn.our_seq.wrapping_add(chunk.len() as u32);
+                            frames.push(data_frame);
+                            offset = chunk_end;
+                        }
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {

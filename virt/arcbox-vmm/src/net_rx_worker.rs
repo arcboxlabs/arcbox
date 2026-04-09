@@ -154,9 +154,16 @@ fn inject_one_frame(ctx: &NetRxWorkerContext, frame: &[u8], used_idx: &mut u16) 
 
             if written < VIRTIO_NET_HDR_SIZE {
                 // Write virtio-net header (or partial header).
+                // With MRG_RXBUF, num_buffers (bytes 10-11) must be 1.
                 let hdr_remaining = VIRTIO_NET_HDR_SIZE - written;
                 let hdr_bytes = hdr_remaining.min(to_write);
-                buf[..hdr_bytes].fill(0); // Zeroed virtio-net header.
+                buf[..hdr_bytes].fill(0);
+                if written <= 10 && written + hdr_bytes > 10 {
+                    let nb_off = 10 - written;
+                    if nb_off + 2 <= hdr_bytes {
+                        buf[nb_off..nb_off + 2].copy_from_slice(&1u16.to_le_bytes());
+                    }
+                }
                 // Write frame data after header.
                 let frame_bytes = to_write - hdr_bytes;
                 if frame_bytes > 0 {
