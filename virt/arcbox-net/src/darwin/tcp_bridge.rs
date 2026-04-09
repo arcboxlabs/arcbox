@@ -767,7 +767,7 @@ impl TcpBridge {
 
                 let stream = match result {
                     Ok(Ok(s)) => {
-                        tracing::info!("TCP SYN gate: host connect succeeded for {key:?}");
+                        tracing::debug!("TCP SYN gate: host connect succeeded for {key:?}");
                         Some(s)
                     }
                     Ok(Err(e)) => {
