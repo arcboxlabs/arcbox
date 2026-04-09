@@ -12,7 +12,7 @@ use bytes::Bytes;
 use std::io::{self, Read, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::error::{Result, TransportError};
 
@@ -34,7 +34,8 @@ impl BlockingVsockTransport {
     /// # Safety
     /// `fd` must be a valid, connected Unix socket fd.
     pub unsafe fn from_raw_fd(fd: RawFd) -> io::Result<Self> {
-        let stream = UnixStream::from_raw_fd(fd);
+        // SAFETY: caller guarantees fd is a valid, connected Unix socket.
+        let stream = unsafe { UnixStream::from_raw_fd(fd) };
         stream.set_nonblocking(true)?;
         Ok(Self { stream })
     }
@@ -55,8 +56,8 @@ impl BlockingVsockTransport {
                     )));
                 }
                 Ok(n) => offset += n,
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(TransportError::io(e)),
             }
         }
@@ -98,8 +99,8 @@ impl BlockingVsockTransport {
                     )));
                 }
                 Ok(n) => offset += n,
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(TransportError::io(e)),
             }
         }

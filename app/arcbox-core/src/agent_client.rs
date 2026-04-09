@@ -294,15 +294,18 @@ impl AgentClient {
                     })?
             }
             AgentTransport::Blocking(t) => {
-                let deadline = Instant::now() + BLOCKING_RPC_TIMEOUT;
-                // Send request.
-                t.send(&buf, deadline)
-                    .map_err(|e| CoreError::Machine(format!("failed to send request: {e}")))?;
-                // Receive response.
-                t.recv(deadline)
-                    .map_err(|e| {
-                        CoreError::Machine(format!("failed to receive response: {e}"))
-                    })?
+                // block_in_place tells the tokio multi-thread scheduler that
+                // this worker is about to block, so it can spawn a replacement.
+                // This prevents the 5s poll timeout from stalling other tasks.
+                tokio::task::block_in_place(|| {
+                    let deadline = Instant::now() + BLOCKING_RPC_TIMEOUT;
+                    t.send(&buf, deadline)
+                        .map_err(|e| CoreError::Machine(format!("failed to send request: {e}")))?;
+                    t.recv(deadline)
+                        .map_err(|e| {
+                            CoreError::Machine(format!("failed to receive response: {e}"))
+                        })
+                })?
             }
         };
 
