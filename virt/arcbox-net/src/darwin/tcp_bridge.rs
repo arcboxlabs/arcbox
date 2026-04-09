@@ -308,28 +308,9 @@ impl TcpBridge {
             self.fast_path_conns.remove(&key);
             return Some(Vec::new()); // Intercepted, no reply frame.
         }
-        if flags & 0x01 != 0 {
-            // FIN: close host stream and send FIN+ACK back to guest.
-            tracing::debug!("Fast path: FIN from guest {src_ip}:{src_port}→{dst_ip}:{dst_port}");
-            // FIN consumes 1 sequence number.
-            conn.last_ack = conn.last_ack.wrapping_add(1);
-            let guest_mac = self.fast_path_guest_mac.unwrap_or([0xFF; 6]);
-            let fin_ack = crate::ethernet::build_tcp_fin_frame(&crate::ethernet::TcpFrameParams {
-                src_ip: conn.remote_ip,
-                dst_ip: conn.guest_ip,
-                src_port: conn.remote_port,
-                dst_port: conn.guest_port,
-                seq: conn.our_seq,
-                ack: conn.last_ack,
-                window: 65535,
-                src_mac: self.fast_path_gateway_mac,
-                dst_mac: guest_mac,
-            });
-            self.fast_path_conns.remove(&key);
-            return Some(fin_ack);
-        }
-
         // Extract payload using IPv4 total_length to exclude Ethernet padding.
+        // NOTE: FIN check is deferred until after payload write — RFC 793
+        // allows FIN segments to carry data.
         let ip_total_len = u16::from_be_bytes([frame[ip_start + 2], frame[ip_start + 3]]) as usize;
         let ip_end = ip_start + ip_total_len;
         let tcp_data_offset = ((frame[l4_start + 12] >> 4) as usize) * 4;
@@ -360,6 +341,28 @@ impl TcpBridge {
                     return None;
                 }
             }
+        }
+
+        // FIN handling — after payload has been forwarded to host.
+        if flags & 0x01 != 0 {
+            tracing::debug!("Fast path: FIN from guest {src_ip}:{src_port}→{dst_ip}:{dst_port}");
+            // FIN consumes 1 sequence number (in addition to any data bytes
+            // already accounted for above).
+            conn.last_ack = conn.last_ack.wrapping_add(1);
+            let guest_mac = self.fast_path_guest_mac.unwrap_or([0xFF; 6]);
+            let fin_ack = crate::ethernet::build_tcp_fin_frame(&crate::ethernet::TcpFrameParams {
+                src_ip: conn.remote_ip,
+                dst_ip: conn.guest_ip,
+                src_port: conn.remote_port,
+                dst_port: conn.guest_port,
+                seq: conn.our_seq,
+                ack: conn.last_ack,
+                window: 65535,
+                src_mac: self.fast_path_gateway_mac,
+                dst_mac: guest_mac,
+            });
+            self.fast_path_conns.remove(&key);
+            return Some(fin_ack);
         }
 
         // Generate ACK frame back to guest.
@@ -652,11 +655,11 @@ impl TcpBridge {
             // Check for existing pending entry.
             if let Some(existing) = self.pending_syns.get(&key) {
                 if existing.syn_seq == syn.syn_seq {
-                    tracing::info!("TCP SYN gate: retransmit dropped (pending) for {key:?}");
+                    tracing::debug!("TCP SYN gate: retransmit dropped (pending) for {key:?}");
                     continue;
                 }
                 // Different ISN = new connection attempt, remove stale entry.
-                tracing::info!("TCP SYN gate: ISN changed for {key:?}, replacing pending");
+                tracing::debug!("TCP SYN gate: ISN changed for {key:?}, replacing pending");
                 self.pending_syns.remove(&key);
             }
 
@@ -664,12 +667,12 @@ impl TcpBridge {
             // on next poll), different ISN = guest retried with new connection.
             if let Some(pre) = self.pre_connected.get(&key) {
                 if pre.syn_seq == syn.syn_seq {
-                    tracing::info!(
+                    tracing::debug!(
                         "TCP SYN gate: retransmit dropped (pre-connected exists) for {key:?}"
                     );
                     continue;
                 }
-                tracing::info!(
+                tracing::debug!(
                     "TCP SYN gate: ISN changed for {key:?}, evicting stale pre-connected stream"
                 );
                 self.pre_connected.remove(&key);
@@ -768,11 +771,11 @@ impl TcpBridge {
                         Some(s)
                     }
                     Ok(Err(e)) => {
-                        tracing::info!("TCP SYN gate: host connect failed for {key:?}: {e}");
+                        tracing::warn!("TCP SYN gate: host connect failed for {key:?}: {e}");
                         None
                     }
                     Err(_) => {
-                        tracing::info!("TCP SYN gate: host connect timed out for {key:?}");
+                        tracing::warn!("TCP SYN gate: host connect timed out for {key:?}");
                         None
                     }
                 };
@@ -789,7 +792,7 @@ impl TcpBridge {
                 },
             );
 
-            tracing::info!("TCP SYN gate: pending entry created for {key:?}");
+            tracing::debug!("TCP SYN gate: pending entry created for {key:?}");
         }
 
         rst_frames
@@ -871,9 +874,6 @@ impl TcpBridge {
                         },
                     );
 
-                    tracing::debug!(
-                        "TCP SYN gate: injected SYN + stored pre-connected stream for {key:?}"
-                    );
                     tracing::info!(
                         "TCP SYN gate: injected SYN + stored pre-connected stream for {key:?}"
                     );
@@ -882,7 +882,7 @@ impl TcpBridge {
                     // Build RST|ACK from the original SYN frame.
                     if let Some(rst) = build_rst_from_syn(&pending.frame, gateway_mac) {
                         rst_frames.push(rst);
-                        tracing::info!("TCP SYN gate: sending RST for failed connect {key:?}");
+                        tracing::warn!("TCP SYN gate: sending RST for failed connect {key:?}");
                     }
                 }
             }
@@ -891,7 +891,7 @@ impl TcpBridge {
         // Expire stale pre-connected streams.
         self.pre_connected.retain(|key, pre| {
             if pre.created.elapsed() > std::time::Duration::from_secs(PRE_CONNECTED_TTL_SECS) {
-                tracing::info!("TCP SYN gate: pre-connected stream expired for {key:?}");
+                tracing::debug!("TCP SYN gate: pre-connected stream expired for {key:?}");
                 false
             } else {
                 true

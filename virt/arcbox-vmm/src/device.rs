@@ -1027,9 +1027,9 @@ impl DeviceManager {
                 }
                 virtio_mmio::regs::QUEUE_NOTIFY => {
                     let queue_idx = value32 as u16;
-                    // Log vsock TX notifications at info level for debugging.
+                    // Log vsock TX notifications at trace level (per-kick hot path).
                     if device.info.device_type == DeviceType::VirtioVsock && queue_idx == 1 {
-                        tracing::info!("QUEUE_NOTIFY: vsock TX queue 1 kicked by guest!",);
+                        tracing::trace!("QUEUE_NOTIFY: vsock TX queue 1 kicked by guest!",);
                     }
                     tracing::trace!(
                         "QUEUE_NOTIFY: device {} ({:?}) queue {}",
@@ -1172,14 +1172,14 @@ impl DeviceManager {
                                 let mut dev = virtio_dev.lock().map_err(|e| {
                                     VmmError::Device(format!("Failed to lock device: {e}"))
                                 })?;
-                                // Log vsock TX processing at info level.
+                                // Log vsock TX processing at trace level (per-kick hot path).
                                 let is_vsock_tx = device.info.device_type
                                     == DeviceType::VirtioVsock
                                     && queue_idx == 1;
                                 match dev.process_queue(queue_idx, guest_mem, &qcfg) {
                                     Ok(completions) if !completions.is_empty() => {
                                         if is_vsock_tx {
-                                            tracing::info!(
+                                            tracing::trace!(
                                                 "Vsock QUEUE_NOTIFY TX: {} completions processed!",
                                                 completions.len(),
                                             );
@@ -1210,7 +1210,7 @@ impl DeviceManager {
                                     }
                                     Ok(_) => {
                                         if is_vsock_tx {
-                                            tracing::info!(
+                                            tracing::trace!(
                                                 "Vsock QUEUE_NOTIFY TX: kicked but 0 completions \
                                                  (last_avail_idx_tx may already be current)",
                                             );
@@ -1392,7 +1392,7 @@ impl DeviceManager {
         }
         let head_idx = u16::from_le_bytes([guest_mem[ring_off], guest_mem[ring_off + 1]]) as usize;
 
-        tracing::info!(
+        tracing::trace!(
             "vsock write_to_rx_desc: avail_idx={} used_idx={} head_idx={} pkt_len={} q_size={}",
             avail_idx,
             used_idx,
@@ -1417,7 +1417,7 @@ impl DeviceManager {
             let next = u16::from_le_bytes(guest_mem[d_off + 14..d_off + 16].try_into().unwrap());
 
             desc_count += 1;
-            tracing::info!(
+            tracing::trace!(
                 "  desc[{}]: addr={:#x} len={} flags={:#06x} (W={} N={}) next={}",
                 idx,
                 addr,
@@ -1436,7 +1436,7 @@ impl DeviceManager {
                     guest_mem[addr..addr + to_write]
                         .copy_from_slice(&packet[written..written + to_write]);
                     written += to_write;
-                    tracing::info!(
+                    tracing::trace!(
                         "  → wrote {} bytes at GPA {:#x} (total={})",
                         to_write,
                         addr,
@@ -1472,7 +1472,7 @@ impl DeviceManager {
             let new_used = (used_idx + 1) as u16;
             guest_mem[used_idx_off..used_idx_off + 2].copy_from_slice(&new_used.to_le_bytes());
 
-            tracing::info!(
+            tracing::trace!(
                 "vsock write_to_rx_desc: OK — {} bytes, used_idx {} → {}",
                 written,
                 used_idx,
@@ -1491,7 +1491,7 @@ impl DeviceManager {
                 let flags = u32::from_le_bytes(packet[32..36].try_into().unwrap());
                 let buf_alloc = u32::from_le_bytes(packet[36..40].try_into().unwrap());
                 let fwd_cnt = u32::from_le_bytes(packet[40..44].try_into().unwrap());
-                tracing::info!(
+                tracing::trace!(
                     "  header: src={}:{} dst={}:{} len={} type={} op={} flags={} buf_alloc={} fwd_cnt={}",
                     src_cid,
                     src_port,
@@ -1516,7 +1516,7 @@ impl DeviceManager {
                     let readback = &guest_mem[first_addr..first_addr + 44];
                     let rb_dst_cid = u64::from_le_bytes(readback[8..16].try_into().unwrap());
                     let rb_op = u16::from_le_bytes(readback[30..32].try_into().unwrap());
-                    tracing::info!(
+                    tracing::trace!(
                         "  readback: dst_cid={} op={} first_8_bytes={:02x?}",
                         rb_dst_cid,
                         rb_op,
@@ -1547,7 +1547,7 @@ impl DeviceManager {
                             guest_mem[tx_used_addr + 2],
                             guest_mem[tx_used_addr + 3],
                         ]);
-                        tracing::info!(
+                        tracing::trace!(
                             "  TX queue state: avail_idx={} used_idx={} (delta={})",
                             tx_avail,
                             tx_used,
@@ -1730,7 +1730,7 @@ impl DeviceManager {
             std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
             let new_used = (used_idx + 1) as u16;
             guest_mem[used_idx_off..used_idx_off + 2].copy_from_slice(&new_used.to_le_bytes());
-            tracing::info!(
+            tracing::trace!(
                 "inject_vsock_rx_raw: OK — {} bytes injected, used_idx {} -> {}",
                 written,
                 used_idx,
@@ -1954,7 +1954,7 @@ impl DeviceManager {
                     )
                 };
                 if n > 0 {
-                    tracing::info!(
+                    tracing::trace!(
                         "vsock Phase 1: data available on fd {} for {:?} — enqueue RW",
                         fd,
                         conn_id,
@@ -2269,7 +2269,7 @@ impl DeviceManager {
                 if let Ok(mut vdev) = dev.lock() {
                     match vdev.process_queue(1, guest_mem, &qcfg) {
                         Ok(completions) if !completions.is_empty() => {
-                            tracing::info!("Vsock TX poll: {} completions", completions.len());
+                            tracing::trace!("Vsock TX poll: {} completions", completions.len());
                             injected = true;
 
                             // After TX processing, check if any connections now

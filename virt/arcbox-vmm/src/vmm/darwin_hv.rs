@@ -1844,7 +1844,9 @@ fn vcpu_run_loop(
 
                 let wfi_has_net = device_manager.poll_net_rx();
                 if wfi_has_net {
-                    device_manager.raise_interrupt_for(crate::device::DeviceType::VirtioNet, 1);
+                    if let Some(nid) = device_manager.primary_net_device_id() {
+                        device_manager.raise_interrupt_for_device(nid, 1);
+                    }
                 }
 
                 let wfi_has_bridge = device_manager.poll_bridge_rx();

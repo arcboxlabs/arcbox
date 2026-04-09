@@ -151,6 +151,7 @@ impl BlockingVsockTransport {
 mod tests {
     use super::*;
     use std::os::unix::io::FromRawFd;
+    use std::time::Duration;
 
     #[test]
     fn test_blocking_roundtrip() {
