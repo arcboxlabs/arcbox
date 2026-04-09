@@ -229,7 +229,7 @@ impl VirtioMmioState {
                     (self.device_features >> 32) as u32
                 }
             }
-            regs::QUEUE_NUM_MAX => 256, // Max queue size
+            regs::QUEUE_NUM_MAX => 1024, // Max queue size (increased from 256 for throughput)
             regs::QUEUE_READY => {
                 if (self.queue_sel as usize) < 8 {
                     u32::from(self.queue_ready[self.queue_sel as usize])
