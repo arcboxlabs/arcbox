@@ -1,0 +1,27 @@
+[package]
+name = "arcbox-e2e-smoke"
+description = "E2E smoke tests for ArcBox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+# The library crate provides the test harness; integration tests use it.
+[lib]
+name = "e2e"
+path = "src/lib.rs"
+
+[[test]]
+name = "smoke"
+path = "tests/smoke.rs"
+
+[dependencies]
+dirs = "6"
+libc = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true
