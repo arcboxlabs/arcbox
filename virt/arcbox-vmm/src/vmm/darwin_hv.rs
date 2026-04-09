@@ -1520,13 +1520,17 @@ impl Vmm {
             mgr.allocate(port, guest_cid, internal_fd)
         };
 
-        #[allow(clippy::cast_possible_wrap)]
-        let host_fd = Self::duplicate_client_vsock_fd(host_fd, conn_id.host_port as RawFd)
-            .inspect_err(|_| {
-                if let Ok(mut mgr) = conns.lock() {
-                    mgr.remove(&conn_id);
-                }
-            })?;
+        let min_fd = RawFd::try_from(conn_id.host_port).map_err(|_| {
+            VmmError::Device(format!(
+                "vsock host_port {} exceeds RawFd range",
+                conn_id.host_port
+            ))
+        })?;
+        let host_fd = Self::duplicate_client_vsock_fd(host_fd, min_fd).inspect_err(|_| {
+            if let Ok(mut mgr) = conns.lock() {
+                mgr.remove(&conn_id);
+            }
+        })?;
 
         tracing::info!(
             "HV vsock connect: guest_port={}, host_port={}, host_fd={}",
