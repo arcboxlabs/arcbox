@@ -320,6 +320,66 @@ impl AgentClient {
         Ok((resp_type, payload))
     }
 
+    /// Synchronous RPC call for blocking transport. No async, no tokio.
+    /// Only works with `AgentTransport::Blocking`.
+    fn rpc_call_blocking(
+        &mut self,
+        msg_type: MessageType,
+        payload: &[u8],
+    ) -> Result<(u32, Vec<u8>)> {
+        let trace_id = "";
+        let buf = Self::build_message(msg_type, trace_id, payload);
+
+        let response = match &mut self.transport {
+            AgentTransport::Blocking(t) => {
+                let deadline = Instant::now() + BLOCKING_RPC_TIMEOUT;
+                t.send(&buf, deadline)
+                    .map_err(|e| CoreError::Machine(format!("failed to send request: {e}")))?;
+                t.recv(deadline)
+                    .map_err(|e| CoreError::Machine(format!("failed to receive response: {e}")))?
+            }
+            AgentTransport::Async(_) => {
+                return Err(CoreError::Machine(
+                    "rpc_call_blocking called on async transport".into(),
+                ));
+            }
+        };
+
+        let (resp_type, _resp_trace, payload) = Self::parse_response(&response)?;
+        if resp_type == MessageType::Error as u32 {
+            let error_msg = parse_error_response(&payload)?;
+            return Err(CoreError::Machine(error_msg));
+        }
+        Ok((resp_type, payload))
+    }
+
+    /// Synchronous ping — uses blocking transport's native deadline.
+    /// Call from `spawn_blocking` or any non-async context.
+    pub fn ping_blocking(&mut self) -> Result<PingResponse> {
+        let req = PingRequest {
+            message: "ping".to_string(),
+            timestamp_secs: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| i64::try_from(d.as_secs()).unwrap_or(0))
+                .unwrap_or(0),
+        };
+        let payload = req.encode_to_vec();
+        let (resp_type, resp_payload) =
+            self.rpc_call_blocking(MessageType::PingRequest, &payload)?;
+        if resp_type != MessageType::PingResponse as u32 {
+            return Err(CoreError::Machine(format!(
+                "unexpected response type: {resp_type}"
+            )));
+        }
+        PingResponse::decode(&resp_payload[..])
+            .map_err(|e| CoreError::Machine(format!("failed to decode response: {e}")))
+    }
+
+    /// Returns true if this client uses the blocking transport (AF_UNIX / HV).
+    pub fn is_blocking(&self) -> bool {
+        matches!(self.transport, AgentTransport::Blocking(_))
+    }
+
     /// Pings the agent.
     ///
     /// # Errors
@@ -352,6 +412,19 @@ impl AgentClient {
     /// # Errors
     ///
     /// Returns an error if the request fails.
+    /// Synchronous get_system_info for blocking transport.
+    pub fn get_system_info_blocking(&mut self) -> Result<SystemInfo> {
+        let (resp_type, resp_payload) =
+            self.rpc_call_blocking(MessageType::GetSystemInfoRequest, &[])?;
+        if resp_type != MessageType::GetSystemInfoResponse as u32 {
+            return Err(CoreError::Machine(format!(
+                "unexpected response type: {resp_type}"
+            )));
+        }
+        SystemInfo::decode(&resp_payload[..])
+            .map_err(|e| CoreError::Machine(format!("failed to decode response: {e}")))
+    }
+
     pub async fn get_system_info(&mut self) -> Result<SystemInfo> {
         let (resp_type, resp_payload) = self
             .rpc_call(MessageType::GetSystemInfoRequest, &[])

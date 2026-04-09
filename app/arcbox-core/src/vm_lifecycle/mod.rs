@@ -772,70 +772,60 @@ impl VmLifecycleManager {
 
     /// Waits for the agent to become ready.
     async fn wait_for_agent(&self, timeout: Duration) -> Result<()> {
-        let deadline = tokio::time::Instant::now() + timeout;
-        let poll_interval = Duration::from_millis(100);
-
         tracing::debug!("Waiting for agent to become ready...");
 
-        while tokio::time::Instant::now() < deadline {
-            #[cfg(target_os = "macos")]
-            match self
-                .machine_manager
-                .read_console_output(DEFAULT_MACHINE_NAME)
-            {
-                Ok(output) => {
+        let mm = Arc::clone(&self.machine_manager);
+
+        // Run the entire probe loop on a blocking thread. On macOS HV backend,
+        // the agent transport is AF_UNIX socketpair → BlockingVsockTransport.
+        // Rapid connect/teardown of these fds stalls the tokio kqueue reactor's
+        // timer wheel, so neither tokio::time::sleep nor tokio::time::timeout
+        // can be used reliably inside this loop. spawn_blocking isolates the
+        // probe from the async runtime entirely.
+        let probe_result = tokio::task::spawn_blocking(move || {
+            let deadline = std::time::Instant::now() + timeout;
+            let poll_interval = Duration::from_millis(100);
+
+            while std::time::Instant::now() < deadline {
+                // Console output (best-effort, non-blocking).
+                #[cfg(target_os = "macos")]
+                if let Ok(output) = mm.read_console_output(DEFAULT_MACHINE_NAME) {
                     let trimmed = output.trim_matches('\0');
                     if !trimmed.is_empty() {
-                        tracing::info!("Guest console: {}", trimmed.trim_end());
+                        tracing::info!("{}", trimmed.trim_end());
                     }
                 }
-                Err(e) => {
-                    tracing::debug!("Console read failed: {}", e);
+
+                // connect_agent → AF_UNIX detected → BlockingVsockTransport.
+                // ping_blocking uses libc::poll with 5s deadline — no tokio.
+                match mm.connect_agent(DEFAULT_MACHINE_NAME) {
+                    Ok(mut agent) => match agent.ping_blocking() {
+                        Ok(_) => return Ok(()),
+                        Err(e) => tracing::debug!("Agent ping failed: {e}"),
+                    },
+                    Err(e) => tracing::debug!("Agent connection failed: {e}"),
                 }
+
+                std::thread::sleep(poll_interval);
             }
 
-            // Try to connect to agent with a per-attempt timeout.
-            // connect_agent only creates a socketpair and enqueues an OP_REQUEST
-            // (no guest memory access), but the async ping() RPC may hang if the
-            // vsock data path has a race on the first few attempts after boot.
-            // A 2s timeout prevents any single attempt from blocking the loop.
-            // connect_agent creates a socketpair + injects OP_REQUEST. If the
-            // guest hasn't started the agent yet, the connection will be RST'd
-            // and ping() returns early EOF. The retry loop handles this.
-            // connect_agent detects AF_UNIX fds (HV backend) and uses the
-            // blocking transport with libc::poll-based deadlines. No tokio
-            // timer or reactor involvement on this path — immune to the
-            // kqueue stall that affected the async VsockStream approach.
-            // The blocking transport's BLOCKING_RPC_TIMEOUT (5s) handles
-            // both the "OP_REQUEST not yet injected" and "agent not ready"
-            // cases, so no outer tokio::time::timeout is needed.
-            match self.machine_manager.connect_agent(DEFAULT_MACHINE_NAME) {
-                Ok(mut agent) => {
-                    match agent.ping().await {
-                        Ok(_response) => {
-                            tracing::info!("Agent is ready");
-                            self.health_monitor.record_success();
-                            #[cfg(target_os = "macos")]
-                            {
-                                let mm = Arc::clone(&self.machine_manager);
-                                tokio::spawn(serial::serial_read_adaptive(mm));
-                            }
-                            return Ok(());
-                        }
-                        Err(e) => {
-                            tracing::debug!("Agent ping failed: {}", e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::debug!("Agent connection failed: {}", e);
-                }
-            }
+            Err(CoreError::Vm("timeout waiting for agent".to_string()))
+        })
+        .await
+        .map_err(|e| CoreError::Vm(format!("probe task panicked: {e}")))?;
 
-            tokio::time::sleep(poll_interval).await;
+        probe_result?;
+
+        // Back on async context — do async follow-up work.
+        tracing::info!("Agent is ready");
+        self.health_monitor.record_success();
+        #[cfg(target_os = "macos")]
+        {
+            let mm = Arc::clone(&self.machine_manager);
+            tokio::spawn(serial::serial_read_adaptive(mm));
         }
 
-        Err(CoreError::Vm("timeout waiting for agent".to_string()))
+        Ok(())
     }
 
     /// Records activity, updating the last-activity timestamp.

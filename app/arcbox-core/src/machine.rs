@@ -443,6 +443,10 @@ impl MachineManager {
     ///
     /// Polls the agent via vsock with exponential backoff. Once the agent
     /// responds, queries `SystemInfo` to get the guest IP.
+    ///
+    /// Runs the probe loop on a blocking thread to avoid tokio reactor
+    /// stalls from rapid socketpair fd teardown (same rationale as
+    /// `wait_for_agent` in `vm_lifecycle`).
     async fn wait_for_machine_ready(&self, name: &str) -> Result<()> {
         const MAX_ATTEMPTS: u32 = 20;
         const INITIAL_DELAY_MS: u64 = 500;
@@ -450,93 +454,80 @@ impl MachineManager {
 
         tracing::info!("Waiting for machine '{}' agent to become ready...", name);
 
-        let mut delay_ms = INITIAL_DELAY_MS;
+        // block_in_place is used here (instead of spawn_blocking) because
+        // MachineManager is not Clone/Arc at this call site. block_in_place
+        // is acceptable: the total blocking time is bounded by
+        // MAX_ATTEMPTS * MAX_DELAY_MS ≈ 60s, and the blocking RPC uses
+        // BlockingVsockTransport (libc::poll) — no tokio reactor interaction.
+        let probe_result: Result<String> = tokio::task::block_in_place(|| {
+            let mut delay_ms = INITIAL_DELAY_MS;
 
-        for attempt in 1..=MAX_ATTEMPTS {
-            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            for attempt in 1..=MAX_ATTEMPTS {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
 
-            // Try to connect and ping.
-            match self.connect_agent(name) {
-                Ok(mut agent) => match agent.ping().await {
-                    Ok(resp) => {
-                        tracing::debug!(
-                            "Machine '{}' agent reachable (version: {}, attempt {})",
-                            name,
-                            resp.version,
-                            attempt
-                        );
-
-                        match agent.get_system_info().await {
-                            Ok(info) => {
-                                if let Some(ip) = select_routable_ip(&info.ip_addresses) {
-                                    {
-                                        let mut machines = self
-                                            .machines
-                                            .write()
-                                            .map_err(|_| CoreError::LockPoisoned)?;
-                                        if let Some(machine) = machines.get_mut(name) {
-                                            machine.ip_address = Some(ip.clone());
+                match self.connect_agent(name) {
+                    Ok(mut agent) if agent.is_blocking() => {
+                        match agent.ping_blocking() {
+                            Ok(resp) => {
+                                tracing::debug!(
+                                    "Machine '{}' agent reachable (version: {}, attempt {})",
+                                    name, resp.version, attempt,
+                                );
+                                match agent.get_system_info_blocking() {
+                                    Ok(info) => {
+                                        if let Some(ip) = select_routable_ip(&info.ip_addresses) {
+                                            return Ok(ip);
                                         }
-                                    }
-                                    if let Err(e) = self.persistence.update_ip(name, Some(&ip)) {
-                                        tracing::warn!(
-                                            "Failed to persist IP for machine '{}': {}",
-                                            name,
-                                            e
+                                        tracing::trace!(
+                                            "Machine '{}' no routable IP yet (attempt {})",
+                                            name, attempt,
                                         );
                                     }
-
-                                    tracing::info!(
-                                        "Machine '{}' ready with IP {} (attempt {})",
+                                    Err(e) => tracing::trace!(
+                                        "Machine '{}' get_system_info failed (attempt {attempt}): {e}",
                                         name,
-                                        ip,
-                                        attempt
-                                    );
-                                    return Ok(());
+                                    ),
                                 }
-
-                                tracing::trace!(
-                                    "Machine '{}' system info has no routable IP yet (attempt {})",
-                                    name,
-                                    attempt
-                                );
                             }
-                            Err(e) => {
-                                tracing::trace!(
-                                    "Machine '{}' get_system_info attempt {} failed: {}",
-                                    name,
-                                    attempt,
-                                    e
-                                );
-                            }
+                            Err(e) => tracing::trace!(
+                                "Machine '{}' ping failed (attempt {attempt}): {e}", name,
+                            ),
                         }
                     }
-                    Err(e) => {
+                    Ok(_agent) => {
+                        // Async transport (VZ/Linux) — skip in blocking context.
                         tracing::trace!(
-                            "Machine '{}' ping attempt {} failed: {}",
-                            name,
-                            attempt,
-                            e
+                            "Machine '{}' async transport in blocking probe (attempt {})",
+                            name, attempt,
                         );
                     }
-                },
-                Err(e) => {
-                    tracing::trace!(
-                        "Machine '{}' connect attempt {} failed: {}",
-                        name,
-                        attempt,
-                        e
-                    );
+                    Err(e) => tracing::trace!(
+                        "Machine '{}' connect failed (attempt {attempt}): {e}", name,
+                    ),
                 }
+
+                delay_ms = (delay_ms * 3 / 2).min(MAX_DELAY_MS);
             }
 
-            // Exponential backoff with cap.
-            delay_ms = (delay_ms * 3 / 2).min(MAX_DELAY_MS);
-        }
+            Err(CoreError::Machine(format!(
+                "Machine '{name}' agent did not report a routable IP within timeout"
+            )))
+        });
 
-        Err(CoreError::Machine(format!(
-            "Machine '{name}' agent did not report a routable IP within timeout"
-        )))
+        let ip = probe_result?;
+
+        // Back on async context — update state.
+        {
+            let mut machines = self.machines.write().map_err(|_| CoreError::LockPoisoned)?;
+            if let Some(machine) = machines.get_mut(name) {
+                machine.ip_address = Some(ip.clone());
+            }
+        }
+        if let Err(e) = self.persistence.update_ip(name, Some(&ip)) {
+            tracing::warn!("Failed to persist IP for machine '{}': {}", name, e);
+        }
+        tracing::info!("Machine '{}' ready with IP {}", name, ip);
+        Ok(())
     }
 
     fn assign_cid_for_start(&self, name: &str) -> Result<(VmId, u32)> {
