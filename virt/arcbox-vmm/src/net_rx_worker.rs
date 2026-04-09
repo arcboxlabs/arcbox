@@ -298,7 +298,6 @@ pub fn net_rx_worker_loop(ctx: NetRxWorkerContext) {
                 }
 
                 let frame = &frame_buf[..n as usize];
-                tracing::trace!("net-io: read {n} bytes, used_idx={used_idx}");
                 if inject_one_frame(&ctx, frame, &mut used_idx) {
                     pending_frames += 1;
                     if batch_start.is_none() {
@@ -306,15 +305,18 @@ pub fn net_rx_worker_loop(ctx: NetRxWorkerContext) {
                     }
                 } else {
                     // No RX descriptors available. Flush pending interrupt
-                    // so the guest can process and repost, then back off to
-                    // avoid busy-spinning and starving the vCPU thread.
+                    // so the guest can process and repost, then back off.
+                    // The frame just read is lost — TCP retransmission from
+                    // the host will recover it after the guest reposts.
                     if pending_frames > 0 {
                         write_avail_event(&ctx, used_idx);
                         maybe_notify(&ctx, old_used, used_idx);
                         pending_frames = 0;
                         batch_start = None;
+                        old_used = used_idx;
                     }
-                    // Yield CPU so the vCPU thread can process the interrupt.
+                    // 100μs gives the vCPU enough time to process the
+                    // interrupt and repost descriptors.
                     std::thread::sleep(Duration::from_micros(100));
                     break;
                 }
@@ -325,6 +327,7 @@ pub fn net_rx_worker_loop(ctx: NetRxWorkerContext) {
                     maybe_notify(&ctx, old_used, used_idx);
                     pending_frames = 0;
                     batch_start = None;
+                    old_used = used_idx;
                 }
             }
         }
