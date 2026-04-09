@@ -164,7 +164,23 @@ fn inject_one_frame(ctx: &NetRxWorkerContext, frame: &[u8], used_idx: &mut u16) 
                         buf[nb_off..nb_off + 2].copy_from_slice(&1u16.to_le_bytes());
                     }
                 }
-                // TODO(ABX-352): GSO offload — disabled pending header investigation.
+                // GSO for large TCP/IPv4 frames with NEEDS_CSUM.
+                if written == 0
+                    && hdr_bytes >= 10
+                    && frame.len() > 1500
+                    && frame.len() >= 54
+                    && frame[12] == 0x08
+                    && frame[13] == 0x00
+                    && frame[23] == 6
+                    && frame[14] & 0x0F == 5
+                {
+                    buf[0] = 1; // NEEDS_CSUM
+                    buf[1] = 1; // GSO_TCPV4
+                    buf[2..4].copy_from_slice(&34u16.to_le_bytes());
+                    buf[4..6].copy_from_slice(&1460u16.to_le_bytes());
+                    buf[6..8].copy_from_slice(&34u16.to_le_bytes());
+                    buf[8..10].copy_from_slice(&16u16.to_le_bytes());
+                }
                 // Write frame data after header.
                 let frame_bytes = to_write - hdr_bytes;
                 if frame_bytes > 0 {

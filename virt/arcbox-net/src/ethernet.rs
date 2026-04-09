@@ -452,6 +452,89 @@ pub fn build_tcp_data_frame(p: &TcpFrameParams, payload: &[u8]) -> Vec<u8> {
     frame
 }
 
+/// Builds a TCP data frame with only a pseudo-header checksum (for GSO).
+///
+/// Identical to [`build_tcp_data_frame`] except the TCP checksum field
+/// contains only the pseudo-header checksum. The guest kernel completes
+/// the checksum per-segment during GSO segmentation.
+#[must_use]
+pub fn build_tcp_data_frame_partial_csum(p: &TcpFrameParams, payload: &[u8]) -> Vec<u8> {
+    let TcpFrameParams {
+        src_ip,
+        dst_ip,
+        src_port,
+        dst_port,
+        seq,
+        ack,
+        window,
+        src_mac,
+        dst_mac,
+    } = *p;
+
+    let tcp_hdr_len = 20;
+    let tcp_total_len = tcp_hdr_len + payload.len();
+    let ip_total_len = 20 + tcp_total_len;
+    let frame_len = ETH_HEADER_LEN + ip_total_len;
+    let mut frame = vec![0u8; frame_len];
+
+    // -- Ethernet header --
+    frame[0..6].copy_from_slice(&dst_mac);
+    frame[6..12].copy_from_slice(&src_mac);
+    frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+
+    // -- IPv4 header --
+    let ip = ETH_HEADER_LEN;
+    frame[ip] = 0x45;
+    frame[ip + 2..ip + 4].copy_from_slice(&(ip_total_len as u16).to_be_bytes());
+    frame[ip + 6..ip + 8].copy_from_slice(&0x4000u16.to_be_bytes()); // DF
+    frame[ip + 8] = 64; // TTL
+    frame[ip + 9] = 6; // TCP
+    frame[ip + 12..ip + 16].copy_from_slice(&src_ip.octets());
+    frame[ip + 16..ip + 20].copy_from_slice(&dst_ip.octets());
+    let ip_cksum = ipv4_header_checksum(&frame[ip..ip + 20]);
+    frame[ip + 10..ip + 12].copy_from_slice(&ip_cksum.to_be_bytes());
+
+    // -- TCP header --
+    let tcp = ip + 20;
+    frame[tcp..tcp + 2].copy_from_slice(&src_port.to_be_bytes());
+    frame[tcp + 2..tcp + 4].copy_from_slice(&dst_port.to_be_bytes());
+    frame[tcp + 4..tcp + 8].copy_from_slice(&seq.to_be_bytes());
+    frame[tcp + 8..tcp + 12].copy_from_slice(&ack.to_be_bytes());
+    frame[tcp + 12] = 0x50; // Data offset: 5
+    frame[tcp + 13] = 0x18; // Flags: ACK | PSH
+    frame[tcp + 14..tcp + 16].copy_from_slice(&window.to_be_bytes());
+
+    // -- Payload --
+    frame[tcp + 20..].copy_from_slice(payload);
+
+    // Pseudo-header-only TCP checksum. The guest kernel completes it
+    // per-segment during GSO segmentation (VIRTIO_NET_HDR_F_NEEDS_CSUM).
+    let pseudo_cksum = tcp_pseudo_header_checksum(src_ip, dst_ip, tcp_total_len);
+    frame[tcp + 16..tcp + 18].copy_from_slice(&pseudo_cksum.to_be_bytes());
+
+    frame
+}
+
+/// Computes the TCP pseudo-header checksum only (for GSO offload).
+///
+/// The guest kernel adds the TCP header + payload contribution per segment.
+#[must_use]
+pub fn tcp_pseudo_header_checksum(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, tcp_len: usize) -> u16 {
+    let mut sum: u32 = 0;
+    let src = src_ip.octets();
+    let dst = dst_ip.octets();
+    sum += u32::from(u16::from_be_bytes([src[0], src[1]]));
+    sum += u32::from(u16::from_be_bytes([src[2], src[3]]));
+    sum += u32::from(u16::from_be_bytes([dst[0], dst[1]]));
+    sum += u32::from(u16::from_be_bytes([dst[2], dst[3]]));
+    sum += 6u32; // TCP protocol
+    sum += tcp_len as u32;
+    while sum > 0xFFFF {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !sum as u16
+}
+
 /// Builds a TCP FIN+ACK frame for connection teardown.
 #[must_use]
 pub fn build_tcp_fin_frame(p: &TcpFrameParams) -> Vec<u8> {

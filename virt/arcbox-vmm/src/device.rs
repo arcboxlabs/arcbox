@@ -2724,7 +2724,21 @@ impl DeviceManager {
             // With MRG_RXBUF, num_buffers (bytes 10-11) must be 1.
             let mut virtio_net_hdr = [0u8; 12];
             virtio_net_hdr[10..12].copy_from_slice(&1u16.to_le_bytes());
-            // TODO(ABX-352): GSO offload — disabled pending header investigation.
+            // GSO for large TCP/IPv4 frames.
+            if frame.len() > 1500
+                && frame.len() >= 54
+                && frame[12] == 0x08
+                && frame[13] == 0x00
+                && frame[23] == 6
+                && frame[14] & 0x0F == 5
+            {
+                virtio_net_hdr[0] = 1; // NEEDS_CSUM
+                virtio_net_hdr[1] = 1; // GSO_TCPV4
+                virtio_net_hdr[2..4].copy_from_slice(&34u16.to_le_bytes());
+                virtio_net_hdr[4..6].copy_from_slice(&1460u16.to_le_bytes());
+                virtio_net_hdr[6..8].copy_from_slice(&34u16.to_le_bytes());
+                virtio_net_hdr[8..10].copy_from_slice(&16u16.to_le_bytes());
+            }
             let total_len = virtio_net_hdr.len() + frame.len();
 
             // Pop an available RX descriptor.

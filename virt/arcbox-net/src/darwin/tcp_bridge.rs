@@ -441,8 +441,10 @@ impl TcpBridge {
                     // 2048-byte datagram limit.
                     let data = &conn.read_buf[..n];
                     if self.large_frames_enabled {
-                        // Large frame path: one frame per read (up to 32KB).
-                        let data_frame = crate::ethernet::build_tcp_data_frame(
+                        // Large frame path with GSO: one frame per read (up to 32KB).
+                        // Uses partial (pseudo-header) checksum — the guest kernel
+                        // completes it per-segment during GSO segmentation.
+                        let data_frame = crate::ethernet::build_tcp_data_frame_partial_csum(
                             &crate::ethernet::TcpFrameParams {
                                 src_ip: conn.remote_ip,
                                 dst_ip: conn.guest_ip,

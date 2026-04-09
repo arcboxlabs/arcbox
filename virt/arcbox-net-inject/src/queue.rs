@@ -91,10 +91,29 @@ pub fn inject_one_frame(
                         buf[nb_off..nb_off + 2].copy_from_slice(&1u16.to_le_bytes());
                     }
                 }
-                // TODO(ABX-352): GSO offload for large TCP frames. Requires
-                // correct hdr_len accounting (IP options, TCP options) and
-                // checksum field setup. Currently disabled — guest drops
-                // packets with incorrect GSO headers.
+                // GSO offload: for large TCP/IPv4 frames with standard headers
+                // (IHL=5, no options), set NEEDS_CSUM + GSO fields so the
+                // guest kernel segments at MSS boundaries.
+                // Requires the frame to have a partial (pseudo-header) checksum
+                // in the TCP checksum field — build_tcp_data_frame_partial_csum
+                // provides this.
+                if written == 0
+                    && hdr_bytes >= 10
+                    && frame.len() > 1500
+                    && frame.len() >= 54
+                    && frame[12] == 0x08
+                    && frame[13] == 0x00 // IPv4
+                    && frame[23] == 6 // TCP
+                    && frame[14] & 0x0F == 5
+                // IHL=5, no IP options
+                {
+                    buf[0] = 1; // flags = VIRTIO_NET_HDR_F_NEEDS_CSUM
+                    buf[1] = 1; // gso_type = VIRTIO_NET_HDR_GSO_TCPV4
+                    buf[2..4].copy_from_slice(&34u16.to_le_bytes()); // hdr_len (hint)
+                    buf[4..6].copy_from_slice(&1460u16.to_le_bytes()); // gso_size
+                    buf[6..8].copy_from_slice(&34u16.to_le_bytes()); // csum_start (Eth14+IP20)
+                    buf[8..10].copy_from_slice(&16u16.to_le_bytes()); // csum_offset (TCP csum field)
+                }
                 // Write frame data after header.
                 let frame_bytes = to_write - hdr_bytes;
                 if frame_bytes > 0 {
