@@ -282,7 +282,11 @@ impl Vmnet {
                 VmnetMode::Bridged => {
                     if let Some(ref iface) = config.bridge_interface {
                         let s = std::ffi::CString::new(iface.as_str()).unwrap();
-                        xpc_dictionary_set_string(dict, vmnet_shared_interface_name_key, s.as_ptr());
+                        xpc_dictionary_set_string(
+                            dict,
+                            vmnet_shared_interface_name_key,
+                            s.as_ptr(),
+                        );
                     } else {
                         xpc_release(dict);
                         dispatch_release(queue.cast());
@@ -465,8 +469,7 @@ impl Vmnet {
         config: &VmnetConfig,
     ) -> Result<StartResult> {
         // SAFETY: vmnet_start_interface with NULL handler operates synchronously.
-        let interface =
-            unsafe { vmnet_start_interface(config_dict, queue, ptr::null()) };
+        let interface = unsafe { vmnet_start_interface(config_dict, queue, ptr::null()) };
 
         unsafe { xpc_release(config_dict) };
 

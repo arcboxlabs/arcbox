@@ -1933,7 +1933,8 @@ impl DeviceManager {
                 .unwrap_or_default();
 
             // Log at INFO once per unique count change to avoid spam.
-            static LAST_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            static LAST_COUNT: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
             let count = connected_fds.len();
             if count != LAST_COUNT.swap(count, std::sync::atomic::Ordering::Relaxed) {
                 tracing::info!("vsock Phase 1: {} connected fds", count);
@@ -1953,7 +1954,8 @@ impl DeviceManager {
                 if n > 0 {
                     tracing::info!(
                         "vsock Phase 1: data available on fd {} for {:?} — enqueue RW",
-                        fd, conn_id,
+                        fd,
+                        conn_id,
                     );
                     if let Ok(mut mgr) = self.vsock_connections.lock() {
                         mgr.enqueue_rw(*conn_id);
@@ -1961,7 +1963,8 @@ impl DeviceManager {
                 } else if n == 0 {
                     tracing::info!(
                         "vsock Phase 1: EOF on fd {} for {:?} — enqueue RST",
-                        fd, conn_id,
+                        fd,
+                        conn_id,
                     );
                     // Host stream closed — enqueue RST.
                     if let Ok(mut mgr) = self.vsock_connections.lock() {
@@ -2609,7 +2612,11 @@ impl DeviceManager {
             if packet_data.len() > 12 {
                 let frame = &packet_data[12..];
                 let n = unsafe {
-                    libc::write(bridge_fd, frame.as_ptr().cast::<libc::c_void>(), frame.len())
+                    libc::write(
+                        bridge_fd,
+                        frame.as_ptr().cast::<libc::c_void>(),
+                        frame.len(),
+                    )
                 };
                 if n < 0 {
                     let err = std::io::Error::last_os_error();
@@ -2678,12 +2685,10 @@ impl DeviceManager {
         // Read up to 64 frames per poll (same as NIC1).
         for _ in 0..64 {
             let avail_idx =
-                u16::from_le_bytes([guest_mem[avail_addr + 2], guest_mem[avail_addr + 3]])
-                    as usize;
+                u16::from_le_bytes([guest_mem[avail_addr + 2], guest_mem[avail_addr + 3]]) as usize;
             let used_idx_off = used_addr + 2;
             let used_idx =
-                u16::from_le_bytes([guest_mem[used_idx_off], guest_mem[used_idx_off + 1]])
-                    as usize;
+                u16::from_le_bytes([guest_mem[used_idx_off], guest_mem[used_idx_off + 1]]) as usize;
 
             if avail_idx == used_idx {
                 break; // No RX descriptors available.
@@ -2725,9 +2730,8 @@ impl DeviceManager {
                 }
                 let addr =
                     u64::from_le_bytes(guest_mem[d_off..d_off + 8].try_into().unwrap()) as usize;
-                let len =
-                    u32::from_le_bytes(guest_mem[d_off + 8..d_off + 12].try_into().unwrap())
-                        as usize;
+                let len = u32::from_le_bytes(guest_mem[d_off + 8..d_off + 12].try_into().unwrap())
+                    as usize;
                 let flags =
                     u16::from_le_bytes(guest_mem[d_off + 12..d_off + 14].try_into().unwrap());
                 let next =
@@ -2777,8 +2781,7 @@ impl DeviceManager {
                     .copy_from_slice(&(written as u32).to_le_bytes());
                 std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
                 let new_used = (used_idx + 1) as u16;
-                guest_mem[used_idx_off..used_idx_off + 2]
-                    .copy_from_slice(&new_used.to_le_bytes());
+                guest_mem[used_idx_off..used_idx_off + 2].copy_from_slice(&new_used.to_le_bytes());
             }
 
             injected = true;

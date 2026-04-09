@@ -22,56 +22,131 @@ use arcbox_protocol::sandbox_v1::{
     SandboxInfo, StopSandboxRequest,
 };
 use arcbox_transport::Transport;
-use arcbox_transport::vsock::{VsockAddr, VsockTransport};
+use arcbox_transport::vsock::{BlockingVsockTransport, VsockAddr, VsockTransport};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use prost::Message;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+
+/// Transport backend for agent RPC.
+///
+/// `Async` is the default for Linux AF_VSOCK and macOS VZ backend (real vsock
+/// fds that tokio/kqueue handles correctly).
+///
+/// `Blocking` is used for macOS HV backend socketpair fds (AF_UNIX). These fds
+/// trigger a tokio/kqueue reactor stall when rapidly created and torn down in a
+/// retry loop, causing timer wakeups to stop firing. The blocking transport
+/// uses `libc::poll` + `std::os::unix::net::UnixStream` and never touches the
+/// tokio reactor.
+enum AgentTransport {
+    Async(VsockTransport),
+    Blocking(BlockingVsockTransport),
+}
+
+/// Default RPC deadline for blocking transport operations.
+const BLOCKING_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+
+impl AgentTransport {
+    /// Async send — only valid for `Async` variant. Streaming RPCs that
+    /// consume `self` and spawn async tasks must go through the async path.
+    async fn async_send(&mut self, data: Bytes) -> std::result::Result<(), arcbox_transport::error::TransportError> {
+        match self {
+            Self::Async(t) => t.send(data).await,
+            Self::Blocking(_) => Err(arcbox_transport::error::TransportError::Protocol(
+                "streaming RPCs not supported on blocking transport".into(),
+            )),
+        }
+    }
+
+    /// Async recv — only valid for `Async` variant.
+    async fn async_recv(&mut self) -> std::result::Result<Bytes, arcbox_transport::error::TransportError> {
+        match self {
+            Self::Async(t) => t.recv().await,
+            Self::Blocking(_) => Err(arcbox_transport::error::TransportError::Protocol(
+                "streaming RPCs not supported on blocking transport".into(),
+            )),
+        }
+    }
+
+    /// Split into send/recv halves — only valid for `Async` variant.
+    fn into_split(
+        self,
+    ) -> std::result::Result<
+        (
+            arcbox_transport::vsock::VsockSender,
+            arcbox_transport::vsock::VsockReceiver,
+        ),
+        arcbox_transport::error::TransportError,
+    > {
+        match self {
+            Self::Async(t) => t.into_split(),
+            Self::Blocking(_) => Err(arcbox_transport::error::TransportError::Protocol(
+                "split not supported on blocking transport".into(),
+            )),
+        }
+    }
+}
 
 /// Agent client for a single VM.
 pub struct AgentClient {
     /// VM CID (Context ID).
     cid: u32,
-    /// Transport (connected or not).
-    transport: VsockTransport,
+    /// Transport backend.
+    transport: AgentTransport,
     /// Whether connected.
     connected: bool,
 }
 
 impl AgentClient {
-    /// Creates a new agent client for the given VM CID.
+    /// Creates a new agent client for the given VM CID (async transport).
     #[must_use]
     pub const fn new(cid: u32) -> Self {
         let addr = VsockAddr::new(cid, AGENT_PORT);
         Self {
             cid,
-            transport: VsockTransport::new(addr),
+            transport: AgentTransport::Async(VsockTransport::new(addr)),
             connected: false,
         }
     }
 
     /// Creates an agent client from an existing vsock file descriptor.
     ///
-    /// This is used on macOS where vsock connections are obtained through
-    /// the hypervisor layer (Virtualization.framework) rather than directly
-    /// through `AF_VSOCK`.
-    ///
-    /// # Arguments
-    /// * `cid` - The VM's CID (for tracking purposes)
-    /// * `fd` - A connected vsock file descriptor from the hypervisor
-    ///
-    /// # Errors
-    /// Returns an error if the fd is invalid.
+    /// Detects the socket domain via `getsockname`:
+    /// - `AF_UNIX` → blocking transport (HV backend socketpair)
+    /// - anything else → async tokio transport (VZ / AF_VSOCK)
     #[cfg(target_os = "macos")]
     pub fn from_fd(cid: u32, fd: std::os::unix::io::RawFd) -> Result<Self> {
-        let addr = VsockAddr::new(cid, AGENT_PORT);
-        let transport = VsockTransport::from_raw_fd(fd, addr)
-            .map_err(|e| CoreError::Machine(format!("invalid vsock fd: {e}")))?;
+        let is_unix = {
+            let mut addr: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+            let mut len: libc::socklen_t =
+                std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+            let ret = unsafe {
+                libc::getsockname(fd, (&raw mut addr).cast::<libc::sockaddr>(), &raw mut len)
+            };
+            ret == 0 && addr.ss_family == libc::AF_UNIX as libc::sa_family_t
+        };
 
-        Ok(Self {
-            cid,
-            transport,
-            connected: true,
-        })
+        if is_unix {
+            // HV backend socketpair — use blocking transport to avoid
+            // tokio/kqueue reactor stall on rapid connect/teardown cycles.
+            let transport = unsafe { BlockingVsockTransport::from_raw_fd(fd) }
+                .map_err(|e| CoreError::Machine(format!("invalid vsock fd: {e}")))?;
+            Ok(Self {
+                cid,
+                transport: AgentTransport::Blocking(transport),
+                connected: true,
+            })
+        } else {
+            // VZ backend or AF_VSOCK — use async tokio transport.
+            let addr = VsockAddr::new(cid, AGENT_PORT);
+            let transport = VsockTransport::from_raw_fd(fd, addr)
+                .map_err(|e| CoreError::Machine(format!("invalid vsock fd: {e}")))?;
+            Ok(Self {
+                cid,
+                transport: AgentTransport::Async(transport),
+                connected: true,
+            })
+        }
     }
 
     /// Returns the VM CID.
@@ -90,10 +165,16 @@ impl AgentClient {
             return Ok(());
         }
 
-        self.transport
-            .connect()
-            .await
-            .map_err(|e| CoreError::Machine(format!("failed to connect to agent: {e}")))?;
+        match &mut self.transport {
+            AgentTransport::Async(t) => {
+                t.connect()
+                    .await
+                    .map_err(|e| CoreError::Machine(format!("failed to connect to agent: {e}")))?;
+            }
+            AgentTransport::Blocking(_) => {
+                // Blocking transport is connected at creation time (from_fd).
+            }
+        }
 
         self.connected = true;
         tracing::debug!(cid = self.cid, "connected to agent");
@@ -103,10 +184,11 @@ impl AgentClient {
     /// Disconnects from the agent.
     pub async fn disconnect(&mut self) -> Result<()> {
         if self.connected {
-            self.transport
-                .disconnect()
-                .await
-                .map_err(|e| CoreError::Machine(format!("failed to disconnect: {e}")))?;
+            if let AgentTransport::Async(t) = &mut self.transport {
+                t.disconnect()
+                    .await
+                    .map_err(|e| CoreError::Machine(format!("failed to disconnect: {e}")))?;
+            }
             self.connected = false;
         }
         Ok(())
@@ -198,18 +280,31 @@ impl AgentClient {
 
         let buf = Self::build_message(msg_type, trace_id, payload);
 
-        // Send request.
-        self.transport
-            .send(buf)
-            .await
-            .map_err(|e| CoreError::Machine(format!("failed to send request: {e}")))?;
-
-        // Receive response.
-        let response = self
-            .transport
-            .recv()
-            .await
-            .map_err(|e| CoreError::Machine(format!("failed to receive response: {e}")))?;
+        let response = match &mut self.transport {
+            AgentTransport::Async(t) => {
+                // Send request.
+                t.send(buf)
+                    .await
+                    .map_err(|e| CoreError::Machine(format!("failed to send request: {e}")))?;
+                // Receive response.
+                t.recv()
+                    .await
+                    .map_err(|e| {
+                        CoreError::Machine(format!("failed to receive response: {e}"))
+                    })?
+            }
+            AgentTransport::Blocking(t) => {
+                let deadline = Instant::now() + BLOCKING_RPC_TIMEOUT;
+                // Send request.
+                t.send(&buf, deadline)
+                    .map_err(|e| CoreError::Machine(format!("failed to send request: {e}")))?;
+                // Receive response.
+                t.recv(deadline)
+                    .map_err(|e| {
+                        CoreError::Machine(format!("failed to receive response: {e}"))
+                    })?
+            }
+        };
 
         let (resp_type, _resp_trace, payload) = Self::parse_response(&response)?;
 
@@ -554,14 +649,14 @@ impl AgentClient {
         let payload = req.encode_to_vec();
         let buf = Self::build_message(MessageType::SandboxRunRequest, "", &payload);
         self.transport
-            .send(buf)
+            .async_send(buf)
             .await
             .map_err(|e| CoreError::Machine(format!("failed to send run request: {}", e)))?;
 
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             loop {
-                let raw = match self.transport.recv().await {
+                let raw = match self.transport.async_recv().await {
                     Ok(r) => r,
                     Err(e) => {
                         let _ = tx.send(Err(CoreError::Machine(format!("recv error: {}", e))));
@@ -629,14 +724,14 @@ impl AgentClient {
         let payload = req.encode_to_vec();
         let buf = Self::build_message(MessageType::SandboxEventsRequest, "", &payload);
         self.transport
-            .send(buf)
+            .async_send(buf)
             .await
             .map_err(|e| CoreError::Machine(format!("failed to send events request: {}", e)))?;
 
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             loop {
-                let raw = match self.transport.recv().await {
+                let raw = match self.transport.async_recv().await {
                     Ok(r) => r,
                     Err(e) => {
                         let _ = tx.send(Err(CoreError::Machine(format!("recv error: {}", e))));
@@ -703,14 +798,14 @@ impl AgentClient {
         let payload = req.encode_to_vec();
         let buf = Self::build_message(MessageType::SandboxExecRequest, "", &payload);
         self.transport
-            .send(buf)
+            .async_send(buf)
             .await
             .map_err(|e| CoreError::Machine(format!("failed to send exec request: {}", e)))?;
 
         let (mut sender, mut receiver) = self
             .transport
             .into_split()
-            .map_err(|e| CoreError::Machine(format!("failed to split transport: {}", e)))?;
+            .map_err(|e| CoreError::Machine(format!("failed to split transport: {e}")))?;
 
         let (out_tx, out_rx) = mpsc::unbounded_channel();
 

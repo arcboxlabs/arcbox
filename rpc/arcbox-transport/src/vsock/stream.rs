@@ -79,37 +79,35 @@ impl AsyncRead for VsockStream {
     ) -> Poll<io::Result<()>> {
         match &mut self.get_mut().inner {
             VsockStreamInner::Unix(us) => Pin::new(us).poll_read(cx, buf),
-            VsockStreamInner::Fd(inner) => {
-                loop {
-                    let mut guard = ready!(inner.poll_read_ready(cx))?;
-                    let unfilled = buf.initialize_unfilled();
-                    match guard.try_io(|inner| {
-                        loop {
-                            let n = unsafe {
-                                libc::read(
-                                    inner.as_raw_fd(),
-                                    unfilled.as_mut_ptr().cast::<libc::c_void>(),
-                                    unfilled.len(),
-                                )
-                            };
-                            if n >= 0 {
-                                return Ok(n as usize);
-                            }
-                            let err = io::Error::last_os_error();
-                            if err.kind() != io::ErrorKind::Interrupted {
-                                return Err(err);
-                            }
+            VsockStreamInner::Fd(inner) => loop {
+                let mut guard = ready!(inner.poll_read_ready(cx))?;
+                let unfilled = buf.initialize_unfilled();
+                match guard.try_io(|inner| {
+                    loop {
+                        let n = unsafe {
+                            libc::read(
+                                inner.as_raw_fd(),
+                                unfilled.as_mut_ptr().cast::<libc::c_void>(),
+                                unfilled.len(),
+                            )
+                        };
+                        if n >= 0 {
+                            return Ok(n as usize);
                         }
-                    }) {
-                        Ok(Ok(n)) => {
-                            buf.advance(n);
-                            return Poll::Ready(Ok(()));
+                        let err = io::Error::last_os_error();
+                        if err.kind() != io::ErrorKind::Interrupted {
+                            return Err(err);
                         }
-                        Ok(Err(e)) => return Poll::Ready(Err(e)),
-                        Err(_would_block) => {}
                     }
+                }) {
+                    Ok(Ok(n)) => {
+                        buf.advance(n);
+                        return Poll::Ready(Ok(()));
+                    }
+                    Ok(Err(e)) => return Poll::Ready(Err(e)),
+                    Err(_would_block) => {}
                 }
-            }
+            },
         }
     }
 }
@@ -122,32 +120,30 @@ impl AsyncWrite for VsockStream {
     ) -> Poll<io::Result<usize>> {
         match &mut self.get_mut().inner {
             VsockStreamInner::Unix(us) => Pin::new(us).poll_write(cx, buf),
-            VsockStreamInner::Fd(inner) => {
-                loop {
-                    let mut guard = ready!(inner.poll_write_ready(cx))?;
-                    match guard.try_io(|inner| {
-                        loop {
-                            let n = unsafe {
-                                libc::write(
-                                    inner.as_raw_fd(),
-                                    buf.as_ptr().cast::<libc::c_void>(),
-                                    buf.len(),
-                                )
-                            };
-                            if n >= 0 {
-                                return Ok(n as usize);
-                            }
-                            let err = io::Error::last_os_error();
-                            if err.kind() != io::ErrorKind::Interrupted {
-                                return Err(err);
-                            }
+            VsockStreamInner::Fd(inner) => loop {
+                let mut guard = ready!(inner.poll_write_ready(cx))?;
+                match guard.try_io(|inner| {
+                    loop {
+                        let n = unsafe {
+                            libc::write(
+                                inner.as_raw_fd(),
+                                buf.as_ptr().cast::<libc::c_void>(),
+                                buf.len(),
+                            )
+                        };
+                        if n >= 0 {
+                            return Ok(n as usize);
                         }
-                    }) {
-                        Ok(result) => return Poll::Ready(result),
-                        Err(_would_block) => {}
+                        let err = io::Error::last_os_error();
+                        if err.kind() != io::ErrorKind::Interrupted {
+                            return Err(err);
+                        }
                     }
+                }) {
+                    Ok(result) => return Poll::Ready(result),
+                    Err(_would_block) => {}
                 }
-            }
+            },
         }
     }
 
@@ -161,27 +157,25 @@ impl AsyncWrite for VsockStream {
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut self.get_mut().inner {
             VsockStreamInner::Unix(us) => Pin::new(us).poll_shutdown(cx),
-            VsockStreamInner::Fd(inner) => {
-                loop {
-                    let mut guard = ready!(inner.poll_write_ready(cx))?;
-                    match guard.try_io(|inner| {
-                        let ret = unsafe { libc::shutdown(inner.as_raw_fd(), libc::SHUT_WR) };
-                        if ret < 0 {
-                            let err = io::Error::last_os_error();
-                            if matches!(err.raw_os_error(), Some(libc::ENOTCONN | libc::EINVAL)) {
-                                Ok(())
-                            } else {
-                                Err(err)
+            VsockStreamInner::Fd(inner) => loop {
+                let mut guard = ready!(inner.poll_write_ready(cx))?;
+                match guard.try_io(|inner| {
+                    let ret = unsafe { libc::shutdown(inner.as_raw_fd(), libc::SHUT_WR) };
+                    if ret < 0 {
+                        let err = io::Error::last_os_error();
+                        if matches!(err.raw_os_error(), Some(libc::ENOTCONN | libc::EINVAL)) {
+                            Ok(())
+                        } else {
+                            Err(err)
+                        }
+                    } else {
+                        Ok(())
                     }
-                } else {
-                    Ok(())
-                }
-            }) {
+                }) {
                     Ok(result) => return Poll::Ready(result),
                     Err(_would_block) => {}
                 }
-                }
-            }
+            },
         }
     }
 }

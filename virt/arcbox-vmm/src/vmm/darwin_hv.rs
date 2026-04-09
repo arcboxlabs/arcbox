@@ -16,7 +16,7 @@
 
 #[cfg(test)]
 use std::alloc::{Layout, alloc_zeroed, dealloc};
-use std::os::unix::io::{FromRawFd, OwnedFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -330,6 +330,29 @@ fn fdt_err(e: vm_fdt::Error) -> VmmError {
 }
 
 impl Vmm {
+    /// Duplicates a daemon-facing socketpair fd into a monotonically increasing
+    /// descriptor range derived from the connection's host port.
+    ///
+    /// During guest boot, the daemon opens and drops several short-lived vsock
+    /// probe connections in quick succession. On macOS the low socketpair fd
+    /// number was being recycled immediately (`20`, `20`, `20`, ...), which in
+    /// turn let Tokio/kqueue reuse the same registration slot across retries.
+    /// When a previous registration had not been fully torn down yet, later
+    /// attempts could miss both EOF and timeout wakeups. Rebinding the daemon
+    /// end to the per-connection host port avoids that fd-number reuse while
+    /// keeping the actual socket semantics unchanged.
+    fn duplicate_client_vsock_fd(fd: OwnedFd, min_fd: RawFd) -> Result<OwnedFd> {
+        let dup_fd = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, min_fd) };
+        if dup_fd < 0 {
+            return Err(VmmError::Device(format!(
+                "vsock client fd dup failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        Ok(unsafe { OwnedFd::from_raw_fd(dup_fd) })
+    }
+
     /// Custom VMM initialization using Hypervisor.framework (manual execution).
     ///
     /// This path is an alternative to `initialize_darwin()` (VZ framework).
@@ -1358,8 +1381,7 @@ impl Vmm {
 
         // Create socketpair for the relay (same pattern as NIC1).
         let mut fds: [libc::c_int; 2] = [0; 2];
-        let ret =
-            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
+        let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
         if ret != 0 {
             return Err(VmmError::Device(format!(
                 "socketpair for vmnet bridge failed: {}",
@@ -1450,8 +1472,6 @@ impl Vmm {
     /// cycle after injection.
     #[allow(clippy::unnecessary_wraps)]
     pub(super) fn connect_vsock_hv(&self, port: u32) -> Result<std::os::unix::io::RawFd> {
-        use std::os::unix::io::FromRawFd;
-
         // Create a Unix SOCK_STREAM socketpair for bidirectional data.
         let mut fds: [libc::c_int; 2] = [0; 2];
         // SAFETY: socketpair with valid parameters.
@@ -1481,6 +1501,8 @@ impl Vmm {
         // fds[0] = returned to caller (daemon agent client)
         // fds[1] = internal, owned by VsockConnectionManager
         // SAFETY: fds are valid from socketpair.
+        let host_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        // SAFETY: fds are valid from socketpair.
         let internal_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
 
         let dm = self
@@ -1490,19 +1512,26 @@ impl Vmm {
 
         let guest_cid = self.config.guest_cid.unwrap_or(3) as u64;
 
+        let conns = dm.vsock_connections();
         let (conn_id, connect_rx) = {
-            let conns = dm.vsock_connections();
             let mut mgr = conns
                 .lock()
                 .map_err(|e| VmmError::Device(format!("vsock manager lock failed: {e}")))?;
             mgr.allocate(port, guest_cid, internal_fd)
         };
 
+        let host_fd = Self::duplicate_client_vsock_fd(host_fd, conn_id.host_port as RawFd)
+            .inspect_err(|_| {
+                if let Ok(mut mgr) = conns.lock() {
+                    mgr.remove(&conn_id);
+                }
+            })?;
+
         tracing::info!(
             "HV vsock connect: guest_port={}, host_port={}, host_fd={}",
             port,
             conn_id.host_port,
-            fds[0],
+            host_fd.as_raw_fd(),
         );
 
         // OP_REQUEST is in backend_rxq. The vCPU BSP thread's poll_vsock_rx
@@ -1517,7 +1546,7 @@ impl Vmm {
         // is dropped, which is fine — we don't read it.
         let _ = connect_rx; // Drop receiver — we don't wait on it.
 
-        Ok(fds[0])
+        Ok(host_fd.into_raw_fd())
     }
 }
 
@@ -2325,6 +2354,57 @@ mod tests {
         assert_eq!(uart.output.len(), 1);
         uart.flush();
         assert!(uart.output.is_empty());
+    }
+
+    #[test]
+    fn test_duplicate_client_vsock_fd_uses_high_fd_without_breaking_socketpair() {
+        let mut fds = [0; 2];
+        let ret =
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        assert_eq!(
+            ret,
+            0,
+            "socketpair failed: {}",
+            std::io::Error::last_os_error()
+        );
+
+        let original_host_fd = fds[0];
+        let host_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        let peer_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+
+        let duplicated = Vmm::duplicate_client_vsock_fd(host_fd, 50_000).unwrap();
+        assert!(
+            duplicated.as_raw_fd() >= 50_000,
+            "duplicated fd should move out of the low recycled range"
+        );
+
+        let probe = unsafe { libc::fcntl(original_host_fd, libc::F_GETFD) };
+        assert_eq!(probe, -1, "original fd should be closed after duplication");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::EBADF)
+        );
+
+        let payload = b"ok";
+        let written = unsafe {
+            libc::write(
+                peer_fd.as_raw_fd(),
+                payload.as_ptr().cast::<libc::c_void>(),
+                payload.len(),
+            )
+        };
+        assert_eq!(written, payload.len() as isize);
+
+        let mut buf = [0u8; 2];
+        let read = unsafe {
+            libc::read(
+                duplicated.as_raw_fd(),
+                buf.as_mut_ptr().cast::<libc::c_void>(),
+                buf.len(),
+            )
+        };
+        assert_eq!(read, buf.len() as isize);
+        assert_eq!(&buf, payload);
     }
 
     #[test]

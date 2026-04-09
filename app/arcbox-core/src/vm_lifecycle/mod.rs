@@ -802,18 +802,17 @@ impl VmLifecycleManager {
             // connect_agent creates a socketpair + injects OP_REQUEST. If the
             // guest hasn't started the agent yet, the connection will be RST'd
             // and ping() returns early EOF. The retry loop handles this.
-            tracing::info!("wait_for_agent: connect attempt");
-            let connect_result = self.machine_manager.connect_agent(DEFAULT_MACHINE_NAME);
-            match connect_result {
+            // connect_agent detects AF_UNIX fds (HV backend) and uses the
+            // blocking transport with libc::poll-based deadlines. No tokio
+            // timer or reactor involvement on this path — immune to the
+            // kqueue stall that affected the async VsockStream approach.
+            // The blocking transport's BLOCKING_RPC_TIMEOUT (5s) handles
+            // both the "OP_REQUEST not yet injected" and "agent not ready"
+            // cases, so no outer tokio::time::timeout is needed.
+            match self.machine_manager.connect_agent(DEFAULT_MACHINE_NAME) {
                 Ok(mut agent) => {
-                    tracing::info!("wait_for_agent: connected, pinging...");
-                    let ping_result = tokio::time::timeout(Duration::from_secs(2), agent.ping()).await;
-                    // Explicitly drop agent BEFORE processing result to ensure
-                    // AsyncFd is deregistered from the tokio reactor before the
-                    // fd number is potentially reused by the next socketpair.
-                    drop(agent);
-                    match ping_result {
-                        Ok(Ok(_response)) => {
+                    match agent.ping().await {
+                        Ok(_response) => {
                             tracing::info!("Agent is ready");
                             self.health_monitor.record_success();
                             #[cfg(target_os = "macos")]
@@ -823,11 +822,8 @@ impl VmLifecycleManager {
                             }
                             return Ok(());
                         }
-                        Ok(Err(e)) => {
-                            tracing::info!("Agent ping failed: {}", e);
-                        }
-                        Err(_) => {
-                            tracing::info!("Agent ping timed out (2s)");
+                        Err(e) => {
+                            tracing::debug!("Agent ping failed: {}", e);
                         }
                     }
                 }
@@ -836,9 +832,7 @@ impl VmLifecycleManager {
                 }
             }
 
-            tracing::info!("wait_for_agent: sleeping 100ms before retry...");
             tokio::time::sleep(poll_interval).await;
-            tracing::info!("wait_for_agent: sleep done, retrying");
         }
 
         Err(CoreError::Vm("timeout waiting for agent".to_string()))

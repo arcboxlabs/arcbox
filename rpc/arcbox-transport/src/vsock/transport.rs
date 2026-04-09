@@ -145,7 +145,9 @@ impl VsockTransport {
         // SAFETY: fd is a valid socketpair fd from connect_vsock_hv.
         use std::os::unix::io::FromRawFd as _;
         let std_stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
-        std_stream.set_nonblocking(true).map_err(TransportError::io)?;
+        std_stream
+            .set_nonblocking(true)
+            .map_err(TransportError::io)?;
         let tokio_stream =
             tokio::net::UnixStream::from_std(std_stream).map_err(TransportError::io)?;
         let stream = VsockStream::from_unix_stream(tokio_stream);

@@ -594,9 +594,7 @@ impl Vmm {
         }
 
         match self.resolved_backend {
-            Some(ResolvedBackend::Hv) => {
-                self.connect_vsock_hv(port)
-            }
+            Some(ResolvedBackend::Hv) => self.connect_vsock_hv(port),
             _ => {
                 let vm = self
                     .darwin_vm

@@ -640,7 +640,6 @@ impl MachineManager {
         self.vm_manager.connect_vsock(&machine.vm_id, port)
     }
 
-
     /// Connects to the agent on a running machine (Linux).
     #[cfg(target_os = "linux")]
     pub fn connect_agent(&self, name: &str) -> Result<crate::agent_client::AgentClient> {
