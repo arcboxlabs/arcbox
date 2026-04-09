@@ -2724,6 +2724,7 @@ impl DeviceManager {
             // With MRG_RXBUF, num_buffers (bytes 10-11) must be 1.
             let mut virtio_net_hdr = [0u8; 12];
             virtio_net_hdr[10..12].copy_from_slice(&1u16.to_le_bytes());
+            // TODO(ABX-352): GSO offload — disabled pending header investigation.
             let total_len = virtio_net_hdr.len() + frame.len();
 
             // Pop an available RX descriptor.

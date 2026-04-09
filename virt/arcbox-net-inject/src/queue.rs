@@ -84,13 +84,17 @@ pub fn inject_one_frame(
                 let hdr_remaining = VIRTIO_NET_HDR_SIZE - written;
                 let hdr_bytes = hdr_remaining.min(to_write);
                 buf[..hdr_bytes].fill(0);
-                // Set num_buffers = 1 at offset 10-11 within the header.
+                // Set num_buffers = 1 at offset 10-11 (MRG_RXBUF).
                 if written <= 10 && written + hdr_bytes > 10 {
                     let nb_off = 10 - written;
                     if nb_off + 2 <= hdr_bytes {
                         buf[nb_off..nb_off + 2].copy_from_slice(&1u16.to_le_bytes());
                     }
                 }
+                // TODO(ABX-352): GSO offload for large TCP frames. Requires
+                // correct hdr_len accounting (IP options, TCP options) and
+                // checksum field setup. Currently disabled — guest drops
+                // packets with incorrect GSO headers.
                 // Write frame data after header.
                 let frame_bytes = to_write - hdr_bytes;
                 if frame_bytes > 0 {

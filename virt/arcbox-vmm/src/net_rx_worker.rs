@@ -164,6 +164,7 @@ fn inject_one_frame(ctx: &NetRxWorkerContext, frame: &[u8], used_idx: &mut u16) 
                         buf[nb_off..nb_off + 2].copy_from_slice(&1u16.to_le_bytes());
                     }
                 }
+                // TODO(ABX-352): GSO offload — disabled pending header investigation.
                 // Write frame data after header.
                 let frame_bytes = to_write - hdr_bytes;
                 if frame_bytes > 0 {
