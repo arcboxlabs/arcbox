@@ -30,3 +30,42 @@ impl FrameSink for ChannelFrameSink {
         self.tx.try_send(frame).is_ok()
     }
 }
+
+/// A TCP connection promoted to the inline inject path.
+///
+/// Carries everything the inject thread needs to construct
+/// Ethernet/IP/TCP headers and read from the host socket. This struct
+/// lives in `arcbox-net` (which does NOT depend on `arcbox-net-inject`)
+/// so that the datapath / tcp_bridge can produce it without a reverse
+/// dependency. The VMM layer implements [`ConnSink`] by converting
+/// `PromotedConn` into `arcbox_net_inject::InlineConn`.
+pub struct PromotedConn {
+    /// Host-side TCP stream (non-blocking).
+    pub stream: std::net::TcpStream,
+    /// Remote IP as seen by the guest.
+    pub remote_ip: std::net::Ipv4Addr,
+    /// Guest IP.
+    pub guest_ip: std::net::Ipv4Addr,
+    /// Remote TCP port.
+    pub remote_port: u16,
+    /// Guest TCP port.
+    pub guest_port: u16,
+    /// Our SEQ number for frames sent TO guest.
+    pub our_seq: u32,
+    /// Last ACK from guest (shared with the datapath via atomic so the
+    /// inject thread and fast-path intercept stay in sync).
+    pub last_ack: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// Gateway MAC for Ethernet source.
+    pub gw_mac: [u8; 6],
+    /// Guest MAC for Ethernet destination.
+    pub guest_mac: [u8; 6],
+}
+
+/// Accepts promoted fast-path connections and delivers them to the RX
+/// inject thread. Implemented in the VMM layer as a thin wrapper around
+/// a crossbeam channel of `InlineConn`.
+pub trait ConnSink: Send + Sync {
+    /// Sends a promoted connection. Returns `true` if accepted, `false`
+    /// if the channel is full (connection stays on the slow path).
+    fn send_conn(&self, conn: PromotedConn) -> bool;
+}

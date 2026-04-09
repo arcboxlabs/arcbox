@@ -454,6 +454,11 @@ pub struct DeviceManager {
     /// direct guest memory injection. Set before DRIVER_OK; taken once
     /// to construct the `RxInjectThread`.
     rx_inject_channel: Mutex<Option<crossbeam_channel::Receiver<Vec<u8>>>>,
+    /// Channel for promoted inline (vhost-style) TCP connections. The
+    /// datapath sends `InlineConn` values; the inject thread receives
+    /// them and reads directly from host sockets into guest buffers.
+    inline_conn_channel:
+        Mutex<Option<crossbeam_channel::Receiver<arcbox_net_inject::inline_conn::InlineConn>>>,
 }
 
 // SAFETY: guest_ram_base points to memory that is valid for the lifetime of the
@@ -489,6 +494,7 @@ impl DeviceManager {
             running: None,
             net_host_fd_slot: Mutex::new(None),
             rx_inject_channel: Mutex::new(None),
+            inline_conn_channel: Mutex::new(None),
         }
     }
 
@@ -584,6 +590,18 @@ impl DeviceManager {
     pub fn set_rx_inject_channel(&mut self, rx: crossbeam_channel::Receiver<Vec<u8>>) {
         *self
             .rx_inject_channel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(rx);
+    }
+
+    /// Stores the inline connection channel so the DRIVER_OK handler can
+    /// pass it to the `RxInjectThread`.
+    pub fn set_inline_conn_channel(
+        &mut self,
+        rx: crossbeam_channel::Receiver<arcbox_net_inject::inline_conn::InlineConn>,
+    ) {
+        *self
+            .inline_conn_channel
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(rx);
     }
@@ -706,8 +724,22 @@ impl DeviceManager {
                 }
             });
 
+            // Take the inline connection channel if available; otherwise
+            // create an unbounded channel with a dummy sender that is
+            // immediately dropped (the receiver will never yield items).
+            let conn_rx = self
+                .inline_conn_channel
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .unwrap_or_else(|| {
+                    let (_tx, rx) = crossbeam_channel::unbounded();
+                    rx
+                });
+
             let inject_thread = arcbox_net_inject::inject::RxInjectThread {
                 rx: rx_channel,
+                conn_rx,
                 guest_mem,
                 queue,
                 irq: arcbox_net_inject::irq::IrqHandle {

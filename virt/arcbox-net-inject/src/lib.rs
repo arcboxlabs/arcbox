@@ -7,6 +7,7 @@
 
 pub mod guest_mem;
 pub mod inject;
+pub mod inline_conn;
 pub mod irq;
 pub mod notify;
 pub mod queue;

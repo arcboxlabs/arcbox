@@ -95,6 +95,10 @@ pub struct NetworkDatapath {
     /// destined for the guest go through this sink (to the inject thread)
     /// instead of the socketpair write_queue.
     pub frame_sink: Option<std::sync::Arc<dyn crate::direct_rx::FrameSink>>,
+    /// Connection sink for promoted fast-path TCP connections. When set,
+    /// `TcpBridge` can send promoted connections to the RX inject thread
+    /// for inline (zero-copy) host→guest data transfer.
+    pub conn_sink: Option<std::sync::Arc<dyn crate::direct_rx::ConnSink>>,
 }
 
 impl NetworkDatapath {
@@ -131,6 +135,7 @@ impl NetworkDatapath {
             cancel,
             mtu,
             frame_sink: None,
+            conn_sink: None,
         }
     }
 
@@ -140,6 +145,14 @@ impl NetworkDatapath {
     /// channel to the RX inject thread) instead of the socketpair write path.
     pub fn set_frame_sink(&mut self, sink: std::sync::Arc<dyn crate::direct_rx::FrameSink>) {
         self.frame_sink = Some(sink);
+    }
+
+    /// Attaches a connection sink for promoted fast-path TCP connections.
+    ///
+    /// When set, `TcpBridge` can send promoted connections to the RX inject
+    /// thread for inline (zero-copy) host-to-guest data transfer.
+    pub fn set_conn_sink(&mut self, sink: std::sync::Arc<dyn crate::direct_rx::ConnSink>) {
+        self.conn_sink = Some(sink);
     }
 
     /// Runs the event loop until the cancellation token fires.
@@ -165,6 +178,7 @@ impl NetworkDatapath {
             cancel,
             mtu,
             frame_sink,
+            conn_sink,
         } = self;
 
         // Set guest_fd to non-blocking for AsyncFd.
@@ -209,6 +223,12 @@ impl NetworkDatapath {
         // overhead by 10-30x.
         if frame_sink.is_some() {
             tcp_bridge.enable_large_frames();
+        }
+
+        // Attach connection sink so promoted fast-path connections can be
+        // forwarded to the RX inject thread for inline transfer.
+        if let Some(ref sink) = conn_sink {
+            tcp_bridge.set_conn_sink(sink.clone());
         }
 
         // Enable proxy-aware connections: detect host VPN/proxy environment

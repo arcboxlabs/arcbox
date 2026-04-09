@@ -1421,6 +1421,18 @@ impl Vmm {
         // RxInjectThread at DRIVER_OK time.
         device_manager.set_rx_inject_channel(frame_rx);
 
+        // Create bounded channel for promoted inline TCP connections.
+        // The datapath sends PromotedConn via the ConnSink trait; the
+        // adapter converts to InlineConn and forwards to the inject thread.
+        let (conn_tx, conn_rx) =
+            crossbeam_channel::bounded::<arcbox_net_inject::inline_conn::InlineConn>(256);
+
+        let conn_sink: std::sync::Arc<dyn arcbox_net::direct_rx::ConnSink> =
+            std::sync::Arc::new(InlineConnSinkAdapter { tx: conn_tx });
+        datapath.set_conn_sink(conn_sink);
+
+        device_manager.set_inline_conn_channel(conn_rx);
+
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
             VmmError::Device(format!(
                 "tokio runtime not available for network datapath: {e}"
@@ -2258,6 +2270,35 @@ fn handle_psci(
             // Return NOT_SUPPORTED (-1) in X0.
             let _ = vcpu.set_reg(reg::X0, u64::MAX);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Inline connection sink adapter
+// ---------------------------------------------------------------------------
+
+/// Bridges `arcbox_net::direct_rx::ConnSink` (type-erased, no inject dep)
+/// to the `arcbox_net_inject::InlineConn` crossbeam channel. Lives in the
+/// VMM layer which depends on both crates.
+struct InlineConnSinkAdapter {
+    tx: crossbeam_channel::Sender<arcbox_net_inject::inline_conn::InlineConn>,
+}
+
+impl arcbox_net::direct_rx::ConnSink for InlineConnSinkAdapter {
+    fn send_conn(&self, conn: arcbox_net::direct_rx::PromotedConn) -> bool {
+        let inline = arcbox_net_inject::inline_conn::InlineConn {
+            stream: conn.stream,
+            remote_ip: conn.remote_ip,
+            guest_ip: conn.guest_ip,
+            remote_port: conn.remote_port,
+            guest_port: conn.guest_port,
+            our_seq: conn.our_seq,
+            last_ack: conn.last_ack,
+            gw_mac: conn.gw_mac,
+            guest_mac: conn.guest_mac,
+            host_eof: false,
+        };
+        self.tx.try_send(inline).is_ok()
     }
 }
 
