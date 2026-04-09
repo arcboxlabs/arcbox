@@ -311,6 +311,10 @@ pub struct Vmm {
     /// HVC fast path: device_idx → (raw_fd, blk_size). Shared with vCPU threads.
     #[cfg(target_os = "macos")]
     hvc_blk_fds: Arc<Vec<(i32, u32)>>,
+    /// DAX window host-side mmap address (stored as usize to keep Vmm: Send) and
+    /// size, for munmap on shutdown.
+    #[cfg(target_os = "macos")]
+    hv_dax_mmap: Option<(usize, usize)>,
 }
 
 impl Vmm {
@@ -405,6 +409,8 @@ impl Vmm {
             hv_blk_worker_threads: Vec::new(),
             #[cfg(target_os = "macos")]
             hvc_blk_fds: Arc::new(Vec::new()),
+            #[cfg(target_os = "macos")]
+            hv_dax_mmap: None,
         })
     }
 

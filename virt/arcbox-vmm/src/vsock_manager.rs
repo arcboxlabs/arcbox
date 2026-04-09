@@ -310,8 +310,13 @@ impl VsockConnectionManager {
 
     /// Removes a connection and closes its fd.
     pub fn remove(&mut self, id: &VsockConnectionId) {
-        if let Some(conn) = self.connections.remove(id) {
-            let _ = conn; // OwnedFd dropped here, closing the socketpair.
+        if let Some(mut conn) = self.connections.remove(id) {
+            // Best-effort: notify the receiver (if still alive) that this
+            // connection is being torn down.
+            if let Some(tx) = conn.injected_notify.take() {
+                let _ = tx.send(());
+            }
+            // OwnedFd dropped here, closing the socketpair.
             // Remove from backend_rxq too.
             self.backend_rxq.retain(|qid| qid != id);
             tracing::info!(

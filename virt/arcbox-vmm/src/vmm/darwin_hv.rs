@@ -421,15 +421,21 @@ impl Vmm {
                 )
             };
             if dax_ptr != libc::MAP_FAILED {
-                unsafe {
+                let map_result = unsafe {
                     vm.map_memory(
                         dax_ptr.cast(),
                         dax_base,
                         dax_size,
                         MemoryPermission::READ_WRITE,
                     )
-                    .map_err(|e| VmmError::Memory(format!("DAX window hv_vm_map: {e}")))?;
+                };
+                if let Err(e) = map_result {
+                    // Clean up the host mmap before propagating the error.
+                    unsafe { libc::munmap(dax_ptr, dax_size) };
+                    return Err(VmmError::Memory(format!("DAX window hv_vm_map: {e}")));
                 }
+                // Store for munmap on shutdown.
+                self.hv_dax_mmap = Some((dax_ptr as usize, dax_size));
                 tracing::info!(
                     "DAX window pre-mapped: IPA {:#x}..{:#x} ({}MB)",
                     dax_base,
@@ -920,7 +926,7 @@ impl Vmm {
                 // GIC SPI numbering: FDT SPI number = INTID - 32.
                 // hv_gic_set_spi uses INTID directly (starting at 32).
                 fdt.property_array_u32("interrupts", &[0, entry.irq.saturating_sub(32), 4])
-                    .map_err(fdt_err)?; // SPI, edge
+                    .map_err(fdt_err)?; // SPI, level
                 fdt.property_null("dma-coherent").map_err(fdt_err)?;
                 fdt.end_node(node).map_err(fdt_err)?;
             }
@@ -1204,7 +1210,16 @@ impl Vmm {
             }
         }
 
-        // Cleanup in correct order: GIC → VM → guest memory.
+        // Join all block I/O worker threads before dropping guest memory.
+        // Workers hold GuestMemWriter which references the guest RAM mapping;
+        // dropping guest memory first would create a use-after-free.
+        for t in self.hv_blk_worker_threads.drain(..) {
+            if let Err(e) = t.join() {
+                tracing::warn!("blk worker thread join failed: {e:?}");
+            }
+        }
+
+        // Cleanup in correct order: GIC → VM → DAX → guest memory.
         // Guest memory must be dropped after the VM so the mapped pages
         // remain valid until hv_vm_destroy completes.
         #[cfg(feature = "gic")]
@@ -1212,6 +1227,19 @@ impl Vmm {
             self.hv_gic.take();
         }
         self.hv_vm.take();
+
+        // Unmap the DAX window before releasing guest memory.
+        if let Some((dax_addr, dax_len)) = self.hv_dax_mmap.take() {
+            // SAFETY: dax_addr/dax_len were returned by a successful mmap during
+            // initialize_darwin_hv; the region has not been munmap'd elsewhere.
+            let ret = unsafe { libc::munmap(dax_addr as *mut libc::c_void, dax_len) };
+            if ret != 0 {
+                tracing::warn!("DAX munmap failed: {}", std::io::Error::last_os_error());
+            } else {
+                tracing::debug!("DAX window munmap'd ({} bytes)", dax_len);
+            }
+        }
+
         self.hv_guest_mem.take();
 
         tracing::info!("Custom VMM stopped");
@@ -1257,24 +1285,48 @@ impl Vmm {
         let host_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
 
         // Set large socket buffers and non-blocking on HV side.
+        // SAFETY: setsockopt/fcntl with valid fd from the socketpair above.
         unsafe {
             let buf_size: libc::c_int = 8 * 1024 * 1024;
-            libc::setsockopt(
+            if libc::setsockopt(
                 hv_fd.as_raw_fd(),
                 libc::SOL_SOCKET,
                 libc::SO_SNDBUF,
                 (&raw const buf_size).cast::<libc::c_void>(),
                 std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            );
-            libc::setsockopt(
+            ) != 0
+            {
+                tracing::warn!(
+                    "setsockopt SO_SNDBUF failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+            if libc::setsockopt(
                 hv_fd.as_raw_fd(),
                 libc::SOL_SOCKET,
                 libc::SO_RCVBUF,
                 (&raw const buf_size).cast::<libc::c_void>(),
                 std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            );
+            ) != 0
+            {
+                tracing::warn!(
+                    "setsockopt SO_RCVBUF failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
             let flags = libc::fcntl(hv_fd.as_raw_fd(), libc::F_GETFL, 0);
-            libc::fcntl(hv_fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+            if flags == -1 {
+                return Err(VmmError::Device(format!(
+                    "fcntl F_GETFL failed: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            if libc::fcntl(hv_fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) == -1 {
+                return Err(VmmError::Device(format!(
+                    "fcntl F_SETFL O_NONBLOCK failed: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
         }
 
         // Register the HV-side fd with DeviceManager for TX/RX bridging.
@@ -1403,22 +1455,45 @@ impl Vmm {
         // Set large buffers + non-blocking on HV side.
         unsafe {
             let buf_size: libc::c_int = 8 * 1024 * 1024;
-            libc::setsockopt(
+            if libc::setsockopt(
                 hv_fd.as_raw_fd(),
                 libc::SOL_SOCKET,
                 libc::SO_SNDBUF,
                 (&raw const buf_size).cast::<libc::c_void>(),
                 std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            );
-            libc::setsockopt(
+            ) != 0
+            {
+                tracing::warn!(
+                    "bridge setsockopt SO_SNDBUF failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+            if libc::setsockopt(
                 hv_fd.as_raw_fd(),
                 libc::SOL_SOCKET,
                 libc::SO_RCVBUF,
                 (&raw const buf_size).cast::<libc::c_void>(),
                 std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            );
+            ) != 0
+            {
+                tracing::warn!(
+                    "bridge setsockopt SO_RCVBUF failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
             let flags = libc::fcntl(hv_fd.as_raw_fd(), libc::F_GETFL, 0);
-            libc::fcntl(hv_fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+            if flags == -1 {
+                return Err(VmmError::Device(format!(
+                    "bridge fcntl F_GETFL failed: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            if libc::fcntl(hv_fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) == -1 {
+                return Err(VmmError::Device(format!(
+                    "bridge fcntl F_SETFL O_NONBLOCK failed: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
         }
 
         // Register the bridge VirtioNet device with the vmnet MAC.
@@ -1496,11 +1571,34 @@ impl Vmm {
         unsafe {
             // fds[1]: internal end — needs O_NONBLOCK for poll_vsock_rx libc::read.
             let flags = libc::fcntl(fds[1], libc::F_GETFL);
-            libc::fcntl(fds[1], libc::F_SETFL, flags | libc::O_NONBLOCK);
+            if flags == -1 {
+                return Err(VmmError::Device(format!(
+                    "vsock fcntl F_GETFL failed: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            if libc::fcntl(fds[1], libc::F_SETFL, flags | libc::O_NONBLOCK) == -1 {
+                return Err(VmmError::Device(format!(
+                    "vsock fcntl F_SETFL O_NONBLOCK failed: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
             // Both ends: FD_CLOEXEC.
             for &fd in &fds {
                 let flags = libc::fcntl(fd, libc::F_GETFD);
-                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+                if flags == -1 {
+                    tracing::warn!(
+                        "vsock fcntl F_GETFD failed on fd {fd}: {}",
+                        std::io::Error::last_os_error()
+                    );
+                    continue;
+                }
+                if libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) == -1 {
+                    tracing::warn!(
+                        "vsock fcntl F_SETFD FD_CLOEXEC failed on fd {fd}: {}",
+                        std::io::Error::last_os_error()
+                    );
+                }
             }
         }
 

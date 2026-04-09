@@ -413,7 +413,9 @@ pub struct DeviceManager {
     /// data extracted from TX queue is written here.
     net_host_fd: Option<std::os::unix::io::RawFd>,
     /// Last processed avail index for VirtioNet TX queue (NIC1).
-    net_last_avail_tx: std::sync::atomic::AtomicUsize,
+    /// VirtIO queue indices are u16 and wrap at 65536; AtomicU16 ensures
+    /// comparison logic handles wrap correctly.
+    net_last_avail_tx: std::sync::atomic::AtomicU16,
     /// DeviceId of the primary VirtioNet (NIC1) for targeted IRQ delivery.
     /// Required because `raise_interrupt_for(DeviceType::VirtioNet)` uses
     /// HashMap iteration which is non-deterministic — with two VirtioNet
@@ -425,7 +427,9 @@ pub struct DeviceManager {
     /// DeviceId of the bridge VirtioNet so QUEUE_NOTIFY can dispatch correctly.
     bridge_net_device_id: Option<DeviceId>,
     /// Last processed avail index for bridge VirtioNet TX queue (NIC2).
-    bridge_last_avail_tx: std::sync::atomic::AtomicUsize,
+    /// VirtIO queue indices are u16 and wrap at 65536; AtomicU16 ensures
+    /// comparison logic handles wrap correctly.
+    bridge_last_avail_tx: std::sync::atomic::AtomicU16,
     /// Host-side vsock connection manager (HV backend only).
     vsock_connections:
         std::sync::Arc<std::sync::Mutex<crate::vsock_manager::VsockConnectionManager>>,
@@ -453,11 +457,11 @@ impl DeviceManager {
             guest_ram_gpa: 0,
             irq_callback: None,
             net_host_fd: None,
-            net_last_avail_tx: std::sync::atomic::AtomicUsize::new(0),
+            net_last_avail_tx: std::sync::atomic::AtomicU16::new(0),
             primary_net_device_id: None,
             bridge_host_fd: None,
             bridge_net_device_id: None,
-            bridge_last_avail_tx: std::sync::atomic::AtomicUsize::new(0),
+            bridge_last_avail_tx: std::sync::atomic::AtomicU16::new(0),
             vsock_connections: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::vsock_manager::VsockConnectionManager::new(),
             )),
@@ -1294,36 +1298,25 @@ impl DeviceManager {
         entries
     }
 
-    /// Polls host vsock fds for incoming data and injects into guest RX queue.
-    ///
-    /// Injects a vsock OP_REQUEST into the guest RX queue to initiate a connection.
-    /// If the device isn't ready yet, queues the request for later injection
-    /// during poll_vsock_rx.
-    /// Injects an OP_REQUEST for a newly allocated vsock connection.
-    ///
-    /// The connection must have already been allocated in the manager via
-    /// `VsockConnectionManager::allocate()`. This method attempts immediate
-    /// injection; if the device isn't ready, the manager's pending list
-    /// ensures deferred injection via `poll_vsock_rx`.
-    /// Attempts immediate RX fill for a newly allocated connection.
+    /// Injects an OP_REQUEST for a newly allocated vsock connection into the
+    /// guest RX virtqueue.
     ///
     /// The connection has already been allocated with `RxOps::REQUEST` enqueued
-    /// and pushed to `backend_rxq`. This method tries to fill an RX descriptor
-    /// now. If the device isn't ready, the pending op stays in `backend_rxq`
-    /// for deferred processing by `poll_vsock_rx`.
-    /// Injects the OP_REQUEST for a newly allocated vsock connection directly
-    /// into the guest RX virtqueue.
+    /// and pushed to `backend_rxq`. This method tries a single immediate
+    /// injection via `inject_vsock_rx_raw`. If the device isn't DRIVER_OK yet,
+    /// the pending op stays in `backend_rxq` for deferred processing by
+    /// `poll_vsock_rx` — no busy-wait needed.
     ///
-    /// This uses `inject_vsock_rx_raw` (low-level direct guest memory write)
-    /// instead of going through `poll_vsock_rx`, so it does NOT acquire the
-    /// `vsock_connections` mutex and cannot deadlock with the vCPU thread.
+    /// Uses `inject_vsock_rx_raw` (direct guest memory write) instead of
+    /// `poll_vsock_rx`, so it does NOT acquire the `vsock_connections` mutex
+    /// and cannot deadlock with the vCPU thread.
     ///
     /// **Thread safety**: writes to guest memory are safe because the vCPU is
     /// either (a) inside `hv_vcpu_run` (guest code doesn't touch RX used ring
     /// while the device hasn't signaled) or (b) in the BSP poll loop which
     /// only touches RX descriptors through `poll_vsock_rx` (mutual exclusion
-    /// by the GIL-like BSP poll structure). The `inject_vsock_rx_raw` method
-    /// uses `fence(Release)` to ensure descriptor data is visible before the
+    /// by the GIL-like BSP poll structure). `inject_vsock_rx_raw` uses
+    /// `fence(Release)` to ensure descriptor data is visible before the
     /// used_idx update.
     pub fn inject_vsock_connect(
         &self,
@@ -1338,33 +1331,23 @@ impl DeviceManager {
             VsockOp::Request,
         );
 
-        // Try direct injection with retry. The vsock device may not be
-        // DRIVER_OK yet during early boot — poll until it is, up to 10s.
-        // This ensures the daemon's fd is usable immediately after return
-        // (guest will either RST or RESPONSE within one vCPU cycle).
+        // Try direct injection once. If the device isn't DRIVER_OK yet the
+        // pending op stays in `backend_rxq` for deferred processing by
+        // `poll_vsock_rx` — no busy-wait needed.
         //
-        // We drain the REQUEST from backend_rxq on success to prevent
+        // On success we drain the REQUEST from backend_rxq to prevent
         // poll_vsock_rx from injecting a duplicate.
-        for attempt in 0..1000 {
-            if self.inject_vsock_rx_raw(&hdr.to_bytes()) {
-                if let Ok(mut mgr) = self.vsock_connections.lock() {
-                    mgr.backend_rxq.retain(|qid| *qid != id);
-                    if let Some(conn) = mgr.get_mut(&id) {
-                        conn.rx_queue.dequeue();
-                    }
+        if self.inject_vsock_rx_raw(&hdr.to_bytes()) {
+            if let Ok(mut mgr) = self.vsock_connections.lock() {
+                mgr.backend_rxq.retain(|qid| *qid != id);
+                if let Some(conn) = mgr.get_mut(&id) {
+                    conn.rx_queue.dequeue();
                 }
-                return true;
             }
-            if attempt == 0 {
-                tracing::debug!(
-                    "vsock inject: device not ready, polling (guest_port={})",
-                    id.guest_port,
-                );
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            return true;
         }
-        tracing::warn!(
-            "vsock inject: gave up after 10s (guest_port={}), leaving in backend_rxq",
+        tracing::debug!(
+            "vsock inject: device not ready, deferring to poll_vsock_rx (guest_port={})",
             id.guest_port,
         );
         false
@@ -2442,17 +2425,20 @@ impl DeviceManager {
         if avail_addr + 4 > guest_mem.len() {
             return false;
         }
-        let avail_idx =
-            u16::from_le_bytes([guest_mem[avail_addr + 2], guest_mem[avail_addr + 3]]) as usize;
         let used_idx_off = used_addr + 2;
         let mut used_idx =
-            u16::from_le_bytes([guest_mem[used_idx_off], guest_mem[used_idx_off + 1]]) as usize;
+            u16::from_le_bytes([guest_mem[used_idx_off], guest_mem[used_idx_off + 1]]);
 
         let mut injected = false;
 
         // Read up to 64 frames per poll to avoid starving other devices.
         for _ in 0..64 {
-            if used_idx >= avail_idx {
+            // Re-read avail_idx each iteration so newly posted buffers are
+            // picked up without waiting for the next poll cycle.
+            std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
+            let avail_idx =
+                u16::from_le_bytes([guest_mem[avail_addr + 2], guest_mem[avail_addr + 3]]);
+            if used_idx == avail_idx {
                 break; // No more RX descriptors available.
             }
 
@@ -2476,7 +2462,7 @@ impl DeviceManager {
             let total_len = virtio_net_hdr.len() + frame.len();
 
             // Pop an available RX descriptor.
-            let ring_off = avail_addr + 4 + 2 * (used_idx % q_size);
+            let ring_off = avail_addr + 4 + 2 * ((used_idx as usize) % q_size);
             if ring_off + 2 > guest_mem.len() {
                 break;
             }
@@ -2524,16 +2510,15 @@ impl DeviceManager {
             }
 
             // Update used ring.
-            let used_entry = used_addr + 4 + (used_idx % q_size) * 8;
+            let used_entry = used_addr + 4 + ((used_idx as usize) % q_size) * 8;
             if used_entry + 8 <= guest_mem.len() {
                 guest_mem[used_entry..used_entry + 4]
                     .copy_from_slice(&(head_idx as u32).to_le_bytes());
                 guest_mem[used_entry + 4..used_entry + 8]
                     .copy_from_slice(&(written as u32).to_le_bytes());
                 std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
-                used_idx += 1;
-                guest_mem[used_idx_off..used_idx_off + 2]
-                    .copy_from_slice(&(used_idx as u16).to_le_bytes());
+                used_idx = used_idx.wrapping_add(1);
+                guest_mem[used_idx_off..used_idx_off + 2].copy_from_slice(&used_idx.to_le_bytes());
             }
 
             injected = true;
@@ -2587,8 +2572,7 @@ impl DeviceManager {
         if avail_addr + 4 > memory.len() {
             return Vec::new();
         }
-        let avail_idx =
-            u16::from_le_bytes([memory[avail_addr + 2], memory[avail_addr + 3]]) as usize;
+        let avail_idx = u16::from_le_bytes([memory[avail_addr + 2], memory[avail_addr + 3]]);
 
         let mut current_avail = self
             .net_last_avail_tx
@@ -2596,7 +2580,7 @@ impl DeviceManager {
         let mut completions = Vec::new();
 
         while current_avail != avail_idx {
-            let ring_off = avail_addr + 4 + 2 * (current_avail % q_size);
+            let ring_off = avail_addr + 4 + 2 * ((current_avail as usize) % q_size);
             if ring_off + 2 > memory.len() {
                 break;
             }
@@ -2652,7 +2636,7 @@ impl DeviceManager {
             }
 
             completions.push((head_idx as u16, total_len));
-            current_avail += 1;
+            current_avail = current_avail.wrapping_add(1);
         }
 
         self.net_last_avail_tx
@@ -2711,8 +2695,7 @@ impl DeviceManager {
         if avail_addr + 4 > memory.len() {
             return Vec::new();
         }
-        let avail_idx =
-            u16::from_le_bytes([memory[avail_addr + 2], memory[avail_addr + 3]]) as usize;
+        let avail_idx = u16::from_le_bytes([memory[avail_addr + 2], memory[avail_addr + 3]]);
 
         let mut current_avail = self
             .bridge_last_avail_tx
@@ -2720,7 +2703,7 @@ impl DeviceManager {
         let mut completions = Vec::new();
 
         while current_avail != avail_idx {
-            let ring_off = avail_addr + 4 + 2 * (current_avail % q_size);
+            let ring_off = avail_addr + 4 + 2 * ((current_avail as usize) % q_size);
             if ring_off + 2 > memory.len() {
                 break;
             }
@@ -2776,7 +2759,7 @@ impl DeviceManager {
             }
 
             completions.push((head_idx as u16, total_len));
-            current_avail += 1;
+            current_avail = current_avail.wrapping_add(1);
         }
 
         self.bridge_last_avail_tx
@@ -2840,12 +2823,16 @@ impl DeviceManager {
         let mut injected = false;
 
         // Read up to 64 frames per poll (same as NIC1).
+        let used_idx_off = used_addr + 2;
+        let mut used_idx =
+            u16::from_le_bytes([guest_mem[used_idx_off], guest_mem[used_idx_off + 1]]);
+
         for _ in 0..64 {
+            // Re-read avail_idx each iteration so newly posted buffers are
+            // picked up without waiting for the next poll cycle.
+            std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
             let avail_idx =
-                u16::from_le_bytes([guest_mem[avail_addr + 2], guest_mem[avail_addr + 3]]) as usize;
-            let used_idx_off = used_addr + 2;
-            let used_idx =
-                u16::from_le_bytes([guest_mem[used_idx_off], guest_mem[used_idx_off + 1]]) as usize;
+                u16::from_le_bytes([guest_mem[avail_addr + 2], guest_mem[avail_addr + 3]]);
 
             if avail_idx == used_idx {
                 break; // No RX descriptors available.
@@ -2871,7 +2858,7 @@ impl DeviceManager {
             let total = virtio_hdr.len() + frame.len();
 
             // Pop an available RX descriptor and write header + frame.
-            let ring_off = avail_addr + 4 + 2 * (used_idx % q_size);
+            let ring_off = avail_addr + 4 + 2 * ((used_idx as usize) % q_size);
             if ring_off + 2 > guest_mem.len() {
                 break;
             }
@@ -2933,15 +2920,15 @@ impl DeviceManager {
             }
 
             // Update used ring.
-            let used_entry = used_addr + 4 + (used_idx % q_size) * 8;
+            let used_entry = used_addr + 4 + ((used_idx as usize) % q_size) * 8;
             if used_entry + 8 <= guest_mem.len() {
                 guest_mem[used_entry..used_entry + 4]
                     .copy_from_slice(&(head_idx as u32).to_le_bytes());
                 guest_mem[used_entry + 4..used_entry + 8]
                     .copy_from_slice(&(written as u32).to_le_bytes());
                 std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
-                let new_used = (used_idx + 1) as u16;
-                guest_mem[used_idx_off..used_idx_off + 2].copy_from_slice(&new_used.to_le_bytes());
+                used_idx = used_idx.wrapping_add(1);
+                guest_mem[used_idx_off..used_idx_off + 2].copy_from_slice(&used_idx.to_le_bytes());
             }
 
             injected = true;
@@ -3062,7 +3049,7 @@ impl Default for DeviceManager {
 #[cfg(test)]
 const _: () = {
     fn assert_send<T: Send>() {}
-    fn assert_sync<T: Send>() {}
+    fn assert_sync<T: Sync>() {}
     fn _check() {
         assert_send::<DeviceManager>();
         assert_sync::<DeviceManager>();

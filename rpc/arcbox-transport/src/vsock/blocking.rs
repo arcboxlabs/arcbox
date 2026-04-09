@@ -139,10 +139,17 @@ impl BlockingVsockTransport {
                 "transport deadline exceeded",
             )));
         }
-        // Check for error/hangup before proceeding.
-        if pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
-            // Let the subsequent read/write surface the actual error.
+        // POLLNVAL means the fd itself is invalid -- return an error
+        // immediately rather than letting a subsequent read/write surface it.
+        if pfd.revents & libc::POLLNVAL != 0 {
+            return Err(TransportError::io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "poll: POLLNVAL -- file descriptor is not valid",
+            )));
         }
+        // POLLERR/POLLHUP: the fd is valid but the peer hung up or an error
+        // occurred. Fall through — the subsequent read/write will surface the
+        // actual error.
         Ok(())
     }
 }
@@ -156,9 +163,9 @@ mod tests {
     #[test]
     fn test_blocking_roundtrip() {
         let mut fds: [libc::c_int; 2] = [0; 2];
-        unsafe {
-            libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr());
-        }
+        let ret =
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        assert_eq!(ret, 0, "socketpair failed: {}", io::Error::last_os_error());
         let mut client = unsafe { BlockingVsockTransport::from_raw_fd(fds[0]).unwrap() };
         let mut server = unsafe { BlockingVsockTransport::from_raw_fd(fds[1]).unwrap() };
 
@@ -179,9 +186,9 @@ mod tests {
     #[test]
     fn test_blocking_timeout() {
         let mut fds: [libc::c_int; 2] = [0; 2];
-        unsafe {
-            libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr());
-        }
+        let ret =
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        assert_eq!(ret, 0, "socketpair failed: {}", io::Error::last_os_error());
         let mut client = unsafe { BlockingVsockTransport::from_raw_fd(fds[0]).unwrap() };
         // Don't write anything on fds[1] — recv should timeout.
         let _server_fd = unsafe { UnixStream::from_raw_fd(fds[1]) };
@@ -194,9 +201,9 @@ mod tests {
     #[test]
     fn test_blocking_peer_close_eof() {
         let mut fds: [libc::c_int; 2] = [0; 2];
-        unsafe {
-            libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr());
-        }
+        let ret =
+            unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        assert_eq!(ret, 0, "socketpair failed: {}", io::Error::last_os_error());
         let mut client = unsafe { BlockingVsockTransport::from_raw_fd(fds[0]).unwrap() };
         // Close peer immediately.
         unsafe { libc::close(fds[1]) };

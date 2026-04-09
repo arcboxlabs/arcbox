@@ -128,6 +128,13 @@ impl AgentClient {
             let ret = unsafe {
                 libc::getsockname(fd, (&raw mut addr).cast::<libc::sockaddr>(), &raw mut len)
             };
+            if ret != 0 {
+                tracing::warn!(
+                    fd,
+                    err = %std::io::Error::last_os_error(),
+                    "getsockname failed on vsock fd, falling through to async transport path"
+                );
+            }
             ret == 0 && addr.ss_family == libc::AF_UNIX as libc::sa_family_t
         };
 
