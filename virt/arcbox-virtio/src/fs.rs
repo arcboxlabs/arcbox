@@ -895,11 +895,39 @@ impl VirtioDevice for VirtioFs {
         }
 
         // Read descriptors directly from guest memory (not the internal VirtQueue).
-        // Translate GPAs to slice offsets by subtracting gpa_base.
+        // Translate GPAs to slice offsets by subtracting gpa_base (checked to
+        // guard against a malicious guest providing a GPA below the RAM base).
         let gpa_base = queue_config.gpa_base as usize;
-        let desc_addr = queue_config.desc_addr as usize - gpa_base;
-        let avail_addr = queue_config.avail_addr as usize - gpa_base;
-        let used_addr = queue_config.used_addr as usize - gpa_base;
+        let desc_addr = (queue_config.desc_addr as usize)
+            .checked_sub(gpa_base)
+            .ok_or_else(|| {
+                tracing::warn!(
+                    "invalid desc GPA {:#x} below ram base {:#x}",
+                    queue_config.desc_addr,
+                    gpa_base
+                );
+                VirtioError::InvalidQueue("desc GPA below ram base".into())
+            })?;
+        let avail_addr = (queue_config.avail_addr as usize)
+            .checked_sub(gpa_base)
+            .ok_or_else(|| {
+                tracing::warn!(
+                    "invalid avail GPA {:#x} below ram base {:#x}",
+                    queue_config.avail_addr,
+                    gpa_base
+                );
+                VirtioError::InvalidQueue("avail GPA below ram base".into())
+            })?;
+        let used_addr = (queue_config.used_addr as usize)
+            .checked_sub(gpa_base)
+            .ok_or_else(|| {
+                tracing::warn!(
+                    "invalid used GPA {:#x} below ram base {:#x}",
+                    queue_config.used_addr,
+                    gpa_base
+                );
+                VirtioError::InvalidQueue("used GPA below ram base".into())
+            })?;
         let q_size = queue_config.size as usize;
 
         if avail_addr + 4 > memory.len() {
@@ -930,9 +958,13 @@ impl VirtioDevice for VirtioFs {
                 if d_off + 16 > memory.len() {
                     break;
                 }
-                let addr = u64::from_le_bytes(memory[d_off..d_off + 8].try_into().unwrap())
-                    as usize
-                    - gpa_base;
+                let addr = match (u64::from_le_bytes(memory[d_off..d_off + 8].try_into().unwrap())
+                    as usize)
+                    .checked_sub(gpa_base)
+                {
+                    Some(a) => a,
+                    None => continue,
+                };
                 let len =
                     u32::from_le_bytes(memory[d_off + 8..d_off + 12].try_into().unwrap()) as usize;
                 let flags = u16::from_le_bytes(memory[d_off + 12..d_off + 14].try_into().unwrap());

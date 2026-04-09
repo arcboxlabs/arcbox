@@ -991,11 +991,39 @@ impl VirtioDevice for VirtioBlock {
             return Ok(Vec::new());
         }
 
-        // Translate GPAs to slice offsets by subtracting gpa_base.
+        // Translate GPAs to slice offsets by subtracting gpa_base (checked to
+        // guard against a malicious guest providing a GPA below the RAM base).
         let gpa_base = queue_config.gpa_base as usize;
-        let desc_table_addr = queue_config.desc_addr as usize - gpa_base;
-        let avail_addr = queue_config.avail_addr as usize - gpa_base;
-        let used_addr = queue_config.used_addr as usize - gpa_base;
+        let desc_table_addr = (queue_config.desc_addr as usize)
+            .checked_sub(gpa_base)
+            .ok_or_else(|| {
+                tracing::warn!(
+                    "invalid desc GPA {:#x} below ram base {:#x}",
+                    queue_config.desc_addr,
+                    gpa_base
+                );
+                VirtioError::InvalidQueue("desc GPA below ram base".into())
+            })?;
+        let avail_addr = (queue_config.avail_addr as usize)
+            .checked_sub(gpa_base)
+            .ok_or_else(|| {
+                tracing::warn!(
+                    "invalid avail GPA {:#x} below ram base {:#x}",
+                    queue_config.avail_addr,
+                    gpa_base
+                );
+                VirtioError::InvalidQueue("avail GPA below ram base".into())
+            })?;
+        let used_addr = (queue_config.used_addr as usize)
+            .checked_sub(gpa_base)
+            .ok_or_else(|| {
+                tracing::warn!(
+                    "invalid used GPA {:#x} below ram base {:#x}",
+                    queue_config.used_addr,
+                    gpa_base
+                );
+                VirtioError::InvalidQueue("used GPA below ram base".into())
+            })?;
         let q_size = queue_config.size as usize;
 
         // Read the avail ring index (offset 2 in the avail ring).
@@ -1024,10 +1052,20 @@ impl VirtioDevice for VirtioBlock {
                 if desc_offset + 16 > memory.len() {
                     return Err(VirtioError::InvalidQueue("descriptor out of bounds".into()));
                 }
-                // Translate descriptor buffer GPA to slice offset.
-                let addr =
-                    u64::from_le_bytes(memory[desc_offset..desc_offset + 8].try_into().unwrap())
-                        - gpa_base as u64;
+                // Translate descriptor buffer GPA to slice offset (checked).
+                let raw_gpa =
+                    u64::from_le_bytes(memory[desc_offset..desc_offset + 8].try_into().unwrap());
+                let addr = match raw_gpa.checked_sub(gpa_base as u64) {
+                    Some(a) => a,
+                    None => {
+                        tracing::warn!(
+                            "invalid descriptor GPA {:#x} below ram base {:#x}",
+                            raw_gpa,
+                            gpa_base
+                        );
+                        break;
+                    }
+                };
                 let len = u32::from_le_bytes(
                     memory[desc_offset + 8..desc_offset + 12]
                         .try_into()

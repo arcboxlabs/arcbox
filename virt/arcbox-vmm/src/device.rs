@@ -1111,8 +1111,17 @@ impl DeviceManager {
                                 };
                                 if !net_completions.is_empty() {
                                     // Update used ring for completed TX descriptors.
-                                    // Translate GPAs to slice offsets by subtracting gpa_base.
-                                    let used_off = qcfg.used_addr as usize - gpa_base;
+                                    // Translate GPAs to slice offsets (checked).
+                                    let Some(used_off) =
+                                        (qcfg.used_addr as usize).checked_sub(gpa_base)
+                                    else {
+                                        tracing::warn!(
+                                            "invalid used GPA {:#x} below ram base {:#x}",
+                                            qcfg.used_addr,
+                                            gpa_base
+                                        );
+                                        return Ok(());
+                                    };
                                     let q_size = qcfg.size as usize;
                                     let used_idx_off = used_off + 2;
                                     let mut used_idx = u16::from_le_bytes([
@@ -1140,15 +1149,18 @@ impl DeviceManager {
                                     // vring_need_event(avail_event, new, old) before
                                     // kicking. Setting avail_event = current avail_idx
                                     // ensures the guest kicks on the next submission.
-                                    let avail_off = qcfg.avail_addr as usize - gpa_base;
-                                    let avail_idx = u16::from_le_bytes([
-                                        guest_mem[avail_off + 2],
-                                        guest_mem[avail_off + 3],
-                                    ]);
-                                    let avail_event_off = used_off + 4 + q_size * 8;
-                                    if avail_event_off + 2 <= guest_mem.len() {
-                                        guest_mem[avail_event_off..avail_event_off + 2]
-                                            .copy_from_slice(&avail_idx.to_le_bytes());
+                                    if let Some(avail_off) =
+                                        (qcfg.avail_addr as usize).checked_sub(gpa_base)
+                                    {
+                                        let avail_idx = u16::from_le_bytes([
+                                            guest_mem[avail_off + 2],
+                                            guest_mem[avail_off + 3],
+                                        ]);
+                                        let avail_event_off = used_off + 4 + q_size * 8;
+                                        if avail_event_off + 2 <= guest_mem.len() {
+                                            guest_mem[avail_event_off..avail_event_off + 2]
+                                                .copy_from_slice(&avail_idx.to_le_bytes());
+                                        }
                                     }
 
                                     if let Some(_irq) = device.info.irq {
@@ -1418,7 +1430,9 @@ impl DeviceManager {
                 u32::from_le_bytes(guest_mem[d_off + 8..d_off + 12].try_into().unwrap()) as usize;
             let flags = u16::from_le_bytes(guest_mem[d_off + 12..d_off + 14].try_into().unwrap());
             let next = u16::from_le_bytes(guest_mem[d_off + 14..d_off + 16].try_into().unwrap());
-            let addr = addr_gpa - gpa_base;
+            let Some(addr) = addr_gpa.checked_sub(gpa_base) else {
+                continue;
+            };
 
             desc_count += 1;
             tracing::trace!(
@@ -1516,17 +1530,18 @@ impl DeviceManager {
                 let first_gpa =
                     u64::from_le_bytes(guest_mem[first_d_off..first_d_off + 8].try_into().unwrap())
                         as usize;
-                let first_off = first_gpa - gpa_base;
-                if first_off + 44 <= guest_mem.len() {
-                    let readback = &guest_mem[first_off..first_off + 44];
-                    let rb_dst_cid = u64::from_le_bytes(readback[8..16].try_into().unwrap());
-                    let rb_op = u16::from_le_bytes(readback[30..32].try_into().unwrap());
-                    tracing::trace!(
-                        "  readback: dst_cid={} op={} first_8_bytes={:02x?}",
-                        rb_dst_cid,
-                        rb_op,
-                        &readback[..8],
-                    );
+                if let Some(first_off) = first_gpa.checked_sub(gpa_base) {
+                    if first_off + 44 <= guest_mem.len() {
+                        let readback = &guest_mem[first_off..first_off + 44];
+                        let rb_dst_cid = u64::from_le_bytes(readback[8..16].try_into().unwrap());
+                        let rb_op = u16::from_le_bytes(readback[30..32].try_into().unwrap());
+                        tracing::trace!(
+                            "  readback: dst_cid={} op={} first_8_bytes={:02x?}",
+                            rb_dst_cid,
+                            rb_op,
+                            &readback[..8],
+                        );
+                    }
                 }
             }
         }
@@ -1541,24 +1556,28 @@ impl DeviceManager {
             if let Ok(mmio) = mmio_arc.read() {
                 let txi = 1usize;
                 if txi < 8 && mmio.queue_ready[txi] && mmio.queue_num[txi] > 0 {
-                    // Translate TX queue GPAs to slice offsets.
-                    let tx_avail_off = mmio.queue_driver[txi] as usize - gpa_base;
-                    let tx_used_off = mmio.queue_device[txi] as usize - gpa_base;
-                    if tx_avail_off + 4 <= guest_mem.len() && tx_used_off + 4 <= guest_mem.len() {
-                        let tx_avail = u16::from_le_bytes([
-                            guest_mem[tx_avail_off + 2],
-                            guest_mem[tx_avail_off + 3],
-                        ]);
-                        let tx_used = u16::from_le_bytes([
-                            guest_mem[tx_used_off + 2],
-                            guest_mem[tx_used_off + 3],
-                        ]);
-                        tracing::trace!(
-                            "  TX queue state: avail_idx={} used_idx={} (delta={})",
-                            tx_avail,
-                            tx_used,
-                            tx_avail.wrapping_sub(tx_used),
-                        );
+                    // Translate TX queue GPAs to slice offsets (checked).
+                    if let (Some(tx_avail_off), Some(tx_used_off)) = (
+                        (mmio.queue_driver[txi] as usize).checked_sub(gpa_base),
+                        (mmio.queue_device[txi] as usize).checked_sub(gpa_base),
+                    ) {
+                        if tx_avail_off + 4 <= guest_mem.len() && tx_used_off + 4 <= guest_mem.len()
+                        {
+                            let tx_avail = u16::from_le_bytes([
+                                guest_mem[tx_avail_off + 2],
+                                guest_mem[tx_avail_off + 3],
+                            ]);
+                            let tx_used = u16::from_le_bytes([
+                                guest_mem[tx_used_off + 2],
+                                guest_mem[tx_used_off + 3],
+                            ]);
+                            tracing::trace!(
+                                "  TX queue state: avail_idx={} used_idx={} (delta={})",
+                                tx_avail,
+                                tx_used,
+                                tx_avail.wrapping_sub(tx_used),
+                            );
+                        }
                     }
                 } else {
                     tracing::warn!(
@@ -1621,10 +1640,31 @@ impl DeviceManager {
         // Virtualization.framework and is valid for `ram_size` bytes.
         let guest_mem = unsafe { std::slice::from_raw_parts_mut(ram_base, ram_size) };
 
-        // Translate GPAs to slice offsets by subtracting gpa_base.
-        let desc_addr = desc_gpa - gpa_base;
-        let avail_addr = avail_gpa - gpa_base;
-        let used_addr = used_gpa - gpa_base;
+        // Translate GPAs to slice offsets (checked against ram base).
+        let Some(desc_addr) = desc_gpa.checked_sub(gpa_base) else {
+            tracing::warn!(
+                "inject_vsock_rx_raw: desc GPA {:#x} below ram base {:#x}",
+                desc_gpa,
+                gpa_base
+            );
+            return false;
+        };
+        let Some(avail_addr) = avail_gpa.checked_sub(gpa_base) else {
+            tracing::warn!(
+                "inject_vsock_rx_raw: avail GPA {:#x} below ram base {:#x}",
+                avail_gpa,
+                gpa_base
+            );
+            return false;
+        };
+        let Some(used_addr) = used_gpa.checked_sub(gpa_base) else {
+            tracing::warn!(
+                "inject_vsock_rx_raw: used GPA {:#x} below ram base {:#x}",
+                used_gpa,
+                gpa_base
+            );
+            return false;
+        };
 
         if avail_addr + 4 > guest_mem.len() {
             return false;
@@ -1672,7 +1712,9 @@ impl DeviceManager {
                 u32::from_le_bytes(guest_mem[d_off + 8..d_off + 12].try_into().unwrap()) as usize;
             let flags = u16::from_le_bytes(guest_mem[d_off + 12..d_off + 14].try_into().unwrap());
             let next = u16::from_le_bytes(guest_mem[d_off + 14..d_off + 16].try_into().unwrap());
-            let addr = addr_gpa - gpa_base;
+            let Some(addr) = addr_gpa.checked_sub(gpa_base) else {
+                continue;
+            };
 
             desc_count += 1;
             tracing::debug!(
@@ -1761,14 +1803,15 @@ impl DeviceManager {
                         .try_into()
                         .unwrap(),
                 ) as usize;
-                let verify_off = verify_gpa - gpa_base;
-                if verify_off + 8 <= guest_mem.len() {
-                    let readback = &guest_mem[verify_off..verify_off + 8];
-                    tracing::debug!(
-                        "inject_vsock_rx_raw: verify first 8 bytes at {:#x}: {:02x?}",
-                        verify_gpa,
-                        readback,
-                    );
+                if let Some(verify_off) = verify_gpa.checked_sub(gpa_base) {
+                    if verify_off + 8 <= guest_mem.len() {
+                        let readback = &guest_mem[verify_off..verify_off + 8];
+                        tracing::debug!(
+                            "inject_vsock_rx_raw: verify first 8 bytes at {:#x}: {:02x?}",
+                            verify_gpa,
+                            readback,
+                        );
+                    }
                 }
             }
         }
@@ -1801,11 +1844,32 @@ impl DeviceManager {
             return Ok(false);
         }
 
-        // Translate GPAs to slice offsets by subtracting gpa_base.
+        // Translate GPAs to slice offsets (checked against ram base).
         let gpa_base = qcfg.gpa_base as usize;
-        let desc_addr = qcfg.desc_addr as usize - gpa_base;
-        let avail_addr = qcfg.avail_addr as usize - gpa_base;
-        let used_addr = qcfg.used_addr as usize - gpa_base;
+        let Some(desc_addr) = (qcfg.desc_addr as usize).checked_sub(gpa_base) else {
+            tracing::warn!(
+                "dispatch_blk_async: desc GPA {:#x} below ram base {:#x}",
+                qcfg.desc_addr,
+                gpa_base
+            );
+            return Ok(false);
+        };
+        let Some(avail_addr) = (qcfg.avail_addr as usize).checked_sub(gpa_base) else {
+            tracing::warn!(
+                "dispatch_blk_async: avail GPA {:#x} below ram base {:#x}",
+                qcfg.avail_addr,
+                gpa_base
+            );
+            return Ok(false);
+        };
+        let Some(used_addr) = (qcfg.used_addr as usize).checked_sub(gpa_base) else {
+            tracing::warn!(
+                "dispatch_blk_async: used GPA {:#x} below ram base {:#x}",
+                qcfg.used_addr,
+                gpa_base
+            );
+            return Ok(false);
+        };
         let q_size = qcfg.size as usize;
 
         if avail_addr + 4 > memory.len() {
@@ -1851,7 +1915,9 @@ impl DeviceManager {
                     // Translate GPA to slice offset for direct memory access.
                     first_desc = false;
                     if len >= 16 {
-                        let hdr_off = addr as usize - gpa_base;
+                        let Some(hdr_off) = (addr as usize).checked_sub(gpa_base) else {
+                            break;
+                        };
                         if hdr_off + 16 <= memory.len() {
                             let req_type = u32::from_le_bytes(
                                 memory[hdr_off..hdr_off + 4].try_into().unwrap(),
@@ -2017,10 +2083,16 @@ impl DeviceManager {
             return false;
         }
 
-        // Translate GPAs to slice offsets by subtracting gpa_base.
-        let desc_addr = mmio.queue_desc[rxi] as usize - gpa_base;
-        let avail_addr = mmio.queue_driver[rxi] as usize - gpa_base;
-        let used_addr = mmio.queue_device[rxi] as usize - gpa_base;
+        // Translate GPAs to slice offsets (checked against ram base).
+        let Some(desc_addr) = (mmio.queue_desc[rxi] as usize).checked_sub(gpa_base) else {
+            return false;
+        };
+        let Some(avail_addr) = (mmio.queue_driver[rxi] as usize).checked_sub(gpa_base) else {
+            return false;
+        };
+        let Some(used_addr) = (mmio.queue_device[rxi] as usize).checked_sub(gpa_base) else {
+            return false;
+        };
         let q_size = mmio.queue_num[rxi] as usize;
 
         // Also grab TX queue config for Phase 3.
@@ -2349,10 +2421,16 @@ impl DeviceManager {
         if qi >= 8 || !mmio.queue_ready[qi] || mmio.queue_num[qi] == 0 {
             return false;
         }
-        // Translate GPAs to slice offsets by subtracting gpa_base.
-        let desc_addr = mmio.queue_desc[qi] as usize - gpa_base;
-        let avail_addr = mmio.queue_driver[qi] as usize - gpa_base;
-        let used_addr = mmio.queue_device[qi] as usize - gpa_base;
+        // Translate GPAs to slice offsets (checked against ram base).
+        let Some(desc_addr) = (mmio.queue_desc[qi] as usize).checked_sub(gpa_base) else {
+            return false;
+        };
+        let Some(avail_addr) = (mmio.queue_driver[qi] as usize).checked_sub(gpa_base) else {
+            return false;
+        };
+        let Some(used_addr) = (mmio.queue_device[qi] as usize).checked_sub(gpa_base) else {
+            return false;
+        };
         let q_size = mmio.queue_num[qi] as usize;
 
         drop(mmio); // Release lock before accessing guest memory.
@@ -2422,7 +2500,9 @@ impl DeviceManager {
                     u16::from_le_bytes(guest_mem[d_off + 12..d_off + 14].try_into().unwrap());
                 let next =
                     u16::from_le_bytes(guest_mem[d_off + 14..d_off + 16].try_into().unwrap());
-                let addr = addr_gpa - gpa_base;
+                let Some(addr) = addr_gpa.checked_sub(gpa_base) else {
+                    continue;
+                };
 
                 // RX descriptors are device-writable.
                 if flags & 2 != 0 && addr + len <= guest_mem.len() {
@@ -2484,10 +2564,24 @@ impl DeviceManager {
             return Vec::new();
         }
 
-        // Translate GPAs to slice offsets by subtracting gpa_base.
+        // Translate GPAs to slice offsets (checked against ram base).
         let gpa_base = qcfg.gpa_base as usize;
-        let desc_addr = qcfg.desc_addr as usize - gpa_base;
-        let avail_addr = qcfg.avail_addr as usize - gpa_base;
+        let Some(desc_addr) = (qcfg.desc_addr as usize).checked_sub(gpa_base) else {
+            tracing::warn!(
+                "handle_net_tx: desc GPA {:#x} below ram base {:#x}",
+                qcfg.desc_addr,
+                gpa_base
+            );
+            return Vec::new();
+        };
+        let Some(avail_addr) = (qcfg.avail_addr as usize).checked_sub(gpa_base) else {
+            tracing::warn!(
+                "handle_net_tx: avail GPA {:#x} below ram base {:#x}",
+                qcfg.avail_addr,
+                gpa_base
+            );
+            return Vec::new();
+        };
         let q_size = qcfg.size as usize;
 
         if avail_addr + 4 > memory.len() {
@@ -2516,9 +2610,13 @@ impl DeviceManager {
                 if d_off + 16 > memory.len() {
                     break;
                 }
-                let addr = u64::from_le_bytes(memory[d_off..d_off + 8].try_into().unwrap())
-                    as usize
-                    - gpa_base;
+                let addr = match (u64::from_le_bytes(memory[d_off..d_off + 8].try_into().unwrap())
+                    as usize)
+                    .checked_sub(gpa_base)
+                {
+                    Some(a) => a,
+                    None => continue,
+                };
                 let len =
                     u32::from_le_bytes(memory[d_off + 8..d_off + 12].try_into().unwrap()) as usize;
                 let flags = u16::from_le_bytes(memory[d_off + 12..d_off + 14].try_into().unwrap());
@@ -2590,10 +2688,24 @@ impl DeviceManager {
             return Vec::new();
         }
 
-        // Translate GPAs to slice offsets by subtracting gpa_base.
+        // Translate GPAs to slice offsets (checked against ram base).
         let gpa_base = qcfg.gpa_base as usize;
-        let desc_addr = qcfg.desc_addr as usize - gpa_base;
-        let avail_addr = qcfg.avail_addr as usize - gpa_base;
+        let Some(desc_addr) = (qcfg.desc_addr as usize).checked_sub(gpa_base) else {
+            tracing::warn!(
+                "handle_bridge_tx: desc GPA {:#x} below ram base {:#x}",
+                qcfg.desc_addr,
+                gpa_base
+            );
+            return Vec::new();
+        };
+        let Some(avail_addr) = (qcfg.avail_addr as usize).checked_sub(gpa_base) else {
+            tracing::warn!(
+                "handle_bridge_tx: avail GPA {:#x} below ram base {:#x}",
+                qcfg.avail_addr,
+                gpa_base
+            );
+            return Vec::new();
+        };
         let q_size = qcfg.size as usize;
 
         if avail_addr + 4 > memory.len() {
@@ -2621,9 +2733,13 @@ impl DeviceManager {
                 if d_off + 16 > memory.len() {
                     break;
                 }
-                let addr = u64::from_le_bytes(memory[d_off..d_off + 8].try_into().unwrap())
-                    as usize
-                    - gpa_base;
+                let addr = match (u64::from_le_bytes(memory[d_off..d_off + 8].try_into().unwrap())
+                    as usize)
+                    .checked_sub(gpa_base)
+                {
+                    Some(a) => a,
+                    None => continue,
+                };
                 let len =
                     u32::from_le_bytes(memory[d_off + 8..d_off + 12].try_into().unwrap()) as usize;
                 let flags = u16::from_le_bytes(memory[d_off + 12..d_off + 14].try_into().unwrap());
@@ -2704,10 +2820,16 @@ impl DeviceManager {
             return false;
         }
 
-        // Translate GPAs to slice offsets by subtracting gpa_base.
-        let desc_addr = mmio.queue_desc[qi] as usize - gpa_base;
-        let avail_addr = mmio.queue_driver[qi] as usize - gpa_base;
-        let used_addr = mmio.queue_device[qi] as usize - gpa_base;
+        // Translate GPAs to slice offsets (checked against ram base).
+        let Some(desc_addr) = (mmio.queue_desc[qi] as usize).checked_sub(gpa_base) else {
+            return false;
+        };
+        let Some(avail_addr) = (mmio.queue_driver[qi] as usize).checked_sub(gpa_base) else {
+            return false;
+        };
+        let Some(used_addr) = (mmio.queue_device[qi] as usize).checked_sub(gpa_base) else {
+            return false;
+        };
         let q_size = mmio.queue_num[qi] as usize;
         drop(mmio);
 
@@ -2771,7 +2893,9 @@ impl DeviceManager {
                     u16::from_le_bytes(guest_mem[d_off + 12..d_off + 14].try_into().unwrap());
                 let next =
                     u16::from_le_bytes(guest_mem[d_off + 14..d_off + 16].try_into().unwrap());
-                let addr = addr_gpa - gpa_base;
+                let Some(addr) = addr_gpa.checked_sub(gpa_base) else {
+                    continue;
+                };
 
                 if flags & 2 != 0 && addr + len <= guest_mem.len() {
                     // Write from [virtio_hdr | frame] combined.

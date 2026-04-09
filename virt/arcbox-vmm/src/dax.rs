@@ -80,21 +80,23 @@ impl arcbox_fs::DaxMapper for HvDaxMapper {
             return Err(libc::EINVAL);
         }
 
+        // Hold the lock across overlap check, mmap, hv_vm_map, and insertion
+        // to prevent TOCTOU races between concurrent setup_mapping calls.
+        // mmap and hv_vm_map are sub-microsecond, so holding the mutex is fine.
+        let mut mappings = self.mappings.lock().unwrap();
+
         // Overlap check: no existing mapping may intersect [window_offset, end).
-        {
-            let mappings = self.mappings.lock().unwrap();
-            for (&existing_offset, existing) in &*mappings {
-                let existing_end = existing_offset + existing.length as u64;
-                if window_offset < existing_end && end > existing_offset {
-                    tracing::warn!(
-                        "DAX setup_mapping overlap: new [{:#x}..{:#x}) vs existing [{:#x}..{:#x})",
-                        window_offset,
-                        end,
-                        existing_offset,
-                        existing_end,
-                    );
-                    return Err(libc::EEXIST);
-                }
+        for (&existing_offset, existing) in &*mappings {
+            let existing_end = existing_offset + existing.length as u64;
+            if window_offset < existing_end && end > existing_offset {
+                tracing::warn!(
+                    "DAX setup_mapping overlap: new [{:#x}..{:#x}) vs existing [{:#x}..{:#x})",
+                    window_offset,
+                    end,
+                    existing_offset,
+                    existing_end,
+                );
+                return Err(libc::EEXIST);
             }
         }
 
@@ -141,7 +143,6 @@ impl arcbox_fs::DaxMapper for HvDaxMapper {
             return Err(libc::EFAULT);
         }
 
-        let mut mappings = self.mappings.lock().unwrap();
         mappings.insert(
             window_offset,
             DaxMapping {
