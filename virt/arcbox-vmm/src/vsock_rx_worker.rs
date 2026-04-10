@@ -520,6 +520,13 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                 }
             }
 
+            if registered_fds.len() != current_fds.len() {
+                tracing::info!(
+                    "vsock-rx: fd registration changed: {} -> {}",
+                    registered_fds.len(),
+                    current_fds.len()
+                );
+            }
             registered_fds = current_fds;
         }
 

@@ -1775,23 +1775,11 @@ impl DeviceManager {
             VsockOp::Request,
         );
 
-        // Try direct injection for OP_REQUEST. The worker re-reads
-        // used_idx from guest memory on each iteration, so there is no
-        // used_idx conflict even if the worker is already running.
-        if self.inject_vsock_rx_raw(&hdr.to_bytes()) {
-            if let Ok(mut mgr) = self.vsock_connections.lock() {
-                mgr.backend_rxq.retain(|qid| *qid != id);
-                if let Some(conn) = mgr.get_mut(&id) {
-                    conn.rx_queue.dequeue();
-                }
-            }
-            return true;
-        }
-        tracing::debug!(
-            "vsock inject: device not ready, deferring to poll_vsock_rx (guest_port={})",
-            id.guest_port,
-        );
-        false
+        // The vsock_rx_worker is the sole writer to the RX queue.
+        // OP_REQUEST stays in backend_rxq for the worker's
+        // drain_control_packets() to inject.
+        let _ = hdr;
+        true
     }
 
     /// Injects a raw packet into the vsock RX queue (queue 0).
