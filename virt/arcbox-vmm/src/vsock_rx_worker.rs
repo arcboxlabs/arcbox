@@ -616,11 +616,17 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                 };
 
                 if credit == 0 {
-                    // Credit exhausted. Flush any pending interrupt so the
-                    // guest can process queued data and post a CreditUpdate.
-                    // Then send a CreditRequest and yield to let the vCPU
-                    // thread process the guest's TX queue (which contains
-                    // the CreditUpdate response).
+                    if let Ok(mgr) = ctx.vsock_mgr.lock() {
+                        if let Some(c) = mgr.get(&conn_id) {
+                            tracing::info!(
+                                "vsock-rx: credit=0 conn={:?} buf_alloc={} rx_cnt={} peer_fwd={}",
+                                conn_id,
+                                c.peer_buf_alloc,
+                                c.rx_cnt.0,
+                                c.peer_fwd_cnt.0,
+                            );
+                        }
+                    }
                     if batch_count > 0 {
                         trigger_irq(&ctx);
                         batch_count = 0;
@@ -710,7 +716,13 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                         batch_start = Some(Instant::now());
                     }
                 } else {
-                    // Injection failed (descriptor too small or exhausted).
+                    // Injection failed — partial write prevented commit.
+                    tracing::warn!(
+                        "vsock-rx: inject_packet returned 0, pkt_len={} desc_cap={} credit={}",
+                        pkt.len(),
+                        desc_cap,
+                        credit,
+                    );
                     if batch_count > 0 {
                         trigger_irq(&ctx);
                         batch_count = 0;

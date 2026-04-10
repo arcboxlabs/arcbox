@@ -72,9 +72,11 @@ mod inner {
     /// to the default 8 KiB.
     const RELAY_BUF_SIZE: usize = 256 * 1024;
 
-    /// Vsock buffer target: 8 MiB. Child sockets inherit from the listener,
+    /// Vsock buffer target. Child sockets inherit from the listener,
     /// so OP_RESPONSE carries the large buf_alloc immediately.
-    const VSOCK_BUF_SIZE: usize = 8 * 1024 * 1024;
+    /// NOTE: 8 MiB caused guest kernel to stop sending CreditUpdates.
+    /// Using 2 MiB as a safe value pending kernel investigation.
+    const VSOCK_BUF_SIZE: usize = 2 * 1024 * 1024;
 
     /// Sets the vsock-specific buffer sizes that directly control the
     /// guest kernel's `buf_alloc` advertised to the host.
