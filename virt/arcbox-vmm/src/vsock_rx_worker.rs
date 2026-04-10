@@ -312,13 +312,19 @@ fn poll_vsock_inline_conns(
         };
         let credit = (Wrapping(peer_buf_alloc) - (conn.local_rx_cnt - peer_fwd_cnt)).0 as usize;
         if credit == 0 {
-            continue; // Will be retried next iteration after CreditUpdate.
+            continue;
         }
 
         // 2. Check descriptor capacity.
         let desc_cap = peek_rx_capacity(ctx, *used_idx);
         if desc_cap <= VsockHeader::SIZE {
-            break; // Descriptor exhaustion.
+            // Flush any pending interrupt so guest can refill descriptors.
+            if *batch_count > 0 {
+                trigger_irq(ctx);
+                *batch_count = 0;
+                *batch_start = None;
+            }
+            break;
         }
         let max_payload = (desc_cap - VsockHeader::SIZE)
             .min(credit)
@@ -328,6 +334,11 @@ fn poll_vsock_inline_conns(
         std::sync::atomic::fence(Ordering::Acquire);
         let avail_idx = ctx.guest_mem.read_u16(ctx.rx_queue.avail_gpa as usize + 2);
         if *used_idx == avail_idx {
+            if *batch_count > 0 {
+                trigger_irq(ctx);
+                *batch_count = 0;
+                *batch_start = None;
+            }
             break;
         }
 
