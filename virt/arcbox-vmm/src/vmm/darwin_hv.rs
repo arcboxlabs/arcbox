@@ -674,6 +674,7 @@ impl Vmm {
         if self.config.networking {
             let net_config = arcbox_virtio::net::NetConfig {
                 mac: arcbox_virtio::net::NetConfig::random_mac(),
+                mtu: arcbox_net::darwin::smoltcp_device::ENHANCED_ETHERNET_MTU as u16,
                 ..Default::default()
             };
             let mut net_dev = arcbox_virtio::net::VirtioNet::new(net_config);
