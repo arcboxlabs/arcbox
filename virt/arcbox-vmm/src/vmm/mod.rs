@@ -292,6 +292,9 @@ pub struct Vmm {
     /// Used by connect_vsock_hv to inject OP_REQUEST packets after VM starts.
     #[cfg(target_os = "macos")]
     hv_device_manager: Option<std::sync::Arc<DeviceManager>>,
+    /// Sender for promoting port-forward connections to vsock inline inject.
+    #[cfg(target_os = "macos")]
+    vsock_inline_tx: Option<crossbeam_channel::Sender<crate::vsock_rx_worker::VsockInlineConn>>,
     /// HV-side network fd (NIC1). Paired with the NetworkDatapath fd.
     /// Kept alive so the socketpair stays open while the VM runs.
     #[cfg(target_os = "macos")]
@@ -400,6 +403,8 @@ impl Vmm {
             resolved_backend: None,
             #[cfg(target_os = "macos")]
             hv_device_manager: None,
+            #[cfg(target_os = "macos")]
+            vsock_inline_tx: None,
             #[cfg(target_os = "macos")]
             hv_net_fd: None,
             hv_bridge_net_fd: None,

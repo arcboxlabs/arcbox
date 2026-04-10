@@ -909,6 +909,27 @@ impl VmManager {
         vmm.connect_vsock(port).map_err(CoreError::from)
     }
 
+    /// Promotes a port-forward TCP stream to vsock inline injection.
+    #[cfg(target_os = "macos")]
+    pub fn promote_vsock_inline(
+        &self,
+        id: &VmId,
+        stream: std::net::TcpStream,
+        host_port: u32,
+        guest_port: u32,
+    ) -> Result<bool> {
+        let vms = self.vms.read().map_err(|_| CoreError::LockPoisoned)?;
+        let entry = vms
+            .get(id)
+            .ok_or_else(|| CoreError::not_found(id.to_string()))?;
+        let vmm = entry
+            .vmm
+            .as_ref()
+            .ok_or_else(|| CoreError::invalid_state("VMM not initialized"))?;
+        vmm.promote_vsock_inline(stream, host_port, guest_port)
+            .map_err(CoreError::from)
+    }
+
     /// Reads serial console output from a running VM (macOS only).
     #[cfg(target_os = "macos")]
     pub fn read_console_output(&self, id: &VmId) -> Result<String> {

@@ -1434,6 +1434,12 @@ impl Vmm {
 
         device_manager.set_inline_conn_channel(conn_rx);
 
+        // Create vsock inline connection channel for direct injection.
+        let (vsock_inline_tx, vsock_inline_rx) =
+            crossbeam_channel::bounded::<crate::vsock_rx_worker::VsockInlineConn>(256);
+        device_manager.set_vsock_inline_conn_channel(vsock_inline_rx);
+        self.vsock_inline_tx = Some(vsock_inline_tx);
+
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
             VmmError::Device(format!(
                 "tokio runtime not available for network datapath: {e}"

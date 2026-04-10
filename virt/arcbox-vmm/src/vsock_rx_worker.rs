@@ -11,6 +11,8 @@
 //! - **Interrupt coalescing**: batches packets before firing GIC SPI
 //! - **Control packets**: REQUEST, RESPONSE, CREDIT_UPDATE, RESET
 
+use std::io::Read;
+use std::num::Wrapping;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -47,6 +49,28 @@ pub struct VsockRxQueueConfig {
     pub size: u16,
 }
 
+/// A port-forwarding TCP connection promoted to the inline inject path.
+///
+/// Instead of relaying through a socketpair, the worker reads directly
+/// from this TCP stream into guest descriptor buffers, prepending a
+/// 44-byte VsockHeader inline. Eliminates 4 copies and 2 syscalls
+/// compared to the socketpair path.
+pub struct VsockInlineConn {
+    /// Host-side TCP stream (non-blocking, clone of the port forwarder's stream).
+    pub stream: std::net::TcpStream,
+    /// Vsock connection identity.
+    pub conn_id: VsockConnectionId,
+    /// Guest CID (typically 3).
+    pub guest_cid: u64,
+    /// Bytes injected into guest RX by this inline path.
+    pub local_rx_cnt: Wrapping<u32>,
+    /// Host stream reached EOF.
+    pub host_eof: bool,
+}
+
+// SAFETY: TcpStream is Send; all other fields are plain data.
+unsafe impl Send for VsockInlineConn {}
+
 /// Shared context for the vsock RX worker thread.
 pub struct VsockRxWorkerContext {
     pub guest_mem: GuestMemWriter,
@@ -57,6 +81,8 @@ pub struct VsockRxWorkerContext {
     pub exit_vcpus: Arc<dyn Fn() + Send + Sync>,
     pub vsock_mgr: Arc<Mutex<VsockConnectionManager>>,
     pub running: Arc<AtomicBool>,
+    /// Channel for receiving promoted port-forward connections.
+    pub inline_conn_rx: crossbeam_channel::Receiver<VsockInlineConn>,
 }
 
 // SAFETY: All fields are Send+Sync or wrapped in Arc<Mutex/RwLock>.
@@ -226,6 +252,163 @@ fn build_control_packet(
     hdr.to_bytes().to_vec()
 }
 
+/// Writes a 44-byte VsockHeader (OP_RW) directly into a guest descriptor
+/// buffer. Returns `VsockHeader::SIZE` on success, 0 if buffer too small.
+fn write_inline_vsock_header(
+    buf: &mut [u8],
+    conn: &VsockInlineConn,
+    payload_len: usize,
+    fwd_cnt: u32,
+) -> usize {
+    if buf.len() < VsockHeader::SIZE {
+        return 0;
+    }
+    buf[0..8].copy_from_slice(&2u64.to_le_bytes()); // src_cid = HOST
+    buf[8..16].copy_from_slice(&conn.guest_cid.to_le_bytes()); // dst_cid
+    buf[16..20].copy_from_slice(&conn.conn_id.host_port.to_le_bytes()); // src_port
+    buf[20..24].copy_from_slice(&conn.conn_id.guest_port.to_le_bytes()); // dst_port
+    buf[24..28].copy_from_slice(&(payload_len as u32).to_le_bytes()); // len
+    buf[28..30].copy_from_slice(&1u16.to_le_bytes()); // socket_type = STREAM
+    buf[30..32].copy_from_slice(&(VsockOp::Rw as u16).to_le_bytes()); // op
+    buf[32..36].copy_from_slice(&0u32.to_le_bytes()); // flags
+    buf[36..40].copy_from_slice(&TX_BUFFER_SIZE.to_le_bytes()); // buf_alloc
+    buf[40..44].copy_from_slice(&fwd_cnt.to_le_bytes()); // fwd_cnt
+    VsockHeader::SIZE
+}
+
+/// Polls all inline (promoted) connections, reading from host TCP sockets
+/// directly into guest descriptor buffers. This is the zero-socketpair
+/// fast path for port forwarding.
+fn poll_vsock_inline_conns(
+    ctx: &VsockRxWorkerContext,
+    inline_conns: &mut Vec<VsockInlineConn>,
+    used_idx: &mut u16,
+    batch_count: &mut u16,
+    batch_start: &mut Option<Instant>,
+) {
+    let q_size = ctx.rx_queue.size as usize;
+    if q_size == 0 {
+        return;
+    }
+
+    // Prune closed connections.
+    inline_conns.retain(|c| !c.host_eof);
+
+    for conn in inline_conns.iter_mut() {
+        if (*batch_count as usize) >= BATCH_SIZE {
+            break;
+        }
+
+        // 1. Check credit (peer state from manager, local rx_cnt without lock).
+        let (peer_buf_alloc, peer_fwd_cnt, fwd_cnt) = {
+            let Ok(mgr) = ctx.vsock_mgr.lock() else {
+                continue;
+            };
+            let Some(c) = mgr.get(&conn.conn_id) else {
+                conn.host_eof = true;
+                continue;
+            };
+            (c.peer_buf_alloc, c.peer_fwd_cnt, c.fwd_cnt.0)
+        };
+        let credit = (Wrapping(peer_buf_alloc) - (conn.local_rx_cnt - peer_fwd_cnt)).0 as usize;
+        if credit == 0 {
+            continue; // Will be retried next iteration after CreditUpdate.
+        }
+
+        // 2. Check descriptor capacity.
+        let desc_cap = peek_rx_capacity(ctx, *used_idx);
+        if desc_cap <= VsockHeader::SIZE {
+            break; // Descriptor exhaustion.
+        }
+        let max_payload = (desc_cap - VsockHeader::SIZE)
+            .min(credit)
+            .min(MAX_READ_SIZE);
+
+        // 3. Pop descriptor from avail ring.
+        std::sync::atomic::fence(Ordering::Acquire);
+        let avail_idx = ctx.guest_mem.read_u16(ctx.rx_queue.avail_gpa as usize + 2);
+        if *used_idx == avail_idx {
+            break;
+        }
+
+        let ring_off = ctx.rx_queue.avail_gpa as usize + 4 + 2 * ((*used_idx as usize) % q_size);
+        let head_idx = ctx.guest_mem.read_u16(ring_off) as usize;
+
+        let d_off = ctx.rx_queue.desc_gpa as usize + head_idx * 16;
+        let Some(desc_slice) = ctx.guest_mem.slice(d_off, 16) else {
+            continue;
+        };
+        let addr_gpa = u64::from_le_bytes(desc_slice[0..8].try_into().unwrap()) as usize;
+        let buf_len = u32::from_le_bytes(desc_slice[8..12].try_into().unwrap()) as usize;
+        let flags = u16::from_le_bytes(desc_slice[12..14].try_into().unwrap());
+
+        if flags & 2 == 0 || buf_len < VsockHeader::SIZE + 1 {
+            continue;
+        }
+
+        // SAFETY: descriptor buffers are device-owned during injection.
+        let Some(buf) = (unsafe { ctx.guest_mem.slice_mut(addr_gpa, buf_len) }) else {
+            continue;
+        };
+
+        // 4. Read TCP payload directly into guest buffer at offset 44.
+        let payload_limit = max_payload.min(buf_len - VsockHeader::SIZE);
+        let payload_buf = &mut buf[VsockHeader::SIZE..VsockHeader::SIZE + payload_limit];
+        match conn.stream.read(payload_buf) {
+            Ok(0) => {
+                // EOF — send OP_SHUTDOWN.
+                conn.host_eof = true;
+                let pkt = build_control_packet(
+                    conn.conn_id,
+                    conn.guest_cid,
+                    VsockOp::Shutdown,
+                    fwd_cnt,
+                    3, // VIRTIO_VSOCK_SHUTDOWN_RCV | SEND
+                );
+                if inject_packet(ctx, &pkt, used_idx) > 0 {
+                    *batch_count += 1;
+                    if batch_start.is_none() {
+                        *batch_start = Some(Instant::now());
+                    }
+                }
+            }
+            Ok(n) => {
+                // 5. Write 44-byte VsockHeader inline.
+                write_inline_vsock_header(buf, conn, n, fwd_cnt);
+                let total = VsockHeader::SIZE + n;
+
+                // 6. Update used ring.
+                let used_entry_off =
+                    ctx.rx_queue.used_gpa as usize + 4 + ((*used_idx as usize) % q_size) * 8;
+                ctx.guest_mem.write_u32(used_entry_off, head_idx as u32);
+                ctx.guest_mem.write_u32(used_entry_off + 4, total as u32);
+
+                std::sync::atomic::fence(Ordering::Release);
+                *used_idx = used_idx.wrapping_add(1);
+                ctx.guest_mem
+                    .write_u16(ctx.rx_queue.used_gpa as usize + 2, *used_idx);
+
+                // 7. Update credit tracking.
+                conn.local_rx_cnt += Wrapping(n as u32);
+                if let Ok(mut mgr) = ctx.vsock_mgr.lock() {
+                    if let Some(c) = mgr.get_mut(&conn.conn_id) {
+                        c.record_rx(n as u32);
+                    }
+                }
+
+                *batch_count += 1;
+                if batch_start.is_none() {
+                    *batch_start = Some(Instant::now());
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => {
+                conn.host_eof = true;
+            }
+        }
+    }
+}
+
 /// Main loop for the vsock RX worker thread.
 pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
     tracing::info!("vsock-rx worker started (queue_size={})", ctx.rx_queue.size);
@@ -245,15 +428,30 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
     let mut batch_start: Option<Instant> = None;
     let mut registered_fds: Vec<i32> = Vec::new();
     let mut read_buf = vec![0u8; MAX_READ_SIZE];
+    let mut inline_conns: Vec<VsockInlineConn> = Vec::new();
 
     let timeout = libc::timespec {
         tv_sec: 0,
         tv_nsec: POLL_TIMEOUT.as_nanos() as i64,
     };
+    let zero_timeout = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
 
     loop {
         if !ctx.running.load(Ordering::Relaxed) {
             break;
+        }
+
+        // ----- Accept new inline connections (non-blocking) -----
+        while let Ok(conn) = ctx.inline_conn_rx.try_recv() {
+            tracing::info!(
+                "vsock inline conn added: host_port={} guest_port={}",
+                conn.conn_id.host_port,
+                conn.conn_id.guest_port,
+            );
+            inline_conns.push(conn);
         }
 
         // ----- Dynamic fd registration -----
@@ -321,7 +519,25 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
         // ----- Also drain control packets (REQUEST, RESPONSE, CREDIT_UPDATE, RESET) -----
         drain_control_packets(&ctx, &mut used_idx, &mut batch_count, &mut batch_start);
 
+        // ----- Poll inline connections (direct TCP → guest buffer) -----
+        if !inline_conns.is_empty() {
+            poll_vsock_inline_conns(
+                &ctx,
+                &mut inline_conns,
+                &mut used_idx,
+                &mut batch_count,
+                &mut batch_start,
+            );
+        }
+
         // ----- kqueue wait -----
+        // Use zero timeout when inline conns are active (non-blocking poll
+        // so we return to inline polling quickly).
+        let effective_timeout = if inline_conns.is_empty() {
+            &timeout
+        } else {
+            &zero_timeout
+        };
         let mut events = [libc::kevent {
             ident: 0,
             filter: 0,
@@ -337,7 +553,7 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                 0,
                 events.as_mut_ptr(),
                 i32::try_from(events.len()).unwrap_or(16),
-                &raw const timeout,
+                std::ptr::from_ref::<libc::timespec>(effective_timeout),
             )
         };
 

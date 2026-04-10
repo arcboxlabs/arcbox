@@ -267,9 +267,11 @@ impl VirtioVsock {
                 // Guest accepted a host-initiated connection.
                 // src_port = guest port, dst_port = host ephemeral port.
                 tracing::info!(
-                    "Vsock TX: OP_RESPONSE — connection established (guest_port={}, host_port={})",
+                    "Vsock TX: OP_RESPONSE — connection established (guest_port={}, host_port={}, buf_alloc={}, fwd_cnt={})",
                     src_port,
                     dst_port,
+                    buf_alloc,
+                    fwd_cnt,
                 );
                 if let Some(conns) = connections {
                     conns.update_peer_credit(src_port, dst_port, buf_alloc, fwd_cnt);
@@ -796,7 +798,7 @@ impl VirtioDevice for VirtioVsock {
                     let dst_cid = { hdr.dst_cid };
                     let src_port = { hdr.src_port };
                     let dst_port = { hdr.dst_port };
-                    tracing::info!(
+                    tracing::trace!(
                         "Vsock TX: op={} src={}:{} dst={}:{} len={} (packet_data={} bytes)",
                         op_val,
                         src_cid,

@@ -605,6 +605,34 @@ impl Vmm {
         }
     }
 
+    /// Promotes a port-forward TCP stream to the vsock inline inject path.
+    /// The stream will be read by the vsock-rx worker directly into guest
+    /// memory, bypassing the socketpair.
+    pub fn promote_vsock_inline(
+        &self,
+        stream: std::net::TcpStream,
+        host_port: u32,
+        guest_port: u32,
+    ) -> Result<bool> {
+        let Some(ref tx) = self.vsock_inline_tx else {
+            return Ok(false);
+        };
+
+        let guest_cid = self.config.guest_cid.unwrap_or(3) as u64;
+        let conn = crate::vsock_rx_worker::VsockInlineConn {
+            stream,
+            conn_id: crate::vsock_manager::VsockConnectionId {
+                host_port,
+                guest_port,
+            },
+            guest_cid,
+            local_rx_cnt: std::num::Wrapping(0),
+            host_eof: false,
+        };
+
+        Ok(tx.try_send(conn).is_ok())
+    }
+
     /// Reads console output (hvc0) from the VM.
     pub fn read_console_output(&self) -> Result<String> {
         if let Some(ref vm) = self.darwin_vm {

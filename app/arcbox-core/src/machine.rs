@@ -635,6 +635,26 @@ impl MachineManager {
         self.vm_manager.connect_vsock(&machine.vm_id, port)
     }
 
+    /// Promotes a port-forward TCP stream to vsock inline injection.
+    #[cfg(target_os = "macos")]
+    pub fn promote_vsock_inline(
+        &self,
+        name: &str,
+        stream: std::net::TcpStream,
+        host_port: u32,
+        guest_port: u32,
+    ) -> Result<bool> {
+        let vm_id = {
+            let machines = self.machines.read().map_err(|_| CoreError::LockPoisoned)?;
+            let machine = machines
+                .get(name)
+                .ok_or_else(|| CoreError::not_found(name.to_string()))?;
+            machine.vm_id.clone()
+        };
+        self.vm_manager
+            .promote_vsock_inline(&vm_id, stream, host_port, guest_port)
+    }
+
     /// Connects to the agent on a running machine (Linux).
     #[cfg(target_os = "linux")]
     pub fn connect_agent(&self, name: &str) -> Result<crate::agent_client::AgentClient> {

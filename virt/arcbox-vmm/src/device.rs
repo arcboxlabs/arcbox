@@ -460,6 +460,9 @@ pub struct DeviceManager {
         Mutex<Option<crossbeam_channel::Receiver<arcbox_net_inject::inline_conn::InlineConn>>>,
     /// Vsock RX worker thread handle. Spawned at DRIVER_OK for VirtioVsock.
     vsock_rx_worker_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Channel for promoted vsock inline connections (bypasses socketpair).
+    vsock_inline_conn_channel:
+        Mutex<Option<crossbeam_channel::Receiver<crate::vsock_rx_worker::VsockInlineConn>>>,
 }
 
 // SAFETY: guest_ram_base points to memory that is valid for the lifetime of the
@@ -497,6 +500,7 @@ impl DeviceManager {
             rx_inject_channel: Mutex::new(None),
             inline_conn_channel: Mutex::new(None),
             vsock_rx_worker_handle: Mutex::new(None),
+            vsock_inline_conn_channel: Mutex::new(None),
         }
     }
 
@@ -608,6 +612,17 @@ impl DeviceManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(rx);
     }
 
+    /// Stores the vsock inline connection channel for the worker thread.
+    pub fn set_vsock_inline_conn_channel(
+        &mut self,
+        rx: crossbeam_channel::Receiver<crate::vsock_rx_worker::VsockInlineConn>,
+    ) {
+        *self
+            .vsock_inline_conn_channel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(rx);
+    }
+
     /// Returns the primary NIC host fd (without removing it).
     /// The fd is shared: net-io thread reads, handle_net_tx writes.
     fn get_net_host_fd_slot(&self) -> Option<i32> {
@@ -712,6 +727,17 @@ impl DeviceManager {
         };
         let vsock_mgr = self.vsock_connections.clone();
 
+        // Take the inline connection channel if set, else create a dummy.
+        let inline_conn_rx = self
+            .vsock_inline_conn_channel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .unwrap_or_else(|| {
+                let (_tx, rx) = crossbeam_channel::unbounded();
+                rx
+            });
+
         let ctx = crate::vsock_rx_worker::VsockRxWorkerContext {
             guest_mem,
             rx_queue,
@@ -721,6 +747,7 @@ impl DeviceManager {
             exit_vcpus,
             vsock_mgr,
             running,
+            inline_conn_rx,
         };
 
         match std::thread::Builder::new()

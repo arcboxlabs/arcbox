@@ -43,8 +43,21 @@ pub enum Error {
 /// - **Linux**: opens an `AF_VSOCK` socket
 pub trait VsockConnector: Send + Sync + 'static {
     /// Opens a vsock connection to the given guest port.
-    /// Returns a raw fd that the caller owns.
-    fn connect(&self, guest_port: u32) -> Result<RawFd, String>;
+    /// Returns `(fd, host_port)` where fd is a raw fd the caller owns
+    /// and host_port is the ephemeral vsock port assigned to this connection.
+    fn connect(&self, guest_port: u32) -> Result<(RawFd, u32), String>;
+
+    /// Promotes a host TCP stream to the inline inject path, bypassing
+    /// the socketpair for host→guest data. Returns true if promotion
+    /// succeeded. Default: no inline support (falls back to socketpair relay).
+    fn promote_inline(
+        &self,
+        _stream: std::net::TcpStream,
+        _host_port: u32,
+        _guest_port: u32,
+    ) -> bool {
+        false
+    }
 }
 
 /// A single port forwarding rule.
@@ -165,7 +178,7 @@ async fn listener_loop(
 
 /// Relays a single TCP connection over vsock to the guest.
 async fn relay_connection(
-    mut tcp: tokio::net::TcpStream,
+    tcp: tokio::net::TcpStream,
     connector: Arc<dyn VsockConnector>,
     target_ip: Ipv4Addr,
     target_port: u16,
@@ -175,10 +188,12 @@ async fn relay_connection(
     // Open vsock connection to the guest port forwarding service.
     // This is a blocking call (socketpair creation + OP_REQUEST injection),
     // so we run it on a blocking thread.
-    let fd = tokio::task::spawn_blocking(move || connector.connect(PORT_FORWARD_VSOCK_PORT))
-        .await
-        .map_err(|e| Error::VsockConnect(e.to_string()))?
-        .map_err(Error::VsockConnect)?;
+    let connector2 = Arc::clone(&connector);
+    let (fd, host_port) =
+        tokio::task::spawn_blocking(move || connector2.connect(PORT_FORWARD_VSOCK_PORT))
+            .await
+            .map_err(|e| Error::VsockConnect(e.to_string()))?
+            .map_err(Error::VsockConnect)?;
 
     // Wrap the raw fd in a tokio AsyncFd for non-blocking I/O.
     // SAFETY: fd is a valid, owned socket from the connector.
@@ -201,8 +216,50 @@ async fn relay_connection(
         });
     }
 
-    // Bidirectional relay.
-    let (v2t, t2v) = tokio::io::copy_bidirectional(&mut tcp, &mut vsock).await?;
+    // Try to promote host→guest to inline inject (bypasses socketpair).
+    let tcp_std = tcp.into_std().map_err(Error::Io)?;
+    tcp_std.set_nonblocking(true).map_err(Error::Io)?;
+
+    if let Ok(inline_clone) = tcp_std.try_clone() {
+        let promoted = tokio::task::spawn_blocking(move || {
+            connector.promote_inline(inline_clone, host_port, PORT_FORWARD_VSOCK_PORT)
+        })
+        .await
+        .unwrap_or(false);
+
+        if promoted {
+            // Host→guest: handled by vsock-rx worker (inline inject).
+            // Guest→host: half-duplex relay via socketpair.
+            tracing::info!(
+                "Port forward {}:{} promoted to inline inject (host_port={})",
+                target_ip,
+                target_port,
+                host_port,
+            );
+            let tcp_g2h = tokio::net::TcpStream::from_std(tcp_std).map_err(Error::Io)?;
+            let (mut vsock_read, _vsock_write) = tokio::io::split(vsock);
+            let (_tcp_read, mut tcp_write) = tokio::io::split(tcp_g2h);
+            const RELAY_BUF: usize = 256 * 1024;
+            let g2h = tokio::io::copy_buf(
+                &mut tokio::io::BufReader::with_capacity(RELAY_BUF, &mut vsock_read),
+                &mut tcp_write,
+            )
+            .await?;
+            tracing::debug!(
+                "Port forward {}:{} done (inline): guest→host={g2h}",
+                target_ip,
+                target_port,
+            );
+            return Ok(());
+        }
+    }
+
+    // Fallback: full bidirectional relay via socketpair.
+    let mut tcp = tokio::net::TcpStream::from_std(tcp_std).map_err(Error::Io)?;
+    const RELAY_BUF: usize = 256 * 1024;
+    let (v2t, t2v) =
+        tokio::io::copy_bidirectional_with_sizes(&mut tcp, &mut vsock, RELAY_BUF, RELAY_BUF)
+            .await?;
 
     tracing::debug!(
         "Port forward {}:{} done: host→guest={v2t} guest→host={t2v}",

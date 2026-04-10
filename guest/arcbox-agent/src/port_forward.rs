@@ -59,8 +59,76 @@ mod inner {
         }
     }
 
+    // Linux UAPI constants for vsock-specific buffer control.
+    // These options live at the AF_VSOCK socket level, not SOL_VSOCK.
+    // They directly control the virtio_vsock driver's buf_alloc advertised
+    // to the host, unlike generic SO_RCVBUF.
+    const SO_VM_SOCKETS_BUFFER_SIZE: libc::c_int = 0;
+    const SO_VM_SOCKETS_BUFFER_MIN_SIZE: libc::c_int = 1;
+    const SO_VM_SOCKETS_BUFFER_MAX_SIZE: libc::c_int = 2;
+
+    /// Relay buffer size for copy_bidirectional_with_sizes.
+    /// 256 KiB reduces wakeup frequency at high throughput compared
+    /// to the default 8 KiB.
+    const RELAY_BUF_SIZE: usize = 256 * 1024;
+
+    /// Sets the vsock-specific buffer sizes that directly control the
+    /// guest kernel's `buf_alloc` advertised to the host.
+    fn set_vsock_buffers(stream: &VsockStream, size: usize) {
+        use std::os::unix::io::AsRawFd;
+        let fd = stream.as_raw_fd();
+        let size = size as u64;
+        for (opt, name) in [
+            (SO_VM_SOCKETS_BUFFER_MAX_SIZE, "BUFFER_MAX_SIZE"),
+            (SO_VM_SOCKETS_BUFFER_SIZE, "BUFFER_SIZE"),
+            (SO_VM_SOCKETS_BUFFER_MIN_SIZE, "BUFFER_MIN_SIZE"),
+        ] {
+            let ret = unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::AF_VSOCK,
+                    opt,
+                    std::ptr::addr_of!(size).cast(),
+                    std::mem::size_of::<u64>() as libc::socklen_t,
+                )
+            };
+            if ret != 0 {
+                tracing::warn!(
+                    "setsockopt(AF_VSOCK, {name}) failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+
+        let mut effective = 0_u64;
+        let mut len = std::mem::size_of::<u64>() as libc::socklen_t;
+        let ret = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::AF_VSOCK,
+                SO_VM_SOCKETS_BUFFER_SIZE,
+                std::ptr::addr_of_mut!(effective).cast(),
+                std::ptr::addr_of_mut!(len),
+            )
+        };
+        if ret == 0 {
+            tracing::info!(
+                "Port forward vsock buffer configured: requested={size} effective={effective}"
+            );
+        } else {
+            tracing::warn!(
+                "getsockopt(AF_VSOCK, BUFFER_SIZE) failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+
     /// Handles a single forwarded connection.
     async fn handle(mut vsock: VsockStream) -> Result<()> {
+        // Raise vsock buffer to 8 MiB so the guest kernel advertises a
+        // larger buf_alloc, increasing host→guest credit window.
+        set_vsock_buffers(&vsock, 8 * 1024 * 1024);
+
         // Read 6-byte header: [ip: 4][port: 2 BE]
         let mut header = [0u8; 6];
         vsock
@@ -95,9 +163,14 @@ mod inner {
 
         tcp.set_nodelay(true)?;
 
-        let (v2t, t2v) = tokio::io::copy_bidirectional(&mut vsock, &mut tcp)
-            .await
-            .context("port forward relay")?;
+        let (v2t, t2v) = tokio::io::copy_bidirectional_with_sizes(
+            &mut vsock,
+            &mut tcp,
+            RELAY_BUF_SIZE,
+            RELAY_BUF_SIZE,
+        )
+        .await
+        .context("port forward relay")?;
 
         tracing::debug!(
             "Port forward {} done: vsock→tcp={v2t} tcp→vsock={t2v}",

@@ -44,10 +44,24 @@ struct MachineVsockConnector {
 
 #[cfg(target_os = "macos")]
 impl arcbox_port_forward::VsockConnector for MachineVsockConnector {
-    fn connect(&self, guest_port: u32) -> std::result::Result<std::os::unix::io::RawFd, String> {
-        self.machine_manager
+    fn connect(
+        &self,
+        guest_port: u32,
+    ) -> std::result::Result<(std::os::unix::io::RawFd, u32), String> {
+        let fd = self
+            .machine_manager
             .connect_vsock_port(DEFAULT_MACHINE_NAME, guest_port)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        // HV backend duplicates the client fd to match host_port number.
+        #[allow(clippy::cast_sign_loss)]
+        let host_port = fd as u32;
+        Ok((fd, host_port))
+    }
+
+    fn promote_inline(&self, stream: std::net::TcpStream, host_port: u32, guest_port: u32) -> bool {
+        self.machine_manager
+            .promote_vsock_inline(DEFAULT_MACHINE_NAME, stream, host_port, guest_port)
+            .unwrap_or(false)
     }
 }
 const REQUIRED_RUNTIME_ASSETS: [&str; 5] = [

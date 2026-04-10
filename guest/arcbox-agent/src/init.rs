@@ -269,6 +269,16 @@ mod platform {
         if let Err(e) = std::fs::write("/proc/sys/net/ipv4/ip_forward", b"1\n") {
             tracing::warn!(error = %e, "failed to enable ip_forward");
         }
+
+        // Raise socket buffer limits so the virtio_vsock driver can
+        // advertise a large buf_alloc to the host. The default rmem_max
+        // (~212 KiB) caps vsock buf_alloc to 256 KiB, limiting port
+        // forwarding throughput to ~8 Gbps. With 16 MiB rmem_max and
+        // 4 MiB default, new vsock sockets get 4 MiB buffers.
+        ensure_sysctl_at_least("/proc/sys/net/core/rmem_max", 16 * 1024 * 1024);
+        ensure_sysctl_at_least("/proc/sys/net/core/rmem_default", 4 * 1024 * 1024);
+        ensure_sysctl_at_least("/proc/sys/net/core/wmem_max", 16 * 1024 * 1024);
+        ensure_sysctl_at_least("/proc/sys/net/core/wmem_default", 4 * 1024 * 1024);
         // Bring up loopback interface.
         match std::process::Command::new("/bin/busybox")
             .args(["ip", "link", "set", "lo", "up"])
