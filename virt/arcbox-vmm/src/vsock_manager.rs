@@ -186,9 +186,15 @@ impl VsockConnection {
     }
 
     /// Updates peer credit state from an incoming guest packet.
+    /// Only advances peer_fwd_cnt forward (wrapping-aware) to prevent
+    /// out-of-order TX packets from regressing the credit state.
     pub fn update_peer_credit(&mut self, buf_alloc: u32, fwd_cnt: u32) {
         self.peer_buf_alloc = buf_alloc;
-        self.peer_fwd_cnt = Wrapping(fwd_cnt);
+        // Accept fwd_cnt only if it advances (wrapping-safe comparison).
+        let new = Wrapping(fwd_cnt);
+        if (new - self.peer_fwd_cnt).0 < (1u32 << 31) {
+            self.peer_fwd_cnt = new;
+        }
     }
 
     /// Called after data is written to the host stream (from guest OP_RW).

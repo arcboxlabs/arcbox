@@ -709,6 +709,17 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                     if let Ok(mut mgr) = ctx.vsock_mgr.lock() {
                         if let Some(conn) = mgr.get_mut(&conn_id) {
                             conn.record_rx(data.len() as u32);
+                            // Debug: detect credit overrun.
+                            let in_flight = (conn.rx_cnt - conn.peer_fwd_cnt).0;
+                            if in_flight > conn.peer_buf_alloc {
+                                tracing::warn!(
+                                    "vsock-rx: CREDIT OVERRUN conn={:?} in_flight={} buf_alloc={} data_len={}",
+                                    conn_id,
+                                    in_flight,
+                                    conn.peer_buf_alloc,
+                                    data.len(),
+                                );
+                            }
                         }
                     }
                     batch_count += 1;
