@@ -92,7 +92,10 @@ pub struct VsockConnectionId {
 ///
 /// Sized for high-throughput port forwarding over vsock. The guest can
 /// have up to this many bytes in-flight before needing a credit update.
-/// 1 MiB provides ~40 Gbps at sub-ms RTT without stalling on credits.
+/// Host-side TX buffer (guest→host direction). Advertised as
+/// `buf_alloc` in every host→guest packet. The host→guest direction
+/// is limited by the guest's `peer_buf_alloc` (typically 256 KiB
+/// from Linux kernel's virtio_vsock).
 pub const TX_BUFFER_SIZE: u32 = 1024 * 1024;
 
 /// A single host↔guest vsock connection.

@@ -1609,6 +1609,9 @@ impl DeviceManager {
                                                 "Vsock QUEUE_NOTIFY TX: {} completions processed!",
                                                 completions.len(),
                                             );
+                                            // Notify vsock RX worker that credit
+                                            // may have refreshed. Non-blocking write
+                                            // — drop wakeup if pipe is full.
                                         }
                                         tracing::trace!(
                                             "Device {} queue {} processed {} completions",

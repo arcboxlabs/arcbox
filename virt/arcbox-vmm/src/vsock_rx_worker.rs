@@ -23,10 +23,11 @@ use crate::irq::Irq;
 use crate::vsock_manager::{RxOps, TX_BUFFER_SIZE, VsockConnectionId, VsockConnectionManager};
 
 /// Maximum packets to inject per kqueue wakeup.
-const BATCH_SIZE: usize = 64;
+const BATCH_SIZE: usize = 128;
 
 /// Maximum bytes to read from a single socket per iteration.
-/// Larger reads improve throughput by reducing per-packet overhead.
+/// Must account for VsockHeader overhead — actual payload per read is
+/// limited by peek_rx_capacity() - HEADER_SIZE anyway.
 const MAX_READ_SIZE: usize = 65536;
 
 /// Interrupt coalescing timeout (latency bound).
@@ -36,7 +37,7 @@ const COALESCE_TIMEOUT: Duration = Duration::from_micros(50);
 const POLL_TIMEOUT: Duration = Duration::from_millis(1);
 
 /// Backoff when RX descriptors are exhausted.
-const DESCRIPTOR_BACKOFF: Duration = Duration::from_micros(100);
+const DESCRIPTOR_BACKOFF: Duration = Duration::from_micros(50);
 
 /// RX queue layout, captured at DRIVER_OK time.
 pub struct VsockRxQueueConfig {
@@ -411,6 +412,8 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                         old_used = used_idx;
                     }
 
+                    // Brief yield so the vCPU can process the guest's
+                    // CreditUpdate TX response.
                     std::thread::sleep(Duration::from_micros(100));
                     break;
                 }
