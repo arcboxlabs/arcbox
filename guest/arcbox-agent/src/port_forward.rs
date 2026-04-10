@@ -130,11 +130,7 @@ mod inner {
 
     /// Handles a single forwarded connection.
     async fn handle(mut vsock: VsockStream) -> Result<()> {
-        // Fallback: also set on accepted socket in case listener inheritance
-        // didn't apply (older kernels). The OP_RESPONSE already carries the
-        // large buf_alloc from the listener.
         use std::os::unix::io::AsRawFd;
-        set_vsock_fd_buffers(vsock.as_raw_fd(), VSOCK_BUF_SIZE);
 
         // Read 6-byte header: [ip: 4][port: 2 BE]
         let mut header = [0u8; 6];
@@ -170,19 +166,168 @@ mod inner {
 
         tcp.set_nodelay(true)?;
 
-        let (v2t, t2v) = tokio::io::copy_bidirectional_with_sizes(
-            &mut vsock,
-            &mut tcp,
-            RELAY_BUF_SIZE,
-            RELAY_BUF_SIZE,
-        )
-        .await
-        .context("port forward relay")?;
+        // Enlarge TCP buffers to prevent backpressure from stalling the
+        // vsock credit flow. Default SO_SNDBUF (~16 KiB) fills instantly
+        // at 10 Gbps, blocking the agent's relay and stopping CreditUpdates.
+        {
+            use std::os::unix::io::AsRawFd;
+            let tcp_fd = tcp.as_raw_fd();
+            let buf_size: libc::c_int = 4 * 1024 * 1024;
+            for opt in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
+                unsafe {
+                    libc::setsockopt(
+                        tcp_fd,
+                        libc::SOL_SOCKET,
+                        opt,
+                        std::ptr::addr_of!(buf_size).cast(),
+                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                    );
+                }
+            }
+        }
 
-        tracing::debug!(
-            "Port forward {} done: vsock→tcp={v2t} tcp→vsock={t2v}",
-            target_addr,
-        );
+        // Use splice via pipe for kernel-to-kernel data transfer.
+        // vsock→pipe uses copy_splice_read (1 kernel copy), pipe→tcp
+        // uses MSG_SPLICE_PAGES (zero-copy). Eliminates userspace relay.
+        let vsock_fd = vsock.as_raw_fd();
+        let tcp_fd = tcp.as_raw_fd();
+
+        // Keep the streams alive so fds aren't closed.
+        let _vsock_guard = vsock;
+        let _tcp_guard = tcp;
+
+        tokio::task::spawn_blocking(move || splice_relay_fds(vsock_fd, tcp_fd))
+            .await
+            .context("splice relay join")??;
+
+        Ok(())
+    }
+
+    /// Bidirectional splice relay between two fds via a kernel pipe.
+    ///
+    /// Each direction uses `splice(src → pipe) + splice(pipe → dst)`.
+    /// The pipe→tcp leg is zero-copy (MSG_SPLICE_PAGES). The vsock→pipe
+    /// leg uses the kernel's copy_splice_read fallback (one kernel copy,
+    /// no userspace copy). Net: eliminates all userspace memcpy.
+    ///
+    /// Runs on a blocking thread because splice is a blocking syscall.
+    fn splice_relay_fds(vsock_fd: i32, tcp_fd: i32) -> anyhow::Result<()> {
+        // Set both to blocking for splice.
+        unsafe {
+            let flags = libc::fcntl(vsock_fd, libc::F_GETFL);
+            libc::fcntl(vsock_fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
+            let flags = libc::fcntl(tcp_fd, libc::F_GETFL);
+            libc::fcntl(tcp_fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
+        }
+
+        // Create pipes for each direction.
+        let mut pipe_v2t = [0i32; 2]; // vsock → tcp
+        let mut pipe_t2v = [0i32; 2]; // tcp → vsock
+        if unsafe { libc::pipe(pipe_v2t.as_mut_ptr()) } != 0
+            || unsafe { libc::pipe(pipe_t2v.as_mut_ptr()) } != 0
+        {
+            anyhow::bail!("pipe() failed: {}", std::io::Error::last_os_error());
+        }
+
+        // Increase pipe capacity for throughput.
+        unsafe {
+            libc::fcntl(pipe_v2t[0], libc::F_SETPIPE_SZ, 1024 * 1024);
+            libc::fcntl(pipe_t2v[0], libc::F_SETPIPE_SZ, 1024 * 1024);
+        }
+
+        const SPLICE_LEN: usize = 1024 * 1024;
+        const SPLICE_FLAGS: libc::c_uint = libc::SPLICE_F_MOVE | libc::SPLICE_F_MORE;
+
+        // Spawn one thread per direction.
+        let v2t = std::thread::Builder::new()
+            .name("splice-v2t".into())
+            .spawn(move || -> anyhow::Result<u64> {
+                let mut total = 0u64;
+                loop {
+                    let n = unsafe {
+                        libc::splice(
+                            vsock_fd,
+                            std::ptr::null_mut(),
+                            pipe_v2t[1],
+                            std::ptr::null_mut(),
+                            SPLICE_LEN,
+                            SPLICE_FLAGS,
+                        )
+                    };
+                    if n <= 0 {
+                        break;
+                    }
+                    let mut remaining = n as usize;
+                    while remaining > 0 {
+                        let w = unsafe {
+                            libc::splice(
+                                pipe_v2t[0],
+                                std::ptr::null_mut(),
+                                tcp_fd,
+                                std::ptr::null_mut(),
+                                remaining,
+                                SPLICE_FLAGS,
+                            )
+                        };
+                        if w <= 0 {
+                            break;
+                        }
+                        remaining -= w as usize;
+                    }
+                    total += n as u64;
+                }
+                unsafe {
+                    libc::close(pipe_v2t[0]);
+                    libc::close(pipe_v2t[1]);
+                }
+                Ok(total)
+            })?;
+
+        // tcp → vsock direction in current thread.
+        let mut t2v_total = 0u64;
+        loop {
+            let n = unsafe {
+                libc::splice(
+                    tcp_fd,
+                    std::ptr::null_mut(),
+                    pipe_t2v[1],
+                    std::ptr::null_mut(),
+                    SPLICE_LEN,
+                    SPLICE_FLAGS,
+                )
+            };
+            if n <= 0 {
+                break;
+            }
+            let mut remaining = n as usize;
+            while remaining > 0 {
+                let w = unsafe {
+                    libc::splice(
+                        pipe_t2v[0],
+                        std::ptr::null_mut(),
+                        vsock_fd,
+                        std::ptr::null_mut(),
+                        remaining,
+                        SPLICE_FLAGS,
+                    )
+                };
+                if w <= 0 {
+                    break;
+                }
+                remaining -= w as usize;
+            }
+            t2v_total += n as u64;
+        }
+        unsafe {
+            libc::close(pipe_t2v[0]);
+            libc::close(pipe_t2v[1]);
+        }
+
+        let v2t_total = v2t
+            .join()
+            .map_err(|_| anyhow::anyhow!("splice-v2t panicked"))??;
+
+        tracing::debug!("splice relay done: vsock→tcp={v2t_total} tcp→vsock={t2v_total}",);
         Ok(())
     }
 

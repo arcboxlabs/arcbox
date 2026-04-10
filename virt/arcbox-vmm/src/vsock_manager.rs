@@ -189,7 +189,11 @@ impl VsockConnection {
     /// Only advances peer_fwd_cnt forward (wrapping-aware) to prevent
     /// out-of-order TX packets from regressing the credit state.
     pub fn update_peer_credit(&mut self, buf_alloc: u32, fwd_cnt: u32) {
-        self.peer_buf_alloc = buf_alloc;
+        // Take the max buf_alloc seen — prevent out-of-order packets
+        // from regressing the advertised buffer size.
+        if buf_alloc > self.peer_buf_alloc {
+            self.peer_buf_alloc = buf_alloc;
+        }
         // Accept fwd_cnt only if it advances (wrapping-safe comparison).
         let new = Wrapping(fwd_cnt);
         if (new - self.peer_fwd_cnt).0 < (1u32 << 31) {
