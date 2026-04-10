@@ -337,7 +337,18 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                 };
 
                 if credit == 0 {
-                    // Request credit update from guest.
+                    // Credit exhausted. Flush any pending interrupt so the
+                    // guest can process queued data and post a CreditUpdate.
+                    // Then send a CreditRequest and yield to let the vCPU
+                    // thread process the guest's TX queue (which contains
+                    // the CreditUpdate response).
+                    if batch_count > 0 {
+                        trigger_irq(&ctx);
+                        batch_count = 0;
+                        batch_start = None;
+                        old_used = used_idx;
+                    }
+
                     let pkt = {
                         let Ok(mgr) = ctx.vsock_mgr.lock() else { break };
                         let Some(conn) = mgr.get(&conn_id) else { break };
@@ -349,7 +360,14 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                             0,
                         )
                     };
-                    let _ = inject_packet(&ctx, &pkt, &mut used_idx);
+                    if inject_packet(&ctx, &pkt, &mut used_idx) {
+                        // Immediately fire interrupt for the CreditRequest.
+                        trigger_irq(&ctx);
+                        old_used = used_idx;
+                    }
+
+                    // Yield to vCPU thread to process guest's CreditUpdate.
+                    std::thread::sleep(Duration::from_micros(100));
                     break;
                 }
 
@@ -383,6 +401,13 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                 }
 
                 let data = &read_buf[..n as usize];
+                tracing::info!(
+                    "vsock-rx: read {} bytes from fd {} (credit={}, conn={:?})",
+                    data.len(),
+                    fd,
+                    credit,
+                    conn_id,
+                );
                 let pkt = build_rw_packet(conn_id, guest_cid, data, fwd_cnt);
 
                 // Record bytes sent to guest.
