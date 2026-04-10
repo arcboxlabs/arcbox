@@ -1745,21 +1745,14 @@ impl DeviceManager {
             VsockOp::Request,
         );
 
-        // Try direct injection once. If the device isn't DRIVER_OK yet the
-        // pending op stays in `backend_rxq` for deferred processing by
-        // `poll_vsock_rx` — no busy-wait needed.
+        // The vsock_rx_worker thread is the sole writer to the RX queue.
+        // Don't inject here — leave the REQUEST in backend_rxq for the
+        // worker's drain_control_packets() to handle. This avoids
+        // used_idx conflicts between this thread and the worker.
         //
-        // On success we drain the REQUEST from backend_rxq to prevent
-        // poll_vsock_rx from injecting a duplicate.
-        if self.inject_vsock_rx_raw(&hdr.to_bytes()) {
-            if let Ok(mut mgr) = self.vsock_connections.lock() {
-                mgr.backend_rxq.retain(|qid| *qid != id);
-                if let Some(conn) = mgr.get_mut(&id) {
-                    conn.rx_queue.dequeue();
-                }
-            }
-            return true;
-        }
+        // The worker polls backend_rxq every 1ms, so the REQUEST will
+        // be injected promptly.
+        let _ = hdr; // Suppress unused warning.
         tracing::debug!(
             "vsock inject: device not ready, deferring to poll_vsock_rx (guest_port={})",
             id.guest_port,
@@ -1998,6 +1991,7 @@ impl DeviceManager {
     /// Directly writes to guest memory and updates the used ring. Safe to call
     /// from the daemon thread — does NOT acquire `vsock_connections` mutex.
     /// Used by `inject_vsock_connect` for immediate OP_REQUEST delivery.
+    #[allow(dead_code)]
     fn inject_vsock_rx_raw(&self, packet: &[u8]) -> bool {
         let (Some(ram_base), ram_size) = (self.guest_ram_base, self.guest_ram_size) else {
             return false;

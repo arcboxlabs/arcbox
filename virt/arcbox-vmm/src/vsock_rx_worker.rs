@@ -70,18 +70,61 @@ fn trigger_irq(ctx: &VsockRxWorkerContext) {
     (ctx.exit_vcpus)();
 }
 
-/// Injects a raw vsock packet into the guest RX queue.
-/// Returns true on success.
-fn inject_packet(ctx: &VsockRxWorkerContext, packet: &[u8], used_idx: &mut u16) -> bool {
+/// Peeks the next available RX descriptor chain's total writable
+/// capacity (bytes). Returns 0 if no descriptors are available.
+fn peek_rx_capacity(ctx: &VsockRxWorkerContext, used_idx: u16) -> usize {
     let q_size = ctx.rx_queue.size as usize;
     if q_size == 0 {
-        return false;
+        return 0;
+    }
+
+    std::sync::atomic::fence(Ordering::Acquire);
+    let avail_idx = ctx.guest_mem.read_u16(ctx.rx_queue.avail_gpa as usize + 2);
+    if used_idx == avail_idx {
+        return 0;
+    }
+
+    let ring_off = ctx.rx_queue.avail_gpa as usize + 4 + 2 * ((used_idx as usize) % q_size);
+    let head_idx = ctx.guest_mem.read_u16(ring_off) as usize;
+
+    let desc_base = ctx.rx_queue.desc_gpa as usize;
+    let mut capacity = 0usize;
+    let mut idx = head_idx;
+
+    for _ in 0..q_size {
+        let d_off = desc_base + idx * 16;
+        let Some(desc_slice) = ctx.guest_mem.slice(d_off, 16) else {
+            break;
+        };
+        let len = u32::from_le_bytes(desc_slice[8..12].try_into().unwrap()) as usize;
+        let flags = u16::from_le_bytes(desc_slice[12..14].try_into().unwrap());
+        let next = u16::from_le_bytes(desc_slice[14..16].try_into().unwrap());
+
+        if flags & 2 != 0 {
+            capacity += len;
+        }
+        if flags & 1 == 0 {
+            break;
+        }
+        idx = next as usize;
+    }
+
+    capacity
+}
+
+/// Injects a raw vsock packet into the guest RX queue.
+/// Returns the number of bytes written, or 0 on failure.
+/// Only commits the used ring entry if the ENTIRE packet was written.
+fn inject_packet(ctx: &VsockRxWorkerContext, packet: &[u8], used_idx: &mut u16) -> usize {
+    let q_size = ctx.rx_queue.size as usize;
+    if q_size == 0 {
+        return 0;
     }
 
     std::sync::atomic::fence(Ordering::Acquire);
     let avail_idx = ctx.guest_mem.read_u16(ctx.rx_queue.avail_gpa as usize + 2);
     if *used_idx == avail_idx {
-        return false;
+        return 0;
     }
 
     let ring_off = ctx.rx_queue.avail_gpa as usize + 4 + 2 * ((*used_idx as usize) % q_size);
@@ -120,8 +163,11 @@ fn inject_packet(ctx: &VsockRxWorkerContext, packet: &[u8], used_idx: &mut u16) 
         idx = next as usize;
     }
 
-    if written == 0 {
-        return false;
+    // Only commit if the ENTIRE packet was written. A partial vsock
+    // packet is corrupted — the guest will drop it and the connection
+    // stalls. Better to not commit and retry later.
+    if written < packet.len() {
+        return 0;
     }
 
     // Update used ring.
@@ -134,7 +180,7 @@ fn inject_packet(ctx: &VsockRxWorkerContext, packet: &[u8], used_idx: &mut u16) 
     ctx.guest_mem
         .write_u16(ctx.rx_queue.used_gpa as usize + 2, *used_idx);
 
-    true
+    written
 }
 
 /// Builds a vsock OP_RW packet from raw data.
@@ -360,25 +406,38 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                             0,
                         )
                     };
-                    if inject_packet(&ctx, &pkt, &mut used_idx) {
-                        // Immediately fire interrupt for the CreditRequest.
+                    if inject_packet(&ctx, &pkt, &mut used_idx) > 0 {
                         trigger_irq(&ctx);
                         old_used = used_idx;
                     }
 
-                    // Yield to vCPU thread to process guest's CreditUpdate.
                     std::thread::sleep(Duration::from_micros(100));
                     break;
                 }
 
-                let max_read = credit.min(MAX_READ_SIZE);
+                // Pre-check descriptor capacity so we never read more
+                // payload than fits in header + payload form.
+                let desc_cap = peek_rx_capacity(&ctx, used_idx);
+                if desc_cap <= VsockHeader::SIZE {
+                    // No room for even a header — descriptor exhaustion.
+                    if batch_count > 0 {
+                        trigger_irq(&ctx);
+                        batch_count = 0;
+                        batch_start = None;
+                        old_used = used_idx;
+                    }
+                    std::thread::sleep(DESCRIPTOR_BACKOFF);
+                    break;
+                }
+                let max_payload = desc_cap - VsockHeader::SIZE;
+                let max_read = credit.min(max_payload).min(MAX_READ_SIZE);
+
                 let n = unsafe {
                     libc::read(fd, read_buf.as_mut_ptr().cast::<libc::c_void>(), max_read)
                 };
 
                 if n <= 0 {
                     if n == 0 {
-                        // EOF — send SHUTDOWN.
                         let pkt = {
                             let Ok(mgr) = ctx.vsock_mgr.lock() else { break };
                             let Some(conn) = mgr.get(&conn_id) else { break };
@@ -390,40 +449,33 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                                 3,
                             )
                         };
-                        if inject_packet(&ctx, &pkt, &mut used_idx) {
+                        if inject_packet(&ctx, &pkt, &mut used_idx) > 0 {
                             batch_count += 1;
                             if batch_start.is_none() {
                                 batch_start = Some(Instant::now());
                             }
                         }
                     }
-                    break; // EAGAIN or error
+                    break;
                 }
 
                 let data = &read_buf[..n as usize];
-                tracing::info!(
-                    "vsock-rx: read {} bytes from fd {} (credit={}, conn={:?})",
-                    data.len(),
-                    fd,
-                    credit,
-                    conn_id,
-                );
                 let pkt = build_rw_packet(conn_id, guest_cid, data, fwd_cnt);
 
-                // Record bytes sent to guest.
-                if let Ok(mut mgr) = ctx.vsock_mgr.lock() {
-                    if let Some(conn) = mgr.get_mut(&conn_id) {
-                        conn.record_rx(data.len() as u32);
+                let written = inject_packet(&ctx, &pkt, &mut used_idx);
+                if written > 0 {
+                    // Record credit ONLY after successful full injection.
+                    if let Ok(mut mgr) = ctx.vsock_mgr.lock() {
+                        if let Some(conn) = mgr.get_mut(&conn_id) {
+                            conn.record_rx(data.len() as u32);
+                        }
                     }
-                }
-
-                if inject_packet(&ctx, &pkt, &mut used_idx) {
                     batch_count += 1;
                     if batch_start.is_none() {
                         batch_start = Some(Instant::now());
                     }
                 } else {
-                    // Descriptor exhaustion — flush and backoff.
+                    // Injection failed (descriptor too small or exhausted).
                     if batch_count > 0 {
                         trigger_irq(&ctx);
                         batch_count = 0;
@@ -508,12 +560,7 @@ fn drain_control_packets(
 
             match op {
                 RxOps::REQUEST => {
-                    let pkt = build_control_packet(conn_id, conn.guest_cid, VsockOp::Request, 0, 0);
-                    // Fire injected_notify.
-                    if let Some(tx) = conn.injected_notify.take() {
-                        let _ = tx.send(());
-                    }
-                    pkt
+                    build_control_packet(conn_id, conn.guest_cid, VsockOp::Request, 0, 0)
                 }
                 RxOps::RESPONSE => {
                     conn.connect = true;
@@ -545,10 +592,21 @@ fn drain_control_packets(
             }
         };
 
-        if inject_packet(ctx, &pkt, used_idx) {
+        if inject_packet(ctx, &pkt, used_idx) > 0 {
             *batch_count += 1;
             if batch_start.is_none() {
                 *batch_start = Some(Instant::now());
+            }
+
+            // Fire injected_notify AFTER successful injection for REQUEST.
+            if op == RxOps::REQUEST {
+                if let Ok(mut mgr) = ctx.vsock_mgr.lock() {
+                    if let Some(conn) = mgr.get_mut(&conn_id) {
+                        if let Some(tx) = conn.injected_notify.take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                }
             }
         }
 
