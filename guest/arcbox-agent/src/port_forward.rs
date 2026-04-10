@@ -72,11 +72,14 @@ mod inner {
     /// to the default 8 KiB.
     const RELAY_BUF_SIZE: usize = 256 * 1024;
 
+    /// Vsock buffer target: 8 MiB. Child sockets inherit from the listener,
+    /// so OP_RESPONSE carries the large buf_alloc immediately.
+    const VSOCK_BUF_SIZE: usize = 8 * 1024 * 1024;
+
     /// Sets the vsock-specific buffer sizes that directly control the
     /// guest kernel's `buf_alloc` advertised to the host.
-    fn set_vsock_buffers(stream: &VsockStream, size: usize) {
-        use std::os::unix::io::AsRawFd;
-        let fd = stream.as_raw_fd();
+    /// Called on the LISTENER fd so child sockets inherit the large buffer.
+    fn set_vsock_fd_buffers(fd: std::os::unix::io::RawFd, size: usize) {
         let size = size as u64;
         for (opt, name) in [
             (SO_VM_SOCKETS_BUFFER_MAX_SIZE, "BUFFER_MAX_SIZE"),
@@ -125,9 +128,11 @@ mod inner {
 
     /// Handles a single forwarded connection.
     async fn handle(mut vsock: VsockStream) -> Result<()> {
-        // Raise vsock buffer to 8 MiB so the guest kernel advertises a
-        // larger buf_alloc, increasing host→guest credit window.
-        set_vsock_buffers(&vsock, 8 * 1024 * 1024);
+        // Fallback: also set on accepted socket in case listener inheritance
+        // didn't apply (older kernels). The OP_RESPONSE already carries the
+        // large buf_alloc from the listener.
+        use std::os::unix::io::AsRawFd;
+        set_vsock_fd_buffers(vsock.as_raw_fd(), VSOCK_BUF_SIZE);
 
         // Read 6-byte header: [ip: 4][port: 2 BE]
         let mut header = [0u8; 6];
@@ -187,7 +192,13 @@ mod inner {
 
         loop {
             match VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, port)) {
-                Ok(l) => return Ok(l),
+                Ok(l) => {
+                    // Set buffer on listener fd — child sockets inherit,
+                    // so OP_RESPONSE immediately carries the large buf_alloc.
+                    use std::os::unix::io::AsRawFd;
+                    set_vsock_fd_buffers(l.as_raw_fd(), VSOCK_BUF_SIZE);
+                    return Ok(l);
+                }
                 Err(e) => {
                     tracing::warn!(
                         port,

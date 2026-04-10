@@ -12,7 +12,6 @@
 //! - **Control packets**: REQUEST, RESPONSE, CREDIT_UPDATE, RESET
 
 use std::io::Read;
-use std::num::Wrapping;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -62,8 +61,6 @@ pub struct VsockInlineConn {
     pub conn_id: VsockConnectionId,
     /// Guest CID (typically 3).
     pub guest_cid: u64,
-    /// Bytes injected into guest RX by this inline path.
-    pub local_rx_cnt: Wrapping<u32>,
     /// Host stream reached EOF.
     pub host_eof: bool,
 }
@@ -299,8 +296,8 @@ fn poll_vsock_inline_conns(
             break;
         }
 
-        // 1. Check credit (peer state from manager, local rx_cnt without lock).
-        let (peer_buf_alloc, peer_fwd_cnt, fwd_cnt) = {
+        // 1. Check credit — single source of truth from the manager.
+        let (credit, fwd_cnt) = {
             let Ok(mgr) = ctx.vsock_mgr.lock() else {
                 continue;
             };
@@ -308,9 +305,8 @@ fn poll_vsock_inline_conns(
                 conn.host_eof = true;
                 continue;
             };
-            (c.peer_buf_alloc, c.peer_fwd_cnt, c.fwd_cnt.0)
+            (c.peer_avail_credit(), c.fwd_cnt.0)
         };
-        let credit = (Wrapping(peer_buf_alloc) - (conn.local_rx_cnt - peer_fwd_cnt)).0 as usize;
         if credit == 0 {
             continue;
         }
@@ -318,12 +314,13 @@ fn poll_vsock_inline_conns(
         // 2. Check descriptor capacity.
         let desc_cap = peek_rx_capacity(ctx, *used_idx);
         if desc_cap <= VsockHeader::SIZE {
-            // Flush any pending interrupt so guest can refill descriptors.
+            // Flush interrupt so guest can refill, then backoff.
             if *batch_count > 0 {
                 trigger_irq(ctx);
                 *batch_count = 0;
                 *batch_start = None;
             }
+            std::thread::sleep(DESCRIPTOR_BACKOFF);
             break;
         }
         let max_payload = (desc_cap - VsockHeader::SIZE)
@@ -399,8 +396,7 @@ fn poll_vsock_inline_conns(
                 ctx.guest_mem
                     .write_u16(ctx.rx_queue.used_gpa as usize + 2, *used_idx);
 
-                // 7. Update credit tracking.
-                conn.local_rx_cnt += Wrapping(n as u32);
+                // 7. Update credit in the manager (single source of truth).
                 if let Ok(mut mgr) = ctx.vsock_mgr.lock() {
                     if let Some(c) = mgr.get_mut(&conn.conn_id) {
                         c.record_rx(n as u32);
@@ -542,13 +538,15 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
         }
 
         // ----- kqueue wait -----
-        // Use zero timeout when inline conns are active (non-blocking poll
-        // so we return to inline polling quickly).
-        let effective_timeout = if inline_conns.is_empty() {
-            &timeout
-        } else {
-            &zero_timeout
-        };
+        // Only use zero timeout when inline conns are active AND there
+        // are RX descriptors available. Otherwise use normal timeout to
+        // avoid busy-spinning on descriptor exhaustion.
+        let effective_timeout =
+            if !inline_conns.is_empty() && peek_rx_capacity(&ctx, used_idx) > VsockHeader::SIZE {
+                &zero_timeout
+            } else {
+                &timeout
+            };
         let mut events = [libc::kevent {
             ident: 0,
             filter: 0,

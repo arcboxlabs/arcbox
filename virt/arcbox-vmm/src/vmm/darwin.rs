@@ -626,7 +626,6 @@ impl Vmm {
                 guest_port,
             },
             guest_cid,
-            local_rx_cnt: std::num::Wrapping(0),
             host_eof: false,
         };
 
