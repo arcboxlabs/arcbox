@@ -172,8 +172,17 @@ impl VsockConnection {
     ///
     /// `peer_buf_alloc - (rx_cnt - peer_fwd_cnt)` = total guest buffer minus
     /// bytes currently in-flight (sent but not yet consumed by the guest).
+    ///
+    /// Uses saturating subtraction to prevent u32 underflow when in-flight
+    /// bytes temporarily exceed the peer's advertised buffer. The Wrapping
+    /// subtraction for counter difference (rx_cnt - peer_fwd_cnt) is correct
+    /// because those are monotonic wrapping counters. But the outer
+    /// subtraction from peer_buf_alloc must not wrap — doing so returns
+    /// ~4 GB of phantom credit, flooding the guest.
+    /// (Same bug as Linux kernel CVE-2026-23069, commit 60316d7f10b17a7.)
     pub fn peer_avail_credit(&self) -> usize {
-        (Wrapping(self.peer_buf_alloc) - (self.rx_cnt - self.peer_fwd_cnt)).0 as usize
+        let in_flight = (self.rx_cnt - self.peer_fwd_cnt).0;
+        self.peer_buf_alloc.saturating_sub(in_flight) as usize
     }
 
     /// Updates peer credit state from an incoming guest packet.
