@@ -78,6 +78,8 @@ pub mod vcpu;
 pub(crate) mod virtqueue_util;
 pub mod vmm;
 pub mod vsock_manager;
+#[cfg(target_os = "macos")]
+pub(crate) mod vsock_rx_worker;
 
 pub use boot::{BootParams, KernelLoader, KernelType};
 pub use builder::{VmBuilder, VmInstance};
