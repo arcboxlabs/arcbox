@@ -75,6 +75,7 @@ pub struct VsockRxWorkerContext {
     pub mmio_state: Arc<RwLock<VirtioMmioState>>,
     pub irq_callback: Arc<dyn Fn(Irq, bool) -> crate::error::Result<()> + Send + Sync>,
     pub irq: Irq,
+    #[allow(dead_code)]
     pub exit_vcpus: Arc<dyn Fn() + Send + Sync>,
     pub vsock_mgr: Arc<Mutex<VsockConnectionManager>>,
     pub running: Arc<AtomicBool>,
@@ -86,12 +87,43 @@ pub struct VsockRxWorkerContext {
 unsafe impl Send for VsockRxWorkerContext {}
 
 /// Triggers a vsock RX interrupt.
+/// Sets GIC SPI level but does NOT call hv_vcpus_exit — the vCPU will
+/// pick up the pending interrupt on the next WFI or timer tick.
+/// Removing hv_vcpus_exit prevents the interrupt storm that caused
+/// guest RCU stalls (all 4 vCPUs forced out of hv_vcpu_run on every batch).
 fn trigger_irq(ctx: &VsockRxWorkerContext) {
     if let Ok(mut s) = ctx.mmio_state.write() {
         s.trigger_interrupt(1); // INT_VRING
     }
     let _ = (ctx.irq_callback)(ctx.irq, true);
-    (ctx.exit_vcpus)();
+    // NOTE: intentionally NOT calling (ctx.exit_vcpus)() here.
+    // The GIC SPI is level-triggered; the vCPU will see it on the
+    // next exception return or WFI exit. This gives the guest CPU
+    // time to process existing work before handling the new interrupt.
+}
+
+/// Conditionally triggers an interrupt based on EVENT_IDX suppression.
+/// Only fires GIC SPI + hv_vcpus_exit when the guest actually wants a
+/// notification (used_event crossed). This prevents interrupt storms
+/// that starve guest userspace and cause RCU stalls.
+fn maybe_notify(ctx: &VsockRxWorkerContext, old_used: u16, new_used: u16) {
+    if crate::virtqueue_util::should_notify(
+        &ctx.guest_mem,
+        ctx.rx_queue.avail_gpa,
+        ctx.rx_queue.size,
+        old_used,
+        new_used,
+    ) {
+        trigger_irq(ctx);
+    }
+}
+
+/// Writes avail_event into the used ring for EVENT_IDX.
+fn write_avail_event(ctx: &VsockRxWorkerContext, _used_idx: u16) {
+    let q_size = ctx.rx_queue.size as usize;
+    let avail_event_off = ctx.rx_queue.used_gpa as usize + 4 + q_size * 8;
+    let avail_idx = ctx.guest_mem.read_u16(ctx.rx_queue.avail_gpa as usize + 2);
+    ctx.guest_mem.write_u16(avail_event_off, avail_idx);
 }
 
 /// Peeks the next available RX descriptor chain's total writable
@@ -628,7 +660,8 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                         }
                     }
                     if batch_count > 0 {
-                        trigger_irq(&ctx);
+                        write_avail_event(&ctx, used_idx);
+                        maybe_notify(&ctx, old_used, used_idx);
                         batch_count = 0;
                         batch_start = None;
                         old_used = used_idx;
@@ -646,7 +679,8 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                         )
                     };
                     if inject_packet(&ctx, &pkt, &mut used_idx) > 0 {
-                        trigger_irq(&ctx);
+                        write_avail_event(&ctx, used_idx);
+                        maybe_notify(&ctx, old_used, used_idx);
                         old_used = used_idx;
                     }
 
@@ -662,7 +696,8 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                 if desc_cap <= VsockHeader::SIZE {
                     // No room for even a header — descriptor exhaustion.
                     if batch_count > 0 {
-                        trigger_irq(&ctx);
+                        write_avail_event(&ctx, used_idx);
+                        maybe_notify(&ctx, old_used, used_idx);
                         batch_count = 0;
                         batch_start = None;
                         old_used = used_idx;
@@ -735,7 +770,8 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                         credit,
                     );
                     if batch_count > 0 {
-                        trigger_irq(&ctx);
+                        write_avail_event(&ctx, used_idx);
+                        maybe_notify(&ctx, old_used, used_idx);
                         batch_count = 0;
                         batch_start = None;
                         old_used = used_idx;
@@ -746,7 +782,8 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
 
                 // Flush at batch boundary.
                 if batch_count as usize >= BATCH_SIZE {
-                    trigger_irq(&ctx);
+                    write_avail_event(&ctx, used_idx);
+                    maybe_notify(&ctx, old_used, used_idx);
                     batch_count = 0;
                     batch_start = None;
                     old_used = used_idx;
@@ -766,7 +803,8 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
 
     // Final flush.
     if batch_count > 0 {
-        trigger_irq(&ctx);
+        write_avail_event(&ctx, used_idx);
+        maybe_notify(&ctx, old_used, used_idx);
     }
     unsafe { libc::close(kq) };
     tracing::info!("vsock-rx worker stopped");
