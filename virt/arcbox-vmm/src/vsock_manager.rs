@@ -599,4 +599,64 @@ mod tests {
         conn.advance_fwd_cnt(TX_BUFFER_SIZE * 3 / 4 + 1);
         assert_eq!(conn.rx_queue.peek(), RxOps::CREDIT_UPDATE);
     }
+
+    // -----------------------------------------------------------------
+    // Regression tests for peer_avail_credit u32 underflow
+    // (CVE-2026-23069 equivalent — phantom credit from wrapping)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn peer_avail_credit_saturates_to_zero_when_in_flight_exceeds_buf_alloc() {
+        let mut mgr = VsockConnectionManager::new();
+        let (_, internal) = make_socketpair();
+        let (id, _rx) = mgr.allocate(1024, 3, internal);
+
+        let conn = mgr.get_mut(&id).unwrap();
+        conn.update_peer_credit(262_144, 0); // 256 KiB buf_alloc
+
+        // Inject more than buf_alloc without any guest consumption.
+        conn.record_rx(300_000); // in_flight = 300_000 > 262_144
+
+        // Must be 0, NOT a huge wrap-around value.
+        assert_eq!(conn.peer_avail_credit(), 0);
+    }
+
+    #[test]
+    fn peer_avail_credit_is_correct_when_within_window() {
+        let mut mgr = VsockConnectionManager::new();
+        let (_, internal) = make_socketpair();
+        let (id, _rx) = mgr.allocate(1024, 3, internal);
+
+        let conn = mgr.get_mut(&id).unwrap();
+        conn.update_peer_credit(262_144, 0);
+
+        conn.record_rx(100_000);
+        assert_eq!(conn.peer_avail_credit(), 162_144);
+
+        // Guest forwards 50_000 bytes.
+        conn.update_peer_credit(262_144, 50_000);
+        assert_eq!(conn.peer_avail_credit(), 212_144);
+    }
+
+    #[test]
+    fn peer_avail_credit_handles_wrapping_counters_but_not_outer_underflow() {
+        let mut mgr = VsockConnectionManager::new();
+        let (_, internal) = make_socketpair();
+        let (id, _rx) = mgr.allocate(1024, 3, internal);
+
+        let conn = mgr.get_mut(&id).unwrap();
+        conn.update_peer_credit(262_144, 0);
+
+        // Simulate counters near u32::MAX (wrapping territory).
+        conn.rx_cnt = Wrapping(u32::MAX - 1000);
+        conn.peer_fwd_cnt = Wrapping(u32::MAX - 1500);
+        // in_flight = (MAX-1000) - (MAX-1500) = 500 (wrapping correct)
+        assert_eq!(conn.peer_avail_credit(), 262_144 - 500);
+
+        // Now push in_flight past buf_alloc via wrapping.
+        conn.rx_cnt = Wrapping(u32::MAX);
+        conn.peer_fwd_cnt = Wrapping(u32::MAX - 300_000);
+        // in_flight = MAX - (MAX-300_000) = 300_000 > 262_144
+        assert_eq!(conn.peer_avail_credit(), 0);
+    }
 }

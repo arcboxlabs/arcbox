@@ -24,7 +24,9 @@ use crate::irq::Irq;
 use crate::vsock_manager::{RxOps, TX_BUFFER_SIZE, VsockConnectionId, VsockConnectionManager};
 
 /// Maximum packets to inject per kqueue wakeup.
-const BATCH_SIZE: usize = 128;
+/// Kept small to prevent guest softirq starvation (RCU stall).
+/// At 8 KiB per packet, 16 packets = 128 KiB per batch.
+const BATCH_SIZE: usize = 16;
 
 /// Maximum bytes to read from a single socket per iteration.
 /// Must account for VsockHeader overhead — actual payload per read is
@@ -75,7 +77,6 @@ pub struct VsockRxWorkerContext {
     pub mmio_state: Arc<RwLock<VirtioMmioState>>,
     pub irq_callback: Arc<dyn Fn(Irq, bool) -> crate::error::Result<()> + Send + Sync>,
     pub irq: Irq,
-    #[allow(dead_code)]
     pub exit_vcpus: Arc<dyn Fn() + Send + Sync>,
     pub vsock_mgr: Arc<Mutex<VsockConnectionManager>>,
     pub running: Arc<AtomicBool>,
@@ -86,20 +87,15 @@ pub struct VsockRxWorkerContext {
 // SAFETY: All fields are Send+Sync or wrapped in Arc<Mutex/RwLock>.
 unsafe impl Send for VsockRxWorkerContext {}
 
-/// Triggers a vsock RX interrupt.
-/// Sets GIC SPI level but does NOT call hv_vcpus_exit — the vCPU will
-/// pick up the pending interrupt on the next WFI or timer tick.
-/// Removing hv_vcpus_exit prevents the interrupt storm that caused
-/// guest RCU stalls (all 4 vCPUs forced out of hv_vcpu_run on every batch).
+/// Triggers a vsock RX interrupt and kicks vCPUs out of WFI.
+/// hv_vcpus_exit is REQUIRED — without it, vCPUs stay in WFI
+/// and never see the pending GIC SPI (causes RCU stall from WFI deadlock).
 fn trigger_irq(ctx: &VsockRxWorkerContext) {
     if let Ok(mut s) = ctx.mmio_state.write() {
         s.trigger_interrupt(1); // INT_VRING
     }
     let _ = (ctx.irq_callback)(ctx.irq, true);
-    // NOTE: intentionally NOT calling (ctx.exit_vcpus)() here.
-    // The GIC SPI is level-triggered; the vCPU will see it on the
-    // next exception return or WFI exit. This gives the guest CPU
-    // time to process existing work before handling the new interrupt.
+    (ctx.exit_vcpus)();
 }
 
 /// Conditionally triggers an interrupt based on EVENT_IDX suppression.
@@ -780,13 +776,17 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                     break;
                 }
 
-                // Flush at batch boundary.
+                // Flush at batch boundary and yield to let guest CPU
+                // process the batch before we inject more. Without this
+                // yield, the worker fills the RX queue faster than the
+                // guest can drain it, causing softirq starvation → RCU stall.
                 if batch_count as usize >= BATCH_SIZE {
                     write_avail_event(&ctx, used_idx);
                     maybe_notify(&ctx, old_used, used_idx);
                     batch_count = 0;
                     batch_start = None;
                     old_used = used_idx;
+                    std::thread::sleep(Duration::from_micros(50));
                 }
             }
         }
