@@ -58,11 +58,8 @@ impl arcbox_port_forward::VsockConnector for MachineVsockConnector {
         Ok((fd, host_port))
     }
 
-    fn promote_inline(&self, stream: std::net::TcpStream, host_port: u32, guest_port: u32) -> bool {
-        self.machine_manager
-            .promote_vsock_inline(DEFAULT_MACHINE_NAME, stream, host_port, guest_port)
-            .unwrap_or(false)
-    }
+    // TODO: inline inject disabled — receiver=0 bug under investigation.
+    // fn promote_inline(&self, ...) -> bool { ... }
 }
 const REQUIRED_RUNTIME_ASSETS: [&str; 5] = [
     "dockerd",
