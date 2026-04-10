@@ -122,6 +122,25 @@ fn write_avail_event(ctx: &VsockRxWorkerContext, _used_idx: u16) {
     ctx.guest_mem.write_u16(avail_event_off, avail_idx);
 }
 
+/// Flushes a pending batch using EVENT_IDX-aware notification logic.
+fn flush_batch(
+    ctx: &VsockRxWorkerContext,
+    batch_count: &mut u16,
+    batch_start: &mut Option<Instant>,
+    old_used: &mut u16,
+    used_idx: u16,
+) {
+    if *batch_count == 0 {
+        return;
+    }
+
+    write_avail_event(ctx, used_idx);
+    maybe_notify(ctx, *old_used, used_idx);
+    *batch_count = 0;
+    *batch_start = None;
+    *old_used = used_idx;
+}
+
 /// Peeks the next available RX descriptor chain's total writable
 /// capacity (bytes). Returns 0 if no descriptors are available.
 fn peek_rx_capacity(ctx: &VsockRxWorkerContext, used_idx: u16) -> usize {
@@ -308,6 +327,7 @@ fn poll_vsock_inline_conns(
     ctx: &VsockRxWorkerContext,
     inline_conns: &mut Vec<VsockInlineConn>,
     used_idx: &mut u16,
+    old_used: &mut u16,
     batch_count: &mut u16,
     batch_start: &mut Option<Instant>,
 ) {
@@ -343,11 +363,7 @@ fn poll_vsock_inline_conns(
         let desc_cap = peek_rx_capacity(ctx, *used_idx);
         if desc_cap <= VsockHeader::SIZE {
             // Flush interrupt so guest can refill, then backoff.
-            if *batch_count > 0 {
-                trigger_irq(ctx);
-                *batch_count = 0;
-                *batch_start = None;
-            }
+            flush_batch(ctx, batch_count, batch_start, old_used, *used_idx);
             std::thread::sleep(DESCRIPTOR_BACKOFF);
             break;
         }
@@ -359,11 +375,7 @@ fn poll_vsock_inline_conns(
         std::sync::atomic::fence(Ordering::Acquire);
         let avail_idx = ctx.guest_mem.read_u16(ctx.rx_queue.avail_gpa as usize + 2);
         if *used_idx == avail_idx {
-            if *batch_count > 0 {
-                trigger_irq(ctx);
-                *batch_count = 0;
-                *batch_start = None;
-            }
+            flush_batch(ctx, batch_count, batch_start, old_used, *used_idx);
             break;
         }
 
@@ -567,6 +579,7 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                 &ctx,
                 &mut inline_conns,
                 &mut used_idx,
+                &mut old_used,
                 &mut batch_count,
                 &mut batch_start,
             );
@@ -655,13 +668,13 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                             );
                         }
                     }
-                    if batch_count > 0 {
-                        write_avail_event(&ctx, used_idx);
-                        maybe_notify(&ctx, old_used, used_idx);
-                        batch_count = 0;
-                        batch_start = None;
-                        old_used = used_idx;
-                    }
+                    flush_batch(
+                        &ctx,
+                        &mut batch_count,
+                        &mut batch_start,
+                        &mut old_used,
+                        used_idx,
+                    );
 
                     let pkt = {
                         let Ok(mgr) = ctx.vsock_mgr.lock() else { break };
@@ -691,13 +704,13 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                 let desc_cap = peek_rx_capacity(&ctx, used_idx);
                 if desc_cap <= VsockHeader::SIZE {
                     // No room for even a header — descriptor exhaustion.
-                    if batch_count > 0 {
-                        write_avail_event(&ctx, used_idx);
-                        maybe_notify(&ctx, old_used, used_idx);
-                        batch_count = 0;
-                        batch_start = None;
-                        old_used = used_idx;
-                    }
+                    flush_batch(
+                        &ctx,
+                        &mut batch_count,
+                        &mut batch_start,
+                        &mut old_used,
+                        used_idx,
+                    );
                     std::thread::sleep(DESCRIPTOR_BACKOFF);
                     break;
                 }
@@ -765,13 +778,13 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                         desc_cap,
                         credit,
                     );
-                    if batch_count > 0 {
-                        write_avail_event(&ctx, used_idx);
-                        maybe_notify(&ctx, old_used, used_idx);
-                        batch_count = 0;
-                        batch_start = None;
-                        old_used = used_idx;
-                    }
+                    flush_batch(
+                        &ctx,
+                        &mut batch_count,
+                        &mut batch_start,
+                        &mut old_used,
+                        used_idx,
+                    );
                     std::thread::sleep(DESCRIPTOR_BACKOFF);
                     break;
                 }
@@ -781,11 +794,13 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                 // yield, the worker fills the RX queue faster than the
                 // guest can drain it, causing softirq starvation → RCU stall.
                 if batch_count as usize >= BATCH_SIZE {
-                    write_avail_event(&ctx, used_idx);
-                    maybe_notify(&ctx, old_used, used_idx);
-                    batch_count = 0;
-                    batch_start = None;
-                    old_used = used_idx;
+                    flush_batch(
+                        &ctx,
+                        &mut batch_count,
+                        &mut batch_start,
+                        &mut old_used,
+                        used_idx,
+                    );
                     std::thread::sleep(Duration::from_micros(50));
                 }
             }
@@ -802,10 +817,13 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
     }
 
     // Final flush.
-    if batch_count > 0 {
-        write_avail_event(&ctx, used_idx);
-        maybe_notify(&ctx, old_used, used_idx);
-    }
+    flush_batch(
+        &ctx,
+        &mut batch_count,
+        &mut batch_start,
+        &mut old_used,
+        used_idx,
+    );
     unsafe { libc::close(kq) };
     tracing::info!("vsock-rx worker stopped");
 }
@@ -928,11 +946,148 @@ fn flush_if_timeout(
     if *batch_count > 0 {
         if let Some(start) = *batch_start {
             if start.elapsed() >= COALESCE_TIMEOUT {
-                trigger_irq(ctx);
-                *batch_count = 0;
-                *batch_start = None;
-                *old_used = used_idx;
+                flush_batch(ctx, batch_count, batch_start, old_used, used_idx);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::atomic::AtomicUsize;
+
+    use crate::device::VirtioMmioState;
+
+    struct TestCtx {
+        _memory: Box<[u8]>,
+        ctx: VsockRxWorkerContext,
+        irq_count: Arc<AtomicUsize>,
+    }
+
+    fn make_test_ctx(used_event: u16, avail_idx: u16) -> TestCtx {
+        const DESC_GPA: u64 = 0x1000;
+        const AVAIL_GPA: u64 = 0x2000;
+        const USED_GPA: u64 = 0x3000;
+        const QUEUE_SIZE: u16 = 8;
+
+        let mut memory = vec![0u8; 0x4000].into_boxed_slice();
+        memory[AVAIL_GPA as usize + 2..AVAIL_GPA as usize + 4]
+            .copy_from_slice(&avail_idx.to_le_bytes());
+        let used_event_off = AVAIL_GPA as usize + 4 + 2 * QUEUE_SIZE as usize;
+        memory[used_event_off..used_event_off + 2].copy_from_slice(&used_event.to_le_bytes());
+
+        let guest_mem = unsafe { GuestMemWriter::new(memory.as_mut_ptr(), memory.len(), 0) };
+        let mmio_state = Arc::new(RwLock::new(VirtioMmioState::new(0, 0)));
+        let irq_count = Arc::new(AtomicUsize::new(0));
+        let irq_count_for_cb = Arc::clone(&irq_count);
+        let exit_vcpu_count = Arc::new(AtomicUsize::new(0));
+        let exit_vcpu_count_for_cb = Arc::clone(&exit_vcpu_count);
+        let (_tx, rx) = crossbeam_channel::unbounded();
+
+        let ctx = VsockRxWorkerContext {
+            guest_mem,
+            rx_queue: VsockRxQueueConfig {
+                desc_gpa: DESC_GPA,
+                avail_gpa: AVAIL_GPA,
+                used_gpa: USED_GPA,
+                size: QUEUE_SIZE,
+            },
+            mmio_state,
+            irq_callback: Arc::new(move |_, _| {
+                irq_count_for_cb.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }),
+            irq: 5,
+            exit_vcpus: Arc::new(move || {
+                exit_vcpu_count_for_cb.fetch_add(1, Ordering::Relaxed);
+            }),
+            vsock_mgr: Arc::new(Mutex::new(VsockConnectionManager::new())),
+            running: Arc::new(AtomicBool::new(true)),
+            inline_conn_rx: rx,
+        };
+
+        TestCtx {
+            _memory: memory,
+            ctx,
+            irq_count,
+        }
+    }
+
+    #[test]
+    fn flush_if_timeout_respects_event_idx_suppression() {
+        let fixture = make_test_ctx(2, 7);
+        let mut batch_count = 1;
+        let mut batch_start = Some(
+            Instant::now()
+                .checked_sub(COALESCE_TIMEOUT)
+                .expect("coalesce timeout is representable"),
+        );
+        let mut old_used = 1;
+
+        flush_if_timeout(
+            &fixture.ctx,
+            &mut batch_count,
+            &mut batch_start,
+            &mut old_used,
+            2,
+        );
+
+        assert_eq!(batch_count, 0);
+        assert!(batch_start.is_none());
+        assert_eq!(old_used, 2);
+        assert_eq!(fixture.irq_count.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            fixture
+                .ctx
+                .mmio_state
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .interrupt_status,
+            0
+        );
+
+        let avail_event_off =
+            fixture.ctx.rx_queue.used_gpa as usize + 4 + 8 * fixture.ctx.rx_queue.size as usize;
+        assert_eq!(fixture.ctx.guest_mem.read_u16(avail_event_off), 7);
+    }
+
+    #[test]
+    fn flush_if_timeout_notifies_when_event_idx_requests_it() {
+        let fixture = make_test_ctx(1, 9);
+        let mut batch_count = 1;
+        let mut batch_start = Some(
+            Instant::now()
+                .checked_sub(COALESCE_TIMEOUT)
+                .expect("coalesce timeout is representable"),
+        );
+        let mut old_used = 1;
+
+        flush_if_timeout(
+            &fixture.ctx,
+            &mut batch_count,
+            &mut batch_start,
+            &mut old_used,
+            2,
+        );
+
+        assert_eq!(batch_count, 0);
+        assert!(batch_start.is_none());
+        assert_eq!(old_used, 2);
+        assert_eq!(fixture.irq_count.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            fixture
+                .ctx
+                .mmio_state
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .interrupt_status,
+            1
+        );
+
+        let avail_event_off =
+            fixture.ctx.rx_queue.used_gpa as usize + 4 + 8 * fixture.ctx.rx_queue.size as usize;
+        assert_eq!(fixture.ctx.guest_mem.read_u16(avail_event_off), 9);
     }
 }

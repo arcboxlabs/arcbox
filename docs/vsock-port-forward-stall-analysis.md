@@ -200,6 +200,45 @@ static int virtnet_poll(struct napi_struct *napi, int budget) {
 | `virt/arcbox-port-forward/src/forwarder.rs` | Host TCP→vsock relay |
 | `guest/arcbox-agent/src/port_forward.rs` | Guest vsock→TCP relay (splice) |
 
+## Reproduction
+
+```bash
+# Build and deploy
+cargo build -p arcbox-daemon --features vmnet
+cargo build -p arcbox-agent --target aarch64-unknown-linux-musl --release
+codesign --force --options runtime \
+    --entitlements bundle/arcbox.entitlements \
+    -s "Developer ID Application: ArcBox, Inc. (422ACSY6Y5)" \
+    target/debug/arcbox-daemon
+cp target/aarch64-unknown-linux-musl/release/arcbox-agent ~/.arcbox/bin/arcbox-agent
+
+# Start daemon (fresh VM — kill any existing daemon and wait for VM shutdown)
+pkill -f arcbox-daemon; sleep 15
+RUST_LOG=info target/debug/arcbox-daemon &
+sleep 35
+
+# Start iperf3 server in container
+DOCKER_HOST=unix://$HOME/.arcbox/run/docker.sock \
+    docker run -d --name iperf-server -p 5201:5201 networkstatic/iperf3 -s
+sleep 5
+
+# Reproduce the stall (stalls at ~2 seconds, receiver=0)
+iperf3 -c 127.0.0.1 -p 5201 -P 4 -t 10
+
+# Check host-side diagnostics
+grep "CREDIT OVERRUN" ~/.arcbox/log/daemon.log        # should be 0
+grep "credit=0" ~/.arcbox/log/daemon.log | tail -5     # credit exhaustion events
+grep "rcu.*stall" ~/.arcbox/log/daemon.log | tail -5   # guest RCU stall
+
+# Run unit tests (credit underflow regression tests)
+cargo test -p arcbox-vmm --lib vsock_manager
+```
+
+**Expected**: stalls after ~2 seconds, `receiver=0`, guest RCU stall in logs.
+
+**Key diagnostic**: if `CREDIT OVERRUN` appears, the `saturating_sub` fix regressed.
+If `credit=0` never appears but stall still happens, the guest is overwhelmed before credit even depletes.
+
 ## References
 
 - [Linux RCU stall documentation](https://docs.kernel.org/RCU/stallwarn.html)
