@@ -1632,6 +1632,34 @@ impl Vmm {
             )));
         }
 
+        // Enlarge socketpair buffers. macOS defaults to ~8 KiB which
+        // limits throughput to buffer_size / kqueue_cycle_time. With
+        // 512 KiB buffers the worker can read a full CONN_WAKEUP_CAP
+        // worth of data per cycle without waiting for the port forwarder
+        // to refill.
+        {
+            let buf_size: libc::c_int = 512 * 1024;
+            for &fd in &fds {
+                // SAFETY: valid fd from socketpair, standard setsockopt.
+                unsafe {
+                    libc::setsockopt(
+                        fd,
+                        libc::SOL_SOCKET,
+                        libc::SO_SNDBUF,
+                        std::ptr::addr_of!(buf_size).cast(),
+                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                    );
+                    libc::setsockopt(
+                        fd,
+                        libc::SOL_SOCKET,
+                        libc::SO_RCVBUF,
+                        std::ptr::addr_of!(buf_size).cast(),
+                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                    );
+                }
+            }
+        }
+
         // Set non-blocking + cloexec on internal fd (for poll_vsock_rx peek).
         // The daemon-side fd (fds[0]) stays BLOCKING with a receive timeout —
         // tokio's AsyncFd will set O_NONBLOCK when it wraps the fd.
