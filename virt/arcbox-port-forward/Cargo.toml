@@ -11,6 +11,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 tokio-util = { version = "0.7", features = ["net"] }
+libc.workspace = true
 
 [lints]
 workspace = true

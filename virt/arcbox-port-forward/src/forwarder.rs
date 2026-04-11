@@ -10,7 +10,6 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::sync::Arc;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
@@ -161,7 +160,7 @@ async fn listener_loop(
                             if let Err(e) = relay_connection(
                                 stream, connector, target_ip, target_port,
                             ).await {
-                                tracing::debug!(
+                                tracing::warn!(
                                     "Port forward {peer} → {target_ip}:{target_port}: {e}"
                                 );
                             }
@@ -178,7 +177,7 @@ async fn listener_loop(
 
 /// Relays a single TCP connection over vsock to the guest.
 async fn relay_connection(
-    mut tcp: tokio::net::TcpStream,
+    tcp: tokio::net::TcpStream,
     connector: Arc<dyn VsockConnector>,
     target_ip: Ipv4Addr,
     target_port: u16,
@@ -195,41 +194,153 @@ async fn relay_connection(
             .map_err(|e| Error::VsockConnect(e.to_string()))?
             .map_err(Error::VsockConnect)?;
 
-    // Wrap the raw fd in a tokio AsyncFd for non-blocking I/O.
     // SAFETY: fd is a valid, owned socket from the connector.
-    let std_stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
-    std_stream.set_nonblocking(true)?;
-    let mut vsock = tokio::net::UnixStream::from_std(std_stream)?;
+    let vsock_stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+    // Blocking mode for handshake.
 
-    // Send the 6-byte target header.
-    let header = protocol::encode_header(target_ip, target_port);
-    vsock.write_all(&header).await?;
-
-    // Read 1-byte status.
-    let mut status_buf = [0u8; 1];
-    vsock.read_exact(&mut status_buf).await?;
-
-    if status_buf[0] != protocol::STATUS_OK {
-        return Err(Error::Handshake {
-            status: status_buf[0],
-            desc: protocol::status_description(status_buf[0]),
-        });
+    // Send the 6-byte target header (blocking).
+    {
+        use std::io::Write;
+        let header = protocol::encode_header(target_ip, target_port);
+        (&vsock_stream).write_all(&header)?;
     }
 
-    // TODO(perf): inline inject promotion disabled pending receiver=0 bug.
-    // The into_std()/from_std() roundtrip also breaks tokio stream state.
+    // Read 1-byte status (blocking).
+    {
+        use std::io::Read;
+        let mut status_buf = [0u8; 1];
+        (&vsock_stream).read_exact(&mut status_buf)?;
+        if status_buf[0] != protocol::STATUS_OK {
+            return Err(Error::Handshake {
+                status: status_buf[0],
+                desc: protocol::status_description(status_buf[0]),
+            });
+        }
+    }
+
     let _ = (&connector, host_port);
 
-    // Bidirectional relay via socketpair.
-    const RELAY_BUF: usize = 256 * 1024;
-    let (v2t, t2v) =
-        tokio::io::copy_bidirectional_with_sizes(&mut tcp, &mut vsock, RELAY_BUF, RELAY_BUF)
-            .await?;
+    // Convert TCP stream to std blocking.
+    let tcp_std = tcp.into_std()?;
+    tcp_std.set_nonblocking(false)?;
 
-    tracing::debug!(
-        "Port forward {}:{} done: host→guest={v2t} guest→host={t2v}",
-        target_ip,
-        target_port,
-    );
+    // Enlarge TCP recv buffer to prevent zero-window stalls. The
+    // default macOS SO_RCVBUF is 128 KiB — at 8 Gbps that fills in
+    // ~128μs, shorter than one INJECT_YIELD cycle. The TCP window
+    // closes, iperf enters persist mode with exponential backoff,
+    // and recovery stalls indefinitely.
+    {
+        use std::os::unix::io::AsRawFd;
+        let buf_size: libc::c_int = 16 * 1024 * 1024; // 16 MiB
+        unsafe {
+            libc::setsockopt(
+                tcp_std.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                std::ptr::addr_of!(buf_size).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+    }
+
+    // Blocking bidirectional relay — eliminates tokio from the data path.
+    let relay_start = std::time::Instant::now();
+    let result = tokio::task::spawn_blocking(move || -> io::Result<(u64, u64)> {
+        use std::io::{Read, Write};
+
+        let vsock_r = vsock_stream;
+        let vsock_w = vsock_r.try_clone()?;
+        let tcp_r = tcp_std;
+        let tcp_w = tcp_r.try_clone()?;
+
+        // tcp → vsock (host→guest)
+        let t2v = std::thread::Builder::new().name("pf-t2v".into()).spawn(
+            move || -> io::Result<u64> {
+                let mut buf = vec![0u8; 256 * 1024];
+                let mut total = 0u64;
+                let mut vsock_w = vsock_w;
+                let mut tcp_r = tcp_r;
+                let mut last_log = std::time::Instant::now();
+                let mut log_bytes = 0u64;
+                loop {
+                    let t0 = std::time::Instant::now();
+                    let n = tcp_r.read(&mut buf)?;
+                    let read_dur = t0.elapsed();
+                    if n == 0 {
+                        tracing::info!("pf-t2v: TCP EOF after {total} bytes");
+                        break;
+                    }
+                    let t1 = std::time::Instant::now();
+                    vsock_w.write_all(&buf[..n])?;
+                    let write_dur = t1.elapsed();
+                    total += n as u64;
+                    log_bytes += n as u64;
+
+                    // Log if any syscall takes > 100ms (indicates blocking)
+                    if read_dur.as_millis() > 100 || write_dur.as_millis() > 100 {
+                        tracing::warn!(
+                            "pf-t2v SLOW: read={:?} write={:?} n={n} total={total} ({:.1} GB)",
+                            read_dur,
+                            write_dur,
+                            total as f64 / 1e9
+                        );
+                    }
+
+                    if last_log.elapsed() >= std::time::Duration::from_secs(2) {
+                        let mbps = log_bytes as f64 * 8.0 / last_log.elapsed().as_secs_f64() / 1e6;
+                        tracing::info!(
+                            "pf-t2v: {mbps:.0} Mbps, total={total} ({:.1} GB)",
+                            total as f64 / 1e9
+                        );
+                        log_bytes = 0;
+                        last_log = std::time::Instant::now();
+                    }
+                }
+                Ok(total)
+            },
+        )?;
+
+        // vsock → tcp (guest→host) in current thread
+        let mut buf = vec![0u8; 256 * 1024];
+        let mut v2t_total = 0u64;
+        let mut vsock_r = vsock_r;
+        let mut tcp_w = tcp_w;
+        loop {
+            let n = vsock_r.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            tcp_w.write_all(&buf[..n])?;
+            v2t_total += n as u64;
+        }
+
+        let t2v_total = t2v
+            .join()
+            .map_err(|_| io::Error::other("pf-t2v panicked"))??;
+        Ok((t2v_total, v2t_total))
+    })
+    .await
+    .map_err(|e| io::Error::other(e.to_string()))?;
+
+    let elapsed = relay_start.elapsed();
+    match &result {
+        Ok((t2v, v2t)) => {
+            tracing::info!(
+                "Port forward {}:{} done after {:.1}s: host→guest={t2v} guest→host={v2t}",
+                target_ip,
+                target_port,
+                elapsed.as_secs_f64(),
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Port forward {}:{} FAILED after {:.1}s: {e}",
+                target_ip,
+                target_port,
+                elapsed.as_secs_f64(),
+            );
+        }
+    }
+    result?;
     Ok(())
 }

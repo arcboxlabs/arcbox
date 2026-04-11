@@ -562,6 +562,7 @@ name = "arcbox-port-forward"
 version = "0.3.21"
 dependencies = [
  "arcbox-constants",
+ "libc",
  "thiserror",
  "tokio",
  "tokio-util",
