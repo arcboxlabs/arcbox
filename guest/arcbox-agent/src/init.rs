@@ -110,6 +110,12 @@ mod platform {
         }
     }
 
+    fn write_sysctl(path: &str, value: &str) {
+        if let Err(e) = fs::write(path, format!("{value}\n")) {
+            tracing::warn!(path, error = %e, "failed to write sysctl");
+        }
+    }
+
     fn mount_tmpfs(target: &str) {
         if crate::mount::is_mounted(target) {
             return;
@@ -279,6 +285,15 @@ mod platform {
         ensure_sysctl_at_least("/proc/sys/net/core/rmem_default", 4 * 1024 * 1024);
         ensure_sysctl_at_least("/proc/sys/net/core/wmem_max", 16 * 1024 * 1024);
         ensure_sysctl_at_least("/proc/sys/net/core/wmem_default", 4 * 1024 * 1024);
+
+        // TCP-specific buffer tuning. net.core.* only sets the ceiling;
+        // the TCP autotuner uses tcp_rmem/tcp_wmem (min/default/max) to
+        // pick actual per-socket sizes. Without this, the default max is
+        // ~6 MiB which can bottleneck the splice relay → container path.
+        write_sysctl("/proc/sys/net/ipv4/tcp_rmem", "4096 1048576 16777216");
+        write_sysctl("/proc/sys/net/ipv4/tcp_wmem", "4096 1048576 16777216");
+        // Increase the netdev backlog for high-throughput loopback traffic.
+        write_sysctl("/proc/sys/net/core/netdev_max_backlog", "5000");
         // Bring up loopback interface.
         match std::process::Command::new("/bin/busybox")
             .args(["ip", "link", "set", "lo", "up"])

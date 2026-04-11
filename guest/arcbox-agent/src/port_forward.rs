@@ -243,6 +243,8 @@ mod inner {
             .name("splice-v2t".into())
             .spawn(move || -> anyhow::Result<u64> {
                 let mut total = 0u64;
+                let mut last_log = std::time::Instant::now();
+                let mut log_bytes = 0u64;
                 loop {
                     let n = unsafe {
                         libc::splice(
@@ -255,6 +257,10 @@ mod inner {
                         )
                     };
                     if n <= 0 {
+                        let errno = std::io::Error::last_os_error();
+                        tracing::warn!(
+                            "splice-v2t: vsock→pipe returned {n}, errno={errno}, total={total}"
+                        );
                         break;
                     }
                     let mut remaining = n as usize;
@@ -270,11 +276,29 @@ mod inner {
                             )
                         };
                         if w <= 0 {
+                            let errno = std::io::Error::last_os_error();
+                            tracing::warn!(
+                                "splice-v2t: pipe→tcp returned {w}, errno={errno}, remaining={remaining}, total={total}"
+                            );
                             break;
                         }
                         remaining -= w as usize;
                     }
                     total += n as u64;
+                    log_bytes += n as u64;
+
+                    // Periodic throughput log (every 2 seconds).
+                    let elapsed = last_log.elapsed();
+                    if elapsed >= std::time::Duration::from_secs(2) {
+                        let mbps =
+                            log_bytes as f64 * 8.0 / elapsed.as_secs_f64() / 1_000_000.0;
+                        tracing::info!(
+                            "splice-v2t: {mbps:.0} Mbps, total={total} ({:.1} GB)",
+                            total as f64 / 1_073_741_824.0
+                        );
+                        log_bytes = 0;
+                        last_log = std::time::Instant::now();
+                    }
                 }
                 unsafe {
                     libc::close(pipe_v2t[0]);
