@@ -253,48 +253,47 @@ async fn relay_connection(
         let tcp_r = tcp_std;
         let tcp_w = tcp_r.try_clone()?;
 
-        // tcp → vsock (host→guest)
-        let t2v = std::thread::Builder::new().name("pf-t2v".into()).spawn(
+        // tcp → vsock (host→guest): decoupled via channel so TCP read
+        // never blocks on socketpair write. This keeps the TCP recv
+        // buffer drained and the TCP window open even during brief
+        // socketpair backpressure.
+        // Unbounded channel: the TCP reader MUST NOT block. macOS caps
+        // socket buffers at kern.ipc.maxsockbuf (8MB), so any bounded
+        // channel that fills during a >~40ms socketpair stall causes
+        // the TCP window to close, triggering persist-mode backoff that
+        // never fully recovers. Steady-state memory is near-zero (the
+        // socketpair writer drains as fast as data arrives). Only peaks
+        // during vsock credit/descriptor backpressure bursts.
+        let (tx, rx) = crossbeam_channel::unbounded::<Vec<u8>>();
+
+        // TCP reader thread: drains TCP recv buffer into channel.
+        let tcp_reader = std::thread::Builder::new().name("pf-tcp-rd".into()).spawn(
             move || -> io::Result<u64> {
                 let mut buf = vec![0u8; 256 * 1024];
                 let mut total = 0u64;
-                let mut vsock_w = vsock_w;
                 let mut tcp_r = tcp_r;
-                let mut last_log = std::time::Instant::now();
-                let mut log_bytes = 0u64;
                 loop {
-                    let t0 = std::time::Instant::now();
                     let n = tcp_r.read(&mut buf)?;
-                    let read_dur = t0.elapsed();
                     if n == 0 {
-                        tracing::info!("pf-t2v: TCP EOF after {total} bytes");
                         break;
                     }
-                    let t1 = std::time::Instant::now();
-                    vsock_w.write_all(&buf[..n])?;
-                    let write_dur = t1.elapsed();
                     total += n as u64;
-                    log_bytes += n as u64;
-
-                    // Log if any syscall takes > 100ms (indicates blocking)
-                    if read_dur.as_millis() > 100 || write_dur.as_millis() > 100 {
-                        tracing::warn!(
-                            "pf-t2v SLOW: read={:?} write={:?} n={n} total={total} ({:.1} GB)",
-                            read_dur,
-                            write_dur,
-                            total as f64 / 1e9
-                        );
+                    if tx.send(buf[..n].to_vec()).is_err() {
+                        break;
                     }
+                }
+                Ok(total)
+            },
+        )?;
 
-                    if last_log.elapsed() >= std::time::Duration::from_secs(2) {
-                        let mbps = log_bytes as f64 * 8.0 / last_log.elapsed().as_secs_f64() / 1e6;
-                        tracing::info!(
-                            "pf-t2v: {mbps:.0} Mbps, total={total} ({:.1} GB)",
-                            total as f64 / 1e9
-                        );
-                        log_bytes = 0;
-                        last_log = std::time::Instant::now();
-                    }
+        // Socketpair writer thread: drains channel into socketpair.
+        let t2v = std::thread::Builder::new().name("pf-sp-wr".into()).spawn(
+            move || -> io::Result<u64> {
+                let mut total = 0u64;
+                let mut vsock_w = vsock_w;
+                while let Ok(data) = rx.recv() {
+                    vsock_w.write_all(&data)?;
+                    total += data.len() as u64;
                 }
                 Ok(total)
             },
@@ -314,10 +313,17 @@ async fn relay_connection(
             v2t_total += n as u64;
         }
 
-        let t2v_total = t2v
+        let tcp_rd_total = tcp_reader
             .join()
-            .map_err(|_| io::Error::other("pf-t2v panicked"))??;
-        Ok((t2v_total, v2t_total))
+            .map_err(|_| io::Error::other("pf-tcp-rd panicked"))??;
+        let sp_wr_total = t2v
+            .join()
+            .map_err(|_| io::Error::other("pf-sp-wr panicked"))??;
+        // tcp_rd_total = bytes read from TCP, sp_wr_total = bytes
+        // written to socketpair. They should match unless channel
+        // was dropped early.
+        let _ = tcp_rd_total;
+        Ok((sp_wr_total, v2t_total))
     })
     .await
     .map_err(|e| io::Error::other(e.to_string()))?;
