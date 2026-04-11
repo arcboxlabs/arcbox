@@ -35,7 +35,7 @@ use arcbox_virtio::vsock::{VsockAddr, VsockHeader, VsockHostConnections, VsockOp
 use crate::blk_worker::GuestMemWriter;
 use crate::device::VirtioMmioState;
 use crate::irq::Irq;
-use crate::vsock_manager::{RxOps, VsockConnectionId, VsockConnectionManager, TX_BUFFER_SIZE};
+use crate::vsock_manager::{RxOps, TX_BUFFER_SIZE, VsockConnectionId, VsockConnectionManager};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -790,7 +790,7 @@ fn process_tx_queue(
         // to kick again (EVENT_IDX suppression for TX queue).
         let avail_event_off = used_gpa + 4 + 8 * q_size;
         ctx.guest_mem
-            .write_u16(avail_event_off, ((current_avail + 1) as u16));
+            .write_u16(avail_event_off, (current_avail + 1) as u16);
 
         current_avail += 1;
         processed += 1;

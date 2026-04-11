@@ -458,11 +458,14 @@ pub struct DeviceManager {
     /// them and reads directly from host sockets into guest buffers.
     inline_conn_channel:
         Mutex<Option<crossbeam_channel::Receiver<arcbox_net_inject::inline_conn::InlineConn>>>,
-    /// Vsock RX worker thread handle. Spawned at DRIVER_OK for VirtioVsock.
+    /// Vsock muxer thread handle. Spawned at DRIVER_OK for VirtioVsock.
+    /// Replaces the old vsock_rx_worker -- the muxer handles both TX and RX.
     vsock_rx_worker_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Write end of the pipe that signals the muxer when the guest kicks TX queue.
+    vsock_tx_kick_fd: Mutex<Option<i32>>,
     /// Channel for promoted vsock inline connections (bypasses socketpair).
     vsock_inline_conn_channel:
-        Mutex<Option<crossbeam_channel::Receiver<crate::vsock_rx_worker::VsockInlineConn>>>,
+        Mutex<Option<crossbeam_channel::Receiver<crate::vsock_muxer::VsockInlineConn>>>,
 }
 
 // SAFETY: guest_ram_base points to memory that is valid for the lifetime of the
@@ -500,6 +503,7 @@ impl DeviceManager {
             rx_inject_channel: Mutex::new(None),
             inline_conn_channel: Mutex::new(None),
             vsock_rx_worker_handle: Mutex::new(None),
+            vsock_tx_kick_fd: Mutex::new(None),
             vsock_inline_conn_channel: Mutex::new(None),
         }
     }
@@ -612,10 +616,10 @@ impl DeviceManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(rx);
     }
 
-    /// Stores the vsock inline connection channel for the worker thread.
+    /// Stores the vsock inline connection channel for the muxer thread.
     pub fn set_vsock_inline_conn_channel(
         &mut self,
-        rx: crossbeam_channel::Receiver<crate::vsock_rx_worker::VsockInlineConn>,
+        rx: crossbeam_channel::Receiver<crate::vsock_muxer::VsockInlineConn>,
     ) {
         *self
             .vsock_inline_conn_channel
@@ -640,17 +644,20 @@ impl DeviceManager {
             .take()
     }
 
-    /// Takes the vsock RX worker thread handle for join on shutdown.
-    pub fn take_vsock_rx_worker_handle(&self) -> Option<std::thread::JoinHandle<()>> {
+    /// Takes the vsock muxer thread handle for join on shutdown.
+    pub fn take_vsock_muxer_handle(&self) -> Option<std::thread::JoinHandle<()>> {
         self.vsock_rx_worker_handle
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
     }
 
-    /// Spawns the vsock RX worker thread for the VirtioVsock device.
+    /// Spawns the vsock muxer thread for the VirtioVsock device.
+    /// The muxer handles both TX (guest->host) and RX (host->guest) in a
+    /// single kqueue event loop, replacing the old split architecture where
+    /// the vCPU thread processed TX inline and `vsock_rx_worker` handled RX.
     /// Called from the DRIVER_OK handler. Only spawns once.
-    fn maybe_spawn_vsock_rx_worker(
+    fn maybe_spawn_vsock_muxer(
         &self,
         device_id: DeviceId,
         mmio_arc: &Arc<RwLock<VirtioMmioState>>,
@@ -672,7 +679,7 @@ impl DeviceManager {
         }
 
         let (Some(ram_base), ram_size) = (self.guest_ram_base, self.guest_ram_size) else {
-            tracing::warn!("vsock-rx worker: no guest RAM mapped");
+            tracing::warn!("vsock muxer: no guest RAM mapped");
             return;
         };
         let gpa_base = self.guest_ram_gpa;
@@ -680,19 +687,67 @@ impl DeviceManager {
         let Ok(mmio) = mmio_arc.read() else {
             return;
         };
-        let qi = 0usize; // RX queue index
-        if qi >= 8 || !mmio.queue_ready[qi] || mmio.queue_num[qi] == 0 {
-            tracing::warn!("vsock-rx worker: RX queue not ready");
+
+        // Capture RX queue config (queue 0).
+        let rx_qi = 0usize;
+        if rx_qi >= 8 || !mmio.queue_ready[rx_qi] || mmio.queue_num[rx_qi] == 0 {
+            tracing::warn!("vsock muxer: RX queue not ready");
             return;
         }
+        let rx_queue = crate::vsock_muxer::VsockRxQueueConfig {
+            desc_gpa: mmio.queue_desc[rx_qi],
+            avail_gpa: mmio.queue_driver[rx_qi],
+            used_gpa: mmio.queue_device[rx_qi],
+            size: mmio.queue_num[rx_qi],
+        };
 
-        let rx_queue = crate::vsock_rx_worker::VsockRxQueueConfig {
-            desc_gpa: mmio.queue_desc[qi],
-            avail_gpa: mmio.queue_driver[qi],
-            used_gpa: mmio.queue_device[qi],
-            size: mmio.queue_num[qi],
+        // Capture TX queue config (queue 1).
+        let tx_qi = 1usize;
+        if tx_qi >= 8 || !mmio.queue_ready[tx_qi] || mmio.queue_num[tx_qi] == 0 {
+            tracing::warn!("vsock muxer: TX queue not ready");
+            return;
+        }
+        let tx_queue = crate::vsock_muxer::VsockTxQueueConfig {
+            desc_gpa: mmio.queue_desc[tx_qi],
+            avail_gpa: mmio.queue_driver[tx_qi],
+            used_gpa: mmio.queue_device[tx_qi],
+            size: mmio.queue_num[tx_qi],
         };
         drop(mmio);
+
+        // Create the TX kick pipe. The vCPU QUEUE_NOTIFY handler writes a
+        // byte to the write end; the muxer kqueue loop reads from the read end.
+        let mut pipe_fds = [0i32; 2];
+        // SAFETY: pipe() with a valid two-element array.
+        if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } != 0 {
+            tracing::error!(
+                "vsock muxer: pipe() failed: {}",
+                std::io::Error::last_os_error()
+            );
+            return;
+        }
+        // Both ends non-blocking so neither the vCPU nor the muxer ever blocks.
+        // SAFETY: pipe_fds are valid fds just created by pipe().
+        unsafe {
+            libc::fcntl(
+                pipe_fds[0],
+                libc::F_SETFL,
+                libc::fcntl(pipe_fds[0], libc::F_GETFL) | libc::O_NONBLOCK,
+            );
+            libc::fcntl(
+                pipe_fds[1],
+                libc::F_SETFL,
+                libc::fcntl(pipe_fds[1], libc::F_GETFL) | libc::O_NONBLOCK,
+            );
+        }
+        let tx_kick_read = pipe_fds[0];
+        let tx_kick_write = pipe_fds[1];
+
+        // Store write end so the QUEUE_NOTIFY handler can signal the muxer.
+        *self
+            .vsock_tx_kick_fd
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tx_kick_write);
 
         // SAFETY: ram_base is valid for ram_size bytes (VM-lifetime mapping).
         let guest_mem = unsafe {
@@ -702,27 +757,27 @@ impl DeviceManager {
         let irq_callback = match self.net_rx_irq_callback.as_ref() {
             Some(cb) => Arc::clone(cb),
             None => {
-                tracing::warn!("vsock-rx worker: no IRQ callback");
+                tracing::warn!("vsock muxer: no IRQ callback");
                 return;
             }
         };
         let exit_vcpus = match self.net_rx_exit_vcpus.as_ref() {
             Some(f) => Arc::clone(f),
             None => {
-                tracing::warn!("vsock-rx worker: no exit_vcpus hook");
+                tracing::warn!("vsock muxer: no exit_vcpus hook");
                 return;
             }
         };
         let running = match self.running.as_ref() {
             Some(r) => Arc::clone(r),
             None => {
-                tracing::warn!("vsock-rx worker: no running flag");
+                tracing::warn!("vsock muxer: no running flag");
                 return;
             }
         };
 
         let Some(irq) = device.info.irq else {
-            tracing::warn!("vsock-rx worker: device has no IRQ");
+            tracing::warn!("vsock muxer: device has no IRQ");
             return;
         };
         let vsock_mgr = self.vsock_connections.clone();
@@ -738,9 +793,15 @@ impl DeviceManager {
                 rx
             });
 
-        let ctx = crate::vsock_rx_worker::VsockRxWorkerContext {
+        // Dummy allocation channel -- daemon allocation path will be wired
+        // in Phase 4. For now the muxer just never receives alloc requests.
+        let (_alloc_tx, alloc_rx) = crossbeam_channel::unbounded();
+
+        let ctx = crate::vsock_muxer::VsockMuxerContext {
             guest_mem,
             rx_queue,
+            tx_queue,
+            tx_kick_fd: tx_kick_read,
             mmio_state: mmio_arc.clone(),
             irq_callback,
             irq,
@@ -748,21 +809,22 @@ impl DeviceManager {
             vsock_mgr,
             running,
             inline_conn_rx,
+            alloc_rx,
         };
 
         match std::thread::Builder::new()
-            .name("vsock-rx".to_string())
-            .spawn(move || crate::vsock_rx_worker::vsock_rx_worker_loop(ctx))
+            .name("vsock-mux".to_string())
+            .spawn(move || crate::vsock_muxer::vsock_muxer_loop(ctx))
         {
             Ok(handle) => {
                 *self
                     .vsock_rx_worker_handle
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
-                tracing::info!("vsock-rx worker thread spawned");
+                tracing::info!("vsock muxer thread spawned");
             }
             Err(e) => {
-                tracing::error!("Failed to spawn vsock-rx worker: {e}");
+                tracing::error!("Failed to spawn vsock muxer: {e}");
             }
         }
     }
@@ -1455,8 +1517,8 @@ impl DeviceManager {
 
                         // Spawn the net-io worker for the primary VirtioNet device.
                         self.maybe_spawn_net_rx_worker(device_id, state);
-                        // Spawn the vsock RX worker for the VirtioVsock device.
-                        self.maybe_spawn_vsock_rx_worker(device_id, state);
+                        // Spawn the vsock muxer for the VirtioVsock device.
+                        self.maybe_spawn_vsock_muxer(device_id, state);
                     }
 
                     // Handle device reset
@@ -1472,16 +1534,31 @@ impl DeviceManager {
                 }
                 virtio_mmio::regs::QUEUE_NOTIFY => {
                     let queue_idx = value32 as u16;
-                    // Log vsock TX notifications at trace level (per-kick hot path).
-                    if device.info.device_type == DeviceType::VirtioVsock && queue_idx == 1 {
-                        tracing::trace!("QUEUE_NOTIFY: vsock TX queue 1 kicked by guest!",);
-                    }
                     tracing::trace!(
                         "QUEUE_NOTIFY: device {} ({:?}) queue {}",
                         device_id.0,
                         device.info.device_type,
                         queue_idx,
                     );
+
+                    // If this is vsock TX queue 1 and the muxer pipe is set,
+                    // signal the muxer instead of processing TX inline on the
+                    // vCPU thread. The muxer owns the TX queue and handles
+                    // completions + IRQ injection.
+                    if device.info.device_type == DeviceType::VirtioVsock && queue_idx == 1 {
+                        let kick_fd = *self
+                            .vsock_tx_kick_fd
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if let Some(fd) = kick_fd {
+                            // Non-blocking write -- drop if pipe full (muxer will drain).
+                            // SAFETY: fd is a valid pipe fd created by us.
+                            unsafe {
+                                libc::write(fd, [1u8].as_ptr().cast(), 1);
+                            }
+                            return Ok(());
+                        }
+                    }
 
                     if let Some(virtio_dev) = &device.virtio_device {
                         // Build QueueConfig from current MMIO state for the

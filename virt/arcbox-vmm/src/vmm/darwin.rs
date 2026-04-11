@@ -619,7 +619,7 @@ impl Vmm {
         };
 
         let guest_cid = self.config.guest_cid.unwrap_or(3) as u64;
-        let conn = crate::vsock_rx_worker::VsockInlineConn {
+        let conn = crate::vsock_muxer::VsockInlineConn {
             stream,
             conn_id: crate::vsock_manager::VsockConnectionId {
                 host_port,

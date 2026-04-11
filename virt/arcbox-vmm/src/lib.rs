@@ -79,6 +79,9 @@ pub(crate) mod virtqueue_util;
 pub mod vmm;
 pub mod vsock_manager;
 #[cfg(target_os = "macos")]
+pub(crate) mod vsock_muxer;
+#[cfg(target_os = "macos")]
+#[allow(dead_code)] // Deprecated: replaced by vsock_muxer. Retained for reference.
 pub(crate) mod vsock_rx_worker;
 
 pub use boot::{BootParams, KernelLoader, KernelType};

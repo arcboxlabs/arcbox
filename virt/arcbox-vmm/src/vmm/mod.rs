@@ -294,7 +294,7 @@ pub struct Vmm {
     hv_device_manager: Option<std::sync::Arc<DeviceManager>>,
     /// Sender for promoting port-forward connections to vsock inline inject.
     #[cfg(target_os = "macos")]
-    vsock_inline_tx: Option<crossbeam_channel::Sender<crate::vsock_rx_worker::VsockInlineConn>>,
+    vsock_inline_tx: Option<crossbeam_channel::Sender<crate::vsock_muxer::VsockInlineConn>>,
     /// HV-side network fd (NIC1). Paired with the NetworkDatapath fd.
     /// Kept alive so the socketpair stays open while the VM runs.
     #[cfg(target_os = "macos")]

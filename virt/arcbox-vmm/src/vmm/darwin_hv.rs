@@ -1436,7 +1436,7 @@ impl Vmm {
 
         // Create vsock inline connection channel for direct injection.
         let (vsock_inline_tx, vsock_inline_rx) =
-            crossbeam_channel::bounded::<crate::vsock_rx_worker::VsockInlineConn>(256);
+            crossbeam_channel::bounded::<crate::vsock_muxer::VsockInlineConn>(256);
         device_manager.set_vsock_inline_conn_channel(vsock_inline_rx);
         self.vsock_inline_tx = Some(vsock_inline_tx);
 
