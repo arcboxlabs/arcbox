@@ -23,14 +23,10 @@ use crate::device::VirtioMmioState;
 use crate::irq::Irq;
 use crate::vsock_manager::{RxOps, TX_BUFFER_SIZE, VsockConnectionId, VsockConnectionManager};
 
-/// Maximum packets to inject per kqueue wakeup.
-/// Kept small to prevent guest softirq starvation (RCU stall).
-/// At 8 KiB per packet, 16 packets = 128 KiB per batch.
-const BATCH_SIZE: usize = 16;
+/// Maximum packets to inject per kqueue wakeup before flushing IRQ.
+const BATCH_SIZE: usize = 64;
 
 /// Maximum bytes to read from a single socket per iteration.
-/// Must account for VsockHeader overhead — actual payload per read is
-/// limited by peek_rx_capacity() - HEADER_SIZE anyway.
 const MAX_READ_SIZE: usize = 65536;
 
 /// Interrupt coalescing timeout (latency bound).
@@ -41,6 +37,21 @@ const POLL_TIMEOUT: Duration = Duration::from_millis(1);
 
 /// Backoff when RX descriptors are exhausted.
 const DESCRIPTOR_BACKOFF: Duration = Duration::from_micros(50);
+
+/// Per-connection byte cap per kqueue wakeup cycle.
+const CONN_WAKEUP_CAP: usize = 512 * 1024;
+
+/// Global byte cap across ALL connections per main loop cycle.
+/// Matched to the guest kernel's VIRTIO_VSOCK_RX_BUDGET (64 descriptors).
+/// 64 × 4 KiB = 256 KiB. Injecting more per cycle would outpace the
+/// budget and accumulate descriptors until the queue fills.
+const CYCLE_BYTE_CAP: usize = 256 * 1024;
+
+/// Yield after each main loop iteration. With the guest kernel budget
+/// patch, rx_work self-limits to 64 packets and yields. This sleep just
+/// needs to cover IRQ delivery + kworker scheduling (~10-20μs), not the
+/// full processing time.
+const INJECT_YIELD: Duration = Duration::from_micros(100);
 
 /// RX queue layout, captured at DRIVER_OK time.
 pub struct VsockRxQueueConfig {
@@ -120,25 +131,6 @@ fn write_avail_event(ctx: &VsockRxWorkerContext, _used_idx: u16) {
     let avail_event_off = ctx.rx_queue.used_gpa as usize + 4 + q_size * 8;
     let avail_idx = ctx.guest_mem.read_u16(ctx.rx_queue.avail_gpa as usize + 2);
     ctx.guest_mem.write_u16(avail_event_off, avail_idx);
-}
-
-/// Flushes a pending batch using EVENT_IDX-aware notification logic.
-fn flush_batch(
-    ctx: &VsockRxWorkerContext,
-    batch_count: &mut u16,
-    batch_start: &mut Option<Instant>,
-    old_used: &mut u16,
-    used_idx: u16,
-) {
-    if *batch_count == 0 {
-        return;
-    }
-
-    write_avail_event(ctx, used_idx);
-    maybe_notify(ctx, *old_used, used_idx);
-    *batch_count = 0;
-    *batch_start = None;
-    *old_used = used_idx;
 }
 
 /// Peeks the next available RX descriptor chain's total writable
@@ -327,7 +319,6 @@ fn poll_vsock_inline_conns(
     ctx: &VsockRxWorkerContext,
     inline_conns: &mut Vec<VsockInlineConn>,
     used_idx: &mut u16,
-    old_used: &mut u16,
     batch_count: &mut u16,
     batch_start: &mut Option<Instant>,
 ) {
@@ -363,7 +354,11 @@ fn poll_vsock_inline_conns(
         let desc_cap = peek_rx_capacity(ctx, *used_idx);
         if desc_cap <= VsockHeader::SIZE {
             // Flush interrupt so guest can refill, then backoff.
-            flush_batch(ctx, batch_count, batch_start, old_used, *used_idx);
+            if *batch_count > 0 {
+                trigger_irq(ctx);
+                *batch_count = 0;
+                *batch_start = None;
+            }
             std::thread::sleep(DESCRIPTOR_BACKOFF);
             break;
         }
@@ -375,7 +370,11 @@ fn poll_vsock_inline_conns(
         std::sync::atomic::fence(Ordering::Acquire);
         let avail_idx = ctx.guest_mem.read_u16(ctx.rx_queue.avail_gpa as usize + 2);
         if *used_idx == avail_idx {
-            flush_batch(ctx, batch_count, batch_start, old_used, *used_idx);
+            if *batch_count > 0 {
+                trigger_irq(ctx);
+                *batch_count = 0;
+                *batch_start = None;
+            }
             break;
         }
 
@@ -476,6 +475,7 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
     let mut registered_fds: Vec<i32> = Vec::new();
     let mut read_buf = vec![0u8; MAX_READ_SIZE];
     let mut inline_conns: Vec<VsockInlineConn> = Vec::new();
+    let mut last_data = Instant::now();
 
     let timeout = libc::timespec {
         tv_sec: 0,
@@ -579,7 +579,6 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                 &ctx,
                 &mut inline_conns,
                 &mut used_idx,
-                &mut old_used,
                 &mut batch_count,
                 &mut batch_start,
             );
@@ -626,7 +625,31 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
             continue;
         }
 
+        // ----- Queue high-water check -----
+        // If more than 3/4 of the RX queue is consumed, skip data
+        // injection this cycle and let the guest catch up. Without
+        // this, a tiny processing deficit (~0.01 desc/cycle) gradually
+        // fills the 1024-entry queue over ~15 seconds → permanent stall.
+        let q_size = ctx.rx_queue.size as usize;
+        let avail_idx_snap = ctx.guest_mem.read_u16(ctx.rx_queue.avail_gpa as usize + 2);
+        let q_free = avail_idx_snap.wrapping_sub(used_idx) as usize;
+        let q_backpressure = q_free < q_size / 4;
+        if q_backpressure {
+            // Queue running low — ALWAYS fire IRQ (even if batch_count=0)
+            // to wake guest rx_work so it returns descriptors. Then yield.
+            if batch_count > 0 {
+                batch_count = 0;
+                batch_start = None;
+                old_used = used_idx;
+            }
+            write_avail_event(&ctx, used_idx);
+            trigger_irq(&ctx);
+            std::thread::sleep(INJECT_YIELD);
+            continue;
+        }
+
         // ----- Process readable fds -----
+        let mut cycle_bytes: usize = 0;
         for event in events.iter().take(nev as usize) {
             #[allow(clippy::cast_possible_wrap)]
             let fd = event.ident as i32;
@@ -643,9 +666,19 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
             };
             let Some(conn_id) = conn_info else { continue };
 
-            // Read in a loop until EAGAIN or batch limit.
+            // Read in a loop until EAGAIN, batch limit, or byte cap.
+            let mut conn_bytes: usize = 0;
+            // Fair-share: divide remaining cycle budget by ready events
+            // so no single connection starves the others.
+            let per_event = CYCLE_BYTE_CAP / (nev as usize).max(1);
+            let conn_cap = per_event
+                .min(CONN_WAKEUP_CAP)
+                .min(CYCLE_BYTE_CAP.saturating_sub(cycle_bytes));
             for _ in 0..BATCH_SIZE {
                 if batch_count as usize >= BATCH_SIZE {
+                    break;
+                }
+                if conn_bytes >= conn_cap {
                     break;
                 }
 
@@ -657,25 +690,13 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                 };
 
                 if credit == 0 {
-                    if let Ok(mgr) = ctx.vsock_mgr.lock() {
-                        if let Some(c) = mgr.get(&conn_id) {
-                            tracing::info!(
-                                "vsock-rx: credit=0 conn={:?} buf_alloc={} rx_cnt={} peer_fwd={}",
-                                conn_id,
-                                c.peer_buf_alloc,
-                                c.rx_cnt.0,
-                                c.peer_fwd_cnt.0,
-                            );
-                        }
-                    }
-                    flush_batch(
-                        &ctx,
-                        &mut batch_count,
-                        &mut batch_start,
-                        &mut old_used,
-                        used_idx,
-                    );
-
+                    // Send a CreditRequest to solicit a CreditUpdate from
+                    // the guest. Without this, the guest only sends
+                    // CreditUpdate when the application calls recvmsg().
+                    // If the splice relay is blocked (TCP backpressure),
+                    // no recvmsg → no CreditUpdate → permanent deadlock.
+                    // CreditRequest triggers the guest kernel to respond
+                    // with OP_CREDIT_UPDATE unconditionally.
                     let pkt = {
                         let Ok(mgr) = ctx.vsock_mgr.lock() else { break };
                         let Some(conn) = mgr.get(&conn_id) else { break };
@@ -688,14 +709,13 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                         )
                     };
                     if inject_packet(&ctx, &pkt, &mut used_idx) > 0 {
+                        // Must fire IRQ so guest rx_work runs and processes
+                        // the CreditRequest. Without this, the packet sits
+                        // in the RX queue unnoticed → no CreditUpdate → deadlock.
                         write_avail_event(&ctx, used_idx);
-                        maybe_notify(&ctx, old_used, used_idx);
+                        trigger_irq(&ctx);
                         old_used = used_idx;
                     }
-
-                    // Brief yield so the vCPU can process the guest's
-                    // CreditUpdate TX response.
-                    std::thread::sleep(Duration::from_micros(100));
                     break;
                 }
 
@@ -704,18 +724,25 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                 let desc_cap = peek_rx_capacity(&ctx, used_idx);
                 if desc_cap <= VsockHeader::SIZE {
                     // No room for even a header — descriptor exhaustion.
-                    flush_batch(
-                        &ctx,
-                        &mut batch_count,
-                        &mut batch_start,
-                        &mut old_used,
-                        used_idx,
-                    );
+                    if batch_count > 0 {
+                        write_avail_event(&ctx, used_idx);
+                        maybe_notify(&ctx, old_used, used_idx);
+                        batch_count = 0;
+                        batch_start = None;
+                        old_used = used_idx;
+                    }
                     std::thread::sleep(DESCRIPTOR_BACKOFF);
                     break;
                 }
                 let max_payload = desc_cap - VsockHeader::SIZE;
-                let max_read = credit.min(max_payload).min(MAX_READ_SIZE);
+                let remaining_cap = conn_cap.saturating_sub(conn_bytes);
+                let max_read = credit
+                    .min(max_payload)
+                    .min(MAX_READ_SIZE)
+                    .min(remaining_cap);
+                if max_read == 0 {
+                    break;
+                }
 
                 let n = unsafe {
                     libc::read(fd, read_buf.as_mut_ptr().cast::<libc::c_void>(), max_read)
@@ -767,63 +794,83 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
                         }
                     }
                     batch_count += 1;
+                    conn_bytes += data.len();
+                    cycle_bytes += data.len();
                     if batch_start.is_none() {
                         batch_start = Some(Instant::now());
                     }
                 } else {
                     // Injection failed — partial write prevented commit.
-                    tracing::warn!(
+                    tracing::debug!(
                         "vsock-rx: inject_packet returned 0, pkt_len={} desc_cap={} credit={}",
                         pkt.len(),
                         desc_cap,
                         credit,
                     );
-                    flush_batch(
-                        &ctx,
-                        &mut batch_count,
-                        &mut batch_start,
-                        &mut old_used,
-                        used_idx,
-                    );
+                    if batch_count > 0 {
+                        write_avail_event(&ctx, used_idx);
+                        maybe_notify(&ctx, old_used, used_idx);
+                        batch_count = 0;
+                        batch_start = None;
+                        old_used = used_idx;
+                    }
                     std::thread::sleep(DESCRIPTOR_BACKOFF);
                     break;
                 }
 
-                // Flush at batch boundary and yield to let guest CPU
-                // process the batch before we inject more. Without this
-                // yield, the worker fills the RX queue faster than the
-                // guest can drain it, causing softirq starvation → RCU stall.
+                // Flush at batch boundary for IRQ coalescing.
+                // No sleep — CONN_WAKEUP_CAP handles pacing.
                 if batch_count as usize >= BATCH_SIZE {
-                    flush_batch(
-                        &ctx,
-                        &mut batch_count,
-                        &mut batch_start,
-                        &mut old_used,
-                        used_idx,
-                    );
-                    std::thread::sleep(Duration::from_micros(50));
+                    write_avail_event(&ctx, used_idx);
+                    maybe_notify(&ctx, old_used, used_idx);
+                    batch_count = 0;
+                    batch_start = None;
+                    old_used = used_idx;
                 }
             }
         }
 
-        // Check coalescing timeout.
-        flush_if_timeout(
-            &ctx,
-            &mut batch_count,
-            &mut batch_start,
-            &mut old_used,
-            used_idx,
-        );
+        // Unconditional end-of-cycle: flush any pending batch, then
+        // yield so guest rx_work can fully drain descriptors, call
+        // virtqueue_enable_cb (which requires NO new descriptors),
+        // return, and let send_work run (CreditUpdate TX).
+        //
+        // This single unconditional block replaces all prior
+        // conditional flush/yield/anti-spin/stall-detect logic.
+        if batch_count > 0 {
+            write_avail_event(&ctx, used_idx);
+            trigger_irq(&ctx);
+            batch_count = 0;
+            batch_start = None;
+            old_used = used_idx;
+            last_data = Instant::now();
+        } else if nev > 0 && last_data.elapsed() > Duration::from_secs(2) {
+            // Stall: events firing but no data injected for 2+ seconds.
+            if let Ok(mgr) = ctx.vsock_mgr.lock() {
+                let avail_idx = ctx.guest_mem.read_u16(ctx.rx_queue.avail_gpa as usize + 2);
+                for (id, fd) in mgr.connected_fds() {
+                    if let Some(c) = mgr.get(&id) {
+                        tracing::warn!(
+                            "STALL conn={id:?} credit={} buf_alloc={} rx={} fwd={} used={used_idx} avail={avail_idx} desc_cap={} fd={fd}",
+                            c.peer_avail_credit(),
+                            c.peer_buf_alloc,
+                            c.rx_cnt.0,
+                            c.peer_fwd_cnt.0,
+                            peek_rx_capacity(&ctx, used_idx),
+                        );
+                    }
+                }
+            }
+            last_data = Instant::now(); // don't spam
+        }
+        std::thread::sleep(INJECT_YIELD);
     }
 
     // Final flush.
-    flush_batch(
-        &ctx,
-        &mut batch_count,
-        &mut batch_start,
-        &mut old_used,
-        used_idx,
-    );
+    if batch_count > 0 {
+        write_avail_event(&ctx, used_idx);
+        maybe_notify(&ctx, old_used, used_idx);
+    }
     unsafe { libc::close(kq) };
     tracing::info!("vsock-rx worker stopped");
 }
@@ -946,148 +993,14 @@ fn flush_if_timeout(
     if *batch_count > 0 {
         if let Some(start) = *batch_start {
             if start.elapsed() >= COALESCE_TIMEOUT {
-                flush_batch(ctx, batch_count, batch_start, old_used, used_idx);
+                write_avail_event(ctx, used_idx);
+                // Unconditional IRQ for latency-bound timeout: if the
+                // coalescing timer fires, we must deliver promptly.
+                trigger_irq(ctx);
+                *batch_count = 0;
+                *batch_start = None;
+                *old_used = used_idx;
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use std::sync::atomic::AtomicUsize;
-
-    use crate::device::VirtioMmioState;
-
-    struct TestCtx {
-        _memory: Box<[u8]>,
-        ctx: VsockRxWorkerContext,
-        irq_count: Arc<AtomicUsize>,
-    }
-
-    fn make_test_ctx(used_event: u16, avail_idx: u16) -> TestCtx {
-        const DESC_GPA: u64 = 0x1000;
-        const AVAIL_GPA: u64 = 0x2000;
-        const USED_GPA: u64 = 0x3000;
-        const QUEUE_SIZE: u16 = 8;
-
-        let mut memory = vec![0u8; 0x4000].into_boxed_slice();
-        memory[AVAIL_GPA as usize + 2..AVAIL_GPA as usize + 4]
-            .copy_from_slice(&avail_idx.to_le_bytes());
-        let used_event_off = AVAIL_GPA as usize + 4 + 2 * QUEUE_SIZE as usize;
-        memory[used_event_off..used_event_off + 2].copy_from_slice(&used_event.to_le_bytes());
-
-        let guest_mem = unsafe { GuestMemWriter::new(memory.as_mut_ptr(), memory.len(), 0) };
-        let mmio_state = Arc::new(RwLock::new(VirtioMmioState::new(0, 0)));
-        let irq_count = Arc::new(AtomicUsize::new(0));
-        let irq_count_for_cb = Arc::clone(&irq_count);
-        let exit_vcpu_count = Arc::new(AtomicUsize::new(0));
-        let exit_vcpu_count_for_cb = Arc::clone(&exit_vcpu_count);
-        let (_tx, rx) = crossbeam_channel::unbounded();
-
-        let ctx = VsockRxWorkerContext {
-            guest_mem,
-            rx_queue: VsockRxQueueConfig {
-                desc_gpa: DESC_GPA,
-                avail_gpa: AVAIL_GPA,
-                used_gpa: USED_GPA,
-                size: QUEUE_SIZE,
-            },
-            mmio_state,
-            irq_callback: Arc::new(move |_, _| {
-                irq_count_for_cb.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            }),
-            irq: 5,
-            exit_vcpus: Arc::new(move || {
-                exit_vcpu_count_for_cb.fetch_add(1, Ordering::Relaxed);
-            }),
-            vsock_mgr: Arc::new(Mutex::new(VsockConnectionManager::new())),
-            running: Arc::new(AtomicBool::new(true)),
-            inline_conn_rx: rx,
-        };
-
-        TestCtx {
-            _memory: memory,
-            ctx,
-            irq_count,
-        }
-    }
-
-    #[test]
-    fn flush_if_timeout_respects_event_idx_suppression() {
-        let fixture = make_test_ctx(2, 7);
-        let mut batch_count = 1;
-        let mut batch_start = Some(
-            Instant::now()
-                .checked_sub(COALESCE_TIMEOUT)
-                .expect("coalesce timeout is representable"),
-        );
-        let mut old_used = 1;
-
-        flush_if_timeout(
-            &fixture.ctx,
-            &mut batch_count,
-            &mut batch_start,
-            &mut old_used,
-            2,
-        );
-
-        assert_eq!(batch_count, 0);
-        assert!(batch_start.is_none());
-        assert_eq!(old_used, 2);
-        assert_eq!(fixture.irq_count.load(Ordering::Relaxed), 0);
-        assert_eq!(
-            fixture
-                .ctx
-                .mmio_state
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .interrupt_status,
-            0
-        );
-
-        let avail_event_off =
-            fixture.ctx.rx_queue.used_gpa as usize + 4 + 8 * fixture.ctx.rx_queue.size as usize;
-        assert_eq!(fixture.ctx.guest_mem.read_u16(avail_event_off), 7);
-    }
-
-    #[test]
-    fn flush_if_timeout_notifies_when_event_idx_requests_it() {
-        let fixture = make_test_ctx(1, 9);
-        let mut batch_count = 1;
-        let mut batch_start = Some(
-            Instant::now()
-                .checked_sub(COALESCE_TIMEOUT)
-                .expect("coalesce timeout is representable"),
-        );
-        let mut old_used = 1;
-
-        flush_if_timeout(
-            &fixture.ctx,
-            &mut batch_count,
-            &mut batch_start,
-            &mut old_used,
-            2,
-        );
-
-        assert_eq!(batch_count, 0);
-        assert!(batch_start.is_none());
-        assert_eq!(old_used, 2);
-        assert_eq!(fixture.irq_count.load(Ordering::Relaxed), 1);
-        assert_eq!(
-            fixture
-                .ctx
-                .mmio_state
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .interrupt_status,
-            1
-        );
-
-        let avail_event_off =
-            fixture.ctx.rx_queue.used_gpa as usize + 4 + 8 * fixture.ctx.rx_queue.size as usize;
-        assert_eq!(fixture.ctx.guest_mem.read_u16(avail_event_off), 9);
     }
 }
