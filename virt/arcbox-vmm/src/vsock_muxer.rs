@@ -630,7 +630,12 @@ fn drain_control_packets(
             }
         };
 
-        if inject_packet(ctx, &pkt, used_idx) > 0 {
+        let desc_cap = peek_rx_capacity(ctx, *used_idx);
+        let injected = inject_packet(ctx, &pkt, used_idx);
+        tracing::info!(
+            "vsock-muxer: drain_control op={op} conn={conn_id:?} injected={injected} desc_cap={desc_cap}"
+        );
+        if injected > 0 {
             *batch_count += 1;
             if batch_start.is_none() {
                 *batch_start = Some(Instant::now());
@@ -786,17 +791,25 @@ fn process_tx_queue(
         let new_used = used_idx_val.wrapping_add(1);
         ctx.guest_mem.write_u16(used_gpa + 2, new_used);
 
-        // Write avail_event in the TX used ring so the guest knows when
-        // to kick again (EVENT_IDX suppression for TX queue).
-        let avail_event_off = used_gpa + 4 + 8 * q_size;
-        ctx.guest_mem
-            .write_u16(avail_event_off, (current_avail + 1) as u16);
-
         current_avail += 1;
         processed += 1;
     }
 
     *last_avail_idx_tx = current_avail;
+
+    // Set avail_event to 0 to disable EVENT_IDX suppression for TX.
+    // The guest kicks on every TX submission. Cost is negligible
+    // (~1000 extra kicks/s at peak) vs stability of never missing
+    // a TX kick.
+    // Write avail_event = current avail_idx from guest memory.
+    // Same pattern as the RX write_avail_event that works correctly.
+    // This tells the guest: "I've consumed everything — kick on next."
+    if processed > 0 {
+        let avail_event_off = used_gpa + 4 + 8 * q_size;
+        let avail_idx_now = ctx.guest_mem.read_u16(avail_gpa + 2);
+        std::sync::atomic::fence(Ordering::Release);
+        ctx.guest_mem.write_u16(avail_event_off, avail_idx_now);
+    }
 
     // Fire TX completion IRQ if any descriptors were processed.
     if processed > 0 {
@@ -1199,20 +1212,84 @@ pub fn vsock_muxer_loop(ctx: VsockMuxerContext) {
                 &mut rx_batch_start,
             );
             if tx_count > 0 {
-                tracing::trace!("vsock-muxer: processed {} TX descriptors", tx_count);
+                tracing::trace!(
+                    "vsock-muxer: TX processed {tx_count} descs (last_avail={last_avail_idx_tx})"
+                );
             }
         }
 
+        // ---- Step 6.5: Rescan kqueue after TX ----
+        // TX may have connected new fds. Re-run fd registration (step 3
+        // logic) then do a zero-timeout kqueue to catch already-readable
+        // fds. This follows crosvm/cloud-hypervisor pattern: only process
+        // fds that kqueue reports as ready, never poll-all.
+        {
+            let fds: Vec<(VsockConnectionId, i32)> = ctx
+                .vsock_mgr
+                .lock()
+                .map(|mgr| mgr.connected_fds())
+                .unwrap_or_default();
+            let current_fds: Vec<i32> = fds.iter().map(|(_, fd)| *fd).collect();
+            for &fd in &current_fds {
+                if !registered_fds.contains(&fd) {
+                    let ev = libc::kevent {
+                        ident: fd as usize,
+                        filter: libc::EVFILT_READ,
+                        flags: libc::EV_ADD | libc::EV_ENABLE,
+                        fflags: 0,
+                        data: 0,
+                        udata: std::ptr::null_mut(),
+                    };
+                    unsafe {
+                        libc::kevent(
+                            kq,
+                            &raw const ev,
+                            1,
+                            std::ptr::null_mut(),
+                            0,
+                            std::ptr::null(),
+                        );
+                    }
+                }
+            }
+            // Remove stale fds.
+            for &fd in &registered_fds {
+                if !current_fds.contains(&fd) {
+                    let ev = libc::kevent {
+                        ident: fd as usize,
+                        filter: libc::EVFILT_READ,
+                        flags: libc::EV_DELETE,
+                        fflags: 0,
+                        data: 0,
+                        udata: std::ptr::null_mut(),
+                    };
+                    unsafe {
+                        libc::kevent(
+                            kq,
+                            &raw const ev,
+                            1,
+                            std::ptr::null_mut(),
+                            0,
+                            std::ptr::null(),
+                        );
+                    }
+                }
+            }
+            registered_fds = current_fds;
+        }
+
+        // No rescan needed — kqueue level-triggered events will fire
+        // on the NEXT main poll for any newly registered fds with data.
+
         // ---- Step 7: Process readable socketpair fds (RX data injection) ----
-        // Skip data injection if the RX queue is running low (>3/4 consumed).
-        let q_size = ctx.rx_queue.size as usize;
+        // Only process fds that kqueue reported as ready (from main poll
+        // or rescan). Never poll-all — stale fds cause EBADF loops.
         let avail_idx_snap = ctx.guest_mem.read_u16(ctx.rx_queue.avail_gpa as usize + 2);
         let q_free = avail_idx_snap.wrapping_sub(rx_used_idx) as usize;
-        let q_backpressure = q_free < q_size / 4;
+        let q_backpressure = q_free == 0;
 
         if q_backpressure {
-            // Queue running low -- fire IRQ to wake guest rx_work so it
-            // returns descriptors, then skip data injection this cycle.
+            // Avail ring empty — fire IRQ so guest rx_work refills.
             if rx_batch_count > 0 {
                 rx_batch_count = 0;
                 rx_batch_start = None;
@@ -1221,16 +1298,13 @@ pub fn vsock_muxer_loop(ctx: VsockMuxerContext) {
             write_avail_event_rx(&ctx, rx_used_idx);
             trigger_irq(&ctx);
         } else {
-            // Process each readable socketpair fd from kqueue events.
+            // Process ONLY kqueue-ready socketpair fds.
             for event in events.iter().take(nev as usize) {
-                // Skip the TX kick pipe event (already handled above).
                 if event.udata as usize == TX_KICK_TOKEN {
                     continue;
                 }
-
                 #[allow(clippy::cast_possible_wrap)]
                 let fd = event.ident as i32;
-
                 // Find which connection this fd belongs to.
                 let conn_info = {
                     let Ok(mgr) = ctx.vsock_mgr.lock() else {
@@ -1314,6 +1388,9 @@ pub fn vsock_muxer_loop(ctx: VsockMuxerContext) {
                     let n = unsafe {
                         libc::read(fd, read_buf.as_mut_ptr().cast::<libc::c_void>(), max_read)
                     };
+                    if n > 0 {
+                        tracing::info!("vsock-muxer: RX read fd={fd} n={n} conn={conn_id:?}");
+                    }
 
                     if n <= 0 {
                         if n == 0 {

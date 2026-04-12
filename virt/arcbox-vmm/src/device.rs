@@ -1551,12 +1551,13 @@ impl DeviceManager {
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
                         if let Some(fd) = kick_fd {
-                            // Non-blocking write -- drop if pipe full (muxer will drain).
-                            // SAFETY: fd is a valid pipe fd created by us.
                             unsafe {
                                 libc::write(fd, [1u8].as_ptr().cast(), 1);
                             }
+                            tracing::trace!("vsock TX kick → pipe fd={fd}");
                             return Ok(());
+                        } else {
+                            tracing::warn!("vsock TX QUEUE_NOTIFY but no pipe fd!");
                         }
                     }
 
@@ -2483,8 +2484,23 @@ impl DeviceManager {
     }
 
     /// Processes vsock TX queue only (guest → host). RX is handled by
-    /// vsock_rx_worker thread. Returns true if TX generated completions.
+    /// the muxer thread. Returns true if TX generated completions.
+    ///
+    /// When the muxer is active, this is a no-op — the muxer handles TX
+    /// via the QUEUE_NOTIFY pipe kick, not this polling path.
     pub fn poll_vsock_rx(&self) -> bool {
+        // If the muxer is active, skip. The muxer gets TX kicks via the
+        // pipe in QUEUE_NOTIFY, not from this poll (which fires on EVERY
+        // vCPU exit and would flood the pipe with useless wakeups).
+        if self
+            .vsock_tx_kick_fd
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return false;
+        }
+
         let (Some(ram_base), ram_size) = (self.guest_ram_base, self.guest_ram_size) else {
             return false;
         };
