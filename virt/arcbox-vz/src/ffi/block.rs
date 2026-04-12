@@ -396,6 +396,107 @@ pub fn create_blocking_vsock_context_block(sender: std_mpsc::Sender<VsockResult>
 }
 
 // ============================================================================
+// Lifecycle Completion Block (start / request_stop / pause / resume)
+// ============================================================================
+
+/// Result type for VM lifecycle operations that only report success / NSError.
+pub type StateResult = Result<(), String>;
+
+/// Block for VM lifecycle completion handlers.
+///
+/// Captures a oneshot sender so each async `start()` / `stop()` / `pause()`
+/// / `resume()` call has its own private channel, avoiding the global-static
+/// race that occurs when multiple VM instances issue lifecycle operations
+/// concurrently.
+#[repr(C)]
+pub struct StateContextBlock {
+    /// ISA pointer.
+    pub isa: *const c_void,
+    /// Block flags.
+    pub flags: i32,
+    /// Reserved.
+    pub reserved: i32,
+    /// Invoke function pointer — matches `(NSError *)` completion handler.
+    pub invoke: unsafe extern "C" fn(*mut Self, *mut AnyObject),
+    /// Block descriptor.
+    pub descriptor: *const BlockDescriptorWithHelpers,
+    /// Captured context: raw pointer to Box<`oneshot::Sender`<StateResult>>.
+    pub sender_ptr: *mut c_void,
+}
+
+unsafe extern "C" fn state_block_copy(_dst: *mut c_void, _src: *const c_void) {
+    // sender_ptr is a raw pointer; ownership transfers with the block copy.
+}
+
+unsafe extern "C" fn state_block_dispose(block: *mut c_void) {
+    // SAFETY: `block` is a `StateContextBlock` pointer supplied by the block
+    // runtime. `sender_ptr` is either null (already consumed by invoke) or a
+    // valid Box pointer set by `create_state_completion_block`.
+    unsafe {
+        let block = block as *mut StateContextBlock;
+        let sender_ptr = (*block).sender_ptr;
+        if !sender_ptr.is_null() {
+            let _ = Box::from_raw(sender_ptr as *mut oneshot::Sender<StateResult>);
+        }
+    }
+}
+
+unsafe extern "C" fn state_block_invoke(block: *mut StateContextBlock, error: *mut AnyObject) {
+    // SAFETY: `block` is a valid `StateContextBlock` invoked by VZ. We take
+    // ownership of the boxed sender via `Box::from_raw` and null the pointer
+    // so dispose can't double-free.
+    unsafe {
+        let sender_ptr = (*block).sender_ptr;
+        if sender_ptr.is_null() {
+            return;
+        }
+        let sender = Box::from_raw(sender_ptr as *mut oneshot::Sender<StateResult>);
+        (*block).sender_ptr = ptr::null_mut();
+
+        let result = if error.is_null() {
+            Ok(())
+        } else {
+            let desc: *mut AnyObject = crate::msg_send!(error, localizedDescription);
+            Err(crate::ffi::nsstring_to_string(desc))
+        };
+        let _ = sender.send(result);
+    }
+}
+
+/// Descriptor for `StateContextBlock`.
+static STATE_CONTEXT_BLOCK_DESCRIPTOR: BlockDescriptorWithHelpers = BlockDescriptorWithHelpers {
+    reserved: 0,
+    size: std::mem::size_of::<StateContextBlock>() as u64,
+    copy_helper: state_block_copy,
+    dispose_helper: state_block_dispose,
+};
+
+/// Creates a lifecycle-completion block with a captured sender.
+///
+/// The caller passes the returned pointer to the VZ completion-handler API;
+/// the block retains/releases itself according to normal block-runtime
+/// semantics.
+#[must_use]
+pub fn create_state_completion_block(sender: oneshot::Sender<StateResult>) -> *const c_void {
+    let sender_box = Box::new(sender);
+    let sender_ptr = Box::into_raw(sender_box) as *mut c_void;
+
+    // SAFETY: Stack block with correct ABI layout. `_Block_copy` heap-allocates
+    // a copy and returns its pointer.
+    unsafe {
+        let stack_block = StateContextBlock {
+            isa: _NSConcreteStackBlock,
+            flags: BLOCK_HAS_COPY_DISPOSE,
+            reserved: 0,
+            invoke: state_block_invoke,
+            descriptor: &STATE_CONTEXT_BLOCK_DESCRIPTOR,
+            sender_ptr,
+        };
+        _Block_copy(&stack_block as *const StateContextBlock as *const c_void)
+    }
+}
+
+// ============================================================================
 // Block Runtime FFI
 // ============================================================================
 
