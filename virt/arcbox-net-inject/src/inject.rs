@@ -26,7 +26,13 @@ use crate::queue::{self, RxQueueConfig};
 const BATCH_SIZE: usize = 256;
 
 /// Interrupt coalescing timeout.
-const COALESCE_TIMEOUT: Duration = Duration::from_micros(50);
+///
+/// With GSO on the RX path the average frame size is ~30 KiB, so at
+/// 10 Gbps we're at ~37 kfps — a 50 µs timeout only batches ~2 frames
+/// before firing an IRQ, so the `BATCH_SIZE` ceiling is never reached.
+/// 200 µs raises the effective batch to ~7 frames without noticeably
+/// hurting ACK latency (Linux NAPI poll is typically 200 µs anyway).
+const COALESCE_TIMEOUT: Duration = Duration::from_micros(200);
 
 /// Backoff duration when RX descriptors are exhausted.
 const DESCRIPTOR_BACKOFF: Duration = Duration::from_micros(100);
