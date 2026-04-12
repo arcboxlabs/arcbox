@@ -32,18 +32,6 @@ use tokio::sync::oneshot;
 /// Block has copy/dispose helpers.
 const BLOCK_HAS_COPY_DISPOSE: i32 = 1 << 25;
 
-/// Block has a C++ style destructor.
-#[allow(dead_code)]
-const BLOCK_HAS_CTOR: i32 = 1 << 26;
-
-/// Block is a global block.
-#[allow(dead_code)]
-const BLOCK_IS_GLOBAL: i32 = 1 << 28;
-
-/// Block has a signature.
-#[allow(dead_code)]
-const BLOCK_HAS_SIGNATURE: i32 = 1 << 30;
-
 // ============================================================================
 // Block ABI Structures
 // ============================================================================
@@ -81,21 +69,6 @@ pub struct CompletionBlock {
     pub reserved: i32,
     /// Invoke function pointer.
     pub invoke: unsafe extern "C" fn(*const c_void, *mut AnyObject),
-    /// Block descriptor.
-    pub descriptor: *const BlockDescriptor,
-}
-
-/// Block structure for vsock completion handlers that take (`VZVirtioSocketConnection` *, `NSError` *).
-#[repr(C)]
-pub struct VsockCompletionBlock {
-    /// ISA pointer.
-    pub isa: *const c_void,
-    /// Block flags.
-    pub flags: i32,
-    /// Reserved.
-    pub reserved: i32,
-    /// Invoke function pointer.
-    pub invoke: unsafe extern "C" fn(*const c_void, *mut AnyObject, *mut AnyObject),
     /// Block descriptor.
     pub descriptor: *const BlockDescriptor,
 }
@@ -476,28 +449,5 @@ pub unsafe fn create_completion_block(
         };
 
         _Block_copy(&stack_block as *const CompletionBlock as *const c_void)
-    }
-}
-
-/// Creates a vsock completion block and copies it to the heap.
-///
-/// # Safety
-///
-/// The returned block must eventually be released with `_Block_release`.
-#[allow(dead_code)]
-pub unsafe fn create_vsock_completion_block(
-    invoke: unsafe extern "C" fn(*const c_void, *mut AnyObject, *mut AnyObject),
-) -> *const c_void {
-    // SAFETY: Same as create_completion_block — stack block with correct ABI layout, copied to heap via _Block_copy.
-    unsafe {
-        let stack_block = VsockCompletionBlock {
-            isa: _NSConcreteStackBlock,
-            flags: 0,
-            reserved: 0,
-            invoke,
-            descriptor: &SIMPLE_BLOCK_DESCRIPTOR,
-        };
-
-        _Block_copy(&stack_block as *const VsockCompletionBlock as *const c_void)
     }
 }
