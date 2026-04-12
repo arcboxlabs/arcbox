@@ -270,6 +270,9 @@ impl RxInjectThread {
         let q_size = self.queue.size as usize;
         let avail_event_off = self.queue.used_gpa as usize + 4 + q_size * 8;
         let avail_idx = self.guest_mem.read_u16(self.queue.avail_gpa as usize + 2);
+        // Release fence: ensure prior used-ring writes are visible before
+        // the guest observes the new avail_event value.
+        std::sync::atomic::fence(Ordering::Release);
         self.guest_mem.write_u16(avail_event_off, avail_idx);
 
         // Unconditionally fire interrupt. EVENT_IDX suppression can be

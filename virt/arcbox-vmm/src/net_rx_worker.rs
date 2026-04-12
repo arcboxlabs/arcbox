@@ -386,6 +386,10 @@ fn write_avail_event(ctx: &NetRxWorkerContext, used_idx: u16) {
     let avail_event_off = ctx.rx_queue.used_gpa as usize + 4 + q_size * 8;
     // Request notification when guest posts the next batch of buffers.
     let avail_idx = ctx.guest_mem.read_u16(ctx.rx_queue.avail_gpa as usize + 2);
+    // Release fence: ensure prior used-ring writes are globally visible
+    // before the guest observes the new avail_event value. On ARM64 plain
+    // stores are not ordered across threads without this.
+    std::sync::atomic::fence(Ordering::Release);
     ctx.guest_mem.write_u16(avail_event_off, avail_idx);
     let _ = used_idx; // Suppress unused warning; used_idx is for future should_notify.
 }

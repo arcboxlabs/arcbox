@@ -1256,6 +1256,19 @@ impl Vmm {
             }
         }
 
+        // Join the net RX worker (rx-inject or legacy net-io) for the same
+        // reason: it also holds GuestMemWriter. The thread polls `running`
+        // every POLL_TIMEOUT (1 ms) so it will observe the store above and
+        // exit promptly, but we must still wait for it before unmapping
+        // guest memory.
+        if let Some(ref dm) = self.hv_device_manager {
+            if let Some(t) = dm.take_net_rx_worker_handle() {
+                if let Err(e) = t.join() {
+                    tracing::warn!("net rx worker thread join failed: {e:?}");
+                }
+            }
+        }
+
         // Cleanup in correct order: GIC → VM → DAX → guest memory.
         // Guest memory must be dropped after the VM so the mapped pages
         // remain valid until hv_vm_destroy completes.
