@@ -1,0 +1,18 @@
+[package]
+name = "arcbox-port-forward"
+version = "0.3.21"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Vsock-based TCP port forwarding for ArcBox VMs"
+
+[dependencies]
+arcbox-constants = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+tokio-util = { version = "0.7", features = ["net"] }
+libc.workspace = true
+crossbeam-channel = "0.5.15"
+
+[lints]
+workspace = true

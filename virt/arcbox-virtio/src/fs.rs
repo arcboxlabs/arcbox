@@ -45,6 +45,7 @@ pub const FUSE_BIG_WRITES: u32 = 1 << 5;
 pub const FUSE_WRITEBACK_CACHE: u32 = 1 << 16;
 pub const FUSE_PARALLEL_DIROPS: u32 = 1 << 18;
 pub const FUSE_CACHE_SYMLINKS: u32 = 1 << 23;
+pub const FUSE_MAP_ALIGNMENT: u32 = 1 << 26;
 
 /// Default max readahead size (128 KB).
 pub const DEFAULT_MAX_READAHEAD: u32 = 128 * 1024;
@@ -241,6 +242,8 @@ pub struct FuseSession {
     max_write: u32,
     /// Maximum pages per request.
     max_pages: u16,
+    /// Whether DAX is enabled for this session.
+    dax_enabled: bool,
 }
 
 impl FuseSession {
@@ -251,10 +254,11 @@ impl FuseSession {
             initialized: AtomicBool::new(false),
             major: FUSE_KERNEL_VERSION,
             minor: FUSE_KERNEL_MINOR_VERSION,
-            flags: FUSE_ASYNC_READ | FUSE_BIG_WRITES | FUSE_WRITEBACK_CACHE,
+            flags: FUSE_ASYNC_READ | FUSE_BIG_WRITES | FUSE_WRITEBACK_CACHE | FUSE_MAP_ALIGNMENT,
             max_readahead: DEFAULT_MAX_READAHEAD,
             max_write: DEFAULT_MAX_WRITE,
             max_pages: DEFAULT_MAX_PAGES,
+            dax_enabled: false,
         }
     }
 
@@ -342,6 +346,10 @@ impl FuseSession {
         self.minor = FUSE_KERNEL_MINOR_VERSION;
         self.max_readahead = guest_max_readahead.min(DEFAULT_MAX_READAHEAD);
         self.flags &= guest_flags; // Only enable mutually supported flags
+        self.dax_enabled = self.flags & FUSE_MAP_ALIGNMENT != 0;
+        if self.dax_enabled {
+            tracing::info!("FUSE DAX negotiated");
+        }
 
         // Build FUSE_INIT response
         // Layout: major(4) + minor(4) + max_readahead(4) + flags(4) +
@@ -376,7 +384,10 @@ impl FuseSession {
         response.extend_from_slice(&1u32.to_le_bytes()); // time_gran (1 ns)
         response.extend_from_slice(&self.max_pages.to_le_bytes());
         response.extend_from_slice(&0u16.to_le_bytes()); // padding
-        response.extend_from_slice(&[0u8; 32]); // unused
+        // unused[0] = map_alignment (page shift, 12 = 4096 bytes).
+        let map_alignment: u32 = if self.dax_enabled { 12 } else { 0 };
+        response.extend_from_slice(&map_alignment.to_le_bytes());
+        response.extend_from_slice(&[0u8; 28]); // remaining unused
 
         self.initialized.store(true, Ordering::Release);
 
@@ -396,10 +407,11 @@ impl FuseSession {
         self.initialized.store(false, Ordering::Release);
         self.major = FUSE_KERNEL_VERSION;
         self.minor = FUSE_KERNEL_MINOR_VERSION;
-        self.flags = FUSE_ASYNC_READ | FUSE_BIG_WRITES | FUSE_WRITEBACK_CACHE;
+        self.flags = FUSE_ASYNC_READ | FUSE_BIG_WRITES | FUSE_WRITEBACK_CACHE | FUSE_MAP_ALIGNMENT;
         self.max_readahead = DEFAULT_MAX_READAHEAD;
         self.max_write = DEFAULT_MAX_WRITE;
         self.max_pages = DEFAULT_MAX_PAGES;
+        self.dax_enabled = false;
     }
 }
 
@@ -453,15 +465,19 @@ pub struct VirtioFs {
     session: FuseSession,
     /// Request handler (provided by arcbox-fs).
     handler: Option<Arc<dyn FuseRequestHandler>>,
-    /// Request queues for FUSE traffic.
+    /// Request queues for FUSE traffic (host-side, used by tests).
     request_queues: Vec<VirtQueue>,
     /// Whether the device is activated.
     activated: bool,
+    /// Last processed avail index for request queue 1 (guest-memory path).
+    last_avail_idx_q1: usize,
 }
 
 impl VirtioFs {
     /// Feature: Notification.
     pub const FEATURE_NOTIFICATION: u64 = 1 << 0;
+    /// VirtIO version 1 compliance (required for modern MMIO transport).
+    pub const FEATURE_VERSION_1: u64 = 1 << virtio_bindings::virtio_config::VIRTIO_F_VERSION_1;
 
     /// FUSE opcode for INIT.
     const FUSE_INIT: u32 = 26;
@@ -474,12 +490,13 @@ impl VirtioFs {
     pub fn new(config: FsConfig) -> Self {
         Self {
             config,
-            features: crate::queue::VIRTIO_F_EVENT_IDX,
+            features: Self::FEATURE_VERSION_1,
             acked_features: 0,
             session: FuseSession::new(),
             handler: None,
             request_queues: Vec::new(),
             activated: false,
+            last_avail_idx_q1: 0,
         }
     }
 
@@ -488,12 +505,13 @@ impl VirtioFs {
     pub fn with_handler(config: FsConfig, handler: Arc<dyn FuseRequestHandler>) -> Self {
         Self {
             config,
-            features: crate::queue::VIRTIO_F_EVENT_IDX,
+            features: Self::FEATURE_VERSION_1,
             acked_features: 0,
             session: FuseSession::new(),
             handler: Some(handler),
             request_queues: Vec::new(),
             activated: false,
+            last_avail_idx_q1: 0,
         }
     }
 
@@ -860,6 +878,169 @@ impl VirtioDevice for VirtioFs {
 
         tracing::debug!("VirtIO-FS device reset: tag='{}'", self.config.tag);
     }
+
+    fn process_queue(
+        &mut self,
+        queue_idx: u16,
+        memory: &mut [u8],
+        queue_config: &crate::QueueConfig,
+    ) -> Result<Vec<(u16, u32)>> {
+        // Queue 0 is the hiprio/notification queue — nothing to do for now.
+        if queue_idx == 0 {
+            return Ok(Vec::new());
+        }
+
+        if !queue_config.ready || queue_config.size == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Read descriptors directly from guest memory (not the internal VirtQueue).
+        // Translate GPAs to slice offsets by subtracting gpa_base (checked to
+        // guard against a malicious guest providing a GPA below the RAM base).
+        let gpa_base = queue_config.gpa_base as usize;
+        let desc_addr = (queue_config.desc_addr as usize)
+            .checked_sub(gpa_base)
+            .ok_or_else(|| {
+                tracing::warn!(
+                    "invalid desc GPA {:#x} below ram base {:#x}",
+                    queue_config.desc_addr,
+                    gpa_base
+                );
+                VirtioError::InvalidQueue("desc GPA below ram base".into())
+            })?;
+        let avail_addr = (queue_config.avail_addr as usize)
+            .checked_sub(gpa_base)
+            .ok_or_else(|| {
+                tracing::warn!(
+                    "invalid avail GPA {:#x} below ram base {:#x}",
+                    queue_config.avail_addr,
+                    gpa_base
+                );
+                VirtioError::InvalidQueue("avail GPA below ram base".into())
+            })?;
+        let used_addr = (queue_config.used_addr as usize)
+            .checked_sub(gpa_base)
+            .ok_or_else(|| {
+                tracing::warn!(
+                    "invalid used GPA {:#x} below ram base {:#x}",
+                    queue_config.used_addr,
+                    gpa_base
+                );
+                VirtioError::InvalidQueue("used GPA below ram base".into())
+            })?;
+        let q_size = queue_config.size as usize;
+
+        if avail_addr + 4 > memory.len() {
+            return Ok(Vec::new());
+        }
+        let avail_idx =
+            u16::from_le_bytes([memory[avail_addr + 2], memory[avail_addr + 3]]) as usize;
+
+        // Track last processed index per queue. Use a simple field for queue 1.
+        let last_avail = self.last_avail_idx_q1;
+        let mut current_avail = last_avail;
+        let mut completions = Vec::new();
+
+        while current_avail != avail_idx {
+            let ring_off = avail_addr + 4 + 2 * (current_avail % q_size);
+            if ring_off + 2 > memory.len() {
+                break;
+            }
+            let head_idx = u16::from_le_bytes([memory[ring_off], memory[ring_off + 1]]) as usize;
+
+            // Walk descriptor chain: collect request data (read-only) and
+            // response buffer locations (write-only).
+            let mut request_data = Vec::new();
+            let mut write_bufs: Vec<(usize, usize)> = Vec::new();
+            let mut idx = head_idx;
+            for _ in 0..q_size {
+                let d_off = desc_addr + idx * 16;
+                if d_off + 16 > memory.len() {
+                    break;
+                }
+                let addr = match (u64::from_le_bytes(memory[d_off..d_off + 8].try_into().unwrap())
+                    as usize)
+                    .checked_sub(gpa_base)
+                {
+                    Some(a) => a,
+                    None => continue,
+                };
+                let len =
+                    u32::from_le_bytes(memory[d_off + 8..d_off + 12].try_into().unwrap()) as usize;
+                let flags = u16::from_le_bytes(memory[d_off + 12..d_off + 14].try_into().unwrap());
+                let next = u16::from_le_bytes(memory[d_off + 14..d_off + 16].try_into().unwrap());
+
+                if flags & crate::queue::flags::WRITE != 0 {
+                    write_bufs.push((addr, len));
+                } else if addr + len <= memory.len() {
+                    request_data.extend_from_slice(&memory[addr..addr + len]);
+                }
+
+                if flags & crate::queue::flags::NEXT == 0 {
+                    break;
+                }
+                idx = next as usize;
+            }
+
+            // Process the FUSE request.
+            let response = match self.process_request(&request_data) {
+                Ok(resp) => resp,
+                Err(e) => {
+                    tracing::warn!("VirtioFS FUSE request error: {e}");
+                    // Return EIO for the unique id from the request header.
+                    let unique = if request_data.len() >= 16 {
+                        u64::from_le_bytes(request_data[8..16].try_into().unwrap())
+                    } else {
+                        0
+                    };
+                    FuseResponse::error(unique, libc::EIO).into_data()
+                }
+            };
+
+            // Write response into the write-only descriptors.
+            let mut resp_offset = 0;
+            for &(buf_addr, buf_len) in &write_bufs {
+                let remaining = response.len() - resp_offset;
+                if remaining == 0 {
+                    break;
+                }
+                let to_write = remaining.min(buf_len);
+                if buf_addr + to_write <= memory.len() {
+                    memory[buf_addr..buf_addr + to_write]
+                        .copy_from_slice(&response[resp_offset..resp_offset + to_write]);
+                }
+                resp_offset += to_write;
+            }
+
+            // Update used ring.
+            let used_idx_off = used_addr + 2;
+            let used_idx = u16::from_le_bytes([memory[used_idx_off], memory[used_idx_off + 1]]);
+            let used_entry = used_addr + 4 + ((used_idx as usize) % q_size) * 8;
+            if used_entry + 8 <= memory.len() {
+                memory[used_entry..used_entry + 4]
+                    .copy_from_slice(&(head_idx as u32).to_le_bytes());
+                memory[used_entry + 4..used_entry + 8]
+                    .copy_from_slice(&(response.len() as u32).to_le_bytes());
+                std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+                let new_used = used_idx.wrapping_add(1);
+                memory[used_idx_off..used_idx_off + 2].copy_from_slice(&new_used.to_le_bytes());
+            }
+
+            // Update avail_event for EVENT_IDX notification.
+            let avail_event_off = used_addr + 4 + 8 * q_size;
+            if avail_event_off + 2 <= memory.len() {
+                let ae = ((current_avail + 1) as u16).to_le_bytes();
+                memory[avail_event_off] = ae[0];
+                memory[avail_event_off + 1] = ae[1];
+            }
+
+            completions.push((head_idx as u16, response.len() as u32));
+            current_avail += 1;
+        }
+
+        self.last_avail_idx_q1 = current_avail;
+        Ok(completions)
+    }
 }
 
 #[cfg(test)]
@@ -928,8 +1109,11 @@ mod tests {
     #[test]
     fn test_fs_features() {
         let fs = VirtioFs::new(FsConfig::default());
-        // Default advertises EVENT_IDX
-        assert_ne!(fs.features() & crate::queue::VIRTIO_F_EVENT_IDX, 0);
+        // Default advertises VERSION_1
+        assert_ne!(
+            fs.features() & (1 << virtio_bindings::virtio_config::VIRTIO_F_VERSION_1),
+            0
+        );
     }
 
     #[test]

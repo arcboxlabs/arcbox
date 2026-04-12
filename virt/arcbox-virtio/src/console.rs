@@ -506,7 +506,7 @@ impl VirtioConsole {
     /// Feature: Emergency write.
     pub const FEATURE_EMERG_WRITE: u64 = 1 << 2;
     /// `VirtIO` 1.0 feature.
-    pub const FEATURE_VERSION_1: u64 = 1 << 32;
+    pub const FEATURE_VERSION_1: u64 = 1 << virtio_bindings::virtio_config::VIRTIO_F_VERSION_1;
 
     /// Creates a new console device.
     #[must_use]
@@ -755,6 +755,162 @@ impl VirtioDevice for VirtioConsole {
             port.input_buffer.clear();
             port.output_buffer.clear();
         }
+    }
+
+    fn process_queue(
+        &mut self,
+        queue_idx: u16,
+        memory: &mut [u8],
+        queue_config: &crate::QueueConfig,
+    ) -> Result<Vec<(u16, u32)>> {
+        // Queue 0 = RX (host→guest), Queue 1 = TX (guest→host).
+        // We only handle TX here — extract guest output from descriptors.
+        if queue_idx != 1 {
+            return Ok(Vec::new());
+        }
+
+        if !queue_config.ready || queue_config.size == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Translate GPAs to slice offsets by subtracting gpa_base (checked to
+        // guard against a malicious guest providing a GPA below the RAM base).
+        let gpa_base = queue_config.gpa_base as usize;
+        let desc_addr = (queue_config.desc_addr as usize)
+            .checked_sub(gpa_base)
+            .ok_or_else(|| {
+                tracing::warn!(
+                    "invalid desc GPA {:#x} below ram base {:#x}",
+                    queue_config.desc_addr,
+                    gpa_base
+                );
+                VirtioError::InvalidQueue("desc GPA below ram base".into())
+            })?;
+        let avail_addr = (queue_config.avail_addr as usize)
+            .checked_sub(gpa_base)
+            .ok_or_else(|| {
+                tracing::warn!(
+                    "invalid avail GPA {:#x} below ram base {:#x}",
+                    queue_config.avail_addr,
+                    gpa_base
+                );
+                VirtioError::InvalidQueue("avail GPA below ram base".into())
+            })?;
+        let used_addr = (queue_config.used_addr as usize)
+            .checked_sub(gpa_base)
+            .ok_or_else(|| {
+                tracing::warn!(
+                    "invalid used GPA {:#x} below ram base {:#x}",
+                    queue_config.used_addr,
+                    gpa_base
+                );
+                VirtioError::InvalidQueue("used GPA below ram base".into())
+            })?;
+        let queue_size = queue_config.size as usize;
+
+        // Read avail index.
+        if avail_addr + 4 > memory.len() {
+            return Ok(Vec::new());
+        }
+        let avail_idx =
+            u16::from_le_bytes([memory[avail_addr + 2], memory[avail_addr + 3]]) as usize;
+
+        // Read used index.
+        if used_addr + 4 > memory.len() {
+            return Ok(Vec::new());
+        }
+        let used_idx_ref = &memory[used_addr + 2..used_addr + 4];
+        let mut used_idx = u16::from_le_bytes([used_idx_ref[0], used_idx_ref[1]]) as usize;
+
+        let mut completions = Vec::new();
+
+        // Process available descriptors.
+        while used_idx != avail_idx {
+            let avail_ring_off = avail_addr + 4 + (used_idx % queue_size) * 2;
+            if avail_ring_off + 2 > memory.len() {
+                break;
+            }
+            let head_idx = u16::from_le_bytes([memory[avail_ring_off], memory[avail_ring_off + 1]]);
+
+            // Walk descriptor chain, extract TX data.
+            let mut idx = head_idx as usize;
+            let mut total_len = 0u32;
+            for _ in 0..queue_size {
+                let d_off = desc_addr + idx * 16;
+                if d_off + 16 > memory.len() {
+                    break;
+                }
+                let addr = match (u64::from_le_bytes(memory[d_off..d_off + 8].try_into().unwrap())
+                    as usize)
+                    .checked_sub(gpa_base)
+                {
+                    Some(a) => a,
+                    None => continue,
+                };
+                let len = u32::from_le_bytes(memory[d_off + 8..d_off + 12].try_into().unwrap());
+                let flags = u16::from_le_bytes(memory[d_off + 12..d_off + 14].try_into().unwrap());
+                let next = u16::from_le_bytes(memory[d_off + 14..d_off + 16].try_into().unwrap());
+
+                let is_write = flags & 2 != 0; // VIRTQ_DESC_F_WRITE
+                if !is_write {
+                    // Read-only descriptor = data FROM guest (TX output).
+                    let start = addr;
+                    let end = start + len as usize;
+                    if end <= memory.len() {
+                        let data = &memory[start..end];
+                        // Emit to host serial log.
+                        if let Some(port) = self.ports.first_mut() {
+                            port.output_buffer.extend(data.iter().copied());
+                            // Flush on newline.
+                            while let Some(pos) =
+                                port.output_buffer.iter().position(|&b| b == b'\n')
+                            {
+                                let line: Vec<u8> = port.output_buffer.drain(..=pos).collect();
+                                if let Ok(s) = std::str::from_utf8(&line) {
+                                    tracing::info!(target: "guest_console", "{}", s.trim_end());
+                                }
+                            }
+                        }
+                        total_len += len;
+                    }
+                }
+
+                if flags & 1 == 0 {
+                    break; // No NEXT
+                }
+                idx = next as usize;
+            }
+
+            // Write used ring entry.
+            let used_ring_off = used_addr + 4 + (used_idx % queue_size) * 8;
+            if used_ring_off + 8 <= memory.len() {
+                memory[used_ring_off..used_ring_off + 4]
+                    .copy_from_slice(&(head_idx as u32).to_le_bytes());
+                memory[used_ring_off + 4..used_ring_off + 8]
+                    .copy_from_slice(&total_len.to_le_bytes());
+            }
+
+            used_idx += 1;
+            completions.push((head_idx, total_len));
+        }
+
+        // Update used index and avail_event.
+        if !completions.is_empty() {
+            std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+            let new_used = (used_idx as u16).to_le_bytes();
+            memory[used_addr + 2] = new_used[0];
+            memory[used_addr + 3] = new_used[1];
+
+            // Set avail_event = current avail_idx so driver notifies on next request.
+            let avail_event_off = used_addr + 4 + 8 * queue_size;
+            if avail_event_off + 2 <= memory.len() {
+                let ae = (avail_idx as u16).to_le_bytes();
+                memory[avail_event_off] = ae[0];
+                memory[avail_event_off + 1] = ae[1];
+            }
+        }
+
+        Ok(completions)
     }
 }
 

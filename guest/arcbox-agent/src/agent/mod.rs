@@ -125,10 +125,23 @@ mod linux {
         DOCKER_API_VSOCK_PORT
     }
 
+    /// HVC fast-path block device for the data disk (device index 1 = vdb).
+    /// Falls back to the standard VirtIO block device if HVC device is absent.
+    const HVC_DATA_DEVICE: &str = "/dev/arcboxhvc1";
+
     fn docker_data_device() -> String {
-        cmdline_value(DOCKER_DATA_DEVICE_CMDLINE_KEY)
-            .filter(|v| !v.trim().is_empty())
-            .unwrap_or_else(|| DOCKER_DATA_DEVICE_DEFAULT.to_string())
+        // Prefer explicit kernel cmdline override.
+        if let Some(v) = cmdline_value(DOCKER_DATA_DEVICE_CMDLINE_KEY) {
+            if !v.trim().is_empty() {
+                return v;
+            }
+        }
+        // Use HVC fast-path device if available.
+        if Path::new(HVC_DATA_DEVICE).exists() {
+            tracing::info!("using HVC fast-path block device: {}", HVC_DATA_DEVICE);
+            return HVC_DATA_DEVICE.to_string();
+        }
+        DOCKER_DATA_DEVICE_DEFAULT.to_string()
     }
 
     fn kubernetes_api_vsock_port() -> u32 {
@@ -282,12 +295,20 @@ mod linux {
             if let Err(e) = std::fs::create_dir_all(target) {
                 return Err(format!("failed to create {}: {}", target, e));
             }
-            let opts = format!("compress=zstd:3,discard=async,subvol={}", subvol);
+            let opts = format!(
+                "compress=zstd:1,discard=async,noatime,space_cache=v2,subvol={}",
+                subvol
+            );
             match std::process::Command::new("/bin/busybox")
                 .args(["mount", "-t", "btrfs", "-o", &opts, &device, target])
                 .status()
             {
                 Ok(s) if s.success() => {
+                    // Disable Btrfs COW on metadata-heavy subdirectories.
+                    // BoltDB (containerd/dockerd) does frequent fdatasync on
+                    // small pages. Without NOCOW, each write triggers Btrfs
+                    // copy-on-write + APFS COW on the host = double amplification.
+                    disable_cow_on_metadata_dirs(target);
                     notes.push(format!("mounted {} -> {}", subvol, target));
                 }
                 Ok(s) => {
@@ -308,6 +329,66 @@ mod linux {
             Ok(notes.join("; "))
         }
     }
+
+    /// Disables Btrfs COW (sets NOCOW attribute) on metadata-heavy subdirectories.
+    ///
+    /// BoltDB and other metadata stores do frequent fdatasync on small pages.
+    /// Btrfs COW amplifies each write (copy 16KB metadata page + update B-tree),
+    /// and the host's APFS does another COW on top — double write amplification.
+    /// NOCOW converts these to in-place overwrites at the Btrfs layer.
+    #[cfg(target_os = "linux")]
+    fn disable_cow_on_metadata_dirs(mount_point: &str) {
+        // FS_IOC_SETFLAGS = _IOW('f', 2, long)
+        // FS_NOCOW_FL = 0x00800000
+        const FS_NOCOW_FL: libc::c_long = 0x0080_0000;
+
+        // Subdirectories that contain BoltDB or other fsync-heavy metadata.
+        // The NOCOW attribute is inherited by new files created in these dirs.
+        let metadata_subdirs = [
+            "io.containerd.metadata.v1.bolt",
+            "io.containerd.snapshotter.v1.overlayfs",
+            "containerd",
+            "network",
+            "builder",
+            "buildkit",
+            "image",
+            "trust",
+        ];
+
+        for subdir in &metadata_subdirs {
+            let path = format!("{}/{}", mount_point, subdir);
+            let _ = std::fs::create_dir_all(&path);
+
+            let Ok(cpath) = std::ffi::CString::new(path.as_str()) else {
+                continue;
+            };
+            // SAFETY: valid path, O_RDONLY | O_DIRECTORY.
+            let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
+            if fd < 0 {
+                continue;
+            }
+
+            let mut flags: libc::c_long = 0;
+            // Get current flags, then set NOCOW.
+            // SAFETY: FS_IOC_GETFLAGS/SETFLAGS on a valid directory fd.
+            unsafe {
+                #[allow(clippy::cast_possible_truncation)]
+                let get_flags: libc::c_ulong = 0x8008_6601; // FS_IOC_GETFLAGS
+                #[allow(clippy::cast_possible_truncation)]
+                let set_flags: libc::c_ulong = 0x4008_6602; // FS_IOC_SETFLAGS
+                if libc::ioctl(fd, get_flags as libc::c_int, &mut flags) == 0 {
+                    flags |= FS_NOCOW_FL;
+                    if libc::ioctl(fd, set_flags as libc::c_int, &flags) == 0 {
+                        tracing::debug!("set NOCOW on {}", path);
+                    }
+                }
+                libc::close(fd);
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn disable_cow_on_metadata_dirs(_mount_point: &str) {}
 
     // BTRFS_IOC_SUBVOL_CREATE = _IOW(0x94, 14, struct btrfs_ioctl_vol_args)
     // struct btrfs_ioctl_vol_args { __s64 fd; char name[4088]; }  total = 4096 bytes
@@ -400,6 +481,13 @@ mod linux {
                 }
             });
 
+            // Start vsock-based TCP port forwarding proxy.
+            tokio::spawn(async {
+                if let Err(e) = crate::port_forward::run().await {
+                    tracing::warn!("Port forward proxy exited: {}", e);
+                }
+            });
+
             let mut listener =
                 bind_vsock_listener_with_retry(AGENT_PORT, "agent rpc listener").await?;
 
@@ -460,10 +548,10 @@ mod linux {
         loop {
             match listener.accept().await {
                 Ok((stream, peer_addr)) => {
-                    tracing::debug!("Docker API proxy accepted connection from {:?}", peer_addr);
+                    tracing::info!("Docker API proxy accepted connection from {:?}", peer_addr);
                     tokio::spawn(async move {
                         if let Err(e) = proxy_docker_api_connection(stream).await {
-                            tracing::debug!("Docker API proxy connection ended: {}", e);
+                            tracing::warn!("Docker API proxy connection error: {}", e);
                         }
                     });
                 }
@@ -474,14 +562,106 @@ mod linux {
         }
     }
 
-    async fn proxy_docker_api_connection(mut vsock_stream: VsockStream) -> Result<()> {
-        let mut unix_stream = UnixStream::connect(DOCKER_API_UNIX_SOCKET)
+    async fn proxy_docker_api_connection(vsock_stream: VsockStream) -> Result<()> {
+        let unix_stream = UnixStream::connect(DOCKER_API_UNIX_SOCKET)
             .await
             .context("failed to connect guest docker unix socket")?;
+        tracing::info!("Docker proxy: connected to {}", DOCKER_API_UNIX_SOCKET);
 
-        let _ = tokio::io::copy_bidirectional(&mut vsock_stream, &mut unix_stream)
-            .await
-            .context("docker api proxy copy failed")?;
+        let (mut vsock_rd, mut vsock_wr) = tokio::io::split(vsock_stream);
+        let (mut unix_rd, mut unix_wr) = tokio::io::split(unix_stream);
+
+        // vsock → unix (host HTTP request → dockerd)
+        let v2u = tokio::spawn(async move {
+            let mut total: u64 = 0;
+            let mut buf = [0u8; 8192];
+            loop {
+                let n = match tokio::io::AsyncReadExt::read(&mut vsock_rd, &mut buf).await {
+                    Ok(0) => {
+                        tracing::info!("Docker proxy vsock→unix: EOF after {} bytes", total);
+                        break;
+                    }
+                    Ok(n) => n,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Docker proxy vsock→unix: read error after {} bytes: {}",
+                            total,
+                            e
+                        );
+                        break;
+                    }
+                };
+                if total == 0 {
+                    tracing::info!(
+                        "Docker proxy vsock→unix: first chunk {} bytes: {:?}",
+                        n,
+                        String::from_utf8_lossy(&buf[..n.min(120)]),
+                    );
+                }
+                if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut unix_wr, &buf[..n]).await {
+                    tracing::warn!(
+                        "Docker proxy vsock→unix: write error after {} bytes: {}",
+                        total,
+                        e
+                    );
+                    break;
+                }
+                total += n as u64;
+            }
+            let _ = tokio::io::AsyncWriteExt::shutdown(&mut unix_wr).await;
+            total
+        });
+
+        // unix → vsock (dockerd response → host)
+        let u2v = tokio::spawn(async move {
+            let mut total: u64 = 0;
+            let mut buf = [0u8; 8192];
+            loop {
+                let n = match tokio::io::AsyncReadExt::read(&mut unix_rd, &mut buf).await {
+                    Ok(0) => {
+                        tracing::info!("Docker proxy unix→vsock: EOF after {} bytes", total);
+                        break;
+                    }
+                    Ok(n) => n,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Docker proxy unix→vsock: read error after {} bytes: {}",
+                            total,
+                            e
+                        );
+                        break;
+                    }
+                };
+                if total == 0 {
+                    tracing::info!(
+                        "Docker proxy unix→vsock: first chunk {} bytes: {:?}",
+                        n,
+                        String::from_utf8_lossy(&buf[..n.min(120)]),
+                    );
+                }
+                if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut vsock_wr, &buf[..n]).await
+                {
+                    tracing::warn!(
+                        "Docker proxy unix→vsock: write error after {} bytes: {}",
+                        total,
+                        e
+                    );
+                    break;
+                }
+                total += n as u64;
+            }
+            let _ = tokio::io::AsyncWriteExt::shutdown(&mut vsock_wr).await;
+            total
+        });
+
+        let (v2u_result, u2v_result) = tokio::join!(v2u, u2v);
+        let v2u_bytes = v2u_result.unwrap_or(0);
+        let u2v_bytes = u2v_result.unwrap_or(0);
+        tracing::info!(
+            "Docker proxy session done: vsock→unix={} bytes, unix→vsock={} bytes",
+            v2u_bytes,
+            u2v_bytes,
+        );
         Ok(())
     }
 
@@ -907,11 +1087,12 @@ mod linux {
             notes.push(note);
         }
 
-        // Poll until docker socket is ready (up to ~30 seconds).
-        // dockerd on first boot may need significant time to initialise its
-        // overlay2 storage and connect to containerd.
+        // Poll until docker socket is ready (up to ~90 seconds).
+        // On large data volumes with VirtIO block I/O, containerd may need
+        // up to 30s to scan its content store, and dockerd may need additional
+        // time to load containers from Btrfs.
         let mut status = collect_runtime_status().await;
-        for _ in 0..60 {
+        for _ in 0..180 {
             if status.docker_ready {
                 break;
             }
@@ -1082,15 +1263,24 @@ mod linux {
             }
         }
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        // On large data volumes (Btrfs with many layers/snapshots), containerd
+        // may need significant time to scan its content store on first boot.
+        // VirtIO block I/O is slower than VZ native disk, so allow up to 30s.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let start = tokio::time::Instant::now();
         while tokio::time::Instant::now() < deadline {
             if probe_first_ready_socket(&CONTAINERD_SOCKET_CANDIDATES).await {
+                let elapsed = start.elapsed();
+                tracing::info!(
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "containerd socket poll complete containerd_ready=true"
+                );
                 return true;
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
 
-        notes.push("containerd socket not ready after 8s".to_string());
+        notes.push("containerd socket not ready after 30s".to_string());
         false
     }
 
@@ -1128,7 +1318,17 @@ mod linux {
         use arcbox_protocol::agent::ServiceStatus;
 
         let containerd_ready = probe_first_ready_socket(&CONTAINERD_SOCKET_CANDIDATES).await;
-        let docker_ready = probe_unix_socket(DOCKER_API_UNIX_SOCKET).await;
+        // Two-level check: socket connectable (fast) + HTTP API probe (strong).
+        // Use socket connectable as the ready gate so the daemon doesn't stall
+        // when dockerd takes >30s to fully initialize (Loading containers on
+        // large data volumes). The HTTP probe result is included in the detail.
+        let docker_socket_ok = probe_unix_socket(DOCKER_API_UNIX_SOCKET).await;
+        let docker_api_ok = if docker_socket_ok {
+            probe_docker_api_ready(DOCKER_API_UNIX_SOCKET).await
+        } else {
+            false
+        };
+        let docker_ready = docker_socket_ok;
         let runtime_dir = PathBuf::from(ARCBOX_RUNTIME_BIN_DIR);
         let missing_runtime_binaries = missing_runtime_binaries_at(&runtime_dir);
 
@@ -1161,12 +1361,17 @@ mod linux {
             }
         });
 
-        // dockerd status
-        let docker_detail = if docker_ready {
-            format!("socket reachable: {}", DOCKER_API_UNIX_SOCKET)
+        // dockerd status — distinguish socket-connectable vs API-ready.
+        let docker_detail = if docker_api_ok {
+            format!("API /_ping OK: {}", DOCKER_API_UNIX_SOCKET)
+        } else if docker_socket_ok {
+            format!(
+                "socket connectable, API initializing: {}",
+                DOCKER_API_UNIX_SOCKET
+            )
         } else if Path::new(DOCKER_API_UNIX_SOCKET).exists() {
             format!(
-                "socket exists but not reachable: {}",
+                "socket exists but not connectable: {}",
                 DOCKER_API_UNIX_SOCKET
             )
         } else {
@@ -1503,6 +1708,7 @@ mod linux {
         false
     }
 
+    /// Checks if a Unix socket is connectable (lightweight probe).
     async fn probe_unix_socket(path: &str) -> bool {
         if !Path::new(path).exists() {
             return false;
@@ -1510,6 +1716,33 @@ mod linux {
         match tokio::time::timeout(Duration::from_millis(300), UnixStream::connect(path)).await {
             Ok(Ok(_stream)) => true,
             Ok(Err(_)) | Err(_) => false,
+        }
+    }
+
+    /// Sends a real HTTP `GET /_ping` to the Docker socket and waits for a
+    /// valid response. This is much stronger than `probe_unix_socket` which
+    /// only checks if `connect()` succeeds — dockerd may accept connections
+    /// before its HTTP handler is ready.
+    async fn probe_docker_api_ready(path: &str) -> bool {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let Ok(Ok(mut stream)) =
+            tokio::time::timeout(Duration::from_millis(500), UnixStream::connect(path)).await
+        else {
+            return false;
+        };
+        let req = b"GET /_ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        if stream.write_all(req).await.is_err() {
+            return false;
+        }
+        let mut buf = [0u8; 256];
+        match tokio::time::timeout(Duration::from_secs(3), stream.read(&mut buf)).await {
+            Ok(Ok(n)) if n > 0 => {
+                let resp = String::from_utf8_lossy(&buf[..n]);
+                // dockerd returns "HTTP/1.1 200 OK" with body "OK".
+                resp.starts_with("HTTP/1.1 200")
+            }
+            _ => false,
         }
     }
 

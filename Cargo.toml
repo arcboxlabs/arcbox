@@ -22,6 +22,7 @@ members = [
     "virt/arcbox-vm",
     "virt/arcbox-fs",
     "virt/arcbox-net",
+    "virt/arcbox-port-forward",
     "virt/arcbox-dhcp",
 
     # ============================================
@@ -53,7 +54,7 @@ members = [
     # ============================================
     # Guest Components (MIT OR Apache-2.0)
     # ============================================
-    "guest/arcbox-agent",
+    "guest/arcbox-agent", "virt/arcbox-net-inject",
 ]
 
 [workspace.package]
@@ -78,8 +79,9 @@ serde_json = "1"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "tracing-log"] }
 tracing-appender = "0.2"
+tracing-log = "0.2"
 
 # Error reporting
 sentry = { version = "0.46", default-features = false, features = [
@@ -187,6 +189,7 @@ arcbox-virtio = { version = "0.3.21", path = "virt/arcbox-virtio" } # x-release-
 arcbox-vm = { version = "0.3.21", path = "virt/arcbox-vm" } # x-release-please-version
 arcbox-fs = { version = "0.3.21", path = "virt/arcbox-fs" } # x-release-please-version
 arcbox-net = { version = "0.3.21", path = "virt/arcbox-net" } # x-release-please-version
+arcbox-port-forward = { version = "0.3.21", path = "virt/arcbox-port-forward" } # x-release-please-version
 arcbox-dhcp = { version = "0.3.21", path = "virt/arcbox-dhcp" } # x-release-please-version
 arcbox-container = { version = "0.3.21", path = "runtime/arcbox-container" } # x-release-please-version
 arcbox-protocol = { version = "0.3.21", path = "rpc/arcbox-protocol" } # x-release-please-version

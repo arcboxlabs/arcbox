@@ -54,6 +54,12 @@ pub const FUSE_MAX_PAGES: u32 = 1 << 22;
 pub const FUSE_CACHE_SYMLINKS: u32 = 1 << 23;
 pub const FUSE_NO_OPENDIR_SUPPORT: u32 = 1 << 24;
 pub const FUSE_EXPLICIT_INVAL_DATA: u32 = 1 << 25;
+/// DAX support — direct host page mapping into guest address space.
+pub const FUSE_MAP_ALIGNMENT: u32 = 1 << 26;
+
+/// FUSE_SETUPMAPPING flags.
+pub const FUSE_SETUPMAPPING_FLAG_WRITE: u64 = 1 << 0;
+pub const FUSE_SETUPMAPPING_FLAG_READ: u64 = 1 << 1;
 
 // Setattr valid flags
 pub const FATTR_MODE: u32 = 1 << 0;
@@ -520,6 +526,41 @@ pub struct FuseBatchForgetIn {
     pub count: u32,
     /// Padding.
     pub dummy: u32,
+}
+
+/// FUSE_SETUPMAPPING request — maps a file region into the DAX window.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct FuseSetupMappingIn {
+    /// File handle.
+    pub fh: u64,
+    /// File offset.
+    pub foffset: u64,
+    /// Mapping length.
+    pub len: u64,
+    /// Flags (FUSE_SETUPMAPPING_FLAG_WRITE, FUSE_SETUPMAPPING_FLAG_READ).
+    pub flags: u64,
+    /// Offset within the DAX window.
+    pub moffset: u64,
+}
+
+/// FUSE_REMOVEMAPPING request header.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct FuseRemoveMappingIn {
+    /// Number of mappings to remove.
+    pub count: u32,
+    pub dummy: u32,
+}
+
+/// FUSE_REMOVEMAPPING — one mapping entry to remove.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct FuseRemoveMappingOne {
+    /// Offset within the DAX window.
+    pub moffset: u64,
+    /// Length.
+    pub len: u64,
 }
 
 // ============================================================================

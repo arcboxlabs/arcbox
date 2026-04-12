@@ -84,6 +84,16 @@ impl HvVm {
         // SAFETY: The caller ensures the IPA region was previously mapped.
         error::check(unsafe { ffi::hv_vm_protect(ipa, size, perm.bits()) })
     }
+
+    /// Forces all vCPUs in the current VM to exit their run loops.
+    ///
+    /// Any blocked [`HvVcpu::run()`](crate::HvVcpu::run) call will return
+    /// `VcpuExit::Canceled`. This can be called from any thread and is the
+    /// primary mechanism for clean shutdown.
+    pub fn exit_all_vcpus(&self) -> HvResult<()> {
+        // SAFETY: Passing NULL with count 0 exits all vCPUs in the VM.
+        error::check(unsafe { ffi::hv_vcpus_exit(std::ptr::null(), 0) })
+    }
 }
 
 #[cfg(test)]
@@ -108,6 +118,14 @@ mod tests {
             result.is_err(),
             "second VM create should fail with Busy or Error"
         );
+    }
+
+    #[test]
+    #[ignore]
+    fn exit_all_vcpus_succeeds() {
+        let _vm = HvVm::new().expect("VM create failed");
+        _vm.exit_all_vcpus()
+            .expect("exit_all_vcpus should succeed even with no vCPUs");
     }
 
     #[test]

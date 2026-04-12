@@ -275,6 +275,7 @@ dependencies = [
  "arcbox-hypervisor",
  "arcbox-migration",
  "arcbox-net",
+ "arcbox-port-forward",
  "arcbox-protocol",
  "arcbox-transport",
  "arcbox-virtio",
@@ -456,6 +457,7 @@ dependencies = [
 name = "arcbox-hv"
 version = "0.3.20"
 dependencies = [
+ "libc",
  "thiserror",
  "tracing",
 ]
@@ -515,6 +517,7 @@ dependencies = [
  "arcbox-virtio",
  "bytes",
  "chrono",
+ "crossbeam-channel",
  "crossbeam-utils",
  "hashbrown 0.14.5",
  "ipnetwork 0.20.0",
@@ -532,6 +535,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "arcbox-net-inject"
+version = "0.3.21"
+dependencies = [
+ "crossbeam-channel",
+ "tracing",
+]
+
+[[package]]
 name = "arcbox-oci"
 version = "0.3.21"
 dependencies = [
@@ -544,6 +555,19 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "arcbox-port-forward"
+version = "0.3.21"
+dependencies = [
+ "arcbox-constants",
+ "crossbeam-channel",
+ "libc",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -591,12 +615,14 @@ dependencies = [
  "arcbox-hypervisor",
  "async-trait",
  "bytes",
+ "getrandom 0.2.17",
  "libc",
  "rayon",
  "tempfile",
  "thiserror",
  "tokio",
  "tracing",
+ "virtio-bindings",
 ]
 
 [[package]]
@@ -625,14 +651,18 @@ version = "0.3.21"
 dependencies = [
  "arcbox-dns",
  "arcbox-error",
+ "arcbox-fs",
  "arcbox-hv",
  "arcbox-hypervisor",
  "arcbox-net",
+ "arcbox-net-inject",
  "arcbox-virtio",
  "bytes",
  "chrono",
+ "crossbeam-channel",
  "futures",
  "libc",
+ "linux-loader",
  "lz4_flex",
  "serde",
  "serde_json",
@@ -641,7 +671,11 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "uuid",
+ "vm-fdt",
+ "vm-memory",
+ "vm-superio",
 ]
 
 [[package]]
@@ -1720,9 +1754,9 @@ dependencies = [
 
 [[package]]
 name = "heapless"
-version = "0.8.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bfb9eb618601c89945a70e254898da93b13be0388091d42117462b265bb3fad"
+checksum = "b1edcd5a338e64688fbdcb7531a846cfd3476a54784dcb918a0844682bc7ada5"
 dependencies = [
  "hash32",
  "stable_deref_trait",
@@ -2243,6 +2277,15 @@ dependencies = [
  "libc",
  "plain",
  "redox_syscall 0.7.3",
+]
+
+[[package]]
+name = "linux-loader"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de72cb02c55ecffcf75fe78295926f872eb6eb0a58d629c58a8c324dc26380f6"
+dependencies = [
+ "vm-memory",
 ]
 
 [[package]]
@@ -3890,9 +3933,9 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "smoltcp"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dad095989c1533c1c266d9b1e8d70a1329dd3723c3edac6d03bbd67e7bf6f4bb"
+checksum = "ac729b0a77bd092a3f06ddaddc59fe0d67f48ba0de45a9abe707c2842c7f8767"
 dependencies = [
  "bitflags 1.3.2",
  "byteorder",
@@ -4741,6 +4784,35 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "virtio-bindings"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "091f1f09cfbf2a78563b562e7a949465cce1aef63b6065645188d995162f8868"
+
+[[package]]
+name = "vm-fdt"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e21282841a059bb62627ce8441c491f09603622cd5a21c43bfedc85a2952f23"
+
+[[package]]
+name = "vm-memory"
+version = "0.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f39348a049689cabd3377cdd9182bf526ec76a6f823b79903896452e9d7a7380"
+dependencies = [
+ "libc",
+ "thiserror",
+ "winapi",
+]
+
+[[package]]
+name = "vm-superio"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69c376a9b84afdf97bddd2628096cf3554208b2a676cf06b4532e0f433a54e02"
 
 [[package]]
 name = "vsock"

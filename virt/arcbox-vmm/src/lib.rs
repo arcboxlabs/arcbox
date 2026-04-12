@@ -60,17 +60,29 @@
 //!
 //! vm.run().await?;
 //! ```
+pub mod blk_worker;
 pub mod boot;
 pub mod builder;
+pub mod dax;
 pub mod device;
+// Intentionally not `pub` — only used by darwin_hv to spawn the worker.
 pub mod error;
 pub mod event;
 pub mod fdt;
 pub mod irq;
 pub mod memory;
+#[cfg(target_os = "macos")]
+pub(crate) mod net_rx_worker;
 pub mod snapshot;
 pub mod vcpu;
+pub(crate) mod virtqueue_util;
 pub mod vmm;
+pub mod vsock_manager;
+#[cfg(target_os = "macos")]
+pub(crate) mod vsock_muxer;
+#[cfg(target_os = "macos")]
+#[allow(dead_code)] // Deprecated: replaced by vsock_muxer. Retained for reference.
+pub(crate) mod vsock_rx_worker;
 
 pub use boot::{BootParams, KernelLoader, KernelType};
 pub use builder::{VmBuilder, VmInstance};
@@ -82,4 +94,6 @@ pub use snapshot::{
     SnapshotTargetType, VmRestoreData, VmSnapshotContext,
 };
 pub use vcpu::{DeviceManagerExitHandler, ExitHandler, VcpuManager};
-pub use vmm::{SharedDirConfig, Vmm, VmmConfig, VmmState};
+pub use vmm::{
+    BlockDeviceConfig, ResolvedBackend, SharedDirConfig, VmBackend, Vmm, VmmConfig, VmmState,
+};

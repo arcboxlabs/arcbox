@@ -27,10 +27,18 @@ lz4_flex = "0.11"
 libc.workspace = true
 arcbox-dns = { workspace = true }
 arcbox-hv = { version = "0.3.20", path = "../arcbox-hv" }
+vm-memory = { version = "0.17", features = ["backend-mmap"] }
+linux-loader = { version = "0.13", features = ["elf", "pe"] }
+vm-fdt = "0.3"
+vm-superio = "0.8"
+arcbox-fs = { version = "0.3.21", path = "../arcbox-fs" }
+arcbox-net-inject = { version = "0.3.21", path = "../arcbox-net-inject" }
+crossbeam-channel = "0.5"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
 default = []

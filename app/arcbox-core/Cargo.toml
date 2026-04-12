@@ -42,6 +42,7 @@ arcbox-helper = { workspace = true }
 arcbox-migration = { path = "../arcbox-migration" }
 libc = { workspace = true }
 tempfile = "3"
+arcbox-port-forward = { version = "0.3.21", path = "../../virt/arcbox-port-forward" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 ifbridge = { workspace = true }
@@ -56,6 +57,7 @@ backend-guest-docker = []
 provision-bundled = []
 provision-distro = []
 vmnet = ["arcbox-vmm/vmnet"]
+gic = ["arcbox-vmm/gic"]
 
 [lints]
 workspace = true

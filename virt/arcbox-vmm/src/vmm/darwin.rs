@@ -483,6 +483,9 @@ impl Vmm {
 
         tracing::info!("vmnet relay task spawned");
 
+        // Extract MAC string before moving vmnet (info borrows the Arc).
+        let mac_str = arcbox_net::darwin::format_mac(&info.mac);
+
         // Store state for cleanup.
         let vz_raw_fd = vz_fd.as_raw_fd();
         self.vmnet_bridge = Some(vmnet);
@@ -490,7 +493,6 @@ impl Vmm {
         self.vmnet_bridge_fd = Some(vz_fd);
 
         // Pass the vmnet MAC to the VZ-side NIC so bridge FDB lookups match.
-        let mac_str = arcbox_net::darwin::format_mac(&info.mac);
         Ok(VirtioDeviceConfig::network_file_handle_with_mac(
             vz_raw_fd, mac_str,
         ))
@@ -541,6 +543,7 @@ impl Vmm {
             cancel.cancel();
         }
         let _ = self.net_vz_fd.take();
+        let _ = self.hv_bridge_net_fd.take();
 
         // Stop vmnet relay and bridge interface.
         #[cfg(feature = "vmnet")]
@@ -575,6 +578,13 @@ impl Vmm {
     }
 
     /// Connects to a vsock port on the guest VM.
+    ///
+    /// For the HV backend, this blocks until the vCPU thread has injected
+    /// the OP_REQUEST into guest memory (up to 30s). After return, the guest
+    /// will respond with RST or RESPONSE — the caller handles both via
+    /// read() returning EOF (RST) or data (RESPONSE + subsequent OP_RW).
+    ///
+    /// For the VZ backend, the fd is immediately usable.
     pub fn connect_vsock(&self, port: u32) -> Result<std::os::unix::io::RawFd> {
         if self.state != VmmState::Running {
             return Err(VmmError::invalid_state(format!(
@@ -583,12 +593,43 @@ impl Vmm {
             )));
         }
 
-        let vm = self
-            .darwin_vm
-            .as_ref()
-            .ok_or_else(|| VmmError::invalid_state("no DarwinVm".to_string()))?;
+        match self.resolved_backend {
+            Some(ResolvedBackend::Hv) => self.connect_vsock_hv(port),
+            _ => {
+                let vm = self
+                    .darwin_vm
+                    .as_ref()
+                    .ok_or_else(|| VmmError::invalid_state("no DarwinVm".to_string()))?;
+                vm.connect_vsock(port).map_err(VmmError::Hypervisor)
+            }
+        }
+    }
 
-        vm.connect_vsock(port).map_err(VmmError::Hypervisor)
+    /// Promotes a port-forward TCP stream to the vsock inline inject path.
+    /// The stream will be read by the vsock-rx worker directly into guest
+    /// memory, bypassing the socketpair.
+    pub fn promote_vsock_inline(
+        &self,
+        stream: std::net::TcpStream,
+        host_port: u32,
+        guest_port: u32,
+    ) -> Result<bool> {
+        let Some(ref tx) = self.vsock_inline_tx else {
+            return Ok(false);
+        };
+
+        let guest_cid = self.config.guest_cid.unwrap_or(3) as u64;
+        let conn = crate::vsock_muxer::VsockInlineConn {
+            stream,
+            conn_id: crate::vsock_manager::VsockConnectionId {
+                host_port,
+                guest_port,
+            },
+            guest_cid,
+            host_eof: false,
+        };
+
+        Ok(tx.try_send(conn).is_ok())
     }
 
     /// Reads console output (hvc0) from the VM.

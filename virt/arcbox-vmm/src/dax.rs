@@ -1,0 +1,209 @@
+//! VirtioFS DAX (Direct Access) mapper implementation.
+//!
+//! Maps host file pages into the guest's DAX window IPA region using
+//! Hypervisor.framework's `hv_vm_map` / `hv_vm_unmap` global APIs.
+
+use std::collections::BTreeMap;
+use std::sync::Mutex;
+
+/// Computes DAX window base IPA — placed immediately after guest RAM.
+/// Must be above RAM so `devm_memremap_pages` can register it as ZONE_DEVICE.
+pub fn dax_window_base(ram_base: u64, ram_size: u64) -> u64 {
+    // Page-align to 2MB boundary (huge page) for optimal TLB usage.
+    let after_ram = ram_base + ram_size;
+    (after_ram + 0x1F_FFFF) & !0x1F_FFFF
+}
+
+/// DAX window size per VirtioFS share (128 MB each).
+pub const DAX_WINDOW_PER_SHARE: u64 = 128 * 1024 * 1024;
+
+/// Total DAX window size for a given number of VirtioFS shares.
+pub fn dax_window_total(num_shares: usize) -> u64 {
+    num_shares.max(1) as u64 * DAX_WINDOW_PER_SHARE
+}
+
+/// A single active DAX mapping.
+struct DaxMapping {
+    host_ptr: *mut u8,
+    guest_ipa: u64,
+    length: usize,
+}
+
+// SAFETY: host_ptr is from mmap, valid for mapping lifetime.
+unsafe impl Send for DaxMapping {}
+
+/// DAX mapper backed by Hypervisor.framework global hv_vm_map/unmap.
+pub struct HvDaxMapper {
+    mappings: Mutex<BTreeMap<u64, DaxMapping>>,
+    /// Base IPA of the DAX window (computed from RAM layout).
+    base_ipa: u64,
+    /// Total DAX window size — mappings must stay within [0, window_size).
+    window_size: u64,
+}
+
+impl HvDaxMapper {
+    pub fn new(base_ipa: u64, window_size: u64) -> Self {
+        Self {
+            mappings: Mutex::new(BTreeMap::new()),
+            base_ipa,
+            window_size,
+        }
+    }
+}
+
+impl arcbox_fs::DaxMapper for HvDaxMapper {
+    fn setup_mapping(
+        &self,
+        host_fd: i32,
+        file_offset: u64,
+        window_offset: u64,
+        length: u64,
+        writable: bool,
+    ) -> Result<(), i32> {
+        let page_mask = 0xFFF_u64;
+        if (file_offset | window_offset | length) & page_mask != 0 {
+            return Err(libc::EINVAL);
+        }
+        if length == 0 {
+            return Err(libc::EINVAL);
+        }
+
+        // Bounds check: mapping must fit within the DAX window.
+        let end = window_offset.checked_add(length).ok_or(libc::EINVAL)?;
+        if end > self.window_size {
+            tracing::warn!(
+                "DAX setup_mapping out of bounds: offset={:#x} len={:#x} window_size={:#x}",
+                window_offset,
+                length,
+                self.window_size,
+            );
+            return Err(libc::EINVAL);
+        }
+
+        // Hold the lock across overlap check, mmap, hv_vm_map, and insertion
+        // to prevent TOCTOU races between concurrent setup_mapping calls.
+        // mmap and hv_vm_map are sub-microsecond, so holding the mutex is fine.
+        let mut mappings = self.mappings.lock().unwrap();
+
+        // Overlap check: no existing mapping may intersect [window_offset, end).
+        for (&existing_offset, existing) in &*mappings {
+            let existing_end = existing_offset + existing.length as u64;
+            if window_offset < existing_end && end > existing_offset {
+                tracing::warn!(
+                    "DAX setup_mapping overlap: new [{:#x}..{:#x}) vs existing [{:#x}..{:#x})",
+                    window_offset,
+                    end,
+                    existing_offset,
+                    existing_end,
+                );
+                return Err(libc::EEXIST);
+            }
+        }
+
+        let prot = if writable {
+            libc::PROT_READ | libc::PROT_WRITE
+        } else {
+            libc::PROT_READ
+        };
+
+        // mmap host file region.
+        let host_ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                length as usize,
+                prot,
+                libc::MAP_SHARED,
+                host_fd,
+                #[allow(clippy::cast_possible_wrap)]
+                {
+                    file_offset as libc::off_t
+                },
+            )
+        };
+        if host_ptr == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO));
+        }
+
+        let guest_ipa = self.base_ipa + window_offset;
+        let perm = if writable {
+            arcbox_hv::MemoryPermission::READ | arcbox_hv::MemoryPermission::WRITE
+        } else {
+            arcbox_hv::MemoryPermission::READ
+        };
+
+        // Map into guest IPA via global HV API.
+        let ret = unsafe {
+            arcbox_hv::ffi::hv_vm_map(host_ptr.cast(), guest_ipa, length as usize, perm.bits())
+        };
+        if ret != 0 {
+            tracing::warn!("DAX hv_vm_map failed: ret={ret}");
+            unsafe { libc::munmap(host_ptr, length as usize) };
+            return Err(libc::EFAULT);
+        }
+
+        mappings.insert(
+            window_offset,
+            DaxMapping {
+                host_ptr: host_ptr.cast(),
+                guest_ipa,
+                length: length as usize,
+            },
+        );
+
+        tracing::debug!(
+            "DAX setup: window_offset={:#x} len={:#x} ipa={:#x}",
+            window_offset,
+            length,
+            guest_ipa,
+        );
+        Ok(())
+    }
+
+    fn remove_mapping(&self, window_offset: u64, length: u64) -> Result<(), i32> {
+        let mut mappings = self.mappings.lock().unwrap();
+        let Some(mapping) = mappings.remove(&window_offset) else {
+            return Err(libc::ENOENT);
+        };
+
+        // Validate that the requested length matches the stored mapping.
+        // Partial unmaps are not supported — return EINVAL and restore.
+        if length as usize != mapping.length {
+            tracing::warn!(
+                "DAX remove_mapping length mismatch: requested={:#x} stored={:#x}",
+                length,
+                mapping.length,
+            );
+            mappings.insert(window_offset, mapping);
+            return Err(libc::EINVAL);
+        }
+
+        // Unmap from guest IPA.
+        let ret = unsafe { arcbox_hv::ffi::hv_vm_unmap(mapping.guest_ipa, mapping.length) };
+        if ret != 0 {
+            tracing::warn!("DAX hv_vm_unmap failed: ret={ret}");
+        }
+
+        unsafe { libc::munmap(mapping.host_ptr.cast(), mapping.length) };
+
+        tracing::debug!(
+            "DAX remove: window_offset={:#x} len={:#x}",
+            window_offset,
+            length,
+        );
+        Ok(())
+    }
+}
+
+impl Drop for HvDaxMapper {
+    fn drop(&mut self) {
+        let mappings = self.mappings.lock().unwrap();
+        for mapping in mappings.values() {
+            unsafe {
+                arcbox_hv::ffi::hv_vm_unmap(mapping.guest_ipa, mapping.length);
+                libc::munmap(mapping.host_ptr.cast(), mapping.length);
+            }
+        }
+    }
+}

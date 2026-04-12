@@ -3,22 +3,26 @@
 //! This module provides the core virtqueue data structures used for
 //! communication between the guest driver and host device.
 
+use virtio_bindings::virtio_ring;
+
 use crate::error::{Result, VirtioError};
 
 /// VirtIO available ring flag: guest requests no interrupt on used buffer consumption.
-const VRING_AVAIL_F_NO_INTERRUPT: u16 = 1;
+const VRING_AVAIL_F_NO_INTERRUPT: u16 = virtio_ring::VRING_AVAIL_F_NO_INTERRUPT as u16;
 
 /// VirtIO feature bit for event index-based notification suppression (VirtIO spec 2.7.7).
-pub const VIRTIO_F_EVENT_IDX: u64 = 1 << 29;
+pub const VIRTIO_F_EVENT_IDX: u64 = 1 << virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 
-/// Descriptor flags.
+/// Descriptor flags sourced from `virtio_bindings::virtio_ring`.
 pub mod flags {
+    use super::virtio_ring;
+
     /// Descriptor continues via next field.
-    pub const NEXT: u16 = 1;
+    pub const NEXT: u16 = virtio_ring::VRING_DESC_F_NEXT as u16;
     /// Buffer is write-only (for device).
-    pub const WRITE: u16 = 2;
+    pub const WRITE: u16 = virtio_ring::VRING_DESC_F_WRITE as u16;
     /// Buffer contains a list of descriptors.
-    pub const INDIRECT: u16 = 4;
+    pub const INDIRECT: u16 = virtio_ring::VRING_DESC_F_INDIRECT as u16;
 }
 
 /// A single descriptor in the descriptor table.

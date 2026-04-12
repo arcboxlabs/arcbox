@@ -19,13 +19,13 @@
 
 use crate::error::{FsError, Result};
 use crate::fuse::{
-    FATTR_ATIME, FATTR_GID, FATTR_MODE, FATTR_MTIME, FATTR_SIZE, FATTR_UID,
-    FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION, FuseAccessIn, FuseAttr, FuseAttrOut,
-    FuseCreateIn, FuseDirent, FuseEntryOut, FuseFallocateIn, FuseFlushIn, FuseForgetIn,
-    FuseFsyncIn, FuseGetxattrIn, FuseGetxattrOut, FuseInHeader, FuseInitIn, FuseInitOut,
-    FuseLinkIn, FuseLseekIn, FuseLseekOut, FuseMkdirIn, FuseMknodIn, FuseOpcode, FuseOpenIn,
-    FuseOpenOut, FuseOutHeader, FuseReadIn, FuseReleaseIn, FuseRenameIn, FuseSetattrIn,
-    FuseSetxattrIn, FuseStatfsOut, FuseWriteIn, FuseWriteOut,
+    FATTR_ATIME, FATTR_GID, FATTR_MODE, FATTR_MTIME, FATTR_SIZE, FATTR_UID, FUSE_DO_READDIRPLUS,
+    FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION, FUSE_MAP_ALIGNMENT, FUSE_READDIRPLUS_AUTO,
+    FuseAccessIn, FuseAttr, FuseAttrOut, FuseCreateIn, FuseDirent, FuseEntryOut, FuseFallocateIn,
+    FuseFlushIn, FuseForgetIn, FuseFsyncIn, FuseGetxattrIn, FuseGetxattrOut, FuseInHeader,
+    FuseInitIn, FuseInitOut, FuseLinkIn, FuseLseekIn, FuseLseekOut, FuseMkdirIn, FuseMknodIn,
+    FuseOpcode, FuseOpenIn, FuseOpenOut, FuseOutHeader, FuseReadIn, FuseReleaseIn, FuseRenameIn,
+    FuseSetattrIn, FuseSetxattrIn, FuseStatfsOut, FuseWriteIn, FuseWriteOut,
 };
 use crate::passthrough::PassthroughFs;
 
@@ -108,6 +108,9 @@ impl ResponseBuilder {
 
     /// Writes an error response.
     pub fn write_error(&mut self, unique: u64, errno: i32) {
+        if errno != 0 {
+            tracing::debug!("FUSE: error response unique={} errno={}", unique, -errno);
+        }
         self.buffer.clear();
         let header = FuseOutHeader::error(unique, errno);
         self.write_struct(&header);
@@ -194,6 +197,8 @@ pub struct FuseDispatcher {
     config: DispatcherConfig,
     /// Whether FUSE_INIT has been received.
     initialized: std::sync::atomic::AtomicBool,
+    /// Optional DAX mapper for direct host page mapping.
+    dax_mapper: Option<Arc<dyn crate::DaxMapper>>,
 }
 
 impl FuseDispatcher {
@@ -204,7 +209,13 @@ impl FuseDispatcher {
             fs,
             config,
             initialized: std::sync::atomic::AtomicBool::new(false),
+            dax_mapper: None,
         }
+    }
+
+    /// Sets the DAX mapper for direct host page mapping.
+    pub fn set_dax_mapper(&mut self, mapper: Arc<dyn crate::DaxMapper>) {
+        self.dax_mapper = Some(mapper);
     }
 
     /// Dispatches a FUSE request and returns the response.
@@ -229,6 +240,13 @@ impl FuseDispatcher {
 
         let ctx = RequestContext::from(&header);
         let mut response = ResponseBuilder::new();
+
+        tracing::debug!(
+            "FUSE: {:?} nodeid={} unique={}",
+            opcode,
+            ctx.nodeid,
+            ctx.unique
+        );
 
         // Dispatch to handler
         match opcode {
@@ -255,6 +273,7 @@ impl FuseDispatcher {
             FuseOpcode::Flush => self.handle_flush(&ctx, body, &mut response),
             FuseOpcode::Opendir => self.handle_opendir(&ctx, body, &mut response),
             FuseOpcode::Readdir => self.handle_readdir(&ctx, body, &mut response),
+            FuseOpcode::Readdirplus => self.handle_readdirplus(&ctx, body, &mut response),
             FuseOpcode::Releasedir => self.handle_releasedir(&ctx, body, &mut response),
             FuseOpcode::Fsyncdir => self.handle_fsyncdir(&ctx, body, &mut response),
             FuseOpcode::Access => self.handle_access(&ctx, body, &mut response),
@@ -264,8 +283,14 @@ impl FuseDispatcher {
             FuseOpcode::Removexattr => self.handle_removexattr(&ctx, body, &mut response),
             FuseOpcode::Lseek => self.handle_lseek(&ctx, body, &mut response),
             FuseOpcode::Fallocate => self.handle_fallocate(&ctx, body, &mut response),
+            FuseOpcode::SetupMapping => self.handle_setup_mapping(&ctx, body, &mut response),
+            FuseOpcode::RemoveMapping => self.handle_remove_mapping(&ctx, body, &mut response),
             _ => {
-                // Unsupported operation
+                tracing::warn!(
+                    "FUSE: unsupported opcode {:?} ({}), returning ENOSYS",
+                    opcode,
+                    header.opcode
+                );
                 response.write_error(ctx.unique, libc::ENOSYS);
             }
         }
@@ -292,12 +317,35 @@ impl FuseDispatcher {
             return;
         }
 
-        let init_out = FuseInitOut {
+        // Negotiate feature flags with the guest kernel
+        let mut flags = FuseInitOut::default().flags;
+
+        // Negotiate READDIRPLUS: eliminates separate LOOKUP calls after
+        // directory listing, significantly reducing round-trips.
+        if init_in.flags & FUSE_DO_READDIRPLUS != 0 {
+            flags |= FUSE_DO_READDIRPLUS;
+        }
+        if init_in.flags & FUSE_READDIRPLUS_AUTO != 0 {
+            flags |= FUSE_READDIRPLUS_AUTO;
+        }
+
+        // Negotiate DAX (direct host page mapping) if mapper is available.
+        let mut map_alignment = 0u32;
+        if self.dax_mapper.is_some() && init_in.flags & FUSE_MAP_ALIGNMENT != 0 {
+            flags |= FUSE_MAP_ALIGNMENT;
+            map_alignment = 12; // page shift: 2^12 = 4096
+            tracing::info!("FUSE DAX negotiated (map_alignment={})", map_alignment);
+        }
+
+        let mut init_out = FuseInitOut {
             major: FUSE_KERNEL_VERSION,
             minor: FUSE_KERNEL_MINOR_VERSION,
             max_readahead: init_in.max_readahead,
+            flags,
             ..FuseInitOut::default()
         };
+        // map_alignment is at unused[0] per FUSE protocol spec.
+        init_out.unused[0] = map_alignment;
 
         self.initialized
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -756,6 +804,87 @@ impl FuseDispatcher {
     }
 
     // ========================================================================
+    // DAX Mapping Operations
+    // ========================================================================
+
+    fn handle_setup_mapping(
+        &self,
+        ctx: &RequestContext,
+        body: &[u8],
+        response: &mut ResponseBuilder,
+    ) {
+        use crate::fuse::FuseSetupMappingIn;
+
+        let Some(ref mapper) = self.dax_mapper else {
+            response.write_error(ctx.unique, libc::ENOSYS);
+            return;
+        };
+
+        if body.len() < std::mem::size_of::<FuseSetupMappingIn>() {
+            response.write_error(ctx.unique, libc::EINVAL);
+            return;
+        }
+
+        let req = unsafe { std::ptr::read_unaligned(body.as_ptr().cast::<FuseSetupMappingIn>()) };
+
+        // Get the host fd from the file handle.
+        let host_fd = match self.fs.get_file_raw_fd(req.fh) {
+            Some(fd) => fd,
+            None => {
+                response.write_error(ctx.unique, libc::EBADF);
+                return;
+            }
+        };
+
+        let writable = req.flags & crate::fuse::FUSE_SETUPMAPPING_FLAG_WRITE != 0;
+
+        match mapper.setup_mapping(host_fd, req.foffset, req.moffset, req.len, writable) {
+            Ok(()) => response.write_empty(ctx.unique),
+            Err(errno) => response.write_error(ctx.unique, errno),
+        }
+    }
+
+    fn handle_remove_mapping(
+        &self,
+        ctx: &RequestContext,
+        body: &[u8],
+        response: &mut ResponseBuilder,
+    ) {
+        use crate::fuse::{FuseRemoveMappingIn, FuseRemoveMappingOne};
+
+        let Some(ref mapper) = self.dax_mapper else {
+            response.write_error(ctx.unique, libc::ENOSYS);
+            return;
+        };
+
+        let hdr_size = std::mem::size_of::<FuseRemoveMappingIn>();
+        if body.len() < hdr_size {
+            response.write_error(ctx.unique, libc::EINVAL);
+            return;
+        }
+
+        let hdr = unsafe { std::ptr::read_unaligned(body.as_ptr().cast::<FuseRemoveMappingIn>()) };
+        let entry_size = std::mem::size_of::<FuseRemoveMappingOne>();
+        let entries = &body[hdr_size..];
+
+        for i in 0..hdr.count as usize {
+            let off = i * entry_size;
+            if off + entry_size > entries.len() {
+                break;
+            }
+            let entry = unsafe {
+                std::ptr::read_unaligned(entries[off..].as_ptr().cast::<FuseRemoveMappingOne>())
+            };
+            if let Err(errno) = mapper.remove_mapping(entry.moffset, entry.len) {
+                response.write_error(ctx.unique, errno);
+                return;
+            }
+        }
+
+        response.write_empty(ctx.unique);
+    }
+
+    // ========================================================================
     // Directory Operations
     // ========================================================================
 
@@ -828,6 +957,92 @@ impl FuseDispatcher {
                 }
 
                 response.write_bytes(ctx.unique, &dirent_buf);
+            }
+            Err(e) => response.write_error(ctx.unique, e.to_errno()),
+        }
+    }
+
+    /// Handles FUSE_READDIRPLUS: like readdir but each entry includes a full
+    /// `FuseEntryOut` with inode attributes and cache timeouts. This allows
+    /// the guest kernel to populate its dcache and icache in a single round
+    /// trip, eliminating separate LOOKUP calls after directory listing.
+    fn handle_readdirplus(
+        &self,
+        ctx: &RequestContext,
+        body: &[u8],
+        response: &mut ResponseBuilder,
+    ) {
+        if body.len() < size_of::<FuseReadIn>() {
+            response.write_error(ctx.unique, libc::EINVAL);
+            return;
+        }
+
+        // SAFETY: FuseReadIn may sit at an unaligned offset in the VirtIO buffer.
+        let read_in = unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseReadIn) };
+
+        match self.fs.readdir(read_in.fh, read_in.offset) {
+            Ok(entries) => {
+                let mut buf = Vec::new();
+                let mut offset = read_in.offset + 1;
+
+                for entry in entries {
+                    let name_bytes = entry.name.as_bytes();
+                    // READDIRPLUS entry: FuseEntryOut + FuseDirent + name + padding
+                    let dirent_size = FuseDirent::size(name_bytes.len());
+                    let entry_size = size_of::<FuseEntryOut>() + dirent_size;
+
+                    // Check if we have room in the buffer
+                    if buf.len() + entry_size > read_in.size as usize {
+                        break;
+                    }
+
+                    // Try to get attributes for this entry via getattr.
+                    // If getattr fails (e.g. inode disappeared between opendir
+                    // and readdirplus) we skip the entry rather than failing
+                    // the entire request.
+                    let attr = match self.fs.getattr(entry.ino) {
+                        Ok(attr) => attr,
+                        Err(_) => continue,
+                    };
+
+                    // Build the entry_out with cache timeouts
+                    let entry_out = self.make_entry_out(entry.ino, &attr);
+
+                    // Write FuseEntryOut
+                    let entry_out_bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            std::ptr::from_ref::<FuseEntryOut>(&entry_out) as *const u8,
+                            size_of::<FuseEntryOut>(),
+                        )
+                    };
+                    buf.extend_from_slice(entry_out_bytes);
+
+                    // Write FuseDirent header
+                    let dirent = FuseDirent {
+                        ino: entry.ino,
+                        off: offset,
+                        namelen: name_bytes.len() as u32,
+                        typ: entry.file_type.to_dirent_type(),
+                    };
+                    let dirent_bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            std::ptr::from_ref::<FuseDirent>(&dirent) as *const u8,
+                            size_of::<FuseDirent>(),
+                        )
+                    };
+                    buf.extend_from_slice(dirent_bytes);
+
+                    // Write name
+                    buf.extend_from_slice(name_bytes);
+
+                    // Pad to 8-byte boundary
+                    let padding = dirent_size - size_of::<FuseDirent>() - name_bytes.len();
+                    buf.extend(std::iter::repeat_n(0u8, padding));
+
+                    offset += 1;
+                }
+
+                response.write_bytes(ctx.unique, &buf);
             }
             Err(e) => response.write_error(ctx.unique, e.to_errno()),
         }
@@ -1406,5 +1621,152 @@ mod tests {
         assert_eq!(header.error, 0);
         assert_eq!(header.len as usize, FuseOutHeader::SIZE + 5);
         assert_eq!(&response[FuseOutHeader::SIZE..], b"hello");
+    }
+
+    #[test]
+    fn test_init_negotiates_readdirplus() {
+        let (_temp, dispatcher) = setup_dispatcher();
+
+        // Send INIT with READDIRPLUS flags
+        let init_in = FuseInitIn {
+            major: FUSE_KERNEL_VERSION,
+            minor: FUSE_KERNEL_MINOR_VERSION,
+            max_readahead: 128 * 1024,
+            flags: FUSE_DO_READDIRPLUS | FUSE_READDIRPLUS_AUTO,
+        };
+
+        let mut request = make_header(FuseOpcode::Init, 0, size_of::<FuseInitIn>());
+        let init_bytes = unsafe {
+            std::slice::from_raw_parts(
+                &init_in as *const FuseInitIn as *const u8,
+                size_of::<FuseInitIn>(),
+            )
+        };
+        request.extend_from_slice(init_bytes);
+
+        let response = dispatcher.dispatch(&request).unwrap();
+        let header = parse_response_header(&response);
+        assert_eq!(header.error, 0);
+
+        // Parse the INIT response and verify READDIRPLUS flags are set
+        let init_out = unsafe {
+            std::ptr::read_unaligned(
+                (response.as_ptr() as *const u8).add(FuseOutHeader::SIZE) as *const FuseInitOut
+            )
+        };
+        assert_ne!(
+            init_out.flags & FUSE_DO_READDIRPLUS,
+            0,
+            "FUSE_DO_READDIRPLUS should be negotiated"
+        );
+        assert_ne!(
+            init_out.flags & FUSE_READDIRPLUS_AUTO,
+            0,
+            "FUSE_READDIRPLUS_AUTO should be negotiated"
+        );
+    }
+
+    #[test]
+    fn test_readdirplus() {
+        let (temp, dispatcher) = setup_dispatcher();
+
+        // Create files so the directory has known entries
+        std::fs::write(temp.path().join("alpha.txt"), "aaa").unwrap();
+        std::fs::write(temp.path().join("beta.txt"), "bb").unwrap();
+
+        // Opendir on root inode
+        let open_in = FuseOpenIn {
+            flags: 0,
+            unused: 0,
+        };
+        let mut request = make_header(FuseOpcode::Opendir, 1, size_of::<FuseOpenIn>());
+        let open_bytes = unsafe {
+            std::slice::from_raw_parts(
+                &open_in as *const FuseOpenIn as *const u8,
+                size_of::<FuseOpenIn>(),
+            )
+        };
+        request.extend_from_slice(open_bytes);
+
+        let response = dispatcher.dispatch(&request).unwrap();
+        let header = parse_response_header(&response);
+        assert_eq!(header.error, 0);
+
+        let open_out = unsafe {
+            std::ptr::read_unaligned(
+                (response.as_ptr() as *const u8).add(FuseOutHeader::SIZE) as *const FuseOpenOut
+            )
+        };
+        let fh = open_out.fh;
+
+        // Send READDIRPLUS request
+        let read_in = FuseReadIn {
+            fh,
+            offset: 0,
+            size: 8192, // Generous buffer
+            read_flags: 0,
+            lock_owner: 0,
+            flags: 0,
+            padding: 0,
+        };
+        let mut request = make_header(FuseOpcode::Readdirplus, 1, size_of::<FuseReadIn>());
+        let read_bytes = unsafe {
+            std::slice::from_raw_parts(
+                &read_in as *const FuseReadIn as *const u8,
+                size_of::<FuseReadIn>(),
+            )
+        };
+        request.extend_from_slice(read_bytes);
+
+        let response = dispatcher.dispatch(&request).unwrap();
+        let header = parse_response_header(&response);
+        assert_eq!(header.error, 0, "READDIRPLUS should succeed");
+
+        // The response body should be non-empty (it contains entries for
+        // at least ".", "..", "alpha.txt", "beta.txt").
+        let body_len = response.len() - FuseOutHeader::SIZE;
+        assert!(
+            body_len > 0,
+            "READDIRPLUS response should contain directory entries"
+        );
+
+        // Each READDIRPLUS entry starts with a FuseEntryOut followed by a
+        // FuseDirent. Verify we can parse the first entry.
+        let body = &response[FuseOutHeader::SIZE..];
+        assert!(
+            body.len() >= size_of::<FuseEntryOut>() + size_of::<FuseDirent>(),
+            "Response should contain at least one full READDIRPLUS entry"
+        );
+
+        // Parse the first FuseEntryOut to verify it has valid timeouts
+        let first_entry = unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseEntryOut) };
+        assert!(
+            first_entry.nodeid > 0,
+            "First entry should have a valid node ID"
+        );
+        assert!(
+            first_entry.entry_valid > 0 || first_entry.attr_valid > 0,
+            "First entry should have cache timeouts set"
+        );
+
+        // Releasedir
+        let release_in = FuseReleaseIn {
+            fh,
+            flags: 0,
+            release_flags: 0,
+            lock_owner: 0,
+        };
+        let mut request = make_header(FuseOpcode::Releasedir, 1, size_of::<FuseReleaseIn>());
+        let release_bytes = unsafe {
+            std::slice::from_raw_parts(
+                &release_in as *const FuseReleaseIn as *const u8,
+                size_of::<FuseReleaseIn>(),
+            )
+        };
+        request.extend_from_slice(release_bytes);
+
+        let response = dispatcher.dispatch(&request).unwrap();
+        let header = parse_response_header(&response);
+        assert_eq!(header.error, 0);
     }
 }

@@ -9,7 +9,6 @@
 //! - Memory-mapped I/O for zero-copy operations
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
@@ -417,6 +416,8 @@ pub struct BlockConfig {
     pub path: PathBuf,
     /// Read-only mode.
     pub read_only: bool,
+    /// Number of request queues (1 = single queue, >1 = multi-queue with F_MQ).
+    pub num_queues: u16,
 }
 
 impl Default for BlockConfig {
@@ -426,39 +427,43 @@ impl Default for BlockConfig {
             blk_size: 512,
             path: PathBuf::new(),
             read_only: false,
+            num_queues: 1,
         }
     }
 }
 
 /// `VirtIO` block request types.
+///
+/// Values sourced from `virtio_bindings::virtio_blk::VIRTIO_BLK_T_*`.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockRequestType {
     /// Read request.
-    In = 0,
+    In = virtio_bindings::virtio_blk::VIRTIO_BLK_T_IN,
     /// Write request.
-    Out = 1,
+    Out = virtio_bindings::virtio_blk::VIRTIO_BLK_T_OUT,
     /// Flush request.
-    Flush = 4,
+    Flush = virtio_bindings::virtio_blk::VIRTIO_BLK_T_FLUSH,
     /// Get device ID.
-    GetId = 8,
+    GetId = virtio_bindings::virtio_blk::VIRTIO_BLK_T_GET_ID,
     /// Discard request.
-    Discard = 11,
+    Discard = virtio_bindings::virtio_blk::VIRTIO_BLK_T_DISCARD,
     /// Write zeroes request.
-    WriteZeroes = 13,
+    WriteZeroes = virtio_bindings::virtio_blk::VIRTIO_BLK_T_WRITE_ZEROES,
 }
 
 impl TryFrom<u32> for BlockRequestType {
     type Error = VirtioError;
 
     fn try_from(value: u32) -> std::result::Result<Self, Self::Error> {
+        use virtio_bindings::virtio_blk;
         match value {
-            0 => Ok(Self::In),
-            1 => Ok(Self::Out),
-            4 => Ok(Self::Flush),
-            8 => Ok(Self::GetId),
-            11 => Ok(Self::Discard),
-            13 => Ok(Self::WriteZeroes),
+            virtio_blk::VIRTIO_BLK_T_IN => Ok(Self::In),
+            virtio_blk::VIRTIO_BLK_T_OUT => Ok(Self::Out),
+            virtio_blk::VIRTIO_BLK_T_FLUSH => Ok(Self::Flush),
+            virtio_blk::VIRTIO_BLK_T_GET_ID => Ok(Self::GetId),
+            virtio_blk::VIRTIO_BLK_T_DISCARD => Ok(Self::Discard),
+            virtio_blk::VIRTIO_BLK_T_WRITE_ZEROES => Ok(Self::WriteZeroes),
             _ => Err(VirtioError::InvalidOperation(format!(
                 "Unknown block request type: {value}"
             ))),
@@ -467,15 +472,17 @@ impl TryFrom<u32> for BlockRequestType {
 }
 
 /// `VirtIO` block request status.
+///
+/// Values sourced from `virtio_bindings::virtio_blk::VIRTIO_BLK_S_*`.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]
 pub enum BlockStatus {
     /// Success.
-    Ok = 0,
+    Ok = virtio_bindings::virtio_blk::VIRTIO_BLK_S_OK as u8,
     /// I/O error.
-    IoErr = 1,
+    IoErr = virtio_bindings::virtio_blk::VIRTIO_BLK_S_IOERR as u8,
     /// Unsupported operation.
-    Unsupp = 2,
+    Unsupp = virtio_bindings::virtio_blk::VIRTIO_BLK_S_UNSUPP as u8,
 }
 
 /// `VirtIO` block request header.
@@ -517,37 +524,47 @@ pub struct VirtioBlock {
     config: BlockConfig,
     features: u64,
     acked_features: u64,
-    /// Backing file handle.
+    /// Backing file handle (for flush/close).
     file: Option<Arc<RwLock<File>>>,
+    /// Raw fd for pread/pwrite — avoids seek+lock on every I/O.
+    raw_fd: Option<std::os::unix::io::RawFd>,
     /// Request queue.
     queue: Option<VirtQueue>,
     /// Device ID string.
     device_id: String,
+    /// Last-seen available ring index for guest-memory queue processing.
+    last_avail_idx: u16,
 }
 
 impl VirtioBlock {
+    // Feature bits sourced from `virtio_bindings::virtio_blk`.
+    // The crate exports bit *positions*, so we shift 1 left by that position.
+
     /// Feature: Maximum segment size.
-    pub const FEATURE_SIZE_MAX: u64 = 1 << 1;
+    pub const FEATURE_SIZE_MAX: u64 = 1 << virtio_bindings::virtio_blk::VIRTIO_BLK_F_SIZE_MAX;
     /// Feature: Maximum number of segments.
-    pub const FEATURE_SEG_MAX: u64 = 1 << 2;
+    pub const FEATURE_SEG_MAX: u64 = 1 << virtio_bindings::virtio_blk::VIRTIO_BLK_F_SEG_MAX;
     /// Feature: Disk geometry.
-    pub const FEATURE_GEOMETRY: u64 = 1 << 4;
+    pub const FEATURE_GEOMETRY: u64 = 1 << virtio_bindings::virtio_blk::VIRTIO_BLK_F_GEOMETRY;
     /// Feature: Read-only.
-    pub const FEATURE_RO: u64 = 1 << 5;
+    pub const FEATURE_RO: u64 = 1 << virtio_bindings::virtio_blk::VIRTIO_BLK_F_RO;
     /// Feature: Block size.
-    pub const FEATURE_BLK_SIZE: u64 = 1 << 6;
+    pub const FEATURE_BLK_SIZE: u64 = 1 << virtio_bindings::virtio_blk::VIRTIO_BLK_F_BLK_SIZE;
     /// Feature: Flush command.
-    pub const FEATURE_FLUSH: u64 = 1 << 9;
+    pub const FEATURE_FLUSH: u64 = 1 << virtio_bindings::virtio_blk::VIRTIO_BLK_F_FLUSH;
     /// Feature: Topology.
-    pub const FEATURE_TOPOLOGY: u64 = 1 << 10;
+    pub const FEATURE_TOPOLOGY: u64 = 1 << virtio_bindings::virtio_blk::VIRTIO_BLK_F_TOPOLOGY;
     /// Feature: Configuration writeback.
-    pub const FEATURE_CONFIG_WCE: u64 = 1 << 11;
+    pub const FEATURE_CONFIG_WCE: u64 = 1 << virtio_bindings::virtio_blk::VIRTIO_BLK_F_CONFIG_WCE;
     /// Feature: Discard command.
-    pub const FEATURE_DISCARD: u64 = 1 << 13;
+    pub const FEATURE_DISCARD: u64 = 1 << virtio_bindings::virtio_blk::VIRTIO_BLK_F_DISCARD;
     /// Feature: Write zeroes command.
-    pub const FEATURE_WRITE_ZEROES: u64 = 1 << 14;
+    pub const FEATURE_WRITE_ZEROES: u64 =
+        1 << virtio_bindings::virtio_blk::VIRTIO_BLK_F_WRITE_ZEROES;
+    /// Feature: Multiple request queues.
+    pub const FEATURE_MQ: u64 = 1 << virtio_bindings::virtio_blk::VIRTIO_BLK_F_MQ;
     /// `VirtIO` 1.0 feature.
-    pub const FEATURE_VERSION_1: u64 = 1 << 32;
+    pub const FEATURE_VERSION_1: u64 = 1 << virtio_bindings::virtio_config::VIRTIO_F_VERSION_1;
 
     /// Creates a new block device.
     #[must_use]
@@ -561,6 +578,9 @@ impl VirtioBlock {
 
         if config.read_only {
             features |= Self::FEATURE_RO;
+        }
+        if config.num_queues > 1 {
+            features |= Self::FEATURE_MQ;
         }
 
         let device_id = format!(
@@ -577,8 +597,10 @@ impl VirtioBlock {
             features,
             acked_features: 0,
             file: None,
+            raw_fd: None,
             queue: None,
             device_id,
+            last_avail_idx: 0,
         }
     }
 
@@ -607,9 +629,20 @@ impl VirtioBlock {
             blk_size: 512,
             path: path.clone(),
             read_only,
+            num_queues: 1,
         };
 
+        use std::os::unix::io::AsRawFd;
+        let fd = file.as_raw_fd();
+
+        // Disable page cache on macOS for large disk images.
+        #[cfg(target_os = "macos")]
+        unsafe {
+            libc::fcntl(fd, libc::F_NOCACHE, 1);
+        }
+
         let mut device = Self::new(config);
+        device.raw_fd = Some(fd);
         device.file = Some(Arc::new(RwLock::new(file)));
 
         tracing::info!(
@@ -626,6 +659,44 @@ impl VirtioBlock {
     #[must_use]
     pub fn capacity_bytes(&self) -> u64 {
         self.config.capacity * u64::from(self.config.blk_size)
+    }
+
+    /// Returns the raw fd for pread/pwrite (if activated).
+    #[must_use]
+    pub fn raw_fd(&self) -> Option<std::os::unix::io::RawFd> {
+        self.raw_fd
+    }
+
+    /// Returns the block size in bytes.
+    #[must_use]
+    pub fn blk_size(&self) -> u32 {
+        self.config.blk_size
+    }
+
+    /// Returns true if the device is read-only.
+    #[must_use]
+    pub fn is_read_only(&self) -> bool {
+        self.config.read_only
+    }
+
+    /// Returns the device ID string.
+    #[must_use]
+    pub fn device_id_string(&self) -> &str {
+        &self.device_id
+    }
+
+    /// Returns the number of request queues.
+    #[must_use]
+    pub fn num_queues(&self) -> u16 {
+        self.config.num_queues
+    }
+
+    /// Sets the number of request queues (must call before activate).
+    pub fn set_num_queues(&mut self, n: u16) {
+        self.config.num_queues = n.max(1);
+        if self.config.num_queues > 1 {
+            self.features |= Self::FEATURE_MQ;
+        }
     }
 
     /// Handles a block request.
@@ -647,52 +718,56 @@ impl VirtioBlock {
         }
     }
 
+    /// Reads from disk using pread — no seek, no lock, position-independent.
     fn handle_read(&self, sector: u64, data: &mut [u8]) -> Result<usize> {
-        let file = self
-            .file
-            .as_ref()
+        let fd = self
+            .raw_fd
             .ok_or_else(|| VirtioError::NotReady("Block device not activated".into()))?;
 
-        let mut file = file
-            .write()
-            .map_err(|e| VirtioError::Io(format!("Failed to lock file: {e}")))?;
-
-        let offset = sector * u64::from(self.config.blk_size);
-        file.seek(SeekFrom::Start(offset))
-            .map_err(|e| VirtioError::Io(format!("Seek failed: {e}")))?;
-
-        let bytes_read = file
-            .read(data)
-            .map_err(|e| VirtioError::Io(format!("Read failed: {e}")))?;
-
-        tracing::trace!("Read {} bytes from sector {}", bytes_read, sector);
-        Ok(bytes_read)
+        #[allow(clippy::cast_possible_wrap)]
+        let offset = (sector * u64::from(self.config.blk_size)) as libc::off_t;
+        // SAFETY: fd is valid, data is a valid mutable buffer.
+        let n = unsafe {
+            libc::pread(
+                fd,
+                data.as_mut_ptr().cast::<libc::c_void>(),
+                data.len(),
+                offset,
+            )
+        };
+        if n < 0 {
+            return Err(VirtioError::Io(format!(
+                "pread failed at sector {}: {}",
+                sector,
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(n as usize)
     }
 
+    /// Writes to disk using pwrite — no seek, no lock, position-independent.
     fn handle_write(&self, sector: u64, data: &[u8]) -> Result<usize> {
         if self.config.read_only {
             return Err(VirtioError::InvalidOperation("Device is read-only".into()));
         }
 
-        let file = self
-            .file
-            .as_ref()
+        let fd = self
+            .raw_fd
             .ok_or_else(|| VirtioError::NotReady("Block device not activated".into()))?;
 
-        let mut file = file
-            .write()
-            .map_err(|e| VirtioError::Io(format!("Failed to lock file: {e}")))?;
-
-        let offset = sector * u64::from(self.config.blk_size);
-        file.seek(SeekFrom::Start(offset))
-            .map_err(|e| VirtioError::Io(format!("Seek failed: {e}")))?;
-
-        let bytes_written = file
-            .write(data)
-            .map_err(|e| VirtioError::Io(format!("Write failed: {e}")))?;
-
-        tracing::trace!("Wrote {} bytes to sector {}", bytes_written, sector);
-        Ok(bytes_written)
+        #[allow(clippy::cast_possible_wrap)]
+        let offset = (sector * u64::from(self.config.blk_size)) as libc::off_t;
+        // SAFETY: fd is valid, data is a valid buffer.
+        let n =
+            unsafe { libc::pwrite(fd, data.as_ptr().cast::<libc::c_void>(), data.len(), offset) };
+        if n < 0 {
+            return Err(VirtioError::Io(format!(
+                "pwrite failed at sector {}: {}",
+                sector,
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(n as usize)
     }
 
     fn handle_flush(&self) -> Result<usize> {
@@ -832,12 +907,22 @@ impl VirtioDevice for VirtioBlock {
         // offset 16: geometry (cylinders u16, heads u8, sectors u8)
         // offset 20: blk_size (u32)
         // offset 24: topology...
+        // VirtIO 1.1 config space layout:
+        // 0:  capacity (u64)
+        // 8:  size_max (u32)
+        // 12: seg_max (u32)
+        // 16: geometry (4 bytes)
+        // 20: blk_size (u32)
+        // 24: topology (10 bytes)
+        // 34: num_queues (u16, only with VIRTIO_BLK_F_MQ)
         let config_data = [
             self.config.capacity.to_le_bytes().as_slice(),
             &(1u32 << 12).to_le_bytes(), // size_max: 4KB
             &128u32.to_le_bytes(),       // seg_max: 128 segments
             &[0u8; 4],                   // geometry: not used
             &self.config.blk_size.to_le_bytes(),
+            &[0u8; 10], // topology: not used
+            &self.config.num_queues.to_le_bytes(),
         ]
         .concat();
 
@@ -867,6 +952,15 @@ impl VirtioDevice for VirtioBlock {
                     ))
                 })?;
 
+            use std::os::unix::io::AsRawFd;
+            let fd = file.as_raw_fd();
+
+            // Note: F_NOCACHE is intentionally NOT set for data disks.
+            // Container metadata scanning benefits from page cache warmup.
+            // The pread/pwrite path (no seek, no RwLock) is the main
+            // performance win over the old seek+lock+read pattern.
+
+            self.raw_fd = Some(fd);
             self.file = Some(Arc::new(RwLock::new(file)));
         }
 
@@ -883,7 +977,179 @@ impl VirtioDevice for VirtioBlock {
     fn reset(&mut self) {
         self.acked_features = 0;
         self.queue = None;
+        self.last_avail_idx = 0;
         // Keep file handle open for quick reactivation
+    }
+
+    fn process_queue(
+        &mut self,
+        _queue_idx: u16,
+        memory: &mut [u8],
+        queue_config: &crate::QueueConfig,
+    ) -> Result<Vec<(u16, u32)>> {
+        if !queue_config.ready || queue_config.size == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Translate GPAs to slice offsets by subtracting gpa_base (checked to
+        // guard against a malicious guest providing a GPA below the RAM base).
+        let gpa_base = queue_config.gpa_base as usize;
+        let desc_table_addr = (queue_config.desc_addr as usize)
+            .checked_sub(gpa_base)
+            .ok_or_else(|| {
+                tracing::warn!(
+                    "invalid desc GPA {:#x} below ram base {:#x}",
+                    queue_config.desc_addr,
+                    gpa_base
+                );
+                VirtioError::InvalidQueue("desc GPA below ram base".into())
+            })?;
+        let avail_addr = (queue_config.avail_addr as usize)
+            .checked_sub(gpa_base)
+            .ok_or_else(|| {
+                tracing::warn!(
+                    "invalid avail GPA {:#x} below ram base {:#x}",
+                    queue_config.avail_addr,
+                    gpa_base
+                );
+                VirtioError::InvalidQueue("avail GPA below ram base".into())
+            })?;
+        let used_addr = (queue_config.used_addr as usize)
+            .checked_sub(gpa_base)
+            .ok_or_else(|| {
+                tracing::warn!(
+                    "invalid used GPA {:#x} below ram base {:#x}",
+                    queue_config.used_addr,
+                    gpa_base
+                );
+                VirtioError::InvalidQueue("used GPA below ram base".into())
+            })?;
+        let q_size = queue_config.size as usize;
+
+        // Read the avail ring index (offset 2 in the avail ring).
+        if avail_addr + 4 + 2 * q_size > memory.len() {
+            return Err(VirtioError::InvalidQueue("avail ring out of bounds".into()));
+        }
+        let avail_idx = u16::from_le_bytes([memory[avail_addr + 2], memory[avail_addr + 3]]);
+
+        // Read the last-seen index from the used ring (we store it inline
+        // using a field on self, initialised to 0 on activate/reset).
+        let last_avail = self.last_avail_idx;
+
+        let mut completions = Vec::new();
+
+        let mut current_avail = last_avail;
+        while current_avail != avail_idx {
+            let ring_offset = avail_addr + 4 + 2 * ((current_avail as usize) % q_size);
+            let head_idx =
+                u16::from_le_bytes([memory[ring_offset], memory[ring_offset + 1]]) as usize;
+
+            // Walk the descriptor chain starting at head_idx.
+            let mut descriptors = Vec::new();
+            let mut idx = head_idx;
+            loop {
+                let desc_offset = desc_table_addr + idx * 16;
+                if desc_offset + 16 > memory.len() {
+                    return Err(VirtioError::InvalidQueue("descriptor out of bounds".into()));
+                }
+                // Translate descriptor buffer GPA to slice offset (checked).
+                let raw_gpa =
+                    u64::from_le_bytes(memory[desc_offset..desc_offset + 8].try_into().unwrap());
+                let addr = match raw_gpa.checked_sub(gpa_base as u64) {
+                    Some(a) => a,
+                    None => {
+                        tracing::warn!(
+                            "invalid descriptor GPA {:#x} below ram base {:#x}",
+                            raw_gpa,
+                            gpa_base
+                        );
+                        break;
+                    }
+                };
+                let len = u32::from_le_bytes(
+                    memory[desc_offset + 8..desc_offset + 12]
+                        .try_into()
+                        .unwrap(),
+                );
+                let flags = u16::from_le_bytes(
+                    memory[desc_offset + 12..desc_offset + 14]
+                        .try_into()
+                        .unwrap(),
+                );
+                let next = u16::from_le_bytes(
+                    memory[desc_offset + 14..desc_offset + 16]
+                        .try_into()
+                        .unwrap(),
+                );
+
+                descriptors.push(Descriptor {
+                    addr,
+                    len,
+                    flags,
+                    next,
+                });
+
+                if flags & crate::queue::flags::NEXT == 0 {
+                    break;
+                }
+                idx = next as usize;
+                if idx >= q_size {
+                    return Err(VirtioError::InvalidQueue(
+                        "descriptor next index out of bounds".into(),
+                    ));
+                }
+            }
+
+            // Process the descriptor chain using existing block I/O logic.
+            let (bytes, status) = self.process_descriptor_chain(&descriptors, memory)?;
+
+            // Write the status byte into the last writable descriptor.
+            if let Some(last_wr) = descriptors.iter().rev().find(|d| d.is_write_only()) {
+                let status_offset = last_wr.addr as usize + last_wr.len as usize - 1;
+                if status_offset < memory.len() {
+                    memory[status_offset] = status as u8;
+                }
+            }
+
+            // Push completion into the used ring.
+            let used_idx_offset = used_addr + 2;
+            let used_idx =
+                u16::from_le_bytes([memory[used_idx_offset], memory[used_idx_offset + 1]]);
+            let used_ring_entry = used_addr + 4 + ((used_idx as usize) % q_size) * 8;
+            if used_ring_entry + 8 <= memory.len() {
+                memory[used_ring_entry..used_ring_entry + 4]
+                    .copy_from_slice(&(head_idx as u32).to_le_bytes());
+                memory[used_ring_entry + 4..used_ring_entry + 8]
+                    .copy_from_slice(&(bytes as u32).to_le_bytes());
+                // Write barrier: ensure ring entry is visible before idx update.
+                // ARM64 weak memory ordering requires this for correct guest observation.
+                std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
+                // Increment used index.
+                let new_used_idx = used_idx.wrapping_add(1);
+                memory[used_idx_offset..used_idx_offset + 2]
+                    .copy_from_slice(&new_used_idx.to_le_bytes());
+            }
+
+            completions.push((head_idx as u16, bytes as u32));
+            current_avail = current_avail.wrapping_add(1);
+        }
+
+        self.last_avail_idx = current_avail;
+
+        // When VIRTIO_F_EVENT_IDX is negotiated, update the avail_event field
+        // in the used ring. This tells the driver "notify me when avail idx
+        // reaches this value". Setting it to current_avail means "notify me
+        // immediately on the next request".
+        // avail_event is at used_ring + 4 + 8 * queue_size.
+        if !completions.is_empty() {
+            let avail_event_offset = used_addr + 4 + 8 * q_size;
+            if avail_event_offset + 2 <= memory.len() {
+                memory[avail_event_offset..avail_event_offset + 2]
+                    .copy_from_slice(&current_avail.to_le_bytes());
+            }
+        }
+
+        Ok(completions)
     }
 }
 
@@ -904,6 +1170,7 @@ mod tests {
             blk_size: 512,
             path: PathBuf::from("/tmp/test.img"),
             read_only: false,
+            num_queues: 1,
         };
 
         let device = VirtioBlock::new(config);
@@ -926,6 +1193,7 @@ mod tests {
             blk_size: 512,
             path: PathBuf::new(),
             read_only: true,
+            num_queues: 1,
         };
 
         let device = VirtioBlock::new(ro_config);
@@ -1186,6 +1454,7 @@ mod tests {
             blk_size: 512,
             path: PathBuf::new(),
             read_only: false,
+            num_queues: 1,
         };
 
         let device = VirtioBlock::new(config);
@@ -1258,6 +1527,7 @@ mod tests {
             blk_size: 512,
             path: PathBuf::new(),
             read_only: false,
+            num_queues: 1,
         };
 
         let device = VirtioBlock::new(config);

@@ -29,6 +29,17 @@ pub struct HvVcpu {
 }
 
 impl HvVcpu {
+    /// Returns the raw framework handle for use with `hv_vcpus_exit`.
+    ///
+    /// The handle is valid for the lifetime of this vCPU and can be
+    /// shared (as a `u64`) with other threads for targeted exit.
+    #[must_use]
+    pub fn raw_handle(&self) -> u64 {
+        self.id
+    }
+}
+
+impl HvVcpu {
     /// Creates a new vCPU with default configuration.
     ///
     /// Must be called from the thread that will run the vCPU.
