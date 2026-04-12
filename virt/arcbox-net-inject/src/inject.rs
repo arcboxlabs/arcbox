@@ -18,7 +18,12 @@ use crate::irq::IrqHandle;
 use crate::queue::{self, RxQueueConfig};
 
 /// Maximum frames to inject per batch before checking interrupt thresholds.
-const BATCH_SIZE: usize = 64;
+///
+/// At line-rate (~9 Gbps, 500k fps), a batch of 64 frames means the inject
+/// thread fires IRQ ~8000 times/second. Each IRQ entails an MMIO trap and
+/// guest-side RX soft-irq processing. Raising to 256 cuts IRQ rate to
+/// ~2000/s while the 50 µs `COALESCE_TIMEOUT` still bounds latency.
+const BATCH_SIZE: usize = 256;
 
 /// Interrupt coalescing timeout.
 const COALESCE_TIMEOUT: Duration = Duration::from_micros(50);
