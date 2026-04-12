@@ -29,12 +29,24 @@ use std::time::Instant;
 
 use std::sync::Arc;
 
+use socket2::SockRef;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::ethernet::{ETH_HEADER_LEN, build_udp_ip_ethernet};
+
+/// Socket buffer size applied to accepted inbound TCP streams.
+///
+/// The OS default on macOS is ~128 KiB which forces TCP to shrink the window
+/// under high-throughput bulk transfers (e.g. iperf3). Raising to 4 MiB lets
+/// the window grow to match the BDP of localhost / high-speed paths.
+///
+/// Requires `kern.ipc.maxsockbuf` to allow at least this value (default 8 MiB
+/// on macOS; confirm with `sysctl kern.ipc.maxsockbuf`). setsockopt silently
+/// clamps to the maxsockbuf ceiling, so oversizing is harmless.
+const INBOUND_TCP_BUF_SIZE: usize = 4 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Ephemeral port allocator
@@ -403,6 +415,16 @@ async fn tcp_listener_task(
                             "Inbound TCP accept: {} → host:{} → container:{}",
                             peer, host_port, container_port,
                         );
+                        // Raise send/recv buffers so the TCP window can grow to
+                        // localhost BDP. Failures here are non-fatal — the OS
+                        // default still works, just throttles throughput.
+                        let sock = SockRef::from(&stream);
+                        if let Err(e) = sock.set_recv_buffer_size(INBOUND_TCP_BUF_SIZE) {
+                            tracing::warn!("Failed to set SO_RCVBUF on inbound stream: {e}");
+                        }
+                        if let Err(e) = sock.set_send_buffer_size(INBOUND_TCP_BUF_SIZE) {
+                            tracing::warn!("Failed to set SO_SNDBUF on inbound stream: {e}");
+                        }
                         let cmd = InboundCommand::TcpAccepted {
                             host_port,
                             container_port,
