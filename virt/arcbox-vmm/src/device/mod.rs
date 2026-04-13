@@ -9,7 +9,6 @@
 //! `bridge_net`, `vsock`) for VMM-driven setup and bookkeeping.
 
 use std::collections::HashMap;
-use std::os::unix::io::AsRawFd;
 use std::sync::{Arc, Mutex, RwLock};
 
 #[cfg(test)]
@@ -332,7 +331,10 @@ impl DeviceManager {
         if let Some(ctx) = self.build_device_ctx(device_id) {
             if let Ok(mut dev) = device.lock() {
                 dev.bind_ctx(ctx);
-                dev.bind_connections(self.vsock_connections.clone());
+                // Bind both views in one shot: trait-object for TX
+                // (`process_queue`) and concrete for RX injection
+                // (`poll_rx_injection`).
+                dev.bind_connection_manager(self.vsock_connections.clone());
             }
         } else {
             tracing::warn!(
@@ -1513,228 +1515,6 @@ impl DeviceManager {
     /// Writes a packet into the next available RX descriptor in guest memory.
     ///
     /// Pops one descriptor from the avail ring, walks the chain writing data,
-    /// and updates the used ring. Returns number of bytes written (0 on failure).
-    ///
-    /// `desc_addr`, `avail_addr`, `used_addr` are already translated to slice
-    /// offsets (GPA minus `gpa_base`). `gpa_base` is needed to translate
-    /// descriptor buffer addresses which are raw GPAs in guest memory.
-    #[allow(clippy::too_many_arguments)]
-    fn write_to_rx_descriptor(
-        &self,
-        guest_mem: &mut [u8],
-        desc_addr: usize,
-        avail_addr: usize,
-        used_addr: usize,
-        q_size: usize,
-        gpa_base: usize,
-        packet: &[u8],
-    ) -> usize {
-        let avail_idx =
-            u16::from_le_bytes([guest_mem[avail_addr + 2], guest_mem[avail_addr + 3]]) as usize;
-        let used_idx_off = used_addr + 2;
-        let used_idx =
-            u16::from_le_bytes([guest_mem[used_idx_off], guest_mem[used_idx_off + 1]]) as usize;
-
-        if avail_idx == used_idx {
-            return 0; // No available descriptors.
-        }
-
-        let ring_off = avail_addr + 4 + 2 * (used_idx % q_size);
-        if ring_off + 2 > guest_mem.len() {
-            return 0;
-        }
-        let head_idx = u16::from_le_bytes([guest_mem[ring_off], guest_mem[ring_off + 1]]) as usize;
-
-        tracing::trace!(
-            "vsock write_to_rx_desc: avail_idx={} used_idx={} head_idx={} pkt_len={} q_size={}",
-            avail_idx,
-            used_idx,
-            head_idx,
-            packet.len(),
-            q_size,
-        );
-
-        // Walk descriptor chain, writing packet data to WRITE-flagged descriptors.
-        let mut written = 0;
-        let mut idx = head_idx;
-        let mut desc_count = 0u32;
-        for _ in 0..q_size {
-            let d_off = desc_addr + idx * 16;
-            if d_off + 16 > guest_mem.len() {
-                break;
-            }
-            let addr_gpa =
-                u64::from_le_bytes(guest_mem[d_off..d_off + 8].try_into().unwrap()) as usize;
-            let len =
-                u32::from_le_bytes(guest_mem[d_off + 8..d_off + 12].try_into().unwrap()) as usize;
-            let flags = u16::from_le_bytes(guest_mem[d_off + 12..d_off + 14].try_into().unwrap());
-            let next = u16::from_le_bytes(guest_mem[d_off + 14..d_off + 16].try_into().unwrap());
-            let Some(addr) = addr_gpa.checked_sub(gpa_base) else {
-                continue;
-            };
-
-            desc_count += 1;
-            tracing::trace!(
-                "  desc[{}]: addr={:#x} len={} flags={:#06x} (W={} N={}) next={}",
-                idx,
-                addr_gpa,
-                len,
-                flags,
-                flags & 2 != 0,
-                flags & 1 != 0,
-                next,
-            );
-
-            // WRITE flag = 0x02 (VRING_DESC_F_WRITE).
-            if flags & 2 != 0 && addr + len <= guest_mem.len() {
-                let remaining = packet.len().saturating_sub(written);
-                let to_write = remaining.min(len);
-                if to_write > 0 {
-                    guest_mem[addr..addr + to_write]
-                        .copy_from_slice(&packet[written..written + to_write]);
-                    written += to_write;
-                    tracing::trace!(
-                        "  → wrote {} bytes at GPA {:#x} (total={})",
-                        to_write,
-                        addr_gpa,
-                        written,
-                    );
-                }
-            } else if flags & 2 == 0 {
-                tracing::warn!("  desc[{}] has no WRITE flag!", idx);
-            }
-
-            // NEXT flag = 0x01 (VRING_DESC_F_NEXT).
-            if flags & 1 == 0 || written >= packet.len() {
-                break;
-            }
-            idx = next as usize;
-        }
-
-        if written == 0 {
-            tracing::error!(
-                "vsock write_to_rx_desc: FAILED — 0 bytes written! {} descs examined",
-                desc_count,
-            );
-            return 0;
-        }
-
-        // Update used ring entry.
-        let used_entry = used_addr + 4 + (used_idx % q_size) * 8;
-        if used_entry + 8 <= guest_mem.len() {
-            guest_mem[used_entry..used_entry + 4].copy_from_slice(&(head_idx as u32).to_le_bytes());
-            guest_mem[used_entry + 4..used_entry + 8]
-                .copy_from_slice(&(written as u32).to_le_bytes());
-            std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
-            let new_used = (used_idx + 1) as u16;
-            guest_mem[used_idx_off..used_idx_off + 2].copy_from_slice(&new_used.to_le_bytes());
-
-            tracing::trace!(
-                "vsock write_to_rx_desc: OK — {} bytes, used_idx {} → {}",
-                written,
-                used_idx,
-                used_idx + 1,
-            );
-
-            // Dump first 44 bytes of packet for verification.
-            if packet.len() >= 44 {
-                let src_cid = u64::from_le_bytes(packet[0..8].try_into().unwrap());
-                let dst_cid = u64::from_le_bytes(packet[8..16].try_into().unwrap());
-                let src_port = u32::from_le_bytes(packet[16..20].try_into().unwrap());
-                let dst_port = u32::from_le_bytes(packet[20..24].try_into().unwrap());
-                let pkt_len = u32::from_le_bytes(packet[24..28].try_into().unwrap());
-                let sock_type = u16::from_le_bytes(packet[28..30].try_into().unwrap());
-                let op = u16::from_le_bytes(packet[30..32].try_into().unwrap());
-                let flags = u32::from_le_bytes(packet[32..36].try_into().unwrap());
-                let buf_alloc = u32::from_le_bytes(packet[36..40].try_into().unwrap());
-                let fwd_cnt = u32::from_le_bytes(packet[40..44].try_into().unwrap());
-                tracing::trace!(
-                    "  header: src={}:{} dst={}:{} len={} type={} op={} flags={} buf_alloc={} fwd_cnt={}",
-                    src_cid,
-                    src_port,
-                    dst_cid,
-                    dst_port,
-                    pkt_len,
-                    sock_type,
-                    op,
-                    flags,
-                    buf_alloc,
-                    fwd_cnt,
-                );
-            }
-
-            // Readback verification: read the header from guest memory.
-            if desc_count >= 1 && written >= 44 {
-                let first_d_off = desc_addr + head_idx * 16;
-                let first_gpa =
-                    u64::from_le_bytes(guest_mem[first_d_off..first_d_off + 8].try_into().unwrap())
-                        as usize;
-                if let Some(first_off) = first_gpa.checked_sub(gpa_base) {
-                    if first_off + 44 <= guest_mem.len() {
-                        let readback = &guest_mem[first_off..first_off + 44];
-                        let rb_dst_cid = u64::from_le_bytes(readback[8..16].try_into().unwrap());
-                        let rb_op = u16::from_le_bytes(readback[30..32].try_into().unwrap());
-                        tracing::trace!(
-                            "  readback: dst_cid={} op={} first_8_bytes={:02x?}",
-                            rb_dst_cid,
-                            rb_op,
-                            &readback[..8],
-                        );
-                    }
-                }
-            }
-        }
-
-        // Also check TX queue state for diagnostics.
-        if let Some(mmio_arc) = self
-            .devices
-            .values()
-            .find(|d| d.info.device_type == DeviceType::VirtioVsock)
-            .and_then(|d| d.mmio_state.as_ref())
-        {
-            if let Ok(mmio) = mmio_arc.read() {
-                let txi = 1usize;
-                if txi < 8 && mmio.queue_ready[txi] && mmio.queue_num[txi] > 0 {
-                    // Translate TX queue GPAs to slice offsets (checked).
-                    if let (Some(tx_avail_off), Some(tx_used_off)) = (
-                        (mmio.queue_driver[txi] as usize).checked_sub(gpa_base),
-                        (mmio.queue_device[txi] as usize).checked_sub(gpa_base),
-                    ) {
-                        if tx_avail_off + 4 <= guest_mem.len() && tx_used_off + 4 <= guest_mem.len()
-                        {
-                            let tx_avail = u16::from_le_bytes([
-                                guest_mem[tx_avail_off + 2],
-                                guest_mem[tx_avail_off + 3],
-                            ]);
-                            let tx_used = u16::from_le_bytes([
-                                guest_mem[tx_used_off + 2],
-                                guest_mem[tx_used_off + 3],
-                            ]);
-                            tracing::trace!(
-                                "  TX queue state: avail_idx={} used_idx={} (delta={})",
-                                tx_avail,
-                                tx_used,
-                                tx_avail.wrapping_sub(tx_used),
-                            );
-                        }
-                    }
-                } else {
-                    tracing::warn!(
-                        "  TX queue NOT ready: ready={} num={}",
-                        if txi < 8 {
-                            mmio.queue_ready[txi]
-                        } else {
-                            false
-                        },
-                        if txi < 8 { mmio.queue_num[txi] } else { 0 },
-                    );
-                }
-            }
-        }
-
-        written
-    }
-
     /// Dispatches block I/O descriptors to the async worker thread.
     ///
     /// Parses the avail ring, builds `BlkWorkItem`s, and sends them via the
@@ -1952,403 +1732,63 @@ impl DeviceManager {
         dev.poll_rx(&rx_qcfg)
     }
 
-    /// Called from the vCPU run loop during WFI (guest idle). Returns true
-    /// if any data was injected (caller should trigger interrupt).
-    #[allow(unused_assignments, unused_variables)]
+    /// Called from the vCPU run loop during WFI (guest idle). Returns
+    /// true if any data was injected (caller should trigger interrupt).
+    /// Thin shim that builds RX + TX `QueueConfig` snapshots from the
+    /// vsock device's MMIO state and forwards to
+    /// `VirtioVsock::poll_rx_injection`. The 400-line body that was here
+    /// previously now lives on the device.
     pub fn poll_vsock_rx(&self) -> bool {
-        use crate::vsock_manager::RxOps;
-        use arcbox_virtio::vsock::{VsockAddr, VsockHeader, VsockOp};
-
-        let mut injected = false;
-
-        let (Some(ram_base), ram_size) = (self.guest_ram_base, self.guest_ram_size) else {
+        let Some(vsock_arc) = self.vsock.as_ref() else {
             return false;
         };
-        let gpa_base = self.guest_ram_gpa as usize;
-        // SAFETY: `ram_base` is the host mapping returned by
-        // Virtualization.framework and is valid for `ram_size` bytes.
-        let guest_mem = unsafe { std::slice::from_raw_parts_mut(ram_base, ram_size) };
-
-        // ------------------------------------------------------------------
-        // Phase 1: Check connected streams for readable data → enqueue RW
-        // ------------------------------------------------------------------
-        {
-            let connected_fds = self
-                .vsock_connections
-                .lock()
-                .map(|mgr| mgr.connected_fds())
-                .unwrap_or_default();
-
-            // Log at INFO once per unique count change to avoid spam.
-            static LAST_COUNT: std::sync::atomic::AtomicUsize =
-                std::sync::atomic::AtomicUsize::new(0);
-            let count = connected_fds.len();
-            if count != LAST_COUNT.swap(count, std::sync::atomic::Ordering::Relaxed) {
-                tracing::info!("vsock Phase 1: {} connected fds", count);
-            }
-
-            for (conn_id, fd) in &connected_fds {
-                // Peek if there's data without consuming it.
-                let mut peek_buf = [0u8; 1];
-                // SAFETY: `*fd` is owned by VsockConnectionManager and kept
-                // live for the duration of this peek. `peek_buf` is a valid
-                // mutable slice of 1 byte. MSG_DONTWAIT ensures non-blocking.
-                let n = unsafe {
-                    libc::recv(
-                        *fd,
-                        peek_buf.as_mut_ptr().cast::<libc::c_void>(),
-                        1,
-                        libc::MSG_PEEK | libc::MSG_DONTWAIT,
-                    )
-                };
-                if n > 0 {
-                    tracing::trace!(
-                        "vsock Phase 1: data available on fd {} for {:?} — enqueue RW",
-                        fd,
-                        conn_id,
-                    );
-                    if let Ok(mut mgr) = self.vsock_connections.lock() {
-                        mgr.enqueue_rw(*conn_id);
-                    }
-                } else if n == 0 {
-                    tracing::debug!(
-                        "vsock Phase 1: EOF on fd {} for {:?} — enqueue RST",
-                        fd,
-                        conn_id,
-                    );
-                    // Host stream closed — enqueue RST.
-                    if let Ok(mut mgr) = self.vsock_connections.lock() {
-                        mgr.enqueue_reset(*conn_id);
-                    }
-                }
-                // n < 0 with EAGAIN/EWOULDBLOCK = no data, skip.
-            }
-        }
-
-        // ------------------------------------------------------------------
-        // Phase 2: Drain backend_rxq → fill available RX descriptors
-        // ------------------------------------------------------------------
-        // Get RX queue MMIO state.
-        let mmio_state = self
+        let Some(device) = self
             .devices
             .values()
             .find(|d| d.info.device_type == DeviceType::VirtioVsock)
-            .and_then(|d| d.mmio_state.as_ref());
-        let Some(mmio_arc) = mmio_state else {
+        else {
             return false;
         };
-        let Ok(mmio) = mmio_arc.read() else {
+        let Some(mmio_arc) = device.mmio_state.as_ref() else {
             return false;
         };
 
-        let rxi = 0usize;
-        if rxi >= 8 || !mmio.queue_ready[rxi] || mmio.queue_num[rxi] == 0 {
-            return false;
-        }
-
-        // Translate GPAs to slice offsets (checked against ram base).
-        let Some(desc_addr) = (mmio.queue_desc[rxi] as usize).checked_sub(gpa_base) else {
-            return false;
-        };
-        let Some(avail_addr) = (mmio.queue_driver[rxi] as usize).checked_sub(gpa_base) else {
-            return false;
-        };
-        let Some(used_addr) = (mmio.queue_device[rxi] as usize).checked_sub(gpa_base) else {
-            return false;
-        };
-        let q_size = mmio.queue_num[rxi] as usize;
-
-        // Also grab TX queue config for Phase 3.
-        let txi = 1usize;
-        let tx_ready = txi < 8 && mmio.queue_ready[txi] && mmio.queue_num[txi] > 0;
-        let tx_qcfg = if tx_ready {
-            Some(arcbox_virtio::QueueConfig {
-                desc_addr: mmio.queue_desc[txi],
-                avail_addr: mmio.queue_driver[txi],
-                used_addr: mmio.queue_device[txi],
-                size: mmio.queue_num[txi],
+        let (rx_qcfg, tx_qcfg) = {
+            let Ok(mmio) = mmio_arc.read() else {
+                return false;
+            };
+            let rxi = 0usize;
+            if !mmio.queue_ready[rxi] || mmio.queue_num[rxi] == 0 {
+                return false;
+            }
+            let rx = QueueConfig {
+                desc_addr: mmio.queue_desc[rxi],
+                avail_addr: mmio.queue_driver[rxi],
+                used_addr: mmio.queue_device[rxi],
+                size: mmio.queue_num[rxi],
                 ready: true,
                 gpa_base: self.guest_ram_gpa,
-            })
-        } else {
-            None
+            };
+            let txi = 1usize;
+            let tx = if mmio.queue_ready[txi] && mmio.queue_num[txi] > 0 {
+                Some(QueueConfig {
+                    desc_addr: mmio.queue_desc[txi],
+                    avail_addr: mmio.queue_driver[txi],
+                    used_addr: mmio.queue_device[txi],
+                    size: mmio.queue_num[txi],
+                    ready: true,
+                    gpa_base: self.guest_ram_gpa,
+                })
+            } else {
+                None
+            };
+            (rx, tx)
         };
-        drop(mmio);
 
-        if avail_addr + 4 > guest_mem.len() {
+        let Ok(mut dev) = vsock_arc.lock() else {
             return false;
-        }
-
-        // Process backend_rxq: pop connections, fill RX descriptors.
-        //
-        // IMPORTANT: If we break out of this loop because RX descriptors are
-        // exhausted (avail_idx == used_idx) while backend_rxq still has entries,
-        // those entries remain in the queue for the next poll cycle. However,
-        // the guest won't refill RX descriptors until its rx_work runs, which
-        // requires an interrupt. We set `injected = true` in that case so the
-        // caller triggers INT_VRING, waking the guest's virtio_vsock_rx_fill.
-        let mut rxq_starved = false;
-        loop {
-            // Check available RX descriptors.
-            let avail_idx =
-                u16::from_le_bytes([guest_mem[avail_addr + 2], guest_mem[avail_addr + 3]]) as usize;
-            let used_idx_off = used_addr + 2;
-            let used_idx =
-                u16::from_le_bytes([guest_mem[used_idx_off], guest_mem[used_idx_off + 1]]) as usize;
-
-            if avail_idx == used_idx {
-                // No RX descriptors available. If backend_rxq still has pending
-                // entries, mark as starved so we trigger an interrupt to make
-                // the guest refill its RX queue.
-                if let Ok(mgr) = self.vsock_connections.lock() {
-                    if !mgr.backend_rxq.is_empty() {
-                        rxq_starved = true;
-                    }
-                }
-                break;
-            }
-
-            // Pop next connection from backend_rxq.
-            let conn_id = {
-                let Ok(mut mgr) = self.vsock_connections.lock() else {
-                    break;
-                };
-                mgr.backend_rxq.pop_front()
-            };
-            let Some(conn_id) = conn_id else {
-                break; // No pending connections.
-            };
-
-            // Build the packet for this connection's highest-priority RX op.
-            let packet = {
-                let Ok(mut mgr) = self.vsock_connections.lock() else {
-                    break;
-                };
-                let Some(conn) = mgr.get_mut(&conn_id) else {
-                    continue; // Connection removed while queued.
-                };
-
-                // Peek: if Reset is highest priority, handle teardown.
-                if conn.rx_queue.peek() == RxOps::RESET {
-                    conn.rx_queue.dequeue();
-                    let hdr = VsockHeader::new(
-                        VsockAddr::host(conn_id.host_port),
-                        VsockAddr::new(conn.guest_cid, conn_id.guest_port),
-                        VsockOp::Rst,
-                    );
-                    let pkt = hdr.to_bytes().to_vec();
-                    // Remove connection after sending RST.
-                    mgr.remove(&conn_id);
-                    pkt
-                } else {
-                    let op = conn.rx_queue.dequeue();
-                    if op == 0 {
-                        continue; // Spurious entry — no pending ops.
-                    }
-
-                    match op {
-                        RxOps::REQUEST => {
-                            let hdr = VsockHeader::new(
-                                VsockAddr::host(conn_id.host_port),
-                                VsockAddr::new(conn.guest_cid, conn_id.guest_port),
-                                VsockOp::Request,
-                            );
-                            tracing::debug!(
-                                "Vsock RX: sending OP_REQUEST guest_port={} host_port={}",
-                                conn_id.guest_port,
-                                conn_id.host_port,
-                            );
-                            hdr.to_bytes().to_vec()
-                        }
-                        RxOps::RESPONSE => {
-                            conn.connect = true;
-                            let hdr = VsockHeader::new(
-                                VsockAddr::host(conn_id.host_port),
-                                VsockAddr::new(conn.guest_cid, conn_id.guest_port),
-                                VsockOp::Response,
-                            );
-                            tracing::debug!(
-                                "Vsock RX: sending OP_RESPONSE guest_port={} host_port={}",
-                                conn_id.guest_port,
-                                conn_id.host_port,
-                            );
-                            hdr.to_bytes().to_vec()
-                        }
-                        RxOps::RW => {
-                            if !conn.connect {
-                                // Not connected yet — send RST instead.
-                                let hdr = VsockHeader::new(
-                                    VsockAddr::host(conn_id.host_port),
-                                    VsockAddr::new(conn.guest_cid, conn_id.guest_port),
-                                    VsockOp::Rst,
-                                );
-                                mgr.remove(&conn_id);
-                                hdr.to_bytes().to_vec()
-                            } else {
-                                // Check credit before reading.
-                                let credit = conn.peer_avail_credit();
-                                if credit == 0 {
-                                    // No guest buffer space — request credit update.
-                                    let mut hdr = VsockHeader::new(
-                                        VsockAddr::host(conn_id.host_port),
-                                        VsockAddr::new(conn.guest_cid, conn_id.guest_port),
-                                        VsockOp::CreditRequest,
-                                    );
-                                    hdr.buf_alloc = crate::vsock_manager::TX_BUFFER_SIZE;
-                                    hdr.fwd_cnt = conn.fwd_cnt.0;
-                                    // Re-enqueue RW so we retry after credit update.
-                                    conn.rx_queue.enqueue(RxOps::RW);
-                                    hdr.to_bytes().to_vec()
-                                } else {
-                                    // Read from host fd.
-                                    let fd = conn.internal_fd.as_raw_fd();
-                                    let max_read = credit.min(4096);
-                                    let mut buf = vec![0u8; max_read];
-                                    // SAFETY: `fd` is borrowed from `conn.internal_fd`
-                                    // which remains live through `conn`. `buf` is a
-                                    // valid mutable allocation of `max_read` bytes.
-                                    // The fd is non-blocking so read returns promptly.
-                                    let n = unsafe {
-                                        libc::read(
-                                            fd,
-                                            buf.as_mut_ptr().cast::<libc::c_void>(),
-                                            max_read,
-                                        )
-                                    };
-                                    if n <= 0 {
-                                        if n == 0 {
-                                            // Stream closed — send SHUTDOWN.
-                                            let mut hdr = VsockHeader::new(
-                                                VsockAddr::host(conn_id.host_port),
-                                                VsockAddr::new(conn.guest_cid, conn_id.guest_port),
-                                                VsockOp::Shutdown,
-                                            );
-                                            hdr.flags = 3; // VIRTIO_VSOCK_SHUTDOWN_RCV | SEND
-                                            hdr.buf_alloc = crate::vsock_manager::TX_BUFFER_SIZE;
-                                            hdr.fwd_cnt = conn.fwd_cnt.0;
-                                            hdr.to_bytes().to_vec()
-                                        } else {
-                                            continue; // EAGAIN — no data right now.
-                                        }
-                                    } else {
-                                        let data = &buf[..n as usize];
-                                        let mut hdr = VsockHeader::new(
-                                            VsockAddr::host(conn_id.host_port),
-                                            VsockAddr::new(conn.guest_cid, conn_id.guest_port),
-                                            VsockOp::Rw,
-                                        );
-                                        hdr.len = data.len() as u32;
-                                        hdr.buf_alloc = crate::vsock_manager::TX_BUFFER_SIZE;
-                                        hdr.fwd_cnt = conn.fwd_cnt.0;
-
-                                        conn.record_rx(data.len() as u32);
-
-                                        let hdr_bytes = hdr.to_bytes();
-                                        let mut pkt =
-                                            Vec::with_capacity(VsockHeader::SIZE + data.len());
-                                        pkt.extend_from_slice(&hdr_bytes[..VsockHeader::SIZE]);
-                                        pkt.extend_from_slice(data);
-
-                                        tracing::debug!(
-                                            "Vsock RX: OP_RW {} bytes guest_port={} host_port={} fwd_cnt={}",
-                                            data.len(),
-                                            conn_id.guest_port,
-                                            conn_id.host_port,
-                                            conn.fwd_cnt.0,
-                                        );
-                                        pkt
-                                    }
-                                }
-                            }
-                        }
-                        RxOps::CREDIT_UPDATE => {
-                            let mut hdr = VsockHeader::new(
-                                VsockAddr::host(conn_id.host_port),
-                                VsockAddr::new(conn.guest_cid, conn_id.guest_port),
-                                VsockOp::CreditUpdate,
-                            );
-                            hdr.buf_alloc = crate::vsock_manager::TX_BUFFER_SIZE;
-                            hdr.fwd_cnt = conn.fwd_cnt.0;
-                            conn.mark_credit_sent();
-                            hdr.to_bytes().to_vec()
-                        }
-                        _ => continue,
-                    }
-                }
-            };
-
-            // Write the packet to an available RX descriptor.
-            let written = self.write_to_rx_descriptor(
-                guest_mem, desc_addr, avail_addr, used_addr, q_size, gpa_base, &packet,
-            );
-
-            if written > 0 {
-                injected = true;
-
-                // Fire injected_notify for REQUEST ops — unblocks the daemon
-                // thread waiting in connect_vsock_hv.
-                if let Ok(mut mgr) = self.vsock_connections.lock() {
-                    if let Some(conn) = mgr.get_mut(&conn_id) {
-                        if let Some(tx) = conn.injected_notify.take() {
-                            let _ = tx.send(());
-                        }
-                    }
-                }
-            }
-
-            // If connection still has pending ops, re-push to backend_rxq.
-            if let Ok(mut mgr) = self.vsock_connections.lock() {
-                if let Some(conn) = mgr.get(&conn_id) {
-                    if conn.rx_queue.pending() {
-                        mgr.backend_rxq.push_back(conn_id);
-                    }
-                }
-            }
-        }
-
-        // If backend_rxq still has entries but we couldn't inject because
-        // the guest's RX vring is full, signal an interrupt. This wakes the
-        // guest's virtio_vsock rx_work → rx_fill, replenishing descriptors.
-        // On the next poll cycle we'll retry the stalled backend_rxq entries.
-        if rxq_starved {
-            injected = true;
-        }
-
-        // ------------------------------------------------------------------
-        // Phase 3: TX poll — drain vsock TX queue for guest→host responses
-        // ------------------------------------------------------------------
-        if let Some(qcfg) = tx_qcfg {
-            if let Some(dev) = self
-                .devices
-                .values()
-                .find(|d| d.info.device_type == DeviceType::VirtioVsock)
-                .and_then(|d| d.virtio_device.as_ref())
-            {
-                if let Ok(mut vdev) = dev.lock() {
-                    match vdev.process_queue(1, guest_mem, &qcfg) {
-                        Ok(completions) if !completions.is_empty() => {
-                            tracing::trace!("Vsock TX poll: {} completions", completions.len());
-                            injected = true;
-
-                            // After TX processing, check if any connections now
-                            // have pending RX (e.g., CreditUpdate after OP_RW).
-                            if let Ok(mut mgr) = self.vsock_connections.lock() {
-                                let ids: Vec<_> = mgr.connections_with_pending_rx();
-                                for id in ids {
-                                    mgr.backend_rxq.push_back(id);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("Vsock TX poll error: {e}");
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        injected
+        };
+        dev.poll_rx_injection(&rx_qcfg, tx_qcfg.as_ref())
     }
 }
 

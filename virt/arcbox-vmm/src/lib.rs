@@ -77,7 +77,16 @@ pub mod snapshot;
 pub mod vcpu;
 pub(crate) mod virtqueue_util;
 pub mod vmm;
-pub mod vsock_manager;
+/// Back-compat re-export of `arcbox_virtio::vsock_manager`.
+///
+/// The module moved to `arcbox-virtio` so that
+/// `VirtioVsock::poll_rx_injection` can reach `RxOps` /
+/// `VsockConnection` internals without `arcbox-virtio` depending on
+/// `arcbox-vmm`. Existing `crate::vsock_manager::*` imports continue
+/// to work via this shim.
+pub mod vsock_manager {
+    pub use arcbox_virtio::vsock_manager::*;
+}
 
 pub use boot::{BootParams, KernelLoader, KernelType};
 pub use builder::{VmBuilder, VmInstance};

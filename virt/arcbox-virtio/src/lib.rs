@@ -54,6 +54,7 @@ pub mod queue;
 pub mod queue_guest;
 pub mod rng;
 pub mod vsock;
+pub mod vsock_manager;
 
 // Re-export commonly used virtio constants from virtio-bindings.
 pub use virtio_bindings;
