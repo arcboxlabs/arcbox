@@ -8,15 +8,29 @@
 //! - PTY (pseudo-terminal) for real terminal emulation
 //! - Socket-based for network console
 
+#![allow(clippy::ptr_as_ptr)]
+#![allow(clippy::borrow_as_ptr)]
+#![allow(clippy::unnecessary_cast)]
+#![allow(clippy::cognitive_complexity)]
+#![allow(clippy::map_unwrap_or)]
+#![allow(clippy::useless_vec)]
+#![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::redundant_clone)]
+#![allow(clippy::unnecessary_map_or)]
+#![allow(clippy::missing_fields_in_debug)]
+#![allow(clippy::needless_lifetimes)]
+#![allow(clippy::needless_collect)]
+#![allow(mismatched_lifetime_syntaxes)]
+
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 
-use crate::error::{Result, VirtioError};
-use crate::queue::VirtQueue;
-use crate::{VirtioDevice, VirtioDeviceId};
+use arcbox_virtio_core::error::{Result, VirtioError};
+use arcbox_virtio_core::queue::VirtQueue;
+use arcbox_virtio_core::{VirtioDevice, VirtioDeviceId, virtio_bindings};
 
 /// Console device configuration.
 #[derive(Debug, Clone)]
@@ -761,7 +775,7 @@ impl VirtioDevice for VirtioConsole {
         &mut self,
         queue_idx: u16,
         memory: &mut [u8],
-        queue_config: &crate::QueueConfig,
+        queue_config: &arcbox_virtio_core::QueueConfig,
     ) -> Result<Vec<(u16, u32)>> {
         // Queue 0 = RX (host→guest), Queue 1 = TX (guest→host).
         // We only handle TX here — extract guest output from descriptors.

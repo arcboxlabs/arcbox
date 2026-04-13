@@ -17,11 +17,28 @@
 //! - [`GuestMemWriter`]: GPA-keyed accessor over guest RAM.
 //! - [`Result`] / [`VirtioError`]: error types shared by all devices.
 
+#![allow(clippy::ptr_as_ptr)]
+#![allow(clippy::borrow_as_ptr)]
+#![allow(clippy::unnecessary_cast)]
+#![allow(clippy::cognitive_complexity)]
+#![allow(clippy::map_unwrap_or)]
+#![allow(clippy::useless_vec)]
+#![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::redundant_clone)]
+#![allow(clippy::unnecessary_map_or)]
+#![allow(clippy::missing_fields_in_debug)]
+#![allow(clippy::needless_lifetimes)]
+#![allow(clippy::needless_collect)]
+#![allow(mismatched_lifetime_syntaxes)]
+
 pub mod error;
 pub mod guest_mem;
+pub mod queue;
+pub mod queue_guest;
 
 pub use error::{Result, VirtioError};
 pub use guest_mem::GuestMemWriter;
+pub use queue::{AvailRing, Descriptor, UsedRing, VirtQueue};
 
 // Re-export commonly used virtio constants from virtio-bindings so
 // downstream crates can reach them without an extra direct dependency.

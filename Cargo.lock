@@ -600,6 +600,8 @@ version = "0.3.21"
 dependencies = [
  "arcbox-error",
  "arcbox-hypervisor",
+ "arcbox-virtio-blk",
+ "arcbox-virtio-console",
  "arcbox-virtio-core",
  "arcbox-virtio-rng",
  "async-trait",
@@ -612,6 +614,29 @@ dependencies = [
  "tokio",
  "tracing",
  "virtio-bindings",
+]
+
+[[package]]
+name = "arcbox-virtio-blk"
+version = "0.3.21"
+dependencies = [
+ "arcbox-virtio-core",
+ "async-trait",
+ "libc",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "arcbox-virtio-console"
+version = "0.3.21"
+dependencies = [
+ "arcbox-virtio-core",
+ "async-trait",
+ "libc",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

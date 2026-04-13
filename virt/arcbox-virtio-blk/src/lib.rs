@@ -8,13 +8,27 @@
 //! - Direct I/O (`O_DIRECT`) for bypassing OS cache
 //! - Memory-mapped I/O for zero-copy operations
 
+#![allow(clippy::ptr_as_ptr)]
+#![allow(clippy::borrow_as_ptr)]
+#![allow(clippy::unnecessary_cast)]
+#![allow(clippy::cognitive_complexity)]
+#![allow(clippy::map_unwrap_or)]
+#![allow(clippy::useless_vec)]
+#![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::redundant_clone)]
+#![allow(clippy::unnecessary_map_or)]
+#![allow(clippy::missing_fields_in_debug)]
+#![allow(clippy::needless_lifetimes)]
+#![allow(clippy::needless_collect)]
+#![allow(mismatched_lifetime_syntaxes)]
+
 use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use crate::error::{Result, VirtioError};
-use crate::queue::{Descriptor, VirtQueue};
-use crate::{VirtioDevice, VirtioDeviceId};
+use arcbox_virtio_core::error::{Result, VirtioError};
+use arcbox_virtio_core::queue::{Descriptor, VirtQueue};
+use arcbox_virtio_core::{VirtioDevice, VirtioDeviceId, virtio_bindings};
 
 // ============================================================================
 // Async Block Backend Trait
@@ -574,7 +588,7 @@ impl VirtioBlock {
             | Self::FEATURE_BLK_SIZE
             | Self::FEATURE_FLUSH
             | Self::FEATURE_VERSION_1
-            | crate::queue::VIRTIO_F_EVENT_IDX;
+            | arcbox_virtio_core::queue::VIRTIO_F_EVENT_IDX;
 
         if config.read_only {
             features |= Self::FEATURE_RO;
@@ -965,7 +979,7 @@ impl VirtioDevice for VirtioBlock {
         }
 
         // Create request queue with EVENT_IDX if negotiated
-        let event_idx = (self.acked_features & crate::queue::VIRTIO_F_EVENT_IDX) != 0;
+        let event_idx = (self.acked_features & arcbox_virtio_core::queue::VIRTIO_F_EVENT_IDX) != 0;
         let mut queue = VirtQueue::new(256)?;
         queue.set_event_idx(event_idx);
         self.queue = Some(queue);
@@ -985,7 +999,7 @@ impl VirtioDevice for VirtioBlock {
         &mut self,
         _queue_idx: u16,
         memory: &mut [u8],
-        queue_config: &crate::QueueConfig,
+        queue_config: &arcbox_virtio_core::QueueConfig,
     ) -> Result<Vec<(u16, u32)>> {
         if !queue_config.ready || queue_config.size == 0 {
             return Ok(Vec::new());
@@ -1089,7 +1103,7 @@ impl VirtioDevice for VirtioBlock {
                     next,
                 });
 
-                if flags & crate::queue::flags::NEXT == 0 {
+                if flags & arcbox_virtio_core::queue::flags::NEXT == 0 {
                     break;
                 }
                 idx = next as usize;
