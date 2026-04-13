@@ -8,14 +8,14 @@
 //!
 //! ## Module layout
 //!
-//! - [`addr`]: `VsockAddr`, `VsockHostConnections` trait, well-known CIDs
-//! - [`protocol`]: `VsockOp` enum + 44-byte `VsockHeader` wire format
-//! - [`connection`]: `VsockConnection` + `ConnectionState` (in-process loopback)
-//! - [`backend`]: `VsockBackend` trait + `LoopbackBackend`
-//! - [`tcp`][]: `TcpBackend`
-//! - [`host`][]: `HostVsockBackend` (Unix Hypervisor.framework path)
-//! - [`device`]: `VsockConfig`, `VirtioVsock` device, `VirtioDevice` impl
-//! - [`manager`]: connection manager (`VsockConnectionManager`, `RxOps`, …)
+//! - `addr`: `VsockAddr`, `VsockHostConnections` trait, well-known CIDs
+//! - `protocol`: `VsockOp` enum + 44-byte `VsockHeader` wire format
+//! - `connection`: `VsockConnection` + `ConnectionState` (in-process loopback)
+//! - `backend`: `VsockBackend` trait + `LoopbackBackend`
+//! - `tcp`: `TcpBackend`
+//! - `host`: `HostVsockBackend` (Unix Hypervisor.framework path)
+//! - `device`: `VsockConfig`, `VirtioVsock` device, `VirtioDevice` impl
+//! - `manager`: connection manager (`VsockConnectionManager`, `RxOps`, …)
 
 #![allow(clippy::ptr_as_ptr)]
 #![allow(clippy::borrow_as_ptr)]
@@ -43,7 +43,7 @@ pub mod manager;
 mod protocol;
 mod tcp;
 
-pub use addr::{HOST_CID, RESERVED_CID, VsockAddr, VsockHostConnections};
+pub use addr::{VsockAddr, VsockHostConnections};
 pub use backend::{LoopbackBackend, VsockBackend};
 pub use connection::{ConnectionState, VsockConnection};
 pub use device::{VirtioVsock, VsockConfig};

@@ -4,12 +4,12 @@
 //!
 //! ## Module layout
 //!
-//! - [`config`]: `NetConfig`, `NetStatus`, `NetPort`
-//! - [`header`]: `VirtioNetHeader` + `NetPacket` wire types
-//! - [`backend`]: `NetBackend` trait + cross-platform `LoopbackBackend`
-//! - [`tap`]: TAP backend (Linux only)
-//! - [`socket`]: UDP-tunnel backend (macOS only)
-//! - [`device`]: `VirtioNet` device + `VirtioDevice` impl
+//! - `config`: `NetConfig`, `NetStatus`, `NetPort`
+//! - `header`: `VirtioNetHeader` + `NetPacket` wire types
+//! - `backend`: `NetBackend` trait + cross-platform `LoopbackBackend`
+//! - `tap`: TAP backend (Linux only)
+//! - `socket`: UDP-tunnel backend (macOS only)
+//! - `device`: `VirtioNet` device + `VirtioDevice` impl
 
 #![allow(clippy::ptr_as_ptr)]
 #![allow(clippy::borrow_as_ptr)]

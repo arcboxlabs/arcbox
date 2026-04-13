@@ -25,11 +25,11 @@
 //!
 //! ## Module layout
 //!
-//! - [`protocol`]: FUSE wire-protocol constants
-//! - [`request`]: `FuseRequest` / `FuseResponse` envelopes
-//! - [`session`]: `FuseSession` — INIT handshake + negotiated state
-//! - [`handler`]: `FuseRequestHandler` trait
-//! - [`device`]: `FsConfig`, `VirtioFs`, `VirtioDevice` impl
+//! - `protocol`: FUSE wire-protocol constants
+//! - `request`: `FuseRequest` / `FuseResponse` envelopes
+//! - `session`: `FuseSession` — INIT handshake + negotiated state
+//! - `handler`: `FuseRequestHandler` trait
+//! - `device`: `FsConfig`, `VirtioFs`, `VirtioDevice` impl
 
 #![allow(clippy::ptr_as_ptr)]
 #![allow(clippy::borrow_as_ptr)]

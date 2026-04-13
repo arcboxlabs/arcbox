@@ -10,12 +10,12 @@
 //!
 //! ## Module layout
 //!
-//! - [`backend`]: `AsyncBlockBackend` trait
-//! - [`async_file`]: tokio-backed file backend
-//! - [`mmap`]: memory-mapped backend (zero-copy)
-//! - [`direct_io`]: `O_DIRECT` backend (Linux only)
-//! - [`request`]: wire types — config, header, status, request type
-//! - [`device`]: `VirtioBlock` device + `VirtioDevice` impl
+//! - `backend`: `AsyncBlockBackend` trait
+//! - `async_file`: tokio-backed file backend
+//! - `mmap`: memory-mapped backend (zero-copy)
+//! - `direct_io`: `O_DIRECT` backend (Linux only)
+//! - `request`: wire types — config, header, status, request type
+//! - `device`: `VirtioBlock` device + `VirtioDevice` impl
 
 #![allow(clippy::ptr_as_ptr)]
 #![allow(clippy::borrow_as_ptr)]

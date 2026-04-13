@@ -10,10 +10,10 @@
 //!
 //! ## Module layout
 //!
-//! - [`io`]: `ConsoleIo` trait + in-process backends (`StdioConsole`, `BufferConsole`)
-//! - [`pty`]: PTY backend (Unix only)
-//! - [`socket`]: Unix-socket backend (Unix only)
-//! - [`device`]: `VirtioConsole` device + `VirtioDevice` impl
+//! - `io`: `ConsoleIo` trait + in-process backends (`StdioConsole`, `BufferConsole`)
+//! - `pty`: PTY backend (Unix only)
+//! - `socket`: Unix-socket backend (Unix only)
+//! - `device`: `VirtioConsole` device + `VirtioDevice` impl
 
 #![allow(clippy::ptr_as_ptr)]
 #![allow(clippy::borrow_as_ptr)]
