@@ -21,6 +21,7 @@ use crate::memory::MemoryManager;
 
 mod checksum;
 mod mmio_state;
+pub(crate) mod net_worker;
 
 use checksum::finalize_virtio_net_checksum;
 pub use mmio_state::{MmioDevice, VirtioMmioState, virtio_mmio};
@@ -142,28 +143,8 @@ pub struct DeviceManager {
     /// for block devices is dispatched to the worker instead of processing
     /// synchronously on the vCPU thread.
     blk_workers: HashMap<DeviceId, crate::blk_worker::BlkWorkerHandle>,
-    /// Net-io worker thread handle. Spawned once at DRIVER_OK for the
-    /// primary VirtioNet device. Joined on shutdown. Wrapped in Mutex
-    /// because the spawn happens inside `handle_mmio_write(&self)`.
-    net_rx_worker_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
-    /// IRQ callback for the net-io worker thread (cloned from irq_callback).
-    net_rx_irq_callback: Option<DeviceIrqCallback>,
-    /// Force-exit all vCPUs closure for the net-io worker thread.
-    net_rx_exit_vcpus: Option<Arc<dyn Fn() + Send + Sync>>,
-    /// VM-wide running flag shared with worker threads.
-    running: Option<Arc<std::sync::atomic::AtomicBool>>,
-    /// Primary NIC host fd, wrapped in Mutex so it can be taken from
-    /// the `&self` DRIVER_OK handler. Mirrors `net_host_fd` ownership.
-    net_host_fd_slot: Mutex<Option<i32>>,
-    /// Crossbeam channel receiving frames from the datapath loop for
-    /// direct guest memory injection. Set before DRIVER_OK; taken once
-    /// to construct the `RxInjectThread`.
-    rx_inject_channel: Mutex<Option<crossbeam_channel::Receiver<Vec<u8>>>>,
-    /// Channel for promoted inline (vhost-style) TCP connections. The
-    /// datapath sends `InlineConn` values; the inject thread receives
-    /// them and reads directly from host sockets into guest buffers.
-    inline_conn_channel:
-        Mutex<Option<crossbeam_channel::Receiver<arcbox_net_inject::inline_conn::InlineConn>>>,
+    /// Network RX worker lifecycle (resource collection + spawn + join).
+    net_rx_worker: net_worker::NetRxWorkerSlot,
 }
 
 // SAFETY: `DeviceManager` contains several types that are not `Send`/`Sync`
@@ -175,20 +156,13 @@ pub struct DeviceManager {
 //   vCPU thread's exclusive lock or the per-device `mmio_state`/`virtio_dev`
 //   lock. No pointer arithmetic escapes the struct.
 //
-// * `net_host_fd_slot: Mutex<Option<i32>>` — transfer-of-ownership slot
-//   the DRIVER_OK handler uses to hand the primary NIC fd to the
-//   net-io worker. Set-once from `set_net_host_fd`. The live TX-path fd
-//   and TX cursor for each NIC live on its `VirtioNet::NetPort`, not on
-//   DeviceManager.
-//
 // * `primary_net` / `bridge_net` / `vsock: Option<Arc<Mutex<...>>>` —
 //   typed shortcuts; the same `Arc` is stored in the `devices` HashMap
 //   via type erasure. Hot paths read OnceLock-guarded `NetPort` and
 //   atomics directly — no mutex contention on the TX fast path.
 //
-// * `vsock_connections`, `blk_workers`, `net_rx_worker_handle`,
-//   `rx_inject_channel`, `inline_conn_channel` — each uses its own
-//   `Arc<Mutex<...>>` / `Mutex<...>` / crossbeam channel, providing
+// * `vsock_connections`, `blk_workers`, `net_rx_worker` — each uses its
+//   own `Arc<Mutex<...>>` / `Mutex<...>` / crossbeam channel, providing
 //   per-field thread safety.
 //
 // Cross-thread invariant: the raw `*mut u8` in `guest_ram_base` must never
@@ -219,13 +193,7 @@ impl DeviceManager {
             )),
             vsock: None,
             blk_workers: HashMap::new(),
-            net_rx_worker_handle: Mutex::new(None),
-            net_rx_irq_callback: None,
-            net_rx_exit_vcpus: None,
-            running: None,
-            net_host_fd_slot: Mutex::new(None),
-            rx_inject_channel: Mutex::new(None),
-            inline_conn_channel: Mutex::new(None),
+            net_rx_worker: net_worker::NetRxWorkerSlot::new(),
         }
     }
 
@@ -265,10 +233,7 @@ impl DeviceManager {
     pub fn set_net_host_fd(&mut self, fd: std::os::unix::io::RawFd, device_id: DeviceId) {
         use arcbox_virtio::net::NetPort;
         self.primary_net_device_id = Some(device_id);
-        *self
-            .net_host_fd_slot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(fd);
+        self.net_rx_worker.set_host_fd(fd);
 
         if let Some(primary) = self.primary_net.as_ref() {
             let port = NetPort {
@@ -477,23 +442,19 @@ impl DeviceManager {
         irq_callback: Arc<dyn Fn(crate::irq::Irq, bool) -> crate::error::Result<()> + Send + Sync>,
         exit_vcpus: Arc<dyn Fn() + Send + Sync>,
     ) {
-        self.net_rx_irq_callback = Some(irq_callback);
-        self.net_rx_exit_vcpus = Some(exit_vcpus);
+        self.net_rx_worker.set_hooks(irq_callback, exit_vcpus);
     }
 
     /// Stores the VM-wide `running` flag so the DRIVER_OK handler can
     /// pass it to the net-io worker context.
     pub fn set_running(&mut self, running: Arc<std::sync::atomic::AtomicBool>) {
-        self.running = Some(running);
+        self.net_rx_worker.set_running(running);
     }
 
     /// Stores the RX inject channel so the DRIVER_OK handler can take it
     /// and spawn the `RxInjectThread`.
     pub fn set_rx_inject_channel(&mut self, rx: crossbeam_channel::Receiver<Vec<u8>>) {
-        *self
-            .rx_inject_channel
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(rx);
+        self.net_rx_worker.set_rx_inject_channel(rx);
     }
 
     /// Stores the inline connection channel so the DRIVER_OK handler can
@@ -502,36 +463,17 @@ impl DeviceManager {
         &mut self,
         rx: crossbeam_channel::Receiver<arcbox_net_inject::inline_conn::InlineConn>,
     ) {
-        *self
-            .inline_conn_channel
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(rx);
-    }
-
-    /// Returns the primary NIC host fd (without removing it).
-    /// The fd is shared: net-io thread reads, handle_net_tx writes.
-    fn get_net_host_fd_slot(&self) -> Option<i32> {
-        *self
-            .net_host_fd_slot
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.net_rx_worker.set_inline_conn_channel(rx);
     }
 
     /// Takes the net-io worker thread handle for join on shutdown.
     pub fn take_net_rx_worker_handle(&self) -> Option<std::thread::JoinHandle<()>> {
-        self.net_rx_worker_handle
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
+        self.net_rx_worker.take_handle()
     }
 
     /// Spawns the net-io worker thread if `device_id` is the primary VirtioNet
     /// and the worker has not already been spawned. Called from the DRIVER_OK
     /// handler (which only has `&self`).
-    ///
-    /// Prefers the `RxInjectThread` path (channel-based, no socketpair reads)
-    /// when `rx_inject_channel` is set. Falls back to the legacy
-    /// `net_rx_worker` (kqueue on socketpair fd) for VZ backend compatibility.
     fn maybe_spawn_net_rx_worker(
         &self,
         device_id: DeviceId,
@@ -545,185 +487,22 @@ impl DeviceManager {
             Some(d) if d.info.device_type == DeviceType::VirtioNet => d,
             _ => return,
         };
-
-        // Guard: only spawn once.
-        {
-            let guard = self
-                .net_rx_worker_handle
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if guard.is_some() {
-                return;
-            }
-        }
-
-        let mmio = match mmio_arc.read() {
-            Ok(m) => m,
-            Err(_) => return,
-        };
-
-        let qi = 0; // RX queue index.
-        let Some(guest_base) = self.guest_ram_base else {
-            tracing::warn!("net-io: guest_ram_base not set");
-            return;
-        };
-        let Some(irq_callback) = self.net_rx_irq_callback.clone() else {
-            tracing::warn!("net-io: irq_callback not set");
-            return;
-        };
-        let Some(exit_vcpus) = self.net_rx_exit_vcpus.clone() else {
-            tracing::warn!("net-io: exit_vcpus not set");
-            return;
-        };
         let Some(irq) = device.info.irq else {
             tracing::warn!("net-io: device has no IRQ");
             return;
         };
-        let Some(running) = self.running.clone() else {
-            tracing::warn!("net-io: running flag not set");
+        let Some(guest_base) = self.guest_ram_base else {
+            tracing::warn!("net-io: guest_ram_base not set");
             return;
         };
 
-        // Try the new RxInjectThread path (channel-based, HV backend).
-        let rx_channel = self
-            .rx_inject_channel
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-
-        if let Some(rx_channel) = rx_channel {
-            // SAFETY: `guest_base` is the host mapping returned by
-            // Virtualization.framework, valid for `guest_ram_size` bytes
-            // for the lifetime of the VM.
-            let guest_mem = unsafe {
-                arcbox_net_inject::guest_mem::GuestMemWriter::new(
-                    guest_base,
-                    self.guest_ram_size,
-                    self.guest_ram_gpa as usize,
-                )
-            };
-
-            let queue = arcbox_net_inject::queue::RxQueueConfig {
-                desc_gpa: mmio.queue_desc[qi],
-                avail_gpa: mmio.queue_driver[qi],
-                used_gpa: mmio.queue_device[qi],
-                size: mmio.queue_num[qi],
-            };
-            drop(mmio);
-
-            // Wrap the VMM IRQ callback to match the inject crate's type.
-            let vmm_callback = irq_callback;
-            let inject_callback: Arc<arcbox_net_inject::irq::IrqCallback> =
-                Arc::new(move |gsi, level| {
-                    vmm_callback(gsi, level)
-                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
-                });
-
-            let mmio_arc_clone = mmio_arc.clone();
-            let set_interrupt_status: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-                if let Ok(mut s) = mmio_arc_clone.write() {
-                    s.trigger_interrupt(1); // INT_VRING
-                }
-            });
-
-            // Take the inline connection channel if available; otherwise
-            // create an unbounded channel with a dummy sender that is
-            // immediately dropped (the receiver will never yield items).
-            let conn_rx = self
-                .inline_conn_channel
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-                .unwrap_or_else(|| {
-                    let (_tx, rx) = crossbeam_channel::unbounded();
-                    rx
-                });
-
-            let inject_thread = arcbox_net_inject::inject::RxInjectThread {
-                rx: rx_channel,
-                conn_rx,
-                guest_mem,
-                queue,
-                irq: arcbox_net_inject::irq::IrqHandle {
-                    callback: inject_callback,
-                    exit_vcpus,
-                    irq,
-                },
-                set_interrupt_status,
-                running,
-            };
-
-            match std::thread::Builder::new()
-                .name("rx-inject".to_string())
-                .spawn(move || inject_thread.run())
-            {
-                Ok(handle) => {
-                    *self
-                        .net_rx_worker_handle
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
-                    tracing::info!(
-                        "Spawned rx-inject thread for primary VirtioNet (channel-based)"
-                    );
-                }
-                Err(e) => {
-                    tracing::error!("Failed to spawn rx-inject thread: {e}");
-                }
-            }
-            return;
-        }
-
-        // Fallback: legacy net_rx_worker (kqueue on socketpair fd).
-        let Some(net_fd) = self.get_net_host_fd_slot() else {
-            tracing::warn!("net-io: no host fd available for primary VirtioNet");
-            return;
-        };
-
-        let rx_queue = crate::net_rx_worker::RxQueueConfig {
-            desc_gpa: mmio.queue_desc[qi],
-            avail_gpa: mmio.queue_driver[qi],
-            used_gpa: mmio.queue_device[qi],
-            size: mmio.queue_num[qi],
-        };
-        drop(mmio);
-
-        // SAFETY: `guest_base` is the host mapping returned by
-        // Virtualization.framework, valid for `guest_ram_size` bytes
-        // for the lifetime of the VM.
-        let guest_mem = unsafe {
-            crate::blk_worker::GuestMemWriter::new(
-                guest_base,
-                self.guest_ram_size,
-                self.guest_ram_gpa as usize,
-            )
-        };
-
-        let ctx = crate::net_rx_worker::NetRxWorkerContext {
-            net_host_fd: net_fd,
-            guest_mem,
-            rx_queue,
-            mmio_state: mmio_arc.clone(),
-            irq_callback,
+        self.net_rx_worker.try_spawn(
+            mmio_arc,
             irq,
-            exit_vcpus,
-            running,
-        };
-
-        match std::thread::Builder::new()
-            .name("net-io".to_string())
-            .spawn(move || crate::net_rx_worker::net_rx_worker_loop(ctx))
-        {
-            Ok(handle) => {
-                *self
-                    .net_rx_worker_handle
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
-                tracing::info!("Spawned net-io worker thread for primary VirtioNet (legacy)");
-            }
-            Err(e) => {
-                tracing::error!("Failed to spawn net-io worker thread: {e}");
-            }
-        }
+            guest_base,
+            self.guest_ram_size,
+            self.guest_ram_gpa,
+        );
     }
 
     /// Returns a clone of the IRQ callback Arc (if set).
@@ -1282,20 +1061,13 @@ impl DeviceManager {
 
                             // VirtioBlock async path: dispatch to worker thread
                             // instead of blocking the vCPU with synchronous I/O.
-                            if device.info.device_type == DeviceType::VirtioBlock
-                                && self.blk_workers.contains_key(&device_id)
-                            {
-                                tracing::trace!("blk async dispatch for device {}", device_id.0);
-                                match self
-                                    .dispatch_blk_async(guest_mem, &qcfg, device_id, queue_idx)
-                                {
-                                    Ok(true) => {
-                                        // Worker will handle completions and IRQ.
-                                    }
-                                    Ok(false) => {}
-                                    Err(e) => {
-                                        tracing::warn!("blk async dispatch error: {e}");
-                                    }
+                            if device.info.device_type == DeviceType::VirtioBlock {
+                                if let Some(handle) = self.blk_workers.get(&device_id) {
+                                    tracing::trace!(
+                                        "blk async dispatch for device {}",
+                                        device_id.0
+                                    );
+                                    handle.dispatch(guest_mem, &qcfg, queue_idx);
                                 }
                             }
                             // VirtioNet TX (queue 1): extract ethernet frames
@@ -1509,183 +1281,6 @@ impl DeviceManager {
             .collect();
         entries.sort_by_key(|e| e.reg_base);
         entries
-    }
-
-    /// Injects a raw packet into the vsock RX queue (queue 0).
-    /// Writes a packet into the next available RX descriptor in guest memory.
-    ///
-    /// Pops one descriptor from the avail ring, walks the chain writing data,
-    /// Dispatches block I/O descriptors to the async worker thread.
-    ///
-    /// Parses the avail ring, builds `BlkWorkItem`s, and sends them via the
-    /// channel. The worker thread performs pread/pwrite and writes completions.
-    /// Returns Ok(true) if any items were dispatched.
-    pub fn dispatch_blk_async(
-        &self,
-        memory: &mut [u8],
-        qcfg: &QueueConfig,
-        device_id: DeviceId,
-        queue_idx: u16,
-    ) -> Result<bool> {
-        use crate::blk_worker::{BlkRequestType, BlkWorkItem};
-
-        let Some(handle) = self.blk_workers.get(&device_id) else {
-            return Ok(false);
-        };
-        let Some(worker) = handle.get_queue(queue_idx) else {
-            return Ok(false);
-        };
-
-        if !qcfg.ready || qcfg.size == 0 {
-            return Ok(false);
-        }
-
-        // Translate GPAs to slice offsets (checked against ram base).
-        let gpa_base = qcfg.gpa_base as usize;
-        let Some(desc_addr) = (qcfg.desc_addr as usize).checked_sub(gpa_base) else {
-            tracing::warn!(
-                "dispatch_blk_async: desc GPA {:#x} below ram base {:#x}",
-                qcfg.desc_addr,
-                gpa_base
-            );
-            return Ok(false);
-        };
-        let Some(avail_addr) = (qcfg.avail_addr as usize).checked_sub(gpa_base) else {
-            tracing::warn!(
-                "dispatch_blk_async: avail GPA {:#x} below ram base {:#x}",
-                qcfg.avail_addr,
-                gpa_base
-            );
-            return Ok(false);
-        };
-        let Some(used_addr) = (qcfg.used_addr as usize).checked_sub(gpa_base) else {
-            tracing::warn!(
-                "dispatch_blk_async: used GPA {:#x} below ram base {:#x}",
-                qcfg.used_addr,
-                gpa_base
-            );
-            return Ok(false);
-        };
-        let q_size = qcfg.size as usize;
-
-        if avail_addr + 4 > memory.len() {
-            return Ok(false);
-        }
-        let avail_idx = u16::from_le_bytes([memory[avail_addr + 2], memory[avail_addr + 3]]);
-
-        let last_avail = worker
-            .last_avail_idx
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let mut current = last_avail;
-        let mut dispatched = false;
-
-        while current != avail_idx {
-            let ring_off = avail_addr + 4 + 2 * ((current as usize) % q_size);
-            if ring_off + 2 > memory.len() {
-                break;
-            }
-            let head_idx = u16::from_le_bytes([memory[ring_off], memory[ring_off + 1]]);
-
-            // Walk descriptor chain.
-            let mut buffers = Vec::new();
-            let mut status_gpa: u64 = 0;
-            let mut total_data_len: u32 = 0;
-            let mut request_type = BlkRequestType::Read;
-            let mut sector: u64 = 0;
-            let mut first_desc = true;
-            let mut idx = head_idx as usize;
-
-            loop {
-                let d_off = desc_addr + idx * 16;
-                if d_off + 16 > memory.len() {
-                    break;
-                }
-                let addr = u64::from_le_bytes(memory[d_off..d_off + 8].try_into().unwrap());
-                let len = u32::from_le_bytes(memory[d_off + 8..d_off + 12].try_into().unwrap());
-                let flags = u16::from_le_bytes(memory[d_off + 12..d_off + 14].try_into().unwrap());
-                let next = u16::from_le_bytes(memory[d_off + 14..d_off + 16].try_into().unwrap());
-                let is_write = flags & 2 != 0;
-
-                if first_desc {
-                    // First descriptor = block request header (16 bytes).
-                    // Translate GPA to slice offset for direct memory access.
-                    first_desc = false;
-                    if len >= 16 {
-                        let Some(hdr_off) = (addr as usize).checked_sub(gpa_base) else {
-                            break;
-                        };
-                        if hdr_off + 16 <= memory.len() {
-                            let req_type = u32::from_le_bytes(
-                                memory[hdr_off..hdr_off + 4].try_into().unwrap(),
-                            );
-                            sector = u64::from_le_bytes(
-                                memory[hdr_off + 8..hdr_off + 16].try_into().unwrap(),
-                            );
-                            request_type = match req_type {
-                                0 => BlkRequestType::Read,
-                                1 => BlkRequestType::Write,
-                                4 => BlkRequestType::Flush,
-                                8 => BlkRequestType::GetId,
-                                _ => BlkRequestType::Read,
-                            };
-                        }
-                    }
-                } else {
-                    buffers.push((addr, len, is_write));
-                    // Last writable descriptor's last byte = status byte.
-                    if is_write && len > 0 {
-                        status_gpa = addr + u64::from(len) - 1;
-                    }
-                    // Count data bytes (exclude 1-byte status descriptor).
-                    if len > 1 {
-                        total_data_len += len;
-                    }
-                }
-
-                if flags & 1 == 0 {
-                    break; // No NEXT flag.
-                }
-                idx = next as usize;
-                if idx >= q_size {
-                    break;
-                }
-            }
-
-            let item = BlkWorkItem {
-                head_idx,
-                request_type,
-                sector,
-                buffers,
-                status_gpa,
-                total_data_len,
-                used_addr: qcfg.used_addr,
-                avail_addr: qcfg.avail_addr,
-                queue_size: qcfg.size,
-            };
-
-            if worker.tx.send(item).is_err() {
-                tracing::warn!("blk worker channel closed, falling back to sync");
-                // Remove from map on next opportunity. For now, break.
-                break;
-            }
-            dispatched = true;
-            current = current.wrapping_add(1);
-        }
-
-        worker
-            .last_avail_idx
-            .store(current, std::sync::atomic::Ordering::Relaxed);
-
-        // Update avail_event for EVENT_IDX.
-        if dispatched {
-            let avail_event_off = used_addr + 4 + q_size * 8;
-            if avail_event_off + 2 <= memory.len() {
-                memory[avail_event_off..avail_event_off + 2]
-                    .copy_from_slice(&current.to_le_bytes());
-            }
-        }
-
-        Ok(dispatched)
     }
 
     /// Polls the bridge (vmnet) host fd for inbound frames and injects

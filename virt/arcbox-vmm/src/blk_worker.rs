@@ -580,6 +580,166 @@ impl BlkWorkerHandle {
     pub fn get_queue(&self, queue_idx: u16) -> Option<&BlkQueueWorker> {
         self.queues.get(queue_idx as usize)
     }
+
+    /// Parses available descriptors from the virtqueue and dispatches them
+    /// as `BlkWorkItem`s to the worker thread.
+    ///
+    /// Returns `true` if any items were dispatched.
+    pub fn dispatch(
+        &self,
+        memory: &mut [u8],
+        qcfg: &arcbox_virtio::QueueConfig,
+        queue_idx: u16,
+    ) -> bool {
+        let Some(worker) = self.get_queue(queue_idx) else {
+            return false;
+        };
+
+        if !qcfg.ready || qcfg.size == 0 {
+            return false;
+        }
+
+        // Translate GPAs to slice offsets (checked against ram base).
+        let gpa_base = qcfg.gpa_base as usize;
+        let Some(desc_addr) = (qcfg.desc_addr as usize).checked_sub(gpa_base) else {
+            tracing::warn!(
+                "blk dispatch: desc GPA {:#x} below ram base {:#x}",
+                qcfg.desc_addr,
+                gpa_base
+            );
+            return false;
+        };
+        let Some(avail_addr) = (qcfg.avail_addr as usize).checked_sub(gpa_base) else {
+            tracing::warn!(
+                "blk dispatch: avail GPA {:#x} below ram base {:#x}",
+                qcfg.avail_addr,
+                gpa_base
+            );
+            return false;
+        };
+        let Some(used_addr) = (qcfg.used_addr as usize).checked_sub(gpa_base) else {
+            tracing::warn!(
+                "blk dispatch: used GPA {:#x} below ram base {:#x}",
+                qcfg.used_addr,
+                gpa_base
+            );
+            return false;
+        };
+        let q_size = qcfg.size as usize;
+
+        if avail_addr + 4 > memory.len() {
+            return false;
+        }
+        let avail_idx = u16::from_le_bytes([memory[avail_addr + 2], memory[avail_addr + 3]]);
+
+        let last_avail = worker.last_avail_idx.load(Ordering::Relaxed);
+        let mut current = last_avail;
+        let mut dispatched = false;
+
+        while current != avail_idx {
+            let ring_off = avail_addr + 4 + 2 * ((current as usize) % q_size);
+            if ring_off + 2 > memory.len() {
+                break;
+            }
+            let head_idx = u16::from_le_bytes([memory[ring_off], memory[ring_off + 1]]);
+
+            // Walk descriptor chain.
+            let mut buffers = Vec::new();
+            let mut status_gpa: u64 = 0;
+            let mut total_data_len: u32 = 0;
+            let mut request_type = BlkRequestType::Read;
+            let mut sector: u64 = 0;
+            let mut first_desc = true;
+            let mut idx = head_idx as usize;
+
+            loop {
+                let d_off = desc_addr + idx * 16;
+                if d_off + 16 > memory.len() {
+                    break;
+                }
+                let addr = u64::from_le_bytes(memory[d_off..d_off + 8].try_into().unwrap());
+                let len = u32::from_le_bytes(memory[d_off + 8..d_off + 12].try_into().unwrap());
+                let flags = u16::from_le_bytes(memory[d_off + 12..d_off + 14].try_into().unwrap());
+                let next = u16::from_le_bytes(memory[d_off + 14..d_off + 16].try_into().unwrap());
+                let is_write = flags & 2 != 0;
+
+                if first_desc {
+                    // First descriptor = block request header (16 bytes).
+                    first_desc = false;
+                    if len >= 16 {
+                        let Some(hdr_off) = (addr as usize).checked_sub(gpa_base) else {
+                            break;
+                        };
+                        if hdr_off + 16 <= memory.len() {
+                            let req_type = u32::from_le_bytes(
+                                memory[hdr_off..hdr_off + 4].try_into().unwrap(),
+                            );
+                            sector = u64::from_le_bytes(
+                                memory[hdr_off + 8..hdr_off + 16].try_into().unwrap(),
+                            );
+                            request_type = match req_type {
+                                0 => BlkRequestType::Read,
+                                1 => BlkRequestType::Write,
+                                4 => BlkRequestType::Flush,
+                                8 => BlkRequestType::GetId,
+                                _ => BlkRequestType::Read,
+                            };
+                        }
+                    }
+                } else {
+                    buffers.push((addr, len, is_write));
+                    // Last writable descriptor's last byte = status byte.
+                    if is_write && len > 0 {
+                        status_gpa = addr + u64::from(len) - 1;
+                    }
+                    // Count data bytes (exclude 1-byte status descriptor).
+                    if len > 1 {
+                        total_data_len += len;
+                    }
+                }
+
+                if flags & 1 == 0 {
+                    break; // No NEXT flag.
+                }
+                idx = next as usize;
+                if idx >= q_size {
+                    break;
+                }
+            }
+
+            let item = BlkWorkItem {
+                head_idx,
+                request_type,
+                sector,
+                buffers,
+                status_gpa,
+                total_data_len,
+                used_addr: qcfg.used_addr,
+                avail_addr: qcfg.avail_addr,
+                queue_size: qcfg.size,
+            };
+
+            if worker.tx.send(item).is_err() {
+                tracing::warn!("blk worker channel closed, falling back to sync");
+                break;
+            }
+            dispatched = true;
+            current = current.wrapping_add(1);
+        }
+
+        worker.last_avail_idx.store(current, Ordering::Relaxed);
+
+        // Update avail_event for EVENT_IDX.
+        if dispatched {
+            let avail_event_off = used_addr + 4 + q_size * 8;
+            if avail_event_off + 2 <= memory.len() {
+                memory[avail_event_off..avail_event_off + 2]
+                    .copy_from_slice(&current.to_le_bytes());
+            }
+        }
+
+        dispatched
+    }
 }
 
 /// Shared flush barrier across all queues of a device.
