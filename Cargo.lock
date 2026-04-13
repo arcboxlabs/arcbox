@@ -601,6 +601,7 @@ dependencies = [
  "arcbox-error",
  "arcbox-hypervisor",
  "arcbox-virtio-core",
+ "arcbox-virtio-rng",
  "async-trait",
  "bytes",
  "getrandom 0.2.17",
@@ -621,6 +622,15 @@ dependencies = [
  "thiserror",
  "tracing",
  "virtio-bindings",
+]
+
+[[package]]
+name = "arcbox-virtio-rng"
+version = "0.3.21"
+dependencies = [
+ "arcbox-virtio-core",
+ "getrandom 0.2.17",
+ "tracing",
 ]
 
 [[package]]

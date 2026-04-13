@@ -50,9 +50,14 @@ pub mod fs;
 pub mod net;
 pub mod queue;
 pub mod queue_guest;
-pub mod rng;
 pub mod vsock;
 pub mod vsock_manager;
+
+/// Back-compat re-export of the per-device crate `arcbox-virtio-rng`.
+/// Existing `arcbox_virtio::rng::VirtioRng` paths keep working.
+pub mod rng {
+    pub use arcbox_virtio_rng::*;
+}
 
 // Re-export the foundational types from arcbox-virtio-core so existing
 // `arcbox_virtio::{VirtioDevice, DeviceCtx, ...}` imports keep working

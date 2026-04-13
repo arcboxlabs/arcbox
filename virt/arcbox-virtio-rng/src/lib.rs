@@ -4,8 +4,8 @@
 //! This is one of the simplest VirtIO devices — it has a single
 //! request queue and no configuration space.
 
-use crate::error::VirtioError;
-use crate::{VirtioDevice, VirtioDeviceId};
+use arcbox_virtio_core::error::VirtioError;
+use arcbox_virtio_core::{VirtioDevice, VirtioDeviceId, virtio_bindings};
 
 /// VirtIO entropy (RNG) device.
 pub struct VirtioRng {
@@ -59,7 +59,7 @@ impl VirtioDevice for VirtioRng {
 
     fn write_config(&mut self, _offset: u64, _data: &[u8]) {}
 
-    fn activate(&mut self) -> crate::Result<()> {
+    fn activate(&mut self) -> arcbox_virtio_core::Result<()> {
         self.active = true;
         tracing::info!("VirtIO RNG activated");
         Ok(())
@@ -73,8 +73,8 @@ impl VirtioDevice for VirtioRng {
         &mut self,
         queue_idx: u16,
         memory: &mut [u8],
-        queue_config: &crate::QueueConfig,
-    ) -> crate::Result<Vec<(u16, u32)>> {
+        queue_config: &arcbox_virtio_core::QueueConfig,
+    ) -> arcbox_virtio_core::Result<Vec<(u16, u32)>> {
         // Queue 0 is the only queue: guest provides empty write-only
         // buffers, we fill them with random bytes.
         if queue_idx != 0 || !queue_config.ready || queue_config.size == 0 {

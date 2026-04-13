@@ -12,6 +12,7 @@ authors.workspace = true
 arcbox-error = { workspace = true }
 arcbox-hypervisor = { workspace = true }
 arcbox-virtio-core = { workspace = true }
+arcbox-virtio-rng = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
