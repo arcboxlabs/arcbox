@@ -14,8 +14,6 @@
 //! - GICv3 is provided by Hypervisor.framework's hardware emulation
 //!   (macOS 15+); device interrupts are injected via `Gic::set_spi()`.
 
-#[cfg(test)]
-use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -39,15 +37,24 @@ use crate::irq::{Gsi, IrqTriggerCallback};
 
 use super::*;
 
+#[cfg(test)]
+mod guest_ram;
 mod hvc_blk;
 mod inline_sink;
+mod network;
+pub(super) mod pl011;
 mod psci;
 mod vcpu_loop;
 
 use inline_sink::InlineConnSinkAdapter;
+use pl011::PL011_BASE;
+use pl011::PL011_SIZE;
+pub(super) use pl011::Pl011;
+#[cfg(test)]
+use pl011::{PL011_DR, PL011_FR};
 pub use psci::CpuOnRequest;
 use psci::CpuOnSenders;
-use vcpu_loop::vcpu_run_loop;
+use vcpu_loop::{VcpuContext, vcpu_run_loop};
 
 /// Shared registry of vCPU thread handles for WFI unparking.
 ///
@@ -93,141 +100,8 @@ const GIC_REDIST_SIZE: u64 = 0x200_0000;
 /// (HV backend). Now backed by `vm-memory`'s mmap abstraction.
 pub(super) type HvGuestMem = GuestMemoryMmap;
 
-/// Type alias for `GuestRam` used by the parent `Vmm` struct to hold the
-/// Holds a page-aligned host allocation that backs guest RAM.
-/// Superseded by GuestMemoryMmap in the live boot path; retained for tests.
 #[cfg(test)]
-struct GuestRam {
-    ptr: *mut u8,
-    layout: Layout,
-}
-
-// SAFETY: `GuestRam` wraps a heap allocation via `alloc_zeroed` / `dealloc`.
-// The raw `*mut u8` is only reached through `&mut self` (exclusive) slice
-// views — raw pointer access does not alias across threads. Send/Sync are
-// safe because the backing allocation is not thread-local and the mutex
-// discipline is owned by the test harness.
-#[cfg(test)]
-unsafe impl Send for GuestRam {}
-#[cfg(test)]
-unsafe impl Sync for GuestRam {}
-
-#[cfg(test)]
-impl GuestRam {
-    /// Allocates page-aligned zeroed memory for guest RAM.
-    fn new(size: usize) -> Result<Self> {
-        let layout = Layout::from_size_align(size, PAGE_SIZE)
-            .map_err(|e| VmmError::Memory(format!("invalid RAM layout: {e}")))?;
-
-        // SAFETY: Layout is valid and non-zero.
-        let ptr = unsafe { alloc_zeroed(layout) };
-        if ptr.is_null() {
-            return Err(VmmError::Memory(format!(
-                "failed to allocate {} bytes for guest RAM",
-                size
-            )));
-        }
-
-        Ok(Self { ptr, layout })
-    }
-
-    /// Returns the host pointer to guest RAM.
-    fn as_ptr(&self) -> *mut u8 {
-        self.ptr
-    }
-
-    /// Returns guest RAM as a mutable slice.
-    fn as_mut_slice(&mut self) -> &mut [u8] {
-        // SAFETY: ptr was allocated with this layout by alloc_zeroed and
-        // &mut self guarantees exclusive access.
-        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.layout.size()) }
-    }
-
-    fn size(&self) -> usize {
-        self.layout.size()
-    }
-}
-
-#[cfg(test)]
-impl Drop for GuestRam {
-    fn drop(&mut self) {
-        // SAFETY: ptr was allocated with this layout by alloc_zeroed.
-        unsafe { dealloc(self.ptr, self.layout) };
-    }
-}
-
-// ---------------------------------------------------------------------------
-// PL011 UART emulation
-// ---------------------------------------------------------------------------
-
-/// Minimal PL011 UART emulator for early boot console output.
-///
-/// Only implements enough to capture kernel boot messages. The FDT already
-/// has a PL011 node at 0x0900_0000 — this emulator handles the data path
-/// so early `earlycon` output reaches the host log.
-pub(super) struct Pl011 {
-    /// Accumulated output buffer (line buffered).
-    output: Vec<u8>,
-}
-
-/// PL011 MMIO base address. Placed at 0x0B00_0000 to avoid the GIC
-/// redistributor region (0x080A_0000 + 32 MB = 0x0A0A_0000).
-const PL011_BASE: u64 = 0x0B00_0000;
-/// PL011 MMIO region size.
-const PL011_SIZE: u64 = 0x1000;
-
-// PL011 register offsets (only those we emulate).
-const PL011_DR: u64 = 0x000; // Data Register
-const PL011_FR: u64 = 0x018; // Flag Register
-
-impl Pl011 {
-    /// Creates a new PL011 UART emulator.
-    pub fn new() -> Self {
-        Self { output: Vec::new() }
-    }
-
-    /// Returns `true` if `addr` falls within the PL011 MMIO range.
-    pub fn contains(&self, addr: u64) -> bool {
-        (PL011_BASE..PL011_BASE + PL011_SIZE).contains(&addr)
-    }
-
-    /// Handles an MMIO read from the PL011 region.
-    pub fn read(&self, addr: u64, _size: usize) -> u64 {
-        let offset = addr - PL011_BASE;
-        match offset {
-            // Flag Register: TX FIFO never full, RX FIFO always empty.
-            PL011_FR => 0,
-            _ => 0,
-        }
-    }
-
-    /// Handles an MMIO write to the PL011 region.
-    pub fn write(&mut self, addr: u64, _size: usize, value: u64) {
-        let offset = addr - PL011_BASE;
-        if offset == PL011_DR {
-            let byte = (value & 0xFF) as u8;
-            self.output.push(byte);
-            // Emit to host log when we get a newline.
-            if byte == b'\n' {
-                if let Ok(line) = std::str::from_utf8(&self.output) {
-                    tracing::info!(target: "guest_serial", "{}", line.trim_end());
-                }
-                self.output.clear();
-            }
-        }
-        // Ignore writes to control registers — we only care about data.
-    }
-
-    /// Flush any remaining partial-line output.
-    pub fn flush(&mut self) {
-        if !self.output.is_empty() {
-            if let Ok(line) = std::str::from_utf8(&self.output) {
-                tracing::info!(target: "guest_serial", "{}", line.trim_end());
-            }
-            self.output.clear();
-        }
-    }
-}
+use guest_ram::GuestRam;
 
 // ---------------------------------------------------------------------------
 // Device slot tracking
@@ -1149,12 +1023,14 @@ impl Vmm {
                                 i,
                                 req.entry_point,
                                 req.context_id,
-                                dm,
-                                r,
-                                uart,
-                                senders_placeholder,
-                                th,
-                                hvc_fds_clone,
+                                VcpuContext {
+                                    device_manager: dm,
+                                    running: r,
+                                    pl011: uart,
+                                    cpu_on_senders: senders_placeholder,
+                                    vcpu_thread_handles: th,
+                                    hvc_blk_fds: hvc_fds_clone,
+                                },
                             );
                         }
                         Err(_) => {
@@ -1182,12 +1058,14 @@ impl Vmm {
                         0,
                         kernel_entry,
                         fdt_addr,
-                        device_manager,
-                        running,
-                        pl011,
-                        cpu_on_senders,
-                        vcpu_thread_handles,
-                        hvc_blk_fds,
+                        VcpuContext {
+                            device_manager,
+                            running,
+                            pl011,
+                            cpu_on_senders,
+                            vcpu_thread_handles,
+                            hvc_blk_fds,
+                        },
                     );
                 })
                 .map_err(|e| VmmError::Vcpu(format!("spawn vcpu-0: {e}")))?;
@@ -1269,335 +1147,6 @@ impl Vmm {
         self.hv_guest_mem.take();
 
         tracing::info!("Custom VMM stopped");
-        Ok(())
-    }
-
-    /// Creates the network datapath for the HV backend.
-    ///
-    /// Sets up a SOCK_DGRAM socketpair. One end is registered with DeviceManager
-    /// for VirtioNet TX/RX bridging. The other end feeds NetworkDatapath (the
-    /// same stack used by VZ: DHCP, DNS, socket proxy, TCP bridge).
-    fn create_hv_network_datapath(
-        &mut self,
-        device_manager: &mut crate::device::DeviceManager,
-        primary_net_id: crate::device::DeviceId,
-    ) -> Result<()> {
-        use arcbox_net::darwin::datapath_loop::NetworkDatapath;
-        use arcbox_net::darwin::inbound_relay::InboundListenerManager;
-        use arcbox_net::darwin::socket_proxy::SocketProxy;
-        use arcbox_net::dhcp::{DhcpConfig, DhcpServer};
-        use arcbox_net::dns::{DnsConfig, DnsForwarder};
-        use std::net::Ipv4Addr;
-
-        let gateway_ip = Ipv4Addr::new(10, 0, 2, 1);
-        let guest_ip = Ipv4Addr::new(10, 0, 2, 2);
-        let netmask = Ipv4Addr::new(255, 255, 255, 0);
-        let gateway_mac: [u8; 6] = [0x02, 0xAB, 0xCD, 0x00, 0x00, 0x01];
-
-        // 1. Create a SOCK_DGRAM socketpair for L2 Ethernet frame exchange.
-        let mut fds: [libc::c_int; 2] = [0; 2];
-        // SAFETY: `fds` is a valid 2-element array; socketpair writes two
-        // fds into it on success.
-        let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
-        if ret != 0 {
-            return Err(VmmError::Device(format!(
-                "net socketpair failed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-
-        // fds[0] = HV side (DeviceManager reads/writes raw ethernet frames)
-        // fds[1] = datapath side (NetworkDatapath reads/writes)
-        // SAFETY: Both fds are fresh from socketpair with sole ownership;
-        // wrapping them in OwnedFd is the standard transfer pattern.
-        let hv_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
-        // SAFETY: Same as above for the peer fd.
-        let host_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
-
-        // Set large socket buffers and non-blocking on HV side.
-        // SAFETY: `hv_fd` is a live OwnedFd from the socketpair above.
-        // `buf_size` lives on the stack for the whole block; setsockopt
-        // copies out during the call. fcntl F_SETFL is side-effect-only.
-        unsafe {
-            let buf_size: libc::c_int = 8 * 1024 * 1024;
-            if libc::setsockopt(
-                hv_fd.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_SNDBUF,
-                (&raw const buf_size).cast::<libc::c_void>(),
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            ) != 0
-            {
-                tracing::warn!(
-                    "setsockopt SO_SNDBUF failed: {}",
-                    std::io::Error::last_os_error()
-                );
-            }
-            if libc::setsockopt(
-                hv_fd.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_RCVBUF,
-                (&raw const buf_size).cast::<libc::c_void>(),
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            ) != 0
-            {
-                tracing::warn!(
-                    "setsockopt SO_RCVBUF failed: {}",
-                    std::io::Error::last_os_error()
-                );
-            }
-            let flags = libc::fcntl(hv_fd.as_raw_fd(), libc::F_GETFL, 0);
-            if flags == -1 {
-                return Err(VmmError::Device(format!(
-                    "fcntl F_GETFL failed: {}",
-                    std::io::Error::last_os_error()
-                )));
-            }
-            if libc::fcntl(hv_fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) == -1 {
-                return Err(VmmError::Device(format!(
-                    "fcntl F_SETFL O_NONBLOCK failed: {}",
-                    std::io::Error::last_os_error()
-                )));
-            }
-        }
-
-        // Register the HV-side fd with DeviceManager for TX/RX bridging.
-        device_manager.set_net_host_fd(hv_fd.as_raw_fd(), primary_net_id);
-
-        // 2. Cancellation token.
-        let cancel = tokio_util::sync::CancellationToken::new();
-        self.net_cancel = Some(cancel.clone());
-
-        // 3. Create socket proxy and channels.
-        let (reply_tx, reply_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
-        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(256);
-        let socket_proxy =
-            SocketProxy::new(gateway_ip, gateway_mac, guest_ip, reply_tx, cancel.clone());
-
-        self.inbound_listener_manager = Some(InboundListenerManager::new(cmd_tx));
-
-        // 4. Create DHCP + DNS.
-        let dhcp_config = DhcpConfig::new(gateway_ip, netmask)
-            .with_pool_range(guest_ip, Ipv4Addr::new(10, 0, 2, 254))
-            .with_dns_servers(vec![gateway_ip]);
-        let dhcp_server = DhcpServer::new(dhcp_config);
-
-        let dns_config = DnsConfig::new(gateway_ip);
-        let dns_forwarder = if let Some(ref shared_table) = self.shared_dns_hosts {
-            DnsForwarder::with_shared_hosts(dns_config, std::sync::Arc::clone(shared_table))
-        } else {
-            DnsForwarder::new(dns_config)
-        };
-
-        // 5. Build and spawn the datapath.
-        let net_mtu = arcbox_net::darwin::smoltcp_device::ENHANCED_ETHERNET_MTU;
-        let mut datapath = NetworkDatapath::new(
-            host_fd,
-            socket_proxy,
-            reply_rx,
-            cmd_rx,
-            dhcp_server,
-            dns_forwarder,
-            gateway_ip,
-            guest_ip,
-            gateway_mac,
-            cancel,
-            net_mtu,
-        );
-
-        // Create bounded channel for RX frame injection. The datapath loop
-        // sends frames through the FrameSink; the RxInjectThread (spawned at
-        // DRIVER_OK) receives them and writes directly to guest memory.
-        let (frame_tx, frame_rx) = crossbeam_channel::bounded::<Vec<u8>>(4096);
-        let sink = std::sync::Arc::new(arcbox_net::direct_rx::ChannelFrameSink::new(frame_tx));
-        datapath.set_frame_sink(sink);
-
-        // Store the receiving half so DeviceManager can hand it to the
-        // RxInjectThread at DRIVER_OK time.
-        device_manager.set_rx_inject_channel(frame_rx);
-
-        // Create bounded channel for promoted inline TCP connections.
-        // The datapath sends PromotedConn via the ConnSink trait; the
-        // adapter converts to InlineConn and forwards to the inject thread.
-        let (conn_tx, conn_rx) =
-            crossbeam_channel::bounded::<arcbox_net_inject::inline_conn::InlineConn>(256);
-
-        let conn_sink: std::sync::Arc<dyn arcbox_net::direct_rx::ConnSink> =
-            std::sync::Arc::new(InlineConnSinkAdapter { tx: conn_tx });
-        datapath.set_conn_sink(conn_sink);
-
-        device_manager.set_inline_conn_channel(conn_rx);
-
-        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
-            VmmError::Device(format!(
-                "tokio runtime not available for network datapath: {e}"
-            ))
-        })?;
-
-        runtime.spawn(async move {
-            if let Err(e) = datapath.run().await {
-                tracing::error!("HV network datapath exited with error: {}", e);
-            }
-        });
-
-        // Keep the HV-side fd alive for VM lifetime.
-        self.hv_net_fd = Some(hv_fd);
-
-        tracing::info!(
-            "HV network datapath: gateway={}, guest={}, MTU={}",
-            gateway_ip,
-            guest_ip,
-            net_mtu,
-        );
-        Ok(())
-    }
-
-    /// Creates the bridge NIC (NIC2) backed by vmnet.framework for container
-    /// IP routing. The vmnet interface runs in Shared (NAT) mode, providing a
-    /// macOS bridge interface (e.g., bridge101) that the host route reconciler
-    /// can target with `route add 172.16.0.0/12 → bridge101`.
-    ///
-    /// Data path: vmnet ↔ VmnetRelay (async) ↔ socketpair ↔ DeviceManager ↔ Guest NIC2.
-    #[cfg(feature = "vmnet")]
-    fn create_hv_bridge_nic(
-        &mut self,
-        device_manager: &mut crate::device::DeviceManager,
-        memory_manager: &mut crate::memory::MemoryManager,
-        irq_chip: &crate::irq::IrqChip,
-    ) -> Result<()> {
-        use arcbox_net::darwin::vmnet::{Vmnet, VmnetConfig};
-        use arcbox_net::darwin::vmnet_relay::VmnetRelay;
-
-        // Parse MAC from config (stable per VM for bridge FDB lookup).
-        let config = if let Some(ref mac_str) = self.config.bridge_nic_mac {
-            let mac = arcbox_net::darwin::parse_mac(mac_str)
-                .map_err(|e| VmmError::Device(format!("invalid bridge NIC MAC: {e}")))?;
-            VmnetConfig::shared().with_mac(mac)
-        } else {
-            VmnetConfig::shared()
-        };
-
-        let vmnet = std::sync::Arc::new(
-            Vmnet::new(config).map_err(|e| VmmError::Device(format!("vmnet start failed: {e}")))?,
-        );
-
-        let info = vmnet
-            .interface_info()
-            .ok_or_else(|| VmmError::Device("vmnet interface_info unavailable".to_string()))?;
-
-        let vmnet_mac = info.mac;
-        tracing::info!(
-            mac = arcbox_net::darwin::format_mac(&vmnet_mac),
-            mtu = info.mtu,
-            "HV bridge NIC: vmnet interface created"
-        );
-
-        // Create socketpair for the relay (same pattern as NIC1).
-        let mut fds: [libc::c_int; 2] = [0; 2];
-        // SAFETY: `fds` is a valid 2-element array; socketpair writes two
-        // fds into it on success.
-        let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
-        if ret != 0 {
-            return Err(VmmError::Device(format!(
-                "socketpair for vmnet bridge failed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-
-        // fds[0] = HV side (DeviceManager reads/writes bridge frames)
-        // fds[1] = relay side (VmnetRelay forwards to vmnet)
-        // SAFETY: Both fds are fresh from socketpair with sole ownership.
-        let hv_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
-        // SAFETY: Same as above for the peer fd.
-        let relay_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
-
-        // Set large buffers + non-blocking on HV side.
-        // SAFETY: `hv_fd` is a live OwnedFd from the socketpair above.
-        // `buf_size` lives on the stack for the whole block; setsockopt
-        // copies out during the call. fcntl F_SETFL is side-effect-only.
-        unsafe {
-            let buf_size: libc::c_int = 8 * 1024 * 1024;
-            if libc::setsockopt(
-                hv_fd.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_SNDBUF,
-                (&raw const buf_size).cast::<libc::c_void>(),
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            ) != 0
-            {
-                tracing::warn!(
-                    "bridge setsockopt SO_SNDBUF failed: {}",
-                    std::io::Error::last_os_error()
-                );
-            }
-            if libc::setsockopt(
-                hv_fd.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_RCVBUF,
-                (&raw const buf_size).cast::<libc::c_void>(),
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            ) != 0
-            {
-                tracing::warn!(
-                    "bridge setsockopt SO_RCVBUF failed: {}",
-                    std::io::Error::last_os_error()
-                );
-            }
-            let flags = libc::fcntl(hv_fd.as_raw_fd(), libc::F_GETFL, 0);
-            if flags == -1 {
-                return Err(VmmError::Device(format!(
-                    "bridge fcntl F_GETFL failed: {}",
-                    std::io::Error::last_os_error()
-                )));
-            }
-            if libc::fcntl(hv_fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) == -1 {
-                return Err(VmmError::Device(format!(
-                    "bridge fcntl F_SETFL O_NONBLOCK failed: {}",
-                    std::io::Error::last_os_error()
-                )));
-            }
-        }
-
-        // Register the bridge VirtioNet device with the vmnet MAC.
-        let net_config = arcbox_virtio::net::NetConfig {
-            mac: vmnet_mac,
-            ..Default::default()
-        };
-        let bridge_dev = arcbox_virtio::net::VirtioNet::new(net_config);
-        let (bridge_device_id, bridge_arc) = device_manager.register_virtio_device(
-            crate::device::DeviceType::VirtioNet,
-            "virtio-net-bridge",
-            bridge_dev,
-            memory_manager,
-            irq_chip,
-        )?;
-        // Hand DeviceManager the typed handle so hot-path methods can reach
-        // the concrete VirtioNet without a HashMap lookup + dyn dispatch.
-        device_manager.set_bridge_net(bridge_device_id, bridge_arc);
-
-        // Wire the bridge fd to the DeviceManager.
-        device_manager.set_bridge_host_fd(hv_fd.as_raw_fd(), bridge_device_id);
-
-        // Spawn vmnet relay task.
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let relay = VmnetRelay::new(std::sync::Arc::clone(&vmnet), cancel.clone());
-
-        let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
-            VmmError::Device(format!("tokio runtime not available for vmnet relay: {e}"))
-        })?;
-
-        runtime.spawn(async move {
-            if let Err(e) = relay.run(relay_fd).await {
-                tracing::error!("HV vmnet relay exited with error: {e}");
-            }
-        });
-
-        // Store state for cleanup (reuses the same Vmm fields as VZ path).
-        self.vmnet_bridge = Some(vmnet);
-        self.vmnet_relay_cancel = Some(cancel);
-        self.hv_bridge_net_fd = Some(hv_fd);
-
-        tracing::info!("HV bridge NIC (NIC2) ready: vmnet relay running");
         Ok(())
     }
 
@@ -1952,10 +1501,10 @@ mod tests {
         // Write "Hi\n" byte by byte.
         uart.write(PL011_BASE + PL011_DR, 1, b'H' as u64);
         uart.write(PL011_BASE + PL011_DR, 1, b'i' as u64);
-        assert_eq!(uart.output.len(), 2);
+        assert_eq!(uart.output().len(), 2);
         // Newline flushes the buffer.
         uart.write(PL011_BASE + PL011_DR, 1, b'\n' as u64);
-        assert!(uart.output.is_empty());
+        assert!(uart.output().is_empty());
     }
 
     #[test]
@@ -1969,9 +1518,9 @@ mod tests {
     fn test_pl011_flush_partial() {
         let mut uart = Pl011::new();
         uart.write(PL011_BASE + PL011_DR, 1, b'X' as u64);
-        assert_eq!(uart.output.len(), 1);
+        assert_eq!(uart.output().len(), 1);
         uart.flush();
-        assert!(uart.output.is_empty());
+        assert!(uart.output().is_empty());
     }
 
     #[test]

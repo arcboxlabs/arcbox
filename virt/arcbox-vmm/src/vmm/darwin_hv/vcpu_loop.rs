@@ -37,6 +37,45 @@ const SCTLR_EL1_RESET: u64 = (1 << 11) // RES1
     | (1 << 28) // RES1
     | (1 << 29); // RES1
 
+/// Shared state passed to each vCPU thread.
+///
+/// Groups the resources that every vCPU needs access to, replacing what
+/// was previously 6 separate function parameters.
+pub(super) struct VcpuContext {
+    /// Shared device manager for MMIO dispatch.
+    pub device_manager: Arc<crate::device::DeviceManager>,
+    /// Shared flag; the loop exits when this is set to `false`.
+    pub running: Arc<AtomicBool>,
+    /// Shared PL011 UART emulator for early console output.
+    pub pl011: Arc<std::sync::Mutex<Pl011>>,
+    /// Channel senders for waking secondary vCPUs via PSCI CPU_ON.
+    /// `None` when the VM has only one vCPU.
+    pub cpu_on_senders: Option<CpuOnSenders>,
+    /// Registry of vCPU thread handles used by the IRQ callback to
+    /// unpark WFI-blocked threads.
+    pub vcpu_thread_handles: VcpuThreadHandles,
+    /// Per-block-device file descriptors and sector sizes for HVC fast path.
+    pub hvc_blk_fds: Arc<Vec<(i32, u32)>>,
+}
+
+/// Reads the value of an MMIO write source register, handling the ARM64
+/// XZR (register 31) special case.
+///
+/// On ARM64, register 31 in a load/store encoding is XZR (always zero),
+/// not SP. `HvVcpu::get_reg(31)` returns SP, so we intercept it here.
+fn read_mmio_write_reg(vcpu: &HvVcpu, vcpu_id: u32, register: u8) -> Option<u64> {
+    if register == 31 {
+        return Some(0);
+    }
+    match vcpu.get_reg(u32::from(register)) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::error!("vCPU {vcpu_id}: get_reg(X{register}) failed: {e}");
+            None
+        }
+    }
+}
+
 /// Runs a single vCPU in a loop, dispatching MMIO traps to the device manager.
 ///
 /// This function is intended to be called from a dedicated thread per vCPU.
@@ -51,25 +90,17 @@ const SCTLR_EL1_RESET: u64 = (1 << 11) // RES1
 ///   in PSCI CPU_ON.
 /// * `x0_value` — Initial value of X0. For the BSP this is the FDT address;
 ///   for a secondary vCPU it is the context_id from PSCI CPU_ON.
-/// * `device_manager` — Shared device manager for MMIO dispatch.
-/// * `running` — Shared flag; the loop exits when this is set to `false`.
-/// * `pl011` — Shared PL011 UART emulator for early console output.
-/// * `cpu_on_senders` — Channel senders for waking secondary vCPUs via
-///   PSCI CPU_ON. `None` when the VM has only one vCPU.
-/// * `vcpu_thread_handles` — Registry of vCPU thread handles used by the
-///   IRQ callback to unpark WFI-blocked threads.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn vcpu_run_loop(
-    vcpu_id: u32,
-    entry_addr: u64,
-    x0_value: u64,
-    device_manager: Arc<crate::device::DeviceManager>,
-    running: Arc<AtomicBool>,
-    pl011: Arc<std::sync::Mutex<Pl011>>,
-    cpu_on_senders: Option<CpuOnSenders>,
-    vcpu_thread_handles: VcpuThreadHandles,
-    hvc_blk_fds: Arc<Vec<(i32, u32)>>,
-) {
+/// * `ctx` — Shared resources for the vCPU (device manager, IRQ state, etc.).
+pub(super) fn vcpu_run_loop(vcpu_id: u32, entry_addr: u64, x0_value: u64, ctx: VcpuContext) {
+    let VcpuContext {
+        device_manager,
+        running,
+        pl011,
+        cpu_on_senders,
+        vcpu_thread_handles,
+        hvc_blk_fds,
+    } = ctx;
+
     // Register this thread's handle so the IRQ callback can unpark us.
     {
         let mut handles = vcpu_thread_handles
@@ -170,21 +201,8 @@ pub(super) fn vcpu_run_loop(
                     };
                     if uart_match {
                         if mmio.is_write {
-                            // ARM64: register 31 = XZR (zero), not SP.
-                            let value = if mmio.register == 31 {
-                                0u64
-                            } else {
-                                match vcpu.get_reg(u32::from(mmio.register)) {
-                                    Ok(v) => v,
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "vCPU {vcpu_id}: get_reg(X{}) failed: {e}",
-                                            mmio.register
-                                        );
-                                        0
-                                    }
-                                }
-                            };
+                            let value =
+                                read_mmio_write_reg(&vcpu, vcpu_id, mmio.register).unwrap_or(0);
                             pl011.lock().unwrap().write(
                                 mmio.address,
                                 mmio.access_size as usize,
@@ -211,24 +229,10 @@ pub(super) fn vcpu_run_loop(
                 if !handled_by_pl011 {
                     // Dispatch to DeviceManager for VirtIO MMIO devices.
                     if mmio.is_write {
-                        // ARM64: register 31 in a load/store is XZR (zero register),
-                        // not SP. HV.framework's get_reg(31) returns SP, so we must
-                        // handle XZR explicitly.
-                        let value = if mmio.register == 31 {
-                            0u64
-                        } else {
-                            match vcpu.get_reg(u32::from(mmio.register)) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    tracing::error!(
-                                        "vCPU {vcpu_id}: get_reg(X{}) failed: {e}",
-                                        mmio.register
-                                    );
-                                    let pc = vcpu.get_reg(reg::PC).unwrap_or(0);
-                                    let _ = vcpu.set_reg(reg::PC, pc + 4);
-                                    continue;
-                                }
-                            }
+                        let Some(value) = read_mmio_write_reg(&vcpu, vcpu_id, mmio.register) else {
+                            let pc = vcpu.get_reg(reg::PC).unwrap_or(0);
+                            let _ = vcpu.set_reg(reg::PC, pc + 4);
+                            continue;
                         };
                         tracing::trace!(
                             "MMIO write: addr={:#x} offset={:#x} X{}={:#x} size={}",
