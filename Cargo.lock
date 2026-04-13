@@ -537,6 +537,7 @@ dependencies = [
 name = "arcbox-net-inject"
 version = "0.3.21"
 dependencies = [
+ "arcbox-virtio",
  "crossbeam-channel",
  "tracing",
 ]

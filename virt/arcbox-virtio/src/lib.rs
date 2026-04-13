@@ -48,6 +48,7 @@ pub mod blk;
 pub mod console;
 pub mod error;
 pub mod fs;
+pub mod guest_mem;
 pub mod net;
 pub mod queue;
 pub mod queue_guest;
@@ -58,7 +59,41 @@ pub mod vsock;
 pub use virtio_bindings;
 
 pub use error::{Result, VirtioError};
+pub use guest_mem::GuestMemWriter;
 pub use queue::{AvailRing, Descriptor, UsedRing, VirtQueue};
+
+/// Per-device context shared between the VMM and each `VirtioDevice` for
+/// accessing guest physical memory and injecting interrupts.
+///
+/// Every device that needs to read descriptors, write completions to
+/// device-owned buffers, or raise a VirtIO used-ring / config-change
+/// interrupt holds a `DeviceCtx`. Construction happens inside the VMM
+/// at device-registration time, so by the time guest I/O begins both
+/// fields are populated — devices store this by value (no `Option`).
+///
+/// `mem` is a shared-lifetime accessor over the single guest RAM mmap.
+/// `raise_irq` is pre-bound to the device's GSI and MMIO state; the
+/// only argument is the interrupt reason (`INT_VRING` = 1 for used-ring
+/// notifications, `INT_CONFIG` = 2 for config-space changes).
+#[derive(Clone)]
+pub struct DeviceCtx {
+    /// Guest physical memory accessor.
+    pub mem: std::sync::Arc<GuestMemWriter>,
+    /// Pre-bound interrupt trigger: updates the device's MMIO
+    /// `interrupt_status` register and then asserts the device's GSI
+    /// on the platform IRQ chip.
+    pub raise_irq: std::sync::Arc<dyn Fn(u32) + Send + Sync>,
+}
+
+impl std::fmt::Debug for DeviceCtx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceCtx")
+            .field("mem_len", &self.mem.len())
+            .field("mem_gpa_base", &self.mem.gpa_base())
+            .field("raise_irq", &"<fn>")
+            .finish()
+    }
+}
 
 /// `VirtIO` device type IDs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
