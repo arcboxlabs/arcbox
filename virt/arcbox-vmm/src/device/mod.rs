@@ -17,7 +17,6 @@ use crate::error::{Result, VmmError};
 use crate::irq::{Irq, IrqChip};
 use crate::memory::MemoryManager;
 
-mod bridge_nic;
 mod checksum;
 mod mmio_state;
 
@@ -119,15 +118,15 @@ pub struct DeviceManager {
     /// HashMap iteration which is non-deterministic — with two VirtioNet
     /// devices it could match the bridge NIC instead of the primary NIC.
     primary_net_device_id: Option<DeviceId>,
-    /// Bridge host fd for HV path (NIC2 — vmnet bridge, container IP routing).
-    /// Same semantics as `net_host_fd` but for the bridge NIC connected to vmnet.
-    bridge_host_fd: Option<std::os::unix::io::RawFd>,
-    /// DeviceId of the bridge VirtioNet so QUEUE_NOTIFY can dispatch correctly.
+    /// DeviceId of the bridge VirtioNet so QUEUE_NOTIFY can dispatch correctly
+    /// to `bridge_net` without a HashMap lookup.
     bridge_net_device_id: Option<DeviceId>,
-    /// Last processed avail index for bridge VirtioNet TX queue (NIC2).
-    /// VirtIO queue indices are u16 and wrap at 65536; AtomicU16 ensures
-    /// comparison logic handles wrap correctly.
-    bridge_last_avail_tx: std::sync::atomic::AtomicU16,
+    /// Typed handle to the bridge VirtioNet (NIC2 — vmnet bridge). Shares
+    /// the same `Arc<Mutex<_>>` as the generic entry in `devices`; exposes
+    /// the concrete device so DeviceManager can call inherent hot-path
+    /// methods (`handle_tx`, `poll_rx`) without dyn dispatch. Host fd and
+    /// TX avail-index cursor live on the device itself via `NetPort`.
+    bridge_net: Option<Arc<Mutex<arcbox_virtio::net::VirtioNet>>>,
     /// Host-side vsock connection manager (HV backend only).
     vsock_connections:
         std::sync::Arc<std::sync::Mutex<crate::vsock_manager::VsockConnectionManager>>,
@@ -168,14 +167,18 @@ pub struct DeviceManager {
 //   vCPU thread's exclusive lock or the per-device `mmio_state`/`virtio_dev`
 //   lock. No pointer arithmetic escapes the struct.
 //
-// * `net_host_fd: Option<RawFd>` / `bridge_host_fd: Option<RawFd>` — plain
-//   fds, but they are set once during initialization (before any worker
-//   spawns) and then only read. The matching `OwnedFd` lives in the
-//   `*_host_fd_slot: Mutex<Option<i32>>` which governs transfer-of-ownership
-//   to spawned workers.
+// * `net_host_fd: Option<RawFd>` — plain fd, set once during initialization
+//   (before any worker spawns) and then only read. The matching `OwnedFd`
+//   lives in `net_host_fd_slot: Mutex<Option<i32>>` which governs
+//   transfer-of-ownership to spawned workers. Bridge NIC's host fd is
+//   owned by the bridge `VirtioNet`'s `NetPort`, not here.
 //
-// * `net_last_avail_tx` / `bridge_last_avail_tx: AtomicU16` — lock-free,
-//   Acquire/Release ordered (see their load/store sites).
+// * `net_last_avail_tx: AtomicU16` — lock-free, Acquire/Release ordered
+//   (see its load/store sites). Bridge NIC's TX cursor is on the bridge
+//   `VirtioNet`'s `NetPort`, not here.
+//
+// * `bridge_net: Option<Arc<Mutex<VirtioNet>>>` — typed shortcut; the
+//   same `Arc` is stored in the `devices` HashMap via type erasure.
 //
 // * `vsock_connections`, `blk_workers`, `net_rx_worker_handle`,
 //   `rx_inject_channel`, `inline_conn_channel` — each uses its own
@@ -204,9 +207,8 @@ impl DeviceManager {
             net_host_fd: None,
             net_last_avail_tx: std::sync::atomic::AtomicU16::new(0),
             primary_net_device_id: None,
-            bridge_host_fd: None,
             bridge_net_device_id: None,
-            bridge_last_avail_tx: std::sync::atomic::AtomicU16::new(0),
+            bridge_net: None,
             vsock_connections: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::vsock_manager::VsockConnectionManager::new(),
             )),
@@ -265,10 +267,94 @@ impl DeviceManager {
         self.primary_net_device_id
     }
 
-    /// Sets the bridge NIC host fd and device ID (NIC2 — vmnet bridge).
-    pub fn set_bridge_host_fd(&mut self, fd: std::os::unix::io::RawFd, device_id: DeviceId) {
-        self.bridge_host_fd = Some(fd);
+    /// Registers a typed handle to the bridge VirtioNet (NIC2) and binds
+    /// its `DeviceCtx` (guest memory + IRQ trigger). Must be called after
+    /// `set_guest_memory` + `set_irq_callback` so both ingredients exist,
+    /// and before `set_bridge_host_fd` so the fd binding can reach the
+    /// concrete device.
+    pub fn set_bridge_net(
+        &mut self,
+        device_id: DeviceId,
+        device: Arc<Mutex<arcbox_virtio::net::VirtioNet>>,
+    ) {
         self.bridge_net_device_id = Some(device_id);
+
+        if let Some(ctx) = self.build_device_ctx(device_id) {
+            if let Ok(mut dev) = device.lock() {
+                dev.bind_ctx(ctx);
+            }
+        } else {
+            tracing::warn!(
+                "set_bridge_net: DeviceCtx not built (guest_mem or irq_callback missing) — \
+                 bridge hot paths will be no-ops"
+            );
+        }
+
+        self.bridge_net = Some(device);
+    }
+
+    /// Constructs a `DeviceCtx` for a given device: a `GuestMemWriter`
+    /// over guest RAM plus a `raise_irq` closure pre-bound to this
+    /// device's GSI and MMIO state. Returns `None` if prerequisites are
+    /// missing — caller decides whether to tolerate the absence.
+    fn build_device_ctx(&self, device_id: DeviceId) -> Option<arcbox_virtio::DeviceCtx> {
+        let ram_base = self.guest_ram_base?;
+        if self.guest_ram_size == 0 {
+            return None;
+        }
+        let device = self.devices.get(&device_id)?;
+        let irq = device.info.irq?;
+        let mmio_arc = device.mmio_state.as_ref()?.clone();
+        let irq_callback = self.irq_callback.as_ref()?.clone();
+
+        // SAFETY: `ram_base` is the host mapping returned by the platform
+        // hypervisor and is valid for `guest_ram_size` bytes for the
+        // lifetime of the DeviceManager (same contract as the other
+        // GuestMemWriter constructions in this crate).
+        let mem = unsafe {
+            arcbox_virtio::GuestMemWriter::new(
+                ram_base,
+                self.guest_ram_size,
+                self.guest_ram_gpa as usize,
+            )
+        };
+
+        let raise_irq: Arc<dyn Fn(u32) + Send + Sync> = Arc::new(move |reason: u32| {
+            if let Ok(mut s) = mmio_arc.write() {
+                s.trigger_interrupt(reason);
+            }
+            let _ = irq_callback(irq, true);
+        });
+
+        Some(arcbox_virtio::DeviceCtx {
+            mem: Arc::new(mem),
+            raise_irq,
+        })
+    }
+
+    /// Sets the bridge NIC host fd (NIC2 — vmnet bridge). The fd is stored
+    /// on the bridge `VirtioNet` itself via `NetPort`; DeviceManager no
+    /// longer owns it.
+    pub fn set_bridge_host_fd(&mut self, fd: std::os::unix::io::RawFd, _device_id: DeviceId) {
+        use arcbox_virtio::net::NetPort;
+        let Some(bridge) = self.bridge_net.as_ref() else {
+            tracing::error!("set_bridge_host_fd called before set_bridge_net");
+            return;
+        };
+        let port = NetPort {
+            host_fd: fd,
+            last_avail_tx: std::sync::atomic::AtomicU16::new(0),
+        };
+        if let Ok(dev) = bridge.lock() {
+            if dev.bind_port(port).is_err() {
+                tracing::warn!("bridge_net port already bound — ignoring rebind");
+            }
+        }
+    }
+
+    /// Returns the typed handle to the bridge VirtioNet if one was registered.
+    pub fn bridge_net(&self) -> Option<&Arc<Mutex<arcbox_virtio::net::VirtioNet>>> {
+        self.bridge_net.as_ref()
     }
 
     /// Returns the guest RAM base pointer (for worker thread context).
@@ -741,7 +827,7 @@ impl DeviceManager {
         device: D,
         memory_manager: &mut MemoryManager,
         irq_chip: &IrqChip,
-    ) -> Result<DeviceId> {
+    ) -> Result<(DeviceId, Arc<Mutex<D>>)> {
         let id = DeviceId::new(self.next_id);
         self.next_id += 1;
 
@@ -766,7 +852,12 @@ impl DeviceManager {
             virtio_device_id,
             features,
         )));
-        let virtio_device = Arc::new(Mutex::new(device));
+        // Keep the concrete `Arc<Mutex<D>>` so the caller can hold a typed
+        // handle (needed for hot-path shortcuts like `bridge_net` /
+        // `primary_net` on DeviceManager). The trait-object form goes into
+        // the generic HashMap used for MMIO dispatch.
+        let virtio_device: Arc<Mutex<D>> = Arc::new(Mutex::new(device));
+        let virtio_device_erased: Arc<Mutex<dyn VirtioDevice>> = virtio_device.clone();
 
         self.mmio_map.insert(mmio_base, id);
         self.devices.insert(
@@ -774,7 +865,7 @@ impl DeviceManager {
             RegisteredDevice {
                 info,
                 mmio_state: Some(mmio_state),
-                virtio_device: Some(virtio_device),
+                virtio_device: Some(virtio_device_erased),
             },
         );
 
@@ -786,7 +877,7 @@ impl DeviceManager {
             irq
         );
 
-        Ok(id)
+        Ok((id, virtio_device))
     }
 
     /// Gets device info by ID.
@@ -1131,13 +1222,26 @@ impl DeviceManager {
                             // Dispatch to correct fd: NIC1 (net_host_fd) or NIC2 (bridge).
                             else if device.info.device_type == DeviceType::VirtioNet
                                 && queue_idx == 1
-                                && (self.net_host_fd.is_some() || self.bridge_host_fd.is_some())
+                                && (self.net_host_fd.is_some() || self.bridge_net.is_some())
                             {
                                 let is_bridge = self
                                     .bridge_net_device_id
                                     .is_some_and(|bid| bid == device_id);
                                 let net_completions = if is_bridge {
-                                    self.handle_bridge_tx(guest_mem, &qcfg)
+                                    // Bridge NIC TX lives on the device itself
+                                    // now; DeviceManager just dispatches.
+                                    match self.bridge_net.as_ref() {
+                                        Some(arc) => arc
+                                            .lock()
+                                            .map(|d| {
+                                                d.drain_tx_queue(
+                                                    &qcfg,
+                                                    finalize_virtio_net_checksum,
+                                                )
+                                            })
+                                            .unwrap_or_default(),
+                                        None => Vec::new(),
+                                    }
                                 } else {
                                     self.handle_net_tx(guest_mem, &qcfg)
                                 };
@@ -1723,6 +1827,51 @@ impl DeviceManager {
         }
 
         Ok(dispatched)
+    }
+
+    /// Polls the bridge (vmnet) host fd for inbound frames and injects
+    /// them into the bridge VirtioNet RX queue. Thin shim that reads the
+    /// device's current MMIO-transport queue configuration, hands it to
+    /// `VirtioNet::poll_rx`, and returns whether any frame was injected.
+    /// Caller fires the used-ring interrupt on `true`.
+    pub fn poll_bridge_rx(&self) -> bool {
+        let Some(bridge_arc) = self.bridge_net.as_ref() else {
+            return false;
+        };
+        let Some(bridge_id) = self.bridge_net_device_id else {
+            return false;
+        };
+        let Some(device) = self.devices.get(&bridge_id) else {
+            return false;
+        };
+        let Some(mmio_arc) = device.mmio_state.as_ref() else {
+            return false;
+        };
+
+        // Build a snapshot of the RX queue (idx 0) from MMIO state.
+        let rx_qcfg = {
+            let Ok(mmio) = mmio_arc.read() else {
+                return false;
+            };
+            let qi = 0usize;
+            if !mmio.queue_ready[qi] || mmio.queue_num[qi] == 0 {
+                return false;
+            }
+            QueueConfig {
+                desc_addr: mmio.queue_desc[qi],
+                avail_addr: mmio.queue_driver[qi],
+                used_addr: mmio.queue_device[qi],
+                size: mmio.queue_num[qi],
+                ready: true,
+                gpa_base: self.guest_ram_gpa,
+                vsock_connections: None,
+            }
+        };
+
+        let Ok(dev) = bridge_arc.lock() else {
+            return false;
+        };
+        dev.poll_rx(&rx_qcfg)
     }
 
     /// Called from the vCPU run loop during WFI (guest idle). Returns true

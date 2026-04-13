@@ -523,7 +523,7 @@ impl Vmm {
             let console = arcbox_virtio::console::VirtioConsole::new(
                 arcbox_virtio::console::ConsoleConfig::default(),
             );
-            device_manager.register_virtio_device(
+            let (_console_id, _console_arc) = device_manager.register_virtio_device(
                 DeviceType::VirtioConsole,
                 "virtio-console",
                 console,
@@ -566,7 +566,7 @@ impl Vmm {
 
             let fs_dev = arcbox_virtio::fs::VirtioFs::with_handler(fs_config, handler);
             let name = format!("virtiofs-{}", dir.tag);
-            let fs_device_id = device_manager.register_virtio_device(
+            let (fs_device_id, _fs_arc) = device_manager.register_virtio_device(
                 DeviceType::VirtioFs,
                 name,
                 fs_dev,
@@ -606,7 +606,7 @@ impl Vmm {
             let num_queues = blk.num_queues();
             let dev_id_str = blk.device_id_string().to_string();
             let name = format!("virtio-blk-{}", block_dev.path.display());
-            let device_id = device_manager.register_virtio_device(
+            let (device_id, _blk_arc) = device_manager.register_virtio_device(
                 DeviceType::VirtioBlock,
                 name,
                 blk,
@@ -642,7 +642,7 @@ impl Vmm {
             };
             let mut net_dev = arcbox_virtio::net::VirtioNet::new(net_config);
             net_dev.enable_tso_features();
-            let primary_net_id = device_manager.register_virtio_device(
+            let (primary_net_id, _primary_net_arc) = device_manager.register_virtio_device(
                 DeviceType::VirtioNet,
                 "virtio-net",
                 net_dev,
@@ -671,7 +671,7 @@ impl Vmm {
         // /dev/urandom indefinitely.
         {
             let rng_dev = arcbox_virtio::rng::VirtioRng::new();
-            device_manager.register_virtio_device(
+            let (_rng_id, _rng_arc) = device_manager.register_virtio_device(
                 DeviceType::VirtioRng,
                 "virtio-rng",
                 rng_dev,
@@ -686,7 +686,7 @@ impl Vmm {
                 guest_cid: self.config.guest_cid.unwrap_or(3) as u64,
             };
             let vsock_dev = arcbox_virtio::vsock::VirtioVsock::new(vsock_config);
-            device_manager.register_virtio_device(
+            let (_vsock_id, _vsock_arc) = device_manager.register_virtio_device(
                 DeviceType::VirtioVsock,
                 "virtio-vsock",
                 vsock_dev,
@@ -1555,13 +1555,16 @@ impl Vmm {
             ..Default::default()
         };
         let bridge_dev = arcbox_virtio::net::VirtioNet::new(net_config);
-        let bridge_device_id = device_manager.register_virtio_device(
+        let (bridge_device_id, bridge_arc) = device_manager.register_virtio_device(
             crate::device::DeviceType::VirtioNet,
             "virtio-net-bridge",
             bridge_dev,
             memory_manager,
             irq_chip,
         )?;
+        // Hand DeviceManager the typed handle so hot-path methods can reach
+        // the concrete VirtioNet without a HashMap lookup + dyn dispatch.
+        device_manager.set_bridge_net(bridge_device_id, bridge_arc);
 
         // Wire the bridge fd to the DeviceManager.
         device_manager.set_bridge_host_fd(hv_fd.as_raw_fd(), bridge_device_id);
