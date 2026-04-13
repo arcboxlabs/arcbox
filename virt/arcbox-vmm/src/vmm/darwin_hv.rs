@@ -158,6 +158,11 @@ struct GuestRam {
     layout: Layout,
 }
 
+// SAFETY: `GuestRam` wraps a heap allocation via `alloc_zeroed` / `dealloc`.
+// The raw `*mut u8` is only reached through `&mut self` (exclusive) slice
+// views — raw pointer access does not alias across threads. Send/Sync are
+// safe because the backing allocation is not thread-local and the mutex
+// discipline is owned by the test harness.
 #[cfg(test)]
 unsafe impl Send for GuestRam {}
 #[cfg(test)]
@@ -342,6 +347,8 @@ impl Vmm {
     /// end to the per-connection host port avoids that fd-number reuse while
     /// keeping the actual socket semantics unchanged.
     fn duplicate_client_vsock_fd(fd: OwnedFd, min_fd: RawFd) -> Result<OwnedFd> {
+        // SAFETY: `fd` is a live OwnedFd; fcntl(F_DUPFD_CLOEXEC) is a
+        // read-only operation on the open file table and cannot cause UB.
         let dup_fd = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, min_fd) };
         if dup_fd < 0 {
             return Err(VmmError::Device(format!(
@@ -350,6 +357,8 @@ impl Vmm {
             )));
         }
 
+        // SAFETY: `dup_fd` is a fresh fd produced by the kernel on success;
+        // no other owner exists, so `OwnedFd` takes sole ownership.
         Ok(unsafe { OwnedFd::from_raw_fd(dup_fd) })
     }
 
@@ -387,6 +396,10 @@ impl Vmm {
             let host_ptr = region.as_ptr();
             let guest_addr = region.start_addr().raw_value();
             let size = region.len() as usize;
+            // SAFETY: `region` is a live GuestMemoryMmap region owned by
+            // `guest_mem`, which is moved into `self` below and kept alive
+            // for the VM's lifetime. The host mapping therefore remains
+            // valid for `size` bytes as long as the HV mapping exists.
             unsafe {
                 vm.map_memory(
                     host_ptr,
@@ -410,6 +423,8 @@ impl Vmm {
         let dax_base = crate::dax::dax_window_base(RAM_BASE_IPA, ram_size as u64);
         let dax_size = crate::dax::dax_window_total(self.config.shared_dirs.len()) as usize;
         {
+            // SAFETY: Anonymous mmap with null addr hint — the kernel picks a
+            // valid address. Arguments are all constants or validated sizes.
             let dax_ptr = unsafe {
                 libc::mmap(
                     std::ptr::null_mut(),
@@ -421,6 +436,9 @@ impl Vmm {
                 )
             };
             if dax_ptr != libc::MAP_FAILED {
+                // SAFETY: `dax_ptr` points to a fresh mmap of `dax_size`
+                // bytes owned by `self.hv_dax_mmap` for the VM's lifetime
+                // (or munmap'd below on error).
                 let map_result = unsafe {
                     vm.map_memory(
                         dax_ptr.cast(),
@@ -431,6 +449,8 @@ impl Vmm {
                 };
                 if let Err(e) = map_result {
                     // Clean up the host mmap before propagating the error.
+                    // SAFETY: `dax_ptr` is the region we just mmap'd; it has
+                    // no aliases because the HV mapping failed.
                     unsafe { libc::munmap(dax_ptr, dax_size) };
                     return Err(VmmError::Memory(format!("DAX window hv_vm_map: {e}")));
                 }
@@ -1126,6 +1146,9 @@ impl Vmm {
                     });
                 // Force-exit all vCPUs closure (thread-safe global API).
                 let exit_fn: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {
+                    // SAFETY: `hv_vcpus_exit(NULL, 0)` is the documented
+                    // "exit every vCPU in the process" form and is safe to
+                    // call from any thread per Hypervisor.framework docs.
                     unsafe { arcbox_hv::ffi::hv_vcpus_exit(std::ptr::null(), 0) };
                 });
                 dm.set_net_rx_hooks(net_irq_cb, exit_fn);
@@ -1320,7 +1343,8 @@ impl Vmm {
 
         // 1. Create a SOCK_DGRAM socketpair for L2 Ethernet frame exchange.
         let mut fds: [libc::c_int; 2] = [0; 2];
-        // SAFETY: socketpair with valid parameters.
+        // SAFETY: `fds` is a valid 2-element array; socketpair writes two
+        // fds into it on success.
         let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
         if ret != 0 {
             return Err(VmmError::Device(format!(
@@ -1331,11 +1355,16 @@ impl Vmm {
 
         // fds[0] = HV side (DeviceManager reads/writes raw ethernet frames)
         // fds[1] = datapath side (NetworkDatapath reads/writes)
+        // SAFETY: Both fds are fresh from socketpair with sole ownership;
+        // wrapping them in OwnedFd is the standard transfer pattern.
         let hv_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        // SAFETY: Same as above for the peer fd.
         let host_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
 
         // Set large socket buffers and non-blocking on HV side.
-        // SAFETY: setsockopt/fcntl with valid fd from the socketpair above.
+        // SAFETY: `hv_fd` is a live OwnedFd from the socketpair above.
+        // `buf_size` lives on the stack for the whole block; setsockopt
+        // copies out during the call. fcntl F_SETFL is side-effect-only.
         unsafe {
             let buf_size: libc::c_int = 8 * 1024 * 1024;
             if libc::setsockopt(
@@ -1512,6 +1541,8 @@ impl Vmm {
 
         // Create socketpair for the relay (same pattern as NIC1).
         let mut fds: [libc::c_int; 2] = [0; 2];
+        // SAFETY: `fds` is a valid 2-element array; socketpair writes two
+        // fds into it on success.
         let ret = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
         if ret != 0 {
             return Err(VmmError::Device(format!(
@@ -1522,10 +1553,15 @@ impl Vmm {
 
         // fds[0] = HV side (DeviceManager reads/writes bridge frames)
         // fds[1] = relay side (VmnetRelay forwards to vmnet)
+        // SAFETY: Both fds are fresh from socketpair with sole ownership.
         let hv_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        // SAFETY: Same as above for the peer fd.
         let relay_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
 
         // Set large buffers + non-blocking on HV side.
+        // SAFETY: `hv_fd` is a live OwnedFd from the socketpair above.
+        // `buf_size` lives on the stack for the whole block; setsockopt
+        // copies out during the call. fcntl F_SETFL is side-effect-only.
         unsafe {
             let buf_size: libc::c_int = 8 * 1024 * 1024;
             if libc::setsockopt(
@@ -1625,7 +1661,8 @@ impl Vmm {
     pub(super) fn connect_vsock_hv(&self, port: u32) -> Result<std::os::unix::io::RawFd> {
         // Create a Unix SOCK_STREAM socketpair for bidirectional data.
         let mut fds: [libc::c_int; 2] = [0; 2];
-        // SAFETY: socketpair with valid parameters.
+        // SAFETY: `fds` is a valid 2-element array; socketpair writes two
+        // fds into it on success.
         let ret =
             unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
         if ret != 0 {
@@ -1638,6 +1675,9 @@ impl Vmm {
         // Set non-blocking + cloexec on internal fd (for poll_vsock_rx peek).
         // The daemon-side fd (fds[0]) stays BLOCKING with a receive timeout —
         // tokio's AsyncFd will set O_NONBLOCK when it wraps the fd.
+        // SAFETY: `fds[0]` and `fds[1]` are live kernel fds from the
+        // socketpair above. fcntl is side-effect-only; none of the branches
+        // escape the fds outside this function.
         unsafe {
             // fds[1]: internal end — needs O_NONBLOCK for poll_vsock_rx libc::read.
             let flags = libc::fcntl(fds[1], libc::F_GETFL);
@@ -1674,9 +1714,11 @@ impl Vmm {
 
         // fds[0] = returned to caller (daemon agent client)
         // fds[1] = internal, owned by VsockConnectionManager
-        // SAFETY: fds are valid from socketpair.
+        // SAFETY: Both fds are fresh from socketpair above with sole
+        // ownership; wrapping them in OwnedFd is the standard transfer
+        // pattern, and OwnedFd's Drop closes them on error paths.
         let host_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
-        // SAFETY: fds are valid from socketpair.
+        // SAFETY: Same as above for the peer fd.
         let internal_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
 
         let dm = self
@@ -2162,18 +2204,27 @@ fn handle_hvc_blk_io(
         return (-libc::EFAULT as i64) as u64;
     }
 
+    // SAFETY: The bounds check above guarantees `gpa - gpa_base + byte_len`
+    // is within the allocation pointed to by `ram_base`. `ram_base` is the
+    // live host mapping tracked by `DeviceManager` for the VM's lifetime.
     let host_ptr = unsafe { ram_base.add(gpa - gpa_base) };
 
     #[allow(clippy::cast_possible_wrap)]
     let offset = (sector * u64::from(blk_size)) as libc::off_t;
 
+    // SAFETY: `host_ptr` is valid for `byte_len` bytes (bounds-checked
+    // above) and `raw_fd` is an open fd from `hvc_blk_fds` (owned by the
+    // VMM). pread/pwrite take an exclusive borrow for the call duration;
+    // the guest vCPU that triggered this HVC is parked, so no aliasing.
     let n = if is_write {
         unsafe { libc::pwrite(raw_fd, host_ptr.cast(), byte_len, offset) }
     } else {
         unsafe { libc::pread(raw_fd, host_ptr.cast(), byte_len, offset) }
     };
     if n < 0 {
-        let errno = unsafe { *libc::__error() };
+        let errno = std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO);
         return (-errno as i64) as u64;
     }
     n as u64
@@ -2187,9 +2238,13 @@ fn handle_hvc_blk_flush(vcpu: &arcbox_hv::HvVcpu, hvc_blk_fds: &[(i32, u32)]) ->
     let Some(&(raw_fd, _)) = hvc_blk_fds.get(device_idx as usize) else {
         return (-libc::ENODEV as i64) as u64;
     };
+    // SAFETY: `raw_fd` is an open fd from `hvc_blk_fds` owned by the VMM;
+    // fsync is side-effect-only on the file descriptor.
     let ret = unsafe { libc::fsync(raw_fd) };
     if ret < 0 {
-        let errno = unsafe { *libc::__error() };
+        let errno = std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO);
         return (-errno as i64) as u64;
     }
     0
@@ -2562,6 +2617,7 @@ mod tests {
     #[test]
     fn test_duplicate_client_vsock_fd_uses_high_fd_without_breaking_socketpair() {
         let mut fds = [0; 2];
+        // SAFETY: `fds` is a 2-element array; socketpair fills it on success.
         let ret =
             unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
         assert_eq!(
@@ -2572,7 +2628,9 @@ mod tests {
         );
 
         let original_host_fd = fds[0];
+        // SAFETY: Both fds are fresh from socketpair with sole ownership.
         let host_fd = unsafe { OwnedFd::from_raw_fd(fds[0]) };
+        // SAFETY: Same as above for the peer fd.
         let peer_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
 
         let duplicated = Vmm::duplicate_client_vsock_fd(host_fd, 50_000).unwrap();
@@ -2581,6 +2639,8 @@ mod tests {
             "duplicated fd should move out of the low recycled range"
         );
 
+        // SAFETY: fcntl F_GETFD is a pure query; EBADF is the expected result
+        // since the original fd was consumed by `duplicate_client_vsock_fd`.
         let probe = unsafe { libc::fcntl(original_host_fd, libc::F_GETFD) };
         assert_eq!(probe, -1, "original fd should be closed after duplication");
         assert_eq!(
@@ -2589,6 +2649,8 @@ mod tests {
         );
 
         let payload = b"ok";
+        // SAFETY: `peer_fd` is live; `payload` is a valid slice covering
+        // `payload.len()` bytes for the duration of the write.
         let written = unsafe {
             libc::write(
                 peer_fd.as_raw_fd(),
@@ -2599,6 +2661,8 @@ mod tests {
         assert_eq!(written, payload.len() as isize);
 
         let mut buf = [0u8; 2];
+        // SAFETY: `duplicated` is live; `buf` is a valid mutable slice
+        // covering `buf.len()` bytes for the duration of the read.
         let read = unsafe {
             libc::read(
                 duplicated.as_raw_fd(),

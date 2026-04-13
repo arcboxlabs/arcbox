@@ -461,8 +461,33 @@ pub struct DeviceManager {
         Mutex<Option<crossbeam_channel::Receiver<arcbox_net_inject::inline_conn::InlineConn>>>,
 }
 
-// SAFETY: guest_ram_base points to memory that is valid for the lifetime of the
-// DeviceManager and is accessed exclusively through synchronized vCPU/device paths.
+// SAFETY: `DeviceManager` contains several types that are not `Send`/`Sync`
+// by default; we assert it manually because the actual access discipline is:
+//
+// * `guest_ram_base: *mut u8` — initialized once at VM start, then treated
+//   as read-only from the struct's perspective. All mutation of the pointee
+//   happens through slice views reconstructed per-call under either the
+//   vCPU thread's exclusive lock or the per-device `mmio_state`/`virtio_dev`
+//   lock. No pointer arithmetic escapes the struct.
+//
+// * `net_host_fd: Option<RawFd>` / `bridge_host_fd: Option<RawFd>` — plain
+//   fds, but they are set once during initialization (before any worker
+//   spawns) and then only read. The matching `OwnedFd` lives in the
+//   `*_host_fd_slot: Mutex<Option<i32>>` which governs transfer-of-ownership
+//   to spawned workers.
+//
+// * `net_last_avail_tx` / `bridge_last_avail_tx: AtomicU16` — lock-free,
+//   Acquire/Release ordered (see their load/store sites).
+//
+// * `vsock_connections`, `blk_workers`, `net_rx_worker_handle`,
+//   `rx_inject_channel`, `inline_conn_channel` — each uses its own
+//   `Arc<Mutex<...>>` / `Mutex<...>` / crossbeam channel, providing
+//   per-field thread safety.
+//
+// Cross-thread invariant: the raw `*mut u8` in `guest_ram_base` must never
+// be used to produce two overlapping `&mut [u8]` slices live at the same
+// time. This is upheld by construction — each caller builds a fresh slice
+// under the appropriate lock, uses it briefly, then drops it.
 unsafe impl Send for DeviceManager {}
 unsafe impl Sync for DeviceManager {}
 
@@ -502,8 +527,18 @@ impl DeviceManager {
     ///
     /// # Safety
     ///
-    /// `base` must point to a valid allocation of at least `size` bytes that
-    /// remains valid for the lifetime of the `DeviceManager`.
+    /// The caller must guarantee all of the following for the entire
+    /// lifetime of this `DeviceManager`:
+    ///
+    /// * `base` is non-null and points to an allocation of at least `size`
+    ///   bytes (the backing guest RAM mapping returned by the hypervisor).
+    /// * The allocation is not unmapped, moved, or freed until after this
+    ///   `DeviceManager` is dropped.
+    /// * No other Rust reference produces a `&mut [u8]` over the same
+    ///   region concurrently — internal code only constructs fresh slices
+    ///   under device or vCPU locks.
+    /// * `gpa_base` is the guest physical address where `base` is mapped;
+    ///   descriptor GPAs are translated by subtracting `gpa_base`.
     pub unsafe fn set_guest_memory(&mut self, base: *mut u8, size: usize, gpa_base: u64) {
         self.guest_ram_base = Some(base);
         self.guest_ram_size = size;
@@ -2030,6 +2065,9 @@ impl DeviceManager {
             for (conn_id, fd) in &connected_fds {
                 // Peek if there's data without consuming it.
                 let mut peek_buf = [0u8; 1];
+                // SAFETY: `*fd` is owned by VsockConnectionManager and kept
+                // live for the duration of this peek. `peek_buf` is a valid
+                // mutable slice of 1 byte. MSG_DONTWAIT ensures non-blocking.
                 let n = unsafe {
                     libc::recv(
                         *fd,
@@ -2242,6 +2280,10 @@ impl DeviceManager {
                                     let fd = conn.internal_fd.as_raw_fd();
                                     let max_read = credit.min(4096);
                                     let mut buf = vec![0u8; max_read];
+                                    // SAFETY: `fd` is borrowed from `conn.internal_fd`
+                                    // which remains live through `conn`. `buf` is a
+                                    // valid mutable allocation of `max_read` bytes.
+                                    // The fd is non-blocking so read returns promptly.
                                     let n = unsafe {
                                         libc::read(
                                             fd,
@@ -2462,6 +2504,10 @@ impl DeviceManager {
             // Non-blocking read from the network host fd.
             #[allow(clippy::large_stack_arrays)]
             let mut frame_buf = [0u8; 65536]; // Max jumbo + virtio-net header
+            // SAFETY: `net_fd` is owned by the DeviceManager via `net_host_fd`
+            // and kept live for the DM's lifetime. `frame_buf` is a valid
+            // mutable slice for `frame_buf.len()` bytes. The fd is marked
+            // non-blocking during socketpair setup, so read returns promptly.
             let n = unsafe {
                 libc::read(
                     net_fd,
@@ -2658,6 +2704,9 @@ impl DeviceManager {
             if packet_data.len() > VirtioNetHeader::SIZE {
                 let frame = &packet_data[VirtioNetHeader::SIZE..];
                 // Write raw ethernet frame to the network datapath fd.
+                // SAFETY: `net_fd` is owned by the DeviceManager and live
+                // for the call. `frame` is a valid byte slice borrowed from
+                // `packet_data` for the duration of the write.
                 let n = unsafe {
                     libc::write(net_fd, frame.as_ptr().cast::<libc::c_void>(), frame.len())
                 };
@@ -2682,6 +2731,8 @@ impl DeviceManager {
     /// Called from the QUEUE_NOTIFY handler when the guest sends a packet.
     pub fn write_net_tx_frame(&self, frame: &[u8]) {
         if let Some(fd) = self.net_host_fd {
+            // SAFETY: `fd` is the live `net_host_fd` owned by this
+            // DeviceManager; `frame` is a valid caller-provided slice.
             let n = unsafe { libc::write(fd, frame.as_ptr().cast::<libc::c_void>(), frame.len()) };
             if n < 0 {
                 let err = std::io::Error::last_os_error();
@@ -2777,6 +2828,9 @@ impl DeviceManager {
             // Strip the virtio-net header after applying checksum offload.
             if packet_data.len() > VirtioNetHeader::SIZE {
                 let frame = &packet_data[VirtioNetHeader::SIZE..];
+                // SAFETY: `bridge_fd` is owned by the DeviceManager and live
+                // for the call. `frame` is a valid byte slice borrowed from
+                // `packet_data` for the duration of the write.
                 let n = unsafe {
                     libc::write(
                         bridge_fd,
@@ -2874,6 +2928,9 @@ impl DeviceManager {
 
             // Non-blocking read from bridge fd.
             let mut buf = [0u8; 9216]; // MAX_FRAME_SIZE
+            // SAFETY: `bridge_fd` is owned by the DeviceManager and live
+            // for the call. `buf` is a valid mutable stack slice of
+            // `buf.len()` bytes. MSG_DONTWAIT ensures non-blocking.
             let n = unsafe {
                 libc::recv(
                     bridge_fd,
