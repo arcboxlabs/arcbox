@@ -48,7 +48,7 @@
 
 mod device;
 mod handler;
-pub mod protocol;
+mod protocol;
 mod request;
 mod session;
 
