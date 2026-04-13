@@ -128,14 +128,18 @@ impl AgentClient {
             let ret = unsafe {
                 libc::getsockname(fd, (&raw mut addr).cast::<libc::sockaddr>(), &raw mut len)
             };
+            // Hard-fail on getsockname errors rather than silently falling
+            // through to async transport. If the HV backend handed us an
+            // AF_UNIX socketpair and getsockname fails, mis-routing to async
+            // transport would re-enter the exact kqueue/tokio stall the
+            // blocking path was designed to avoid.
             if ret != 0 {
-                tracing::warn!(
-                    fd,
-                    err = %std::io::Error::last_os_error(),
-                    "getsockname failed on vsock fd, falling through to async transport path"
-                );
+                let err = std::io::Error::last_os_error();
+                return Err(CoreError::Machine(format!(
+                    "getsockname failed on vsock fd {fd}: {err}"
+                )));
             }
-            ret == 0 && addr.ss_family == libc::AF_UNIX as libc::sa_family_t
+            addr.ss_family == libc::AF_UNIX as libc::sa_family_t
         };
 
         if is_unix {

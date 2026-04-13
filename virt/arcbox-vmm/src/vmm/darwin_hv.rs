@@ -1611,19 +1611,16 @@ impl Vmm {
 
     /// Connects to a vsock port on the guest VM (HV backend).
     ///
-    /// Creates a Unix socketpair. One end is returned to the caller for
-    /// host-side I/O. The other end is stored for the vsock forwarding
-    /// path to relay data between host and guest VirtIO vsock queues.
+    /// Creates a Unix `SOCK_STREAM` socketpair; one end is returned to the
+    /// caller for host-side I/O, the other is registered with
+    /// `VsockConnectionManager` so the VirtIO vsock device can relay data
+    /// between the socketpair and the guest's RX/TX queues.
     ///
-    /// Note: full bidirectional forwarding requires vsock TX queue
-    /// processing in the vCPU run loop (QUEUE_NOTIFY handler) and
-    /// RX packet injection. Currently this provides the socketpair
-    /// plumbing; actual data forwarding is handled by the VirtioVsock
-    /// device's process_queue implementation.
-    /// Creates a vsock connection to the guest. Blocks until the vCPU thread
-    /// has injected the OP_REQUEST into guest memory (up to 30s). The returned
-    /// fd is a socketpair end — the guest will RST or RESPONSE within one vCPU
-    /// cycle after injection.
+    /// Returns immediately after allocating and enqueueing the connection —
+    /// OP_REQUEST injection into the guest RX queue is deferred to
+    /// `poll_vsock_rx` running on the vCPU thread. The returned fd is
+    /// usable right away; the guest responds with OP_RESPONSE or OP_RST
+    /// within one vCPU cycle of injection.
     #[allow(clippy::unnecessary_wraps)]
     pub(super) fn connect_vsock_hv(&self, port: u32) -> Result<std::os::unix::io::RawFd> {
         // Create a Unix SOCK_STREAM socketpair for bidirectional data.

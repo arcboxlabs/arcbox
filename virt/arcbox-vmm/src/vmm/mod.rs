@@ -1106,6 +1106,25 @@ impl Drop for Vmm {
                 let _ = self.stop();
             }
         }
+
+        // Always clean up the DAX mmap if still set. Covers the case where
+        // initialize_darwin_hv succeeded in setting `hv_dax_mmap` but a later
+        // init step failed, returning Err before the VM ever transitioned
+        // past Created — `stop()` won't run but the mapping still leaks if
+        // we don't munmap here.
+        #[cfg(target_os = "macos")]
+        if let Some((addr, len)) = self.hv_dax_mmap.take() {
+            // SAFETY: addr/len were returned by a successful mmap in
+            // initialize_darwin_hv; stop_darwin_hv (if it ran) took() the
+            // value so we can only reach here with the original mapping.
+            let ret = unsafe { libc::munmap(addr as *mut libc::c_void, len) };
+            if ret != 0 {
+                tracing::warn!(
+                    "DAX munmap in Drop failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
     }
 }
 
