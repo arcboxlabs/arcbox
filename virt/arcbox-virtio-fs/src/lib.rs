@@ -23,11 +23,27 @@
 //!       (implemented by arcbox-fs)
 //! ```
 
-use crate::error::{Result, VirtioError};
-use crate::queue::VirtQueue;
-use crate::{VirtioDevice, VirtioDeviceId};
+#![allow(clippy::ptr_as_ptr)]
+#![allow(clippy::borrow_as_ptr)]
+#![allow(clippy::unnecessary_cast)]
+#![allow(clippy::cognitive_complexity)]
+#![allow(clippy::map_unwrap_or)]
+#![allow(clippy::useless_vec)]
+#![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::redundant_clone)]
+#![allow(clippy::unnecessary_map_or)]
+#![allow(clippy::missing_fields_in_debug)]
+#![allow(clippy::needless_lifetimes)]
+#![allow(clippy::needless_collect)]
+#![allow(mismatched_lifetime_syntaxes)]
+#![allow(clippy::too_many_lines)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use arcbox_virtio_core::error::{Result, VirtioError};
+use arcbox_virtio_core::queue::VirtQueue;
+use arcbox_virtio_core::{VirtioDevice, VirtioDeviceId, virtio_bindings};
 
 // ============================================================================
 // FUSE Constants
@@ -841,7 +857,7 @@ impl VirtioDevice for VirtioFs {
         self.session.reset();
 
         // Create request queues
-        let event_idx = (self.acked_features & crate::queue::VIRTIO_F_EVENT_IDX) != 0;
+        let event_idx = (self.acked_features & arcbox_virtio_core::queue::VIRTIO_F_EVENT_IDX) != 0;
         let mut queues = Vec::with_capacity(self.config.num_queues as usize);
         for _ in 0..self.config.num_queues {
             let mut q = VirtQueue::new(self.config.queue_size)?;
@@ -883,7 +899,7 @@ impl VirtioDevice for VirtioFs {
         &mut self,
         queue_idx: u16,
         memory: &mut [u8],
-        queue_config: &crate::QueueConfig,
+        queue_config: &arcbox_virtio_core::QueueConfig,
     ) -> Result<Vec<(u16, u32)>> {
         // Queue 0 is the hiprio/notification queue — nothing to do for now.
         if queue_idx == 0 {
@@ -970,13 +986,13 @@ impl VirtioDevice for VirtioFs {
                 let flags = u16::from_le_bytes(memory[d_off + 12..d_off + 14].try_into().unwrap());
                 let next = u16::from_le_bytes(memory[d_off + 14..d_off + 16].try_into().unwrap());
 
-                if flags & crate::queue::flags::WRITE != 0 {
+                if flags & arcbox_virtio_core::queue::flags::WRITE != 0 {
                     write_bufs.push((addr, len));
                 } else if addr + len <= memory.len() {
                     request_data.extend_from_slice(&memory[addr..addr + len]);
                 }
 
-                if flags & crate::queue::flags::NEXT == 0 {
+                if flags & arcbox_virtio_core::queue::flags::NEXT == 0 {
                     break;
                 }
                 idx = next as usize;
@@ -1046,7 +1062,7 @@ impl VirtioDevice for VirtioFs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::queue::flags;
+    use arcbox_virtio_core::queue::flags;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     // ==========================================================================
@@ -1469,7 +1485,7 @@ mod tests {
         queue
             .set_descriptor(
                 0,
-                crate::queue::Descriptor {
+                arcbox_virtio_core::queue::Descriptor {
                     addr: init_req_offset as u64,
                     len: init_req.len() as u32,
                     flags: flags::NEXT,
@@ -1480,7 +1496,7 @@ mod tests {
         queue
             .set_descriptor(
                 1,
-                crate::queue::Descriptor {
+                arcbox_virtio_core::queue::Descriptor {
                     addr: init_resp_offset as u64,
                     len: 80,
                     flags: flags::WRITE,
@@ -1502,7 +1518,7 @@ mod tests {
         queue
             .set_descriptor(
                 2,
-                crate::queue::Descriptor {
+                arcbox_virtio_core::queue::Descriptor {
                     addr: other_req_offset as u64,
                     len: other_req.len() as u32,
                     flags: flags::NEXT,
@@ -1513,7 +1529,7 @@ mod tests {
         queue
             .set_descriptor(
                 3,
-                crate::queue::Descriptor {
+                arcbox_virtio_core::queue::Descriptor {
                     addr: other_resp_offset as u64,
                     len: 32,
                     flags: flags::WRITE,

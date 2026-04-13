@@ -14,7 +14,10 @@ arcbox-hypervisor = { workspace = true }
 arcbox-virtio-core = { workspace = true }
 arcbox-virtio-blk = { workspace = true }
 arcbox-virtio-console = { workspace = true }
+arcbox-virtio-fs = { workspace = true }
+arcbox-virtio-net = { workspace = true }
 arcbox-virtio-rng = { workspace = true }
+arcbox-virtio-vsock = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }

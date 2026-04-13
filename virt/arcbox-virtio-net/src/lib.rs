@@ -2,14 +2,30 @@
 //!
 //! Implements the `VirtIO` network device for Ethernet connectivity.
 
+#![allow(clippy::ptr_as_ptr)]
+#![allow(clippy::borrow_as_ptr)]
+#![allow(clippy::unnecessary_cast)]
+#![allow(clippy::cognitive_complexity)]
+#![allow(clippy::map_unwrap_or)]
+#![allow(clippy::useless_vec)]
+#![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::redundant_clone)]
+#![allow(clippy::unnecessary_map_or)]
+#![allow(clippy::missing_fields_in_debug)]
+#![allow(clippy::needless_lifetimes)]
+#![allow(clippy::needless_collect)]
+#![allow(mismatched_lifetime_syntaxes)]
+#![allow(clippy::too_many_lines)]
+#![allow(clippy::too_many_arguments)]
+
 use std::collections::VecDeque;
 use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::error::{Result, VirtioError};
-use crate::queue::VirtQueue;
-use crate::{DeviceCtx, QueueConfig, VirtioDevice, VirtioDeviceId};
+use arcbox_virtio_core::error::{Result, VirtioError};
+use arcbox_virtio_core::queue::VirtQueue;
+use arcbox_virtio_core::{DeviceCtx, QueueConfig, VirtioDevice, VirtioDeviceId, virtio_bindings};
 
 /// Network device configuration.
 #[derive(Debug, Clone)]
@@ -643,7 +659,7 @@ impl VirtioNet {
             | Self::FEATURE_CSUM
             | Self::FEATURE_GUEST_CSUM
             | Self::FEATURE_VERSION_1
-            | crate::queue::VIRTIO_F_EVENT_IDX;
+            | arcbox_virtio_core::queue::VIRTIO_F_EVENT_IDX;
 
         Self {
             config,
@@ -1370,7 +1386,7 @@ impl VirtioDevice for VirtioNet {
     }
 
     fn activate(&mut self) -> Result<()> {
-        let event_idx = (self.acked_features & crate::queue::VIRTIO_F_EVENT_IDX) != 0;
+        let event_idx = (self.acked_features & arcbox_virtio_core::queue::VIRTIO_F_EVENT_IDX) != 0;
 
         let mut rx = VirtQueue::new(256)?;
         let mut tx = VirtQueue::new(256)?;
@@ -2137,7 +2153,7 @@ mod tests {
             VirtioNet::FEATURE_MAC
                 | VirtioNet::FEATURE_GUEST_TSO4
                 | VirtioNet::FEATURE_VERSION_1
-                | crate::queue::VIRTIO_F_EVENT_IDX,
+                | arcbox_virtio_core::queue::VIRTIO_F_EVENT_IDX,
         );
         assert!(net.tso_negotiated());
     }

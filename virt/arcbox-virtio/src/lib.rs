@@ -44,11 +44,6 @@
 #![allow(clippy::needless_collect)]
 #![allow(mismatched_lifetime_syntaxes)]
 
-pub mod fs;
-pub mod net;
-pub mod vsock;
-pub mod vsock_manager;
-
 /// Back-compat re-export of `arcbox-virtio-blk`.
 pub mod blk {
     pub use arcbox_virtio_blk::*;
@@ -59,9 +54,31 @@ pub mod console {
     pub use arcbox_virtio_console::*;
 }
 
+/// Back-compat re-export of `arcbox-virtio-fs`.
+pub mod fs {
+    pub use arcbox_virtio_fs::*;
+}
+
+/// Back-compat re-export of `arcbox-virtio-net`.
+pub mod net {
+    pub use arcbox_virtio_net::*;
+}
+
 /// Back-compat re-export of `arcbox-virtio-rng`.
 pub mod rng {
     pub use arcbox_virtio_rng::*;
+}
+
+/// Back-compat re-export of `arcbox-virtio-vsock`.
+pub mod vsock {
+    pub use arcbox_virtio_vsock::*;
+}
+
+/// Back-compat re-export of the vsock connection manager. The actual
+/// `RxOps` / `VsockConnectionManager` / `VsockConnection` definitions
+/// live in `arcbox-virtio-vsock::manager` after the per-device split.
+pub mod vsock_manager {
+    pub use arcbox_virtio_vsock::manager::*;
 }
 
 // Back-compat re-export of `queue` / `queue_guest` modules (moved to

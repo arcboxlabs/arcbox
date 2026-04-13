@@ -22,7 +22,10 @@ members = [
     "virt/arcbox-virtio-core",
     "virt/arcbox-virtio-blk",
     "virt/arcbox-virtio-console",
+    "virt/arcbox-virtio-fs",
+    "virt/arcbox-virtio-net",
     "virt/arcbox-virtio-rng",
+    "virt/arcbox-virtio-vsock",
     "virt/arcbox-vm",
     "virt/arcbox-fs",
     "virt/arcbox-net",
@@ -192,7 +195,10 @@ arcbox-virtio = { version = "0.3.21", path = "virt/arcbox-virtio" } # x-release-
 arcbox-virtio-core = { version = "0.3.21", path = "virt/arcbox-virtio-core" } # x-release-please-version
 arcbox-virtio-blk = { version = "0.3.21", path = "virt/arcbox-virtio-blk" } # x-release-please-version
 arcbox-virtio-console = { version = "0.3.21", path = "virt/arcbox-virtio-console" } # x-release-please-version
+arcbox-virtio-fs = { version = "0.3.21", path = "virt/arcbox-virtio-fs" } # x-release-please-version
+arcbox-virtio-net = { version = "0.3.21", path = "virt/arcbox-virtio-net" } # x-release-please-version
 arcbox-virtio-rng = { version = "0.3.21", path = "virt/arcbox-virtio-rng" } # x-release-please-version
+arcbox-virtio-vsock = { version = "0.3.21", path = "virt/arcbox-virtio-vsock" } # x-release-please-version
 arcbox-vm = { version = "0.3.21", path = "virt/arcbox-vm" } # x-release-please-version
 arcbox-fs = { version = "0.3.21", path = "virt/arcbox-fs" } # x-release-please-version
 arcbox-net = { version = "0.3.21", path = "virt/arcbox-net" } # x-release-please-version

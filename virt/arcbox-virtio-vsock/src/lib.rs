@@ -6,6 +6,24 @@
 //! On Darwin, the native VZ framework handles vsock. This implementation
 //! is primarily used for Linux KVM.
 
+#![allow(clippy::ptr_as_ptr)]
+#![allow(clippy::borrow_as_ptr)]
+#![allow(clippy::unnecessary_cast)]
+#![allow(clippy::cognitive_complexity)]
+#![allow(clippy::map_unwrap_or)]
+#![allow(clippy::useless_vec)]
+#![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::redundant_clone)]
+#![allow(clippy::unnecessary_map_or)]
+#![allow(clippy::missing_fields_in_debug)]
+#![allow(clippy::needless_lifetimes)]
+#![allow(clippy::needless_collect)]
+#![allow(mismatched_lifetime_syntaxes)]
+#![allow(clippy::too_many_lines)]
+#![allow(clippy::too_many_arguments)]
+
+pub mod manager;
+
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -13,9 +31,9 @@ use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex, RwLock};
 
-use crate::error::{Result, VirtioError};
-use crate::queue::VirtQueue;
-use crate::{VirtioDevice, VirtioDeviceId};
+use arcbox_virtio_core::error::{Result, VirtioError};
+use arcbox_virtio_core::queue::VirtQueue;
+use arcbox_virtio_core::{VirtioDevice, VirtioDeviceId, virtio_bindings};
 
 /// Vsock device configuration.
 #[derive(Debug, Clone)]
@@ -61,7 +79,7 @@ pub struct VirtioVsock {
     /// Guest memory + IRQ context. Bound at registration time on the
     /// HV backend; remains `None` on the VZ backend (which does not use
     /// the custom-VMM `poll_rx_injection` path).
-    ctx: Option<crate::DeviceCtx>,
+    ctx: Option<arcbox_virtio_core::DeviceCtx>,
     /// Trait-object view of the host-side connection manager. Used by
     /// `process_queue` (TX path) so tests can supply a mock implementing
     /// `VsockHostConnections` without dragging in the concrete manager.
@@ -72,7 +90,7 @@ pub struct VirtioVsock {
     /// `enqueue_rw`/`enqueue_reset`, `peek`/`dequeue`/`pending` on
     /// `RxOps`, etc.). Always set alongside `conns` in production via
     /// `bind_connection_manager`; left `None` in unit-test contexts.
-    conn_mgr: Option<Arc<Mutex<crate::vsock_manager::VsockConnectionManager>>>,
+    conn_mgr: Option<Arc<Mutex<crate::manager::VsockConnectionManager>>>,
 }
 
 impl VirtioVsock {
@@ -95,7 +113,7 @@ impl VirtioVsock {
             config,
             features: Self::FEATURE_STREAM
                 | Self::FEATURE_VERSION_1
-                | crate::queue::VIRTIO_F_EVENT_IDX,
+                | arcbox_virtio_core::queue::VIRTIO_F_EVENT_IDX,
             acked_features: 0,
             backend: None,
             connections: RwLock::new(HashMap::new()),
@@ -118,7 +136,7 @@ impl VirtioVsock {
             config,
             features: Self::FEATURE_STREAM
                 | Self::FEATURE_VERSION_1
-                | crate::queue::VIRTIO_F_EVENT_IDX,
+                | arcbox_virtio_core::queue::VIRTIO_F_EVENT_IDX,
             acked_features: 0,
             backend: Some(Arc::new(Mutex::new(backend))),
             connections: RwLock::new(HashMap::new()),
@@ -141,7 +159,7 @@ impl VirtioVsock {
 
     /// Binds the device's `DeviceCtx` (guest memory + IRQ trigger).
     /// Required by the custom-VMM `poll_rx_injection` hot path.
-    pub fn bind_ctx(&mut self, ctx: crate::DeviceCtx) {
+    pub fn bind_ctx(&mut self, ctx: arcbox_virtio_core::DeviceCtx) {
         self.ctx = Some(ctx);
     }
 
@@ -159,7 +177,7 @@ impl VirtioVsock {
     /// view (for `poll_rx_injection`) — same `Arc`, two lenses.
     pub fn bind_connection_manager(
         &mut self,
-        mgr: Arc<Mutex<crate::vsock_manager::VsockConnectionManager>>,
+        mgr: Arc<Mutex<crate::manager::VsockConnectionManager>>,
     ) {
         self.conns = Some(mgr.clone());
         self.conn_mgr = Some(mgr);
@@ -712,12 +730,12 @@ impl VirtioVsock {
     #[allow(clippy::too_many_lines)]
     pub fn poll_rx_injection(
         &mut self,
-        rx_qcfg: &crate::QueueConfig,
-        tx_qcfg: Option<&crate::QueueConfig>,
+        rx_qcfg: &arcbox_virtio_core::QueueConfig,
+        tx_qcfg: Option<&arcbox_virtio_core::QueueConfig>,
     ) -> bool {
         use std::os::fd::AsRawFd;
 
-        use crate::vsock_manager::{RxOps, TX_BUFFER_SIZE};
+        use crate::manager::{RxOps, TX_BUFFER_SIZE};
 
         let Some(ctx) = self.ctx.clone() else {
             return false;
@@ -1222,7 +1240,7 @@ impl VirtioDevice for VirtioVsock {
         &mut self,
         queue_idx: u16,
         memory: &mut [u8],
-        queue_config: &crate::QueueConfig,
+        queue_config: &arcbox_virtio_core::QueueConfig,
     ) -> Result<Vec<(u16, u32)>> {
         // Queue 0 = RX (host→guest), Queue 1 = TX (guest→host), Queue 2 = Event.
         // We handle TX here: extract vsock packets, forward data to host fds.
@@ -1303,11 +1321,13 @@ impl VirtioDevice for VirtioVsock {
                 let next = u16::from_le_bytes(memory[d_off + 14..d_off + 16].try_into().unwrap());
 
                 // TX descriptors are read-only (guest→host data).
-                if flags & crate::queue::flags::WRITE == 0 && addr + len <= memory.len() {
+                if flags & arcbox_virtio_core::queue::flags::WRITE == 0
+                    && addr + len <= memory.len()
+                {
                     packet_data.extend_from_slice(&memory[addr..addr + len]);
                 }
 
-                if flags & crate::queue::flags::NEXT == 0 {
+                if flags & arcbox_virtio_core::queue::flags::NEXT == 0 {
                     break;
                 }
                 idx = next as usize;
@@ -2522,7 +2542,7 @@ mod tests {
 
         // Set up descriptor in the TX queue.
         let queue = vsock.tx_queue.as_mut().unwrap();
-        let desc = crate::queue::Descriptor {
+        let desc = arcbox_virtio_core::queue::Descriptor {
             addr: guest_addr as u64,
             len: total as u32,
             flags: 0, // Read-only for device
@@ -2569,10 +2589,10 @@ mod tests {
         // Also prepare RX queue with a write-only descriptor for the response.
         {
             let rx_queue = vsock.rx_queue.as_mut().unwrap();
-            let rx_desc = crate::queue::Descriptor {
+            let rx_desc = arcbox_virtio_core::queue::Descriptor {
                 addr: 0x800,
                 len: 256,
-                flags: crate::queue::flags::WRITE,
+                flags: arcbox_virtio_core::queue::flags::WRITE,
                 next: 0,
             };
             rx_queue.set_descriptor(0, rx_desc).unwrap();
@@ -2653,10 +2673,10 @@ mod tests {
         // Provide an RX descriptor for the RST response.
         {
             let rx_queue = vsock.rx_queue.as_mut().unwrap();
-            let rx_desc = crate::queue::Descriptor {
+            let rx_desc = arcbox_virtio_core::queue::Descriptor {
                 addr: 0x800,
                 len: 256,
-                flags: crate::queue::flags::WRITE,
+                flags: arcbox_virtio_core::queue::flags::WRITE,
                 next: 0,
             };
             rx_queue.set_descriptor(0, rx_desc).unwrap();
@@ -2778,10 +2798,10 @@ mod tests {
         // Set up an RX write-only descriptor.
         {
             let rx_queue = vsock.rx_queue.as_mut().unwrap();
-            let desc = crate::queue::Descriptor {
+            let desc = arcbox_virtio_core::queue::Descriptor {
                 addr: 0x200,
                 len: 512,
-                flags: crate::queue::flags::WRITE,
+                flags: arcbox_virtio_core::queue::flags::WRITE,
                 next: 0,
             };
             rx_queue.set_descriptor(0, desc).unwrap();
@@ -2989,7 +3009,7 @@ mod tests {
             credit_updates: Vec::new(),
         }));
 
-        let qcfg = crate::QueueConfig {
+        let qcfg = arcbox_virtio_core::QueueConfig {
             desc_addr: desc_addr as u64,
             avail_addr: avail_addr as u64,
             used_addr: used_addr as u64,
@@ -3072,7 +3092,7 @@ mod tests {
             removed: Vec::new(),
         }));
 
-        let qcfg = crate::QueueConfig {
+        let qcfg = arcbox_virtio_core::QueueConfig {
             desc_addr: desc_addr as u64,
             avail_addr: avail_addr as u64,
             used_addr: used_addr as u64,

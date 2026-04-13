@@ -17,7 +17,7 @@ use std::os::unix::io::FromRawFd;
 use std::os::unix::io::{AsRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::vsock::VsockHostConnections;
+use crate::VsockHostConnections;
 
 // ============================================================================
 // RxOps: Per-connection pending RX operation bitmask

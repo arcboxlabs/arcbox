@@ -603,7 +603,10 @@ dependencies = [
  "arcbox-virtio-blk",
  "arcbox-virtio-console",
  "arcbox-virtio-core",
+ "arcbox-virtio-fs",
+ "arcbox-virtio-net",
  "arcbox-virtio-rng",
+ "arcbox-virtio-vsock",
  "async-trait",
  "bytes",
  "getrandom 0.2.17",
@@ -650,11 +653,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "arcbox-virtio-fs"
+version = "0.3.21"
+dependencies = [
+ "arcbox-virtio-core",
+ "bytes",
+ "libc",
+ "rayon",
+ "tracing",
+]
+
+[[package]]
+name = "arcbox-virtio-net"
+version = "0.3.21"
+dependencies = [
+ "arcbox-virtio-core",
+ "async-trait",
+ "libc",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "arcbox-virtio-rng"
 version = "0.3.21"
 dependencies = [
  "arcbox-virtio-core",
  "getrandom 0.2.17",
+ "tracing",
+]
+
+[[package]]
+name = "arcbox-virtio-vsock"
+version = "0.3.21"
+dependencies = [
+ "arcbox-virtio-core",
+ "libc",
+ "tempfile",
  "tracing",
 ]
 
