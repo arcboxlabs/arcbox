@@ -127,9 +127,16 @@ pub struct DeviceManager {
     /// methods (`handle_tx`, `poll_rx`) without dyn dispatch. Host fd and
     /// TX avail-index cursor live on the device itself via `NetPort`.
     bridge_net: Option<Arc<Mutex<arcbox_virtio::net::VirtioNet>>>,
-    /// Host-side vsock connection manager (HV backend only).
+    /// Host-side vsock connection manager (HV backend only). Same `Arc`
+    /// is also bound onto the `vsock` typed shortcut's device via
+    /// `bind_connections`, so the device's `process_queue` can read it
+    /// directly without `QueueConfig` plumbing.
     vsock_connections:
         std::sync::Arc<std::sync::Mutex<crate::vsock_manager::VsockConnectionManager>>,
+    /// Typed handle to the VirtioVsock device. Shares the same `Arc`
+    /// stored in `devices`. Used by `set_vsock` to bind the device's
+    /// `DeviceCtx` and connection manager at registration time.
+    vsock: Option<Arc<Mutex<arcbox_virtio::vsock::VirtioVsock>>>,
     /// Per-block-device async I/O worker handles. When present, QUEUE_NOTIFY
     /// for block devices is dispatched to the worker instead of processing
     /// synchronously on the vCPU thread.
@@ -210,6 +217,7 @@ impl DeviceManager {
             vsock_connections: std::sync::Arc::new(std::sync::Mutex::new(
                 crate::vsock_manager::VsockConnectionManager::new(),
             )),
+            vsock: None,
             blk_workers: HashMap::new(),
             net_rx_worker_handle: Mutex::new(None),
             net_rx_irq_callback: None,
@@ -310,6 +318,33 @@ impl DeviceManager {
     /// Returns the typed handle to the primary VirtioNet if one was registered.
     pub fn primary_net(&self) -> Option<&Arc<Mutex<arcbox_virtio::net::VirtioNet>>> {
         self.primary_net.as_ref()
+    }
+
+    /// Registers a typed handle to the VirtioVsock device and binds its
+    /// `DeviceCtx` plus the host-side connection manager. Must be called
+    /// after `set_guest_memory` + `set_irq_callback`.
+    pub fn set_vsock(
+        &mut self,
+        device_id: DeviceId,
+        device: Arc<Mutex<arcbox_virtio::vsock::VirtioVsock>>,
+    ) {
+        if let Some(ctx) = self.build_device_ctx(device_id) {
+            if let Ok(mut dev) = device.lock() {
+                dev.bind_ctx(ctx);
+                dev.bind_connections(self.vsock_connections.clone());
+            }
+        } else {
+            tracing::warn!(
+                "set_vsock: DeviceCtx not built (guest_mem or irq_callback missing) — \
+                 vsock TX hot path will fall back to QueueConfig plumbing"
+            );
+        }
+        self.vsock = Some(device);
+    }
+
+    /// Returns the typed handle to the VirtioVsock device if registered.
+    pub fn vsock(&self) -> Option<&Arc<Mutex<arcbox_virtio::vsock::VirtioVsock>>> {
+        self.vsock.as_ref()
     }
 
     /// Registers a typed handle to the bridge VirtioNet (NIC2) and binds
@@ -1222,7 +1257,6 @@ impl DeviceManager {
                                     size: mmio_state.queue_num[qi],
                                     ready: mmio_state.queue_ready[qi],
                                     gpa_base: self.guest_ram_gpa,
-                                    vsock_connections: Some(self.vsock_connections.clone()),
                                 }
                             } else {
                                 QueueConfig::default()
@@ -1908,7 +1942,6 @@ impl DeviceManager {
                 size: mmio.queue_num[qi],
                 ready: true,
                 gpa_base: self.guest_ram_gpa,
-                vsock_connections: None,
             }
         };
 
@@ -2035,7 +2068,6 @@ impl DeviceManager {
                 size: mmio.queue_num[txi],
                 ready: true,
                 gpa_base: self.guest_ram_gpa,
-                vsock_connections: Some(self.vsock_connections.clone()),
             })
         } else {
             None

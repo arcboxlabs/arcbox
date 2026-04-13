@@ -58,6 +58,15 @@ pub struct VirtioVsock {
     last_avail_idx_tx: usize,
     /// Last processed avail index for RX queue (guest-memory path).
     last_avail_idx_rx: usize,
+    /// Guest memory + IRQ context. Bound at registration time on the
+    /// HV backend; remains `None` on the VZ backend (which does not use
+    /// the custom-VMM `poll_rx_injection` path).
+    ctx: Option<crate::DeviceCtx>,
+    /// Host-side connection manager. Owned here so the device's TX path
+    /// (`process_queue` for queue 1) and RX-injection path
+    /// (`poll_rx_injection`) can both reach it without the VMM having to
+    /// thread it through `QueueConfig`.
+    conns: Option<Arc<Mutex<dyn VsockHostConnections>>>,
 }
 
 impl VirtioVsock {
@@ -90,6 +99,8 @@ impl VirtioVsock {
             host_connections: HashMap::new(),
             last_avail_idx_tx: 0,
             last_avail_idx_rx: 0,
+            ctx: None,
+            conns: None,
         }
     }
 
@@ -110,12 +121,31 @@ impl VirtioVsock {
             host_connections: HashMap::new(),
             last_avail_idx_tx: 0,
             last_avail_idx_rx: 0,
+            ctx: None,
+            conns: None,
         }
     }
 
     /// Sets the backend.
     pub fn set_backend<B: VsockBackend + 'static>(&mut self, backend: B) {
         self.backend = Some(Arc::new(Mutex::new(backend)));
+    }
+
+    /// Binds the device's `DeviceCtx` (guest memory + IRQ trigger).
+    /// Required by the custom-VMM `poll_rx_injection` hot path.
+    pub fn bind_ctx(&mut self, ctx: crate::DeviceCtx) {
+        self.ctx = Some(ctx);
+    }
+
+    /// Binds the host-side connection manager. Required by the
+    /// `poll_rx_injection` hot path and by `process_queue(1, ...)` (TX).
+    pub fn bind_connections(&mut self, conns: Arc<Mutex<dyn VsockHostConnections>>) {
+        self.conns = Some(conns);
+    }
+
+    /// Returns a clone of the bound connection manager Arc, if any.
+    pub fn connections(&self) -> Option<Arc<Mutex<dyn VsockHostConnections>>> {
+        self.conns.clone()
     }
 
     /// Returns the guest CID.
@@ -808,7 +838,7 @@ impl VirtioDevice for VirtioVsock {
                     );
 
                     let payload = &packet_data[VsockHeader::SIZE..];
-                    if let Some(ref conns_arc) = queue_config.vsock_connections {
+                    if let Some(conns_arc) = self.conns.clone() {
                         if let Ok(mut conns) = conns_arc.lock() {
                             self.handle_tx_packet_with_fds(&hdr, payload, Some(&mut *conns));
                         }
@@ -2471,8 +2501,8 @@ mod tests {
             size: q_size as u16,
             ready: true,
             gpa_base: 0,
-            vsock_connections: Some(mock.clone()),
         };
+        vsock.bind_connections(mock.clone());
 
         let completions =
             <VirtioVsock as VirtioDevice>::process_queue(&mut vsock, 1, &mut memory, &qcfg)
@@ -2554,8 +2584,8 @@ mod tests {
             size: q_size as u16,
             ready: true,
             gpa_base: 0,
-            vsock_connections: Some(mock.clone()),
         };
+        vsock.bind_connections(mock.clone());
 
         let completions =
             <VirtioVsock as VirtioDevice>::process_queue(&mut vsock, 1, &mut memory, &qcfg)

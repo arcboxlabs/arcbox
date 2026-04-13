@@ -690,13 +690,18 @@ impl Vmm {
                 guest_cid: self.config.guest_cid.unwrap_or(3) as u64,
             };
             let vsock_dev = arcbox_virtio::vsock::VirtioVsock::new(vsock_config);
-            let (_vsock_id, _vsock_arc) = device_manager.register_virtio_device(
+            let (vsock_id, vsock_arc) = device_manager.register_virtio_device(
                 DeviceType::VirtioVsock,
                 "virtio-vsock",
                 vsock_dev,
                 &mut memory_manager,
                 &irq_chip,
             )?;
+            // Bind DeviceCtx + connection manager so the device's
+            // `process_queue` reaches them directly without QueueConfig
+            // plumbing, and the future `poll_rx_injection` migration has
+            // its prerequisites in place.
+            device_manager.set_vsock(vsock_id, vsock_arc);
         }
 
         for dev_info in device_manager.iter() {
