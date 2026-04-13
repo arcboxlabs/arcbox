@@ -642,13 +642,17 @@ impl Vmm {
             };
             let mut net_dev = arcbox_virtio::net::VirtioNet::new(net_config);
             net_dev.enable_tso_features();
-            let (primary_net_id, _primary_net_arc) = device_manager.register_virtio_device(
+            let (primary_net_id, primary_net_arc) = device_manager.register_virtio_device(
                 DeviceType::VirtioNet,
                 "virtio-net",
                 net_dev,
                 &mut memory_manager,
                 &irq_chip,
             )?;
+            // Hand DeviceManager the typed handle so QUEUE_NOTIFY dispatch
+            // can reach the concrete VirtioNet's `drain_tx_queue` without
+            // a HashMap lookup + dyn dispatch.
+            device_manager.set_primary_net(primary_net_id, primary_net_arc);
 
             // Set up the network datapath (reuses VZ path's entire stack).
             self.create_hv_network_datapath(&mut device_manager, primary_net_id)?;

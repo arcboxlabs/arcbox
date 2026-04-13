@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::os::unix::io::AsRawFd;
 use std::sync::{Arc, Mutex, RwLock};
 
+#[cfg(test)]
 use arcbox_virtio::net::VirtioNetHeader;
 use arcbox_virtio::{DeviceStatus, QueueConfig, VirtioDevice};
 
@@ -105,19 +106,18 @@ pub struct DeviceManager {
     guest_ram_gpa: u64,
     /// IRQ trigger callback for injecting interrupts into the guest.
     irq_callback: Option<DeviceIrqCallback>,
-    /// Network host fd for HV path (NIC1 — primary, outbound traffic).
-    /// Data read from this fd is injected into the VirtioNet RX queue;
-    /// data extracted from TX queue is written here.
-    net_host_fd: Option<std::os::unix::io::RawFd>,
-    /// Last processed avail index for VirtioNet TX queue (NIC1).
-    /// VirtIO queue indices are u16 and wrap at 65536; AtomicU16 ensures
-    /// comparison logic handles wrap correctly.
-    net_last_avail_tx: std::sync::atomic::AtomicU16,
-    /// DeviceId of the primary VirtioNet (NIC1) for targeted IRQ delivery.
-    /// Required because `raise_interrupt_for(DeviceType::VirtioNet)` uses
-    /// HashMap iteration which is non-deterministic — with two VirtioNet
-    /// devices it could match the bridge NIC instead of the primary NIC.
+    /// DeviceId of the primary VirtioNet (NIC1) for targeted IRQ delivery
+    /// and worker-spawn dispatch. Required because
+    /// `raise_interrupt_for(DeviceType::VirtioNet)` uses HashMap iteration
+    /// which is non-deterministic — with two VirtioNet devices it could
+    /// match the bridge NIC instead of the primary NIC.
     primary_net_device_id: Option<DeviceId>,
+    /// Typed handle to the primary VirtioNet (NIC1 — NAT datapath).
+    /// Shares the same `Arc<Mutex<_>>` as the generic entry in `devices`;
+    /// exposes the concrete device so QUEUE_NOTIFY dispatch can call
+    /// inherent hot-path methods without dyn dispatch. Host fd and TX
+    /// avail-index cursor live on the device via `NetPort`.
+    primary_net: Option<Arc<Mutex<arcbox_virtio::net::VirtioNet>>>,
     /// DeviceId of the bridge VirtioNet so QUEUE_NOTIFY can dispatch correctly
     /// to `bridge_net` without a HashMap lookup.
     bridge_net_device_id: Option<DeviceId>,
@@ -167,18 +167,17 @@ pub struct DeviceManager {
 //   vCPU thread's exclusive lock or the per-device `mmio_state`/`virtio_dev`
 //   lock. No pointer arithmetic escapes the struct.
 //
-// * `net_host_fd: Option<RawFd>` — plain fd, set once during initialization
-//   (before any worker spawns) and then only read. The matching `OwnedFd`
-//   lives in `net_host_fd_slot: Mutex<Option<i32>>` which governs
-//   transfer-of-ownership to spawned workers. Bridge NIC's host fd is
-//   owned by the bridge `VirtioNet`'s `NetPort`, not here.
+// * `net_host_fd_slot: Mutex<Option<i32>>` — transfer-of-ownership slot
+//   the DRIVER_OK handler uses to hand the primary NIC fd to the
+//   net-io worker. Set-once from `set_net_host_fd`. The live TX-path fd
+//   and TX cursor for each NIC live on its `VirtioNet::NetPort`, not on
+//   DeviceManager.
 //
-// * `net_last_avail_tx: AtomicU16` — lock-free, Acquire/Release ordered
-//   (see its load/store sites). Bridge NIC's TX cursor is on the bridge
-//   `VirtioNet`'s `NetPort`, not here.
-//
-// * `bridge_net: Option<Arc<Mutex<VirtioNet>>>` — typed shortcut; the
-//   same `Arc` is stored in the `devices` HashMap via type erasure.
+// * `primary_net` / `bridge_net: Option<Arc<Mutex<VirtioNet>>>` — typed
+//   shortcuts; the same `Arc` is stored in the `devices` HashMap via
+//   type erasure. Hot paths (`drain_tx_queue`, `poll_rx`) read the
+//   device's `NetPort` (OnceLock-guarded) and atomics directly — no
+//   mutex contention on the TX fast path.
 //
 // * `vsock_connections`, `blk_workers`, `net_rx_worker_handle`,
 //   `rx_inject_channel`, `inline_conn_channel` — each uses its own
@@ -204,9 +203,8 @@ impl DeviceManager {
             guest_ram_size: 0,
             guest_ram_gpa: 0,
             irq_callback: None,
-            net_host_fd: None,
-            net_last_avail_tx: std::sync::atomic::AtomicU16::new(0),
             primary_net_device_id: None,
+            primary_net: None,
             bridge_net_device_id: None,
             bridge_net: None,
             vsock_connections: std::sync::Arc::new(std::sync::Mutex::new(
@@ -251,20 +249,67 @@ impl DeviceManager {
     }
 
     /// Sets the host-side network fd for HV path frame exchange (NIC1).
-    /// Also copies the fd into `net_host_fd_slot` so the DRIVER_OK handler
-    /// can take ownership for the net-io worker thread.
+    ///
+    /// The fd is (a) bound onto the primary `VirtioNet` itself via
+    /// `NetPort` so the device's TX hot path can write to it directly,
+    /// and (b) copied into `net_host_fd_slot` so the DRIVER_OK handler
+    /// can still take ownership for the net-io worker thread.
     pub fn set_net_host_fd(&mut self, fd: std::os::unix::io::RawFd, device_id: DeviceId) {
-        self.net_host_fd = Some(fd);
+        use arcbox_virtio::net::NetPort;
         self.primary_net_device_id = Some(device_id);
         *self
             .net_host_fd_slot
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(fd);
+
+        if let Some(primary) = self.primary_net.as_ref() {
+            let port = NetPort {
+                host_fd: fd,
+                last_avail_tx: std::sync::atomic::AtomicU16::new(0),
+            };
+            if let Ok(dev) = primary.lock() {
+                if dev.bind_port(port).is_err() {
+                    tracing::warn!("primary_net port already bound — ignoring rebind");
+                }
+            }
+        } else {
+            tracing::error!("set_net_host_fd called before set_primary_net");
+        }
+    }
+
+    /// Registers a typed handle to the primary VirtioNet (NIC1) and binds
+    /// its `DeviceCtx`. Must be called after `set_guest_memory` +
+    /// `set_irq_callback` so both ingredients exist, and before
+    /// `set_net_host_fd` so the fd binding can reach the concrete device.
+    pub fn set_primary_net(
+        &mut self,
+        device_id: DeviceId,
+        device: Arc<Mutex<arcbox_virtio::net::VirtioNet>>,
+    ) {
+        self.primary_net_device_id = Some(device_id);
+
+        if let Some(ctx) = self.build_device_ctx(device_id) {
+            if let Ok(mut dev) = device.lock() {
+                dev.bind_ctx(ctx);
+            }
+        } else {
+            tracing::warn!(
+                "set_primary_net: DeviceCtx not built (guest_mem or irq_callback missing) — \
+                 primary NIC hot paths will be no-ops"
+            );
+        }
+
+        self.primary_net = Some(device);
     }
 
     /// Returns the primary NIC device ID (for targeted IRQ delivery).
     pub fn primary_net_device_id(&self) -> Option<DeviceId> {
         self.primary_net_device_id
+    }
+
+    /// Returns the typed handle to the primary VirtioNet if one was registered.
+    pub fn primary_net(&self) -> Option<&Arc<Mutex<arcbox_virtio::net::VirtioNet>>> {
+        self.primary_net.as_ref()
     }
 
     /// Registers a typed handle to the bridge VirtioNet (NIC2) and binds
@@ -1218,33 +1263,32 @@ impl DeviceManager {
                             }
                             // VirtioNet TX (queue 1): extract ethernet frames
                             // from guest memory and write to the network host fd.
-                            // This bypasses the generic process_queue.
-                            // Dispatch to correct fd: NIC1 (net_host_fd) or NIC2 (bridge).
+                            // This bypasses the generic process_queue — the
+                            // concrete `VirtioNet` owns its fd + TX cursor via
+                            // `NetPort` and implements the hot path itself.
                             else if device.info.device_type == DeviceType::VirtioNet
                                 && queue_idx == 1
-                                && (self.net_host_fd.is_some() || self.bridge_net.is_some())
+                                && (self.primary_net.is_some() || self.bridge_net.is_some())
                             {
                                 let is_bridge = self
                                     .bridge_net_device_id
                                     .is_some_and(|bid| bid == device_id);
-                                let net_completions = if is_bridge {
-                                    // Bridge NIC TX lives on the device itself
-                                    // now; DeviceManager just dispatches.
-                                    match self.bridge_net.as_ref() {
-                                        Some(arc) => arc
-                                            .lock()
-                                            .map(|d| {
-                                                d.drain_tx_queue(
-                                                    &qcfg,
-                                                    finalize_virtio_net_checksum,
-                                                )
-                                            })
-                                            .unwrap_or_default(),
-                                        None => Vec::new(),
-                                    }
+                                let typed = if is_bridge {
+                                    self.bridge_net.as_ref()
                                 } else {
-                                    self.handle_net_tx(guest_mem, &qcfg)
+                                    self.primary_net.as_ref()
                                 };
+                                let net_completions = match typed {
+                                    Some(arc) => arc
+                                        .lock()
+                                        .map(|d| {
+                                            d.drain_tx_queue(&qcfg, finalize_virtio_net_checksum)
+                                        })
+                                        .unwrap_or_default(),
+                                    None => Vec::new(),
+                                };
+                                let _ = guest_mem; // unused on this branch now
+
                                 if !net_completions.is_empty() {
                                     // Update used ring for completed TX descriptors.
                                     // Translate GPAs to slice offsets (checked).
@@ -2272,322 +2316,6 @@ impl DeviceManager {
         }
 
         injected
-    }
-
-    /// Polls the network host fd for incoming frames and injects them into
-    /// the VirtioNet RX queue (queue 0). Returns true if any frame was injected.
-    ///
-    /// Each injected frame is prefixed with a 12-byte virtio-net header (all zeros
-    /// for simple passthrough — no checksum offload or GSO on the RX path yet).
-    pub fn poll_net_rx(&self) -> bool {
-        let Some(net_fd) = self.net_host_fd else {
-            return false;
-        };
-        let (Some(ram_base), ram_size) = (self.guest_ram_base, self.guest_ram_size) else {
-            return false;
-        };
-        let gpa_base = self.guest_ram_gpa as usize;
-
-        // Find the primary VirtioNet device MMIO state (by stored ID, not
-        // HashMap scan, to avoid hitting the bridge NIC non-deterministically).
-        let primary_id = match self.primary_net_device_id {
-            Some(id) => id,
-            None => return false,
-        };
-        let mmio_arc = self
-            .devices
-            .get(&primary_id)
-            .and_then(|d| d.mmio_state.as_ref());
-        let Some(mmio_arc) = mmio_arc else {
-            return false;
-        };
-        let Ok(mmio) = mmio_arc.read() else {
-            return false;
-        };
-
-        // RX = queue 0 for VirtioNet.
-        let qi = 0usize;
-        if qi >= 8 || !mmio.queue_ready[qi] || mmio.queue_num[qi] == 0 {
-            return false;
-        }
-        // Translate GPAs to slice offsets (checked against ram base).
-        let Some(desc_addr) = (mmio.queue_desc[qi] as usize).checked_sub(gpa_base) else {
-            return false;
-        };
-        let Some(avail_addr) = (mmio.queue_driver[qi] as usize).checked_sub(gpa_base) else {
-            return false;
-        };
-        let Some(used_addr) = (mmio.queue_device[qi] as usize).checked_sub(gpa_base) else {
-            return false;
-        };
-        let q_size = mmio.queue_num[qi] as usize;
-
-        drop(mmio); // Release lock before accessing guest memory.
-
-        // SAFETY: `ram_base` is the host mapping returned by
-        // Virtualization.framework and is valid for `ram_size` bytes.
-        let guest_mem = unsafe { std::slice::from_raw_parts_mut(ram_base, ram_size) };
-
-        if avail_addr + 4 > guest_mem.len() {
-            return false;
-        }
-        let used_idx_off = used_addr + 2;
-        let mut used_idx =
-            u16::from_le_bytes([guest_mem[used_idx_off], guest_mem[used_idx_off + 1]]);
-
-        let mut injected = false;
-
-        // Read up to 64 frames per poll to avoid starving other devices.
-        for _ in 0..64 {
-            // Re-read avail_idx each iteration so newly posted buffers are
-            // picked up without waiting for the next poll cycle.
-            std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
-            let avail_idx =
-                u16::from_le_bytes([guest_mem[avail_addr + 2], guest_mem[avail_addr + 3]]);
-            if used_idx == avail_idx {
-                break; // No more RX descriptors available.
-            }
-
-            // Non-blocking read from the network host fd.
-            #[allow(clippy::large_stack_arrays)]
-            let mut frame_buf = [0u8; 65536]; // Max jumbo + virtio-net header
-            // SAFETY: `net_fd` is owned by the DeviceManager via `net_host_fd`
-            // and kept live for the DM's lifetime. `frame_buf` is a valid
-            // mutable slice for `frame_buf.len()` bytes. The fd is marked
-            // non-blocking during socketpair setup, so read returns promptly.
-            let n = unsafe {
-                libc::read(
-                    net_fd,
-                    frame_buf.as_mut_ptr().cast::<libc::c_void>(),
-                    frame_buf.len(),
-                )
-            };
-            if n <= 0 {
-                break; // No data or error (EAGAIN for non-blocking).
-            }
-            let frame = &frame_buf[..n as usize];
-
-            // Build packet: 12-byte virtio-net header + ethernet frame.
-            // With MRG_RXBUF, num_buffers (bytes 10-11) must be 1.
-            let mut virtio_net_hdr = [0u8; 12];
-            virtio_net_hdr[10..12].copy_from_slice(&1u16.to_le_bytes());
-            // GSO for large TCP/IPv4 frames.
-            if frame.len() > 1500
-                && frame.len() >= 54
-                && frame[12] == 0x08
-                && frame[13] == 0x00
-                && frame[23] == 6
-                && frame[14] & 0x0F == 5
-            {
-                virtio_net_hdr[0] = 1; // NEEDS_CSUM
-                virtio_net_hdr[1] = 1; // GSO_TCPV4
-                virtio_net_hdr[2..4].copy_from_slice(&34u16.to_le_bytes());
-                virtio_net_hdr[4..6].copy_from_slice(&1460u16.to_le_bytes());
-                virtio_net_hdr[6..8].copy_from_slice(&34u16.to_le_bytes());
-                virtio_net_hdr[8..10].copy_from_slice(&16u16.to_le_bytes());
-            }
-            let total_len = virtio_net_hdr.len() + frame.len();
-
-            // Pop an available RX descriptor.
-            let ring_off = avail_addr + 4 + 2 * ((used_idx as usize) % q_size);
-            if ring_off + 2 > guest_mem.len() {
-                break;
-            }
-            let head_idx =
-                u16::from_le_bytes([guest_mem[ring_off], guest_mem[ring_off + 1]]) as usize;
-
-            // Walk descriptor chain and write the packet.
-            let mut written = 0;
-            let mut idx = head_idx;
-            let packet_data: Vec<u8> = [&virtio_net_hdr[..], frame].concat();
-            for _ in 0..q_size {
-                let d_off = desc_addr + idx * 16;
-                if d_off + 16 > guest_mem.len() {
-                    break;
-                }
-                let addr_gpa =
-                    u64::from_le_bytes(guest_mem[d_off..d_off + 8].try_into().unwrap()) as usize;
-                let len = u32::from_le_bytes(guest_mem[d_off + 8..d_off + 12].try_into().unwrap())
-                    as usize;
-                let flags =
-                    u16::from_le_bytes(guest_mem[d_off + 12..d_off + 14].try_into().unwrap());
-                let next =
-                    u16::from_le_bytes(guest_mem[d_off + 14..d_off + 16].try_into().unwrap());
-                let Some(addr) = addr_gpa.checked_sub(gpa_base) else {
-                    continue;
-                };
-
-                // RX descriptors are device-writable.
-                if flags & 2 != 0 && addr + len <= guest_mem.len() {
-                    let remaining = total_len.saturating_sub(written);
-                    let to_write = remaining.min(len);
-                    guest_mem[addr..addr + to_write]
-                        .copy_from_slice(&packet_data[written..written + to_write]);
-                    written += to_write;
-                }
-
-                if flags & 1 == 0 || written >= total_len {
-                    break;
-                }
-                idx = next as usize;
-            }
-
-            if written == 0 {
-                break;
-            }
-
-            // Update used ring.
-            let used_entry = used_addr + 4 + ((used_idx as usize) % q_size) * 8;
-            if used_entry + 8 <= guest_mem.len() {
-                guest_mem[used_entry..used_entry + 4]
-                    .copy_from_slice(&(head_idx as u32).to_le_bytes());
-                guest_mem[used_entry + 4..used_entry + 8]
-                    .copy_from_slice(&(written as u32).to_le_bytes());
-                std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
-                used_idx = used_idx.wrapping_add(1);
-                guest_mem[used_idx_off..used_idx_off + 2].copy_from_slice(&used_idx.to_le_bytes());
-            }
-
-            injected = true;
-        }
-
-        // Write avail_event in the used ring (VIRTIO_F_EVENT_IDX) to
-        // request kicks from the guest for new RX buffer submissions.
-        if injected {
-            let avail_idx_now =
-                u16::from_le_bytes([guest_mem[avail_addr + 2], guest_mem[avail_addr + 3]]);
-            let avail_event_off = used_addr + 4 + q_size * 8;
-            if avail_event_off + 2 <= guest_mem.len() {
-                guest_mem[avail_event_off..avail_event_off + 2]
-                    .copy_from_slice(&avail_idx_now.to_le_bytes());
-            }
-        }
-
-        injected
-    }
-
-    /// Extracts ethernet frames from VirtioNet TX queue descriptors and writes
-    /// them to the network host fd. Returns (head_idx, total_len) completions.
-    fn handle_net_tx(&self, memory: &[u8], qcfg: &QueueConfig) -> Vec<(u16, u32)> {
-        let Some(net_fd) = self.net_host_fd else {
-            return Vec::new();
-        };
-        if !qcfg.ready || qcfg.size == 0 {
-            return Vec::new();
-        }
-
-        // Translate GPAs to slice offsets (checked against ram base).
-        let gpa_base = qcfg.gpa_base as usize;
-        let Some(desc_addr) = (qcfg.desc_addr as usize).checked_sub(gpa_base) else {
-            tracing::warn!(
-                "handle_net_tx: desc GPA {:#x} below ram base {:#x}",
-                qcfg.desc_addr,
-                gpa_base
-            );
-            return Vec::new();
-        };
-        let Some(avail_addr) = (qcfg.avail_addr as usize).checked_sub(gpa_base) else {
-            tracing::warn!(
-                "handle_net_tx: avail GPA {:#x} below ram base {:#x}",
-                qcfg.avail_addr,
-                gpa_base
-            );
-            return Vec::new();
-        };
-        let q_size = qcfg.size as usize;
-
-        if avail_addr + 4 > memory.len() {
-            return Vec::new();
-        }
-        let avail_idx = u16::from_le_bytes([memory[avail_addr + 2], memory[avail_addr + 3]]);
-
-        let mut current_avail = self
-            .net_last_avail_tx
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let mut completions = Vec::new();
-
-        while current_avail != avail_idx {
-            let ring_off = avail_addr + 4 + 2 * ((current_avail as usize) % q_size);
-            if ring_off + 2 > memory.len() {
-                break;
-            }
-            let head_idx = u16::from_le_bytes([memory[ring_off], memory[ring_off + 1]]) as usize;
-
-            // Walk descriptor chain to extract the full packet (virtio-net header + frame).
-            let mut packet_data = Vec::new();
-            let mut idx = head_idx;
-            for _ in 0..q_size {
-                let d_off = desc_addr + idx * 16;
-                if d_off + 16 > memory.len() {
-                    break;
-                }
-                let addr = match (u64::from_le_bytes(memory[d_off..d_off + 8].try_into().unwrap())
-                    as usize)
-                    .checked_sub(gpa_base)
-                {
-                    Some(a) => a,
-                    None => continue,
-                };
-                let len =
-                    u32::from_le_bytes(memory[d_off + 8..d_off + 12].try_into().unwrap()) as usize;
-                let flags = u16::from_le_bytes(memory[d_off + 12..d_off + 14].try_into().unwrap());
-                let next = u16::from_le_bytes(memory[d_off + 14..d_off + 16].try_into().unwrap());
-
-                // TX descriptors are read-only (guest→host).
-                if flags & 2 == 0 && addr + len <= memory.len() {
-                    packet_data.extend_from_slice(&memory[addr..addr + len]);
-                }
-
-                if flags & 1 == 0 {
-                    break;
-                }
-                idx = next as usize;
-            }
-
-            let total_len = packet_data.len() as u32;
-            finalize_virtio_net_checksum(&mut packet_data);
-
-            // Strip the virtio-net header after applying checksum offload.
-            if packet_data.len() > VirtioNetHeader::SIZE {
-                let frame = &packet_data[VirtioNetHeader::SIZE..];
-                // Write raw ethernet frame to the network datapath fd.
-                // SAFETY: `net_fd` is owned by the DeviceManager and live
-                // for the call. `frame` is a valid byte slice borrowed from
-                // `packet_data` for the duration of the write.
-                let n = unsafe {
-                    libc::write(net_fd, frame.as_ptr().cast::<libc::c_void>(), frame.len())
-                };
-                if n < 0 {
-                    let err = std::io::Error::last_os_error();
-                    if err.raw_os_error() != Some(libc::EAGAIN) {
-                        tracing::warn!("net TX write failed: {err}");
-                    }
-                }
-            }
-
-            completions.push((head_idx as u16, total_len));
-            current_avail = current_avail.wrapping_add(1);
-        }
-
-        self.net_last_avail_tx
-            .store(current_avail, std::sync::atomic::Ordering::Relaxed);
-        completions
-    }
-
-    /// Writes a raw ethernet frame to the network host fd (for VirtioNet TX).
-    /// Called from the QUEUE_NOTIFY handler when the guest sends a packet.
-    pub fn write_net_tx_frame(&self, frame: &[u8]) {
-        if let Some(fd) = self.net_host_fd {
-            // SAFETY: `fd` is the live `net_host_fd` owned by this
-            // DeviceManager; `frame` is a valid caller-provided slice.
-            let n = unsafe { libc::write(fd, frame.as_ptr().cast::<libc::c_void>(), frame.len()) };
-            if n < 0 {
-                let err = std::io::Error::last_os_error();
-                if err.raw_os_error() != Some(libc::EAGAIN) {
-                    tracing::warn!("net TX write failed: {err}");
-                }
-            }
-        }
     }
 }
 
