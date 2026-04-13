@@ -1,10 +1,12 @@
-//! Device management for VMM.
+//! Device registry and MMIO dispatch for the custom VMM.
 //!
-//! This module provides device management including `VirtIO` MMIO transport.
-//!
-//! The device manager bridges between:
-//! - MMIO transport layer (`VirtioMmioState`) that handles guest MMIO accesses
-//! - `VirtIO` device implementations (`VirtioDevice`) from arcbox-virtio
+//! `DeviceManager` owns a registry of `RegisteredDevice` entries (one per
+//! virtio-mmio device) and routes guest MMIO accesses to the right
+//! `VirtioDevice` implementation. Per-device hot paths (TX descriptor
+//! drain, RX injection, vsock connection state) live on the device
+//! structs in `arcbox-virtio` itself; the manager only handles the
+//! transport-level dispatch and a few typed shortcuts (`primary_net`,
+//! `bridge_net`, `vsock`) for VMM-driven setup and bookkeeping.
 
 use std::collections::HashMap;
 use std::os::unix::io::AsRawFd;
@@ -180,11 +182,10 @@ pub struct DeviceManager {
 //   and TX cursor for each NIC live on its `VirtioNet::NetPort`, not on
 //   DeviceManager.
 //
-// * `primary_net` / `bridge_net: Option<Arc<Mutex<VirtioNet>>>` — typed
-//   shortcuts; the same `Arc` is stored in the `devices` HashMap via
-//   type erasure. Hot paths (`drain_tx_queue`, `poll_rx`) read the
-//   device's `NetPort` (OnceLock-guarded) and atomics directly — no
-//   mutex contention on the TX fast path.
+// * `primary_net` / `bridge_net` / `vsock: Option<Arc<Mutex<...>>>` —
+//   typed shortcuts; the same `Arc` is stored in the `devices` HashMap
+//   via type erasure. Hot paths read OnceLock-guarded `NetPort` and
+//   atomics directly — no mutex contention on the TX fast path.
 //
 // * `vsock_connections`, `blk_workers`, `net_rx_worker_handle`,
 //   `rx_inject_channel`, `inline_conn_channel` — each uses its own
