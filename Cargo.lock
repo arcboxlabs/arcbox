@@ -600,6 +600,7 @@ version = "0.3.21"
 dependencies = [
  "arcbox-error",
  "arcbox-hypervisor",
+ "arcbox-virtio-core",
  "async-trait",
  "bytes",
  "getrandom 0.2.17",
@@ -608,6 +609,16 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tracing",
+ "virtio-bindings",
+]
+
+[[package]]
+name = "arcbox-virtio-core"
+version = "0.3.21"
+dependencies = [
+ "arcbox-error",
+ "thiserror",
  "tracing",
  "virtio-bindings",
 ]

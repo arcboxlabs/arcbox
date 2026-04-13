@@ -19,6 +19,7 @@ members = [
     "virt/arcbox-hypervisor",
     "virt/arcbox-vmm",
     "virt/arcbox-virtio",
+    "virt/arcbox-virtio-core",
     "virt/arcbox-vm",
     "virt/arcbox-fs",
     "virt/arcbox-net",
@@ -185,6 +186,7 @@ arcbox-vz = { version = "0.3.21", path = "virt/arcbox-vz" } # x-release-please-v
 arcbox-hypervisor = { version = "0.3.21", path = "virt/arcbox-hypervisor" } # x-release-please-version
 arcbox-vmm = { version = "0.3.21", path = "virt/arcbox-vmm" } # x-release-please-version
 arcbox-virtio = { version = "0.3.21", path = "virt/arcbox-virtio" } # x-release-please-version
+arcbox-virtio-core = { version = "0.3.21", path = "virt/arcbox-virtio-core" } # x-release-please-version
 arcbox-vm = { version = "0.3.21", path = "virt/arcbox-vm" } # x-release-please-version
 arcbox-fs = { version = "0.3.21", path = "virt/arcbox-fs" } # x-release-please-version
 arcbox-net = { version = "0.3.21", path = "virt/arcbox-net" } # x-release-please-version
