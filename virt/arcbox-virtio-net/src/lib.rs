@@ -8,7 +8,6 @@
 //! - `header`: `VirtioNetHeader` + `NetPacket` wire types
 //! - `backend`: `NetBackend` trait + cross-platform `LoopbackBackend`
 //! - `tap`: TAP backend (Linux only)
-//! - `socket`: UDP-tunnel backend (macOS only)
 //! - `device`: `VirtioNet` device + `VirtioDevice` impl
 
 #![allow(clippy::ptr_as_ptr)]
@@ -31,8 +30,6 @@ mod backend;
 mod config;
 mod device;
 mod header;
-#[cfg(target_os = "macos")]
-mod socket;
 #[cfg(target_os = "linux")]
 mod tap;
 
@@ -40,7 +37,5 @@ pub use backend::{LoopbackBackend, NetBackend};
 pub use config::{NetConfig, NetPort, NetStatus};
 pub use device::VirtioNet;
 pub use header::{NetPacket, VirtioNetHeader};
-#[cfg(target_os = "macos")]
-pub use socket::SocketBackend;
 #[cfg(target_os = "linux")]
 pub use tap::TapBackend;

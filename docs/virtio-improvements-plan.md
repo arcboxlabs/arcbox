@@ -94,18 +94,31 @@ Small, localised commits landing now.
 
 **Why it matters.** The in-process FUSE architecture wins on metadata ops by eliminating IPC round-trips (every FUSE_STAT saves a Unix-socket hop vs. a vhost-user daemon). But for large sequential reads, the win evaporates without DAX: we're still copying the file contents through the virtqueue, which is the same cost as vhost-user without DAX would pay. With DAX, the file's page cache is directly mapped into guest GPA and the guest reads with zero kernel involvement — that's the "90% native" path.
 
-**Locked fix.**
-- Allocate `MmapRegion` for the DAX window (configurable, default 1 GiB).
-- Register the region's GPA with Virtualization.framework via the HV backend.
-- Add `FUSE_SETUPMAPPING` / `FUSE_REMOVEMAPPING` opcode handlers.
-- Extend `VirtioDevice` with `fn shm_regions() -> &[SharedMemoryRegion]` (default empty).
-- Buffer pool per virtqueue thread for FUSE responses (eliminates per-request `Vec<u8>` alloc).
+### ✅ 4.1 Core DAX plumbing *(landed before this plan, verified during Phase 5 audit)*
+
+**What's already shipped.** On audit, Phase 4's correctness wiring is already in the tree from earlier work. Inventory of what exists today:
+
+- `HvDaxMapper` at `virt/arcbox-vmm/src/dax.rs:36` — `libc::mmap` of host files, `hv_vm_map` / `hv_vm_unmap` into guest IPA. Implements `arcbox_fs::DaxMapper`.
+- `DaxMapper` trait at `virt/arcbox-fs/src/lib.rs:56` — `setup_mapping` / `remove_mapping` with the exact signatures needed by the FUSE dispatcher.
+- `FuseOpcode::SetupMapping` / `RemoveMapping` at `virt/arcbox-fs/src/fuse.rs:91` with full request structs (`FuseSetupMappingIn`, `FuseRemoveMappingIn`, `FuseRemoveMappingOne`) and flag constants (`FUSE_SETUPMAPPING_FLAG_READ/WRITE`).
+- `FuseDispatcher::handle_setup_mapping` / `handle_remove_mapping` at `virt/arcbox-fs/src/dispatcher.rs:810,847` — look up the host fd from the FUSE file handle, dispatch to the mapper, translate errno. Returns `ENOSYS` when no mapper is wired (graceful degradation).
+- INIT-time negotiation at `dispatcher.rs:334`: when `FUSE_MAP_ALIGNMENT` is offered by the guest and a mapper is available, we set the flag + `map_alignment=12` (4 KiB pages).
+- MMIO transport SHM region registers at `virt/arcbox-vmm/src/device/mmio_state.rs:174-199`: `SHMSel` (0x0ac) + `SHMLen{Low,High}` (0x0b0/0x0b4) + `SHMBase{Low,High}` (0x0b8/0x0bc) per the VirtIO 1.2 MMIO layout — the guest discovers the DAX window by writing the region index to SHMSel and reading back base/len.
+- Per-share DAX window allocation + IPA registration at `virt/arcbox-vmm/src/vmm/darwin_hv/mod.rs:538-592`: each VirtioFS share gets its own non-overlapping DAX slice (`DAX_WINDOW_PER_SHARE`, default 128 MiB) published via `state.shm_regions.push(...)`.
+
+**Why the design deviates from the plan.** The original plan envisaged `fn shm_regions() -> &[SharedMemoryRegion]` on the `VirtioDevice` trait. The actual implementation stores the regions directly on `VirtioMmioState` during registration — simpler, same externally observable behavior, no trait extension needed. A trait method would have been useful if multiple devices wanted to report SHM regions, but only virtio-fs does, and the MMIO-state approach keeps the regions and the registers they're exposed through in the same module.
+
+### Still deferred
+
+- **End-to-end DAX test.** The plumbing is wired but unverified at the integration level. No test covers the full path: guest `mmap()` → `FUSE_SETUPMAPPING` → `hv_vm_map` → guest page fault → host file read. Verifying requires a Linux guest image with a virtiofs driver that negotiates `FUSE_MAP_ALIGNMENT` and an `arcbox-e2e-test` script that measures read throughput with/without DAX.
+- **FUSE response buffer pool.** The per-request `Vec<u8>` allocation for FUSE responses is still live. Measurable only under sustained metadata-op pressure (directory walks across millions of inodes); not on the critical path for bulk I/O.
+- **`MAX_DAX_WINDOW` tuning + config.** The 128 MiB per-share cap is a hardcoded constant. For workloads that mmap many multi-hundred-MB container layers, the window needs to be sized larger (1 GiB per the original plan) or dynamically re-mapped under pressure. Today the dispatcher's SETUPMAPPING calls will `ENOMEM` once the window fills.
 
 ---
 
 ## Phase 5 — blk async backend
 
-### ✅ 5.1 DISCARD + WRITE_ZEROES + dead-backend cleanup
+### ✅ 5.1 DISCARD + WRITE_ZEROES + dead-backend cleanup *(landed: 12aeb58)*
 
 **Why it mattered.** Container image layer teardown, `fstrim`, and freshly-sparse-file init all round-trip through virtio-blk's DISCARD / WRITE_ZEROES opcodes. The device returned `BlockStatus::Unsupp` for both, so the guest kernel saw the feature bits as absent and fell back to the slow path (explicit zero-filled writes for WRITE_ZEROES; silent no-ops for DISCARD that bypassed the spec's ability to let the device reclaim sparse storage). Alongside this, `AsyncFileBackend` was `#[allow(dead_code)]` because it reopened the backing file on every call — it had to go.
 
@@ -130,9 +143,26 @@ Small, localised commits landing now.
 
 ## Phase 6 — macOS `vmnet.framework` backend
 
-**Why the current code is wrong.** `SocketBackend` on P0 (Apple Silicon) routes packets through a UDP tunnel. Double encapsulation overhead plus the kernel UDP stack on both sides puts a hard ceiling well below line rate. `vmnet.framework` provides a shared-memory ring that bypasses the UDP stack entirely, which is the only viable path to ≥10 Gbps on macOS. The entitlements are already in the binary; this is pure engineering.
+**Why it matters.** A UDP-tunnel or userspace-NAT primary NIC plateaus well below line rate on Apple Silicon. `vmnet.framework` provides a kernel-level shared-memory ring (plus NAT/DHCP/DNS in-kernel), which is the only viable path to ≥10 Gbps on macOS. The `com.apple.vm.networking` entitlement is already in the binary.
 
-**Locked fix.** New backend implementing `NetBackend` over `vmnet.framework`: shared ring, `dispatch_queue` for readiness notifications, TSO/GSO offload delegated to the framework. Keep `SocketBackend` available behind a CLI flag for environments where the entitlement isn't granted.
+### ✅ 6.1 vmnet bridge NIC *(landed before this plan, verified during audit)*
+
+**What's already shipped.** The vmnet layer is substantially built:
+
+- FFI at `virt/arcbox-net/src/darwin/vmnet_ffi.rs` (556 lines): `vmnet_start_interface`, `vmnet_read`, `vmnet_write`, `vmnet_stop_interface`, event-callback setup, XPC dict helpers, full `VmnetCompletionBlock` ObjC layout.
+- High-level wrapper at `virt/arcbox-net/src/darwin/vmnet.rs` (848 lines): `Vmnet` + `VmnetConfig` with Shared / HostOnly / Bridged modes, DHCP range config, subnet mask, MTU/MAC/max_packet_size from the interface-start XPC reply.
+- `VmnetRelay` at `virt/arcbox-net/src/darwin/vmnet_relay.rs` (172 lines): bridges the blocking vmnet read/write API with an async socketpair. vmnet→guest runs on a blocking thread; guest→vmnet runs async via `AsyncFd`. Shared by the VZ and HV bridge NIC paths.
+- Bridge NIC wiring in HV at `virt/arcbox-vmm/src/vmm/darwin_hv/mod.rs:661-670` (gated on `#[cfg(feature = "vmnet")]`) plumbs the relay through `set_bridge_host_fd`.
+
+### Still deferred
+
+- **Primary NIC on vmnet.** HV path's primary NIC today is `NetworkDatapath` (smoltcp NAT + in-process DHCP/DNS + socket proxy at `arcbox-net/src/darwin/datapath_loop.rs`). Swapping to vmnet is a **policy** change: vmnet's kernel NAT means users lose fine-grained control over the guest's routing, port-forwarding has to go through `vmnet`'s built-in rules instead of arcbox's, and the entitlement is required at install time. The vmnet code itself is ready. What's missing is a CLI flag (e.g. `--net=vmnet` vs `--net=userspace`) and the corresponding `create_hv_vmnet_primary_nic` function that mirrors the existing bridge wiring but targets the primary NIC device ID.
+- **`NetBackend` trait adapter.** The current `Vmnet` type implements `arcbox-net::NetworkBackend`, not `arcbox-virtio-net::NetBackend`. This only matters if we want `VirtioNet::new(Box<dyn NetBackend>)` to accept vmnet directly (e.g. for tests or VZ path symmetry). The production HV path uses raw fd injection via `set_net_host_fd` and doesn't go through the trait.
+### ✅ 6.2 Dead `SocketBackend` removal
+
+**Why.** `virt/arcbox-virtio-net/src/socket.rs` had no call site outside its own unit tests. The original plan called for keeping it "behind a CLI flag for environments where the entitlement isn't granted", but the actual fallback for that scenario is `NetworkDatapath` (the current primary NIC backend), not a UDP-tunneled `NetBackend`.
+
+**What shipped.** Deleted `socket.rs`, removed the `mod socket` / `pub use socket::SocketBackend` entries from `virt/arcbox-virtio-net/src/lib.rs`, updated the module-layout docstring.
 
 ---
 
