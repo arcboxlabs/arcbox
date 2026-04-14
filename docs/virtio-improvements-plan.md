@@ -80,11 +80,13 @@ Small, localised commits landing now.
 
 **What shipped.** `NetOffloadFlags` struct + `configure_offload` / `set_vnet_hdr_sz` methods on `NetBackend` trait (default no-op). TAP backend translates `NetOffloadFlags` into `TUN_F_CSUM | TUN_F_TSO4 | TUN_F_TSO6 | TUN_F_TSO_ECN | TUN_F_UFO` and sets `TUNSETVNETHDRSZ = 12`. `VirtioNet::activate` reads `acked_features` and drives both calls.
 
-### 3.3 Zero-copy RX *(not started)*
+### ✅ 3.3 RX scratch buffer reuse *(landed: 18d0b92)*
 
-**Why it matters.** Every RX packet still goes backend-fd → `Vec<u8>` frame buffer → guest memory. Two copies per packet plus per-packet allocation dominates CPU on any sustained rate. With MRG_RXBUF in place the chain-walking scaffolding exists; the remaining work is having the backend's `recv` write directly into a pre-built scatter-gather descriptor list pointing at guest memory.
+**Why it mattered.** `poll_backend_batch` allocated a fresh `vec![0u8; 65536]` per packet. At sustained rates the allocator dominated CPU even though typical frames are ≤1500 bytes.
 
-**Locked fix.** Extend `NetBackend` with `recv_iovec(&mut [&mut [u8]])` returning bytes read across the slices; the loopback / socket backends can keep using the existing single-buffer `recv` path via a default impl that copies through an internal buffer (no zero-copy win, but no regression); TAP overrides with `readv`. `inject_rx_batch` builds the iovec from the first pre-popped chain directly into guest memory, stamps the header afterwards (num_buffers known after the read completes).
+**What shipped.** Persistent `rx_scratch: Box<[u8]>` on `VirtioNet`, allocated once in `new()` and reused on every `poll_backend_batch` call. Existing 62 tests still pass unchanged.
+
+**What's explicitly *not* shipped (intentional deferral).** True `readv`-direct-to-guest zero-copy via a `recv_iovec` trait method. The hot path for production RX on the custom VMM is the dedicated net-io worker at `virt/arcbox-vmm/src/net_rx_worker.rs`, which already uses a stack scratch buffer (no heap) and writes directly into guest memory via `GuestMemWriter::slice_mut`. The `poll_backend_batch` path is used by tests, the VZ backend, and the `rx_buffer` staging model; those don't justify the trait-level API restructure today. Revisit when a production caller wants the readv path — at which point the locked design (extend `NetBackend` with a default-copy `recv_iovec`, TAP-override with `readv`, call from `inject_rx_batch`) still applies.
 
 ---
 
