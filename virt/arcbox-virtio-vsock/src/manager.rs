@@ -94,9 +94,13 @@ pub const TX_BUFFER_SIZE: u32 = 64 * 1024;
 /// Bytes consumed since the last credit packet before we send a proactive
 /// `CREDIT_UPDATE`.
 ///
-/// 4 KB matches Firecracker's `CONN_CREDIT_UPDATE_THRESHOLD`. A coarser
-/// threshold (e.g. `TX_BUFFER_SIZE * 3/4 = 48 KB`) stalls the guest TX path
-/// on any burst between 4 KB and 48 KB.
+/// Chosen as 4 KB (one page) so the guest sees a refreshed fwd_cnt roughly
+/// every page of drained traffic. A coarser threshold (e.g. 3/4 of
+/// `TX_BUFFER_SIZE` = 48 KB) stalls the guest TX path on bursts between
+/// the window size and the threshold: the guest exhausts its view of our
+/// free buffer and blocks waiting for a credit packet we haven't sent yet.
+/// A finer threshold would just spam credit-only packets without reducing
+/// stall probability meaningfully.
 pub const CREDIT_UPDATE_THRESHOLD: u32 = 4096;
 
 /// A single host↔guest vsock connection.
