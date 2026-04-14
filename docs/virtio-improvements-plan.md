@@ -51,22 +51,18 @@ Small, localised commits landing now.
 - The existing zero-credit fallback now also marks the flag via `note_credit_request_sent` so the two paths don't spam duplicate requests.
 - Four unit tests cover below-half fires, above-half noop, dedup, and pending-clears-on-peer-response.
 
-### 2.2 Proper connection state machine
+### ✅ 2.2 Half-close SHUTDOWN handling *(landed: a52b896)*
 
-**Why `connect: bool` isn't enough.** Half-close (a guest sending `VSOCK_OP_SHUTDOWN` with `no_recv=1, no_send=0`) is a legitimate TCP-like state that lets the peer finish draining before teardown. The current binary flag treats half-close as RESET, dropping pending data. Per-connection timeouts are also impossible to express — a `LocalInit` that never receives a response sits forever.
+**Why it mattered.** `OP_SHUTDOWN` and `OP_RST` shared a match arm that called `remove_connection` regardless of the shutdown flags. A guest doing `shutdown(fd, SHUT_WR)` (half-close on its send side) destroyed the whole connection even though the guest's RX was still active — common TCP-style half-close was broken.
 
-**Locked fix.**
-```rust
-enum ConnState {
-    LocalInit,                                  // we sent REQUEST, waiting for RESPONSE
-    PeerInit,                                   // peer sent REQUEST, we'll send RESPONSE
-    Established,                                // bidirectional data flow
-    LocalClosed,                                // we sent SHUTDOWN, draining peer→us
-    PeerClosed { no_send: bool, no_recv: bool }, // peer sent SHUTDOWN with flags
-    Killed,                                     // RST sent/received, cleanup pending
-}
-```
-Plus `expiry: Option<Instant>` for LocalInit (2s) and Killed (2s) — drives a sweep that converts expired connections to `Killed` → `Cleanup`.
+**What shipped.**
+- `VSOCK_SHUTDOWN_F_RECEIVE` / `VSOCK_SHUTDOWN_F_SEND` / `VSOCK_SHUTDOWN_F_BOTH` constants.
+- New `VsockHostConnections::handle_shutdown(gp, hp, flags)` trait method with a default impl that mirrors `remove_connection` so third-party implementors stay source-compatible.
+- `VsockConnectionManager` dispatches on flags: both-bits → teardown; F_RECEIVE only → `conn.mark_peer_no_recv()`; F_SEND only → informational no-op; flags=0 → conservative teardown.
+- `VsockConnection::peer_no_recv()` / `accepts_data()` accessors; RX path skips RW for half-closed connections but keeps the fd open so the peer's own sends continue to drain.
+- Four unit tests cover F_BOTH, F_RECEIVE, F_SEND, and flags=0.
+
+**Still deferred (not done).** Full `ConnState` enum (`LocalInit` / `Established` / `PeerClosed{no_send, no_recv}` / `Killed`), per-connection expiry, and `PeerInit` peer-originated connections. The `connect: bool` + `peer_no_recv: bool` pair covers the current correctness gap; a richer enum can come when peer-initiated listens land.
 
 ---
 
