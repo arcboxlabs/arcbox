@@ -4,8 +4,20 @@
 
 use std::os::unix::io::RawFd;
 
-use crate::backend::NetBackend;
+use crate::backend::{NetBackend, NetOffloadFlags};
 use crate::header::NetPacket;
+
+// Linux kernel `TUNSETOFFLOAD` / `TUNSETVNETHDRSZ` ioctl numbers and the
+// `TUN_F_*` flag bits. See `<linux/if_tun.h>` — we encode them inline rather
+// than pulling in another crate because only the TAP backend needs them.
+const TUNSETOFFLOAD: libc::c_ulong = 0x400454d0;
+const TUNSETVNETHDRSZ: libc::c_ulong = 0x400454d8;
+
+const TUN_F_CSUM: u32 = 0x01;
+const TUN_F_TSO4: u32 = 0x02;
+const TUN_F_TSO6: u32 = 0x04;
+const TUN_F_TSO_ECN: u32 = 0x08;
+const TUN_F_UFO: u32 = 0x10;
 
 /// TAP network backend for Linux.
 pub struct TapBackend {
@@ -208,5 +220,53 @@ impl NetBackend for TapBackend {
         // SAFETY: poll borrows our pollfd for the duration of the call (timeout 0).
         let ret = unsafe { libc::poll(&mut pollfd, 1, 0) };
         ret > 0 && (pollfd.revents & libc::POLLIN) != 0
+    }
+
+    fn configure_offload(&mut self, flags: NetOffloadFlags) -> std::io::Result<()> {
+        let mut tun_flags: u32 = 0;
+        if flags.csum {
+            tun_flags |= TUN_F_CSUM;
+        }
+        if flags.tso4 {
+            tun_flags |= TUN_F_TSO4;
+        }
+        if flags.tso6 {
+            tun_flags |= TUN_F_TSO6;
+        }
+        if flags.tso_ecn {
+            tun_flags |= TUN_F_TSO_ECN;
+        }
+        if flags.ufo {
+            tun_flags |= TUN_F_UFO;
+        }
+
+        // SAFETY: TUNSETOFFLOAD reads `tun_flags` as an unsigned int. The fd
+        // is exclusively owned by `self`.
+        let ret = unsafe { libc::ioctl(self.fd, TUNSETOFFLOAD, tun_flags) };
+        if ret < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        tracing::debug!(
+            "TAP {}: configured offload flags=0x{:x} (csum={} tso4={} tso6={} tso_ecn={} ufo={})",
+            self.name,
+            tun_flags,
+            flags.csum,
+            flags.tso4,
+            flags.tso6,
+            flags.tso_ecn,
+            flags.ufo,
+        );
+        Ok(())
+    }
+
+    fn set_vnet_hdr_sz(&mut self, size: u32) -> std::io::Result<()> {
+        let sz: libc::c_int = size as libc::c_int;
+        // SAFETY: TUNSETVNETHDRSZ reads `sz` as an int. The fd is exclusively owned.
+        let ret = unsafe { libc::ioctl(self.fd, TUNSETVNETHDRSZ, &sz) };
+        if ret < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        tracing::debug!("TAP {}: set vnet_hdr_sz = {}", self.name, size);
+        Ok(())
     }
 }

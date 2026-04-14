@@ -4,6 +4,27 @@ use std::collections::VecDeque;
 
 use crate::header::NetPacket;
 
+/// Which offload features the guest has negotiated — passed to the backend
+/// after feature acknowledgement so it can configure the host side to match.
+///
+/// For a TAP-based backend this is translated into the kernel's `TUN_F_*`
+/// bitmask; for userspace backends it's typically a no-op. We keep the
+/// shape abstract rather than leaking Linux constants into the trait.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NetOffloadFlags {
+    /// Guest can receive partial checksums — host may stamp
+    /// `CSUM_PARTIAL`-style frames.
+    pub csum: bool,
+    /// Guest accepts TCPv4 segmentation offload.
+    pub tso4: bool,
+    /// Guest accepts TCPv6 segmentation offload.
+    pub tso6: bool,
+    /// Guest accepts TSO with ECN.
+    pub tso_ecn: bool,
+    /// Guest accepts UDP fragmentation offload.
+    pub ufo: bool,
+}
+
 /// Network backend trait.
 pub trait NetBackend: Send + Sync {
     /// Sends a packet.
@@ -34,6 +55,28 @@ pub trait NetBackend: Send + Sync {
     /// features to the guest, and routes TSO packets through `send_tso()`.
     fn supports_tso(&self) -> bool {
         false
+    }
+
+    /// Configure host-side offload to match the features the guest negotiated.
+    ///
+    /// Call from the device's `activate()` hook after `ack_features`. The
+    /// flags come from the guest's acknowledged `GUEST_*` feature bits — the
+    /// backend is free to translate (e.g. TAP translates to `TUN_F_*`) or
+    /// ignore. Default is no-op so non-kernel backends don't need to care.
+    fn configure_offload(&mut self, flags: NetOffloadFlags) -> std::io::Result<()> {
+        let _ = flags;
+        Ok(())
+    }
+
+    /// Configure the size of the `virtio_net_hdr` prepended to each frame on
+    /// the backend's wire representation.
+    ///
+    /// For TAP, this must match the guest's view of the header
+    /// (`sizeof(virtio_net_hdr_v1)` = 12 bytes when `MRG_RXBUF` or any of
+    /// the modern flags are negotiated; 10 bytes on legacy). Default no-op.
+    fn set_vnet_hdr_sz(&mut self, size: u32) -> std::io::Result<()> {
+        let _ = size;
+        Ok(())
     }
 }
 
