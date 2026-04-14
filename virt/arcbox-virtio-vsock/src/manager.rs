@@ -31,12 +31,13 @@ use crate::VsockHostConnections;
 pub struct RxOps(u8);
 
 impl RxOps {
-    // Priority order: Request > Rw > Response > CreditUpdate > Reset
+    // Priority order (lowest bit wins): Request > Rw > Response > CreditUpdate > Reset > CreditRequest
     pub const REQUEST: u8 = 0x01;
     pub const RW: u8 = 0x02;
     pub const RESPONSE: u8 = 0x04;
     pub const CREDIT_UPDATE: u8 = 0x08;
     pub const RESET: u8 = 0x10;
+    pub const CREDIT_REQUEST: u8 = 0x20;
 
     /// Returns true if any operation is pending.
     pub fn pending(&self) -> bool {
@@ -145,6 +146,12 @@ pub struct VsockConnection {
 
     /// Total bytes sent TO the guest via RX virtqueue.
     pub rx_cnt: Wrapping<u32>,
+
+    /// Set when a `CREDIT_REQUEST` packet has been enqueued for the peer and
+    /// the peer has not yet answered with a `CREDIT_UPDATE`. Keeps us from
+    /// spamming repeated credit requests each time we see a low-credit RW —
+    /// one in-flight at a time is enough to refresh our view.
+    credit_request_pending: bool,
 }
 
 impl VsockConnection {
@@ -167,6 +174,7 @@ impl VsockConnection {
             peer_buf_alloc: 0,
             peer_fwd_cnt: Wrapping(0),
             rx_cnt: Wrapping(0),
+            credit_request_pending: false,
         };
         // Enqueue OP_REQUEST to be sent to guest on the next RX fill.
         conn.rx_queue.enqueue(RxOps::REQUEST);
@@ -181,10 +189,45 @@ impl VsockConnection {
         (Wrapping(self.peer_buf_alloc) - (self.rx_cnt - self.peer_fwd_cnt)).0 as usize
     }
 
-    /// Updates peer credit state from an incoming guest packet.
+    /// Updates peer credit state from an incoming guest packet. Also clears
+    /// any in-flight `CREDIT_REQUEST` marker: the peer has just told us the
+    /// fresh state, so whatever we asked about is answered.
     pub fn update_peer_credit(&mut self, buf_alloc: u32, fwd_cnt: u32) {
         self.peer_buf_alloc = buf_alloc;
         self.peer_fwd_cnt = Wrapping(fwd_cnt);
+        self.credit_request_pending = false;
+    }
+
+    /// Enqueues a `CREDIT_REQUEST` op if peer credit has fallen below half
+    /// the peer's advertised buffer and no request is already in flight.
+    ///
+    /// Call from the RX path after sending data the peer now has to process.
+    /// Sending the request proactively — rather than only when credit hits
+    /// zero — means we refresh our (possibly stale) view of `peer_fwd_cnt`
+    /// before we actually deplete our window, avoiding a full TX stall.
+    pub fn maybe_request_credit(&mut self) {
+        if self.credit_request_pending || self.peer_buf_alloc == 0 {
+            return;
+        }
+        let half = (self.peer_buf_alloc / 2) as usize;
+        if self.peer_avail_credit() < half {
+            self.rx_queue.enqueue(RxOps::CREDIT_REQUEST);
+            self.credit_request_pending = true;
+        }
+    }
+
+    /// Marks a `CREDIT_REQUEST` as in-flight without going through the
+    /// `RxOps` queue. Used when the caller emits the request packet directly
+    /// in the RW-with-zero-credit fallback path — we still want the pending
+    /// flag set so `maybe_request_credit` doesn't duplicate us.
+    pub fn note_credit_request_sent(&mut self) {
+        self.credit_request_pending = true;
+    }
+
+    /// True iff we're waiting on the peer for a credit update.
+    #[must_use]
+    pub fn credit_request_pending(&self) -> bool {
+        self.credit_request_pending
     }
 
     /// Called after data is written to the host stream (from guest OP_RW).
@@ -598,5 +641,86 @@ mod tests {
         // One byte below threshold must NOT enqueue an update.
         conn.advance_fwd_cnt(CREDIT_UPDATE_THRESHOLD - 1);
         assert!(!conn.rx_queue.pending());
+    }
+
+    #[test]
+    fn maybe_request_credit_fires_below_half_window() {
+        let mut mgr = VsockConnectionManager::new();
+        let (_, internal) = make_socketpair();
+        let (id, _rx) = mgr.allocate(1024, 3, internal);
+        let conn = mgr.get_mut(&id).unwrap();
+        conn.rx_queue.dequeue(); // drain REQUEST
+
+        conn.update_peer_credit(8192, 0);
+        conn.record_rx(5000); // avail = 8192 - 5000 = 3192, below half (4096)
+        conn.maybe_request_credit();
+
+        assert_eq!(conn.rx_queue.peek(), RxOps::CREDIT_REQUEST);
+        assert!(conn.credit_request_pending());
+    }
+
+    #[test]
+    fn maybe_request_credit_noop_above_half_window() {
+        let mut mgr = VsockConnectionManager::new();
+        let (_, internal) = make_socketpair();
+        let (id, _rx) = mgr.allocate(1024, 3, internal);
+        let conn = mgr.get_mut(&id).unwrap();
+        conn.rx_queue.dequeue();
+
+        conn.update_peer_credit(8192, 0);
+        conn.record_rx(3000); // avail = 5192, above half (4096)
+        conn.maybe_request_credit();
+
+        assert!(!conn.rx_queue.pending());
+        assert!(!conn.credit_request_pending());
+    }
+
+    #[test]
+    fn maybe_request_credit_dedupes_while_pending() {
+        let mut mgr = VsockConnectionManager::new();
+        let (_, internal) = make_socketpair();
+        let (id, _rx) = mgr.allocate(1024, 3, internal);
+        let conn = mgr.get_mut(&id).unwrap();
+        conn.rx_queue.dequeue();
+
+        conn.update_peer_credit(8192, 0);
+        conn.record_rx(5000);
+        conn.maybe_request_credit();
+        // Dequeue the first request so we can see if a duplicate fires.
+        conn.rx_queue.dequeue();
+
+        conn.record_rx(100); // still below half, still pending
+        conn.maybe_request_credit();
+
+        assert!(!conn.rx_queue.pending(), "second request would be a dup");
+    }
+
+    #[test]
+    fn update_peer_credit_clears_pending_flag() {
+        let mut mgr = VsockConnectionManager::new();
+        let (_, internal) = make_socketpair();
+        let (id, _rx) = mgr.allocate(1024, 3, internal);
+        let conn = mgr.get_mut(&id).unwrap();
+        conn.rx_queue.dequeue();
+
+        conn.update_peer_credit(8192, 0);
+        conn.record_rx(5000);
+        conn.maybe_request_credit();
+        assert!(conn.credit_request_pending());
+
+        // Peer answers with a fresh fwd_cnt; pending should clear. The
+        // already-enqueued CREDIT_REQUEST op stays in rx_queue — sending it
+        // is harmless (peer just replies with another CREDIT_UPDATE) and not
+        // worth a bit-clearing helper on RxOps.
+        conn.update_peer_credit(8192, 5000);
+        assert!(!conn.credit_request_pending());
+
+        // Drain the stale CREDIT_REQUEST to simulate the next RX tick.
+        assert_eq!(conn.rx_queue.dequeue(), RxOps::CREDIT_REQUEST);
+
+        // Now that we're at full credit, maybe_request_credit stays quiet.
+        conn.maybe_request_credit();
+        assert!(!conn.rx_queue.pending());
+        assert!(!conn.credit_request_pending());
     }
 }

@@ -902,7 +902,12 @@ impl VirtioVsock {
                                     );
                                     hdr.buf_alloc = TX_BUFFER_SIZE;
                                     hdr.fwd_cnt = conn.fwd_cnt.0;
+                                    // Re-queue the RW so we retry once the peer
+                                    // refreshes our view; mark the request as
+                                    // pending so maybe_request_credit below
+                                    // doesn't also enqueue a duplicate.
                                     conn.rx_queue.enqueue(RxOps::RW);
+                                    conn.note_credit_request_sent();
                                     hdr.to_bytes().to_vec()
                                 } else {
                                     let fd = conn.internal_fd.as_raw_fd();
@@ -944,6 +949,11 @@ impl VirtioVsock {
                                         hdr.fwd_cnt = conn.fwd_cnt.0;
 
                                         conn.record_rx(data.len() as u32);
+                                        // After sending, our view of the
+                                        // peer's free buffer has shrunk.
+                                        // Ask for a refresh if we've crossed
+                                        // the half-window mark.
+                                        conn.maybe_request_credit();
 
                                         let hdr_bytes = hdr.to_bytes();
                                         let mut pkt =
@@ -972,6 +982,25 @@ impl VirtioVsock {
                             hdr.buf_alloc = TX_BUFFER_SIZE;
                             hdr.fwd_cnt = conn.fwd_cnt.0;
                             conn.mark_credit_sent();
+                            hdr.to_bytes().to_vec()
+                        }
+                        RxOps::CREDIT_REQUEST => {
+                            // Ask the peer for their current fwd_cnt. The
+                            // pending flag is already set — it stays set
+                            // until the peer answers with CREDIT_UPDATE,
+                            // which clears it via update_peer_credit.
+                            let mut hdr = VsockHeader::new(
+                                VsockAddr::host(conn_id.host_port),
+                                VsockAddr::new(conn.guest_cid, conn_id.guest_port),
+                                VsockOp::CreditRequest,
+                            );
+                            hdr.buf_alloc = TX_BUFFER_SIZE;
+                            hdr.fwd_cnt = conn.fwd_cnt.0;
+                            tracing::debug!(
+                                "Vsock RX: OP_CREDIT_REQUEST guest_port={} host_port={}",
+                                conn_id.guest_port,
+                                conn_id.host_port,
+                            );
                             hdr.to_bytes().to_vec()
                         }
                         _ => continue,
