@@ -40,14 +40,16 @@ Small, localised commits landing now.
 
 ## Phase 2 — vsock correctness
 
-### 2.1 CREDIT_REQUEST emission
+### ✅ 2.1 CREDIT_REQUEST emission *(landed: a2f3402)*
 
-**Why it matters.** When we want to inject an RW packet but our view of peer `fwd_cnt` is stale, we may believe we have no credit even though the peer has freed buffer. Without a way to ask the peer "what's your current fwd_cnt?", we deadlock waiting for a credit update that won't arrive (the peer only sends one after consuming bytes, but the peer has no pending bytes to consume — both sides wait on each other).
+**Why it mattered.** When we want to inject an RW packet but our view of peer `fwd_cnt` is stale, we may believe we have no credit even though the peer has freed buffer. Without a way to ask the peer "what's your current fwd_cnt?", we'd deadlock waiting for a credit update that wouldn't arrive.
 
-**Locked fix.**
-- Add `RxOps::CREDIT_REQUEST = 0x20` (lower priority than `CREDIT_UPDATE`, higher than `RESET`).
-- In the RX injection path, before enqueueing an RW op, check `peer_avail_credit() < peer_buf_alloc / 2` and enqueue `CREDIT_REQUEST` on the connection.
-- When `CREDIT_REQUEST` dequeues, emit a header-only `VSOCK_OP_CREDIT_REQUEST` packet (len=0). The guest driver responds with `VSOCK_OP_CREDIT_UPDATE`, which our existing TX path already consumes.
+**What shipped.**
+- `RxOps::CREDIT_REQUEST = 0x20` (after RESET in priority order).
+- `VsockConnection::credit_request_pending` flag prevents duplicate requests while one is in flight; cleared on `update_peer_credit`.
+- `conn.maybe_request_credit()` called from the RW-send path enqueues `CREDIT_REQUEST` when `peer_avail_credit < peer_buf_alloc / 2` and no request is outstanding.
+- The existing zero-credit fallback now also marks the flag via `note_credit_request_sent` so the two paths don't spam duplicate requests.
+- Four unit tests cover below-half fires, above-half noop, dedup, and pending-clears-on-peer-response.
 
 ### 2.2 Proper connection state machine
 
