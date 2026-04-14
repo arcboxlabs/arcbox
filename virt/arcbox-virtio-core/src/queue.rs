@@ -244,6 +244,7 @@ impl VirtQueue {
             DescriptorChain {
                 queue: self,
                 current: Some(head_idx),
+                ttl: self.size,
             },
         ))
     }
@@ -314,17 +315,28 @@ impl VirtQueue {
 }
 
 /// Iterator over a descriptor chain.
+///
+/// `ttl` bounds the walk to at most `queue.size` descriptors. A malformed
+/// or malicious guest can publish a chain whose `next` links form a cycle;
+/// without a cap the iterator would spin the host thread forever on every
+/// queue kick. Any legitimate chain has at most `queue.size` descriptors,
+/// so that's the tightest safe upper bound.
 pub struct DescriptorChain<'a> {
     queue: &'a VirtQueue,
     current: Option<u16>,
+    ttl: u16,
 }
 
 impl<'a> Iterator for DescriptorChain<'a> {
     type Item = &'a Descriptor;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.ttl == 0 {
+            return None;
+        }
         let idx = self.current?;
         let desc = self.queue.get_descriptor(idx)?;
+        self.ttl -= 1;
 
         self.current = if desc.has_next() {
             Some(desc.next)
@@ -720,6 +732,60 @@ mod tests {
         assert_eq!(descs.len(), 2);
         assert!(!descs[0].is_write_only());
         assert!(descs[1].is_write_only());
+    }
+
+    #[test]
+    fn test_descriptor_chain_cycle_terminates() {
+        // A malformed guest can publish a chain whose `next` links form a cycle.
+        // The iterator must terminate rather than spinning the host thread.
+        let mut queue = VirtQueue::new(16).unwrap();
+
+        // desc[0] -> desc[1] -> desc[0] (self-referential cycle)
+        queue.desc_table[0] = Descriptor {
+            addr: 0x1000,
+            len: 16,
+            flags: flags::NEXT,
+            next: 1,
+        };
+        queue.desc_table[1] = Descriptor {
+            addr: 0x2000,
+            len: 16,
+            flags: flags::NEXT,
+            next: 0,
+        };
+
+        queue.avail.ring[0] = 0;
+        queue.avail.idx = 1;
+
+        let (_, chain) = queue.pop_avail().unwrap();
+        let descs: Vec<_> = chain.collect();
+
+        // Walk is capped at queue.size (16); must not exceed.
+        assert!(
+            descs.len() <= 16,
+            "chain iteration exceeded queue size cap: got {}",
+            descs.len()
+        );
+    }
+
+    #[test]
+    fn test_descriptor_chain_self_loop_terminates() {
+        // Tightest cycle: a single descriptor whose next points at itself.
+        let mut queue = VirtQueue::new(8).unwrap();
+
+        queue.desc_table[0] = Descriptor {
+            addr: 0x1000,
+            len: 16,
+            flags: flags::NEXT,
+            next: 0,
+        };
+
+        queue.avail.ring[0] = 0;
+        queue.avail.idx = 1;
+
+        let (_, chain) = queue.pop_avail().unwrap();
+        let descs: Vec<_> = chain.collect();
+        assert!(descs.len() <= 8);
     }
 
     // ==========================================================================
