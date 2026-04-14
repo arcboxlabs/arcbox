@@ -279,6 +279,7 @@ impl VirtioVsock {
         let dst_port = { hdr.dst_port };
         let buf_alloc = { hdr.buf_alloc };
         let fwd_cnt = { hdr.fwd_cnt };
+        let flags = { hdr.flags };
 
         match hdr.operation() {
             Some(VsockOp::Request) => {
@@ -342,9 +343,23 @@ impl VirtioVsock {
                     }
                 }
             }
-            Some(VsockOp::Shutdown | VsockOp::Rst) => {
+            Some(VsockOp::Shutdown) => {
                 tracing::debug!(
-                    "Vsock TX: connection closed guest_port={} host_port={}",
+                    "Vsock TX: OP_SHUTDOWN guest_port={} host_port={} flags=0x{:x}",
+                    src_port,
+                    dst_port,
+                    flags,
+                );
+                if let Some(conns) = connections {
+                    // Dispatch on the shutdown flags — a half-close (only
+                    // F_RECEIVE or only F_SEND) should preserve the fd so
+                    // either side can still drain in-flight data.
+                    conns.handle_shutdown(src_port, dst_port, flags);
+                }
+            }
+            Some(VsockOp::Rst) => {
+                tracing::debug!(
+                    "Vsock TX: OP_RST guest_port={} host_port={}",
                     src_port,
                     dst_port,
                 );
@@ -884,6 +899,17 @@ impl VirtioVsock {
                             hdr.to_bytes().to_vec()
                         }
                         RxOps::RW => {
+                            if conn.peer_no_recv() {
+                                // Peer half-closed its receive side. Drop the
+                                // RW silently; the fd stays open so the peer's
+                                // own sends still drain via the TX path.
+                                tracing::trace!(
+                                    "Vsock RX: skipping RW for half-closed conn guest_port={} host_port={}",
+                                    conn_id.guest_port,
+                                    conn_id.host_port,
+                                );
+                                continue;
+                            }
                             if !conn.connect {
                                 let hdr = VsockHeader::new(
                                     VsockAddr::host(conn_id.host_port),

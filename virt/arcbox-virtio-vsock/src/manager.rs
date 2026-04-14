@@ -104,6 +104,15 @@ pub const TX_BUFFER_SIZE: u32 = 64 * 1024;
 /// stall probability meaningfully.
 pub const CREDIT_UPDATE_THRESHOLD: u32 = 4096;
 
+/// `OP_SHUTDOWN` flag: peer will not receive any more data.
+pub const VSOCK_SHUTDOWN_F_RECEIVE: u32 = 1 << 0;
+
+/// `OP_SHUTDOWN` flag: peer will not send any more data.
+pub const VSOCK_SHUTDOWN_F_SEND: u32 = 1 << 1;
+
+/// Mask of both shutdown flags — equivalent to `RST` when set.
+pub const VSOCK_SHUTDOWN_F_BOTH: u32 = VSOCK_SHUTDOWN_F_RECEIVE | VSOCK_SHUTDOWN_F_SEND;
+
 /// A single host↔guest vsock connection.
 ///
 /// Owns the internal end of the socketpair. When this entry is removed from
@@ -152,6 +161,11 @@ pub struct VsockConnection {
     /// spamming repeated credit requests each time we see a low-credit RW —
     /// one in-flight at a time is enough to refresh our view.
     credit_request_pending: bool,
+
+    /// Set when the peer sent `OP_SHUTDOWN` with `F_RECEIVE` — it won't
+    /// accept any more data. We must stop emitting `RW` for this connection
+    /// but keep the fd open so pending peer→host data can still drain.
+    peer_no_recv: bool,
 }
 
 impl VsockConnection {
@@ -175,6 +189,7 @@ impl VsockConnection {
             peer_fwd_cnt: Wrapping(0),
             rx_cnt: Wrapping(0),
             credit_request_pending: false,
+            peer_no_recv: false,
         };
         // Enqueue OP_REQUEST to be sent to guest on the next RX fill.
         conn.rx_queue.enqueue(RxOps::REQUEST);
@@ -228,6 +243,25 @@ impl VsockConnection {
     #[must_use]
     pub fn credit_request_pending(&self) -> bool {
         self.credit_request_pending
+    }
+
+    /// Peer sent `OP_SHUTDOWN` with `F_RECEIVE`. Record the half-close so the
+    /// RX injection path stops trying to deliver more `RW` packets.
+    pub fn mark_peer_no_recv(&mut self) {
+        self.peer_no_recv = true;
+    }
+
+    /// True iff the peer has half-closed its receive side.
+    #[must_use]
+    pub const fn peer_no_recv(&self) -> bool {
+        self.peer_no_recv
+    }
+
+    /// Whether we may send more data to the peer. False once the handshake
+    /// hasn't completed or the peer has told us it won't accept more.
+    #[must_use]
+    pub const fn accepts_data(&self) -> bool {
+        self.connect && !self.peer_no_recv
     }
 
     /// Called after data is written to the host stream (from guest OP_RW).
@@ -481,6 +515,28 @@ impl VsockHostConnections for VsockConnectionManager {
             self.backend_rxq.push_back(id);
         }
     }
+
+    fn handle_shutdown(&mut self, guest_port: u32, host_port: u32, flags: u32) {
+        // Both bits set (or flags==0, which is spec-invalid but treated as
+        // worst case) → full teardown, matching the default trait impl.
+        if flags == 0 || flags & VSOCK_SHUTDOWN_F_BOTH == VSOCK_SHUTDOWN_F_BOTH {
+            self.remove_connection(guest_port, host_port);
+            return;
+        }
+
+        let id = VsockConnectionId {
+            host_port,
+            guest_port,
+        };
+        if flags & VSOCK_SHUTDOWN_F_RECEIVE != 0 {
+            if let Some(conn) = self.connections.get_mut(&id) {
+                conn.mark_peer_no_recv();
+            }
+        }
+        // `VSOCK_SHUTDOWN_F_SEND` alone is purely informational — the peer
+        // won't send more, but we keep the fd open so the host side can still
+        // drain any in-flight data and send its own traffic if it wants to.
+    }
 }
 
 impl Default for VsockConnectionManager {
@@ -722,5 +778,53 @@ mod tests {
         conn.maybe_request_credit();
         assert!(!conn.rx_queue.pending());
         assert!(!conn.credit_request_pending());
+    }
+
+    #[test]
+    fn shutdown_both_bits_removes_connection() {
+        let mut mgr = VsockConnectionManager::new();
+        let (_, internal) = make_socketpair();
+        let (id, _rx) = mgr.allocate(1024, 3, internal);
+        assert!(mgr.get(&id).is_some());
+
+        mgr.handle_shutdown(id.guest_port, id.host_port, VSOCK_SHUTDOWN_F_BOTH);
+        assert!(mgr.get(&id).is_none());
+    }
+
+    #[test]
+    fn shutdown_receive_bit_marks_half_close() {
+        let mut mgr = VsockConnectionManager::new();
+        let (_, internal) = make_socketpair();
+        let (id, _rx) = mgr.allocate(1024, 3, internal);
+
+        mgr.handle_shutdown(id.guest_port, id.host_port, VSOCK_SHUTDOWN_F_RECEIVE);
+        let conn = mgr.get(&id).expect("conn must survive half-close");
+        assert!(conn.peer_no_recv());
+        assert!(!conn.accepts_data() || !conn.connect); // connect=false initially
+    }
+
+    #[test]
+    fn shutdown_send_bit_only_is_informational() {
+        let mut mgr = VsockConnectionManager::new();
+        let (_, internal) = make_socketpair();
+        let (id, _rx) = mgr.allocate(1024, 3, internal);
+
+        mgr.handle_shutdown(id.guest_port, id.host_port, VSOCK_SHUTDOWN_F_SEND);
+        let conn = mgr.get(&id).expect("conn must survive");
+        assert!(
+            !conn.peer_no_recv(),
+            "F_SEND alone does not block host→peer RW"
+        );
+    }
+
+    #[test]
+    fn shutdown_flags_zero_removes_connection_conservatively() {
+        // flags=0 is spec-invalid; worst-case interpretation is full close.
+        let mut mgr = VsockConnectionManager::new();
+        let (_, internal) = make_socketpair();
+        let (id, _rx) = mgr.allocate(1024, 3, internal);
+
+        mgr.handle_shutdown(id.guest_port, id.host_port, 0);
+        assert!(mgr.get(&id).is_none());
     }
 }

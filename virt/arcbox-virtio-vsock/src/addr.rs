@@ -65,6 +65,19 @@ pub trait VsockHostConnections: Send + Sync {
 
     /// Enqueues a `CreditUpdate` to be sent on the next RX fill.
     fn enqueue_credit_update(&mut self, _guest_port: u32, _host_port: u32) {}
+
+    /// Handles a guest-originated `OP_SHUTDOWN` with its flags bitmask.
+    ///
+    /// Per the vsock spec, `flags` carries two bits:
+    /// - `VSOCK_SHUTDOWN_F_RECEIVE` (bit 0) — peer won't receive more data.
+    /// - `VSOCK_SHUTDOWN_F_SEND` (bit 1) — peer won't send more data.
+    ///
+    /// The default behaviour mirrors `RST` (full teardown), which is correct
+    /// when both bits are set; concrete managers override to handle half-close
+    /// cases that should preserve the connection.
+    fn handle_shutdown(&mut self, guest_port: u32, host_port: u32, _flags: u32) {
+        self.remove_connection(guest_port, host_port);
+    }
 }
 
 #[cfg(test)]
