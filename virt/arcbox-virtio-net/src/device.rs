@@ -27,6 +27,13 @@ pub struct VirtioNet {
     backend: Option<Arc<Mutex<dyn NetBackend>>>,
     /// RX buffer.
     rx_buffer: VecDeque<NetPacket>,
+    /// Persistent scratch buffer for draining backend reads into before
+    /// copying to `rx_buffer`. Sized at construction and reused across every
+    /// `poll_backend_batch` iteration so we don't heap-allocate 64 KB per
+    /// received packet. `Box<[u8]>` rather than `Box<[u8; N]>` so the
+    /// initialisation lands straight on the heap (an array literal would
+    /// materialise on the stack first).
+    rx_scratch: Box<[u8]>,
     /// TX statistics.
     tx_packets: u64,
     tx_bytes: u64,
@@ -88,6 +95,11 @@ impl VirtioNet {
     /// Default maximum number of packets per `poll_backend_batch` call.
     pub const DEFAULT_RX_BATCH_SIZE: usize = 64;
 
+    /// Size of the persistent RX scratch buffer. 64 KiB covers any
+    /// plausible single-frame read — jumbo frames, GSO-merged bursts
+    /// from vmnet, and standard MTU frames all fit comfortably.
+    pub const RX_SCRATCH_SIZE: usize = 65536;
+
     /// Ethernet (14) + IPv4 (20) + TCP (20) header length.
     const ETH_IP_TCP_HDR_LEN: u16 = 54;
 
@@ -114,6 +126,7 @@ impl VirtioNet {
             tx_queue: None,
             backend: None,
             rx_buffer: VecDeque::new(),
+            rx_scratch: vec![0u8; Self::RX_SCRATCH_SIZE].into_boxed_slice(),
             tx_packets: 0,
             tx_bytes: 0,
             rx_packets: 0,
@@ -333,28 +346,33 @@ impl VirtioNet {
     pub fn poll_backend_batch(&mut self, max_batch: usize) -> Result<usize> {
         let mut received = 0;
 
-        if let Some(backend) = &self.backend {
-            let mut backend = backend
-                .lock()
-                .map_err(|e| VirtioError::Io(format!("Failed to lock backend: {e}")))?;
+        let Some(backend) = self.backend.clone() else {
+            return Ok(0);
+        };
+        let mut backend = backend
+            .lock()
+            .map_err(|e| VirtioError::Io(format!("Failed to lock backend: {e}")))?;
 
-            while received < max_batch && backend.has_data() {
-                let mut buf = vec![0u8; 65536];
-                let n = backend
-                    .recv(&mut buf)
-                    .map_err(|e| VirtioError::Io(format!("Recv failed: {e}")))?;
+        while received < max_batch && backend.has_data() {
+            // Reuse the per-device scratch buffer instead of allocating a
+            // fresh 64 KiB `Vec` per packet — that alloc+dealloc pair was
+            // the dominant CPU cost at sustained RX rates. The Vec we push
+            // into `rx_buffer` still holds an owned copy (sized to the
+            // actual frame length), which is unavoidable while we stage
+            // through `rx_buffer`; true readv-to-guest zero-copy is the
+            // job of the dedicated net-io worker, not this path.
+            let n = backend
+                .recv(&mut self.rx_scratch[..])
+                .map_err(|e| VirtioError::Io(format!("Recv failed: {e}")))?;
 
-                if n > 0 {
-                    buf.truncate(n);
-                    let packet = NetPacket::new(buf);
-                    self.rx_packets += 1;
-                    self.rx_bytes += n as u64;
-                    self.rx_buffer.push_back(packet);
-                    received += 1;
-                } else {
-                    break;
-                }
+            if n == 0 {
+                break;
             }
+            let packet = NetPacket::new(self.rx_scratch[..n].to_vec());
+            self.rx_packets += 1;
+            self.rx_bytes += n as u64;
+            self.rx_buffer.push_back(packet);
+            received += 1;
         }
 
         Ok(received)
