@@ -68,23 +68,23 @@ Small, localised commits landing now.
 
 ## Phase 3 — net correctness & perf
 
-### 3.1 MRG_RXBUF: actually implement it
+### ✅ 3.1 MRG_RXBUF multi-chain RX delivery *(landed: 17a90dd)*
 
-**Why the current code is wrong.** `VIRTIO_NET_F_MRG_RXBUF` is advertised but the RX path stamps `num_buffers=1` on every packet and never spans descriptor chains. Guests that negotiate MRG_RXBUF allocate buffers smaller than frame MTU (the whole point of the feature — small buffer pool for bursty RX); frames exceeding one buffer are either truncated or trigger driver errors.
+**Why it mattered.** `VIRTIO_NET_F_MRG_RXBUF` was advertised but the RX path only ever wrote into one descriptor chain and never stamped `num_buffers`. Guests that negotiate the feature pre-post small buffers expecting the device to concatenate — frames larger than a single buffer silently truncated.
 
-**Locked fix.** At each RX poll, collect multiple avail chains into an aggregate scatter-gather vector, then issue one `readv` syscall into the combined region. Write the actual chain count used into the vnet header's `num_buffers` field. Push all consumed chains to the used ring in one batch.
+**What shipped.** `inject_rx_batch` now pops chains until accumulated write-only capacity covers the full frame, stamps the chain count into bytes 10..12 of the first chain's `virtio_net_hdr`, and writes payload across chains with each used-ring entry reporting the correct per-buffer length. Non-MRG_RXBUF guests still get exactly one chain. Two unit tests cover the spanning and single-chain cases.
 
-### 3.2 TAP offload configuration
+### ✅ 3.2 TAP offload configuration *(landed: 3c7c73a)*
 
-**Why the current code is wrong.** We advertise `VIRTIO_NET_F_CSUM` and `GUEST_CSUM` — meaning the guest may send frames with partial checksums expecting the host to complete them. The TAP fd has never been configured to accept such frames; the kernel forwards them with bad checksums, and middleboxes drop them.
+**Why it mattered.** We advertised `CSUM` / `GUEST_CSUM` / `GUEST_TSO4/6` / `GUEST_UFO` but never called `TUNSETOFFLOAD` on the TAP fd. The Linux kernel TUN driver dropped or mangled partial-checksum and TSO frames that the guest emitted based on our advertisement.
 
-**Locked fix.** After feature negotiation, call `tap.set_offload(TUN_F_CSUM | TUN_F_TSO4 | TUN_F_TSO6 | TUN_F_UFO)` and `tap.set_vnet_hdr_size(size_of::<virtio_net_hdr_v1>() as i32)`. This makes the TAP kernel driver the one that finishes checksums and segments large TSO frames — offloading work to the host network stack where it belongs.
+**What shipped.** `NetOffloadFlags` struct + `configure_offload` / `set_vnet_hdr_sz` methods on `NetBackend` trait (default no-op). TAP backend translates `NetOffloadFlags` into `TUN_F_CSUM | TUN_F_TSO4 | TUN_F_TSO6 | TUN_F_TSO_ECN | TUN_F_UFO` and sets `TUNSETVNETHDRSZ = 12`. `VirtioNet::activate` reads `acked_features` and drives both calls.
 
-### 3.3 Zero-copy RX
+### 3.3 Zero-copy RX *(not started)*
 
-**Why the current code is wrong.** Every RX packet allocates `vec![0u8; 65536]`, copies from the backend fd into that heap buffer, then copies again into guest memory. Two copies per packet plus an allocator round-trip dominates CPU at any sustained rate.
+**Why it matters.** Every RX packet still goes backend-fd → `Vec<u8>` frame buffer → guest memory. Two copies per packet plus per-packet allocation dominates CPU on any sustained rate. With MRG_RXBUF in place the chain-walking scaffolding exists; the remaining work is having the backend's `recv` write directly into a pre-built scatter-gather descriptor list pointing at guest memory.
 
-**Locked fix.** Pre-walk avail descriptors to build an `IoVecBufferMut` pointing directly at guest memory, then `readv` the frame straight into the guest. Zero intermediate copies, zero allocations on the hot path.
+**Locked fix.** Extend `NetBackend` with `recv_iovec(&mut [&mut [u8]])` returning bytes read across the slices; the loopback / socket backends can keep using the existing single-buffer `recv` path via a default impl that copies through an internal buffer (no zero-copy win, but no regression); TAP overrides with `readv`. `inject_rx_batch` builds the iovec from the first pre-popped chain directly into guest memory, stamps the header afterwards (num_buffers known after the read completes).
 
 ---
 
