@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use arcbox_virtio_core::error::{Result, VirtioError};
-use arcbox_virtio_core::queue::VirtQueue;
+use arcbox_virtio_core::queue::{Descriptor, VirtQueue};
 use arcbox_virtio_core::{DeviceCtx, QueueConfig, VirtioDevice, VirtioDeviceId, virtio_bindings};
 
 use crate::backend::{LoopbackBackend, NetBackend, NetOffloadFlags};
@@ -376,6 +376,7 @@ impl VirtioNet {
     pub fn inject_rx_batch(&mut self, memory: &mut [u8]) -> Result<Vec<(u16, u32)>> {
         let host_tso4 = self.acked_features & Self::FEATURE_HOST_TSO4 != 0;
         let host_tso6 = self.acked_features & Self::FEATURE_HOST_TSO6 != 0;
+        let mrg_rxbuf = self.acked_features & Self::FEATURE_MRG_RXBUF != 0;
         let mtu = self.config.mtu as usize;
 
         let queue = self
@@ -400,46 +401,103 @@ impl VirtioNet {
                 }
             }
 
-            match queue.pop_avail() {
-                Some((head_idx, chain)) => {
-                    let header_bytes = packet.header.to_bytes();
-                    let full_frame_len = header_bytes.len() + packet.data.len();
-                    let mut frame = Vec::with_capacity(full_frame_len);
-                    frame.extend_from_slice(&header_bytes);
-                    frame.extend_from_slice(&packet.data);
+            let header_bytes = packet.header.to_bytes();
+            let full_frame_len = header_bytes.len() + packet.data.len();
+            let mut frame = Vec::with_capacity(full_frame_len);
+            frame.extend_from_slice(&header_bytes);
+            frame.extend_from_slice(&packet.data);
 
-                    // Drop the packet (don't complete the descriptor) if any
-                    // write-only descriptor points outside guest memory.
-                    let mut written = 0usize;
-                    let mut out_of_bounds = false;
-                    for desc in chain {
-                        if !desc.is_write_only() {
-                            continue;
-                        }
-                        let start = desc.addr as usize;
-                        let remaining = frame.len().saturating_sub(written);
-                        let to_write = remaining.min(desc.len as usize);
-                        if to_write == 0 {
-                            continue;
-                        }
-                        let end = start + to_write;
-                        if end > memory.len() {
-                            out_of_bounds = true;
-                            break;
-                        }
-                        memory[start..end].copy_from_slice(&frame[written..written + to_write]);
-                        written += to_write;
+            // Collect chains until we either have enough capacity for the
+            // whole frame or the guest runs out of posted buffers. When
+            // MRG_RXBUF wasn't negotiated we stop at one chain — the guest
+            // driver won't accept multi-buffer delivery.
+            let mut chains: Vec<(u16, Vec<Descriptor>)> = Vec::new();
+            let mut capacity = 0usize;
+            while capacity < frame.len() {
+                match queue.pop_avail() {
+                    Some((head_idx, chain)) => {
+                        let descs: Vec<Descriptor> = chain.copied().collect();
+                        capacity += descs
+                            .iter()
+                            .filter(|d| d.is_write_only())
+                            .map(|d| d.len as usize)
+                            .sum::<usize>();
+                        chains.push((head_idx, descs));
                     }
-                    if !out_of_bounds {
-                        completions.push((head_idx, written as u32));
-                    }
+                    None => break,
                 }
-                None => {
-                    // No guest buffers available — push packet back
-                    self.rx_buffer.push_front(packet);
+                if !mrg_rxbuf {
                     break;
                 }
             }
+
+            if chains.is_empty() {
+                // No posted buffers at all — re-queue the packet and bail.
+                self.rx_buffer.push_front(packet);
+                break;
+            }
+
+            // Stamp num_buffers into the first chain's virtio_net_hdr. The
+            // field is bytes 10..12 of the 12-byte header we emit with
+            // VERSION_1 / MRG_RXBUF. Non-MRG_RXBUF guests ignore it.
+            let num_buffers = chains.len() as u16;
+            frame[10..12].copy_from_slice(&num_buffers.to_le_bytes());
+
+            // Write the frame across every chain. Each chain's used-ring
+            // entry reports how many bytes landed in that chain's buffers.
+            let mut written = 0usize;
+            let mut out_of_bounds = false;
+            let mut per_chain: Vec<(u16, u32)> = Vec::with_capacity(chains.len());
+            for (head_idx, descs) in chains {
+                let mut chain_written = 0usize;
+                for desc in descs {
+                    if !desc.is_write_only() {
+                        continue;
+                    }
+                    let remaining = frame.len().saturating_sub(written);
+                    let to_write = remaining.min(desc.len as usize);
+                    if to_write == 0 {
+                        continue;
+                    }
+                    let start = desc.addr as usize;
+                    let end = start + to_write;
+                    if end > memory.len() {
+                        out_of_bounds = true;
+                        break;
+                    }
+                    memory[start..end].copy_from_slice(&frame[written..written + to_write]);
+                    written += to_write;
+                    chain_written += to_write;
+                }
+                if out_of_bounds {
+                    break;
+                }
+                per_chain.push((head_idx, chain_written as u32));
+            }
+
+            if out_of_bounds {
+                // Some descriptor pointed outside guest RAM — the packet is
+                // lost for correctness, but we still have to publish the
+                // consumed chains to the used ring (the guest has already
+                // handed them over). Publish with len=0 so the guest
+                // re-uses the buffers without surfacing garbage data.
+                for (head_idx, _) in per_chain {
+                    completions.push((head_idx, 0));
+                }
+                continue;
+            }
+
+            if written < frame.len() {
+                tracing::warn!(
+                    "virtio-net RX: truncated {}-byte frame to {} bytes ({} chains, mrg_rxbuf={})",
+                    frame.len(),
+                    written,
+                    per_chain.len(),
+                    mrg_rxbuf,
+                );
+            }
+
+            completions.extend(per_chain);
         }
 
         Ok(completions)
@@ -1165,6 +1223,119 @@ mod tests {
         let result = net.process_tx_queue(&memory);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_inject_rx_batch_mrg_rxbuf_spans_chains() {
+        use arcbox_virtio_core::queue::{Descriptor, flags};
+        // With MRG_RXBUF on, a frame larger than a single chain's write-only
+        // capacity should consume multiple chains and stamp num_buffers with
+        // the chain count in the first chain's virtio_net_hdr.
+        let mut net = VirtioNet::with_loopback();
+        net.enable_tso_features(); // adds MRG_RXBUF to the advertised set
+        net.ack_features(VirtioNet::FEATURE_MRG_RXBUF);
+        net.activate().unwrap();
+
+        // Lay out a scratch "guest memory" big enough for header + payload
+        // split across two small buffers (32 bytes each of write space).
+        let mut memory = vec![0u8; 512];
+        let buf0_addr = 128u64;
+        let buf1_addr = 256u64;
+        let buf_size: u32 = 32;
+
+        {
+            let q = net.rx_queue.as_mut().expect("rx queue");
+            // Chain 0 at descriptor 0 — single write-only descriptor.
+            q.set_descriptor(
+                0,
+                Descriptor {
+                    addr: buf0_addr,
+                    len: buf_size,
+                    flags: flags::WRITE,
+                    next: 0,
+                },
+            )
+            .unwrap();
+            // Chain 1 at descriptor 1 — single write-only descriptor.
+            q.set_descriptor(
+                1,
+                Descriptor {
+                    addr: buf1_addr,
+                    len: buf_size,
+                    flags: flags::WRITE,
+                    next: 0,
+                },
+            )
+            .unwrap();
+            q.add_avail(0).unwrap();
+            q.add_avail(1).unwrap();
+            q.set_ready(true);
+        }
+
+        // Packet payload of 40 bytes; total frame = 12 (header) + 40 = 52
+        // which exceeds a single 32-byte buffer → MRG_RXBUF must span.
+        let payload = vec![0xABu8; 40];
+        net.queue_rx(NetPacket::new(payload));
+
+        let completions = net.inject_rx_batch(&mut memory).unwrap();
+        assert_eq!(completions.len(), 2, "frame should span two chains");
+
+        // num_buffers stamped at offset 10..12 in the first chain's header.
+        let num_buffers = u16::from_le_bytes([
+            memory[buf0_addr as usize + 10],
+            memory[buf0_addr as usize + 11],
+        ]);
+        assert_eq!(num_buffers, 2);
+    }
+
+    #[test]
+    fn test_inject_rx_batch_no_mrg_rxbuf_stamps_one() {
+        use arcbox_virtio_core::queue::{Descriptor, flags};
+        // Without MRG_RXBUF, num_buffers should still be set to 1 for spec
+        // compliance on VERSION_1 headers, and we should never consume more
+        // than one chain even if the frame overflows.
+        let mut net = VirtioNet::with_loopback();
+        net.activate().unwrap(); // no MRG_RXBUF ack
+
+        let mut memory = vec![0u8; 512];
+        let buf_addr = 64u64;
+
+        {
+            let q = net.rx_queue.as_mut().expect("rx queue");
+            q.set_descriptor(
+                0,
+                Descriptor {
+                    addr: buf_addr,
+                    len: 128,
+                    flags: flags::WRITE,
+                    next: 0,
+                },
+            )
+            .unwrap();
+            q.set_descriptor(
+                1,
+                Descriptor {
+                    addr: 300,
+                    len: 128,
+                    flags: flags::WRITE,
+                    next: 0,
+                },
+            )
+            .unwrap();
+            q.add_avail(0).unwrap();
+            q.add_avail(1).unwrap();
+            q.set_ready(true);
+        }
+
+        net.queue_rx(NetPacket::new(vec![0xCDu8; 40]));
+        let completions = net.inject_rx_batch(&mut memory).unwrap();
+        assert_eq!(completions.len(), 1, "must not span without MRG_RXBUF");
+
+        let num_buffers = u16::from_le_bytes([
+            memory[buf_addr as usize + 10],
+            memory[buf_addr as usize + 11],
+        ]);
+        assert_eq!(num_buffers, 1);
     }
 
     #[test]
