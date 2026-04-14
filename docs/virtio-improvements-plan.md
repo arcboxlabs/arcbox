@@ -105,13 +105,26 @@ Small, localised commits landing now.
 
 ## Phase 5 — blk async backend
 
-**Why the current code is wrong.** The live `VirtioBlock::process_queue` uses synchronous `libc::pread`/`pwrite`, blocking the vCPU thread. Three backend structs (`AsyncFileBackend`, `MmapBackend`, `DirectIoBackend`) are defined but disconnected — the abstraction compiles but isn't wired into the hot path. `AsyncFileBackend` additionally reopens the file on every call, which is why it's `#[allow(dead_code)]`.
+### ✅ 5.1 DISCARD + WRITE_ZEROES + dead-backend cleanup
 
-**Locked fix.**
-- Delete `AsyncFileBackend` (structurally broken).
-- Pick one live backend per platform: `MmapBackend` on macOS (large pages + `msync`), io_uring on Linux.
-- Wire through the existing `AsyncBlockBackend` trait, removing inline pread/pwrite from `device.rs`.
-- Add `VIRTIO_BLK_F_DISCARD`, `WRITE_ZEROES`, `TOPOLOGY` handling — container image layer teardown fails today with `Unsupp`.
+**Why it mattered.** Container image layer teardown, `fstrim`, and freshly-sparse-file init all round-trip through virtio-blk's DISCARD / WRITE_ZEROES opcodes. The device returned `BlockStatus::Unsupp` for both, so the guest kernel saw the feature bits as absent and fell back to the slow path (explicit zero-filled writes for WRITE_ZEROES; silent no-ops for DISCARD that bypassed the spec's ability to let the device reclaim sparse storage). Alongside this, `AsyncFileBackend` was `#[allow(dead_code)]` because it reopened the backing file on every call — it had to go.
+
+**What shipped.**
+- Deleted `AsyncFileBackend` (`async_file.rs`) — structurally broken, unused.
+- Advertised `VIRTIO_BLK_F_DISCARD` + `VIRTIO_BLK_F_WRITE_ZEROES` from `VirtioBlock::new`.
+- Extended the config space (offsets 36..=59) with `max_discard_sectors`, `max_discard_seg=1`, `discard_sector_alignment=1`, `max_write_zeroes_sectors`, `max_write_zeroes_seg=1`, `write_zeroes_may_unmap=0`. Caps: DISCARD 32768 sectors (16 MiB), WRITE_ZEROES 2048 sectors (1 MiB).
+- `handle_discard_list` — parses the range list, validates each against `MAX_DISCARD_SECTORS`, returns Ok without touching the backing file. Spec-compliant: DISCARD is advisory, the device "MAY" reclaim storage or ignore. Real `fallocate(PUNCH_HOLE)` / `F_PUNCHHOLE` can slot in later without a wire change.
+- `handle_write_zeroes_list` — parses the range list, bounded `pwrite` of a zero buffer per range. Ignores the UNMAP flag since we advertise `write_zeroes_may_unmap=0`.
+- `process_descriptor_chain` routes both opcodes through a read-only-descriptor concatenator (guests are free to split the range list across chained descriptors) + dispatches to the new handlers. Also fixed GET_ID, which was returning `Unsupp` via the fall-through.
+- Nine unit tests: features advertised, config-space fields readable, range-list parsing round-trip + malformed rejection, DISCARD accepts valid / rejects oversize, WRITE_ZEROES actually zeros / rejects oversize / rejects read-only.
+
+### Still deferred
+
+**Why not swap to async.** The synchronous `libc::pread`/`pwrite` hot path still blocks the vCPU thread. The async migration is a separate effort because: (a) the `AsyncBlockBackend` trait is unimplemented — picking io_uring on Linux + dispatch_io on macOS is itself design work; (b) without the core foundation from Phase 7 (real `EventFd` / irqfd and a queue abstraction that devices own end-to-end), an async backend can't signal completions efficiently anyway. The inline pread/pwrite path is correct; it's not the bottleneck for typical container workloads at current scale. Revisit alongside Phase 7.
+
+- Async backend (`AsyncBlockBackend` wired, io_uring on Linux, mmap/dispatch on macOS) — deferred to post-Phase 7.
+- `VIRTIO_BLK_F_TOPOLOGY` — requires querying the underlying storage's physical block size, which isn't trivially portable. Skipped; config space currently reports topology=0 (unused).
+- Real `fallocate(PUNCH_HOLE)` for DISCARD — no user-visible difference today; add when sparse-file reclamation becomes measurable.
 
 ---
 

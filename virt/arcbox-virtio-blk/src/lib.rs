@@ -11,7 +11,6 @@
 //! ## Module layout
 //!
 //! - `backend`: `AsyncBlockBackend` trait
-//! - `async_file`: tokio-backed file backend
 //! - `mmap`: memory-mapped backend (zero-copy)
 //! - `direct_io`: `O_DIRECT` backend (Linux only)
 //! - `request`: wire types — config, header, status, request type
@@ -31,7 +30,6 @@
 #![allow(clippy::needless_collect)]
 #![allow(mismatched_lifetime_syntaxes)]
 
-mod async_file;
 mod backend;
 mod device;
 #[cfg(target_os = "linux")]
@@ -39,7 +37,6 @@ mod direct_io;
 mod mmap;
 mod request;
 
-pub use async_file::AsyncFileBackend;
 pub use backend::AsyncBlockBackend;
 pub use device::VirtioBlock;
 #[cfg(target_os = "linux")]

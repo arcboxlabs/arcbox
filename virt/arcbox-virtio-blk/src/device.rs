@@ -57,6 +57,16 @@ impl VirtioBlock {
     /// `VirtIO` 1.0 feature.
     pub const FEATURE_VERSION_1: u64 = 1 << virtio_bindings::virtio_config::VIRTIO_F_VERSION_1;
 
+    /// Largest range a single WRITE_ZEROES request may cover, in 512-byte
+    /// sectors. Capped at 1 MiB so each range fits in one bounded zero-buffer
+    /// allocation + one `pwrite` syscall. The guest splits larger requests.
+    pub const MAX_WRITE_ZEROES_SECTORS: u32 = 2048;
+
+    /// Largest range a single DISCARD request may cover. Since DISCARD is a
+    /// spec-compliant no-op on our backend (advisory hint), we accept any
+    /// reasonable cap — 16 MiB keeps the guest from fragmenting `fstrim`.
+    pub const MAX_DISCARD_SECTORS: u32 = 32768;
+
     /// Creates a new block device.
     #[must_use]
     pub fn new(config: BlockConfig) -> Self {
@@ -64,6 +74,8 @@ impl VirtioBlock {
             | Self::FEATURE_SEG_MAX
             | Self::FEATURE_BLK_SIZE
             | Self::FEATURE_FLUSH
+            | Self::FEATURE_DISCARD
+            | Self::FEATURE_WRITE_ZEROES
             | Self::FEATURE_VERSION_1
             | arcbox_virtio_core::queue::VIRTIO_F_EVENT_IDX;
 
@@ -193,6 +205,10 @@ impl VirtioBlock {
 
     /// Handles a block request.
     ///
+    /// For DISCARD/WRITE_ZEROES, `data` is the range list (N × 16-byte
+    /// `virtio_blk_discard_write_zeroes` entries); the caller passes it as
+    /// `&mut` for API uniformity with IN/GET_ID but it is only read.
+    ///
     /// # Errors
     ///
     /// Returns an error if the request cannot be processed.
@@ -204,9 +220,8 @@ impl VirtioBlock {
             BlockRequestType::Out => self.handle_write(header.sector, data),
             BlockRequestType::Flush => self.handle_flush(),
             BlockRequestType::GetId => self.handle_get_id(data),
-            BlockRequestType::Discard | BlockRequestType::WriteZeroes => {
-                Err(VirtioError::NotSupported("Operation not supported".into()))
-            }
+            BlockRequestType::Discard => self.handle_discard_list(data),
+            BlockRequestType::WriteZeroes => self.handle_write_zeroes_list(data),
         }
     }
 
@@ -284,6 +299,81 @@ impl VirtioBlock {
         let len = id_bytes.len().min(data.len());
         data[..len].copy_from_slice(&id_bytes[..len]);
         Ok(len)
+    }
+
+    /// DISCARD is an advisory hint under the virtio-blk spec — the device
+    /// "MAY" reclaim storage but is free to ignore it entirely. We accept the
+    /// request, validate the range list is well-formed, and return OK without
+    /// touching the backing file. Real hole-punching via `fallocate` /
+    /// `F_PUNCHHOLE` can slot in here later without a wire-protocol change.
+    fn handle_discard_list(&self, data: &[u8]) -> Result<usize> {
+        for range in parse_range_list(data)? {
+            if u64::from(range.num_sectors) > u64::from(Self::MAX_DISCARD_SECTORS) {
+                return Err(VirtioError::InvalidOperation(format!(
+                    "discard range too large: {} > {}",
+                    range.num_sectors,
+                    Self::MAX_DISCARD_SECTORS
+                )));
+            }
+            if range.flags != 0 {
+                return Err(VirtioError::InvalidOperation(format!(
+                    "discard range has reserved flags set: 0x{:x}",
+                    range.flags
+                )));
+            }
+        }
+        Ok(0)
+    }
+
+    /// WRITE_ZEROES must actually zero the indicated sectors — the guest relies
+    /// on subsequent reads returning zero. We `pwrite` a bounded zero buffer.
+    /// `MAX_WRITE_ZEROES_SECTORS` caps each range at 1 MiB so the allocation +
+    /// syscall count stay predictable; the guest splits larger requests.
+    fn handle_write_zeroes_list(&self, data: &[u8]) -> Result<usize> {
+        if self.config.read_only {
+            return Err(VirtioError::InvalidOperation("Device is read-only".into()));
+        }
+
+        let fd = self
+            .raw_fd
+            .ok_or_else(|| VirtioError::NotReady("Block device not activated".into()))?;
+        let block_size = u64::from(self.config.blk_size);
+
+        for range in parse_range_list(data)? {
+            if u64::from(range.num_sectors) > u64::from(Self::MAX_WRITE_ZEROES_SECTORS) {
+                return Err(VirtioError::InvalidOperation(format!(
+                    "write_zeroes range too large: {} > {}",
+                    range.num_sectors,
+                    Self::MAX_WRITE_ZEROES_SECTORS
+                )));
+            }
+            // Ignore the UNMAP flag: we advertise write_zeroes_may_unmap=0,
+            // so the guest must treat the range as zeroed regardless.
+            let bytes = u64::from(range.num_sectors) * block_size;
+            if bytes == 0 {
+                continue;
+            }
+            #[allow(clippy::cast_possible_wrap)]
+            let offset = (range.sector * block_size) as libc::off_t;
+            let zeros = vec![0u8; bytes as usize];
+            // SAFETY: fd is valid; zeros is a borrowed slice of length `bytes`.
+            let n = unsafe {
+                libc::pwrite(
+                    fd,
+                    zeros.as_ptr().cast::<libc::c_void>(),
+                    zeros.len(),
+                    offset,
+                )
+            };
+            if n < 0 {
+                return Err(VirtioError::Io(format!(
+                    "pwrite (write_zeroes) failed at sector {}: {}",
+                    range.sector,
+                    std::io::Error::last_os_error()
+                )));
+            }
+        }
+        Ok(0)
     }
 
     /// Processes a descriptor chain from the virtqueue.
@@ -367,9 +457,81 @@ impl VirtioBlock {
                 Ok(_) => Ok((0, BlockStatus::Ok)),
                 Err(_) => Ok((0, BlockStatus::IoErr)),
             },
-            _ => Ok((0, BlockStatus::Unsupp)),
+            BlockRequestType::Discard | BlockRequestType::WriteZeroes => {
+                // Concatenate every read-only payload descriptor — guests are
+                // free to split the range list across chained descriptors.
+                let mut list: Vec<u8> = Vec::new();
+                for desc in descriptors.iter().skip(1) {
+                    if desc.is_write_only() {
+                        continue;
+                    }
+                    let start = desc.addr as usize;
+                    let end = start + desc.len as usize;
+                    if end > memory.len() {
+                        return Err(VirtioError::InvalidQueue("Data out of bounds".into()));
+                    }
+                    list.extend_from_slice(&memory[start..end]);
+                }
+                let result = if matches!(request_type, BlockRequestType::Discard) {
+                    self.handle_discard_list(&list)
+                } else {
+                    self.handle_write_zeroes_list(&list)
+                };
+                match result {
+                    Ok(_) => Ok((0, BlockStatus::Ok)),
+                    Err(_) => Ok((0, BlockStatus::IoErr)),
+                }
+            }
+            BlockRequestType::GetId => {
+                // Write the device ID into the first write-only payload desc.
+                for desc in descriptors.iter().skip(1) {
+                    if !desc.is_write_only() || desc.len == 1 {
+                        continue;
+                    }
+                    let start = desc.addr as usize;
+                    let end = start + desc.len as usize;
+                    if end > memory.len() {
+                        return Err(VirtioError::InvalidQueue("Data out of bounds".into()));
+                    }
+                    match self.handle_get_id(&mut memory[start..end]) {
+                        Ok(n) => return Ok((n, BlockStatus::Ok)),
+                        Err(_) => return Ok((0, BlockStatus::IoErr)),
+                    }
+                }
+                Ok((0, BlockStatus::IoErr))
+            }
         }
     }
+}
+
+/// One entry in a DISCARD / WRITE_ZEROES request's range list. The on-wire
+/// struct is `virtio_blk_discard_write_zeroes`: sector (le64), num_sectors
+/// (le32), flags (le32) — 16 bytes total.
+#[derive(Debug, Clone, Copy)]
+struct DiscardWriteZeroesRange {
+    sector: u64,
+    num_sectors: u32,
+    flags: u32,
+}
+
+const RANGE_ENTRY_SIZE: usize = 16;
+
+fn parse_range_list(bytes: &[u8]) -> Result<Vec<DiscardWriteZeroesRange>> {
+    if bytes.is_empty() || bytes.len() % RANGE_ENTRY_SIZE != 0 {
+        return Err(VirtioError::InvalidOperation(format!(
+            "range list size {} not a multiple of 16",
+            bytes.len()
+        )));
+    }
+    let mut ranges = Vec::with_capacity(bytes.len() / RANGE_ENTRY_SIZE);
+    for chunk in bytes.chunks_exact(RANGE_ENTRY_SIZE) {
+        ranges.push(DiscardWriteZeroesRange {
+            sector: u64::from_le_bytes(chunk[0..8].try_into().unwrap()),
+            num_sectors: u32::from_le_bytes(chunk[8..12].try_into().unwrap()),
+            flags: u32::from_le_bytes(chunk[12..16].try_into().unwrap()),
+        });
+    }
+    Ok(ranges)
 }
 
 impl VirtioDevice for VirtioBlock {
@@ -386,22 +548,40 @@ impl VirtioDevice for VirtioBlock {
     }
 
     fn read_config(&self, offset: u64, data: &mut [u8]) {
-        // VirtIO 1.1 config space layout:
-        // 0:  capacity (u64)
-        // 8:  size_max (u32)
-        // 12: seg_max (u32)
-        // 16: geometry (4 bytes)
-        // 20: blk_size (u32)
-        // 24: topology (10 bytes)
-        // 34: num_queues (u16, only with VIRTIO_BLK_F_MQ)
+        // VirtIO 1.1 `virtio_blk_config` layout:
+        //   0:  capacity (u64)
+        //   8:  size_max (u32)
+        //  12:  seg_max (u32)
+        //  16:  geometry (4 bytes)
+        //  20:  blk_size (u32)
+        //  24:  topology (10 bytes)
+        //  34:  num_queues (u16, only with F_MQ)
+        //  36:  max_discard_sectors (u32, only with F_DISCARD)
+        //  40:  max_discard_seg (u32)
+        //  44:  discard_sector_alignment (u32)
+        //  48:  max_write_zeroes_sectors (u32, only with F_WRITE_ZEROES)
+        //  52:  max_write_zeroes_seg (u32)
+        //  56:  write_zeroes_may_unmap (u8)
+        //  57:  unused (3 bytes)
+        //
+        // Guests inspect these fields at probe time before any request is
+        // issued, so they must be populated whenever the matching feature is
+        // advertised — a zeroed field signals "not supported" and the guest
+        // will never emit the op despite the feature bit being set.
         let config_data = [
             self.config.capacity.to_le_bytes().as_slice(),
-            &(1u32 << 12).to_le_bytes(), // size_max: 4KB
+            &(1u32 << 12).to_le_bytes(), // size_max: 4 KiB
             &128u32.to_le_bytes(),       // seg_max: 128 segments
             &[0u8; 4],                   // geometry: not used
             &self.config.blk_size.to_le_bytes(),
             &[0u8; 10], // topology: not used
             &self.config.num_queues.to_le_bytes(),
+            &Self::MAX_DISCARD_SECTORS.to_le_bytes(),
+            &1u32.to_le_bytes(), // max_discard_seg: one range per request
+            &1u32.to_le_bytes(), // discard_sector_alignment: any sector
+            &Self::MAX_WRITE_ZEROES_SECTORS.to_le_bytes(),
+            &1u32.to_le_bytes(), // max_write_zeroes_seg
+            &[0u8; 4],           // write_zeroes_may_unmap=0 + 3 pad bytes
         ]
         .concat();
 
@@ -807,5 +987,151 @@ mod tests {
         let mut sector0 = vec![0u8; 512];
         device.handle_read(0, &mut sector0).unwrap();
         assert!(sector0.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_features_advertise_discard_and_write_zeroes() {
+        let device = VirtioBlock::new(BlockConfig::default());
+        assert!(device.features() & VirtioBlock::FEATURE_DISCARD != 0);
+        assert!(device.features() & VirtioBlock::FEATURE_WRITE_ZEROES != 0);
+    }
+
+    #[test]
+    fn test_config_space_exposes_discard_write_zeroes_limits() {
+        let device = VirtioBlock::new(BlockConfig::default());
+
+        let mut buf = [0u8; 4];
+        device.read_config(36, &mut buf); // max_discard_sectors
+        assert_eq!(u32::from_le_bytes(buf), VirtioBlock::MAX_DISCARD_SECTORS,);
+
+        device.read_config(48, &mut buf); // max_write_zeroes_sectors
+        assert_eq!(
+            u32::from_le_bytes(buf),
+            VirtioBlock::MAX_WRITE_ZEROES_SECTORS,
+        );
+
+        let mut unmap = [0u8; 1];
+        device.read_config(56, &mut unmap); // write_zeroes_may_unmap
+        assert_eq!(unmap[0], 0);
+    }
+
+    #[test]
+    fn test_parse_range_list_rejects_malformed() {
+        assert!(parse_range_list(&[]).is_err());
+        assert!(parse_range_list(&[0u8; 15]).is_err());
+        assert!(parse_range_list(&[0u8; 17]).is_err());
+    }
+
+    #[test]
+    fn test_parse_range_list_roundtrip() {
+        let mut bytes = Vec::with_capacity(32);
+        // range 0: sector=10, num_sectors=8, flags=0
+        bytes.extend_from_slice(&10u64.to_le_bytes());
+        bytes.extend_from_slice(&8u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        // range 1: sector=100, num_sectors=2, flags=1 (UNMAP)
+        bytes.extend_from_slice(&100u64.to_le_bytes());
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+
+        let ranges = parse_range_list(&bytes).unwrap();
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0].sector, 10);
+        assert_eq!(ranges[0].num_sectors, 8);
+        assert_eq!(ranges[0].flags, 0);
+        assert_eq!(ranges[1].sector, 100);
+        assert_eq!(ranges[1].flags, 1);
+    }
+
+    #[test]
+    fn test_handle_discard_accepts_valid_range() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(&vec![0xAAu8; 4096]).unwrap();
+
+        let device = VirtioBlock::from_path(temp_file.path(), false).unwrap();
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0u64.to_le_bytes()); // sector
+        bytes.extend_from_slice(&4u32.to_le_bytes()); // num_sectors
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // flags
+
+        assert!(device.handle_discard_list(&bytes).is_ok());
+
+        // DISCARD is advisory — underlying bytes must be unchanged.
+        let mut buf = vec![0u8; 512];
+        device.handle_read(0, &mut buf).unwrap();
+        assert!(buf.iter().all(|&b| b == 0xAA));
+    }
+
+    #[test]
+    fn test_handle_discard_rejects_oversize_range() {
+        let device = VirtioBlock::new(BlockConfig::default());
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&(VirtioBlock::MAX_DISCARD_SECTORS + 1).to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+
+        assert!(device.handle_discard_list(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_handle_write_zeroes_actually_zeros_sectors() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(&vec![0xFFu8; 4096]).unwrap();
+
+        let device = VirtioBlock::from_path(temp_file.path(), false).unwrap();
+
+        // Zero sectors 0..4 (2048 bytes), leave 2048..4096 untouched.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+
+        device.handle_write_zeroes_list(&bytes).unwrap();
+
+        let mut buf = vec![0u8; 2048];
+        device.handle_read(0, &mut buf).unwrap();
+        assert!(buf.iter().all(|&b| b == 0));
+
+        let mut tail = vec![0u8; 2048];
+        device.handle_read(4, &mut tail).unwrap();
+        assert!(tail.iter().all(|&b| b == 0xFF));
+    }
+
+    #[test]
+    fn test_handle_write_zeroes_rejects_read_only() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(&vec![0xFFu8; 4096]).unwrap();
+
+        let device = VirtioBlock::from_path(temp_file.path(), true).unwrap();
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+
+        assert!(device.handle_write_zeroes_list(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_handle_write_zeroes_rejects_oversize_range() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file
+            .write_all(&vec![
+                0u8;
+                (VirtioBlock::MAX_WRITE_ZEROES_SECTORS as usize + 1)
+                    * 512
+            ])
+            .unwrap();
+
+        let device = VirtioBlock::from_path(temp_file.path(), false).unwrap();
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&(VirtioBlock::MAX_WRITE_ZEROES_SECTORS + 1).to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+
+        assert!(device.handle_write_zeroes_list(&bytes).is_err());
     }
 }
