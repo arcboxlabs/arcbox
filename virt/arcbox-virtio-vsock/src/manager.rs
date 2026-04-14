@@ -91,6 +91,14 @@ pub struct VsockConnectionId {
 /// Default host-side TX buffer size (also advertised as `buf_alloc` to guest).
 pub const TX_BUFFER_SIZE: u32 = 64 * 1024;
 
+/// Bytes consumed since the last credit packet before we send a proactive
+/// `CREDIT_UPDATE`.
+///
+/// 4 KB matches Firecracker's `CONN_CREDIT_UPDATE_THRESHOLD`. A coarser
+/// threshold (e.g. `TX_BUFFER_SIZE * 3/4 = 48 KB`) stalls the guest TX path
+/// on any burst between 4 KB and 48 KB.
+pub const CREDIT_UPDATE_THRESHOLD: u32 = 4096;
+
 /// A single host↔guest vsock connection.
 ///
 /// Owns the internal end of the socketpair. When this entry is removed from
@@ -180,9 +188,10 @@ impl VsockConnection {
     pub fn advance_fwd_cnt(&mut self, bytes: u32) {
         self.fwd_cnt += Wrapping(bytes);
 
-        // Proactive credit update when >3/4 of buffer consumed since last update.
+        // Proactive credit update once enough has been drained that the peer's
+        // in-flight window is meaningfully stale.
         let consumed = (self.fwd_cnt - self.last_fwd_cnt).0;
-        if consumed >= TX_BUFFER_SIZE * 3 / 4 {
+        if consumed >= CREDIT_UPDATE_THRESHOLD {
             self.rx_queue.enqueue(RxOps::CREDIT_UPDATE);
         }
     }
@@ -569,8 +578,21 @@ mod tests {
         let conn = mgr.get_mut(&id).unwrap();
         conn.rx_queue.dequeue();
 
-        // Write 50KB (>3/4 of TX_BUFFER_SIZE=64KB) → should trigger CreditUpdate.
-        conn.advance_fwd_cnt(50 * 1024);
+        // Write past CREDIT_UPDATE_THRESHOLD (4 KB) → should trigger CreditUpdate.
+        conn.advance_fwd_cnt(CREDIT_UPDATE_THRESHOLD);
         assert_eq!(conn.rx_queue.peek(), RxOps::CREDIT_UPDATE);
+    }
+
+    #[test]
+    fn fwd_cnt_below_threshold_does_not_trigger_credit_update() {
+        let mut mgr = VsockConnectionManager::new();
+        let (_, internal) = make_socketpair();
+        let (id, _rx) = mgr.allocate(1024, 3, internal);
+        let conn = mgr.get_mut(&id).unwrap();
+        conn.rx_queue.dequeue();
+
+        // One byte below threshold must NOT enqueue an update.
+        conn.advance_fwd_cnt(CREDIT_UPDATE_THRESHOLD - 1);
+        assert!(!conn.rx_queue.pending());
     }
 }
