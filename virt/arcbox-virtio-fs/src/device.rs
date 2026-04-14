@@ -43,11 +43,11 @@ pub struct VirtioFs {
     features: u64,
     acked_features: u64,
     /// FUSE session state.
-    pub(crate) session: FuseSession,
+    session: FuseSession,
     /// Request handler (provided by arcbox-fs).
     handler: Option<Arc<dyn FuseRequestHandler>>,
     /// Request queues for FUSE traffic (host-side, used by tests).
-    pub(crate) request_queues: Vec<VirtQueue>,
+    request_queues: Vec<VirtQueue>,
     /// Whether the device is activated.
     activated: bool,
     /// Last processed avail index for request queue 1 (guest-memory path).

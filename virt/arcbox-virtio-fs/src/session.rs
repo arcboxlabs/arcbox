@@ -16,7 +16,7 @@ use crate::protocol::{
 #[derive(Debug)]
 pub struct FuseSession {
     /// Whether `FUSE_INIT` has been received and processed.
-    pub(crate) initialized: AtomicBool,
+    initialized: AtomicBool,
     /// Negotiated protocol major version.
     major: u32,
     /// Negotiated protocol minor version.

@@ -6,13 +6,13 @@ use std::path::PathBuf;
 #[allow(dead_code)]
 pub struct AsyncFileBackend {
     /// Path to the backing file.
-    pub(crate) path: PathBuf,
+    path: PathBuf,
     /// Capacity in sectors.
-    pub(crate) capacity: u64,
+    capacity: u64,
     /// Block size.
-    pub(crate) block_size: u32,
+    block_size: u32,
     /// Read-only mode.
-    pub(crate) read_only: bool,
+    read_only: bool,
 }
 
 impl AsyncFileBackend {

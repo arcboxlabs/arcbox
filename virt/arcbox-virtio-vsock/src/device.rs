@@ -35,17 +35,17 @@ impl Default for VsockConfig {
 pub struct VirtioVsock {
     config: VsockConfig,
     features: u64,
-    pub(crate) acked_features: u64,
+    acked_features: u64,
     /// Backend for host-side socket handling.
-    pub(crate) backend: Option<Arc<Mutex<dyn VsockBackend>>>,
+    backend: Option<Arc<Mutex<dyn VsockBackend>>>,
     /// Active connections.
-    pub(crate) connections: RwLock<HashMap<(u32, u32), VsockConnection>>,
+    connections: RwLock<HashMap<(u32, u32), VsockConnection>>,
     /// Queue 0: RX (host -> guest).
-    pub(crate) rx_queue: Option<VirtQueue>,
+    rx_queue: Option<VirtQueue>,
     /// Queue 1: TX (guest -> host).
-    pub(crate) tx_queue: Option<VirtQueue>,
+    tx_queue: Option<VirtQueue>,
     /// Queue 2: Event (control events).
-    pub(crate) event_queue: Option<VirtQueue>,
+    event_queue: Option<VirtQueue>,
     /// Host-side connection fds keyed by guest port.
     /// Used by the guest-memory `process_queue` path to forward data
     /// between host sockets and guest vsock queues.
