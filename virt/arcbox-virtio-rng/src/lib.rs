@@ -152,11 +152,17 @@ impl VirtioDevice for VirtioRng {
 
                 // RNG buffers are write-only (device fills them).
                 if flags & 2 != 0 && addr + len <= memory.len() {
-                    // Fill with random bytes from host /dev/urandom.
-                    getrandom::getrandom(&mut memory[addr..addr + len]).unwrap_or_else(|_| {
-                        // Fallback: zero-fill (better than nothing).
-                        memory[addr..addr + len].fill(0);
-                    });
+                    // Fill with random bytes from host entropy source. A
+                    // zero-fill fallback would hand the guest all-zero bytes
+                    // while reporting them as valid entropy — so on failure
+                    // we stop filling this chain and let the guest retry via
+                    // a short read.
+                    if let Err(e) = getrandom::getrandom(&mut memory[addr..addr + len]) {
+                        tracing::warn!(
+                            "virtio-rng: getrandom failed: {e}; returning short read ({filled} bytes)",
+                        );
+                        break;
+                    }
                     filled += len as u32;
                 }
 
