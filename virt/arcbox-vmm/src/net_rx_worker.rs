@@ -176,10 +176,10 @@ fn inject_one_frame(ctx: &NetRxWorkerContext, frame: &[u8], used_idx: &mut u16) 
                 {
                     buf[0] = 1; // NEEDS_CSUM
                     buf[1] = 1; // GSO_TCPV4
-                    buf[2..4].copy_from_slice(&34u16.to_le_bytes());
-                    buf[4..6].copy_from_slice(&1460u16.to_le_bytes());
-                    buf[6..8].copy_from_slice(&34u16.to_le_bytes());
-                    buf[8..10].copy_from_slice(&16u16.to_le_bytes());
+                    buf[2..4].copy_from_slice(&54u16.to_le_bytes()); // hdr_len: ETH(14)+IP(20)+TCP(20)
+                    buf[4..6].copy_from_slice(&1460u16.to_le_bytes()); // gso_size
+                    buf[6..8].copy_from_slice(&34u16.to_le_bytes()); // csum_start: offset to TCP hdr
+                    buf[8..10].copy_from_slice(&16u16.to_le_bytes()); // csum_offset: TCP checksum
                 }
                 // Write frame data after header.
                 let frame_bytes = to_write - hdr_bytes;

@@ -62,7 +62,11 @@ pub fn handle_hvc_blk_io(
     let ram_size = device_manager.guest_ram_size();
     let gpa = buffer_gpa as usize;
 
-    if gpa < gpa_base || gpa + byte_len > gpa_base + ram_size {
+    if gpa < gpa_base
+        || gpa
+            .checked_add(byte_len)
+            .is_none_or(|end| end > gpa_base + ram_size)
+    {
         return (-libc::EFAULT as i64) as u64;
     }
 
@@ -71,8 +75,11 @@ pub fn handle_hvc_blk_io(
     // live host mapping tracked by `DeviceManager` for the VM's lifetime.
     let host_ptr = unsafe { ram_base.add(gpa - gpa_base) };
 
+    let Some(byte_offset) = sector.checked_mul(u64::from(blk_size)) else {
+        return (-libc::EINVAL as i64) as u64;
+    };
     #[allow(clippy::cast_possible_wrap)]
-    let offset = (sector * u64::from(blk_size)) as libc::off_t;
+    let offset = byte_offset as libc::off_t;
 
     // SAFETY: `host_ptr` is valid for `byte_len` bytes (bounds-checked
     // above) and `raw_fd` is an open fd from `hvc_blk_fds` (owned by the

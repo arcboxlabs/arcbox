@@ -231,59 +231,12 @@ pub fn blk_io_worker_loop(ctx: BlkWorkerContext, rx: std::sync::mpsc::Receiver<B
             }
         }
 
-        // Sort by (request_type, sector) to enable merging.
-        // Flush/GetId items are processed first (low ordinal).
-        if batch.len() > 1 {
-            batch.sort_unstable_by(|a, b| {
-                let type_ord = |t: &BlkRequestType| match t {
-                    BlkRequestType::Flush => 0u8,
-                    BlkRequestType::GetId => 1,
-                    BlkRequestType::Read => 2,
-                    BlkRequestType::Write => 3,
-                };
-                type_ord(&a.request_type)
-                    .cmp(&type_ord(&b.request_type))
-                    .then(a.sector.cmp(&b.sector))
-            });
-        }
-
-        // Process sorted batch. Adjacent same-type items with contiguous
-        // sectors are merged into a single preadv/pwritev call.
-        let mut i = 0;
-        while i < batch.len() {
-            let item = &batch[i];
-
-            // Non-mergeable types: process individually.
-            if !matches!(
-                item.request_type,
-                BlkRequestType::Read | BlkRequestType::Write
-            ) {
-                process_item(&ctx, item);
-                i += 1;
-                continue;
-            }
-
-            // Find merge run: consecutive items with same type and
-            // contiguous sectors.
-            let mut end = i + 1;
-            while end < batch.len()
-                && batch[end].request_type == item.request_type
-                && batch[end].sector
-                    == batch[end - 1].sector
-                        + u64::from(batch[end - 1].total_data_len) / u64::from(ctx.blk_size)
-            {
-                end += 1;
-            }
-
-            if end == i + 1 {
-                // Single item, no merge possible.
-                process_item(&ctx, item);
-            } else {
-                // Merged run: build combined iovec from all items.
-                process_merged(&ctx, &batch[i..end]);
-            }
-            i = end;
-        }
+        // Process batch in segments split at Flush/GetId boundaries.
+        // Within each segment, Read/Write items are sorted by (type, sector)
+        // for merge-friendly ordering. Flush/GetId items are processed after
+        // all preceding Read/Write items complete, preserving durability
+        // semantics: a Flush must not overtake a Write from the same batch.
+        process_batch(&ctx, &mut batch);
 
         let new_used = read_used_idx(&ctx.guest_mem, used_addr);
 
@@ -297,6 +250,75 @@ pub fn blk_io_worker_loop(ctx: BlkWorkerContext, rx: std::sync::mpsc::Receiver<B
     }
 
     tracing::info!("blk-io-worker exiting");
+}
+
+/// Processes a batch of work items, splitting at Flush/GetId boundaries.
+///
+/// Within each segment of Read/Write items, we sort by (type, sector) for
+/// merge-friendly ordering. Flush/GetId items execute only after all
+/// preceding Read/Write items in the batch have completed, preserving the
+/// guest's durability invariant: `[Write, Flush]` must not be reordered.
+fn process_batch(ctx: &BlkWorkerContext, batch: &mut [BlkWorkItem]) {
+    let mut start = 0;
+    while start < batch.len() {
+        // Find the end of this Read/Write segment (up to next Flush/GetId).
+        let mut seg_end = start;
+        while seg_end < batch.len()
+            && matches!(
+                batch[seg_end].request_type,
+                BlkRequestType::Read | BlkRequestType::Write
+            )
+        {
+            seg_end += 1;
+        }
+
+        // Sort the Read/Write segment by (type, sector) for merging.
+        if seg_end - start > 1 {
+            batch[start..seg_end].sort_unstable_by(|a, b| {
+                let type_ord = |t: &BlkRequestType| match t {
+                    BlkRequestType::Read => 0u8,
+                    BlkRequestType::Write => 1,
+                    _ => 2,
+                };
+                type_ord(&a.request_type)
+                    .cmp(&type_ord(&b.request_type))
+                    .then(a.sector.cmp(&b.sector))
+            });
+        }
+
+        // Process the sorted Read/Write segment with merging.
+        let mut i = start;
+        while i < seg_end {
+            let item = &batch[i];
+            let mut end = i + 1;
+            while end < seg_end
+                && batch[end].request_type == item.request_type
+                && batch[end].sector
+                    == batch[end - 1].sector
+                        + u64::from(batch[end - 1].total_data_len) / u64::from(ctx.blk_size)
+            {
+                end += 1;
+            }
+            if end == i + 1 {
+                process_item(ctx, item);
+            } else {
+                process_merged(ctx, &batch[i..end]);
+            }
+            i = end;
+        }
+
+        // Process any Flush/GetId items that follow (one by one).
+        start = seg_end;
+        while start < batch.len()
+            && !matches!(
+                batch[start].request_type,
+                BlkRequestType::Read | BlkRequestType::Write
+            )
+        {
+            process_item(ctx, &batch[start]);
+            start += 1;
+        }
+    }
 }
 
 /// Processes a single block I/O work item.

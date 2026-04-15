@@ -410,8 +410,6 @@ impl Vmm {
         // Each VirtioFS device gets its own DAX window slice so devm_request_mem_region
         // doesn't collide. Total DAX space is split equally among shares.
         let per_share_dax = crate::dax::DAX_WINDOW_PER_SHARE;
-        let dax_mapper: std::sync::Arc<dyn arcbox_fs::DaxMapper> =
-            std::sync::Arc::new(crate::dax::HvDaxMapper::new(dax_base, dax_size as u64));
         let mut dax_offset: u64 = 0;
 
         for dir in &self.config.shared_dirs {
@@ -432,8 +430,14 @@ impl Vmm {
                 .start()
                 .map_err(|e| VmmError::Device(format!("FsServer start failed: {e}")))?;
 
-            // Wire DAX mapper into the FUSE dispatcher.
-            server.set_dax_mapper(dax_mapper.clone());
+            // Wire a per-share DAX mapper with the correct base IPA.
+            // Each share's DAX window is a disjoint slice of the global DAX
+            // region. Using a shared mapper would cause all shares to map
+            // into share 0's window, corrupting guest page tables.
+            let this_dax_base = dax_base + dax_offset;
+            let share_mapper: std::sync::Arc<dyn arcbox_fs::DaxMapper> =
+                std::sync::Arc::new(crate::dax::HvDaxMapper::new(this_dax_base, per_share_dax));
+            server.set_dax_mapper(share_mapper);
 
             let handler: std::sync::Arc<dyn arcbox_virtio::fs::FuseRequestHandler> =
                 std::sync::Arc::new(server);
@@ -449,7 +453,6 @@ impl Vmm {
             )?;
 
             // Configure per-device SHM region (non-overlapping DAX window slice).
-            let this_dax_base = dax_base + dax_offset;
             if let Some(dev) = device_manager.get_registered_device(fs_device_id) {
                 if let Some(ref mmio_arc) = dev.mmio_state {
                     if let Ok(mut state) = mmio_arc.write() {
