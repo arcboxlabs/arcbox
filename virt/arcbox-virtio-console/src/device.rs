@@ -380,19 +380,18 @@ impl VirtioDevice for VirtioConsole {
         if avail_addr + 4 > memory.len() {
             return Ok(Vec::new());
         }
-        let avail_idx =
-            u16::from_le_bytes([memory[avail_addr + 2], memory[avail_addr + 3]]) as usize;
+        let avail_idx = u16::from_le_bytes([memory[avail_addr + 2], memory[avail_addr + 3]]);
 
         if used_addr + 4 > memory.len() {
             return Ok(Vec::new());
         }
         let used_idx_ref = &memory[used_addr + 2..used_addr + 4];
-        let mut used_idx = u16::from_le_bytes([used_idx_ref[0], used_idx_ref[1]]) as usize;
+        let mut used_idx = u16::from_le_bytes([used_idx_ref[0], used_idx_ref[1]]);
 
         let mut completions = Vec::new();
 
         while used_idx != avail_idx {
-            let avail_ring_off = avail_addr + 4 + (used_idx % queue_size) * 2;
+            let avail_ring_off = avail_addr + 4 + (used_idx as usize % queue_size) * 2;
             if avail_ring_off + 2 > memory.len() {
                 break;
             }
@@ -446,7 +445,7 @@ impl VirtioDevice for VirtioConsole {
                 idx = next as usize;
             }
 
-            let used_ring_off = used_addr + 4 + (used_idx % queue_size) * 8;
+            let used_ring_off = used_addr + 4 + (used_idx as usize % queue_size) * 8;
             if used_ring_off + 8 <= memory.len() {
                 memory[used_ring_off..used_ring_off + 4]
                     .copy_from_slice(&(head_idx as u32).to_le_bytes());
@@ -454,22 +453,27 @@ impl VirtioDevice for VirtioConsole {
                     .copy_from_slice(&total_len.to_le_bytes());
             }
 
-            used_idx += 1;
+            used_idx = used_idx.wrapping_add(1);
             completions.push((head_idx, total_len));
         }
 
         if !completions.is_empty() {
             std::sync::atomic::fence(std::sync::atomic::Ordering::Release);
-            let new_used = (used_idx as u16).to_le_bytes();
+            let new_used = used_idx.to_le_bytes();
             memory[used_addr + 2] = new_used[0];
             memory[used_addr + 3] = new_used[1];
 
-            // Set avail_event = current avail_idx so driver notifies on next request.
-            let avail_event_off = used_addr + 4 + 8 * queue_size;
-            if avail_event_off + 2 <= memory.len() {
-                let ae = (avail_idx as u16).to_le_bytes();
-                memory[avail_event_off] = ae[0];
-                memory[avail_event_off + 1] = ae[1];
+            // Only write avail_event when VIRTIO_F_EVENT_IDX was negotiated;
+            // without it the field lives past the used ring and the write
+            // would corrupt guest memory. Console does not advertise EVENT_IDX
+            // so this branch is currently unreachable.
+            if (self.acked_features & arcbox_virtio_core::queue::VIRTIO_F_EVENT_IDX) != 0 {
+                let avail_event_off = used_addr + 4 + 8 * queue_size;
+                if avail_event_off + 2 <= memory.len() {
+                    let ae = avail_idx.to_le_bytes();
+                    memory[avail_event_off] = ae[0];
+                    memory[avail_event_off + 1] = ae[1];
+                }
             }
         }
 

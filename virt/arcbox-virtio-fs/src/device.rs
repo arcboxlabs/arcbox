@@ -51,7 +51,7 @@ pub struct VirtioFs {
     /// Whether the device is activated.
     activated: bool,
     /// Last processed avail index for request queue 1 (guest-memory path).
-    last_avail_idx_q1: usize,
+    last_avail_idx_q1: u16,
 }
 
 impl VirtioFs {
@@ -499,16 +499,14 @@ impl VirtioDevice for VirtioFs {
         if avail_addr + 4 > memory.len() {
             return Ok(Vec::new());
         }
-        let avail_idx =
-            u16::from_le_bytes([memory[avail_addr + 2], memory[avail_addr + 3]]) as usize;
+        let avail_idx = u16::from_le_bytes([memory[avail_addr + 2], memory[avail_addr + 3]]);
 
         // Track last processed index per queue. Use a simple field for queue 1.
-        let last_avail = self.last_avail_idx_q1;
-        let mut current_avail = last_avail;
+        let mut current_avail = self.last_avail_idx_q1;
         let mut completions = Vec::new();
 
         while current_avail != avail_idx {
-            let ring_off = avail_addr + 4 + 2 * (current_avail % q_size);
+            let ring_off = avail_addr + 4 + 2 * (current_avail as usize % q_size);
             if ring_off + 2 > memory.len() {
                 break;
             }
@@ -590,16 +588,18 @@ impl VirtioDevice for VirtioFs {
                 memory[used_idx_off..used_idx_off + 2].copy_from_slice(&new_used.to_le_bytes());
             }
 
-            // Update avail_event for EVENT_IDX notification.
-            let avail_event_off = used_addr + 4 + 8 * q_size;
-            if avail_event_off + 2 <= memory.len() {
-                let ae = ((current_avail + 1) as u16).to_le_bytes();
-                memory[avail_event_off] = ae[0];
-                memory[avail_event_off + 1] = ae[1];
+            // Update avail_event for EVENT_IDX notification — only when negotiated.
+            if (self.acked_features & arcbox_virtio_core::queue::VIRTIO_F_EVENT_IDX) != 0 {
+                let avail_event_off = used_addr + 4 + 8 * q_size;
+                if avail_event_off + 2 <= memory.len() {
+                    let ae = current_avail.wrapping_add(1).to_le_bytes();
+                    memory[avail_event_off] = ae[0];
+                    memory[avail_event_off + 1] = ae[1];
+                }
             }
 
             completions.push((head_idx as u16, response.len() as u32));
-            current_avail += 1;
+            current_avail = current_avail.wrapping_add(1);
         }
 
         self.last_avail_idx_q1 = current_avail;

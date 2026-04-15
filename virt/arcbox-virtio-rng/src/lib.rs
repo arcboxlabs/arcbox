@@ -14,7 +14,7 @@ pub struct VirtioRng {
     /// Whether the device has been activated.
     active: bool,
     /// Last processed avail index for the request queue.
-    last_avail: usize,
+    last_avail: u16,
 }
 
 impl VirtioRng {
@@ -119,14 +119,13 @@ impl VirtioDevice for VirtioRng {
         if avail_addr + 4 > memory.len() {
             return Ok(Vec::new());
         }
-        let avail_idx =
-            u16::from_le_bytes([memory[avail_addr + 2], memory[avail_addr + 3]]) as usize;
+        let avail_idx = u16::from_le_bytes([memory[avail_addr + 2], memory[avail_addr + 3]]);
 
         let mut current = self.last_avail;
         let mut completions = Vec::new();
 
         while current != avail_idx {
-            let ring_off = avail_addr + 4 + 2 * (current % q_size);
+            let ring_off = avail_addr + 4 + 2 * (current as usize % q_size);
             if ring_off + 2 > memory.len() {
                 break;
             }
@@ -181,7 +180,7 @@ impl VirtioDevice for VirtioRng {
             }
 
             completions.push((head_idx as u16, filled));
-            current += 1;
+            current = current.wrapping_add(1);
         }
 
         self.last_avail = current;

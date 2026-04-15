@@ -1046,11 +1046,15 @@ fn resolve_backend(config: &VmmConfig) -> ResolvedBackend {
     match config.backend {
         VmBackend::Vz => ResolvedBackend::Vz,
         VmBackend::Hv => ResolvedBackend::Hv,
-        // Auto: use HV for native ARM64 workloads. VZ is only needed when
-        // the user explicitly requests it (VmBackend::Vz) for Rosetta x86_64
-        // translation. The `enable_rosetta` flag just tells VZ to expose the
-        // Rosetta share — it doesn't force VZ selection.
-        VmBackend::Auto => ResolvedBackend::Hv,
+        // Auto: Rosetta x86_64 translation requires VZ (Hypervisor.framework
+        // cannot translate instructions). For native ARM64 workloads, prefer HV.
+        VmBackend::Auto => {
+            if config.enable_rosetta {
+                ResolvedBackend::Vz
+            } else {
+                ResolvedBackend::Hv
+            }
+        }
     }
 }
 

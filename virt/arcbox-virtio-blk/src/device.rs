@@ -610,7 +610,9 @@ impl VirtioDevice for VirtioBlock {
         // When VIRTIO_F_EVENT_IDX is negotiated, set avail_event = current
         // avail_idx so the driver notifies on the very next request.
         // avail_event lives at used_ring + 4 + 8 * queue_size.
-        if !completions.is_empty() {
+        if !completions.is_empty()
+            && (self.acked_features & arcbox_virtio_core::queue::VIRTIO_F_EVENT_IDX) != 0
+        {
             let avail_event_offset = used_addr + 4 + 8 * q_size;
             if avail_event_offset + 2 <= memory.len() {
                 memory[avail_event_offset..avail_event_offset + 2]
