@@ -32,7 +32,10 @@ mod platform {
         // Mount host /private for macOS symlink targets (/tmp, /var/folders).
         // Must come before tmpfs mounts so /private is available as a VirtioFS
         // target. Guest /tmp and /var remain isolated tmpfs.
-        mount_virtiofs_optional("private", "/private");
+        mount_virtiofs_optional(
+            arcbox_constants::virtiofs::TAG_PRIVATE,
+            arcbox_constants::virtiofs::MOUNT_PRIVATE,
+        );
 
         // Writable layers on top of read-only EROFS.
         mount_tmpfs("/tmp");
@@ -69,7 +72,10 @@ mod platform {
         setup_networking();
 
         // Optional host /Users share (non-fatal if not configured).
-        mount_virtiofs_optional("users", "/Users");
+        mount_virtiofs_optional(
+            arcbox_constants::virtiofs::TAG_USERS,
+            arcbox_constants::virtiofs::MOUNT_USERS,
+        );
 
         // Rosetta x86_64 translation (Apple Silicon only).
         // The host attaches a VirtioFS share containing the Rosetta binary.
