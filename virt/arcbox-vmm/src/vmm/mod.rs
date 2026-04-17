@@ -315,6 +315,16 @@ pub struct Vmm {
     /// size, for munmap on shutdown.
     #[cfg(target_os = "macos")]
     hv_dax_mmap: Option<(usize, usize)>,
+    /// Per-VirtioFS-share DAX mappers (concrete type).
+    ///
+    /// One `Arc<HvDaxMapper>` per configured shared directory, in the
+    /// same order as `config.shared_dirs`. The mapper itself is also
+    /// handed to the `FsServer` as a `dyn DaxMapper` trait object —
+    /// both Arcs point to the same underlying counters, so
+    /// `dax_stats(share_idx)` reports live values as the guest issues
+    /// `FUSE_SETUPMAPPING` / `FUSE_REMOVEMAPPING` requests.
+    #[cfg(target_os = "macos")]
+    hv_dax_mappers: Vec<std::sync::Arc<crate::dax::HvDaxMapper>>,
     /// Cooperative pause flag for the HV backend.
     ///
     /// When set to `true`, every vCPU thread parks itself after its next
@@ -419,6 +429,8 @@ impl Vmm {
             hvc_blk_fds: Arc::new(Vec::new()),
             #[cfg(target_os = "macos")]
             hv_dax_mmap: None,
+            #[cfg(target_os = "macos")]
+            hv_dax_mappers: Vec::new(),
             #[cfg(target_os = "macos")]
             hv_paused: Arc::new(AtomicBool::new(false)),
         })
@@ -674,6 +686,17 @@ impl Vmm {
     #[must_use]
     pub const fn has_balloon(&self) -> bool {
         self.config.balloon
+    }
+
+    /// Returns a snapshot of DAX counters for the given VirtioFS share
+    /// index (0-based, in the order of `config.shared_dirs`). Only
+    /// meaningful on the HV backend — the VZ path does not use
+    /// `HvDaxMapper`. Returns `None` if the index is out of range or
+    /// DAX mappers have not been initialized yet.
+    #[cfg(target_os = "macos")]
+    #[must_use]
+    pub fn dax_stats(&self, share_idx: usize) -> Option<crate::dax::DaxStats> {
+        self.hv_dax_mappers.get(share_idx).map(|m| m.stats())
     }
 
     /// Captures a VM snapshot context from the running hypervisor VM.

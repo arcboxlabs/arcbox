@@ -434,10 +434,17 @@ impl Vmm {
             // Each share's DAX window is a disjoint slice of the global DAX
             // region. Using a shared mapper would cause all shares to map
             // into share 0's window, corrupting guest page tables.
+            //
+            // Keep a concrete `Arc<HvDaxMapper>` on `Vmm` alongside the
+            // trait-object form handed to `FsServer`, so observability code
+            // (ABX-362) and integration tests can read the per-share
+            // `DaxStats` counters directly.
             let this_dax_base = dax_base + dax_offset;
-            let share_mapper: std::sync::Arc<dyn arcbox_fs::DaxMapper> =
+            let concrete_mapper =
                 std::sync::Arc::new(crate::dax::HvDaxMapper::new(this_dax_base, per_share_dax));
+            let share_mapper: std::sync::Arc<dyn arcbox_fs::DaxMapper> = concrete_mapper.clone();
             server.set_dax_mapper(share_mapper);
+            self.hv_dax_mappers.push(concrete_mapper);
 
             let handler: std::sync::Arc<dyn arcbox_virtio::fs::FuseRequestHandler> =
                 std::sync::Arc::new(server);
@@ -1154,6 +1161,11 @@ impl Vmm {
             self.hv_gic.take();
         }
         self.hv_vm.take();
+
+        // Drop per-share DAX mapper handles. Any mappings still held by
+        // FsServer will unmap when the server drops; these are just
+        // observability handles.
+        self.hv_dax_mappers.clear();
 
         // Unmap the DAX window before releasing guest memory.
         if let Some((dax_addr, dax_len)) = self.hv_dax_mmap.take() {

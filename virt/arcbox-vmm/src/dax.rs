@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Computes DAX window base IPA — placed immediately after guest RAM.
 /// Must be above RAM so `devm_memremap_pages` can register it as ZONE_DEVICE.
@@ -32,6 +33,21 @@ struct DaxMapping {
 // SAFETY: host_ptr is from mmap, valid for mapping lifetime.
 unsafe impl Send for DaxMapping {}
 
+/// Observability counters for DAX activity.
+///
+/// Updated from the hot path (setup_mapping / remove_mapping) with
+/// atomic-relaxed writes — suitable for assertions in integration
+/// tests and for lightweight telemetry.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DaxStats {
+    /// Total successful `setup_mapping` calls since mapper creation.
+    pub setup_mappings_count: u64,
+    /// Sum of `length` across all successful `setup_mapping` calls (bytes).
+    pub setup_mappings_bytes: u64,
+    /// Total successful `remove_mapping` calls since mapper creation.
+    pub remove_mappings_count: u64,
+}
+
 /// DAX mapper backed by Hypervisor.framework global hv_vm_map/unmap.
 pub struct HvDaxMapper {
     mappings: Mutex<BTreeMap<u64, DaxMapping>>,
@@ -39,6 +55,12 @@ pub struct HvDaxMapper {
     base_ipa: u64,
     /// Total DAX window size — mappings must stay within [0, window_size).
     window_size: u64,
+    /// Successful setup count (observability).
+    setup_count: AtomicU64,
+    /// Successful setup bytes (observability).
+    setup_bytes: AtomicU64,
+    /// Successful remove count (observability).
+    remove_count: AtomicU64,
 }
 
 impl HvDaxMapper {
@@ -47,6 +69,19 @@ impl HvDaxMapper {
             mappings: Mutex::new(BTreeMap::new()),
             base_ipa,
             window_size,
+            setup_count: AtomicU64::new(0),
+            setup_bytes: AtomicU64::new(0),
+            remove_count: AtomicU64::new(0),
+        }
+    }
+
+    /// Returns a snapshot of the observability counters. Cheap — reads
+    /// three atomic-relaxed loads, allocates nothing.
+    pub fn stats(&self) -> DaxStats {
+        DaxStats {
+            setup_mappings_count: self.setup_count.load(Ordering::Relaxed),
+            setup_mappings_bytes: self.setup_bytes.load(Ordering::Relaxed),
+            remove_mappings_count: self.remove_count.load(Ordering::Relaxed),
         }
     }
 }
@@ -152,6 +187,9 @@ impl arcbox_fs::DaxMapper for HvDaxMapper {
             },
         );
 
+        self.setup_count.fetch_add(1, Ordering::Relaxed);
+        self.setup_bytes.fetch_add(length, Ordering::Relaxed);
+
         tracing::debug!(
             "DAX setup: window_offset={:#x} len={:#x} ipa={:#x}",
             window_offset,
@@ -187,6 +225,8 @@ impl arcbox_fs::DaxMapper for HvDaxMapper {
 
         unsafe { libc::munmap(mapping.host_ptr.cast(), mapping.length) };
 
+        self.remove_count.fetch_add(1, Ordering::Relaxed);
+
         tracing::debug!(
             "DAX remove: window_offset={:#x} len={:#x}",
             window_offset,
@@ -205,5 +245,32 @@ impl Drop for HvDaxMapper {
                 libc::munmap(mapping.host_ptr.cast(), mapping.length);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stats_start_zero() {
+        let m = HvDaxMapper::new(0x8000_0000, 128 * 1024 * 1024);
+        let s = m.stats();
+        assert_eq!(s.setup_mappings_count, 0);
+        assert_eq!(s.setup_mappings_bytes, 0);
+        assert_eq!(s.remove_mappings_count, 0);
+    }
+
+    #[test]
+    fn stats_reflect_fetch_add() {
+        let m = HvDaxMapper::new(0x8000_0000, 128 * 1024 * 1024);
+        // Simulate what the hot path does on a successful setup.
+        m.setup_count.fetch_add(3, Ordering::Relaxed);
+        m.setup_bytes.fetch_add(4096 * 3, Ordering::Relaxed);
+        m.remove_count.fetch_add(1, Ordering::Relaxed);
+        let s = m.stats();
+        assert_eq!(s.setup_mappings_count, 3);
+        assert_eq!(s.setup_mappings_bytes, 4096 * 3);
+        assert_eq!(s.remove_mappings_count, 1);
     }
 }
