@@ -1335,6 +1335,30 @@ impl Vmm {
                     );
                 }
             }
+
+            // Bump socketpair send/receive buffers so large RPC responses
+            // don't hit SO_SNDBUF backpressure on the vsock device's
+            // write path. macOS defaults are typically ~8 KiB, which
+            // caused silent truncation of DAX read responses > 8 KiB
+            // (ABX-365). 1 MiB fits anything the agent currently emits.
+            let bufsize: libc::c_int = 1 << 20;
+            for &fd in &fds {
+                for opt in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
+                    if libc::setsockopt(
+                        fd,
+                        libc::SOL_SOCKET,
+                        opt,
+                        (&raw const bufsize).cast::<libc::c_void>(),
+                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                    ) == -1
+                    {
+                        tracing::debug!(
+                            "vsock setsockopt(opt={opt}, 1MiB) on fd {fd} failed: {}",
+                            std::io::Error::last_os_error()
+                        );
+                    }
+                }
+            }
         }
 
         // fds[0] = returned to caller (daemon agent client)

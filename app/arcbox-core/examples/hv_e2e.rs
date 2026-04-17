@@ -83,20 +83,16 @@ fn run() -> Result<(), String> {
         ));
     }
 
-    // DAX test fixture: 4 KiB of a deterministic byte pattern. Placed
-    // inside the VirtioFS share so the guest can `mmap(MAP_SHARED)` it at
-    // `/arcbox/dax-test.bin` and trigger `FUSE_SETUPMAPPING`. The guest
-    // returns the bytes; we compare against the same pattern here.
-    //
-    // Why only 4 KiB: the HV backend's vsock device forwards packets by
-    // a single non-retrying `libc::write` to a Unix socketpair (see
-    // `arcbox-virtio-vsock/src/device.rs`). macOS default socketpair
-    // SO_SNDBUF is ~8 KiB, so larger responses are silently truncated
-    // and the blocking transport times out. 4 KiB = 1 DAX page, which
-    // is enough to trigger `FUSE_SETUPMAPPING` for this test. Larger
-    // responses will work once the vsock device is extended to loop
-    // on partial writes or SO_SNDBUF is bumped.
-    let dax_fixture = DaxFixture::create(&share_dir, "dax-test.bin", 4 * 1024)?;
+    // DAX test fixture: 512 KiB of a deterministic byte pattern. Placed
+    // inside the VirtioFS share so the guest can `mmap(MAP_SHARED)` it
+    // at `/arcbox/dax-test.bin` and trigger `FUSE_SETUPMAPPING`. The
+    // guest returns the bytes; we compare against the same pattern
+    // here. 512 KiB is large enough that the FUSE client prefers the
+    // DAX fast path over `FUSE_READ`, so the `DaxStats` counters
+    // should increment. Post-ABX-365 the vsock device retries on
+    // partial writes and the socketpair SO_SNDBUF is bumped to 1 MiB,
+    // so responses up to ~1 MiB round-trip without truncation.
+    let dax_fixture = DaxFixture::create(&share_dir, "dax-test.bin", 512 * 1024)?;
 
     println!("[cfg] kernel:  {}", kernel_path.display());
     println!("[cfg] rootfs:  {}", rootfs_path.display());

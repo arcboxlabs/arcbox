@@ -13,6 +13,84 @@ use crate::connection::{ConnectionState, VsockConnection};
 use crate::manager::VsockConnectionManager;
 use crate::protocol::{VsockHeader, VsockOp};
 
+/// Forwards `buf` to `fd` with partial-write + `EAGAIN` handling.
+///
+/// A single `libc::write` on a non-blocking socketpair can return short
+/// (SO_SNDBUF full) or `EAGAIN` (buffer completely full). The previous
+/// implementation dropped the tail in both cases, silently truncating
+/// responses larger than the socket buffer (macOS default ~8 KiB). This
+/// helper loops until all bytes are written, the peer closes the fd, or
+/// the deadline expires. Returns the total number of bytes successfully
+/// delivered.
+///
+/// Runs on the vCPU thread via the BSP's TX handler, so we cap the total
+/// poll wait at a few milliseconds per call — enough to let the client
+/// drain typical RPC responses, short enough that a slow consumer does
+/// not stall the guest indefinitely. If the cap is hit we return a short
+/// count; `advance_fwd_cnt` then reflects only what was delivered, and
+/// the guest's credit accounting backs off naturally. See ABX-365.
+fn write_all_with_backoff(fd: i32, buf: &[u8]) -> usize {
+    const MAX_POLL_RETRIES: u32 = 16;
+    const POLL_TIMEOUT_MS: libc::c_int = 2; // total worst case: 32 ms
+
+    let mut offset = 0usize;
+    let mut eagain_retries = 0u32;
+
+    while offset < buf.len() {
+        // SAFETY: fd is a valid connected socket from the manager;
+        // `buf[offset..]` is a live slice for the remaining bytes.
+        let ret = unsafe {
+            libc::write(
+                fd,
+                buf[offset..].as_ptr().cast::<libc::c_void>(),
+                buf.len() - offset,
+            )
+        };
+
+        use std::cmp::Ordering;
+        match ret.cmp(&0) {
+            Ordering::Greater => {
+                offset += ret as usize;
+                eagain_retries = 0;
+            }
+            Ordering::Equal => {
+                // Peer closed. Nothing more we can do.
+                break;
+            }
+            Ordering::Less => {
+                let err = std::io::Error::last_os_error();
+                match err.raw_os_error() {
+                    Some(e) if e == libc::EAGAIN || e == libc::EWOULDBLOCK => {
+                        if eagain_retries >= MAX_POLL_RETRIES {
+                            tracing::warn!(
+                                "Vsock: giving up after {MAX_POLL_RETRIES} EAGAIN retries at offset {offset}/{} on fd {fd}",
+                                buf.len(),
+                            );
+                            break;
+                        }
+                        eagain_retries += 1;
+                        // Wait for POLLOUT so the next write has a chance.
+                        let mut pfd = libc::pollfd {
+                            fd,
+                            events: libc::POLLOUT,
+                            revents: 0,
+                        };
+                        // SAFETY: single pollfd on the stack, count=1.
+                        let _ = unsafe { libc::poll(&mut pfd, 1, POLL_TIMEOUT_MS) };
+                    }
+                    Some(libc::EINTR) => {}
+                    _ => {
+                        tracing::warn!("Vsock: write to fd {fd} failed at offset {offset}: {err}");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    offset
+}
+
 /// Vsock device configuration.
 #[derive(Debug, Clone)]
 pub struct VsockConfig {
@@ -310,27 +388,34 @@ impl VirtioVsock {
                     conns.update_peer_credit(src_port, dst_port, buf_alloc, fwd_cnt);
                     if let Some(fd) = conns.fd_for(src_port, dst_port) {
                         if !payload.is_empty() {
-                            // SAFETY: fd is a valid connected socket from the manager.
-                            let written = unsafe {
-                                libc::write(
-                                    fd,
-                                    payload.as_ptr().cast::<libc::c_void>(),
-                                    payload.len(),
-                                )
-                            };
-                            if written > 0 {
+                            let total = payload.len();
+                            let forwarded = write_all_with_backoff(fd, payload);
+                            if forwarded > 0 {
                                 tracing::debug!(
-                                    "Vsock TX: OP_RW guest_port={} host_port={} -> fd {fd}, {} bytes",
+                                    "Vsock TX: OP_RW guest_port={} host_port={} -> fd {fd}, {}/{} bytes",
                                     src_port,
                                     dst_port,
-                                    written,
+                                    forwarded,
+                                    total,
                                 );
-                                // Advance fwd_cnt — may trigger CreditUpdate.
-                                conns.advance_fwd_cnt(src_port, dst_port, written as u32);
-                            } else if written < 0 {
+                                // Advance fwd_cnt by the byte count we actually
+                                // delivered to the host socket. If the write
+                                // loop gave up due to sustained EAGAIN or a
+                                // hard error, `forwarded` will be < total and
+                                // guest credit accounting will reflect that
+                                // (fewer acks → guest backs off).
+                                #[allow(clippy::cast_possible_truncation)]
+                                {
+                                    conns.advance_fwd_cnt(src_port, dst_port, forwarded as u32);
+                                }
+                            }
+                            if forwarded < total {
                                 tracing::warn!(
-                                    "Vsock: write to fd {fd} failed: {}",
-                                    std::io::Error::last_os_error()
+                                    "Vsock TX: truncated write guest_port={} host_port={}: only {}/{} bytes forwarded (ABX-365)",
+                                    src_port,
+                                    dst_port,
+                                    forwarded,
+                                    total,
                                 );
                             }
                         }
