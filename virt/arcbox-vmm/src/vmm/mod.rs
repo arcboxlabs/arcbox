@@ -315,6 +315,14 @@ pub struct Vmm {
     /// size, for munmap on shutdown.
     #[cfg(target_os = "macos")]
     hv_dax_mmap: Option<(usize, usize)>,
+    /// Cooperative pause flag for the HV backend.
+    ///
+    /// When set to `true`, every vCPU thread parks itself after its next
+    /// `vcpu.run()` return instead of re-entering guest execution. `resume`
+    /// clears the flag and unparks the threads. Orthogonal to `running`
+    /// (which is a terminal stop signal).
+    #[cfg(target_os = "macos")]
+    hv_paused: Arc<AtomicBool>,
 }
 
 impl Vmm {
@@ -411,6 +419,8 @@ impl Vmm {
             hvc_blk_fds: Arc::new(Vec::new()),
             #[cfg(target_os = "macos")]
             hv_dax_mmap: None,
+            #[cfg(target_os = "macos")]
+            hv_paused: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -561,7 +571,10 @@ impl Vmm {
 
         #[cfg(target_os = "macos")]
         {
-            self.pause_darwin_vm()?;
+            match self.resolved_backend {
+                Some(ResolvedBackend::Hv) => self.pause_darwin_hv()?,
+                Some(ResolvedBackend::Vz) | None => self.pause_darwin_vm()?,
+            }
         }
         #[cfg(target_os = "linux")]
         if let Some(ref mut vcpu_manager) = self.vcpu_manager {
@@ -590,7 +603,10 @@ impl Vmm {
 
         #[cfg(target_os = "macos")]
         {
-            self.resume_darwin_vm()?;
+            match self.resolved_backend {
+                Some(ResolvedBackend::Hv) => self.resume_darwin_hv()?,
+                Some(ResolvedBackend::Vz) | None => self.resume_darwin_vm()?,
+            }
         }
         #[cfg(target_os = "linux")]
         if let Some(ref mut vcpu_manager) = self.vcpu_manager {
@@ -683,8 +699,15 @@ impl Vmm {
         }
 
         #[cfg(target_os = "macos")]
-        if let Some(result) = self.capture_snapshot_darwin() {
-            return result;
+        {
+            if matches!(self.resolved_backend, Some(ResolvedBackend::Hv)) {
+                return Err(VmmError::Unsupported(
+                    "snapshot capture is not yet implemented for the HV backend".to_string(),
+                ));
+            }
+            if let Some(result) = self.capture_snapshot_darwin() {
+                return result;
+            }
         }
 
         Err(VmmError::invalid_state(
@@ -729,8 +752,15 @@ impl Vmm {
         }
 
         #[cfg(target_os = "macos")]
-        if let Some(result) = self.restore_snapshot_darwin(restore_data) {
-            return result;
+        {
+            if matches!(self.resolved_backend, Some(ResolvedBackend::Hv)) {
+                return Err(VmmError::Unsupported(
+                    "snapshot restore is not yet implemented for the HV backend".to_string(),
+                ));
+            }
+            if let Some(result) = self.restore_snapshot_darwin(restore_data) {
+                return result;
+            }
         }
 
         Err(VmmError::invalid_state(
@@ -1194,5 +1224,30 @@ mod tests {
 
         // Can't resume before pausing
         assert!(vmm.resume().is_err());
+    }
+
+    /// With the HV backend resolved, `capture_snapshot_context` must return
+    /// `VmmError::Unsupported` rather than the old generic `invalid_state
+    /// ("hypervisor VM handle is unavailable")` error. This covers the
+    /// ABX-360 correctness gap: HV-backed VMs were silently hitting
+    /// VZ-only snapshot code paths.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_hv_snapshot_returns_unsupported() {
+        let config = VmmConfig {
+            guest_cid: Some(3),
+            ..Default::default()
+        };
+        let mut vmm = Vmm::new(config).unwrap();
+
+        // Simulate a started HV VM without actually booting one.
+        vmm.resolved_backend = Some(ResolvedBackend::Hv);
+        vmm.state = VmmState::Running;
+
+        match vmm.capture_snapshot_context() {
+            Err(VmmError::Unsupported(msg)) => assert!(msg.contains("HV backend")),
+            Err(other) => panic!("expected Unsupported for HV capture, got Err({other:?})"),
+            Ok(_) => panic!("expected Unsupported for HV capture, got Ok"),
+        }
     }
 }

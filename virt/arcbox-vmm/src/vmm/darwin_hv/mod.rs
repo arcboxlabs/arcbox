@@ -990,6 +990,10 @@ impl Vmm {
         // Store a shared reference for connect_vsock_hv to use after start.
         self.hv_device_manager = Some(Arc::clone(&device_manager));
         let running = self.running.clone();
+        let paused = self.hv_paused.clone();
+        // Ensure a fresh start always begins unpaused, even if a prior
+        // session was stopped while paused.
+        paused.store(false, std::sync::atomic::Ordering::SeqCst);
         let vcpu_count = self.config.vcpu_count;
         let pl011 = Arc::new(std::sync::Mutex::new(Pl011::new()));
 
@@ -1008,6 +1012,7 @@ impl Vmm {
                 senders_vec.push(Some(tx));
 
                 let r = running.clone();
+                let p = paused.clone();
                 let dm = device_manager.clone();
                 let th = vcpu_thread_handles.clone();
                 let uart = pl011.clone();
@@ -1029,6 +1034,7 @@ impl Vmm {
                                 VcpuContext {
                                     device_manager: dm,
                                     running: r,
+                                    paused: p,
                                     pl011: uart,
                                     cpu_on_senders: senders_placeholder,
                                     vcpu_thread_handles: th,
@@ -1064,6 +1070,7 @@ impl Vmm {
                         VcpuContext {
                             device_manager,
                             running,
+                            paused,
                             pl011,
                             cpu_on_senders,
                             vcpu_thread_handles,
@@ -1094,6 +1101,19 @@ impl Vmm {
         if let Some(ref vm) = self.hv_vm {
             if let Err(e) = vm.exit_all_vcpus() {
                 tracing::warn!("hv_vcpus_exit failed: {e}");
+            }
+        }
+
+        // Unpark any threads that were parked via cooperative pause — they
+        // must observe `running=false` and exit their loop. `exit_all_vcpus`
+        // only kicks threads out of `vcpu.run()`; parked threads are not
+        // affected by it.
+        if let Some(ref handles) = self.hv_vcpu_thread_handles {
+            let guard = handles
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for t in guard.iter() {
+                t.unpark();
             }
         }
 
@@ -1150,6 +1170,57 @@ impl Vmm {
         self.hv_guest_mem.take();
 
         tracing::info!("Custom VMM stopped");
+        Ok(())
+    }
+
+    /// Cooperatively pauses every vCPU thread in the HV backend.
+    ///
+    /// Sets `hv_paused` and calls `hv_vcpus_exit` to kick all vCPUs out of
+    /// their in-progress `vcpu.run()` calls. Each vCPU observes the flag on
+    /// its next loop iteration and parks itself. Block, net, and vsock
+    /// worker threads are left running — their virtqueue state lives in
+    /// guest memory and naturally quiesces once no vCPU is executing.
+    ///
+    /// Returns immediately after the exit kick; parking is best-effort and
+    /// there is no explicit "all vCPUs parked" acknowledgement. Callers
+    /// needing synchronous pause semantics must rely on the fact that the
+    /// guest cannot observe any externally-visible change once all vCPU
+    /// threads are parked.
+    #[allow(clippy::unnecessary_wraps)]
+    pub(super) fn pause_darwin_hv(&self) -> Result<()> {
+        self.hv_paused
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        if let Some(ref vm) = self.hv_vm {
+            if let Err(e) = vm.exit_all_vcpus() {
+                tracing::warn!("hv_vcpus_exit during pause failed: {e}");
+            }
+        }
+
+        tracing::info!("HV VMM paused");
+        Ok(())
+    }
+
+    /// Resumes every vCPU thread paused by `pause_darwin_hv`.
+    ///
+    /// Clears `hv_paused` and unparks every registered vCPU thread via
+    /// `hv_vcpu_thread_handles`. Each thread wakes from `park()`, re-checks
+    /// the flag, and re-enters the run loop.
+    #[allow(clippy::unnecessary_wraps)]
+    pub(super) fn resume_darwin_hv(&self) -> Result<()> {
+        self.hv_paused
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+
+        if let Some(ref handles) = self.hv_vcpu_thread_handles {
+            let guard = handles
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for t in guard.iter() {
+                t.unpark();
+            }
+        }
+
+        tracing::info!("HV VMM resumed");
         Ok(())
     }
 

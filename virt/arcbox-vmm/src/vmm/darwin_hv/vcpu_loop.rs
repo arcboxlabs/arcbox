@@ -46,6 +46,10 @@ pub(super) struct VcpuContext {
     pub device_manager: Arc<crate::device::DeviceManager>,
     /// Shared flag; the loop exits when this is set to `false`.
     pub running: Arc<AtomicBool>,
+    /// Cooperative pause flag. When `true`, the vCPU parks itself after its
+    /// next `vcpu.run()` return instead of re-entering guest execution.
+    /// Cleared by `resume`, which also unparks the thread.
+    pub paused: Arc<AtomicBool>,
     /// Shared PL011 UART emulator for early console output.
     pub pl011: Arc<std::sync::Mutex<Pl011>>,
     /// Channel senders for waking secondary vCPUs via PSCI CPU_ON.
@@ -95,6 +99,7 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, entry_addr: u64, x0_value: u64, ctx: V
     let VcpuContext {
         device_manager,
         running,
+        paused,
         pl011,
         cpu_on_senders,
         vcpu_thread_handles,
@@ -160,6 +165,20 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, entry_addr: u64, x0_value: u64, ctx: V
     loop {
         if !running.load(Ordering::Relaxed) {
             tracing::info!("vCPU {vcpu_id}: shutdown requested");
+            break;
+        }
+
+        // Cooperative pause: if the host has requested a pause, park here
+        // until resume clears the flag. Check after each `vcpu.run()` return
+        // so the vCPU never re-enters guest execution while paused. The
+        // host calls `hv_vcpus_exit` to kick us out of `vcpu.run()`, we
+        // observe `paused`, and park. `resume` unparks every registered
+        // vCPU thread via `vcpu_thread_handles`.
+        while paused.load(Ordering::Acquire) && running.load(Ordering::Relaxed) {
+            std::thread::park();
+        }
+        if !running.load(Ordering::Relaxed) {
+            tracing::info!("vCPU {vcpu_id}: shutdown observed after pause");
             break;
         }
 
