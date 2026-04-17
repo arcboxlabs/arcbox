@@ -588,6 +588,22 @@ impl Vmm {
             device_manager.set_vsock(vsock_id, vsock_arc);
         }
 
+        // Memory balloon (ABX-363). Lets the host reclaim unused guest
+        // pages via `madvise(MADV_DONTNEED)` when the daemon's idle
+        // monitor signals via `set_balloon_target`.
+        if self.config.balloon {
+            let balloon_dev = arcbox_virtio::balloon::VirtioBalloon::new();
+            let (_balloon_id, balloon_arc) = device_manager.register_virtio_device(
+                DeviceType::VirtioBalloon,
+                "virtio-balloon",
+                balloon_dev,
+                &mut memory_manager,
+                &irq_chip,
+            )?;
+            self.hv_balloon = Some(balloon_arc);
+            tracing::info!("Added memory balloon device (HV)");
+        }
+
         for dev_info in device_manager.iter() {
             tracing::info!(
                 "VirtIO device: {} ({:?}) @ MMIO {:#x} IRQ {:?}",

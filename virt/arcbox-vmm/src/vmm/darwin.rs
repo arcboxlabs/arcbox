@@ -628,6 +628,9 @@ impl Vmm {
     /// The balloon device will inflate or deflate to reach the target:
     /// - **Smaller target**: Balloon inflates, reclaiming memory from guest
     /// - **Larger target**: Balloon deflates, returning memory to guest
+    ///
+    /// Dispatches to VZ's `VZVirtioTraditionalMemoryBalloonDevice` on the VZ
+    /// backend, or to the in-tree `arcbox-virtio-balloon` device on HV.
     pub fn set_balloon_target(&self, target_bytes: u64) -> Result<()> {
         if self.state != VmmState::Running {
             return Err(VmmError::invalid_state(format!(
@@ -636,13 +639,29 @@ impl Vmm {
             )));
         }
 
-        let vm = self
-            .darwin_vm
-            .as_ref()
-            .ok_or_else(|| VmmError::invalid_state("no DarwinVm".to_string()))?;
-
-        vm.set_balloon_target_memory(target_bytes)
-            .map_err(VmmError::Hypervisor)
+        match self.resolved_backend {
+            Some(ResolvedBackend::Hv) => {
+                let balloon = self
+                    .hv_balloon
+                    .as_ref()
+                    .ok_or_else(|| VmmError::invalid_state("HV balloon not configured"))?;
+                // Convert bytes → 4 KiB pages, saturating at u32::MAX.
+                let pages = u32::try_from(target_bytes / 4096).unwrap_or(u32::MAX);
+                let guard = balloon
+                    .lock()
+                    .map_err(|e| VmmError::Device(format!("balloon lock poisoned: {e}")))?;
+                guard.set_num_pages(pages);
+                Ok(())
+            }
+            Some(ResolvedBackend::Vz) | None => {
+                let vm = self
+                    .darwin_vm
+                    .as_ref()
+                    .ok_or_else(|| VmmError::invalid_state("no DarwinVm".to_string()))?;
+                vm.set_balloon_target_memory(target_bytes)
+                    .map_err(VmmError::Hypervisor)
+            }
+        }
     }
 
     /// Gets the current target memory size from the balloon device.
@@ -655,9 +674,17 @@ impl Vmm {
             return 0;
         }
 
-        self.darwin_vm
-            .as_ref()
-            .map_or(0, DarwinVm::get_balloon_target_memory)
+        match self.resolved_backend {
+            Some(ResolvedBackend::Hv) => self.hv_balloon.as_ref().map_or(0, |b| {
+                b.lock()
+                    .map(|g| u64::from(g.num_pages()) * 4096)
+                    .unwrap_or(0)
+            }),
+            Some(ResolvedBackend::Vz) | None => self
+                .darwin_vm
+                .as_ref()
+                .map_or(0, DarwinVm::get_balloon_target_memory),
+        }
     }
 
     /// Gets balloon statistics.
@@ -665,9 +692,22 @@ impl Vmm {
     /// Returns current balloon stats including target, current, and configured memory sizes.
     #[must_use]
     pub fn get_balloon_stats(&self) -> arcbox_hypervisor::BalloonStats {
+        let (target_bytes, current_bytes) = match self.resolved_backend {
+            Some(ResolvedBackend::Hv) => self.hv_balloon.as_ref().map_or((0, 0), |b| {
+                b.lock()
+                    .map(|g| {
+                        (
+                            u64::from(g.num_pages()) * 4096,
+                            u64::from(g.actual()) * 4096,
+                        )
+                    })
+                    .unwrap_or((0, 0))
+            }),
+            Some(ResolvedBackend::Vz) | None => (self.get_balloon_target(), 0),
+        };
         arcbox_hypervisor::BalloonStats {
-            target_bytes: self.get_balloon_target(),
-            current_bytes: 0, // macOS doesn't expose current balloon size
+            target_bytes,
+            current_bytes,
             configured_bytes: self.config.memory_size,
         }
     }

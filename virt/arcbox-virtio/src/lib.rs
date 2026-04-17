@@ -74,6 +74,11 @@ pub mod vsock {
     pub use arcbox_virtio_vsock::*;
 }
 
+/// Back-compat re-export of `arcbox-virtio-balloon`.
+pub mod balloon {
+    pub use arcbox_virtio_balloon::*;
+}
+
 /// Back-compat re-export of the vsock connection manager. The actual
 /// `RxOps` / `VsockConnectionManager` / `VsockConnection` definitions
 /// live in `arcbox-virtio-vsock::manager` after the per-device split.

@@ -601,6 +601,7 @@ version = "0.3.21"
 dependencies = [
  "arcbox-error",
  "arcbox-hypervisor",
+ "arcbox-virtio-balloon",
  "arcbox-virtio-blk",
  "arcbox-virtio-console",
  "arcbox-virtio-core",
@@ -618,6 +619,15 @@ dependencies = [
  "tokio",
  "tracing",
  "virtio-bindings",
+]
+
+[[package]]
+name = "arcbox-virtio-balloon"
+version = "0.3.21"
+dependencies = [
+ "arcbox-virtio-core",
+ "libc",
+ "tracing",
 ]
 
 [[package]]

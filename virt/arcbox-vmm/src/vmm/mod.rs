@@ -325,6 +325,13 @@ pub struct Vmm {
     /// `FUSE_SETUPMAPPING` / `FUSE_REMOVEMAPPING` requests.
     #[cfg(target_os = "macos")]
     hv_dax_mappers: Vec<std::sync::Arc<crate::dax::HvDaxMapper>>,
+    /// HV backend balloon device handle (ABX-363).
+    ///
+    /// `None` until `initialize_darwin_hv` registers the device (only
+    /// happens when `config.balloon` is true). Used by the HV dispatch
+    /// path in `darwin.rs` for `set_balloon_target` / `get_balloon_stats`.
+    #[cfg(target_os = "macos")]
+    hv_balloon: Option<std::sync::Arc<std::sync::Mutex<arcbox_virtio::balloon::VirtioBalloon>>>,
     /// Cooperative pause flag for the HV backend.
     ///
     /// When set to `true`, every vCPU thread parks itself after its next
@@ -431,6 +438,8 @@ impl Vmm {
             hv_dax_mmap: None,
             #[cfg(target_os = "macos")]
             hv_dax_mappers: Vec::new(),
+            #[cfg(target_os = "macos")]
+            hv_balloon: None,
             #[cfg(target_os = "macos")]
             hv_paused: Arc::new(AtomicBool::new(false)),
         })

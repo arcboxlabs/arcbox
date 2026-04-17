@@ -61,6 +61,8 @@ pub enum DeviceType {
     VirtioVsock,
     /// `VirtIO` entropy (RNG).
     VirtioRng,
+    /// `VirtIO` memory balloon.
+    VirtioBalloon,
     /// Other device.
     Other,
 }
