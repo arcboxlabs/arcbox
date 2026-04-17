@@ -11,8 +11,9 @@ use arcbox_protocol::agent::{
     KubernetesDeleteRequest, KubernetesDeleteResponse, KubernetesKubeconfigRequest,
     KubernetesKubeconfigResponse, KubernetesStartRequest, KubernetesStartResponse,
     KubernetesStatusRequest, KubernetesStatusResponse, KubernetesStopRequest,
-    KubernetesStopResponse, PingRequest, PingResponse, RuntimeEnsureRequest, RuntimeEnsureResponse,
-    RuntimeStatusRequest, RuntimeStatusResponse, SystemInfo,
+    KubernetesStopResponse, MmapReadFileRequest, MmapReadFileResponse, PingRequest, PingResponse,
+    RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse,
+    SystemInfo,
 };
 use arcbox_protocol::sandbox_v1::{
     CheckpointRequest, CheckpointResponse, CreateSandboxRequest, CreateSandboxResponse,
@@ -449,6 +450,38 @@ impl AgentClient {
         }
 
         SystemInfo::decode(&resp_payload[..])
+            .map_err(|e| CoreError::Machine(format!("failed to decode response: {e}")))
+    }
+
+    /// Test-only: ask the guest to `mmap(MAP_SHARED)` a file and return its
+    /// bytes. Used by the ABX-362 DAX E2E harness — on a VirtioFS mount the
+    /// guest's `mmap` triggers `FUSE_SETUPMAPPING` and exercises the HV
+    /// DAX path end-to-end. Not wired to any production CLI path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the guest reports an
+    /// `open`/`mmap` failure.
+    pub fn mmap_read_file_blocking(
+        &mut self,
+        path: &str,
+        offset: u64,
+        length: u64,
+    ) -> Result<MmapReadFileResponse> {
+        let req = MmapReadFileRequest {
+            path: path.to_string(),
+            offset,
+            length,
+        };
+        let payload = req.encode_to_vec();
+        let (resp_type, resp_payload) =
+            self.rpc_call_blocking(MessageType::MmapReadFileRequest, &payload)?;
+        if resp_type != MessageType::MmapReadFileResponse as u32 {
+            return Err(CoreError::Machine(format!(
+                "unexpected response type: {resp_type}"
+            )));
+        }
+        MmapReadFileResponse::decode(&resp_payload[..])
             .map_err(|e| CoreError::Machine(format!("failed to decode response: {e}")))
     }
 

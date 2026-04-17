@@ -982,6 +982,7 @@ mod linux {
                 RequestResult::Single(handle_kubernetes_kubeconfig(req).await)
             }
             RpcRequest::Shutdown(req) => RequestResult::Single(handle_shutdown(req)),
+            RpcRequest::MmapReadFile(req) => RequestResult::Single(handle_mmap_read_file(req)),
         }
     }
 
@@ -1032,6 +1033,90 @@ mod linux {
             return false;
         }
         true
+    }
+
+    /// Handles a `MmapReadFile` request (test-only).
+    ///
+    /// Opens the requested file `O_RDONLY`, calls `mmap(MAP_SHARED)`, reads
+    /// the mapped region into a heap buffer, then `munmap`s. When the path
+    /// is on a VirtioFS mount, the `mmap` call triggers `FUSE_SETUPMAPPING`
+    /// on the host, which exercises the DAX path end-to-end (ABX-362).
+    ///
+    /// Page-alignment: `mmap` requires page-aligned offsets, so we round
+    /// `offset` down to the nearest page and slice the returned bytes to
+    /// compensate. This matches how real userspace code uses `mmap`.
+    fn handle_mmap_read_file(req: arcbox_protocol::agent::MmapReadFileRequest) -> RpcResponse {
+        use std::os::unix::io::AsRawFd;
+
+        const PAGE_SIZE: u64 = 4096;
+
+        if req.length == 0 {
+            return RpcResponse::MmapReadFile(arcbox_protocol::agent::MmapReadFileResponse {
+                data: Vec::new(),
+                bytes_read: 0,
+            });
+        }
+        // Hard cap to keep the response message size bounded.
+        if req.length > 64 * 1024 * 1024 {
+            return RpcResponse::Error(crate::rpc::ErrorResponse::new(
+                libc::EINVAL,
+                "MmapReadFile length exceeds 64 MiB cap",
+            ));
+        }
+
+        let file = match std::fs::OpenOptions::new().read(true).open(&req.path) {
+            Ok(f) => f,
+            Err(e) => {
+                return RpcResponse::Error(crate::rpc::ErrorResponse::new(
+                    e.raw_os_error().unwrap_or(libc::EIO),
+                    format!("open {}: {e}", req.path),
+                ));
+            }
+        };
+
+        let page_base = req.offset & !(PAGE_SIZE - 1);
+        let inner_off = (req.offset - page_base) as usize;
+        let total_len = inner_off + req.length as usize;
+        let mapped_len = total_len.div_ceil(PAGE_SIZE as usize) * PAGE_SIZE as usize;
+
+        // SAFETY: mapped_len is > 0 and page-aligned. We pass PROT_READ and a
+        // valid file fd; on success we own the mapping and must munmap it.
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                mapped_len,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                #[allow(clippy::cast_possible_wrap)]
+                {
+                    page_base as libc::off_t
+                },
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            let e = std::io::Error::last_os_error();
+            return RpcResponse::Error(crate::rpc::ErrorResponse::new(
+                e.raw_os_error().unwrap_or(libc::EIO),
+                format!("mmap {}: {e}", req.path),
+            ));
+        }
+
+        // SAFETY: [ptr + inner_off .. ptr + inner_off + req.length] is within
+        // the mapping we just obtained. Copy into a heap buffer so we can
+        // unmap before returning.
+        let data = unsafe {
+            let slice =
+                std::slice::from_raw_parts(ptr.cast::<u8>().add(inner_off), req.length as usize);
+            slice.to_vec()
+        };
+        // SAFETY: ptr/mapped_len were returned by mmap above.
+        unsafe {
+            libc::munmap(ptr, mapped_len);
+        }
+
+        let bytes_read = data.len() as u64;
+        RpcResponse::MmapReadFile(arcbox_protocol::agent::MmapReadFileResponse { data, bytes_read })
     }
 
     /// Handles a Ping request.

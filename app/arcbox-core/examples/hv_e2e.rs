@@ -1,14 +1,17 @@
-//! ABX-361: End-to-end test for the HV backend.
+//! ABX-361 / ABX-362: End-to-end test for the HV backend.
 //!
 //! Boots a Linux guest through the HV (Hypervisor.framework) backend, talks
 //! to the in-guest `arcbox-agent` over vsock, and asserts:
 //!
 //! 1. Ping round-trip succeeds — guest userspace is up.
 //! 2. `GetSystemInfo` returns a non-empty kernel version — RPC framing works.
-//! 3. `Vmm::pause()` stops the guest — a ping during pause times out.
-//! 4. `Vmm::resume()` restarts the guest — the next ping succeeds.
-//!    (This also exercises ABX-360.)
-//! 5. `Vmm::stop()` shuts down cleanly.
+//! 3. DAX E2E (ABX-362): drop a known file on the VirtioFS share, have the
+//!    guest `mmap(MAP_SHARED)` + read it, verify bytes match and the host's
+//!    `DaxStats::setup_mappings_count` incremented.
+//! 4. `Vmm::pause()` stops the guest — a ping during pause times out.
+//! 5. `Vmm::resume()` restarts the guest — the next ping succeeds.
+//!    (Exercises ABX-360.)
+//! 6. `Vmm::stop()` shuts down cleanly.
 //!
 //! Usage:
 //!   cargo build --release --example hv_e2e -p arcbox-core
@@ -69,6 +72,12 @@ fn run() -> Result<(), String> {
         .map_err(|e| format!("create share dir {}: {e}", share_dir.display()))?;
     // Write a dummy agent log so the guest init script has a file to open.
     std::fs::write(share_dir.join("agent.log"), "").ok();
+
+    // DAX test fixture: 8 MiB of a deterministic byte pattern. Placed
+    // inside the VirtioFS share so the guest can `mmap(MAP_SHARED)` it at
+    // `/arcbox/dax-test.bin` and trigger `FUSE_SETUPMAPPING`. The guest
+    // returns the bytes; we compare against the same pattern here.
+    let dax_fixture = DaxFixture::create(&share_dir, "dax-test.bin", 8 * 1024 * 1024)?;
 
     println!("[cfg] kernel:  {}", kernel_path.display());
     println!("[cfg] rootfs:  {}", rootfs_path.display());
@@ -144,6 +153,9 @@ fn run() -> Result<(), String> {
         info.kernel_version, info.hostname
     );
 
+    println!("[phase 4.5] DAX end-to-end (ABX-362)");
+    dax_round_trip(&vmm, &dax_fixture)?;
+
     println!("[phase 5] pause VM (ABX-360)");
     vmm.pause().map_err(|e| format!("Vmm::pause: {e}"))?;
     // Ping should fail because the guest vCPUs are parked.
@@ -203,6 +215,110 @@ fn ping_once(vmm: &Vmm, _deadline: Duration) -> Result<(), String> {
         .ping_blocking()
         .map(|_| ())
         .map_err(|e| format!("ping_blocking: {e}"))
+}
+
+/// Exercises the DAX path end-to-end: host writes a known pattern to a
+/// file on the VirtioFS share; guest `mmap(MAP_SHARED)`s it and returns
+/// the bytes; we compare. Then verify the host's `DaxStats` counters.
+fn dax_round_trip(vmm: &Vmm, fixture: &DaxFixture) -> Result<(), String> {
+    let before = vmm
+        .dax_stats(0)
+        .ok_or("dax_stats(0) returned None — share 0 not configured?")?;
+
+    let fd = vmm
+        .connect_vsock(AGENT_PORT)
+        .map_err(|e| format!("connect_vsock: {e}"))?;
+    let mut client =
+        AgentClient::from_fd(GUEST_CID, fd).map_err(|e| format!("AgentClient::from_fd: {e}"))?;
+    let resp = client
+        .mmap_read_file_blocking(&fixture.guest_path, 0, fixture.length as u64)
+        .map_err(|e| format!("mmap_read_file_blocking: {e}"))?;
+
+    if resp.bytes_read != fixture.length as u64 {
+        return Err(format!(
+            "short read: requested {} bytes, got {}",
+            fixture.length, resp.bytes_read
+        ));
+    }
+    if resp.data.len() != fixture.length {
+        return Err(format!(
+            "data length mismatch: expected {}, got {}",
+            fixture.length,
+            resp.data.len()
+        ));
+    }
+    if resp.data != fixture.pattern {
+        // Find the first diverging byte to aid debugging.
+        let diff = resp
+            .data
+            .iter()
+            .zip(fixture.pattern.iter())
+            .position(|(a, b)| a != b)
+            .unwrap_or(0);
+        return Err(format!(
+            "guest bytes != host bytes, first diff at offset {diff}"
+        ));
+    }
+    println!(
+        "          guest mmap returned {} matching bytes",
+        resp.bytes_read
+    );
+
+    let after = vmm
+        .dax_stats(0)
+        .ok_or("dax_stats(0) returned None after read")?;
+    if after.setup_mappings_count <= before.setup_mappings_count {
+        return Err(format!(
+            "DAX setup_mappings_count did not increase: before={} after={}",
+            before.setup_mappings_count, after.setup_mappings_count
+        ));
+    }
+    let delta_bytes = after.setup_mappings_bytes - before.setup_mappings_bytes;
+    if delta_bytes == 0 {
+        return Err("DAX setup_mappings_bytes did not increase".into());
+    }
+    println!(
+        "          DaxStats: setup +{} ({} bytes), remove +{}",
+        after.setup_mappings_count - before.setup_mappings_count,
+        delta_bytes,
+        after.remove_mappings_count - before.remove_mappings_count,
+    );
+    Ok(())
+}
+
+/// Deterministic byte-pattern fixture written once to the host share and
+/// read back via guest mmap.
+struct DaxFixture {
+    /// Path inside the guest (under the VirtioFS `/arcbox` mount).
+    guest_path: String,
+    /// Bytes written; the guest must return the same sequence.
+    pattern: Vec<u8>,
+    /// Length in bytes — separate field to avoid repeated `.len()`.
+    length: usize,
+}
+
+impl DaxFixture {
+    /// Writes a deterministic pattern into `host_dir/name` and returns a
+    /// fixture describing it. The guest mount for this share is assumed
+    /// to be `/arcbox` (see `mount_virtiofs_optional` in the guest init).
+    fn create(host_dir: &std::path::Path, name: &str, length: usize) -> Result<Self, String> {
+        let mut pattern = Vec::with_capacity(length);
+        for i in 0..length {
+            // Non-trivial pattern: low byte of (i * 0x9E37 + i/13) wraps
+            // across page boundaries so a partial read is visible.
+            #[allow(clippy::cast_possible_truncation)]
+            let b = ((i.wrapping_mul(0x9E37)).wrapping_add(i / 13)) as u8;
+            pattern.push(b);
+        }
+        let host_path = host_dir.join(name);
+        std::fs::write(&host_path, &pattern)
+            .map_err(|e| format!("write fixture {}: {e}", host_path.display()))?;
+        Ok(Self {
+            guest_path: format!("/arcbox/{name}"),
+            pattern,
+            length,
+        })
+    }
 }
 
 fn get_system_info(vmm: &Vmm) -> Result<arcbox_protocol::SystemInfo, String> {

@@ -25,6 +25,10 @@ pub enum MessageType {
     KubernetesStatusRequest = 0x0008,
     KubernetesKubeconfigRequest = 0x0009,
     ShutdownRequest = 0x000A,
+    /// Test-only: force the guest to mmap + read a file so the VirtioFS
+    /// DAX path issues `FUSE_SETUPMAPPING`. Used by the ABX-362 E2E
+    /// harness; not wired to any production CLI path.
+    MmapReadFileRequest = 0x000B,
 
     // Sandbox CRUD request types (0x0020 - 0x0024).
     SandboxCreateRequest = 0x0020,
@@ -58,6 +62,8 @@ pub enum MessageType {
     KubernetesStatusResponse = 0x1008,
     KubernetesKubeconfigResponse = 0x1009,
     ShutdownResponse = 0x100A,
+    /// Test-only: response for `MmapReadFileRequest` (ABX-362).
+    MmapReadFileResponse = 0x100B,
     PortBindingsChanged = 0x1030,
     PortBindingsRemoved = 0x1031,
 
@@ -99,6 +105,7 @@ impl MessageType {
             0x0008 => Some(Self::KubernetesStatusRequest),
             0x0009 => Some(Self::KubernetesKubeconfigRequest),
             0x000A => Some(Self::ShutdownRequest),
+            0x000B => Some(Self::MmapReadFileRequest),
             // Sandbox CRUD requests.
             0x0020 => Some(Self::SandboxCreateRequest),
             0x0021 => Some(Self::SandboxStopRequest),
@@ -126,6 +133,7 @@ impl MessageType {
             0x1008 => Some(Self::KubernetesStatusResponse),
             0x1009 => Some(Self::KubernetesKubeconfigResponse),
             0x100A => Some(Self::ShutdownResponse),
+            0x100B => Some(Self::MmapReadFileResponse),
             0x1030 => Some(Self::PortBindingsChanged),
             0x1031 => Some(Self::PortBindingsRemoved),
             // Sandbox CRUD responses.
@@ -201,6 +209,7 @@ mod tests {
             (0x0008, MessageType::KubernetesStatusRequest),
             (0x0009, MessageType::KubernetesKubeconfigRequest),
             (0x000A, MessageType::ShutdownRequest),
+            (0x000B, MessageType::MmapReadFileRequest),
             (0x1001, MessageType::PingResponse),
             (0x1002, MessageType::GetSystemInfoResponse),
             (0x1003, MessageType::EnsureRuntimeResponse),
@@ -211,6 +220,7 @@ mod tests {
             (0x1008, MessageType::KubernetesStatusResponse),
             (0x1009, MessageType::KubernetesKubeconfigResponse),
             (0x100A, MessageType::ShutdownResponse),
+            (0x100B, MessageType::MmapReadFileResponse),
             (0x1030, MessageType::PortBindingsChanged),
             (0x1031, MessageType::PortBindingsRemoved),
             (0x0000, MessageType::Empty),

@@ -17,9 +17,9 @@ use arcbox_protocol::agent::{
     KubernetesDeleteRequest, KubernetesDeleteResponse, KubernetesKubeconfigRequest,
     KubernetesKubeconfigResponse, KubernetesStartRequest, KubernetesStartResponse,
     KubernetesStatusRequest, KubernetesStatusResponse, KubernetesStopRequest,
-    KubernetesStopResponse, PingRequest, PingResponse, PortBindingsChanged, PortBindingsRemoved,
-    RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse,
-    ShutdownRequest, ShutdownResponse, SystemInfo,
+    KubernetesStopResponse, MmapReadFileRequest, MmapReadFileResponse, PingRequest, PingResponse,
+    PortBindingsChanged, PortBindingsRemoved, RuntimeEnsureRequest, RuntimeEnsureResponse,
+    RuntimeStatusRequest, RuntimeStatusResponse, ShutdownRequest, ShutdownResponse, SystemInfo,
 };
 
 /// Agent version string.
@@ -77,6 +77,7 @@ pub enum RpcRequest {
     KubernetesStatus(KubernetesStatusRequest),
     KubernetesKubeconfig(KubernetesKubeconfigRequest),
     Shutdown(ShutdownRequest),
+    MmapReadFile(MmapReadFileRequest),
 }
 
 /// RPC response envelope.
@@ -96,6 +97,7 @@ pub enum RpcResponse {
     PortBindingsChanged(PortBindingsChanged),
     PortBindingsRemoved(PortBindingsRemoved),
     Error(ErrorResponse),
+    MmapReadFile(MmapReadFileResponse),
 }
 
 impl RpcResponse {
@@ -116,6 +118,7 @@ impl RpcResponse {
             Self::PortBindingsChanged(_) => MessageType::PortBindingsChanged,
             Self::PortBindingsRemoved(_) => MessageType::PortBindingsRemoved,
             Self::Error(_) => MessageType::Error,
+            Self::MmapReadFile(_) => MessageType::MmapReadFileResponse,
         }
     }
 
@@ -136,6 +139,7 @@ impl RpcResponse {
             Self::PortBindingsChanged(msg) => msg.encode_to_vec(),
             Self::PortBindingsRemoved(msg) => msg.encode_to_vec(),
             Self::Error(err) => err.encode(),
+            Self::MmapReadFile(msg) => msg.encode_to_vec(),
         }
     }
 }
@@ -298,6 +302,10 @@ pub fn parse_request(msg_type: MessageType, payload: &[u8]) -> Result<RpcRequest
         MessageType::ShutdownRequest => {
             let req = ShutdownRequest::decode(payload)?;
             Ok(RpcRequest::Shutdown(req))
+        }
+        MessageType::MmapReadFileRequest => {
+            let req = MmapReadFileRequest::decode(payload)?;
+            Ok(RpcRequest::MmapReadFile(req))
         }
         _ => anyhow::bail!("unexpected message type: {:?}", msg_type),
     }

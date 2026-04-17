@@ -1690,6 +1690,37 @@ pub struct ShutdownResponse {
     #[prost(bool, tag = "1")]
     pub accepted: bool,
 }
+/// Test-only: read a file through `mmap(MAP_SHARED)` to force the guest
+/// kernel to issue `FUSE_SETUPMAPPING` and exercise the VirtioFS DAX path.
+/// Used by the ABX-362 E2E harness. Not intended for production callers.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MmapReadFileRequest {
+    /// Absolute guest path (typically a file inside a VirtioFS mount).
+    #[prost(string, tag = "1")]
+    pub path: ::prost::alloc::string::String,
+    /// Byte offset within the file.
+    #[prost(uint64, tag = "2")]
+    pub offset: u64,
+    /// Number of bytes to read. Rounded up to a page boundary internally;
+    /// the response trims back to the requested length.
+    #[prost(uint64, tag = "3")]
+    pub length: u64,
+}
+/// Response to `MmapReadFileRequest`.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MmapReadFileResponse {
+    /// Bytes read, trimmed to the originally requested length.
+    #[prost(bytes = "vec", tag = "1")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+    /// Number of bytes actually read (<= length). Short if file smaller
+    /// than offset+length.
+    #[prost(uint64, tag = "2")]
+    pub bytes_read: u64,
+}
 /// Request to create a network.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

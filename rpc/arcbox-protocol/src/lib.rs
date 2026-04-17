@@ -96,9 +96,10 @@ pub mod agent {
         AgentPingRequest, AgentPingResponse, KubernetesDeleteRequest, KubernetesDeleteResponse,
         KubernetesKubeconfigRequest, KubernetesKubeconfigResponse, KubernetesStartRequest,
         KubernetesStartResponse, KubernetesStatusRequest, KubernetesStatusResponse,
-        KubernetesStopRequest, KubernetesStopResponse, PortBindingsChanged, PortBindingsRemoved,
-        RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse,
-        ServiceStatus, ShutdownRequest, ShutdownResponse, SystemInfo,
+        KubernetesStopRequest, KubernetesStopResponse, MmapReadFileRequest, MmapReadFileResponse,
+        PortBindingsChanged, PortBindingsRemoved, RuntimeEnsureRequest, RuntimeEnsureResponse,
+        RuntimeStatusRequest, RuntimeStatusResponse, ServiceStatus, ShutdownRequest,
+        ShutdownResponse, SystemInfo,
     };
 
     // Backward compatibility type aliases (short names without Agent prefix).
