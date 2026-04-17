@@ -1120,6 +1120,15 @@ impl Vmm {
         self.running
             .store(false, std::sync::atomic::Ordering::SeqCst);
 
+        // Drop the PSCI CPU_ON channel senders. Secondary vCPU threads
+        // spawn with `rx.recv()` waiting for a CPU_ON request; when the
+        // guest only brought up the BSP they stay parked indefinitely.
+        // Dropping the senders makes their `recv()` return `Err(RecvError)`
+        // so they exit the recv and hit the `running=false` check. See
+        // ABX-364 — before this drop the secondary vCPU join could take
+        // 20+ seconds.
+        self.hv_cpu_on_senders.take();
+
         // Force-exit all vCPUs from their run loops.
         if let Some(ref vm) = self.hv_vm {
             if let Err(e) = vm.exit_all_vcpus() {
@@ -1138,6 +1147,15 @@ impl Vmm {
             for t in guard.iter() {
                 t.unpark();
             }
+        }
+
+        // Drop block-I/O worker senders so `rx.recv()` in
+        // `blk_io_worker_loop` returns `Err(RecvError)` and the workers
+        // exit cleanly. The senders live on the `DeviceManager` via
+        // `BlkWorkerHandle`; clearing the map releases our last
+        // reference. ABX-364.
+        if let Some(ref dm) = self.hv_device_manager {
+            dm.clear_blk_workers();
         }
 
         // Join all vCPU threads.

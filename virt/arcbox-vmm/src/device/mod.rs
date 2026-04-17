@@ -144,7 +144,14 @@ pub struct DeviceManager {
     /// Per-block-device async I/O worker handles. When present, QUEUE_NOTIFY
     /// for block devices is dispatched to the worker instead of processing
     /// synchronously on the vCPU thread.
-    blk_workers: HashMap<DeviceId, crate::blk_worker::BlkWorkerHandle>,
+    /// Block-I/O worker senders (one queue per `BlkWorkerHandle`).
+    ///
+    /// Wrapped in a `Mutex` so `stop_darwin_hv` can drop all senders
+    /// during shutdown (`clear_blk_workers`) from an `Arc<DeviceManager>`
+    /// handle. Dropping the senders is what lets `rx.recv()` in
+    /// `blk_io_worker_loop` return `Err(RecvError)` and the worker thread
+    /// exit promptly — see ABX-364.
+    blk_workers: Mutex<HashMap<DeviceId, crate::blk_worker::BlkWorkerHandle>>,
     /// Network RX worker lifecycle (resource collection + spawn + join).
     net_rx_worker: net_worker::NetRxWorkerSlot,
 }
@@ -194,7 +201,7 @@ impl DeviceManager {
                 crate::vsock_manager::VsockConnectionManager::new(),
             )),
             vsock: None,
-            blk_workers: HashMap::new(),
+            blk_workers: Mutex::new(HashMap::new()),
             net_rx_worker: net_worker::NetRxWorkerSlot::new(),
         }
     }
@@ -428,12 +435,24 @@ impl DeviceManager {
     }
 
     /// Registers an async block I/O worker set for a device (one per queue).
-    pub fn set_blk_worker(
-        &mut self,
-        device_id: DeviceId,
-        handle: crate::blk_worker::BlkWorkerHandle,
-    ) {
-        self.blk_workers.insert(device_id, handle);
+    pub fn set_blk_worker(&self, device_id: DeviceId, handle: crate::blk_worker::BlkWorkerHandle) {
+        self.blk_workers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(device_id, handle);
+    }
+
+    /// Drops all block-I/O worker senders so the worker threads can exit.
+    ///
+    /// Each `BlkWorkerHandle` owns `mpsc::Sender`s; dropping them makes the
+    /// corresponding `rx.recv()` in `blk_io_worker_loop` return
+    /// `Err(RecvError)`. Called from `stop_darwin_hv` right before the
+    /// worker threads are joined — see ABX-364.
+    pub fn clear_blk_workers(&self) {
+        self.blk_workers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 
     /// Stores the hooks that the net-io worker thread needs for interrupt
@@ -1064,7 +1083,11 @@ impl DeviceManager {
                             // VirtioBlock async path: dispatch to worker thread
                             // instead of blocking the vCPU with synchronous I/O.
                             if device.info.device_type == DeviceType::VirtioBlock {
-                                if let Some(handle) = self.blk_workers.get(&device_id) {
+                                let workers = self
+                                    .blk_workers
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                if let Some(handle) = workers.get(&device_id) {
                                     tracing::trace!(
                                         "blk async dispatch for device {}",
                                         device_id.0
