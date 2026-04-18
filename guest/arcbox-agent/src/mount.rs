@@ -65,14 +65,22 @@ pub fn mount_virtiofs(tag: &str, mountpoint: &str) -> Result<()> {
     mount_fs(tag, mountpoint, "virtiofs", &[])
 }
 
-/// Mount virtiofs share with `cache=always`.
+/// Mount virtiofs share with `cache=always` and `dax=always`.
 ///
-/// Tells the guest kernel to aggressively cache file data and metadata,
-/// skipping revalidation round-trips to the host. Only safe for shares
-/// whose contents do not change on the host while the VM is running
+/// `cache=always` tells the guest kernel to aggressively cache file data
+/// and metadata, skipping revalidation round-trips to the host. `dax=always`
+/// opts every file in the share into the FUSE DAX fast path: reads and
+/// `mmap` go through `FUSE_SETUPMAPPING` into the shared DAX window
+/// instead of copy-through `FUSE_READ`. Only safe for shares whose
+/// contents do not change on the host while the VM is running
 /// (e.g. the `/arcbox` runtime directory).
 pub fn mount_virtiofs_cached(tag: &str, mountpoint: &str) -> Result<()> {
-    mount_fs(tag, mountpoint, "virtiofs", &["cache=always".to_string()])
+    mount_fs(
+        tag,
+        mountpoint,
+        "virtiofs",
+        &["cache=always".to_string(), "dax=always".to_string()],
+    )
 }
 
 /// Checks if a path is already mounted.

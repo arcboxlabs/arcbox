@@ -235,55 +235,27 @@ impl Vmm {
             );
         }
 
-        // --- 3b. Pre-map DAX window for VirtioFS DAX ---
-        // Placed immediately after guest RAM so devm_memremap_pages can
-        // register it as ZONE_DEVICE (must be above RAM, not in MMIO gap).
+        // --- 3b. Reserve the DAX window IPA range for VirtioFS DAX ---
+        // The window is placed immediately above guest RAM so the guest
+        // kernel's `devm_memremap_pages` sees it as ZONE_DEVICE (must be
+        // above RAM, not in the MMIO gap). We do *not* pre-map an anonymous
+        // backing here: `hv_vm_map` on Apple Silicon does not support
+        // overlapping remaps (an existing stage-2 mapping at the target IPA
+        // makes every subsequent `hv_vm_map` for a sub-range return
+        // `HV_ERROR`, even after a matching `hv_vm_unmap`). Instead the
+        // window stays logically reserved and each FUSE_SETUPMAPPING call
+        // installs a per-file stage-2 mapping into its slice via
+        // `HvDaxMapper::setup_mapping`. If the guest touches the window
+        // before SETUPMAPPING lands it faults — which is the correct DAX
+        // contract.
         let dax_base = crate::dax::dax_window_base(RAM_BASE_IPA, ram_size as u64);
         let dax_size = crate::dax::dax_window_total(self.config.shared_dirs.len()) as usize;
-        {
-            // SAFETY: Anonymous mmap with null addr hint — the kernel picks a
-            // valid address. Arguments are all constants or validated sizes.
-            let dax_ptr = unsafe {
-                libc::mmap(
-                    std::ptr::null_mut(),
-                    dax_size,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
-                    -1,
-                    0,
-                )
-            };
-            if dax_ptr != libc::MAP_FAILED {
-                // SAFETY: `dax_ptr` points to a fresh mmap of `dax_size`
-                // bytes owned by `self.hv_dax_mmap` for the VM's lifetime
-                // (or munmap'd below on error).
-                let map_result = unsafe {
-                    vm.map_memory(
-                        dax_ptr.cast(),
-                        dax_base,
-                        dax_size,
-                        MemoryPermission::READ_WRITE,
-                    )
-                };
-                if let Err(e) = map_result {
-                    // Clean up the host mmap before propagating the error.
-                    // SAFETY: `dax_ptr` is the region we just mmap'd; it has
-                    // no aliases because the HV mapping failed.
-                    unsafe { libc::munmap(dax_ptr, dax_size) };
-                    return Err(VmmError::Memory(format!("DAX window hv_vm_map: {e}")));
-                }
-                // Store for munmap on shutdown.
-                self.hv_dax_mmap = Some((dax_ptr as usize, dax_size));
-                tracing::info!(
-                    "DAX window pre-mapped: IPA {:#x}..{:#x} ({}MB)",
-                    dax_base,
-                    dax_base + dax_size as u64,
-                    dax_size / (1024 * 1024),
-                );
-            } else {
-                tracing::warn!("DAX window mmap failed, DAX disabled");
-            }
-        }
+        tracing::info!(
+            "DAX window reserved: IPA {:#x}..{:#x} ({}MB, on-demand)",
+            dax_base,
+            dax_base + dax_size as u64,
+            dax_size / (1024 * 1024),
+        );
 
         // --- 4. Initialize GIC (macOS 15+) ---
         #[cfg(feature = "gic")]
@@ -1200,18 +1172,6 @@ impl Vmm {
         // FsServer will unmap when the server drops; these are just
         // observability handles.
         self.hv_dax_mappers.clear();
-
-        // Unmap the DAX window before releasing guest memory.
-        if let Some((dax_addr, dax_len)) = self.hv_dax_mmap.take() {
-            // SAFETY: dax_addr/dax_len were returned by a successful mmap during
-            // initialize_darwin_hv; the region has not been munmap'd elsewhere.
-            let ret = unsafe { libc::munmap(dax_addr as *mut libc::c_void, dax_len) };
-            if ret != 0 {
-                tracing::warn!("DAX munmap failed: {}", std::io::Error::last_os_error());
-            } else {
-                tracing::debug!("DAX window munmap'd ({} bytes)", dax_len);
-            }
-        }
 
         self.hv_guest_mem.take();
 

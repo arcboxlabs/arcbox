@@ -135,10 +135,18 @@ impl arcbox_fs::DaxMapper for HvDaxMapper {
             }
         }
 
-        let prot = if writable {
-            libc::PROT_READ | libc::PROT_WRITE
+        // Apple Silicon's `hv_vm_map` requires the host virtual address
+        // backing to be writable even when the stage-2 mapping is installed
+        // read-only. We always open the host mmap with PROT_READ|PROT_WRITE
+        // so the kernel accepts the mapping, and then use `MAP_PRIVATE` to
+        // ensure writes from the guest (if any) stay local as
+        // copy-on-write and never hit the host file. The flags we pass to
+        // `hv_vm_map` still reflect the requested guest permissions.
+        let prot = libc::PROT_READ | libc::PROT_WRITE;
+        let mmap_flags = if writable {
+            libc::MAP_SHARED
         } else {
-            libc::PROT_READ
+            libc::MAP_PRIVATE
         };
 
         // mmap host file region.
@@ -147,7 +155,7 @@ impl arcbox_fs::DaxMapper for HvDaxMapper {
                 std::ptr::null_mut(),
                 length as usize,
                 prot,
-                libc::MAP_SHARED,
+                mmap_flags,
                 host_fd,
                 #[allow(clippy::cast_possible_wrap)]
                 {
@@ -162,18 +170,36 @@ impl arcbox_fs::DaxMapper for HvDaxMapper {
         }
 
         let guest_ipa = self.base_ipa + window_offset;
+        // The FUSE SETUPMAPPING protocol only carries READ / WRITE flags,
+        // not EXECUTE. But the guest kernel routinely exec's binaries
+        // directly out of DAX (that is the whole point of the fast path),
+        // so every readable DAX mapping must be installed as stage-2
+        // executable too — otherwise the first instruction fetch through
+        // the mapping faults with a stage-2 InstructionAbort and the guest
+        // process dies before it can run. This matches how qemu-virtiofsd
+        // grants `PROT_EXEC` alongside `PROT_READ` on the guest VA.
         let perm = if writable {
-            arcbox_hv::MemoryPermission::READ | arcbox_hv::MemoryPermission::WRITE
-        } else {
             arcbox_hv::MemoryPermission::READ
+                | arcbox_hv::MemoryPermission::WRITE
+                | arcbox_hv::MemoryPermission::EXEC
+        } else {
+            arcbox_hv::MemoryPermission::READ | arcbox_hv::MemoryPermission::EXEC
         };
 
-        // Map into guest IPA via global HV API.
+        // Map the host file region into the guest IPA. The DAX window is
+        // reserved but not pre-mapped, so `hv_vm_map` installs a fresh
+        // stage-2 mapping. If a previous SETUPMAPPING occupied this slot
+        // without a matching REMOVEMAPPING, the call will fail — that is a
+        // guest-side bug we surface as EEXIST.
         let ret = unsafe {
             arcbox_hv::ffi::hv_vm_map(host_ptr.cast(), guest_ipa, length as usize, perm.bits())
         };
         if ret != 0 {
-            tracing::warn!("DAX hv_vm_map failed: ret={ret}");
+            tracing::warn!(
+                "DAX hv_vm_map failed: ret={:#x} host_ptr={host_ptr:p} ipa={guest_ipa:#x} len={length:#x} perm={:#x}",
+                ret as u32,
+                perm.bits(),
+            );
             unsafe { libc::munmap(host_ptr, length as usize) };
             return Err(libc::EFAULT);
         }

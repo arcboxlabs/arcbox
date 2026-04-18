@@ -330,11 +330,29 @@ impl FuseDispatcher {
         }
 
         // Negotiate DAX (direct host page mapping) if mapper is available.
+        // The alignment must be at least the host's page size, because every
+        // DAX SETUPMAPPING becomes an `hv_vm_map` on the host — which rejects
+        // sub-page-size mappings with HV_ERROR. Apple Silicon uses 16 KiB
+        // pages; x86_64 and most Linux hosts use 4 KiB. Pick the stricter of
+        // the two at runtime.
         let mut map_alignment = 0u32;
         if self.dax_mapper.is_some() && init_in.flags & FUSE_MAP_ALIGNMENT != 0 {
             flags |= FUSE_MAP_ALIGNMENT;
-            map_alignment = 12; // page shift: 2^12 = 4096
-            tracing::info!("FUSE DAX negotiated (map_alignment={})", map_alignment);
+            // SAFETY: `_SC_PAGESIZE` is always defined; `sysconf` returns the
+            // configured page size. On failure (`-1`) fall back to 16 KiB,
+            // which is the strict case for supported hosts.
+            let host_page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+            let page_size: u64 = if host_page > 0 {
+                host_page as u64
+            } else {
+                16 * 1024
+            };
+            map_alignment = page_size.trailing_zeros();
+            tracing::info!(
+                "FUSE DAX negotiated (map_alignment={} → {} byte pages)",
+                map_alignment,
+                page_size,
+            );
         }
 
         let mut init_out = FuseInitOut {
@@ -827,20 +845,85 @@ impl FuseDispatcher {
 
         let req = unsafe { std::ptr::read_unaligned(body.as_ptr().cast::<FuseSetupMappingIn>()) };
 
-        // Get the host fd from the file handle.
-        let host_fd = match self.fs.get_file_raw_fd(req.fh) {
-            Some(fd) => fd,
-            None => {
-                response.write_error(ctx.unique, libc::EBADF);
-                return;
+        let writable = req.flags & crate::fuse::FUSE_SETUPMAPPING_FLAG_WRITE != 0;
+
+        // The Linux virtiofs DAX client sends `fh = u64::MAX` when it wants
+        // to map a file for which it has no open file handle — typically
+        // the on-demand mapping path used during `execve` and read-ahead.
+        // For that case we fall back to opening a fresh read-only host fd
+        // from the nodeid. `mmap(2)` keeps the mapping alive independent of
+        // the fd's lifetime, so the temporary `File` can be dropped as soon
+        // as `setup_mapping` returns.
+        const SENTINEL_FH: u64 = u64::MAX;
+        let result = if req.fh == SENTINEL_FH {
+            match self.fs.open_inode_readonly(ctx.nodeid) {
+                Ok(file) => {
+                    use std::os::unix::io::AsRawFd;
+                    let host_fd = file.as_raw_fd();
+                    tracing::debug!(
+                        "FUSE SETUPMAPPING (inode-fd): nodeid={} host_fd={} foffset={:#x} moffset={:#x} len={:#x} writable={}",
+                        ctx.nodeid,
+                        host_fd,
+                        req.foffset,
+                        req.moffset,
+                        req.len,
+                        writable,
+                    );
+                    mapper.setup_mapping(host_fd, req.foffset, req.moffset, req.len, writable)
+                    // `file` drops here — closes the fd. The mapping
+                    // installed by `mmap` stays alive regardless.
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "FUSE SETUPMAPPING: failed to open nodeid={} for fh-sentinel mapping: {}",
+                        ctx.nodeid,
+                        e,
+                    );
+                    Err(libc::EBADF)
+                }
+            }
+        } else {
+            match self.fs.get_file_raw_fd(req.fh) {
+                Some(host_fd) => {
+                    tracing::debug!(
+                        "FUSE SETUPMAPPING: fh={:#x} host_fd={} foffset={:#x} moffset={:#x} len={:#x} writable={}",
+                        req.fh,
+                        host_fd,
+                        req.foffset,
+                        req.moffset,
+                        req.len,
+                        writable,
+                    );
+                    mapper.setup_mapping(host_fd, req.foffset, req.moffset, req.len, writable)
+                }
+                None => {
+                    tracing::warn!(
+                        "FUSE SETUPMAPPING: unknown fh={:#x} (foffset={:#x} moffset={:#x} len={:#x} flags={:#x})",
+                        req.fh,
+                        req.foffset,
+                        req.moffset,
+                        req.len,
+                        req.flags,
+                    );
+                    Err(libc::EBADF)
+                }
             }
         };
 
-        let writable = req.flags & crate::fuse::FUSE_SETUPMAPPING_FLAG_WRITE != 0;
-
-        match mapper.setup_mapping(host_fd, req.foffset, req.moffset, req.len, writable) {
+        match result {
             Ok(()) => response.write_empty(ctx.unique),
-            Err(errno) => response.write_error(ctx.unique, errno),
+            Err(errno) => {
+                tracing::warn!(
+                    "FUSE SETUPMAPPING: failed errno={} fh={:#x} nodeid={} foffset={:#x} moffset={:#x} len={:#x}",
+                    errno,
+                    req.fh,
+                    ctx.nodeid,
+                    req.foffset,
+                    req.moffset,
+                    req.len,
+                );
+                response.write_error(ctx.unique, errno);
+            }
         }
     }
 
@@ -981,9 +1064,9 @@ impl FuseDispatcher {
         match self.fs.readdir(read_in.fh, read_in.offset) {
             Ok(entries) => {
                 let mut buf = Vec::new();
-                let base_offset = read_in.offset + 1;
+                let mut offset = read_in.offset + 1;
 
-                for (i, entry) in entries.into_iter().enumerate() {
+                for entry in entries {
                     let name_bytes = entry.name.as_bytes();
                     // READDIRPLUS entry: FuseEntryOut + FuseDirent + name + padding
                     let dirent_size = FuseDirent::size(name_bytes.len());
@@ -1018,7 +1101,7 @@ impl FuseDispatcher {
                     // Write FuseDirent header
                     let dirent = FuseDirent {
                         ino: entry.ino,
-                        off: base_offset + i as u64,
+                        off: offset,
                         namelen: name_bytes.len() as u32,
                         typ: entry.file_type.to_dirent_type(),
                     };
@@ -1036,6 +1119,8 @@ impl FuseDispatcher {
                     // Pad to 8-byte boundary
                     let padding = dirent_size - size_of::<FuseDirent>() - name_bytes.len();
                     buf.extend(std::iter::repeat_n(0u8, padding));
+
+                    offset += 1;
                 }
 
                 response.write_bytes(ctx.unique, &buf);

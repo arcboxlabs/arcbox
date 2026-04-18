@@ -311,10 +311,6 @@ pub struct Vmm {
     /// HVC fast path: device_idx → (raw_fd, blk_size). Shared with vCPU threads.
     #[cfg(target_os = "macos")]
     hvc_blk_fds: Arc<Vec<(i32, u32)>>,
-    /// DAX window host-side mmap address (stored as usize to keep Vmm: Send) and
-    /// size, for munmap on shutdown.
-    #[cfg(target_os = "macos")]
-    hv_dax_mmap: Option<(usize, usize)>,
     /// Per-VirtioFS-share DAX mappers (concrete type).
     ///
     /// One `Arc<HvDaxMapper>` per configured shared directory, in the
@@ -434,8 +430,6 @@ impl Vmm {
             hv_blk_worker_threads: Vec::new(),
             #[cfg(target_os = "macos")]
             hvc_blk_fds: Arc::new(Vec::new()),
-            #[cfg(target_os = "macos")]
-            hv_dax_mmap: None,
             #[cfg(target_os = "macos")]
             hv_dax_mappers: Vec::new(),
             #[cfg(target_os = "macos")]
@@ -1170,25 +1164,6 @@ impl Drop for Vmm {
                 self.state = VmmState::Stopped;
             } else {
                 let _ = self.stop();
-            }
-        }
-
-        // Always clean up the DAX mmap if still set. Covers the case where
-        // initialize_darwin_hv succeeded in setting `hv_dax_mmap` but a later
-        // init step failed, returning Err before the VM ever transitioned
-        // past Created — `stop()` won't run but the mapping still leaks if
-        // we don't munmap here.
-        #[cfg(target_os = "macos")]
-        if let Some((addr, len)) = self.hv_dax_mmap.take() {
-            // SAFETY: addr/len were returned by a successful mmap in
-            // initialize_darwin_hv; stop_darwin_hv (if it ran) took() the
-            // value so we can only reach here with the original mapping.
-            let ret = unsafe { libc::munmap(addr as *mut libc::c_void, len) };
-            if ret != 0 {
-                tracing::warn!(
-                    "DAX munmap in Drop failed: {}",
-                    std::io::Error::last_os_error()
-                );
             }
         }
     }

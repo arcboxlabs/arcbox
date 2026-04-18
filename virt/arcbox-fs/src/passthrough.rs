@@ -1009,6 +1009,21 @@ impl PassthroughFs {
         handles.get(&handle).map(|h| h.file.as_raw_fd())
     }
 
+    /// Opens a short-lived read-only `File` for an inode, for DAX mapping
+    /// requests where the guest passes the `-1` fh sentinel (no open file).
+    ///
+    /// The caller is expected to invoke `mmap` on the returned file's raw
+    /// fd and then drop the `File`. `mmap(2)` keeps the mapping alive
+    /// independent of the fd's lifetime, so dropping the `File` after
+    /// `mmap` succeeds does not invalidate the mapping.
+    pub fn open_inode_readonly(&self, inode: u64) -> Result<std::fs::File> {
+        let path = self.inode_path(inode)?;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .open(&path)
+            .map_err(FsError::io)
+    }
+
     /// Seeks in a file (lseek).
     ///
     /// # Errors
