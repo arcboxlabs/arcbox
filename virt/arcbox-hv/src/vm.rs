@@ -96,6 +96,19 @@ impl HvVm {
     }
 }
 
+impl Drop for HvVm {
+    fn drop(&mut self) {
+        // SAFETY: Destroying the VM is always valid when one exists. We own
+        // the sole VM handle so no other code can race this call.
+        let ret = unsafe { ffi::hv_vm_destroy() };
+        if let Err(e) = error::check(ret) {
+            tracing::warn!("hv_vm_destroy failed: {e}");
+        } else {
+            debug!("hypervisor VM destroyed");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,33 +116,34 @@ mod tests {
     /// Requires `com.apple.security.hypervisor` entitlement.
     /// Run with: `cargo test -p arcbox-hv -- --ignored`
     #[test]
-    #[ignore]
+    #[ignore = "requires com.apple.security.hypervisor entitlement"]
     fn create_and_destroy_vm() {
         let vm = HvVm::new().expect("hv_vm_create failed — is the entitlement set?");
         drop(vm);
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "requires com.apple.security.hypervisor entitlement"]
     fn double_create_returns_busy() {
-        let _vm1 = HvVm::new().expect("first VM create failed");
+        let vm1 = HvVm::new().expect("first VM create failed");
         let result = HvVm::new();
         assert!(
             result.is_err(),
             "second VM create should fail with Busy or Error"
         );
+        drop(vm1);
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "requires com.apple.security.hypervisor entitlement"]
     fn exit_all_vcpus_succeeds() {
-        let _vm = HvVm::new().expect("VM create failed");
-        _vm.exit_all_vcpus()
+        let vm = HvVm::new().expect("VM create failed");
+        vm.exit_all_vcpus()
             .expect("exit_all_vcpus should succeed even with no vCPUs");
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "requires com.apple.security.hypervisor entitlement"]
     fn map_and_unmap_memory() {
         let vm = HvVm::new().expect("VM create failed");
         let size = 4096;
@@ -147,18 +161,5 @@ mod tests {
 
         // SAFETY: ptr was allocated with layout.
         unsafe { std::alloc::dealloc(ptr, layout) };
-    }
-}
-
-impl Drop for HvVm {
-    fn drop(&mut self) {
-        // SAFETY: Destroying the VM is always valid when one exists. We own
-        // the sole VM handle so no other code can race this call.
-        let ret = unsafe { ffi::hv_vm_destroy() };
-        if let Err(e) = error::check(ret) {
-            tracing::warn!("hv_vm_destroy failed: {e}");
-        } else {
-            debug!("hypervisor VM destroyed");
-        }
     }
 }

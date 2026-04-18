@@ -1842,7 +1842,7 @@ mod tests {
         frame[tcp + 13] = 0x02; // SYN
         frame[tcp + 14..tcp + 16].copy_from_slice(&65535u16.to_be_bytes()); // window
         // TCP checksum (pseudo-header + TCP segment)
-        let tcp_cksum = tcp_checksum(&GUEST_IP.octets(), &dst_ip.octets(), &frame[tcp..ip + 40]);
+        let tcp_cksum = tcp_checksum(GUEST_IP.octets(), dst_ip.octets(), &frame[tcp..ip + 40]);
         frame[tcp + 16..tcp + 18].copy_from_slice(&tcp_cksum.to_be_bytes());
         frame
     }
@@ -1901,8 +1901,8 @@ mod tests {
         frame[tcp_start + 13] = 0x10; // ACK
         frame[tcp_start + 14..tcp_start + 16].copy_from_slice(&65535u16.to_be_bytes());
         let tcp_cksum = tcp_checksum(
-            &guest_ip.octets(),
-            &dst_ip.octets(),
+            guest_ip.octets(),
+            dst_ip.octets(),
             &frame[tcp_start..ip_start + 40],
         );
         frame[tcp_start + 16..tcp_start + 18].copy_from_slice(&tcp_cksum.to_be_bytes());
@@ -1924,7 +1924,7 @@ mod tests {
         !sum as u16
     }
 
-    fn tcp_checksum(src_ip: &[u8; 4], dst_ip: &[u8; 4], tcp_segment: &[u8]) -> u16 {
+    fn tcp_checksum(src_ip: [u8; 4], dst_ip: [u8; 4], tcp_segment: &[u8]) -> u16 {
         let mut sum: u32 = 0;
         // Pseudo-header
         sum += u32::from(u16::from_be_bytes([src_ip[0], src_ip[1]]));
@@ -2808,7 +2808,8 @@ mod tests {
                 stream,
                 syn_seq: 1000,
                 created: StdInstant::now()
-                    - std::time::Duration::from_secs(PRE_CONNECTED_TTL_SECS + 1),
+                    .checked_sub(std::time::Duration::from_secs(PRE_CONNECTED_TTL_SECS + 1))
+                    .unwrap(),
             },
         );
 

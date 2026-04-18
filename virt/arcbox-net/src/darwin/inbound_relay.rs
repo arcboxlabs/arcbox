@@ -403,7 +403,7 @@ async fn tcp_listener_task(
     cmd_tx: mpsc::Sender<InboundCommand>,
     cancel: CancellationToken,
 ) {
-    let host_port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+    let host_port = listener.local_addr().map_or(0, |a| a.port());
     loop {
         tokio::select! {
             biased;
@@ -450,7 +450,7 @@ async fn udp_listener_task(
     cmd_tx: mpsc::Sender<InboundCommand>,
     cancel: CancellationToken,
 ) {
-    let host_port = socket.local_addr().map(|a| a.port()).unwrap_or(0);
+    let host_port = socket.local_addr().map_or(0, |a| a.port());
     let socket = Arc::new(socket);
     let mut reply_flows: HashMap<SocketAddr, mpsc::Sender<Vec<u8>>> = HashMap::new();
     let mut buf = vec![0u8; 65535];
@@ -618,7 +618,9 @@ mod tests {
             key,
             InboundUdpFlow {
                 client_tx,
-                last_active: Instant::now() - std::time::Duration::from_secs(120),
+                last_active: Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(120))
+                    .unwrap(),
             },
         );
         assert_eq!(relay.udp_flows.len(), 1);

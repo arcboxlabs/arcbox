@@ -766,7 +766,7 @@ mod tests {
     // Integration tests that require root/entitlements.
     // Run with: sudo cargo test -p arcbox-net vmnet_integration -- --ignored
     #[test]
-    #[ignore]
+    #[ignore = "requires macOS vmnet entitlements and root"]
     fn test_vmnet_create_shared() {
         let vmnet = Vmnet::new_shared();
         assert!(
@@ -782,7 +782,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "requires macOS vmnet entitlements and root"]
     fn test_vmnet_create_host_only() {
         let vmnet = Vmnet::new_host_only();
         assert!(
@@ -796,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "requires macOS vmnet entitlements and root"]
     fn test_vmnet_stop() {
         let vmnet = Vmnet::new_shared().expect("Failed to create vmnet");
         assert!(vmnet.is_running());
@@ -806,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "requires macOS vmnet entitlements and root"]
     fn test_vmnet_read_no_data() {
         let vmnet = Vmnet::new_shared().expect("Failed to create vmnet");
         let mut buf = [0u8; 1500];
@@ -818,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "requires macOS vmnet entitlements and root"]
     fn test_vmnet_write_packet() {
         let vmnet = Vmnet::new_shared().expect("Failed to create vmnet");
 
@@ -836,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "requires macOS vmnet entitlements and root"]
     fn test_vmnet_custom_mac() {
         let mac = [0x02, 0x00, 0x00, 0x12, 0x34, 0x56];
         let config = VmnetConfig::shared().with_mac(mac);

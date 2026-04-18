@@ -468,8 +468,7 @@ fn source_line(shell: ShellKind) -> String {
 async fn check_profile_injected(path: &Path) -> bool {
     tokio::fs::read_to_string(path)
         .await
-        .map(|content| content.contains(PROFILE_MARKER))
-        .unwrap_or(false)
+        .is_ok_and(|content| content.contains(PROFILE_MARKER))
 }
 
 /// Inject the source line into the user's shell profile. Returns the path if

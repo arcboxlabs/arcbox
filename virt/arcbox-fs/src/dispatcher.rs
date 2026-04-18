@@ -919,9 +919,9 @@ impl FuseDispatcher {
         match self.fs.readdir(read_in.fh, read_in.offset) {
             Ok(entries) => {
                 let mut dirent_buf = Vec::new();
-                let mut offset = read_in.offset + 1;
+                let base_offset = read_in.offset + 1;
 
-                for entry in entries {
+                for (i, entry) in entries.into_iter().enumerate() {
                     let name_bytes = entry.name.as_bytes();
                     let entry_size = FuseDirent::size(name_bytes.len());
 
@@ -932,7 +932,7 @@ impl FuseDispatcher {
 
                     let dirent = FuseDirent {
                         ino: entry.ino,
-                        off: offset,
+                        off: base_offset + i as u64,
                         namelen: name_bytes.len() as u32,
                         typ: entry.file_type.to_dirent_type(),
                     };
@@ -952,8 +952,6 @@ impl FuseDispatcher {
                     // Pad to 8-byte boundary
                     let padding = entry_size - size_of::<FuseDirent>() - name_bytes.len();
                     dirent_buf.extend(std::iter::repeat_n(0u8, padding));
-
-                    offset += 1;
                 }
 
                 response.write_bytes(ctx.unique, &dirent_buf);
@@ -983,9 +981,9 @@ impl FuseDispatcher {
         match self.fs.readdir(read_in.fh, read_in.offset) {
             Ok(entries) => {
                 let mut buf = Vec::new();
-                let mut offset = read_in.offset + 1;
+                let base_offset = read_in.offset + 1;
 
-                for entry in entries {
+                for (i, entry) in entries.into_iter().enumerate() {
                     let name_bytes = entry.name.as_bytes();
                     // READDIRPLUS entry: FuseEntryOut + FuseDirent + name + padding
                     let dirent_size = FuseDirent::size(name_bytes.len());
@@ -1020,7 +1018,7 @@ impl FuseDispatcher {
                     // Write FuseDirent header
                     let dirent = FuseDirent {
                         ino: entry.ino,
-                        off: offset,
+                        off: base_offset + i as u64,
                         namelen: name_bytes.len() as u32,
                         typ: entry.file_type.to_dirent_type(),
                     };
@@ -1038,8 +1036,6 @@ impl FuseDispatcher {
                     // Pad to 8-byte boundary
                     let padding = dirent_size - size_of::<FuseDirent>() - name_bytes.len();
                     buf.extend(std::iter::repeat_n(0u8, padding));
-
-                    offset += 1;
                 }
 
                 response.write_bytes(ctx.unique, &buf);

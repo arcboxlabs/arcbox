@@ -1475,14 +1475,11 @@ impl std::fmt::Debug for PassthroughFs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PassthroughFs")
             .field("root", &self.root)
-            .field("inodes", &self.inodes.read().map(|i| i.len()).unwrap_or(0))
-            .field(
-                "handles",
-                &self.handles.read().map(|h| h.len()).unwrap_or(0),
-            )
+            .field("inodes", &self.inodes.read().map_or(0, |i| i.len()))
+            .field("handles", &self.handles.read().map_or(0, |h| h.len()))
             .field(
                 "dir_handles",
-                &self.dir_handles.read().map(|h| h.len()).unwrap_or(0),
+                &self.dir_handles.read().map_or(0, |h| h.len()),
             )
             .finish()
     }

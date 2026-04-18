@@ -676,9 +676,7 @@ impl Vmm {
 
         match self.resolved_backend {
             Some(ResolvedBackend::Hv) => self.hv_balloon.as_ref().map_or(0, |b| {
-                b.lock()
-                    .map(|g| u64::from(g.num_pages()) * 4096)
-                    .unwrap_or(0)
+                b.lock().map_or(0, |g| u64::from(g.num_pages()) * 4096)
             }),
             Some(ResolvedBackend::Vz) | None => self
                 .darwin_vm
@@ -694,14 +692,12 @@ impl Vmm {
     pub fn get_balloon_stats(&self) -> arcbox_hypervisor::BalloonStats {
         let (target_bytes, current_bytes) = match self.resolved_backend {
             Some(ResolvedBackend::Hv) => self.hv_balloon.as_ref().map_or((0, 0), |b| {
-                b.lock()
-                    .map(|g| {
-                        (
-                            u64::from(g.num_pages()) * 4096,
-                            u64::from(g.actual()) * 4096,
-                        )
-                    })
-                    .unwrap_or((0, 0))
+                b.lock().map_or((0, 0), |g| {
+                    (
+                        u64::from(g.num_pages()) * 4096,
+                        u64::from(g.actual()) * 4096,
+                    )
+                })
             }),
             Some(ResolvedBackend::Vz) | None => (self.get_balloon_target(), 0),
         };

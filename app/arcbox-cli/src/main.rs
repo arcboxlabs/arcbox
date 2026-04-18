@@ -90,9 +90,7 @@ async fn execute_info() -> Result<()> {
     println!("Arch: {}", std::env::consts::ARCH);
     println!(
         "CPUs: {}",
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
+        std::thread::available_parallelism().map_or(1, |n| n.get())
     );
 
     match commands::machine::machine_count().await {

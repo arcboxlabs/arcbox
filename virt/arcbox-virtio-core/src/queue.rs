@@ -415,7 +415,7 @@ mod tests {
             next: 42,
         };
 
-        let cloned = desc.clone();
+        let cloned = desc;
         let copied = desc; // Copy
 
         assert_eq!(cloned.addr, 0xDEADBEEF);
@@ -466,7 +466,7 @@ mod tests {
     #[test]
     fn test_used_element_clone_copy() {
         let elem = UsedElement { id: 42, len: 1024 };
-        let cloned = elem.clone();
+        let cloned = elem;
         let copied = elem; // Copy
 
         assert_eq!(cloned.id, 42);

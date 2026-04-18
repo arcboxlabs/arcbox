@@ -225,9 +225,7 @@ pub struct DefaultVmConfig {
 
 impl Default for DefaultVmConfig {
     fn default() -> Self {
-        let host_cpus = std::thread::available_parallelism()
-            .map(|n| n.get() as u32)
-            .unwrap_or(4);
+        let host_cpus = std::thread::available_parallelism().map_or(4, |n| n.get() as u32);
 
         Self {
             cpus: (host_cpus / 2).max(2),

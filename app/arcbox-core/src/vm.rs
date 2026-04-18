@@ -716,7 +716,7 @@ impl VmManager {
     #[must_use]
     pub fn list_vm_snapshots(&self, id: &VmId) -> Vec<SnapshotInfo> {
         let mut snapshots = self.snapshot_manager.list(id.as_str());
-        snapshots.sort_by(|a, b| b.created.cmp(&a.created));
+        snapshots.sort_by_key(|s| std::cmp::Reverse(s.created));
         snapshots
     }
 
@@ -747,7 +747,7 @@ impl VmManager {
             return Ok(Vec::new());
         }
 
-        snapshots.sort_by(|a, b| b.created.cmp(&a.created));
+        snapshots.sort_by_key(|s| std::cmp::Reverse(s.created));
 
         let mut deleted = Vec::new();
         for snapshot in snapshots.into_iter().skip(keep) {

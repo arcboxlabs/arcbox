@@ -434,6 +434,12 @@ impl VsockConnectionManager {
     pub fn len(&self) -> usize {
         self.connections.len()
     }
+
+    /// Returns `true` if there are no active connections.
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.connections.is_empty()
+    }
 }
 
 impl VsockHostConnections for VsockConnectionManager {

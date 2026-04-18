@@ -373,8 +373,7 @@ impl AgentClient {
             message: "ping".to_string(),
             timestamp_secs: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| i64::try_from(d.as_secs()).unwrap_or(0))
-                .unwrap_or(0),
+                .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0)),
         };
         let payload = req.encode_to_vec();
         let (resp_type, resp_payload) =
@@ -403,8 +402,7 @@ impl AgentClient {
             message: "ping".to_string(),
             timestamp_secs: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| i64::try_from(d.as_secs()).unwrap_or(0))
-                .unwrap_or(0),
+                .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(0)),
         };
         let payload = req.encode_to_vec();
 
