@@ -62,6 +62,14 @@ use vcpu_loop::{VcpuContext, vcpu_run_loop};
 /// and calls `unpark()` on every thread so that WFI-parked vCPUs wake up.
 pub(super) type VcpuThreadHandles = Arc<Mutex<Vec<std::thread::Thread>>>;
 
+/// Shared registry of Hypervisor.framework vCPU IDs (opaque `hv_vcpu_t`
+/// handles).
+///
+/// Used by `stop_darwin_hv` / `pause_darwin_hv` to target `hv_vcpus_exit`
+/// correctly. On arm64, `hv_vcpus_exit(NULL, 0)` is a **no-op** — the
+/// framework expects a concrete list of vCPU IDs. See ABX-367.
+pub(super) type HvVcpuIds = Arc<Mutex<Vec<u64>>>;
+
 /// Page size on ARM64.
 #[cfg(test)]
 const PAGE_SIZE: usize = 4096;
@@ -282,6 +290,12 @@ impl Vmm {
         // Shared registry for vCPU thread handles — the IRQ callback uses
         // this to unpark WFI-blocked vCPU threads when an interrupt fires.
         let vcpu_thread_handles: VcpuThreadHandles = Arc::new(Mutex::new(Vec::new()));
+
+        // Shared registry for Hypervisor.framework vCPU IDs. Each
+        // `vcpu_run_loop` pushes its `HvVcpu::raw_handle()` here after
+        // creation so the stop/pause paths can target `hv_vcpus_exit`
+        // with a concrete list (arm64 requires that; see ABX-367).
+        let hv_vcpu_ids: HvVcpuIds = Arc::new(Mutex::new(Vec::new()));
 
         #[cfg(feature = "gic")]
         if let Some(ref gic_ref) = gic {
@@ -818,6 +832,7 @@ impl Vmm {
         self.hv_kernel_entry = Some(kernel_entry);
         self.hv_fdt_addr = Some(fdt_addr.raw_value());
         self.hv_vcpu_thread_handles = Some(vcpu_thread_handles);
+        self.hv_vcpu_ids = Some(hv_vcpu_ids);
 
         tracing::info!("Custom Hypervisor.framework VMM initialized");
         Ok(())
@@ -969,12 +984,32 @@ impl Vmm {
                         }
                         Ok(())
                     });
-                // Force-exit all vCPUs closure (thread-safe global API).
-                let exit_fn: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {
-                    // SAFETY: `hv_vcpus_exit(NULL, 0)` is the documented
-                    // "exit every vCPU in the process" form and is safe to
-                    // call from any thread per Hypervisor.framework docs.
-                    unsafe { arcbox_hv::ffi::hv_vcpus_exit(std::ptr::null(), 0) };
+                // Force-exit all vCPUs closure used by the net-rx worker to
+                // wake a guest that is idle in WFI for interrupt delivery.
+                // On arm64 `hv_vcpus_exit` requires a concrete list of vCPU
+                // IDs; NULL/0 is a silent no-op. Snapshot `hv_vcpu_ids` each
+                // invocation so late-arriving secondaries (PSCI CPU_ON) are
+                // picked up. Safe to call from any thread. See ABX-367.
+                let exit_ids = self
+                    .hv_vcpu_ids
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(Mutex::new(Vec::new())));
+                let exit_fn: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                    let ids_snapshot: Vec<u64> = exit_ids
+                        .lock()
+                        .map_or_else(|e| e.into_inner().clone(), |g| g.clone());
+                    if ids_snapshot.is_empty() {
+                        return;
+                    }
+                    // SAFETY: `ids_snapshot` is a live slice owned by this
+                    // closure for the duration of the FFI call.
+                    #[allow(clippy::cast_possible_truncation)]
+                    unsafe {
+                        arcbox_hv::ffi::hv_vcpus_exit(
+                            ids_snapshot.as_ptr(),
+                            ids_snapshot.len() as u32,
+                        );
+                    }
                 });
                 dm.set_net_rx_hooks(net_irq_cb, exit_fn);
             }
@@ -996,6 +1031,10 @@ impl Vmm {
             .hv_vcpu_thread_handles
             .clone()
             .unwrap_or_else(|| Arc::new(Mutex::new(Vec::new())));
+        let hv_vcpu_ids = self
+            .hv_vcpu_ids
+            .clone()
+            .unwrap_or_else(|| Arc::new(Mutex::new(Vec::new())));
 
         // --- Set up PSCI CPU_ON channels for secondary vCPUs ---
         let cpu_on_senders: Option<CpuOnSenders> = if vcpu_count > 1 {
@@ -1010,6 +1049,7 @@ impl Vmm {
                 let p = paused.clone();
                 let dm = device_manager.clone();
                 let th = vcpu_thread_handles.clone();
+                let ids = hv_vcpu_ids.clone();
                 let uart = pl011.clone();
                 let hvc_fds_clone = self.hvc_blk_fds.clone();
                 let senders_placeholder: Option<CpuOnSenders> = None;
@@ -1033,6 +1073,7 @@ impl Vmm {
                                     pl011: uart,
                                     cpu_on_senders: senders_placeholder,
                                     vcpu_thread_handles: th,
+                                    hv_vcpu_ids: ids,
                                     hvc_blk_fds: hvc_fds_clone,
                                 },
                             );
@@ -1054,6 +1095,7 @@ impl Vmm {
 
         // --- Spawn BSP (vCPU 0) ---
         let hvc_blk_fds = self.hvc_blk_fds.clone();
+        let bsp_hv_vcpu_ids = hv_vcpu_ids;
         {
             let t = std::thread::Builder::new()
                 .name("hv-vcpu-0".to_string())
@@ -1069,6 +1111,7 @@ impl Vmm {
                             pl011,
                             cpu_on_senders,
                             vcpu_thread_handles,
+                            hv_vcpu_ids: bsp_hv_vcpu_ids,
                             hvc_blk_fds,
                         },
                     );
@@ -1110,21 +1153,30 @@ impl Vmm {
             dm.clear_blk_workers();
         }
 
-        // Drive every vCPU thread to exit. `hv_vcpus_exit` is edge-triggered
-        // — the cancel is consumed by whichever vCPU happens to be inside
-        // `vcpu.run()` at the moment it fires. A vCPU parked in the WFI
-        // handler's `park_timeout`, or between iterations, does not see the
-        // cancel and re-enters `vcpu.run()` with nothing pending, blocking
-        // until a device interrupt that will never come once the BSP has
-        // already exited. Loop until every thread self-exits or a hard
-        // deadline trips. See ABX-367.
+        // Drive every vCPU thread to exit. `hv_vcpus_exit` needs a concrete
+        // list of vCPU IDs on arm64 (see ABX-367); we snapshot the ID
+        // registry once up front because all vCPUs have been created by the
+        // time stop runs. A single well-formed cancel is normally enough,
+        // but we loop until threads self-exit or a deadline trips, since a
+        // vCPU observed outside `vcpu.run()` will pick up the cancel on its
+        // next re-entry.
+        let vcpu_ids_snapshot: Vec<u64> = self
+            .hv_vcpu_ids
+            .as_ref()
+            .and_then(|ids| ids.lock().ok().map(|g| g.clone()))
+            .unwrap_or_default();
+
         let stop_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut iterations: u32 = 0;
         loop {
             if self
                 .hv_vcpu_threads
                 .iter()
                 .all(std::thread::JoinHandle::is_finished)
             {
+                tracing::debug!(
+                    "stop_darwin_hv: all vCPU threads finished after {iterations} cancel iterations"
+                );
                 break;
             }
             if std::time::Instant::now() >= stop_deadline {
@@ -1134,14 +1186,15 @@ impl Vmm {
                     .filter(|t| !t.is_finished())
                     .count();
                 tracing::warn!(
-                    "stop_darwin_hv: {alive} vCPU thread(s) did not exit within 5s, proceeding to join (may block)"
+                    "stop_darwin_hv: {alive} vCPU thread(s) did not exit within 5s after {iterations} cancel iterations, proceeding to join (may block)"
                 );
                 break;
             }
 
+            iterations += 1;
             if let Some(ref vm) = self.hv_vm {
-                if let Err(e) = vm.exit_all_vcpus() {
-                    tracing::warn!("hv_vcpus_exit failed: {e}");
+                if let Err(e) = vm.exit_vcpus(&vcpu_ids_snapshot) {
+                    tracing::warn!("hv_vcpus_exit failed (iter {iterations}): {e}");
                 }
             }
             if let Some(ref handles) = self.hv_vcpu_thread_handles {
@@ -1224,8 +1277,19 @@ impl Vmm {
         self.hv_paused
             .store(true, std::sync::atomic::Ordering::SeqCst);
 
+        // Snapshot the registered vCPU IDs and issue a targeted
+        // `hv_vcpus_exit`. On arm64 the NULL/0 form is a no-op, so without
+        // an explicit list no vCPU actually leaves `vcpu.run()` and pause
+        // becomes best-effort in the worst sense — observable pause latency
+        // matches the time to the guest's next natural exit (timer tick,
+        // MMIO, …). See ABX-367.
+        let ids: Vec<u64> = self
+            .hv_vcpu_ids
+            .as_ref()
+            .and_then(|ids| ids.lock().ok().map(|g| g.clone()))
+            .unwrap_or_default();
         if let Some(ref vm) = self.hv_vm {
-            if let Err(e) = vm.exit_all_vcpus() {
+            if let Err(e) = vm.exit_vcpus(&ids) {
                 tracing::warn!("hv_vcpus_exit during pause failed: {e}");
             }
         }

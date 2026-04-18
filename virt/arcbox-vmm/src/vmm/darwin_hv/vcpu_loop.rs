@@ -16,7 +16,7 @@ use super::hvc_blk::{
     handle_hvc_blk_flush, handle_hvc_blk_io,
 };
 use super::psci::{CpuOnSenders, handle_psci};
-use super::{Pl011, VcpuThreadHandles};
+use super::{HvVcpuIds, Pl011, VcpuThreadHandles};
 
 /// ARM64 register IDs re-exported from arcbox-hv.
 pub(super) mod reg {
@@ -58,6 +58,10 @@ pub(super) struct VcpuContext {
     /// Registry of vCPU thread handles used by the IRQ callback to
     /// unpark WFI-blocked threads.
     pub vcpu_thread_handles: VcpuThreadHandles,
+    /// Registry of Hypervisor.framework vCPU IDs. Populated by this loop
+    /// after `HvVcpu::new()`; read by `pause`/`stop` when calling
+    /// `hv_vcpus_exit` (which on arm64 requires a concrete list, not NULL).
+    pub hv_vcpu_ids: HvVcpuIds,
     /// Per-block-device file descriptors and sector sizes for HVC fast path.
     pub hvc_blk_fds: Arc<Vec<(i32, u32)>>,
 }
@@ -103,6 +107,7 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, entry_addr: u64, x0_value: u64, ctx: V
         pl011,
         cpu_on_senders,
         vcpu_thread_handles,
+        hv_vcpu_ids,
         hvc_blk_fds,
     } = ctx;
 
@@ -121,6 +126,16 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, entry_addr: u64, x0_value: u64, ctx: V
             return;
         }
     };
+
+    // Register this vCPU's framework ID so the stop/pause paths can target
+    // `hv_vcpus_exit` at it. `HvVcpu::new` only succeeds on the owning
+    // thread, so we do this after construction. See ABX-367.
+    {
+        let mut ids = hv_vcpu_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ids.push(vcpu.raw_handle());
+    }
 
     // Set initial register state for ARM64 Linux boot protocol:
     //   PC   = entry address (kernel entry for BSP, PSCI entry for secondary)
@@ -198,6 +213,13 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, entry_addr: u64, x0_value: u64, ctx: V
             }
         }
 
+        // ABX-367 instrumentation: log each iteration during shutdown so we
+        // can tell whether a vCPU is stuck inside `vcpu.run()` or spinning
+        // in the exit-dispatch loop. Gated on `running=false` so normal
+        // operation is unaffected.
+        if !running.load(Ordering::Relaxed) {
+            tracing::debug!("vCPU {vcpu_id}: iteration during shutdown (before vcpu.run)");
+        }
         let exit = match vcpu.run() {
             Ok(e) => e,
             Err(e) => {
@@ -206,6 +228,12 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, entry_addr: u64, x0_value: u64, ctx: V
                 break;
             }
         };
+        if !running.load(Ordering::Relaxed) {
+            tracing::debug!(
+                "vCPU {vcpu_id}: vcpu.run returned during shutdown, exit={:?}",
+                core::mem::discriminant(&exit)
+            );
+        }
 
         match exit {
             VcpuExit::Exception {

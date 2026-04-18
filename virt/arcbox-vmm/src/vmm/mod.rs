@@ -258,6 +258,11 @@ pub struct Vmm {
     /// Shared vCPU thread handle registry for WFI unparking (custom HV).
     #[cfg(target_os = "macos")]
     hv_vcpu_thread_handles: Option<std::sync::Arc<std::sync::Mutex<Vec<std::thread::Thread>>>>,
+    /// Shared registry of Hypervisor.framework vCPU IDs (custom HV).
+    /// Populated by each vCPU thread after it creates its `HvVcpu`. Used
+    /// by `pause`/`stop` to target `hv_vcpus_exit` correctly on arm64.
+    #[cfg(target_os = "macos")]
+    hv_vcpu_ids: Option<std::sync::Arc<std::sync::Mutex<Vec<u64>>>>,
     /// PSCI CPU_ON channel senders for secondary vCPUs (custom HV).
     #[cfg(target_os = "macos")]
     #[allow(clippy::type_complexity)]
@@ -403,6 +408,8 @@ impl Vmm {
             hv_vcpu_threads: Vec::new(),
             #[cfg(target_os = "macos")]
             hv_vcpu_thread_handles: None,
+            #[cfg(target_os = "macos")]
+            hv_vcpu_ids: None,
             #[cfg(target_os = "macos")]
             hv_cpu_on_senders: None,
             #[cfg(all(target_os = "macos", feature = "vmnet"))]

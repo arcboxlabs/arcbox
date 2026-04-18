@@ -85,14 +85,31 @@ impl HvVm {
         error::check(unsafe { ffi::hv_vm_protect(ipa, size, perm.bits()) })
     }
 
-    /// Forces all vCPUs in the current VM to exit their run loops.
+    /// Forces the given vCPUs to exit their run loops.
     ///
-    /// Any blocked [`HvVcpu::run()`](crate::HvVcpu::run) call will return
-    /// `VcpuExit::Canceled`. This can be called from any thread and is the
-    /// primary mechanism for clean shutdown.
-    pub fn exit_all_vcpus(&self) -> HvResult<()> {
-        // SAFETY: Passing NULL with count 0 exits all vCPUs in the VM.
-        error::check(unsafe { ffi::hv_vcpus_exit(std::ptr::null(), 0) })
+    /// Any blocked [`HvVcpu::run()`](crate::HvVcpu::run) call on one of the
+    /// listed vCPUs will return `VcpuExit::Canceled`. For a vCPU that is
+    /// not currently inside `hv_vcpu_run`, the next call to `hv_vcpu_run`
+    /// for that vCPU returns immediately without entering the guest. Can
+    /// be called from any thread and is the primary mechanism for clean
+    /// shutdown.
+    ///
+    /// # Important — arm64 vs x86
+    ///
+    /// On **arm64**, Apple's `hv_vcpus_exit` requires a concrete list of
+    /// vCPU IDs; passing `NULL, 0` is a no-op ("exit 0 vCPUs from an empty
+    /// list"). Callers must thread through the real `HvVcpu::raw_handle()`
+    /// values from every vCPU thread. The x86 convention of `NULL, 0`
+    /// meaning "all vCPUs" does not apply. See ABX-367 for the regression
+    /// this prevents.
+    pub fn exit_vcpus(&self, vcpus: &[u64]) -> HvResult<()> {
+        if vcpus.is_empty() {
+            return Ok(());
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        // SAFETY: `vcpus` is a live slice of vCPU IDs; the framework reads
+        // `vcpus.len()` u64 elements and does not retain the pointer.
+        error::check(unsafe { ffi::hv_vcpus_exit(vcpus.as_ptr(), vcpus.len() as u32) })
     }
 }
 
@@ -136,10 +153,10 @@ mod tests {
 
     #[test]
     #[ignore = "requires com.apple.security.hypervisor entitlement"]
-    fn exit_all_vcpus_succeeds() {
+    fn exit_vcpus_empty_list_is_noop() {
         let vm = HvVm::new().expect("VM create failed");
-        vm.exit_all_vcpus()
-            .expect("exit_all_vcpus should succeed even with no vCPUs");
+        vm.exit_vcpus(&[])
+            .expect("exit_vcpus with an empty list should succeed as a no-op");
     }
 
     #[test]
