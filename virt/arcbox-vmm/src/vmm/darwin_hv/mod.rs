@@ -1101,26 +1101,6 @@ impl Vmm {
         // 20+ seconds.
         self.hv_cpu_on_senders.take();
 
-        // Force-exit all vCPUs from their run loops.
-        if let Some(ref vm) = self.hv_vm {
-            if let Err(e) = vm.exit_all_vcpus() {
-                tracing::warn!("hv_vcpus_exit failed: {e}");
-            }
-        }
-
-        // Unpark any threads that were parked via cooperative pause — they
-        // must observe `running=false` and exit their loop. `exit_all_vcpus`
-        // only kicks threads out of `vcpu.run()`; parked threads are not
-        // affected by it.
-        if let Some(ref handles) = self.hv_vcpu_thread_handles {
-            let guard = handles
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for t in guard.iter() {
-                t.unpark();
-            }
-        }
-
         // Drop block-I/O worker senders so `rx.recv()` in
         // `blk_io_worker_loop` returns `Err(RecvError)` and the workers
         // exit cleanly. The senders live on the `DeviceManager` via
@@ -1130,7 +1110,54 @@ impl Vmm {
             dm.clear_blk_workers();
         }
 
-        // Join all vCPU threads.
+        // Drive every vCPU thread to exit. `hv_vcpus_exit` is edge-triggered
+        // — the cancel is consumed by whichever vCPU happens to be inside
+        // `vcpu.run()` at the moment it fires. A vCPU parked in the WFI
+        // handler's `park_timeout`, or between iterations, does not see the
+        // cancel and re-enters `vcpu.run()` with nothing pending, blocking
+        // until a device interrupt that will never come once the BSP has
+        // already exited. Loop until every thread self-exits or a hard
+        // deadline trips. See ABX-367.
+        let stop_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if self
+                .hv_vcpu_threads
+                .iter()
+                .all(std::thread::JoinHandle::is_finished)
+            {
+                break;
+            }
+            if std::time::Instant::now() >= stop_deadline {
+                let alive = self
+                    .hv_vcpu_threads
+                    .iter()
+                    .filter(|t| !t.is_finished())
+                    .count();
+                tracing::warn!(
+                    "stop_darwin_hv: {alive} vCPU thread(s) did not exit within 5s, proceeding to join (may block)"
+                );
+                break;
+            }
+
+            if let Some(ref vm) = self.hv_vm {
+                if let Err(e) = vm.exit_all_vcpus() {
+                    tracing::warn!("hv_vcpus_exit failed: {e}");
+                }
+            }
+            if let Some(ref handles) = self.hv_vcpu_thread_handles {
+                let guard = handles
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for t in guard.iter() {
+                    t.unpark();
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        // Join all vCPU threads — the loop above has either confirmed they
+        // are `is_finished()` (join is instant) or we timed out and accept a
+        // possible block.
         for t in self.hv_vcpu_threads.drain(..) {
             if let Err(e) = t.join() {
                 tracing::warn!("vCPU thread join failed: {e:?}");

@@ -328,6 +328,15 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, entry_addr: u64, x0_value: u64, ctx: V
                 }
                 // No pending data — park with timeout.
                 std::thread::park_timeout(std::time::Duration::from_millis(1));
+                // Re-check `running` immediately after the park returns so
+                // that `stop_darwin_hv` does not have to race a fresh
+                // `vcpu.run()` re-entry. Without this, a vCPU parked in WFI
+                // could consume an `exit_all_vcpus` cancel intended for a
+                // different vCPU and then slip back into `vcpu.run()`
+                // unguarded. See ABX-367.
+                if !running.load(Ordering::Relaxed) {
+                    break;
+                }
             }
 
             VcpuExit::Exception {
