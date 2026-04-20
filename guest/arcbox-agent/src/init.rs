@@ -66,6 +66,13 @@ mod platform {
         // Optional host /Users share (non-fatal if not configured).
         mount_virtiofs_optional("users", "/Users");
 
+        // Optional DAX fixture share for the hv_e2e harness. Mounted with
+        // `cache=always,dax=always` so FUSE_SETUPMAPPING fires on every
+        // read, exercising the stage-2 mmap fast path end-to-end.
+        // Production VMs never attach this tag; the mount is a debug-level
+        // no-op when the share is absent.
+        mount_virtiofs_optional_dax("arcbox-dax", "/arcbox-dax");
+
         // Rosetta x86_64 translation (Apple Silicon only).
         // The host attaches a VirtioFS share containing the Rosetta binary.
         // We mount it and register via binfmt_misc so x86_64 ELF binaries
@@ -189,6 +196,28 @@ mod platform {
         ) {
             // debug, not warn — this share is optional.
             tracing::debug!(tag, mountpoint, error = %e, "virtiofs share not available");
+        }
+    }
+
+    /// Like `mount_virtiofs_optional` but passes `cache=always,dax=always`.
+    ///
+    /// Required for shares whose consumer depends on the FUSE DAX fast path
+    /// firing (e.g. the hv_e2e harness, which asserts `FUSE_SETUPMAPPING`
+    /// counters increment). Still non-fatal when the share is absent, so
+    /// production VMs that don't attach the tag pay only a debug log.
+    fn mount_virtiofs_optional_dax(tag: &str, mountpoint: &str) {
+        if crate::mount::is_mounted(mountpoint) {
+            return;
+        }
+        mkdir_p(mountpoint);
+        if let Err(e) = mount(
+            Some(tag),
+            mountpoint,
+            Some("virtiofs"),
+            MsFlags::empty(),
+            Some("cache=always,dax=always"),
+        ) {
+            tracing::debug!(tag, mountpoint, error = %e, "virtiofs DAX share not available");
         }
     }
 

@@ -924,7 +924,7 @@ mod tests {
 
     #[test]
     fn test_rewrite_kubeconfig_server_updates_arcbox_refs() {
-        let kubeconfig = r#"apiVersion: v1
+        let kubeconfig = r"apiVersion: v1
 clusters:
 - cluster:
     server: https://127.0.0.1:6443
@@ -938,7 +938,7 @@ current-context: default
 users:
 - name: default
   user: {}
-"#;
+";
 
         let rewritten = super::rewrite_kubeconfig_server(kubeconfig);
         assert!(rewritten.contains("server: https://127.0.0.1:16443"));
