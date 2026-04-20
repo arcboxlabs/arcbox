@@ -1435,7 +1435,9 @@ impl Default for DeviceManager {
 // containing a raw pointer (Send + Sync are implemented above).
 #[cfg(test)]
 const _: () = {
+    #[allow(dead_code)]
     fn assert_send<T: Send>() {}
+    #[allow(dead_code)]
     fn assert_sync<T: Sync>() {}
     fn _check() {
         assert_send::<DeviceManager>();

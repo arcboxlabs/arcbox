@@ -851,6 +851,19 @@ impl Vmm {
             .hv_fdt_addr
             .ok_or_else(|| VmmError::config("HV FDT address not set".to_string()))?;
 
+        // Both registries are created during initialize_darwin_hv. Callers
+        // must not invoke start before initialize — guard against that here.
+        if self.hv_vcpu_ids.is_none() {
+            return Err(VmmError::invalid_state(
+                "hv_vcpu_ids not initialized; call initialize() first".to_string(),
+            ));
+        }
+        if self.hv_vcpu_thread_handles.is_none() {
+            return Err(VmmError::invalid_state(
+                "hv_vcpu_thread_handles not initialized; call initialize() first".to_string(),
+            ));
+        }
+
         let mut device_manager = Arc::new(
             self.device_manager
                 .take()
@@ -969,7 +982,7 @@ impl Vmm {
                 let threads_clone = self
                     .hv_vcpu_thread_handles
                     .clone()
-                    .unwrap_or_else(|| Arc::new(Mutex::new(Vec::new())));
+                    .expect("hv_vcpu_thread_handles asserted Some above");
                 let net_irq_cb: crate::device::DeviceIrqCallback =
                     Arc::new(move |gsi: crate::irq::Gsi, level: bool| {
                         gic_clone.set_spi(gsi, level).map_err(|e| {
@@ -993,22 +1006,27 @@ impl Vmm {
                 let exit_ids = self
                     .hv_vcpu_ids
                     .clone()
-                    .unwrap_or_else(|| Arc::new(Mutex::new(Vec::new())));
+                    .expect("hv_vcpu_ids asserted Some above");
                 let exit_fn: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
                     let ids_snapshot: Vec<u64> = exit_ids
                         .lock()
-                        .map_or_else(|e| e.into_inner().clone(), |g| g.clone());
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
                     if ids_snapshot.is_empty() {
                         return;
                     }
-                    // SAFETY: `ids_snapshot` is a live slice owned by this
-                    // closure for the duration of the FFI call.
+                    // SAFETY: `ids_snapshot` is a live Vec owned by this
+                    // closure for the duration of the FFI call; the pointer
+                    // and length are consistent.
                     #[allow(clippy::cast_possible_truncation)]
-                    unsafe {
+                    let ret = unsafe {
                         arcbox_hv::ffi::hv_vcpus_exit(
                             ids_snapshot.as_ptr(),
                             ids_snapshot.len() as u32,
-                        );
+                        )
+                    };
+                    if let Err(e) = arcbox_hv::check(ret) {
+                        tracing::warn!("net-rx exit_fn: hv_vcpus_exit failed: {e}");
                     }
                 });
                 dm.set_net_rx_hooks(net_irq_cb, exit_fn);
@@ -1030,11 +1048,11 @@ impl Vmm {
         let vcpu_thread_handles = self
             .hv_vcpu_thread_handles
             .clone()
-            .unwrap_or_else(|| Arc::new(Mutex::new(Vec::new())));
+            .expect("hv_vcpu_thread_handles asserted Some above");
         let hv_vcpu_ids = self
             .hv_vcpu_ids
             .clone()
-            .unwrap_or_else(|| Arc::new(Mutex::new(Vec::new())));
+            .expect("hv_vcpu_ids asserted Some above");
 
         // --- Set up PSCI CPU_ON channels for secondary vCPUs ---
         let cpu_on_senders: Option<CpuOnSenders> = if vcpu_count > 1 {
@@ -1163,8 +1181,22 @@ impl Vmm {
         let vcpu_ids_snapshot: Vec<u64> = self
             .hv_vcpu_ids
             .as_ref()
-            .and_then(|ids| ids.lock().ok().map(|g| g.clone()))
+            .map(|ids| {
+                ids.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            })
             .unwrap_or_default();
+
+        // Warn if the snapshot is empty while threads are still alive: this
+        // means vCPU threads were spawned before they registered their IDs,
+        // so `hv_vcpus_exit` will be a no-op and the loop may spin until the
+        // deadline. See ABX-367 regression class.
+        if vcpu_ids_snapshot.is_empty() && self.hv_vcpu_threads.iter().any(|t| !t.is_finished()) {
+            tracing::warn!(
+                "stop_darwin_hv: vCPU ID registry empty; threads may not exit cleanly (ABX-367 regression class)"
+            );
+        }
 
         let stop_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut iterations: u32 = 0;
@@ -1239,20 +1271,26 @@ impl Vmm {
             }
         }
 
-        // Cleanup in correct order: GIC → VM → DAX → guest memory.
-        // Guest memory must be dropped after the VM so the mapped pages
-        // remain valid until hv_vm_destroy completes.
+        // Cleanup in correct order: DAX → GIC → VM → guest memory.
+        //
+        // DAX mappers must be drained first because `hv_vm_unmap` must be
+        // called while the VM is still alive. `drain_all` calls `hv_vm_unmap`
+        // + `munmap` for every active mapping and marks the mapper drained so
+        // its `Drop` impl becomes a no-op. After this point it is safe to
+        // call `hv_vm_destroy` (via `hv_vm.take()`).
+        for mapper in &self.hv_dax_mappers {
+            mapper.drain_all();
+        }
+        self.hv_dax_mappers.clear();
+
         #[cfg(feature = "gic")]
         {
             self.hv_gic.take();
         }
         self.hv_vm.take();
 
-        // Drop per-share DAX mapper handles. Any mappings still held by
-        // FsServer will unmap when the server drops; these are just
-        // observability handles.
-        self.hv_dax_mappers.clear();
-
+        // Guest memory must outlive hv_vm so the mapped pages remain valid
+        // until hv_vm_destroy completes (taken above).
         self.hv_guest_mem.take();
 
         tracing::info!("Custom VMM stopped");
@@ -1286,7 +1324,11 @@ impl Vmm {
         let ids: Vec<u64> = self
             .hv_vcpu_ids
             .as_ref()
-            .and_then(|ids| ids.lock().ok().map(|g| g.clone()))
+            .map(|ids| {
+                ids.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            })
             .unwrap_or_default();
         if let Some(ref vm) = self.hv_vm {
             if let Err(e) = vm.exit_vcpus(&ids) {
@@ -1471,36 +1513,6 @@ impl Vmm {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Legacy helpers — superseded by linux-loader + vm-fdt in initialize_darwin_hv().
-// Retained only for unit tests below.
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-fn build_hv_fdt_config(
-    config: &VmmConfig,
-    virtio_devices: &[DeviceTreeEntry],
-) -> Result<FdtConfig> {
-    let mut fdt_config = FdtConfig {
-        num_cpus: config.vcpu_count,
-        memory_size: config.memory_size,
-        memory_base: RAM_BASE_IPA,
-        cmdline: config.kernel_cmdline.clone(),
-        virtio_devices: virtio_devices.to_vec(),
-        ..Default::default()
-    };
-
-    if let Some(initrd) = &config.initrd_path {
-        let size = std::fs::metadata(initrd)
-            .map_err(|e| VmmError::config(format!("cannot stat initrd: {e}")))?
-            .len();
-        fdt_config.initrd_addr = Some(RAM_BASE_IPA + arm64::INITRD_LOAD_ADDR);
-        fdt_config.initrd_size = Some(size);
-    }
-
-    Ok(fdt_config)
-}
-
 #[cfg(test)]
 fn choose_fdt_addr_hv(memory_size: u64, fdt_size: usize) -> Result<u64> {
     let fdt_size = fdt_size as u64;
@@ -1519,80 +1531,6 @@ fn choose_fdt_addr_hv(memory_size: u64, fdt_size: usize) -> Result<u64> {
     }
 
     Ok(preferred)
-}
-
-/// Loads the kernel Image into guest RAM at the ARM64 load address.
-/// Superseded by linux-loader PE::load(); retained for tests.
-#[cfg(test)]
-fn load_kernel_into_ram(ram: &mut [u8], kernel_path: &std::path::Path) -> Result<()> {
-    use std::io::Read;
-
-    let mut file = std::fs::File::open(kernel_path)
-        .map_err(|e| VmmError::config(format!("cannot open kernel: {e}")))?;
-
-    let metadata = file
-        .metadata()
-        .map_err(|e| VmmError::config(format!("cannot stat kernel: {e}")))?;
-    let kernel_size = metadata.len() as usize;
-
-    let load_addr = arm64::KERNEL_LOAD_ADDR as usize;
-    let end = load_addr + kernel_size;
-    if end > ram.len() {
-        return Err(VmmError::Memory(format!(
-            "kernel ({} bytes) does not fit at {:#x} in {} bytes RAM",
-            kernel_size,
-            load_addr,
-            ram.len()
-        )));
-    }
-
-    file.read_exact(&mut ram[load_addr..end])
-        .map_err(|e| VmmError::config(format!("failed to read kernel: {e}")))?;
-
-    tracing::info!(
-        "Kernel loaded: addr={:#x}, size={} bytes",
-        load_addr,
-        kernel_size
-    );
-
-    Ok(())
-}
-
-/// Loads the initrd into guest RAM at the ARM64 load address.
-/// Superseded by vm-memory write_slice(); retained for tests.
-#[cfg(test)]
-fn load_initrd_into_ram(ram: &mut [u8], initrd_path: &std::path::Path) -> Result<()> {
-    use std::io::Read;
-
-    let mut file = std::fs::File::open(initrd_path)
-        .map_err(|e| VmmError::config(format!("cannot open initrd: {e}")))?;
-
-    let metadata = file
-        .metadata()
-        .map_err(|e| VmmError::config(format!("cannot stat initrd: {e}")))?;
-    let initrd_size = metadata.len() as usize;
-
-    let load_addr = arm64::INITRD_LOAD_ADDR as usize;
-    let end = load_addr + initrd_size;
-    if end > ram.len() {
-        return Err(VmmError::Memory(format!(
-            "initrd ({} bytes) does not fit at {:#x} in {} bytes RAM",
-            initrd_size,
-            load_addr,
-            ram.len()
-        )));
-    }
-
-    file.read_exact(&mut ram[load_addr..end])
-        .map_err(|e| VmmError::config(format!("failed to read initrd: {e}")))?;
-
-    tracing::info!(
-        "Initrd loaded: addr={:#x}, size={} bytes",
-        load_addr,
-        initrd_size
-    );
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1762,7 +1700,7 @@ mod tests {
                 payload.len(),
             )
         };
-        assert_eq!(written, payload.len() as isize);
+        assert_eq!(written, isize::try_from(payload.len()).unwrap());
 
         let mut buf = [0u8; 2];
         // SAFETY: `duplicated` is live; `buf` is a valid mutable slice
@@ -1774,7 +1712,7 @@ mod tests {
                 buf.len(),
             )
         };
-        assert_eq!(read, buf.len() as isize);
+        assert_eq!(read, isize::try_from(buf.len()).unwrap());
         assert_eq!(&buf, payload);
     }
 
@@ -1786,10 +1724,13 @@ mod tests {
         // PL011 is at 0x0B00_0000, after both GIC and VirtIO regions.
         let gicr_end = GIC_REDIST_ADDR + GIC_REDIST_SIZE;
         assert!(PL011_BASE >= gicr_end, "PL011 must be outside GIC region");
-        assert!(
-            PL011_BASE + PL011_SIZE <= RAM_BASE_IPA,
-            "PL011 must be below guest RAM"
-        );
+        // Both operands are constants — evaluated at compile time.
+        const {
+            assert!(
+                PL011_BASE + PL011_SIZE <= RAM_BASE_IPA,
+                "PL011 must be below guest RAM"
+            )
+        };
         // PL011 and VirtIO MMIO must not overlap.
         let pl011_range = PL011_BASE..PL011_BASE + PL011_SIZE;
         let virtio_start = VIRTIO_MMIO_BASE;

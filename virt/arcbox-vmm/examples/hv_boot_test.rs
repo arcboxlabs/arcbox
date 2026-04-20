@@ -66,7 +66,7 @@ fn main() {
         serial_console: true,
         virtio_console: true,
         shared_dirs: vec![arcbox_vmm::SharedDirConfig {
-            host_path: arcbox_share.clone(),
+            host_path: arcbox_share,
             tag: "arcbox".to_string(),
             read_only: false,
         }],

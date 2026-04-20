@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Computes DAX window base IPA — placed immediately after guest RAM.
 /// Must be above RAM so `devm_memremap_pages` can register it as ZONE_DEVICE.
@@ -21,6 +21,21 @@ pub const DAX_WINDOW_PER_SHARE: u64 = 128 * 1024 * 1024;
 /// Total DAX window size for a given number of VirtioFS shares.
 pub fn dax_window_total(num_shares: usize) -> u64 {
     num_shares.max(1) as u64 * DAX_WINDOW_PER_SHARE
+}
+
+/// Selects the `mmap(2)` sharing flags for a DAX mapping.
+///
+/// Writable shares use `MAP_SHARED` so guest writes propagate to the host
+/// file. Read-only shares use `MAP_PRIVATE` (COW) — `hv_vm_map` still
+/// requires a writable host VA on Apple Silicon, and COW ensures that any
+/// speculative writes never reach the underlying file.
+/// `MAP_ANON` is not set here; the fd-backed path is always used for DAX.
+fn mmap_flags_for(writable: bool) -> i32 {
+    if writable {
+        libc::MAP_SHARED
+    } else {
+        libc::MAP_PRIVATE
+    }
 }
 
 /// A single active DAX mapping.
@@ -41,11 +56,11 @@ unsafe impl Send for DaxMapping {}
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DaxStats {
     /// Total successful `setup_mapping` calls since mapper creation.
-    pub setup_mappings_count: u64,
+    pub setup_count: u64,
     /// Sum of `length` across all successful `setup_mapping` calls (bytes).
-    pub setup_mappings_bytes: u64,
+    pub setup_bytes: u64,
     /// Total successful `remove_mapping` calls since mapper creation.
-    pub remove_mappings_count: u64,
+    pub remove_count: u64,
 }
 
 /// DAX mapper backed by Hypervisor.framework global hv_vm_map/unmap.
@@ -55,6 +70,14 @@ pub struct HvDaxMapper {
     base_ipa: u64,
     /// Total DAX window size — mappings must stay within [0, window_size).
     window_size: u64,
+    /// Host page size in bytes, queried once at construction.
+    ///
+    /// Used as the alignment mask for `setup_mapping`. Matches the
+    /// `sysconf(_SC_PAGESIZE)` call in `arcbox-fs/src/dispatcher.rs` —
+    /// both sides must agree on granularity or alignment checks diverge.
+    page_size: u64,
+    /// Set to `true` by `drain_all` so `Drop` skips the FFI calls.
+    drained: AtomicBool,
     /// Successful setup count (observability).
     setup_count: AtomicU64,
     /// Successful setup bytes (observability).
@@ -65,10 +88,20 @@ pub struct HvDaxMapper {
 
 impl HvDaxMapper {
     pub fn new(base_ipa: u64, window_size: u64) -> Self {
+        // Query the host page size so alignment checks stay in sync with the
+        // dispatcher (arcbox-fs/src/dispatcher.rs uses the same sysconf call).
+        let page_size = {
+            // SAFETY: `_SC_PAGESIZE` is a valid sysconf key; negative return
+            // means unsupported, which we treat as the safe 4 KiB fallback.
+            let r = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+            if r > 0 { r as u64 } else { 4096 }
+        };
         Self {
             mappings: Mutex::new(BTreeMap::new()),
             base_ipa,
             window_size,
+            page_size,
+            drained: AtomicBool::new(false),
             setup_count: AtomicU64::new(0),
             setup_bytes: AtomicU64::new(0),
             remove_count: AtomicU64::new(0),
@@ -79,10 +112,58 @@ impl HvDaxMapper {
     /// three atomic-relaxed loads, allocates nothing.
     pub fn stats(&self) -> DaxStats {
         DaxStats {
-            setup_mappings_count: self.setup_count.load(Ordering::Relaxed),
-            setup_mappings_bytes: self.setup_bytes.load(Ordering::Relaxed),
-            remove_mappings_count: self.remove_count.load(Ordering::Relaxed),
+            setup_count: self.setup_count.load(Ordering::Relaxed),
+            setup_bytes: self.setup_bytes.load(Ordering::Relaxed),
+            remove_count: self.remove_count.load(Ordering::Relaxed),
         }
+    }
+
+    /// Drains all active DAX mappings, calling `hv_vm_unmap` + `munmap` on
+    /// each entry, then clears the internal map.
+    ///
+    /// Must be called **before** `hv_vm_destroy` so every `hv_vm_unmap` runs
+    /// against a live VM. After `drain_all`, `Drop` becomes a no-op —
+    /// idempotent and safe to call twice.
+    pub fn drain_all(&self) {
+        let mut mappings = self
+            .mappings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        for mapping in mappings.values() {
+            // SAFETY: `mapping.guest_ipa` and `mapping.length` come from a
+            // prior successful `hv_vm_map` call, and `hv_vm_destroy` has not
+            // yet been called at this point (drain_all is invoked before that).
+            let ret = unsafe { arcbox_hv::ffi::hv_vm_unmap(mapping.guest_ipa, mapping.length) };
+            if ret != 0 {
+                tracing::warn!(
+                    "DAX drain_all: hv_vm_unmap ipa={:#x} len={} failed: ret={ret}",
+                    mapping.guest_ipa,
+                    mapping.length,
+                );
+            }
+            // SAFETY: `mapping.host_ptr` is the address returned by the
+            // original `mmap` call for this entry; `mapping.length` is the
+            // same length passed to that `mmap`. The mapping is still live —
+            // nothing else has called `munmap` on this range.
+            let munmap_ret = unsafe { libc::munmap(mapping.host_ptr.cast(), mapping.length) };
+            if munmap_ret != 0 {
+                let errno = std::io::Error::last_os_error();
+                tracing::warn!(
+                    "DAX drain_all: munmap failed for ipa={:#x} len={}: {errno}",
+                    mapping.guest_ipa,
+                    mapping.length,
+                );
+            }
+        }
+        mappings.clear();
+
+        // Mark drained only after all cleanup is complete. If `drained` were
+        // set before `mappings.clear()` and the function panicked mid-loop,
+        // `Drop` would see `drained=true` and skip cleanup, leaving live
+        // entries behind as leaked host VA ranges. Setting it last ensures
+        // `Drop` only skips FFI when every entry has been successfully removed.
+        self.drained.store(true, Ordering::SeqCst);
     }
 }
 
@@ -95,7 +176,7 @@ impl arcbox_fs::DaxMapper for HvDaxMapper {
         length: u64,
         writable: bool,
     ) -> Result<(), i32> {
-        let page_mask = 0xFFF_u64;
+        let page_mask = self.page_size - 1;
         if (file_offset | window_offset | length) & page_mask != 0 {
             return Err(libc::EINVAL);
         }
@@ -118,7 +199,10 @@ impl arcbox_fs::DaxMapper for HvDaxMapper {
         // Hold the lock across overlap check, mmap, hv_vm_map, and insertion
         // to prevent TOCTOU races between concurrent setup_mapping calls.
         // mmap and hv_vm_map are sub-microsecond, so holding the mutex is fine.
-        let mut mappings = self.mappings.lock().unwrap();
+        let mut mappings = self
+            .mappings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         // Overlap check: no existing mapping may intersect [window_offset, end).
         for (&existing_offset, existing) in &*mappings {
@@ -143,13 +227,12 @@ impl arcbox_fs::DaxMapper for HvDaxMapper {
         // copy-on-write and never hit the host file. The flags we pass to
         // `hv_vm_map` still reflect the requested guest permissions.
         let prot = libc::PROT_READ | libc::PROT_WRITE;
-        let mmap_flags = if writable {
-            libc::MAP_SHARED
-        } else {
-            libc::MAP_PRIVATE
-        };
+        let mmap_flags = mmap_flags_for(writable);
 
-        // mmap host file region.
+        // SAFETY: `host_fd` is a valid open fd passed in by the FUSE dispatcher.
+        // `length` is non-zero and page-aligned (checked above). `MAP_PRIVATE` +
+        // `PROT_WRITE` is valid on an `O_RDONLY` fd (COW semantics). The return
+        // value is validated against `MAP_FAILED` immediately below.
         let host_ptr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -200,8 +283,15 @@ impl arcbox_fs::DaxMapper for HvDaxMapper {
                 ret as u32,
                 perm.bits(),
             );
+            // SAFETY: `host_ptr` was just returned by the `mmap` call above
+            // and has not yet been registered anywhere, so this is the only
+            // reference to it.
             unsafe { libc::munmap(host_ptr, length as usize) };
-            return Err(libc::EFAULT);
+            // EIO is the correct errno for a framework-level failure here.
+            // EFAULT would imply the *caller* passed a bad pointer, which is
+            // misleading — the address was valid from our mmap; the framework
+            // rejected the mapping for its own reasons (e.g. HV_NO_RESOURCES).
+            return Err(libc::EIO);
         }
 
         mappings.insert(
@@ -226,7 +316,10 @@ impl arcbox_fs::DaxMapper for HvDaxMapper {
     }
 
     fn remove_mapping(&self, window_offset: u64, length: u64) -> Result<(), i32> {
-        let mut mappings = self.mappings.lock().unwrap();
+        let mut mappings = self
+            .mappings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(mapping) = mappings.remove(&window_offset) else {
             return Err(libc::ENOENT);
         };
@@ -243,13 +336,38 @@ impl arcbox_fs::DaxMapper for HvDaxMapper {
             return Err(libc::EINVAL);
         }
 
-        // Unmap from guest IPA.
+        // Unmap from guest IPA. If this fails the VM is in a bad state, so
+        // return an error rather than silently proceeding to munmap — a
+        // dangling stage-2 mapping is worse than a leaked host VA.
+        // SAFETY: `mapping.guest_ipa` and `mapping.length` come from a prior
+        // successful `hv_vm_map`; the VM is alive during normal operation.
         let ret = unsafe { arcbox_hv::ffi::hv_vm_unmap(mapping.guest_ipa, mapping.length) };
         if ret != 0 {
-            tracing::warn!("DAX hv_vm_unmap failed: ret={ret}");
+            tracing::warn!(
+                "DAX hv_vm_unmap failed: ret={ret} ipa={:#x} len={}; aborting remove",
+                mapping.guest_ipa,
+                mapping.length,
+            );
+            // Restore the entry so the guest can retry.
+            mappings.insert(window_offset, mapping);
+            return Err(libc::EIO);
         }
 
-        unsafe { libc::munmap(mapping.host_ptr.cast(), mapping.length) };
+        // SAFETY: `mapping.host_ptr` was returned by a prior `mmap` for this
+        // entry and is still live — `hv_vm_unmap` just removed the stage-2
+        // reference. `mapping.length` matches the original mmap length.
+        let munmap_ret = unsafe { libc::munmap(mapping.host_ptr.cast(), mapping.length) };
+        if munmap_ret != 0 {
+            // munmap failure after a successful hv_vm_unmap is an accounting
+            // concern only — the stage-2 mapping is already gone. Log and
+            // continue rather than returning an error to the guest.
+            let errno = std::io::Error::last_os_error();
+            tracing::warn!(
+                "DAX munmap failed for ipa={:#x} len={}: {errno}",
+                mapping.guest_ipa,
+                mapping.length,
+            );
+        }
 
         self.remove_count.fetch_add(1, Ordering::Relaxed);
 
@@ -264,8 +382,27 @@ impl arcbox_fs::DaxMapper for HvDaxMapper {
 
 impl Drop for HvDaxMapper {
     fn drop(&mut self) {
-        let mappings = self.mappings.lock().unwrap();
+        // `drain_all` was called by stop_darwin_hv before hv_vm_destroy,
+        // so all mappings are already gone. Skip FFI to avoid calling
+        // hv_vm_unmap against a destroyed VM (UB per Apple's doc).
+        if self.drained.load(Ordering::SeqCst) {
+            return;
+        }
+
+        // Panic path: the VM was not stopped cleanly. Attempt cleanup but
+        // acknowledge the UB risk — hv_vm_destroy may have already run.
+        tracing::warn!(
+            "HvDaxMapper dropped without drain_all — attempting emergency \
+             cleanup; hv_vm_unmap may be called on a destroyed VM (UB risk)"
+        );
+        let mappings = self
+            .mappings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for mapping in mappings.values() {
+            // SAFETY: We attempt cleanup on the panic path knowing that
+            // `hv_vm_destroy` may have already run. The UB risk is
+            // acknowledged above; this is best-effort to avoid leaked mmaps.
             unsafe {
                 arcbox_hv::ffi::hv_vm_unmap(mapping.guest_ipa, mapping.length);
                 libc::munmap(mapping.host_ptr.cast(), mapping.length);
@@ -282,9 +419,9 @@ mod tests {
     fn stats_start_zero() {
         let m = HvDaxMapper::new(0x8000_0000, 128 * 1024 * 1024);
         let s = m.stats();
-        assert_eq!(s.setup_mappings_count, 0);
-        assert_eq!(s.setup_mappings_bytes, 0);
-        assert_eq!(s.remove_mappings_count, 0);
+        assert_eq!(s.setup_count, 0);
+        assert_eq!(s.setup_bytes, 0);
+        assert_eq!(s.remove_count, 0);
     }
 
     #[test]
@@ -295,8 +432,25 @@ mod tests {
         m.setup_bytes.fetch_add(4096 * 3, Ordering::Relaxed);
         m.remove_count.fetch_add(1, Ordering::Relaxed);
         let s = m.stats();
-        assert_eq!(s.setup_mappings_count, 3);
-        assert_eq!(s.setup_mappings_bytes, 4096 * 3);
-        assert_eq!(s.remove_mappings_count, 1);
+        assert_eq!(s.setup_count, 3);
+        assert_eq!(s.setup_bytes, 4096 * 3);
+        assert_eq!(s.remove_count, 1);
+    }
+
+    /// Verifies that `mmap_flags_for` selects the correct sharing semantics.
+    /// MAP_SHARED for writable (writes must reach the host file),
+    /// MAP_PRIVATE for read-only (COW keeps writes from touching the file).
+    #[test]
+    fn mmap_flags_writable_vs_readonly() {
+        assert_eq!(
+            mmap_flags_for(true),
+            libc::MAP_SHARED,
+            "writable mapping must use MAP_SHARED"
+        );
+        assert_eq!(
+            mmap_flags_for(false),
+            libc::MAP_PRIVATE,
+            "read-only mapping must use MAP_PRIVATE (COW)"
+        );
     }
 }

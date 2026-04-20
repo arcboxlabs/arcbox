@@ -111,14 +111,6 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, entry_addr: u64, x0_value: u64, ctx: V
         hvc_blk_fds,
     } = ctx;
 
-    // Register this thread's handle so the IRQ callback can unpark us.
-    {
-        let mut handles = vcpu_thread_handles
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        handles.push(std::thread::current());
-    }
-
     let vcpu = match HvVcpu::new() {
         Ok(v) => v,
         Err(e) => {
@@ -126,16 +118,6 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, entry_addr: u64, x0_value: u64, ctx: V
             return;
         }
     };
-
-    // Register this vCPU's framework ID so the stop/pause paths can target
-    // `hv_vcpus_exit` at it. `HvVcpu::new` only succeeds on the owning
-    // thread, so we do this after construction. See ABX-367.
-    {
-        let mut ids = hv_vcpu_ids
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        ids.push(vcpu.raw_handle());
-    }
 
     // Set initial register state for ARM64 Linux boot protocol:
     //   PC   = entry address (kernel entry for BSP, PSCI entry for secondary)
@@ -161,6 +143,27 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, entry_addr: u64, x0_value: u64, ctx: V
     // ARM64 boot protocol: MMU must be off, caches can be on or off.
     if let Err(e) = vcpu.set_sys_reg(arcbox_hv::sys_reg::HV_SYS_REG_SCTLR_EL1, SCTLR_EL1_RESET) {
         tracing::warn!("vCPU {vcpu_id}: set SCTLR_EL1 failed: {e}");
+    }
+
+    // Register this vCPU's framework ID and this thread's handle after all
+    // register-setup calls succeed. If any setup call fails above, the
+    // early return drops `HvVcpu` (triggering `hv_vcpu_destroy`) and the
+    // thread exits without leaving either a stale ID or a dead `Thread`
+    // in the shared registries. A stale ID would make `hv_vcpus_exit`
+    // pass a dangling handle to Apple's framework (UB per its contract,
+    // ABX-367); a dead thread handle would grow the registry unboundedly
+    // across failed boots.
+    {
+        let mut ids = hv_vcpu_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ids.push(vcpu.raw_handle());
+    }
+    {
+        let mut handles = vcpu_thread_handles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        handles.push(std::thread::current());
     }
 
     // Set MPIDR_EL1 for this vCPU (used by GIC affinity routing).
@@ -213,12 +216,12 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, entry_addr: u64, x0_value: u64, ctx: V
             }
         }
 
-        // ABX-367 instrumentation: log each iteration during shutdown so we
-        // can tell whether a vCPU is stuck inside `vcpu.run()` or spinning
-        // in the exit-dispatch loop. Gated on `running=false` so normal
-        // operation is unaffected.
+        // ABX-367 instrumentation: retained at trace level for future
+        // diagnosis of vCPUs stuck inside or between `vcpu.run()` calls
+        // during shutdown. Gated on `running=false` so normal operation
+        // is unaffected. Not live debug logging — use RUST_LOG=trace to see.
         if !running.load(Ordering::Relaxed) {
-            tracing::debug!("vCPU {vcpu_id}: iteration during shutdown (before vcpu.run)");
+            tracing::trace!("vCPU {vcpu_id}: iteration during shutdown (before vcpu.run)");
         }
         let exit = match vcpu.run() {
             Ok(e) => e,
@@ -229,7 +232,7 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, entry_addr: u64, x0_value: u64, ctx: V
             }
         };
         if !running.load(Ordering::Relaxed) {
-            tracing::debug!(
+            tracing::trace!(
                 "vCPU {vcpu_id}: vcpu.run returned during shutdown, exit={:?}",
                 core::mem::discriminant(&exit)
             );

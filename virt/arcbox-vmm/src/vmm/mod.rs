@@ -257,12 +257,12 @@ pub struct Vmm {
     hv_vcpu_threads: Vec<std::thread::JoinHandle<()>>,
     /// Shared vCPU thread handle registry for WFI unparking (custom HV).
     #[cfg(target_os = "macos")]
-    hv_vcpu_thread_handles: Option<std::sync::Arc<std::sync::Mutex<Vec<std::thread::Thread>>>>,
+    hv_vcpu_thread_handles: Option<darwin_hv::VcpuThreadHandles>,
     /// Shared registry of Hypervisor.framework vCPU IDs (custom HV).
     /// Populated by each vCPU thread after it creates its `HvVcpu`. Used
     /// by `pause`/`stop` to target `hv_vcpus_exit` correctly on arm64.
     #[cfg(target_os = "macos")]
-    hv_vcpu_ids: Option<std::sync::Arc<std::sync::Mutex<Vec<u64>>>>,
+    hv_vcpu_ids: Option<darwin_hv::HvVcpuIds>,
     /// PSCI CPU_ON channel senders for secondary vCPUs (custom HV).
     #[cfg(target_os = "macos")]
     #[allow(clippy::type_complexity)]
@@ -280,21 +280,15 @@ pub struct Vmm {
     /// VZ-side fd for the vmnet bridge NIC attachment.
     #[cfg(all(target_os = "macos", feature = "vmnet"))]
     vmnet_bridge_fd: Option<OwnedFd>,
-    /// Hypervisor.framework VM handle (custom VMM path).
-    #[cfg(target_os = "macos")]
-    hv_vm: Option<arcbox_hv::HvVm>,
-    /// Guest memory backing (vm-memory mmap, custom VMM path).
-    /// Must outlive `hv_vm` since the mapped memory must remain valid.
-    #[cfg(target_os = "macos")]
-    hv_guest_mem: Option<darwin_hv::HvGuestMem>,
-    /// GICv3 handle (custom VMM path, macOS 15+).
-    #[cfg(all(target_os = "macos", feature = "gic"))]
-    hv_gic: Option<std::sync::Arc<arcbox_hv::Gic>>,
     /// Resolved backend choice for this VM instance.
     #[cfg(target_os = "macos")]
     resolved_backend: Option<ResolvedBackend>,
     /// Shared DeviceManager reference for HV backend (set during start_darwin_hv).
     /// Used by connect_vsock_hv to inject OP_REQUEST packets after VM starts.
+    ///
+    /// Declared before `hv_vm` so it drops first: `FsServer` inside the
+    /// DeviceManager holds `Arc<HvDaxMapper>` handles that call
+    /// `hv_vm_unmap` on drop. Those must complete before `hv_vm_destroy`.
     #[cfg(target_os = "macos")]
     hv_device_manager: Option<std::sync::Arc<DeviceManager>>,
     /// HV-side network fd (NIC1). Paired with the NetworkDatapath fd.
@@ -324,6 +318,11 @@ pub struct Vmm {
     /// both Arcs point to the same underlying counters, so
     /// `dax_stats(share_idx)` reports live values as the guest issues
     /// `FUSE_SETUPMAPPING` / `FUSE_REMOVEMAPPING` requests.
+    ///
+    /// Declared before `hv_vm` so implicit Drop order is safe: any
+    /// remaining `Arc<HvDaxMapper>` refs call `hv_vm_unmap` before
+    /// `hv_vm_destroy` runs. `stop_darwin_hv` explicitly calls
+    /// `drain_all` first, making implicit drop a no-op for the normal path.
     #[cfg(target_os = "macos")]
     hv_dax_mappers: Vec<std::sync::Arc<crate::dax::HvDaxMapper>>,
     /// HV backend balloon device handle (ABX-363).
@@ -333,6 +332,41 @@ pub struct Vmm {
     /// path in `darwin.rs` for `set_balloon_target` / `get_balloon_stats`.
     #[cfg(target_os = "macos")]
     hv_balloon: Option<std::sync::Arc<std::sync::Mutex<arcbox_virtio::balloon::VirtioBalloon>>>,
+    /// GICv3 handle (custom VMM path, macOS 15+).
+    ///
+    /// **Drop order — must be declared before `hv_vm`.**
+    /// Rust drops struct fields in declaration order (top to bottom). The GIC
+    /// interrupt controller holds internal references into the VM; its FFI
+    /// destroy/release routines must run while the VM is still alive.
+    /// Declaring `hv_gic` before `hv_vm` guarantees that on any exit path
+    /// (both the normal `stop_darwin_hv` and the panic / implicit-drop path),
+    /// the GIC is torn down before `hv_vm_destroy` is called.
+    #[cfg(all(target_os = "macos", feature = "gic"))]
+    hv_gic: Option<std::sync::Arc<arcbox_hv::Gic>>,
+    /// Hypervisor.framework VM handle (custom VMM path).
+    ///
+    /// **Drop order — must be declared after `hv_gic`, `hv_dax_mappers`,
+    /// and `hv_device_manager`.**
+    /// Rust drops fields in declaration order (top to bottom), so fields
+    /// declared above this one drop first. This ordering ensures:
+    ///   1. `hv_device_manager` (FsServer → Arc<HvDaxMapper> → hv_vm_unmap)
+    ///   2. `hv_dax_mappers` (remaining mapper refs → hv_vm_unmap)
+    ///   3. `hv_gic` (GIC FFI teardown referencing the live VM)
+    ///   4. `hv_vm` → `hv_vm_destroy`
+    ///   5. `hv_guest_mem` (mmap'd pages — must outlive the VM)
+    ///
+    /// `stop_darwin_hv` also calls `drain_all` explicitly for the normal
+    /// path; this declaration ordering is the safety net for panic paths.
+    #[cfg(target_os = "macos")]
+    hv_vm: Option<arcbox_hv::HvVm>,
+    /// Guest memory backing (vm-memory mmap, custom VMM path).
+    ///
+    /// **Drop order — must be declared after `hv_vm`.**
+    /// The mmap'd pages must remain accessible until after `hv_vm_destroy`
+    /// releases all stage-2 mappings. Declaring this last ensures the host
+    /// VA range is freed only after the VM no longer references it.
+    #[cfg(target_os = "macos")]
+    hv_guest_mem: Option<darwin_hv::HvGuestMem>,
     /// Cooperative pause flag for the HV backend.
     ///
     /// When set to `true`, every vCPU thread parks itself after its next
@@ -418,12 +452,12 @@ impl Vmm {
             vmnet_relay_cancel: None,
             #[cfg(all(target_os = "macos", feature = "vmnet"))]
             vmnet_bridge_fd: None,
+            #[cfg(all(target_os = "macos", feature = "gic"))]
+            hv_gic: None,
             #[cfg(target_os = "macos")]
             hv_vm: None,
             #[cfg(target_os = "macos")]
             hv_guest_mem: None,
-            #[cfg(all(target_os = "macos", feature = "gic"))]
-            hv_gic: None,
             #[cfg(target_os = "macos")]
             resolved_backend: None,
             #[cfg(target_os = "macos")]
