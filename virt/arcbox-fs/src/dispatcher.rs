@@ -13,19 +13,23 @@
     clippy::cast_possible_truncation,
     clippy::ptr_as_ptr,
     clippy::borrow_as_ptr,
+    // Test helpers serialize FUSE structs to byte slices using the same
+    // `&x as *const T as *const u8` and `.add(N) as *const T` patterns as
+    // the production code. The suppression is intentional for binary compat.
+    clippy::ref_as_ptr,
+    clippy::unnecessary_cast,
     clippy::significant_drop_tightening,
     clippy::needless_pass_by_ref_mut
 )]
 
 use crate::error::{FsError, Result};
 use crate::fuse::{
-    FATTR_ATIME, FATTR_GID, FATTR_MODE, FATTR_MTIME, FATTR_SIZE, FATTR_UID, FUSE_DO_READDIRPLUS,
-    FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION, FUSE_MAP_ALIGNMENT, FUSE_READDIRPLUS_AUTO,
+    FATTR_ATIME, FATTR_GID, FATTR_MODE, FATTR_MTIME, FATTR_SIZE, FATTR_UID, FUSE_NO_FH,
     FuseAccessIn, FuseAttr, FuseAttrOut, FuseCreateIn, FuseDirent, FuseEntryOut, FuseFallocateIn,
     FuseFlushIn, FuseForgetIn, FuseFsyncIn, FuseGetxattrIn, FuseGetxattrOut, FuseInHeader,
-    FuseInitIn, FuseInitOut, FuseLinkIn, FuseLseekIn, FuseLseekOut, FuseMkdirIn, FuseMknodIn,
-    FuseOpcode, FuseOpenIn, FuseOpenOut, FuseOutHeader, FuseReadIn, FuseReleaseIn, FuseRenameIn,
-    FuseSetattrIn, FuseSetxattrIn, FuseStatfsOut, FuseWriteIn, FuseWriteOut,
+    FuseLinkIn, FuseLseekIn, FuseLseekOut, FuseMkdirIn, FuseMknodIn, FuseOpcode, FuseOpenIn,
+    FuseOpenOut, FuseOutHeader, FuseReadIn, FuseReleaseIn, FuseRenameIn, FuseSetattrIn,
+    FuseSetxattrIn, FuseStatfsOut, FuseWriteIn, FuseWriteOut,
 };
 use crate::passthrough::PassthroughFs;
 
@@ -34,6 +38,78 @@ use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::Arc;
+
+/// Extension trait for `PassthroughFs` that adds DAX-specific operations.
+///
+/// Kept separate from `PassthroughFs` so that the general-purpose filesystem
+/// abstraction stays free of DAX protocol concerns. Only `FuseDispatcher`
+/// (and tests) need to call this method.
+pub trait DaxFsExt {
+    /// Opens a short-lived `File` for the given inode, for use in
+    /// `FUSE_SETUPMAPPING` requests that carry the [`FUSE_NO_FH`] sentinel.
+    ///
+    /// When `writable` is `true` the file is opened O_RDWR so that a subsequent
+    /// `mmap(MAP_SHARED | PROT_WRITE)` does not get EACCES.  When `writable` is
+    /// `false` the file is opened O_RDONLY.
+    ///
+    /// After opening, performs a TOCTOU check by comparing the `st_ino` of the
+    /// opened fd against the `st_ino` of the path still in the filesystem.
+    /// Returns `io::Error` with `EIO` if they differ (file was swapped between
+    /// the path resolution and the open call).
+    ///
+    /// The caller is expected to pass the returned fd to `mmap` / `hv_vm_map`
+    /// and then drop the `File`. The kernel mapping survives fd close.
+    fn open_inode_for_dax(&self, inode: u64, writable: bool) -> std::io::Result<std::fs::File>;
+}
+
+impl DaxFsExt for PassthroughFs {
+    fn open_inode_for_dax(&self, inode: u64, writable: bool) -> std::io::Result<std::fs::File> {
+        use std::os::unix::fs::MetadataExt;
+
+        // Retrieve the kernel st_ino that was recorded at lookup/create time.
+        // This is the ground truth: it reflects the file the guest believes it
+        // has a reference to. If the directory entry is later renamed so that
+        // the path now resolves to a different kernel inode, the comparison
+        // below will catch the swap even when open() itself did not race.
+        let registered_ino = self.kernel_ino_for(inode).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("inode {inode} not found in passthrough table"),
+            )
+        })?;
+
+        let path = self
+            .inode_path(inode)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string()))?;
+
+        // Open with the mode the caller requested.  A writable DAX mapping
+        // requires O_RDWR: mmap(MAP_SHARED | PROT_WRITE) on an O_RDONLY fd
+        // returns EACCES even if the host file itself is writable.
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(writable)
+            .open(&path)?;
+
+        // TOCTOU guard: compare the fd's st_ino against the value that was
+        // stored at inode-registration time. A rename that happened at any
+        // point after registration — including before this function was called
+        // — will cause the fd to have a different kernel inode number, which we
+        // detect here and reject with EIO.
+        let fd_ino = file.metadata()?.ino();
+        if fd_ino != registered_ino {
+            tracing::warn!(
+                inode,
+                path = %path.display(),
+                fd_ino,
+                registered_ino,
+                "TOCTOU mismatch: inode was swapped after registration; rejecting DAX mapping"
+            );
+            return Err(std::io::Error::from_raw_os_error(libc::EIO));
+        }
+
+        Ok(file)
+    }
+}
 
 // ============================================================================
 // Dispatcher Configuration
@@ -195,8 +271,6 @@ pub struct FuseDispatcher {
     fs: Arc<PassthroughFs>,
     /// Dispatcher configuration.
     config: DispatcherConfig,
-    /// Whether FUSE_INIT has been received.
-    initialized: std::sync::atomic::AtomicBool,
     /// Optional DAX mapper for direct host page mapping.
     dax_mapper: Option<Arc<dyn crate::DaxMapper>>,
 }
@@ -208,7 +282,6 @@ impl FuseDispatcher {
         Self {
             fs,
             config,
-            initialized: std::sync::atomic::AtomicBool::new(false),
             dax_mapper: None,
         }
     }
@@ -250,7 +323,10 @@ impl FuseDispatcher {
 
         // Dispatch to handler
         match opcode {
-            FuseOpcode::Init => self.handle_init(&ctx, body, &mut response),
+            // FUSE_INIT is intercepted by FuseSession::handle_init in arcbox-virtio-fs
+            // before any FuseRequestHandler is called.  If we somehow receive it here
+            // the session has already sent the handshake; responding ENOSYS is safe.
+            FuseOpcode::Init => response.write_error(ctx.unique, libc::ENOSYS),
             FuseOpcode::Destroy => self.handle_destroy(&ctx, &mut response),
             FuseOpcode::Lookup => self.handle_lookup(&ctx, body, &mut response),
             FuseOpcode::Forget => self.handle_forget(&ctx, body, &mut response),
@@ -299,80 +375,10 @@ impl FuseDispatcher {
     }
 
     // ========================================================================
-    // Init / Destroy
+    // Destroy
     // ========================================================================
 
-    fn handle_init(&self, ctx: &RequestContext, body: &[u8], response: &mut ResponseBuilder) {
-        if body.len() < size_of::<FuseInitIn>() {
-            response.write_error(ctx.unique, libc::EINVAL);
-            return;
-        }
-
-        // SAFETY: FuseInitIn may sit at an unaligned offset in the VirtIO buffer.
-        let init_in = unsafe { std::ptr::read_unaligned(body.as_ptr() as *const FuseInitIn) };
-
-        // Check version compatibility
-        if init_in.major < FUSE_KERNEL_VERSION {
-            response.write_error(ctx.unique, libc::EPROTO);
-            return;
-        }
-
-        // Negotiate feature flags with the guest kernel
-        let mut flags = FuseInitOut::default().flags;
-
-        // Negotiate READDIRPLUS: eliminates separate LOOKUP calls after
-        // directory listing, significantly reducing round-trips.
-        if init_in.flags & FUSE_DO_READDIRPLUS != 0 {
-            flags |= FUSE_DO_READDIRPLUS;
-        }
-        if init_in.flags & FUSE_READDIRPLUS_AUTO != 0 {
-            flags |= FUSE_READDIRPLUS_AUTO;
-        }
-
-        // Negotiate DAX (direct host page mapping) if mapper is available.
-        // The alignment must be at least the host's page size, because every
-        // DAX SETUPMAPPING becomes an `hv_vm_map` on the host — which rejects
-        // sub-page-size mappings with HV_ERROR. Apple Silicon uses 16 KiB
-        // pages; x86_64 and most Linux hosts use 4 KiB. Pick the stricter of
-        // the two at runtime.
-        let mut map_alignment = 0u32;
-        if self.dax_mapper.is_some() && init_in.flags & FUSE_MAP_ALIGNMENT != 0 {
-            flags |= FUSE_MAP_ALIGNMENT;
-            // SAFETY: `_SC_PAGESIZE` is always defined; `sysconf` returns the
-            // configured page size. On failure (`-1`) fall back to 16 KiB,
-            // which is the strict case for supported hosts.
-            let host_page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-            let page_size: u64 = if host_page > 0 {
-                host_page as u64
-            } else {
-                16 * 1024
-            };
-            map_alignment = page_size.trailing_zeros();
-            tracing::info!(
-                "FUSE DAX negotiated (map_alignment={} → {} byte pages)",
-                map_alignment,
-                page_size,
-            );
-        }
-
-        let mut init_out = FuseInitOut {
-            major: FUSE_KERNEL_VERSION,
-            minor: FUSE_KERNEL_MINOR_VERSION,
-            max_readahead: init_in.max_readahead,
-            flags,
-            ..FuseInitOut::default()
-        };
-        // map_alignment is at unused[0] per FUSE protocol spec.
-        init_out.unused[0] = map_alignment;
-
-        self.initialized
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        response.write_data(ctx.unique, &init_out);
-    }
-
     fn handle_destroy(&self, ctx: &RequestContext, response: &mut ResponseBuilder) {
-        self.initialized
-            .store(false, std::sync::atomic::Ordering::SeqCst);
         response.write_empty(ctx.unique);
     }
 
@@ -847,16 +853,17 @@ impl FuseDispatcher {
 
         let writable = req.flags & crate::fuse::FUSE_SETUPMAPPING_FLAG_WRITE != 0;
 
-        // The Linux virtiofs DAX client sends `fh = u64::MAX` when it wants
-        // to map a file for which it has no open file handle — typically
+        // The Linux virtiofs DAX client sends `fh = FUSE_NO_FH` (u64::MAX) when
+        // it wants to map a file for which it has no open file handle — typically
         // the on-demand mapping path used during `execve` and read-ahead.
-        // For that case we fall back to opening a fresh read-only host fd
-        // from the nodeid. `mmap(2)` keeps the mapping alive independent of
-        // the fd's lifetime, so the temporary `File` can be dropped as soon
-        // as `setup_mapping` returns.
-        const SENTINEL_FH: u64 = u64::MAX;
-        let result = if req.fh == SENTINEL_FH {
-            match self.fs.open_inode_readonly(ctx.nodeid) {
+        // For that case we fall back to opening a fresh host fd via
+        // `DaxFsExt::open_inode_for_dax`, which also performs a TOCTOU check.
+        // The fd is opened writable when the guest requests a writable mapping so
+        // that mmap(MAP_SHARED | PROT_WRITE) does not fail with EACCES.
+        // `mmap(2)` keeps the mapping alive independent of the fd's lifetime,
+        // so the temporary `File` can be dropped as soon as `setup_mapping` returns.
+        let result = if req.fh == FUSE_NO_FH {
+            match DaxFsExt::open_inode_for_dax(self.fs.as_ref(), ctx.nodeid, writable) {
                 Ok(file) => {
                     use std::os::unix::io::AsRawFd;
                     let host_fd = file.as_raw_fd();
@@ -1289,10 +1296,6 @@ impl std::fmt::Debug for FuseDispatcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FuseDispatcher")
             .field("config", &self.config)
-            .field(
-                "initialized",
-                &self.initialized.load(std::sync::atomic::Ordering::Relaxed),
-            )
             .finish()
     }
 }
@@ -1338,37 +1341,6 @@ mod tests {
         assert!(response.len() >= FuseOutHeader::SIZE);
         // SAFETY: FuseOutHeader may sit at an unaligned offset in the response buffer.
         unsafe { std::ptr::read_unaligned(response.as_ptr() as *const FuseOutHeader) }
-    }
-
-    #[test]
-    fn test_init() {
-        let (_temp, dispatcher) = setup_dispatcher();
-
-        let init_in = FuseInitIn {
-            major: FUSE_KERNEL_VERSION,
-            minor: FUSE_KERNEL_MINOR_VERSION,
-            max_readahead: 128 * 1024,
-            flags: 0,
-        };
-
-        let mut request = make_header(FuseOpcode::Init, 0, size_of::<FuseInitIn>());
-        let init_bytes = unsafe {
-            std::slice::from_raw_parts(
-                &init_in as *const FuseInitIn as *const u8,
-                size_of::<FuseInitIn>(),
-            )
-        };
-        request.extend_from_slice(init_bytes);
-
-        let response = dispatcher.dispatch(&request).unwrap();
-        let header = parse_response_header(&response);
-
-        assert_eq!(header.error, 0);
-        assert!(
-            dispatcher
-                .initialized
-                .load(std::sync::atomic::Ordering::Relaxed)
-        );
     }
 
     #[test]
@@ -1653,6 +1625,30 @@ mod tests {
         let header = parse_response_header(&response);
         assert_eq!(header.error, 0);
 
+        // Parse dirent entries and verify each entry's `off` field equals
+        // `base_offset + i` where base_offset = read_in.offset + 1 = 1.
+        // This pins the `base_offset + i` formula introduced in ABX-366.
+        {
+            let body = &response[FuseOutHeader::SIZE..];
+            let base_offset: u64 = read_in.offset + 1; // matches dispatcher formula
+            let mut pos = 0usize;
+            let mut i = 0usize;
+            while pos + size_of::<FuseDirent>() <= body.len() {
+                // SAFETY: FuseDirent may sit at any alignment in the packed response body.
+                let dirent =
+                    unsafe { std::ptr::read_unaligned(body[pos..].as_ptr() as *const FuseDirent) };
+                assert_eq!(
+                    dirent.off,
+                    base_offset + i as u64,
+                    "dirent[{i}].off should be base_offset({base_offset}) + {i}"
+                );
+                let entry_size = FuseDirent::size(dirent.namelen as usize);
+                pos += entry_size;
+                i += 1;
+            }
+            assert!(i > 0, "should have parsed at least one dirent entry");
+        }
+
         // Releasedir
         let release_in = FuseReleaseIn {
             fh,
@@ -1702,49 +1698,6 @@ mod tests {
         assert_eq!(header.error, 0);
         assert_eq!(header.len as usize, FuseOutHeader::SIZE + 5);
         assert_eq!(&response[FuseOutHeader::SIZE..], b"hello");
-    }
-
-    #[test]
-    fn test_init_negotiates_readdirplus() {
-        let (_temp, dispatcher) = setup_dispatcher();
-
-        // Send INIT with READDIRPLUS flags
-        let init_in = FuseInitIn {
-            major: FUSE_KERNEL_VERSION,
-            minor: FUSE_KERNEL_MINOR_VERSION,
-            max_readahead: 128 * 1024,
-            flags: FUSE_DO_READDIRPLUS | FUSE_READDIRPLUS_AUTO,
-        };
-
-        let mut request = make_header(FuseOpcode::Init, 0, size_of::<FuseInitIn>());
-        let init_bytes = unsafe {
-            std::slice::from_raw_parts(
-                &init_in as *const FuseInitIn as *const u8,
-                size_of::<FuseInitIn>(),
-            )
-        };
-        request.extend_from_slice(init_bytes);
-
-        let response = dispatcher.dispatch(&request).unwrap();
-        let header = parse_response_header(&response);
-        assert_eq!(header.error, 0);
-
-        // Parse the INIT response and verify READDIRPLUS flags are set
-        let init_out = unsafe {
-            std::ptr::read_unaligned(
-                (response.as_ptr() as *const u8).add(FuseOutHeader::SIZE) as *const FuseInitOut
-            )
-        };
-        assert_ne!(
-            init_out.flags & FUSE_DO_READDIRPLUS,
-            0,
-            "FUSE_DO_READDIRPLUS should be negotiated"
-        );
-        assert_ne!(
-            init_out.flags & FUSE_READDIRPLUS_AUTO,
-            0,
-            "FUSE_READDIRPLUS_AUTO should be negotiated"
-        );
     }
 
     #[test]
@@ -1849,5 +1802,166 @@ mod tests {
         let response = dispatcher.dispatch(&request).unwrap();
         let header = parse_response_header(&response);
         assert_eq!(header.error, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // #14 — sentinel-fh (FUSE_NO_FH) path in handle_setup_mapping
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_setup_mapping_sentinel_fh() {
+        use crate::fuse::{FUSE_NO_FH, FuseSetupMappingIn};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // A mock DaxMapper that records whether setup_mapping was called.
+        struct RecordingMapper {
+            called: AtomicBool,
+        }
+        impl crate::DaxMapper for RecordingMapper {
+            fn setup_mapping(
+                &self,
+                _host_fd: i32,
+                _file_offset: u64,
+                _window_offset: u64,
+                _length: u64,
+                _writable: bool,
+            ) -> std::result::Result<(), i32> {
+                self.called.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            fn remove_mapping(
+                &self,
+                _window_offset: u64,
+                _length: u64,
+            ) -> std::result::Result<(), i32> {
+                Ok(())
+            }
+        }
+
+        let temp = tempfile::TempDir::new().unwrap();
+
+        // Write a real file so the inode exists and open_inode_for_dax succeeds.
+        std::fs::write(temp.path().join("exec_bin"), b"ELF_PAYLOAD").unwrap();
+
+        let fs = Arc::new(PassthroughFs::new(temp.path()).unwrap());
+
+        // Perform a LOOKUP so the dispatcher has the inode registered.
+        let mapper = Arc::new(RecordingMapper {
+            called: AtomicBool::new(false),
+        });
+        let mut dispatcher = FuseDispatcher::new(Arc::clone(&fs), DispatcherConfig::default());
+        dispatcher.set_dax_mapper(Arc::clone(&mapper) as Arc<dyn crate::DaxMapper>);
+
+        let name = b"exec_bin\0";
+        let mut req = make_header(FuseOpcode::Lookup, 1, name.len());
+        req.extend_from_slice(name);
+        let resp = dispatcher.dispatch(&req).unwrap();
+        let resp_hdr = parse_response_header(&resp);
+        assert_eq!(resp_hdr.error, 0, "lookup must succeed");
+
+        // SAFETY: FuseEntryOut may sit at an unaligned offset in the response buffer.
+        let entry_out = unsafe {
+            std::ptr::read_unaligned(
+                (resp.as_ptr() as *const u8).add(FuseOutHeader::SIZE) as *const FuseEntryOut
+            )
+        };
+        let inode = entry_out.nodeid;
+
+        // Build FUSE_SETUPMAPPING with fh = FUSE_NO_FH (sentinel — no open fd).
+        let mapping_in = FuseSetupMappingIn {
+            fh: FUSE_NO_FH,
+            foffset: 0,
+            len: 4096,
+            flags: 0, // read-only
+            moffset: 0,
+        };
+        let mut req = make_header(
+            FuseOpcode::SetupMapping,
+            inode,
+            size_of::<FuseSetupMappingIn>(),
+        );
+        let mapping_bytes = unsafe {
+            std::slice::from_raw_parts(
+                &mapping_in as *const FuseSetupMappingIn as *const u8,
+                size_of::<FuseSetupMappingIn>(),
+            )
+        };
+        req.extend_from_slice(mapping_bytes);
+
+        let resp = dispatcher.dispatch(&req).unwrap();
+        let resp_hdr = parse_response_header(&resp);
+
+        // 1. Response error must be 0 — not ENOSYS or EBADF.
+        assert_eq!(
+            resp_hdr.error, 0,
+            "SETUPMAPPING with FUSE_NO_FH sentinel should succeed (got errno {})",
+            -resp_hdr.error
+        );
+
+        // 2. The mock setup_mapping must have been called exactly once.
+        assert!(
+            mapper.called.load(Ordering::SeqCst),
+            "DaxMapper::setup_mapping should have been called via the sentinel-fh path"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #15 — DaxFsExt::open_inode_for_dax (positive + TOCTOU negative)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dax_fs_ext_open_inode_for_dax_reads_content() {
+        use crate::dispatcher::DaxFsExt;
+        use std::io::Read;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("data.bin"), b"hello dax").unwrap();
+
+        let fs = PassthroughFs::new(temp.path()).unwrap();
+
+        // Register the inode via lookup.
+        let name = std::ffi::OsStr::new("data.bin");
+        let (inode, _attr) = fs.lookup(1, name).unwrap();
+
+        // (a) The returned file must be readable and contain the written content.
+        let mut file = DaxFsExt::open_inode_for_dax(&fs, inode, false).unwrap();
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).unwrap();
+        assert_eq!(
+            buf, b"hello dax",
+            "open_inode_for_dax should expose file content"
+        );
+    }
+
+    #[test]
+    fn test_dax_fs_ext_open_inode_for_dax_toctou_rename_detected() {
+        use crate::dispatcher::DaxFsExt;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("original.bin"), b"orig").unwrap();
+        std::fs::write(temp.path().join("replacement.bin"), b"evil").unwrap();
+
+        let fs = PassthroughFs::new(temp.path()).unwrap();
+
+        // Register original.bin so the inode table maps inode → "original.bin".
+        let name = std::ffi::OsStr::new("original.bin");
+        let (inode, _attr) = fs.lookup(1, name).unwrap();
+
+        // Simulate a TOCTOU swap: rename replacement.bin → original.bin so
+        // the path now points to a different file (different kernel st_ino).
+        std::fs::rename(
+            temp.path().join("replacement.bin"),
+            temp.path().join("original.bin"),
+        )
+        .unwrap();
+
+        // open_inode_for_dax must detect the st_ino mismatch and return EIO.
+        let result = DaxFsExt::open_inode_for_dax(&fs, inode, false);
+        let err = result.expect_err("should fail with EIO after TOCTOU swap");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::EIO),
+            "expected EIO for TOCTOU-detected rename, got: {err}"
+        );
     }
 }

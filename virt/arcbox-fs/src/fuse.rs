@@ -57,6 +57,15 @@ pub const FUSE_EXPLICIT_INVAL_DATA: u32 = 1 << 25;
 /// DAX support — direct host page mapping into guest address space.
 pub const FUSE_MAP_ALIGNMENT: u32 = 1 << 26;
 
+/// FUSE DAX protocol: sentinel value indicating no open file handle.
+///
+/// When the guest issues `FUSE_SETUPMAPPING` during a path that does not
+/// hold an open file descriptor (e.g. `execve` demand-loading a mapped
+/// executable), it sets `fh` to this value. The FUSE server must then open
+/// the inode internally (read-only), perform the mapping, and close the
+/// temporary fd — `mmap(2)` keeps the mapping alive regardless.
+pub const FUSE_NO_FH: u64 = u64::MAX;
+
 /// FUSE_SETUPMAPPING flags.
 pub const FUSE_SETUPMAPPING_FLAG_WRITE: u64 = 1 << 0;
 pub const FUSE_SETUPMAPPING_FLAG_READ: u64 = 1 << 1;
@@ -589,10 +598,16 @@ pub struct FuseInitOut {
     pub time_gran: u32,
     /// Maximum pages for a single request.
     pub max_pages: u16,
-    /// Padding.
-    pub padding: u16,
-    /// Unused.
-    pub unused: [u32; 8],
+    /// Page-size alignment for DAX mappings, expressed as a power-of-two shift
+    /// (e.g. 12 = 4 KiB, 14 = 16 KiB).  Kernel reads this from offset 30 of
+    /// the init response body; writing to `unused[0]` (offset 32) was a silent
+    /// off-by-one that made Apple Silicon guests treat the host as 4 KiB.
+    pub map_alignment: u16,
+    /// Extended feature flags introduced in FUSE 7.36 (offset 32).  Reserved;
+    /// must be zero until ArcBox requires a feature gated behind this field.
+    pub flags2: u32,
+    /// Reserved tail per FUSE 7.36+ (unused[7] = 28 bytes, offsets 36..64).
+    pub unused: [u32; 7],
 }
 
 impl Default for FuseInitOut {
@@ -607,11 +622,16 @@ impl Default for FuseInitOut {
             max_write: 128 * 1024,
             time_gran: 1,
             max_pages: 32,
-            padding: 0,
-            unused: [0; 8],
+            map_alignment: 0,
+            flags2: 0,
+            unused: [0; 7],
         }
     }
 }
+
+// Wire format sanity: the FUSE 7.36+ fuse_init_out must be exactly 64 bytes.
+// Changing any field width would silently corrupt the FUSE_INIT handshake.
+const _: () = assert!(std::mem::size_of::<FuseInitOut>() == 64);
 
 /// Entry response (for lookup, mkdir, mknod, symlink, link, create).
 #[derive(Debug, Clone, Copy, Default)]

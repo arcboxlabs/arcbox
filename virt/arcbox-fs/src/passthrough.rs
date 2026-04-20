@@ -37,14 +37,22 @@ struct InodeData {
     refcount: AtomicU64,
     /// File type from stat mode.
     file_type: FileType,
+    /// Host kernel inode number (`st_ino`) at registration time.
+    ///
+    /// Used by `DaxFsExt::open_inode_for_dax` for TOCTOU detection: after
+    /// opening the file by path we compare the opened fd's `st_ino` against
+    /// this value. A mismatch means the directory entry was swapped (renamed)
+    /// between our path-to-inode resolution and the open call.
+    kernel_ino: u64,
 }
 
 impl InodeData {
-    fn new(path: PathBuf, file_type: FileType) -> Self {
+    fn new(path: PathBuf, file_type: FileType, kernel_ino: u64) -> Self {
         Self {
             path,
             refcount: AtomicU64::new(1),
             file_type,
+            kernel_ino,
         }
     }
 
@@ -248,11 +256,27 @@ impl PassthroughFs {
             None
         };
 
-        // Initialize root inode
+        // Initialize root inode — stat the root directory to capture its
+        // kernel st_ino at registration time for TOCTOU detection.
+        // Propagating the error here rather than silently falling back to 0:
+        // a kernel_ino of 0 would cause every subsequent DAX TOCTOU check on
+        // the root inode to silently pass (any real st_ino is non-zero), turning
+        // the guard into a no-op and masking rename-based attacks on the root.
+        let root_kernel_ino = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::symlink_metadata(&root)
+                .map(|m| m.ino())
+                .map_err(|e| {
+                    FsError::io(std::io::Error::new(
+                        e.kind(),
+                        format!("failed to stat root path '{}': {e}", root.display()),
+                    ))
+                })?
+        };
         let mut inodes = HashMap::new();
         inodes.insert(
             Self::ROOT_INODE,
-            InodeData::new(PathBuf::new(), FileType::Directory),
+            InodeData::new(PathBuf::new(), FileType::Directory, root_kernel_ino),
         );
 
         Ok(Self {
@@ -294,7 +318,7 @@ impl PassthroughFs {
     }
 
     /// Gets the full host path for an inode.
-    fn inode_path(&self, inode: u64) -> Result<PathBuf> {
+    pub(crate) fn inode_path(&self, inode: u64) -> Result<PathBuf> {
         if inode == Self::ROOT_INODE {
             return Ok(self.root.clone());
         }
@@ -306,6 +330,20 @@ impl PassthroughFs {
 
         let data = inodes.get(&inode).ok_or(FsError::InvalidHandle(inode))?;
         Ok(self.root.join(&data.path))
+    }
+
+    /// Returns the host kernel `st_ino` that was recorded when this inode was
+    /// first registered (at `lookup` / `create` / `mkdir` / `mknod` time).
+    ///
+    /// Used by `DaxFsExt::open_inode_for_dax` to detect TOCTOU swaps: if the
+    /// opened fd's `st_ino` differs from this value the directory entry was
+    /// renamed between resolution and open.
+    pub(crate) fn kernel_ino_for(&self, inode: u64) -> Option<u64> {
+        let inodes = self
+            .inodes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inodes.get(&inode).map(|d| d.kernel_ino)
     }
 
     /// Constructs the full host path for a given parent inode and name.
@@ -415,13 +453,14 @@ impl PassthroughFs {
         }
 
         // Create new inode
+        let kernel_ino = metadata.ino();
         let inode = self.alloc_inode();
         {
             let mut inodes = self
                 .inodes
                 .write()
                 .map_err(|_| FsError::Cache("failed to acquire inode lock".to_string()))?;
-            inodes.insert(inode, InodeData::new(relative, file_type));
+            inodes.insert(inode, InodeData::new(relative, file_type, kernel_ino));
         }
 
         Ok((inode, Self::metadata_to_attr(inode, &metadata)))
@@ -596,13 +635,17 @@ impl PassthroughFs {
 
         // Create inode
         let relative = self.relative_path(&path);
+        let kernel_ino = metadata.ino();
         let inode = self.alloc_inode();
         {
             let mut inodes = self
                 .inodes
                 .write()
                 .map_err(|_| FsError::Cache("failed to acquire inode lock".to_string()))?;
-            inodes.insert(inode, InodeData::new(relative, FileType::Regular));
+            inodes.insert(
+                inode,
+                InodeData::new(relative, FileType::Regular, kernel_ino),
+            );
         }
 
         // Create file handle
@@ -640,6 +683,7 @@ impl PassthroughFs {
 
         let metadata = std::fs::symlink_metadata(&path).map_err(FsError::io)?;
         let relative = self.relative_path(&path);
+        let kernel_ino = metadata.ino();
         let inode = self.alloc_inode();
 
         {
@@ -647,7 +691,10 @@ impl PassthroughFs {
                 .inodes
                 .write()
                 .map_err(|_| FsError::Cache("failed to acquire inode lock".to_string()))?;
-            inodes.insert(inode, InodeData::new(relative, FileType::Directory));
+            inodes.insert(
+                inode,
+                InodeData::new(relative, FileType::Directory, kernel_ino),
+            );
         }
 
         Ok((inode, Self::metadata_to_attr(inode, &metadata)))
@@ -673,6 +720,7 @@ impl PassthroughFs {
 
         let metadata = std::fs::symlink_metadata(&path).map_err(FsError::io)?;
         let relative = self.relative_path(&path);
+        let kernel_ino = metadata.ino();
         let inode = self.alloc_inode();
 
         {
@@ -680,7 +728,10 @@ impl PassthroughFs {
                 .inodes
                 .write()
                 .map_err(|_| FsError::Cache("failed to acquire inode lock".to_string()))?;
-            inodes.insert(inode, InodeData::new(relative, FileType::Symlink));
+            inodes.insert(
+                inode,
+                InodeData::new(relative, FileType::Symlink, kernel_ino),
+            );
         }
 
         Ok((inode, Self::metadata_to_attr(inode, &metadata)))
@@ -756,6 +807,7 @@ impl PassthroughFs {
         let metadata = std::fs::symlink_metadata(&path).map_err(FsError::io)?;
         let file_type = FileType::from_mode(metadata.mode());
         let relative = self.relative_path(&path);
+        let kernel_ino = metadata.ino();
         let inode = self.alloc_inode();
 
         {
@@ -763,7 +815,7 @@ impl PassthroughFs {
                 .inodes
                 .write()
                 .map_err(|_| FsError::Cache("failed to acquire inode lock".to_string()))?;
-            inodes.insert(inode, InodeData::new(relative, file_type));
+            inodes.insert(inode, InodeData::new(relative, file_type, kernel_ino));
         }
 
         Ok((inode, Self::metadata_to_attr(inode, &metadata)))
@@ -1009,21 +1061,6 @@ impl PassthroughFs {
         handles.get(&handle).map(|h| h.file.as_raw_fd())
     }
 
-    /// Opens a short-lived read-only `File` for an inode, for DAX mapping
-    /// requests where the guest passes the `-1` fh sentinel (no open file).
-    ///
-    /// The caller is expected to invoke `mmap` on the returned file's raw
-    /// fd and then drop the `File`. `mmap(2)` keeps the mapping alive
-    /// independent of the fd's lifetime, so dropping the `File` after
-    /// `mmap` succeeds does not invalidate the mapping.
-    pub fn open_inode_readonly(&self, inode: u64) -> Result<std::fs::File> {
-        let path = self.inode_path(inode)?;
-        std::fs::OpenOptions::new()
-            .read(true)
-            .open(&path)
-            .map_err(FsError::io)
-    }
-
     /// Seeks in a file (lseek).
     ///
     /// # Errors
@@ -1149,12 +1186,13 @@ impl PassthroughFs {
                 ino
             } else {
                 // Create new inode
+                let kernel_ino = metadata.ino();
                 let new_ino = self.alloc_inode();
                 let mut inodes = self
                     .inodes
                     .write()
                     .map_err(|_| FsError::Cache("failed to acquire inode lock".to_string()))?;
-                inodes.insert(new_ino, InodeData::new(relative, file_type));
+                inodes.insert(new_ino, InodeData::new(relative, file_type, kernel_ino));
                 new_ino
             };
 

@@ -271,9 +271,11 @@ mod tests {
         };
 
         let mut request = Vec::new();
+        #[allow(clippy::ptr_as_ptr, clippy::borrow_as_ptr, clippy::ref_as_ptr)]
         request.extend_from_slice(unsafe {
             std::slice::from_raw_parts(&header as *const _ as *const u8, FuseInHeader::SIZE)
         });
+        #[allow(clippy::ptr_as_ptr, clippy::borrow_as_ptr, clippy::ref_as_ptr)]
         request.extend_from_slice(unsafe {
             std::slice::from_raw_parts(&init_in as *const _ as *const u8, size_of::<FuseInitIn>())
         });

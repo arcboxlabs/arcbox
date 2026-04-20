@@ -140,7 +140,7 @@ impl FuseSession {
         // Build FUSE_INIT response (80 bytes total).
         // Layout: header(16) + major(4) + minor(4) + max_readahead(4) + flags(4) +
         //         max_background(2) + congestion_threshold(2) + max_write(4) +
-        //         time_gran(4) + max_pages(2) + padding(2) + unused(32)
+        //         time_gran(4) + max_pages(2) + map_alignment(2) + flags2(4) + unused[7](28)
         let mut response = Vec::with_capacity(80);
 
         let unique = u64::from_le_bytes([
@@ -158,7 +158,15 @@ impl FuseSession {
         response.extend_from_slice(&0i32.to_le_bytes()); // error = 0
         response.extend_from_slice(&unique.to_le_bytes());
 
-        // FUSE_INIT response body (64 bytes)
+        // FUSE_INIT response body (64 bytes).
+        // Offsets below are relative to the start of the body (after the 16-byte header).
+        //   0..4  major, 4..8 minor, 8..12 max_readahead, 12..16 flags
+        //  16..18 max_background, 18..20 congestion_threshold
+        //  20..24 max_write, 24..28 time_gran
+        //  28..30 max_pages
+        //  30..32 map_alignment  ← u16 page-shift; NOT padding
+        //  32..36 flags2 (unused here, zeroed)
+        //  36..64 unused[7]
         response.extend_from_slice(&self.major.to_le_bytes());
         response.extend_from_slice(&self.minor.to_le_bytes());
         response.extend_from_slice(&self.max_readahead.to_le_bytes());
@@ -168,11 +176,28 @@ impl FuseSession {
         response.extend_from_slice(&self.max_write.to_le_bytes());
         response.extend_from_slice(&1u32.to_le_bytes()); // time_gran (1 ns)
         response.extend_from_slice(&self.max_pages.to_le_bytes());
-        response.extend_from_slice(&0u16.to_le_bytes()); // padding
-        // unused[0] = map_alignment (page shift, 12 = 4096 bytes).
-        let map_alignment: u32 = if self.dax_enabled { 12 } else { 0 };
+        // map_alignment: page-size shift advertised to the guest (e.g. 12 = 4 KiB,
+        // 14 = 16 KiB).  Must equal the host's actual page size, because every
+        // FUSE_SETUPMAPPING turns into an hv_vm_map on the host, which rejects
+        // sub-page-aligned requests with HV_ERROR.  On Apple Silicon the host page
+        // is 16 KiB (shift=14); on Intel/x86 it is 4 KiB (shift=12).
+        // Derive at runtime instead of hardcoding so the binary is correct on both.
+        let map_alignment: u16 = if self.dax_enabled {
+            // SAFETY: _SC_PAGESIZE is a valid sysconf key; the return value is always
+            // positive on supported platforms.  We fall back to 16 KiB (shift=14,
+            // the strictest value for current ArcBox targets) on any error.
+            let host_page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+            let page_size: u64 = if host_page > 0 {
+                host_page as u64
+            } else {
+                16 * 1024
+            };
+            u16::try_from(page_size.trailing_zeros()).unwrap_or(14)
+        } else {
+            0
+        };
         response.extend_from_slice(&map_alignment.to_le_bytes());
-        response.extend_from_slice(&[0u8; 28]); // remaining unused
+        response.extend_from_slice(&[0u8; 32]); // flags2(4) + unused[7](28)
 
         self.initialized.store(true, Ordering::Release);
 
