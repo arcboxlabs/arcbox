@@ -15,7 +15,7 @@ mod memory;
 mod vcpu;
 mod vm;
 
-pub use error::{HvError, HvResult};
+pub use error::{HvError, HvResult, check};
 pub use exit::{ExceptionClass, MmioInfo, VcpuExit};
 #[cfg(feature = "gic")]
 pub use gic::{Gic, GicConfig};

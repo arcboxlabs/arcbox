@@ -106,9 +106,12 @@ impl HvVm {
         if vcpus.is_empty() {
             return Ok(());
         }
-        #[allow(clippy::cast_possible_truncation)]
         // SAFETY: `vcpus` is a live slice of vCPU IDs; the framework reads
         // `vcpus.len()` u64 elements and does not retain the pointer.
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "vcpu count cannot exceed u32::MAX"
+        )]
         error::check(unsafe { ffi::hv_vcpus_exit(vcpus.as_ptr(), vcpus.len() as u32) })
     }
 }
@@ -157,6 +160,27 @@ mod tests {
         let vm = HvVm::new().expect("VM create failed");
         vm.exit_vcpus(&[])
             .expect("exit_vcpus with an empty list should succeed as a no-op");
+    }
+
+    /// Verifies that the `hv_vcpus_exit` FFI path is actually reached when a
+    /// real vCPU handle is passed. The vCPU is not running, so the framework
+    /// will arm a deferred-exit flag instead of interrupting a run loop — but
+    /// the call must still succeed.
+    #[test]
+    #[ignore = "requires com.apple.security.hypervisor entitlement"]
+    fn exit_vcpus_with_real_vcpu_succeeds() {
+        let vm = HvVm::new().expect("VM create failed");
+        let vcpu = crate::HvVcpu::new().expect("vCPU create failed");
+        let handle = vcpu.raw_handle();
+
+        // Calling exit_vcpus on an idle (not-running) vCPU must still return
+        // Ok — the framework simply sets a flag so the next hv_vcpu_run
+        // returns immediately rather than entering the guest.
+        vm.exit_vcpus(&[handle])
+            .expect("exit_vcpus with a valid idle vCPU should succeed");
+
+        drop(vcpu);
+        drop(vm);
     }
 
     #[test]

@@ -176,15 +176,14 @@ mod tests {
 
     /// M0 risk gate: verify hv_gic_create works on this macOS version.
     #[test]
-    #[ignore]
+    #[ignore = "requires com.apple.security.hypervisor entitlement"]
     fn gic_create_succeeds() {
         let _vm = crate::HvVm::new().expect("VM create failed");
-        let gic = Gic::with_defaults().expect("hv_gic_create failed — is macOS 15+?");
-        drop(gic);
+        let _gic = Gic::with_defaults().expect("hv_gic_create failed — is macOS 15+?");
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "requires com.apple.security.hypervisor entitlement"]
     fn gic_set_spi_does_not_error() {
         let _vm = crate::HvVm::new().expect("VM create failed");
         let gic = Gic::with_defaults().expect("GIC create failed");
@@ -193,7 +192,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "requires com.apple.security.hypervisor entitlement"]
     fn gic_distributor_base_matches_config() {
         let _vm = crate::HvVm::new().expect("VM create failed");
         let gic = Gic::with_defaults().expect("GIC create failed");
@@ -201,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "requires com.apple.security.hypervisor entitlement"]
     fn gic_redistributor_base_requires_vcpu() {
         let _vm = crate::HvVm::new().expect("VM create failed");
         let gic = Gic::with_defaults().expect("GIC create failed");
