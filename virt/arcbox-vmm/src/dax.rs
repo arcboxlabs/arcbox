@@ -158,12 +158,16 @@ impl HvDaxMapper {
         }
         mappings.clear();
 
-        // Mark drained only after all cleanup is complete. If `drained` were
-        // set before `mappings.clear()` and the function panicked mid-loop,
-        // `Drop` would see `drained=true` and skip cleanup, leaving live
-        // entries behind as leaked host VA ranges. Setting it last ensures
-        // `Drop` only skips FFI when every entry has been successfully removed.
-        self.drained.store(true, Ordering::SeqCst);
+        // Mark drained only after the cleanup loop and `mappings.clear()`
+        // both complete. Setting it earlier is unsafe: if a panic unwinds
+        // through the loop, `Drop` would see `drained=true` and skip the
+        // still-live entries in the map, leaking their host VA ranges.
+        // Individual `hv_vm_unmap` / `munmap` failures inside the loop are
+        // logged but not retried — `drained=true` after the loop means
+        // "cleanup was attempted for every entry," not "every entry was
+        // successfully freed." Release-stored; the matching `Acquire` load
+        // in `Drop` establishes happens-before with the cleanup above.
+        self.drained.store(true, Ordering::Release);
     }
 }
 
@@ -385,7 +389,7 @@ impl Drop for HvDaxMapper {
         // `drain_all` was called by stop_darwin_hv before hv_vm_destroy,
         // so all mappings are already gone. Skip FFI to avoid calling
         // hv_vm_unmap against a destroyed VM (UB per Apple's doc).
-        if self.drained.load(Ordering::SeqCst) {
+        if self.drained.load(Ordering::Acquire) {
             return;
         }
 
