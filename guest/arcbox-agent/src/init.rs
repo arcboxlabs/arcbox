@@ -69,8 +69,8 @@ mod platform {
         // Optional DAX fixture share for the hv_e2e harness. Mounted under
         // `/run/arcbox-dax` because `/` is read-only EROFS — mkdir_p on a
         // top-level path fails with EROFS. `/run` is tmpfs, created above.
-        // `cache=always,dax=always` makes FUSE_SETUPMAPPING fire on every
-        // read, exercising the stage-2 mmap fast path end-to-end.
+        // `dax=always` makes FUSE_SETUPMAPPING fire on every read,
+        // exercising the stage-2 mmap fast path end-to-end.
         // Production VMs never attach this tag; the mount is a debug-level
         // no-op when the share is absent.
         mount_virtiofs_optional_dax("arcbox-dax", "/run/arcbox-dax");
