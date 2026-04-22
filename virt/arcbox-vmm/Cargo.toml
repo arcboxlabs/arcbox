@@ -41,7 +41,12 @@ tempfile = "3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
-default = []
+# `gic` is on by default so every binary linking arcbox-vmm
+# (daemon, hv_e2e example, tests) gets the hv_gic_* emulation.
+# Without it, Linux boot dies in arch_timer / GIC probe because
+# no distributor answers MMIO at 0x0800_0000 — same symptom as
+# building with `default-features = false`.
+default = ["gic"]
 criu = []
 gic = ["arcbox-hv/gic"]
 vmnet = ["arcbox-net/vmnet"]
