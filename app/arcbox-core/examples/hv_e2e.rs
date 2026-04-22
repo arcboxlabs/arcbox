@@ -127,7 +127,7 @@ fn run() -> Result<(), String> {
             },
             SharedDirConfig {
                 // The fixture lives in its own ephemeral share so the guest
-                // can reach it at /arcbox-dax without touching the live data
+                // can reach it at /run/arcbox-dax without touching the live data
                 // directory.
                 host_path: dax_fixture.host_dir.path().to_path_buf(),
                 tag: "arcbox-dax".to_string(),
@@ -348,7 +348,7 @@ fn dax_round_trip(vmm: &Vmm, fixture: &DaxFixture) -> Result<(), String> {
     );
 
     // DaxStats gates on the SETUPMAPPING fast path actually firing. The
-    // guest's `/arcbox-dax` mount is configured with `dax=always` so every
+    // guest's `/run/arcbox-dax` mount is configured with `dax=always` so every
     // mmap'd region must flow through FUSE_SETUPMAPPING, not FUSE_READ.
     // A zero setup delta here would mean either the mount silently
     // downgraded to copy-through (regression on the dax=always option,
@@ -363,7 +363,7 @@ fn dax_round_trip(vmm: &Vmm, fixture: &DaxFixture) -> Result<(), String> {
         return Err(format!(
             "expected FUSE_SETUPMAPPING to fire at least once, got setup +0 \
              (bytes +{bytes_delta}, remove +{remove_delta}); guest likely \
-             fell back to FUSE_READ — check that /arcbox-dax is mounted with \
+             fell back to FUSE_READ — check that /run/arcbox-dax is mounted with \
              `dax=always`"
         ));
     }
@@ -390,7 +390,7 @@ struct DaxFixture {
     /// Temporary directory that owns the fixture file. Kept alive so the
     /// guest mount's backing path remains valid throughout the test run.
     host_dir: TempDir,
-    /// Path inside the guest (under the ephemeral VirtioFS `/arcbox-dax` mount).
+    /// Path inside the guest (under the ephemeral VirtioFS `/run/arcbox-dax` mount).
     guest_path: String,
     /// Bytes written; the guest must return the same sequence.
     pattern: Vec<u8>,
@@ -401,7 +401,7 @@ struct DaxFixture {
 impl DaxFixture {
     /// Writes a deterministic pattern into a fresh `TempDir` and returns a
     /// fixture describing it. The guest mount for this share is assumed
-    /// to be `/arcbox-dax` (see `mount_virtiofs_optional` in the guest init).
+    /// to be `/run/arcbox-dax` (see `mount_virtiofs_optional_dax` in the guest init).
     fn create(name: &str, length: usize) -> Result<Self, String> {
         let host_dir = TempDir::new().map_err(|e| format!("TempDir::new for DAX fixture: {e}"))?;
         let mut pattern = Vec::with_capacity(length);
@@ -417,7 +417,7 @@ impl DaxFixture {
             .map_err(|e| format!("write fixture {}: {e}", host_path.display()))?;
         Ok(Self {
             host_dir,
-            guest_path: format!("/arcbox-dax/{name}"),
+            guest_path: format!("/run/arcbox-dax/{name}"),
             pattern,
             length,
         })

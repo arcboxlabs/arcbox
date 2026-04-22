@@ -66,12 +66,14 @@ mod platform {
         // Optional host /Users share (non-fatal if not configured).
         mount_virtiofs_optional("users", "/Users");
 
-        // Optional DAX fixture share for the hv_e2e harness. Mounted with
-        // `cache=always,dax=always` so FUSE_SETUPMAPPING fires on every
+        // Optional DAX fixture share for the hv_e2e harness. Mounted under
+        // `/run/arcbox-dax` because `/` is read-only EROFS — mkdir_p on a
+        // top-level path fails with EROFS. `/run` is tmpfs, created above.
+        // `cache=always,dax=always` makes FUSE_SETUPMAPPING fire on every
         // read, exercising the stage-2 mmap fast path end-to-end.
         // Production VMs never attach this tag; the mount is a debug-level
         // no-op when the share is absent.
-        mount_virtiofs_optional_dax("arcbox-dax", "/arcbox-dax");
+        mount_virtiofs_optional_dax("arcbox-dax", "/run/arcbox-dax");
 
         // Rosetta x86_64 translation (Apple Silicon only).
         // The host attaches a VirtioFS share containing the Rosetta binary.
@@ -199,12 +201,17 @@ mod platform {
         }
     }
 
-    /// Like `mount_virtiofs_optional` but passes `cache=always,dax=always`.
+    /// Like `mount_virtiofs_optional` but passes `dax=always`.
     ///
     /// Required for shares whose consumer depends on the FUSE DAX fast path
     /// firing (e.g. the hv_e2e harness, which asserts `FUSE_SETUPMAPPING`
     /// counters increment). Still non-fatal when the share is absent, so
     /// production VMs that don't attach the tag pay only a debug log.
+    ///
+    /// `cache=` is NOT passed here: the Linux 6.12 virtiofs parameter spec
+    /// only accepts `source` and `dax`, so `cache=always` triggers
+    /// `virtiofs: Unknown parameter 'cache'` and the mount fails outright.
+    /// Caching behaviour is inherited from FUSE defaults.
     fn mount_virtiofs_optional_dax(tag: &str, mountpoint: &str) {
         if crate::mount::is_mounted(mountpoint) {
             return;
@@ -215,7 +222,7 @@ mod platform {
             mountpoint,
             Some("virtiofs"),
             MsFlags::empty(),
-            Some("cache=always,dax=always"),
+            Some("dax=always"),
         ) {
             tracing::debug!(tag, mountpoint, error = %e, "virtiofs DAX share not available");
         }

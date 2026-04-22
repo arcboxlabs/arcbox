@@ -65,22 +65,20 @@ pub fn mount_virtiofs(tag: &str, mountpoint: &str) -> Result<()> {
     mount_fs(tag, mountpoint, "virtiofs", &[])
 }
 
-/// Mount virtiofs share with `cache=always` and `dax=always`.
+/// Mount virtiofs share with `dax=always`.
 ///
-/// `cache=always` tells the guest kernel to aggressively cache file data
-/// and metadata, skipping revalidation round-trips to the host. `dax=always`
-/// opts every file in the share into the FUSE DAX fast path: reads and
-/// `mmap` go through `FUSE_SETUPMAPPING` into the shared DAX window
-/// instead of copy-through `FUSE_READ`. Only safe for shares whose
+/// `dax=always` opts every file in the share into the FUSE DAX fast path:
+/// reads and `mmap` go through `FUSE_SETUPMAPPING` into the shared DAX
+/// window instead of copy-through `FUSE_READ`. Only safe for shares whose
 /// contents do not change on the host while the VM is running
 /// (e.g. the `/arcbox` runtime directory).
+///
+/// `cache=always` is intentionally NOT passed: Linux 6.12 virtiofs
+/// parameter spec rejects it with `Unknown parameter 'cache'` and the
+/// mount fails outright. FUSE's default caching already covers the
+/// non-DAX path, so dropping the option has no effect on the hot path.
 pub fn mount_virtiofs_cached(tag: &str, mountpoint: &str) -> Result<()> {
-    mount_fs(
-        tag,
-        mountpoint,
-        "virtiofs",
-        &["cache=always".to_string(), "dax=always".to_string()],
-    )
+    mount_fs(tag, mountpoint, "virtiofs", &["dax=always".to_string()])
 }
 
 /// Checks if a path is already mounted.
@@ -109,18 +107,15 @@ pub fn is_mounted(_path: &str) -> bool {
 /// - "users" tag -> /Users (macOS /Users, bind-mounted to original path)
 pub fn mount_standard_shares() {
     // The /arcbox share may already be mounted by the trampoline (without
-    // cache options). Remount with cache=always so the guest kernel
-    // aggressively caches runtime binaries (dockerd, containerd, etc.)
-    // that don't change while the VM is running.
+    // dax=always). Remount so the guest kernel activates the DAX fast
+    // path for runtime binaries (dockerd, containerd, etc.) that don't
+    // change while the VM is running.
     if is_mounted(MOUNT_ARCBOX) {
         remount_with_cache(MOUNT_ARCBOX);
     } else if let Err(e) = mount_virtiofs_cached(TAG_ARCBOX, MOUNT_ARCBOX) {
         tracing::warn!("Failed to mount arcbox share: {}", e);
     } else {
-        tracing::info!(
-            "Mounted arcbox share at {} (cache=always,dax=always)",
-            MOUNT_ARCBOX
-        );
+        tracing::info!("Mounted arcbox share at {} (dax=always)", MOUNT_ARCBOX);
     }
 
     // Mount /Users share for transparent macOS path support.
@@ -136,16 +131,16 @@ pub fn mount_standard_shares() {
     }
 }
 
-/// Remount an existing VirtioFS mount with `cache=always,dax=always`.
+/// Remount an existing VirtioFS mount with `dax=always`.
 ///
-/// `cache=always` keeps file data and metadata aggressively cached so the
-/// guest kernel avoids revalidation round-trips. `dax=always` opts every
-/// file into the FUSE DAX fast path: reads and `mmap` go through
-/// `FUSE_SETUPMAPPING` into the shared DAX window rather than copy-through
-/// `FUSE_READ`. Both options mirror what `mount_virtiofs_cached` passes on
-/// a fresh mount and must be present together on a remount to activate the
-/// DAX path when the boot trampoline has already mounted the share without
-/// these options.
+/// `dax=always` opts every file into the FUSE DAX fast path: reads and
+/// `mmap` go through `FUSE_SETUPMAPPING` into the shared DAX window
+/// rather than copy-through `FUSE_READ`. Remount activates the DAX path
+/// when the boot trampoline has already mounted the share without it.
+///
+/// `cache=always` is intentionally NOT passed: Linux 6.12 virtiofs
+/// parameter spec rejects it with `Unknown parameter 'cache'` and the
+/// remount fails.
 #[cfg(target_os = "linux")]
 fn remount_with_cache(mountpoint: &str) {
     use nix::mount::{MsFlags, mount};
@@ -156,13 +151,13 @@ fn remount_with_cache(mountpoint: &str) {
         Path::new(mountpoint),
         None::<&str>,
         MsFlags::MS_REMOUNT,
-        Some("cache=always,dax=always"),
+        Some("dax=always"),
     ) {
         Ok(()) => {
-            tracing::info!(mountpoint, "remounted with cache=always,dax=always");
+            tracing::info!(mountpoint, "remounted with dax=always");
         }
         Err(e) => {
-            tracing::debug!(mountpoint, error = %e, "remount with cache=always,dax=always failed (non-fatal)");
+            tracing::debug!(mountpoint, error = %e, "remount with dax=always failed (non-fatal)");
         }
     }
 }
