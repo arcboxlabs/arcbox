@@ -1729,7 +1729,7 @@ mod tests {
             assert!(
                 PL011_BASE + PL011_SIZE <= RAM_BASE_IPA,
                 "PL011 must be below guest RAM"
-            )
+            );
         };
         // PL011 and VirtIO MMIO must not overlap.
         let pl011_range = PL011_BASE..PL011_BASE + PL011_SIZE;

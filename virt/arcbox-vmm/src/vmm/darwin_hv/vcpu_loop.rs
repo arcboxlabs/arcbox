@@ -438,6 +438,48 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, entry_addr: u64, x0_value: u64, ctx: V
             }
 
             VcpuExit::Exception {
+                class:
+                    ExceptionClass::SystemRegister {
+                        op0,
+                        op1,
+                        crn,
+                        crm,
+                        op2,
+                        is_write,
+                        rt,
+                    },
+                ..
+            } => {
+                // Apple's framework forwards unknown sysreg accesses as
+                // EC=0x18 without auto-advancing ELR_EL2. If we re-enter
+                // guest execution with PC unchanged, the same MSR/MRS
+                // traps again — infinite loop (observed: Linux early boot
+                // writes OSDLR_EL1 = S2_0_C1_C3_4 and wedges).
+                //
+                // Treat every unhandled sysreg as read-as-zero /
+                // write-ignored: Linux boot touches debug regs
+                // (OSDLR_EL1, MDSCR_EL1, DBGBCR*, etc.) that are safe
+                // to silently drop, and reads of unknown regs yield 0.
+                if !is_write && rt != 31 {
+                    // MRS into Xrt. HV_REG_X0..X30 are 0..30 numerically,
+                    // so rt maps directly to the register ID. rt==31 is
+                    // XZR — the discard register; nothing to write.
+                    let _ = vcpu.set_reg(u32::from(rt), 0);
+                }
+                // Advance PC past the trapping instruction (A64 = 4 bytes).
+                if let Ok(pc) = vcpu.get_reg(reg::PC) {
+                    let _ = vcpu.set_reg(reg::PC, pc.wrapping_add(4));
+                }
+                tracing::trace!(
+                    vcpu_id,
+                    is_write,
+                    encoding = %format_args!("S{op0}_{op1}_C{crn}_C{crm}_{op2}"),
+                    rt,
+                    "sysreg access treated as RAZ/WI; PC advanced"
+                );
+            }
+
+            VcpuExit::Exception {
                 class: ref other, ..
             } => {
                 tracing::warn!("vCPU {vcpu_id}: unhandled exception: {other:?}");
