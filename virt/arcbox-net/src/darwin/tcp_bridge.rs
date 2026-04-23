@@ -167,14 +167,17 @@ pub struct TcpBridge {
     handshake_conns: HashMap<SynFlowKey, HandshakeConn>,
 }
 
-/// A TCP connection promoted to the fast path — bypasses smoltcp entirely
-/// for data transfer. smoltcp handled the initial 3-way handshake; data
-/// frames are now intercepted at `classify_ipv4` and relayed directly.
+/// A TCP connection promoted to the fast path — bypasses any TCP state
+/// machine entirely. The shim handles the handshake; data frames are
+/// intercepted inline or polled from the host stream.
 struct FastPathConn {
     /// Host-side TCP stream (std blocking — used from the sync datapath loop).
     stream: std::net::TcpStream,
-    /// Our SEQ number for frames sent TO guest.
-    our_seq: u32,
+    /// Our SEQ number for frames sent TO guest. Shared atomic with the
+    /// inject thread so ACKs emitted by `try_fast_path_intercept` always
+    /// carry a SEQ matching the guest's rcv_nxt for this flow (the inject
+    /// thread advances it when writing payload).
+    our_seq: std::sync::Arc<std::sync::atomic::AtomicU32>,
     /// Last ACK we sent to guest (= next SEQ we expect FROM guest).
     last_ack: u32,
     /// Shared atomic last_ack for inline inject thread synchronization.
@@ -196,12 +199,6 @@ struct FastPathConn {
     /// poll_fast_path() skips connections with this flag — the inject
     /// thread reads directly from the cloned socket.
     inline_owned: bool,
-    /// Cloned stream awaiting inline promotion (deferred until SEQ/ACK
-    /// sync so the inject thread starts with the correct initial SEQ).
-    pending_inline_stream: Option<std::net::TcpStream>,
-    /// Sink for deferred inline promotion — Arc-cloned from TcpBridge
-    /// when we decide to go inline, consumed on SEQ/ACK sync.
-    pending_inline_sink: Option<std::sync::Arc<dyn crate::direct_rx::ConnSink>>,
 }
 
 impl FastPathConn {
@@ -293,77 +290,16 @@ impl TcpBridge {
             dst_port,
         };
 
-        // Capture split-borrow-safe copies before taking the &mut conn.
-        let bridge_gw_mac = self.fast_path_gateway_mac;
-        let bridge_guest_mac = self.fast_path_guest_mac.unwrap_or([0xFF; 6]);
-
         let conn = self.fast_path_conns.get_mut(&key)?;
 
-        // Sync SEQ/ACK from the first frame if we initialized with zeros
-        // (smoltcp doesn't expose its ISN publicly).
         let guest_seq = u32::from_be_bytes([
             frame[l4_start + 4],
             frame[l4_start + 5],
             frame[l4_start + 6],
             frame[l4_start + 7],
         ]);
-        let guest_ack = u32::from_be_bytes([
-            frame[l4_start + 8],
-            frame[l4_start + 9],
-            frame[l4_start + 10],
-            frame[l4_start + 11],
-        ]);
-        if conn.our_seq == 0 && conn.last_ack == 0 {
-            // First frame after promotion: guest_ack tells us what SEQ
-            // it expects from us, and guest_seq is its next byte.
-            conn.our_seq = guest_ack;
-            conn.set_last_ack(guest_seq);
-            tracing::debug!(
-                "Fast path: synced SEQ/ACK for {src_ip}:{src_port}→{dst_ip}:{dst_port}: our_seq={}, last_ack={}",
-                conn.our_seq,
-                conn.last_ack
-            );
 
-            // With SEQ/ACK now known, complete the deferred inline promotion:
-            // hand the cloned stream to the inject thread with the correct
-            // initial our_seq. Before sync, our_seq was 0 and any injected
-            // segment would be out-of-order from the guest's perspective.
-            if let (Some(stream_clone), Some(sink)) = (
-                conn.pending_inline_stream.take(),
-                conn.pending_inline_sink.take(),
-            ) {
-                let last_ack_arc = conn
-                    .last_ack_shared
-                    .clone()
-                    .expect("last_ack_shared set at promotion");
-                let promoted = crate::direct_rx::PromotedConn {
-                    stream: stream_clone,
-                    remote_ip: conn.remote_ip,
-                    guest_ip: conn.guest_ip,
-                    remote_port: conn.remote_port,
-                    guest_port: conn.guest_port,
-                    our_seq: conn.our_seq,
-                    last_ack: last_ack_arc,
-                    gw_mac: bridge_gw_mac,
-                    guest_mac: bridge_guest_mac,
-                };
-                if sink.send_conn(promoted) {
-                    conn.inline_owned = true;
-                    tracing::info!(
-                        "Fast path: promoted INLINE {src_ip}:{src_port} → {dst_ip}:{dst_port} (seq={}, ack={})",
-                        conn.our_seq,
-                        conn.last_ack
-                    );
-                } else {
-                    tracing::warn!(
-                        "Fast path: inline sink full at sync, falling back to poll_fast_path"
-                    );
-                }
-            }
-        }
-
-        // FIN or RST → handle teardown ourselves (smoltcp socket was removed
-        // on promotion, so falling through would leave the frame unhandled).
+        // FIN or RST → handle teardown ourselves.
         if flags & 0x04 != 0 {
             // RST: close host stream immediately, no response needed.
             tracing::debug!("Fast path: RST from guest {src_ip}:{src_port}→{dst_ip}:{dst_port}");
@@ -442,7 +378,7 @@ impl TcpBridge {
                 dst_ip: conn.guest_ip,
                 src_port: conn.remote_port,
                 dst_port: conn.guest_port,
-                seq: conn.our_seq,
+                seq: conn.our_seq.load(std::sync::atomic::Ordering::Relaxed),
                 ack: conn.last_ack,
                 window: 65535,
                 src_mac: self.fast_path_gateway_mac,
@@ -452,14 +388,20 @@ impl TcpBridge {
             return Some(fin_ack);
         }
 
-        // Generate ACK frame back to guest.
+        // Only ACK if the guest sent data — replying to a pure ACK
+        // would create a dup-ACK loop that triggers fast retransmits on
+        // the peer and tanks host→VM throughput.
+        if payload_len == 0 {
+            return Some(Vec::new());
+        }
+
         let guest_mac = self.fast_path_guest_mac.unwrap_or([0xFF; 6]);
         let ack = crate::ethernet::build_tcp_ack_frame(&crate::ethernet::TcpFrameParams {
             src_ip: conn.remote_ip,
             dst_ip: conn.guest_ip,
             src_port: conn.remote_port,
             dst_port: conn.guest_port,
-            seq: conn.our_seq,
+            seq: conn.our_seq.load(std::sync::atomic::Ordering::Relaxed),
             ack: conn.last_ack,
             window: 65535,
             src_mac: self.fast_path_gateway_mac,
@@ -489,50 +431,41 @@ impl TcpBridge {
                 Ok(0) => {
                     // Host EOF — send FIN to guest.
                     conn.host_eof = true;
+                    let seq_now = conn.our_seq.load(std::sync::atomic::Ordering::Relaxed);
                     let fin =
                         crate::ethernet::build_tcp_fin_frame(&crate::ethernet::TcpFrameParams {
                             src_ip: conn.remote_ip,
                             dst_ip: conn.guest_ip,
                             src_port: conn.remote_port,
                             dst_port: conn.guest_port,
-                            seq: conn.our_seq,
+                            seq: seq_now,
                             ack: conn.last_ack,
                             window: 65535,
                             src_mac: gw_mac,
                             dst_mac: guest_mac,
                         });
-                    conn.our_seq = conn.our_seq.wrapping_add(1); // FIN consumes 1 SEQ
+                    // FIN consumes 1 SEQ.
+                    conn.our_seq
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     frames.push(fin);
                     // Don't remove yet — keep the entry so the guest's FIN-ACK
                     // response is handled by try_fast_path_intercept (which will
                     // see the FIN flag and clean up).
                 }
                 Ok(n) => {
-                    // When using the channel-based FrameSink path (HV backend),
-                    // the inject thread handles scatter-gather across multiple
-                    // descriptors via MRG_RXBUF. Send the entire read as one
-                    // large frame — no need to segment at 1994 bytes.
-                    //
-                    // For the legacy socketpair path (VZ backend), segment at
-                    // FAST_PATH_GUEST_MSS to stay within the AF_UNIX SOCK_DGRAM
-                    // 2048-byte datagram limit.
+                    // Channel/inject path: send the entire read as one large
+                    // frame (the inject thread's GSO hint lets the guest
+                    // re-segment at MSS).
                     let data = &conn.read_buf[..n];
                     if self.large_frames_enabled {
-                        // Payload > MTU → use partial (pseudo-header only)
-                        // checksum and rely on the inject-thread's GSO path
-                        // to set NEEDS_CSUM so the guest kernel fills in
-                        // the TCP checksum per segment.
-                        //
-                        // Payload ≤ MTU → GSO won't apply and NEEDS_CSUM
-                        // stays unset, so the frame must carry a full,
-                        // correct TCP checksum.
                         let large = ETH_HEADER_LEN + 40 + data.len() > 1500;
+                        let seq_now = conn.our_seq.load(std::sync::atomic::Ordering::Relaxed);
                         let params = crate::ethernet::TcpFrameParams {
                             src_ip: conn.remote_ip,
                             dst_ip: conn.guest_ip,
                             src_port: conn.remote_port,
                             dst_port: conn.guest_port,
-                            seq: conn.our_seq,
+                            seq: seq_now,
                             ack: conn.last_ack,
                             window: 65535,
                             src_mac: gw_mac,
@@ -543,7 +476,8 @@ impl TcpBridge {
                         } else {
                             crate::ethernet::build_tcp_data_frame(&params, data)
                         };
-                        conn.our_seq = conn.our_seq.wrapping_add(data.len() as u32);
+                        conn.our_seq
+                            .fetch_add(data.len() as u32, std::sync::atomic::Ordering::Relaxed);
                         frames.push(data_frame);
                     } else {
                         // Socketpair path: segment at FAST_PATH_GUEST_MSS.
@@ -551,13 +485,14 @@ impl TcpBridge {
                         while offset < data.len() {
                             let chunk_end = (offset + FAST_PATH_GUEST_MSS).min(data.len());
                             let chunk = &data[offset..chunk_end];
+                            let seq_now = conn.our_seq.load(std::sync::atomic::Ordering::Relaxed);
                             let data_frame = crate::ethernet::build_tcp_data_frame(
                                 &crate::ethernet::TcpFrameParams {
                                     src_ip: conn.remote_ip,
                                     dst_ip: conn.guest_ip,
                                     src_port: conn.remote_port,
                                     dst_port: conn.guest_port,
-                                    seq: conn.our_seq,
+                                    seq: seq_now,
                                     ack: conn.last_ack,
                                     window: 65535,
                                     src_mac: gw_mac,
@@ -565,7 +500,10 @@ impl TcpBridge {
                                 },
                                 chunk,
                             );
-                            conn.our_seq = conn.our_seq.wrapping_add(chunk.len() as u32);
+                            conn.our_seq.fetch_add(
+                                chunk.len() as u32,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
                             frames.push(data_frame);
                             offset = chunk_end;
                         }
@@ -611,63 +549,40 @@ impl TcpBridge {
         stream.set_nodelay(true).ok();
 
         let last_ack_atomic = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(last_ack));
+        let our_seq_atomic = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(our_seq));
 
-        // Decide whether to activate the inline inject thread up front or
-        // defer it.
-        //
-        // - our_seq != 0 (shim-synthesized handshake) — we know exact SEQ/ACK
-        //   at promotion time, so hand the cloned stream to the inject
-        //   thread immediately. This is the fast path: zero-copy host-read
-        //   directly into guest descriptors, matching the existing RX path.
-        // - our_seq == 0 (legacy smoltcp promotion) — smoltcp's ISN isn't
-        //   exposed, so `try_fast_path_intercept` must sync on the first
-        //   guest frame. The stream clone is stashed in pending_inline_*
-        //   and activated there.
+        // Shim-synthesized handshakes know exact SEQ/ACK at promotion
+        // time, so hand the cloned stream to the inject thread
+        // immediately for zero-copy host→guest reads.
         let mut inline_owned = false;
-        let mut pending_inline_stream = None;
-        let mut pending_inline_sink = None;
 
         if let Some(ref sink) = self.conn_sink {
             match stream.try_clone() {
                 Ok(cloned) => {
-                    if our_seq != 0 {
-                        let gw_mac = self.fast_path_gateway_mac;
-                        let guest_mac = self.fast_path_guest_mac.unwrap_or([0xFF; 6]);
-                        let promoted = crate::direct_rx::PromotedConn {
-                            stream: cloned,
-                            remote_ip: key.dst_ip,
-                            guest_ip: key.src_ip,
-                            remote_port: key.dst_port,
-                            guest_port: key.src_port,
-                            our_seq,
-                            last_ack: std::sync::Arc::clone(&last_ack_atomic),
-                            gw_mac,
-                            guest_mac,
-                        };
-                        if sink.send_conn(promoted) {
-                            inline_owned = true;
-                            tracing::info!(
-                                "Fast path: promoted INLINE {}:{} → {}:{} (seq={our_seq}, ack={last_ack})",
-                                key.src_ip,
-                                key.src_port,
-                                key.dst_ip,
-                                key.dst_port,
-                            );
-                        } else {
-                            tracing::warn!(
-                                "Fast path: inline sink full, falling back to channel path"
-                            );
-                        }
-                    } else {
-                        pending_inline_stream = Some(cloned);
-                        pending_inline_sink = Some(std::sync::Arc::clone(sink));
+                    let gw_mac = self.fast_path_gateway_mac;
+                    let guest_mac = self.fast_path_guest_mac.unwrap_or([0xFF; 6]);
+                    let promoted = crate::direct_rx::PromotedConn {
+                        stream: cloned,
+                        remote_ip: key.dst_ip,
+                        guest_ip: key.src_ip,
+                        remote_port: key.dst_port,
+                        guest_port: key.src_port,
+                        our_seq: std::sync::Arc::clone(&our_seq_atomic),
+                        last_ack: std::sync::Arc::clone(&last_ack_atomic),
+                        gw_mac,
+                        guest_mac,
+                    };
+                    if sink.send_conn(promoted) {
+                        inline_owned = true;
                         tracing::info!(
-                            "Fast path: promoted {}:{} → {}:{} (inline pending sync)",
+                            "Fast path: promoted INLINE {}:{} → {}:{} (seq={our_seq}, ack={last_ack})",
                             key.src_ip,
                             key.src_port,
                             key.dst_ip,
                             key.dst_port,
                         );
+                    } else {
+                        tracing::warn!("Fast path: inline sink full, falling back to channel path");
                     }
                 }
                 Err(e) => {
@@ -690,7 +605,7 @@ impl TcpBridge {
             key,
             FastPathConn {
                 stream,
-                our_seq,
+                our_seq: our_seq_atomic,
                 last_ack,
                 last_ack_shared: Some(std::sync::Arc::clone(&last_ack_atomic)),
                 remote_ip: key.dst_ip,
@@ -700,8 +615,6 @@ impl TcpBridge {
                 read_buf: vec![0u8; 32768],
                 host_eof: false,
                 inline_owned,
-                pending_inline_stream,
-                pending_inline_sink,
             },
         );
     }

@@ -35,8 +35,10 @@ pub struct InlineConn {
     pub remote_port: u16,
     /// Guest TCP port.
     pub guest_port: u16,
-    /// Our SEQ number for frames sent TO guest.
-    pub our_seq: u32,
+    /// Our SEQ number for frames sent TO guest (shared with the datapath
+    /// loop via atomic so ACKs emitted by try_fast_path_intercept carry
+    /// the up-to-date seq after the inline thread advances it).
+    pub our_seq: Arc<AtomicU32>,
     /// Last ACK from guest (shared with datapath loop via atomic).
     pub last_ack: Arc<AtomicU32>,
     /// Gateway MAC for Ethernet source.
@@ -111,9 +113,10 @@ pub fn write_inline_headers(buf: &mut [u8], conn: &InlineConn, payload_len: usiz
 
     // -- TCP header (20 bytes at offset 46) --
     let tcp = ip + 20;
+    let our_seq = conn.our_seq.load(Ordering::Relaxed);
     buf[tcp..tcp + 2].copy_from_slice(&conn.remote_port.to_be_bytes());
     buf[tcp + 2..tcp + 4].copy_from_slice(&conn.guest_port.to_be_bytes());
-    buf[tcp + 4..tcp + 8].copy_from_slice(&conn.our_seq.to_be_bytes());
+    buf[tcp + 4..tcp + 8].copy_from_slice(&our_seq.to_be_bytes());
     buf[tcp + 8..tcp + 12].copy_from_slice(&last_ack.to_be_bytes());
     buf[tcp + 12] = 0x50; // Data offset: 5 (20 bytes)
     buf[tcp + 13] = 0x18; // Flags: ACK | PSH
@@ -182,9 +185,10 @@ pub fn write_fin_headers(buf: &mut [u8], conn: &InlineConn) -> usize {
 
     // -- TCP: FIN+ACK --
     let tcp = ip + 20;
+    let our_seq = conn.our_seq.load(Ordering::Relaxed);
     buf[tcp..tcp + 2].copy_from_slice(&conn.remote_port.to_be_bytes());
     buf[tcp + 2..tcp + 4].copy_from_slice(&conn.guest_port.to_be_bytes());
-    buf[tcp + 4..tcp + 8].copy_from_slice(&conn.our_seq.to_be_bytes());
+    buf[tcp + 4..tcp + 8].copy_from_slice(&our_seq.to_be_bytes());
     buf[tcp + 8..tcp + 12].copy_from_slice(&last_ack.to_be_bytes());
     buf[tcp + 12] = 0x50; // data offset = 5 (20 bytes)
     buf[tcp + 13] = 0x11; // FIN | ACK
