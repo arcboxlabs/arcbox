@@ -99,6 +99,38 @@ impl Vmm {
                     std::io::Error::last_os_error()
                 )));
             }
+
+            // For AF_UNIX SOCK_DGRAM the receive queue belongs to the
+            // *peer*'s side: `write(hv_fd)` delivers into host_fd's
+            // recv queue. Without sizing host_fd's SO_RCVBUF, guest→host
+            // bulk TX (iperf3 -R, container-to-host flows) hits ENOBUFS
+            // at the system default (≈8 KiB) and packets are dropped.
+            if libc::setsockopt(
+                host_fd.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                (&raw const buf_size).cast::<libc::c_void>(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            ) != 0
+            {
+                tracing::warn!(
+                    "setsockopt host_fd SO_RCVBUF failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+            if libc::setsockopt(
+                host_fd.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&raw const buf_size).cast::<libc::c_void>(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            ) != 0
+            {
+                tracing::warn!(
+                    "setsockopt host_fd SO_SNDBUF failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
         }
 
         // Register the HV-side fd with DeviceManager for TX/RX bridging.
@@ -295,6 +327,38 @@ impl Vmm {
                     "bridge fcntl F_SETFL O_NONBLOCK failed: {}",
                     std::io::Error::last_os_error()
                 )));
+            }
+
+            // AF_UNIX SOCK_DGRAM buffers live on the *peer*'s side: the
+            // guest→host direction (DeviceManager write → relay_fd read)
+            // needs relay_fd's SO_RCVBUF sized. Without this, bulk guest
+            // TX on the bridge NIC hits ENOBUFS at the system default
+            // (≈8 KiB) and drops packets.
+            if libc::setsockopt(
+                relay_fd.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                (&raw const buf_size).cast::<libc::c_void>(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            ) != 0
+            {
+                tracing::warn!(
+                    "bridge setsockopt relay_fd SO_RCVBUF failed: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+            if libc::setsockopt(
+                relay_fd.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&raw const buf_size).cast::<libc::c_void>(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            ) != 0
+            {
+                tracing::warn!(
+                    "bridge setsockopt relay_fd SO_SNDBUF failed: {}",
+                    std::io::Error::last_os_error()
+                );
             }
         }
 
