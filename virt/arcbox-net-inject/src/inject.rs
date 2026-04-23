@@ -243,7 +243,8 @@ impl RxInjectThread {
                     // removed, and smoltcp replies with RST on the next
                     // guest TX — surfacing as "connection reset by peer".
                     inline_conn::write_fin_headers(buf, conn);
-                    conn.our_seq = conn.our_seq.wrapping_add(1); // FIN consumes 1 SEQ.
+                    conn.our_seq
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed); // FIN consumes 1 SEQ.
 
                     let used_entry_off =
                         self.queue.used_gpa as usize + 4 + ((*used_idx as usize) % q_size) * 8;
@@ -261,7 +262,10 @@ impl RxInjectThread {
                 Ok(n) => {
                     // Write 66-byte header inline (no allocation).
                     inline_conn::write_inline_headers(buf, conn, n);
-                    conn.our_seq = conn.our_seq.wrapping_add(n as u32);
+                    // Advance the shared atomic so ACK frames emitted by
+                    // the datapath carry the correct seq value.
+                    conn.our_seq
+                        .fetch_add(n as u32, std::sync::atomic::Ordering::Relaxed);
 
                     let total_written = inline_conn::TOTAL_HDR_LEN + n;
 

@@ -50,8 +50,10 @@ pub struct PromotedConn {
     pub remote_port: u16,
     /// Guest TCP port.
     pub guest_port: u16,
-    /// Our SEQ number for frames sent TO guest.
-    pub our_seq: u32,
+    /// Our SEQ number for frames sent TO guest (shared atomic so both
+    /// the inject thread's writes and the fast-path intercept's ACK
+    /// frames stay in sync).
+    pub our_seq: std::sync::Arc<std::sync::atomic::AtomicU32>,
     /// Last ACK from guest (shared with the datapath via atomic so the
     /// inject thread and fast-path intercept stay in sync).
     pub last_ack: std::sync::Arc<std::sync::atomic::AtomicU32>,
