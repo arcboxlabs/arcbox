@@ -214,6 +214,12 @@ struct FastPathConn {
     /// poll_fast_path() skips connections with this flag — the inject
     /// thread reads directly from the cloned socket.
     inline_owned: bool,
+    /// Cloned stream awaiting inline promotion (deferred until SEQ/ACK
+    /// sync so the inject thread starts with the correct initial SEQ).
+    pending_inline_stream: Option<std::net::TcpStream>,
+    /// Sink for deferred inline promotion — Arc-cloned from TcpBridge
+    /// when we decide to go inline, consumed on SEQ/ACK sync.
+    pending_inline_sink: Option<std::sync::Arc<dyn crate::direct_rx::ConnSink>>,
 }
 
 impl FastPathConn {
@@ -309,6 +315,10 @@ impl TcpBridge {
             dst_port,
         };
 
+        // Capture split-borrow-safe copies before taking the &mut conn.
+        let bridge_gw_mac = self.fast_path_gateway_mac;
+        let bridge_guest_mac = self.fast_path_guest_mac.unwrap_or([0xFF; 6]);
+
         let conn = self.fast_path_conns.get_mut(&key)?;
 
         // Sync SEQ/ACK from the first frame if we initialized with zeros
@@ -335,6 +345,43 @@ impl TcpBridge {
                 conn.our_seq,
                 conn.last_ack
             );
+
+            // With SEQ/ACK now known, complete the deferred inline promotion:
+            // hand the cloned stream to the inject thread with the correct
+            // initial our_seq. Before sync, our_seq was 0 and any injected
+            // segment would be out-of-order from the guest's perspective.
+            if let (Some(stream_clone), Some(sink)) = (
+                conn.pending_inline_stream.take(),
+                conn.pending_inline_sink.take(),
+            ) {
+                let last_ack_arc = conn
+                    .last_ack_shared
+                    .clone()
+                    .expect("last_ack_shared set at promotion");
+                let promoted = crate::direct_rx::PromotedConn {
+                    stream: stream_clone,
+                    remote_ip: conn.remote_ip,
+                    guest_ip: conn.guest_ip,
+                    remote_port: conn.remote_port,
+                    guest_port: conn.guest_port,
+                    our_seq: conn.our_seq,
+                    last_ack: last_ack_arc,
+                    gw_mac: bridge_gw_mac,
+                    guest_mac: bridge_guest_mac,
+                };
+                if sink.send_conn(promoted) {
+                    conn.inline_owned = true;
+                    tracing::info!(
+                        "Fast path: promoted INLINE {src_ip}:{src_port} → {dst_ip}:{dst_port} (seq={}, ack={})",
+                        conn.our_seq,
+                        conn.last_ack
+                    );
+                } else {
+                    tracing::warn!(
+                        "Fast path: inline sink full at sync, falling back to poll_fast_path"
+                    );
+                }
+            }
         }
 
         // FIN or RST → handle teardown ourselves (smoltcp socket was removed
@@ -552,37 +599,30 @@ impl TcpBridge {
         stream.set_nonblocking(true).ok();
         stream.set_nodelay(true).ok();
 
-        let mut sent_inline = false;
-        // When conn_sink is available, send the socket to the inject thread
-        // for direct socket-to-guest-buffer reads (inline vhost path).
-        // Keep a local FastPathConn for ACK handling (try_fast_path_intercept).
+        // Defer inline promotion until the first guest frame arrives and
+        // try_fast_path_intercept syncs SEQ/ACK. Sending to the inject
+        // thread with our_seq=0 would make every injected segment arrive
+        // out-of-sequence (guest expects guest_ack, not 0) and TCP would
+        // discard the data as duplicate-ACKs — classic dropped tunnel.
         let last_ack_atomic = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(last_ack));
-        let guest_mac = self.fast_path_guest_mac.unwrap_or([0xFF; 6]);
 
-        if let Some(ref sink) = self.conn_sink {
-            if let Ok(cloned_stream) = stream.try_clone() {
-                let promoted = crate::direct_rx::PromotedConn {
-                    stream: cloned_stream,
-                    remote_ip: key.dst_ip,
-                    guest_ip: key.src_ip,
-                    remote_port: key.dst_port,
-                    guest_port: key.src_port,
-                    our_seq,
-                    last_ack: std::sync::Arc::clone(&last_ack_atomic),
-                    gw_mac: self.fast_path_gateway_mac,
-                    guest_mac,
-                };
-                if sink.send_conn(promoted) {
-                    sent_inline = true;
+        let (pending_inline_stream, pending_inline_sink) = if let Some(ref sink) = self.conn_sink {
+            match stream.try_clone() {
+                Ok(cloned) => {
                     tracing::info!(
-                        "Fast path: promoted INLINE {}:{} → {}:{} (seq={our_seq}, ack={last_ack})",
+                        "Fast path: promoted {}:{} → {}:{} (inline pending sync)",
                         key.src_ip,
                         key.src_port,
                         key.dst_ip,
                         key.dst_port,
                     );
-                } else {
-                    tracing::warn!("Fast path: conn_sink full, falling back to channel path");
+                    (Some(cloned), Some(std::sync::Arc::clone(sink)))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Fast path: try_clone failed ({e}), falling back to channel path"
+                    );
+                    (None, None)
                 }
             }
         } else {
@@ -593,7 +633,8 @@ impl TcpBridge {
                 key.dst_ip,
                 key.dst_port,
             );
-        }
+            (None, None)
+        };
 
         self.fast_path_conns.insert(
             key,
@@ -608,7 +649,9 @@ impl TcpBridge {
                 guest_port: key.src_port,
                 read_buf: vec![0u8; 32768],
                 host_eof: false,
-                inline_owned: sent_inline,
+                inline_owned: false,
+                pending_inline_stream,
+                pending_inline_sink,
             },
         );
     }
