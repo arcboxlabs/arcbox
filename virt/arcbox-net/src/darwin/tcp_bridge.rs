@@ -78,6 +78,41 @@ const MAX_PENDING_SYNS: usize = 256;
 /// Timeout for host-side `TcpStream::connect` during SYN gate (seconds).
 const SYN_GATE_CONNECT_TIMEOUT_SECS: u64 = 5;
 
+/// Per-attempt delays for handshake frame retransmission (SYN-ACK or SYN).
+/// Doubled each time — loopback / virtio paths are effectively lossless, so
+/// this covers only the rare slow-guest case.
+const HANDSHAKE_RETRANSMIT_DELAYS: [std::time::Duration; 3] = [
+    std::time::Duration::from_millis(200),
+    std::time::Duration::from_millis(400),
+    std::time::Duration::from_millis(800),
+];
+
+/// Maximum retransmit attempts before we abort the handshake (RST + evict).
+const HANDSHAKE_MAX_RETRANSMITS: u8 = 3;
+
+/// TTL for an in-progress handshake with no guest response. If the guest
+/// never ACKs our SYN-ACK (or never SYN-ACKs our SYN), we abort and evict
+/// after this much time total.
+const HANDSHAKE_TOTAL_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Window scale we advertise to the guest. Shift by 7 = 128× scaling,
+/// giving an effective receive window of 65535 × 128 = 8 MiB. Sufficient
+/// for any VM→Host BDP on a local loopback link.
+const SHIM_WSCALE: u8 = 7;
+
+/// MSS we advertise in handshake frames to the guest. 1460 is the standard
+/// Ethernet MSS (1500 MTU − 40 bytes IP+TCP). Host→guest large frames with
+/// GSO are unaffected — MSS only bounds the *guest's* segment size.
+const SHIM_MSS: u16 = 1460;
+
+/// Monotonically advancing ISN source, stepped by a large odd constant for
+/// well-distributed values without a `rand` dependency (RFC 6528 style).
+static ISN_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x51_3C_A4_E7);
+
+fn next_isn() -> u32 {
+    ISN_COUNTER.fetch_add(0x9E37_79B9, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// TTL for pre-connected streams waiting to be consumed by
 /// `detect_new_connections`. If the guest doesn't retransmit SYN within this
 /// window, the stream is dropped.
@@ -112,6 +147,59 @@ struct PreConnected {
     stream: tokio::net::TcpStream,
     /// ISN from the SYN that triggered this connect, for strict matching.
     syn_seq: u32,
+    created: StdInstant,
+}
+
+/// Role of a TCP connection whose handshake is being synthesized in-shim,
+/// bypassing smoltcp's state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HandshakeRole {
+    /// Guest sent SYN → we responded SYN-ACK → waiting for guest ACK.
+    /// Used for outbound (guest-initiated) connections.
+    PassiveOpen,
+    /// We sent SYN → waiting for guest SYN-ACK.
+    /// Used for inbound port-forward connections.
+    ActiveOpen,
+}
+
+/// In-progress TCP handshake — tracked until the 3-way is complete, at
+/// which point the connection is promoted to `FastPathConn`.
+///
+/// Unlike smoltcp's socket, this struct holds only the fields the shim
+/// actually needs: the flow key, peer options to mirror/record, the ISNs
+/// on both sides, and retransmit bookkeeping. No send/recv buffers, no
+/// sliding window state, no congestion control — those are the host and
+/// guest kernels' responsibility.
+#[allow(dead_code)] // `flow_key` mirrors the HashMap key; `peer_mss` reserved for frame sizing
+struct HandshakeConn {
+    flow_key: SynFlowKey,
+    role: HandshakeRole,
+    /// Our chosen ISN. After handshake, `our_seq = our_isn + 1`.
+    our_isn: u32,
+    /// Peer's ISN. Known immediately for PassiveOpen (from guest SYN);
+    /// for ActiveOpen, set when the guest's SYN-ACK arrives.
+    peer_isn: u32,
+    /// Host-side TCP stream. For PassiveOpen: populated once the async host
+    /// connect completes. For ActiveOpen: set from the already-accepted
+    /// stream at registration time.
+    host_stream: Option<std::net::TcpStream>,
+    /// Oneshot receiver for async host connect (PassiveOpen only).
+    /// Consumed when connect resolves.
+    connect_rx: Option<oneshot::Receiver<Option<tokio::net::TcpStream>>>,
+    /// Peer's TCP options, mirrored in our SYN-ACK (PassiveOpen) or
+    /// captured from their SYN-ACK (ActiveOpen).
+    peer_wscale: Option<u8>,
+    peer_sack: bool,
+    peer_mss: u16,
+    /// MAC addresses used when building frames to the guest.
+    gw_mac: [u8; 6],
+    guest_mac: [u8; 6],
+    /// Retransmit bookkeeping for our handshake frame (SYN-ACK or SYN).
+    retransmit_count: u8,
+    last_sent: Option<StdInstant>,
+    /// Saved frame bytes to re-emit on retransmit.
+    saved_frame: Option<Vec<u8>>,
+    /// When this handshake entry was created — for TTL enforcement.
     created: StdInstant,
 }
 
@@ -183,6 +271,10 @@ pub struct TcpBridge {
     /// Connection sink for sending promoted fast-path connections to the
     /// RX inject thread for inline (zero-copy) host→guest data transfer.
     conn_sink: Option<std::sync::Arc<dyn crate::direct_rx::ConnSink>>,
+    /// TCP handshakes synthesized by the shim — replaces smoltcp's SYN
+    /// socket pool + `pending_syns` + `pre_connected` pipeline. Each entry
+    /// is promoted to `fast_path_conns` once the 3-way completes.
+    handshake_conns: HashMap<SynFlowKey, HandshakeConn>,
 }
 
 /// A TCP connection promoted to the fast path — bypasses smoltcp entirely
@@ -249,6 +341,7 @@ impl TcpBridge {
             fast_path_guest_mac: None,
             large_frames_enabled: false,
             conn_sink: None,
+            handshake_conns: HashMap::new(),
         }
     }
 
@@ -685,6 +778,459 @@ impl TcpBridge {
     #[must_use]
     pub fn fast_path_count(&self) -> usize {
         self.fast_path_conns.len()
+    }
+
+    /// Returns the number of in-progress handshakes.
+    #[must_use]
+    pub fn handshake_count(&self) -> usize {
+        self.handshake_conns.len()
+    }
+
+    /// Parses a TCP SYN frame and registers an in-shim `PassiveOpen`
+    /// handshake: captures the guest ISN and options, generates our ISN,
+    /// and spawns an async host connect. The SYN-ACK is emitted later by
+    /// `poll_handshakes` once the connect resolves.
+    ///
+    /// Returns an RST frame if the SYN is rejected (capacity, malformed).
+    /// Returns `None` on success — the handshake is now tracked.
+    ///
+    /// `gateway_mac` and `guest_mac` are the MAC addresses used on the
+    /// guest's Ethernet link. The guest MAC is learned from the source MAC
+    /// of inbound frames; if `guest_mac` is `None`, we use broadcast as a
+    /// temporary fallback (first guest frame will correct it).
+    pub fn handle_outbound_syn(
+        &mut self,
+        syn_frame: &[u8],
+        gateway_mac: [u8; 6],
+        guest_mac: [u8; 6],
+    ) -> Option<Vec<u8>> {
+        // Parse the SYN frame: ETH(14) + IP(var) + TCP(var).
+        let ip_start = ETH_HEADER_LEN;
+        if syn_frame.len() < ip_start + 40 {
+            return None;
+        }
+        let ihl = ((syn_frame[ip_start] & 0x0F) as usize) * 4;
+        let l4_start = ip_start + ihl;
+        if l4_start + 20 > syn_frame.len() {
+            return None;
+        }
+
+        let src_ip = Ipv4Addr::new(
+            syn_frame[ip_start + 12],
+            syn_frame[ip_start + 13],
+            syn_frame[ip_start + 14],
+            syn_frame[ip_start + 15],
+        );
+        let dst_ip = Ipv4Addr::new(
+            syn_frame[ip_start + 16],
+            syn_frame[ip_start + 17],
+            syn_frame[ip_start + 18],
+            syn_frame[ip_start + 19],
+        );
+        let src_port = u16::from_be_bytes([syn_frame[l4_start], syn_frame[l4_start + 1]]);
+        let dst_port = u16::from_be_bytes([syn_frame[l4_start + 2], syn_frame[l4_start + 3]]);
+        let flags = syn_frame[l4_start + 13];
+        // Require SYN set, ACK clear.
+        if flags & 0x12 != 0x02 {
+            return None;
+        }
+        let guest_isn = u32::from_be_bytes([
+            syn_frame[l4_start + 4],
+            syn_frame[l4_start + 5],
+            syn_frame[l4_start + 6],
+            syn_frame[l4_start + 7],
+        ]);
+
+        let key = SynFlowKey {
+            src_ip,
+            src_port,
+            dst_ip,
+            dst_port,
+        };
+
+        // Retransmit of an existing handshake — same ISN means the guest
+        // is re-sending the SYN because our SYN-ACK was lost. Drop
+        // silently; poll_handshakes will handle the re-send.
+        if let Some(existing) = self.handshake_conns.get(&key) {
+            if existing.role == HandshakeRole::PassiveOpen && existing.peer_isn == guest_isn {
+                tracing::debug!("Handshake shim: SYN retransmit dropped for {key:?}");
+                return None;
+            }
+            // Different ISN = new connection attempt, evict stale entry.
+            tracing::debug!("Handshake shim: ISN changed for {key:?}, replacing");
+            self.handshake_conns.remove(&key);
+        }
+
+        // Capacity guard — send RST instead of silent drop.
+        if self.handshake_conns.len() >= MAX_PENDING_SYNS {
+            tracing::warn!("Handshake shim: capacity reached, RST for {key:?}");
+            return build_rst_from_syn(syn_frame, gateway_mac);
+        }
+
+        // Parse peer options (MSS / WScale / SACK-perm).
+        let opts = crate::ethernet::parse_tcp_syn_options(&syn_frame[l4_start..]);
+        let peer_wscale = opts.wscale;
+        let peer_sack = opts.sack_permitted;
+        let peer_mss = opts.mss.unwrap_or(536);
+
+        // Resolve connect target. Gateway IP → loopback for host.docker.internal.
+        let target_ip = if dst_ip == self.gateway_ip {
+            Ipv4Addr::LOCALHOST
+        } else {
+            dst_ip
+        };
+        let connect_addr =
+            std::net::SocketAddr::V4(std::net::SocketAddrV4::new(target_ip, dst_port));
+
+        // Spawn host connect. Result is delivered via oneshot.
+        let (result_tx, result_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let stream = tokio::time::timeout(
+                std::time::Duration::from_secs(SYN_GATE_CONNECT_TIMEOUT_SECS),
+                tokio::net::TcpStream::connect(connect_addr),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok);
+            let _ = result_tx.send(stream);
+        });
+
+        let our_isn = next_isn();
+        self.handshake_conns.insert(
+            key,
+            HandshakeConn {
+                flow_key: key,
+                role: HandshakeRole::PassiveOpen,
+                our_isn,
+                peer_isn: guest_isn,
+                host_stream: None,
+                connect_rx: Some(result_rx),
+                peer_wscale,
+                peer_sack,
+                peer_mss,
+                gw_mac: gateway_mac,
+                guest_mac,
+                retransmit_count: 0,
+                last_sent: None,
+                saved_frame: None,
+                created: StdInstant::now(),
+            },
+        );
+
+        tracing::debug!(
+            "Handshake shim: passive-open registered {key:?} our_isn={our_isn:08x} guest_isn={guest_isn:08x}"
+        );
+        None
+    }
+
+    /// Registers an inbound port-forward `ActiveOpen` handshake. We will
+    /// emit a SYN toward the guest on the next `poll_handshakes`, then
+    /// wait for the guest's SYN-ACK.
+    ///
+    /// Called from the datapath when `InboundListenerManager` accepts a
+    /// new host connection.
+    pub fn initiate_active_handshake(
+        &mut self,
+        flow_key: SynFlowKey,
+        host_stream: std::net::TcpStream,
+        gateway_mac: [u8; 6],
+        guest_mac: [u8; 6],
+    ) {
+        host_stream.set_nonblocking(true).ok();
+        host_stream.set_nodelay(true).ok();
+
+        let our_isn = next_isn();
+        // Evict any stale entry for the same four-tuple.
+        self.handshake_conns.remove(&flow_key);
+
+        self.handshake_conns.insert(
+            flow_key,
+            HandshakeConn {
+                flow_key,
+                role: HandshakeRole::ActiveOpen,
+                our_isn,
+                peer_isn: 0, // filled in when SYN-ACK arrives
+                host_stream: Some(host_stream),
+                connect_rx: None,
+                peer_wscale: Some(SHIM_WSCALE),
+                peer_sack: true,
+                peer_mss: SHIM_MSS,
+                gw_mac: gateway_mac,
+                guest_mac,
+                retransmit_count: 0,
+                last_sent: None,
+                saved_frame: None,
+                created: StdInstant::now(),
+            },
+        );
+
+        tracing::debug!(
+            "Handshake shim: active-open registered {flow_key:?} our_isn={our_isn:08x}"
+        );
+    }
+
+    /// Drives all in-progress handshakes: polls host connects, emits
+    /// initial frames (SYN-ACK for passive, SYN for active), retransmits,
+    /// and aborts after the TTL / retransmit limit.
+    ///
+    /// Returns frames to inject to the guest.
+    pub fn poll_handshakes(&mut self) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut to_abort: Vec<SynFlowKey> = Vec::new();
+        let now = StdInstant::now();
+
+        for (key, conn) in &mut self.handshake_conns {
+            // Global TTL — abort stuck handshakes.
+            if now.duration_since(conn.created) > HANDSHAKE_TOTAL_TTL {
+                tracing::warn!("Handshake shim: TTL exceeded for {key:?}, aborting");
+                to_abort.push(*key);
+                continue;
+            }
+
+            match conn.role {
+                HandshakeRole::PassiveOpen => {
+                    // If host connect hasn't resolved, try to pick up the result.
+                    if conn.host_stream.is_none() {
+                        let Some(rx) = conn.connect_rx.as_mut() else {
+                            // No stream, no pending connect — aborted.
+                            to_abort.push(*key);
+                            continue;
+                        };
+                        match rx.try_recv() {
+                            Ok(Some(tokio_stream)) => match tokio_stream.into_std() {
+                                Ok(std_stream) => {
+                                    std_stream.set_nonblocking(true).ok();
+                                    std_stream.set_nodelay(true).ok();
+                                    conn.host_stream = Some(std_stream);
+                                    conn.connect_rx = None;
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        "Handshake shim: into_std failed for {key:?}: {e}"
+                                    );
+                                    to_abort.push(*key);
+                                    continue;
+                                }
+                            },
+                            Ok(None) => {
+                                tracing::debug!("Handshake shim: host connect failed for {key:?}");
+                                to_abort.push(*key);
+                                continue;
+                            }
+                            Err(oneshot::error::TryRecvError::Empty) => {
+                                continue; // still connecting
+                            }
+                            Err(oneshot::error::TryRecvError::Closed) => {
+                                to_abort.push(*key);
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Host stream is ready. Emit SYN-ACK (first time) or
+                    // retransmit based on timer.
+                    if conn.saved_frame.is_none() {
+                        let frame = crate::ethernet::build_tcp_syn_ack_frame(
+                            &crate::ethernet::SynAckParams {
+                                src_ip: key.dst_ip,
+                                dst_ip: key.src_ip,
+                                src_port: key.dst_port,
+                                dst_port: key.src_port,
+                                seq: conn.our_isn,
+                                ack: conn.peer_isn.wrapping_add(1),
+                                src_mac: conn.gw_mac,
+                                dst_mac: conn.guest_mac,
+                                mss: SHIM_MSS,
+                                wscale: conn.peer_wscale.map(|_| SHIM_WSCALE),
+                                sack_permitted: conn.peer_sack,
+                            },
+                        );
+                        conn.saved_frame = Some(frame.clone());
+                        conn.last_sent = Some(now);
+                        out.push(frame);
+                    } else if should_retransmit(conn, now) {
+                        if conn.retransmit_count >= HANDSHAKE_MAX_RETRANSMITS {
+                            to_abort.push(*key);
+                            continue;
+                        }
+                        if let Some(ref frame) = conn.saved_frame {
+                            out.push(frame.clone());
+                            conn.retransmit_count += 1;
+                            conn.last_sent = Some(now);
+                        }
+                    }
+                }
+                HandshakeRole::ActiveOpen => {
+                    if conn.saved_frame.is_none() {
+                        let frame =
+                            crate::ethernet::build_tcp_syn_frame(&crate::ethernet::SynParams {
+                                // We're sending from gateway → guest.
+                                src_ip: key.dst_ip,
+                                dst_ip: key.src_ip,
+                                src_port: key.dst_port,
+                                dst_port: key.src_port,
+                                seq: conn.our_isn,
+                                src_mac: conn.gw_mac,
+                                dst_mac: conn.guest_mac,
+                                mss: SHIM_MSS,
+                                wscale: Some(SHIM_WSCALE),
+                            });
+                        conn.saved_frame = Some(frame.clone());
+                        conn.last_sent = Some(now);
+                        out.push(frame);
+                    } else if should_retransmit(conn, now) {
+                        if conn.retransmit_count >= HANDSHAKE_MAX_RETRANSMITS {
+                            to_abort.push(*key);
+                            continue;
+                        }
+                        if let Some(ref frame) = conn.saved_frame {
+                            out.push(frame.clone());
+                            conn.retransmit_count += 1;
+                            conn.last_sent = Some(now);
+                        }
+                    }
+                }
+            }
+        }
+
+        for key in to_abort {
+            self.handshake_conns.remove(&key);
+        }
+
+        out
+    }
+
+    /// Called when a TCP frame arrives that matches a pending handshake
+    /// (keyed on `SynFlowKey`). For PassiveOpen: consumes the guest's ACK
+    /// and promotes to `FastPathConn`. For ActiveOpen: consumes the
+    /// guest's SYN-ACK, emits our final ACK, and promotes.
+    ///
+    /// Returns `Some(Vec<frame>)` if the frame was consumed by the shim
+    /// (possibly emitting reply frames). Returns `None` if no matching
+    /// handshake exists or the frame doesn't match the expected phase.
+    pub fn try_complete_handshake(&mut self, frame: &[u8]) -> Option<Vec<Vec<u8>>> {
+        let ip_start = ETH_HEADER_LEN;
+        if frame.len() < ip_start + 40 {
+            return None;
+        }
+        if frame[ip_start + 9] != 6 {
+            return None;
+        }
+        let ihl = ((frame[ip_start] & 0x0F) as usize) * 4;
+        let l4_start = ip_start + ihl;
+        if l4_start + 20 > frame.len() {
+            return None;
+        }
+
+        let src_ip = Ipv4Addr::new(
+            frame[ip_start + 12],
+            frame[ip_start + 13],
+            frame[ip_start + 14],
+            frame[ip_start + 15],
+        );
+        let dst_ip = Ipv4Addr::new(
+            frame[ip_start + 16],
+            frame[ip_start + 17],
+            frame[ip_start + 18],
+            frame[ip_start + 19],
+        );
+        let src_port = u16::from_be_bytes([frame[l4_start], frame[l4_start + 1]]);
+        let dst_port = u16::from_be_bytes([frame[l4_start + 2], frame[l4_start + 3]]);
+        let flags = frame[l4_start + 13];
+        let seq = u32::from_be_bytes([
+            frame[l4_start + 4],
+            frame[l4_start + 5],
+            frame[l4_start + 6],
+            frame[l4_start + 7],
+        ]);
+        let ack = u32::from_be_bytes([
+            frame[l4_start + 8],
+            frame[l4_start + 9],
+            frame[l4_start + 10],
+            frame[l4_start + 11],
+        ]);
+
+        let key = SynFlowKey {
+            src_ip,
+            src_port,
+            dst_ip,
+            dst_port,
+        };
+        let conn = self.handshake_conns.get(&key)?;
+
+        match conn.role {
+            HandshakeRole::PassiveOpen => {
+                // Expect ACK set, SYN clear.
+                if flags & 0x12 != 0x10 {
+                    return None;
+                }
+                // Guest is ACKing our SYN-ACK: ack should be our_isn + 1.
+                if ack != conn.our_isn.wrapping_add(1) {
+                    tracing::debug!(
+                        "Handshake shim: passive ACK mismatch for {key:?} got ack={ack:08x} want={:08x}",
+                        conn.our_isn.wrapping_add(1)
+                    );
+                    return None;
+                }
+                let conn = self.handshake_conns.remove(&key)?;
+                let our_seq = conn.our_isn.wrapping_add(1);
+                let last_ack = conn.peer_isn.wrapping_add(1);
+                let Some(stream) = conn.host_stream else {
+                    return Some(Vec::new());
+                };
+                self.promote_to_fast_path(key, stream, our_seq, last_ack);
+                Some(Vec::new())
+            }
+            HandshakeRole::ActiveOpen => {
+                // Expect SYN + ACK.
+                if flags & 0x12 != 0x12 {
+                    return None;
+                }
+                if ack != conn.our_isn.wrapping_add(1) {
+                    tracing::debug!(
+                        "Handshake shim: active SYN-ACK ack mismatch for {key:?} got ack={ack:08x} want={:08x}",
+                        conn.our_isn.wrapping_add(1)
+                    );
+                    return None;
+                }
+                // Capture guest ISN from their SYN-ACK.
+                let guest_isn = seq;
+                // Mirror their options back so we can promote with sane state.
+                let peer_opts = crate::ethernet::parse_tcp_syn_options(&frame[l4_start..]);
+
+                let mut conn = self.handshake_conns.remove(&key)?;
+                conn.peer_isn = guest_isn;
+                if peer_opts.wscale.is_some() {
+                    conn.peer_wscale = peer_opts.wscale;
+                }
+                if peer_opts.sack_permitted {
+                    conn.peer_sack = true;
+                }
+
+                // Build ACK completing the handshake.
+                let our_seq = conn.our_isn.wrapping_add(1);
+                let last_ack = guest_isn.wrapping_add(1);
+                let ack_frame =
+                    crate::ethernet::build_tcp_ack_frame(&crate::ethernet::TcpFrameParams {
+                        // Direction: gateway → guest.
+                        src_ip: key.dst_ip,
+                        dst_ip: key.src_ip,
+                        src_port: key.dst_port,
+                        dst_port: key.src_port,
+                        seq: our_seq,
+                        ack: last_ack,
+                        window: 65535,
+                        src_mac: conn.gw_mac,
+                        dst_mac: conn.guest_mac,
+                    });
+
+                let Some(stream) = conn.host_stream else {
+                    return Some(vec![ack_frame]);
+                };
+                self.promote_to_fast_path(key, stream, our_seq, last_ack);
+                Some(vec![ack_frame])
+            }
+        }
     }
 
     /// Determines whether to connect via a proxy tunnel for the given destination.
@@ -1615,6 +2161,19 @@ impl TcpBridge {
     pub fn active_count(&self) -> usize {
         self.connections.len()
     }
+}
+
+/// Returns true if the saved handshake frame is due for retransmit.
+///
+/// The retransmit delay schedule is indexed by `retransmit_count`; the
+/// last-sent timestamp must have elapsed by at least that delay.
+fn should_retransmit(conn: &HandshakeConn, now: StdInstant) -> bool {
+    let Some(last) = conn.last_sent else {
+        return false;
+    };
+    let idx = usize::from(conn.retransmit_count).min(HANDSHAKE_RETRANSMIT_DELAYS.len() - 1);
+    let delay = HANDSHAKE_RETRANSMIT_DELAYS[idx];
+    now.duration_since(last) >= delay
 }
 
 /// Constructs an RST|ACK Ethernet frame in response to a SYN frame.
@@ -3078,5 +3637,324 @@ mod tests {
         );
         assert_eq!(bridge.pre_connected.len(), 2);
         assert!(bridge.pending_syns.is_empty());
+    }
+
+    // -------- Handshake synthesizer tests --------
+
+    #[test]
+    fn test_next_isn_distinct_values() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..1000 {
+            let isn = next_isn();
+            assert!(seen.insert(isn), "next_isn produced duplicate {isn:08x}");
+        }
+    }
+
+    /// Builds a synthetic guest SYN frame with the given options.
+    fn make_guest_syn_frame(
+        src_port: u16,
+        dst_ip: Ipv4Addr,
+        dst_port: u16,
+        seq: u32,
+        options: &[u8],
+    ) -> Vec<u8> {
+        assert_eq!(options.len() % 4, 0);
+        let tcp_hdr_len = 20 + options.len();
+        let ip_total = 20 + tcp_hdr_len;
+        let mut frame = vec![0u8; ETH_HEADER_LEN + ip_total];
+        // Eth: dst=GW_MAC, src=GUEST_MAC, IPv4.
+        frame[0..6].copy_from_slice(&GW_MAC);
+        frame[6..12].copy_from_slice(&GUEST_MAC);
+        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+        // IPv4.
+        let ip = 14;
+        frame[ip] = 0x45;
+        frame[ip + 2..ip + 4].copy_from_slice(&(ip_total as u16).to_be_bytes());
+        frame[ip + 8] = 64;
+        frame[ip + 9] = 6;
+        frame[ip + 12..ip + 16].copy_from_slice(&GUEST_IP.octets());
+        frame[ip + 16..ip + 20].copy_from_slice(&dst_ip.octets());
+        // TCP.
+        let tcp = 34;
+        frame[tcp..tcp + 2].copy_from_slice(&src_port.to_be_bytes());
+        frame[tcp + 2..tcp + 4].copy_from_slice(&dst_port.to_be_bytes());
+        frame[tcp + 4..tcp + 8].copy_from_slice(&seq.to_be_bytes());
+        frame[tcp + 12] = ((tcp_hdr_len / 4) as u8) << 4;
+        frame[tcp + 13] = 0x02; // SYN
+        frame[tcp + 14..tcp + 16].copy_from_slice(&65535u16.to_be_bytes());
+        frame[tcp + 20..tcp + 20 + options.len()].copy_from_slice(options);
+        frame
+    }
+
+    /// Builds a guest ACK frame (pure ACK, no payload).
+    fn make_guest_ack_frame(
+        src_port: u16,
+        dst_ip: Ipv4Addr,
+        dst_port: u16,
+        seq: u32,
+        ack: u32,
+    ) -> Vec<u8> {
+        let mut frame = vec![0u8; ETH_HEADER_LEN + 40];
+        frame[0..6].copy_from_slice(&GW_MAC);
+        frame[6..12].copy_from_slice(&GUEST_MAC);
+        frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+        let ip = 14;
+        frame[ip] = 0x45;
+        frame[ip + 2..ip + 4].copy_from_slice(&40u16.to_be_bytes());
+        frame[ip + 9] = 6;
+        frame[ip + 12..ip + 16].copy_from_slice(&GUEST_IP.octets());
+        frame[ip + 16..ip + 20].copy_from_slice(&dst_ip.octets());
+        let tcp = 34;
+        frame[tcp..tcp + 2].copy_from_slice(&src_port.to_be_bytes());
+        frame[tcp + 2..tcp + 4].copy_from_slice(&dst_port.to_be_bytes());
+        frame[tcp + 4..tcp + 8].copy_from_slice(&seq.to_be_bytes());
+        frame[tcp + 8..tcp + 12].copy_from_slice(&ack.to_be_bytes());
+        frame[tcp + 12] = 0x50;
+        frame[tcp + 13] = 0x10; // ACK
+        frame
+    }
+
+    /// Builds a guest SYN-ACK frame (for ActiveOpen completion tests).
+    fn make_guest_syn_ack_frame(
+        src_port: u16,
+        dst_ip: Ipv4Addr,
+        dst_port: u16,
+        seq: u32,
+        ack: u32,
+    ) -> Vec<u8> {
+        let mut frame = make_guest_ack_frame(src_port, dst_ip, dst_port, seq, ack);
+        let tcp = 34;
+        frame[tcp + 13] = 0x12; // SYN | ACK
+        frame
+    }
+
+    #[tokio::test]
+    async fn handshake_passive_open_registers_and_emits_syn_ack() {
+        // Spin up a local listener so the host connect succeeds.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_port = addr.port();
+
+        let mut bridge = TcpBridge::new(GW_IP);
+        bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
+
+        // Build a guest SYN with MSS + WScale + SACK-Permitted (12-byte options).
+        let opts = &[
+            2, 4, 0x05, 0xB4, // MSS = 1460
+            3, 3, 8, // WScale = 8 (peer)
+            4, 2, // SACK-Permitted
+            1, 1, 1, // NOP padding to 12 bytes (4-aligned)
+        ];
+        // Target 127.0.0.1 directly via the non-gateway path.
+        let syn = make_guest_syn_frame(40001, Ipv4Addr::LOCALHOST, server_port, 0xAAAA_AAAA, opts);
+
+        // handle_outbound_syn returns None on success, Some(RST) on reject.
+        let rst = bridge.handle_outbound_syn(&syn, GW_MAC, GUEST_MAC);
+        assert!(rst.is_none());
+        assert_eq!(bridge.handshake_count(), 1);
+
+        // Accept the server-side connection so our tokio connect resolves.
+        let (_accepted, _) = listener.accept().await.unwrap();
+        // Give the tokio task time to deliver the stream.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Poll — should emit SYN-ACK.
+        let out = bridge.poll_handshakes();
+        assert_eq!(out.len(), 1, "expected one SYN-ACK frame");
+        let syn_ack = &out[0];
+
+        // Verify: flags=SYN|ACK, ack=guest_isn+1, correct options.
+        let tcp = 34;
+        assert_eq!(syn_ack[tcp + 13], 0x12);
+        let ack = u32::from_be_bytes([
+            syn_ack[tcp + 8],
+            syn_ack[tcp + 9],
+            syn_ack[tcp + 10],
+            syn_ack[tcp + 11],
+        ]);
+        assert_eq!(ack, 0xAAAA_AAAAu32.wrapping_add(1));
+        let parsed = crate::ethernet::parse_tcp_syn_options(&syn_ack[tcp..]);
+        assert_eq!(parsed.mss, Some(SHIM_MSS));
+        assert_eq!(parsed.wscale, Some(SHIM_WSCALE));
+        assert!(parsed.sack_permitted);
+    }
+
+    #[tokio::test]
+    async fn handshake_passive_open_completes_on_guest_ack() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_port = addr.port();
+
+        let mut bridge = TcpBridge::new(GW_IP);
+        bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
+
+        let guest_isn = 0x1234_5678u32;
+        let syn = make_guest_syn_frame(
+            40002,
+            Ipv4Addr::LOCALHOST,
+            server_port,
+            guest_isn,
+            &[2, 4, 0x05, 0xB4],
+        );
+        assert!(
+            bridge
+                .handle_outbound_syn(&syn, GW_MAC, GUEST_MAC)
+                .is_none()
+        );
+
+        let (_accepted, _) = listener.accept().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let syn_ack = bridge.poll_handshakes();
+        assert_eq!(syn_ack.len(), 1);
+        let tcp = 34;
+        let our_isn = u32::from_be_bytes([
+            syn_ack[0][tcp + 4],
+            syn_ack[0][tcp + 5],
+            syn_ack[0][tcp + 6],
+            syn_ack[0][tcp + 7],
+        ]);
+
+        // Guest completes the handshake.
+        let guest_ack = make_guest_ack_frame(
+            40002,
+            Ipv4Addr::LOCALHOST,
+            server_port,
+            guest_isn.wrapping_add(1),
+            our_isn.wrapping_add(1),
+        );
+        let result = bridge.try_complete_handshake(&guest_ack);
+        assert!(result.is_some());
+
+        // Now promoted to fast path; handshake entry gone.
+        assert_eq!(bridge.handshake_count(), 0);
+        assert_eq!(bridge.fast_path_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn handshake_active_open_emits_syn_and_completes() {
+        // Pretend the host accepted a connection; wire up two loopback
+        // streams so `initiate_active_handshake` has a valid stream.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (_server, _) = listener.accept().await.unwrap();
+        let host_stream = client.into_std().unwrap();
+
+        let mut bridge = TcpBridge::new(GW_IP);
+        bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
+
+        let flow_key = SynFlowKey {
+            src_ip: GUEST_IP,
+            src_port: 8080,
+            dst_ip: GW_IP,
+            dst_port: 61500,
+        };
+        bridge.initiate_active_handshake(flow_key, host_stream, GW_MAC, GUEST_MAC);
+        assert_eq!(bridge.handshake_count(), 1);
+
+        // Poll emits our SYN toward the guest.
+        let out = bridge.poll_handshakes();
+        assert_eq!(out.len(), 1);
+        let tcp = 34;
+        assert_eq!(out[0][tcp + 13], 0x02, "expected pure SYN");
+        let our_isn = u32::from_be_bytes([
+            out[0][tcp + 4],
+            out[0][tcp + 5],
+            out[0][tcp + 6],
+            out[0][tcp + 7],
+        ]);
+
+        // Guest responds with SYN-ACK.
+        let guest_isn = 0xDEAD_BEEFu32;
+        let syn_ack =
+            make_guest_syn_ack_frame(8080, GW_IP, 61500, guest_isn, our_isn.wrapping_add(1));
+        let reply = bridge.try_complete_handshake(&syn_ack);
+        let reply = reply.expect("shim should accept SYN-ACK");
+        assert_eq!(reply.len(), 1, "expected final ACK frame");
+        assert_eq!(reply[0][tcp + 13], 0x10, "flags=ACK");
+
+        assert_eq!(bridge.handshake_count(), 0);
+        assert_eq!(bridge.fast_path_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn handshake_rejects_mismatched_ack() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut bridge = TcpBridge::new(GW_IP);
+        bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
+
+        let guest_isn = 7777;
+        let syn = make_guest_syn_frame(
+            40003,
+            Ipv4Addr::LOCALHOST,
+            addr.port(),
+            guest_isn,
+            &[2, 4, 0x05, 0xB4],
+        );
+        bridge.handle_outbound_syn(&syn, GW_MAC, GUEST_MAC);
+        let (_accepted, _) = listener.accept().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let _ = bridge.poll_handshakes();
+
+        // ACK with wrong ack number — shim must reject (return None) and
+        // leave the handshake entry intact.
+        let bad_ack = make_guest_ack_frame(
+            40003,
+            Ipv4Addr::LOCALHOST,
+            addr.port(),
+            guest_isn.wrapping_add(1),
+            0xBAD_BAD,
+        );
+        let result = bridge.try_complete_handshake(&bad_ack);
+        assert!(result.is_none());
+        assert_eq!(bridge.handshake_count(), 1);
+        assert_eq!(bridge.fast_path_count(), 0);
+    }
+
+    #[test]
+    fn handshake_capacity_sends_rst() {
+        let mut bridge = TcpBridge::new(GW_IP);
+        // Fill to capacity with fake entries.
+        for i in 0..MAX_PENDING_SYNS {
+            let k = SynFlowKey {
+                src_ip: GUEST_IP,
+                src_port: 10000 + i as u16,
+                dst_ip: Ipv4Addr::new(203, 0, 113, 1),
+                dst_port: 80,
+            };
+            bridge.handshake_conns.insert(
+                k,
+                HandshakeConn {
+                    flow_key: k,
+                    role: HandshakeRole::PassiveOpen,
+                    our_isn: 0,
+                    peer_isn: 0,
+                    host_stream: None,
+                    connect_rx: None,
+                    peer_wscale: None,
+                    peer_sack: false,
+                    peer_mss: 1460,
+                    gw_mac: GW_MAC,
+                    guest_mac: GUEST_MAC,
+                    retransmit_count: 0,
+                    last_sent: None,
+                    saved_frame: None,
+                    created: StdInstant::now(),
+                },
+            );
+        }
+        let syn = make_guest_syn_frame(
+            9999,
+            Ipv4Addr::new(203, 0, 113, 1),
+            80,
+            0,
+            &[2, 4, 0x05, 0xB4],
+        );
+        let rst = bridge.handle_outbound_syn(&syn, GW_MAC, GUEST_MAC);
+        assert!(rst.is_some(), "capacity-exceeded must return RST");
+        let rst = rst.unwrap();
+        assert_eq!(rst[34 + 13], 0x14, "RST|ACK flags expected");
     }
 }
