@@ -336,6 +336,17 @@ impl NetworkDatapath {
                         send_to_guest(frame_sink.as_ref(), &guest_async, &ack, &mut write_queue);
                     }
 
+                    // Handshake intercept: complete in-progress shim handshakes
+                    // (guest ACK → PassiveOpen promotion, guest SYN-ACK →
+                    // ActiveOpen promotion). Frames that match are consumed
+                    // here and never reach smoltcp.
+                    let hs_replies = device.drain_handshake(|frame_data| {
+                        tcp_bridge.try_complete_handshake(frame_data)
+                    });
+                    for reply in hs_replies {
+                        send_to_guest(frame_sink.as_ref(), &guest_async, &reply, &mut write_queue);
+                    }
+
                     // Process intercepted frames (DHCP, DNS, UDP, ICMP).
                     let intercepted = device.take_intercepted();
                     for intercepted_frame in &intercepted {
@@ -356,12 +367,15 @@ impl NetworkDatapath {
                         );
                     }
 
-                    // Gate TCP SYN frames: start host connect, hold SYN
-                    // until connect completes.
+                    // New outbound SYNs: route to the hand-rolled handshake
+                    // synthesizer. No more smoltcp listen sockets / gate_syns
+                    // pipeline — the shim owns this path end-to-end and will
+                    // emit the SYN-ACK via poll_handshakes once the async
+                    // host connect resolves.
                     let gated_syns = device.take_gated_syns();
-                    if !gated_syns.is_empty() {
-                        let rst_frames = tcp_bridge.gate_syns(&gated_syns, gateway_mac);
-                        for rst in rst_frames {
+                    let gmac = guest_mac.unwrap_or([0xFF; 6]);
+                    for syn in &gated_syns {
+                        if let Some(rst) = tcp_bridge.handle_outbound_syn(&syn.frame, gateway_mac, gmac) {
                             send_to_guest(frame_sink.as_ref(), &guest_async, &rst, &mut write_queue);
                         }
                     }
@@ -432,14 +446,15 @@ impl NetworkDatapath {
             }
 
             // ── Common tail: run on every iteration regardless of which
-            //    branch fired. This ensures smoltcp retransmissions,
+            //    branch fired. This ensures handshake retransmissions,
             //    tcp_bridge relay, and frame flushing are never starved.
 
-            // 1. Poll pending SYN gate entries — may inject SYN frames into
-            //    device rx_queue and create listen sockets, or produce RST frames.
-            let rst_frames = tcp_bridge.poll_pending_syns(&mut device, &mut sockets, gateway_mac);
-            for rst in rst_frames {
-                send_to_guest(frame_sink.as_ref(), &guest_async, &rst, &mut write_queue);
+            // 1. Drive the hand-rolled handshake synthesizer. Emits SYN-ACKs
+            //    when host connects complete (PassiveOpen), SYNs for
+            //    active-open (ActiveOpen), and retransmits under loss.
+            let hs_frames = tcp_bridge.poll_handshakes();
+            for frame in hs_frames {
+                send_to_guest(frame_sink.as_ref(), &guest_async, &frame, &mut write_queue);
             }
 
             // 1.5. Drain inbound listener commands so `cmd_rx.recv()` cannot be

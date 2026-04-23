@@ -1640,65 +1640,46 @@ impl TcpBridge {
         true
     }
 
-    /// Initiates an inbound TCP connection: creates a smoltcp socket that
-    /// actively connects to the guest, and spawns a relay task for the
-    /// already-accepted host `TcpStream`.
+    /// Initiates an inbound TCP connection using the hand-rolled handshake
+    /// synthesizer. Allocates an ephemeral gateway port and registers an
+    /// ActiveOpen handshake; the SYN toward the guest is emitted on the
+    /// next `poll_handshakes` call.
     ///
     /// Called when `InboundListenerManager` accepts a new host connection.
+    ///
+    /// The `iface`/`sockets` parameters are retained for API compatibility
+    /// during the smoltcp→shim transition and will be removed once smoltcp
+    /// is deleted.
     pub fn initiate_inbound(
         &mut self,
         container_port: u16,
         stream: tokio::net::TcpStream,
         guest_ip: Ipv4Addr,
         gateway_ip: Ipv4Addr,
-        iface: &mut Interface,
-        sockets: &mut SocketSet<'_>,
+        _iface: &mut Interface,
+        _sockets: &mut SocketSet<'_>,
     ) {
-        let eph_port = self.allocate_ephemeral();
-
-        let rx_buf = tcp::SocketBuffer::new(vec![0u8; SOCKET_BUF_SIZE]);
-        let tx_buf = tcp::SocketBuffer::new(vec![0u8; SOCKET_BUF_SIZE]);
-        let mut sock = tcp::Socket::new(rx_buf, tx_buf);
-        sock.set_nagle_enabled(false);
-        sock.set_ack_delay(None);
-
-        let local_ep = IpEndpoint::new(gateway_ip.into(), eph_port);
-        let remote_ep = IpEndpoint::new(guest_ip.into(), container_port);
-
-        if let Err(e) = sock.connect(iface.context(), remote_ep, local_ep) {
-            tracing::warn!("TCP bridge: inbound connect to guest:{container_port} failed: {e:?}");
+        let Ok(std_stream) = stream.into_std() else {
+            tracing::warn!(
+                "TCP bridge: inbound stream into_std() failed for guest:{container_port}"
+            );
             return;
-        }
+        };
 
-        let handle = sockets.add(sock);
+        let eph_port = self.allocate_ephemeral();
+        let flow_key = SynFlowKey {
+            src_ip: guest_ip,
+            src_port: container_port,
+            dst_ip: gateway_ip,
+            dst_port: eph_port,
+        };
 
-        let (h2g_tx, h2g_rx) = mpsc::channel::<Vec<u8>>(HOST_TO_GUEST_CHANNEL);
-        let (g2h_tx, g2h_rx) = mpsc::channel::<Vec<u8>>(GUEST_TO_HOST_CHANNEL);
-
-        // Spawn a task that relays between the already-connected host TcpStream
-        // and the channels. Same pattern as host_conn_task but the stream is
-        // already connected.
-        tokio::spawn(inbound_host_relay(stream, h2g_tx, g2h_rx));
-
-        let guest_addr = SocketAddr::V4(SocketAddrV4::new(guest_ip, container_port));
-
-        self.connections.insert(
-            handle,
-            BridgedConn {
-                handle,
-                remote: guest_addr,
-                host_to_guest_rx: h2g_rx,
-                guest_to_host_tx: Some(g2h_tx),
-                host_eof: false,
-                host_disconnected: false,
-                pending_send: None,
-                held_stream: None,
-                flow_key: None,
-            },
-        );
+        let gw_mac = self.fast_path_gateway_mac;
+        let gmac = self.fast_path_guest_mac.unwrap_or([0xFF; 6]);
+        self.initiate_active_handshake(flow_key, std_stream, gw_mac, gmac);
 
         tracing::debug!(
-            "TCP bridge: inbound connect initiated  gw:{eph_port} → guest:{container_port}"
+            "TCP bridge: inbound ActiveOpen registered gw:{eph_port} → guest:{container_port}"
         );
     }
 
@@ -2338,68 +2319,6 @@ async fn host_conn_task(
             tracing::debug!("TCP bridge: host write {} bytes to {remote}", data.len());
             if let Err(e) = writer.write_all(&data).await {
                 tracing::debug!("TCP bridge: host write error for {remote}: {e}");
-                break;
-            }
-        }
-    });
-
-    let _ = tokio::join!(read_task, write_task);
-}
-
-/// Relays data between an already-connected host TcpStream and channels,
-/// for inbound (host→guest) connections where the stream is already accepted.
-async fn inbound_host_relay(
-    stream: tokio::net::TcpStream,
-    h2g_tx: mpsc::Sender<Vec<u8>>,
-    mut g2h_rx: mpsc::Receiver<Vec<u8>>,
-) {
-    let peer = stream
-        .peer_addr()
-        .map_or_else(|_| "unknown".into(), |a| a.to_string());
-    tracing::debug!("TCP bridge: inbound relay started for {peer}");
-
-    let (mut reader, mut writer) = stream.into_split();
-
-    let read_task = {
-        let h2g_tx = h2g_tx.clone();
-        let peer = peer.clone();
-        tokio::spawn(async move {
-            let mut buf = vec![0u8; 262_144];
-            loop {
-                match reader.read(&mut buf).await {
-                    Ok(0) => {
-                        tracing::debug!("TCP bridge: inbound host EOF for {peer}");
-                        let _ = h2g_tx.send(Vec::new()).await;
-                        break;
-                    }
-                    Ok(n) => {
-                        tracing::debug!("TCP bridge: inbound host read {n} bytes from {peer}");
-                        if h2g_tx.send(buf[..n].to_vec()).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!("TCP bridge: inbound host read error for {peer}: {e}");
-                        break;
-                    }
-                }
-            }
-        })
-    };
-
-    let write_task = tokio::spawn(async move {
-        while let Some(data) = g2h_rx.recv().await {
-            if data.is_empty() {
-                tracing::debug!("TCP bridge: inbound guest EOF for {peer}");
-                let _ = writer.shutdown().await;
-                break;
-            }
-            tracing::debug!(
-                "TCP bridge: inbound host write {} bytes to {peer}",
-                data.len()
-            );
-            if let Err(e) = writer.write_all(&data).await {
-                tracing::debug!("TCP bridge: inbound host write error for {peer}: {e}");
                 break;
             }
         }
@@ -3220,10 +3139,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initiate_inbound_creates_connecting_socket() {
+    async fn initiate_inbound_registers_active_handshake() {
         let mut device = SmoltcpDevice::new(0, GW_IP, 1500);
         let (mut iface, mut sockets) = make_iface_and_sockets(&mut device);
         let mut bridge = TcpBridge::new(GW_IP);
+        bridge.set_fast_path_macs(GW_MAC, GUEST_MAC);
 
         // Create a pair of connected TcpStreams for the host-side stream.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3234,21 +3154,29 @@ mod tests {
 
         bridge.initiate_inbound(80, stream, GUEST_IP, GW_IP, &mut iface, &mut sockets);
 
+        // Inbound now uses the shim's ActiveOpen path — no smoltcp socket.
         assert_eq!(
-            bridge.active_count(),
+            bridge.handshake_count(),
             1,
-            "Should have one inbound connection"
+            "Should register one ActiveOpen handshake"
         );
 
-        // The socket should be in SynSent state (attempting connect to guest).
-        let (handle, conn) = bridge.connections.iter().next().unwrap();
-        let sock = sockets.get_mut::<tcp::Socket>(*handle);
-        assert!(
-            sock.is_open(),
-            "Socket should be open after connect; state={:?}",
-            sock.state()
+        let (key, hs) = bridge.handshake_conns.iter().next().unwrap();
+        assert_eq!(hs.role, HandshakeRole::ActiveOpen);
+        assert_eq!(
+            key.src_ip, GUEST_IP,
+            "flow_key src (guest view) must be guest IP"
         );
-        assert_eq!(conn.remote, SocketAddr::V4(SocketAddrV4::new(GUEST_IP, 80)));
+        assert_eq!(
+            key.src_port, 80,
+            "flow_key src_port must be the container port"
+        );
+        assert_eq!(key.dst_ip, GW_IP, "flow_key dst must be gateway IP");
+        assert!(
+            (INBOUND_EPHEMERAL_START..=INBOUND_EPHEMERAL_END).contains(&key.dst_port),
+            "flow_key dst_port must be a gateway ephemeral; got {}",
+            key.dst_port
+        );
     }
 
     #[tokio::test]

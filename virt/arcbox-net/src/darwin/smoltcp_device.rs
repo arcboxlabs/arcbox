@@ -270,6 +270,32 @@ impl SmoltcpDevice {
         ack_frames
     }
 
+    /// Filters handshake-completion frames from `rx_queue` before smoltcp sees them.
+    ///
+    /// Parallel to [`drain_fast_path`] but for frames that complete an
+    /// in-progress shim handshake (guest ACK → PassiveOpen completion, or
+    /// guest SYN-ACK → ActiveOpen completion). The callback returns
+    /// `Some(reply_frames)` if consumed (the final ACK for ActiveOpen, or
+    /// empty for PassiveOpen); `None` to leave the frame in the queue.
+    pub fn drain_handshake(
+        &mut self,
+        mut try_complete: impl FnMut(&[u8]) -> Option<Vec<Vec<u8>>>,
+    ) -> Vec<Vec<u8>> {
+        let mut reply_frames = Vec::new();
+
+        let mut i = 0;
+        while i < self.rx_queue.len() {
+            if let Some(replies) = try_complete(&self.rx_queue[i]) {
+                reply_frames.extend(replies);
+                self.rx_queue.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+
+        reply_frames
+    }
+
     /// Classifies a frame and routes it to the appropriate queue.
     fn classify_frame(&mut self, frame: FrameBuf, guest_mac: &mut Option<[u8; 6]>) {
         if frame.len() < ETH_HEADER_LEN {
