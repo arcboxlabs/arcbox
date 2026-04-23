@@ -639,16 +639,39 @@ impl VirtioNet {
             // Strip the virtio-net header after applying checksum offload.
             if packet_data.len() > VirtioNetHeader::SIZE {
                 let frame = &packet_data[VirtioNetHeader::SIZE..];
-                // SAFETY: `host_fd` is owned by the caller via `NetPort`;
-                // `frame` is a valid slice borrowed from `packet_data` for
-                // the duration of the write.
-                let n = unsafe {
-                    libc::write(host_fd, frame.as_ptr().cast::<libc::c_void>(), frame.len())
-                };
-                if n < 0 {
+                // Retry briefly on EAGAIN/ENOBUFS: the host-side socketpair
+                // peer (datapath / smoltcp) might be behind by a few frames
+                // under bulk bursts (iperf3 -R and similar). Without this
+                // retry, guest TCP sees silent packet loss and retransmits,
+                // collapsing throughput to under 1 MB/s while the fast-path
+                // can do ~1 GB/s.
+                let mut retries = 0;
+                loop {
+                    // SAFETY: `host_fd` is owned by the caller via `NetPort`;
+                    // `frame` is a valid slice borrowed from `packet_data`
+                    // for the duration of the write.
+                    let n = unsafe {
+                        libc::write(host_fd, frame.as_ptr().cast::<libc::c_void>(), frame.len())
+                    };
+                    if n >= 0 {
+                        break;
+                    }
                     let err = std::io::Error::last_os_error();
-                    if err.raw_os_error() != Some(libc::EAGAIN) {
-                        tracing::warn!("VirtioNet TX write failed: {err}");
+                    match err.raw_os_error() {
+                        Some(libc::EAGAIN | libc::ENOBUFS) if retries < 64 => {
+                            // Yield so the peer thread can drain, then retry.
+                            std::thread::yield_now();
+                            retries += 1;
+                        }
+                        Some(libc::EAGAIN | libc::ENOBUFS) => {
+                            // Peer is persistently slow — drop the frame.
+                            // Guest TCP will retransmit.
+                            break;
+                        }
+                        _ => {
+                            tracing::warn!("VirtioNet TX write failed: {err}");
+                            break;
+                        }
                     }
                 }
             }
