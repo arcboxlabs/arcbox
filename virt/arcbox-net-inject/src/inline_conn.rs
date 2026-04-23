@@ -64,21 +64,18 @@ pub fn write_inline_headers(buf: &mut [u8], conn: &InlineConn, payload_len: usiz
     let last_ack = conn.last_ack.load(Ordering::Relaxed);
     let tcp_total_len = 20 + payload_len;
     let ip_total_len = 20 + tcp_total_len;
-    let is_gso = payload_len > 1460; // Larger than standard MSS
 
     // -- Virtio-net header (12 bytes) --
     buf[0..12].fill(0);
+    // Always set NEEDS_CSUM so the guest kernel completes the TCP
+    // checksum from the pseudo-header-only value below. This covers
+    // both short (<= MSS) and large (> MSS) segments uniformly and
+    // avoids computing the full checksum in userspace.
+    buf[0] = 1; // flags = VIRTIO_NET_HDR_F_NEEDS_CSUM
+    buf[6..8].copy_from_slice(&34u16.to_le_bytes()); // csum_start (Eth14+IP20)
+    buf[8..10].copy_from_slice(&16u16.to_le_bytes()); // csum_offset (TCP csum field)
     // num_buffers = 1 (MRG_RXBUF)
     buf[10..12].copy_from_slice(&1u16.to_le_bytes());
-
-    if is_gso {
-        buf[0] = 1; // flags = NEEDS_CSUM
-        buf[1] = 1; // gso_type = GSO_TCPV4
-        buf[2..4].copy_from_slice(&34u16.to_le_bytes()); // hdr_len
-        buf[4..6].copy_from_slice(&1460u16.to_le_bytes()); // gso_size
-        buf[6..8].copy_from_slice(&34u16.to_le_bytes()); // csum_start
-        buf[8..10].copy_from_slice(&16u16.to_le_bytes()); // csum_offset
-    }
 
     // -- Ethernet header (14 bytes at offset 12) --
     let eth = 12;
