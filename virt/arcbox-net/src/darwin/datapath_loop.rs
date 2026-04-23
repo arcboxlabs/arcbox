@@ -178,6 +178,7 @@ impl NetworkDatapath {
 
         // Create the frame classifier wrapping the guest socketpair FD.
         let mut device = SmoltcpDevice::new(guest_fd.as_raw_fd(), gateway_ip, mtu);
+        device.set_gateway_mac(gateway_mac);
 
         // TCP shim: handshake synthesizer + fast-path data plane.
         let mut tcp_bridge = TcpBridge::new(gateway_ip);
@@ -295,13 +296,23 @@ impl NetworkDatapath {
                     // Handshake intercept: complete in-progress shim handshakes
                     // (guest ACK → PassiveOpen promotion, guest SYN-ACK →
                     // ActiveOpen promotion). Frames that match are consumed
-                    // here and never reach smoltcp.
+                    // here.
                     let hs_replies = device.drain_handshake(|frame_data| {
                         tcp_bridge.try_complete_handshake(frame_data)
                     });
                     for reply in hs_replies {
                         send_to_guest(frame_sink.as_ref(), &guest_async, &reply, &mut write_queue);
                     }
+
+                    // Flush ARP replies produced inline by the classifier.
+                    for reply in device.take_arp_replies() {
+                        send_to_guest(frame_sink.as_ref(), &guest_async, &reply, &mut write_queue);
+                    }
+
+                    // Discard any TCP frames left in the rx queue that didn't
+                    // match a fast-path or handshake entry — there is no
+                    // userspace TCP stack to consume them.
+                    device.clear_unmatched_rx();
 
                     // Process intercepted frames (DHCP, DNS, UDP, ICMP).
                     let intercepted = device.take_intercepted();
