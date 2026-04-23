@@ -633,23 +633,31 @@ impl TcpBridge {
                     // 2048-byte datagram limit.
                     let data = &conn.read_buf[..n];
                     if self.large_frames_enabled {
-                        // Large frame path with GSO: one frame per read (up to 32KB).
-                        // Uses partial (pseudo-header) checksum — the guest kernel
-                        // completes it per-segment during GSO segmentation.
-                        let data_frame = crate::ethernet::build_tcp_data_frame_partial_csum(
-                            &crate::ethernet::TcpFrameParams {
-                                src_ip: conn.remote_ip,
-                                dst_ip: conn.guest_ip,
-                                src_port: conn.remote_port,
-                                dst_port: conn.guest_port,
-                                seq: conn.our_seq,
-                                ack: conn.last_ack,
-                                window: 65535,
-                                src_mac: gw_mac,
-                                dst_mac: guest_mac,
-                            },
-                            data,
-                        );
+                        // Payload > MTU → use partial (pseudo-header only)
+                        // checksum and rely on the inject-thread's GSO path
+                        // to set NEEDS_CSUM so the guest kernel fills in
+                        // the TCP checksum per segment.
+                        //
+                        // Payload ≤ MTU → GSO won't apply and NEEDS_CSUM
+                        // stays unset, so the frame must carry a full,
+                        // correct TCP checksum.
+                        let large = ETH_HEADER_LEN + 40 + data.len() > 1500;
+                        let params = crate::ethernet::TcpFrameParams {
+                            src_ip: conn.remote_ip,
+                            dst_ip: conn.guest_ip,
+                            src_port: conn.remote_port,
+                            dst_port: conn.guest_port,
+                            seq: conn.our_seq,
+                            ack: conn.last_ack,
+                            window: 65535,
+                            src_mac: gw_mac,
+                            dst_mac: guest_mac,
+                        };
+                        let data_frame = if large {
+                            crate::ethernet::build_tcp_data_frame_partial_csum(&params, data)
+                        } else {
+                            crate::ethernet::build_tcp_data_frame(&params, data)
+                        };
                         conn.our_seq = conn.our_seq.wrapping_add(data.len() as u32);
                         frames.push(data_frame);
                     } else {
