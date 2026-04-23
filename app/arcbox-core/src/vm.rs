@@ -289,7 +289,13 @@ impl VmManager {
                 })
                 .collect(),
             bridge_nic_mac: Some(bridge_nic_mac_for_vm_id(&entry.info.id)),
-            backend: arcbox_vmm::VmBackend::default(),
+            // HV is the default on this branch — VZ path has separate bugs
+            // around proxy/fake-IP datapath; HV path is the target for the
+            // hv-vz-parity work (ABX-360..363). `VmBackend::default()` is
+            // `Auto`, which still dispatches to VZ when rosetta is enabled
+            // (default on Apple Silicon), so force HV explicitly until the
+            // rosetta default is resolved.
+            backend: arcbox_vmm::VmBackend::Hv,
         }
     }
 
