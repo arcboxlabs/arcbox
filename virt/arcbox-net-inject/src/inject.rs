@@ -228,7 +228,35 @@ impl RxInjectThread {
             let payload_buf = &mut buf[inline_conn::TOTAL_HDR_LEN..];
             match conn.stream.read(payload_buf) {
                 Ok(0) => {
+                    tracing::debug!(
+                        "inline {}:{}->{}:{} host EOF",
+                        conn.remote_ip,
+                        conn.remote_port,
+                        conn.guest_ip,
+                        conn.guest_port
+                    );
                     conn.host_eof = true;
+
+                    // Inject FIN+ACK so the guest half-closes its receive
+                    // side gracefully. Without this, guest writes after
+                    // host EOF hit Broken Pipe in tcp_bridge, the conn is
+                    // removed, and smoltcp replies with RST on the next
+                    // guest TX — surfacing as "connection reset by peer".
+                    inline_conn::write_fin_headers(buf, conn);
+                    conn.our_seq = conn.our_seq.wrapping_add(1); // FIN consumes 1 SEQ.
+
+                    let used_entry_off =
+                        self.queue.used_gpa as usize + 4 + ((*used_idx as usize) % q_size) * 8;
+                    self.guest_mem.write_u32(used_entry_off, head_idx as u32);
+                    self.guest_mem
+                        .write_u32(used_entry_off + 4, inline_conn::TOTAL_HDR_LEN as u32);
+
+                    std::sync::atomic::fence(Ordering::Release);
+                    *used_idx = used_idx.wrapping_add(1);
+                    self.guest_mem
+                        .write_u16(self.queue.used_gpa as usize + 2, *used_idx);
+
+                    *batch += 1;
                 }
                 Ok(n) => {
                     // Write 66-byte header inline (no allocation).

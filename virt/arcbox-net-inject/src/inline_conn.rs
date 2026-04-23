@@ -127,6 +127,66 @@ pub fn read_payload_to_guest(conn: &mut InlineConn, buf: &mut [u8]) -> std::io::
     conn.stream.read(buf)
 }
 
+/// Writes a FIN+ACK control frame (66 header bytes, no payload).
+///
+/// Used when the host stream has reached EOF so the guest closes
+/// gracefully instead of RST-ing on the next outbound write. Caller
+/// must increment `conn.our_seq` by 1 after injection (FIN consumes
+/// one sequence number, per RFC 793).
+pub fn write_fin_headers(buf: &mut [u8], conn: &InlineConn) -> usize {
+    if buf.len() < TOTAL_HDR_LEN {
+        return 0;
+    }
+
+    let last_ack = conn.last_ack.load(Ordering::Relaxed);
+    let tcp_total_len = 20; // TCP header only, no payload.
+    let ip_total_len = 20 + tcp_total_len;
+
+    // -- Virtio-net header (12 bytes) --
+    buf[0..12].fill(0);
+    buf[0] = 1; // VIRTIO_NET_HDR_F_NEEDS_CSUM
+    buf[6..8].copy_from_slice(&34u16.to_le_bytes()); // csum_start
+    buf[8..10].copy_from_slice(&16u16.to_le_bytes()); // csum_offset
+    buf[10..12].copy_from_slice(&1u16.to_le_bytes()); // num_buffers
+
+    // -- Ethernet --
+    let eth = 12;
+    buf[eth..eth + 6].copy_from_slice(&conn.guest_mac);
+    buf[eth + 6..eth + 12].copy_from_slice(&conn.gw_mac);
+    buf[eth + 12..eth + 14].copy_from_slice(&0x0800u16.to_be_bytes());
+
+    // -- IPv4 --
+    let ip = eth + 14;
+    buf[ip] = 0x45;
+    buf[ip + 1] = 0;
+    buf[ip + 2..ip + 4].copy_from_slice(&(ip_total_len as u16).to_be_bytes());
+    buf[ip + 4..ip + 6].fill(0);
+    buf[ip + 6..ip + 8].copy_from_slice(&0x4000u16.to_be_bytes());
+    buf[ip + 8] = 64;
+    buf[ip + 9] = 6;
+    buf[ip + 10..ip + 12].fill(0);
+    buf[ip + 12..ip + 16].copy_from_slice(&conn.remote_ip.octets());
+    buf[ip + 16..ip + 20].copy_from_slice(&conn.guest_ip.octets());
+    let ip_cksum = ipv4_header_checksum(&buf[ip..ip + 20]);
+    buf[ip + 10..ip + 12].copy_from_slice(&ip_cksum.to_be_bytes());
+
+    // -- TCP: FIN+ACK --
+    let tcp = ip + 20;
+    buf[tcp..tcp + 2].copy_from_slice(&conn.remote_port.to_be_bytes());
+    buf[tcp + 2..tcp + 4].copy_from_slice(&conn.guest_port.to_be_bytes());
+    buf[tcp + 4..tcp + 8].copy_from_slice(&conn.our_seq.to_be_bytes());
+    buf[tcp + 8..tcp + 12].copy_from_slice(&last_ack.to_be_bytes());
+    buf[tcp + 12] = 0x50; // data offset = 5 (20 bytes)
+    buf[tcp + 13] = 0x11; // FIN | ACK
+    buf[tcp + 14..tcp + 16].copy_from_slice(&65535u16.to_be_bytes());
+    buf[tcp + 16..tcp + 18].fill(0);
+    buf[tcp + 18..tcp + 20].fill(0);
+    let pseudo_cksum = tcp_pseudo_header_checksum(conn.remote_ip, conn.guest_ip, tcp_total_len);
+    buf[tcp + 16..tcp + 18].copy_from_slice(&pseudo_cksum.to_be_bytes());
+
+    TOTAL_HDR_LEN
+}
+
 // -- Inline helper functions (no allocation) --
 
 fn ipv4_header_checksum(header: &[u8]) -> u16 {
