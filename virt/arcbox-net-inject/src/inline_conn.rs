@@ -64,6 +64,7 @@ pub fn write_inline_headers(buf: &mut [u8], conn: &InlineConn, payload_len: usiz
     let last_ack = conn.last_ack.load(Ordering::Relaxed);
     let tcp_total_len = 20 + payload_len;
     let ip_total_len = 20 + tcp_total_len;
+    let eth_total_len = 14 + ip_total_len;
 
     // -- Virtio-net header (12 bytes) --
     buf[0..12].fill(0);
@@ -72,6 +73,15 @@ pub fn write_inline_headers(buf: &mut [u8], conn: &InlineConn, payload_len: usiz
     // both short (<= MSS) and large (> MSS) segments uniformly and
     // avoids computing the full checksum in userspace.
     buf[0] = 1; // flags = VIRTIO_NET_HDR_F_NEEDS_CSUM
+    // GSO: for frames bigger than a classic Ethernet MTU, advertise
+    // GSO_TCPV4 so the guest kernel segments at 1460-byte MSS boundaries.
+    // Without this, guests that stick to MTU=1500 (default when
+    // VIRTIO_NET_F_MTU isn't negotiated) drop oversized frames silently.
+    if eth_total_len > 1500 {
+        buf[1] = 1; // gso_type = VIRTIO_NET_HDR_GSO_TCPV4
+        buf[2..4].copy_from_slice(&34u16.to_le_bytes()); // hdr_len (Eth14+IP20)
+        buf[4..6].copy_from_slice(&1460u16.to_le_bytes()); // gso_size
+    }
     buf[6..8].copy_from_slice(&34u16.to_le_bytes()); // csum_start (Eth14+IP20)
     buf[8..10].copy_from_slice(&16u16.to_le_bytes()); // csum_offset (TCP csum field)
     // num_buffers = 1 (MRG_RXBUF)
