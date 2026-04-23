@@ -725,30 +725,70 @@ impl TcpBridge {
         stream.set_nonblocking(true).ok();
         stream.set_nodelay(true).ok();
 
-        // Defer inline promotion until the first guest frame arrives and
-        // try_fast_path_intercept syncs SEQ/ACK. Sending to the inject
-        // thread with our_seq=0 would make every injected segment arrive
-        // out-of-sequence (guest expects guest_ack, not 0) and TCP would
-        // discard the data as duplicate-ACKs — classic dropped tunnel.
         let last_ack_atomic = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(last_ack));
 
-        let (pending_inline_stream, pending_inline_sink) = if let Some(ref sink) = self.conn_sink {
+        // Decide whether to activate the inline inject thread up front or
+        // defer it.
+        //
+        // - our_seq != 0 (shim-synthesized handshake) — we know exact SEQ/ACK
+        //   at promotion time, so hand the cloned stream to the inject
+        //   thread immediately. This is the fast path: zero-copy host-read
+        //   directly into guest descriptors, matching the existing RX path.
+        // - our_seq == 0 (legacy smoltcp promotion) — smoltcp's ISN isn't
+        //   exposed, so `try_fast_path_intercept` must sync on the first
+        //   guest frame. The stream clone is stashed in pending_inline_*
+        //   and activated there.
+        let mut inline_owned = false;
+        let mut pending_inline_stream = None;
+        let mut pending_inline_sink = None;
+
+        if let Some(ref sink) = self.conn_sink {
             match stream.try_clone() {
                 Ok(cloned) => {
-                    tracing::info!(
-                        "Fast path: promoted {}:{} → {}:{} (inline pending sync)",
-                        key.src_ip,
-                        key.src_port,
-                        key.dst_ip,
-                        key.dst_port,
-                    );
-                    (Some(cloned), Some(std::sync::Arc::clone(sink)))
+                    if our_seq != 0 {
+                        let gw_mac = self.fast_path_gateway_mac;
+                        let guest_mac = self.fast_path_guest_mac.unwrap_or([0xFF; 6]);
+                        let promoted = crate::direct_rx::PromotedConn {
+                            stream: cloned,
+                            remote_ip: key.dst_ip,
+                            guest_ip: key.src_ip,
+                            remote_port: key.dst_port,
+                            guest_port: key.src_port,
+                            our_seq,
+                            last_ack: std::sync::Arc::clone(&last_ack_atomic),
+                            gw_mac,
+                            guest_mac,
+                        };
+                        if sink.send_conn(promoted) {
+                            inline_owned = true;
+                            tracing::info!(
+                                "Fast path: promoted INLINE {}:{} → {}:{} (seq={our_seq}, ack={last_ack})",
+                                key.src_ip,
+                                key.src_port,
+                                key.dst_ip,
+                                key.dst_port,
+                            );
+                        } else {
+                            tracing::warn!(
+                                "Fast path: inline sink full, falling back to channel path"
+                            );
+                        }
+                    } else {
+                        pending_inline_stream = Some(cloned);
+                        pending_inline_sink = Some(std::sync::Arc::clone(sink));
+                        tracing::info!(
+                            "Fast path: promoted {}:{} → {}:{} (inline pending sync)",
+                            key.src_ip,
+                            key.src_port,
+                            key.dst_ip,
+                            key.dst_port,
+                        );
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
                         "Fast path: try_clone failed ({e}), falling back to channel path"
                     );
-                    (None, None)
                 }
             }
         } else {
@@ -759,8 +799,7 @@ impl TcpBridge {
                 key.dst_ip,
                 key.dst_port,
             );
-            (None, None)
-        };
+        }
 
         self.fast_path_conns.insert(
             key,
@@ -775,7 +814,7 @@ impl TcpBridge {
                 guest_port: key.src_port,
                 read_buf: vec![0u8; 32768],
                 host_eof: false,
-                inline_owned: false,
+                inline_owned,
                 pending_inline_stream,
                 pending_inline_sink,
             },
