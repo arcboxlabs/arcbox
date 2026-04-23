@@ -402,28 +402,53 @@ impl TcpBridge {
         let payload_end = ip_end.min(frame.len());
         let payload_len = payload_end.saturating_sub(payload_start);
 
-        // Write payload to host stream (if any).
+        // Write payload to host stream (if any). Handle retransmits by
+        // only advancing `last_ack` when the segment extends previously
+        // acknowledged data; re-writing already-ACKed bytes to the host
+        // would corrupt the TLS stream on the peer side.
         if payload_len > 0 {
             use std::io::Write;
-            let payload = &frame[payload_start..payload_start + payload_len];
-            match conn.stream.write(payload) {
-                Ok(n) => {
-                    conn.set_last_ack(conn.last_ack.wrapping_add(n as u32));
-                    tracing::trace!(
-                        "Fast path TX: {src_ip}:{src_port}→{dst_ip}:{dst_port} {n} bytes"
-                    );
+            let seq_end = guest_seq.wrapping_add(payload_len as u32);
+            // seq_end > conn.last_ack (wrap-safe) means "segment carries
+            // at least one new byte". Otherwise the entire segment is a
+            // retransmit of data we already ACKed.
+            let is_new_data = seq_end.wrapping_sub(conn.last_ack) > 0
+                && seq_end.wrapping_sub(conn.last_ack) < 0x8000_0000;
+            if is_new_data {
+                let payload = &frame[payload_start..payload_start + payload_len];
+                match conn.stream.write(payload) {
+                    Ok(_n) => {
+                        conn.set_last_ack(seq_end);
+                        tracing::trace!(
+                            "Fast path TX: {src_ip}:{src_port}→{dst_ip}:{dst_port} wrote {payload_len} bytes"
+                        );
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        tracing::trace!(
+                            "Fast path TX: {src_ip}:{src_port}→{dst_ip}:{dst_port} WouldBlock"
+                        );
+                        return Some(Vec::new());
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                        // Peer closed; inject already relayed FIN. ACK at
+                        // TCP layer so the guest stops retransmitting.
+                        conn.set_last_ack(seq_end);
+                        tracing::debug!(
+                            "Fast path TX: {src_ip}:{src_port}→{dst_ip}:{dst_port} Broken pipe, draining {payload_len} bytes"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("Fast path TX write error: {e}");
+                        self.fast_path_conns.remove(&key);
+                        return None;
+                    }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // Non-blocking stream not ready. Don't ACK — guest will
-                    // retransmit. Don't remove the connection.
-                    tracing::trace!("Fast path TX: WouldBlock, guest will retransmit");
-                    return Some(Vec::new()); // Signal interception but no ACK frame.
-                }
-                Err(e) => {
-                    tracing::warn!("Fast path TX write error: {e}");
-                    self.fast_path_conns.remove(&key);
-                    return None;
-                }
+            } else {
+                // Duplicate/already-ACKed segment — skip write, re-ACK.
+                tracing::trace!(
+                    "Fast path TX: {src_ip}:{src_port}→{dst_ip}:{dst_port} retransmit (guest_seq={guest_seq}, last_ack={}, payload={payload_len})",
+                    conn.last_ack
+                );
             }
         }
 
