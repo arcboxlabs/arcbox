@@ -173,12 +173,36 @@ impl Vmm {
     /// end to the per-connection host port avoids that fd-number reuse while
     /// keeping the actual socket semantics unchanged.
     fn duplicate_client_vsock_fd(fd: OwnedFd, min_fd: RawFd) -> Result<OwnedFd> {
+        // Clamp `min_fd` below the current RLIMIT_NOFILE soft limit. Port
+        // numbers passed in as `min_fd` can legitimately reach ~65 k, but on
+        // macOS CI runners the soft limit defaults to ~2560, making a raw
+        // F_DUPFD_CLOEXEC return EINVAL. The caller only needs an fd number
+        // that avoids the recycled low range — any value well above the
+        // socketpair/tokio-registration churn band (say, fd > 1024) works.
+        let clamped_min = {
+            let mut rl = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: `getrlimit` writes a single `rlimit` struct; the raw
+            // pointer is valid for the duration of the call.
+            let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, std::ptr::from_mut(&mut rl)) };
+            if rc == 0 && (rl.rlim_cur as RawFd) > 128 {
+                // Reserve ~64 fds for the rest of the process; clamp min_fd
+                // to whichever is smaller.
+                let ceiling = (rl.rlim_cur as RawFd).saturating_sub(64);
+                min_fd.min(ceiling)
+            } else {
+                min_fd
+            }
+        };
+
         // SAFETY: `fd` is a live OwnedFd; fcntl(F_DUPFD_CLOEXEC) is a
         // read-only operation on the open file table and cannot cause UB.
-        let dup_fd = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, min_fd) };
+        let dup_fd = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, clamped_min) };
         if dup_fd < 0 {
             return Err(VmmError::Device(format!(
-                "vsock client fd dup failed: {}",
+                "vsock client fd dup failed: {} (clamped_min={clamped_min})",
                 std::io::Error::last_os_error()
             )));
         }
@@ -1676,9 +1700,15 @@ mod tests {
         let peer_fd = unsafe { OwnedFd::from_raw_fd(fds[1]) };
 
         let duplicated = Vmm::duplicate_client_vsock_fd(host_fd, 50_000).unwrap();
+        // The dup clamps `min_fd` below RLIMIT_NOFILE to stay portable across
+        // runners with a low soft limit (CI macOS defaults to ~2560). We
+        // only require that the result escapes the low socketpair-recycle
+        // band (fds 1–20 ish). A couple-hundred floor is safe on every
+        // environment we target.
         assert!(
-            duplicated.as_raw_fd() >= 50_000,
-            "duplicated fd should move out of the low recycled range"
+            duplicated.as_raw_fd() >= 512,
+            "duplicated fd should move out of the low recycled range (got {})",
+            duplicated.as_raw_fd(),
         );
 
         // SAFETY: fcntl F_GETFD is a pure query; EBADF is the expected result
