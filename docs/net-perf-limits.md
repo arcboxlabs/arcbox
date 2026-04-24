@@ -94,6 +94,75 @@ The 5-second `-P 2 -b 6G` run that showed "one flow 6 Gbps, other 275 Kbps" is a
 
 Host-side profile, not guest-side structural work. Specifically, check inject-thread CPU on the host and profile `try_fast_path_intercept` during `-P 2 -b 6G`.
 
+## Host-side profile (2026-04-24, follow-up)
+
+Sampled the daemon with `/usr/bin/sample` during both `-t 30` runs. Results below are per-thread active samples (total − wait-state syscalls) out of ~12,400 samples per thread over 15 s. Single core = 100 %.
+
+**P1 single-flow, receiver 29.5 Gbps:**
+
+| Thread | Active | % core |
+|---|---|---|
+| hv-vcpu-0 | 10844 | 88 % |
+| rx-inject | 1456 | 12 % |
+| tokio-rt-worker (busy A) | 952 | 8 % |
+| tokio-rt-worker (busy B) | 879 | 7 % |
+| tokio-rt-worker (busy C) | 163 | 1 % |
+| **Total active** | **14502** | **118 %** |
+
+**P2 dual-flow `-b 6G`, receiver 10.9 Gbps:**
+
+| Thread | Active | % core |
+|---|---|---|
+| hv-vcpu-0 | 8297 | 67 % |
+| **rx-inject** | **4418** | **36 %** |
+| hv-vcpu-1/2/3 | ~980 | 8 % combined |
+| tokio-rt-worker (3 workers combined) | ~730 | 6 % combined |
+| **Total active** | **~15000** | **121 %** |
+
+Both runs burn **≈ 120 % of one core**. P1 delivers 29.5 Gbps with that budget; P2 delivers 10.9 Gbps. **Same CPU, 2.7× less throughput.** That rules out every hypothesis that starts with "we need more CPU cycles" — multi-queue, tokio restructuring, work-stealing — none of those add throughput when the budget isn't the constraint.
+
+### What shifted between P1 and P2
+
+- `hv-vcpu-0` dropped from 88 % to 67 %: guest is doing **less** work per second under P2 (fewer bytes moved, fewer TCP transitions).
+- `rx-inject` **tripled** from 12 % to 36 %.
+- Tokio workers stayed trivial (<10 % combined in both cases). **ACK intercept is not the bottleneck.**
+
+### Where rx-inject's extra time went
+
+Hot leaves under the rx-inject thread (active samples, leaves only):
+
+| Function | P1 | P2 | factor |
+|---|---|---|---|
+| `readv` | 931 | 2277 | 2.4× |
+| `hv_vcpus_exit` | 91 | 1176 | **13×** |
+| `pthread_cond_signal` | 76 | 879 | 11× |
+| `hv_gic_set_spi` | — | 133 | — |
+| `Hv::Vm::set_spi` | — | 124 | — |
+| `Hv::Vm::interrupt_cpus` | — | 105 | — |
+| `Hv::Vcpu::interrupt` | — | 104 | — |
+
+IRQ-delivery-related functions — `hv_vcpus_exit`, `hv_gic_set_spi`, `Hv::Vm::set_spi`, `Hv::Vm::interrupt_cpus`, `Hv::Vcpu::interrupt`, `pthread_cond_signal` — account for **~2500 samples** under P2 vs ~170 under P1. The inject thread is spending **~15× more time delivering interrupts into the guest** under dual-flow.
+
+### Root cause
+
+GSO RX-merge coalesces only within a single TCP flow. One flow of 29 Gbps fits into a few dozen giant 60 KB frames per millisecond — each inject cycle moves ~60 KB and fires one IRQ for the whole batch. Two flows at 5–6 Gbps each cannot cross-merge, so the frame count per unit throughput roughly doubles, and every extra frame carries the full IRQ-delivery cost (GIC SPI write, vCPU exit signal, pthread wakeup).
+
+The cap at ≈ 10–12 Gbps combined is where the per-IRQ cost in `hv_vcpus_exit` + `hv_gic_set_spi` eats the remaining headroom.
+
+### What this invalidates
+
+- **Multi-queue virtio-net**: the guest has CPU headroom (exp 3 on the guest side showed 67 % idle on CPU0). Splitting onto more vCPUs doesn't reduce the *per-IRQ* host-side cost, which is where the hot leaves live.
+- **Tokio restructuring / Phase D sync datapath**: tokio workers are trivially loaded in both cases. They are not the bottleneck.
+- **Ring size**: already ruled out.
+
+### What actually remains
+
+- **`VIRTIO_F_EVENT_IDX` IRQ suppression.** We already write `avail_event` in `flush_interrupt` but then unconditionally fire: `// Unconditionally fire interrupt. EVENT_IDX suppression can be added later once the basic path is validated.` (`virt/arcbox-net-inject/src/inject.rs`). Consulting the guest's `used_event_idx` before firing lets us skip 50–90 % of IRQs when the guest is already polling. This directly attacks the hot leaves.
+- **Longer `COALESCE_TIMEOUT`.** Currently 200 µs. Bumping to 500 µs or dynamically scaling under load trades tail latency for fewer IRQs. Easy knob.
+- **Avoid the `pthread_cond_signal` hop.** The inject-thread → vCPU wakeup currently goes `set_interrupt_status + pthread_cond_signal`. If the vCPU is already running (`Hv::Vcpu::run`) we only need `hv_vcpus_exit`; the `pthread_cond_signal` is redundant and shows up at 879 samples in P2.
+
+EVENT_IDX is the direct target of the signature and already scaffolded; it should be tried first.
+
 ## Reproducer
 
 ```bash
