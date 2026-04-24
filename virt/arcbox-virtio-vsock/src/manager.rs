@@ -539,9 +539,40 @@ impl VsockHostConnections for VsockConnectionManager {
                 conn.mark_peer_no_recv();
             }
         }
-        // `VSOCK_SHUTDOWN_F_SEND` alone is purely informational — the peer
-        // won't send more, but we keep the fd open so the host side can still
-        // drain any in-flight data and send its own traffic if it wants to.
+        // `VSOCK_SHUTDOWN_F_SEND`: guest will not send any more data. Propagate
+        // the half-close to the daemon-side fd by shutting down the write side
+        // of the internal socketpair end — the daemon's `read(fds[0])` then
+        // returns EOF. The reverse direction (daemon→guest writes) stays open
+        // so the host can drain any in-flight bytes and finish the session.
+        //
+        // Without this, the daemon's RawFdStream poll_read never observes the
+        // guest's half-close and `copy_bidirectional` stalls forever. This
+        // manifests as `docker run <image>` (foreground attach) hanging after
+        // the container exits: dockerd closes its end of attach, the guest
+        // agent sends OP_SHUTDOWN F_SEND, but the daemon-side bridge never
+        // learns about it and the Docker CLI waits indefinitely for EOF.
+        if flags & VSOCK_SHUTDOWN_F_SEND != 0 {
+            if let Some(conn) = self.connections.get(&id) {
+                let fd = conn.internal_fd.as_raw_fd();
+                // SAFETY: `fd` is borrowed from an `OwnedFd` held by the
+                // connection map; it remains valid for the duration of this
+                // call.
+                let r = unsafe { libc::shutdown(fd, libc::SHUT_WR) };
+                if r != 0 {
+                    let err = std::io::Error::last_os_error();
+                    // ENOTCONN is benign — peer already tore down. Anything
+                    // else is worth flagging but not fatal.
+                    if err.raw_os_error() != Some(libc::ENOTCONN) {
+                        tracing::warn!(
+                            guest_port,
+                            host_port,
+                            "shutdown(internal_fd, SHUT_WR) for F_SEND failed: {}",
+                            err,
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -821,6 +852,44 @@ mod tests {
             !conn.peer_no_recv(),
             "F_SEND alone does not block host→peer RW"
         );
+    }
+
+    #[test]
+    fn shutdown_send_bit_propagates_eof_to_daemon_fd() {
+        // Regression for ABX-372: F_SEND half-close must translate into a
+        // SHUT_WR on the internal socketpair end so the daemon-side fd reads
+        // EOF. Without this, the Docker attach bridge (`copy_bidirectional`)
+        // stalls forever after the container exits.
+        use std::io::Read;
+        use std::os::fd::IntoRawFd;
+
+        let mut mgr = VsockConnectionManager::new();
+        let (daemon_end, internal) = make_socketpair();
+        let (id, _rx) = mgr.allocate(1024, 3, internal);
+
+        // Wrap the daemon end in a blocking `UnixStream` for `read`.
+        let mut daemon_stream =
+            unsafe { std::os::unix::net::UnixStream::from_raw_fd(daemon_end.into_raw_fd()) };
+        // Bound the read so a regression doesn't hang the test runner.
+        daemon_stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+
+        // Before the half-close, the daemon's read blocks. After F_SEND
+        // handling, it must return 0 (EOF).
+        mgr.handle_shutdown(id.guest_port, id.host_port, VSOCK_SHUTDOWN_F_SEND);
+
+        let mut buf = [0u8; 8];
+        let n = daemon_stream
+            .read(&mut buf)
+            .expect("read on daemon fd should not error");
+        assert_eq!(n, 0, "daemon fd must read EOF after F_SEND propagation");
+
+        // Reverse direction stays open: daemon can still write to the peer.
+        use std::io::Write;
+        daemon_stream
+            .write_all(b"still-alive")
+            .expect("daemon→internal write should still succeed");
     }
 
     #[test]
