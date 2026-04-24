@@ -560,9 +560,11 @@ impl VsockHostConnections for VsockConnectionManager {
                 let r = unsafe { libc::shutdown(fd, libc::SHUT_WR) };
                 if r != 0 {
                     let err = std::io::Error::last_os_error();
-                    // ENOTCONN is benign — peer already tore down. Anything
-                    // else is worth flagging but not fatal.
-                    if err.raw_os_error() != Some(libc::ENOTCONN) {
+                    // ENOTCONN / EINVAL are benign — peer already tore down,
+                    // or the write side was already shut (repeat F_SEND).
+                    // Match the pattern used by the daemon-side shutdown in
+                    // `rpc/arcbox-transport/src/vsock/stream.rs`.
+                    if !matches!(err.raw_os_error(), Some(libc::ENOTCONN | libc::EINVAL)) {
                         tracing::warn!(
                             guest_port,
                             host_port,
