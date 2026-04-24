@@ -55,6 +55,7 @@ struct StatusOutput {
     shell_init: ComponentStatus,
     profile_injected: ComponentStatus,
     completions: ComponentStatus,
+    docker_plugins: ComponentStatus,
 }
 
 /// Per-component installation status.
@@ -143,6 +144,17 @@ async fn install(format: OutputFormat) -> Result<()> {
     //     Tools may be in the app bundle (xbin/) or ~/.arcbox/runtime/bin/.
     let docker_tools_linked = link_docker_tools_to_user_bin(&exe, &bin).await;
 
+    // 2c. Register docker-compose / docker-buildx as Docker CLI plugins so
+    //     `docker compose` (space-separated) and `docker buildx` resolve
+    //     the same binaries as `docker-compose` / `docker-buildx` do on
+    //     $PATH. See `cli_plugins` module docs for the rationale.
+    let plugins_registered = match super::cli_plugins::default_docker_config_dir() {
+        Ok(docker_cfg) => super::cli_plugins::register(&bin, &docker_cfg)
+            .await
+            .unwrap_or_default(),
+        Err(_) => super::cli_plugins::Outcome::default(),
+    };
+
     // 3. Write shell init scripts.
     write_shell_init_scripts(&shell).await?;
 
@@ -161,6 +173,7 @@ async fn install(format: OutputFormat) -> Result<()> {
                     "installed": true,
                     "bin": symlink_path.display().to_string(),
                     "docker_tools": docker_tools_linked,
+                    "docker_plugins": plugins_registered,
                     "shell_init": shell.display().to_string(),
                     "completions": comp.display().to_string(),
                     "profile": profile_path.as_ref().map(|p| p.display().to_string()),
@@ -181,6 +194,12 @@ async fn install(format: OutputFormat) -> Result<()> {
                 println!(
                     "  Docker:      {docker_tools_linked} tools linked to {}",
                     bin.display()
+                );
+            }
+            let plugin_count = plugins_registered.symlinks.len();
+            if plugin_count > 0 || plugins_registered.config_updated {
+                println!(
+                    "  CLI plugins: {plugin_count} registered (`docker compose` / `docker buildx`)"
                 );
             }
             println!("  Shell init:  {}", shell.display());
@@ -206,6 +225,15 @@ async fn uninstall(format: OutputFormat) -> Result<()> {
     let shell = shell_dir()?;
     let comp = completions_dir()?;
 
+    // Unregister Docker CLI plugins first — while `bin` still exists, so the
+    // symlink-target ownership check can resolve. Idempotent and non-fatal.
+    let plugins_unregistered = match super::cli_plugins::default_docker_config_dir() {
+        Ok(docker_cfg) => super::cli_plugins::unregister(&bin, &docker_cfg)
+            .await
+            .unwrap_or_default(),
+        Err(_) => super::cli_plugins::Outcome::default(),
+    };
+
     // Remove directories.
     remove_dir_if_exists(&bin).await;
     remove_dir_if_exists(&shell).await;
@@ -221,6 +249,7 @@ async fn uninstall(format: OutputFormat) -> Result<()> {
                 "{}",
                 serde_json::to_string(&serde_json::json!({
                     "uninstalled": true,
+                    "docker_plugins": plugins_unregistered,
                     "profile_cleaned": removed_from.as_ref().map(|p| p.display().to_string()),
                 }))?
             );
@@ -228,6 +257,12 @@ async fn uninstall(format: OutputFormat) -> Result<()> {
         OutputFormat::Quiet => {}
         OutputFormat::Table => {
             println!("ArcBox CLI shell integration removed.");
+            if !plugins_unregistered.symlinks.is_empty() || plugins_unregistered.config_updated {
+                println!(
+                    "  CLI plugins:  {} symlinks removed",
+                    plugins_unregistered.symlinks.len()
+                );
+            }
             if let Some(ref p) = removed_from {
                 println!("  Cleaned profile: {}", p.display());
             }
@@ -274,7 +309,34 @@ async fn status(format: OutputFormat) -> Result<()> {
     let zsh_comp = comp.join("zsh/_abctl");
     let comp_ok = tokio::fs::metadata(&zsh_comp).await.is_ok();
 
-    let all_ok = symlink_ok && init_ok && profile_injected && comp_ok;
+    // Docker CLI plugin registration — only considered "ok" if the compose
+    // binary is present in `bin` and at least one plugin is registered. If
+    // the compose binary isn't even on disk (e.g. developer CLI-only build),
+    // report as not-applicable rather than failing.
+    let compose_present = bin.join("docker-compose").exists();
+    let (plugin_status, plugin_detail) = match super::cli_plugins::default_docker_config_dir() {
+        Ok(docker_cfg) => {
+            let st = super::cli_plugins::status(&bin, &docker_cfg).await;
+            let ok = !compose_present || (!st.symlinked.is_empty() || st.extra_dirs_entry_present);
+            let detail = if compose_present {
+                Some(format!(
+                    "{} symlinks, extraDirs: {}",
+                    st.symlinked.len(),
+                    if st.extra_dirs_entry_present {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                ))
+            } else {
+                Some("skipped (compose binary not installed)".to_string())
+            };
+            (ok, detail)
+        }
+        Err(_) => (true, Some("skipped (no home directory)".to_string())),
+    };
+
+    let all_ok = symlink_ok && init_ok && profile_injected && comp_ok && plugin_status;
 
     match format {
         OutputFormat::Json => {
@@ -300,6 +362,11 @@ async fn status(format: OutputFormat) -> Result<()> {
                     path: Some(comp.display().to_string()),
                     detail: None,
                 },
+                docker_plugins: ComponentStatus {
+                    ok: plugin_status,
+                    path: None,
+                    detail: plugin_detail,
+                },
             };
             println!("{}", serde_json::to_string(&output)?);
         }
@@ -323,6 +390,11 @@ async fn status(format: OutputFormat) -> Result<()> {
                     .unwrap_or_default(),
             );
             print_check("Completions", comp_ok, &comp.display().to_string());
+            print_check(
+                "Docker plugins",
+                plugin_status,
+                plugin_detail.as_deref().unwrap_or(""),
+            );
             println!();
             if all_ok {
                 println!("Status: installed");

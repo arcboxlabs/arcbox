@@ -43,6 +43,7 @@ pub fn resolve_grpc_socket_path() -> PathBuf {
 }
 
 pub mod boot;
+pub mod cli_plugins;
 pub mod daemon;
 #[cfg(target_os = "macos")]
 pub mod dns;
