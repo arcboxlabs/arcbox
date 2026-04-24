@@ -371,14 +371,17 @@ mod linux {
             let mut flags: libc::c_long = 0;
             // Get current flags, then set NOCOW.
             // SAFETY: FS_IOC_GETFLAGS/SETFLAGS on a valid directory fd.
+            // NOTE: `libc::Ioctl` differs per target — `c_ulong` on
+            // Linux GNU, `c_int` on Linux musl. Using the typedef keeps
+            // the cast right for whichever target we cross-compile to.
             unsafe {
-                #[allow(clippy::cast_possible_truncation)]
-                let get_flags: libc::c_ulong = 0x8008_6601; // FS_IOC_GETFLAGS
-                #[allow(clippy::cast_possible_truncation)]
-                let set_flags: libc::c_ulong = 0x4008_6602; // FS_IOC_SETFLAGS
-                if libc::ioctl(fd, get_flags as libc::c_int, &mut flags) == 0 {
+                #[allow(clippy::cast_possible_wrap)]
+                let get_flags = 0x8008_6601u32 as libc::Ioctl; // FS_IOC_GETFLAGS
+                #[allow(clippy::cast_possible_wrap)]
+                let set_flags = 0x4008_6602u32 as libc::Ioctl; // FS_IOC_SETFLAGS
+                if libc::ioctl(fd, get_flags, &mut flags) == 0 {
                     flags |= FS_NOCOW_FL;
-                    if libc::ioctl(fd, set_flags as libc::c_int, &flags) == 0 {
+                    if libc::ioctl(fd, set_flags, &flags) == 0 {
                         tracing::debug!("set NOCOW on {}", path);
                     }
                 }
