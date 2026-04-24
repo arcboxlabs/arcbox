@@ -2425,10 +2425,33 @@ mod tests {
         let payload = vec![0xAB; FAST_PATH_GUEST_MSS * 2 + 128];
         accepted.write_all(&payload).await.unwrap();
 
-        let frames = bridge.poll_fast_path();
+        // Loopback TCP delivery from `write_all` to the peer's recv buffer is
+        // asynchronous at the kernel level. On a slow/busy CI runner a single
+        // immediate `poll_fast_path` can race the delivery and observe zero
+        // bytes (non-blocking read returns WouldBlock). Poll with a small
+        // backoff until we accumulate the whole payload or time out.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut frames: Vec<Vec<u8>> = Vec::new();
+        loop {
+            let batch = bridge.poll_fast_path();
+            let new_frames = !batch.is_empty();
+            frames.extend(batch);
+            let received: usize = frames
+                .iter()
+                .map(|f| f.len().saturating_sub(ETH_HEADER_LEN + 40))
+                .sum();
+            if received >= payload.len() || std::time::Instant::now() >= deadline {
+                break;
+            }
+            if !new_frames {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+
         assert!(
             frames.len() >= 3,
-            "large host payload should be segmented into multiple guest frames"
+            "large host payload should be segmented into multiple guest frames (got {})",
+            frames.len(),
         );
         assert!(
             frames
