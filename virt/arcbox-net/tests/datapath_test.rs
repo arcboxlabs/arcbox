@@ -172,7 +172,8 @@ async fn test_dhcp_full_cycle() {
 // ---------------------------------------------------------------------------
 
 /// Verifies that an ARP request injected through the socketpair is handled
-/// inline by the classifier (reply produced, not left in the rx queue).
+/// inline by the classifier: an ARP reply is generated, the guest MAC is
+/// learned, and the frame is not queued for the slow intercept path.
 #[tokio::test]
 async fn test_frame_classification_arp() {
     use arcbox_net::darwin::classifier::FrameClassifier;
@@ -181,6 +182,9 @@ async fn test_frame_classification_arp() {
     set_nonblocking(host_fd.as_raw_fd());
 
     let mut device = FrameClassifier::new(host_fd.as_raw_fd(), GATEWAY_IP, 1500);
+    // Inline ARP responder needs the gateway MAC to synthesize a reply;
+    // without it the request is silently dropped.
+    device.set_gateway_mac(GATEWAY_MAC);
     let mut guest_mac = None;
 
     // Write an ARP request from the guest side.
@@ -196,6 +200,40 @@ async fn test_frame_classification_arp() {
         guest_mac,
         Some(CLIENT_MAC),
         "guest MAC should be learned from ARP"
+    );
+
+    // An ARP reply should have been generated for the gateway.
+    let replies = device.take_arp_replies();
+    assert_eq!(replies.len(), 1, "expected exactly one ARP reply");
+    let reply = &replies[0];
+    assert!(
+        reply.len() >= 42,
+        "ARP reply must be at least 42 bytes (Ethernet + ARP header), got {}",
+        reply.len()
+    );
+    // Ethernet dst: requester's MAC.
+    assert_eq!(
+        &reply[0..6],
+        &CLIENT_MAC,
+        "reply dst MAC should be the requester"
+    );
+    // Ethernet src: gateway's MAC.
+    assert_eq!(
+        &reply[6..12],
+        &GATEWAY_MAC,
+        "reply src MAC should be the gateway"
+    );
+    // EtherType: 0x0806 (ARP).
+    assert_eq!(
+        &reply[12..14],
+        &[0x08, 0x06],
+        "reply EtherType should be 0x0806"
+    );
+    // ARP opcode at offset 20..22: 2 (reply).
+    assert_eq!(
+        &reply[20..22],
+        &[0x00, 0x02],
+        "ARP opcode should be 2 (reply)"
     );
 }
 
