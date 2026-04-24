@@ -64,8 +64,17 @@ const SHIM_WSCALE: u8 = 7;
 /// GSO are unaffected — MSS only bounds the *guest's* segment size.
 const SHIM_MSS: u16 = 1460;
 
-/// Monotonically advancing ISN source, stepped by a large odd constant for
-/// well-distributed values without a `rand` dependency (RFC 6528 style).
+/// Monotonically advancing ISN source. Stepped by a large odd constant
+/// (Knuth multiplicative) for well-distributed values without a `rand`
+/// dependency.
+///
+/// NOTE: this is *not* RFC 6528 secure. The sequence is deterministic and
+/// predictable given any observed ISN. In the VMM context the attack
+/// surface is limited to the co-resident guest, which already owns its
+/// own stack, so the shim treats ISN unpredictability as a
+/// non-requirement. If this code is ever reused outside that threat
+/// model, replace the counter with an RFC 6528-compliant construction
+/// (secret key + clock).
 static ISN_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x51_3C_A4_E7);
 
 fn next_isn() -> u32 {
@@ -858,7 +867,25 @@ impl TcpBridge {
                                 }
                             },
                             Ok(None) => {
+                                // Host connect refused / timed out. Emit
+                                // RST|ACK toward the guest so the originating
+                                // socket sees an immediate ECONNREFUSED
+                                // instead of waiting for SYN retransmits.
                                 tracing::debug!("Handshake shim: host connect failed for {key:?}");
+                                let rst = crate::ethernet::build_tcp_rst_frame(
+                                    &crate::ethernet::TcpFrameParams {
+                                        src_ip: key.dst_ip,
+                                        dst_ip: key.src_ip,
+                                        src_port: key.dst_port,
+                                        dst_port: key.src_port,
+                                        seq: 0,
+                                        ack: conn.peer_isn.wrapping_add(1),
+                                        window: 0,
+                                        src_mac: conn.gw_mac,
+                                        dst_mac: conn.guest_mac,
+                                    },
+                                );
+                                out.push(rst);
                                 to_abort.push(*key);
                                 continue;
                             }
@@ -1005,8 +1032,19 @@ impl TcpBridge {
 
         match conn.role {
             HandshakeRole::PassiveOpen => {
-                // Expect ACK set, SYN clear.
-                if flags & 0x12 != 0x10 {
+                // Expect ACK set, SYN clear, and RST/FIN both clear. Without
+                // the RST/FIN check, RST|ACK (0x14) and FIN|ACK (0x11) would
+                // pass the old `flags & 0x12 != 0x10` test and incorrectly
+                // promote an already-aborted guest flow into the fast path.
+                const SYN: u8 = 0x02;
+                const ACK: u8 = 0x10;
+                const RST: u8 = 0x04;
+                const FIN: u8 = 0x01;
+                if flags & (SYN | ACK) != ACK || flags & (RST | FIN) != 0 {
+                    if flags & RST != 0 {
+                        tracing::debug!("Handshake shim: RST during PassiveOpen for {key:?}");
+                        self.handshake_conns.remove(&key);
+                    }
                     return None;
                 }
                 // Guest is ACKing our SYN-ACK: ack should be our_isn + 1.
