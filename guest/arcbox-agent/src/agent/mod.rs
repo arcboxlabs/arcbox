@@ -1184,7 +1184,7 @@ mod linux {
             guard,
             req.start_if_needed,
             || do_ensure_runtime_start(),
-            do_ensure_runtime_probe(),
+            || do_ensure_runtime_probe(),
         )
         .await;
 
