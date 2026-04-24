@@ -109,7 +109,8 @@ pub fn inject_one_frame(
                 {
                     buf[0] = 1; // flags = VIRTIO_NET_HDR_F_NEEDS_CSUM
                     buf[1] = 1; // gso_type = VIRTIO_NET_HDR_GSO_TCPV4
-                    buf[2..4].copy_from_slice(&34u16.to_le_bytes()); // hdr_len (hint)
+                    // hdr_len = L2+L3+L4 total header = Eth14+IP20+TCP20 = 54.
+                    buf[2..4].copy_from_slice(&54u16.to_le_bytes());
                     buf[4..6].copy_from_slice(&1460u16.to_le_bytes()); // gso_size
                     buf[6..8].copy_from_slice(&34u16.to_le_bytes()); // csum_start (Eth14+IP20)
                     buf[8..10].copy_from_slice(&16u16.to_le_bytes()); // csum_offset (TCP csum field)

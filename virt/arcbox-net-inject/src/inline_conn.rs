@@ -81,7 +81,9 @@ pub fn write_inline_headers(buf: &mut [u8], conn: &InlineConn, payload_len: usiz
     // VIRTIO_NET_F_MTU isn't negotiated) drop oversized frames silently.
     if eth_total_len > 1500 {
         buf[1] = 1; // gso_type = VIRTIO_NET_HDR_GSO_TCPV4
-        buf[2..4].copy_from_slice(&34u16.to_le_bytes()); // hdr_len (Eth14+IP20)
+        // hdr_len = Eth14 + IP20 + TCP20 = 54 (total L2+L3+L4 header size;
+        // this is where the payload starts, per virtio-net spec).
+        buf[2..4].copy_from_slice(&54u16.to_le_bytes());
         buf[4..6].copy_from_slice(&1460u16.to_le_bytes()); // gso_size
     }
     buf[6..8].copy_from_slice(&34u16.to_le_bytes()); // csum_start (Eth14+IP20)
