@@ -494,7 +494,7 @@ mod agent {
 
         let _ = t_stdout.join();
         let _ = t_stderr.join();
-        let exit_code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+        let exit_code = child.wait().map_or(-1, |s| s.code().unwrap_or(-1));
         let _ = write_frame(
             &mut *writer.lock().unwrap(),
             MSG_EXIT,
