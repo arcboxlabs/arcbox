@@ -177,7 +177,7 @@ impl InboundRelay {
         let l4_start = ip_start + ihl;
 
         match protocol {
-            6 => false, // TCP is now handled by smoltcp
+            6 => false, // TCP is handled by TcpBridge, not the inbound relay
             17 => self.try_handle_udp_reply(frame, ip_start, l4_start),
             _ => false,
         }

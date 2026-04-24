@@ -338,8 +338,8 @@ pub struct TcpFrameParams {
 
 /// Builds a TCP ACK frame (no payload) to acknowledge data from the guest.
 ///
-/// Used by the TCP fast path to ACK guest data segments without going
-/// through smoltcp's TCP state machine.
+/// Used by the TCP fast path to ACK guest data segments using the
+/// hand-rolled TCP state machine in `TcpBridge`.
 #[must_use]
 pub fn build_tcp_ack_frame(p: &TcpFrameParams) -> Vec<u8> {
     let TcpFrameParams {
@@ -394,7 +394,7 @@ pub fn build_tcp_ack_frame(p: &TcpFrameParams) -> Vec<u8> {
 /// Builds a TCP data frame carrying payload from the host to the guest.
 ///
 /// Used by the TCP fast path to inject host TcpStream data into the guest
-/// without going through smoltcp's TCP state machine.
+/// via `TcpBridge`'s hand-rolled TCP state machine.
 #[must_use]
 pub fn build_tcp_data_frame(p: &TcpFrameParams, payload: &[u8]) -> Vec<u8> {
     let TcpFrameParams {

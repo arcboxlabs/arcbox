@@ -8,9 +8,9 @@
 //! - **DHCP** (UDP:67), **DNS** (UDP:53 to gateway), **UDP**, **ICMP** →
 //!   stored in the `intercepted` queue for the datapath loop
 //!
-//! There is no userspace TCP state machine here and no smoltcp dependency.
-//! The struct is still named `SmoltcpDevice` for now to limit downstream
-//! churn; a follow-up rename will drop the legacy prefix.
+//! There is no userspace TCP state machine here. Connections are driven by
+//! [`TcpBridge`](super::tcp_bridge) and the in-kernel guest stack; this
+//! module is purely a demultiplexer.
 
 use std::collections::VecDeque;
 use std::io;
@@ -41,9 +41,9 @@ const PROTO_UDP: u8 = 17;
 
 /// TCP SYN connection info extracted during frame classification.
 ///
-/// SYN frames are held back from smoltcp (`gated_syns`) until the host
-/// connect completes. The full frame is stored so it can be injected
-/// into the rx_queue later.
+/// SYN frames are held back (`gated_syns`) until the host connect
+/// completes. The full frame is stored so it can be injected into
+/// the rx_queue later.
 #[derive(Debug, Clone)]
 pub struct TcpSynInfo {
     pub dst_port: u16,
@@ -54,7 +54,7 @@ pub struct TcpSynInfo {
     pub frame: Vec<u8>,
 }
 
-/// An intercepted frame from the guest that should not go through smoltcp.
+/// An intercepted frame from the guest destined for a non-TCP handler.
 #[derive(Debug)]
 pub struct InterceptedFrame {
     pub frame: FrameBuf,
@@ -78,7 +78,7 @@ pub enum InterceptedKind {
 ///
 /// Reads Ethernet frames, responds to ARP inline, and routes TCP / UDP /
 /// ICMP into the appropriate queues for downstream handlers.
-pub struct SmoltcpDevice {
+pub struct FrameClassifier {
     /// Raw FD of the host end of the socketpair.
     fd: RawFd,
     /// Gateway IP for DNS interception.
@@ -88,7 +88,7 @@ pub struct SmoltcpDevice {
     /// TCP frames queued for downstream drains (fast-path intercept,
     /// handshake completion). Frames not matched by either drain are
     /// silently dropped on the next classifier iteration — there is no
-    /// generic TCP stack to consume them.
+    /// userspace TCP stack to consume them.
     rx_queue: VecDeque<FrameBuf>,
     /// Frames intercepted from the guest (DHCP, DNS, UDP, ICMP).
     intercepted: Vec<InterceptedFrame>,
@@ -109,7 +109,7 @@ pub struct SmoltcpDevice {
     mtu: usize,
 }
 
-impl SmoltcpDevice {
+impl FrameClassifier {
     /// Pool capacity: 4096 buffers. Each buffer is `MAX_PACKET_SIZE` (64 KiB)
     /// in the pool, so total resident = ~256 MiB. This is acceptable because:
     /// - One pool per VM (not per connection)
@@ -164,10 +164,10 @@ impl SmoltcpDevice {
         self.rx_queue.clear();
     }
 
-    /// Drains all available frames from the guest FD, classifying each as
-    /// either a smoltcp frame (ARP/TCP) or an intercepted frame.
+    /// Drains all available frames from the guest FD, classifying each
+    /// into its downstream queue (ARP reply / TCP rx_queue / intercepted).
     ///
-    /// Must be called before `iface.poll()` to feed smoltcp with new data.
+    /// Must be called at the top of each datapath loop tick.
     /// Also learns the guest MAC address from frame source addresses.
     pub fn drain_guest_fd(&mut self, guest_mac: &mut Option<[u8; 6]>) {
         loop {
@@ -198,14 +198,14 @@ impl SmoltcpDevice {
         std::mem::take(&mut self.gated_syns)
     }
 
-    /// Filters fast-path TCP data frames from `rx_queue` before smoltcp sees them.
+    /// Filters fast-path TCP data frames from `rx_queue`.
     ///
     /// For each frame in `rx_queue`, calls `try_intercept` with a reference to
     /// the frame data. If the callback returns `Some(ack_frame)`, the frame is
     /// removed from the queue and the ACK is collected for injection to the guest.
     ///
     /// Frames that are not intercepted (callback returns `None`) remain in the
-    /// queue for smoltcp to process normally.
+    /// queue for the handshake drain or eventual drop by `clear_unmatched_rx`.
     pub fn drain_fast_path(
         &mut self,
         mut try_intercept: impl FnMut(&[u8]) -> Option<Vec<u8>>,
@@ -231,7 +231,7 @@ impl SmoltcpDevice {
         ack_frames
     }
 
-    /// Filters handshake-completion frames from `rx_queue` before smoltcp sees them.
+    /// Filters handshake-completion frames from `rx_queue`.
     ///
     /// Parallel to [`drain_fast_path`] but for frames that complete an
     /// in-progress shim handshake (guest ACK → PassiveOpen completion, or
@@ -536,7 +536,7 @@ mod tests {
     #[test]
     fn classify_arp_generates_reply() {
         let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
-        let mut device = SmoltcpDevice::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
+        let mut device = FrameClassifier::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
         device.set_gateway_mac([0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0x01]);
         let mut guest_mac = None;
 
@@ -553,7 +553,7 @@ mod tests {
     #[test]
     fn classify_tcp_goes_to_rx_queue() {
         let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
-        let mut device = SmoltcpDevice::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
+        let mut device = FrameClassifier::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
         let mut guest_mac = None;
 
         device.classify_frame(FrameBuf::from(make_tcp_frame()), &mut guest_mac);
@@ -565,7 +565,7 @@ mod tests {
     #[test]
     fn classify_dhcp_intercepted() {
         let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
-        let mut device = SmoltcpDevice::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
+        let mut device = FrameClassifier::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
         let mut guest_mac = None;
 
         device.classify_frame(
@@ -581,7 +581,7 @@ mod tests {
     #[test]
     fn classify_dns_to_gateway_intercepted() {
         let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
-        let mut device = SmoltcpDevice::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
+        let mut device = FrameClassifier::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
         let mut guest_mac = None;
 
         device.classify_frame(
@@ -597,7 +597,7 @@ mod tests {
     #[test]
     fn classify_dns_to_external_is_udp() {
         let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
-        let mut device = SmoltcpDevice::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
+        let mut device = FrameClassifier::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
         let mut guest_mac = None;
 
         // DNS to 8.8.8.8 is regular UDP, not intercepted as DNS.
@@ -614,7 +614,7 @@ mod tests {
     #[test]
     fn classify_icmp_intercepted() {
         let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
-        let mut device = SmoltcpDevice::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
+        let mut device = FrameClassifier::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
         let mut guest_mac = None;
 
         device.classify_frame(FrameBuf::from(make_icmp_frame()), &mut guest_mac);
@@ -627,7 +627,7 @@ mod tests {
     #[test]
     fn classify_regular_udp_intercepted() {
         let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
-        let mut device = SmoltcpDevice::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
+        let mut device = FrameClassifier::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
         let mut guest_mac = None;
 
         device.classify_frame(
@@ -647,7 +647,8 @@ mod tests {
         set_nonblocking(host_fd.as_raw_fd());
 
         let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
-        let mut device = SmoltcpDevice::new(host_fd.as_raw_fd(), gateway_ip, DEFAULT_ETHERNET_MTU);
+        let mut device =
+            FrameClassifier::new(host_fd.as_raw_fd(), gateway_ip, DEFAULT_ETHERNET_MTU);
         device.set_gateway_mac([0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0x01]);
         let mut guest_mac = None;
 
@@ -684,7 +685,7 @@ mod tests {
     #[test]
     fn classify_tcp_syn_is_gated() {
         let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
-        let mut device = SmoltcpDevice::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
+        let mut device = FrameClassifier::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
         let mut guest_mac = None;
 
         // Build a TCP SYN frame (flags = 0x02).
@@ -712,7 +713,7 @@ mod tests {
     #[test]
     fn classify_tcp_non_syn_goes_to_rx_queue() {
         let gateway_ip = Ipv4Addr::new(192, 168, 64, 1);
-        let mut device = SmoltcpDevice::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
+        let mut device = FrameClassifier::new(0, gateway_ip, DEFAULT_ETHERNET_MTU);
         let mut guest_mac = None;
 
         // Build a TCP ACK frame (flags = 0x10).

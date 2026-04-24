@@ -640,7 +640,7 @@ impl VirtioNet {
             if packet_data.len() > VirtioNetHeader::SIZE {
                 let frame = &packet_data[VirtioNetHeader::SIZE..];
                 // Retry briefly on EAGAIN/ENOBUFS: the host-side socketpair
-                // peer (datapath / smoltcp) might be behind by a few frames
+                // peer (datapath classifier) might be behind by a few frames
                 // under bulk bursts (iperf3 -R and similar). Without this
                 // retry, guest TCP sees silent packet loss and retransmits,
                 // collapsing throughput to under 1 MB/s while the fast-path

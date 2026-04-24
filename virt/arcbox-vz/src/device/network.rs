@@ -14,7 +14,7 @@ use std::os::unix::io::RawFd;
 /// We round to 4000 to stay safely under the threshold.
 ///
 /// This reduces frame count by ~2.7x vs the default 1500, directly reducing
-/// per-frame overhead through the entire smoltcp datapath.
+/// per-frame overhead through the entire datapath.
 /// The enhanced MTU value set on VZ network devices when the selector is
 /// available (macOS 14+). Exported so the VMM can pass it to the datapath.
 pub const VZ_NETWORK_MTU: u64 = 4000;

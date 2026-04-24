@@ -1,7 +1,7 @@
 //! Network datapath creation for the HV backend.
 //!
-//! Contains `create_hv_network_datapath` (primary NIC1 socketpair + smoltcp
-//! datapath) and `create_hv_bridge_nic` (NIC2 vmnet bridge). Both are
+//! Contains `create_hv_network_datapath` (primary NIC1 socketpair + frame
+//! classifier datapath) and `create_hv_bridge_nic` (NIC2 vmnet bridge). Both are
 //! `impl Vmm` methods that set up socketpairs, configure socket options,
 //! and spawn async tasks for frame forwarding.
 
@@ -162,7 +162,7 @@ impl Vmm {
         };
 
         // 5. Build and spawn the datapath.
-        let net_mtu = arcbox_net::darwin::smoltcp_device::ENHANCED_ETHERNET_MTU;
+        let net_mtu = arcbox_net::darwin::classifier::ENHANCED_ETHERNET_MTU;
         let mut datapath = NetworkDatapath::new(
             host_fd,
             socket_proxy,

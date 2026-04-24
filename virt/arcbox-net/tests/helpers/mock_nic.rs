@@ -9,7 +9,7 @@ use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 
 /// Creates a `SOCK_DGRAM` socketpair and returns `(host_fd, guest_fd)`.
 ///
-/// The host FD is passed into `NetworkDatapath` (or `SmoltcpDevice`).
+/// The host FD is passed into `NetworkDatapath` (or `FrameClassifier`).
 /// The guest FD is used by the test to write/read raw Ethernet frames.
 pub fn mock_guest_nic() -> (OwnedFd, OwnedFd) {
     let mut fds: [i32; 2] = [0; 2];

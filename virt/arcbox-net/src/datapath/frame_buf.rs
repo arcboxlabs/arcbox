@@ -4,10 +4,10 @@
 //! `Vec<u8>` on the hot path with a pool-backed allocation that avoids the
 //! system allocator entirely (O(1) atomic CAS vs ~50-100 ns malloc).
 //!
-//! Code that produces frames from external sources (smoltcp TX, DNS replies,
-//! ARP construction) can still use `FrameBuf::from(vec)` to wrap an existing
-//! `Vec<u8>` without copying. The datapath treats both variants uniformly
-//! via `Deref<Target = [u8]>`.
+//! Code that produces frames from external sources (handshake synthesizer,
+//! DNS replies, ARP construction) can still use `FrameBuf::from(vec)` to
+//! wrap an existing `Vec<u8>` without copying. The datapath treats both
+//! variants uniformly via `Deref<Target = [u8]>`.
 
 use std::ops::Deref;
 use std::sync::Arc;
@@ -19,7 +19,8 @@ use super::pool::PacketPool;
 /// - `Pooled`: data lives in a pre-allocated [`PacketPool`] slot. On drop,
 ///   the slot is returned to the pool (lock-free). This is the fast path.
 /// - `Heap`: data lives in a regular `Vec<u8>`. Used for frames that
-///   originate outside the pool (smoltcp TX, manually constructed frames).
+///   originate outside the pool (handshake replies, manually constructed
+///   frames).
 pub enum FrameBuf {
     /// Pool-backed frame. Automatically freed on drop.
     Pooled {

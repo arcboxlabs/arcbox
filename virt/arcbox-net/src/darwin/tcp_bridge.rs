@@ -104,11 +104,10 @@ enum HandshakeRole {
 /// In-progress TCP handshake — tracked until the 3-way is complete, at
 /// which point the connection is promoted to `FastPathConn`.
 ///
-/// Unlike smoltcp's socket, this struct holds only the fields the shim
-/// actually needs: the flow key, peer options to mirror/record, the ISNs
-/// on both sides, and retransmit bookkeeping. No send/recv buffers, no
-/// sliding window state, no congestion control — those are the host and
-/// guest kernels' responsibility.
+/// The struct holds only the fields the shim actually needs: the flow key,
+/// peer options to mirror/record, the ISNs on both sides, and retransmit
+/// bookkeeping. No send/recv buffers, no sliding window state, no
+/// congestion control — those are the host and guest kernels' responsibility.
 #[allow(dead_code)] // `flow_key` mirrors the HashMap key; `peer_mss` reserved for frame sizing
 struct HandshakeConn {
     flow_key: SynFlowKey,
@@ -256,9 +255,9 @@ impl TcpBridge {
 
     /// Checks if a TCP frame matches a fast-path connection.
     ///
-    /// Called from `classify_ipv4` before the frame reaches smoltcp.
-    /// Returns `Some(ack_frame)` if the frame was handled (payload written
-    /// to host stream, ACK generated), or `None` if not a fast-path match.
+    /// Called from the classifier's `drain_fast_path`. Returns
+    /// `Some(ack_frame)` if the frame was handled (payload written to
+    /// host stream, ACK generated), or `None` if not a fast-path match.
     pub fn try_fast_path_intercept(&mut self, frame: &[u8]) -> Option<Vec<u8>> {
         if frame.len() < ETH_HEADER_LEN + 40 {
             return None; // Too short for ETH + IP + TCP minimum
@@ -543,9 +542,9 @@ impl TcpBridge {
 
     /// Promotes a connection to the fast path.
     ///
-    /// Called when a smoltcp connection reaches ESTABLISHED and has a
-    /// pre-connected host stream. The connection is removed from smoltcp
-    /// and data transfer bypasses the TCP state machine entirely.
+    /// Called when a shim handshake reaches ESTABLISHED and has a
+    /// pre-connected host stream. The connection is moved into
+    /// `fast_path_conns` and subsequent data bypasses handshake bookkeeping.
     pub fn promote_to_fast_path(
         &mut self,
         key: SynFlowKey,
