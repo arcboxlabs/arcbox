@@ -67,6 +67,7 @@ fn create_test_datapath() -> (NetworkDatapath, std::os::fd::OwnedFd, Cancellatio
         GUEST_IP,
         GATEWAY_MAC,
         cancel.clone(),
+        1500, // mtu
     );
 
     (datapath, guest_fd, cancel)
@@ -179,7 +180,7 @@ async fn test_frame_classification_arp() {
     let (host_fd, guest_fd) = mock_guest_nic();
     set_nonblocking(host_fd.as_raw_fd());
 
-    let mut device = SmoltcpDevice::new(host_fd.as_raw_fd(), GATEWAY_IP);
+    let mut device = SmoltcpDevice::new(host_fd.as_raw_fd(), GATEWAY_IP, 1500);
     let mut guest_mac = None;
 
     // Write an ARP request from the guest side.
@@ -207,7 +208,7 @@ async fn test_frame_classification_tcp_syn() {
     let (host_fd, guest_fd) = mock_guest_nic();
     set_nonblocking(host_fd.as_raw_fd());
 
-    let mut device = SmoltcpDevice::new(host_fd.as_raw_fd(), GATEWAY_IP);
+    let mut device = SmoltcpDevice::new(host_fd.as_raw_fd(), GATEWAY_IP, 1500);
     let mut guest_mac = None;
 
     let syn = build_tcp_syn(
@@ -237,7 +238,7 @@ async fn test_frame_classification_icmp() {
     let (host_fd, guest_fd) = mock_guest_nic();
     set_nonblocking(host_fd.as_raw_fd());
 
-    let mut device = SmoltcpDevice::new(host_fd.as_raw_fd(), GATEWAY_IP);
+    let mut device = SmoltcpDevice::new(host_fd.as_raw_fd(), GATEWAY_IP, 1500);
     let mut guest_mac = None;
 
     let icmp = build_icmp_echo(
@@ -266,7 +267,7 @@ async fn test_frame_classification_dhcp() {
     let (host_fd, guest_fd) = mock_guest_nic();
     set_nonblocking(host_fd.as_raw_fd());
 
-    let mut device = SmoltcpDevice::new(host_fd.as_raw_fd(), GATEWAY_IP);
+    let mut device = SmoltcpDevice::new(host_fd.as_raw_fd(), GATEWAY_IP, 1500);
     let mut guest_mac = None;
 
     let discover = build_dhcp_discover(CLIENT_MAC, 0x1234);
