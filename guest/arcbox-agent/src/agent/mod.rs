@@ -449,6 +449,57 @@ mod linux {
         Single(RpcResponse),
     }
 
+    /// Periodically runs `fstrim` on data mount points to reclaim sparse file
+    /// space on the host. First tick fires immediately to trim historical waste.
+    async fn fstrim_loop() {
+        let mut interval = tokio::time::interval(Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            for mount in [DOCKER_DATA_MOUNT_POINT, CONTAINERD_DATA_MOUNT_POINT] {
+                match std::process::Command::new("fstrim").arg(mount).status() {
+                    Ok(s) if s.success() => {
+                        tracing::info!("fstrim {} completed", mount);
+                    }
+                    Ok(s) => {
+                        tracing::debug!(
+                            "fstrim {} exited with code {}",
+                            mount,
+                            s.code().unwrap_or(-1)
+                        );
+                    }
+                    Err(e) => {
+                        tracing::debug!("fstrim {} failed: {}", mount, e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Runs `fstrim` on data mount points once (used by the DiskTrim RPC).
+    fn run_fstrim_now() -> String {
+        let mut results = Vec::new();
+        for mount in [DOCKER_DATA_MOUNT_POINT, CONTAINERD_DATA_MOUNT_POINT] {
+            match std::process::Command::new("fstrim")
+                .arg("-v")
+                .arg(mount)
+                .output()
+            {
+                Ok(output) if output.status.success() => {
+                    let msg = String::from_utf8_lossy(&output.stdout);
+                    results.push(format!("{}: {}", mount, msg.trim()));
+                }
+                Ok(output) => {
+                    let msg = String::from_utf8_lossy(&output.stderr);
+                    results.push(format!("{}: failed ({})", mount, msg.trim()));
+                }
+                Err(e) => {
+                    results.push(format!("{}: error ({})", mount, e));
+                }
+            }
+        }
+        results.join("; ")
+    }
+
     /// The Guest Agent.
     ///
     /// Listens on vsock and handles RPC requests from the host.
@@ -483,6 +534,9 @@ mod linux {
                     tracing::warn!("Kubernetes API proxy exited: {}", e);
                 }
             });
+
+            // Periodic fstrim to reclaim sparse file space on the host.
+            tokio::spawn(fstrim_loop());
 
             let mut listener =
                 bind_vsock_listener_with_retry(AGENT_PORT, "agent rpc listener").await?;
@@ -1014,6 +1068,7 @@ mod linux {
             }
             RpcRequest::Shutdown(req) => RequestResult::Single(handle_shutdown(req)),
             RpcRequest::MmapReadFile(req) => RequestResult::Single(handle_mmap_read_file(req)),
+            RpcRequest::DiskTrim(_) => RequestResult::Single(handle_disk_trim()),
         }
     }
 
@@ -1248,6 +1303,11 @@ mod linux {
 
     async fn handle_runtime_status(_req: RuntimeStatusRequest) -> RpcResponse {
         RpcResponse::RuntimeStatus(collect_runtime_status().await)
+    }
+
+    fn handle_disk_trim() -> RpcResponse {
+        let result = run_fstrim_now();
+        RpcResponse::DiskTrim(arcbox_protocol::agent::DiskTrimResponse { result })
     }
 
     fn kubernetes_control_lock() -> &'static Mutex<()> {
