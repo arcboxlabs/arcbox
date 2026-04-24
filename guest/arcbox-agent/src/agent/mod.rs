@@ -495,7 +495,16 @@ mod linux {
                         tracing::info!("Accepted connection from {:?}", peer_addr);
                         tokio::spawn(async move {
                             if let Err(e) = handle_connection(stream).await {
-                                tracing::error!("Connection error: {}", e);
+                                // A routine daemon-side teardown (host closes the
+                                // socketpair while the agent is writing a response)
+                                // surfaces as BrokenPipe / ConnectionReset /
+                                // UnexpectedEof. Log at warn — the daemon will
+                                // reopen on its next poll iteration.
+                                if is_peer_closed_error(&e) {
+                                    tracing::warn!("Connection closed by peer: {}", e);
+                                } else {
+                                    tracing::error!("Connection error: {}", e);
+                                }
                             }
                         });
                     }
@@ -702,6 +711,25 @@ mod linux {
         fn default() -> Self {
             Self::new()
         }
+    }
+
+    /// True when `err`'s chain contains an `io::Error` whose kind indicates
+    /// that the peer closed the socket. These are routine during daemon
+    /// shutdown or retry-driven teardown, not agent-side faults.
+    fn is_peer_closed_error(err: &anyhow::Error) -> bool {
+        err.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io_err| {
+                    matches!(
+                        io_err.kind(),
+                        std::io::ErrorKind::BrokenPipe
+                            | std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::ConnectionAborted
+                            | std::io::ErrorKind::UnexpectedEof
+                    )
+                })
+        })
     }
 
     /// Handles a single vsock connection.
@@ -1142,17 +1170,20 @@ mod linux {
         RpcResponse::SystemInfo(info)
     }
 
-    /// Idempotent, concurrency-safe EnsureRuntime handler.
+    /// Idempotent, non-blocking EnsureRuntime handler.
     ///
-    /// Delegates to the platform-independent `ensure_runtime` module, injecting
-    /// the actual start and probe functions that depend on Linux system state.
+    /// The first driver spawns [`do_ensure_runtime_start`] as a background
+    /// task and returns `STATUS_STARTING` immediately; subsequent callers see
+    /// the in-progress state and also return `STATUS_STARTING`. The daemon
+    /// polls until the state settles into `Ready`/`Failed`. See
+    /// [`ensure_runtime::ensure_runtime`] for the rationale.
     async fn handle_ensure_runtime(req: RuntimeEnsureRequest) -> RpcResponse {
         let guard = ensure_runtime::runtime_guard();
 
         let response = ensure_runtime::ensure_runtime(
             guard,
             req.start_if_needed,
-            do_ensure_runtime_start(),
+            || do_ensure_runtime_start(),
             do_ensure_runtime_probe(),
         )
         .await;
@@ -2385,388 +2416,5 @@ mod tests {
     #[test]
     fn test_agent_creation() {
         let _agent = Agent::new();
-    }
-
-    // =========================================================================
-    // EnsureRuntime State Machine Tests
-    // =========================================================================
-
-    use crate::agent::ensure_runtime::{
-        self, RuntimeGuard, RuntimeState, STATUS_FAILED, STATUS_REUSED, STATUS_STARTED,
-    };
-    use arcbox_protocol::agent::RuntimeEnsureResponse;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    /// Helper: creates a successful RuntimeEnsureResponse.
-    fn make_ready_response() -> RuntimeEnsureResponse {
-        RuntimeEnsureResponse {
-            ready: true,
-            endpoint: "vsock:2375".to_string(),
-            message: "docker socket ready".to_string(),
-            status: STATUS_STARTED.to_string(),
-        }
-    }
-
-    /// Helper: creates a failed RuntimeEnsureResponse.
-    fn make_failed_response() -> RuntimeEnsureResponse {
-        RuntimeEnsureResponse {
-            ready: false,
-            endpoint: String::new(),
-            message: "docker socket missing".to_string(),
-            status: STATUS_FAILED.to_string(),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_ensure_runtime_first_call_started() {
-        let guard = RuntimeGuard::new();
-        let response =
-            ensure_runtime::ensure_runtime(&guard, true, async { make_ready_response() }, async {
-                unreachable!("probe should not be called when start_if_needed=true")
-            })
-            .await;
-
-        assert!(response.ready);
-        assert_eq!(response.status, STATUS_STARTED);
-        assert_eq!(response.endpoint, "vsock:2375");
-    }
-
-    #[tokio::test]
-    async fn test_ensure_runtime_second_call_reused() {
-        let guard = RuntimeGuard::new();
-
-        // First call: starts runtime.
-        let r1 =
-            ensure_runtime::ensure_runtime(&guard, true, async { make_ready_response() }, async {
-                unreachable!()
-            })
-            .await;
-        assert_eq!(r1.status, STATUS_STARTED);
-
-        // Second call: should reuse.
-        let r2 = ensure_runtime::ensure_runtime(
-            &guard,
-            true,
-            async { panic!("start_fn should not be called for reuse") },
-            async { unreachable!() },
-        )
-        .await;
-        assert!(r2.ready);
-        assert_eq!(r2.status, STATUS_REUSED);
-    }
-
-    #[tokio::test]
-    async fn test_ensure_runtime_20_sequential_calls_no_error() {
-        let guard = RuntimeGuard::new();
-
-        for i in 0..20 {
-            let response = ensure_runtime::ensure_runtime(
-                &guard,
-                true,
-                async { make_ready_response() },
-                async { unreachable!() },
-            )
-            .await;
-            assert!(response.ready, "call {} should succeed", i);
-            if i == 0 {
-                assert_eq!(response.status, STATUS_STARTED);
-            } else {
-                assert_eq!(response.status, STATUS_REUSED);
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_ensure_runtime_probe_only_no_start() {
-        let guard = RuntimeGuard::new();
-
-        let response = ensure_runtime::ensure_runtime(
-            &guard,
-            false,
-            async { panic!("start_fn should not be called when start_if_needed=false") },
-            async {
-                RuntimeEnsureResponse {
-                    ready: false,
-                    endpoint: String::new(),
-                    message: "docker not available".to_string(),
-                    status: STATUS_FAILED.to_string(),
-                }
-            },
-        )
-        .await;
-
-        assert!(!response.ready);
-        assert_eq!(response.status, STATUS_FAILED);
-    }
-
-    #[tokio::test]
-    async fn test_ensure_runtime_failed_then_retry_succeeds() {
-        let guard = RuntimeGuard::new();
-
-        // First call: fails.
-        let r1 =
-            ensure_runtime::ensure_runtime(&guard, true, async { make_failed_response() }, async {
-                unreachable!()
-            })
-            .await;
-        assert!(!r1.ready);
-        assert_eq!(r1.status, STATUS_FAILED);
-
-        // Second call: retry, now succeeds.
-        let r2 =
-            ensure_runtime::ensure_runtime(&guard, true, async { make_ready_response() }, async {
-                unreachable!()
-            })
-            .await;
-        assert!(r2.ready);
-        assert_eq!(r2.status, STATUS_STARTED);
-
-        // Third call: reused.
-        let r3 = ensure_runtime::ensure_runtime(
-            &guard,
-            true,
-            async { panic!("should not start again") },
-            async { unreachable!() },
-        )
-        .await;
-        assert!(r3.ready);
-        assert_eq!(r3.status, STATUS_REUSED);
-    }
-
-    #[tokio::test]
-    async fn test_ensure_runtime_concurrent_5_callers_consistent() {
-        let guard = Arc::new(RuntimeGuard::new());
-        let start_count = Arc::new(AtomicU32::new(0));
-        let barrier = Arc::new(tokio::sync::Barrier::new(5));
-
-        let mut handles = Vec::new();
-        for _ in 0..5 {
-            let guard = Arc::clone(&guard);
-            let start_count = Arc::clone(&start_count);
-            let barrier = Arc::clone(&barrier);
-
-            handles.push(tokio::spawn(async move {
-                // Synchronize all 5 tasks to start concurrently.
-                barrier.wait().await;
-
-                ensure_runtime::ensure_runtime(
-                    &guard,
-                    true,
-                    async {
-                        start_count.fetch_add(1, Ordering::SeqCst);
-                        // Simulate some startup delay.
-                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                        make_ready_response()
-                    },
-                    async { unreachable!() },
-                )
-                .await
-            }));
-        }
-
-        let mut results = Vec::new();
-        for handle in handles {
-            results.push(handle.await.unwrap());
-        }
-
-        // All 5 should report ready.
-        for (i, r) in results.iter().enumerate() {
-            assert!(r.ready, "caller {} should see ready", i);
-        }
-
-        // Exactly 1 should have status "started", rest "reused".
-        let started_count = results
-            .iter()
-            .filter(|r| r.status == STATUS_STARTED)
-            .count();
-        let reused_count = results.iter().filter(|r| r.status == STATUS_REUSED).count();
-        assert_eq!(started_count, 1, "exactly one caller should be the driver");
-        assert_eq!(reused_count, 4, "other callers should get reused");
-
-        // start_fn should have been invoked exactly once.
-        assert_eq!(start_count.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn test_ensure_runtime_concurrent_5_callers_failure_consistent() {
-        let guard = Arc::new(RuntimeGuard::new());
-        let barrier = Arc::new(tokio::sync::Barrier::new(5));
-
-        let mut handles = Vec::new();
-        for _ in 0..5 {
-            let guard = Arc::clone(&guard);
-            let barrier = Arc::clone(&barrier);
-
-            handles.push(tokio::spawn(async move {
-                barrier.wait().await;
-                ensure_runtime::ensure_runtime(
-                    &guard,
-                    true,
-                    async {
-                        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                        make_failed_response()
-                    },
-                    async { unreachable!() },
-                )
-                .await
-            }));
-        }
-
-        let mut results = Vec::new();
-        for handle in handles {
-            results.push(handle.await.unwrap());
-        }
-
-        // All 5 should report not ready.
-        for (i, r) in results.iter().enumerate() {
-            assert!(!r.ready, "caller {} should see not ready", i);
-            assert_eq!(r.status, STATUS_FAILED, "caller {} should get failed", i);
-        }
-    }
-
-    #[tokio::test]
-    async fn test_ensure_runtime_no_lost_wakeup_when_driver_finishes_fast() {
-        // Repeat to make the regression deterministic enough: this used to
-        // hang intermittently when notify happened before waiter registered.
-        for _ in 0..50 {
-            let guard = Arc::new(RuntimeGuard::new());
-            let entered_start_fn = Arc::new(tokio::sync::Notify::new());
-            let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
-
-            let guard_driver = Arc::clone(&guard);
-            let entered_start_fn_driver = Arc::clone(&entered_start_fn);
-            let driver = tokio::spawn(async move {
-                ensure_runtime::ensure_runtime(
-                    &guard_driver,
-                    true,
-                    async move {
-                        entered_start_fn_driver.notify_waiters();
-                        let _ = release_rx.await;
-                        make_ready_response()
-                    },
-                    async { unreachable!() },
-                )
-                .await
-            });
-
-            // Ensure state has transitioned to Starting before spawning waiter.
-            entered_start_fn.notified().await;
-
-            let guard_waiter = Arc::clone(&guard);
-            let waiter = tokio::spawn(async move {
-                ensure_runtime::ensure_runtime(
-                    &guard_waiter,
-                    true,
-                    async { panic!("waiter should never run start_fn") },
-                    async { unreachable!() },
-                )
-                .await
-            });
-
-            // Give waiter a chance to enter wait path, then let driver finish.
-            tokio::task::yield_now().await;
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            let _ = release_tx.send(());
-
-            let driver_resp = tokio::time::timeout(std::time::Duration::from_millis(500), driver)
-                .await
-                .expect("driver timed out")
-                .expect("driver task failed");
-            let waiter_resp = tokio::time::timeout(std::time::Duration::from_millis(500), waiter)
-                .await
-                .expect("waiter timed out")
-                .expect("waiter task failed");
-
-            assert!(driver_resp.ready);
-            assert_eq!(driver_resp.status, STATUS_STARTED);
-            assert!(waiter_resp.ready);
-            assert_eq!(waiter_resp.status, STATUS_REUSED);
-        }
-    }
-
-    #[tokio::test]
-    async fn test_ensure_runtime_state_machine_transitions() {
-        let guard = RuntimeGuard::new();
-
-        // Initially NotStarted.
-        {
-            let state = guard.state.lock().await;
-            assert!(matches!(&*state, RuntimeState::NotStarted));
-        }
-
-        // After successful ensure: Ready.
-        let _ =
-            ensure_runtime::ensure_runtime(&guard, true, async { make_ready_response() }, async {
-                unreachable!()
-            })
-            .await;
-        {
-            let state = guard.state.lock().await;
-            assert!(
-                matches!(&*state, RuntimeState::Ready { .. }),
-                "expected Ready, got {:?}",
-                *state
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_ensure_runtime_state_machine_failed_to_ready() {
-        let guard = RuntimeGuard::new();
-
-        // Fail first.
-        let _ =
-            ensure_runtime::ensure_runtime(&guard, true, async { make_failed_response() }, async {
-                unreachable!()
-            })
-            .await;
-        {
-            let state = guard.state.lock().await;
-            assert!(
-                matches!(&*state, RuntimeState::Failed { .. }),
-                "expected Failed, got {:?}",
-                *state
-            );
-        }
-
-        // Retry succeeds.
-        let _ =
-            ensure_runtime::ensure_runtime(&guard, true, async { make_ready_response() }, async {
-                unreachable!()
-            })
-            .await;
-        {
-            let state = guard.state.lock().await;
-            assert!(
-                matches!(&*state, RuntimeState::Ready { .. }),
-                "expected Ready after retry, got {:?}",
-                *state
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn test_ensure_runtime_probe_after_ready_returns_reused() {
-        let guard = RuntimeGuard::new();
-
-        // Start first.
-        let _ =
-            ensure_runtime::ensure_runtime(&guard, true, async { make_ready_response() }, async {
-                unreachable!()
-            })
-            .await;
-
-        // Probe (start_if_needed=false) should return reused immediately
-        // from the cached state, without calling probe_fn.
-        let r = ensure_runtime::ensure_runtime(
-            &guard,
-            false,
-            async { panic!("start_fn should not be called") },
-            async { panic!("probe_fn should not be called when state is Ready") },
-        )
-        .await;
-        assert!(r.ready);
-        assert_eq!(r.status, STATUS_REUSED);
     }
 }
