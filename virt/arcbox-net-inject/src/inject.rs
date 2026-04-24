@@ -1,7 +1,8 @@
 //! Dedicated OS thread for RX frame injection.
 //!
 //! Supports two input paths:
-//!   1. **Channel frames** (`rx`): pre-constructed Ethernet frames from smoltcp/DHCP/DNS.
+//!   1. **Channel frames** (`rx`): pre-constructed Ethernet frames from the
+//!      classifier / DHCP / DNS / ARP / handshake synthesizer.
 //!   2. **Inline connections** (`conn_rx`): promoted fast-path TCP sockets that
 //!      read directly into guest descriptor buffers (zero intermediate copies).
 
@@ -106,7 +107,7 @@ impl RxInjectThread {
                 self.poll_inline_conns(&mut inline_conns, &mut used_idx, &mut batch);
             }
 
-            // Phase 3: Drain channel frames (smoltcp/DHCP/DNS).
+            // Phase 3: Drain channel frames (classifier / DHCP / DNS / ARP).
             // Use the remaining coalescing timeout after inline polling.
             let elapsed = loop_start.elapsed();
             let remaining = COALESCE_TIMEOUT.saturating_sub(elapsed);

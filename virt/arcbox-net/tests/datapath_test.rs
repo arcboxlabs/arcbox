@@ -168,19 +168,19 @@ async fn test_dhcp_full_cycle() {
 }
 
 // ---------------------------------------------------------------------------
-// Frame classification tests (via SmoltcpDevice directly)
+// Frame classification tests (via FrameClassifier directly)
 // ---------------------------------------------------------------------------
 
-/// Verifies that an ARP request injected through the socketpair is classified
-/// into the smoltcp rx_queue (not intercepted).
+/// Verifies that an ARP request injected through the socketpair is handled
+/// inline by the classifier (reply produced, not left in the rx queue).
 #[tokio::test]
 async fn test_frame_classification_arp() {
-    use arcbox_net::darwin::smoltcp_device::SmoltcpDevice;
+    use arcbox_net::darwin::classifier::FrameClassifier;
 
     let (host_fd, guest_fd) = mock_guest_nic();
     set_nonblocking(host_fd.as_raw_fd());
 
-    let mut device = SmoltcpDevice::new(host_fd.as_raw_fd(), GATEWAY_IP, 1500);
+    let mut device = FrameClassifier::new(host_fd.as_raw_fd(), GATEWAY_IP, 1500);
     let mut guest_mac = None;
 
     // Write an ARP request from the guest side.
@@ -189,7 +189,7 @@ async fn test_frame_classification_arp() {
 
     device.drain_guest_fd(&mut guest_mac);
 
-    // ARP should be in the smoltcp rx_queue, not intercepted.
+    // ARP is handled inline — not queued as an intercepted frame.
     let intercepted = device.take_intercepted();
     assert!(intercepted.is_empty(), "ARP should not be intercepted");
     assert_eq!(
@@ -203,12 +203,12 @@ async fn test_frame_classification_arp() {
 /// (held back for host connect).
 #[tokio::test]
 async fn test_frame_classification_tcp_syn() {
-    use arcbox_net::darwin::smoltcp_device::SmoltcpDevice;
+    use arcbox_net::darwin::classifier::FrameClassifier;
 
     let (host_fd, guest_fd) = mock_guest_nic();
     set_nonblocking(host_fd.as_raw_fd());
 
-    let mut device = SmoltcpDevice::new(host_fd.as_raw_fd(), GATEWAY_IP, 1500);
+    let mut device = FrameClassifier::new(host_fd.as_raw_fd(), GATEWAY_IP, 1500);
     let mut guest_mac = None;
 
     let syn = build_tcp_syn(
@@ -233,12 +233,12 @@ async fn test_frame_classification_tcp_syn() {
 /// Verifies that ICMP frames are classified as intercepted.
 #[tokio::test]
 async fn test_frame_classification_icmp() {
-    use arcbox_net::darwin::smoltcp_device::{InterceptedKind, SmoltcpDevice};
+    use arcbox_net::darwin::classifier::{FrameClassifier, InterceptedKind};
 
     let (host_fd, guest_fd) = mock_guest_nic();
     set_nonblocking(host_fd.as_raw_fd());
 
-    let mut device = SmoltcpDevice::new(host_fd.as_raw_fd(), GATEWAY_IP, 1500);
+    let mut device = FrameClassifier::new(host_fd.as_raw_fd(), GATEWAY_IP, 1500);
     let mut guest_mac = None;
 
     let icmp = build_icmp_echo(
@@ -262,12 +262,12 @@ async fn test_frame_classification_icmp() {
 /// with kind `Dhcp`.
 #[tokio::test]
 async fn test_frame_classification_dhcp() {
-    use arcbox_net::darwin::smoltcp_device::{InterceptedKind, SmoltcpDevice};
+    use arcbox_net::darwin::classifier::{FrameClassifier, InterceptedKind};
 
     let (host_fd, guest_fd) = mock_guest_nic();
     set_nonblocking(host_fd.as_raw_fd());
 
-    let mut device = SmoltcpDevice::new(host_fd.as_raw_fd(), GATEWAY_IP, 1500);
+    let mut device = FrameClassifier::new(host_fd.as_raw_fd(), GATEWAY_IP, 1500);
     let mut guest_mac = None;
 
     let discover = build_dhcp_discover(CLIENT_MAC, 0x1234);

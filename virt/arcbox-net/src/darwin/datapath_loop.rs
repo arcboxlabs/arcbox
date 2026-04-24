@@ -7,7 +7,7 @@
 //!     ↕ VirtIO (VZ framework)
 //! VZFileHandleNetworkDeviceAttachment
 //!     ↕ socketpair FD (L2 Ethernet frames)
-//! SmoltcpDevice (frame classification only)
+//! FrameClassifier (demultiplexes by protocol)
 //!     ├─ ARP            → ArpResponder
 //!     ├─ TCP SYN        → TcpBridge::handle_outbound_syn
 //!     ├─ TCP (live)     → TcpBridge fast path / handshake-complete
@@ -31,8 +31,8 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::darwin::classifier::{FrameClassifier, InterceptedKind};
 use crate::darwin::inbound_relay::InboundCommand;
-use crate::darwin::smoltcp_device::{InterceptedKind, SmoltcpDevice};
 use crate::darwin::socket_proxy::SocketProxy;
 use crate::darwin::tcp_bridge::TcpBridge;
 use crate::datapath::FrameBuf;
@@ -54,10 +54,12 @@ impl AsRawFd for FdWrapper {
     }
 }
 
-/// Async network datapath bridging guest ↔ host through smoltcp + socket proxying.
+/// Async network datapath bridging guest ↔ host via `FrameClassifier`
+/// demultiplexing and socket proxying.
 ///
-/// smoltcp handles ARP and TCP (Phase 2). DHCP, DNS, UDP, and ICMP are
-/// intercepted before reaching smoltcp and handled by existing proxy modules.
+/// `FrameClassifier` routes ARP (inline reply) and TCP (fast-path /
+/// handshake drains). DHCP, DNS, UDP, and ICMP are intercepted and handled
+/// by the corresponding proxy modules.
 pub struct NetworkDatapath {
     /// Host end of the socketpair (guest L2 Ethernet frames).
     pub guest_fd: OwnedFd,
@@ -77,7 +79,7 @@ pub struct NetworkDatapath {
     pub gateway_mac: [u8; 6],
     /// Gateway IP address.
     pub gateway_ip: Ipv4Addr,
-    /// Guest IP address (for inbound TCP connections via smoltcp).
+    /// Guest IP address (for inbound TCP connections).
     pub guest_ip: Ipv4Addr,
     /// Cancellation token for graceful shutdown.
     pub cancel: CancellationToken,
@@ -177,7 +179,7 @@ impl NetworkDatapath {
         set_nonblocking(guest_fd.as_raw_fd())?;
 
         // Create the frame classifier wrapping the guest socketpair FD.
-        let mut device = SmoltcpDevice::new(guest_fd.as_raw_fd(), gateway_ip, mtu);
+        let mut device = FrameClassifier::new(guest_fd.as_raw_fd(), gateway_ip, mtu);
         device.set_gateway_mac(gateway_mac);
 
         // TCP shim: handshake synthesizer + fast-path data plane.
@@ -284,8 +286,7 @@ impl NetworkDatapath {
                     }
 
                     // Fast-path intercept: extract TCP data frames for established
-                    // fast-path connections BEFORE smoltcp sees them. This avoids
-                    // smoltcp's per-segment TCP state machine overhead.
+                    // fast-path connections and synthesize ACKs inline.
                     let fast_acks = device.drain_fast_path(|frame_data| {
                         tcp_bridge.try_fast_path_intercept(frame_data)
                     });
@@ -335,9 +336,8 @@ impl NetworkDatapath {
                     }
 
                     // New outbound SYNs: route to the hand-rolled handshake
-                    // synthesizer. No more smoltcp listen sockets / gate_syns
-                    // pipeline — the shim owns this path end-to-end and will
-                    // emit the SYN-ACK via poll_handshakes once the async
+                    // synthesizer. The shim owns this path end-to-end and
+                    // emits the SYN-ACK via poll_handshakes once the async
                     // host connect resolves.
                     let gated_syns = device.take_gated_syns();
                     let gmac = guest_mac.unwrap_or([0xFF; 6]);
@@ -454,7 +454,7 @@ impl NetworkDatapath {
 /// Dispatches an intercepted frame to the appropriate handler.
 #[allow(clippy::too_many_arguments)]
 fn handle_intercepted_frame(
-    intercepted: &crate::darwin::smoltcp_device::InterceptedFrame,
+    intercepted: &crate::darwin::classifier::InterceptedFrame,
     frame_sink: Option<&std::sync::Arc<dyn crate::direct_rx::FrameSink>>,
     guest_async: &AsyncFd<FdWrapper>,
     write_queue: &mut VecDeque<FrameBuf>,

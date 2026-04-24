@@ -341,12 +341,12 @@ impl Vmm {
         // macOS 14+ Apple Silicon (P0) where VZ's setMaximumTransmissionUnit:
         // always succeeds. On macOS <14 the VZ setter is skipped via
         // respondsToSelector: (see arcbox-vz/device/network.rs), and the VZ
-        // device stays at 1500 while smoltcp gets 4000. This mismatch would
-        // cause frames >1500 to be dropped — acceptable since macOS <14 is not
-        // a supported target. If macOS <14 support is ever needed, plumb the
-        // actual MTU from NetworkDeviceConfiguration::mtu() through the
-        // hypervisor abstraction layer.
-        let net_mtu = arcbox_net::darwin::smoltcp_device::ENHANCED_ETHERNET_MTU;
+        // device stays at 1500 while the classifier gets 4000. This mismatch
+        // would cause frames >1500 to be dropped — acceptable since macOS <14
+        // is not a supported target. If macOS <14 support is ever needed,
+        // plumb the actual MTU from NetworkDeviceConfiguration::mtu() through
+        // the hypervisor abstraction layer.
+        let net_mtu = arcbox_net::darwin::classifier::ENHANCED_ETHERNET_MTU;
 
         let datapath = NetworkDatapath::new(
             host_fd,

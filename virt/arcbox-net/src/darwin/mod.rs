@@ -39,13 +39,13 @@
 //! vmnet.write_packet(&buf[..n])?;
 //! ```
 
+pub mod classifier;
 pub mod datapath_loop;
 pub mod dns_log;
 pub mod inbound_relay;
 pub mod nat;
 pub mod proxy_detect;
 pub mod proxy_tunnel;
-pub mod smoltcp_device;
 pub mod socket_proxy;
 pub mod tcp_bridge;
 pub mod tso_backend;

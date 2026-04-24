@@ -555,7 +555,7 @@ exit 0
     /// Install iptables FORWARD rules for sandbox networking.
     ///
     /// Each sandbox has a point-to-point TAP — no bridge or MASQUERADE needed.
-    /// The host-side smoltcp TcpBridge/SocketProxy terminates connections and
+    /// The host-side TcpBridge / SocketProxy terminates connections and
     /// creates new host sockets, so the original sandbox src IP is irrelevant
     /// for reply routing.
     ///
