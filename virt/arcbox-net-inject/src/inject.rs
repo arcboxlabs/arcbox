@@ -55,6 +55,12 @@ pub struct RxInjectThread {
     pub set_interrupt_status: Arc<dyn Fn() + Send + Sync>,
     /// VM shutdown flag.
     pub running: Arc<AtomicBool>,
+    /// Whether `VIRTIO_F_EVENT_IDX` was negotiated with the guest. When
+    /// true, `flush_interrupt` consults the guest's `used_event_idx`
+    /// before firing the IRQ and skips the GIC SPI / vCPU exit / pthread
+    /// wakeup chain when the driver isn't waiting. Profiling showed this
+    /// path dominating rx-inject CPU under multi-flow load.
+    pub event_idx_enabled: bool,
 }
 
 // SAFETY: All fields are either Send+Sync or raw pointers wrapped
@@ -65,7 +71,11 @@ impl RxInjectThread {
     /// Runs the injection loop until `running` is set to false or
     /// the channel is disconnected.
     pub fn run(self) {
-        tracing::info!("rx-inject thread started (queue_size={})", self.queue.size);
+        tracing::info!(
+            "rx-inject thread started (queue_size={}, event_idx={})",
+            self.queue.size,
+            self.event_idx_enabled,
+        );
 
         let mut used_idx = self.guest_mem.read_u16(self.queue.used_gpa as usize + 2);
         let mut old_used = used_idx;
@@ -432,20 +442,50 @@ impl RxInjectThread {
         }
     }
 
-    /// Fires interrupt after a batch of injections.
-    fn flush_interrupt(&self, _old_used: u16, _used_idx: u16) {
-        // Write avail_event for EVENT_IDX.
+    /// Fires interrupt after a batch of injections, subject to EVENT_IDX
+    /// suppression when the feature is negotiated.
+    ///
+    /// Profiling under multi-flow load showed the unconditional fire path
+    /// (`hv_vcpus_exit` + `hv_gic_set_spi` + `pthread_cond_signal`) eating
+    /// ~15× more CPU than under single-flow — because GSO can't merge
+    /// across flows, dual-flow roughly doubles the frame count per Gbps,
+    /// and every extra frame pays the full IRQ delivery cost. With
+    /// EVENT_IDX, we consult the guest's `used_event_idx` and skip the
+    /// whole chain when the driver is already polling past our update
+    /// range.
+    fn flush_interrupt(&self, old_used: u16, used_idx: u16) {
         let q_size = self.queue.size as usize;
+
+        // Publish avail_event at the tail of the used ring. Lets the guest
+        // suppress its own MMIO kicks when the device has buffer slack.
+        // Release ordering here pairs with the guest's Acquire on the
+        // used-ring: prior used-entry writes must be visible before this
+        // value.
         let avail_event_off = self.queue.used_gpa as usize + 4 + q_size * 8;
         let avail_idx = self.guest_mem.read_u16(self.queue.avail_gpa as usize + 2);
-        // Release fence: ensure prior used-ring writes are visible before
-        // the guest observes the new avail_event value.
         std::sync::atomic::fence(Ordering::Release);
         self.guest_mem.write_u16(avail_event_off, avail_idx);
 
-        // Unconditionally fire interrupt. EVENT_IDX suppression can be
-        // added later once the basic path is validated.
-        (self.set_interrupt_status)();
-        self.irq.trigger();
+        // Decide whether to raise an interrupt. Re-read of `used_event`
+        // inside `should_notify` needs to see the driver's most recent
+        // publish — AcqRel ensures our used-ring updates are visible to
+        // the guest before we sample the threshold it writes in response.
+        let fire = if self.event_idx_enabled {
+            std::sync::atomic::fence(Ordering::AcqRel);
+            crate::notify::should_notify(
+                &self.guest_mem,
+                self.queue.avail_gpa,
+                q_size as u16,
+                old_used,
+                used_idx,
+            )
+        } else {
+            old_used != used_idx
+        };
+
+        if fire {
+            (self.set_interrupt_status)();
+            self.irq.trigger();
+        }
     }
 }

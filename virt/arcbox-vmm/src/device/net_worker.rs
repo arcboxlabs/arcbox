@@ -182,6 +182,11 @@ impl NetRxWorkerSlot {
                 used_gpa: mmio.queue_device[qi],
                 size: mmio.queue_num[qi],
             };
+            // Capture whether VIRTIO_F_EVENT_IDX was negotiated. This is
+            // valid here because try_spawn runs from the DRIVER_OK path,
+            // after feature negotiation has completed.
+            let event_idx_enabled =
+                (mmio.driver_features & arcbox_virtio::queue::VIRTIO_F_EVENT_IDX) != 0;
             drop(mmio);
 
             // Wrap the VMM IRQ callback to match the inject crate's type.
@@ -224,6 +229,7 @@ impl NetRxWorkerSlot {
                 },
                 set_interrupt_status,
                 running,
+                event_idx_enabled,
             };
 
             match std::thread::Builder::new()
