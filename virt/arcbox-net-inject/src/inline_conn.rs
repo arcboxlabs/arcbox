@@ -58,7 +58,17 @@ unsafe impl Send for InlineConn {}
 ///
 /// The TCP checksum field is filled with the pseudo-header checksum only —
 /// the guest kernel completes it per-segment during GSO (NEEDS_CSUM).
-pub fn write_inline_headers(buf: &mut [u8], conn: &InlineConn, payload_len: usize) -> usize {
+///
+/// `num_buffers` is stamped into the virtio-net header's `num_buffers`
+/// field (bytes 10..12). For single-descriptor frames pass `1`; for
+/// MRG_RXBUF multi-descriptor delivery pass the count of descriptors
+/// this frame spans.
+pub fn write_inline_headers(
+    buf: &mut [u8],
+    conn: &InlineConn,
+    payload_len: usize,
+    num_buffers: u16,
+) -> usize {
     if buf.len() < TOTAL_HDR_LEN {
         return 0;
     }
@@ -88,8 +98,8 @@ pub fn write_inline_headers(buf: &mut [u8], conn: &InlineConn, payload_len: usiz
     }
     buf[6..8].copy_from_slice(&34u16.to_le_bytes()); // csum_start (Eth14+IP20)
     buf[8..10].copy_from_slice(&16u16.to_le_bytes()); // csum_offset (TCP csum field)
-    // num_buffers = 1 (MRG_RXBUF)
-    buf[10..12].copy_from_slice(&1u16.to_le_bytes());
+    // num_buffers: 1 for single-descriptor frames, N for MRG_RXBUF.
+    buf[10..12].copy_from_slice(&num_buffers.to_le_bytes());
 
     // -- Ethernet header (14 bytes at offset 12) --
     let eth = 12;

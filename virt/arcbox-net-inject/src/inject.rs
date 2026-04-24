@@ -5,7 +5,7 @@
 //!   2. **Inline connections** (`conn_rx`): promoted fast-path TCP sockets that
 //!      read directly into guest descriptor buffers (zero intermediate copies).
 
-use std::io::Read;
+use std::io::{IoSliceMut, Read};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -168,6 +168,12 @@ impl RxInjectThread {
     /// Polls all active inline connections, reading from host sockets
     /// directly into guest descriptor buffers. Connections that reach
     /// EOF or error are marked and pruned at the start of the next call.
+    ///
+    /// Uses VIRTIO_NET_F_MRG_RXBUF to coalesce up to `MAX_MERGE` descriptors
+    /// into a single logical Ethernet frame per `readv()` syscall. This
+    /// amortizes per-frame header cost and IRQ delivery over a much larger
+    /// payload (up to ~60 KB), letting one GSO_TCPV4 frame fan out into
+    /// dozens of MSS-sized guest segments.
     fn poll_inline_conns(
         &self,
         inline_conns: &mut Vec<InlineConn>,
@@ -182,12 +188,28 @@ impl RxInjectThread {
         // Prune closed connections from previous iteration.
         inline_conns.retain(|c| !c.host_eof);
 
-        // Fair-share pass: each conn gets at most PER_CONN_READS in this
-        // call, then we return to the outer loop to flush the IRQ batch.
-        // Without this cap, a single busy flow drains all 256 descriptors
-        // before the guest sees an interrupt, triggering TCP pressure on
-        // the host side that manifests as heavy loss downstream.
+        // Fair-share pass: each conn gets at most PER_CONN_READS `readv`
+        // calls per outer iteration. Each call can span up to MAX_MERGE
+        // descriptors, so a busy conn can still move ~PER_CONN_READS ×
+        // (MAX_MERGE × per-desc) bytes between IRQ flushes, while leaving
+        // budget for other conns.
         const PER_CONN_READS: u16 = 16;
+
+        // Max descriptors per `readv` (upper bound on num_buffers stamped
+        // into the first descriptor's virtio-net header).
+        const MAX_MERGE: usize = 16;
+
+        // Cap on total payload per frame so the IPv4 total_length field
+        // (u16) doesn't overflow. 60000 = 60040 with Eth/IP/TCP headers,
+        // leaving ~5 KB of headroom under the 65535 limit.
+        const MAX_FRAME_PAYLOAD: usize = 60000;
+
+        let desc_base = self.queue.desc_gpa as usize;
+
+        // Scratch buffers reused across iterations (stack-allocated).
+        let mut head_indices: [u16; MAX_MERGE] = [0; MAX_MERGE];
+        let mut desc_ptrs: [*mut u8; MAX_MERGE] = [std::ptr::null_mut(); MAX_MERGE];
+        let mut desc_lens: [usize; MAX_MERGE] = [0; MAX_MERGE];
 
         for conn in inline_conns.iter_mut() {
             let mut per_conn = 0u16;
@@ -199,47 +221,112 @@ impl RxInjectThread {
                     break;
                 }
 
-                // Check available descriptors.
+                // How many descriptors has the guest posted that we haven't
+                // consumed yet? Wrapping subtraction on u16 gives the correct
+                // count even across the 65536 boundary.
                 std::sync::atomic::fence(Ordering::Acquire);
                 let avail_idx = self.guest_mem.read_u16(self.queue.avail_gpa as usize + 2);
-                if *used_idx == avail_idx {
-                    // No descriptors available — stop all inline polling.
+                let available = avail_idx.wrapping_sub(*used_idx) as usize;
+                if available == 0 {
                     return;
                 }
 
-                // Pop the next available descriptor.
-                let ring_off =
-                    self.queue.avail_gpa as usize + 4 + 2 * ((*used_idx as usize) % q_size);
-                let head_idx = self.guest_mem.read_u16(ring_off) as usize;
+                // Gather up to MAX_MERGE descriptors into the scratch arrays.
+                // No mutation of guest memory yet — we only commit after
+                // readv succeeds.
+                let want = available.min(MAX_MERGE);
+                let mut count = 0usize;
+                let mut total_iov_cap = 0usize;
 
-                // Read descriptor to find a writable buffer large enough for
-                // at least the 66-byte header + 1 byte of payload.
-                let desc_base = self.queue.desc_gpa as usize;
-                let d_off = desc_base + head_idx * 16;
-                let Some(desc_slice) = self.guest_mem.slice(d_off, 16) else {
-                    break;
-                };
+                for i in 0..want {
+                    let slot = (*used_idx).wrapping_add(i as u16) as usize % q_size;
+                    let ring_off = self.queue.avail_gpa as usize + 4 + 2 * slot;
+                    let head_idx = self.guest_mem.read_u16(ring_off);
 
-                let addr_gpa = u64::from_le_bytes(desc_slice[0..8].try_into().unwrap()) as usize;
-                let buf_len = u32::from_le_bytes(desc_slice[8..12].try_into().unwrap()) as usize;
-                let flags = u16::from_le_bytes(desc_slice[12..14].try_into().unwrap());
+                    let d_off = desc_base + (head_idx as usize) * 16;
+                    let Some(desc_slice) = self.guest_mem.slice(d_off, 16) else {
+                        break;
+                    };
+                    let addr_gpa =
+                        u64::from_le_bytes(desc_slice[0..8].try_into().unwrap()) as usize;
+                    let buf_len =
+                        u32::from_le_bytes(desc_slice[8..12].try_into().unwrap()) as usize;
+                    let flags = u16::from_le_bytes(desc_slice[12..14].try_into().unwrap());
 
-                // Descriptor must be device-writable (bit 1) and large enough.
-                if flags & 2 == 0 || buf_len < inline_conn::TOTAL_HDR_LEN + 1 {
+                    if flags & 2 == 0 {
+                        // Not device-writable — we can't use this chain. Stop
+                        // here; we'll revisit on the next pass once the guest
+                        // reposts.
+                        break;
+                    }
+                    let min_len = if i == 0 {
+                        inline_conn::TOTAL_HDR_LEN + 1
+                    } else {
+                        1
+                    };
+                    if buf_len < min_len {
+                        break;
+                    }
+
+                    let Some(off) = self.guest_mem.gpa_to_offset(addr_gpa, buf_len) else {
+                        break;
+                    };
+                    // SAFETY: gpa_to_offset validated bounds. Each descriptor
+                    // buffer is exclusive to the device until the used ring
+                    // is advanced past it.
+                    let ptr = unsafe { self.guest_mem.ptr().add(off) };
+
+                    let iov_cap = if i == 0 {
+                        buf_len - inline_conn::TOTAL_HDR_LEN
+                    } else {
+                        buf_len
+                    };
+                    // Stop growing the frame if the next descriptor would
+                    // push us past MAX_FRAME_PAYLOAD. Always admit the first
+                    // descriptor so we can at least emit a 1-byte frame.
+                    if i > 0 && total_iov_cap + iov_cap > MAX_FRAME_PAYLOAD {
+                        break;
+                    }
+
+                    head_indices[i] = head_idx;
+                    desc_ptrs[i] = ptr;
+                    desc_lens[i] = buf_len;
+                    total_iov_cap += iov_cap;
+                    count += 1;
+                }
+
+                if count == 0 {
                     break;
                 }
 
-                // SAFETY: VirtIO descriptor buffers are device-owned during
-                // injection. The guest will not access them until used_idx
-                // advances (after Release fence below).
-                let Some(buf) = (unsafe { self.guest_mem.slice_mut(addr_gpa, buf_len) }) else {
-                    break;
-                };
+                // Build iovecs from raw pointers. We constructed each slice
+                // from a distinct descriptor buffer region, so the slices
+                // are non-overlapping even though the borrow checker can't
+                // see that.
+                let mut iovs: [IoSliceMut<'_>; MAX_MERGE] = std::array::from_fn(|_| {
+                    // Placeholder — overwritten below for slots < count.
+                    IoSliceMut::new(&mut [])
+                });
+                for i in 0..count {
+                    let (start, cap) = if i == 0 {
+                        (
+                            inline_conn::TOTAL_HDR_LEN,
+                            desc_lens[i] - inline_conn::TOTAL_HDR_LEN,
+                        )
+                    } else {
+                        (0, desc_lens[i])
+                    };
+                    // SAFETY: desc_ptrs[i] points into the VM-lifetime
+                    // guest mmap (bounds checked by gpa_to_offset above).
+                    // The buffer is device-owned until we advance used_idx,
+                    // and each pointer addresses a distinct descriptor.
+                    let slice =
+                        unsafe { std::slice::from_raw_parts_mut(desc_ptrs[i].add(start), cap) };
+                    iovs[i] = IoSliceMut::new(slice);
+                }
 
-                // Read payload from host socket directly into guest buffer
-                // at offset 66 (after the header region).
-                let payload_buf = &mut buf[inline_conn::TOTAL_HDR_LEN..];
-                match conn.stream.read(payload_buf) {
+                let read_result = conn.stream.read_vectored(&mut iovs[..count]);
+                match read_result {
                     Ok(0) => {
                         tracing::debug!(
                             "inline {}:{}->{}:{} host EOF",
@@ -250,16 +337,17 @@ impl RxInjectThread {
                         );
                         conn.host_eof = true;
 
-                        // Inject FIN+ACK so the guest half-closes its receive
-                        // side gracefully.
-                        inline_conn::write_fin_headers(buf, conn);
-                        // FIN consumes 1 SEQ.
-                        conn.our_seq
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        // Consume only the first descriptor for the FIN frame.
+                        // SAFETY: first descriptor buffer is exclusive to us.
+                        let first_buf =
+                            unsafe { std::slice::from_raw_parts_mut(desc_ptrs[0], desc_lens[0]) };
+                        inline_conn::write_fin_headers(first_buf, conn);
+                        conn.our_seq.fetch_add(1, Ordering::Relaxed);
 
                         let used_entry_off =
                             self.queue.used_gpa as usize + 4 + ((*used_idx as usize) % q_size) * 8;
-                        self.guest_mem.write_u32(used_entry_off, head_idx as u32);
+                        self.guest_mem
+                            .write_u32(used_entry_off, head_indices[0] as u32);
                         self.guest_mem
                             .write_u32(used_entry_off + 4, inline_conn::TOTAL_HDR_LEN as u32);
 
@@ -269,39 +357,69 @@ impl RxInjectThread {
                             .write_u16(self.queue.used_gpa as usize + 2, *used_idx);
 
                         *batch += 1;
-                        break; // EOF — no more reads from this conn.
+                        break;
                     }
                     Ok(n) => {
-                        // Write 66-byte header inline (no allocation).
-                        inline_conn::write_inline_headers(buf, conn, n);
+                        // Distribute the n bytes across the iovecs. readv
+                        // fills iov[0] to capacity before spilling into
+                        // iov[1], etc.
+                        let mut remaining = n;
+                        let mut num_used = 0usize;
+                        let mut per_desc_len = [0usize; MAX_MERGE];
+                        for i in 0..count {
+                            if remaining == 0 {
+                                break;
+                            }
+                            let cap = if i == 0 {
+                                desc_lens[i] - inline_conn::TOTAL_HDR_LEN
+                            } else {
+                                desc_lens[i]
+                            };
+                            let filled = remaining.min(cap);
+                            per_desc_len[i] = filled;
+                            remaining -= filled;
+                            num_used = i + 1;
+                        }
+
+                        // Stamp the first descriptor's header with
+                        // num_buffers = num_used and payload_len = n.
+                        // SAFETY: first descriptor is exclusive to us.
+                        let first_buf =
+                            unsafe { std::slice::from_raw_parts_mut(desc_ptrs[0], desc_lens[0]) };
+                        inline_conn::write_inline_headers(first_buf, conn, n, num_used as u16);
+
                         // Advance the shared atomic so ACK frames emitted by
                         // the datapath carry the correct seq value.
-                        conn.our_seq
-                            .fetch_add(n as u32, std::sync::atomic::Ordering::Relaxed);
+                        conn.our_seq.fetch_add(n as u32, Ordering::Relaxed);
 
-                        let total_written = inline_conn::TOTAL_HDR_LEN + n;
+                        // Post used-ring entries: one per descriptor used.
+                        // The first entry also accounts for the 66-byte
+                        // header written in-place.
+                        for i in 0..num_used {
+                            let slot = (*used_idx).wrapping_add(i as u16) as usize % q_size;
+                            let used_entry_off = self.queue.used_gpa as usize + 4 + slot * 8;
+                            let entry_len = if i == 0 {
+                                inline_conn::TOTAL_HDR_LEN + per_desc_len[0]
+                            } else {
+                                per_desc_len[i]
+                            };
+                            self.guest_mem
+                                .write_u32(used_entry_off, head_indices[i] as u32);
+                            self.guest_mem
+                                .write_u32(used_entry_off + 4, entry_len as u32);
+                        }
 
-                        // Update used ring entry.
-                        let used_entry_off =
-                            self.queue.used_gpa as usize + 4 + ((*used_idx as usize) % q_size) * 8;
-                        self.guest_mem.write_u32(used_entry_off, head_idx as u32);
-                        self.guest_mem
-                            .write_u32(used_entry_off + 4, total_written as u32);
-
-                        // Release fence: ensure descriptor data is visible
-                        // before used_idx advances.
+                        // Release fence, then publish the new used_idx.
                         std::sync::atomic::fence(Ordering::Release);
-                        *used_idx = used_idx.wrapping_add(1);
+                        *used_idx = used_idx.wrapping_add(num_used as u16);
                         self.guest_mem
                             .write_u16(self.queue.used_gpa as usize + 2, *used_idx);
 
-                        *batch += 1;
+                        *batch += num_used as u16;
                         per_conn += 1;
-                        // Continue the inner loop — try to drain more data
-                        // from this same connection before moving on.
+                        // Continue — try another readv on this conn.
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        // No more data on this socket — next conn.
                         break;
                     }
                     Err(e) => {
