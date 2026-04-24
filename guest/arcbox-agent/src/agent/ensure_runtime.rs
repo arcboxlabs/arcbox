@@ -4,8 +4,13 @@
 //! The first caller transitions `NotStarted`/`Failed` → `Starting`, spawns
 //! the actual start work as a background task, and returns `STATUS_STARTING`
 //! immediately. Subsequent callers see `Starting` and also return
-//! `STATUS_STARTING`. Once the background task publishes its result, further
-//! calls return cached `Ready`/`Failed` via `STATUS_REUSED`/`STATUS_FAILED`.
+//! `STATUS_STARTING`. Once the background task publishes its result:
+//! - `Ready` → callers get cached endpoint/message with `STATUS_REUSED`.
+//! - `Failed` → the *next* caller with `start_if_needed=true` transitions
+//!   back to `Starting` and spawns a fresh start; callers don't observe a
+//!   cached failed response because the expected recovery mode is "ask the
+//!   agent to try again." Probe-only (`start_if_needed=false`) callers
+//!   bypass the state machine and re-run `probe_fn`.
 //!
 //! Why non-blocking: the host-side vsock transport uses a short per-RPC
 //! deadline (~5s). Blocking the RPC for the full cold-boot window (up to
@@ -15,6 +20,7 @@
 //! lets the daemon poll with its own backoff.
 
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -27,6 +33,7 @@ pub use arcbox_constants::status::{
     RUNTIME_STARTED as STATUS_STARTED, RUNTIME_STARTING as STATUS_STARTING,
 };
 use arcbox_protocol::agent::RuntimeEnsureResponse;
+use futures::FutureExt;
 use tokio::sync::Mutex;
 
 /// Runtime lifecycle state.
@@ -66,9 +73,10 @@ impl Default for RuntimeGuard {
 
 /// Returns the global `RuntimeGuard` singleton as an `Arc`.
 ///
-/// Arc (rather than `&'static`) so the same guard can be cloned into the
-/// background start task without leaking or requiring `'static` bounds on
-/// the future.
+/// `Arc` (rather than `&'static RuntimeGuard`) lets callers cheaply clone the
+/// guard and move an owned handle into the background start task — the
+/// singleton state stays shared, but the spawn doesn't require borrowing
+/// from a `'static` reference.
 #[allow(dead_code)]
 pub fn runtime_guard() -> Arc<RuntimeGuard> {
     static GUARD: OnceLock<Arc<RuntimeGuard>> = OnceLock::new();
@@ -78,27 +86,31 @@ pub fn runtime_guard() -> Arc<RuntimeGuard> {
 /// Non-blocking EnsureRuntime handler.
 ///
 /// - If state is `Ready`: returns the cached endpoint/message with `STATUS_REUSED`.
-/// - If `start_if_needed == false`: awaits `probe_fn` and returns its result.
+/// - If `start_if_needed == false`: invokes `probe_fn` and returns its result.
 /// - If state is `Starting`: returns `STATUS_STARTING` immediately (daemon polls).
-/// - Otherwise: transitions state to `Starting`, spawns `make_start()` as a
-///   background task, and returns `STATUS_STARTING`.
+/// - Otherwise (`NotStarted` or `Failed`): transitions state to `Starting`,
+///   spawns `make_start()` as a background task, and returns `STATUS_STARTING`.
 ///
 /// The background task awaits the start future and publishes the outcome to
-/// `guard.state` (transitioning to `Ready` or `Failed`).
+/// `guard.state` (transitioning to `Ready` or `Failed`). If the start future
+/// panics, the task catches the unwind and publishes a `Failed` state so the
+/// state machine always settles and the daemon's poll loop can make progress.
 ///
-/// `make_start` is `FnOnce() -> Fut` (not a bare `Fut`) so the caller does not
-/// construct the future when we're already starting or ready — avoids wasted
-/// allocations on the hot polling path.
+/// Both `make_start` and `probe_fn` are `FnOnce() -> Fut` (not bare futures)
+/// so the caller does not construct a future on hot `Ready`/`Starting`
+/// polling paths where neither will be invoked.
 #[allow(dead_code)]
-pub async fn ensure_runtime<F, Fut>(
+pub async fn ensure_runtime<F, Fut, P, PFut>(
     guard: Arc<RuntimeGuard>,
     start_if_needed: bool,
     make_start: F,
-    probe_fn: impl Future<Output = RuntimeEnsureResponse>,
+    probe_fn: P,
 ) -> RuntimeEnsureResponse
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = RuntimeEnsureResponse> + Send + 'static,
+    P: FnOnce() -> PFut,
+    PFut: Future<Output = RuntimeEnsureResponse>,
 {
     // Fast path: Ready → return cached state.
     {
@@ -114,7 +126,7 @@ where
     }
 
     if !start_if_needed {
-        return probe_fn.await;
+        return probe_fn().await;
     }
 
     // Decide whether to become the driver (spawn the background task).
@@ -142,7 +154,26 @@ where
         let fut = make_start();
         let guard_for_task = Arc::clone(&guard);
         tokio::spawn(async move {
-            let response = fut.await;
+            // Catch panics from the start future so a bug there can't leave
+            // state stuck at `Starting` forever. `AssertUnwindSafe` is sound
+            // here: we discard the inner future on panic and publish a
+            // fresh `Failed` state directly.
+            let response = match AssertUnwindSafe(fut).catch_unwind().await {
+                Ok(resp) => resp,
+                Err(panic_payload) => {
+                    let message = panic_message(&panic_payload);
+                    tracing::error!(
+                        "ensure_runtime start task panicked: {}; marking runtime Failed",
+                        message
+                    );
+                    RuntimeEnsureResponse {
+                        ready: false,
+                        endpoint: String::new(),
+                        message: format!("runtime start panicked: {message}"),
+                        status: STATUS_FAILED.to_string(),
+                    }
+                }
+            };
             let mut state = guard_for_task.state.lock().await;
             *state = if response.ready {
                 RuntimeState::Ready {
@@ -164,6 +195,17 @@ where
         endpoint: String::new(),
         message: "runtime start in progress".to_string(),
         status: STATUS_STARTING.to_string(),
+    }
+}
+
+/// Best-effort extraction of a human-readable message from a panic payload.
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "panic payload was not a string".to_string()
     }
 }
 
@@ -220,7 +262,7 @@ mod tests {
             Arc::clone(&guard),
             true,
             || async { make_ready_response() },
-            async { unreachable!("probe should not be called when start_if_needed=true") },
+            || async { unreachable!("probe should not be called when start_if_needed=true") },
         )
         .await;
 
@@ -244,7 +286,7 @@ mod tests {
             Arc::clone(&guard),
             true,
             || async { make_ready_response() },
-            async { unreachable!() },
+            || async { unreachable!() },
         )
         .await;
         let _ = wait_settled(&guard, 500).await;
@@ -254,7 +296,7 @@ mod tests {
             Arc::clone(&guard),
             true,
             || async { panic!("start_fn should not be called after Ready") },
-            async { unreachable!() },
+            || async { unreachable!() },
         )
         .await;
 
@@ -280,7 +322,7 @@ mod tests {
                     make_ready_response()
                 }
             },
-            async { unreachable!() },
+            || async { unreachable!() },
         )
         .await;
         assert_eq!(r1.status, STATUS_STARTING);
@@ -290,7 +332,7 @@ mod tests {
             Arc::clone(&guard),
             true,
             || async { panic!("start_fn must not re-run while Starting") },
-            async { unreachable!() },
+            || async { unreachable!() },
         )
         .await;
         assert!(!r2.ready);
@@ -310,7 +352,7 @@ mod tests {
             Arc::clone(&guard),
             true,
             || async { make_failed_response() },
-            async { unreachable!() },
+            || async { unreachable!() },
         )
         .await;
         let settled = wait_settled(&guard, 500).await;
@@ -321,7 +363,7 @@ mod tests {
             Arc::clone(&guard),
             true,
             || async { make_ready_response() },
-            async { unreachable!() },
+            || async { unreachable!() },
         )
         .await;
         assert_eq!(r.status, STATUS_STARTING);
@@ -337,7 +379,7 @@ mod tests {
             Arc::clone(&guard),
             false,
             || async { panic!("start_fn must not run when start_if_needed=false") },
-            async { make_failed_response() },
+            || async { make_failed_response() },
         )
         .await;
 
@@ -374,7 +416,7 @@ mod tests {
                             make_ready_response()
                         }
                     },
-                    async { unreachable!() },
+                    || async { unreachable!() },
                 )
                 .await
             }));
@@ -391,6 +433,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn panic_in_start_task_transitions_to_failed() {
+        let guard = Arc::new(RuntimeGuard::new());
+
+        let r = ensure_runtime(
+            Arc::clone(&guard),
+            true,
+            || async { panic!("boom from start_fn") },
+            || async { unreachable!() },
+        )
+        .await;
+        assert_eq!(r.status, STATUS_STARTING);
+
+        // Without the catch_unwind guard, state would stay Starting forever.
+        // With it, the panic is converted into Failed so the daemon's poll
+        // loop has a terminal state to observe.
+        let settled = wait_settled(&guard, 500).await;
+        assert!(
+            matches!(&settled, RuntimeState::Failed { .. }),
+            "expected Failed after panic, got {:?}",
+            settled
+        );
+
+        // A subsequent start_if_needed=true call retries cleanly.
+        let r = ensure_runtime(
+            Arc::clone(&guard),
+            true,
+            || async { make_ready_response() },
+            || async { unreachable!() },
+        )
+        .await;
+        assert_eq!(r.status, STATUS_STARTING);
+        let settled = wait_settled(&guard, 500).await;
+        assert!(matches!(settled, RuntimeState::Ready { .. }));
+    }
+
+    #[tokio::test]
     async fn probe_after_ready_returns_reused_without_running_probe() {
         let guard = Arc::new(RuntimeGuard::new());
 
@@ -399,7 +477,7 @@ mod tests {
             Arc::clone(&guard),
             true,
             || async { make_ready_response() },
-            async { unreachable!() },
+            || async { unreachable!() },
         )
         .await;
         let _ = wait_settled(&guard, 500).await;
@@ -409,7 +487,7 @@ mod tests {
             Arc::clone(&guard),
             false,
             || async { panic!("start_fn must not run") },
-            async { panic!("probe_fn must not run when state is already Ready") },
+            || async { panic!("probe_fn must not run when state is already Ready") },
         )
         .await;
 

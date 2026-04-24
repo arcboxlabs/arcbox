@@ -62,20 +62,42 @@ pub fn default_docker_config_dir() -> Result<PathBuf> {
 /// Registers ArcBox's compose/buildx binaries as Docker CLI plugins.
 ///
 /// Creates `<docker_config_dir>/cli-plugins/<plugin>` symlinks pointing to
-/// `<user_bin>/<plugin>`, and adds `<user_bin>` to `cliPluginsExtraDirs`
-/// in `<docker_config_dir>/config.json` (preserving all other keys).
+/// `<user_bin>/<plugin>`, and — only if at least one plugin binary actually
+/// exists under `user_bin` — adds `user_bin` to `cliPluginsExtraDirs` in
+/// `<docker_config_dir>/config.json` (preserving all other keys).
 ///
-/// Idempotent: safe to call repeatedly. Never overwrites a symlink pointing
-/// anywhere other than `user_bin` — that means pre-existing Docker Desktop
-/// plugins keep precedence if they were there first.
+/// ## Precedence caveat
+///
+/// Docker resolves plugins in this order: `cliPluginsExtraDirs` →
+/// `~/.docker/cli-plugins/` → system dirs. Because `extraDirs` is searched
+/// *first*, once `user_bin` is registered there, ArcBox's plugin wins even
+/// when a foreign symlink (e.g. Docker Desktop's) is present at
+/// `~/.docker/cli-plugins/<name>`. We keep the foreign symlink in place so
+/// a human auditing `~/.docker/cli-plugins/` still sees it, but it is no
+/// longer the selected binary at CLI invocation time.
+///
+/// This matches the practical expectation: if the user has ArcBox
+/// installed, they almost certainly want ArcBox's compose/buildx over
+/// Docker Desktop's (which would target Desktop's socket, not ArcBox's).
+/// `unregister()` removes `user_bin` from `extraDirs` so Desktop becomes
+/// selectable again on uninstall.
+///
+/// ## Idempotence
+///
+/// Safe to call repeatedly. Never overwrites a foreign symlink — those are
+/// left untouched. Never mutates `config.json` if no plugin binary was
+/// shipped (avoids churn on builds that don't bundle compose/buildx).
 pub async fn register(user_bin: &Path, docker_config_dir: &Path) -> Result<Outcome> {
     let mut outcome = Outcome::default();
 
-    // (B) symlinks
+    // (B) symlinks — also tracks whether any plugin binary was actually
+    //     present so we know to register (A) extraDirs.
     let plugins_dir = docker_config_dir.join("cli-plugins");
     tokio::fs::create_dir_all(&plugins_dir)
         .await
         .with_context(|| format!("failed to create {}", plugins_dir.display()))?;
+
+    let mut any_plugin_present = false;
 
     for plugin in DOCKER_CLI_PLUGINS {
         let target = user_bin.join(plugin);
@@ -85,6 +107,7 @@ pub async fn register(user_bin: &Path, docker_config_dir: &Path) -> Result<Outco
             // silently rather than creating a dangling symlink.
             continue;
         }
+        any_plugin_present = true;
 
         let link = plugins_dir.join(plugin);
         match tokio::fs::symlink_metadata(&link).await {
@@ -94,7 +117,9 @@ pub async fn register(user_bin: &Path, docker_config_dir: &Path) -> Result<Outco
                         continue;
                     }
                     if !is_arcbox_bin_target(&existing, user_bin) {
-                        // Foreign symlink (e.g. Docker Desktop). Leave it alone.
+                        // Foreign symlink (e.g. Docker Desktop). Leave it
+                        // alone — extraDirs below still makes ArcBox win at
+                        // resolution time.
                         continue;
                     }
                     tokio::fs::remove_file(&link).await.ok();
@@ -108,20 +133,30 @@ pub async fn register(user_bin: &Path, docker_config_dir: &Path) -> Result<Outco
         }
 
         #[cfg(unix)]
-        tokio::fs::symlink(&target, &link).await.with_context(|| {
-            format!(
-                "failed to create plugin symlink {} -> {}",
-                link.display(),
-                target.display()
-            )
-        })?;
-        outcome.symlinks.push(link);
+        {
+            tokio::fs::symlink(&target, &link).await.with_context(|| {
+                format!(
+                    "failed to create plugin symlink {} -> {}",
+                    link.display(),
+                    target.display()
+                )
+            })?;
+            outcome.symlinks.push(link);
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = link;
+        }
     }
 
-    // (A) cliPluginsExtraDirs
-    let config_path = docker_config_dir.join("config.json");
-    let user_bin_str = user_bin.to_string_lossy().into_owned();
-    outcome.config_updated = update_extra_dirs(&config_path, &user_bin_str, true).await?;
+    // (A) cliPluginsExtraDirs — only when we actually have plugins to
+    //     advertise. Skipping the mutation on plugin-less installs keeps
+    //     config.json clean.
+    if any_plugin_present {
+        let config_path = docker_config_dir.join("config.json");
+        let user_bin_str = user_bin.to_string_lossy().into_owned();
+        outcome.config_updated = update_extra_dirs(&config_path, &user_bin_str, true).await?;
+    }
 
     Ok(outcome)
 }
@@ -386,6 +421,27 @@ mod tests {
         // The foreign symlink must be untouched.
         assert_eq!(fs::read_link(&foreign_link).unwrap(), foreign_target);
         assert!(!outcome.symlinks.contains(&foreign_link));
+    }
+
+    #[tokio::test]
+    async fn register_without_plugin_binaries_leaves_config_untouched() {
+        let tmp = tempdir().unwrap();
+        let user_bin = tmp.path().join("bin");
+        let docker_cfg = tmp.path().join("docker");
+        fs::create_dir_all(&user_bin).unwrap();
+        // No plugin binaries touched into user_bin.
+
+        let outcome = register(&user_bin, &docker_cfg).await.unwrap();
+
+        assert!(outcome.symlinks.is_empty());
+        assert!(
+            !outcome.config_updated,
+            "config.json must not be mutated when no plugins are present"
+        );
+        assert!(
+            !docker_cfg.join("config.json").exists(),
+            "config.json must not be created when nothing is registered"
+        );
     }
 
     #[tokio::test]
