@@ -19,6 +19,7 @@
   ],
   "packages": {
     ".": {
+      "release-as": "0.4.0",
       "extra-files": [
         {
           "type": "generic",
