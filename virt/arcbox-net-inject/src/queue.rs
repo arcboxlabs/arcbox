@@ -71,7 +71,11 @@ pub fn inject_one_frame(
             // injection. The guest will not access them until used_idx
             // advances (after Release fence below).
             let Some(buf) = (unsafe { guest_mem.slice_mut(addr_gpa, len) }) else {
-                continue;
+                // Bounds violation — treat as malformed ring and stop
+                // walking the chain. `continue` without advancing `idx`
+                // would spin on the same bad descriptor until q_size
+                // iterations burn off.
+                break;
             };
 
             let remaining = total_len.saturating_sub(written);
@@ -79,8 +83,16 @@ pub fn inject_one_frame(
 
             if written < VIRTIO_NET_HDR_SIZE {
                 // Write virtio-net header (or partial header).
-                // With MRG_RXBUF, num_buffers (bytes 10-11) must be 1 for
-                // single-descriptor frames. Without it, guest drops the packet.
+                //
+                // num_buffers semantics under MRG_RXBUF: it is the count of
+                // avail-ring entries ("buffers") the device consumed for
+                // this packet, NOT the number of linked descriptors in the
+                // chain. This function writes exactly one complete packet
+                // into one popped avail entry (spilling into linked NEXT
+                // descriptors within that chain as needed), so num_buffers
+                // is always 1 here. The multi-buffer RX-coalescing path
+                // lives in `inject::poll_inline_conns`, which stamps the
+                // actual span count via `write_inline_headers`.
                 let hdr_remaining = VIRTIO_NET_HDR_SIZE - written;
                 let hdr_bytes = hdr_remaining.min(to_write);
                 buf[..hdr_bytes].fill(0);

@@ -11,6 +11,7 @@ authors.workspace = true
 [dependencies]
 arcbox-virtio-core = { workspace = true }
 async-trait = "0.1"
+getrandom = "0.2"
 libc = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

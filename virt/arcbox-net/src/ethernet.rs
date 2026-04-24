@@ -412,6 +412,13 @@ pub fn build_tcp_data_frame(p: &TcpFrameParams, payload: &[u8]) -> Vec<u8> {
     let tcp_hdr_len = 20;
     let tcp_total_len = tcp_hdr_len + payload.len();
     let ip_total_len = 20 + tcp_total_len;
+    // IPv4 encodes total length in a 16-bit field; the `as u16` cast below
+    // would silently truncate for oversized payloads. Assert so the failure
+    // is loud if a caller ever exceeds the per-frame MTU budget.
+    assert!(
+        u16::try_from(ip_total_len).is_ok(),
+        "build_tcp_data_frame: ip_total_len={ip_total_len} overflows u16"
+    );
     let frame_len = ETH_HEADER_LEN + ip_total_len;
     let mut frame = vec![0u8; frame_len];
 
@@ -474,6 +481,13 @@ pub fn build_tcp_data_frame_partial_csum(p: &TcpFrameParams, payload: &[u8]) -> 
     let tcp_hdr_len = 20;
     let tcp_total_len = tcp_hdr_len + payload.len();
     let ip_total_len = 20 + tcp_total_len;
+    // Same IPv4 total_length overflow guard as `build_tcp_data_frame`.
+    // Callers are GSO-oriented and bounded by the RX descriptor budget,
+    // but asserting here keeps us honest if that ever slips.
+    assert!(
+        u16::try_from(ip_total_len).is_ok(),
+        "build_tcp_data_frame_partial_csum: ip_total_len={ip_total_len} overflows u16"
+    );
     let frame_len = ETH_HEADER_LEN + ip_total_len;
     let mut frame = vec![0u8; frame_len];
 

@@ -29,20 +29,33 @@ impl Default for NetConfig {
 
 impl NetConfig {
     /// Generates a random MAC address.
+    ///
+    /// The first three bytes are the locally-administered ArcBox OUI
+    /// (`52:54:AB`). The remaining three bytes come from `getrandom`, giving
+    /// 24 bits of true entropy — 1-in-16M collision odds. Time-derived
+    /// fallbacks were rejected because concurrent VM creation within the
+    /// same nanosecond tick would otherwise produce identical MACs and
+    /// poison the host ARP cache.
     #[must_use]
     pub fn random_mac() -> [u8; 6] {
         let mut mac = [0u8; 6];
-        // ArcBox OUI prefix: 52:54:AB
         mac[0] = 0x52;
         mac[1] = 0x54;
         mac[2] = 0xAB;
-        let random = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
-        mac[3] = ((random >> 16) & 0xFF) as u8;
-        mac[4] = ((random >> 8) & 0xFF) as u8;
-        mac[5] = (random & 0xFF) as u8;
+        let mut suffix = [0u8; 3];
+        if getrandom::getrandom(&mut suffix).is_err() {
+            // Extremely unlikely on supported platforms; fall back to the
+            // process-id XOR monotonic counter so we still avoid the
+            // all-zeroes collision pattern.
+            static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let pid = std::process::id();
+            let mixed = pid ^ n ^ 0x9E37_79B9;
+            suffix[0] = (mixed >> 16) as u8;
+            suffix[1] = (mixed >> 8) as u8;
+            suffix[2] = mixed as u8;
+        }
+        mac[3..6].copy_from_slice(&suffix);
         mac
     }
 }
