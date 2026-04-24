@@ -42,6 +42,58 @@ Three cheap guest-side experiments to run before considering structural changes 
 
 Pick the fix based on which of those three actually moves the needle. Multi-queue virtio-net is substantial (frontend, backend N threads, feature negotiation, flow hashing) and should not be speculated into.
 
+## Diagnostic results (2026-04-24)
+
+Ran all three. Short answer: **bottleneck is not guest-side**.
+
+**Experiment 1 — `QUEUE_NUM_MAX` 1024 → 2048**: unchanged. `-P 2 -b 6G` still collapses to ~550 Kbps receiver. Ring size is not the cap.
+
+**Experiment 2 — guest `ethtool` + `/proc/interrupts`**:
+
+| Signal | Value |
+|---|---|
+| `ethtool -l eth0` combined queues | **1** (current = max, no multi-queue negotiated) |
+| `ethtool -g eth0` RX/TX rings | 1024 / 1024 |
+| `ethtool -S eth0` rx_drops after `-b 6G -t 20` | **0** (no loss at the NIC) |
+| `ethtool -k eth0` GRO/TSO/LRO | all on |
+| `/proc/interrupts` virtio1 | **7499 on CPU0, 0 on CPU1-3** (pinned) |
+
+Interrupts pin to CPU0, but see experiment 3 — that CPU is not saturated.
+
+**Experiment 3 — guest `mpstat` during `-P 2 -b 6G -t 20`** (steady state, iperf3 SUM ≈ 10.3 Gbps):
+
+| CPU | %sys | %soft | %idle |
+|---|---|---|---|
+| 0 | 9.6 | 23.0 | **66.7** |
+| 1 | 0 | 1.5 | 98.5 |
+| 2 | 0 | 0 | 100 |
+| 3 | 0 | 0 | 100 |
+
+CPU0 has **65–70 % idle headroom** — NAPI/softirq is nowhere near saturated. Multi-queue would parallelize work CPU0 already handles comfortably. It is not the right fix.
+
+### What this rules out
+
+- **Ring capacity** (ruled out by exp 1)
+- **Guest NIC drops** (ruled out by exp 2 — `rx_drops=0`)
+- **Guest softirq CPU saturation** (ruled out by exp 3 — CPU0 at 25 % soft)
+- **Multi-CPU parallelism** (ruled out by exp 3 — CPU0 has headroom)
+
+### What this implicates
+
+The host-side pipeline, not the guest. Candidates:
+
+- **ACK-intercept path** in the tokio datapath loop (`try_fast_path_intercept` in `tcp_bridge.rs`) runs on a single tokio task. Each guest ACK frame does a HashMap lookup, a TCP flow update, a `stream.write` to the host socket, and an ACK-frame build — per ACK, sequentially across all flows. `tx_kicks = 660 k` during the 20 s test, so the datapath processed ~33 k ACKs/sec single-threaded.
+- **Inject thread** sharing one CPU for N flows — but mpstat on the host wasn't captured; this is the next thing to measure.
+- **Host-side flow-control interaction** with loopback TCP.
+
+### Repeatability note
+
+The 5-second `-P 2 -b 6G` run that showed "one flow 6 Gbps, other 275 Kbps" is a transient startup pattern. Over 20 seconds the flows converge to ~6 + 4.3 Gbps = ~10.3 Gbps aggregate. The *steady-state* cap is 10–12 Gbps combined, roughly half of the single-flow 22 Gbps. The pipeline isn't collapsing — it just doesn't scale beyond one flow's worth of throughput.
+
+### Next step
+
+Host-side profile, not guest-side structural work. Specifically, check inject-thread CPU on the host and profile `try_fast_path_intercept` during `-P 2 -b 6G`.
+
 ## Reproducer
 
 ```bash
