@@ -182,115 +182,133 @@ impl RxInjectThread {
         // Prune closed connections from previous iteration.
         inline_conns.retain(|c| !c.host_eof);
 
+        // Fair-share pass: each conn gets at most PER_CONN_READS in this
+        // call, then we return to the outer loop to flush the IRQ batch.
+        // Without this cap, a single busy flow drains all 256 descriptors
+        // before the guest sees an interrupt, triggering TCP pressure on
+        // the host side that manifests as heavy loss downstream.
+        const PER_CONN_READS: u16 = 16;
+
         for conn in inline_conns.iter_mut() {
-            if (*batch as usize) >= BATCH_SIZE {
-                break;
-            }
-
-            // Check available descriptors.
-            std::sync::atomic::fence(Ordering::Acquire);
-            let avail_idx = self.guest_mem.read_u16(self.queue.avail_gpa as usize + 2);
-            if *used_idx == avail_idx {
-                // No descriptors available — stop all inline polling.
-                break;
-            }
-
-            // Pop the next available descriptor.
-            let ring_off = self.queue.avail_gpa as usize + 4 + 2 * ((*used_idx as usize) % q_size);
-            let head_idx = self.guest_mem.read_u16(ring_off) as usize;
-
-            // Read descriptor to find a writable buffer large enough for
-            // at least the 66-byte header + 1 byte of payload.
-            let desc_base = self.queue.desc_gpa as usize;
-            let d_off = desc_base + head_idx * 16;
-            let Some(desc_slice) = self.guest_mem.slice(d_off, 16) else {
-                continue;
-            };
-
-            let addr_gpa = u64::from_le_bytes(desc_slice[0..8].try_into().unwrap()) as usize;
-            let buf_len = u32::from_le_bytes(desc_slice[8..12].try_into().unwrap()) as usize;
-            let flags = u16::from_le_bytes(desc_slice[12..14].try_into().unwrap());
-
-            // Descriptor must be device-writable (bit 1) and large enough.
-            if flags & 2 == 0 || buf_len < inline_conn::TOTAL_HDR_LEN + 1 {
-                continue;
-            }
-
-            // SAFETY: VirtIO descriptor buffers are device-owned during
-            // injection. The guest will not access them until used_idx
-            // advances (after Release fence below).
-            let Some(buf) = (unsafe { self.guest_mem.slice_mut(addr_gpa, buf_len) }) else {
-                continue;
-            };
-
-            // Read payload from host socket directly into guest buffer
-            // at offset 66 (after the header region).
-            let payload_buf = &mut buf[inline_conn::TOTAL_HDR_LEN..];
-            match conn.stream.read(payload_buf) {
-                Ok(0) => {
-                    tracing::debug!(
-                        "inline {}:{}->{}:{} host EOF",
-                        conn.remote_ip,
-                        conn.remote_port,
-                        conn.guest_ip,
-                        conn.guest_port
-                    );
-                    conn.host_eof = true;
-
-                    // Inject FIN+ACK so the guest half-closes its receive
-                    // side gracefully. Without this, guest writes after
-                    // host EOF hit Broken Pipe in tcp_bridge, the conn is
-                    // removed, and smoltcp replies with RST on the next
-                    // guest TX — surfacing as "connection reset by peer".
-                    inline_conn::write_fin_headers(buf, conn);
-                    conn.our_seq
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed); // FIN consumes 1 SEQ.
-
-                    let used_entry_off =
-                        self.queue.used_gpa as usize + 4 + ((*used_idx as usize) % q_size) * 8;
-                    self.guest_mem.write_u32(used_entry_off, head_idx as u32);
-                    self.guest_mem
-                        .write_u32(used_entry_off + 4, inline_conn::TOTAL_HDR_LEN as u32);
-
-                    std::sync::atomic::fence(Ordering::Release);
-                    *used_idx = used_idx.wrapping_add(1);
-                    self.guest_mem
-                        .write_u16(self.queue.used_gpa as usize + 2, *used_idx);
-
-                    *batch += 1;
+            let mut per_conn = 0u16;
+            loop {
+                if (*batch as usize) >= BATCH_SIZE {
+                    break;
                 }
-                Ok(n) => {
-                    // Write 66-byte header inline (no allocation).
-                    inline_conn::write_inline_headers(buf, conn, n);
-                    // Advance the shared atomic so ACK frames emitted by
-                    // the datapath carry the correct seq value.
-                    conn.our_seq
-                        .fetch_add(n as u32, std::sync::atomic::Ordering::Relaxed);
-
-                    let total_written = inline_conn::TOTAL_HDR_LEN + n;
-
-                    // Update used ring entry.
-                    let used_entry_off =
-                        self.queue.used_gpa as usize + 4 + ((*used_idx as usize) % q_size) * 8;
-                    self.guest_mem.write_u32(used_entry_off, head_idx as u32);
-                    self.guest_mem
-                        .write_u32(used_entry_off + 4, total_written as u32);
-
-                    // Release fence: ensure descriptor data is visible before
-                    // used_idx advances.
-                    std::sync::atomic::fence(Ordering::Release);
-                    *used_idx = used_idx.wrapping_add(1);
-                    self.guest_mem
-                        .write_u16(self.queue.used_gpa as usize + 2, *used_idx);
-
-                    *batch += 1;
+                if per_conn >= PER_CONN_READS {
+                    break;
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // No data ready on this socket — try the next connection.
+
+                // Check available descriptors.
+                std::sync::atomic::fence(Ordering::Acquire);
+                let avail_idx = self.guest_mem.read_u16(self.queue.avail_gpa as usize + 2);
+                if *used_idx == avail_idx {
+                    // No descriptors available — stop all inline polling.
+                    return;
                 }
-                Err(e) => {
-                    tracing::debug!("inline conn error: {e}");
-                    conn.host_eof = true;
+
+                // Pop the next available descriptor.
+                let ring_off =
+                    self.queue.avail_gpa as usize + 4 + 2 * ((*used_idx as usize) % q_size);
+                let head_idx = self.guest_mem.read_u16(ring_off) as usize;
+
+                // Read descriptor to find a writable buffer large enough for
+                // at least the 66-byte header + 1 byte of payload.
+                let desc_base = self.queue.desc_gpa as usize;
+                let d_off = desc_base + head_idx * 16;
+                let Some(desc_slice) = self.guest_mem.slice(d_off, 16) else {
+                    break;
+                };
+
+                let addr_gpa = u64::from_le_bytes(desc_slice[0..8].try_into().unwrap()) as usize;
+                let buf_len = u32::from_le_bytes(desc_slice[8..12].try_into().unwrap()) as usize;
+                let flags = u16::from_le_bytes(desc_slice[12..14].try_into().unwrap());
+
+                // Descriptor must be device-writable (bit 1) and large enough.
+                if flags & 2 == 0 || buf_len < inline_conn::TOTAL_HDR_LEN + 1 {
+                    break;
+                }
+
+                // SAFETY: VirtIO descriptor buffers are device-owned during
+                // injection. The guest will not access them until used_idx
+                // advances (after Release fence below).
+                let Some(buf) = (unsafe { self.guest_mem.slice_mut(addr_gpa, buf_len) }) else {
+                    break;
+                };
+
+                // Read payload from host socket directly into guest buffer
+                // at offset 66 (after the header region).
+                let payload_buf = &mut buf[inline_conn::TOTAL_HDR_LEN..];
+                match conn.stream.read(payload_buf) {
+                    Ok(0) => {
+                        tracing::debug!(
+                            "inline {}:{}->{}:{} host EOF",
+                            conn.remote_ip,
+                            conn.remote_port,
+                            conn.guest_ip,
+                            conn.guest_port
+                        );
+                        conn.host_eof = true;
+
+                        // Inject FIN+ACK so the guest half-closes its receive
+                        // side gracefully.
+                        inline_conn::write_fin_headers(buf, conn);
+                        // FIN consumes 1 SEQ.
+                        conn.our_seq
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                        let used_entry_off =
+                            self.queue.used_gpa as usize + 4 + ((*used_idx as usize) % q_size) * 8;
+                        self.guest_mem.write_u32(used_entry_off, head_idx as u32);
+                        self.guest_mem
+                            .write_u32(used_entry_off + 4, inline_conn::TOTAL_HDR_LEN as u32);
+
+                        std::sync::atomic::fence(Ordering::Release);
+                        *used_idx = used_idx.wrapping_add(1);
+                        self.guest_mem
+                            .write_u16(self.queue.used_gpa as usize + 2, *used_idx);
+
+                        *batch += 1;
+                        break; // EOF — no more reads from this conn.
+                    }
+                    Ok(n) => {
+                        // Write 66-byte header inline (no allocation).
+                        inline_conn::write_inline_headers(buf, conn, n);
+                        // Advance the shared atomic so ACK frames emitted by
+                        // the datapath carry the correct seq value.
+                        conn.our_seq
+                            .fetch_add(n as u32, std::sync::atomic::Ordering::Relaxed);
+
+                        let total_written = inline_conn::TOTAL_HDR_LEN + n;
+
+                        // Update used ring entry.
+                        let used_entry_off =
+                            self.queue.used_gpa as usize + 4 + ((*used_idx as usize) % q_size) * 8;
+                        self.guest_mem.write_u32(used_entry_off, head_idx as u32);
+                        self.guest_mem
+                            .write_u32(used_entry_off + 4, total_written as u32);
+
+                        // Release fence: ensure descriptor data is visible
+                        // before used_idx advances.
+                        std::sync::atomic::fence(Ordering::Release);
+                        *used_idx = used_idx.wrapping_add(1);
+                        self.guest_mem
+                            .write_u16(self.queue.used_gpa as usize + 2, *used_idx);
+
+                        *batch += 1;
+                        per_conn += 1;
+                        // Continue the inner loop — try to drain more data
+                        // from this same connection before moving on.
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        // No more data on this socket — next conn.
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::debug!("inline conn error: {e}");
+                        conn.host_eof = true;
+                        break;
+                    }
                 }
             }
         }
