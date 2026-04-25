@@ -25,7 +25,7 @@ use arcbox_protocol::agent::{
 use super::btrfs::ensure_data_mount;
 use super::cmdline::docker_api_vsock_port;
 use super::probe::{probe_docker_api_ready, probe_first_ready_socket, probe_unix_socket};
-use super::sync_clock_from_host;
+use super::rpc::sync_clock_from_host;
 use crate::agent::ensure_runtime;
 use crate::rpc::RpcResponse;
 

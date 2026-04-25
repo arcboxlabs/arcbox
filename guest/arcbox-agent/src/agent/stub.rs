@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 
-use super::AGENT_PORT;
+use arcbox_constants::ports::AGENT_PORT;
 
 /// The Guest Agent (stub for non-Linux platforms).
 pub struct Agent;
