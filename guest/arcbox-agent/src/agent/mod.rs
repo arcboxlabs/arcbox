@@ -7,7 +7,6 @@
 //! [`stub`] (a no-op kept buildable on non-Linux hosts for development).
 
 use anyhow::Result;
-use arcbox_constants::ports::AGENT_PORT;
 
 pub mod ensure_runtime;
 
