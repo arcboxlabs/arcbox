@@ -3,7 +3,6 @@
 //! Listens on vsock and dispatches RPC requests on the Linux guest.
 //! Non-Linux platforms use the stub in `super::stub`.
 
-use std::io::{Read as _, Seek as _, SeekFrom};
 use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -16,7 +15,7 @@ use tokio::net::TcpStream;
 use tokio::net::UnixStream;
 use tokio::process::Command;
 use tokio::sync::Mutex;
-use tokio_vsock::{VMADDR_CID_ANY, VsockAddr, VsockListener, VsockStream};
+use tokio_vsock::VsockStream;
 
 use super::AGENT_PORT;
 use super::ensure_runtime;
@@ -25,19 +24,12 @@ use crate::rpc::{
     read_message, write_message, write_response,
 };
 use crate::sandbox::SandboxService;
-use arcbox_constants::cmdline::{
-    DOCKER_DATA_DEVICE_KEY as DOCKER_DATA_DEVICE_CMDLINE_KEY, GUEST_DOCKER_VSOCK_PORT_KEY,
-};
-use arcbox_constants::devices::DOCKER_DATA_BLOCK_DEVICE as DOCKER_DATA_DEVICE_DEFAULT;
-use arcbox_constants::env::GUEST_DOCKER_VSOCK_PORT as GUEST_DOCKER_VSOCK_PORT_ENV;
 use arcbox_constants::paths::{
-    ARCBOX_RUNTIME_BIN_DIR, CNI_DATA_MOUNT_POINT, CONTAINERD_DATA_MOUNT_POINT, CONTAINERD_SOCKET,
-    DOCKER_API_UNIX_SOCKET, DOCKER_DATA_MOUNT_POINT, K3S_CNI_BIN_DIR, K3S_CNI_CONF_DIR,
-    K3S_DATA_MOUNT_POINT, K3S_KUBECONFIG_PATH, KUBELET_DATA_MOUNT_POINT,
+    ARCBOX_RUNTIME_BIN_DIR, CNI_DATA_MOUNT_POINT, CONTAINERD_SOCKET, DOCKER_API_UNIX_SOCKET,
+    DOCKER_DATA_MOUNT_POINT, K3S_CNI_BIN_DIR, K3S_CNI_CONF_DIR, K3S_DATA_MOUNT_POINT,
+    K3S_KUBECONFIG_PATH, KUBELET_DATA_MOUNT_POINT,
 };
-use arcbox_constants::ports::{
-    DOCKER_API_VSOCK_PORT, KUBERNETES_API_GUEST_PORT, KUBERNETES_API_VSOCK_PORT,
-};
+use arcbox_constants::ports::KUBERNETES_API_GUEST_PORT;
 use arcbox_constants::status::{SERVICE_ERROR, SERVICE_NOT_READY, SERVICE_READY};
 
 use arcbox_protocol::agent::{
@@ -47,6 +39,16 @@ use arcbox_protocol::agent::{
     KubernetesStopResponse, PingResponse, RuntimeEnsureRequest, RuntimeEnsureResponse,
     RuntimeStatusRequest, RuntimeStatusResponse, SystemInfo,
 };
+
+mod btrfs;
+mod cmdline;
+mod probe;
+mod vsock;
+
+use btrfs::ensure_data_mount;
+use cmdline::{docker_api_vsock_port, kubernetes_api_vsock_port};
+use probe::{probe_docker_api_ready, probe_first_ready_socket, probe_tcp, probe_unix_socket};
+use vsock::{bind_vsock_listener_with_retry, is_peer_closed_error};
 
 // =========================================================================
 // Sandbox service singleton
@@ -82,355 +84,6 @@ const CONTAINERD_SOCKET_CANDIDATES: [&str; 2] =
 const K3S_PID_FILE: &str = "/run/arcbox/k3s.pid";
 const K3S_NAMESPACE: &str = "k8s.io";
 const KUBERNETES_HOST_ENDPOINT: &str = "https://127.0.0.1:16443";
-
-fn cmdline_value(key: &str) -> Option<String> {
-    let cmdline = std::fs::read_to_string("/proc/cmdline").ok()?;
-    for token in cmdline.split_whitespace() {
-        if let Some(value) = token.strip_prefix(key) {
-            if !value.is_empty() {
-                return Some(value.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn docker_api_vsock_port() -> u32 {
-    if let Some(port) = std::env::var(GUEST_DOCKER_VSOCK_PORT_ENV)
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .filter(|port| *port > 0)
-    {
-        return port;
-    }
-
-    if let Some(port) = cmdline_value(GUEST_DOCKER_VSOCK_PORT_KEY)
-        .and_then(|raw| raw.parse::<u32>().ok())
-        .filter(|port| *port > 0)
-    {
-        return port;
-    }
-
-    DOCKER_API_VSOCK_PORT
-}
-
-/// HVC fast-path block device for the data disk (device index 1 = vdb).
-/// Falls back to the standard VirtIO block device if HVC device is absent.
-const HVC_DATA_DEVICE: &str = "/dev/arcboxhvc1";
-
-fn docker_data_device() -> String {
-    // Prefer explicit kernel cmdline override.
-    if let Some(v) = cmdline_value(DOCKER_DATA_DEVICE_CMDLINE_KEY) {
-        if !v.trim().is_empty() {
-            return v;
-        }
-    }
-    // Use HVC fast-path device if available.
-    if Path::new(HVC_DATA_DEVICE).exists() {
-        tracing::info!("using HVC fast-path block device: {}", HVC_DATA_DEVICE);
-        return HVC_DATA_DEVICE.to_string();
-    }
-    DOCKER_DATA_DEVICE_DEFAULT.to_string()
-}
-
-fn kubernetes_api_vsock_port() -> u32 {
-    KUBERNETES_API_VSOCK_PORT
-}
-
-/// Btrfs primary superblock magic `_BHRfS_M` at absolute disk offset
-/// `0x10040` (superblock starts at `0x10000`, magic at internal offset `0x40`).
-const BTRFS_MAGIC: [u8; 8] = [0x5f, 0x42, 0x48, 0x52, 0x66, 0x53, 0x5f, 0x4d];
-const BTRFS_MAGIC_OFFSET: u64 = 0x10040;
-
-/// Temporary mount point for the raw Btrfs device before subvolume bind mounts.
-///
-/// Must live on a writable filesystem. `/run` is tmpfs (set up in PID1 init),
-/// while EROFS root is read-only and cannot host dynamic mountpoints.
-const BTRFS_TEMP_MOUNT: &str = "/run/arcbox/data";
-
-fn has_btrfs_superblock(device: &str) -> bool {
-    let mut file = match std::fs::File::open(device) {
-        Ok(file) => file,
-        Err(_) => return false,
-    };
-    if file.seek(SeekFrom::Start(BTRFS_MAGIC_OFFSET)).is_err() {
-        return false;
-    }
-    let mut magic = [0_u8; 8];
-    if file.read_exact(&mut magic).is_err() {
-        return false;
-    }
-    magic == BTRFS_MAGIC
-}
-
-/// Formats the device as Btrfs if it does not already have a Btrfs superblock.
-/// Old ext4 disks are unconditionally wiped (alpha breaking change).
-fn ensure_btrfs_format(device: &str) -> Result<String, String> {
-    if has_btrfs_superblock(device) {
-        return Ok("data device already Btrfs".to_string());
-    }
-
-    // /sbin/mkfs.btrfs is baked into the EROFS rootfs.
-    let binary = "/sbin/mkfs.btrfs";
-    if !Path::new(binary).exists() {
-        return Err(format!("{} not found in EROFS rootfs", binary));
-    }
-
-    match std::process::Command::new(binary)
-        .args(["-f", device])
-        .status()
-    {
-        Ok(status) if status.success() => Ok(format!("formatted {} as Btrfs", device)),
-        Ok(status) => Err(format!(
-            "mkfs.btrfs failed on {} (exit={})",
-            device,
-            status.code().unwrap_or(-1)
-        )),
-        Err(e) => Err(format!("failed to execute mkfs.btrfs: {}", e)),
-    }
-}
-
-/// Mounts the data volume (Btrfs), creates subvolumes, and bind-mounts them.
-///
-/// Layout after this function returns:
-/// - `/run/arcbox/data` — raw Btrfs mount (internal, not used by daemons)
-/// - `/var/lib/docker` — bind mount of `@docker` subvolume
-/// - `/var/lib/containerd` — bind mount of `@containerd` subvolume
-/// - `/var/lib/rancher/k3s` — bind mount of `@k3s` subvolume
-/// - `/var/lib/kubelet` — bind mount of `@kubelet` subvolume
-/// - `/var/lib/cni` — bind mount of `@cni` subvolume
-///
-/// Returns `Ok(notes)` on success or `Err(reason)` if the data volume
-/// could not be set up. Callers must abort runtime startup on error —
-/// running containerd/dockerd without persistent storage is unsafe.
-fn ensure_data_mount() -> Result<String, String> {
-    // Already fully set up?
-    if crate::mount::is_mounted(DOCKER_DATA_MOUNT_POINT)
-        && crate::mount::is_mounted(CONTAINERD_DATA_MOUNT_POINT)
-        && crate::mount::is_mounted(K3S_DATA_MOUNT_POINT)
-        && crate::mount::is_mounted(KUBELET_DATA_MOUNT_POINT)
-        && crate::mount::is_mounted(CNI_DATA_MOUNT_POINT)
-    {
-        return Ok("data subvolumes already mounted".to_string());
-    }
-
-    let device = docker_data_device();
-    if !Path::new(&device).exists() {
-        return Err(format!("data device missing: {}", device));
-    }
-
-    // Step 1: Format if not Btrfs.
-    match ensure_btrfs_format(&device) {
-        Ok(note) => tracing::info!("{}", note),
-        Err(e) => return Err(e),
-    }
-
-    // Step 2: Mount raw Btrfs to temporary writable mount point.
-    if !crate::mount::is_mounted(BTRFS_TEMP_MOUNT) {
-        if let Err(e) = std::fs::create_dir_all(BTRFS_TEMP_MOUNT) {
-            return Err(format!("failed to create {}: {}", BTRFS_TEMP_MOUNT, e));
-        }
-        match std::process::Command::new("/bin/busybox")
-            .args([
-                "mount",
-                "-t",
-                "btrfs",
-                "-o",
-                "compress=zstd:3,discard=async",
-                &device,
-                BTRFS_TEMP_MOUNT,
-            ])
-            .status()
-        {
-            Ok(s) if s.success() => {}
-            Ok(s) => {
-                return Err(format!(
-                    "mount -t btrfs {} {} failed (exit={})",
-                    device,
-                    BTRFS_TEMP_MOUNT,
-                    s.code().unwrap_or(-1)
-                ));
-            }
-            Err(e) => return Err(format!("mount exec failed: {}", e)),
-        }
-    }
-
-    // Step 3: Create subvolumes if missing.
-    for subvol in ["@docker", "@containerd", "@k3s", "@kubelet", "@cni"] {
-        let subvol_path = format!("{}/{}", BTRFS_TEMP_MOUNT, subvol);
-        if Path::new(&subvol_path).exists() {
-            continue;
-        }
-        // EROFS only includes mkfs.btrfs, not full btrfs-progs. Use the
-        // BTRFS_IOC_SUBVOL_CREATE ioctl directly to create subvolumes.
-        if let Err(e) = btrfs_create_subvolume(&subvol_path) {
-            return Err(format!("failed to create subvolume {}: {}", subvol, e));
-        }
-    }
-
-    let mut notes = Vec::new();
-
-    // Step 4: Bind mount subvolumes to final paths.
-    for (subvol, target) in [
-        ("@docker", DOCKER_DATA_MOUNT_POINT),
-        ("@containerd", CONTAINERD_DATA_MOUNT_POINT),
-        ("@k3s", K3S_DATA_MOUNT_POINT),
-        ("@kubelet", KUBELET_DATA_MOUNT_POINT),
-        ("@cni", CNI_DATA_MOUNT_POINT),
-    ] {
-        if crate::mount::is_mounted(target) {
-            continue;
-        }
-        if let Err(e) = std::fs::create_dir_all(target) {
-            return Err(format!("failed to create {}: {}", target, e));
-        }
-        let opts = format!(
-            "compress=zstd:1,discard=async,noatime,space_cache=v2,subvol={}",
-            subvol
-        );
-        match std::process::Command::new("/bin/busybox")
-            .args(["mount", "-t", "btrfs", "-o", &opts, &device, target])
-            .status()
-        {
-            Ok(s) if s.success() => {
-                // Disable Btrfs COW on metadata-heavy subdirectories.
-                // BoltDB (containerd/dockerd) does frequent fdatasync on
-                // small pages. Without NOCOW, each write triggers Btrfs
-                // copy-on-write + APFS COW on the host = double amplification.
-                disable_cow_on_metadata_dirs(target);
-                notes.push(format!("mounted {} -> {}", subvol, target));
-            }
-            Ok(s) => {
-                return Err(format!(
-                    "mount subvol={} {} failed (exit={})",
-                    subvol,
-                    target,
-                    s.code().unwrap_or(-1)
-                ));
-            }
-            Err(e) => return Err(format!("mount exec failed: {}", e)),
-        }
-    }
-
-    if notes.is_empty() {
-        Ok("data subvolumes already mounted".to_string())
-    } else {
-        Ok(notes.join("; "))
-    }
-}
-
-/// Disables Btrfs COW (sets NOCOW attribute) on metadata-heavy subdirectories.
-///
-/// BoltDB and other metadata stores do frequent fdatasync on small pages.
-/// Btrfs COW amplifies each write (copy 16KB metadata page + update B-tree),
-/// and the host's APFS does another COW on top — double write amplification.
-/// NOCOW converts these to in-place overwrites at the Btrfs layer.
-#[cfg(target_os = "linux")]
-fn disable_cow_on_metadata_dirs(mount_point: &str) {
-    // FS_IOC_SETFLAGS = _IOW('f', 2, long)
-    // FS_NOCOW_FL = 0x00800000
-    const FS_NOCOW_FL: libc::c_long = 0x0080_0000;
-
-    // Subdirectories that contain BoltDB or other fsync-heavy metadata.
-    // The NOCOW attribute is inherited by new files created in these dirs.
-    let metadata_subdirs = [
-        "io.containerd.metadata.v1.bolt",
-        "io.containerd.snapshotter.v1.overlayfs",
-        "containerd",
-        "network",
-        "builder",
-        "buildkit",
-        "image",
-        "trust",
-    ];
-
-    for subdir in &metadata_subdirs {
-        let path = format!("{}/{}", mount_point, subdir);
-        let _ = std::fs::create_dir_all(&path);
-
-        let Ok(cpath) = std::ffi::CString::new(path.as_str()) else {
-            continue;
-        };
-        // SAFETY: valid path, O_RDONLY | O_DIRECTORY.
-        let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
-        if fd < 0 {
-            continue;
-        }
-
-        let mut flags: libc::c_long = 0;
-        // Get current flags, then set NOCOW.
-        // SAFETY: FS_IOC_GETFLAGS/SETFLAGS on a valid directory fd.
-        // NOTE: `libc::Ioctl` differs per target — `c_ulong` on
-        // Linux GNU, `c_int` on Linux musl. Using the typedef keeps
-        // the cast right for whichever target we cross-compile to.
-        unsafe {
-            #[allow(clippy::cast_possible_wrap)]
-            let get_flags = 0x8008_6601u32 as libc::Ioctl; // FS_IOC_GETFLAGS
-            #[allow(clippy::cast_possible_wrap)]
-            let set_flags = 0x4008_6602u32 as libc::Ioctl; // FS_IOC_SETFLAGS
-            if libc::ioctl(fd, get_flags, &mut flags) == 0 {
-                flags |= FS_NOCOW_FL;
-                if libc::ioctl(fd, set_flags, &flags) == 0 {
-                    tracing::debug!("set NOCOW on {}", path);
-                }
-            }
-            libc::close(fd);
-        }
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn disable_cow_on_metadata_dirs(_mount_point: &str) {}
-
-// BTRFS_IOC_SUBVOL_CREATE = _IOW(0x94, 14, struct btrfs_ioctl_vol_args)
-// struct btrfs_ioctl_vol_args { __s64 fd; char name[4088]; }  total = 4096 bytes
-//
-// nix::ioctl_write_ptr! computes the request number portably (handles
-// c_int on musl vs c_ulong on glibc).
-#[cfg(target_os = "linux")]
-nix::ioctl_write_ptr!(btrfs_ioc_subvol_create, 0x94, 14, [u8; 4096]);
-
-/// Creates a Btrfs subvolume using the `BTRFS_IOC_SUBVOL_CREATE` ioctl.
-///
-/// This avoids needing the full `btrfs-progs` CLI in the EROFS rootfs.
-#[cfg(target_os = "linux")]
-fn btrfs_create_subvolume(path: &str) -> Result<(), String> {
-    use std::os::unix::io::AsRawFd;
-
-    let parent = Path::new(path)
-        .parent()
-        .ok_or_else(|| "no parent directory".to_string())?;
-    let name = Path::new(path)
-        .file_name()
-        .ok_or_else(|| "no subvolume name".to_string())?
-        .to_str()
-        .ok_or_else(|| "invalid subvolume name".to_string())?;
-
-    let parent_dir =
-        std::fs::File::open(parent).map_err(|e| format!("open {}: {}", parent.display(), e))?;
-
-    let mut args = [0u8; 4096];
-    // First 8 bytes: fd field (unused for SUBVOL_CREATE, set to 0).
-    // Bytes 8..4096: null-terminated name.
-    let name_bytes = name.as_bytes();
-    if name_bytes.len() >= 4088 {
-        return Err("subvolume name too long".to_string());
-    }
-    args[8..8 + name_bytes.len()].copy_from_slice(name_bytes);
-
-    // SAFETY: valid fd from File::open, args buffer is 4096 bytes matching
-    // the kernel struct btrfs_ioctl_vol_args layout.
-    unsafe { btrfs_ioc_subvol_create(parent_dir.as_raw_fd(), &args) }
-        .map_err(|e| format!("BTRFS_IOC_SUBVOL_CREATE: {}", e))?;
-
-    tracing::info!("created Btrfs subvolume {}", path);
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn btrfs_create_subvolume(_path: &str) -> Result<(), String> {
-    Err("Btrfs subvolume creation is only supported on Linux".to_string())
-}
 
 /// Result from handling a request.
 enum RequestResult {
@@ -501,35 +154,6 @@ impl Agent {
                 }
             }
         }
-    }
-}
-
-async fn bind_vsock_listener_with_retry(port: u32, component: &str) -> Result<VsockListener> {
-    const INITIAL_DELAY_MS: u64 = 120;
-    const MAX_DELAY_MS: u64 = 2_000;
-
-    let mut delay_ms = INITIAL_DELAY_MS;
-
-    loop {
-        let addr = VsockAddr::new(VMADDR_CID_ANY, port);
-        match VsockListener::bind(addr) {
-            Ok(listener) => {
-                tracing::info!(port, component, "vsock listener bound");
-                return Ok(listener);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    port,
-                    component,
-                    retry_delay_ms = delay_ms,
-                    error = %e,
-                    "failed to bind vsock listener, retrying"
-                );
-            }
-        }
-
-        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-        delay_ms = (delay_ms * 3 / 2).min(MAX_DELAY_MS);
     }
 }
 
@@ -698,25 +322,6 @@ impl Default for Agent {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// True when `err`'s chain contains an `io::Error` whose kind indicates
-/// that the peer closed the socket. These are routine during daemon
-/// shutdown or retry-driven teardown, not agent-side faults.
-fn is_peer_closed_error(err: &anyhow::Error) -> bool {
-    err.chain().any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io_err| {
-                matches!(
-                    io_err.kind(),
-                    std::io::ErrorKind::BrokenPipe
-                        | std::io::ErrorKind::ConnectionReset
-                        | std::io::ErrorKind::ConnectionAborted
-                        | std::io::ErrorKind::UnexpectedEof
-                )
-            })
-    })
 }
 
 /// Handles a single vsock connection.
@@ -1267,13 +872,6 @@ fn k3s_pid() -> Option<i32> {
     }
 }
 
-async fn probe_tcp(addr: SocketAddrV4) -> bool {
-    matches!(
-        tokio::time::timeout(Duration::from_millis(300), TcpStream::connect(addr)).await,
-        Ok(Ok(_))
-    )
-}
-
 async fn k3s_api_ready() -> bool {
     probe_tcp(SocketAddrV4::new(
         Ipv4Addr::LOCALHOST,
@@ -1786,53 +1384,6 @@ async fn collect_kubernetes_status() -> KubernetesStatusResponse {
         endpoint: KUBERNETES_HOST_ENDPOINT.to_string(),
         detail,
         services,
-    }
-}
-
-async fn probe_first_ready_socket(paths: &[&str]) -> bool {
-    for path in paths {
-        if probe_unix_socket(path).await {
-            return true;
-        }
-    }
-    false
-}
-
-/// Checks if a Unix socket is connectable (lightweight probe).
-async fn probe_unix_socket(path: &str) -> bool {
-    if !Path::new(path).exists() {
-        return false;
-    }
-    match tokio::time::timeout(Duration::from_millis(300), UnixStream::connect(path)).await {
-        Ok(Ok(_stream)) => true,
-        Ok(Err(_)) | Err(_) => false,
-    }
-}
-
-/// Sends a real HTTP `GET /_ping` to the Docker socket and waits for a
-/// valid response. This is much stronger than `probe_unix_socket` which
-/// only checks if `connect()` succeeds — dockerd may accept connections
-/// before its HTTP handler is ready.
-async fn probe_docker_api_ready(path: &str) -> bool {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let Ok(Ok(mut stream)) =
-        tokio::time::timeout(Duration::from_millis(500), UnixStream::connect(path)).await
-    else {
-        return false;
-    };
-    let req = b"GET /_ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    if stream.write_all(req).await.is_err() {
-        return false;
-    }
-    let mut buf = [0u8; 256];
-    match tokio::time::timeout(Duration::from_secs(3), stream.read(&mut buf)).await {
-        Ok(Ok(n)) if n > 0 => {
-            let resp = String::from_utf8_lossy(&buf[..n]);
-            // dockerd returns "HTTP/1.1 200 OK" with body "OK".
-            resp.starts_with("HTTP/1.1 200")
-        }
-        _ => false,
     }
 }
 
