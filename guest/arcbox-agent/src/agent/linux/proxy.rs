@@ -69,10 +69,9 @@ async fn proxy_docker_api_connection(vsock_stream: VsockStream) -> Result<()> {
                 }
             };
             if total == 0 {
-                tracing::info!(
-                    "Docker proxy vsock→unix: first chunk {} bytes: {:?}",
-                    n,
-                    String::from_utf8_lossy(&buf[..n.min(120)]),
+                tracing::debug!(
+                    "Docker proxy vsock→unix: first chunk received ({} bytes, payload redacted)",
+                    n
                 );
             }
             if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut unix_wr, &buf[..n]).await {
@@ -110,10 +109,9 @@ async fn proxy_docker_api_connection(vsock_stream: VsockStream) -> Result<()> {
                 }
             };
             if total == 0 {
-                tracing::info!(
-                    "Docker proxy unix→vsock: first chunk {} bytes: {:?}",
-                    n,
-                    String::from_utf8_lossy(&buf[..n.min(120)]),
+                tracing::debug!(
+                    "Docker proxy unix→vsock: first chunk received ({} bytes, payload redacted)",
+                    n
                 );
             }
             if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut vsock_wr, &buf[..n]).await {
