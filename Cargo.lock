@@ -1310,9 +1310,9 @@ dependencies = [
 
 [[package]]
 name = "dimicon"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b10b3601704f9f8b56bd6db73b1e3428262b9579b0968f55cb83f7c7a3420de"
+checksum = "daa6bd72b26b8c8f81ddea345f66059dd052ca4f85902af7733986f81bfca61e"
 dependencies = [
  "reqwest",
  "serde",
