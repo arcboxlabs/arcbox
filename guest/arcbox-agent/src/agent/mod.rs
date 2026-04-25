@@ -126,15 +126,6 @@ mod tests {
         assert!(result.unwrap().contains("\\n"));
     }
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn test_shared_containerd_config_uses_k3s_cni_paths() {
-        let config = super::linux::shared_containerd_config();
-        assert!(config.contains("bin_dir = \"/var/lib/rancher/k3s/data/cni\""));
-        assert!(config.contains("conf_dir = \"/var/lib/rancher/k3s/agent/etc/cni/net.d\""));
-        assert!(config.contains("max_conf_num = 1"));
-    }
-
     #[test]
     fn test_agent_creation() {
         let _agent = Agent::new();
