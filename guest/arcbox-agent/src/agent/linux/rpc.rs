@@ -24,6 +24,7 @@ use super::kubernetes::{
 use super::runtime::{handle_ensure_runtime, handle_runtime_status};
 use super::sandbox::handle_sandbox_message;
 use super::system_info::handle_get_system_info;
+use super::vsock::is_peer_closed_error;
 
 /// Result from handling a request.
 enum RequestResult {
@@ -43,8 +44,10 @@ where
         let (msg_type, trace_id, payload) = match read_message(&mut stream).await {
             Ok(msg) => msg,
             Err(e) => {
-                // Check if it's an EOF (clean disconnect)
-                if e.to_string().contains("failed to read message header") {
+                // Treat peer-closed errors as a clean disconnect; surface
+                // anything else (parse failure, unexpected I/O) to the
+                // caller so it's logged.
+                if is_peer_closed_error(&e) {
                     tracing::debug!("Client disconnected");
                     return Ok(());
                 }
