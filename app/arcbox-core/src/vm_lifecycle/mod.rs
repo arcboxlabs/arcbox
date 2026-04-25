@@ -69,8 +69,13 @@ const BALLOON_SHRINK_DELAY_SECS: u64 = 10;
 
 /// Persistent guest dockerd data image name.
 const DOCKER_DATA_IMAGE_NAME: &str = "docker.img";
-/// Persistent guest dockerd data image size (64 GiB sparse file).
-const DOCKER_DATA_IMAGE_SIZE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+/// Persistent guest dockerd data image size (8 TiB sparse file).
+///
+/// This is the virtual size of the block device. The host file is sparse and
+/// only consumes actual disk space for written blocks. 8 TiB matches OrbStack
+/// and prevents users from hitting artificial limits.
+const DOCKER_DATA_IMAGE_SIZE_BYTES: u64 = 8 * 1024 * 1024 * 1024 * 1024;
+
 /// Extended VM lifecycle state.
 ///
 /// This extends the basic `MachineState` with additional states
