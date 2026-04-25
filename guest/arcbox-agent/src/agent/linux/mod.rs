@@ -3,27 +3,23 @@
 //! Listens on vsock and dispatches RPC requests on the Linux guest.
 //! Non-Linux platforms use the stub in `super::stub`.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpStream;
-use tokio::net::UnixStream;
 use tokio::process::Command;
 use tokio::sync::Mutex;
-use tokio_vsock::VsockStream;
 
 use super::AGENT_PORT;
 use super::ensure_runtime;
 use crate::rpc::{
-    AGENT_VERSION, ErrorResponse, MessageType, RpcRequest, RpcResponse, parse_request,
-    read_message, write_message, write_response,
+    AGENT_VERSION, ErrorResponse, RpcRequest, RpcResponse, parse_request, read_message,
+    write_response,
 };
-use crate::sandbox::SandboxService;
 use arcbox_constants::paths::{
     ARCBOX_RUNTIME_BIN_DIR, CNI_DATA_MOUNT_POINT, CONTAINERD_SOCKET, DOCKER_API_UNIX_SOCKET,
     DOCKER_DATA_MOUNT_POINT, K3S_CNI_BIN_DIR, K3S_CNI_CONF_DIR, K3S_DATA_MOUNT_POINT,
@@ -37,46 +33,24 @@ use arcbox_protocol::agent::{
     KubernetesKubeconfigResponse, KubernetesStartRequest, KubernetesStartResponse,
     KubernetesStatusRequest, KubernetesStatusResponse, KubernetesStopRequest,
     KubernetesStopResponse, PingResponse, RuntimeEnsureRequest, RuntimeEnsureResponse,
-    RuntimeStatusRequest, RuntimeStatusResponse, SystemInfo,
+    RuntimeStatusRequest, RuntimeStatusResponse,
 };
 
 mod btrfs;
 mod cmdline;
 mod probe;
+mod proxy;
+mod sandbox;
+mod system_info;
 mod vsock;
 
 use btrfs::ensure_data_mount;
-use cmdline::{docker_api_vsock_port, kubernetes_api_vsock_port};
+use cmdline::docker_api_vsock_port;
 use probe::{probe_docker_api_ready, probe_first_ready_socket, probe_tcp, probe_unix_socket};
+use proxy::{run_docker_api_proxy, run_kubernetes_api_proxy};
+use sandbox::{handle_sandbox_message, sandbox_service};
+use system_info::handle_get_system_info;
 use vsock::{bind_vsock_listener_with_retry, is_peer_closed_error};
-
-// =========================================================================
-// Sandbox service singleton
-// =========================================================================
-
-/// Returns the global [`SandboxService`] singleton.
-///
-/// The service is initialised lazily on the first call.  Initialisation
-/// failures are logged as warnings and `None` is stored, so sandbox
-/// operations will return a 503 error rather than crashing the agent.
-fn sandbox_service() -> Option<&'static Arc<SandboxService>> {
-    static SERVICE: OnceLock<Option<Arc<SandboxService>>> = OnceLock::new();
-    SERVICE
-        .get_or_init(|| {
-            let config = crate::config::load();
-            match SandboxService::new(config) {
-                Ok(svc) => {
-                    tracing::info!("sandbox service initialised");
-                    Some(Arc::new(svc))
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "sandbox service unavailable");
-                    None
-                }
-            }
-        })
-        .as_ref()
-}
 
 /// Containerd socket candidates (primary + legacy fallback).
 const CONTAINERD_SOCKET_CANDIDATES: [&str; 2] =
@@ -157,167 +131,6 @@ impl Agent {
     }
 }
 
-async fn run_docker_api_proxy() -> Result<()> {
-    let port = docker_api_vsock_port();
-    let mut listener = bind_vsock_listener_with_retry(port, "docker api proxy").await?;
-    tracing::info!("Docker API proxy listening on vsock port {}", port);
-
-    loop {
-        match listener.accept().await {
-            Ok((stream, peer_addr)) => {
-                tracing::info!("Docker API proxy accepted connection from {:?}", peer_addr);
-                tokio::spawn(async move {
-                    if let Err(e) = proxy_docker_api_connection(stream).await {
-                        tracing::warn!("Docker API proxy connection error: {}", e);
-                    }
-                });
-            }
-            Err(e) => {
-                tracing::warn!("Docker API proxy accept failed: {}", e);
-            }
-        }
-    }
-}
-
-async fn proxy_docker_api_connection(vsock_stream: VsockStream) -> Result<()> {
-    let unix_stream = UnixStream::connect(DOCKER_API_UNIX_SOCKET)
-        .await
-        .context("failed to connect guest docker unix socket")?;
-    tracing::info!("Docker proxy: connected to {}", DOCKER_API_UNIX_SOCKET);
-
-    let (mut vsock_rd, mut vsock_wr) = tokio::io::split(vsock_stream);
-    let (mut unix_rd, mut unix_wr) = tokio::io::split(unix_stream);
-
-    // vsock → unix (host HTTP request → dockerd)
-    let v2u = tokio::spawn(async move {
-        let mut total: u64 = 0;
-        let mut buf = [0u8; 8192];
-        loop {
-            let n = match tokio::io::AsyncReadExt::read(&mut vsock_rd, &mut buf).await {
-                Ok(0) => {
-                    tracing::info!("Docker proxy vsock→unix: EOF after {} bytes", total);
-                    break;
-                }
-                Ok(n) => n,
-                Err(e) => {
-                    tracing::warn!(
-                        "Docker proxy vsock→unix: read error after {} bytes: {}",
-                        total,
-                        e
-                    );
-                    break;
-                }
-            };
-            if total == 0 {
-                tracing::info!(
-                    "Docker proxy vsock→unix: first chunk {} bytes: {:?}",
-                    n,
-                    String::from_utf8_lossy(&buf[..n.min(120)]),
-                );
-            }
-            if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut unix_wr, &buf[..n]).await {
-                tracing::warn!(
-                    "Docker proxy vsock→unix: write error after {} bytes: {}",
-                    total,
-                    e
-                );
-                break;
-            }
-            total += n as u64;
-        }
-        let _ = tokio::io::AsyncWriteExt::shutdown(&mut unix_wr).await;
-        total
-    });
-
-    // unix → vsock (dockerd response → host)
-    let u2v = tokio::spawn(async move {
-        let mut total: u64 = 0;
-        let mut buf = [0u8; 8192];
-        loop {
-            let n = match tokio::io::AsyncReadExt::read(&mut unix_rd, &mut buf).await {
-                Ok(0) => {
-                    tracing::info!("Docker proxy unix→vsock: EOF after {} bytes", total);
-                    break;
-                }
-                Ok(n) => n,
-                Err(e) => {
-                    tracing::warn!(
-                        "Docker proxy unix→vsock: read error after {} bytes: {}",
-                        total,
-                        e
-                    );
-                    break;
-                }
-            };
-            if total == 0 {
-                tracing::info!(
-                    "Docker proxy unix→vsock: first chunk {} bytes: {:?}",
-                    n,
-                    String::from_utf8_lossy(&buf[..n.min(120)]),
-                );
-            }
-            if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut vsock_wr, &buf[..n]).await {
-                tracing::warn!(
-                    "Docker proxy unix→vsock: write error after {} bytes: {}",
-                    total,
-                    e
-                );
-                break;
-            }
-            total += n as u64;
-        }
-        let _ = tokio::io::AsyncWriteExt::shutdown(&mut vsock_wr).await;
-        total
-    });
-
-    let (v2u_result, u2v_result) = tokio::join!(v2u, u2v);
-    let v2u_bytes = v2u_result.unwrap_or(0);
-    let u2v_bytes = u2v_result.unwrap_or(0);
-    tracing::info!(
-        "Docker proxy session done: vsock→unix={} bytes, unix→vsock={} bytes",
-        v2u_bytes,
-        u2v_bytes,
-    );
-    Ok(())
-}
-
-async fn run_kubernetes_api_proxy() -> Result<()> {
-    let port = kubernetes_api_vsock_port();
-    let mut listener = bind_vsock_listener_with_retry(port, "kubernetes api proxy").await?;
-    tracing::info!("Kubernetes API proxy listening on vsock port {}", port);
-
-    loop {
-        match listener.accept().await {
-            Ok((stream, peer_addr)) => {
-                tracing::debug!(
-                    "Kubernetes API proxy accepted connection from {:?}",
-                    peer_addr
-                );
-                tokio::spawn(async move {
-                    if let Err(e) = proxy_kubernetes_api_connection(stream).await {
-                        tracing::debug!("Kubernetes API proxy connection ended: {}", e);
-                    }
-                });
-            }
-            Err(e) => {
-                tracing::warn!("Kubernetes API proxy accept failed: {}", e);
-            }
-        }
-    }
-}
-
-async fn proxy_kubernetes_api_connection(mut vsock_stream: VsockStream) -> Result<()> {
-    let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, KUBERNETES_API_GUEST_PORT);
-    let mut tcp_stream = TcpStream::connect(addr)
-        .await
-        .context("failed to connect guest kubernetes api socket")?;
-
-    let _ = tokio::io::copy_bidirectional(&mut vsock_stream, &mut tcp_stream)
-        .await
-        .context("kubernetes api proxy copy failed")?;
-    Ok(())
-}
-
 impl Default for Agent {
     fn default() -> Self {
         Self::new()
@@ -383,196 +196,6 @@ where
             }
         }
     }
-}
-
-/// Dispatches a sandbox RPC request.
-///
-/// Non-streaming requests (CRUD, snapshots) write a single response frame
-/// and return.  Streaming requests (Run, Events) write multiple frames
-/// until the stream ends.
-async fn handle_sandbox_message<S>(
-    stream: &mut S,
-    msg_type: MessageType,
-    trace_id: &str,
-    payload: &[u8],
-) -> anyhow::Result<()>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    let svc = match sandbox_service() {
-        Some(s) => Arc::clone(s),
-        None => {
-            let err = ErrorResponse::new(503, "sandbox service unavailable");
-            write_message(stream, MessageType::Error, trace_id, &err.encode()).await?;
-            return Ok(());
-        }
-    };
-
-    match msg_type {
-        // -----------------------------------------------------------------
-        // CRUD
-        // -----------------------------------------------------------------
-        MessageType::SandboxCreateRequest => match svc.create(payload).await {
-            Ok(resp) => {
-                use prost::Message as _;
-                write_message(
-                    stream,
-                    MessageType::SandboxCreateResponse,
-                    trace_id,
-                    &resp.encode_to_vec(),
-                )
-                .await?;
-            }
-            Err(e) => {
-                send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
-            }
-        },
-        MessageType::SandboxStopRequest => match svc.stop(payload).await {
-            Ok(()) => {
-                write_message(stream, MessageType::SandboxStopResponse, trace_id, &[]).await?;
-            }
-            Err(e) => {
-                send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
-            }
-        },
-        MessageType::SandboxRemoveRequest => match svc.remove(payload).await {
-            Ok(()) => {
-                write_message(stream, MessageType::SandboxRemoveResponse, trace_id, &[]).await?;
-            }
-            Err(e) => {
-                send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
-            }
-        },
-        MessageType::SandboxInspectRequest => match svc.inspect(payload) {
-            Ok(resp) => {
-                use prost::Message as _;
-                write_message(
-                    stream,
-                    MessageType::SandboxInspectResponse,
-                    trace_id,
-                    &resp.encode_to_vec(),
-                )
-                .await?;
-            }
-            Err(e) => {
-                send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
-            }
-        },
-        MessageType::SandboxListRequest => match svc.list(payload) {
-            Ok(resp) => {
-                use prost::Message as _;
-                write_message(
-                    stream,
-                    MessageType::SandboxListResponse,
-                    trace_id,
-                    &resp.encode_to_vec(),
-                )
-                .await?;
-            }
-            Err(e) => {
-                send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
-            }
-        },
-        // -----------------------------------------------------------------
-        // Streaming: Run
-        // -----------------------------------------------------------------
-        MessageType::SandboxRunRequest => {
-            svc.handle_run(stream, trace_id, payload).await?;
-        }
-        // -----------------------------------------------------------------
-        // Streaming: Events
-        // -----------------------------------------------------------------
-        MessageType::SandboxEventsRequest => {
-            svc.handle_events(stream, trace_id, payload).await?;
-        }
-        // -----------------------------------------------------------------
-        // Streaming: Exec
-        // -----------------------------------------------------------------
-        MessageType::SandboxExecRequest => {
-            svc.handle_exec(stream, trace_id, payload).await?;
-        }
-        // -----------------------------------------------------------------
-        // Snapshots
-        // -----------------------------------------------------------------
-        MessageType::SandboxCheckpointRequest => match svc.checkpoint(payload).await {
-            Ok(resp) => {
-                use prost::Message as _;
-                write_message(
-                    stream,
-                    MessageType::SandboxCheckpointResponse,
-                    trace_id,
-                    &resp.encode_to_vec(),
-                )
-                .await?;
-            }
-            Err(e) => {
-                send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
-            }
-        },
-        MessageType::SandboxRestoreRequest => match svc.restore(payload).await {
-            Ok(resp) => {
-                use prost::Message as _;
-                write_message(
-                    stream,
-                    MessageType::SandboxRestoreResponse,
-                    trace_id,
-                    &resp.encode_to_vec(),
-                )
-                .await?;
-            }
-            Err(e) => {
-                send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
-            }
-        },
-        MessageType::SandboxListSnapshotsRequest => match svc.list_snapshots(payload) {
-            Ok(resp) => {
-                use prost::Message as _;
-                write_message(
-                    stream,
-                    MessageType::SandboxListSnapshotsResponse,
-                    trace_id,
-                    &resp.encode_to_vec(),
-                )
-                .await?;
-            }
-            Err(e) => {
-                send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
-            }
-        },
-        MessageType::SandboxDeleteSnapshotRequest => match svc.delete_snapshot(payload) {
-            Ok(()) => {
-                write_message(
-                    stream,
-                    MessageType::SandboxDeleteSnapshotResponse,
-                    trace_id,
-                    &[],
-                )
-                .await?;
-            }
-            Err(e) => {
-                send_sandbox_error(stream, trace_id, e.status_code(), &e.to_string()).await?;
-            }
-        },
-        _ => {
-            send_sandbox_error(stream, trace_id, 400, "unrecognised sandbox message type").await?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Write a single `Error` frame back to the caller.
-async fn send_sandbox_error<S>(
-    stream: &mut S,
-    trace_id: &str,
-    code: i32,
-    message: &str,
-) -> anyhow::Result<()>
-where
-    S: tokio::io::AsyncWrite + Unpin,
-{
-    let err = ErrorResponse::new(code, message);
-    write_message(stream, MessageType::Error, trace_id, &err.encode()).await
 }
 
 /// Handles a single RPC request.
@@ -745,12 +368,6 @@ fn handle_ping(req: arcbox_protocol::agent::PingRequest) -> RpcResponse {
         },
         version: AGENT_VERSION.to_string(),
     })
-}
-
-/// Handles a GetSystemInfo request.
-async fn handle_get_system_info() -> RpcResponse {
-    let info = collect_system_info();
-    RpcResponse::SystemInfo(info)
 }
 
 /// Idempotent, non-blocking EnsureRuntime handler.
@@ -1655,113 +1272,4 @@ async fn try_start_bundled_runtime() -> String {
     ensure_dockerd_ready(&runtime_bin_dir, &mut notes).await;
 
     notes.join("; ")
-}
-
-/// Collects system information from the guest.
-fn collect_system_info() -> SystemInfo {
-    fn parse_ip_output(stdout: &[u8]) -> Vec<String> {
-        let mut ips = Vec::new();
-        let output = String::from_utf8_lossy(stdout);
-
-        for token in output.split(|c: char| c.is_whitespace() || c == ',') {
-            let token = token.trim();
-            if token.is_empty() {
-                continue;
-            }
-
-            let Ok(addr) = token.parse::<IpAddr>() else {
-                continue;
-            };
-            if addr.is_loopback() {
-                continue;
-            }
-
-            let ip = addr.to_string();
-            if !ips.iter().any(|existing| existing == &ip) {
-                ips.push(ip);
-            }
-        }
-
-        ips
-    }
-
-    let mut info = SystemInfo::default();
-
-    // Kernel version
-    if let Ok(uname) = nix::sys::utsname::uname() {
-        info.kernel_version = uname.release().to_string_lossy().to_string();
-        info.os_name = uname.sysname().to_string_lossy().to_string();
-        info.os_version = uname.version().to_string_lossy().to_string();
-        info.arch = uname.machine().to_string_lossy().to_string();
-        info.hostname = uname.nodename().to_string_lossy().to_string();
-    }
-
-    // Memory info
-    if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
-        for line in meminfo.lines() {
-            if line.starts_with("MemTotal:") {
-                if let Some(kb) = line.split_whitespace().nth(1) {
-                    if let Ok(kb_val) = kb.parse::<u64>() {
-                        info.total_memory = kb_val * 1024;
-                    }
-                }
-            } else if line.starts_with("MemAvailable:") {
-                if let Some(kb) = line.split_whitespace().nth(1) {
-                    if let Ok(kb_val) = kb.parse::<u64>() {
-                        info.available_memory = kb_val * 1024;
-                    }
-                }
-            }
-        }
-    }
-
-    // CPU count
-    info.cpu_count = std::thread::available_parallelism()
-        .map(|p| p.get() as u32)
-        .unwrap_or(1);
-
-    // Load average
-    if let Ok(loadavg) = std::fs::read_to_string("/proc/loadavg") {
-        let parts: Vec<&str> = loadavg.split_whitespace().collect();
-        if parts.len() >= 3 {
-            if let Ok(load1) = parts[0].parse::<f64>() {
-                info.load_average.push(load1);
-            }
-            if let Ok(load5) = parts[1].parse::<f64>() {
-                info.load_average.push(load5);
-            }
-            if let Ok(load15) = parts[2].parse::<f64>() {
-                info.load_average.push(load15);
-            }
-        }
-    }
-
-    // Uptime
-    if let Ok(uptime) = std::fs::read_to_string("/proc/uptime") {
-        if let Some(secs) = uptime.split_whitespace().next() {
-            if let Ok(secs_val) = secs.parse::<f64>() {
-                info.uptime = secs_val as u64;
-            }
-        }
-    }
-
-    // IP addresses (excluding loopback).
-    // Coreutils `hostname` supports `-I`, BusyBox supports `-i`.
-    for flag in ["-I", "-i"] {
-        let Ok(output) = std::process::Command::new("hostname").arg(flag).output() else {
-            continue;
-        };
-
-        if !output.status.success() {
-            continue;
-        }
-
-        let ips = parse_ip_output(&output.stdout);
-        if !ips.is_empty() {
-            info.ip_addresses = ips;
-            break;
-        }
-    }
-
-    info
 }
