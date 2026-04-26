@@ -29,6 +29,14 @@ mod platform {
         // Docker Desktop and OrbStack both set 1048576 in their guest VMs.
         raise_fd_limits();
 
+        // Mount host /private for macOS symlink targets (/tmp, /var/folders).
+        // Must come before tmpfs mounts so /private is available as a VirtioFS
+        // target. Guest /tmp and /var remain isolated tmpfs.
+        mount_virtiofs_optional(
+            arcbox_constants::virtiofs::TAG_PRIVATE,
+            arcbox_constants::virtiofs::MOUNT_PRIVATE,
+        );
+
         // Writable layers on top of read-only EROFS.
         mount_tmpfs("/tmp");
         mount_tmpfs("/run");
@@ -64,7 +72,10 @@ mod platform {
         setup_networking();
 
         // Optional host /Users share (non-fatal if not configured).
-        mount_virtiofs_optional("users", "/Users");
+        mount_virtiofs_optional(
+            arcbox_constants::virtiofs::TAG_USERS,
+            arcbox_constants::virtiofs::MOUNT_USERS,
+        );
 
         // Optional DAX fixture share for the hv_e2e harness. Mounted under
         // `/run/arcbox-dax` because `/` is read-only EROFS — mkdir_p on a
