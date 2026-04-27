@@ -84,6 +84,16 @@ impl From<std::io::Error> for NetError {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl From<arcbox_vmnet::VmnetError> for NetError {
+    fn from(err: arcbox_vmnet::VmnetError) -> Self {
+        match err {
+            arcbox_vmnet::VmnetError::Config(msg) => Self::Common(CommonError::config(msg)),
+            arcbox_vmnet::VmnetError::Io(io) => Self::Common(CommonError::from(io)),
+        }
+    }
+}
+
 impl NetError {
     /// Creates a configuration error.
     #[must_use]
