@@ -190,6 +190,8 @@ fc-sdk = "0.2.3"
 arcbox-constants = { version = "0.4.1", path = "common/arcbox-constants", features = ["std"] } # x-release-please-version
 arcbox-dns = { version = "0.4.1", path = "common/arcbox-dns" } # x-release-please-version
 arcbox-error = { version = "0.4.1", path = "common/arcbox-error" } # x-release-please-version
+arcbox-route = { version = "0.4.1", path = "common/arcbox-route" } # x-release-please-version
+arcbox-hv = { version = "0.3.20", path = "virt/arcbox-hv" } # x-release-please-version
 arcbox-vz = { version = "0.4.1", path = "virt/arcbox-vz" } # x-release-please-version
 arcbox-hypervisor = { version = "0.4.1", path = "virt/arcbox-hypervisor" } # x-release-please-version
 arcbox-vmm = { version = "0.4.1", path = "virt/arcbox-vmm" } # x-release-please-version
@@ -206,8 +208,10 @@ arcbox-vm = { version = "0.4.1", path = "virt/arcbox-vm" } # x-release-please-ve
 arcbox-fs = { version = "0.4.1", path = "virt/arcbox-fs" } # x-release-please-version
 arcbox-net = { version = "0.4.1", path = "virt/arcbox-net" } # x-release-please-version
 arcbox-vmnet = { version = "0.4.1", path = "virt/arcbox-vmnet" } # x-release-please-version
+arcbox-net-inject = { version = "0.4.1", path = "virt/arcbox-net-inject" } # x-release-please-version
 arcbox-dhcp = { version = "0.4.1", path = "virt/arcbox-dhcp" } # x-release-please-version
 arcbox-container = { version = "0.4.1", path = "runtime/arcbox-container" } # x-release-please-version
+arcbox-oci = { version = "0.4.1", path = "runtime/arcbox-oci" } # x-release-please-version
 arcbox-protocol = { version = "0.4.1", path = "rpc/arcbox-protocol" } # x-release-please-version
 arcbox-grpc = { version = "0.4.1", path = "rpc/arcbox-grpc" } # x-release-please-version
 arcbox-transport = { version = "0.4.1", path = "rpc/arcbox-transport" } # x-release-please-version
@@ -215,6 +219,7 @@ arcbox-docker = { version = "0.4.1", path = "app/arcbox-docker" } # x-release-pl
 arcbox-helper = { version = "0.4.1", path = "app/arcbox-helper" } # x-release-please-version
 arcbox-core = { version = "0.4.1", path = "app/arcbox-core" } # x-release-please-version
 arcbox-api = { version = "0.4.1", path = "app/arcbox-api" } # x-release-please-version
+arcbox-migration = { version = "0.4.1", path = "app/arcbox-migration" } # x-release-please-version
 arcbox-logging = { version = "0.4.1", path = "common/arcbox-logging", default-features = false } # x-release-please-version
 
 # Test infrastructure
