@@ -265,18 +265,22 @@ impl Vmnet {
                     }
                 }
                 VmnetMode::Bridged => {
-                    if let Some(ref iface) = config.bridge_interface {
-                        let s = std::ffi::CString::new(iface.as_str()).unwrap();
-                        xpc_dictionary_set_string(
-                            dict,
-                            vmnet_shared_interface_name_key,
-                            s.as_ptr(),
-                        );
-                    } else {
+                    let Some(ref iface) = config.bridge_interface else {
                         xpc_release(dict);
                         dispatch_release(queue.cast());
                         return Err(VmnetError::config("bridge mode requires interface name"));
-                    }
+                    };
+                    let s = match std::ffi::CString::new(iface.as_str()) {
+                        Ok(s) => s,
+                        Err(_) => {
+                            xpc_release(dict);
+                            dispatch_release(queue.cast());
+                            return Err(VmnetError::config(
+                                "bridge interface name contains a NUL byte",
+                            ));
+                        }
+                    };
+                    xpc_dictionary_set_string(dict, vmnet_shared_interface_name_key, s.as_ptr());
                 }
             }
 
@@ -423,8 +427,17 @@ impl Vmnet {
             dispatch_release(sema);
         }
 
-        // If the user specified a MAC, prefer it. Otherwise use what vmnet returned.
-        let mac = config.mac.unwrap_or(info.mac);
+        // Prefer user-specified MAC; otherwise the one vmnet returned. If
+        // both are absent (vmnet did not populate the dictionary or parsing
+        // failed), fall back to a generated locally-administered MAC so we
+        // never advertise the all-zero address.
+        let mac = config.mac.unwrap_or_else(|| {
+            if info.mac == [0u8; 6] {
+                generate_mac()
+            } else {
+                info.mac
+            }
+        });
         let mtu = if config.mtu == DEFAULT_MTU {
             info.mtu
         } else {
@@ -665,7 +678,6 @@ fn parse_mac(s: &str) -> Option<[u8; 6]> {
 }
 
 /// Generates a random MAC address with the locally administered bit set.
-#[cfg(not(feature = "vmnet"))]
 fn generate_mac() -> [u8; 6] {
     use std::time::{SystemTime, UNIX_EPOCH};
 

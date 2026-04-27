@@ -30,7 +30,9 @@ pub mod tcp_bridge;
 pub mod tso_backend;
 pub mod tun;
 
-pub use arcbox_vmnet::{Vmnet, VmnetConfig, VmnetInterfaceInfo, VmnetMode, VmnetRelay};
+#[cfg(feature = "vmnet")]
+pub use arcbox_vmnet::VmnetRelay;
+pub use arcbox_vmnet::{Vmnet, VmnetConfig, VmnetInterfaceInfo, VmnetMode};
 pub use nat::DarwinNatNetwork;
 pub use tun::DarwinTun;
 

@@ -122,6 +122,20 @@ fn bridged_without_interface_fails_with_config_error() {
     }
 }
 
+/// An interface name containing an interior NUL byte must not panic — vmnet
+/// should reject it cleanly with a `Config` error.
+#[test]
+fn bridged_with_nul_in_interface_name_fails_cleanly() {
+    let config = VmnetConfig::bridged("en0\0evil");
+    match Vmnet::new(config) {
+        Err(VmnetError::Config(msg)) => {
+            assert!(msg.contains("NUL"), "unexpected message: {msg}");
+        }
+        Ok(_) => panic!("interface name with NUL should fail"),
+        Err(other) => panic!("expected config error, got {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Live tests — require entitlement / root.
 // ---------------------------------------------------------------------------

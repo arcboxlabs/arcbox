@@ -32,8 +32,8 @@
 
 pub mod error;
 pub mod ffi;
-pub mod interface;
-pub mod relay;
+mod interface;
+mod relay;
 
 pub use error::{Result, VmnetError};
 pub use interface::{Vmnet, VmnetConfig, VmnetInterfaceInfo, VmnetMode};
