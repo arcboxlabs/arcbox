@@ -515,6 +515,7 @@ dependencies = [
  "arcbox-dns",
  "arcbox-error",
  "arcbox-virtio",
+ "arcbox-vmnet",
  "bytes",
  "chrono",
  "crossbeam-channel",
@@ -736,6 +737,7 @@ dependencies = [
  "arcbox-net",
  "arcbox-net-inject",
  "arcbox-virtio",
+ "arcbox-vmnet",
  "bytes",
  "chrono",
  "crossbeam-channel",
@@ -755,6 +757,18 @@ dependencies = [
  "vm-fdt",
  "vm-memory",
  "vm-superio",
+]
+
+[[package]]
+name = "arcbox-vmnet"
+version = "0.4.1"
+dependencies = [
+ "libc",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
