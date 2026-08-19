@@ -181,7 +181,7 @@ impl SandboxManager {
                 Ok(result) => return Ok(result),
                 // Post-commit ambiguity: the sandbox is running under this
                 // id — cold-booting would recreate a live sandbox.
-                Err(error @ VmmError::AckUnconfirmed { .. }) => return Err(error),
+                Err(error @ ComputerError::AckUnconfirmed { .. }) => return Err(error),
                 Err(error) => {
                     warn!(
                         sandbox_id = %id,
@@ -245,7 +245,7 @@ impl SandboxManager {
                             .await
                         {
                             Ok(result) => return Ok(result),
-                            Err(error @ VmmError::AckUnconfirmed { .. }) => {
+                            Err(error @ ComputerError::AckUnconfirmed { .. }) => {
                                 return Err(error);
                             }
                             Err(error) => {
@@ -301,16 +301,17 @@ impl SandboxManager {
         let record = match self.records.provision_intent(&id, request_key, spec)? {
             ProvisionIntent::Created(record) | ProvisionIntent::Resume(record) => record,
             ProvisionIntent::Replay(record) => {
-                let outcome = record
-                    .provision_outcome
-                    .ok_or_else(|| VmmError::WrongState {
-                        id: id.clone(),
-                        expected: "a persisted create outcome".into(),
-                        actual: "none".into(),
-                    })?;
+                let outcome =
+                    record
+                        .provision_outcome
+                        .ok_or_else(|| ComputerError::WrongState {
+                            id: id.clone(),
+                            expected: "a persisted create outcome".into(),
+                            actual: "none".into(),
+                        })?;
                 return Ok((id, outcome.ip_address));
             }
-            ProvisionIntent::Blocked(_) => return Err(VmmError::AlreadyExists(id)),
+            ProvisionIntent::Blocked(_) => return Err(ComputerError::AlreadyExists(id)),
         };
         let generation = record.generation;
         let deadlines = Deadlines {
@@ -381,7 +382,7 @@ impl SandboxManager {
                 );
             }
 
-            Ok::<_, VmmError>(ip_address)
+            Ok::<_, ComputerError>(ip_address)
         }
         .await;
 
@@ -446,13 +447,13 @@ impl SandboxManager {
                         rollback = %rollback,
                         "sandbox create rollback incomplete; instance left Failed"
                     );
-                    return Err(VmmError::Other(format!(
+                    return Err(ComputerError::Other(format!(
                         "{error}; sandbox rollback is incomplete: {rollback}"
                     )));
                 }
                 let abort = self.records.abort_provision(&id, generation)?;
                 if let Some(durability_error) = abort.durability_error {
-                    return Err(VmmError::Unavailable(format!(
+                    return Err(ComputerError::Unavailable(format!(
                         "{error}; create rollback is visible, but durability is unconfirmed: {durability_error}"
                     )));
                 }
@@ -630,9 +631,9 @@ impl SandboxManager {
                 // whose actor died without finishing. Its VM is live,
                 // unhanded, and dies with this process, which is the one thing
                 // this pass exists to report.
-                Err(VmmError::NotFound(_))
+                Err(ComputerError::NotFound(_))
                     if !super::still_registered(&self.computers, &id, incarnation) => {}
-                Err(VmmError::NotFound(_)) => failures.push(format!(
+                Err(ComputerError::NotFound(_)) => failures.push(format!(
                     "{id}: its actor stopped without answering, so the vm was not handed over"
                 )),
                 Err(error) => failures.push(format!("{id}: {error}")),
@@ -650,7 +651,7 @@ impl SandboxManager {
         if failures.is_empty() {
             return Ok(());
         }
-        Err(VmmError::Unavailable(format!(
+        Err(ComputerError::Unavailable(format!(
             "some sandboxes could not be handed over and will be killed on exit: {}",
             failures.join("; ")
         )))
@@ -665,7 +666,7 @@ impl SandboxManager {
             // an intent nobody acknowledged, or a tombstone a previous
             // removal did not finish — and the claim is what serializes this
             // against a create of the same id arriving now.
-            Err(VmmError::NotFound(_)) => {
+            Err(ComputerError::NotFound(_)) => {
                 let vm_dir = PathBuf::from(&self.config.firecracker.data_dir)
                     .join("sandboxes")
                     .join(id);
@@ -685,7 +686,7 @@ impl SandboxManager {
                     Ok(_reservation) => {
                         let commit = self.records.cancel_pending_or_missing(id)?;
                         if let Some(error) = commit.durability_error {
-                            return Err(VmmError::Unavailable(format!(
+                            return Err(ComputerError::Unavailable(format!(
                                 "sandbox {id} removal is visible, but durability is unconfirmed: {error}"
                             )));
                         }
@@ -693,7 +694,7 @@ impl SandboxManager {
                         return Ok(());
                     }
                     // A create won the race for the id; remove what it made.
-                    Err(VmmError::AlreadyExists(_)) => self.mailbox(id)?,
+                    Err(ComputerError::AlreadyExists(_)) => self.mailbox(id)?,
                     Err(error) => return Err(error),
                 }
             }
@@ -838,7 +839,7 @@ impl SandboxManager {
 
     /// Verify the computer is `Ready` and return the agent inside it.
     ///
-    /// A paused computer answers [`VmmError::Paused`], not `WrongState`, so
+    /// A paused computer answers [`ComputerError::Paused`], not `WrongState`, so
     /// the daemon can resume it transparently and retry (CORE-21).
     pub(super) fn require_ready_agent(&self, id: &SandboxId) -> Result<Arc<dyn GuestAgent>> {
         self.agent_in(id, &[SandboxState::Ready], "Ready")
@@ -847,7 +848,7 @@ impl SandboxManager {
     /// Verify the computer is alive (Ready or Running) and return the agent
     /// inside it. Unlike [`Self::require_ready_agent`], an in-flight workload
     /// does not block the operation — file I/O works alongside Run/Exec.
-    /// Paused states map to [`VmmError::Paused`] for the daemon's transparent
+    /// Paused states map to [`ComputerError::Paused`] for the daemon's transparent
     /// resume, as above.
     pub(super) fn require_alive_agent(&self, id: &SandboxId) -> Result<Arc<dyn GuestAgent>> {
         self.agent_in(
@@ -872,8 +873,8 @@ impl SandboxManager {
         let snapshot = self.snapshot(id)?;
         if !allowed.contains(&snapshot.state) {
             return Err(match snapshot.state {
-                SandboxState::Pausing | SandboxState::Paused => VmmError::Paused(id.clone()),
-                state => VmmError::WrongState {
+                SandboxState::Pausing | SandboxState::Paused => ComputerError::Paused(id.clone()),
+                state => ComputerError::WrongState {
                     id: id.clone(),
                     expected: expected.to_owned(),
                     actual: state.to_string(),
@@ -882,7 +883,7 @@ impl SandboxManager {
         }
         snapshot
             .agent
-            .ok_or_else(|| VmmError::Vsock(format!("sandbox {id} has no running vm to reach")))
+            .ok_or_else(|| ComputerError::Vsock(format!("sandbox {id} has no running vm to reach")))
     }
 }
 
