@@ -430,7 +430,7 @@ impl ComputerActor {
         }
     }
 
-    pub(super) fn public(&self) -> SandboxState {
+    pub(super) fn public(&self) -> ComputerState {
         self.snapshot_tx.borrow().state
     }
 

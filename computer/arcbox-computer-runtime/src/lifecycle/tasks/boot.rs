@@ -21,7 +21,7 @@ use crate::error::{ComputerError, Result};
 use crate::lifecycle::runtime::ComputerRuntime;
 use crate::sandbox::boot::{StageError, create_rootfs_symlink, stage_rootfs_cow_or_copy};
 use crate::sandbox::spec::build_vm_spec;
-use crate::sandbox::{self, NetworkAttachment, SandboxSpec, SandboxState};
+use crate::sandbox::{self, ComputerState, NetworkAttachment, SandboxSpec};
 use crate::snapshot_cow::{CowHandle, CowManager};
 
 pub type BootOutput = (Arc<dyn VmHandle>, Box<dyn ReadyGate>);
@@ -209,7 +209,7 @@ pub async fn do_boot(
         computer.state
     };
 
-    if matches!(state, SandboxState::Stopping | SandboxState::Stopped) {
+    if matches!(state, ComputerState::Stopping | ComputerState::Stopped) {
         complete_resource_handoff(&mut resource_handoff);
         return Err(BootFailure {
             error: ComputerError::WrongState {
@@ -339,7 +339,7 @@ pub async fn do_boot(
         prepared: None,
         cow_handle: None,
     })?;
-    if matches!(state, SandboxState::Stopping | SandboxState::Stopped) {
+    if matches!(state, ComputerState::Stopping | ComputerState::Stopped) {
         return Err(BootFailure {
             error: ComputerError::WrongState {
                 id: id.to_owned(),

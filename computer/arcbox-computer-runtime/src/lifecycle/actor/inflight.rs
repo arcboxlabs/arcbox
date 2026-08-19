@@ -334,7 +334,7 @@ impl ComputerActor {
         }
         self.pending_stop = None;
         match self.public() {
-            SandboxState::Ready | SandboxState::Running => {
+            ComputerState::Ready | ComputerState::Running => {
                 let budget_ms = u64::try_from(budget.as_millis()).unwrap_or(u64::MAX);
                 self.dispatch(machine, Event::Stop { budget_ms }).await;
             }

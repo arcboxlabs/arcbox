@@ -64,7 +64,7 @@ use crate::sandbox::record::{
 use crate::sandbox::types::action;
 use crate::sandbox::workload::WorkloadClaim;
 use crate::sandbox::{
-    CheckpointInfo, IdleAction, LifecycleUpdate, SandboxEvent, SandboxId, SandboxState,
+    CheckpointInfo, ComputerState, IdleAction, LifecycleUpdate, SandboxEvent, SandboxId,
 };
 
 mod commands;
@@ -246,7 +246,7 @@ pub struct Deadlines {
 /// for it.
 #[derive(Clone)]
 pub struct ComputerSnapshot {
-    pub state: SandboxState,
+    pub state: ComputerState,
     pub agent: Option<Arc<dyn GuestAgent>>,
     /// The running VM, for the graceful hand-over a process exit does.
     pub handle: Option<Arc<dyn VmHandle>>,
@@ -278,7 +278,7 @@ impl ComputerSnapshot {
     ///
     /// Everything but the agent, which the actor publishes and withdraws
     /// with the guest's reachability rather than reading it off the runtime.
-    pub fn project(runtime: &ComputerRuntime, state: SandboxState, deadlines: Deadlines) -> Self {
+    pub fn project(runtime: &ComputerRuntime, state: ComputerState, deadlines: Deadlines) -> Self {
         Self {
             state,
             agent: None,

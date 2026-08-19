@@ -939,6 +939,8 @@ fn still_registered(computers: &Computers, id: &SandboxId, incarnation: Uuid) ->
         .is_some_and(|current| current.incarnation == incarnation)
 }
 
+pub use types::ComputerState;
+
 #[cfg(test)]
 mod tests {
     use arcbox_vm_driver::testkit::FakeDriver;

@@ -38,7 +38,7 @@
 //!   `arcbox-vm-proto` vsock client as its one implementation
 //! - [`RootfsBuilder`] — OCI/overlay2 → ext4 with `/sbin/vm-agent` injected,
 //!   and the default busybox image; the composer supplies [`RootfsPaths`]
-//! - [`SandboxState`] — a computer's public lifecycle state
+//! - [`ComputerState`] — a computer's public lifecycle state
 //! - [`RuntimeConfig`] / [`SandboxSpec`] — configuration types
 //!
 //! This crate names no VMM and no network implementation. Sandboxes reach
@@ -87,12 +87,14 @@ pub use rootfs::{
 };
 pub use sandbox::pause_reason;
 pub use sandbox::{
-    CheckpointInfo, CheckpointSummary, IdleAction, LifecycleUpdate, RestoreSandboxSpec,
-    SandboxEvent, SandboxId, SandboxInfo, SandboxManager, SandboxMountSpec, SandboxNetworkIdentity,
-    SandboxNetworkInfo, SandboxNetworkSpec, SandboxSpec, SandboxState, SandboxSummary,
+    CheckpointInfo, CheckpointSummary, ComputerState, IdleAction, LifecycleUpdate,
+    RestoreSandboxSpec, SandboxEvent, SandboxId, SandboxInfo, SandboxManager, SandboxMountSpec,
+    SandboxNetworkIdentity, SandboxNetworkInfo, SandboxNetworkSpec, SandboxSpec, SandboxSummary,
     TemplateWarmRef,
 };
 pub use sandbox::{
     ExecutionChannel, ExecutionOutput, ExecutionSnapshot, ExecutionSpec, StdinState,
 };
 pub use snapshot::{SnapshotCatalog, SnapshotInfo};
+
+pub use sandbox::ComputerState as SandboxState;

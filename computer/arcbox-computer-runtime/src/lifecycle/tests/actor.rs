@@ -29,7 +29,7 @@ use crate::sandbox::reconcile::{SandboxStateRecord, write_state_record};
 use crate::sandbox::record::{SandboxProvisionOutcome, SandboxRecordStore};
 use crate::sandbox::workload::WorkloadClaim;
 use crate::sandbox::{
-    CheckpointInfo, IdleAction, LifecycleUpdate, SandboxEvent, SandboxSpec, SandboxState,
+    CheckpointInfo, ComputerState, IdleAction, LifecycleUpdate, SandboxEvent, SandboxSpec,
 };
 use crate::testkit::agent::FakeAgentFactory;
 
@@ -290,7 +290,7 @@ impl Harness {
         )));
         let (snapshot_tx, snapshot) = watch::channel(ComputerSnapshot::project(
             &runtime.lock().unwrap(),
-            SandboxState::Starting,
+            ComputerState::Starting,
             deadlines,
         ));
         let (timers, timers_enabled) = watch::channel(true);
@@ -365,11 +365,11 @@ impl Harness {
         })
         .ok()
         .await;
-        self.settled(SandboxState::Ready).await;
+        self.settled(ComputerState::Ready).await;
     }
 
     /// Waits for the snapshot to reach `state`.
-    async fn settled(&mut self, state: SandboxState) {
+    async fn settled(&mut self, state: ComputerState) {
         self.snapshot
             .wait_for(|snapshot| snapshot.state == state)
             .await
@@ -622,7 +622,7 @@ async fn a_failure_keeps_its_crash_journal_when_the_release_fails() {
     harness.script.release_fails.store(true, Ordering::SeqCst);
 
     harness.commands.send(Command::VmExited).unwrap();
-    harness.settled(SandboxState::Failed).await;
+    harness.settled(ComputerState::Failed).await;
     harness.awaited("release").await;
     tokio::task::yield_now().await;
     assert!(
@@ -638,7 +638,7 @@ async fn a_failure_drops_its_crash_journal_once_the_release_is_done() {
     assert!(harness.has_journal());
 
     harness.commands.send(Command::VmExited).unwrap();
-    harness.settled(SandboxState::Failed).await;
+    harness.settled(ComputerState::Failed).await;
     while harness.has_journal() {
         tokio::task::yield_now().await;
     }
@@ -779,7 +779,7 @@ async fn a_stop_during_the_gates_own_cmd_is_still_deferred() {
         })
         .ok()
         .await;
-    harness.settled(SandboxState::Running).await;
+    harness.settled(ComputerState::Running).await;
     let stopped = harness.send(|reply| Command::Stop {
         budget: Duration::from_secs(30),
         reply,
@@ -885,7 +885,7 @@ async fn a_paused_computer_records_what_it_retained() {
     // is the very next thing a client does, and the effects that write those
     // fields run after the transition published the snapshot.
     let snapshot = harness.snapshot.borrow();
-    assert_eq!(snapshot.state, SandboxState::Paused);
+    assert_eq!(snapshot.state, ComputerState::Paused);
     assert_eq!(snapshot.pause_snapshot_id.as_deref(), Some("snap"));
     assert!(snapshot.paused_at.is_some());
 }
@@ -1176,7 +1176,7 @@ async fn a_refused_failure_write_still_releases_and_keeps_the_journal() {
     std::fs::create_dir(&record_path).unwrap();
 
     harness.commands.send(Command::VmExited).unwrap();
-    harness.settled(SandboxState::Failed).await;
+    harness.settled(ComputerState::Failed).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     assert!(
@@ -1206,7 +1206,7 @@ async fn a_handover_ordered_during_a_stop_is_refused() {
         budget: Duration::from_secs(60),
         reply,
     });
-    harness.settled(SandboxState::Stopping).await;
+    harness.settled(ComputerState::Stopping).await;
 
     let error = harness
         .send(|reply| Command::Detach { reply })
@@ -1294,7 +1294,7 @@ async fn a_refused_handover_leaves_the_computer_usable() {
     );
     assert_eq!(
         harness.snapshot.borrow().state,
-        SandboxState::Ready,
+        ComputerState::Ready,
         "a refused handover moved the computer"
     );
     // Usable includes dialable. The agent comes off the snapshot before the
@@ -1504,14 +1504,14 @@ async fn a_handover_is_not_answered_by_an_earlier_flows_failure() {
         !harness.script.calls().contains(&"checkpoint"),
         "the pause the refused write was recording must not have run"
     );
-    assert_eq!(harness.snapshot.borrow().state, SandboxState::Ready);
+    assert_eq!(harness.snapshot.borrow().state, ComputerState::Ready);
 
     harness.send(|reply| Command::Detach { reply }).ok().await;
     assert!(
         harness.script.calls().contains(&"detach"),
         "the handover did not reach the driver"
     );
-    assert_eq!(harness.snapshot.borrow().state, SandboxState::Ready);
+    assert_eq!(harness.snapshot.borrow().state, ComputerState::Ready);
 }
 
 /// A port call that does not return is a failed handover, not a wedged actor.
@@ -1535,7 +1535,7 @@ async fn a_handover_that_does_not_return_fails_the_handover_alone() {
     assert!(error.to_string().contains("did not finish"), "{error}");
     assert_eq!(
         harness.snapshot.borrow().state,
-        SandboxState::Ready,
+        ComputerState::Ready,
         "a handover that timed out moved the computer"
     );
     assert!(

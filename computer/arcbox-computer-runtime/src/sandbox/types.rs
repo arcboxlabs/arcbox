@@ -44,7 +44,7 @@ impl NetworkAttachment {
 
 /// Lifecycle state of a sandbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SandboxState {
+pub enum ComputerState {
     /// VMM prepared; VM still booting.
     Starting,
     /// VM booted and ready to accept workloads (or last workload exited).
@@ -65,7 +65,7 @@ pub enum SandboxState {
     Paused,
 }
 
-impl std::fmt::Display for SandboxState {
+impl std::fmt::Display for ComputerState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Starting => write!(f, "starting"),
@@ -216,7 +216,7 @@ pub struct RestoreSandboxSpec {
 /// Lightweight summary for `List` operations.
 pub struct SandboxSummary {
     pub id: SandboxId,
-    pub state: SandboxState,
+    pub state: ComputerState,
     pub labels: HashMap<String, String>,
     /// Allocated IP address (empty when network mode is `"none"`).
     pub ip_address: String,
@@ -233,7 +233,7 @@ pub struct SandboxSummary {
 /// Detailed sandbox state for `Inspect`.
 pub struct SandboxInfo {
     pub id: SandboxId,
-    pub state: SandboxState,
+    pub state: ComputerState,
     pub labels: HashMap<String, String>,
     pub vcpus: u32,
     pub memory_mib: u64,
@@ -361,3 +361,5 @@ pub struct CheckpointSummary {
 }
 
 // SandboxManager
+
+pub use self::ComputerState as SandboxState;

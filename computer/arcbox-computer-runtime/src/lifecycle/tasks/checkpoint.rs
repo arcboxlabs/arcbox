@@ -21,7 +21,7 @@ use tracing::info;
 use crate::error::{ComputerError, Result};
 use crate::lifecycle::runtime::ComputerRuntime;
 use crate::sandbox::policy::settle::{self, Capture, GuestHold, Settlement};
-use crate::sandbox::{CheckpointInfo, SandboxId, SandboxState};
+use crate::sandbox::{CheckpointInfo, ComputerState, SandboxId};
 use crate::snapshot::{SnapshotCatalog, SnapshotDraft};
 
 /// What a single [`checkpoint_impl`] call should capture, and how it should
@@ -34,7 +34,7 @@ pub struct CheckpointRequest {
     /// State the instance must be in. The Checkpoint RPC and the warm-create
     /// publisher require `Ready`; pause has already claimed the instance and
     /// moved it to `Pausing` (CORE-21).
-    pub expected_state: SandboxState,
+    pub expected_state: ComputerState,
     /// Resume the guest once the snapshot files are written.
     ///
     /// False only for pause, whose whole point is that the guest must never
@@ -82,7 +82,7 @@ struct CheckpointSource {
 fn checkpoint_source(
     computer: &Arc<Mutex<ComputerRuntime>>,
     sandbox_id: &SandboxId,
-    expected_state: SandboxState,
+    expected_state: ComputerState,
 ) -> Result<CheckpointSource> {
     let inst = computer.lock().unwrap();
     if inst.state != expected_state {

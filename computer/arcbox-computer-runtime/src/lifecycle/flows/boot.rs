@@ -20,7 +20,7 @@ use crate::lifecycle::tasks::{TaskFailure, TaskResult};
 use crate::sandbox::boot::run_ready_probe;
 use crate::sandbox::warm::{WarmPublishTicket, publish_after_boot};
 use crate::sandbox::workload::{WorkloadClaim, WorkloadSlot, start_run_workload};
-use crate::sandbox::{SandboxId, SandboxSpec, SandboxState};
+use crate::sandbox::{ComputerState, SandboxId, SandboxSpec};
 
 impl ComputerFlows {
     pub(super) async fn boot_vm(
@@ -115,7 +115,7 @@ impl ComputerFlows {
                 // reservation the boot's own `cmd` is owed — so the
                 // checkpoint's precondition is what this pipeline set, not
                 // what an API caller would see.
-                SandboxState::Starting,
+                ComputerState::Starting,
             )
             .await
             .map_err(TaskFailure::frozen)?;
