@@ -167,7 +167,7 @@ impl Effects {
         self.emit(Effect::SpawnRelease { scope });
     }
 
-    /// The graceful stop: `stop_sandbox`. `drain` says whether a workload is
+    /// The graceful stop: `stop_computer`. `drain` says whether a workload is
     /// running and owed the budget to finish first — the machine knows,
     /// because it is the state the stop came from.
     pub(super) fn stop(&mut self, budget_ms: u64, drain: bool) {

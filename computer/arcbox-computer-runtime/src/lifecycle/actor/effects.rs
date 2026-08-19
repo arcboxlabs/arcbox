@@ -248,8 +248,8 @@ impl ComputerActor {
             // What that costs depends on what the phase was for. A phase the
             // flow is *about to act on* — `Stopping` before a shutdown,
             // `Removing` before a release, `Resuming` before a resume — must
-            // stop it, which is what `stop_sandbox`, `begin_removal` and
-            // `resume_sandbox` do with their `?`. A phase that only records
+            // stop it, which is what `stop_computer`, `begin_removal` and
+            // `resume_computer` do with their `?`. A phase that only records
             // where the computer *ended up* must not: `persist_boot_failure`
             // reports the failure and lets the release run, keeping the
             // crash journal — which is exactly what `GateJournal` means.

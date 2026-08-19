@@ -32,7 +32,7 @@ impl ComputerManager {
     /// timer; `on_idle` replaces the policy. `None` fields are unchanged.
     /// Allowed in any non-terminal state — a paused computer keeps honoring
     /// its (re-armed) TTL, and new idle knobs apply on the next `Ready`.
-    pub async fn set_sandbox_lifecycle(
+    pub async fn set_computer_lifecycle(
         &self,
         id: &ComputerId,
         update: LifecycleUpdate,

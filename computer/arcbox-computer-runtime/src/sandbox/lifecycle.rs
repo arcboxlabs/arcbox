@@ -530,7 +530,7 @@ impl ComputerManager {
     /// outlives the remaining budget. All runtime resources (TAP + IP,
     /// dm-snapshot CoW, jailer chroot) are released on `Stopped`; only the
     /// inspectable record and the log directory survive until `Remove`.
-    pub async fn stop_sandbox(&self, id: &ComputerId, timeout_seconds: u32) -> Result<()> {
+    pub async fn stop_computer(&self, id: &ComputerId, timeout_seconds: u32) -> Result<()> {
         self.await_reconcile().await?;
         let budget = Duration::from_secs(u64::from(if timeout_seconds > 0 {
             timeout_seconds
@@ -568,8 +568,8 @@ impl ComputerManager {
     /// while the successor is adopting them.
     pub async fn detach_all(&self) -> Result<()> {
         // The sweep adopts and kills VMs by the same deterministic names, so
-        // racing it is the same class of bug; `stop_sandbox` and
-        // `remove_sandbox` wait it out for exactly this reason. Neither its
+        // racing it is the same class of bug; `stop_computer` and
+        // `remove_computer` wait it out for exactly this reason. Neither its
         // failure nor its slowness is propagated the way theirs is — see
         // `SWEEP_WAIT_BUDGET`.
         match tokio::time::timeout(SWEEP_WAIT_BUDGET, self.await_reconcile()).await {
@@ -658,7 +658,7 @@ impl ComputerManager {
     }
 
     /// Forcibly destroy a sandbox and release all resources immediately.
-    pub async fn remove_sandbox(&self, id: &ComputerId, force: bool) -> Result<()> {
+    pub async fn remove_computer(&self, id: &ComputerId, force: bool) -> Result<()> {
         self.await_reconcile().await?;
         let mailbox = match self.mailbox(id) {
             Ok(mailbox) => mailbox,

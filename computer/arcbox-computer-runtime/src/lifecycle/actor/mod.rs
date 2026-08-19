@@ -416,7 +416,7 @@ pub struct ComputerActor {
     waiters: Vec<(Answer, Reply)>,
     capture_reply: Option<oneshot::Sender<Result<CheckpointInfo>>>,
     /// A graceful stop asked for while a launch was in flight, dispatched as
-    /// soon as the launch resolves. Today's `stop_sandbox` answers
+    /// soon as the launch resolves. Today's `stop_computer` answers
     /// `WrongState` there; deferring is what the engine's actor does and what
     /// the R3 plan specifies (§B.3).
     pending_stop: Option<Duration>,

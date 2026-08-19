@@ -208,7 +208,7 @@ impl ComputerManager {
         // vCPUs/memory allocated. The fresh snapshot is dropped too — no
         // record references it yet — and the error names the builder id so
         // the operator can remove it and retry.
-        if let Err(remove_error) = self.remove_sandbox(&id, true).await {
+        if let Err(remove_error) = self.remove_computer(&id, true).await {
             if let Ok((snapshot_id, _)) = &checkpoint {
                 self.discard_promoted_snapshot(snapshot_id).await;
             }

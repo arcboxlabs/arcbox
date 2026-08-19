@@ -92,7 +92,7 @@ mod tests {
             serde_json::from_slice(&std::fs::read(vm_dir.join("state.json")).unwrap()).unwrap();
         assert!(state["pid"].as_u64().is_some(), "the vmm pid is journalled");
 
-        tokio::time::timeout(Duration::from_secs(5), manager.remove_sandbox(&id, true))
+        tokio::time::timeout(Duration::from_secs(5), manager.remove_computer(&id, true))
             .await
             .expect("force removal must cancel the parked boot")
             .unwrap();

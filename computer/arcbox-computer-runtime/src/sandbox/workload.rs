@@ -105,7 +105,7 @@ impl ComputerManager {
         clippy::too_many_arguments,
         reason = "public API mirrors workload request"
     )]
-    pub async fn run_in_sandbox(
+    pub async fn run_in_computer(
         &self,
         id: &ComputerId,
         cmd: Vec<String>,

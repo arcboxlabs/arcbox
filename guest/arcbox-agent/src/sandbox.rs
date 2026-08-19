@@ -423,7 +423,7 @@ impl SandboxService {
         req: sandbox_v1::StopSandboxRequest,
     ) -> Result<(), SandboxError> {
         self.manager
-            .stop_sandbox(&req.id, req.timeout_seconds)
+            .stop_computer(&req.id, req.timeout_seconds)
             .await
             .map_err(SandboxError::from)?;
         deregister_sandbox_dns(&req.id);
@@ -438,7 +438,7 @@ impl SandboxService {
         req: sandbox_v1::PauseSandboxRequest,
     ) -> Result<(), SandboxError> {
         self.manager
-            .pause_sandbox(&req.id)
+            .pause_computer(&req.id)
             .await
             .map_err(SandboxError::from)?;
         deregister_sandbox_dns(&req.id);
@@ -461,7 +461,7 @@ impl SandboxService {
         };
         let ip_address = self
             .manager
-            .resume_sandbox(&req.id, reason)
+            .resume_computer(&req.id, reason)
             .await
             .map_err(SandboxError::from)?;
         if !ip_address.is_empty() {
@@ -488,7 +488,7 @@ impl SandboxService {
                 .map(|value| idle_action_to_spec(value.as_known().unwrap_or_default())),
         };
         self.manager
-            .set_sandbox_lifecycle(&req.id, update)
+            .set_computer_lifecycle(&req.id, update)
             .await
             .map_err(SandboxError::from)
     }
@@ -499,7 +499,7 @@ impl SandboxService {
         req: sandbox_v1::RemoveSandboxRequest,
     ) -> Result<(), SandboxError> {
         self.manager
-            .remove_sandbox(&req.id, req.force)
+            .remove_computer(&req.id, req.force)
             .await
             .map_err(SandboxError::from)?;
         deregister_sandbox_dns(&req.id);

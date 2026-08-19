@@ -230,11 +230,11 @@ async fn e2e_sandbox_basic_lifecycle() {
     let info = mgr.inspect_sandbox(&id).unwrap();
     assert_eq!(info.state, ComputerState::Ready);
 
-    mgr.stop_sandbox(&id, 5).await.unwrap();
+    mgr.stop_computer(&id, 5).await.unwrap();
     let info = mgr.inspect_sandbox(&id).unwrap();
     assert_eq!(info.state, ComputerState::Stopped);
 
-    mgr.remove_sandbox(&id, true).await.unwrap();
+    mgr.remove_computer(&id, true).await.unwrap();
     assert!(
         mgr.inspect_sandbox(&id).is_err(),
         "sandbox should be gone after remove"
@@ -261,7 +261,7 @@ async fn e2e_event_broadcast_ready() {
         "expected ready event for sandbox {id}"
     );
 
-    mgr.remove_sandbox(&id, true).await.unwrap();
+    mgr.remove_computer(&id, true).await.unwrap();
 }
 
 /// Create two sandboxes with TAP networking and verify they receive distinct
@@ -301,12 +301,12 @@ async fn e2e_two_sandboxes_distinct_ips() {
         "sandbox 2 did not reach ready"
     );
 
-    mgr.remove_sandbox(&id1, true).await.unwrap();
-    mgr.remove_sandbox(&id2, true).await.unwrap();
+    mgr.remove_computer(&id1, true).await.unwrap();
+    mgr.remove_computer(&id2, true).await.unwrap();
 }
 
 /// Create a sandbox with TAP networking, verify the TAP interface exists while
-/// it is running, then verify it is removed after `remove_sandbox`.
+/// it is running, then verify it is removed after `remove_computer`.
 /// Requires root.
 #[tokio::test]
 #[ignore = "requires FC_BINARY/FC_KERNEL/FC_ROOTFS environment variables and root"]
@@ -352,7 +352,7 @@ async fn e2e_sandbox_with_tap_network() {
         tap_name
     };
 
-    mgr.remove_sandbox(&id, true).await.unwrap();
+    mgr.remove_computer(&id, true).await.unwrap();
 
     assert!(
         !common::iface_exists(&tap_name),
@@ -383,7 +383,7 @@ async fn e2e_run_command() {
     );
 
     let mut rx = mgr
-        .run_in_sandbox(
+        .run_in_computer(
             &id,
             vec!["echo".into(), "hello from vm".into()],
             HashMap::new(),
@@ -417,7 +417,7 @@ async fn e2e_run_command() {
     );
     assert_eq!(exit_code, 0, "echo should exit with code 0");
 
-    mgr.remove_sandbox(&id, true).await.unwrap();
+    mgr.remove_computer(&id, true).await.unwrap();
 }
 
 /// The VMM pid the sandbox's crash journal names, so the test can prove a
@@ -567,7 +567,7 @@ async fn outlives_its_manager_and_is_adopted(confinement: Confinement) {
     // An exec proves the vsock path was re-established, not just that the
     // process is alive: this agent was built from the adopted handle.
     let mut rx = mgr
-        .run_in_sandbox(
+        .run_in_computer(
             &id,
             vec!["echo".into(), "still here".into()],
             HashMap::new(),
@@ -600,7 +600,7 @@ async fn outlives_its_manager_and_is_adopted(confinement: Confinement) {
 
     // And the adopted sandbox is still removable — through the handle, since
     // no PreparedVm crosses a restart.
-    mgr.remove_sandbox(&id, true).await.unwrap();
+    mgr.remove_computer(&id, true).await.unwrap();
     assert!(mgr.inspect_sandbox(&id).is_err());
     {
         assert!(!firecracker_alive(pid), "remove left a firecracker behind");

@@ -405,7 +405,7 @@ impl Fixture {
     pub async fn run(&self, id: &ComputerId, cmd: &[&str]) -> Vec<u8> {
         let mut output = self
             .manager
-            .run_in_sandbox(
+            .run_in_computer(
                 id,
                 cmd.iter().map(|arg| (*arg).to_owned()).collect(),
                 HashMap::new(),

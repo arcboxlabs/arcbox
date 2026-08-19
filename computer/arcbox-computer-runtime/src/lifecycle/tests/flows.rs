@@ -563,7 +563,7 @@ fn a_released_claim_reopens_the_computer_and_balances_its_running() {
     assert!(effects.contains(&Effect::ArmTimer(Timer::Idle)));
 }
 
-/// Only a stop that has a workload to drain asks for one. `stop_sandbox`
+/// Only a stop that has a workload to drain asks for one. `stop_computer`
 /// polls for the workload's exit within the budget and skips that poll
 /// entirely when nothing is running — a computer that is merely `Ready`
 /// would otherwise spend the whole budget waiting for an exit that cannot

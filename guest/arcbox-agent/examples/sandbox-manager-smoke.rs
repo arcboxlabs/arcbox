@@ -167,7 +167,7 @@ async fn main() -> anyhow::Result<()> {
 
         if ip == ip2 {
             // Clean up before bailing.
-            let _ = manager.remove_sandbox(&id2, true).await;
+            let _ = manager.remove_computer(&id2, true).await;
             bail!("duplicate IP {ip2} assigned to two concurrent sandboxes");
         }
         println!("  [net.3]  IPs are distinct ({ip} ≠ {ip2}) ✓");
@@ -182,11 +182,11 @@ async fn main() -> anyhow::Result<()> {
             .and_then(|n| tap_name_for(&n.ip_address));
 
         manager
-            .stop_sandbox(&id2, 10)
+            .stop_computer(&id2, 10)
             .await
             .context("stop smoke-net-2")?;
         manager
-            .remove_sandbox(&id2, false)
+            .remove_computer(&id2, false)
             .await
             .context("remove smoke-net-2")?;
         println!("  [net.3]  smoke-net-2 removed");
@@ -293,12 +293,12 @@ async fn main() -> anyhow::Result<()> {
 
     // Phase 1 cleanup
     manager
-        .stop_sandbox(&id, 30)
+        .stop_computer(&id, 30)
         .await
         .context("stop_sandbox")?;
     println!("\n  [stop]   done");
     manager
-        .remove_sandbox(&id, false)
+        .remove_computer(&id, false)
         .await
         .context("remove_sandbox")?;
     println!("  [remove] done");
@@ -333,11 +333,11 @@ async fn main() -> anyhow::Result<()> {
         );
 
         manager
-            .stop_sandbox(&rid, 30)
+            .stop_computer(&rid, 30)
             .await
             .context("stop restored")?;
         manager
-            .remove_sandbox(&rid, false)
+            .remove_computer(&rid, false)
             .await
             .context("remove restored")?;
         println!("  [cleanup] restored sandbox removed");
@@ -360,7 +360,7 @@ async fn run_cmd(
 ) -> anyhow::Result<String> {
     let label = cmd.join(" ");
     let mut rx = manager
-        .run_in_sandbox(
+        .run_in_computer(
             &id.to_owned(),
             cmd.iter().map(|s| s.to_string()).collect(),
             HashMap::new(),

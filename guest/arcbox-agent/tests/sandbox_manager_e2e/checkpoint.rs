@@ -72,7 +72,7 @@ async fn jailed_checkpoint_chain_preserves_source_and_geometry() {
 
             // Remove the old jail before restore to catch references to staged assets.
             let pid = super::journaled_pid(dir.path(), &id);
-            mgr.remove_sandbox(&id, true).await.unwrap();
+            mgr.remove_computer(&id, true).await.unwrap();
             assert!(!super::firecracker_alive(pid));
             let (restored, ip) = mgr
                 .restore_computer(RestoreComputerSpec {
@@ -111,7 +111,7 @@ async fn jailed_checkpoint_chain_preserves_source_and_geometry() {
         }
 
         let pid = super::journaled_pid(dir.path(), &id);
-        mgr.remove_sandbox(&id, true).await.unwrap();
+        mgr.remove_computer(&id, true).await.unwrap();
         assert!(!super::firecracker_alive(pid));
         for snapshot in snapshots {
             mgr.delete_checkpoint(&snapshot).await.unwrap();
@@ -141,7 +141,7 @@ async fn cleanup(mgr: &ComputerManager) -> Vec<String> {
     match mgr.list_sandboxes(None, &HashMap::new()) {
         Ok(sandboxes) => {
             for sandbox in sandboxes {
-                if let Err(error) = mgr.remove_sandbox(&sandbox.id, true).await {
+                if let Err(error) = mgr.remove_computer(&sandbox.id, true).await {
                     errors.push(format!("remove sandbox {}: {error}", sandbox.id));
                 }
             }
@@ -163,7 +163,7 @@ async fn cleanup(mgr: &ComputerManager) -> Vec<String> {
 
 async fn run_script(mgr: &ComputerManager, id: &String, script: &str) -> String {
     let mut output = mgr
-        .run_in_sandbox(
+        .run_in_computer(
             id,
             vec!["/bin/sh".into(), "-c".into(), script.into()],
             HashMap::new(),

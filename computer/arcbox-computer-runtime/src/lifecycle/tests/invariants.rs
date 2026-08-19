@@ -1,5 +1,5 @@
 //! The rules that must hold in every state: recovery's seeding, and the gates
-//! `stop_sandbox`, `cleanup::begin_removal` and the two deadline timers apply.
+//! `stop_computer`, `cleanup::begin_removal` and the two deadline timers apply.
 
 use super::harness::{
     ALL_PHASES, BUDGET_MS, detached_machine, explore, ordinal, reach, ready_machine, step,
@@ -134,7 +134,7 @@ fn only_ready_and_the_gates_own_cmd_take_the_workload_slot() {
 /// Drives a cold create through to `ready`, discarding effects.
 #[test]
 fn a_stop_only_acts_while_the_guest_serves() {
-    // `stop_sandbox` accepts Ready/Running/Stopping (and retries idempotently
+    // `stop_computer` accepts Ready/Running/Stopping (and retries idempotently
     // from Stopped), answering WrongState elsewhere. Only the first two are a
     // state change, so re-entering `stopping` emits nothing; everything else
     // the machine swallows for the actor to answer.

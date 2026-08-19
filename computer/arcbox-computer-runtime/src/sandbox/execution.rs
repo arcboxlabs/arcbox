@@ -560,7 +560,7 @@ impl ExecutionRegistry {
     /// parked attach/wait subscribers resolve. Entries stay registered —
     /// their buffered output remains readable until the per-execution
     /// retention GC drops them.
-    fn interrupt_sandbox(&self, sandbox_id: &str) {
+    fn interrupt_computer(&self, sandbox_id: &str) {
         let executions: Vec<Arc<Execution>> = {
             let inner = self.inner.lock().unwrap();
             inner
@@ -587,7 +587,7 @@ pub(super) fn spawn_teardown_purge(
         loop {
             match events.recv().await {
                 Ok(ev) if ev.is_terminal() => {
-                    registry.interrupt_sandbox(&ev.sandbox_id);
+                    registry.interrupt_computer(&ev.sandbox_id);
                 }
                 Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -1128,7 +1128,7 @@ mod tests {
             .live
             .insert(("sandbox-1".into(), "exec-1".into()), Arc::clone(&exec));
 
-        registry.interrupt_sandbox("sandbox-1");
+        registry.interrupt_computer("sandbox-1");
         // Still registered: buffered output stays readable until the
         // retention GC, but the execution is resolved as torn down.
         assert!(registry.get("sandbox-1", "exec-1").is_ok());
@@ -1145,7 +1145,7 @@ mod tests {
             .unwrap()
             .live
             .insert(("sandbox-1".into(), "exec-2".into()), Arc::clone(&done));
-        registry.interrupt_sandbox("sandbox-1");
+        registry.interrupt_computer("sandbox-1");
         assert_eq!(done.snapshot().exit_status, Some(ExitStatus::Code(3)));
     }
 

@@ -549,7 +549,7 @@ async fn a_superseded_tasks_completion_cannot_drive_the_machine() {
 
 #[tokio::test(start_paused = true)]
 async fn a_stop_during_a_launch_is_served_once_the_launch_lands() {
-    // Today's `stop_sandbox` answers WrongState here; the actor defers it,
+    // Today's `stop_computer` answers WrongState here; the actor defers it,
     // which is what stops a stop from racing a boot mid-acquisition.
     let mut harness = Harness::start(Boot::Completes, no_deadlines()).await;
     let created = harness.send(|reply| Command::Provision {
@@ -860,7 +860,7 @@ async fn a_failed_restore_answers_only_once_its_teardown_has_freed_the_id() {
 /// A paused computer records what it retained where its readers look.
 ///
 /// `Inspect` and `List` size the checkpoint and the disk overlay from the
-/// runtime, and a resume finds its checkpoint there — `pause_sandbox` wrote
+/// runtime, and a resume finds its checkpoint there — `pause_computer` wrote
 /// both at the `Paused` commit, and nothing else does.
 #[tokio::test(start_paused = true)]
 async fn a_paused_computer_records_what_it_retained() {
