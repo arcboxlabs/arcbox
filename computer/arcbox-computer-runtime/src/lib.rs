@@ -96,5 +96,3 @@ pub use sandbox::{
     ExecutionChannel, ExecutionOutput, ExecutionSnapshot, ExecutionSpec, StdinState,
 };
 pub use snapshot::{SnapshotCatalog, SnapshotInfo};
-
-pub use error::ComputerError as VmmError;

@@ -221,8 +221,6 @@ impl From<arcbox_atomic_file::AtomicWriteError> for ComputerError {
     }
 }
 
-pub use ComputerError as VmmError;
-
 #[cfg(test)]
 mod tests {
     use super::*;

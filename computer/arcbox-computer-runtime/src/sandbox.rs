@@ -30,7 +30,6 @@ use crate::agent::{ExecInputMsg, ExitStatus, OutputChunk, PortWait, StartCommand
 use crate::agent::{GuestAgent, Readiness};
 use crate::config::RuntimeConfig;
 use crate::environment::NodeEnvironment;
-use crate::error::ComputerError as VmmError;
 use crate::error::{ComputerError, Result};
 use crate::lifecycle::actor::{
     Command, ComputerActor, ComputerSeed, ComputerSnapshot, Deadlines, Mailbox, Seeded,
