@@ -150,7 +150,7 @@ impl ComputerActor {
                 let handover = match tokio::time::timeout(DETACH_TIMEOUT, self.tasks.detach()).await
                 {
                     Ok(handover) => handover,
-                    Err(_) => Err(TaskFailure::recoverable(VmmError::Process(format!(
+                    Err(_) => Err(TaskFailure::recoverable(ComputerError::Process(format!(
                         "handing computer {} over did not finish within {}s",
                         self.id,
                         DETACH_TIMEOUT.as_secs()
@@ -329,7 +329,7 @@ impl ComputerActor {
     /// way, before anything is torn down.
     fn fail_write(&mut self, detail: &str) -> Flow {
         let message = format!("computer {} {detail}", self.id);
-        let error = VmmError::Unavailable(message.clone());
+        let error = ComputerError::Unavailable(message.clone());
         self.error = Some(error.to_string());
         // Parked to be reported only when nobody was there to hear it: the
         // flows that answer immediately (a cold create) have nothing parked,

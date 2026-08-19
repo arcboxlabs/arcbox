@@ -17,7 +17,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use crate::agent::{GuestAgent, GuestAgentFactory};
 use crate::config::RuntimeConfig;
-use crate::error::{Result, VmmError};
+use crate::error::{ComputerError, Result};
 use crate::lifecycle::actor::{
     Command, ComputerActor, ComputerSeed, ComputerSnapshot, Deadlines, Seeded, WorkloadOutcome,
 };
@@ -137,7 +137,7 @@ impl ComputerTasks for Script {
                 drop(handed_off);
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 self.cleanup_finished.store(true, Ordering::SeqCst);
-                Err(TaskFailure::recoverable(VmmError::Process(
+                Err(TaskFailure::recoverable(ComputerError::Process(
                     "the vmm would not spawn".into(),
                 )))
             }
@@ -174,7 +174,7 @@ impl ComputerTasks for Script {
         }
         self.restore_finished.store(true, Ordering::SeqCst);
         if self.restore_fails.load(Ordering::SeqCst) {
-            return Err(TaskFailure::recoverable(VmmError::Process(
+            return Err(TaskFailure::recoverable(ComputerError::Process(
                 "the checkpoint would not load".into(),
             )));
         }
@@ -219,7 +219,7 @@ impl ComputerTasks for Script {
             tokio::time::sleep(takes).await;
         }
         if self.detach_fails.load(Ordering::SeqCst) {
-            return Err(TaskFailure::recoverable(VmmError::Process(
+            return Err(TaskFailure::recoverable(ComputerError::Process(
                 "the vmm would not be handed over".into(),
             )));
         }
@@ -237,7 +237,7 @@ impl ComputerTasks for Script {
             tokio::time::sleep(takes).await;
         }
         if self.release_fails.load(Ordering::SeqCst) {
-            return Err(TaskFailure::recoverable(VmmError::Process(
+            return Err(TaskFailure::recoverable(ComputerError::Process(
                 "the vmm would not die".into(),
             )));
         }
@@ -422,7 +422,7 @@ impl Waiter {
         self.0.await.unwrap().unwrap();
     }
 
-    async fn error(self) -> VmmError {
+    async fn error(self) -> ComputerError {
         self.0.await.unwrap().unwrap_err()
     }
 }
@@ -809,7 +809,7 @@ async fn a_claim_the_machine_refuses_is_answered_wrong_state() {
         })
         .error()
         .await;
-    assert!(matches!(error, VmmError::WrongState { .. }), "{error}");
+    assert!(matches!(error, ComputerError::WrongState { .. }), "{error}");
 
     // ...and a non-forced remove is refused for the same reason.
     let error = harness
@@ -819,7 +819,7 @@ async fn a_claim_the_machine_refuses_is_answered_wrong_state() {
         })
         .error()
         .await;
-    assert!(matches!(error, VmmError::WrongState { .. }), "{error}");
+    assert!(matches!(error, ComputerError::WrongState { .. }), "{error}");
 }
 
 /// A restore that fails is unwound by a force remove, and its caller must not
@@ -1213,7 +1213,7 @@ async fn a_handover_ordered_during_a_stop_is_refused() {
         .error()
         .await;
     assert!(
-        matches!(error, VmmError::WrongState { .. }),
+        matches!(error, ComputerError::WrongState { .. }),
         "a handover during a teardown must be refused, not raced: {error}"
     );
     assert!(
@@ -1248,7 +1248,7 @@ async fn a_teardown_after_a_handover_never_reaches_the_vm() {
         .error()
         .await;
     assert!(
-        matches!(stop, VmmError::WrongState { .. }),
+        matches!(stop, ComputerError::WrongState { .. }),
         "a stop after a handover must be refused: {stop}"
     );
     let removed = harness
@@ -1256,7 +1256,7 @@ async fn a_teardown_after_a_handover_never_reaches_the_vm() {
         .error()
         .await;
     assert!(
-        matches!(removed, VmmError::WrongState { .. }),
+        matches!(removed, ComputerError::WrongState { .. }),
         "a forced remove after a handover must be refused: {removed}"
     );
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1366,7 +1366,7 @@ async fn a_handed_over_computer_refuses_a_lifecycle_update() {
         .error()
         .await;
     assert!(
-        matches!(error, VmmError::WrongState { .. }),
+        matches!(error, ComputerError::WrongState { .. }),
         "a handed-over record was written: {error}"
     );
 }
@@ -1399,7 +1399,7 @@ async fn a_handover_during_a_capture_is_refused() {
         .send(|reply| Command::Detach { reply })
         .error()
         .await;
-    let VmmError::WrongState {
+    let ComputerError::WrongState {
         expected, actual, ..
     } = &error
     else {
@@ -1568,7 +1568,7 @@ async fn a_handed_over_computer_answers_nothing_but_another_handover() {
     async fn refused(waiter: Waiter, verb: &str) {
         let error = waiter.error().await;
         assert!(
-            matches!(error, VmmError::WrongState { .. }),
+            matches!(error, ComputerError::WrongState { .. }),
             "{verb} was accepted by a handed-over computer: {error}"
         );
     }
@@ -1640,7 +1640,7 @@ async fn a_handed_over_computer_answers_nothing_but_another_handover() {
         .unwrap();
     assert!(matches!(
         capture.await.unwrap().unwrap_err(),
-        VmmError::WrongState { .. }
+        ComputerError::WrongState { .. }
     ));
 
     // Nothing reached the guest, and a second handover is still the idempotent

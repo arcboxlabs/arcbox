@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex, Weak};
 
 use arcbox_computer_runtime::agent::VmProtoAgentFactory;
 use arcbox_computer_runtime::{
-    NodeEnvironment, RootfsBuilder, RootfsPaths, SandboxManager, SandboxMountSpec,
-    SandboxNetworkSpec, SandboxSpec, SandboxState, VmmError,
+    ComputerError, NodeEnvironment, RootfsBuilder, RootfsPaths, SandboxManager, SandboxMountSpec,
+    SandboxNetworkSpec, SandboxSpec, SandboxState,
 };
 use arcbox_connect::sandbox_v1;
 use arcbox_fc_driver::{FcDriver, FcDriverConfig};
@@ -400,8 +400,8 @@ impl SandboxService {
                     // reclaimed it — from genuine pin corruption. Neither is
                     // a rebuild trigger.
                     return Err(match self.manager.get_template(&resolved.name) {
-                        Err(VmmError::TemplateNotFound(_)) => {
-                            SandboxError::from(VmmError::TemplateNotFound(format!(
+                        Err(ComputerError::TemplateNotFound(_)) => {
+                            SandboxError::from(ComputerError::TemplateNotFound(format!(
                                 "{} (deleted while this create was resolving it)",
                                 resolved.name
                             )))
@@ -679,9 +679,9 @@ impl SandboxService {
     }
 }
 
-fn completed_create_is_stale(state: Result<SandboxState, VmmError>) -> bool {
+fn completed_create_is_stale(state: Result<SandboxState, ComputerError>) -> bool {
     match state {
-        Ok(SandboxState::Stopped | SandboxState::Failed) | Err(VmmError::NotFound(_)) => true,
+        Ok(SandboxState::Stopped | SandboxState::Failed) | Err(ComputerError::NotFound(_)) => true,
         // A paused sandbox is logically alive: the same-id create replay
         // must keep answering until it is actually removed.
         Ok(
@@ -815,10 +815,10 @@ mod tests {
         for state in [SandboxState::Stopped, SandboxState::Failed] {
             assert!(completed_create_is_stale(Ok(state)));
         }
-        assert!(completed_create_is_stale(Err(VmmError::NotFound(
+        assert!(completed_create_is_stale(Err(ComputerError::NotFound(
             "removed".into()
         ))));
-        assert!(!completed_create_is_stale(Err(VmmError::Config(
+        assert!(!completed_create_is_stale(Err(ComputerError::Config(
             "inspect failed".into()
         ))));
     }

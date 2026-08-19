@@ -38,7 +38,7 @@ impl ComputerActor {
     /// that succeeds leaves the actor alive, so not even its exit answers.
     fn abandon_capture(&mut self) {
         if let Some(reply) = self.capture_reply.take() {
-            let _ = reply.send(Err(VmmError::Unavailable(format!(
+            let _ = reply.send(Err(ComputerError::Unavailable(format!(
                 "computer {}: the checkpoint was preempted by another operation",
                 self.id
             ))));
@@ -97,7 +97,7 @@ impl ComputerActor {
             // the panicking task never transferred was still out there.
             Ok(Err(error)) if !error.is_cancelled() => {
                 error!(sandbox_id = %self.id, %error, "a computer sub-task panicked");
-                self.fail_every_waiter(VmmError::Process(format!(
+                self.fail_every_waiter(ComputerError::Process(format!(
                     "computer {} sub-task panicked: {error}",
                     self.id
                 )));
@@ -258,11 +258,11 @@ impl ComputerActor {
                 let event = failure.event();
                 let error = failure.into_error();
                 let error = if let Some(reply) = self.capture_reply.take() {
-                    // VmmError is not Clone. Preserve its type for the capture
+                    // ComputerError is not Clone. Preserve its type for the capture
                     // caller and retain its text for secondary waiters.
                     let text = error.to_string();
                     let _ = reply.send(Err(error));
-                    VmmError::Other(text)
+                    ComputerError::Other(text)
                 } else {
                     error
                 };
@@ -280,9 +280,9 @@ impl ComputerActor {
                     // today. A flow whose *own* failure started this removal
                     // has its error parked, and the two are composed.
                     let error = match self.unwinding.take() {
-                        Some(cause) => {
-                            VmmError::Unavailable(format!("{cause}; teardown incomplete: {error}"))
-                        }
+                        Some(cause) => ComputerError::Unavailable(format!(
+                            "{cause}; teardown incomplete: {error}"
+                        )),
                         None => error,
                     };
                     self.fail_every_waiter(error);

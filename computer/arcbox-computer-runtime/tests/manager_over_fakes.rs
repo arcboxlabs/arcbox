@@ -24,7 +24,7 @@ use std::sync::Arc;
 use arcbox_computer_runtime::snapshot::SnapshotGeometry;
 use arcbox_computer_runtime::testkit::agent::Reply;
 use arcbox_computer_runtime::{
-    IdleAction, LifecycleUpdate, RestoreSandboxSpec, SandboxSpec, SandboxState, VmmError,
+    ComputerError, IdleAction, LifecycleUpdate, RestoreSandboxSpec, SandboxSpec, SandboxState,
     pause_reason,
 };
 use support::{Fixture, Setup, action, await_action, drain_actions, never_exits};
@@ -104,7 +104,7 @@ async fn a_create_boots_to_ready_and_serves_exec_and_files() {
         .unwrap();
     assert!(matches!(
         fixture.manager.stat_sandbox_path(&id, "/tmp/note").await,
-        Err(VmmError::PathNotFound(_))
+        Err(ComputerError::PathNotFound(_))
     ));
 
     // A watch is a stream the port owns rather than a socket, so what the
@@ -496,7 +496,7 @@ async fn set_lifecycle_rejects_terminal_states_and_missing_ids() {
             .manager
             .set_sandbox_lifecycle(&"ghost".to_owned(), LifecycleUpdate::default())
             .await,
-        Err(VmmError::NotFound(_))
+        Err(ComputerError::NotFound(_))
     ));
 
     let stopped = fixture.ready("halted").await;
@@ -509,7 +509,7 @@ async fn set_lifecycle_rejects_terminal_states_and_missing_ids() {
             .manager
             .set_sandbox_lifecycle(&stopped, LifecycleUpdate::default())
             .await,
-        Err(VmmError::WrongState { .. })
+        Err(ComputerError::WrongState { .. })
     ));
 
     // Paused computers accept updates: the TTL keeps applying to them.
@@ -650,7 +650,7 @@ async fn pause_is_idempotent_and_gates_on_state() {
 
     assert!(matches!(
         fixture.manager.pause_sandbox(&"missing".to_owned()).await,
-        Err(VmmError::NotFound(_))
+        Err(ComputerError::NotFound(_))
     ));
 
     let asleep = fixture.ready("asleep").await;
@@ -666,7 +666,7 @@ async fn pause_is_idempotent_and_gates_on_state() {
     fixture.await_state(&busy, SandboxState::Running).await;
     assert!(matches!(
         fixture.manager.pause_sandbox(&busy).await,
-        Err(VmmError::WrongState { .. })
+        Err(ComputerError::WrongState { .. })
     ));
 }
 
@@ -678,7 +678,7 @@ async fn a_direct_mode_pause_is_refused_before_it_freezes_anything() {
     let id = fixture.ready("plain").await;
 
     let error = fixture.manager.pause_sandbox(&id).await.unwrap_err();
-    assert!(matches!(error, VmmError::Config(_)), "{error}");
+    assert!(matches!(error, ComputerError::Config(_)), "{error}");
     assert!(error.to_string().contains("jailer"), "{error}");
     assert_eq!(
         fixture.manager.inspect_sandbox(&id).unwrap().state,
@@ -728,7 +728,7 @@ async fn resume_is_a_noop_on_live_states_and_refuses_terminal_ones() {
             .manager
             .resume_sandbox(&stopped, pause_reason::RESUME)
             .await,
-        Err(VmmError::WrongState { .. })
+        Err(ComputerError::WrongState { .. })
     ));
 }
 
@@ -744,7 +744,7 @@ async fn a_pause_that_leaves_the_guest_frozen_fails_and_releases_the_computer() 
 
     let error = fixture.manager.pause_sandbox(&id).await.unwrap_err();
     assert!(
-        !matches!(error, VmmError::WrongState { .. }),
+        !matches!(error, ComputerError::WrongState { .. }),
         "the capture failure is the reported error: {error}"
     );
     fixture.await_released(&id).await;
@@ -763,7 +763,7 @@ async fn a_pause_that_leaves_the_guest_frozen_fails_and_releases_the_computer() 
             .manager
             .resume_sandbox(&id, pause_reason::RESUME)
             .await,
-        Err(VmmError::WrongState { .. })
+        Err(ComputerError::WrongState { .. })
     ));
 }
 
@@ -779,7 +779,7 @@ async fn the_data_plane_reports_a_paused_computer_readably() {
 
     assert!(matches!(
         fixture.manager.read_sandbox_file(&id, "/tmp/x").await,
-        Err(VmmError::Paused(paused)) if paused == id
+        Err(ComputerError::Paused(paused)) if paused == id
     ));
     assert!(matches!(
         fixture
@@ -796,7 +796,7 @@ async fn the_data_plane_reports_a_paused_computer_readably() {
             )
             .await
             .err(),
-        Some(VmmError::Paused(paused)) if paused == id
+        Some(ComputerError::Paused(paused)) if paused == id
     ));
 }
 
@@ -998,12 +998,15 @@ async fn a_restore_without_valid_geometry_reserves_no_resources() {
             .restore_sandbox(request.clone())
             .await
             .unwrap_err();
-        assert!(matches!(error, VmmError::FailedPrecondition(_)), "{error}");
+        assert!(
+            matches!(error, ComputerError::FailedPrecondition(_)),
+            "{error}"
+        );
         assert!(!fixture.record_path(&clone).exists());
         assert!(!fixture.vm_dir(&clone).exists());
         assert!(matches!(
             fixture.manager.inspect_sandbox(&clone),
-            Err(VmmError::NotFound(_))
+            Err(ComputerError::NotFound(_))
         ));
         assert_eq!(
             fixture.driver().restored_vms(),
@@ -1050,7 +1053,7 @@ async fn an_adopted_computer_with_a_legacy_record_refuses_checkpoint() {
             .await
             .expect_err("the record has no safe restore provenance");
         assert!(
-            matches!(&error, VmmError::FailedPrecondition(message) if message.contains(&format!("no {missing} path"))),
+            matches!(&error, ComputerError::FailedPrecondition(message) if message.contains(&format!("no {missing} path"))),
             "unexpected checkpoint refusal: {error}"
         );
         assert!(
@@ -1190,7 +1193,7 @@ async fn a_caller_cannot_squat_on_the_reserved_checkpoint_name_or_labels() {
             .checkpoint_sandbox(&id, name.to_owned(), labels)
             .await
             .expect_err("a reserved name or label is refused");
-        assert!(matches!(error, VmmError::Config(_)), "{error}");
+        assert!(matches!(error, ComputerError::Config(_)), "{error}");
     }
 }
 
@@ -1373,7 +1376,7 @@ async fn remove_refuses_a_busy_computer_unless_forced() {
 
     assert!(matches!(
         fixture.manager.remove_sandbox(&id, false).await,
-        Err(VmmError::WrongState { .. })
+        Err(ComputerError::WrongState { .. })
     ));
     fixture.manager.remove_sandbox(&id, true).await.unwrap();
     await_action(&mut events, &id, action::REMOVED).await;
@@ -1484,12 +1487,12 @@ async fn a_teardown_after_a_handover_never_reaches_the_vm() {
 
     let stopped = fixture.manager.stop_sandbox(&id, 30).await.unwrap_err();
     assert!(
-        matches!(stopped, VmmError::WrongState { .. }),
+        matches!(stopped, ComputerError::WrongState { .. }),
         "a stop after a handover must be refused: {stopped}"
     );
     let removed = fixture.manager.remove_sandbox(&id, true).await.unwrap_err();
     assert!(
-        matches!(removed, VmmError::WrongState { .. }),
+        matches!(removed, ComputerError::WrongState { .. }),
         "a forced remove after a handover must be refused: {removed}"
     );
 
@@ -1623,13 +1626,13 @@ async fn a_create_replays_its_recorded_outcome_rather_than_building_a_second_com
                 .manager
                 .replay_sandbox_create(&id, "another-key")
                 .await,
-            Err(VmmError::AlreadyExists(_))
+            Err(ComputerError::AlreadyExists(_))
         ),
         "the key that made the record owns it"
     );
     assert!(matches!(
         fixture.manager.create_sandbox_keyed(spec, "one-key").await,
-        Err(VmmError::AlreadyExists(_))
+        Err(ComputerError::AlreadyExists(_))
     ));
     assert_eq!(
         fixture
@@ -1660,7 +1663,7 @@ async fn a_create_of_a_live_id_under_another_key_is_refused() {
 
     assert!(matches!(
         fixture.manager.create_sandbox_keyed(spec(), "yours").await,
-        Err(VmmError::AlreadyExists(_))
+        Err(ComputerError::AlreadyExists(_))
     ));
 
     // And a same-key retry after the computer has left its live phases is
@@ -1669,6 +1672,6 @@ async fn a_create_of_a_live_id_under_another_key_is_refused() {
     fixture.await_state(&id, SandboxState::Stopped).await;
     assert!(matches!(
         fixture.manager.create_sandbox_keyed(spec(), "mine").await,
-        Err(VmmError::AlreadyExists(_))
+        Err(ComputerError::AlreadyExists(_))
     ));
 }
