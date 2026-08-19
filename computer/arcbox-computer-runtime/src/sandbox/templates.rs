@@ -15,7 +15,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::SandboxManager;
-use super::types::{ComputerId, ComputerState, SandboxSpec};
+use super::types::{ComputerId, ComputerSpec, ComputerState};
 use crate::error::{ComputerError, Result};
 use crate::snapshot::{SnapshotDraft, SnapshotGeometry};
 use crate::template_catalog::{
@@ -184,7 +184,7 @@ impl SandboxManager {
         let mut suffix = Uuid::new_v4().simple().to_string();
         suffix.truncate(16);
         let builder_id = format!("tpl-build-{suffix}");
-        let spec = SandboxSpec {
+        let spec = ComputerSpec {
             id: Some(builder_id.clone()),
             rootfs: rootfs_path.to_owned(),
             vcpus,
@@ -338,7 +338,7 @@ pub struct PrewarmOutcome {
 /// the template.
 pub(super) fn template_restore_eligible(
     config: &crate::config::RuntimeConfig,
-    spec: &SandboxSpec,
+    spec: &ComputerSpec,
     caller_supplied_boot: bool,
     warm: &crate::sandbox::TemplateWarmRef,
 ) -> bool {

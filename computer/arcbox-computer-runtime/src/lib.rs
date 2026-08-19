@@ -39,7 +39,7 @@
 //! - [`RootfsBuilder`] — OCI/overlay2 → ext4 with `/sbin/vm-agent` injected,
 //!   and the default busybox image; the composer supplies [`RootfsPaths`]
 //! - [`ComputerState`] — a computer's public lifecycle state
-//! - [`RuntimeConfig`] / [`SandboxSpec`] — configuration types
+//! - [`RuntimeConfig`] / [`ComputerSpec`] — configuration types
 //!
 //! This crate names no VMM and no network implementation. Sandboxes reach
 //! both only through `arcbox-vm-driver`'s ports, and the composer supplies
@@ -78,7 +78,7 @@ pub use arcbox_vm_proto::file as file_proto;
 pub use arcbox_snapshot::{snapshot, snapshot_cow, template_catalog};
 
 pub use agent::{ExecInputMsg, ExitStatus, OutputChunk, PortWait, StartCommand};
-pub use config::{DefaultVmConfig, FirecrackerConfig, GrpcConfig, NetworkConfig, RuntimeConfig};
+pub use config::{ComputerConfig, DefaultVmConfig, GrpcConfig, NetworkConfig, RuntimeConfig};
 pub use environment::NodeEnvironment;
 pub use error::{ComputerError, Result};
 pub use rootfs::{
@@ -88,9 +88,9 @@ pub use rootfs::{
 pub use sandbox::pause_reason;
 pub use sandbox::{
     CheckpointInfo, CheckpointSummary, ComputerId, ComputerMountSpec, ComputerNetworkIdentity,
-    ComputerNetworkInfo, ComputerNetworkSpec, ComputerState, IdleAction, LifecycleUpdate,
-    RestoreSandboxSpec, SandboxEvent, SandboxInfo, SandboxManager, SandboxSpec, SandboxSummary,
-    TemplateWarmRef,
+    ComputerNetworkInfo, ComputerNetworkSpec, ComputerSpec, ComputerState, IdleAction,
+    LifecycleUpdate, RestoreComputerSpec, SandboxEvent, SandboxInfo, SandboxManager,
+    SandboxSummary, TemplateWarmRef,
 };
 pub use sandbox::{
     ExecutionChannel, ExecutionOutput, ExecutionSnapshot, ExecutionSpec, StdinState,

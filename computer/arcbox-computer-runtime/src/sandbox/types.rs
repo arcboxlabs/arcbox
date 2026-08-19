@@ -136,7 +136,7 @@ pub struct ComputerMountSpec {
 /// boundary (see the guest agent's `SandboxService::create`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct SandboxSpec {
+pub struct ComputerSpec {
     /// Caller-supplied ID; auto-generated (UUID) when `None` or empty.
     pub id: Option<String>,
     /// Arbitrary key-value metadata (filtering, listing).
@@ -186,7 +186,7 @@ pub struct SandboxSpec {
 }
 
 /// A template's pre-warmed boot-to-ready snapshot, threaded through
-/// [`SandboxSpec`] (CORE-107).
+/// [`ComputerSpec`] (CORE-107).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TemplateWarmRef {
     /// Snapshot id in the snapshot catalog.
@@ -198,7 +198,7 @@ pub struct TemplateWarmRef {
 
 /// Parameters to restore a sandbox from a checkpoint.
 #[derive(Debug, Clone, Default)]
-pub struct RestoreSandboxSpec {
+pub struct RestoreComputerSpec {
     /// Caller-supplied ID (None = auto-generate).
     pub id: Option<String>,
     /// Source checkpoint/snapshot ID.

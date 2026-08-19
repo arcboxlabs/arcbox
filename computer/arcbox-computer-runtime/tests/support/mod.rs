@@ -22,8 +22,8 @@ use arcbox_computer_runtime::config::{JailerConfig, RuntimeConfig};
 use arcbox_computer_runtime::testkit::agent::FakeAgentFactory;
 use arcbox_computer_runtime::testkit::fake_environment;
 use arcbox_computer_runtime::{
-    ComputerId, ComputerState, NodeEnvironment, OutputChunk, SandboxEvent, SandboxManager,
-    SandboxSpec,
+    ComputerId, ComputerSpec, ComputerState, NodeEnvironment, OutputChunk, SandboxEvent,
+    SandboxManager,
 };
 use arcbox_vm_driver::testkit::{FakeDriver, FakeNetwork};
 use tokio::sync::broadcast;
@@ -313,9 +313,9 @@ impl Fixture {
     /// data-plane and lifecycle verb is specified against.
     pub async fn ready(&self, id: &str) -> ComputerId {
         let id = self
-            .booted(SandboxSpec {
+            .booted(ComputerSpec {
                 id: Some(id.to_owned()),
-                ..SandboxSpec::default()
+                ..ComputerSpec::default()
             })
             .await;
         self.await_state(&id, ComputerState::Ready).await;
@@ -327,7 +327,7 @@ impl Fixture {
     /// Not the same as [`Self::ready`]: a spec carrying an initial `cmd`
     /// publishes READY and RUNNING in the same breath, so a computer whose
     /// cmd does not exit is announced ready and observed `Running`.
-    pub async fn booted(&self, spec: SandboxSpec) -> ComputerId {
+    pub async fn booted(&self, spec: ComputerSpec) -> ComputerId {
         let mut events = self.manager.subscribe_events();
         let (id, _ip) = self
             .manager
@@ -500,10 +500,10 @@ pub fn drain_actions(events: &mut broadcast::Receiver<SandboxEvent>, id: &str) -
 
 /// A spec whose initial command never exits, so the computer stays busy
 /// until something tears it down.
-pub fn never_exits(id: &str) -> SandboxSpec {
-    SandboxSpec {
+pub fn never_exits(id: &str) -> ComputerSpec {
+    ComputerSpec {
         id: Some(id.to_owned()),
         cmd: vec!["/bin/wedged".into()],
-        ..SandboxSpec::default()
+        ..ComputerSpec::default()
     }
 }

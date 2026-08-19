@@ -41,7 +41,7 @@ fn fingerprint(path: &Path) -> std::io::Result<FileFingerprint> {
 
 /// Derive the warm key for an effective (defaults-applied) create spec,
 /// fingerprinting the kernel and rootfs files on disk.
-pub(super) fn derive_warm_key(spec: &SandboxSpec) -> std::io::Result<WarmKey> {
+pub(super) fn derive_warm_key(spec: &ComputerSpec) -> std::io::Result<WarmKey> {
     Ok(warm_key(
         spec,
         fingerprint(Path::new(&spec.kernel))?,
@@ -256,8 +256,8 @@ mod tests {
         warm_key(&base_spec(), fingerprint_of(7), fingerprint_of(42))
     }
 
-    fn base_spec() -> SandboxSpec {
-        SandboxSpec {
+    fn base_spec() -> ComputerSpec {
+        ComputerSpec {
             kernel: "/run/kernel/vmlinux".into(),
             rootfs: "/data/rootfs.ext4".into(),
             boot_args: "console=ttyS0 quiet".into(),

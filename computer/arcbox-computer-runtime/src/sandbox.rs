@@ -70,8 +70,8 @@ pub(crate) use spec::ROOTFS_DISK_ID;
 pub(crate) use types::NetworkAttachment;
 pub use types::{
     CheckpointInfo, CheckpointSummary, ComputerId, ComputerMountSpec, ComputerNetworkInfo,
-    ComputerNetworkSpec, ComputerState, IdleAction, LifecycleUpdate, RestoreSandboxSpec,
-    SandboxEvent, SandboxInfo, SandboxSpec, SandboxSummary, TemplateWarmRef,
+    ComputerNetworkSpec, ComputerSpec, ComputerState, IdleAction, LifecycleUpdate,
+    RestoreComputerSpec, SandboxEvent, SandboxInfo, SandboxSummary, TemplateWarmRef,
 };
 
 const EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -948,7 +948,7 @@ mod tests {
     fn placeholder(id: &str) -> ComputerRuntime {
         ComputerRuntime::new(
             id.to_owned(),
-            SandboxSpec::default(),
+            ComputerSpec::default(),
             None,
             PathBuf::from("/tmp/x"),
         )

@@ -4,7 +4,7 @@ use std::panic::{AssertUnwindSafe, resume_unwind};
 
 use arcbox_computer_runtime::snapshot::SnapshotGeometry;
 use arcbox_computer_runtime::{
-    ComputerState, OutputChunk, RestoreSandboxSpec, SandboxManager, SandboxSpec, SnapshotCatalog,
+    ComputerSpec, ComputerState, OutputChunk, RestoreComputerSpec, SandboxManager, SnapshotCatalog,
 };
 use futures::FutureExt;
 
@@ -37,7 +37,7 @@ async fn jailed_checkpoint_chain_preserves_source_and_geometry() {
         finalize_startup_cleanup(&mgr).await;
         let mut events = mgr.subscribe_events();
         let (mut id, ip) = mgr
-            .create_sandbox(SandboxSpec {
+            .create_sandbox(ComputerSpec {
                 id: Some("origin".into()),
                 kernel: kernel.clone(),
                 rootfs: rootfs.clone(),
@@ -75,10 +75,10 @@ async fn jailed_checkpoint_chain_preserves_source_and_geometry() {
             mgr.remove_sandbox(&id, true).await.unwrap();
             assert!(!super::firecracker_alive(pid));
             let (restored, ip) = mgr
-                .restore_sandbox(RestoreSandboxSpec {
+                .restore_sandbox(RestoreComputerSpec {
                     id: Some(format!("generation-{generation}")),
                     snapshot_id: checkpoint.snapshot_id.clone(),
-                    ..RestoreSandboxSpec::default()
+                    ..RestoreComputerSpec::default()
                 })
                 .await
                 .unwrap();

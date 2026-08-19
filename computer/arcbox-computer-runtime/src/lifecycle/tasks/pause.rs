@@ -153,7 +153,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::sandbox::SandboxSpec;
+    use crate::sandbox::ComputerSpec;
     use crate::snapshot_cow::CowOptions;
 
     /// Which grip on its VM a computer holds.
@@ -202,7 +202,7 @@ mod tests {
         }
         let mut computer = ComputerRuntime::new(
             "job".to_owned(),
-            SandboxSpec::default(),
+            ComputerSpec::default(),
             None,
             vm_dir.clone(),
         );

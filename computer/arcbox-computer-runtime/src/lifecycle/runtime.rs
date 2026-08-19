@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::agent::ExitStatus;
-use crate::sandbox::{ComputerId, ComputerState, SandboxSpec};
+use crate::sandbox::{ComputerId, ComputerSpec, ComputerState};
 use crate::snapshot_cow::CowHandle;
 
 /// A computer's runtime state as its actor and its sub-tasks share it.
@@ -37,7 +37,7 @@ pub struct ComputerRuntime {
     /// User-supplied labels.
     pub labels: HashMap<String, String>,
     /// Original creation spec.
-    pub spec: SandboxSpec,
+    pub spec: ComputerSpec,
     /// The public lifecycle state, mirrored here from the actor's machine on
     /// every transition. A sub-task reads it to see a teardown that started
     /// while it was running — the cooperative half of preemption, which an
@@ -107,7 +107,7 @@ pub struct ComputerRuntime {
 impl ComputerRuntime {
     pub(crate) fn new(
         id: ComputerId,
-        spec: SandboxSpec,
+        spec: ComputerSpec,
         network: Option<NetworkLease>,
         vm_dir: PathBuf,
     ) -> Self {
@@ -116,7 +116,7 @@ impl ComputerRuntime {
 
     pub(crate) fn new_with_generation(
         id: ComputerId,
-        spec: SandboxSpec,
+        spec: ComputerSpec,
         network: Option<NetworkLease>,
         vm_dir: PathBuf,
         generation: Uuid,
@@ -126,7 +126,7 @@ impl ComputerRuntime {
 
     fn new_inner(
         id: ComputerId,
-        spec: SandboxSpec,
+        spec: ComputerSpec,
         network: Option<NetworkLease>,
         vm_dir: PathBuf,
         record_generation: Option<Uuid>,

@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex, Weak};
 
 use arcbox_computer_runtime::agent::VmProtoAgentFactory;
 use arcbox_computer_runtime::{
-    ComputerError, ComputerMountSpec, ComputerNetworkSpec, ComputerState, NodeEnvironment,
-    RootfsBuilder, RootfsPaths, SandboxManager, SandboxSpec,
+    ComputerError, ComputerMountSpec, ComputerNetworkSpec, ComputerSpec, ComputerState,
+    NodeEnvironment, RootfsBuilder, RootfsPaths, SandboxManager,
 };
 use arcbox_connect::sandbox_v1;
 use arcbox_fc_driver::{FcDriver, FcDriverConfig};
@@ -718,8 +718,8 @@ fn deregister_sandbox_dns(id: &str) {
     }
 }
 
-/// Convert a `CreateSandboxRequest` proto to a [`SandboxSpec`].
-fn proto_to_spec(req: sandbox_v1::CreateSandboxRequest) -> SandboxSpec {
+/// Convert a `CreateSandboxRequest` proto to a [`ComputerSpec`].
+fn proto_to_spec(req: sandbox_v1::CreateSandboxRequest) -> ComputerSpec {
     // An unset `limits`/`network` field derefs to the default instance, and
     // an unknown wire value falls back to UNSPECIFIED — the proto3 defaults.
     let (vcpus, memory_mib) = (req.limits.vcpus, req.limits.memory_mib);
@@ -728,7 +728,7 @@ fn proto_to_spec(req: sandbox_v1::CreateSandboxRequest) -> SandboxSpec {
         // UNSPECIFIED defaults to a networked sandbox.
         sandbox_v1::NetworkMode::Enabled | sandbox_v1::NetworkMode::Unspecified => "tap",
     };
-    SandboxSpec {
+    ComputerSpec {
         id: if req.id.is_empty() {
             None
         } else {

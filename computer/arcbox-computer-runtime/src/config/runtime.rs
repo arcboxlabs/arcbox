@@ -8,7 +8,7 @@ use super::JailerConfig;
 /// config file spells it out (`/etc/arcbox/vmm.toml` in the System VM).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfig {
-    pub firecracker: FirecrackerConfig,
+    pub firecracker: ComputerConfig,
     pub network: NetworkConfig,
     pub grpc: GrpcConfig,
     pub defaults: DefaultVmConfig,
@@ -25,7 +25,7 @@ pub struct RuntimeConfig {
 /// does not know, so one section serves both halves and the file's shape
 /// is unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FirecrackerConfig {
+pub struct ComputerConfig {
     /// Jailer isolation for every sandbox VMM (absent = no isolation).
     #[serde(default)]
     pub jailer: Option<JailerConfig>,
@@ -103,7 +103,7 @@ pub struct DefaultVmConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            firecracker: FirecrackerConfig {
+            firecracker: ComputerConfig {
                 jailer: None,
                 data_dir: "/var/lib/firecracker-vmm".into(),
                 pool_size: default_pool_size(),
@@ -167,7 +167,7 @@ mod tests {
     fn pool_size_defaults_to_one_spare_slot() {
         assert_eq!(RuntimeConfig::default().firecracker.pool_size, 1);
         // A config written before the knob existed still loads with the default.
-        let cfg: FirecrackerConfig = toml::from_str("data_dir = \"/var/lib/vmm\"\n").unwrap();
+        let cfg: ComputerConfig = toml::from_str("data_dir = \"/var/lib/vmm\"\n").unwrap();
         assert_eq!(cfg.pool_size, 1);
     }
 
@@ -175,10 +175,10 @@ mod tests {
     fn warm_create_defaults_on_and_parses_the_escape_hatch() {
         assert!(RuntimeConfig::default().firecracker.warm_create);
         // A config written before the knob existed still loads with the default.
-        let cfg: FirecrackerConfig = toml::from_str("data_dir = \"/var/lib/vmm\"\n").unwrap();
+        let cfg: ComputerConfig = toml::from_str("data_dir = \"/var/lib/vmm\"\n").unwrap();
         assert!(cfg.warm_create);
         // The escape hatch is reachable by config alone.
-        let cfg: FirecrackerConfig =
+        let cfg: ComputerConfig =
             toml::from_str("data_dir = \"/var/lib/vmm\"\nwarm_create = false\n").unwrap();
         assert!(!cfg.warm_create);
     }
@@ -187,10 +187,10 @@ mod tests {
     fn dmsetup_candidates_absent_is_none_and_explicit_lists_parse_as_written() {
         // A config written before the field existed still loads; the
         // absence is preserved so the composer can supply its own list.
-        let cfg: FirecrackerConfig = toml::from_str("data_dir = \"/var/lib/vmm\"\n").unwrap();
+        let cfg: ComputerConfig = toml::from_str("data_dir = \"/var/lib/vmm\"\n").unwrap();
         assert_eq!(cfg.dmsetup_candidates, None);
         // An explicit list is used exactly as written.
-        let cfg: FirecrackerConfig = toml::from_str(
+        let cfg: ComputerConfig = toml::from_str(
             "data_dir = \"/var/lib/vmm\"\n\
              dmsetup_candidates = [\"/opt/arcbox/dmsetup\", \"/sbin/dmsetup\"]\n",
         )
@@ -205,7 +205,7 @@ mod tests {
             )
         );
         // An empty list is a deliberate "no dmsetup" — CoW off.
-        let cfg: FirecrackerConfig = toml::from_str(
+        let cfg: ComputerConfig = toml::from_str(
             "data_dir = \"/var/lib/vmm\"\n\
              dmsetup_candidates = []\n",
         )

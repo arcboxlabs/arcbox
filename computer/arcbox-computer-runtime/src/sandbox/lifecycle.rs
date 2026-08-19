@@ -37,7 +37,7 @@ impl SandboxManager {
             .map(|outcome| outcome.map(|outcome| (id.to_owned(), outcome.ip_address)))
     }
 
-    pub async fn create_sandbox(&self, spec: SandboxSpec) -> Result<(ComputerId, String)> {
+    pub async fn create_sandbox(&self, spec: ComputerSpec) -> Result<(ComputerId, String)> {
         self.create_sandbox_keyed(spec, &Uuid::new_v4().to_string())
             .await
     }
@@ -45,7 +45,7 @@ impl SandboxManager {
     /// Create a sandbox with a stable key for durable request replay.
     pub async fn create_sandbox_keyed(
         &self,
-        spec: SandboxSpec,
+        spec: ComputerSpec,
         request_key: &str,
     ) -> Result<(ComputerId, String)> {
         self.create_sandbox_inner(spec, request_key, WarmPolicy::Auto)
@@ -93,7 +93,7 @@ impl SandboxManager {
     /// a duplicate full-memory snapshot).
     pub(super) async fn create_sandbox_inner(
         &self,
-        mut spec: SandboxSpec,
+        mut spec: ComputerSpec,
         request_key: &str,
         warm_policy: WarmPolicy,
     ) -> Result<(ComputerId, String)> {
@@ -675,7 +675,7 @@ impl SandboxManager {
                     id,
                     ComputerRuntime::new(
                         id.clone(),
-                        SandboxSpec {
+                        ComputerSpec {
                             id: Some(id.clone()),
                             ..Default::default()
                         },

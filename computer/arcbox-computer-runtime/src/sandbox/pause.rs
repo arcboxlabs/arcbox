@@ -14,7 +14,7 @@
 //!   writes — which is why restoring *from* a pause checkpoint is refused.
 //!
 //! Resume mirrors the fresh-network restore path: a new TAP + IP is
-//! allocated (`RestoreSandboxSpec::network_override` semantics) and the
+//! allocated (`RestoreComputerSpec::network_override` semantics) and the
 //! sandbox returns to `Ready` under its original id. The old allocation was
 //! quarantined at pause time and its host forwarding state cleaned via the
 //! same durable ticket flow Stop uses. Whether the guest needs re-addressing

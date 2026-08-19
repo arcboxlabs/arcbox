@@ -24,7 +24,7 @@ use std::sync::Arc;
 use arcbox_computer_runtime::snapshot::SnapshotGeometry;
 use arcbox_computer_runtime::testkit::agent::Reply;
 use arcbox_computer_runtime::{
-    ComputerError, ComputerState, IdleAction, LifecycleUpdate, RestoreSandboxSpec, SandboxSpec,
+    ComputerError, ComputerSpec, ComputerState, IdleAction, LifecycleUpdate, RestoreComputerSpec,
     pause_reason,
 };
 use support::{Fixture, Setup, action, await_action, drain_actions, never_exits};
@@ -44,10 +44,10 @@ async fn a_create_boots_to_ready_and_serves_exec_and_files() {
 
     let (id, ip) = fixture
         .manager
-        .create_sandbox(SandboxSpec {
+        .create_sandbox(ComputerSpec {
             id: Some("booted".into()),
             cmd: vec!["/bin/hello".into()],
-            ..SandboxSpec::default()
+            ..ComputerSpec::default()
         })
         .await
         .unwrap();
@@ -145,10 +145,10 @@ async fn a_cmd_carrying_boot_announces_its_workload_around_ready() {
 
     let (id, _ip) = fixture
         .manager
-        .create_sandbox(SandboxSpec {
+        .create_sandbox(ComputerSpec {
             id: Some("noisy".into()),
             cmd: vec!["/bin/hello".into()],
-            ..SandboxSpec::default()
+            ..ComputerSpec::default()
         })
         .await
         .unwrap();
@@ -186,7 +186,7 @@ async fn a_ready_probe_command_that_never_exits_fails_the_boot() {
 
     let (id, _ip) = fixture
         .manager
-        .create_sandbox(SandboxSpec {
+        .create_sandbox(ComputerSpec {
             id: Some("wedged".into()),
             ready_probe: Some(
                 arcbox_computer_runtime::template_catalog::ReadyProbeSpec::Command {
@@ -194,7 +194,7 @@ async fn a_ready_probe_command_that_never_exits_fails_the_boot() {
                     timeout_seconds: 1,
                 },
             ),
-            ..SandboxSpec::default()
+            ..ComputerSpec::default()
         })
         .await
         .unwrap();
@@ -220,7 +220,7 @@ async fn a_boot_whose_cmd_exits_while_the_gate_runs_still_reaches_ready() {
 
     let (id, _ip) = fixture
         .manager
-        .create_sandbox(SandboxSpec {
+        .create_sandbox(ComputerSpec {
             id: Some("gated".into()),
             cmd: vec!["/bin/cmd".into()],
             ready_probe: Some(
@@ -229,7 +229,7 @@ async fn a_boot_whose_cmd_exits_while_the_gate_runs_still_reaches_ready() {
                     timeout_seconds: 30,
                 },
             ),
-            ..SandboxSpec::default()
+            ..ComputerSpec::default()
         })
         .await
         .unwrap();
@@ -264,9 +264,9 @@ async fn a_boot_the_driver_refuses_fails_and_releases_the_computer() {
 
     let (id, _ip) = fixture
         .manager
-        .create_sandbox(SandboxSpec {
+        .create_sandbox(ComputerSpec {
             id: Some("doomed".into()),
-            ..SandboxSpec::default()
+            ..ComputerSpec::default()
         })
         .await
         .unwrap();
@@ -295,9 +295,9 @@ async fn a_create_that_fails_before_activation_hands_the_address_back() {
 
     fixture
         .manager
-        .create_sandbox(SandboxSpec {
+        .create_sandbox(ComputerSpec {
             id: Some("doomed".into()),
-            ..SandboxSpec::default()
+            ..ComputerSpec::default()
         })
         .await
         .expect_err("the journal write cannot succeed against a directory");
@@ -311,9 +311,9 @@ async fn a_create_that_fails_before_activation_hands_the_address_back() {
     );
     let (_id, reused) = fixture
         .manager
-        .create_sandbox(SandboxSpec {
+        .create_sandbox(ComputerSpec {
             id: Some("next".into()),
-            ..SandboxSpec::default()
+            ..ComputerSpec::default()
         })
         .await
         .unwrap();
@@ -369,11 +369,11 @@ async fn an_idle_computer_is_removed_when_its_policy_says_kill() {
     let fixture = Fixture::jailed().await;
     let mut events = fixture.manager.subscribe_events();
     let id = fixture
-        .booted(SandboxSpec {
+        .booted(ComputerSpec {
             id: Some("bored".into()),
             idle_timeout_seconds: 2,
             on_idle: IdleAction::Kill,
-            ..SandboxSpec::default()
+            ..ComputerSpec::default()
         })
         .await;
 
@@ -390,11 +390,11 @@ async fn an_idle_computer_pauses_and_says_the_timer_did_it() {
     let fixture = Fixture::jailed().await;
     let mut events = fixture.manager.subscribe_events();
     let id = fixture
-        .booted(SandboxSpec {
+        .booted(ComputerSpec {
             id: Some("napper".into()),
             idle_timeout_seconds: 2,
             on_idle: IdleAction::Pause,
-            ..SandboxSpec::default()
+            ..ComputerSpec::default()
         })
         .await;
 
@@ -835,11 +835,11 @@ async fn a_checkpoint_restores_onto_a_fresh_address() {
 
     let (clone, clone_ip) = fixture
         .manager
-        .restore_sandbox(RestoreSandboxSpec {
+        .restore_sandbox(RestoreComputerSpec {
             id: Some("clone".into()),
             snapshot_id: checkpoint.snapshot_id.clone(),
             network_override: true,
-            ..RestoreSandboxSpec::default()
+            ..RestoreComputerSpec::default()
         })
         .await
         .unwrap();
@@ -879,11 +879,11 @@ async fn an_adopted_computers_checkpoint_restores() {
         .unwrap();
     let (clone, _) = fixture
         .manager
-        .restore_sandbox(RestoreSandboxSpec {
+        .restore_sandbox(RestoreComputerSpec {
             id: Some("adopted-clone".into()),
             snapshot_id: checkpoint.snapshot_id,
             network_override: true,
-            ..RestoreSandboxSpec::default()
+            ..RestoreComputerSpec::default()
         })
         .await
         .unwrap();
@@ -900,11 +900,11 @@ async fn a_restored_computers_checkpoint_restores_again() {
         memory_mib: 768,
     };
     let origin = fixture
-        .booted(SandboxSpec {
+        .booted(ComputerSpec {
             id: Some("origin".into()),
             vcpus: geometry.vcpus,
             memory_mib: geometry.memory_mib,
-            ..SandboxSpec::default()
+            ..ComputerSpec::default()
         })
         .await;
     fixture.await_state(&origin, ComputerState::Ready).await;
@@ -918,11 +918,11 @@ async fn a_restored_computers_checkpoint_restores_again() {
     assert_eq!(first_meta.geometry, Some(geometry));
     let (first_clone, _) = fixture
         .manager
-        .restore_sandbox(RestoreSandboxSpec {
+        .restore_sandbox(RestoreComputerSpec {
             id: Some("first-clone".into()),
             snapshot_id: first.snapshot_id,
             network_override: true,
-            ..RestoreSandboxSpec::default()
+            ..RestoreComputerSpec::default()
         })
         .await
         .unwrap();
@@ -941,11 +941,11 @@ async fn a_restored_computers_checkpoint_restores_again() {
     assert_eq!(second_meta.rootfs_path, first_meta.rootfs_path);
     let (second_clone, _) = fixture
         .manager
-        .restore_sandbox(RestoreSandboxSpec {
+        .restore_sandbox(RestoreComputerSpec {
             id: Some("second-clone".into()),
             snapshot_id: second.snapshot_id,
             network_override: true,
-            ..RestoreSandboxSpec::default()
+            ..RestoreComputerSpec::default()
         })
         .await
         .unwrap();
@@ -970,11 +970,11 @@ async fn a_restore_without_valid_geometry_reserves_no_resources() {
         .unwrap();
     let meta_path = meta.vmstate_path.parent().unwrap().join("meta.json");
     let clone = "clone".to_owned();
-    let request = RestoreSandboxSpec {
+    let request = RestoreComputerSpec {
         id: Some(clone.clone()),
         snapshot_id: checkpoint.snapshot_id,
         network_override: true,
-        ..RestoreSandboxSpec::default()
+        ..RestoreComputerSpec::default()
     };
     for geometry in [
         None,
@@ -1146,11 +1146,11 @@ async fn a_failed_restore_frees_its_id_before_it_answers() {
     fixture.driver().fail_next_boot();
     fixture
         .manager
-        .restore_sandbox(RestoreSandboxSpec {
+        .restore_sandbox(RestoreComputerSpec {
             id: Some("second".into()),
             snapshot_id: checkpoint.snapshot_id.clone(),
             network_override: true,
-            ..RestoreSandboxSpec::default()
+            ..RestoreComputerSpec::default()
         })
         .await
         .expect_err("the driver refused the restore");
@@ -1160,11 +1160,11 @@ async fn a_failed_restore_frees_its_id_before_it_answers() {
     fixture.settle_network_cleanups().await;
     let (again, _ip) = fixture
         .manager
-        .restore_sandbox(RestoreSandboxSpec {
+        .restore_sandbox(RestoreComputerSpec {
             id: Some("second".into()),
             snapshot_id: checkpoint.snapshot_id,
             network_override: true,
-            ..RestoreSandboxSpec::default()
+            ..RestoreComputerSpec::default()
         })
         .await
         .expect("the failed restore left nothing owning the id");
@@ -1233,10 +1233,10 @@ async fn a_durable_record_pins_its_rootfs_until_removal() {
     let source = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(source.path(), b"rootfs").unwrap();
     let id = fixture
-        .booted(SandboxSpec {
+        .booted(ComputerSpec {
             id: Some("pinned".into()),
             rootfs: source.path().to_str().unwrap().into(),
-            ..SandboxSpec::default()
+            ..ComputerSpec::default()
         })
         .await;
     fixture.await_state(&id, ComputerState::Ready).await;
@@ -1307,9 +1307,9 @@ async fn a_boot_whose_warm_publish_freezes_the_guest_fails() {
 
     let (id, _ip) = fixture
         .manager
-        .create_sandbox(SandboxSpec {
+        .create_sandbox(ComputerSpec {
             id: Some("chilled".into()),
-            ..SandboxSpec::default()
+            ..ComputerSpec::default()
         })
         .await
         .unwrap();
@@ -1336,7 +1336,7 @@ async fn a_forced_remove_preempts_a_boot_in_flight() {
 
     let (id, _ip) = fixture
         .manager
-        .create_sandbox(SandboxSpec {
+        .create_sandbox(ComputerSpec {
             id: Some("wedged".into()),
             ready_probe: Some(
                 arcbox_computer_runtime::template_catalog::ReadyProbeSpec::Command {
@@ -1346,7 +1346,7 @@ async fn a_forced_remove_preempts_a_boot_in_flight() {
                     timeout_seconds: 600,
                 },
             ),
-            ..SandboxSpec::default()
+            ..ComputerSpec::default()
         })
         .await
         .unwrap();
@@ -1593,9 +1593,9 @@ async fn a_computer_whose_vm_died_comes_back_failed() {
 #[tokio::test]
 async fn a_create_replays_its_recorded_outcome_rather_than_building_a_second_computer() {
     let fixture = Fixture::jailed().await;
-    let spec = SandboxSpec {
+    let spec = ComputerSpec {
         id: Some("twice".into()),
-        ..SandboxSpec::default()
+        ..ComputerSpec::default()
     };
     let (id, ip) = fixture
         .manager
@@ -1652,9 +1652,9 @@ async fn a_create_replays_its_recorded_outcome_rather_than_building_a_second_com
 #[tokio::test]
 async fn a_create_of_a_live_id_under_another_key_is_refused() {
     let fixture = Fixture::jailed().await;
-    let spec = || SandboxSpec {
+    let spec = || ComputerSpec {
         id: Some("taken".into()),
-        ..SandboxSpec::default()
+        ..ComputerSpec::default()
     };
     let (id, _ip) = fixture
         .manager

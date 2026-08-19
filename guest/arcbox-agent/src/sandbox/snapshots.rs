@@ -1,6 +1,6 @@
 //! Sandbox checkpoint / restore handlers.
 
-use arcbox_computer_runtime::{ComputerState, RestoreSandboxSpec};
+use arcbox_computer_runtime::{ComputerState, RestoreComputerSpec};
 use arcbox_connect::sandbox_v1;
 use buffa::Message;
 
@@ -37,7 +37,7 @@ impl SandboxService {
         if !req.id.is_empty() {
             self.clear_stale_completed_create(&req.id);
         }
-        let spec = RestoreSandboxSpec {
+        let spec = RestoreComputerSpec {
             id: if req.id.is_empty() {
                 None
             } else {
