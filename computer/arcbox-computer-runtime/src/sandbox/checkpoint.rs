@@ -307,7 +307,7 @@ impl ComputerManager {
         let mut nic: Option<NicSpec> = None;
         let setup = async {
             super::reconcile::create_runtime_dir(&vm_dir)?;
-            let cleanup_record = super::reconcile::SandboxStateRecord::new(
+            let cleanup_record = super::reconcile::ComputerStateRecord::new(
                 &new_id,
                 None,
                 lease

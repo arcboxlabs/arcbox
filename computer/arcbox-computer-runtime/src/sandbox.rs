@@ -97,7 +97,7 @@ pub(crate) type Computers = Arc<RwLock<HashMap<ComputerId, ComputerRef>>>;
 /// Manages the full lifecycle of multiple sandbox microVMs.
 pub struct ComputerManager {
     computers: Computers,
-    records: Arc<record::SandboxRecordStore>,
+    records: Arc<record::ComputerRecordStore>,
     /// What every computer's flows are built from — the driver, the guest
     /// network, the agent factory, the record store, the catalogs and the
     /// pool. One `Arc`, cloned into each actor.
@@ -185,7 +185,7 @@ impl ComputerManager {
                 )));
             }
         }
-        let records = Arc::new(record::SandboxRecordStore::new(Path::new(
+        let records = Arc::new(record::ComputerRecordStore::new(Path::new(
             &config.firecracker.data_dir,
         ))?);
         drop(records.load_all()?);
@@ -623,8 +623,8 @@ pub(crate) fn journaled_pid(prepared: &dyn PreparedVm) -> Option<i32> {
 ///
 /// The driver knows both because it spawned the VMM that way. Nothing else
 /// can work either out afterwards: see
-/// [`SandboxStateRecord::api_socket`](crate::sandbox::reconcile::SandboxStateRecord::api_socket)
-/// and [`SandboxStateRecord::jail`](crate::sandbox::reconcile::SandboxStateRecord::jail).
+/// [`ComputerStateRecord::api_socket`](crate::sandbox::reconcile::ComputerStateRecord::api_socket)
+/// and [`ComputerStateRecord::jail`](crate::sandbox::reconcile::ComputerStateRecord::jail).
 pub(crate) fn journaled_vmm(prepared: &dyn PreparedVm) -> Option<JournaledVmm> {
     prepared.record().process.map(|process| JournaledVmm {
         api_socket: process.api_socket,
@@ -689,7 +689,7 @@ pub(crate) fn catalogued_checkpoint(meta: &SnapshotMeta) -> Result<CheckpointIma
 /// site. On the sweep path it costs that record its reconciliation — the
 /// journal is skipped rather than acted on, and every resource it names
 /// is held (`reconcile::sweep_orphans`). On a record *load* it costs
-/// every record theirs: [`SandboxRecordStore::load_all`] validates each
+/// every record theirs: [`ComputerRecordStore::load_all`] validates each
 /// id and propagates, so one rejection aborts the whole startup read,
 /// which is the stronger reason the cap is absent. It also runs against
 /// snapshot / execution ids that never become a VM identity at all. Both

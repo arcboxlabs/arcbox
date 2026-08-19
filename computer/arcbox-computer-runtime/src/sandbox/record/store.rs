@@ -1,4 +1,4 @@
-//! The file-backed record store: how a [`super::phase::SandboxRecord`]
+//! The file-backed record store: how a [`super::phase::ComputerRecord`]
 //! reaches the disk, and what "durable" means for each write.
 //!
 //! Every mutation is generation-checked, serialized by a process-local
@@ -20,8 +20,8 @@ use uuid::Uuid;
 use arcbox_atomic_file::AtomicWriteError;
 
 use super::phase::{
-    ExistingProvision, ProvisionIntent, RECORD_VERSION, SandboxPhase, SandboxProvisionOutcome,
-    SandboxRecord, SandboxTransition, classify_existing_provision, validate_record,
+    ComputerRecord, ExistingProvision, ProvisionIntent, RECORD_VERSION, SandboxPhase,
+    SandboxProvisionOutcome, SandboxTransition, classify_existing_provision, validate_record,
 };
 use crate::error::{ComputerError, Result};
 use crate::sandbox::types::IdleAction;
@@ -49,12 +49,12 @@ impl<T> DurableCommit<T> {
 }
 
 /// File-backed sandbox record store serialized by a process-local mutex.
-pub struct SandboxRecordStore {
+pub struct ComputerRecordStore {
     root: PathBuf,
     lock: Mutex<()>,
 }
 
-impl SandboxRecordStore {
+impl ComputerRecordStore {
     /// Opens the durable store beside, rather than inside, runtime sandboxes.
     pub fn new(data_dir: &Path) -> Result<Self> {
         let root = data_dir.join(RECORDS_DIR);
@@ -70,13 +70,13 @@ impl SandboxRecordStore {
 
     /// Loads the current record for `id`.
     #[cfg(test)]
-    pub(in crate::sandbox) fn load(&self, id: &str) -> Result<Option<SandboxRecord>> {
+    pub(in crate::sandbox) fn load(&self, id: &str) -> Result<Option<ComputerRecord>> {
         let _guard = self.lock()?;
         self.load_unlocked(id)
     }
 
     /// Loads every durable record, rejecting any malformed record file.
-    pub(in crate::sandbox) fn load_all(&self) -> Result<Vec<SandboxRecord>> {
+    pub(in crate::sandbox) fn load_all(&self) -> Result<Vec<ComputerRecord>> {
         let _guard = self.lock()?;
         let mut paths = fs::read_dir(&self.root)?
             .map(|entry| entry.map(|entry| entry.path()))
@@ -161,7 +161,7 @@ impl SandboxRecordStore {
             });
         }
 
-        let record = SandboxRecord::new(id, request_key, effective_spec);
+        let record = ComputerRecord::new(id, request_key, effective_spec);
         if let Some(error) = self.save_unlocked(&record)? {
             warn!(
                 sandbox_id = id,
@@ -177,7 +177,7 @@ impl SandboxRecordStore {
         id: &str,
         generation: Uuid,
         transition: SandboxTransition,
-    ) -> Result<DurableCommit<SandboxRecord>> {
+    ) -> Result<DurableCommit<ComputerRecord>> {
         let _guard = self.lock()?;
         let mut record = self
             .load_unlocked(id)?
@@ -254,7 +254,7 @@ impl SandboxRecordStore {
             .map_err(|_| ComputerError::Other("sandbox record store mutex poisoned".into()))
     }
 
-    fn load_unlocked(&self, id: &str) -> Result<Option<SandboxRecord>> {
+    fn load_unlocked(&self, id: &str) -> Result<Option<ComputerRecord>> {
         validate_id("sandbox id", id)?;
         let path = self.record_path(id);
         let metadata = match fs::symlink_metadata(&path) {
@@ -287,12 +287,12 @@ impl SandboxRecordStore {
                 header.version
             )));
         }
-        let record: SandboxRecord = serde_json::from_slice(&bytes)?;
+        let record: ComputerRecord = serde_json::from_slice(&bytes)?;
         validate_record(id, &record)?;
         Ok(Some(record))
     }
 
-    fn save_unlocked(&self, record: &SandboxRecord) -> Result<Option<String>> {
+    fn save_unlocked(&self, record: &ComputerRecord) -> Result<Option<String>> {
         validate_record(&record.id, record)?;
         let bytes = serde_json::to_vec_pretty(record)?;
         // A record that reached the filesystem but whose rename is not
@@ -399,7 +399,7 @@ mod tests {
         }
     }
 
-    fn created(intent: ProvisionIntent) -> SandboxRecord {
+    fn created(intent: ProvisionIntent) -> ComputerRecord {
         match intent {
             ProvisionIntent::Created(record) => record,
             other => panic!("expected created intent, got {other:?}"),
@@ -409,11 +409,11 @@ mod tests {
     #[test]
     fn records_survive_reopen_and_ignore_truncated_temporary_files() {
         let data_dir = tempfile::tempdir().unwrap();
-        let store = SandboxRecordStore::new(data_dir.path()).unwrap();
+        let store = ComputerRecordStore::new(data_dir.path()).unwrap();
         let record = created(store.provision_intent("box", "key", spec("box")).unwrap());
 
         fs::write(store.root.join(".box.interrupted.tmp"), b"{").unwrap();
-        let reopened = SandboxRecordStore::new(data_dir.path()).unwrap();
+        let reopened = ComputerRecordStore::new(data_dir.path()).unwrap();
 
         assert_eq!(reopened.load("box").unwrap(), Some(record));
         assert_eq!(reopened.load("other").unwrap(), None);
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn ready_restore_outcome_replays_after_store_reopen() {
         let data_dir = tempfile::tempdir().unwrap();
-        let store = SandboxRecordStore::new(data_dir.path()).unwrap();
+        let store = ComputerRecordStore::new(data_dir.path()).unwrap();
         let record = created(
             store
                 .provision_intent("restored", "restore-key", spec("restored"))
@@ -452,7 +452,7 @@ mod tests {
             )
             .unwrap();
 
-        let reopened = SandboxRecordStore::new(data_dir.path()).unwrap();
+        let reopened = ComputerRecordStore::new(data_dir.path()).unwrap();
         assert_eq!(
             reopened
                 .replay_provision("restored", "restore-key")
@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn load_all_rejects_corrupt_and_unsupported_records() {
         let data_dir = tempfile::tempdir().unwrap();
-        let store = SandboxRecordStore::new(data_dir.path()).unwrap();
+        let store = ComputerRecordStore::new(data_dir.path()).unwrap();
         let mut record = created(store.provision_intent("box", "key", spec("box")).unwrap());
         let path = store.record_path("box");
 
@@ -487,7 +487,7 @@ mod tests {
     #[test]
     fn matching_intent_resumes_then_replays_but_a_different_key_collides() {
         let data_dir = tempfile::tempdir().unwrap();
-        let store = SandboxRecordStore::new(data_dir.path()).unwrap();
+        let store = ComputerRecordStore::new(data_dir.path()).unwrap();
         assert_eq!(store.replay_provision("missing", "key").unwrap(), None);
         let mut original = spec("box");
         original.rootfs = "/first/rootfs.ext4".into();
@@ -513,7 +513,7 @@ mod tests {
 
         let mut with_secret = spec("box");
         with_secret.env.insert("TOKEN".into(), "secret".into());
-        let store2 = SandboxRecordStore::new(data_dir.path()).unwrap();
+        let store2 = ComputerRecordStore::new(data_dir.path()).unwrap();
         store2
             .provision_intent("secret-box", "secret-key", {
                 with_secret.id = Some("secret-box".into());
@@ -580,7 +580,7 @@ mod tests {
     #[test]
     fn transitions_enforce_generation_and_lifecycle_edges() {
         let data_dir = tempfile::tempdir().unwrap();
-        let store = SandboxRecordStore::new(data_dir.path()).unwrap();
+        let store = ComputerRecordStore::new(data_dir.path()).unwrap();
         let record = created(store.provision_intent("box", "key", spec("box")).unwrap());
 
         assert!(
@@ -668,7 +668,7 @@ mod tests {
     #[test]
     fn pause_resume_transitions_carry_the_snapshot_and_paused_at() {
         let data_dir = tempfile::tempdir().unwrap();
-        let store = SandboxRecordStore::new(data_dir.path()).unwrap();
+        let store = ComputerRecordStore::new(data_dir.path()).unwrap();
         let record = created(store.provision_intent("box", "key", spec("box")).unwrap());
         let generation = record.generation;
         store
@@ -772,7 +772,7 @@ mod tests {
     #[test]
     fn failed_pause_reverts_to_ready_and_paused_cannot_stop() {
         let data_dir = tempfile::tempdir().unwrap();
-        let store = SandboxRecordStore::new(data_dir.path()).unwrap();
+        let store = ComputerRecordStore::new(data_dir.path()).unwrap();
         let record = created(store.provision_intent("box", "key", spec("box")).unwrap());
         let generation = record.generation;
         store
@@ -821,7 +821,7 @@ mod tests {
     #[test]
     fn pre_ack_abort_releases_only_the_expected_generation() {
         let data_dir = tempfile::tempdir().unwrap();
-        let store = SandboxRecordStore::new(data_dir.path()).unwrap();
+        let store = ComputerRecordStore::new(data_dir.path()).unwrap();
         let record = created(store.provision_intent("box", "key", spec("box")).unwrap());
 
         assert!(store.abort_provision("box", Uuid::new_v4()).is_err());

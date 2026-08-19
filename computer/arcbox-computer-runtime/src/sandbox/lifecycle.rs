@@ -362,7 +362,7 @@ impl ComputerManager {
                 .unwrap_or_default();
 
             super::reconcile::create_runtime_dir(&vm_dir)?;
-            let cleanup_record = super::reconcile::SandboxStateRecord::new(
+            let cleanup_record = super::reconcile::ComputerStateRecord::new(
                 &id,
                 None,
                 lease

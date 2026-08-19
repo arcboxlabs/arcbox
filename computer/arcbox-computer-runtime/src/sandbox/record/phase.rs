@@ -60,7 +60,7 @@ pub struct SandboxProvisionOutcome {
 
 /// Versioned durable state for one sandbox generation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SandboxRecord {
+pub struct ComputerRecord {
     pub(super) version: u32,
     pub(in crate::sandbox) id: ComputerId,
     pub(crate) generation: Uuid,
@@ -89,10 +89,10 @@ pub struct SandboxRecord {
 /// Result of reserving a durable provisioning intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProvisionIntent {
-    Created(SandboxRecord),
-    Resume(SandboxRecord),
-    Replay(SandboxRecord),
-    Blocked(SandboxRecord),
+    Created(ComputerRecord),
+    Resume(ComputerRecord),
+    Replay(ComputerRecord),
+    Blocked(ComputerRecord),
 }
 
 /// Generation-checked lifecycle update.
@@ -126,7 +126,7 @@ impl SandboxTransition {
     }
 }
 
-impl SandboxRecord {
+impl ComputerRecord {
     pub(super) fn new(id: &str, request_key: &str, effective_spec: ComputerSpec) -> Self {
         let created_at = Utc::now();
         let ttl_deadline = (effective_spec.ttl_seconds > 0)
@@ -304,7 +304,7 @@ pub(super) enum ExistingProvision {
 }
 
 pub(super) fn classify_existing_provision(
-    record: &SandboxRecord,
+    record: &ComputerRecord,
     request_key: &str,
 ) -> Result<ExistingProvision> {
     if record.request_key != request_key {
@@ -325,7 +325,7 @@ pub(super) fn classify_existing_provision(
     })
 }
 
-pub(super) fn validate_record(id: &str, record: &SandboxRecord) -> Result<()> {
+pub(super) fn validate_record(id: &str, record: &ComputerRecord) -> Result<()> {
     validate_id("sandbox id", id)?;
     if record.version != RECORD_VERSION {
         return Err(ComputerError::Config(format!(
@@ -425,8 +425,8 @@ mod tests {
         }
     }
 
-    fn creating(id: &str) -> SandboxRecord {
-        SandboxRecord::new(
+    fn creating(id: &str) -> ComputerRecord {
+        ComputerRecord::new(
             id,
             "key",
             ComputerSpec {
@@ -484,7 +484,7 @@ mod tests {
 
     #[test]
     fn ready_records_keep_checkpoint_provenance_and_redact_consumed_inputs() {
-        let mut record = SandboxRecord::new(
+        let mut record = ComputerRecord::new(
             "box",
             "key",
             ComputerSpec {

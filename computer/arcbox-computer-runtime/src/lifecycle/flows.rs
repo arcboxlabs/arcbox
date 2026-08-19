@@ -30,8 +30,8 @@ use crate::config::RuntimeConfig;
 use crate::error::{ComputerError, Result};
 use crate::lifecycle::runtime::ComputerRuntime;
 use crate::sandbox::pool::SlotPool;
+use crate::sandbox::record::ComputerRecordStore;
 use crate::sandbox::record::SandboxProvisionOutcome;
-use crate::sandbox::record::SandboxRecordStore;
 use crate::sandbox::warm::WarmPublishTicket;
 use crate::sandbox::{CheckpointInfo, ComputerId, NetworkAttachment};
 use crate::snapshot::{SnapshotCatalog, SnapshotMeta};
@@ -52,7 +52,7 @@ pub struct ComputerServices {
     pub agents: Arc<dyn GuestAgentFactory>,
     pub config: Arc<RuntimeConfig>,
     pub cow_manager: Arc<CowManager>,
-    pub records: Arc<SandboxRecordStore>,
+    pub records: Arc<ComputerRecordStore>,
     pub snapshots: Arc<SnapshotCatalog>,
     pub events: Arc<crate::sandbox::events::EventBus>,
     pub pool: Arc<SlotPool>,

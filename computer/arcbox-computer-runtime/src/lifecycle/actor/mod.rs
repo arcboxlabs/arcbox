@@ -59,7 +59,7 @@ use crate::error::{ComputerError, Result};
 use crate::lifecycle::runtime::ComputerRuntime;
 use crate::sandbox::policy::deadlines;
 use crate::sandbox::record::{
-    PersistPhase, SandboxProvisionOutcome, SandboxRecordStore, SandboxTransition,
+    ComputerRecordStore, PersistPhase, SandboxProvisionOutcome, SandboxTransition,
 };
 use crate::sandbox::types::action;
 use crate::sandbox::workload::WorkloadClaim;
@@ -400,7 +400,7 @@ pub struct ComputerActor {
     /// — the durable effects are then no-ops, as they are today.
     generation: Option<Uuid>,
     vm_dir: PathBuf,
-    records: Arc<SandboxRecordStore>,
+    records: Arc<ComputerRecordStore>,
     events: Arc<crate::sandbox::events::EventBus>,
     tasks: Arc<dyn ComputerTasks>,
     seeded: Seeded,
@@ -490,7 +490,7 @@ pub struct ComputerSeed {
     pub unregister: Arc<dyn Fn() + Send + Sync>,
     pub generation: Option<Uuid>,
     pub vm_dir: PathBuf,
-    pub records: Arc<SandboxRecordStore>,
+    pub records: Arc<ComputerRecordStore>,
     pub events: Arc<crate::sandbox::events::EventBus>,
     pub tasks: Arc<dyn ComputerTasks>,
     pub deadlines: Deadlines,

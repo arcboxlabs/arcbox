@@ -25,8 +25,8 @@ use crate::lifecycle::effect::ReleaseScope;
 use crate::lifecycle::event::{PauseReason, Provision, RestoreOrigin};
 use crate::lifecycle::runtime::ComputerRuntime;
 use crate::lifecycle::tasks::{CaptureSpec, ComputerTasks, Drain, TaskFailure, TaskResult};
-use crate::sandbox::reconcile::{SandboxStateRecord, write_state_record};
-use crate::sandbox::record::{SandboxProvisionOutcome, SandboxRecordStore};
+use crate::sandbox::reconcile::{ComputerStateRecord, write_state_record};
+use crate::sandbox::record::{ComputerRecordStore, SandboxProvisionOutcome};
 use crate::sandbox::workload::WorkloadClaim;
 use crate::sandbox::{
     CheckpointInfo, ComputerEvent, ComputerSpec, ComputerState, IdleAction, LifecycleUpdate,
@@ -296,10 +296,10 @@ impl Harness {
         let (timers, timers_enabled) = watch::channel(true);
         if journal {
             let config = RuntimeConfig::default();
-            let record = SandboxStateRecord::new("box", None, None, None, &config, None).unwrap();
+            let record = ComputerStateRecord::new("box", None, None, None, &config, None).unwrap();
             write_state_record(dir.path(), &record).unwrap();
         }
-        let records = Arc::new(SandboxRecordStore::new(dir.path()).unwrap());
+        let records = Arc::new(ComputerRecordStore::new(dir.path()).unwrap());
         // No durable record by default: these tests exercise the actor, not
         // the store, so the record writes are no-ops. The crash journal is
         // not — it is a file beside them, and its ordering is the thing
@@ -1168,7 +1168,7 @@ async fn a_refused_failure_write_still_releases_and_keeps_the_journal() {
     let mut harness = Harness::recorded(Boot::Completes, no_deadlines()).await;
     harness.boot_to_ready().await;
     let journal =
-        SandboxStateRecord::new("box", None, None, None, &RuntimeConfig::default(), None).unwrap();
+        ComputerStateRecord::new("box", None, None, None, &RuntimeConfig::default(), None).unwrap();
     write_state_record(harness.dir.path(), &journal).unwrap();
 
     let record_path = harness.dir.path().join("sandbox-records").join("box.json");
