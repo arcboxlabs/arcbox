@@ -20,7 +20,7 @@ use crate::lifecycle::tasks::{TaskFailure, TaskResult};
 use crate::sandbox::boot::run_ready_probe;
 use crate::sandbox::warm::{WarmPublishTicket, publish_after_boot};
 use crate::sandbox::workload::{WorkloadClaim, WorkloadSlot, start_run_workload};
-use crate::sandbox::{ComputerState, SandboxId, SandboxSpec};
+use crate::sandbox::{ComputerId, ComputerState, SandboxSpec};
 
 impl ComputerFlows {
     pub(super) async fn boot_vm(
@@ -225,7 +225,7 @@ impl Attachment {
 /// The single-workload slot as the actor owns it: the claim, its rollback and
 /// the exit are all lifecycle transitions, so all three are mailbox verbs.
 pub struct ActorSlot {
-    pub id: SandboxId,
+    pub id: ComputerId,
     pub mailbox: Mailbox,
 }
 

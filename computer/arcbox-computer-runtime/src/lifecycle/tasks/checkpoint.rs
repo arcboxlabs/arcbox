@@ -21,7 +21,7 @@ use tracing::info;
 use crate::error::{ComputerError, Result};
 use crate::lifecycle::runtime::ComputerRuntime;
 use crate::sandbox::policy::settle::{self, Capture, GuestHold, Settlement};
-use crate::sandbox::{CheckpointInfo, ComputerState, SandboxId};
+use crate::sandbox::{CheckpointInfo, ComputerId, ComputerState};
 use crate::snapshot::{SnapshotCatalog, SnapshotDraft};
 
 /// What a single [`checkpoint_impl`] call should capture, and how it should
@@ -81,7 +81,7 @@ struct CheckpointSource {
 
 fn checkpoint_source(
     computer: &Arc<Mutex<ComputerRuntime>>,
-    sandbox_id: &SandboxId,
+    sandbox_id: &ComputerId,
     expected_state: ComputerState,
 ) -> Result<CheckpointSource> {
     let inst = computer.lock().unwrap();
@@ -134,7 +134,7 @@ fn checkpoint_source(
 pub async fn checkpoint_impl(
     computer: &Arc<Mutex<ComputerRuntime>>,
     snapshots: &SnapshotCatalog,
-    sandbox_id: &SandboxId,
+    sandbox_id: &ComputerId,
     request: CheckpointRequest,
 ) -> std::result::Result<CheckpointInfo, CheckpointFailure> {
     let resume_after = request.resume_after;
@@ -173,7 +173,7 @@ pub async fn checkpoint_impl(
 /// commit to the catalog.
 async fn capture(
     snapshots: &SnapshotCatalog,
-    sandbox_id: &SandboxId,
+    sandbox_id: &ComputerId,
     source: CheckpointSource,
     request: CheckpointRequest,
 ) -> Result<CheckpointInfo> {

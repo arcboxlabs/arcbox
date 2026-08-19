@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::{ComputerError, Result};
-use crate::sandbox::{SandboxId, SandboxSpec, validate_id};
+use crate::sandbox::{ComputerId, SandboxSpec, validate_id};
 
 pub(super) const RECORD_VERSION: u32 = 1;
 
@@ -62,7 +62,7 @@ pub struct SandboxProvisionOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxRecord {
     pub(super) version: u32,
-    pub(in crate::sandbox) id: SandboxId,
+    pub(in crate::sandbox) id: ComputerId,
     pub(crate) generation: Uuid,
     pub(in crate::sandbox) request_key: String,
     pub(in crate::sandbox) effective_spec: SandboxSpec,

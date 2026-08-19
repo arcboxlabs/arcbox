@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::agent::ExitStatus;
-use crate::sandbox::{ComputerState, SandboxId, SandboxSpec};
+use crate::sandbox::{ComputerId, ComputerState, SandboxSpec};
 use crate::snapshot_cow::CowHandle;
 
 /// A computer's runtime state as its actor and its sub-tasks share it.
@@ -31,7 +31,7 @@ pub type Runtime = Arc<Mutex<ComputerRuntime>>;
 /// the one thing an abort must not be able to strand.
 pub struct ComputerRuntime {
     /// Unique identifier.
-    pub id: SandboxId,
+    pub id: ComputerId,
     /// Durable lifecycle record generation.
     pub(crate) record_generation: Option<Uuid>,
     /// User-supplied labels.
@@ -106,7 +106,7 @@ pub struct ComputerRuntime {
 
 impl ComputerRuntime {
     pub(crate) fn new(
-        id: SandboxId,
+        id: ComputerId,
         spec: SandboxSpec,
         network: Option<NetworkLease>,
         vm_dir: PathBuf,
@@ -115,7 +115,7 @@ impl ComputerRuntime {
     }
 
     pub(crate) fn new_with_generation(
-        id: SandboxId,
+        id: ComputerId,
         spec: SandboxSpec,
         network: Option<NetworkLease>,
         vm_dir: PathBuf,
@@ -125,7 +125,7 @@ impl ComputerRuntime {
     }
 
     fn new_inner(
-        id: SandboxId,
+        id: ComputerId,
         spec: SandboxSpec,
         network: Option<NetworkLease>,
         vm_dir: PathBuf,

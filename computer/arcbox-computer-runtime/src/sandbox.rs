@@ -69,9 +69,9 @@ pub use pause::reason as pause_reason;
 pub(crate) use spec::ROOTFS_DISK_ID;
 pub(crate) use types::NetworkAttachment;
 pub use types::{
-    CheckpointInfo, CheckpointSummary, ComputerState, IdleAction, LifecycleUpdate,
-    RestoreSandboxSpec, SandboxEvent, SandboxId, SandboxInfo, SandboxMountSpec, SandboxNetworkInfo,
-    SandboxNetworkSpec, SandboxSpec, SandboxSummary, TemplateWarmRef,
+    CheckpointInfo, CheckpointSummary, ComputerId, ComputerMountSpec, ComputerNetworkInfo,
+    ComputerNetworkSpec, ComputerState, IdleAction, LifecycleUpdate, RestoreSandboxSpec,
+    SandboxEvent, SandboxInfo, SandboxSpec, SandboxSummary, TemplateWarmRef,
 };
 
 const EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -92,7 +92,7 @@ pub(crate) struct ComputerRef {
 }
 
 /// The live computers, by id.
-pub(crate) type Computers = Arc<RwLock<HashMap<SandboxId, ComputerRef>>>;
+pub(crate) type Computers = Arc<RwLock<HashMap<ComputerId, ComputerRef>>>;
 
 /// Manages the full lifecycle of multiple sandbox microVMs.
 pub struct SandboxManager {
@@ -336,7 +336,7 @@ impl SandboxManager {
     }
 
     /// This computer's registry entry.
-    pub(super) fn computer(&self, id: &SandboxId) -> Result<ComputerRef> {
+    pub(super) fn computer(&self, id: &ComputerId) -> Result<ComputerRef> {
         self.check_reconcile()?;
         self.computers
             .read()
@@ -347,12 +347,12 @@ impl SandboxManager {
     }
 
     /// This computer's mailbox.
-    pub(super) fn mailbox(&self, id: &SandboxId) -> Result<Mailbox> {
+    pub(super) fn mailbox(&self, id: &ComputerId) -> Result<Mailbox> {
         Ok(self.computer(id)?.mailbox)
     }
 
     /// What a read of this computer sees, without touching its mailbox.
-    pub(super) fn snapshot(&self, id: &SandboxId) -> Result<ComputerSnapshot> {
+    pub(super) fn snapshot(&self, id: &ComputerId) -> Result<ComputerSnapshot> {
         Ok(self.computer(id)?.snapshot.borrow().clone())
     }
 
@@ -478,7 +478,7 @@ impl SandboxManager {
     /// before asking. The gate this used to take could therefore only ever
     /// have fired for a sandbox that has no lease to report anyway, and it
     /// has no non-blocking form on the port.
-    pub fn sandbox_network_identity(&self, id: &str) -> Result<SandboxNetworkIdentity> {
+    pub fn sandbox_network_identity(&self, id: &str) -> Result<ComputerNetworkIdentity> {
         let snapshot = self.snapshot(&id.to_owned())?;
         let lease = snapshot
             .lease
@@ -488,7 +488,7 @@ impl SandboxManager {
                 expected: "sandbox with an active network allocation".into(),
                 actual: snapshot.state.to_string(),
             })?;
-        Ok(SandboxNetworkIdentity {
+        Ok(ComputerNetworkIdentity {
             ip: lease.ipv4()?,
             cleanup_token: lease.cleanup_token.clone(),
             expose: self.services.network.host_ingress(lease)?,
@@ -564,7 +564,7 @@ pub(super) const fn attach_mode(net_invariant: bool) -> AttachMode {
 
 /// A sandbox's network identity as seen by forwarding and DNS consumers.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SandboxNetworkIdentity {
+pub struct ComputerNetworkIdentity {
     /// External pool IP — the address the rest of the system keeps using.
     pub ip: std::net::Ipv4Addr,
     /// Opaque generation token carried through host cleanup finalization.
@@ -772,7 +772,7 @@ pub(super) fn validate_new_sandbox_id(
 /// error path unwinds it.
 pub(crate) fn reserve_actor(
     computers: &Computers,
-    id: &SandboxId,
+    id: &ComputerId,
     runtime: ComputerRuntime,
 ) -> Result<ActorReservation> {
     let mut map = computers.write().unwrap();
@@ -813,7 +813,7 @@ pub(crate) fn reserve_actor(
 /// sender goes with it, so an actor already running would stop too.
 pub(crate) struct ActorReservation {
     computers: Computers,
-    id: SandboxId,
+    id: ComputerId,
     incarnation: Uuid,
     runtime: Runtime,
     mailbox: Mailbox,
@@ -908,7 +908,7 @@ pub(crate) struct ActorSpawn {
 /// needed: a computer removed and re-created under the same id (deterministic
 /// caller-supplied ids make this common) installs a fresh entry, and the
 /// departing actor must not evict it.
-fn forget_computer(computers: &Computers, id: &SandboxId, incarnation: Uuid) {
+fn forget_computer(computers: &Computers, id: &ComputerId, incarnation: Uuid) {
     let mut map = computers.write().unwrap();
     if map
         .get(id)
@@ -931,7 +931,7 @@ fn forget_computer(computers: &Computers, id: &SandboxId, incarnation: Uuid) {
 ///
 /// Reads nothing the actor owns, so it stays answerable for a computer whose
 /// runtime mutex a panic has poisoned.
-fn still_registered(computers: &Computers, id: &SandboxId, incarnation: Uuid) -> bool {
+fn still_registered(computers: &Computers, id: &ComputerId, incarnation: Uuid) -> bool {
     computers
         .read()
         .unwrap()

@@ -54,7 +54,7 @@ impl SandboxManager {
     /// Checkpoint a `Ready` sandbox into the snapshot catalog.
     pub async fn checkpoint_sandbox(
         &self,
-        sandbox_id: &SandboxId,
+        sandbox_id: &ComputerId,
         name: String,
         labels: HashMap<String, String>,
     ) -> Result<CheckpointInfo> {
@@ -82,7 +82,7 @@ impl SandboxManager {
     /// exactly what the label guard refuses.
     pub(super) async fn capture_checkpoint(
         &self,
-        sandbox_id: &SandboxId,
+        sandbox_id: &ComputerId,
         name: String,
         labels: HashMap<String, String>,
     ) -> Result<CheckpointInfo> {
@@ -103,7 +103,7 @@ impl SandboxManager {
     /// The restored sandbox starts in `Ready` state immediately.
     ///
     /// Returns `(sandbox_id, ip_address)`.
-    pub async fn restore_sandbox(&self, spec: RestoreSandboxSpec) -> Result<(SandboxId, String)> {
+    pub async fn restore_sandbox(&self, spec: RestoreSandboxSpec) -> Result<(ComputerId, String)> {
         self.restore_sandbox_keyed(spec, &Uuid::new_v4().to_string())
             .await
     }
@@ -113,7 +113,7 @@ impl SandboxManager {
         &self,
         spec: RestoreSandboxSpec,
         restore_key: &str,
-    ) -> Result<(SandboxId, String)> {
+    ) -> Result<(ComputerId, String)> {
         let RestoreSandboxSpec {
             id,
             snapshot_id,
@@ -143,7 +143,7 @@ impl SandboxManager {
         &self,
         request: RestoreRequest,
         restore_key: &str,
-    ) -> Result<(SandboxId, String)> {
+    ) -> Result<(ComputerId, String)> {
         // Gate on the startup sweep before touching per-id resources (see
         // create_sandbox / await_reconcile).
         self.await_reconcile().await?;

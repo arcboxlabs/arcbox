@@ -87,9 +87,9 @@ pub use rootfs::{
 };
 pub use sandbox::pause_reason;
 pub use sandbox::{
-    CheckpointInfo, CheckpointSummary, ComputerState, IdleAction, LifecycleUpdate,
-    RestoreSandboxSpec, SandboxEvent, SandboxId, SandboxInfo, SandboxManager, SandboxMountSpec,
-    SandboxNetworkIdentity, SandboxNetworkInfo, SandboxNetworkSpec, SandboxSpec, SandboxSummary,
+    CheckpointInfo, CheckpointSummary, ComputerId, ComputerMountSpec, ComputerNetworkIdentity,
+    ComputerNetworkInfo, ComputerNetworkSpec, ComputerState, IdleAction, LifecycleUpdate,
+    RestoreSandboxSpec, SandboxEvent, SandboxInfo, SandboxManager, SandboxSpec, SandboxSummary,
     TemplateWarmRef,
 };
 pub use sandbox::{

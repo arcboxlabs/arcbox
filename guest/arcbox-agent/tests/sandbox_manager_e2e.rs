@@ -51,8 +51,8 @@ use arcbox_agent::config::{AdapterConfig, GuestConfig, JailerProcess};
 use arcbox_agent::sandbox::{block_tools, node_environment};
 use arcbox_computer_runtime::config::JailerConfig;
 use arcbox_computer_runtime::{
-    ComputerState, DefaultVmConfig, FirecrackerConfig, GrpcConfig, NetworkConfig, RuntimeConfig,
-    SandboxEvent, SandboxManager, SandboxNetworkSpec, SandboxSpec,
+    ComputerNetworkSpec, ComputerState, DefaultVmConfig, FirecrackerConfig, GrpcConfig,
+    NetworkConfig, RuntimeConfig, SandboxEvent, SandboxManager, SandboxSpec,
 };
 
 // ---------------------------------------------------------------------------
@@ -147,7 +147,7 @@ fn config_in(data_dir: &str, confinement: Confinement) -> Option<GuestConfig> {
 /// Return a SandboxSpec with networking disabled (no TAP, no root required).
 fn no_tap() -> SandboxSpec {
     SandboxSpec {
-        network: SandboxNetworkSpec {
+        network: ComputerNetworkSpec {
             mode: "none".into(),
         },
         ..Default::default()

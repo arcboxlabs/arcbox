@@ -99,7 +99,7 @@ impl SandboxManager {
     /// Idempotent: pausing a `Paused` sandbox is a no-op. Any other state
     /// answers `WrongState` — an active execution must finish (or be
     /// stopped) first, matching the contract's "requires READY".
-    pub async fn pause_sandbox(&self, id: &SandboxId) -> Result<()> {
+    pub async fn pause_sandbox(&self, id: &ComputerId) -> Result<()> {
         self.pause_sandbox_with_reason(id, PauseReason::Requested)
             .await
     }
@@ -108,7 +108,7 @@ impl SandboxManager {
     /// the idle detector reports `idle_timeout` (see [`reason`]).
     pub(super) async fn pause_sandbox_with_reason(
         &self,
-        id: &SandboxId,
+        id: &ComputerId,
         reason: PauseReason,
     ) -> Result<()> {
         self.await_reconcile().await?;
@@ -140,7 +140,7 @@ impl SandboxManager {
     /// "reason" attribute (see [`reason`]).
     ///
     /// Returns the sandbox's (fresh) IP address, empty without networking.
-    pub async fn resume_sandbox(&self, id: &SandboxId, resume_reason: &str) -> Result<String> {
+    pub async fn resume_sandbox(&self, id: &ComputerId, resume_reason: &str) -> Result<String> {
         self.await_reconcile().await?;
         let computer = self.computer(id)?;
         computer

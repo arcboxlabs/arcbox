@@ -15,7 +15,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::SandboxManager;
-use super::types::{ComputerState, SandboxId, SandboxSpec};
+use super::types::{ComputerId, ComputerState, SandboxSpec};
 use crate::error::{ComputerError, Result};
 use crate::snapshot::{SnapshotDraft, SnapshotGeometry};
 use crate::template_catalog::{
@@ -231,7 +231,7 @@ impl SandboxManager {
     /// Wait for the builder to reach READY, then checkpoint it under the
     /// template label. Polled rather than event-driven: a lagged broadcast
     /// receiver would miss the READY edge, while polling cannot.
-    async fn prewarm_checkpoint(&self, id: &SandboxId, template: &str) -> Result<(String, u64)> {
+    async fn prewarm_checkpoint(&self, id: &ComputerId, template: &str) -> Result<(String, u64)> {
         const READY_POLL_MS: u64 = 250;
         const READY_TIMEOUT_SECS: u64 = 180;
         let deadline =

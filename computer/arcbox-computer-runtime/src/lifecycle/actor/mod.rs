@@ -64,7 +64,7 @@ use crate::sandbox::record::{
 use crate::sandbox::types::action;
 use crate::sandbox::workload::WorkloadClaim;
 use crate::sandbox::{
-    CheckpointInfo, ComputerState, IdleAction, LifecycleUpdate, SandboxEvent, SandboxId,
+    CheckpointInfo, ComputerId, ComputerState, IdleAction, LifecycleUpdate, SandboxEvent,
 };
 
 mod commands;
@@ -112,7 +112,7 @@ impl Mailbox {
     /// Asks the actor for something and waits for its answer.
     pub(crate) async fn ask<T>(
         &self,
-        id: &SandboxId,
+        id: &ComputerId,
         command: impl FnOnce(oneshot::Sender<Result<T>>) -> Command,
     ) -> Result<T> {
         let (reply, answer) = oneshot::channel();
@@ -386,7 +386,7 @@ enum Flow {
 
 /// The lifecycle actor.
 pub struct ComputerActor {
-    id: SandboxId,
+    id: ComputerId,
     /// The resources this computer holds, shared with the sub-tasks the
     /// actor spawns. The actor is the only other writer: it mirrors the
     /// public state into it, records the workload's exit, and projects the
@@ -485,7 +485,7 @@ pub enum Seeded {
 
 /// What one actor is built from.
 pub struct ComputerSeed {
-    pub id: SandboxId,
+    pub id: ComputerId,
     pub runtime: Arc<Mutex<ComputerRuntime>>,
     pub unregister: Arc<dyn Fn() + Send + Sync>,
     pub generation: Option<Uuid>,

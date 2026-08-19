@@ -68,7 +68,7 @@ mod tests {
             .create_sandbox_keyed(
                 SandboxSpec {
                     id: Some("job".into()),
-                    network: SandboxNetworkSpec {
+                    network: ComputerNetworkSpec {
                         mode: "none".into(),
                     },
                     ..Default::default()

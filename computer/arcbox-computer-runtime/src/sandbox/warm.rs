@@ -108,7 +108,7 @@ pub struct WarmPublishTicket {
 /// a cmd-less boot, `Starting` when the tail is still holding the workload
 /// slot for the initial cmd.
 pub async fn publish_after_boot(
-    sandbox_id: &SandboxId,
+    sandbox_id: &ComputerId,
     ticket: &WarmPublishTicket,
     computer: &Arc<Mutex<ComputerRuntime>>,
     cow_manager: &CowManager,
@@ -176,7 +176,7 @@ impl From<crate::lifecycle::tasks::checkpoint::CheckpointFailure> for PublishFai
 /// (see [`super::policy::warm`]).
 /// Returns `None` when the key was already cached by a concurrent create.
 async fn publish_warm_snapshot(
-    sandbox_id: &SandboxId,
+    sandbox_id: &ComputerId,
     ticket: &WarmPublishTicket,
     computer: &Arc<Mutex<ComputerRuntime>>,
     cow_manager: &CowManager,
@@ -263,7 +263,7 @@ mod tests {
             boot_args: "console=ttyS0 quiet".into(),
             vcpus: 2,
             memory_mib: 512,
-            network: SandboxNetworkSpec { mode: "tap".into() },
+            network: ComputerNetworkSpec { mode: "tap".into() },
             ..Default::default()
         }
     }

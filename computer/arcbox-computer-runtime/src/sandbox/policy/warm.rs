@@ -206,7 +206,7 @@ impl WarmCache {
 mod tests {
     use super::*;
     use crate::config::JailerConfig;
-    use crate::sandbox::{SandboxMountSpec, SandboxNetworkSpec};
+    use crate::sandbox::{ComputerMountSpec, ComputerNetworkSpec};
 
     fn kernel_fingerprint() -> FileFingerprint {
         FileFingerprint {
@@ -235,7 +235,7 @@ mod tests {
             boot_args: "console=ttyS0 quiet".into(),
             vcpus: 2,
             memory_mib: 512,
-            network: SandboxNetworkSpec { mode: "tap".into() },
+            network: ComputerNetworkSpec { mode: "tap".into() },
             ..Default::default()
         }
     }
@@ -362,7 +362,7 @@ mod tests {
         assert!(!warm_eligible(&config, &explicit_ip, false));
 
         let mut mounted = base_spec();
-        mounted.mounts.push(SandboxMountSpec {
+        mounted.mounts.push(ComputerMountSpec {
             source: "/src".into(),
             target: "/dst".into(),
             readonly: true,

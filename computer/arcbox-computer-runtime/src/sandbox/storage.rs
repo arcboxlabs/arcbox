@@ -37,7 +37,7 @@ use crate::lifecycle::actor::ComputerSnapshot;
 /// snapshot publish.
 pub(super) fn retained_artifacts(
     config: &RuntimeConfig,
-    id: &SandboxId,
+    id: &ComputerId,
     snapshot: &ComputerSnapshot,
 ) -> RetainedArtifacts {
     let preserved = super::preserved_cow_file(config, id);

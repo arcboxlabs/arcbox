@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex, Weak};
 
 use arcbox_computer_runtime::agent::VmProtoAgentFactory;
 use arcbox_computer_runtime::{
-    ComputerError, ComputerState, NodeEnvironment, RootfsBuilder, RootfsPaths, SandboxManager,
-    SandboxMountSpec, SandboxNetworkSpec, SandboxSpec,
+    ComputerError, ComputerMountSpec, ComputerNetworkSpec, ComputerState, NodeEnvironment,
+    RootfsBuilder, RootfsPaths, SandboxManager, SandboxSpec,
 };
 use arcbox_connect::sandbox_v1;
 use arcbox_fc_driver::{FcDriver, FcDriverConfig};
@@ -542,7 +542,7 @@ impl SandboxService {
     pub fn sandbox_network_identity(
         &self,
         sandbox_id: &str,
-    ) -> Result<arcbox_computer_runtime::SandboxNetworkIdentity, SandboxError> {
+    ) -> Result<arcbox_computer_runtime::ComputerNetworkIdentity, SandboxError> {
         self.manager
             .sandbox_network_identity(sandbox_id)
             .map_err(SandboxError::from)
@@ -749,13 +749,13 @@ fn proto_to_spec(req: sandbox_v1::CreateSandboxRequest) -> SandboxSpec {
         mounts: req
             .mounts
             .into_iter()
-            .map(|m| SandboxMountSpec {
+            .map(|m| ComputerMountSpec {
                 source: m.source,
                 target: m.target,
                 readonly: m.readonly,
             })
             .collect(),
-        network: SandboxNetworkSpec { mode: mode.into() },
+        network: ComputerNetworkSpec { mode: mode.into() },
         ttl_seconds: req.ttl_seconds,
         ssh_public_key: req.ssh_public_key,
         idle_timeout_seconds: req.idle_timeout_seconds,
