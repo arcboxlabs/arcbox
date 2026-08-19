@@ -80,7 +80,7 @@ pub use arcbox_snapshot::{snapshot, snapshot_cow, template_catalog};
 pub use agent::{ExecInputMsg, ExitStatus, OutputChunk, PortWait, StartCommand};
 pub use config::{DefaultVmConfig, FirecrackerConfig, GrpcConfig, NetworkConfig, RuntimeConfig};
 pub use environment::NodeEnvironment;
-pub use error::{Result, VmmError};
+pub use error::{ComputerError, Result};
 pub use rootfs::{
     ROOTFS_CAPACITY_GRANULARITY, RootfsBuilder, RootfsPaths, RootfsSource, RootfsSpec,
     VM_AGENT_PATH,
@@ -96,3 +96,5 @@ pub use sandbox::{
     ExecutionChannel, ExecutionOutput, ExecutionSnapshot, ExecutionSpec, StdinState,
 };
 pub use snapshot::{SnapshotCatalog, SnapshotInfo};
+
+pub use error::ComputerError as VmmError;

@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use tokio::sync::oneshot;
 
 use super::{RootfsBuilder, is_oci_layout, rootfs_err};
-use crate::error::VmmError;
+use crate::error::ComputerError;
 
 /// One ext4 block group with the formatter's 4 KiB block size.
 /// Capacities must contain whole groups because the formatter rounds up.
@@ -36,7 +36,7 @@ impl RootfsBuilder {
     /// `.<uuid>.ext4.tmp` for the caller to remove.
     pub async fn build_rootfs(&self, spec: RootfsSpec) -> crate::error::Result<()> {
         if spec.size == 0 || !spec.size.is_multiple_of(ROOTFS_CAPACITY_GRANULARITY) {
-            return Err(VmmError::Config(format!(
+            return Err(ComputerError::Config(format!(
                 "rootfs capacity {} must be a positive multiple of {ROOTFS_CAPACITY_GRANULARITY} bytes (one ext4 block group)",
                 spec.size
             )));
@@ -362,7 +362,7 @@ mod tests {
                 })
                 .await
                 .unwrap_err();
-            assert!(matches!(error, VmmError::Config(_)), "{error}");
+            assert!(matches!(error, ComputerError::Config(_)), "{error}");
             assert!(!out.parent().unwrap().exists());
         }
     }
