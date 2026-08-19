@@ -15,7 +15,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::SandboxManager;
-use super::types::{SandboxId, SandboxSpec, SandboxState};
+use super::types::{ComputerState, SandboxId, SandboxSpec};
 use crate::error::{ComputerError, Result};
 use crate::snapshot::{SnapshotDraft, SnapshotGeometry};
 use crate::template_catalog::{
@@ -239,8 +239,8 @@ impl SandboxManager {
         loop {
             let info = self.inspect_sandbox(id)?;
             match info.state {
-                SandboxState::Ready => break,
-                SandboxState::Failed => {
+                ComputerState::Ready => break,
+                ComputerState::Failed => {
                     return Err(ComputerError::FailedPrecondition(format!(
                         "prewarm boot failed: {}",
                         info.error.unwrap_or_else(|| "unknown boot failure".into())

@@ -112,7 +112,7 @@ pub async fn publish_after_boot(
     ticket: &WarmPublishTicket,
     computer: &Arc<Mutex<ComputerRuntime>>,
     cow_manager: &CowManager,
-    expected_state: SandboxState,
+    expected_state: ComputerState,
 ) -> Result<()> {
     if !ticket.cache.begin_publish(&ticket.key) {
         debug!(
@@ -180,7 +180,7 @@ async fn publish_warm_snapshot(
     ticket: &WarmPublishTicket,
     computer: &Arc<Mutex<ComputerRuntime>>,
     cow_manager: &CowManager,
-    expected_state: SandboxState,
+    expected_state: ComputerState,
 ) -> std::result::Result<Option<String>, PublishFailure> {
     // A concurrent first-create may have published while this guest booted.
     if warm_entries(&ticket.snapshots)?

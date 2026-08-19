@@ -118,7 +118,7 @@ impl SandboxManager {
         // off the snapshot rather than left to the flow, because it is a
         // refusal the caller gets *instead* of the claim: only a computer
         // that would otherwise be paused hears it, exactly as today.
-        if computer.snapshot.borrow().state == SandboxState::Ready
+        if computer.snapshot.borrow().state == ComputerState::Ready
             && self.config.firecracker.jailer.is_none()
         {
             return Err(ComputerError::Config(

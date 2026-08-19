@@ -69,9 +69,9 @@ pub use pause::reason as pause_reason;
 pub(crate) use spec::ROOTFS_DISK_ID;
 pub(crate) use types::NetworkAttachment;
 pub use types::{
-    CheckpointInfo, CheckpointSummary, IdleAction, LifecycleUpdate, RestoreSandboxSpec,
-    SandboxEvent, SandboxId, SandboxInfo, SandboxMountSpec, SandboxNetworkInfo, SandboxNetworkSpec,
-    SandboxSpec, SandboxState, SandboxSummary, TemplateWarmRef,
+    CheckpointInfo, CheckpointSummary, ComputerState, IdleAction, LifecycleUpdate,
+    RestoreSandboxSpec, SandboxEvent, SandboxId, SandboxInfo, SandboxMountSpec, SandboxNetworkInfo,
+    SandboxNetworkSpec, SandboxSpec, SandboxSummary, TemplateWarmRef,
 };
 
 const EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -784,7 +784,7 @@ pub(crate) fn reserve_actor(
     let runtime = Arc::new(Mutex::new(runtime));
     let (snapshot_tx, snapshot) = tokio::sync::watch::channel(ComputerSnapshot::project(
         &runtime.lock().unwrap(),
-        SandboxState::Starting,
+        ComputerState::Starting,
         Deadlines::default(),
     ));
     map.insert(
@@ -938,8 +938,6 @@ fn still_registered(computers: &Computers, id: &SandboxId, incarnation: Uuid) ->
         .get(id)
         .is_some_and(|current| current.incarnation == incarnation)
 }
-
-pub use types::ComputerState;
 
 #[cfg(test)]
 mod tests {

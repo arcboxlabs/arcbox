@@ -6,8 +6,9 @@ use arcbox_computer_runtime::template_catalog::{
     ReadyProbeSpec, TemplateDefaultsSpec, TemplateEntry,
 };
 use arcbox_computer_runtime::{
-    CheckpointInfo, CheckpointSummary, ExecutionChannel, ExecutionSnapshot, ExitStatus, IdleAction,
-    SandboxEvent as VmSandboxEvent, SandboxInfo, SandboxState, SandboxSummary, StdinState,
+    CheckpointInfo, CheckpointSummary, ComputerState, ExecutionChannel, ExecutionSnapshot,
+    ExitStatus, IdleAction, SandboxEvent as VmSandboxEvent, SandboxInfo, SandboxSummary,
+    StdinState,
 };
 use arcbox_connect::sandbox_v1;
 use buffa_types::google::protobuf::Timestamp;
@@ -140,16 +141,16 @@ pub(super) fn channel_to_proto(channel: ExecutionChannel, tty: bool) -> sandbox_
     }
 }
 
-pub(super) fn state_to_proto(state: SandboxState) -> sandbox_v1::SandboxState {
+pub(super) fn state_to_proto(state: ComputerState) -> sandbox_v1::SandboxState {
     match state {
-        SandboxState::Starting => sandbox_v1::SandboxState::Starting,
-        SandboxState::Ready => sandbox_v1::SandboxState::Ready,
-        SandboxState::Running => sandbox_v1::SandboxState::Running,
-        SandboxState::Stopping => sandbox_v1::SandboxState::Stopping,
-        SandboxState::Stopped => sandbox_v1::SandboxState::Stopped,
-        SandboxState::Failed => sandbox_v1::SandboxState::Failed,
-        SandboxState::Pausing => sandbox_v1::SandboxState::Pausing,
-        SandboxState::Paused => sandbox_v1::SandboxState::Paused,
+        ComputerState::Starting => sandbox_v1::SandboxState::Starting,
+        ComputerState::Ready => sandbox_v1::SandboxState::Ready,
+        ComputerState::Running => sandbox_v1::SandboxState::Running,
+        ComputerState::Stopping => sandbox_v1::SandboxState::Stopping,
+        ComputerState::Stopped => sandbox_v1::SandboxState::Stopped,
+        ComputerState::Failed => sandbox_v1::SandboxState::Failed,
+        ComputerState::Pausing => sandbox_v1::SandboxState::Pausing,
+        ComputerState::Paused => sandbox_v1::SandboxState::Paused,
     }
 }
 

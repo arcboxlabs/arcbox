@@ -108,7 +108,7 @@ mod tests {
 
     fn snapshot(vm_dir: &Path, cow_file: Option<PathBuf>) -> ComputerSnapshot {
         ComputerSnapshot {
-            state: SandboxState::Ready,
+            state: ComputerState::Ready,
             agent: None,
             handle: None,
             error: None,

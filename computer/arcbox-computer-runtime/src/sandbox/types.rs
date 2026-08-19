@@ -361,5 +361,3 @@ pub struct CheckpointSummary {
 }
 
 // SandboxManager
-
-pub use self::ComputerState as SandboxState;

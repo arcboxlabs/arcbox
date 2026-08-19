@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex, Weak};
 
 use arcbox_computer_runtime::agent::VmProtoAgentFactory;
 use arcbox_computer_runtime::{
-    ComputerError, NodeEnvironment, RootfsBuilder, RootfsPaths, SandboxManager, SandboxMountSpec,
-    SandboxNetworkSpec, SandboxSpec, SandboxState,
+    ComputerError, ComputerState, NodeEnvironment, RootfsBuilder, RootfsPaths, SandboxManager,
+    SandboxMountSpec, SandboxNetworkSpec, SandboxSpec,
 };
 use arcbox_connect::sandbox_v1;
 use arcbox_fc_driver::{FcDriver, FcDriverConfig};
@@ -679,18 +679,20 @@ impl SandboxService {
     }
 }
 
-fn completed_create_is_stale(state: Result<SandboxState, ComputerError>) -> bool {
+fn completed_create_is_stale(state: Result<ComputerState, ComputerError>) -> bool {
     match state {
-        Ok(SandboxState::Stopped | SandboxState::Failed) | Err(ComputerError::NotFound(_)) => true,
+        Ok(ComputerState::Stopped | ComputerState::Failed) | Err(ComputerError::NotFound(_)) => {
+            true
+        }
         // A paused sandbox is logically alive: the same-id create replay
         // must keep answering until it is actually removed.
         Ok(
-            SandboxState::Starting
-            | SandboxState::Ready
-            | SandboxState::Running
-            | SandboxState::Stopping
-            | SandboxState::Pausing
-            | SandboxState::Paused,
+            ComputerState::Starting
+            | ComputerState::Ready
+            | ComputerState::Running
+            | ComputerState::Stopping
+            | ComputerState::Pausing
+            | ComputerState::Paused,
         )
         | Err(_) => false,
     }
@@ -805,14 +807,14 @@ mod tests {
     #[test]
     fn completed_create_is_stale_only_after_terminal_or_removed_state() {
         for state in [
-            SandboxState::Starting,
-            SandboxState::Ready,
-            SandboxState::Running,
-            SandboxState::Stopping,
+            ComputerState::Starting,
+            ComputerState::Ready,
+            ComputerState::Running,
+            ComputerState::Stopping,
         ] {
             assert!(!completed_create_is_stale(Ok(state)));
         }
-        for state in [SandboxState::Stopped, SandboxState::Failed] {
+        for state in [ComputerState::Stopped, ComputerState::Failed] {
             assert!(completed_create_is_stale(Ok(state)));
         }
         assert!(completed_create_is_stale(Err(ComputerError::NotFound(

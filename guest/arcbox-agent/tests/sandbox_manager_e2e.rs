@@ -51,8 +51,8 @@ use arcbox_agent::config::{AdapterConfig, GuestConfig, JailerProcess};
 use arcbox_agent::sandbox::{block_tools, node_environment};
 use arcbox_computer_runtime::config::JailerConfig;
 use arcbox_computer_runtime::{
-    DefaultVmConfig, FirecrackerConfig, GrpcConfig, NetworkConfig, RuntimeConfig, SandboxEvent,
-    SandboxManager, SandboxNetworkSpec, SandboxSpec, SandboxState,
+    ComputerState, DefaultVmConfig, FirecrackerConfig, GrpcConfig, NetworkConfig, RuntimeConfig,
+    SandboxEvent, SandboxManager, SandboxNetworkSpec, SandboxSpec,
 };
 
 // ---------------------------------------------------------------------------
@@ -228,11 +228,11 @@ async fn e2e_sandbox_basic_lifecycle() {
     );
 
     let info = mgr.inspect_sandbox(&id).unwrap();
-    assert_eq!(info.state, SandboxState::Ready);
+    assert_eq!(info.state, ComputerState::Ready);
 
     mgr.stop_sandbox(&id, 5).await.unwrap();
     let info = mgr.inspect_sandbox(&id).unwrap();
-    assert_eq!(info.state, SandboxState::Stopped);
+    assert_eq!(info.state, ComputerState::Stopped);
 
     mgr.remove_sandbox(&id, true).await.unwrap();
     assert!(
@@ -550,7 +550,7 @@ async fn outlives_its_manager_and_is_adopted(confinement: Confinement) {
     let info = mgr.inspect_sandbox(&id).unwrap();
     assert_eq!(
         info.state,
-        SandboxState::Ready,
+        ComputerState::Ready,
         "the sandbox is usable again, not failed"
     );
     assert_eq!(

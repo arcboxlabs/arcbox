@@ -22,8 +22,8 @@ use arcbox_computer_runtime::config::{JailerConfig, RuntimeConfig};
 use arcbox_computer_runtime::testkit::agent::FakeAgentFactory;
 use arcbox_computer_runtime::testkit::fake_environment;
 use arcbox_computer_runtime::{
-    NodeEnvironment, OutputChunk, SandboxEvent, SandboxId, SandboxManager, SandboxSpec,
-    SandboxState,
+    ComputerState, NodeEnvironment, OutputChunk, SandboxEvent, SandboxId, SandboxManager,
+    SandboxSpec,
 };
 use arcbox_vm_driver::testkit::{FakeDriver, FakeNetwork};
 use tokio::sync::broadcast;
@@ -318,7 +318,7 @@ impl Fixture {
                 ..SandboxSpec::default()
             })
             .await;
-        self.await_state(&id, SandboxState::Ready).await;
+        self.await_state(&id, ComputerState::Ready).await;
         id
     }
 
@@ -343,7 +343,7 @@ impl Fixture {
     /// Every verb answers from the computer's actor and several of them
     /// leave work running behind the answer, so a read taken right after
     /// one can still see the state it started from.
-    pub async fn await_state(&self, id: &SandboxId, state: SandboxState) {
+    pub async fn await_state(&self, id: &SandboxId, state: ComputerState) {
         let deadline = tokio::time::Instant::now() + DEADLINE;
         loop {
             let seen = self.manager.inspect_sandbox(id);
@@ -389,7 +389,7 @@ impl Fixture {
     /// is the last thing a release does and therefore the one observation
     /// that covers the whole of it.
     pub async fn await_released(&self, id: &SandboxId) {
-        self.await_state(id, SandboxState::Failed).await;
+        self.await_state(id, ComputerState::Failed).await;
         let journal = self.vm_dir(id).join("state.json");
         let deadline = tokio::time::Instant::now() + DEADLINE;
         while journal.exists() {

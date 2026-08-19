@@ -42,7 +42,7 @@ use std::time::Instant;
 
 use anyhow::{Context, bail};
 use arcbox_computer_runtime::{
-    RestoreSandboxSpec, SandboxEvent, SandboxManager, SandboxSpec, SandboxState,
+    ComputerState, RestoreSandboxSpec, SandboxEvent, SandboxManager, SandboxSpec,
 };
 use tokio::sync::broadcast;
 use tokio::time::timeout;
@@ -408,8 +408,8 @@ async fn wait_for_ready(
 ) -> anyhow::Result<()> {
     if let Ok(info) = manager.inspect_sandbox(&id.to_string()) {
         match info.state {
-            SandboxState::Ready => return Ok(()),
-            SandboxState::Failed => bail!(
+            ComputerState::Ready => return Ok(()),
+            ComputerState::Failed => bail!(
                 "sandbox {id} failed: {}",
                 info.error.unwrap_or_else(|| "unknown".into())
             ),

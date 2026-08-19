@@ -4,7 +4,7 @@ use std::panic::{AssertUnwindSafe, resume_unwind};
 
 use arcbox_computer_runtime::snapshot::SnapshotGeometry;
 use arcbox_computer_runtime::{
-    OutputChunk, RestoreSandboxSpec, SandboxManager, SandboxSpec, SandboxState, SnapshotCatalog,
+    ComputerState, OutputChunk, RestoreSandboxSpec, SandboxManager, SandboxSpec, SnapshotCatalog,
 };
 use futures::FutureExt;
 
@@ -85,7 +85,7 @@ async fn jailed_checkpoint_chain_preserves_source_and_geometry() {
             id = restored;
             assert_eq!(ip, "");
             let info = mgr.inspect_sandbox(&id).unwrap();
-            assert_eq!(info.state, SandboxState::Ready);
+            assert_eq!(info.state, ComputerState::Ready);
             assert_eq!(info.vcpus, geometry.vcpus);
             assert_eq!(info.memory_mib, geometry.memory_mib);
             assert_eq!(

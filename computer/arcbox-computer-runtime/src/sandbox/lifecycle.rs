@@ -412,7 +412,7 @@ impl SandboxManager {
                     {
                         let mut creating = arc.lock().unwrap();
                         creating.network = lease;
-                        creating.state = SandboxState::Failed;
+                        creating.state = ComputerState::Failed;
                         creating.error = Some(error.to_string());
                     }
                     let record_error = self
@@ -842,7 +842,7 @@ impl SandboxManager {
     /// A paused computer answers [`ComputerError::Paused`], not `WrongState`, so
     /// the daemon can resume it transparently and retry (CORE-21).
     pub(super) fn require_ready_agent(&self, id: &SandboxId) -> Result<Arc<dyn GuestAgent>> {
-        self.agent_in(id, &[SandboxState::Ready], "Ready")
+        self.agent_in(id, &[ComputerState::Ready], "Ready")
     }
 
     /// Verify the computer is alive (Ready or Running) and return the agent
@@ -853,7 +853,7 @@ impl SandboxManager {
     pub(super) fn require_alive_agent(&self, id: &SandboxId) -> Result<Arc<dyn GuestAgent>> {
         self.agent_in(
             id,
-            &[SandboxState::Ready, SandboxState::Running],
+            &[ComputerState::Ready, ComputerState::Running],
             "Ready or Running",
         )
     }
@@ -867,13 +867,13 @@ impl SandboxManager {
     fn agent_in(
         &self,
         id: &SandboxId,
-        allowed: &[SandboxState],
+        allowed: &[ComputerState],
         expected: &str,
     ) -> Result<Arc<dyn GuestAgent>> {
         let snapshot = self.snapshot(id)?;
         if !allowed.contains(&snapshot.state) {
             return Err(match snapshot.state {
-                SandboxState::Pausing | SandboxState::Paused => ComputerError::Paused(id.clone()),
+                ComputerState::Pausing | ComputerState::Paused => ComputerError::Paused(id.clone()),
                 state => ComputerError::WrongState {
                     id: id.clone(),
                     expected: expected.to_owned(),
