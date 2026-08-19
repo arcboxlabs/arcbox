@@ -19,5 +19,5 @@ pub use phase::PersistPhase;
 pub use phase::ProvisionIntent;
 /// Crate-visible, like [`PersistPhase`]: `crate::lifecycle`'s actor is what
 /// executes the durable writes the machine asks for.
-pub use phase::{SandboxProvisionOutcome, SandboxTransition};
+pub use phase::{ComputerProvisionOutcome, SandboxTransition};
 pub use store::ComputerRecordStore;

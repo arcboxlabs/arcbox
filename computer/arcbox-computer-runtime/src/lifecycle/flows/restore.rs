@@ -22,7 +22,7 @@ use crate::lifecycle::tasks::restore::{RestoreTimings, RestoreVm, RestoredVm, re
 use crate::lifecycle::tasks::resume::restore_paused;
 use crate::lifecycle::tasks::{TaskFailure, TaskResult};
 use crate::sandbox::reconcile::{ComputerStateRecord, JournaledLease, write_state_record};
-use crate::sandbox::record::SandboxProvisionOutcome;
+use crate::sandbox::record::ComputerProvisionOutcome;
 use crate::sandbox::{journaled_pid, journaled_vmm, pool};
 
 impl ComputerFlows {
@@ -32,7 +32,7 @@ impl ComputerFlows {
     pub(super) async fn restore_vm(
         &self,
         origin: RestoreOrigin,
-    ) -> TaskResult<(Arc<dyn GuestAgent>, SandboxProvisionOutcome)> {
+    ) -> TaskResult<(Arc<dyn GuestAgent>, ComputerProvisionOutcome)> {
         let Launch::Restore(launch) = self.take_launch() else {
             return Err(self.wrong_launch("restore"));
         };
@@ -169,7 +169,7 @@ impl ComputerFlows {
             &snapshot_id,
         );
 
-        Ok((agent, SandboxProvisionOutcome { ip_address }))
+        Ok((agent, ComputerProvisionOutcome { ip_address }))
     }
 
     /// Bring a paused computer back in place, onto a fresh network.

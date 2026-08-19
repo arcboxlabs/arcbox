@@ -26,7 +26,7 @@ use crate::lifecycle::event::{PauseReason, Provision, RestoreOrigin};
 use crate::lifecycle::runtime::ComputerRuntime;
 use crate::lifecycle::tasks::{CaptureSpec, ComputerTasks, Drain, TaskFailure, TaskResult};
 use crate::sandbox::reconcile::{ComputerStateRecord, write_state_record};
-use crate::sandbox::record::{ComputerRecordStore, SandboxProvisionOutcome};
+use crate::sandbox::record::{ComputerProvisionOutcome, ComputerRecordStore};
 use crate::sandbox::workload::WorkloadClaim;
 use crate::sandbox::{
     CheckpointInfo, ComputerEvent, ComputerSpec, ComputerState, IdleAction, LifecycleUpdate,
@@ -166,7 +166,7 @@ impl ComputerTasks for Script {
     async fn restore(
         &self,
         _origin: RestoreOrigin,
-    ) -> TaskResult<(Arc<dyn GuestAgent>, SandboxProvisionOutcome)> {
+    ) -> TaskResult<(Arc<dyn GuestAgent>, ComputerProvisionOutcome)> {
         self.record("restore");
         let takes = *self.restore_takes.lock().unwrap();
         if let Some(takes) = takes {
@@ -178,7 +178,7 @@ impl ComputerTasks for Script {
                 "the checkpoint would not load".into(),
             )));
         }
-        Ok((Arc::clone(&self.agent), SandboxProvisionOutcome::default()))
+        Ok((Arc::clone(&self.agent), ComputerProvisionOutcome::default()))
     }
 
     async fn checkpoint(
@@ -360,7 +360,7 @@ impl Harness {
     async fn boot_to_ready(&mut self) {
         self.send(|reply| Command::Provision {
             provision: Provision::Boot { warm: false },
-            outcome: SandboxProvisionOutcome::default(),
+            outcome: ComputerProvisionOutcome::default(),
             reply,
         })
         .ok()
@@ -478,7 +478,7 @@ async fn a_force_remove_preempts_a_boot_that_has_handed_its_resources_over() {
     harness
         .send(|reply| Command::Provision {
             provision: Provision::Boot { warm: false },
-            outcome: SandboxProvisionOutcome::default(),
+            outcome: ComputerProvisionOutcome::default(),
             reply,
         })
         .ok()
@@ -504,7 +504,7 @@ async fn a_teardown_stalls_until_the_boot_hands_its_resources_over() {
     harness
         .send(|reply| Command::Provision {
             provision: Provision::Boot { warm: false },
-            outcome: SandboxProvisionOutcome::default(),
+            outcome: ComputerProvisionOutcome::default(),
             reply,
         })
         .ok()
@@ -534,7 +534,7 @@ async fn a_superseded_tasks_completion_cannot_drive_the_machine() {
     // on the handoff at the moment the task signals it and completes.
     let created = harness.send(|reply| Command::Provision {
         provision: Provision::Boot { warm: false },
-        outcome: SandboxProvisionOutcome::default(),
+        outcome: ComputerProvisionOutcome::default(),
         reply,
     });
     let removed = harness.send(|reply| Command::Remove { force: true, reply });
@@ -554,7 +554,7 @@ async fn a_stop_during_a_launch_is_served_once_the_launch_lands() {
     let mut harness = Harness::start(Boot::Completes, no_deadlines()).await;
     let created = harness.send(|reply| Command::Provision {
         provision: Provision::Boot { warm: false },
-        outcome: SandboxProvisionOutcome::default(),
+        outcome: ComputerProvisionOutcome::default(),
         reply,
     });
     let stopped = harness.send(|reply| Command::Stop {
@@ -680,7 +680,7 @@ async fn a_panicked_sub_task_is_reported_rather_than_swallowed() {
     let harness = Harness::start(Boot::HandsOffThenPanics, no_deadlines()).await;
     harness.send(|reply| Command::Provision {
         provision: Provision::Boot { warm: false },
-        outcome: SandboxProvisionOutcome::default(),
+        outcome: ComputerProvisionOutcome::default(),
         reply,
     });
     let error = harness
@@ -709,7 +709,7 @@ async fn a_boot_that_never_handed_off_is_joined_so_its_own_cleanup_finishes() {
     let harness = Harness::start(Boot::DropsHandoffThenCleansUp, no_deadlines()).await;
     harness.send(|reply| Command::Provision {
         provision: Provision::Boot { warm: false },
-        outcome: SandboxProvisionOutcome::default(),
+        outcome: ComputerProvisionOutcome::default(),
         reply,
     });
     // Let the actor observe the dropped signal before the teardown asks.
@@ -738,7 +738,7 @@ async fn a_restore_is_joined_rather_than_aborted() {
         provision: Provision::Restore {
             origin: RestoreOrigin::Restore,
         },
-        outcome: SandboxProvisionOutcome::default(),
+        outcome: ComputerProvisionOutcome::default(),
         reply,
     });
     tokio::task::yield_now().await;
@@ -763,7 +763,7 @@ async fn a_stop_during_the_gates_own_cmd_is_still_deferred() {
     harness
         .send(|reply| Command::Provision {
             provision: Provision::Boot { warm: false },
-            outcome: SandboxProvisionOutcome::default(),
+            outcome: ComputerProvisionOutcome::default(),
             reply,
         })
         .ok()
@@ -840,7 +840,7 @@ async fn a_failed_restore_answers_only_once_its_teardown_has_freed_the_id() {
         provision: Provision::Restore {
             origin: RestoreOrigin::WarmCreate,
         },
-        outcome: SandboxProvisionOutcome::default(),
+        outcome: ComputerProvisionOutcome::default(),
         reply,
     });
 

@@ -1,5 +1,5 @@
 use super::reconcile::JournaledLease;
-use super::record::{ProvisionIntent, SandboxProvisionOutcome};
+use super::record::{ComputerProvisionOutcome, ProvisionIntent};
 use super::*;
 use crate::lifecycle::tasks::CaptureSpec;
 
@@ -377,7 +377,7 @@ impl ComputerManager {
             })),
             seeded: Seeded::Fresh,
         });
-        let outcome = SandboxProvisionOutcome {
+        let outcome = ComputerProvisionOutcome {
             ip_address: ip_address.clone(),
         };
         // A restore's caller waits for READY: that is what makes the sandbox

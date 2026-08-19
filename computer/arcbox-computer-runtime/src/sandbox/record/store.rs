@@ -20,8 +20,8 @@ use uuid::Uuid;
 use arcbox_atomic_file::AtomicWriteError;
 
 use super::phase::{
-    ComputerRecord, ExistingProvision, ProvisionIntent, RECORD_VERSION, SandboxPhase,
-    SandboxProvisionOutcome, SandboxTransition, classify_existing_provision, validate_record,
+    ComputerPhase, ComputerProvisionOutcome, ComputerRecord, ExistingProvision, ProvisionIntent,
+    RECORD_VERSION, SandboxTransition, classify_existing_provision, validate_record,
 };
 use crate::error::{ComputerError, Result};
 use crate::sandbox::types::IdleAction;
@@ -117,7 +117,7 @@ impl ComputerRecordStore {
         &self,
         id: &str,
         request_key: &str,
-    ) -> Result<Option<SandboxProvisionOutcome>> {
+    ) -> Result<Option<ComputerProvisionOutcome>> {
         validate_provision_input(id, request_key)?;
         let _guard = self.lock()?;
         let Some(record) = self.load_unlocked(id)? else {
@@ -225,12 +225,12 @@ impl ComputerRecordStore {
 
     /// Removes a known pre-ACK provision intent after side effects rolled back.
     pub fn abort_provision(&self, id: &str, generation: Uuid) -> Result<DurableCommit<()>> {
-        self.delete_record(id, generation, SandboxPhase::Creating)
+        self.delete_record(id, generation, ComputerPhase::Creating)
     }
 
     /// Releases an ID only after removal and resource cleanup completed.
     pub fn finish_remove(&self, id: &str, generation: Uuid) -> Result<DurableCommit<()>> {
-        self.delete_record(id, generation, SandboxPhase::Removing)
+        self.delete_record(id, generation, ComputerPhase::Removing)
     }
 
     /// Cancels a pre-ACK intent, or confirms that an already-removed ID is free.
@@ -242,7 +242,7 @@ impl ComputerRecordStore {
         let Some(record) = self.load_unlocked(id)? else {
             return Ok(self.confirm_absence_unlocked());
         };
-        if record.phase != SandboxPhase::Creating || record.provision_outcome.is_some() {
+        if record.phase != ComputerPhase::Creating || record.provision_outcome.is_some() {
             return Err(ComputerError::AlreadyExists(id.to_owned()));
         }
         self.delete_unlocked(id)
@@ -315,7 +315,7 @@ impl ComputerRecordStore {
         &self,
         id: &str,
         generation: Uuid,
-        expected_phase: SandboxPhase,
+        expected_phase: ComputerPhase,
     ) -> Result<DurableCommit<()>> {
         let _guard = self.lock()?;
         let Some(record) = self.load_unlocked(id)? else {
@@ -441,7 +441,7 @@ mod tests {
                 .provision_intent("restored", "restore-key", spec("restored"))
                 .unwrap(),
         );
-        let outcome = SandboxProvisionOutcome {
+        let outcome = ComputerProvisionOutcome {
             ip_address: "192.0.2.8".into(),
         };
         store
@@ -542,21 +542,21 @@ mod tests {
             .transition(
                 "box",
                 record.generation,
-                SandboxTransition::Starting(SandboxProvisionOutcome {
+                SandboxTransition::Starting(ComputerProvisionOutcome {
                     ip_address: "192.0.2.2".into(),
                 }),
             )
             .unwrap();
         assert_eq!(
             store.replay_provision("box", "key").unwrap(),
-            Some(SandboxProvisionOutcome {
+            Some(ComputerProvisionOutcome {
                 ip_address: "192.0.2.2".into()
             })
         );
         assert!(matches!(
             store.provision_intent("box", "key", spec("box")).unwrap(),
             ProvisionIntent::Replay(found)
-                if found.provision_outcome == Some(SandboxProvisionOutcome {
+                if found.provision_outcome == Some(ComputerProvisionOutcome {
                     ip_address: "192.0.2.2".into()
                 })
         ));
@@ -573,7 +573,7 @@ mod tests {
         ));
         assert!(matches!(
             store.provision_intent("box", "key", spec("box")).unwrap(),
-            ProvisionIntent::Blocked(found) if found.phase == SandboxPhase::Failed
+            ProvisionIntent::Blocked(found) if found.phase == ComputerPhase::Failed
         ));
     }
 
@@ -595,14 +595,14 @@ mod tests {
         );
         assert_eq!(
             store.load("box").unwrap().unwrap().phase,
-            SandboxPhase::Creating
+            ComputerPhase::Creating
         );
 
         store
             .transition(
                 "box",
                 record.generation,
-                SandboxTransition::Starting(SandboxProvisionOutcome {
+                SandboxTransition::Starting(ComputerProvisionOutcome {
                     ip_address: String::new(),
                 }),
             )
@@ -675,7 +675,7 @@ mod tests {
             .transition(
                 "box",
                 generation,
-                SandboxTransition::Starting(SandboxProvisionOutcome {
+                SandboxTransition::Starting(ComputerProvisionOutcome {
                     ip_address: "192.0.2.2".into(),
                 }),
             )
@@ -709,7 +709,7 @@ mod tests {
             )
             .unwrap()
             .value;
-        assert_eq!(paused.phase, SandboxPhase::Paused);
+        assert_eq!(paused.phase, ComputerPhase::Paused);
         assert_eq!(paused.pause_snapshot_id.as_deref(), Some("snap"));
         assert!(paused.paused_at.is_some());
 
@@ -747,7 +747,7 @@ mod tests {
             .transition("box", generation, SandboxTransition::Ready)
             .unwrap()
             .value;
-        assert_eq!(ready.phase, SandboxPhase::Ready);
+        assert_eq!(ready.phase, ComputerPhase::Ready);
         assert_eq!(ready.pause_snapshot_id, None);
         assert_eq!(ready.paused_at, None);
 
@@ -779,7 +779,7 @@ mod tests {
             .transition(
                 "box",
                 generation,
-                SandboxTransition::Starting(SandboxProvisionOutcome {
+                SandboxTransition::Starting(ComputerProvisionOutcome {
                     ip_address: String::new(),
                 }),
             )

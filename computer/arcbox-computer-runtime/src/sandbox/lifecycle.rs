@@ -1,5 +1,5 @@
 use super::reconcile::JournaledLease;
-use super::record::{ProvisionIntent, SandboxProvisionOutcome, SandboxTransition};
+use super::record::{ComputerProvisionOutcome, ProvisionIntent, SandboxTransition};
 use super::*;
 use crate::lifecycle::actor::ComputerSnapshot;
 use crate::sandbox::record::PersistPhase;
@@ -501,7 +501,7 @@ impl ComputerManager {
             })),
             seeded: Seeded::Fresh,
         });
-        let outcome = SandboxProvisionOutcome {
+        let outcome = ComputerProvisionOutcome {
             ip_address: ip_address.clone(),
         };
         // `AckUnconfirmed` says the `Starting` write is visible but not

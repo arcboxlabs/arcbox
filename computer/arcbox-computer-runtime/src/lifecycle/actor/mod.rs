@@ -59,7 +59,7 @@ use crate::error::{ComputerError, Result};
 use crate::lifecycle::runtime::ComputerRuntime;
 use crate::sandbox::policy::deadlines;
 use crate::sandbox::record::{
-    ComputerRecordStore, PersistPhase, SandboxProvisionOutcome, SandboxTransition,
+    ComputerProvisionOutcome, ComputerRecordStore, PersistPhase, SandboxTransition,
 };
 use crate::sandbox::types::action;
 use crate::sandbox::workload::WorkloadClaim;
@@ -155,7 +155,7 @@ pub enum Command {
     /// answered by READY, which is what its caller waits for.
     Provision {
         provision: Provision,
-        outcome: SandboxProvisionOutcome,
+        outcome: ComputerProvisionOutcome,
         reply: Reply,
     },
     /// Capture a user checkpoint; answered with the catalog entry.
@@ -318,7 +318,7 @@ struct Completion {
 /// What a completed sub-task tells the actor.
 enum Report {
     Booted(Arc<dyn GuestAgent>),
-    Restored(Arc<dyn GuestAgent>, SandboxProvisionOutcome),
+    Restored(Arc<dyn GuestAgent>, ComputerProvisionOutcome),
     Resumed(Arc<dyn GuestAgent>),
     Gated,
     Captured(CheckpointInfo),
@@ -439,7 +439,7 @@ pub struct ComputerActor {
     /// pause's own, which names itself.
     capture: Option<CaptureSpec>,
     /// The provision outcome the `Starting` and atomic-`Ready` writes carry.
-    outcome: SandboxProvisionOutcome,
+    outcome: ComputerProvisionOutcome,
     /// Attributes of the events a transition asks for.
     pause_reason: PauseReason,
     resume_reason: String,
@@ -532,7 +532,7 @@ impl ComputerActor {
             error: None,
             pause_snapshot_id: None,
             capture: None,
-            outcome: SandboxProvisionOutcome::default(),
+            outcome: ComputerProvisionOutcome::default(),
             pause_reason: PauseReason::Requested,
             resume_reason: crate::sandbox::pause_reason::RESUME.to_owned(),
             exit: None,

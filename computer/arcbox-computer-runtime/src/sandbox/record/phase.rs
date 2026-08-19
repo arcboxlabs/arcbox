@@ -19,7 +19,7 @@ pub(super) const RECORD_VERSION: u32 = 1;
 /// phase at `Ready`, avoiding record writes on the execution hot path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SandboxPhase {
+pub enum ComputerPhase {
     Creating,
     Starting,
     Ready,
@@ -42,19 +42,19 @@ pub enum SandboxPhase {
 /// caller sees.
 ///
 /// The module boundary is where the two names meet: inside `record` the
-/// enum is `SandboxPhase`, and this alias — the only one of the two
+/// enum is `ComputerPhase`, and this alias — the only one of the two
 /// [`super`] re-exports — is what every other module says. R3's rename
 /// then has one module to touch.
 ///
 /// Crate-visible rather than `pub(in crate::sandbox)`: `crate::lifecycle`'s
 /// state machine projects onto these phases and its table test is written
-/// against [`SandboxPhase::can_transition_to`], so the durable vocabulary
+/// against [`ComputerPhase::can_transition_to`], so the durable vocabulary
 /// has to reach one module outside `sandbox`.
-pub type PersistPhase = SandboxPhase;
+pub type PersistPhase = ComputerPhase;
 
 /// The stable result returned once a provisioning request has been accepted.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SandboxProvisionOutcome {
+pub struct ComputerProvisionOutcome {
     pub ip_address: String,
 }
 
@@ -66,8 +66,8 @@ pub struct ComputerRecord {
     pub(crate) generation: Uuid,
     pub(in crate::sandbox) request_key: String,
     pub(in crate::sandbox) effective_spec: ComputerSpec,
-    pub(in crate::sandbox) phase: SandboxPhase,
-    pub(in crate::sandbox) provision_outcome: Option<SandboxProvisionOutcome>,
+    pub(in crate::sandbox) phase: ComputerPhase,
+    pub(in crate::sandbox) provision_outcome: Option<ComputerProvisionOutcome>,
     pub(in crate::sandbox) created_at: DateTime<Utc>,
     pub(in crate::sandbox) error: Option<String>,
     /// Catalog id of the internal pause checkpoint. Set while the record is
@@ -98,8 +98,8 @@ pub enum ProvisionIntent {
 /// Generation-checked lifecycle update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxTransition {
-    Starting(SandboxProvisionOutcome),
-    ReadyWithOutcome(SandboxProvisionOutcome),
+    Starting(ComputerProvisionOutcome),
+    ReadyWithOutcome(ComputerProvisionOutcome),
     Ready,
     Stopping,
     Stopped,
@@ -111,17 +111,17 @@ pub enum SandboxTransition {
 }
 
 impl SandboxTransition {
-    fn phase(&self) -> SandboxPhase {
+    fn phase(&self) -> ComputerPhase {
         match self {
-            Self::Starting(_) => SandboxPhase::Starting,
-            Self::ReadyWithOutcome(_) | Self::Ready => SandboxPhase::Ready,
-            Self::Stopping => SandboxPhase::Stopping,
-            Self::Stopped => SandboxPhase::Stopped,
-            Self::Failed(_) => SandboxPhase::Failed,
-            Self::Removing => SandboxPhase::Removing,
-            Self::Pausing => SandboxPhase::Pausing,
-            Self::Paused { .. } => SandboxPhase::Paused,
-            Self::Resuming => SandboxPhase::Resuming,
+            Self::Starting(_) => ComputerPhase::Starting,
+            Self::ReadyWithOutcome(_) | Self::Ready => ComputerPhase::Ready,
+            Self::Stopping => ComputerPhase::Stopping,
+            Self::Stopped => ComputerPhase::Stopped,
+            Self::Failed(_) => ComputerPhase::Failed,
+            Self::Removing => ComputerPhase::Removing,
+            Self::Pausing => ComputerPhase::Pausing,
+            Self::Paused { .. } => ComputerPhase::Paused,
+            Self::Resuming => ComputerPhase::Resuming,
         }
     }
 }
@@ -138,7 +138,7 @@ impl ComputerRecord {
             generation: Uuid::new_v4(),
             request_key: request_key.to_owned(),
             effective_spec,
-            phase: SandboxPhase::Creating,
+            phase: ComputerPhase::Creating,
             provision_outcome: None,
             created_at,
             error: None,
@@ -151,7 +151,7 @@ impl ComputerRecord {
     pub(super) fn apply(&mut self, transition: SandboxTransition) -> Result<()> {
         let next = transition.phase();
         let atomic_ready = matches!(&transition, SandboxTransition::ReadyWithOutcome(_))
-            && self.phase == SandboxPhase::Creating;
+            && self.phase == ComputerPhase::Creating;
         if !atomic_ready && !self.phase.can_transition_to(next) {
             return Err(ComputerError::WrongState {
                 id: self.id.clone(),
@@ -171,7 +171,7 @@ impl ComputerRecord {
                         actual: format!("provision outcome {outcome:?}"),
                     });
                 }
-                self.phase = SandboxPhase::Starting;
+                self.phase = ComputerPhase::Starting;
                 self.provision_outcome = Some(outcome);
                 self.error = None;
             }
@@ -185,42 +185,42 @@ impl ComputerRecord {
                         actual: format!("provision outcome {outcome:?}"),
                     });
                 }
-                self.phase = SandboxPhase::Ready;
+                self.phase = ComputerPhase::Ready;
                 self.provision_outcome = Some(outcome);
                 self.error = None;
                 self.redact_runtime_inputs();
             }
             SandboxTransition::Ready => {
-                self.phase = SandboxPhase::Ready;
+                self.phase = ComputerPhase::Ready;
                 self.error = None;
                 self.pause_snapshot_id = None;
                 self.paused_at = None;
                 self.redact_runtime_inputs();
             }
             SandboxTransition::Stopping => {
-                self.phase = SandboxPhase::Stopping;
+                self.phase = ComputerPhase::Stopping;
                 self.error = None;
                 self.redact_runtime_inputs();
             }
             SandboxTransition::Stopped => {
-                self.phase = SandboxPhase::Stopped;
+                self.phase = ComputerPhase::Stopped;
                 self.error = None;
             }
             SandboxTransition::Failed(error) => {
-                self.phase = SandboxPhase::Failed;
+                self.phase = ComputerPhase::Failed;
                 self.error = Some(error);
                 self.redact_runtime_inputs();
             }
             SandboxTransition::Removing => {
-                self.phase = SandboxPhase::Removing;
+                self.phase = ComputerPhase::Removing;
                 self.redact_runtime_inputs();
             }
             SandboxTransition::Pausing => {
-                self.phase = SandboxPhase::Pausing;
+                self.phase = ComputerPhase::Pausing;
                 self.error = None;
             }
             SandboxTransition::Paused { snapshot_id } => {
-                self.phase = SandboxPhase::Paused;
+                self.phase = ComputerPhase::Paused;
                 self.pause_snapshot_id = Some(snapshot_id);
                 // Stamped once per pause, not once per transition: a failed
                 // resume parks the record back at `Paused`, and overwriting
@@ -231,7 +231,7 @@ impl ComputerRecord {
                 self.error = None;
             }
             SandboxTransition::Resuming => {
-                self.phase = SandboxPhase::Resuming;
+                self.phase = ComputerPhase::Resuming;
                 self.error = None;
             }
         }
@@ -251,7 +251,7 @@ impl ComputerRecord {
     }
 }
 
-impl SandboxPhase {
+impl ComputerPhase {
     pub fn can_transition_to(self, next: Self) -> bool {
         self == next
             || matches!(
@@ -311,17 +311,17 @@ pub(super) fn classify_existing_provision(
         return Err(ComputerError::AlreadyExists(record.id.clone()));
     }
     Ok(match record.phase {
-        SandboxPhase::Creating => ExistingProvision::Pending,
-        SandboxPhase::Starting | SandboxPhase::Ready => ExistingProvision::Replay,
+        ComputerPhase::Creating => ExistingProvision::Pending,
+        ComputerPhase::Starting | ComputerPhase::Ready => ExistingProvision::Replay,
         // A paused sandbox's provision outcome names a released IP, so a
         // same-key create retry must not replay it as live.
-        SandboxPhase::Stopping
-        | SandboxPhase::Stopped
-        | SandboxPhase::Failed
-        | SandboxPhase::Removing
-        | SandboxPhase::Pausing
-        | SandboxPhase::Paused
-        | SandboxPhase::Resuming => ExistingProvision::Blocked,
+        ComputerPhase::Stopping
+        | ComputerPhase::Stopped
+        | ComputerPhase::Failed
+        | ComputerPhase::Removing
+        | ComputerPhase::Pausing
+        | ComputerPhase::Paused
+        | ComputerPhase::Resuming => ExistingProvision::Blocked,
     })
 }
 
@@ -349,20 +349,20 @@ pub(super) fn validate_record(id: &str, record: &ComputerRecord) -> Result<()> {
             "sandbox record provision request key is empty for {id}"
         )));
     }
-    if record.phase == SandboxPhase::Creating && record.provision_outcome.is_some() {
+    if record.phase == ComputerPhase::Creating && record.provision_outcome.is_some() {
         return Err(ComputerError::Config(format!(
             "creating sandbox record unexpectedly has a provision outcome for {id}"
         )));
     }
     if matches!(
         record.phase,
-        SandboxPhase::Starting
-            | SandboxPhase::Ready
-            | SandboxPhase::Stopping
-            | SandboxPhase::Stopped
-            | SandboxPhase::Pausing
-            | SandboxPhase::Paused
-            | SandboxPhase::Resuming
+        ComputerPhase::Starting
+            | ComputerPhase::Ready
+            | ComputerPhase::Stopping
+            | ComputerPhase::Stopped
+            | ComputerPhase::Pausing
+            | ComputerPhase::Paused
+            | ComputerPhase::Resuming
     ) && record.provision_outcome.is_none()
     {
         return Err(ComputerError::Config(format!(
@@ -370,8 +370,10 @@ pub(super) fn validate_record(id: &str, record: &ComputerRecord) -> Result<()> {
             record.phase.as_str()
         )));
     }
-    if matches!(record.phase, SandboxPhase::Paused | SandboxPhase::Resuming)
-        && record.pause_snapshot_id.is_none()
+    if matches!(
+        record.phase,
+        ComputerPhase::Paused | ComputerPhase::Resuming
+    ) && record.pause_snapshot_id.is_none()
     {
         return Err(ComputerError::Config(format!(
             "sandbox record has no pause snapshot in phase {} for {id}",
@@ -383,14 +385,14 @@ pub(super) fn validate_record(id: &str, record: &ComputerRecord) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::SandboxPhase::*;
+    use super::ComputerPhase::*;
     use super::*;
 
     /// Every durable phase, in declaration order. Both axes of the edge
     /// table below iterate this, so a phase missing here is a pair nobody
     /// checks — [`targets_of`]'s exhaustive match is what stops a new
     /// variant from being added without a row.
-    const ALL_PHASES: [SandboxPhase; 10] = [
+    const ALL_PHASES: [ComputerPhase; 10] = [
         Creating, Starting, Ready, Stopping, Stopped, Failed, Removing, Pausing, Paused, Resuming,
     ];
 
@@ -401,7 +403,7 @@ mod tests {
     /// `can_transition_to`, which is why the test below asserts it over all
     /// `(from, to)` pairs instead of sampling: an edge missing here becomes
     /// a wrong state machine there.
-    fn targets_of(from: SandboxPhase) -> &'static [SandboxPhase] {
+    fn targets_of(from: ComputerPhase) -> &'static [ComputerPhase] {
         match from {
             Creating => &[Starting, Failed, Removing],
             Starting => &[Ready, Stopping, Failed, Removing],
@@ -419,8 +421,8 @@ mod tests {
         }
     }
 
-    fn outcome() -> SandboxProvisionOutcome {
-        SandboxProvisionOutcome {
+    fn outcome() -> ComputerProvisionOutcome {
+        ComputerProvisionOutcome {
             ip_address: "192.0.2.2".into(),
         }
     }
@@ -459,7 +461,7 @@ mod tests {
         // `SandboxTransition::phase`'s own match is exhaustive, so a new
         // transition cannot skip this list without failing to compile there
         // first.
-        let projections: [(SandboxTransition, SandboxPhase); 10] = [
+        let projections: [(SandboxTransition, ComputerPhase); 10] = [
             (SandboxTransition::Starting(outcome()), Starting),
             (SandboxTransition::ReadyWithOutcome(outcome()), Ready),
             (SandboxTransition::Ready, Ready),

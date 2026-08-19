@@ -1573,7 +1573,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::super::ComputerSpec;
-    use super::super::record::{PersistPhase, ProvisionIntent, SandboxProvisionOutcome};
+    use super::super::record::{ComputerProvisionOutcome, PersistPhase, ProvisionIntent};
     use super::*;
 
     /// `state.json` written before the guest-network port existed, verbatim.
@@ -1774,7 +1774,7 @@ mod tests {
                     .transition(
                         id,
                         generation,
-                        SandboxTransition::Starting(SandboxProvisionOutcome {
+                        SandboxTransition::Starting(ComputerProvisionOutcome {
                             ip_address: "192.0.2.2".into(),
                         }),
                     )
@@ -1788,7 +1788,7 @@ mod tests {
                     .transition(
                         id,
                         generation,
-                        SandboxTransition::Starting(SandboxProvisionOutcome {
+                        SandboxTransition::Starting(ComputerProvisionOutcome {
                             ip_address: "192.0.2.2".into(),
                         }),
                     )
