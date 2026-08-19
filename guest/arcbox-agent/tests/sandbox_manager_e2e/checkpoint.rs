@@ -84,7 +84,7 @@ async fn jailed_checkpoint_chain_preserves_source_and_geometry() {
                 .unwrap();
             id = restored;
             assert_eq!(ip, "");
-            let info = mgr.inspect_sandbox(&id).unwrap();
+            let info = mgr.inspect_computer(&id).unwrap();
             assert_eq!(info.state, ComputerState::Ready);
             assert_eq!(info.vcpus, geometry.vcpus);
             assert_eq!(info.memory_mib, geometry.memory_mib);
@@ -138,7 +138,7 @@ async fn jailed_checkpoint_chain_preserves_source_and_geometry() {
 
 async fn cleanup(mgr: &ComputerManager) -> Vec<String> {
     let mut errors = Vec::new();
-    match mgr.list_sandboxes(None, &HashMap::new()) {
+    match mgr.list_computers(None, &HashMap::new()) {
         Ok(sandboxes) => {
             for sandbox in sandboxes {
                 if let Err(error) = mgr.remove_computer(&sandbox.id, true).await {

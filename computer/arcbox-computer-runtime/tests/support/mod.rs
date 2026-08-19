@@ -346,7 +346,7 @@ impl Fixture {
     pub async fn await_state(&self, id: &ComputerId, state: ComputerState) {
         let deadline = tokio::time::Instant::now() + DEADLINE;
         loop {
-            let seen = self.manager.inspect_sandbox(id);
+            let seen = self.manager.inspect_computer(id);
             match &seen {
                 Ok(info) if info.state == state => return,
                 _ if tokio::time::Instant::now() >= deadline => panic!(
@@ -364,7 +364,7 @@ impl Fixture {
     /// Wait until `id` is no longer registered, or fail the test.
     pub async fn await_gone(&self, id: &ComputerId) {
         let deadline = tokio::time::Instant::now() + DEADLINE;
-        while self.manager.inspect_sandbox(id).is_ok() {
+        while self.manager.inspect_computer(id).is_ok() {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "{id} is still registered"

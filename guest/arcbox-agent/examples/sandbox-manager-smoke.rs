@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
     wait_for_ready(&manager, &id, &mut events, 60).await?;
     println!("  [ready]   boot={}ms", t0.elapsed().as_millis());
 
-    let info = manager.inspect_sandbox(&id).context("inspect_sandbox")?;
+    let info = manager.inspect_computer(&id).context("inspect_sandbox")?;
     println!(
         "  [inspect] state={} vcpus={} mem={}MiB ip={}",
         info.state,
@@ -112,7 +112,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let list = manager
-        .list_sandboxes(None, &HashMap::new())
+        .list_computers(None, &HashMap::new())
         .context("list sandboxes")?;
     println!("  [list]    {} sandbox(es):", list.len());
     for s in &list {
@@ -176,7 +176,7 @@ async fn main() -> anyhow::Result<()> {
 
         // Capture TAP name before destroying the sandbox.
         let tap2 = manager
-            .inspect_sandbox(&id2)
+            .inspect_computer(&id2)
             .ok()
             .and_then(|i| i.network)
             .and_then(|n| tap_name_for(&n.ip_address));
@@ -322,7 +322,7 @@ async fn main() -> anyhow::Result<()> {
 
         wait_for_ready(&manager, &rid, &mut events2, 30).await?;
 
-        let rinfo = manager.inspect_sandbox(&rid).context("inspect restored")?;
+        let rinfo = manager.inspect_computer(&rid).context("inspect restored")?;
         println!(
             "  [inspect] state={} ip={}",
             rinfo.state,
@@ -406,7 +406,7 @@ async fn wait_for_ready(
     events: &mut broadcast::Receiver<ComputerEvent>,
     timeout_secs: u64,
 ) -> anyhow::Result<()> {
-    if let Ok(info) = manager.inspect_sandbox(&id.to_string()) {
+    if let Ok(info) = manager.inspect_computer(&id.to_string()) {
         match info.state {
             ComputerState::Ready => return Ok(()),
             ComputerState::Failed => bail!(

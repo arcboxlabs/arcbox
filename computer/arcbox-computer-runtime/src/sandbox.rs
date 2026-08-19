@@ -83,7 +83,7 @@ type ReconcileResult = std::result::Result<(), Arc<str>>;
 /// What replaced `Arc<Mutex<ComputerRuntime>>`. Every verb is a send on the
 /// mailbox and every read is a borrow of the snapshot, so neither the map
 /// lock nor a per-computer mutex is ever held across an await — the
-/// discipline `list_sandboxes` used to have to state.
+/// discipline `list_computers` used to have to state.
 #[derive(Clone)]
 pub(crate) struct ComputerRef {
     mailbox: Mailbox,
@@ -478,7 +478,7 @@ impl ComputerManager {
     /// before asking. The gate this used to take could therefore only ever
     /// have fired for a sandbox that has no lease to report anyway, and it
     /// has no non-blocking form on the port.
-    pub fn sandbox_network_identity(&self, id: &str) -> Result<ComputerNetworkIdentity> {
+    pub fn computer_network_identity(&self, id: &str) -> Result<ComputerNetworkIdentity> {
         let snapshot = self.snapshot(&id.to_owned())?;
         let lease = snapshot
             .lease
@@ -544,7 +544,7 @@ pub(super) fn netmask(prefix_len: u8) -> std::net::Ipv4Addr {
 
 /// The connectivity every sandbox gets: egress through the host's address,
 /// which is what the System VM's netfilter provides for the pool.
-pub(super) const fn sandbox_network_policy() -> NetworkPolicy {
+pub(super) const fn computer_network_policy() -> NetworkPolicy {
     NetworkPolicy {
         mode: NetworkMode::Nat,
     }

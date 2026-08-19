@@ -237,7 +237,7 @@ impl ComputerManager {
         let deadline =
             tokio::time::Instant::now() + std::time::Duration::from_secs(READY_TIMEOUT_SECS);
         loop {
-            let info = self.inspect_sandbox(id)?;
+            let info = self.inspect_computer(id)?;
             match info.state {
                 ComputerState::Ready => break,
                 ComputerState::Failed => {

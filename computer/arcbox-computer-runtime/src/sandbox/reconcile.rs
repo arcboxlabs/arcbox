@@ -2862,7 +2862,7 @@ mod tests {
         let lease = network
             .reserve(
                 &VmId::new("stuck").unwrap(),
-                super::super::sandbox_network_policy(),
+                super::super::computer_network_policy(),
             )
             .await
             .unwrap();

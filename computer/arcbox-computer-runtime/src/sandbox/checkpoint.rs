@@ -278,7 +278,7 @@ impl ComputerManager {
                 .network
                 .reserve(
                     &VmId::new(new_id.as_str())?,
-                    super::sandbox_network_policy(),
+                    super::computer_network_policy(),
                 )
                 .await
             {

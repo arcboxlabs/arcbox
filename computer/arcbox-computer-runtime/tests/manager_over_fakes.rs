@@ -86,24 +86,24 @@ async fn a_create_boots_to_ready_and_serves_exec_and_files() {
     // The file verbs reach the guest through the port.
     fixture
         .manager
-        .write_sandbox_file(&id, "/tmp/note", 0o644, b"written")
+        .write_computer_file(&id, "/tmp/note", 0o644, b"written")
         .await
         .unwrap();
     assert_eq!(
         fixture
             .manager
-            .read_sandbox_file(&id, "/tmp/note")
+            .read_computer_file(&id, "/tmp/note")
             .await
             .unwrap(),
         b"written"
     );
     fixture
         .manager
-        .move_sandbox_path(&id, "/tmp/note", "/tmp/moved")
+        .move_computer_path(&id, "/tmp/note", "/tmp/moved")
         .await
         .unwrap();
     assert!(matches!(
-        fixture.manager.stat_sandbox_path(&id, "/tmp/note").await,
+        fixture.manager.stat_computer_path(&id, "/tmp/note").await,
         Err(ComputerError::PathNotFound(_))
     ));
 
@@ -111,7 +111,7 @@ async fn a_create_boots_to_ready_and_serves_exec_and_files() {
     // guest side emits arrives through it whatever the transport.
     let mut watch = fixture
         .manager
-        .watch_sandbox_dir(&id, "/tmp/moved", false)
+        .watch_computer_dir(&id, "/tmp/moved", false)
         .await
         .unwrap();
     fixture
@@ -407,7 +407,7 @@ async fn an_idle_computer_pauses_and_says_the_timer_did_it() {
     );
     fixture.await_state(&id, ComputerState::Paused).await;
     assert!(
-        fixture.manager.inspect_sandbox(&id).is_ok(),
+        fixture.manager.inspect_computer(&id).is_ok(),
         "the PAUSE policy never removes the computer"
     );
 }
@@ -462,7 +462,7 @@ async fn set_lifecycle_rearms_the_ttl_and_replaces_only_what_it_names() {
         .await
         .unwrap();
 
-    let info = fixture.manager.inspect_sandbox(&id).unwrap();
+    let info = fixture.manager.inspect_computer(&id).unwrap();
     let deadline = info.ttl_deadline.expect("ttl deadline armed");
     assert!(deadline >= before + chrono::Duration::seconds(600));
     assert!(deadline <= chrono::Utc::now() + chrono::Duration::seconds(600));
@@ -481,7 +481,7 @@ async fn set_lifecycle_rearms_the_ttl_and_replaces_only_what_it_names() {
         )
         .await
         .unwrap();
-    let info = fixture.manager.inspect_sandbox(&id).unwrap();
+    let info = fixture.manager.inspect_computer(&id).unwrap();
     assert_eq!(info.ttl_deadline, None);
     assert_eq!(info.idle_timeout_seconds, 30);
     assert_eq!(info.on_idle, IdleAction::Pause);
@@ -552,7 +552,7 @@ async fn a_pause_records_what_it_retained_and_a_resume_uses_it() {
     );
     await_action(&mut events, &id, action::PAUSED).await;
 
-    let info = fixture.manager.inspect_sandbox(&id).unwrap();
+    let info = fixture.manager.inspect_computer(&id).unwrap();
     assert!(info.paused_at.is_some(), "the pause records when it froze");
     assert!(
         info.storage_bytes > 0,
@@ -560,7 +560,7 @@ async fn a_pause_records_what_it_retained_and_a_resume_uses_it() {
     );
     let listed = fixture
         .manager
-        .list_sandboxes(None, &HashMap::new())
+        .list_computers(None, &HashMap::new())
         .unwrap();
     let summary = listed.iter().find(|entry| entry.id == id).unwrap();
     assert_eq!(
@@ -614,7 +614,7 @@ async fn storage_bytes_meters_the_overlay_while_running_and_list_agrees() {
     std::fs::create_dir_all(overlay.parent().unwrap()).unwrap();
     std::fs::write(&overlay, vec![0xA5; 256 * 1024]).unwrap();
 
-    let info = fixture.manager.inspect_sandbox(&id).unwrap();
+    let info = fixture.manager.inspect_computer(&id).unwrap();
     assert!(
         info.storage_bytes >= 256 * 1024,
         "a running computer's live overlay is metered, got {}",
@@ -622,7 +622,7 @@ async fn storage_bytes_meters_the_overlay_while_running_and_list_agrees() {
     );
     let listed = fixture
         .manager
-        .list_sandboxes(None, &HashMap::new())
+        .list_computers(None, &HashMap::new())
         .unwrap();
     let summary = listed.iter().find(|entry| entry.id == id).unwrap();
     assert_eq!(
@@ -632,7 +632,7 @@ async fn storage_bytes_meters_the_overlay_while_running_and_list_agrees() {
 
     fixture.manager.pause_computer(&id).await.unwrap();
     fixture.await_state(&id, ComputerState::Paused).await;
-    let paused = fixture.manager.inspect_sandbox(&id).unwrap();
+    let paused = fixture.manager.inspect_computer(&id).unwrap();
     assert!(
         paused.storage_bytes > info.storage_bytes,
         "pausing adds the checkpoint on top of the retained overlay \
@@ -681,7 +681,7 @@ async fn a_direct_mode_pause_is_refused_before_it_freezes_anything() {
     assert!(matches!(error, ComputerError::Config(_)), "{error}");
     assert!(error.to_string().contains("jailer"), "{error}");
     assert_eq!(
-        fixture.manager.inspect_sandbox(&id).unwrap().state,
+        fixture.manager.inspect_computer(&id).unwrap().state,
         ComputerState::Ready,
         "the refused pause left the computer alone"
     );
@@ -697,7 +697,7 @@ async fn resume_is_a_noop_on_live_states_and_refuses_terminal_ones() {
     let ready = fixture.ready("awake").await;
     let address = fixture
         .manager
-        .inspect_sandbox(&ready)
+        .inspect_computer(&ready)
         .unwrap()
         .network
         .expect("a networked computer")
@@ -778,7 +778,7 @@ async fn the_data_plane_reports_a_paused_computer_readably() {
     fixture.await_state(&id, ComputerState::Paused).await;
 
     assert!(matches!(
-        fixture.manager.read_sandbox_file(&id, "/tmp/x").await,
+        fixture.manager.read_computer_file(&id, "/tmp/x").await,
         Err(ComputerError::Paused(paused)) if paused == id
     ));
     assert!(matches!(
@@ -828,7 +828,7 @@ async fn a_checkpoint_restores_onto_a_fresh_address() {
         vec![checkpoint.snapshot_id.clone()]
     );
     assert_eq!(
-        fixture.manager.inspect_sandbox(&id).unwrap().state,
+        fixture.manager.inspect_computer(&id).unwrap().state,
         ComputerState::Ready,
         "the origin keeps running: the capture resumed it"
     );
@@ -853,7 +853,7 @@ async fn a_checkpoint_restores_onto_a_fresh_address() {
         clone_ip,
         fixture
             .manager
-            .inspect_sandbox(&id)
+            .inspect_computer(&id)
             .unwrap()
             .network
             .unwrap()
@@ -1007,7 +1007,7 @@ async fn a_restore_without_valid_geometry_reserves_no_resources() {
         assert!(!fixture.record_path(&clone).exists());
         assert!(!fixture.vm_dir(&clone).exists());
         assert!(matches!(
-            fixture.manager.inspect_sandbox(&clone),
+            fixture.manager.inspect_computer(&clone),
             Err(ComputerError::NotFound(_))
         ));
         assert_eq!(
@@ -1085,7 +1085,7 @@ async fn a_recoverable_checkpoint_failure_leaves_the_computer_ready() {
         .expect_err("a capture the driver refused");
 
     assert_eq!(
-        fixture.manager.inspect_sandbox(&id).unwrap().state,
+        fixture.manager.inspect_computer(&id).unwrap().state,
         ComputerState::Ready
     );
     assert!(
@@ -1575,7 +1575,7 @@ async fn a_computer_whose_vm_died_comes_back_failed() {
 
     let info = fixture
         .manager
-        .inspect_sandbox(&id)
+        .inspect_computer(&id)
         .expect("the sweep reinstated the computer");
     assert_eq!(info.state, ComputerState::Failed);
     fixture.manager.remove_computer(&id, false).await.unwrap();
@@ -1643,7 +1643,7 @@ async fn a_create_replays_its_recorded_outcome_rather_than_building_a_second_com
     assert_eq!(
         fixture
             .manager
-            .list_sandboxes(None, &HashMap::new())
+            .list_computers(None, &HashMap::new())
             .unwrap()
             .len(),
         1,

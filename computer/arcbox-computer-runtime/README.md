@@ -19,7 +19,7 @@ arcbox-daemon  ──vsock──►  arcbox-agent        ──vsock──►  v
 ```
 
 `arcbox-agent` owns the `sandbox.v1`
-surface and the vsock transport, and calls `SandboxManager` underneath.
+surface and the vsock transport, and calls `ComputerManager` underneath.
 There are no service implementations, no tonic, and no daemon here. Node image builders can use `RootfsBuilder` independently.
 
 The **`vm-agent`** binary that becomes PID 1 *inside* each sandbox is a
@@ -55,13 +55,13 @@ sudo -E env ARCBOX_REQUIRE_BLOCK_TOOLS=1 cargo test -p arcbox-computer-runtime -
 
 ```rust
 use std::sync::Arc;
-use arcbox_computer_runtime::{NodeEnvironment, RuntimeConfig, SandboxManager, SandboxSpec};
+use arcbox_computer_runtime::{NodeEnvironment, RuntimeConfig, ComputerManager, ComputerSpec};
 
 // `environment` is the composer's; see below.
-let manager = Arc::new(SandboxManager::new(RuntimeConfig::default(), environment)?);
+let manager = Arc::new(ComputerManager::new(RuntimeConfig::default(), environment)?);
 
 let (id, ip) = manager
-    .create_sandbox(SandboxSpec {
+    .create_computer(ComputerSpec {
         vcpus: 1,
         memory_mib: 512,
         ..Default::default()
@@ -87,7 +87,7 @@ This crate builds none of them and names no VMM: whoever composes the node
 does. For the System VM that is `arcbox_agent::sandbox::node_environment`.
 
 - `driver` — the VMM behind `arcbox_vm_driver::VmDriver`. It must claim
-  `Prepare` and `Staging` and offer `vsock`, or `SandboxManager::new`
+  `Prepare` and `Staging` and offer `vsock`, or `ComputerManager::new`
   refuses it.
 - `network` — what the NICs attach to, behind
   `arcbox_vm_driver::net::GuestNetwork`. It must offer `NetworkReconcile`.

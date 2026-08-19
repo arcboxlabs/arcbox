@@ -35,7 +35,7 @@ restructure plan and its locked decisions live in
   predicates like `EngineError::Agent { code }` carry the agent's
   HTTP-style wire codes (404/412 obsolete-ticket, 423 paused, 503 retry)
   — those codes are protocol contract, mirrored guest-side.
-  `arcbox-computer-runtime` has its own `VmmError` and does not speak
+  `arcbox-computer-runtime` has its own `ComputerError` and does not speak
   `EngineError`; the guest agent converts at its boundary.
 
 ## Crates
@@ -69,7 +69,7 @@ restructure plan and its locked decisions live in
     instead: the adapters themselves as a `NodeEnvironment`, and the
     `[firecracker]` keys that configure them as the composer's own
     config type (`arcbox_agent::config::AdapterConfig`), read out of the
-    same TOML section this crate's `FirecrackerConfig` reads. Do not
+    same TOML section this crate's `ComputerConfig` reads. Do not
     reintroduce an adapter edge, in any dependency section — a test that
     wants a real adapter belongs to the composer or to the adapter's own
     contract run.
@@ -80,16 +80,9 @@ restructure plan and its locked decisions live in
     is 1 and there is no migration story, so renaming any of them breaks
     upgrade-in-place — the R3 rename deliberately leaves every one of
     them alone.
-  - **Transitional naming**: the crate is `arcbox-computer-runtime` but
-    its types still read `SandboxManager` / `SandboxSpec` / `VmmError`,
-    and its config still calls the section-shaped struct
-    `FirecrackerConfig` though what is left in it is the runtime's own —
-    a data dir, an isolation spec, pool and CoW policy — the adapter's
-    settings having gone to the composer (the TOML key is frozen; the
-    type name is not, and follows in that rename).
-    `VmmConfig` is already `RuntimeConfig`. The `Computer*` rename is its
-    own PR, with `compat.rs` aliases for the guest agent. Not an
-    inconsistency to file.
+  - **Runtime naming**: use `Computer*` names for computer-domain types.
+    The guest agent converts runtime types to public `Sandbox*` wire
+    types. Keep the TOML section name `firecracker` unchanged.
 
 ## Reaching the platform without a `#[cfg]`
 

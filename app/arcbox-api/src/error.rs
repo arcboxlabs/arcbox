@@ -105,14 +105,14 @@ impl From<ApiError> for connectrpc::ConnectError {
 /// The wire carries only an HTTP-style code + message, so registry
 /// precision comes from the message shapes this same tree produces (the
 /// daemon and agent ship from one master state, enforced by the protocol
-/// handshake): `VmmError`'s `Display` impls and the guest `SandboxError`
+/// handshake): `ComputerError`'s `Display` impls and the guest `SandboxError`
 /// constructors. The markers are pinned by the tests below — changing a
 /// message shape must update both together.
 fn classify_agent_error(code: i32, message: &str) -> Option<connectrpc::ErrorDetail> {
     use arcbox_connect::sandbox_v1 as pb;
 
     match code {
-        // VmmError::NotFound → "VM not found: {id}"; the execution
+        // ComputerError::NotFound → "VM not found: {id}"; the execution
         // registry names its resource explicitly.
         404 if message.starts_with("execution '") => Some(error_info(
             pb::ErrorCode::ExecutionNotFound,
@@ -124,7 +124,7 @@ fn classify_agent_error(code: i32, message: &str) -> Option<connectrpc::ErrorDet
             "list sandboxes with `abctl sandbox list`",
             &[],
         )),
-        // VmmError::TemplateNotFound → "template not found: {reference}"
+        // ComputerError::TemplateNotFound → "template not found: {reference}"
         // (the template catalog, CORE-107).
         404 if message.starts_with("template not found: ") => {
             let reference = message
@@ -136,7 +136,7 @@ fn classify_agent_error(code: i32, message: &str) -> Option<connectrpc::ErrorDet
                 &[("reference", reference)],
             ))
         }
-        // VmmError::PathNotFound → "path not found: {path}" (the sandbox
+        // ComputerError::PathNotFound → "path not found: {path}" (the sandbox
         // filesystem verbs, CORE-62).
         404 if message.starts_with("path not found: ") => {
             let path = message.strip_prefix("path not found: ").unwrap_or_default();
@@ -168,7 +168,7 @@ fn classify_agent_error(code: i32, message: &str) -> Option<connectrpc::ErrorDet
             "check `SandboxService.GetCapabilities` for this host's sandbox support",
             &[],
         )),
-        // VmmError::WrongState → "VM '{id}' is in wrong state: expected
+        // ComputerError::WrongState → "VM '{id}' is in wrong state: expected
         // {expected}, got {actual}". FAILED and PAUSED are their own registry
         // codes — both need an action, not a wait; anything else is "exists
         // but not ready for this call" (still STARTING, busy RUNNING under
@@ -278,7 +278,7 @@ mod tests {
 
     /// Pins the guest message markers the classifier keys on. If one of
     /// these fails after a message change, update the marker AND this test
-    /// together (`VmmError` Display impls / guest `SandboxError` sites).
+    /// together (`ComputerError` Display impls / guest `SandboxError` sites).
     #[test]
     fn agent_errors_classify_into_the_registry() {
         assert_eq!(
@@ -339,13 +339,13 @@ mod tests {
             ),
             Some(pb::ErrorCode::TemplateInvalid)
         );
-        // VmmError::TemplateNotFound (the template catalog, CORE-107) —
+        // ComputerError::TemplateNotFound (the template catalog, CORE-107) —
         // distinct from the sandbox 404 despite sharing the wire code.
         assert_eq!(
             classified(404, "template not found: code:9.9"),
             Some(pb::ErrorCode::TemplateNotFound)
         );
-        // VmmError::PathNotFound (the filesystem verbs, CORE-62).
+        // ComputerError::PathNotFound (the filesystem verbs, CORE-62).
         assert_eq!(
             classified(404, "path not found: /work/missing.txt"),
             Some(pb::ErrorCode::FileNotFound)

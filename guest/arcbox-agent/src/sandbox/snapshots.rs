@@ -53,7 +53,7 @@ impl SandboxService {
             .restore_computer_keyed(spec, &restore_key)
             .await
             .map_err(SandboxError::from)?;
-        let live = self.manager.inspect_sandbox(&id).is_ok_and(|info| {
+        let live = self.manager.inspect_computer(&id).is_ok_and(|info| {
             matches!(
                 info.state,
                 ComputerState::Starting | ComputerState::Ready | ComputerState::Running

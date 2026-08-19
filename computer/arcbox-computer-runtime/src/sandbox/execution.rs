@@ -846,7 +846,7 @@ impl ComputerManager {
     /// The vm-agent watches the guest's own listen table in-process — no
     /// connect probes that would perturb the workload with spurious
     /// accepted connections.
-    pub async fn wait_sandbox_port(
+    pub async fn wait_computer_port(
         &self,
         id: &ComputerId,
         port: u16,

@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-/// Core VMM error type.
+/// Computer runtime error type.
 #[derive(Debug, Error)]
 pub enum ComputerError {
     /// The requested VM was not found.

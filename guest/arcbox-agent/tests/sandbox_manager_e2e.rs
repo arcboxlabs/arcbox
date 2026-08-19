@@ -227,16 +227,16 @@ async fn e2e_sandbox_basic_lifecycle() {
         "sandbox did not reach ready state"
     );
 
-    let info = mgr.inspect_sandbox(&id).unwrap();
+    let info = mgr.inspect_computer(&id).unwrap();
     assert_eq!(info.state, ComputerState::Ready);
 
     mgr.stop_computer(&id, 5).await.unwrap();
-    let info = mgr.inspect_sandbox(&id).unwrap();
+    let info = mgr.inspect_computer(&id).unwrap();
     assert_eq!(info.state, ComputerState::Stopped);
 
     mgr.remove_computer(&id, true).await.unwrap();
     assert!(
-        mgr.inspect_sandbox(&id).is_err(),
+        mgr.inspect_computer(&id).is_err(),
         "sandbox should be gone after remove"
     );
 }
@@ -334,7 +334,7 @@ async fn e2e_sandbox_with_tap_network() {
     );
 
     let tap_name = {
-        let info = mgr.inspect_sandbox(&id).unwrap();
+        let info = mgr.inspect_computer(&id).unwrap();
         let net = info.network.expect("tap mode should populate network info");
         // The host interface is deliberately not part of the sandbox API
         // (CORE-54); this test owns the host, so it derives the name the
@@ -547,7 +547,7 @@ async fn outlives_its_manager_and_is_adopted(confinement: Confinement) {
         mgr.finalize_startup_cleanup(&token).await.unwrap();
     }
 
-    let info = mgr.inspect_sandbox(&id).unwrap();
+    let info = mgr.inspect_computer(&id).unwrap();
     assert_eq!(
         info.state,
         ComputerState::Ready,
@@ -601,7 +601,7 @@ async fn outlives_its_manager_and_is_adopted(confinement: Confinement) {
     // And the adopted sandbox is still removable — through the handle, since
     // no PreparedVm crosses a restart.
     mgr.remove_computer(&id, true).await.unwrap();
-    assert!(mgr.inspect_sandbox(&id).is_err());
+    assert!(mgr.inspect_computer(&id).is_err());
     {
         assert!(!firecracker_alive(pid), "remove left a firecracker behind");
         assert!(

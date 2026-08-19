@@ -513,7 +513,7 @@ impl SandboxService {
             .map_err(|e| SandboxError::Decode(e.to_string()))?;
         let info = self
             .manager
-            .inspect_sandbox(&req.id)
+            .inspect_computer(&req.id)
             .map_err(SandboxError::from)?;
         Ok(convert::info_to_proto(info))
     }
@@ -526,7 +526,7 @@ impl SandboxService {
         let labels: std::collections::HashMap<String, String> = req.labels.into_iter().collect();
         let summaries = self
             .manager
-            .list_sandboxes(state_filter, &labels)
+            .list_computers(state_filter, &labels)
             .map_err(SandboxError::from)?;
         let (page, next_page_token) =
             convert::paginate(summaries, |s| &s.id, req.page_size, &req.page_token);
@@ -544,7 +544,7 @@ impl SandboxService {
         sandbox_id: &str,
     ) -> Result<arcbox_computer_runtime::ComputerNetworkIdentity, SandboxError> {
         self.manager
-            .sandbox_network_identity(sandbox_id)
+            .computer_network_identity(sandbox_id)
             .map_err(SandboxError::from)
     }
 
@@ -672,7 +672,7 @@ impl SandboxService {
         self.creates.clear_completed_if(id, || {
             completed_create_is_stale(
                 self.manager
-                    .inspect_sandbox(&id.to_owned())
+                    .inspect_computer(&id.to_owned())
                     .map(|info| info.state),
             )
         });

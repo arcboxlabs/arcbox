@@ -352,7 +352,7 @@ impl ComputerManager {
                 lease = Some(
                     self.services
                         .network
-                        .reserve(&VmId::new(&id)?, super::sandbox_network_policy())
+                        .reserve(&VmId::new(&id)?, super::computer_network_policy())
                         .await?,
                 );
             }
@@ -723,7 +723,7 @@ impl ComputerManager {
     }
 
     /// Return the current state and metadata of a sandbox.
-    pub fn inspect_sandbox(&self, id: &ComputerId) -> Result<ComputerInfo> {
+    pub fn inspect_computer(&self, id: &ComputerId) -> Result<ComputerInfo> {
         let snapshot = self.snapshot(id)?;
         // Size the retained artifacts after the read: the sizing stats files
         // and scans the catalog, and the snapshot is a borrow of a `watch`
@@ -735,7 +735,7 @@ impl ComputerManager {
     }
 
     /// List sandboxes, optionally filtered by state string and/or labels.
-    pub fn list_sandboxes(
+    pub fn list_computers(
         &self,
         state_filter: Option<&str>,
         label_filter: &HashMap<String, String>,
@@ -824,7 +824,7 @@ impl ComputerManager {
     /// and contiguous in the order received — so a subscriber that sees
     /// `sequence` jump by more than one has missed events (including any
     /// history from before it subscribed) and should fall back to
-    /// [`Self::inspect_sandbox`] / [`Self::list_sandboxes`] to re-derive
+    /// [`Self::inspect_computer`] / [`Self::list_computers`] to re-derive
     /// state instead of carrying what it has. That test is conclusive
     /// precisely because this subscription is unfiltered; a downstream
     /// view that filters it (the wire API's per-sandbox subscription)
