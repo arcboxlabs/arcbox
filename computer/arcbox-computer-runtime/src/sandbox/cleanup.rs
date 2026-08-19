@@ -46,7 +46,7 @@ mod tests {
             .into_owned();
         let cow_probe = Arc::new(CowTestProbe::default());
         let driver = FakeDriver::new();
-        let manager = SandboxManager::new(
+        let manager = ComputerManager::new(
             config.clone(),
             crate::NodeEnvironment {
                 driver: Arc::new(driver.clone()),

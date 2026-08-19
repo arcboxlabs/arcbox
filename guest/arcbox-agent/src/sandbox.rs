@@ -1,6 +1,6 @@
 //! Sandbox service for the guest agent.
 //!
-//! Wraps [`SandboxManager`] from `arcbox-computer-runtime` and translates
+//! Wraps [`ComputerManager`] from `arcbox-computer-runtime` and translates
 //! between the `sandbox_v1` protobuf types (from `arcbox-connect`) and the
 //! native Rust types used by `arcbox-computer-runtime`. Lifecycle CRUD
 //! lives here; executions, events, file I/O, and snapshots live in the
@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex, Weak};
 
 use arcbox_computer_runtime::agent::VmProtoAgentFactory;
 use arcbox_computer_runtime::{
-    ComputerError, ComputerMountSpec, ComputerNetworkSpec, ComputerSpec, ComputerState,
-    NodeEnvironment, RootfsBuilder, RootfsPaths, SandboxManager,
+    ComputerError, ComputerManager, ComputerMountSpec, ComputerNetworkSpec, ComputerSpec,
+    ComputerState, NodeEnvironment, RootfsBuilder, RootfsPaths,
 };
 use arcbox_connect::sandbox_v1;
 use arcbox_fc_driver::{FcDriver, FcDriverConfig};
@@ -62,9 +62,9 @@ pub fn probe_kvm() -> Result<(), String> {
     }
 }
 
-/// Thin wrapper around [`SandboxManager`] for use in the agent's RPC layer.
+/// Thin wrapper around [`ComputerManager`] for use in the agent's RPC layer.
 pub struct SandboxService {
-    manager: Arc<SandboxManager>,
+    manager: Arc<ComputerManager>,
     creates: Arc<CreateRegistry>,
     operations: SandboxOperationLocks,
     /// Template names with a Build in flight; a second Build on a busy name
@@ -113,7 +113,7 @@ pub fn rootfs_builder(block_tools: Arc<dyn BlockTools>) -> RootfsBuilder {
 }
 
 /// The environment-specific components the sandbox stack runs on inside
-/// the System VM. This is where they are built: `SandboxManager::new`
+/// the System VM. This is where they are built: `ComputerManager::new`
 /// builds none of them, so the choice of VMM is made here.
 ///
 /// Four components, out of the two halves of `config`:
@@ -196,7 +196,7 @@ impl SandboxService {
         let environment = node_environment(&config, block_tools)?;
         // `into_shared` starts the lifecycle monitor driving the idle/TTL
         // expiry timers (CORE-21/60).
-        let manager = SandboxManager::new(config.runtime, environment)
+        let manager = ComputerManager::new(config.runtime, environment)
             .map_err(|e| anyhow::anyhow!("{e}"))?
             .into_shared();
         let creates = Arc::new(CreateRegistry::default());

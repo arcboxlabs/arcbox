@@ -1,4 +1,4 @@
-//! `SandboxManager` — orchestrates sandbox microVM lifecycle.
+//! `ComputerManager` — orchestrates sandbox microVM lifecycle.
 //!
 //! A sandbox is a short-lived, strongly-isolated microVM decoupled from its
 //! workload: when the initial `cmd` process exits the sandbox transitions back
@@ -69,9 +69,9 @@ pub use pause::reason as pause_reason;
 pub(crate) use spec::ROOTFS_DISK_ID;
 pub(crate) use types::NetworkAttachment;
 pub use types::{
-    CheckpointInfo, CheckpointSummary, ComputerId, ComputerMountSpec, ComputerNetworkInfo,
-    ComputerNetworkSpec, ComputerSpec, ComputerState, IdleAction, LifecycleUpdate,
-    RestoreComputerSpec, SandboxEvent, SandboxInfo, SandboxSummary, TemplateWarmRef,
+    CheckpointInfo, CheckpointSummary, ComputerEvent, ComputerId, ComputerInfo, ComputerMountSpec,
+    ComputerNetworkInfo, ComputerNetworkSpec, ComputerSpec, ComputerState, ComputerSummary,
+    IdleAction, LifecycleUpdate, RestoreComputerSpec, TemplateWarmRef,
 };
 
 const EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -95,7 +95,7 @@ pub(crate) struct ComputerRef {
 pub(crate) type Computers = Arc<RwLock<HashMap<ComputerId, ComputerRef>>>;
 
 /// Manages the full lifecycle of multiple sandbox microVMs.
-pub struct SandboxManager {
+pub struct ComputerManager {
     computers: Computers,
     records: Arc<record::SandboxRecordStore>,
     /// What every computer's flows are built from — the driver, the guest
@@ -125,7 +125,7 @@ pub struct SandboxManager {
     timers_enabled: tokio::sync::watch::Sender<bool>,
 }
 
-impl SandboxManager {
+impl ComputerManager {
     /// Create a new manager from the given configuration, over the
     /// environment-specific components the composer supplies.
     ///
@@ -578,7 +578,7 @@ pub struct ComputerNetworkIdentity {
     pub expose: HostIngress,
 }
 
-/// The guest network's cleanup protocol, which [`SandboxManager::new`]
+/// The guest network's cleanup protocol, which [`ComputerManager::new`]
 /// requires — the quarantine ledger gates every address the pool hands
 /// out, and the startup sweep gates the pool itself.
 pub(super) fn reconcile_capability(network: &dyn GuestNetwork) -> &dyn NetworkReconcile {
@@ -587,7 +587,7 @@ pub(super) fn reconcile_capability(network: &dyn GuestNetwork) -> &dyn NetworkRe
         .expect("SandboxManager::new requires the guest network's reconcile capability")
 }
 
-/// The driver's `Prepare` capability, which [`SandboxManager::new`]
+/// The driver's `Prepare` capability, which [`ComputerManager::new`]
 /// requires — the boot, pool, and restore flows all spawn the VMM before
 /// there is a guest to run on it.
 pub(crate) fn prepare_capability(driver: &dyn VmDriver) -> &dyn Prepare {
@@ -596,7 +596,7 @@ pub(crate) fn prepare_capability(driver: &dyn VmDriver) -> &dyn Prepare {
         .expect("SandboxManager::new requires the driver's Prepare capability")
 }
 
-/// A grip's `Staging` capability, which [`SandboxManager::new`] requires —
+/// A grip's `Staging` capability, which [`ComputerManager::new`] requires —
 /// every flow that puts a guest on a VMM first brings that guest's files
 /// into the area the VMM can reach, and pause takes its disk back out of
 /// it.
@@ -890,7 +890,7 @@ impl Drop for ActorReservation {
 
 /// Everything an actor needs that the reservation does not already hold.
 ///
-/// Assembled from the manager's own pieces rather than from `&SandboxManager`
+/// Assembled from the manager's own pieces rather than from `&ComputerManager`
 /// so the startup sweep can seed actors too: it runs in a task spawned from
 /// the constructor, before the manager it belongs to exists.
 pub(crate) struct ActorSpawn {
@@ -1000,14 +1000,14 @@ mod tests {
             ),
         ] {
             let driver = FakeDriver::builder().capabilities(capabilities).build();
-            let error = SandboxManager::new(config.clone(), environment(driver))
+            let error = ComputerManager::new(config.clone(), environment(driver))
                 .err()
                 .unwrap_or_else(|| panic!("a driver without {name} is refused"));
             assert!(matches!(error, ComputerError::Config(_)), "{error}");
             assert!(error.to_string().contains(name), "{error}");
         }
 
-        let manager = SandboxManager::new(config.clone(), environment(FakeDriver::new()))
+        let manager = ComputerManager::new(config.clone(), environment(FakeDriver::new()))
             .expect("a driver with every needed capability is accepted");
         assert_eq!(manager.services.driver.name(), "fake");
     }

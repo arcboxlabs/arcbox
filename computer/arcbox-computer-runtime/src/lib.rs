@@ -29,7 +29,7 @@
 //!
 //! # Public API
 //!
-//! - [`SandboxManager`] — top-level sandbox orchestrator
+//! - [`ComputerManager`] — top-level sandbox orchestrator
 //! - [`NodeEnvironment`] — the four environment-specific components a
 //!   composer supplies, all required: the VM driver, the guest network,
 //!   the guest-agent factory, and the copy-on-write rootfs manager
@@ -87,10 +87,10 @@ pub use rootfs::{
 };
 pub use sandbox::pause_reason;
 pub use sandbox::{
-    CheckpointInfo, CheckpointSummary, ComputerId, ComputerMountSpec, ComputerNetworkIdentity,
-    ComputerNetworkInfo, ComputerNetworkSpec, ComputerSpec, ComputerState, IdleAction,
-    LifecycleUpdate, RestoreComputerSpec, SandboxEvent, SandboxInfo, SandboxManager,
-    SandboxSummary, TemplateWarmRef,
+    CheckpointInfo, CheckpointSummary, ComputerEvent, ComputerId, ComputerInfo, ComputerManager,
+    ComputerMountSpec, ComputerNetworkIdentity, ComputerNetworkInfo, ComputerNetworkSpec,
+    ComputerSpec, ComputerState, ComputerSummary, IdleAction, LifecycleUpdate, RestoreComputerSpec,
+    TemplateWarmRef,
 };
 pub use sandbox::{
     ExecutionChannel, ExecutionOutput, ExecutionSnapshot, ExecutionSpec, StdinState,

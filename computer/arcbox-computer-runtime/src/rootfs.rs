@@ -138,7 +138,7 @@ impl RootfsBuilder {
     ///
     /// `pinned` are images that must survive the superseded-image sweep
     /// because a durable record, snapshot, or template still needs them
-    /// (`SandboxManager::pinned_rootfs_paths`).
+    /// (`ComputerManager::pinned_rootfs_paths`).
     ///
     /// Returns the path to the generated (or cached) ext4 image.
     pub async fn convert_layer_to_rootfs(

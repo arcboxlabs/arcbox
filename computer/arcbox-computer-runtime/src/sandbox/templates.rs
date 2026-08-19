@@ -1,4 +1,4 @@
-//! Template-catalog surface on [`SandboxManager`] (CORE-107).
+//! Template-catalog surface on [`ComputerManager`] (CORE-107).
 //!
 //! Thin delegation to [`TemplateCatalog`](crate::template_catalog::TemplateCatalog)
 //! plus the artifact side effects the catalog itself never performs: draining
@@ -6,7 +6,7 @@
 //! Build orchestration (rootfs conversion, prewarm) lives in the guest agent
 //! and lands its results here via [`register_template_draft`].
 //!
-//! [`register_template_draft`]: SandboxManager::register_template_draft
+//! [`register_template_draft`]: ComputerManager::register_template_draft
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -14,7 +14,7 @@ use std::path::Path;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use super::SandboxManager;
+use super::ComputerManager;
 use super::types::{ComputerId, ComputerSpec, ComputerState};
 use crate::error::{ComputerError, Result};
 use crate::snapshot::{SnapshotDraft, SnapshotGeometry};
@@ -39,7 +39,7 @@ pub struct PromotedSnapshot {
     pub artifact_bytes: u64,
 }
 
-impl SandboxManager {
+impl ComputerManager {
     /// Resolve a `name[:version]` catalog reference.
     pub fn get_template(&self, reference: &str) -> Result<ResolvedTemplate> {
         self.templates.resolve(reference).map_err(Into::into)
@@ -395,17 +395,17 @@ mod tests {
     use std::path::Path;
 
     use crate::config::RuntimeConfig;
-    use crate::sandbox::SandboxManager;
+    use crate::sandbox::ComputerManager;
     use crate::snapshot::{SnapshotCatalog, SnapshotDraft};
     use crate::template_catalog::{
         TEMPLATE_LABEL, TemplateDefaultsSpec, TemplateEntry, WarmArtifact,
     };
 
-    async fn manager(data_dir: &Path) -> SandboxManager {
+    async fn manager(data_dir: &Path) -> ComputerManager {
         let mut config = RuntimeConfig::default();
         config.firecracker.data_dir = data_dir.to_string_lossy().into_owned();
         let environment = crate::testkit::fake_environment(&config).unwrap();
-        let manager = SandboxManager::new(config, environment).unwrap();
+        let manager = ComputerManager::new(config, environment).unwrap();
         manager.await_reconcile().await.unwrap();
         manager
     }

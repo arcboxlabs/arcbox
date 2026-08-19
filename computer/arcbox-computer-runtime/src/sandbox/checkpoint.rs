@@ -12,7 +12,7 @@ use crate::lifecycle::tasks::CaptureSpec;
 pub(super) const CHECKPOINT_FORMAT: &str = arcbox_vm_driver::testkit::CHECKPOINT_FORMAT;
 
 /// Parameters for the internal restore path
-/// ([`SandboxManager::restore_from_snapshot`]), shared by the Restore RPC
+/// ([`ComputerManager::restore_from_snapshot`]), shared by the Restore RPC
 /// and internal callers.
 pub(super) struct RestoreRequest {
     /// Source checkpoint id.
@@ -29,7 +29,7 @@ pub(super) struct RestoreRequest {
     pub(super) origin: RestoreOrigin,
 }
 
-impl SandboxManager {
+impl ComputerManager {
     /// Rootfs images that durable records, snapshots, or templates still need.
     ///
     /// Exposed so whoever owns the converted-rootfs cache can pin them; see

@@ -80,7 +80,7 @@ impl std::fmt::Display for ComputerState {
     }
 }
 
-// Spec types (input to SandboxManager methods)
+// Spec types (input to ComputerManager methods)
 
 /// What happens when a sandbox's idle timeout expires (CORE-21).
 ///
@@ -214,7 +214,7 @@ pub struct RestoreComputerSpec {
 // Public output types (returned to callers / gRPC layer)
 
 /// Lightweight summary for `List` operations.
-pub struct SandboxSummary {
+pub struct ComputerSummary {
     pub id: ComputerId,
     pub state: ComputerState,
     pub labels: HashMap<String, String>,
@@ -231,7 +231,7 @@ pub struct SandboxSummary {
 }
 
 /// Detailed sandbox state for `Inspect`.
-pub struct SandboxInfo {
+pub struct ComputerInfo {
     pub id: ComputerId,
     pub state: ComputerState,
     pub labels: HashMap<String, String>,
@@ -258,7 +258,7 @@ pub struct SandboxInfo {
     pub on_idle: IdleAction,
 }
 
-/// Network details within `SandboxInfo`.
+/// Network details within `ComputerInfo`.
 pub struct ComputerNetworkInfo {
     pub ip_address: String,
     pub gateway: String,
@@ -266,7 +266,7 @@ pub struct ComputerNetworkInfo {
 
 // Events
 
-/// The `action` values a [`SandboxEvent`] carries, in lifecycle order.
+/// The `action` values a [`ComputerEvent`] carries, in lifecycle order.
 ///
 /// `action` stays a `String` on the event (it crosses the API as one), but
 /// every emit site and match in this crate goes through these constants, so
@@ -288,7 +288,7 @@ pub mod action {
 
 /// A sandbox lifecycle event broadcast to subscribers.
 #[derive(Debug, Clone)]
-pub struct SandboxEvent {
+pub struct ComputerEvent {
     pub sandbox_id: ComputerId,
     /// One of the [`action`] constants.
     pub action: String,
@@ -307,11 +307,11 @@ pub struct SandboxEvent {
     /// only on an event that never went through the bus (or, on the
     /// wire, one from a daemon predating sequencing). The delivery
     /// contract this makes checkable is on
-    /// [`SandboxManager::subscribe_events`](crate::SandboxManager::subscribe_events).
+    /// [`ComputerManager::subscribe_events`](crate::ComputerManager::subscribe_events).
     pub sequence: u64,
 }
 
-impl SandboxEvent {
+impl ComputerEvent {
     pub fn new(sandbox_id: &str, action: &str) -> Self {
         Self {
             sandbox_id: sandbox_id.to_owned(),
@@ -360,4 +360,4 @@ pub struct CheckpointSummary {
     pub created_at: String,
 }
 
-// SandboxManager
+// ComputerManager

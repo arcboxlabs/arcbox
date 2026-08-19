@@ -54,7 +54,7 @@ pub struct ExecutionSpec {
     pub tty_size: Option<(u16, u16)>,
     /// Kill the process after this many seconds (0 = no timeout).
     pub timeout_seconds: u32,
-    /// Keep stdin open for [`SandboxManager::write_stdin`]. When false the
+    /// Keep stdin open for [`ComputerManager::write_stdin`]. When false the
     /// process starts with stdin already at EOF (run semantics).
     pub stdin: bool,
 }
@@ -298,7 +298,7 @@ impl Execution {
         (snapshot, rx)
     }
 
-    /// Offset-idempotent stdin write; see [`SandboxManager::write_stdin`].
+    /// Offset-idempotent stdin write; see [`ComputerManager::write_stdin`].
     async fn write_stdin(&self, offset: u64, data: &[u8], eof: bool) -> Result<StdinState> {
         if eof && self.tty {
             return Err(ComputerError::Config(
@@ -581,7 +581,7 @@ impl ExecutionRegistry {
 /// threading the registry through each of them.
 pub(super) fn spawn_teardown_purge(
     registry: Arc<ExecutionRegistry>,
-    mut events: broadcast::Receiver<SandboxEvent>,
+    mut events: broadcast::Receiver<ComputerEvent>,
 ) {
     tokio::spawn(async move {
         loop {
@@ -637,7 +637,7 @@ async fn run_session(
     registry.remove_generation(&exec);
 }
 
-impl SandboxManager {
+impl ComputerManager {
     /// Start an execution inside a `Ready` sandbox.
     ///
     /// The execution id (caller-supplied or generated) addresses the process
@@ -740,7 +740,7 @@ impl SandboxManager {
     /// retained byte if retention already dropped the requested offset), then
     /// live output, and closes once the execution has exited and both
     /// channels are drained. Read the final state with
-    /// [`SandboxManager::wait_execution`] afterwards.
+    /// [`ComputerManager::wait_execution`] afterwards.
     pub fn attach_execution(
         &self,
         sandbox_id: &str,

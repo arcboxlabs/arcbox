@@ -24,7 +24,7 @@
 
 use super::*;
 
-impl SandboxManager {
+impl ComputerManager {
     /// Replace a computer's lifecycle deadlines (CORE-60).
     ///
     /// `ttl_seconds` re-arms the hard cap from *now* (0 removes it);

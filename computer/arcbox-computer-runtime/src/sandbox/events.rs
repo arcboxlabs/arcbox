@@ -12,9 +12,9 @@ use std::sync::Mutex;
 
 use tokio::sync::broadcast;
 
-use super::SandboxEvent;
+use super::ComputerEvent;
 
-/// Broadcasts [`SandboxEvent`]s to subscribers, stamping each with the next
+/// Broadcasts [`ComputerEvent`]s to subscribers, stamping each with the next
 /// sequence number as it goes out.
 ///
 /// The counter is global across all sandboxes of one manager and lives only
@@ -23,7 +23,7 @@ use super::SandboxEvent;
 /// absent field as `0` — it means "emitted by a daemon that predates
 /// sequencing", not "the first event".
 pub struct EventBus {
-    tx: broadcast::Sender<SandboxEvent>,
+    tx: broadcast::Sender<ComputerEvent>,
     /// The last sequence stamped. The lock deliberately spans the send:
     /// stamping and broadcasting under one guard is what makes the order
     /// subscribers observe identical to the numbering, so a gap in received
@@ -42,7 +42,7 @@ impl EventBus {
     }
 
     /// A new subscription, receiving every event published after this call.
-    pub fn subscribe(&self) -> broadcast::Receiver<SandboxEvent> {
+    pub fn subscribe(&self) -> broadcast::Receiver<ComputerEvent> {
         self.tx.subscribe()
     }
 
@@ -51,7 +51,7 @@ impl EventBus {
     /// Fire-and-forget: with no subscriber attached the event is discarded
     /// (and its sequence number consumed, which is correct — a subscriber
     /// that attaches later sees the jump and knows it missed history).
-    pub fn publish(&self, mut event: SandboxEvent) {
+    pub fn publish(&self, mut event: ComputerEvent) {
         let mut last = self.last.lock().unwrap();
         *last += 1;
         event.sequence = *last;
@@ -79,7 +79,7 @@ mod tests {
                 let bus = Arc::clone(&bus);
                 tokio::spawn(async move {
                     for _ in 0..64 {
-                        bus.publish(SandboxEvent::new(&format!("box-{p}"), action::READY));
+                        bus.publish(ComputerEvent::new(&format!("box-{p}"), action::READY));
                     }
                 })
             })
@@ -104,11 +104,11 @@ mod tests {
     #[tokio::test]
     async fn a_late_subscriber_sees_the_history_it_missed_as_a_gap() {
         let bus = EventBus::new(16);
-        bus.publish(SandboxEvent::new("early", action::CREATED));
-        bus.publish(SandboxEvent::new("early", action::READY));
+        bus.publish(ComputerEvent::new("early", action::CREATED));
+        bus.publish(ComputerEvent::new("early", action::READY));
 
         let mut rx = bus.subscribe();
-        bus.publish(SandboxEvent::new("late", action::CREATED));
+        bus.publish(ComputerEvent::new("late", action::CREATED));
         let first = rx.try_recv().unwrap();
         assert_eq!(
             first.sequence, 3,

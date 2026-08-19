@@ -22,8 +22,8 @@ use arcbox_computer_runtime::config::{JailerConfig, RuntimeConfig};
 use arcbox_computer_runtime::testkit::agent::FakeAgentFactory;
 use arcbox_computer_runtime::testkit::fake_environment;
 use arcbox_computer_runtime::{
-    ComputerId, ComputerSpec, ComputerState, NodeEnvironment, OutputChunk, SandboxEvent,
-    SandboxManager,
+    ComputerEvent, ComputerId, ComputerManager, ComputerSpec, ComputerState, NodeEnvironment,
+    OutputChunk,
 };
 use arcbox_vm_driver::testkit::{FakeDriver, FakeNetwork};
 use tokio::sync::broadcast;
@@ -168,7 +168,7 @@ struct Ports {
 }
 
 impl Ports {
-    async fn manager(&self, config: &RuntimeConfig) -> Arc<SandboxManager> {
+    async fn manager(&self, config: &RuntimeConfig) -> Arc<ComputerManager> {
         let mut environment =
             fake_environment(config).expect("a copy-on-write manager over the data dir");
         if let Some(probe) = &self.cow_probe {
@@ -181,7 +181,7 @@ impl Ports {
                 .expect("a probe-backed cow manager over the data dir"),
             );
         }
-        let manager = SandboxManager::new(
+        let manager = ComputerManager::new(
             config.clone(),
             NodeEnvironment {
                 // The fixture's own clones, so a restart hands its
@@ -215,7 +215,7 @@ impl Ports {
 /// A manager over the fakes, with the handles a test scripts and asserts
 /// through.
 pub struct Fixture {
-    pub manager: Arc<SandboxManager>,
+    pub manager: Arc<ComputerManager>,
     ports: Ports,
     config: RuntimeConfig,
     /// The data dir, kept alive for the fixture's life.
@@ -429,7 +429,7 @@ impl Fixture {
 
 /// Play the host's half of the network-cleanup ticket protocol for every
 /// quarantined address, and answer with the ids it settled.
-pub async fn settle_network_cleanups(manager: &SandboxManager) -> Vec<String> {
+pub async fn settle_network_cleanups(manager: &ComputerManager) -> Vec<String> {
     let pending = manager.pending_network_cleanups().await.unwrap();
     for (id, token) in &pending {
         manager
@@ -444,7 +444,7 @@ pub async fn settle_network_cleanups(manager: &SandboxManager) -> Vec<String> {
     pending.into_iter().map(|(id, _)| id).collect()
 }
 
-/// The `action` values [`SandboxEvent`] carries, as the wire spells them.
+/// The `action` values [`ComputerEvent`] carries, as the wire spells them.
 ///
 /// Spelled out rather than imported: the constants they mirror are
 /// crate-private, and it is the *strings* an out-of-crate consumer matches
@@ -465,10 +465,10 @@ pub mod action {
 /// Wait for `action` on `id`, or fail the test — reporting a failure on
 /// the same computer immediately rather than waiting out the deadline.
 pub async fn await_action(
-    events: &mut broadcast::Receiver<SandboxEvent>,
+    events: &mut broadcast::Receiver<ComputerEvent>,
     id: &str,
     action: &str,
-) -> SandboxEvent {
+) -> ComputerEvent {
     let deadline = tokio::time::Instant::now() + DEADLINE;
     loop {
         let event = tokio::time::timeout_at(deadline, events.recv())
@@ -488,7 +488,7 @@ pub async fn await_action(
 }
 
 /// Every `action` seen for `id` so far, in order.
-pub fn drain_actions(events: &mut broadcast::Receiver<SandboxEvent>, id: &str) -> Vec<String> {
+pub fn drain_actions(events: &mut broadcast::Receiver<ComputerEvent>, id: &str) -> Vec<String> {
     let mut actions = Vec::new();
     while let Ok(event) = events.try_recv() {
         if event.sandbox_id == id {

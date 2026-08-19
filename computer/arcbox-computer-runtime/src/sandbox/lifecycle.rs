@@ -24,7 +24,7 @@ pub(super) enum WarmPolicy {
 /// per-computer bound: past that it is not about to finish.
 const SWEEP_WAIT_BUDGET: Duration = Duration::from_secs(10);
 
-impl SandboxManager {
+impl ComputerManager {
     /// Replay a durable Create outcome without resolving its template again.
     pub async fn replay_sandbox_create(
         &self,
@@ -723,7 +723,7 @@ impl SandboxManager {
     }
 
     /// Return the current state and metadata of a sandbox.
-    pub fn inspect_sandbox(&self, id: &ComputerId) -> Result<SandboxInfo> {
+    pub fn inspect_sandbox(&self, id: &ComputerId) -> Result<ComputerInfo> {
         let snapshot = self.snapshot(id)?;
         // Size the retained artifacts after the read: the sizing stats files
         // and scans the catalog, and the snapshot is a borrow of a `watch`
@@ -739,7 +739,7 @@ impl SandboxManager {
         &self,
         state_filter: Option<&str>,
         label_filter: &HashMap<String, String>,
-    ) -> Result<Vec<SandboxSummary>> {
+    ) -> Result<Vec<ComputerSummary>> {
         self.check_reconcile()?;
         // Snapshot every computer's read view under the map read guard. No
         // per-computer lock is taken at all, so the "never hold the map lock
@@ -756,7 +756,7 @@ impl SandboxManager {
         // which is what keeps List and Inspect agreeing in every state — and
         // pays one catalog listing for the whole response instead of one per
         // paused sandbox (only paused rows carry a checkpoint to resolve).
-        let mut summaries: Vec<(SandboxSummary, super::storage::RetainedArtifacts)> = computers
+        let mut summaries: Vec<(ComputerSummary, super::storage::RetainedArtifacts)> = computers
             .iter()
             .filter_map(|(id, snapshot)| {
                 if let Some(sf) = state_filter
@@ -771,7 +771,7 @@ impl SandboxManager {
                         return None;
                     }
                 }
-                let summary = SandboxSummary {
+                let summary = ComputerSummary {
                     id: id.clone(),
                     state: snapshot.state,
                     labels: snapshot.labels.clone(),
@@ -819,7 +819,7 @@ impl SandboxManager {
     /// [`RecvError::Lagged`](tokio::sync::broadcast::error::RecvError::Lagged)
     /// with the overwritten events lost.
     ///
-    /// What makes the loss *detectable* is [`SandboxEvent::sequence`]
+    /// What makes the loss *detectable* is [`ComputerEvent::sequence`]
     /// (CORE-147): 1-based, global across all sandboxes of this manager,
     /// and contiguous in the order received — so a subscriber that sees
     /// `sequence` jump by more than one has missed events (including any
@@ -833,7 +833,7 @@ impl SandboxManager {
     /// while no manager ran were never numbered at all — a consumer that
     /// outlives the manager must reconcile on reconnect regardless of
     /// sequence.
-    pub fn subscribe_events(&self) -> broadcast::Receiver<SandboxEvent> {
+    pub fn subscribe_events(&self) -> broadcast::Receiver<ComputerEvent> {
         self.events.subscribe()
     }
 
@@ -888,8 +888,8 @@ impl SandboxManager {
 }
 
 /// A computer's read snapshot as `Inspect` reports it.
-fn snapshot_to_info(id: &ComputerId, snapshot: &ComputerSnapshot) -> SandboxInfo {
-    SandboxInfo {
+fn snapshot_to_info(id: &ComputerId, snapshot: &ComputerSnapshot) -> ComputerInfo {
+    ComputerInfo {
         id: id.clone(),
         state: snapshot.state,
         labels: snapshot.labels.clone(),
@@ -915,7 +915,7 @@ fn snapshot_to_info(id: &ComputerId, snapshot: &ComputerSnapshot) -> SandboxInfo
 
 /// Files a listed checkpoint occupies on disk, for storage accounting.
 ///
-/// The listing counterpart of [`SandboxManager::checkpoint_paths`]: it reads
+/// The listing counterpart of [`ComputerManager::checkpoint_paths`]: it reads
 /// an already-loaded [`SnapshotInfo`] so a multi-sandbox response pays one
 /// catalog scan rather than one per paused sandbox.
 fn snapshot_files(info: &crate::snapshot::SnapshotInfo) -> Vec<PathBuf> {
@@ -942,7 +942,7 @@ mod tests {
                 ..arcbox_vm_driver::testkit::FakeDriver::new().capabilities()
             })
             .build();
-        SandboxManager::new(
+        ComputerManager::new(
             config.clone(),
             NodeEnvironment {
                 driver: Arc::new(driver),

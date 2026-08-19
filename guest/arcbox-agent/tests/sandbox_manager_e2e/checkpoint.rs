@@ -4,7 +4,7 @@ use std::panic::{AssertUnwindSafe, resume_unwind};
 
 use arcbox_computer_runtime::snapshot::SnapshotGeometry;
 use arcbox_computer_runtime::{
-    ComputerSpec, ComputerState, OutputChunk, RestoreComputerSpec, SandboxManager, SnapshotCatalog,
+    ComputerManager, ComputerSpec, ComputerState, OutputChunk, RestoreComputerSpec, SnapshotCatalog,
 };
 use futures::FutureExt;
 
@@ -136,7 +136,7 @@ async fn jailed_checkpoint_chain_preserves_source_and_geometry() {
     assert!(cleanup_errors.is_empty(), "checkpoint cleanup failed");
 }
 
-async fn cleanup(mgr: &SandboxManager) -> Vec<String> {
+async fn cleanup(mgr: &ComputerManager) -> Vec<String> {
     let mut errors = Vec::new();
     match mgr.list_sandboxes(None, &HashMap::new()) {
         Ok(sandboxes) => {
@@ -161,7 +161,7 @@ async fn cleanup(mgr: &SandboxManager) -> Vec<String> {
     errors
 }
 
-async fn run_script(mgr: &SandboxManager, id: &String, script: &str) -> String {
+async fn run_script(mgr: &ComputerManager, id: &String, script: &str) -> String {
     let mut output = mgr
         .run_in_sandbox(
             id,

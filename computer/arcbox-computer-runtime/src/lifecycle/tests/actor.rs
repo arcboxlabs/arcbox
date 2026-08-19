@@ -29,7 +29,7 @@ use crate::sandbox::reconcile::{SandboxStateRecord, write_state_record};
 use crate::sandbox::record::{SandboxProvisionOutcome, SandboxRecordStore};
 use crate::sandbox::workload::WorkloadClaim;
 use crate::sandbox::{
-    CheckpointInfo, ComputerSpec, ComputerState, IdleAction, LifecycleUpdate, SandboxEvent,
+    CheckpointInfo, ComputerEvent, ComputerSpec, ComputerState, IdleAction, LifecycleUpdate,
 };
 use crate::testkit::agent::FakeAgentFactory;
 
@@ -252,7 +252,7 @@ struct Harness {
     registered: Arc<AtomicBool>,
     runtime: crate::lifecycle::runtime::Runtime,
     snapshot: watch::Receiver<ComputerSnapshot>,
-    events: broadcast::Receiver<SandboxEvent>,
+    events: broadcast::Receiver<ComputerEvent>,
     script: Arc<Script>,
     actor: tokio::task::JoinHandle<()>,
     _timers: watch::Sender<bool>,
@@ -395,7 +395,7 @@ impl Harness {
     }
 
     /// The next event carrying `action`.
-    async fn next_event(&mut self, action: &str) -> SandboxEvent {
+    async fn next_event(&mut self, action: &str) -> ComputerEvent {
         loop {
             let event = self.events.recv().await.expect("the event bus stays open");
             if event.action == action {

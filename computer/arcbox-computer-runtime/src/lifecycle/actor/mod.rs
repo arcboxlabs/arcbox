@@ -64,7 +64,7 @@ use crate::sandbox::record::{
 use crate::sandbox::types::action;
 use crate::sandbox::workload::WorkloadClaim;
 use crate::sandbox::{
-    CheckpointInfo, ComputerId, ComputerState, IdleAction, LifecycleUpdate, SandboxEvent,
+    CheckpointInfo, ComputerEvent, ComputerId, ComputerState, IdleAction, LifecycleUpdate,
 };
 
 mod commands;
@@ -465,7 +465,7 @@ pub struct ComputerActor {
     idle: Option<Pin<Box<tokio::time::Sleep>>>,
     retry: Option<Pin<Box<tokio::time::Sleep>>>,
     /// `false` keeps both deadline timers unarmed: a manager that was never
-    /// shared (`SandboxManager::into_shared`) fires no timers, which unit
+    /// shared (`ComputerManager::into_shared`) fires no timers, which unit
     /// tests of unrelated surfaces rely on.
     timers_enabled: watch::Receiver<bool>,
 }

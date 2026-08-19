@@ -468,7 +468,7 @@ impl ComputerActor {
     }
 
     fn publish(&mut self, notify: Notify) {
-        let event = SandboxEvent::new(&self.id, notify_action(notify));
+        let event = ComputerEvent::new(&self.id, notify_action(notify));
         let event = match notify {
             Notify::Failed => {
                 let error = self.error.clone().unwrap_or_default();

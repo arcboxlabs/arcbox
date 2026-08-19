@@ -51,8 +51,8 @@ use arcbox_agent::config::{AdapterConfig, GuestConfig, JailerProcess};
 use arcbox_agent::sandbox::{block_tools, node_environment};
 use arcbox_computer_runtime::config::JailerConfig;
 use arcbox_computer_runtime::{
-    ComputerConfig, ComputerNetworkSpec, ComputerSpec, ComputerState, DefaultVmConfig, GrpcConfig,
-    NetworkConfig, RuntimeConfig, SandboxEvent, SandboxManager,
+    ComputerConfig, ComputerEvent, ComputerManager, ComputerNetworkSpec, ComputerSpec,
+    ComputerState, DefaultVmConfig, GrpcConfig, NetworkConfig, RuntimeConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -156,14 +156,14 @@ fn no_tap() -> ComputerSpec {
 
 /// A manager over the environment `SandboxService::new` composes: this
 /// suite exercises the real composition rather than one of its own.
-fn manager(cfg: GuestConfig) -> SandboxManager {
+fn manager(cfg: GuestConfig) -> ComputerManager {
     let environment = node_environment(&cfg, block_tools()).unwrap();
-    SandboxManager::new(cfg.runtime, environment).unwrap()
+    ComputerManager::new(cfg.runtime, environment).unwrap()
 }
 
 /// Complete the startup cleanup handshake for a manager backed by a fresh
 /// test directory, where no stale host resources exist.
-async fn finalize_startup_cleanup(mgr: &SandboxManager) {
+async fn finalize_startup_cleanup(mgr: &ComputerManager) {
     let token = mgr
         .startup_cleanup_token()
         .await
@@ -176,7 +176,7 @@ async fn finalize_startup_cleanup(mgr: &SandboxManager) {
 /// or until a `"failed"` event for `id` is received, or a 30-second timeout
 /// expires.  Returns `true` on success.
 async fn wait_for_event(
-    rx: &mut tokio::sync::broadcast::Receiver<SandboxEvent>,
+    rx: &mut tokio::sync::broadcast::Receiver<ComputerEvent>,
     id: &str,
     action: &str,
 ) -> bool {

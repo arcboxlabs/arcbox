@@ -10,7 +10,7 @@ use super::*;
 use crate::agent::DirWatch;
 use crate::file_proto::FileStatDto;
 
-impl SandboxManager {
+impl ComputerManager {
     /// Read a file from inside an alive sandbox.
     pub async fn read_sandbox_file(&self, id: &ComputerId, path: &str) -> Result<Vec<u8>> {
         let agent = self.require_alive_agent(id)?;

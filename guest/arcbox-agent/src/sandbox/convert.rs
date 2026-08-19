@@ -6,9 +6,8 @@ use arcbox_computer_runtime::template_catalog::{
     ReadyProbeSpec, TemplateDefaultsSpec, TemplateEntry,
 };
 use arcbox_computer_runtime::{
-    CheckpointInfo, CheckpointSummary, ComputerState, ExecutionChannel, ExecutionSnapshot,
-    ExitStatus, IdleAction, SandboxEvent as VmSandboxEvent, SandboxInfo, SandboxSummary,
-    StdinState,
+    CheckpointInfo, CheckpointSummary, ComputerEvent, ComputerInfo, ComputerState, ComputerSummary,
+    ExecutionChannel, ExecutionSnapshot, ExitStatus, IdleAction, StdinState,
 };
 use arcbox_connect::sandbox_v1;
 use buffa_types::google::protobuf::Timestamp;
@@ -188,7 +187,7 @@ pub(super) fn event_kind(action: &str) -> sandbox_v1::SandboxEventKind {
     }
 }
 
-pub(super) fn vm_event_to_proto(e: VmSandboxEvent) -> sandbox_v1::SandboxEvent {
+pub(super) fn vm_event_to_proto(e: ComputerEvent) -> sandbox_v1::SandboxEvent {
     sandbox_v1::SandboxEvent {
         sandbox_id: e.sandbox_id,
         kind: event_kind(&e.action).into(),
@@ -199,7 +198,7 @@ pub(super) fn vm_event_to_proto(e: VmSandboxEvent) -> sandbox_v1::SandboxEvent {
     }
 }
 
-pub(super) fn info_to_proto(info: SandboxInfo) -> sandbox_v1::SandboxInfo {
+pub(super) fn info_to_proto(info: ComputerInfo) -> sandbox_v1::SandboxInfo {
     // The host TAP name is deliberately not exposed (CORE-54): it is a host
     // interface a tenant can neither see nor use.
     let network = info.network.map(|n| sandbox_v1::SandboxNetwork {
@@ -240,7 +239,7 @@ pub(super) fn idle_action_to_proto(action: IdleAction) -> sandbox_v1::IdleAction
     }
 }
 
-pub(super) fn summary_to_proto(s: SandboxSummary) -> sandbox_v1::SandboxSummary {
+pub(super) fn summary_to_proto(s: ComputerSummary) -> sandbox_v1::SandboxSummary {
     sandbox_v1::SandboxSummary {
         id: s.id,
         state: state_to_proto(s.state).into(),

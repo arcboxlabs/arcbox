@@ -1,4 +1,4 @@
-//! End-to-end smoke test for [`SandboxManager`], over the environment this
+//! End-to-end smoke test for [`ComputerManager`], over the environment this
 //! crate composes for the System VM.
 //!
 //! ## Usage
@@ -42,7 +42,7 @@ use std::time::Instant;
 
 use anyhow::{Context, bail};
 use arcbox_computer_runtime::{
-    ComputerSpec, ComputerState, RestoreComputerSpec, SandboxEvent, SandboxManager,
+    ComputerEvent, ComputerManager, ComputerSpec, ComputerState, RestoreComputerSpec,
 };
 use tokio::sync::broadcast;
 use tokio::time::timeout;
@@ -82,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
     let environment =
         arcbox_agent::sandbox::node_environment(&config, arcbox_agent::sandbox::block_tools())?;
     let manager =
-        SandboxManager::new(config.runtime, environment).context("SandboxManager::new")?;
+        ComputerManager::new(config.runtime, environment).context("SandboxManager::new")?;
 
     // Phase 1 — Core lifecycle
     println!("\n=== Phase 1: Core lifecycle ===");
@@ -353,7 +353,7 @@ async fn main() -> anyhow::Result<()> {
 ///
 /// Prints a one-line summary with exit code and trimmed output.
 async fn run_cmd(
-    manager: &SandboxManager,
+    manager: &ComputerManager,
     id: &str,
     cmd: &[&str],
     timeout_secs: u32,
@@ -401,9 +401,9 @@ async fn run_cmd(
 /// Checks current state first (fast path for snapshot restores that complete
 /// synchronously), then falls back to watching the event broadcast channel.
 async fn wait_for_ready(
-    manager: &SandboxManager,
+    manager: &ComputerManager,
     id: &str,
-    events: &mut broadcast::Receiver<SandboxEvent>,
+    events: &mut broadcast::Receiver<ComputerEvent>,
     timeout_secs: u64,
 ) -> anyhow::Result<()> {
     if let Ok(info) = manager.inspect_sandbox(&id.to_string()) {

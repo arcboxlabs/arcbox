@@ -91,7 +91,7 @@ pub struct ResumeFailure {
     pub unwound: bool,
 }
 
-impl SandboxManager {
+impl ComputerManager {
     /// Pause a `Ready` sandbox: checkpoint it, then release its runtime
     /// resources while keeping the record, checkpoint, and disk overlay
     /// under the same id.
