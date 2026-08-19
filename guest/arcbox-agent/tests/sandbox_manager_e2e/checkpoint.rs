@@ -37,7 +37,7 @@ async fn jailed_checkpoint_chain_preserves_source_and_geometry() {
         finalize_startup_cleanup(&mgr).await;
         let mut events = mgr.subscribe_events();
         let (mut id, ip) = mgr
-            .create_sandbox(ComputerSpec {
+            .create_computer(ComputerSpec {
                 id: Some("origin".into()),
                 kernel: kernel.clone(),
                 rootfs: rootfs.clone(),
@@ -58,7 +58,7 @@ async fn jailed_checkpoint_chain_preserves_source_and_geometry() {
         let mut snapshots = Vec::new();
         for generation in 1..=2 {
             let checkpoint = mgr
-                .checkpoint_sandbox(&id, format!("generation-{generation}"), HashMap::new())
+                .checkpoint_computer(&id, format!("generation-{generation}"), HashMap::new())
                 .await
                 .unwrap();
             let meta = catalog.find_by_id(&checkpoint.snapshot_id).unwrap();
@@ -75,7 +75,7 @@ async fn jailed_checkpoint_chain_preserves_source_and_geometry() {
             mgr.remove_sandbox(&id, true).await.unwrap();
             assert!(!super::firecracker_alive(pid));
             let (restored, ip) = mgr
-                .restore_sandbox(RestoreComputerSpec {
+                .restore_computer(RestoreComputerSpec {
                     id: Some(format!("generation-{generation}")),
                     snapshot_id: checkpoint.snapshot_id.clone(),
                     ..RestoreComputerSpec::default()

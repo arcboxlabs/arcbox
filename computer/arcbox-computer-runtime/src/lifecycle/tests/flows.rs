@@ -352,7 +352,7 @@ fn a_user_checkpoint_holds_ready_and_writes_no_record() {
     }
 
     // A recoverable failure returns to Ready without a record write, exactly
-    // as `checkpoint_sandbox` does today — with the idle window restarted,
+    // as `checkpoint_computer` does today — with the idle window restarted,
     // since the expiry swallowed above consumed a one-shot timer.
     let (state, effects) = step(&mut sm, &mut context, &Event::Failure);
     assert_eq!(state.to_public(), ComputerState::Ready);

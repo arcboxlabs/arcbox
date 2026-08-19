@@ -1,6 +1,6 @@
 //! The manager's own flows, driven end to end over the fakes.
 //!
-//! One computer per test, created through `create_sandbox` and reached
+//! One computer per test, created through `create_computer` and reached
 //! only through the public API — so what these assert is what a caller
 //! gets, and no test can reach a state a real flow does not produce.
 //!
@@ -44,7 +44,7 @@ async fn a_create_boots_to_ready_and_serves_exec_and_files() {
 
     let (id, ip) = fixture
         .manager
-        .create_sandbox(ComputerSpec {
+        .create_computer(ComputerSpec {
             id: Some("booted".into()),
             cmd: vec!["/bin/hello".into()],
             ..ComputerSpec::default()
@@ -145,7 +145,7 @@ async fn a_cmd_carrying_boot_announces_its_workload_around_ready() {
 
     let (id, _ip) = fixture
         .manager
-        .create_sandbox(ComputerSpec {
+        .create_computer(ComputerSpec {
             id: Some("noisy".into()),
             cmd: vec!["/bin/hello".into()],
             ..ComputerSpec::default()
@@ -186,7 +186,7 @@ async fn a_ready_probe_command_that_never_exits_fails_the_boot() {
 
     let (id, _ip) = fixture
         .manager
-        .create_sandbox(ComputerSpec {
+        .create_computer(ComputerSpec {
             id: Some("wedged".into()),
             ready_probe: Some(
                 arcbox_computer_runtime::template_catalog::ReadyProbeSpec::Command {
@@ -220,7 +220,7 @@ async fn a_boot_whose_cmd_exits_while_the_gate_runs_still_reaches_ready() {
 
     let (id, _ip) = fixture
         .manager
-        .create_sandbox(ComputerSpec {
+        .create_computer(ComputerSpec {
             id: Some("gated".into()),
             cmd: vec!["/bin/cmd".into()],
             ready_probe: Some(
@@ -264,7 +264,7 @@ async fn a_boot_the_driver_refuses_fails_and_releases_the_computer() {
 
     let (id, _ip) = fixture
         .manager
-        .create_sandbox(ComputerSpec {
+        .create_computer(ComputerSpec {
             id: Some("doomed".into()),
             ..ComputerSpec::default()
         })
@@ -295,7 +295,7 @@ async fn a_create_that_fails_before_activation_hands_the_address_back() {
 
     fixture
         .manager
-        .create_sandbox(ComputerSpec {
+        .create_computer(ComputerSpec {
             id: Some("doomed".into()),
             ..ComputerSpec::default()
         })
@@ -311,7 +311,7 @@ async fn a_create_that_fails_before_activation_hands_the_address_back() {
     );
     let (_id, reused) = fixture
         .manager
-        .create_sandbox(ComputerSpec {
+        .create_computer(ComputerSpec {
             id: Some("next".into()),
             ..ComputerSpec::default()
         })
@@ -814,7 +814,7 @@ async fn a_checkpoint_restores_onto_a_fresh_address() {
 
     let checkpoint = fixture
         .manager
-        .checkpoint_sandbox(&id, "user".into(), HashMap::new())
+        .checkpoint_computer(&id, "user".into(), HashMap::new())
         .await
         .unwrap();
     assert_eq!(
@@ -835,7 +835,7 @@ async fn a_checkpoint_restores_onto_a_fresh_address() {
 
     let (clone, clone_ip) = fixture
         .manager
-        .restore_sandbox(RestoreComputerSpec {
+        .restore_computer(RestoreComputerSpec {
             id: Some("clone".into()),
             snapshot_id: checkpoint.snapshot_id.clone(),
             network_override: true,
@@ -874,12 +874,12 @@ async fn an_adopted_computers_checkpoint_restores() {
 
     let checkpoint = fixture
         .manager
-        .checkpoint_sandbox(&id, "adopted".into(), HashMap::new())
+        .checkpoint_computer(&id, "adopted".into(), HashMap::new())
         .await
         .unwrap();
     let (clone, _) = fixture
         .manager
-        .restore_sandbox(RestoreComputerSpec {
+        .restore_computer(RestoreComputerSpec {
             id: Some("adopted-clone".into()),
             snapshot_id: checkpoint.snapshot_id,
             network_override: true,
@@ -910,7 +910,7 @@ async fn a_restored_computers_checkpoint_restores_again() {
     fixture.await_state(&origin, ComputerState::Ready).await;
     let first = fixture
         .manager
-        .checkpoint_sandbox(&origin, "first".into(), HashMap::new())
+        .checkpoint_computer(&origin, "first".into(), HashMap::new())
         .await
         .unwrap();
     let catalog = fixture.snapshot_catalog();
@@ -918,7 +918,7 @@ async fn a_restored_computers_checkpoint_restores_again() {
     assert_eq!(first_meta.geometry, Some(geometry));
     let (first_clone, _) = fixture
         .manager
-        .restore_sandbox(RestoreComputerSpec {
+        .restore_computer(RestoreComputerSpec {
             id: Some("first-clone".into()),
             snapshot_id: first.snapshot_id,
             network_override: true,
@@ -932,7 +932,7 @@ async fn a_restored_computers_checkpoint_restores_again() {
 
     let second = fixture
         .manager
-        .checkpoint_sandbox(&first_clone, "second".into(), HashMap::new())
+        .checkpoint_computer(&first_clone, "second".into(), HashMap::new())
         .await
         .unwrap();
     let second_meta = catalog.find_by_id(&second.snapshot_id).unwrap();
@@ -941,7 +941,7 @@ async fn a_restored_computers_checkpoint_restores_again() {
     assert_eq!(second_meta.rootfs_path, first_meta.rootfs_path);
     let (second_clone, _) = fixture
         .manager
-        .restore_sandbox(RestoreComputerSpec {
+        .restore_computer(RestoreComputerSpec {
             id: Some("second-clone".into()),
             snapshot_id: second.snapshot_id,
             network_override: true,
@@ -961,7 +961,7 @@ async fn a_restore_without_valid_geometry_reserves_no_resources() {
     let origin = fixture.ready("origin").await;
     let checkpoint = fixture
         .manager
-        .checkpoint_sandbox(&origin, "source".into(), HashMap::new())
+        .checkpoint_computer(&origin, "source".into(), HashMap::new())
         .await
         .unwrap();
     let meta = fixture
@@ -997,7 +997,7 @@ async fn a_restore_without_valid_geometry_reserves_no_resources() {
         std::fs::write(&meta_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
         let error = fixture
             .manager
-            .restore_sandbox(request.clone())
+            .restore_computer(request.clone())
             .await
             .unwrap_err();
         assert!(
@@ -1021,7 +1021,7 @@ async fn a_restore_without_valid_geometry_reserves_no_resources() {
     }
 
     std::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
-    fixture.manager.restore_sandbox(request).await.unwrap();
+    fixture.manager.restore_computer(request).await.unwrap();
     fixture.await_state(&clone, ComputerState::Ready).await;
     let journal: serde_json::Value =
         serde_json::from_slice(&std::fs::read(fixture.vm_dir(&clone).join("state.json")).unwrap())
@@ -1051,7 +1051,7 @@ async fn an_adopted_computer_with_a_legacy_record_refuses_checkpoint() {
         fixture.await_state(&id, ComputerState::Ready).await;
         let error = fixture
             .manager
-            .checkpoint_sandbox(&id, "legacy".into(), HashMap::new())
+            .checkpoint_computer(&id, "legacy".into(), HashMap::new())
             .await
             .expect_err("the record has no safe restore provenance");
         assert!(
@@ -1080,7 +1080,7 @@ async fn a_recoverable_checkpoint_failure_leaves_the_computer_ready() {
 
     fixture
         .manager
-        .checkpoint_sandbox(&id, "user".into(), HashMap::new())
+        .checkpoint_computer(&id, "user".into(), HashMap::new())
         .await
         .expect_err("a capture the driver refused");
 
@@ -1117,7 +1117,7 @@ async fn a_checkpoint_that_leaves_the_guest_frozen_fails_and_releases_the_comput
 
     let error = fixture
         .manager
-        .checkpoint_sandbox(&id, "user".into(), HashMap::new())
+        .checkpoint_computer(&id, "user".into(), HashMap::new())
         .await
         .expect_err("a capture that froze the guest");
     assert!(
@@ -1139,14 +1139,14 @@ async fn a_failed_restore_frees_its_id_before_it_answers() {
     let origin = fixture.ready("origin").await;
     let checkpoint = fixture
         .manager
-        .checkpoint_sandbox(&origin, "user".into(), HashMap::new())
+        .checkpoint_computer(&origin, "user".into(), HashMap::new())
         .await
         .unwrap();
 
     fixture.driver().fail_next_boot();
     fixture
         .manager
-        .restore_sandbox(RestoreComputerSpec {
+        .restore_computer(RestoreComputerSpec {
             id: Some("second".into()),
             snapshot_id: checkpoint.snapshot_id.clone(),
             network_override: true,
@@ -1160,7 +1160,7 @@ async fn a_failed_restore_frees_its_id_before_it_answers() {
     fixture.settle_network_cleanups().await;
     let (again, _ip) = fixture
         .manager
-        .restore_sandbox(RestoreComputerSpec {
+        .restore_computer(RestoreComputerSpec {
             id: Some("second".into()),
             snapshot_id: checkpoint.snapshot_id,
             network_override: true,
@@ -1192,7 +1192,7 @@ async fn a_caller_cannot_squat_on_the_reserved_checkpoint_name_or_labels() {
     ] {
         let error = fixture
             .manager
-            .checkpoint_sandbox(&id, name.to_owned(), labels)
+            .checkpoint_computer(&id, name.to_owned(), labels)
             .await
             .expect_err("a reserved name or label is refused");
         assert!(matches!(error, ComputerError::Config(_)), "{error}");
@@ -1307,7 +1307,7 @@ async fn a_boot_whose_warm_publish_freezes_the_guest_fails() {
 
     let (id, _ip) = fixture
         .manager
-        .create_sandbox(ComputerSpec {
+        .create_computer(ComputerSpec {
             id: Some("chilled".into()),
             ..ComputerSpec::default()
         })
@@ -1336,7 +1336,7 @@ async fn a_forced_remove_preempts_a_boot_in_flight() {
 
     let (id, _ip) = fixture
         .manager
-        .create_sandbox(ComputerSpec {
+        .create_computer(ComputerSpec {
             id: Some("wedged".into()),
             ready_probe: Some(
                 arcbox_computer_runtime::template_catalog::ReadyProbeSpec::Command {
@@ -1586,7 +1586,7 @@ async fn a_computer_whose_vm_died_comes_back_failed() {
 /// rather than building a second computer — the durable half of an
 /// at-least-once RPC.
 ///
-/// The replay is its own verb, and has to be: `create_sandbox_keyed`
+/// The replay is its own verb, and has to be: `create_computer_keyed`
 /// claims the id in memory *before* it consults the durable record, so
 /// while the computer is live the claim answers first. A caller that
 /// retries has to ask the record.
@@ -1599,7 +1599,7 @@ async fn a_create_replays_its_recorded_outcome_rather_than_building_a_second_com
     };
     let (id, ip) = fixture
         .manager
-        .create_sandbox_keyed(spec.clone(), "one-key")
+        .create_computer_keyed(spec.clone(), "one-key")
         .await
         .unwrap();
     fixture.await_state(&id, ComputerState::Ready).await;
@@ -1607,7 +1607,7 @@ async fn a_create_replays_its_recorded_outcome_rather_than_building_a_second_com
     assert_eq!(
         fixture
             .manager
-            .replay_sandbox_create(&id, "one-key")
+            .replay_computer_create(&id, "one-key")
             .await
             .unwrap(),
         Some((id.clone(), ip)),
@@ -1616,7 +1616,7 @@ async fn a_create_replays_its_recorded_outcome_rather_than_building_a_second_com
     assert_eq!(
         fixture
             .manager
-            .replay_sandbox_create("nobody", "one-key")
+            .replay_computer_create("nobody", "one-key")
             .await
             .unwrap(),
         None,
@@ -1626,14 +1626,14 @@ async fn a_create_replays_its_recorded_outcome_rather_than_building_a_second_com
         matches!(
             fixture
                 .manager
-                .replay_sandbox_create(&id, "another-key")
+                .replay_computer_create(&id, "another-key")
                 .await,
             Err(ComputerError::AlreadyExists(_))
         ),
         "the key that made the record owns it"
     );
     assert!(matches!(
-        fixture.manager.create_sandbox_keyed(spec, "one-key").await,
+        fixture.manager.create_computer_keyed(spec, "one-key").await,
         Err(ComputerError::AlreadyExists(_))
     ));
     assert_eq!(
@@ -1658,13 +1658,13 @@ async fn a_create_of_a_live_id_under_another_key_is_refused() {
     };
     let (id, _ip) = fixture
         .manager
-        .create_sandbox_keyed(spec(), "mine")
+        .create_computer_keyed(spec(), "mine")
         .await
         .unwrap();
     fixture.await_state(&id, ComputerState::Ready).await;
 
     assert!(matches!(
-        fixture.manager.create_sandbox_keyed(spec(), "yours").await,
+        fixture.manager.create_computer_keyed(spec(), "yours").await,
         Err(ComputerError::AlreadyExists(_))
     ));
 
@@ -1673,7 +1673,7 @@ async fn a_create_of_a_live_id_under_another_key_is_refused() {
     fixture.manager.stop_sandbox(&id, 1).await.unwrap();
     fixture.await_state(&id, ComputerState::Stopped).await;
     assert!(matches!(
-        fixture.manager.create_sandbox_keyed(spec(), "mine").await,
+        fixture.manager.create_computer_keyed(spec(), "mine").await,
         Err(ComputerError::AlreadyExists(_))
     ));
 }

@@ -5,7 +5,7 @@
 //! to `Ready` rather than stopping, and continues accepting `Run` calls until
 //! an explicit `Stop`/`Remove` or TTL expiry.
 //!
-//! `create_sandbox` returns immediately with state `"starting"`.  The VM boots
+//! `create_computer` returns immediately with state `"starting"`.  The VM boots
 //! in a background task which broadcasts a `"ready"` event on success.
 
 use std::collections::HashMap;
@@ -682,7 +682,7 @@ pub(crate) fn catalogued_checkpoint(meta: &SnapshotMeta) -> Result<CheckpointIma
 /// restricted to `[A-Za-z0-9_-]`. This rejects path traversal (`/`, `\`, `..`),
 /// NUL and whitespace. The narrower rule a VMM imposes on the id it runs under
 /// is *not* checked here — that is [`VmId`]'s, applied by
-/// [`validate_new_sandbox_id`] where an id becomes a VM identity.
+/// [`validate_new_computer_id`] where an id becomes a VM identity.
 ///
 /// Deliberately NO length cap here: this also runs against persisted
 /// records, and what one legacy over-long id would cost differs by call
@@ -694,7 +694,7 @@ pub(crate) fn catalogued_checkpoint(meta: &SnapshotMeta) -> Result<CheckpointIma
 /// which is the stronger reason the cap is absent. It also runs against
 /// snapshot / execution ids that never become a VM identity at all. Both
 /// limits the driver imposes are enforced only where a sandbox id enters
-/// the system: [`validate_new_sandbox_id`].
+/// the system: [`validate_new_computer_id`].
 ///
 /// The gap between this alphabet and [`VmId`]'s is not academic: `_` is
 /// legal here and is not a `VmId`, so every record a pre-#680 process
@@ -736,7 +736,7 @@ pub(super) fn validate_id(kind: &str, id: &str) -> Result<()> {
 /// every attempt while the VMM is up and bound inside its chroot; caught
 /// by the CORE-107 prewarm e2e, whose 51-char builder id overflowed the
 /// stock budget).
-pub(super) fn validate_new_sandbox_id(
+pub(super) fn validate_new_computer_id(
     id: &str,
     driver: &dyn VmDriver,
     config: &RuntimeConfig,
@@ -1080,19 +1080,19 @@ mod tests {
         let mut config = jailed_config();
         let budget = CONTROL_PLANE_ID.len();
         let driver = FakeDriver::builder().jailed_id_budget(budget).build();
-        assert!(validate_new_sandbox_id(CONTROL_PLANE_ID, &driver, &config).is_ok());
-        assert!(validate_new_sandbox_id(&"a".repeat(budget), &driver, &config).is_ok());
-        assert!(validate_new_sandbox_id(&"a".repeat(budget + 1), &driver, &config).is_err());
+        assert!(validate_new_computer_id(CONTROL_PLANE_ID, &driver, &config).is_ok());
+        assert!(validate_new_computer_id(&"a".repeat(budget), &driver, &config).is_ok());
+        assert!(validate_new_computer_id(&"a".repeat(budget + 1), &driver, &config).is_err());
 
         // A tighter budget refuses what the looser one took, rather than
         // silently reintroducing the connect timeout.
         let tighter = FakeDriver::builder().jailed_id_budget(budget - 1).build();
-        assert!(validate_new_sandbox_id(CONTROL_PLANE_ID, &tighter, &config).is_err());
+        assert!(validate_new_computer_id(CONTROL_PLANE_ID, &tighter, &config).is_err());
 
         // A driver that reports no budget for this isolation bounds
         // nothing: only `VmId`'s own 64-byte ceiling is left.
         config.firecracker.jailer = None;
-        assert!(validate_new_sandbox_id(&"a".repeat(budget + 1), &tighter, &config).is_ok());
+        assert!(validate_new_computer_id(&"a".repeat(budget + 1), &tighter, &config).is_ok());
     }
 
     /// CORE-140. Firecracker validates the `--id` it is handed and refuses it
@@ -1107,13 +1107,13 @@ mod tests {
             .build();
         for _ in 0..2 {
             let error =
-                validate_new_sandbox_id(&CONTROL_PLANE_ID.replacen('-', "_", 1), &driver, &config)
+                validate_new_computer_id(&CONTROL_PLANE_ID.replacen('-', "_", 1), &driver, &config)
                     .expect_err("firecracker would refuse to run under this id");
             assert!(
                 matches!(&error, ComputerError::Config(message) if message.contains('_')),
                 "the error should name the offending character, got {error}"
             );
-            assert!(validate_new_sandbox_id(CONTROL_PLANE_ID, &driver, &config).is_ok());
+            assert!(validate_new_computer_id(CONTROL_PLANE_ID, &driver, &config).is_ok());
             // Direct mode passes the same `--id`, so it is refused there too.
             config.firecracker.jailer = None;
         }

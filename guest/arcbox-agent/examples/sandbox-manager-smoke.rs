@@ -91,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
 
     let t0 = Instant::now();
     let (id, ip) = manager
-        .create_sandbox(ComputerSpec {
+        .create_computer(ComputerSpec {
             id: Some("smoke-1".into()),
             ..Default::default()
         })
@@ -157,7 +157,7 @@ async fn main() -> anyhow::Result<()> {
     {
         let mut events_n = manager.subscribe_events();
         let (id2, ip2) = manager
-            .create_sandbox(ComputerSpec {
+            .create_computer(ComputerSpec {
                 id: Some("smoke-net-2".into()),
                 ..Default::default()
             })
@@ -281,7 +281,7 @@ async fn main() -> anyhow::Result<()> {
     let snapshot_id_opt: Option<String> = if run_phase3 {
         println!("\n=== Phase 3: Checkpoint ===");
         let ck = manager
-            .checkpoint_sandbox(&id, "smoke-test".into(), HashMap::new())
+            .checkpoint_computer(&id, "smoke-test".into(), HashMap::new())
             .await
             .context("checkpoint_sandbox")?;
         println!("  [checkpoint] snapshot_id={}", ck.snapshot_id);
@@ -309,7 +309,7 @@ async fn main() -> anyhow::Result<()> {
 
         let mut events2 = manager.subscribe_events();
         let (rid, rip) = manager
-            .restore_sandbox(RestoreComputerSpec {
+            .restore_computer(RestoreComputerSpec {
                 id: Some("smoke-restored".into()),
                 snapshot_id,
                 labels: HashMap::new(),

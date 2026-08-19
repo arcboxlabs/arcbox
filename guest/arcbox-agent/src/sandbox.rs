@@ -298,7 +298,7 @@ impl SandboxService {
         if !request.id.is_empty()
             && let Some((id, ip_address)) = self
                 .manager
-                .replay_sandbox_create(&request.id, create_key)
+                .replay_computer_create(&request.id, create_key)
                 .await
                 .map_err(SandboxError::from)?
         {
@@ -349,7 +349,7 @@ impl SandboxService {
 
         let (id, ip_address) = self
             .manager
-            .create_sandbox_keyed(spec, create_key)
+            .create_computer_keyed(spec, create_key)
             .await
             .map_err(SandboxError::from)?;
         register_sandbox_dns(&id, &ip_address);

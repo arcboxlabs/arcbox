@@ -176,7 +176,7 @@ impl ComputerManager {
             self.config.defaults.memory_mib
         };
         // Short id on purpose: it must fit the driver's own id budget
-        // (`VmDriver::id_budget`, enforced by `validate_new_sandbox_id`) —
+        // (`VmDriver::id_budget`, enforced by `validate_new_computer_id`) —
         // `template-build-<full uuid>` was 51 chars and overflowed AF_UNIX's
         // `sun_path`, failing the builder boot as an opaque socket timeout.
         // 16 hex chars keep collisions out of reach for an ephemeral,
@@ -195,7 +195,7 @@ impl ComputerManager {
             ..Default::default()
         };
         let (id, _ip) = self
-            .create_sandbox_inner(
+            .create_computer_inner(
                 spec,
                 &Uuid::new_v4().to_string(),
                 super::lifecycle::WarmPolicy::Disabled,

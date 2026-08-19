@@ -52,7 +52,7 @@ impl ComputerManager {
     }
 
     /// Checkpoint a `Ready` sandbox into the snapshot catalog.
-    pub async fn checkpoint_sandbox(
+    pub async fn checkpoint_computer(
         &self,
         sandbox_id: &ComputerId,
         name: String,
@@ -73,7 +73,7 @@ impl ComputerManager {
         self.capture_checkpoint(sandbox_id, name, labels).await
     }
 
-    /// [`Self::checkpoint_sandbox`] without the reserved-name and
+    /// [`Self::checkpoint_computer`] without the reserved-name and
     /// reserved-label guards, for the catalogs that own those names.
     ///
     /// The guards exist to stop a *caller* squatting on the pause
@@ -103,13 +103,16 @@ impl ComputerManager {
     /// The restored sandbox starts in `Ready` state immediately.
     ///
     /// Returns `(sandbox_id, ip_address)`.
-    pub async fn restore_sandbox(&self, spec: RestoreComputerSpec) -> Result<(ComputerId, String)> {
-        self.restore_sandbox_keyed(spec, &Uuid::new_v4().to_string())
+    pub async fn restore_computer(
+        &self,
+        spec: RestoreComputerSpec,
+    ) -> Result<(ComputerId, String)> {
+        self.restore_computer_keyed(spec, &Uuid::new_v4().to_string())
             .await
     }
 
     /// Restore with a stable request key for durable replay.
-    pub async fn restore_sandbox_keyed(
+    pub async fn restore_computer_keyed(
         &self,
         spec: RestoreComputerSpec,
         restore_key: &str,
@@ -145,7 +148,7 @@ impl ComputerManager {
         restore_key: &str,
     ) -> Result<(ComputerId, String)> {
         // Gate on the startup sweep before touching per-id resources (see
-        // create_sandbox / await_reconcile).
+        // create_computer / await_reconcile).
         self.await_reconcile().await?;
 
         let caller_supplied_id = request.spec.id.as_ref().is_some_and(|id| !id.is_empty());
@@ -156,7 +159,7 @@ impl ComputerManager {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| Uuid::new_v4().to_string());
 
-        super::validate_new_sandbox_id(&new_id, &*self.services.driver, &self.config)?;
+        super::validate_new_computer_id(&new_id, &*self.services.driver, &self.config)?;
         // The snapshot id is caller-supplied and flows into snapshot dir paths
         // (create_dir_all / copy / remove_dir_all) — validate it too, or a
         // `../` id would traverse out of the snapshots directory.

@@ -221,7 +221,7 @@ async fn e2e_sandbox_basic_lifecycle() {
     let mgr = manager(cfg);
     let mut events = mgr.subscribe_events();
 
-    let (id, _ip) = mgr.create_sandbox(no_tap()).await.unwrap();
+    let (id, _ip) = mgr.create_computer(no_tap()).await.unwrap();
     assert!(
         wait_for_event(&mut events, &id, "ready").await,
         "sandbox did not reach ready state"
@@ -255,7 +255,7 @@ async fn e2e_event_broadcast_ready() {
     let mgr = manager(cfg);
     let mut events = mgr.subscribe_events();
 
-    let (id, _) = mgr.create_sandbox(no_tap()).await.unwrap();
+    let (id, _) = mgr.create_computer(no_tap()).await.unwrap();
     assert!(
         wait_for_event(&mut events, &id, "ready").await,
         "expected ready event for sandbox {id}"
@@ -287,8 +287,8 @@ async fn e2e_two_sandboxes_distinct_ips() {
     let mut ev1 = mgr.subscribe_events();
     let mut ev2 = mgr.subscribe_events();
 
-    let (id1, ip1) = mgr.create_sandbox(Default::default()).await.unwrap();
-    let (id2, ip2) = mgr.create_sandbox(Default::default()).await.unwrap();
+    let (id1, ip1) = mgr.create_computer(Default::default()).await.unwrap();
+    let (id2, ip2) = mgr.create_computer(Default::default()).await.unwrap();
 
     assert_ne!(ip1, ip2, "sandboxes must receive distinct IP addresses");
 
@@ -326,7 +326,7 @@ async fn e2e_sandbox_with_tap_network() {
     finalize_startup_cleanup(&mgr).await;
     let mut events = mgr.subscribe_events();
 
-    let (id, ip) = mgr.create_sandbox(Default::default()).await.unwrap();
+    let (id, ip) = mgr.create_computer(Default::default()).await.unwrap();
     assert!(!ip.is_empty(), "tap mode should assign an IP address");
     assert!(
         wait_for_event(&mut events, &id, "ready").await,
@@ -376,7 +376,7 @@ async fn e2e_run_command() {
     let mgr = manager(cfg);
     let mut events = mgr.subscribe_events();
 
-    let (id, _) = mgr.create_sandbox(no_tap()).await.unwrap();
+    let (id, _) = mgr.create_computer(no_tap()).await.unwrap();
     assert!(
         wait_for_event(&mut events, &id, "ready").await,
         "sandbox did not reach ready"
@@ -514,7 +514,7 @@ async fn outlives_its_manager_and_is_adopted(confinement: Confinement) {
         let mgr = manager(cfg);
         finalize_startup_cleanup(&mgr).await;
         let mut events = mgr.subscribe_events();
-        let (id, ip) = mgr.create_sandbox(ComputerSpec::default()).await.unwrap();
+        let (id, ip) = mgr.create_computer(ComputerSpec::default()).await.unwrap();
         assert!(
             wait_for_event(&mut events, &id, "ready").await,
             "sandbox did not reach ready"

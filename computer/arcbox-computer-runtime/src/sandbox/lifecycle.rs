@@ -26,7 +26,7 @@ const SWEEP_WAIT_BUDGET: Duration = Duration::from_secs(10);
 
 impl ComputerManager {
     /// Replay a durable Create outcome without resolving its template again.
-    pub async fn replay_sandbox_create(
+    pub async fn replay_computer_create(
         &self,
         id: &str,
         request_key: &str,
@@ -37,18 +37,18 @@ impl ComputerManager {
             .map(|outcome| outcome.map(|outcome| (id.to_owned(), outcome.ip_address)))
     }
 
-    pub async fn create_sandbox(&self, spec: ComputerSpec) -> Result<(ComputerId, String)> {
-        self.create_sandbox_keyed(spec, &Uuid::new_v4().to_string())
+    pub async fn create_computer(&self, spec: ComputerSpec) -> Result<(ComputerId, String)> {
+        self.create_computer_keyed(spec, &Uuid::new_v4().to_string())
             .await
     }
 
     /// Create a sandbox with a stable key for durable request replay.
-    pub async fn create_sandbox_keyed(
+    pub async fn create_computer_keyed(
         &self,
         spec: ComputerSpec,
         request_key: &str,
     ) -> Result<(ComputerId, String)> {
-        self.create_sandbox_inner(spec, request_key, WarmPolicy::Auto)
+        self.create_computer_inner(spec, request_key, WarmPolicy::Auto)
             .await
     }
 
@@ -86,12 +86,12 @@ impl ComputerManager {
         }
     }
 
-    /// [`Self::create_sandbox_keyed`] with explicit warm behaviour: the
+    /// [`Self::create_computer_keyed`] with explicit warm behaviour: the
     /// prewarm builder (CORE-107) passes [`WarmPolicy::Disabled`] so its own
     /// boot neither restores from a warm source nor publishes into the
     /// warm-cache LRU (which would burn one of the `MAX_WARM_KEYS` slots on
     /// a duplicate full-memory snapshot).
-    pub(super) async fn create_sandbox_inner(
+    pub(super) async fn create_computer_inner(
         &self,
         mut spec: ComputerSpec,
         request_key: &str,
@@ -135,7 +135,7 @@ impl ComputerManager {
         // Hold a caller-supplied id to what the driver can actually run it
         // as — its VM identity and its socket-path budget. Auto-generated
         // UUIDs pass unchanged.
-        super::validate_new_sandbox_id(&id, &*self.services.driver, &self.config)?;
+        super::validate_new_computer_id(&id, &*self.services.driver, &self.config)?;
         spec.id = Some(id.clone());
 
         // Template warm-restore (CORE-107): a catalog template carrying a

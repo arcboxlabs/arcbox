@@ -37,7 +37,7 @@ const DEADLINE: Duration = Duration::from_secs(10);
 /// tidiness. A sandbox id has to fit what AF_UNIX leaves of the jail's
 /// socket paths, and macOS's per-user `$TMPDIR` (`/var/folders/../T/`)
 /// spends ~50 bytes of that on its own — enough to take the budget to
-/// zero, so every `create_sandbox` would be refused at id validation
+/// zero, so every `create_computer` would be refused at id validation
 /// before reaching anything it meant to exercise. A short root is also
 /// what a real node's jail base is.
 ///
@@ -331,7 +331,7 @@ impl Fixture {
         let mut events = self.manager.subscribe_events();
         let (id, _ip) = self
             .manager
-            .create_sandbox(spec)
+            .create_computer(spec)
             .await
             .expect("the create is accepted");
         await_action(&mut events, &id, action::READY).await;
