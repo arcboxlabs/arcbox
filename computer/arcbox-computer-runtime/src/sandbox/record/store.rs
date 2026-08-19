@@ -20,8 +20,8 @@ use uuid::Uuid;
 use arcbox_atomic_file::AtomicWriteError;
 
 use super::phase::{
-    ComputerPhase, ComputerProvisionOutcome, ComputerRecord, ExistingProvision, ProvisionIntent,
-    RECORD_VERSION, SandboxTransition, classify_existing_provision, validate_record,
+    ComputerPhase, ComputerProvisionOutcome, ComputerRecord, ComputerTransition, ExistingProvision,
+    ProvisionIntent, RECORD_VERSION, classify_existing_provision, validate_record,
 };
 use crate::error::{ComputerError, Result};
 use crate::sandbox::types::IdleAction;
@@ -176,7 +176,7 @@ impl ComputerRecordStore {
         &self,
         id: &str,
         generation: Uuid,
-        transition: SandboxTransition,
+        transition: ComputerTransition,
     ) -> Result<DurableCommit<ComputerRecord>> {
         let _guard = self.lock()?;
         let mut record = self
@@ -448,7 +448,7 @@ mod tests {
             .transition(
                 "restored",
                 record.generation,
-                SandboxTransition::ReadyWithOutcome(outcome.clone()),
+                ComputerTransition::ReadyWithOutcome(outcome.clone()),
             )
             .unwrap();
 
@@ -525,7 +525,7 @@ mod tests {
             .transition(
                 "secret-box",
                 secret_record.generation,
-                SandboxTransition::Failed("boot failed".into()),
+                ComputerTransition::Failed("boot failed".into()),
             )
             .unwrap();
         assert!(
@@ -542,7 +542,7 @@ mod tests {
             .transition(
                 "box",
                 record.generation,
-                SandboxTransition::Starting(ComputerProvisionOutcome {
+                ComputerTransition::Starting(ComputerProvisionOutcome {
                     ip_address: "192.0.2.2".into(),
                 }),
             )
@@ -564,7 +564,7 @@ mod tests {
             .transition(
                 "box",
                 record.generation,
-                SandboxTransition::Failed("boot failed".into()),
+                ComputerTransition::Failed("boot failed".into()),
             )
             .unwrap();
         assert!(matches!(
@@ -585,12 +585,12 @@ mod tests {
 
         assert!(
             store
-                .transition("box", Uuid::new_v4(), SandboxTransition::Ready)
+                .transition("box", Uuid::new_v4(), ComputerTransition::Ready)
                 .is_err()
         );
         assert!(
             store
-                .transition("box", record.generation, SandboxTransition::Ready)
+                .transition("box", record.generation, ComputerTransition::Ready)
                 .is_err()
         );
         assert_eq!(
@@ -602,36 +602,36 @@ mod tests {
             .transition(
                 "box",
                 record.generation,
-                SandboxTransition::Starting(ComputerProvisionOutcome {
+                ComputerTransition::Starting(ComputerProvisionOutcome {
                     ip_address: String::new(),
                 }),
             )
             .unwrap();
         store
-            .transition("box", record.generation, SandboxTransition::Ready)
+            .transition("box", record.generation, ComputerTransition::Ready)
             .unwrap();
         assert!(store.replay_provision("box", "key").unwrap().is_some());
         store
-            .transition("box", record.generation, SandboxTransition::Stopping)
+            .transition("box", record.generation, ComputerTransition::Stopping)
             .unwrap();
         assert!(matches!(
             store.replay_provision("box", "key"),
             Err(ComputerError::AlreadyExists(id)) if id == "box"
         ));
         store
-            .transition("box", record.generation, SandboxTransition::Stopped)
+            .transition("box", record.generation, ComputerTransition::Stopped)
             .unwrap();
         assert!(matches!(
             store.replay_provision("box", "key"),
             Err(ComputerError::AlreadyExists(id)) if id == "box"
         ));
         store
-            .transition("box", record.generation, SandboxTransition::Stopped)
+            .transition("box", record.generation, ComputerTransition::Stopped)
             .unwrap()
             .confirmed("idempotent stopped retry")
             .unwrap();
         store
-            .transition("box", record.generation, SandboxTransition::Removing)
+            .transition("box", record.generation, ComputerTransition::Removing)
             .unwrap();
         assert!(matches!(
             store.replay_provision("box", "key"),
@@ -656,7 +656,7 @@ mod tests {
             .transition(
                 "failed",
                 failed.generation,
-                SandboxTransition::Failed("interrupted".into()),
+                ComputerTransition::Failed("interrupted".into()),
             )
             .unwrap();
         assert!(matches!(
@@ -675,13 +675,13 @@ mod tests {
             .transition(
                 "box",
                 generation,
-                SandboxTransition::Starting(ComputerProvisionOutcome {
+                ComputerTransition::Starting(ComputerProvisionOutcome {
                     ip_address: "192.0.2.2".into(),
                 }),
             )
             .unwrap();
         store
-            .transition("box", generation, SandboxTransition::Ready)
+            .transition("box", generation, ComputerTransition::Ready)
             .unwrap();
 
         // Pausing may not jump straight to Paused-from-Ready.
@@ -690,20 +690,20 @@ mod tests {
                 .transition(
                     "box",
                     generation,
-                    SandboxTransition::Paused {
+                    ComputerTransition::Paused {
                         snapshot_id: "snap".into()
                     }
                 )
                 .is_err()
         );
         store
-            .transition("box", generation, SandboxTransition::Pausing)
+            .transition("box", generation, ComputerTransition::Pausing)
             .unwrap();
         let paused = store
             .transition(
                 "box",
                 generation,
-                SandboxTransition::Paused {
+                ComputerTransition::Paused {
                     snapshot_id: "snap".into(),
                 },
             )
@@ -721,7 +721,7 @@ mod tests {
 
         // Resume keeps the snapshot until Ready clears it.
         let resuming = store
-            .transition("box", generation, SandboxTransition::Resuming)
+            .transition("box", generation, ComputerTransition::Resuming)
             .unwrap()
             .value;
         assert_eq!(resuming.pause_snapshot_id.as_deref(), Some("snap"));
@@ -732,7 +732,7 @@ mod tests {
             .transition(
                 "box",
                 generation,
-                SandboxTransition::Paused {
+                ComputerTransition::Paused {
                     snapshot_id: "snap".into(),
                 },
             )
@@ -741,10 +741,10 @@ mod tests {
         assert_eq!(reverted.paused_at, paused.paused_at);
         // …and a successful one lands Ready with the pause state cleared.
         store
-            .transition("box", generation, SandboxTransition::Resuming)
+            .transition("box", generation, ComputerTransition::Resuming)
             .unwrap();
         let ready = store
-            .transition("box", generation, SandboxTransition::Ready)
+            .transition("box", generation, ComputerTransition::Ready)
             .unwrap()
             .value;
         assert_eq!(ready.phase, ComputerPhase::Ready);
@@ -753,13 +753,13 @@ mod tests {
 
         // A genuine re-pause after Ready gets a fresh stamp.
         store
-            .transition("box", generation, SandboxTransition::Pausing)
+            .transition("box", generation, ComputerTransition::Pausing)
             .unwrap();
         let repaused = store
             .transition(
                 "box",
                 generation,
-                SandboxTransition::Paused {
+                ComputerTransition::Paused {
                     snapshot_id: "snap2".into(),
                 },
             )
@@ -779,29 +779,29 @@ mod tests {
             .transition(
                 "box",
                 generation,
-                SandboxTransition::Starting(ComputerProvisionOutcome {
+                ComputerTransition::Starting(ComputerProvisionOutcome {
                     ip_address: String::new(),
                 }),
             )
             .unwrap();
         store
-            .transition("box", generation, SandboxTransition::Ready)
+            .transition("box", generation, ComputerTransition::Ready)
             .unwrap();
         store
-            .transition("box", generation, SandboxTransition::Pausing)
+            .transition("box", generation, ComputerTransition::Pausing)
             .unwrap();
         store
-            .transition("box", generation, SandboxTransition::Ready)
+            .transition("box", generation, ComputerTransition::Ready)
             .unwrap();
 
         store
-            .transition("box", generation, SandboxTransition::Pausing)
+            .transition("box", generation, ComputerTransition::Pausing)
             .unwrap();
         store
             .transition(
                 "box",
                 generation,
-                SandboxTransition::Paused {
+                ComputerTransition::Paused {
                     snapshot_id: "snap".into(),
                 },
             )
@@ -809,11 +809,11 @@ mod tests {
         // Paused has no VM to drain: only Resume, Failed, or Removing apply.
         assert!(
             store
-                .transition("box", generation, SandboxTransition::Stopping)
+                .transition("box", generation, ComputerTransition::Stopping)
                 .is_err()
         );
         store
-            .transition("box", generation, SandboxTransition::Removing)
+            .transition("box", generation, ComputerTransition::Removing)
             .unwrap();
         store.finish_remove("box", generation).unwrap();
     }

@@ -1,5 +1,5 @@
 use super::reconcile::JournaledLease;
-use super::record::{ComputerProvisionOutcome, ProvisionIntent, SandboxTransition};
+use super::record::{ComputerProvisionOutcome, ComputerTransition, ProvisionIntent};
 use super::*;
 use crate::lifecycle::actor::ComputerSnapshot;
 use crate::sandbox::record::PersistPhase;
@@ -420,7 +420,7 @@ impl ComputerManager {
                         .transition(
                             &id,
                             generation,
-                            SandboxTransition::Failed(error.to_string()),
+                            ComputerTransition::Failed(error.to_string()),
                         )
                         .err()
                         .map(|record_error| format!("record: {record_error}"));

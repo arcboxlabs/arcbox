@@ -59,7 +59,7 @@ use crate::error::{ComputerError, Result};
 use crate::lifecycle::runtime::ComputerRuntime;
 use crate::sandbox::policy::deadlines;
 use crate::sandbox::record::{
-    ComputerProvisionOutcome, ComputerRecordStore, PersistPhase, SandboxTransition,
+    ComputerProvisionOutcome, ComputerRecordStore, ComputerTransition, PersistPhase,
 };
 use crate::sandbox::types::action;
 use crate::sandbox::workload::WorkloadClaim;

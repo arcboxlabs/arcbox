@@ -54,7 +54,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use super::policy::recovery::{self, JournalEvidence, RecoveryAction, SweepAction};
-use super::record::{ComputerRecord, ComputerRecordStore, PersistPhase, SandboxTransition};
+use super::record::{ComputerRecord, ComputerRecordStore, ComputerTransition, PersistPhase};
 use super::{ComputerState, LeaseExt};
 use crate::config::RuntimeConfig;
 use crate::error::{ComputerError, Result};
@@ -1020,7 +1020,7 @@ pub(super) fn normalize_durable_records(
                     .transition(
                         &record.id,
                         record.generation,
-                        SandboxTransition::Failed(AGENT_RESTART_ERROR.into()),
+                        ComputerTransition::Failed(AGENT_RESTART_ERROR.into()),
                     )?
                     .confirmed("sandbox restart normalization")?;
                 inactive.push(RecoveredComputer::reinstated(inactive_instance(
@@ -1765,7 +1765,7 @@ mod tests {
                     .transition(
                         id,
                         generation,
-                        SandboxTransition::Failed("original failure".into()),
+                        ComputerTransition::Failed("original failure".into()),
                     )
                     .unwrap();
             }
@@ -1774,13 +1774,13 @@ mod tests {
                     .transition(
                         id,
                         generation,
-                        SandboxTransition::Starting(ComputerProvisionOutcome {
+                        ComputerTransition::Starting(ComputerProvisionOutcome {
                             ip_address: "192.0.2.2".into(),
                         }),
                     )
                     .unwrap();
                 store
-                    .transition(id, generation, SandboxTransition::Removing)
+                    .transition(id, generation, ComputerTransition::Removing)
                     .unwrap();
             }
             phase => {
@@ -1788,7 +1788,7 @@ mod tests {
                     .transition(
                         id,
                         generation,
-                        SandboxTransition::Starting(ComputerProvisionOutcome {
+                        ComputerTransition::Starting(ComputerProvisionOutcome {
                             ip_address: "192.0.2.2".into(),
                         }),
                     )
@@ -1797,32 +1797,32 @@ mod tests {
                     PersistPhase::Starting => {}
                     PersistPhase::Ready => {
                         store
-                            .transition(id, generation, SandboxTransition::Ready)
+                            .transition(id, generation, ComputerTransition::Ready)
                             .unwrap();
                     }
                     PersistPhase::Stopping | PersistPhase::Stopped => {
                         store
-                            .transition(id, generation, SandboxTransition::Stopping)
+                            .transition(id, generation, ComputerTransition::Stopping)
                             .unwrap();
                         if phase == PersistPhase::Stopped {
                             store
-                                .transition(id, generation, SandboxTransition::Stopped)
+                                .transition(id, generation, ComputerTransition::Stopped)
                                 .unwrap();
                         }
                     }
                     PersistPhase::Pausing | PersistPhase::Paused | PersistPhase::Resuming => {
                         store
-                            .transition(id, generation, SandboxTransition::Ready)
+                            .transition(id, generation, ComputerTransition::Ready)
                             .unwrap();
                         store
-                            .transition(id, generation, SandboxTransition::Pausing)
+                            .transition(id, generation, ComputerTransition::Pausing)
                             .unwrap();
                         if phase != PersistPhase::Pausing {
                             store
                                 .transition(
                                     id,
                                     generation,
-                                    SandboxTransition::Paused {
+                                    ComputerTransition::Paused {
                                         snapshot_id: "snap".into(),
                                     },
                                 )
@@ -1830,7 +1830,7 @@ mod tests {
                         }
                         if phase == PersistPhase::Resuming {
                             store
-                                .transition(id, generation, SandboxTransition::Resuming)
+                                .transition(id, generation, ComputerTransition::Resuming)
                                 .unwrap();
                         }
                     }

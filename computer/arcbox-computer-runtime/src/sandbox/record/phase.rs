@@ -97,7 +97,7 @@ pub enum ProvisionIntent {
 
 /// Generation-checked lifecycle update.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SandboxTransition {
+pub enum ComputerTransition {
     Starting(ComputerProvisionOutcome),
     ReadyWithOutcome(ComputerProvisionOutcome),
     Ready,
@@ -110,7 +110,7 @@ pub enum SandboxTransition {
     Resuming,
 }
 
-impl SandboxTransition {
+impl ComputerTransition {
     fn phase(&self) -> ComputerPhase {
         match self {
             Self::Starting(_) => ComputerPhase::Starting,
@@ -148,9 +148,9 @@ impl ComputerRecord {
         }
     }
 
-    pub(super) fn apply(&mut self, transition: SandboxTransition) -> Result<()> {
+    pub(super) fn apply(&mut self, transition: ComputerTransition) -> Result<()> {
         let next = transition.phase();
-        let atomic_ready = matches!(&transition, SandboxTransition::ReadyWithOutcome(_))
+        let atomic_ready = matches!(&transition, ComputerTransition::ReadyWithOutcome(_))
             && self.phase == ComputerPhase::Creating;
         if !atomic_ready && !self.phase.can_transition_to(next) {
             return Err(ComputerError::WrongState {
@@ -161,7 +161,7 @@ impl ComputerRecord {
         }
 
         match transition {
-            SandboxTransition::Starting(outcome) => {
+            ComputerTransition::Starting(outcome) => {
                 if let Some(existing) = &self.provision_outcome
                     && existing != &outcome
                 {
@@ -175,7 +175,7 @@ impl ComputerRecord {
                 self.provision_outcome = Some(outcome);
                 self.error = None;
             }
-            SandboxTransition::ReadyWithOutcome(outcome) => {
+            ComputerTransition::ReadyWithOutcome(outcome) => {
                 if let Some(existing) = &self.provision_outcome
                     && existing != &outcome
                 {
@@ -190,36 +190,36 @@ impl ComputerRecord {
                 self.error = None;
                 self.redact_runtime_inputs();
             }
-            SandboxTransition::Ready => {
+            ComputerTransition::Ready => {
                 self.phase = ComputerPhase::Ready;
                 self.error = None;
                 self.pause_snapshot_id = None;
                 self.paused_at = None;
                 self.redact_runtime_inputs();
             }
-            SandboxTransition::Stopping => {
+            ComputerTransition::Stopping => {
                 self.phase = ComputerPhase::Stopping;
                 self.error = None;
                 self.redact_runtime_inputs();
             }
-            SandboxTransition::Stopped => {
+            ComputerTransition::Stopped => {
                 self.phase = ComputerPhase::Stopped;
                 self.error = None;
             }
-            SandboxTransition::Failed(error) => {
+            ComputerTransition::Failed(error) => {
                 self.phase = ComputerPhase::Failed;
                 self.error = Some(error);
                 self.redact_runtime_inputs();
             }
-            SandboxTransition::Removing => {
+            ComputerTransition::Removing => {
                 self.phase = ComputerPhase::Removing;
                 self.redact_runtime_inputs();
             }
-            SandboxTransition::Pausing => {
+            ComputerTransition::Pausing => {
                 self.phase = ComputerPhase::Pausing;
                 self.error = None;
             }
-            SandboxTransition::Paused { snapshot_id } => {
+            ComputerTransition::Paused { snapshot_id } => {
                 self.phase = ComputerPhase::Paused;
                 self.pause_snapshot_id = Some(snapshot_id);
                 // Stamped once per pause, not once per transition: a failed
@@ -230,7 +230,7 @@ impl ComputerRecord {
                 self.paused_at.get_or_insert_with(Utc::now);
                 self.error = None;
             }
-            SandboxTransition::Resuming => {
+            ComputerTransition::Resuming => {
                 self.phase = ComputerPhase::Resuming;
                 self.error = None;
             }
@@ -458,25 +458,25 @@ mod tests {
 
     #[test]
     fn every_transition_projects_onto_one_phase() {
-        // `SandboxTransition::phase`'s own match is exhaustive, so a new
+        // `ComputerTransition::phase`'s own match is exhaustive, so a new
         // transition cannot skip this list without failing to compile there
         // first.
-        let projections: [(SandboxTransition, ComputerPhase); 10] = [
-            (SandboxTransition::Starting(outcome()), Starting),
-            (SandboxTransition::ReadyWithOutcome(outcome()), Ready),
-            (SandboxTransition::Ready, Ready),
-            (SandboxTransition::Stopping, Stopping),
-            (SandboxTransition::Stopped, Stopped),
-            (SandboxTransition::Failed("boom".into()), Failed),
-            (SandboxTransition::Removing, Removing),
-            (SandboxTransition::Pausing, Pausing),
+        let projections: [(ComputerTransition, ComputerPhase); 10] = [
+            (ComputerTransition::Starting(outcome()), Starting),
+            (ComputerTransition::ReadyWithOutcome(outcome()), Ready),
+            (ComputerTransition::Ready, Ready),
+            (ComputerTransition::Stopping, Stopping),
+            (ComputerTransition::Stopped, Stopped),
+            (ComputerTransition::Failed("boom".into()), Failed),
+            (ComputerTransition::Removing, Removing),
+            (ComputerTransition::Pausing, Pausing),
             (
-                SandboxTransition::Paused {
+                ComputerTransition::Paused {
                     snapshot_id: "snap".into(),
                 },
                 Paused,
             ),
-            (SandboxTransition::Resuming, Resuming),
+            (ComputerTransition::Resuming, Resuming),
         ];
 
         for (transition, phase) in projections {
@@ -504,9 +504,9 @@ mod tests {
             },
         );
         record
-            .apply(SandboxTransition::Starting(outcome()))
+            .apply(ComputerTransition::Starting(outcome()))
             .unwrap();
-        record.apply(SandboxTransition::Ready).unwrap();
+        record.apply(ComputerTransition::Ready).unwrap();
 
         assert_eq!(record.effective_spec.kernel, "/assets/vmlinux");
         assert_eq!(record.effective_spec.rootfs, "/assets/rootfs.ext4");
@@ -524,24 +524,24 @@ mod tests {
     fn only_a_restore_may_commit_ready_straight_from_creating() {
         // `Creating -> Ready` is not an edge...
         let mut record = creating("box");
-        assert!(record.apply(SandboxTransition::Ready).is_err());
+        assert!(record.apply(ComputerTransition::Ready).is_err());
         assert_eq!(record.phase, Creating);
 
         // ...except for the restore path's single-hop commit, which carries
         // the outcome the skipped `Starting` write would have persisted.
         record
-            .apply(SandboxTransition::ReadyWithOutcome(outcome()))
+            .apply(ComputerTransition::ReadyWithOutcome(outcome()))
             .unwrap();
         assert_eq!(record.phase, Ready);
         assert_eq!(record.provision_outcome, Some(outcome()));
 
         // The exception is keyed on `Creating`: from anywhere else the edge
         // set rules, so a stopped record cannot be revived by it.
-        record.apply(SandboxTransition::Stopping).unwrap();
-        record.apply(SandboxTransition::Stopped).unwrap();
+        record.apply(ComputerTransition::Stopping).unwrap();
+        record.apply(ComputerTransition::Stopped).unwrap();
         assert!(
             record
-                .apply(SandboxTransition::ReadyWithOutcome(outcome()))
+                .apply(ComputerTransition::ReadyWithOutcome(outcome()))
                 .is_err()
         );
         assert_eq!(record.phase, Stopped);
