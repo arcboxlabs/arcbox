@@ -57,7 +57,7 @@ jobs:
           - arch: amd64
             runner: macos-26-intel
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       # Check out the tag being released, not the dispatching ref — a
@@ -76,19 +76,6 @@ jobs:
       - name: Install Protobuf compiler
         timeout-minutes: 5
         run: brew install protobuf
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-fleet-agent-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-fleet-agent-${{ matrix.arch }}-
 
       - name: Import signing certificate
         env:
@@ -121,7 +108,6 @@ jobs:
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
 
       - name: Build arcbox-fleet-agent (release)
-        timeout-minutes: 15
         run: cargo build --release --locked -p arcbox-fleet-agent
 
       - name: Codesign arcbox-fleet-agent
@@ -171,7 +157,7 @@ jobs:
             # sha256 of https://musl.cc/aarch64-linux-musl-cross.tgz
             musl_sha256: c909817856d6ceda86aa510894fa3527eac7989f0ef6e87b5721c58737a06c38
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       # Same tag-ref discipline as build-macos.
@@ -224,21 +210,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-fleet-agent-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-fleet-agent-${{ matrix.arch }}-
-
       - name: Build arcbox-fleet-agent
-        timeout-minutes: 10
         run: cargo build --release --locked -p arcbox-fleet-agent --target ${{ matrix.target }}
 
       - name: Verify artifact is fully static
