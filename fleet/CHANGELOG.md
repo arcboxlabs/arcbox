@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.5](https://github.com/arcboxlabs/arcbox/compare/fleet-agent-v0.1.4...fleet-agent-v0.1.5) (2026-09-11)
+
+
+### Features
+
+* **fleet-agent:** capture docker and vm runner output ([e285103](https://github.com/arcboxlabs/arcbox/commit/e28510323450e1bc7a38667b7779b33ed9ad6f52))
+* **fleet-agent:** surface job log paths ([86f22a8](https://github.com/arcboxlabs/arcbox/commit/86f22a893354a3a4532f853cb412084bf56e96f2))
+* **fleet-agent:** write each job's output to its own log file ([ed5249c](https://github.com/arcboxlabs/arcbox/commit/ed5249cf2e3026da4c9be82292716da8f2836311))
+
+
+### Bug Fixes
+
+* **ci:** finish the stable-1.98 clippy sweep the macOS job walks ([ef12b7c](https://github.com/arcboxlabs/arcbox/commit/ef12b7c5da0cb686038033992a05a6b1a9bda704))
+
 ## [0.1.4](https://github.com/arcboxlabs/arcbox/compare/fleet-agent-v0.1.3...fleet-agent-v0.1.4) (2026-08-14)
 
 
