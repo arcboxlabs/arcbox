@@ -83,12 +83,20 @@ fn k3s_pid() -> Option<i32> {
     }
 }
 
+/// Whether clients can use the API: it accepts connections *and* k3s has
+/// written the admin kubeconfig they authenticate with.
+///
+/// The port alone is not enough. k3s binds it while preparing the cluster and
+/// writes the kubeconfig only at the end of server startup, so a status built
+/// on the probe alone reports ready to a client whose very next call,
+/// `Kubeconfig`, fails with `ENOENT`.
 async fn k3s_api_ready() -> bool {
-    probe_tcp(SocketAddrV4::new(
-        Ipv4Addr::LOCALHOST,
-        KUBERNETES_API_GUEST_PORT,
-    ))
-    .await
+    Path::new(K3S_KUBECONFIG_PATH).exists()
+        && probe_tcp(SocketAddrV4::new(
+            Ipv4Addr::LOCALHOST,
+            KUBERNETES_API_GUEST_PORT,
+        ))
+        .await
 }
 
 pub(super) async fn handle_start_kubernetes(_req: KubernetesStartRequest) -> RpcResponse {
