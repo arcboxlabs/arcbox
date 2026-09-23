@@ -268,8 +268,11 @@ fn test_unknown_opcode() {
         )
     };
 
-    let result = dispatcher.dispatch(request);
-    assert!(result.is_err());
+    let response = dispatcher.dispatch(request).unwrap();
+    let header = parse_response_header(&response);
+
+    assert_eq!(header.error, -LINUX_ENOSYS);
+    assert_eq!(header.unique, 1);
 }
 
 #[test]
