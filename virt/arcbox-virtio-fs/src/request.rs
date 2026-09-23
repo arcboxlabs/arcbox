@@ -91,14 +91,14 @@ impl FuseResponse {
         Self { data }
     }
 
-    /// Creates an error response.
+    /// Creates an error response from a host errno.
     #[must_use]
     pub fn error(unique: u64, errno: i32) -> Self {
         let len = 16u32;
         let mut data = Vec::with_capacity(len as usize);
 
         data.extend_from_slice(&len.to_le_bytes());
-        data.extend_from_slice(&(-errno).to_le_bytes());
+        data.extend_from_slice(&(-crate::linux_errno(errno)).to_le_bytes());
         data.extend_from_slice(&unique.to_le_bytes());
 
         Self { data }

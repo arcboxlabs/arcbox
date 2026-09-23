@@ -25,6 +25,7 @@
 //!
 //! ## Module layout
 //!
+//! - `errno`: host-to-Linux errno translation for reply headers
 //! - `protocol`: FUSE wire-protocol constants
 //! - `request`: `FuseRequest` / `FuseResponse` envelopes
 //! - `session`: `FuseSession` — INIT handshake + negotiated state
@@ -47,12 +48,14 @@
 #![allow(clippy::too_many_lines)]
 
 mod device;
+mod errno;
 mod handler;
 mod protocol;
 mod request;
 mod session;
 
 pub use device::{FsConfig, VirtioFs};
+pub use errno::linux_errno;
 pub use handler::FuseRequestHandler;
 pub use protocol::{
     DEFAULT_MAX_PAGES, DEFAULT_MAX_READAHEAD, DEFAULT_MAX_WRITE, FUSE_ASYNC_READ, FUSE_BIG_WRITES,

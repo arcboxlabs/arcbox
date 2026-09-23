@@ -65,7 +65,7 @@ impl FsError {
         matches!(self, Self::Common(CommonError::NotFound(_)))
     }
 
-    /// Converts the error to a POSIX errno.
+    /// Converts the error to a host errno.
     #[must_use]
     pub fn to_errno(&self) -> i32 {
         match self {
@@ -77,13 +77,9 @@ impl FsError {
         }
     }
 
-    /// Converts a CommonError to a Linux-compatible POSIX errno.
     fn common_to_errno(err: &CommonError) -> i32 {
         match err {
-            CommonError::Io(e) => {
-                let raw = e.raw_os_error().unwrap_or(libc::EIO);
-                Self::host_errno_to_linux(raw)
-            }
+            CommonError::Io(e) => e.raw_os_error().unwrap_or(libc::EIO),
             CommonError::NotFound(_) => libc::ENOENT,
             CommonError::PermissionDenied(_) => libc::EACCES,
             CommonError::AlreadyExists(_) => libc::EEXIST,
@@ -92,30 +88,5 @@ impl FsError {
             | CommonError::Timeout(_)
             | CommonError::Internal(_) => libc::EIO,
         }
-    }
-
-    /// Translates a host (macOS) errno to a Linux errno.
-    ///
-    /// macOS and Linux share many POSIX errno values (1-34) but diverge
-    /// for platform-specific codes. The FUSE response must use Linux
-    /// errno numbers because the guest kernel interprets them directly.
-    #[cfg(target_os = "macos")]
-    fn host_errno_to_linux(errno: i32) -> i32 {
-        // macOS errno constants that differ from Linux:
-        // macOS ENOATTR (93) → Linux ENODATA (61)
-        // macOS ENOPOLICY (103) → Linux EIO
-        // macOS EQFULL (106) → Linux EIO
-        const MACOS_ENOATTR: i32 = 93;
-        const LINUX_ENODATA: i32 = 61;
-
-        match errno {
-            MACOS_ENOATTR => LINUX_ENODATA,
-            _ => errno,
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn host_errno_to_linux(errno: i32) -> i32 {
-        errno
     }
 }

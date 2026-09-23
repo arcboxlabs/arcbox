@@ -8,6 +8,9 @@ use crate::passthrough::PassthroughFs;
 
 use super::*;
 
+const LINUX_ENOSYS: i32 = 38;
+const LINUX_ENOTEMPTY: i32 = 39;
+
 fn setup_dispatcher() -> (TempDir, FuseDispatcher) {
     let temp = TempDir::new().expect("failed to create temp dir");
     let fs = Arc::new(PassthroughFs::new(temp.path()).expect("failed to create fs"));
@@ -117,6 +120,20 @@ fn test_mkdir_and_rmdir() {
     let response = dispatcher.dispatch(&request).unwrap();
     let header = parse_response_header(&response);
     assert_eq!(header.error, 0);
+}
+
+#[test]
+fn test_rmdir_nonempty() {
+    let (temp, dispatcher) = setup_dispatcher();
+    std::fs::create_dir_all(temp.path().join("dir/child")).unwrap();
+
+    let name = b"dir\0";
+    let mut request = make_header(FuseOpcode::Rmdir, 1, name.len());
+    request.extend_from_slice(name);
+
+    let response = dispatcher.dispatch(&request).unwrap();
+    let header = parse_response_header(&response);
+    assert_eq!(header.error, -LINUX_ENOTEMPTY);
 }
 
 #[test]
@@ -264,7 +281,7 @@ fn test_unsupported_opcode() {
     let response = dispatcher.dispatch(&request).unwrap();
     let header = parse_response_header(&response);
 
-    assert_eq!(header.error, -libc::ENOSYS);
+    assert_eq!(header.error, -LINUX_ENOSYS);
 }
 
 #[test]

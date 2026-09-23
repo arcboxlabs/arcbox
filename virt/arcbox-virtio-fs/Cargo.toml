@@ -15,5 +15,8 @@ libc = { workspace = true }
 rayon = "1.11.0"
 tracing = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+linux-raw-sys = { version = "0.12.1", default-features = false, features = ["errno"] }
+
 [lints]
 workspace = true
