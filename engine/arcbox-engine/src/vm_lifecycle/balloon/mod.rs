@@ -19,29 +19,31 @@
 //!   detection is delegated to the guest (see `WatchMemoryPressure`)
 //!   and the only moves are "keep" or "give it all back".
 //! - **Idle shrinking runs only on reclaim-capable backends — and no macOS
-//!   backend is one today** (2026-07-29 measurements, macOS 26.4). VZ:
-//!   Apple neither deallocates nor `madvise`s the pages the guest gives up
-//!   — a 15.35 GB inflation left the daemon's `phys_footprint`
-//!   byte-identical, and under real host memory pressure the kernel
-//!   *compressed* the ballooned pages as live data (calibrated against a
-//!   `MADV_FREE` probe, which the same pressure discards within seconds).
-//!   HV: its device inflates with `MADV_DONTNEED`, which Darwin treats as
-//!   a deactivation hint — calibrated footprint-inert, contents preserved
-//!   (compressed, never discarded, under pressure); real Darwin reclaim
-//!   needs `MADV_FREE_REUSABLE` (calibrated: footprint drops instantly).
-//!   So shrinking is guest starvation with zero host benefit on either
-//!   backend. See [`controller::BalloonDeps::reclaim_capable`]; flip a
-//!   backend only with a measured host footprint drop on inflate.
+//!   backend is one today.** VZ (2026-07-29, macOS 26.4): Apple neither
+//!   deallocates nor `madvise`s the pages the guest gives up — a 15.35 GB
+//!   inflation left the daemon's `phys_footprint` byte-identical, and
+//!   under real host memory pressure the kernel *compressed* the ballooned
+//!   pages as live data (calibrated against a `MADV_FREE` probe, which the
+//!   same pressure discards within seconds). HV: since 2026-09-25 its
+//!   device releases reported ranges by refreshing their stage-2 mapping
+//!   (`virt/arcbox-vmm/src/vmm/darwin_hv/page_release.rs`), and the
+//!   guest's free page reporting drains idle memory back to the host
+//!   *without any host-side target* — so the descent below has nothing to
+//!   add there either, and the gate stays closed on HV by design rather
+//!   than by inability. See [`controller::BalloonDeps::reclaim_capable`];
+//!   flip a backend only with a measured host footprint drop on inflate.
 //! - **What the host actually pays is the high-water mark of guest-touched
 //!   pages, not the configured `memory_mb`** (2026-08-01, VZ, macOS 26.4).
 //!   A fresh idle 16 GB VM costs ~718 MB of host `phys_footprint`; the
 //!   guest allocating 3 GB of tmpfs takes it to 3717 MB, and the guest
-//!   freeing that memory leaves it at 3717 MB. Absent any reclaim path the
-//!   mark only ratchets upward, which is precisely the cost a working
-//!   balloon would release. Measure the XPC helper process
+//!   freeing that memory leaves it at 3717 MB. On VZ the mark only
+//!   ratchets upward, which is precisely the cost a working balloon would
+//!   release. Measure the XPC helper process
 //!   (`com.apple.Virtualization.VirtualMachine`) on VZ, not the daemon —
 //!   guest RAM lives there, which is also why VZ can never be made
-//!   reclaim-capable: that memory is not ours to `madvise`.
+//!   reclaim-capable: that memory is not ours to release. On HV the guest
+//!   RAM is the daemon's own mapping and page reporting releases it, so
+//!   the daemon's footprint follows the guest's free memory back down.
 //!
 //! # Before re-enabling the host-driven descent, read this
 //!
@@ -49,15 +51,12 @@
 //! dormant, not merely unused, and two independent attempts to tune it
 //! (2026-07-21, 2026-07-31) were abandoned for the same reason: **it has
 //! no backend to serve.** VZ can never be reclaim-capable (above). HV
-//! already advertises `VIRTIO_BALLOON_F_REPORTING` and its guest kernel
-//! enables page reporting, so an HV guest hands back free ranges *on its
-//! own, continuously* — the host side only has to release them, and today
-//! it `madvise(MADV_DONTNEED)`s, which is footprint-inert on Darwin
-//! (`virt/arcbox-virtio-balloon/src/lib.rs`). So the work that would make
-//! HV reclaim is `MADV_FREE_REUSABLE` on the reporting path, and once
-//! that lands the guest is already driving; a host-side idle descent is
-//! the wrong shape for it, not a missing piece. Delete this machinery
-//! before you tune it.
+//! advertises `VIRTIO_BALLOON_F_REPORTING`, its guest kernel enables page
+//! reporting, and since 2026-09-25 the host releases every reported range
+//! (`virt/arcbox-vmm/src/vmm/darwin_hv/page_release.rs`), so an HV guest
+//! hands idle memory back *on its own, continuously* with the guest
+//! driving; a host-side idle descent is the wrong shape for it, not a
+//! missing piece. Delete this machinery before you tune it.
 //!
 //! If a descent is nevertheless the answer for some future backend, both
 //! measured failure modes must be designed out first:

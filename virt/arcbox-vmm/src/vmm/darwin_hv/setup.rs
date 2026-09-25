@@ -464,11 +464,14 @@ impl Vmm {
             device_manager.set_vsock(vsock_id, vsock_arc);
         }
 
-        // Memory balloon (ABX-363). Lets the host reclaim unused guest
-        // pages via `madvise(MADV_DONTNEED)` when the daemon's idle
-        // monitor signals via `set_balloon_target`.
+        // Memory balloon (ABX-363). The guest's free page reporting hands
+        // idle ranges to the device, which returns them to the host by
+        // refreshing their stage-2 mapping (`page_release`);
+        // `set_balloon_target` is the traditional inflate path on top.
         if self.config.balloon {
-            let balloon_dev = arcbox_virtio::balloon::VirtioBalloon::new();
+            let balloon_dev = arcbox_virtio::balloon::VirtioBalloon::with_releaser(Box::new(
+                page_release::Stage2Refresh,
+            ));
             let (_balloon_id, balloon_arc) = device_manager.register_virtio_device(
                 DeviceType::VirtioBalloon,
                 "virtio-balloon",

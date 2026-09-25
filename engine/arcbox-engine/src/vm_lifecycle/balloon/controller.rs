@@ -79,13 +79,12 @@ pub(in crate::vm_lifecycle) trait BalloonDeps:
     /// The watch type produced by [`Self::open_pressure_watch`].
     type Watch: PressureWatch;
 
-    /// Whether inflating the balloon actually releases host memory on the
-    /// current backend. When `false`, idle shrinking is pure cost (guest
-    /// scarcity + reclaim CPU) with zero host-side benefit, and the
-    /// controller must not shrink at all. No macOS backend qualifies
-    /// today — see the module docs for the per-backend measurements (VZ:
-    /// Apple no-op; HV: Darwin-inert `MADV_DONTNEED`) and what flipping a
-    /// backend requires.
+    /// Whether a host-driven shrink would return memory to the host.
+    ///
+    /// `false` keeps the idle descent inert. The `balloon` module docs
+    /// hold the evidence per backend: VZ cannot release (Apple owns the
+    /// pages), HV releases on its own through free page reporting and
+    /// needs no target.
     fn reclaim_capable(&self) -> bool;
 
     /// Configured full memory of the machine, if the machine record exists.

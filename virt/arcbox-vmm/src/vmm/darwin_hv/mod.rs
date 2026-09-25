@@ -35,6 +35,7 @@ mod hvc_blk;
 mod inline_sink;
 mod lifecycle;
 mod network;
+mod page_release;
 pub(super) mod pl011;
 pub(super) mod pl031;
 mod psci;
