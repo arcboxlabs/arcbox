@@ -318,3 +318,119 @@ async fn run_iptables(args: &[String]) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inspect(ports: serde_json::Value, ip: &str) -> serde_json::Value {
+        serde_json::json!({
+            "NetworkSettings": {
+                "Ports": ports,
+                "Networks": { "bridge": { "IPAddress": ip } }
+            }
+        })
+    }
+
+    #[test]
+    fn only_specific_ipv4_host_addresses_are_pinned() {
+        let doc = inspect(
+            serde_json::json!({
+                "80/tcp": [
+                    {"HostIp": "127.0.0.1", "HostPort": "32768"},
+                    {"HostIp": "0.0.0.0", "HostPort": "8080"},
+                    {"HostIp": "", "HostPort": "8081"},
+                    {"HostIp": "::1", "HostPort": "8082"}
+                ],
+                "53/udp": [{"HostIp": "192.168.1.5", "HostPort": "5353"}],
+                "9000/tcp": null
+            }),
+            "172.17.0.2",
+        );
+        let got = pinned_publishes(&doc);
+        assert_eq!(
+            got,
+            vec![
+                PinnedPublish {
+                    protocol: "udp".into(),
+                    host_port: 5353,
+                    container_port: 53,
+                    container_ip: "172.17.0.2".parse().unwrap(),
+                },
+                PinnedPublish {
+                    protocol: "tcp".into(),
+                    host_port: 32768,
+                    container_port: 80,
+                    container_ip: "172.17.0.2".parse().unwrap(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn no_ports_or_no_ip_yields_nothing() {
+        assert!(pinned_publishes(&serde_json::json!({})).is_empty());
+        let no_ip = serde_json::json!({
+            "NetworkSettings": {
+                "Ports": {"80/tcp": [{"HostIp": "127.0.0.1", "HostPort": "1"}]},
+                "Networks": {}
+            }
+        });
+        assert!(pinned_publishes(&no_ip).is_empty());
+    }
+
+    #[test]
+    fn rule_spec_matches_the_uplink_and_names_the_container() {
+        let publish = PinnedPublish {
+            protocol: "tcp".into(),
+            host_port: 32768,
+            container_port: 80,
+            container_ip: "172.17.0.2".parse().unwrap(),
+        };
+        let spec = rule_spec("eth0", "abc123", &publish);
+        assert_eq!(
+            spec.join(" "),
+            "-i eth0 -p tcp --dport 32768 -m comment --comment arcbox-publish:abc123 \
+             -j DNAT --to-destination 172.17.0.2:80"
+        );
+        assert_eq!(
+            nat_prerouting("-I", &spec)[..6],
+            ["-t", "nat", "-w", "2", "-I", "PREROUTING"]
+        );
+    }
+
+    #[test]
+    fn orphan_sweep_recognises_only_our_rules() {
+        let ours = "-A PREROUTING -i eth0 -p tcp -m tcp --dport 32768 -m comment \
+                    --comment \"arcbox-publish:abc123\" -j DNAT --to-destination 172.17.0.2:80";
+        let args = orphan_delete_args(ours).expect("our rule is swept");
+        assert_eq!(&args[..6], ["-t", "nat", "-w", "2", "-D", "PREROUTING"]);
+        assert!(
+            args.contains(&"arcbox-publish:abc123".to_string()),
+            "comment unquoted"
+        );
+
+        let docker = "-A PREROUTING -m addrtype --dst-type LOCAL -j DOCKER";
+        assert!(orphan_delete_args(docker).is_none());
+        let sandbox = "-A PREROUTING -p tcp -m tcp --dport 40000 -m comment \
+                       --comment \"arcbox-sbx:gen\" -j DNAT --to-destination 172.20.0.2:80";
+        assert!(
+            orphan_delete_args(sandbox).is_none(),
+            "sandbox rules belong elsewhere"
+        );
+    }
+
+    #[test]
+    fn rule_check_distinguishes_absent_from_broken() {
+        use std::os::unix::process::ExitStatusExt as _;
+        let ok = |code: i32| Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: Vec::new(),
+            stderr: b"err".to_vec(),
+        };
+        let args = vec!["-C".to_string()];
+        assert!(classify_rule_check(ok(0), &args).unwrap());
+        assert!(!classify_rule_check(ok(1), &args).unwrap());
+        assert!(classify_rule_check(ok(2), &args).is_err());
+    }
+}

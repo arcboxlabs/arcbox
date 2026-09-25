@@ -836,7 +836,9 @@ exit 0
         run_init_cmd("/sbin/iptables", args, desc, Duration::from_secs(10));
     }
 
-    fn detect_primary_interface() -> Option<String> {
+    /// The guest's uplink NIC — the interface the host relay's traffic arrives
+    /// on. The lowest-sorted `eth*`/`en*` name, matching what DHCP configures.
+    pub fn detect_primary_interface() -> Option<String> {
         let entries = fs::read_dir("/sys/class/net").ok()?;
         let mut candidates = Vec::new();
         for entry in entries.flatten() {
@@ -957,7 +959,7 @@ exit 0
 }
 
 #[cfg(target_os = "linux")]
-pub use platform::detect_bridge_interface;
+pub use platform::{detect_bridge_interface, detect_primary_interface};
 #[cfg(target_os = "linux")]
 pub use platform::{init_system, machine_init};
 

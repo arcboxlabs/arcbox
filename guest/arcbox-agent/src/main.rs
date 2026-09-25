@@ -86,6 +86,7 @@ mod dns;
 mod dns_server;
 mod docker_config;
 mod docker_events;
+mod publish_mirror;
 
 /// Max bytes for `agent.log` before it rotates (matches the daemon's 10 MiB).
 const AGENT_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
@@ -254,12 +255,22 @@ async fn main() -> Result<()> {
         })
     };
 
-    // Start Docker event listener for auto-registering container DNS.
+    // Start Docker event listener for auto-registering container DNS and
+    // mirroring host-address-pinned publishes. Rules a previous agent left in
+    // the kernel go first; reconciliation reinstalls what still applies.
     let docker_handle = {
         let dns = Arc::clone(&dns);
         let cancel = cancel.clone();
         tokio::spawn(async move {
-            docker_events::reconcile_and_watch(&dns, cancel).await;
+            if let Err(e) = publish_mirror::remove_all_orphans().await {
+                tracing::warn!(error = %e, "failed to sweep stale publish mirror rules");
+            }
+            let uplink = uplink_interface();
+            let sync = docker_events::ContainerSync {
+                dns: &dns,
+                mirror: publish_mirror::PublishMirror::new(uplink),
+            };
+            docker_events::reconcile_and_watch(sync, cancel).await;
         })
     };
 
@@ -284,6 +295,16 @@ async fn main() -> Result<()> {
     let _ = nfs_handle.await;
 
     result
+}
+
+/// The NIC the host relay's traffic reaches the guest on; `eth0` when the
+/// probe finds nothing, which is what every ArcBox guest image ships.
+fn uplink_interface() -> String {
+    #[cfg(target_os = "linux")]
+    if let Some(name) = init::detect_primary_interface() {
+        return name;
+    }
+    "eth0".to_owned()
 }
 
 #[cfg(test)]

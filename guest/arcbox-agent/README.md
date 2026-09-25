@@ -30,6 +30,17 @@ The proxy itself listens on vsock port 2375 and relays each connection to
 zero-length frame is one side's EOF, which is how a `docker run -i`'s stdin
 EOF reaches the container when the vsock fd itself cannot half-close.
 
+## Published Ports
+
+Host-side, a published port is a userspace listener on the Mac that relays
+into the guest at its uplink address. dockerd's own DNAT rule for a binding
+pinned to a specific host address (`-p 127.0.0.1:8080:80`) carries
+`-d 127.0.0.1` and would never match that relayed traffic, so the agent
+watches Docker container events and mirrors every such binding with a
+PREROUTING rule matching the uplink interface instead (`publish_mirror.rs`).
+The rules are tagged `arcbox-publish:<container id>`, removed when the
+container dies, and swept at agent startup.
+
 ## Cross-Compilation
 
 ```bash
