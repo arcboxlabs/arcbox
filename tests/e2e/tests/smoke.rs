@@ -16,8 +16,9 @@
 //! for an ephemeral one on `127.0.0.1` and reads it back with `docker port`,
 //! per the parallel-safety contract in AGENTS.md.
 //!
-//! Covers ABX-305 (run & exit), ABX-306 (published port), ABX-308 (name
-//! resolution), ABX-309 (boot budget), CORE-67 (setup phase progression).
+//! Covers ABX-305 (run & exit), #268 (stdin EOF reaches the container),
+//! ABX-306 (published port), ABX-308 (name resolution), ABX-309 (boot
+//! budget), CORE-67 (setup phase progression).
 //!
 //! Deliberately **not** covered: **ABX-307** (L3 direct routing to a
 //! container IP via bridge100). The host route is installed by the
@@ -32,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use arcbox_e2e::daemon::PhaseMarks;
-use arcbox_e2e::docker::{docker_ignore, docker_output, ensure_image};
+use arcbox_e2e::docker::{docker_ignore, docker_output, docker_output_with_input, ensure_image};
 use arcbox_e2e::metrics::RunMetrics;
 use arcbox_e2e::scenario::run_vz_scenario;
 use arcbox_protocol::v1::setup_status::Phase;
@@ -42,7 +43,7 @@ const DOCKER_TIMEOUT: Duration = Duration::from_secs(60);
 /// Body the in-container httpd serves; distinctive enough that a stray proxy
 /// or a wrong-port connection cannot produce it by accident.
 const MARKER: &str = "arcbox-smoke-ok";
-/// How long to wait for busybox httpd to bind inside the container. The
+/// How long to wait for the in-container server to bind. The
 /// container is already running by then — this only covers process start.
 const HTTPD_READY: Duration = Duration::from_secs(30);
 /// Per-attempt budget for a host→container HTTP request.
@@ -108,6 +109,9 @@ fn smoke_suite() -> Result<()> {
         let guard = ContainerGuard::new(data_dir, &server_name);
 
         metrics.time("container_run", || run_and_exit(data_dir, &image))?;
+        metrics.time("stdin_eof", || {
+            stdin_eof_reaches_container(data_dir, &image)
+        })?;
         let host_port = metrics.time("published_port", || {
             published_port_reaches_container(data_dir, &image, &server_name)
         })?;
@@ -213,6 +217,35 @@ fn run_and_exit(data_dir: &std::path::Path, image: &str) -> Result<()> {
     Ok(())
 }
 
+/// #268 — stdin EOF reaches the container.
+///
+/// `docker run -i` fed from a pipe: once the pipe drains the CLI half-closes
+/// the hijacked attach stream, and the container's `cat` must see EOF and
+/// exit. The vsock fd between host and guest cannot half-close on its own,
+/// so the Docker API channel carries EOF in-band (`HalfCloseStream`);
+/// without that `cat` blocks forever and the CLI never returns.
+fn stdin_eof_reaches_container(data_dir: &std::path::Path, image: &str) -> Result<()> {
+    let out = docker_output_with_input(
+        data_dir,
+        &[
+            "run",
+            "--rm",
+            "-i",
+            image,
+            "sh",
+            "-c",
+            "cat; echo stdin-closed",
+        ],
+        b"piped-stdin\n",
+        DOCKER_TIMEOUT,
+    )
+    .context("docker run -i did not return after stdin EOF (#268)")?;
+    if !out.contains("piped-stdin") || !out.contains("stdin-closed") {
+        bail!("expected the piped line and the post-EOF marker; got: {out:?}");
+    }
+    Ok(())
+}
+
 /// ABX-306 — a published port on the host reaches the container.
 ///
 /// Publishes to `127.0.0.1` on an *ephemeral* host port (`-p 127.0.0.1::80`)
@@ -287,12 +320,19 @@ fn name_resolves_from_sibling(data_dir: &std::path::Path, image: &str, target: &
     Ok(())
 }
 
-/// busybox httpd serving a single file containing [`MARKER`].
+/// A one-file HTTP server on busybox `nc`, serving [`MARKER`].
 ///
 /// Uses what alpine already ships rather than pulling nginx, so the suite
-/// needs exactly one image.
+/// needs exactly one image. `nc` rather than `httpd`: alpine 3.22 moved the
+/// `httpd` applet out of the base busybox into `busybox-extras`, and
+/// `alpine:latest` has not carried it since. Each accepted connection gets
+/// one canned response; the loop re-arms for the next.
 fn httpd_command() -> String {
-    format!("mkdir -p /www && printf '%s' '{MARKER}' > /www/index.html && httpd -f -p 80 -h /www")
+    format!(
+        "while true; do printf 'HTTP/1.1 200 OK\\r\\nContent-Length: {len}\\r\\n\
+         Connection: close\\r\\n\\r\\n{MARKER}' | nc -l -p 80; done",
+        len = MARKER.len()
+    )
 }
 
 /// Extracts the host port from `docker port <c> 80/tcp` output, e.g.

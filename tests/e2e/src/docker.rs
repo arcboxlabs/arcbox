@@ -5,7 +5,7 @@
 //! via `DOCKER_HOST`, so the developer's Docker context and any host
 //! daemon stay untouched (see tests/e2e/README.md on isolation).
 
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -30,6 +30,28 @@ pub fn docker_output(data_dir: &Path, args: &[&str], timeout: Duration) -> Resul
             .args(args),
         timeout,
     )?;
+    docker_result(args, &output)
+}
+
+/// [`docker_output`] with `input` written to the command's stdin, which is
+/// then closed — so a `docker run -i` sees stdin EOF once the bytes are in.
+pub fn docker_output_with_input(
+    data_dir: &Path,
+    args: &[&str],
+    input: &[u8],
+    timeout: Duration,
+) -> Result<String> {
+    let output = run_with_timeout_input(
+        Command::new("docker")
+            .env("DOCKER_HOST", docker_host(data_dir))
+            .args(args),
+        Some(input.to_vec()),
+        timeout,
+    )?;
+    docker_result(args, &output)
+}
+
+fn docker_result(args: &[&str], output: &std::process::Output) -> Result<String> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     if output.status.success() {
@@ -188,6 +210,19 @@ fn kill_process_group(pgid: i32) {
 /// group kill is not conditional on timing out: once the direct child is
 /// gone, nothing else may hold pipes this function is about to join on.
 pub fn run_with_timeout(command: &mut Command, timeout: Duration) -> Result<std::process::Output> {
+    run_with_timeout_input(command, None, timeout)
+}
+
+/// [`run_with_timeout`] that feeds `input` to the child's stdin and closes
+/// it; with `None` the child inherits this process's stdin.
+pub fn run_with_timeout_input(
+    command: &mut Command,
+    input: Option<Vec<u8>>,
+    timeout: Duration,
+) -> Result<std::process::Output> {
+    if input.is_some() {
+        command.stdin(Stdio::piped());
+    }
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -195,6 +230,14 @@ pub fn run_with_timeout(command: &mut Command, timeout: Duration) -> Result<std:
         .spawn()?;
     // Captured before any reap: `Child::id` is not meaningful afterwards.
     let pgid = i32::try_from(child.id()).expect("pid fits in i32");
+    if let Some(input) = input {
+        let mut stdin = child.stdin.take().expect("stdin was requested piped");
+        // Written off-thread so a child that never reads cannot block us
+        // past the timeout; dropping the handle is the EOF.
+        thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        });
+    }
     let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| {
         thread::spawn(move || {
             let mut buf = Vec::new();
