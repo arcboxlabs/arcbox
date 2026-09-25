@@ -156,9 +156,10 @@ impl LifecycleShared {
                 None
             }
         };
-        let drift_reason = existing_machine.as_ref().and_then(|machine| {
-            machine_drift_reason(machine, &self.config.default_vm, desired_boot.as_ref())
-        });
+        let desired_vm = self.desired_vm();
+        let drift_reason = existing_machine
+            .as_ref()
+            .and_then(|machine| machine_drift_reason(machine, &desired_vm, desired_boot.as_ref()));
         if let Some(field) = drift_reason {
             let m = existing_machine.as_ref().unwrap();
             tracing::warn!(
@@ -166,8 +167,8 @@ impl LifecycleShared {
                 persisted_cpus = m.cpus,
                 persisted_memory = m.memory_mb,
                 persisted_kernel = m.kernel.as_deref().unwrap_or("none"),
-                desired_cpus = self.config.default_vm.cpus,
-                desired_memory = self.config.default_vm.memory_mb,
+                desired_cpus = desired_vm.cpus,
+                desired_memory = desired_vm.memory_mb,
                 "default machine config drifted from desired defaults; recreating"
             );
             let _ = self.machine_manager.remove(&self.machine_name, true);
@@ -330,11 +331,12 @@ impl LifecycleShared {
             read_only: false,
         });
 
+        let desired_vm = self.desired_vm();
         let config = MachineConfig {
             name: self.machine_name.clone(),
-            cpus: self.config.default_vm.cpus,
-            memory_mb: self.config.default_vm.memory_mb,
-            disk_gb: self.config.default_vm.disk_gb,
+            cpus: desired_vm.cpus,
+            memory_mb: desired_vm.memory_mb,
+            disk_gb: desired_vm.disk_gb,
             kernel: Some(boot.kernel),
             cmdline: Some(boot.cmdline),
             block_devices,
@@ -347,7 +349,7 @@ impl LifecycleShared {
             // wired is decided per-backend at VM build time (VZ only), so the
             // value stays correct across a backend switch — see
             // `VmManager::build_vmm_config`.
-            enable_rosetta: self.config.default_vm.rosetta,
+            enable_rosetta: desired_vm.rosetta,
         };
 
         tracing::info!(

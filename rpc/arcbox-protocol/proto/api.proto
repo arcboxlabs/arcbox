@@ -199,6 +199,16 @@ service SystemService {
     // running containers. Returns the resulting backend.
     rpc SetSystemVmBackend(SetSystemVmBackendRequest) returns (SystemVmBackendInfo);
 
+    // Gets the System VM's CPU and memory limits, with the host's capacity
+    // for context.
+    rpc GetSystemVmResources(Empty) returns (SystemVmResources);
+
+    // Sets the System VM's CPU and memory limits. The choice is written to
+    // the user's config.toml so it survives daemon restarts; the System VM
+    // is recreated so it takes effect, which stops running containers.
+    // Returns the resulting limits.
+    rpc SetSystemVmResources(SetSystemVmResourcesRequest) returns (SystemVmResources);
+
     // Dumps a diagnostic snapshot of the System VM's virtio devices:
     // per-queue kick counters, live avail/used ring indices, EVENT_IDX
     // slots, and pending interrupt state. Custom-VMM backends only —
@@ -238,6 +248,27 @@ message SystemVmBackendInfo {
 // Request to switch the System VM's hypervisor backend.
 message SetSystemVmBackendRequest {
     SystemVmBackend backend = 1;
+}
+
+// The System VM's CPU and memory limits and the host's capacity.
+message SystemVmResources {
+    // vCPUs the System VM boots with.
+    uint32 cpus = 1;
+    // Memory the System VM boots with, in MiB.
+    uint64 memory_mb = 2;
+    // Logical CPUs on the host; the ceiling for `cpus`.
+    uint32 host_cpus = 3;
+    // Physical memory on the host in MiB; the ceiling for `memory_mb`.
+    uint64 host_memory_mb = 4;
+}
+
+// Request to change the System VM's CPU and memory limits. A zero field
+// keeps the current value.
+message SetSystemVmResourcesRequest {
+    // vCPUs, 1 through the host's logical CPU count.
+    uint32 cpus = 1;
+    // Memory in MiB, 512 through the host's physical memory.
+    uint64 memory_mb = 2;
 }
 
 // Request to resolve a container's filesystem layer directories.

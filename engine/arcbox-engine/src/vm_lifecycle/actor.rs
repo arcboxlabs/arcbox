@@ -112,6 +112,12 @@ pub(super) struct LifecycleShared {
     /// Live hypervisor backend, encoded as `VmBackend as u8`. Seeded from the
     /// persisted machine; updated by `set_backend` for the next (re)boot.
     pub(super) backend: std::sync::atomic::AtomicU8,
+    /// vCPUs the next (re)boot creates the machine with. Seeded from
+    /// `config.default_vm`; updated by `set_resources`.
+    pub(super) desired_cpus: std::sync::atomic::AtomicU32,
+    /// Memory in MiB the next (re)boot creates the machine with. Seeded from
+    /// `config.default_vm`; updated by `set_resources`.
+    pub(super) desired_memory_mb: std::sync::atomic::AtomicU64,
     /// VM incarnation counter, bumped on every stop (see `restart_generation`).
     pub(super) restart_generation: std::sync::atomic::AtomicU64,
     /// Timestamp of last activity (epoch millis, for idle detection).
@@ -142,6 +148,16 @@ impl LifecycleShared {
             .as_millis() as u64;
         let last = self.last_activity_ms.load(Ordering::Relaxed);
         now_ms.saturating_sub(last) / 1000
+    }
+
+    /// The VM configuration the next (re)boot creates the machine with:
+    /// `config.default_vm` under the live CPU and memory limits.
+    pub(super) fn desired_vm(&self) -> super::DefaultVmConfig {
+        super::DefaultVmConfig {
+            cpus: self.desired_cpus.load(Ordering::Acquire),
+            memory_mb: self.desired_memory_mb.load(Ordering::Acquire),
+            ..self.config.default_vm.clone()
+        }
     }
 
     /// Returns the System VM's current hypervisor backend.

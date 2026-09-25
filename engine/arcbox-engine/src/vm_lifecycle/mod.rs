@@ -45,7 +45,7 @@ use crate::event::EventBus;
 use crate::machine::{MachineInfo, MachineManager};
 use arcbox_image::boot_assets::BootAssetProvider;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -213,6 +213,8 @@ impl VmLifecycleManager {
             boot_assets,
             recovery,
             health_monitor,
+            desired_cpus: AtomicU32::new(config.default_vm.cpus),
+            desired_memory_mb: AtomicU64::new(config.default_vm.memory_mb),
             config,
             backend: AtomicU8::new(seeded_backend as u8),
             restart_generation: AtomicU64::new(0),
@@ -457,10 +459,25 @@ impl VmLifecycleManager {
         &self.shared.boot_assets
     }
 
-    /// Returns the resolved default VM configuration used by lifecycle.
+    /// Returns the VM configuration the next (re)boot creates the machine
+    /// with: the configured defaults under the live CPU and memory limits.
     #[must_use]
     pub fn default_vm_config(&self) -> DefaultVmConfig {
-        self.shared.config.default_vm.clone()
+        self.shared.desired_vm()
+    }
+
+    /// Sets the CPU and memory limits used on the next (re)boot of the
+    /// System VM.
+    ///
+    /// Does not stop or restart a running VM; the next boot's drift check
+    /// recreates the machine when either differs from the persisted record.
+    /// To apply immediately the caller forces that boot (see
+    /// `Runtime::resize_system_vm`).
+    pub fn set_resources(&self, cpus: u32, memory_mb: u64) {
+        self.shared.desired_cpus.store(cpus, Ordering::Release);
+        self.shared
+            .desired_memory_mb
+            .store(memory_mb, Ordering::Release);
     }
 
     /// Returns the health monitor.

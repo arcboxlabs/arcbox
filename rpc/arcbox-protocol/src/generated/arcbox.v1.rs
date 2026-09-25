@@ -265,6 +265,33 @@ pub struct SetSystemVmBackendRequest {
     #[prost(enumeration = "SystemVmBackend", tag = "1")]
     pub backend: i32,
 }
+/// The System VM's CPU and memory limits and the host's capacity.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SystemVmResources {
+    /// vCPUs the System VM boots with.
+    #[prost(uint32, tag = "1")]
+    pub cpus: u32,
+    /// Memory the System VM boots with, in MiB.
+    #[prost(uint64, tag = "2")]
+    pub memory_mb: u64,
+    /// Logical CPUs on the host; the ceiling for `cpus`.
+    #[prost(uint32, tag = "3")]
+    pub host_cpus: u32,
+    /// Physical memory on the host in MiB; the ceiling for `memory_mb`.
+    #[prost(uint64, tag = "4")]
+    pub host_memory_mb: u64,
+}
+/// Request to change the System VM's CPU and memory limits. A zero field
+/// keeps the current value.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetSystemVmResourcesRequest {
+    /// vCPUs, 1 through the host's logical CPU count.
+    #[prost(uint32, tag = "1")]
+    pub cpus: u32,
+    /// Memory in MiB, 512 through the host's physical memory.
+    #[prost(uint64, tag = "2")]
+    pub memory_mb: u64,
+}
 /// Request to resolve a container's filesystem layer directories.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ResolveContainerFsRequest {
