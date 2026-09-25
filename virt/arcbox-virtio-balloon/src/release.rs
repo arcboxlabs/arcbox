@@ -148,3 +148,153 @@ pub fn release(releaser: &dyn PageReleaser, ram: GuestRam, offset: usize, len: u
     }
     u32::try_from(aligned.len() as u64 / BALLOON_PAGE_SIZE).unwrap_or(u32::MAX)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    const HOST_16K: usize = 16 * 1024;
+
+    /// Records every range it is asked to release.
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<(u64, usize)>>);
+
+    impl PageReleaser for Recorder {
+        fn release(&self, _host: *mut u8, gpa: u64, len: usize) -> std::io::Result<()> {
+            self.0.lock().unwrap().push((gpa, len));
+            Ok(())
+        }
+    }
+
+    struct Refuser;
+
+    impl PageReleaser for Refuser {
+        fn release(&self, _host: *mut u8, _gpa: u64, _len: usize) -> std::io::Result<()> {
+            Err(std::io::Error::from_raw_os_error(libc::EINVAL))
+        }
+    }
+
+    #[test]
+    fn host_aligned_shrinks_inward_and_never_grows() {
+        assert_eq!(host_aligned(0x1000, 0x1000, HOST_16K), None);
+        assert_eq!(host_aligned(0x1000, 0x8000, HOST_16K), Some(0x4000..0x8000));
+        assert_eq!(host_aligned(0x4000, 0x8000, HOST_16K), Some(0x4000..0xC000));
+        assert_eq!(host_aligned(0x4000, 0x7FFF, HOST_16K), Some(0x4000..0x8000));
+        assert_eq!(host_aligned(0, 0x4000, 4096), Some(0..0x4000));
+        assert_eq!(host_aligned(usize::MAX - 0x100, 0x200, HOST_16K), None);
+    }
+
+    #[test]
+    fn pfn_runs_sort_dedup_and_coalesce() {
+        let pfns: Vec<u8> = [7u32, 5, 6, 2, 3, 9, 6]
+            .iter()
+            .flat_map(|p| p.to_le_bytes())
+            .chain([0xAA, 0xBB])
+            .collect();
+        let p = BALLOON_PAGE_SIZE;
+        assert_eq!(
+            pfn_runs(&pfns),
+            vec![2 * p..4 * p, 5 * p..8 * p, 9 * p..10 * p]
+        );
+        assert!(pfn_runs(&[]).is_empty());
+    }
+
+    /// Page-aligned scratch mapping standing in for guest RAM.
+    struct Ram {
+        ptr: *mut u8,
+        len: usize,
+    }
+
+    impl Ram {
+        fn new(len: usize) -> Self {
+            // SAFETY: fresh anonymous private mapping owned by this struct.
+            let ptr = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    len,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            assert_ne!(ptr, libc::MAP_FAILED);
+            Self {
+                ptr: ptr.cast(),
+                len,
+            }
+        }
+
+        fn guest(&self, gpa_base: u64) -> GuestRam {
+            GuestRam {
+                base: self.ptr,
+                len: self.len,
+                gpa_base,
+            }
+        }
+
+        fn bytes(&mut self) -> &mut [u8] {
+            // SAFETY: ptr/len describe the live private mapping above.
+            unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+        }
+    }
+
+    impl Drop for Ram {
+        fn drop(&mut self) {
+            // SAFETY: mapping created in new() with this exact len.
+            unsafe { libc::munmap(self.ptr.cast(), self.len) };
+        }
+    }
+
+    #[test]
+    fn release_hands_over_only_whole_host_pages_at_their_guest_address() {
+        let host = host_page_size();
+        let ram = Ram::new(4 * host);
+        let recorder = Recorder::default();
+        // One guest page short of a host page on either side: nothing
+        // outside `[host, 3*host)` may be released.
+        let offset = host - BALLOON_PAGE_SIZE as usize;
+        let len = 2 * host + 2 * BALLOON_PAGE_SIZE as usize;
+        let released = release(&recorder, ram.guest(0x4000_0000), offset, len);
+        assert_eq!(released as usize, 2 * host / BALLOON_PAGE_SIZE as usize);
+        assert_eq!(
+            *recorder.0.lock().unwrap(),
+            vec![(0x4000_0000 + host as u64, 2 * host)]
+        );
+    }
+
+    #[test]
+    fn release_refuses_ranges_outside_the_mapping_and_reports_refusals() {
+        let host = host_page_size();
+        let ram = Ram::new(2 * host);
+        let recorder = Recorder::default();
+        let guest = ram.guest(0);
+        assert_eq!(release(&recorder, guest, host, 2 * host), 0);
+        assert_eq!(release(&recorder, guest, usize::MAX - host, 2 * host), 0);
+        assert_eq!(release(&recorder, guest, 0, BALLOON_PAGE_SIZE as usize), 0);
+        assert!(recorder.0.lock().unwrap().is_empty());
+        assert_eq!(
+            release(&Refuser, guest, 0, host),
+            0,
+            "a refusal releases nothing"
+        );
+    }
+
+    #[test]
+    fn madvise_releaser_keeps_the_mapping_usable() {
+        let host = host_page_size();
+        let mut ram = Ram::new(2 * host);
+        ram.bytes().fill(0xAB);
+        assert_eq!(
+            release(&MadviseReleaser, ram.guest(0), 0, host),
+            host as u32 / 4096
+        );
+        // Linux drops the page (reads back zero); Darwin keeps it. Either
+        // way the page after it is untouched and the range stays mapped.
+        let bytes = ram.bytes();
+        assert!(bytes[0] == 0 || bytes[0] == 0xAB);
+        assert!(bytes[host..].iter().all(|b| *b == 0xAB));
+    }
+}

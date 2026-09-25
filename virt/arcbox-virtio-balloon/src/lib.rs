@@ -597,6 +597,62 @@ mod tests {
         );
     }
 
+    /// Records every `(gpa, len)` the device asks it to release.
+    #[derive(Default)]
+    struct Recorder(std::sync::Mutex<Vec<(u64, usize)>>);
+
+    impl PageReleaser for std::sync::Arc<Recorder> {
+        fn release(&self, _host: *mut u8, gpa: u64, len: usize) -> std::io::Result<()> {
+            self.0.lock().unwrap().push((gpa, len));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn reporting_hands_the_releaser_the_guest_address() {
+        let mut ram = TestRam::new(GPA_BASE);
+        let recorder = std::sync::Arc::new(Recorder::default());
+        let mut b = VirtioBalloon::with_releaser(Box::new(std::sync::Arc::clone(&recorder)));
+        b.ack_features(b.features());
+        let cfg = ram.cfg();
+        let host = release::host_page_size();
+        ram.write_desc(0, GPA_BASE + DATA_OFF, host as u32, F_WRITE, 0);
+        ram.publish_avail(0, 0);
+        b.process_queue(QUEUE_REPORTING, ram.slice(), &cfg).unwrap();
+        assert_eq!(
+            *recorder.0.lock().unwrap(),
+            vec![(GPA_BASE + DATA_OFF, host)]
+        );
+    }
+
+    #[test]
+    fn inflate_releases_coalesced_runs_and_completes() {
+        let mut ram = TestRam::new(GPA_BASE);
+        let mut b = reporting_device();
+        let cfg = ram.cfg();
+
+        // A PFN array naming every guest page of one host page, out of
+        // order, plus a lone page beyond RAM that must be refused.
+        let host = release::host_page_size() as u64;
+        let first_pfn = (GPA_BASE + DATA_OFF) / BALLOON_PAGE_SIZE;
+        let per_host = host / BALLOON_PAGE_SIZE;
+        let mut pfns: Vec<u32> = (0..per_host)
+            .rev()
+            .map(|i| (first_pfn + i) as u32)
+            .collect();
+        pfns.push(((GPA_BASE + 0x10_0000) / BALLOON_PAGE_SIZE) as u32);
+        let bytes: Vec<u8> = pfns.iter().flat_map(|p| p.to_le_bytes()).collect();
+        let list_off = DATA_OFF + host; // keep the list out of the released page
+        let o = ram.off(GPA_BASE + list_off);
+        ram.slice()[o..o + bytes.len()].copy_from_slice(&bytes);
+        ram.write_desc(0, GPA_BASE + list_off, bytes.len() as u32, 0, 0);
+        ram.publish_avail(0, 0);
+
+        let completions = b.process_queue(QUEUE_INFLATE, ram.slice(), &cfg).unwrap();
+        assert_eq!(completions, vec![(0, 0)]);
+        assert_eq!(b.inflated_total() as u64, per_host, "exactly one host page");
+    }
+
     #[test]
     fn reporting_rejects_hostile_ranges_but_completes_chains() {
         let mut ram = TestRam::new(GPA_BASE);
