@@ -126,10 +126,10 @@ mod platform {
     fn raise_fd_limits() {
         // Ensure the kernel ceiling (fs.nr_open) is at least the target.
         // The default is already 1048576, but guard against custom kernels.
-        ensure_sysctl_at_least("/proc/sys/fs/nr_open", super::NOFILE_LIMIT);
+        ensure_sysctl_at_least("/proc/sys/fs/nr_open", crate::docker_config::NOFILE_LIMIT);
 
         // Only raise — never lower a previously higher inherited limit.
-        let target = super::NOFILE_LIMIT;
+        let target = crate::docker_config::NOFILE_LIMIT;
         match nix::sys::resource::getrlimit(Resource::RLIMIT_NOFILE) {
             Ok((soft, hard)) if soft >= target && hard >= target => {}
             _ => {
@@ -869,15 +869,13 @@ exit 0
         }
     }
 
-    /// Writes Docker daemon configuration (DNS, direct routing, and ulimits).
+    /// Writes `/etc/docker/daemon.json`: the keys ArcBox manages plus the
+    /// operator's overrides from the host (see `crate::docker_config`).
     ///
     /// Containers get their DNS from the Docker daemon config, NOT from the
     /// guest's /etc/resolv.conf. We point them to 10.0.2.1 (the gateway)
     /// so container DNS queries go through the host-side forwarder which can
     /// resolve *.arcbox.local names registered from the host.
-    ///
-    /// Default ulimits ensure containers get a high NOFILE limit even if
-    /// Docker's own heuristics pick a lower value.
     fn write_docker_daemon_config() {
         mkdir_p("/etc/docker");
         let network = match crate::agent::container_network() {
@@ -887,8 +885,24 @@ exit 0
                 return;
             }
         };
-        let content = super::docker_daemon_json(network);
-        if let Err(e) = std::fs::write("/etc/docker/daemon.json", &content) {
+        let overrides_path = crate::docker_config::overrides_path();
+        let overrides = match crate::docker_config::read_overrides(Path::new(&overrides_path)) {
+            Ok(overrides) => overrides,
+            Err(error) => {
+                // Booting with the managed keys alone beats not booting; the
+                // operator sees why their mirrors did not apply.
+                tracing::error!(%error, "ignoring unreadable dockerd overrides from the host");
+                Default::default()
+            }
+        };
+        let rendered = crate::docker_config::render(network, overrides);
+        if !rendered.refused.is_empty() {
+            tracing::warn!(
+                keys = ?rendered.refused,
+                "dropped dockerd overrides for keys ArcBox manages"
+            );
+        }
+        if let Err(e) = std::fs::write("/etc/docker/daemon.json", &rendered.content) {
             tracing::warn!(error = %e, "failed to write /etc/docker/daemon.json");
         }
     }
@@ -940,48 +954,6 @@ exit 0
             }
         }
     }
-}
-
-/// Target NOFILE limit for the guest VM, matching Docker Desktop / OrbStack.
-/// Used by both `raise_fd_limits()` and `docker_daemon_json()`.
-#[cfg(any(target_os = "linux", test))]
-const NOFILE_LIMIT: u64 = 1_048_576;
-
-/// Returns the Docker daemon.json content as a string.
-///
-/// Extracted as a pure function so the output contract (DNS, direct routing,
-/// default ulimits, and containerd image store) is testable independently of
-/// the filesystem and platform.
-///
-/// `containerd-snapshotter` stays explicitly `true` even though dockerd ≥ 29
-/// defaults to the containerd image store: without the explicit flag, dockerd
-/// falls back to the graphdriver whenever it finds prior graphdriver state on
-/// the data volume (`graphdriver-prior`), which would silently flip a machine
-/// with stale overlay2 remnants back to the legacy store. dockerd 29 logs a
-/// benign "no longer needed" warning for it.
-#[cfg(any(target_os = "linux", test))]
-fn docker_daemon_json(network: arcbox_constants::container_network::ContainerNetwork) -> String {
-    let bridge = format!(
-        "{}/{}",
-        network.docker_bridge_gateway(),
-        network.docker_network_prefix()
-    );
-    serde_json::json!({
-        "dns": ["10.0.2.1"],
-        "allow-direct-routing": true,
-        "bip": bridge,
-        "default-address-pools": [{
-            "base": network.to_string(),
-            "size": network.docker_network_prefix()
-        }],
-        "default-ulimits": {
-            "nofile": { "Name": "nofile", "Soft": NOFILE_LIMIT, "Hard": NOFILE_LIMIT }
-        },
-        "features": {
-            "containerd-snapshotter": true
-        }
-    })
-    .to_string()
 }
 
 #[cfg(target_os = "linux")]
@@ -1046,67 +1018,6 @@ fn report_missing_mounts(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    fn default_daemon_json() -> String {
-        docker_daemon_json(arcbox_constants::container_network::ContainerNetwork::default())
-    }
-
-    #[test]
-    fn daemon_json_contains_nofile_ulimit() {
-        let json = default_daemon_json();
-        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
-        let nofile = &v["default-ulimits"]["nofile"];
-        assert_eq!(nofile["Soft"], 1048576);
-        assert_eq!(nofile["Hard"], 1048576);
-        assert_eq!(nofile["Name"], "nofile");
-    }
-
-    #[test]
-    fn daemon_json_contains_dns() {
-        let json = default_daemon_json();
-        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
-        assert_eq!(v["dns"][0], "10.0.2.1");
-    }
-
-    #[test]
-    fn daemon_json_allows_direct_container_routing() {
-        let json = default_daemon_json();
-        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
-        assert_eq!(v["allow-direct-routing"], true);
-    }
-
-    #[test]
-    fn daemon_json_preserves_the_production_docker_bridge() {
-        let json = default_daemon_json();
-        let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
-
-        assert_eq!(value["bip"], "172.17.0.1/16");
-        assert_eq!(value["default-address-pools"][0]["base"], "172.16.0.0/12");
-        assert_eq!(value["default-address-pools"][0]["size"], 16);
-    }
-
-    #[test]
-    fn daemon_json_enables_containerd_snapshotter() {
-        let json = default_daemon_json();
-        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
-        assert_eq!(v["features"]["containerd-snapshotter"], true);
-    }
-
-    #[test]
-    fn daemon_json_uses_the_selected_container_pool() {
-        let network = arcbox_constants::container_network::ContainerNetwork::from_kernel_cmdline(
-            "root=/dev/vda arcbox.container_network=10.80.0.0/20",
-        )
-        .unwrap();
-        let json = docker_daemon_json(network);
-        let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
-
-        assert_eq!(value["bip"], "10.80.1.1/24");
-        assert_eq!(value["default-address-pools"][0]["base"], "10.80.0.0/20");
-        assert_eq!(value["default-address-pools"][0]["size"], 24);
-    }
-
     #[test]
     fn report_missing_mounts_flags_only_unmounted() {
         // All mounted → Ok.

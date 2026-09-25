@@ -79,6 +79,18 @@ mounts, named volumes, and interactive `exec` all work today. `abctl docker setu
 installs and manages the matching `docker`, `buildx`, and `compose` binaries for
 you.
 
+The engine is configured from `~/.config/arcbox/config.toml`; a daemon restart
+applies it:
+
+```toml
+[docker]
+registry_mirrors = ["https://mirror.example.com"]   # tried before Docker Hub
+insecure_registries = ["registry.corp:5000"]
+
+[docker.engine]                 # any other dockerd daemon.json key
+max-concurrent-downloads = 6
+```
+
 ### amd64 and arm64 images
 
 ArcBox runs `linux/amd64` images on Apple Silicon next to native arm64. x86-64 is

@@ -391,6 +391,15 @@ pub mod guest {
     /// Log directory inside the VirtioFS mount.
     pub const LOG: &str = "log";
 
+    /// Host-written configuration the guest reads at boot, relative to
+    /// [`MOUNT`] on the guest side and to the data directory on the host.
+    pub const CONFIG: &str = "config";
+
+    /// Operator overrides for the guest `dockerd` `daemon.json`, inside
+    /// [`CONFIG`]. The host renders `[docker.engine]` here before every
+    /// System VM boot; the guest agent merges it over the keys it manages.
+    pub const DOCKER_ENGINE_CONFIG: &str = "docker-engine.json";
+
     /// Host-built artifacts the guest reads back.
     ///
     /// Currently unused: the sandbox image staging that lived here moved

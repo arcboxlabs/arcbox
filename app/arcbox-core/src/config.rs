@@ -31,6 +31,12 @@
 //! guest_docker_vsock_port = 2375
 //! cidr = "172.16.0.0/12"
 //!
+//! [docker]
+//! # registry_mirrors = ["https://mirror.example.com"]
+//! # insecure_registries = ["registry.corp:5000"]
+//! # [docker.engine]                # any other dockerd daemon.json key
+//! # max-concurrent-downloads = 6
+//!
 //! [logging]
 //! level = "info"
 //! ```
@@ -366,6 +372,18 @@ pub struct DockerConfig {
     pub socket_path: PathBuf,
     /// Enable Docker API.
     pub enabled: bool,
+    /// Registry mirrors `dockerd` pulls through, tried in order before the
+    /// upstream registry. Written to `registry-mirrors` in the guest's
+    /// `daemon.json`.
+    pub registry_mirrors: Vec<String>,
+    /// Registries reached over plain HTTP or with an untrusted certificate.
+    /// Written to `insecure-registries`.
+    pub insecure_registries: Vec<String>,
+    /// Further `daemon.json` keys, merged last. ArcBox owns `dns`, `bip`,
+    /// `default-address-pools`, `allow-direct-routing`, the `nofile` ulimit
+    /// and `features.containerd-snapshotter`; a value for one of those here
+    /// is ignored with a warning in the guest log.
+    pub engine: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Default for DockerConfig {
@@ -381,7 +399,32 @@ impl DockerConfig {
         Self {
             socket_path: HostLayout::for_profile(profile).docker_socket,
             enabled: true,
+            registry_mirrors: Vec::new(),
+            insecure_registries: Vec::new(),
+            engine: serde_json::Map::new(),
         }
+    }
+
+    /// The `daemon.json` fragment the guest merges over its own keys.
+    ///
+    /// The two typed lists win over same-named keys in `engine`, so an
+    /// operator who set both cannot be surprised by which one applied.
+    #[must_use]
+    pub fn engine_overrides(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut overrides = self.engine.clone();
+        if !self.registry_mirrors.is_empty() {
+            overrides.insert(
+                "registry-mirrors".into(),
+                serde_json::Value::from(self.registry_mirrors.clone()),
+            );
+        }
+        if !self.insecure_registries.is_empty() {
+            overrides.insert(
+                "insecure-registries".into(),
+                serde_json::Value::from(self.insecure_registries.clone()),
+            );
+        }
+        overrides
     }
 }
 
@@ -565,6 +608,37 @@ mod tests {
             .extract()
             .expect("config with vm.backend");
         assert_eq!(config.vm.backend, arcbox_vmm::VmBackend::Hv);
+    }
+
+    #[test]
+    fn docker_engine_overrides_merge_typed_lists_over_free_form_keys() {
+        let config: Config = Figment::new()
+            .merge(Serialized::defaults(Config::default()))
+            .merge(Toml::string(
+                r#"
+[docker]
+registry_mirrors = ["https://mirror.example.com"]
+insecure_registries = ["registry.corp:5000"]
+
+[docker.engine]
+max-concurrent-downloads = 6
+registry-mirrors = ["https://ignored.example.com"]
+"#,
+            ))
+            .extract()
+            .expect("valid docker engine config");
+
+        let overrides = config.docker.engine_overrides();
+        assert_eq!(overrides["max-concurrent-downloads"], 6);
+        assert_eq!(
+            overrides["registry-mirrors"],
+            serde_json::json!(["https://mirror.example.com"])
+        );
+        assert_eq!(
+            overrides["insecure-registries"],
+            serde_json::json!(["registry.corp:5000"])
+        );
+        assert!(Config::default().docker.engine_overrides().is_empty());
     }
 
     #[test]

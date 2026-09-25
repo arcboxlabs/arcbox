@@ -84,6 +84,7 @@ mod dns;
 
 // Guest-side DNS server and Docker event-driven container registration.
 mod dns_server;
+mod docker_config;
 mod docker_events;
 
 /// Max bytes for `agent.log` before it rotates (matches the daemon's 10 MiB).

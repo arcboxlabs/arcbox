@@ -14,6 +14,7 @@ mod create_key;
 mod create_registry;
 pub mod dns;
 pub mod dns_server;
+pub mod docker_config;
 #[cfg(target_os = "linux")]
 pub mod error;
 pub mod memory_pressure;

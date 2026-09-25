@@ -47,6 +47,7 @@ arcbox-image.workspace = true
 arcbox-engine.workspace = true
 arcbox-computer.workspace = true
 arcbox-fakeip.workspace = true
+arcbox-atomic-file.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 arcbox-route.workspace = true

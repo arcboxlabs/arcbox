@@ -1,6 +1,7 @@
 //! `ArcBox` runtime.
 
 mod assets;
+mod engine_config;
 mod kubeconfig;
 mod progress;
 mod sandbox_host;
@@ -912,6 +913,10 @@ impl Runtime {
 
         // Validate all guest binaries are present and executable (boot-blocking).
         ensure_guest_binaries(&self.config.data_dir, &generation)?;
+
+        // The operator's dockerd overrides ride the shared data directory
+        // into the guest, which merges them into daemon.json at init.
+        engine_config::stage_engine_config(&self.config.data_dir, &self.config.docker)?;
 
         // Boot the VM through the lifecycle manager first so the agent
         // handshake is observable on its own: `ensure_vm_ready` below covers
