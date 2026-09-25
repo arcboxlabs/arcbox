@@ -6,12 +6,17 @@
 
 use arcbox_api::IconServiceImpl;
 
+/// `redis`, not `nginx`: dimicon 0.2.0 probes only `<image>/logo.png` in
+/// docker-library/docs, and nginx swapped its logo for `logo.svg` on
+/// 2026-09-21 (docker-library/docs#2704), so nginx now resolves through the
+/// devicon fallback instead. redis's `logo.png` has been unchanged since
+/// 2024-06. When dimicon learns `logo.svg`, any official image will do.
 #[tokio::test]
 async fn get_icon_for_official_image() {
     let svc = IconServiceImpl::new();
-    let resp = svc.resolve("nginx").await.unwrap();
+    let resp = svc.resolve("redis").await.unwrap();
 
-    assert!(!resp.url.is_empty(), "expected icon URL for nginx");
+    assert!(!resp.url.is_empty(), "expected icon URL for redis");
     assert_eq!(resp.source, "docker_official_image");
 }
 
