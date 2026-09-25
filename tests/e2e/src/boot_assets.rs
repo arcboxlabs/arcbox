@@ -468,16 +468,27 @@ fn stage_runtime_binaries(data_dir: &Path, version: &str) {
     // directory, which older installs used for guest binaries too. Either
     // way the daemon checksum-verifies what it finds, so a stale file costs
     // a re-download rather than a bad boot.
-    let versioned = installed.join(version).join("bin");
-    let guest_src = if versioned.is_dir() {
-        versioned
+    let versioned = installed.join(version);
+    if versioned.is_dir() {
+        // A generation holds `bin/` plus companion assets the manifest
+        // installs elsewhere (`install_dir`), today the microVM `kernel/`.
+        // Mirror every subdirectory: a companion asset the harness leaves
+        // out is a CDN download the daemon may not be able to make.
+        let Ok(entries) = fs::read_dir(&versioned) else {
+            return;
+        };
+        let dest = data_dir.join("runtime").join(version);
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                stage_binary_dir(&entry.path(), &dest.join(entry.file_name()));
+            }
+        }
     } else {
-        installed.join("bin")
-    };
-    stage_binary_dir(
-        &guest_src,
-        &data_dir.join("runtime").join(version).join("bin"),
-    );
+        stage_binary_dir(
+            &installed.join("bin"),
+            &data_dir.join("runtime").join(version).join("bin"),
+        );
+    }
 }
 
 /// Copies every regular file in `src_dir` into `dest_dir`, warning per file.
