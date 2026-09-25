@@ -385,7 +385,7 @@ impl Vmm {
         };
 
         // 5. Build the datapath and spawn it on the tokio runtime.
-        let datapath = NetworkDatapath::new(
+        let mut datapath = NetworkDatapath::new(
             host_fd,
             egress,
             reply_rx,
@@ -398,6 +398,9 @@ impl Vmm {
             cancel,
             net_mtu,
         );
+        if let Some(env) = self.proxy_env.clone() {
+            datapath.set_proxy_env(env);
+        }
 
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
             VmmError::Device(format!(

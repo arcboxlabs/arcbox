@@ -18,7 +18,7 @@ use crate::machine::{MachineManager, MachineState};
 #[cfg(target_os = "macos")]
 use crate::macos::MacMachineManager;
 use crate::migration::MigrationManager;
-use crate::vm::VmManager;
+use crate::vm::{HostNetwork, VmManager};
 use crate::vm_lifecycle::{
     DEFAULT_MACHINE_NAME, VmLifecycleConfig, VmLifecycleManager, VmLifecycleState,
 };
@@ -213,15 +213,19 @@ impl Runtime {
         let vm_manager = Arc::new(VmManager::new(snapshot_dir));
         let network_manager = Arc::new(NetworkManager::new(arcbox_net::NetConfig::default()));
 
-        // Share the host-side DNS hosts table with the VMM so both
-        // the host DnsService and the VMM-side datapath DnsForwarder
-        // resolve from the same table.
-        let shared_dns_table = Some(network_manager.local_hosts_table());
+        // Every VM's datapath is wired to the host the same way: the DNS
+        // hosts table it shares with the host DnsService, and the operator's
+        // egress proxy policy. `system` probes the Mac's proxy settings here,
+        // once per daemon start.
+        let host_network = HostNetwork {
+            dns_hosts: Some(network_manager.local_hosts_table()),
+            proxy: config.network.proxy_settings().resolve(),
+        };
 
         let machine_manager = Arc::new(MachineManager::new(
             Arc::clone(&vm_manager),
             config.data_dir.clone(),
-            shared_dns_table,
+            host_network,
             event_bus.clone(),
         ));
 

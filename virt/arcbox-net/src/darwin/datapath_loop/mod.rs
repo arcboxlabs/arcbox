@@ -35,6 +35,7 @@ use splicetcp::{FdFrameSource, FrameSource};
 use crate::darwin::classifier::FrameClassifier;
 use crate::darwin::egress::HostEgress;
 use crate::darwin::inbound_relay::InboundCommand;
+use crate::darwin::proxy_detect::ProxyEnvironment;
 use crate::darwin::tcp_bridge::TcpBridge;
 use crate::dhcp::DhcpServer;
 use crate::dns::DnsForwarder;
@@ -89,6 +90,10 @@ pub struct NetworkDatapath {
     /// `TcpBridge` can send promoted connections to the RX inject thread
     /// for inline (zero-copy) host→guest data transfer.
     pub conn_sink: Option<std::sync::Arc<dyn crate::direct_rx::ConnSink>>,
+    /// Proxy the guest's TCP and UDP egress is tunnelled through, already
+    /// resolved from the operator's policy. `None` connects everything
+    /// directly.
+    pub proxy_env: Option<ProxyEnvironment>,
 }
 
 impl NetworkDatapath {
@@ -96,6 +101,8 @@ impl NetworkDatapath {
     ///
     /// `guest_fd` is the host side of the socketpair passed to VZ.
     /// `egress` and `reply_rx` are created via `HostEgress::new()`.
+    /// Egress connects directly until [`Self::set_proxy_env`] installs a
+    /// proxy.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -126,7 +133,13 @@ impl NetworkDatapath {
             mtu,
             frame_sink: None,
             conn_sink: None,
+            proxy_env: None,
         }
+    }
+
+    /// Tunnels guest egress through `env`'s proxy, honouring its bypass list.
+    pub fn set_proxy_env(&mut self, env: ProxyEnvironment) {
+        self.proxy_env = Some(env);
     }
 
     /// Attaches a frame sink for host-to-guest RX injection.
@@ -169,6 +182,7 @@ impl NetworkDatapath {
             mtu,
             frame_sink,
             conn_sink,
+            proxy_env,
         } = self;
 
         // Set guest_fd to non-blocking for AsyncFd.
@@ -201,15 +215,18 @@ impl NetworkDatapath {
             tcp_bridge.set_conn_sink(sink.clone());
         }
 
-        // Enable proxy-aware connections: detect host VPN/proxy environment
-        // and share the DNS resolution log so TcpBridge can map IPs to domains.
-        let proxy_env = super::proxy_detect::ProxyEnvironment::detect();
-        // Give guest UDP the same proxy enforcement as TCP: share the fake-IP log
-        // + proxy env so the UDP path reverses fake-IPs and honours the SOCKS
-        // proxy + bypass list, mirroring the TCP bridge below. (HTTP proxies can't
-        // carry UDP, so only a SOCKS proxy actually routes UDP.)
-        egress.set_proxy_awareness(dns_log.clone(), proxy_env.clone());
-        tcp_bridge.set_proxy_awareness(dns_log.clone(), proxy_env);
+        // Proxy-aware egress, per the operator's policy. TCP and UDP get the
+        // same environment so both reverse fake-IPs and honour the proxy and
+        // its bypass list (HTTP proxies cannot carry UDP, so only a SOCKS
+        // proxy actually routes UDP). Without a proxy the bridge still gets
+        // the DNS log, so flow metadata keeps recovering domains.
+        match proxy_env {
+            Some(env) => {
+                egress.set_proxy_awareness(dns_log.clone(), env.clone());
+                tcp_bridge.set_proxy_awareness(dns_log.clone(), env);
+            }
+            None => tcp_bridge.set_dns_log(dns_log.clone()),
+        }
 
         let guest_async = AsyncFd::new(FdWrapper(guest_fd))?;
 

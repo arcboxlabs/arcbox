@@ -69,7 +69,7 @@ pub use migration::MigrationManager;
 pub use runtime::{
     InitProgress, Runtime, SandboxPortExposure, SandboxPortMapping, SandboxPortProtocol,
 };
-pub use vm::{SharedDirConfig, VmConfig, VmManager};
+pub use vm::{HostNetwork, SharedDirConfig, VmConfig, VmManager};
 pub use vm_lifecycle::{
     ActivityScope, DEFAULT_MACHINE_NAME, DefaultVmConfig, HealthMonitor, VmLifecycleConfig,
     VmLifecycleManager, VmLifecycleState,

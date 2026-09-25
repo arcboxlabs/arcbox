@@ -92,7 +92,7 @@ fn test_start_failure_rolls_back_to_created() {
     let (manager, _dir) = test_vm_manager();
     let vm_id = manager.create(VmConfig::default()).unwrap();
 
-    let _ = manager.start(&vm_id, None);
+    let _ = manager.start(&vm_id, HostNetwork::default());
     let info = manager.get(&vm_id).expect("vm should still exist");
     assert_eq!(info.state, MachineState::Created);
 }

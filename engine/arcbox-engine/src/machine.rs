@@ -5,7 +5,7 @@
 
 use crate::error::{EngineError, Result};
 use crate::persistence::MachinePersistence;
-use crate::vm::{SharedDirConfig, VmConfig, VmId, VmManager};
+use crate::vm::{HostNetwork, SharedDirConfig, VmConfig, VmId, VmManager};
 // Only the macOS `connect_agent` dials the agent port — the vsock helper it
 // rides is macOS-only.
 #[cfg(target_os = "macos")]
@@ -273,8 +273,8 @@ pub struct MachineManager {
     data_dir: PathBuf,
     /// Machine-specific directory (`data_dir/machines`/).
     machines_dir: PathBuf,
-    /// Shared DNS hosts table from NetworkManager, passed to VMM on start.
-    shared_dns_hosts: Option<std::sync::Arc<arcbox_dns::LocalHostsTable>>,
+    /// Host networking every machine's datapath is wired to on start.
+    host_network: HostNetwork,
     /// System-wide event bus. User-machine lifecycle events are published here
     /// so watchers (`MachineService.Events`) see them; the default System VM's
     /// events are published by its own lifecycle actor instead.
@@ -287,7 +287,7 @@ impl MachineManager {
     pub fn new(
         vm_manager: Arc<VmManager>,
         data_dir: PathBuf,
-        shared_dns_hosts: Option<std::sync::Arc<arcbox_dns::LocalHostsTable>>,
+        host_network: HostNetwork,
         event_bus: crate::event::EventBus,
     ) -> Self {
         let machines_dir = data_dir.join("machines");
@@ -386,7 +386,7 @@ impl MachineManager {
             persistence,
             data_dir,
             machines_dir,
-            shared_dns_hosts,
+            host_network,
             event_bus,
         }
     }
@@ -596,8 +596,7 @@ impl MachineManager {
             .is_some();
 
         // Start underlying VM
-        self.vm_manager
-            .start(&vm_id, self.shared_dns_hosts.clone())?;
+        self.vm_manager.start(&vm_id, self.host_network.clone())?;
 
         // Update machine state
         let started_at = Utc::now();

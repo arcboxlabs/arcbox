@@ -11,7 +11,8 @@ use std::sync::RwLock;
 use std::time::Duration;
 
 pub use types::{
-    BlockDeviceConfig, SharedDirConfig, VmConfig, VmId, VmInfo, bridge_nic_mac_for_vm_id,
+    BlockDeviceConfig, HostNetwork, SharedDirConfig, VmConfig, VmId, VmInfo,
+    bridge_nic_mac_for_vm_id,
 };
 
 use arcbox_vmm::{
@@ -202,16 +203,12 @@ impl VmManager {
         }
     }
 
-    /// Starts a VM.
+    /// Starts a VM, wiring its datapath to `host_network`.
     ///
     /// # Errors
     ///
     /// Returns an error if the VM cannot be started.
-    pub fn start(
-        &self,
-        id: &VmId,
-        shared_dns_hosts: Option<std::sync::Arc<arcbox_dns::LocalHostsTable>>,
-    ) -> Result<()> {
+    pub fn start(&self, id: &VmId, host_network: HostNetwork) -> Result<()> {
         let mut vms = self.vms.write().map_err(|_| EngineError::LockPoisoned)?;
 
         let entry = vms
@@ -238,13 +235,19 @@ impl VmManager {
             }
         };
 
-        // Share the host DNS hosts table with the VMM-side DnsForwarder.
+        // Wire the datapath to the host: the shared DNS hosts table and the
+        // operator's egress proxy policy.
         #[cfg(target_os = "macos")]
-        if let Some(table) = shared_dns_hosts {
-            vmm.set_shared_dns_hosts(table);
+        {
+            if let Some(table) = host_network.dns_hosts {
+                vmm.set_shared_dns_hosts(table);
+            }
+            if let Some(proxy) = host_network.proxy {
+                vmm.set_proxy_env(proxy);
+            }
         }
         #[cfg(not(target_os = "macos"))]
-        let _ = shared_dns_hosts;
+        let _ = host_network;
 
         if let Err(e) = vmm.start() {
             entry.info.state = MachineState::Created;

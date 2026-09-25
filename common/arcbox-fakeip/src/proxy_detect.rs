@@ -13,7 +13,7 @@ use std::net::Ipv4Addr;
 use std::process::Command;
 
 /// Proxy server configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProxyConfig {
     pub host: String,
     pub port: u16,

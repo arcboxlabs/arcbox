@@ -10,7 +10,12 @@ fn test_machine_manager_with_bus(
     event_bus: crate::event::EventBus,
 ) -> MachineManager {
     let vm_manager = Arc::new(VmManager::new(data_dir.join("snapshots")));
-    MachineManager::new(vm_manager, data_dir.to_path_buf(), None, event_bus)
+    MachineManager::new(
+        vm_manager,
+        data_dir.to_path_buf(),
+        HostNetwork::default(),
+        event_bus,
+    )
 }
 
 #[tokio::test]

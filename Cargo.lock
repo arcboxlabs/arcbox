@@ -529,6 +529,7 @@ dependencies = [
  "arcbox-dns",
  "arcbox-engine",
  "arcbox-error",
+ "arcbox-fakeip",
  "arcbox-fs",
  "arcbox-helper",
  "arcbox-hypervisor",
@@ -718,6 +719,7 @@ dependencies = [
  "arcbox-constants",
  "arcbox-dns",
  "arcbox-error",
+ "arcbox-fakeip",
  "arcbox-hypervisor",
  "arcbox-image",
  "arcbox-net",
@@ -760,6 +762,7 @@ dependencies = [
 name = "arcbox-fakeip"
 version = "0.7.0"
 dependencies = [
+ "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -1285,6 +1288,7 @@ dependencies = [
  "arcbox-constants",
  "arcbox-dns",
  "arcbox-error",
+ "arcbox-fakeip",
  "arcbox-fs",
  "arcbox-hv",
  "arcbox-hypervisor",

@@ -24,6 +24,8 @@
 //! [network]
 //! subnet = "10.0.2.0/24"
 //! dns = ["8.8.8.8", "8.8.4.4"]
+//! # proxy = "system"                 # or "none", or "socks5://127.0.0.1:1080"
+//! # proxy_exclude = [".corp.example"] # NO_PROXY-style hosts that stay direct
 //!
 //! [container]
 //! guest_docker_vsock_port = 2375
@@ -36,6 +38,7 @@
 use arcbox_constants::container_network::ContainerNetwork;
 use arcbox_constants::paths::{ArcboxProfile, HostLayout};
 use arcbox_constants::ports::DOCKER_API_VSOCK_PORT;
+use arcbox_fakeip::proxy_policy::{ProxyPolicy, ProxySettings};
 use figment::{
     Figment,
     providers::{Env, Format, Serialized, Toml},
@@ -296,6 +299,29 @@ pub struct NetworkConfig {
     pub ipv6: bool,
     /// MTU for virtual network interfaces.
     pub mtu: u16,
+    /// Where guest egress goes: `system` (follow the Mac's proxy settings,
+    /// the default), `none` (always direct), or a proxy URL such as
+    /// `socks5://127.0.0.1:1080` or `http://proxy.corp:3128`.
+    #[serde(
+        serialize_with = "serialize_proxy_policy",
+        deserialize_with = "deserialize_proxy_policy"
+    )]
+    pub proxy: ProxyPolicy,
+    /// Hosts that bypass the proxy, in `NO_PROXY` form (`example.com`,
+    /// `.example.com`, `*.example.com`). Added to the Mac's own exclusions
+    /// under `proxy = "system"`.
+    pub proxy_exclude: Vec<String>,
+}
+
+impl NetworkConfig {
+    /// The guest egress policy as the datapath consumes it.
+    #[must_use]
+    pub fn proxy_settings(&self) -> ProxySettings {
+        ProxySettings {
+            policy: self.proxy.clone(),
+            exclude: self.proxy_exclude.clone(),
+        }
+    }
 }
 
 impl Default for NetworkConfig {
@@ -306,8 +332,28 @@ impl Default for NetworkConfig {
             dns: vec!["8.8.8.8".to_string(), "8.8.4.4".to_string()],
             ipv6: false,
             mtu: 1500,
+            proxy: ProxyPolicy::System,
+            proxy_exclude: Vec::new(),
         }
     }
+}
+
+fn serialize_proxy_policy<S>(policy: &ProxyPolicy, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.collect_str(policy)
+}
+
+fn deserialize_proxy_policy<'de, D>(deserializer: D) -> Result<ProxyPolicy, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    String::deserialize(deserializer)?
+        .parse()
+        .map_err(D::Error::custom)
 }
 
 /// Docker API configuration.
@@ -519,6 +565,63 @@ mod tests {
             .extract()
             .expect("config with vm.backend");
         assert_eq!(config.vm.backend, arcbox_vmm::VmBackend::Hv);
+    }
+
+    #[test]
+    fn network_proxy_defaults_to_following_the_system() {
+        let network = Config::default().network;
+        assert_eq!(network.proxy, ProxyPolicy::System);
+        assert!(network.proxy_exclude.is_empty());
+    }
+
+    #[test]
+    fn network_proxy_parses_keywords_and_urls_from_toml() {
+        let load = |toml: &str| -> Config {
+            Figment::new()
+                .merge(Serialized::defaults(Config::default()))
+                .merge(Toml::string(toml))
+                .extract()
+                .expect("valid network proxy config")
+        };
+
+        assert_eq!(
+            load("[network]\nproxy = \"none\"").network.proxy,
+            ProxyPolicy::None
+        );
+
+        let custom = load(
+            "[network]\nproxy = \"socks5://127.0.0.1:1080\"\nproxy_exclude = [\".corp.example\"]",
+        );
+        assert_eq!(custom.network.proxy.to_string(), "socks5://127.0.0.1:1080");
+        assert_eq!(custom.network.proxy_exclude, vec![".corp.example"]);
+
+        let settings = custom.network.proxy_settings();
+        let env = settings.resolve().expect("a custom proxy resolves");
+        assert_eq!(env.socks_proxy.as_ref().map(|p| p.port), Some(1080));
+        assert!(env.should_bypass("api.corp.example"));
+    }
+
+    #[test]
+    fn network_proxy_rejects_an_unusable_url() {
+        let invalid = Figment::new()
+            .merge(Serialized::defaults(Config::default()))
+            .merge(Toml::string("[network]\nproxy = \"ftp://proxy.corp:21\""))
+            .extract::<Config>();
+        assert!(invalid.is_err());
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err, reason = "figment::Jail closure signature")]
+    fn network_proxy_parses_from_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("ARCBOX_NETWORK_PROXY", "none");
+            let config: Config = Figment::new()
+                .merge(Serialized::defaults(Config::default()))
+                .merge(Env::prefixed("ARCBOX_").split("_"))
+                .extract()?;
+            assert_eq!(config.network.proxy, ProxyPolicy::None);
+            Ok(())
+        });
     }
 
     #[test]
