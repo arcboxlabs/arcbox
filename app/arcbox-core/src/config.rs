@@ -50,7 +50,7 @@ use figment::{
     providers::{Env, Format, Serialized, Toml},
 };
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// `ArcBox` configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,10 +121,13 @@ impl Config {
     /// Explicit `ARCBOX_*` environment values and config file values override
     /// profile defaults.
     pub fn load_for_profile(profile: ArcboxProfile) -> Result<Self, Box<figment::Error>> {
-        let mut config: Self = Figment::new()
+        let mut figment = Figment::new()
             .merge(Serialized::defaults(Self::for_profile(profile)))
-            .merge(Toml::file(system_config_path()))
-            .merge(Toml::file(user_config_path()))
+            .merge(Toml::file(system_config_path()));
+        for path in user_config_paths() {
+            figment = figment.merge(Toml::file(path));
+        }
+        let mut config: Self = figment
             .merge(Env::prefixed("ARCBOX_").split("_"))
             .extract()
             .map_err(Box::new)?;
@@ -528,11 +531,26 @@ impl Default for StorageConfig {
     }
 }
 
-fn user_config_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("~/.config"))
-        .join("arcbox")
-        .join("config.toml")
+/// User configuration files, lowest precedence first.
+///
+/// The documented location is `~/.config/arcbox/config.toml`
+/// (`$XDG_CONFIG_HOME` when set). `dirs::config_dir()` is the platform
+/// convention instead — `~/Library/Application Support` on macOS — and
+/// was the only path read for a long time, so a file there keeps working
+/// but the documented one wins when both exist. On Linux the two coincide
+/// and the list has one entry.
+fn user_config_paths() -> Vec<PathBuf> {
+    let relative = Path::new("arcbox").join("config.toml");
+    let xdg = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .or_else(|| dirs::home_dir().map(|home| home.join(".config")))
+        .map(|dir| dir.join(&relative));
+    let platform = dirs::config_dir().map(|dir| dir.join(&relative));
+
+    let mut paths: Vec<PathBuf> = platform.into_iter().chain(xdg).collect();
+    paths.dedup();
+    paths
 }
 
 fn system_config_path() -> PathBuf {
@@ -754,5 +772,31 @@ registry-mirrors = ["https://ignored.example.com"]
         assert!(config.run_dir().ends_with("run"));
         assert!(config.log_dir().ends_with("log"));
         assert!(config.docker_img_path().ends_with("data/docker.img"));
+    }
+
+    /// The documented `~/.config/arcbox/config.toml` must be read — on macOS
+    /// `dirs::config_dir()` is `~/Library/Application Support`, and reading
+    /// only that silently ignored the file every doc tells users to write.
+    #[test]
+    #[allow(clippy::result_large_err, reason = "figment::Jail closure signature")]
+    fn user_config_reads_the_xdg_path_and_it_wins_over_the_platform_path() {
+        figment::Jail::expect_with(|jail| {
+            let xdg = jail.directory().join("xdg");
+            std::fs::create_dir_all(xdg.join("arcbox")).unwrap();
+            jail.set_env("XDG_CONFIG_HOME", xdg.to_str().unwrap());
+
+            let paths = user_config_paths();
+            let documented = xdg.join("arcbox").join("config.toml");
+            assert_eq!(
+                paths.last(),
+                Some(&documented),
+                "XDG path has the last word"
+            );
+
+            std::fs::write(&documented, "[network]\nproxy = \"none\"\n").unwrap();
+            let config = Config::load_for_profile(ArcboxProfile::Production).unwrap();
+            assert_eq!(config.network.proxy, ProxyPolicy::None);
+            Ok(())
+        });
     }
 }

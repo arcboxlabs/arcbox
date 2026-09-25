@@ -134,11 +134,13 @@ init through the `arcbox` VirtioFS share (`/arcbox/config/`).
 
 | Path | Purpose | Creator |
 |------|---------|---------|
-| `~/.config/arcbox/config.toml` | User configuration (via `dirs::config_dir()`) | user (manual) |
+| `~/.config/arcbox/config.toml` | User configuration (`$XDG_CONFIG_HOME/arcbox/config.toml` when set). Read last, so it wins. | user (manual) |
+| `~/Library/Application Support/arcbox/config.toml` | macOS-only compatibility location (`dirs::config_dir()`); read before the XDG path. | user (manual) |
 | `/etc/arcbox/config.toml` | System-wide configuration | admin (manual) |
 
-Defined in `app/arcbox-core/src/config.rs` (`user_config_path`,
-`system_config_path`).
+Defined in `app/arcbox-core/src/config.rs` (`user_config_paths`,
+`system_config_path`). Precedence, lowest first: built-in defaults, the
+system file, the user files above, then `ARCBOX_*` environment variables.
 
 ---
 
