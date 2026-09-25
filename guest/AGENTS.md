@@ -13,7 +13,7 @@ non-obvious invariants and failure signatures.
   the 39-line no-op `stub.rs` (`agent/mod.rs` cfg-selects `linux` vs `stub`), so
   `cargo test -p arcbox-agent` only exercises the stub + pure helpers and proves
   *nothing* about guest behavior. Build for `aarch64-unknown-linux-musl` (recipe
-  in `guest/arcbox-agent/README.md` / root CLAUDE.md) and validate through e2e.
+  in `guest/arcbox-agent/README.md` / root AGENTS.md) and validate through e2e.
 - **CI never lints the agent — you must, locally.** The workspace gate excludes
   it (`cargo clippy --workspace --exclude arcbox-agent -- -D warnings`,
   `.github/workflows/ci.yml`; the build and test steps exclude it too) and no
@@ -85,6 +85,22 @@ non-obvious invariants and failure signatures.
   wire types** (see doc comments in `wire.rs`): the ABX-362 DAX path and the
   busybox-respawn supervision test. Keep them, but keep them test-scoped — do
   not wire a CLI to them or "clean them up."
+- **A publish pinned to a host address needs the guest-side mirror.** dockerd's
+  DNAT for `-p 127.0.0.1:8080:80` carries `-d 127.0.0.1`; the host relay dials
+  the guest at its uplink address, so that rule never matches and the publish
+  is unreachable from the Mac while `0.0.0.0` publishes work. `publish_mirror.rs`
+  installs an uplink-matching PREROUTING rule per such binding on container
+  `start` (comment `arcbox-publish:<id>`), removes it on `die`/`destroy`, and
+  sweeps orphans at agent start (`docker_events.rs` drives it next to DNS
+  registration). Regression signature: `127.0.0.1:` publishes RST from the
+  host — check `iptables -t nat -S PREROUTING` in the guest for
+  `arcbox-publish:` rules.
+- **`daemon.json` is merged, not owned.** `docker_config.rs` renders ArcBox's
+  keys, then merges `/arcbox/config/docker-engine.json` — the daemon's
+  rendering of `[docker]` from the user's `config.toml` — over the rest.
+  `OWNED_KEYS` (`dns`, `bip`, `default-address-pools`, `allow-direct-routing`,
+  `default-ulimits`, `features`) are refused with a warning; a key the runtime
+  depends on goes there, or an operator can break it from config.
 
 ## Debugging (symptom → first commands → likely cause)
 

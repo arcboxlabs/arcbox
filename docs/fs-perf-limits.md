@@ -94,7 +94,7 @@ OrbStack, Docker Desktop, and our own HV backend.
   ours drift ≤9%. Cross-day ratios are noise.
 - **Native is not a denominator for metadata**: cache-hot APFS stat runs at
   605k ops/s; no FUSE transport approaches it. Use competitor guests as the
-  bar. (The CLAUDE.md "File I/O >90% of native" target predates this.)
+  bar. (The AGENTS.md "File I/O >90% of native" target predates this.)
 - **Only the in-process trio is ratio-safe**: `metadata_stat`,
   `create_delete`, `negative_lookup`. The others shell out to PATH tools,
   call macOS-only `purge`, or depend on the I/O engine — see

@@ -177,7 +177,7 @@ decaying average that lies on short windows) — keep it that way. It does
 NOT launch anything: it requires an already-running `--pid` (e.g. a live
 `arcbox-daemon`) and samples cputime/RSS over `--seconds` (default 30). The
 verdict thresholds (`cpu <0.05%`, `rss <150MB`) are hardcoded in
-`commands/idle.rs` and must track the root CLAUDE.md performance table;
+`commands/idle.rs` and must track the root AGENTS.md performance table;
 change them together.
 
 MISS is EXPECTED today, not a regression. HV baselines from the 2026-07 HV

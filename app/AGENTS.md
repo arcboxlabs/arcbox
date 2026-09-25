@@ -11,7 +11,7 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
 ## Startup & readiness contract
 
 - Startup is a phased, typed pipeline and the order is load-bearing — see
-  root CLAUDE.md "Architecture Principles" and `docs/daemon-lifecycle.md`
+  root AGENTS.md "Architecture Principles" and `docs/daemon-lifecycle.md`
   before reordering. The current chain is 8 steps
   (`prepare_host → acquire_daemon_lease → start_control_plane →
   release_stale_resources → prepare_assets → boot_runtime →
@@ -160,6 +160,15 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   an async RPC on HV) fails deterministically. `sync_guest_clock`
   (`vm_lifecycle/boot.rs`) is the reference pattern: `spawn_blocking` the
   connect, then dispatch `ping_blocking` vs `ping` on `is_blocking()`.
+- **Streaming RPCs do not exist on the HV transport.** `AgentTransport::Blocking`
+  refuses `async_send`/`async_recv`, so a streaming RPC the daemon issues
+  unconditionally at startup kills every HV boot — the sandbox cleanup replay
+  did exactly that (`Failed to initialize sandbox cleanup … streaming RPCs not
+  supported on blocking transport`) until `init_runtime` gated it on
+  `backend.supports_nested_virt()`; HV runs no sandboxes, so there is nothing
+  to replay. A new startup RPC either has a blocking variant or a per-backend
+  skip. CI runs no HV daemon-level scenario, so the check is manual:
+  `ARCBOX_VM_BACKEND=hv cargo test -p arcbox-e2e --test boot_assets -- --ignored`.
 
 ## VM lifecycle internals (`engine/arcbox-engine/src/vm_lifecycle`)
 
@@ -177,24 +186,30 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   + large `docker.img` mount under CPU/I/O pressure). A tight 30s budget
   raced the cold-boot path into "timeout waiting for agent" loops — do not
   tighten it toward the <1.5s cold-boot target.
-- **The idle balloon never shrinks today: no macOS backend reclaims** —
-  the gate is `BalloonDeps::reclaim_capable` (`balloon/controller.rs`),
-  false on both backends, and it is load-bearing (measured 2026-07-29,
-  macOS 26.4; full evidence in `balloon/mod.rs` docs). VZ inflation
-  releases NOTHING host-side (15.35 GB inflated, daemon `phys_footprint`
-  byte-identical, pages *compressed as live data* under real host
-  pressure). HV inflates via `MADV_DONTNEED`, which Darwin treats as a
-  deactivation hint (calibrated footprint-inert; contents preserved).
-  Host footprint is NOT the configured `memory_mb` — VZ commits guest RAM
-  lazily, so the cost is the high-water mark of guest-*touched* pages
-  (measured 2026-08-01: a fresh idle 16 GB VM = ~718MB; the guest
-  allocating 3GB of tmpfs takes it to 3717MB and freeing it changes
-  nothing). With no reclaim path that mark is a one-way ratchet, and
-  `memory_mb` is a ceiling on the eventual cost rather than an upfront
-  charge. The only macOS levers are `memory_mb`, a VM restart, and the
-  macOS compressor. Do not flip a backend to reclaim-capable without a
-  measured host `phys_footprint` drop on inflate (HV path: switch the
-  device to `MADV_FREE_REUSABLE` first).
+- **The idle balloon never shrinks, on either backend, by design** — the
+  gate is `BalloonDeps::reclaim_capable` (`balloon/controller.rs`), false on
+  both, and load-bearing (full evidence in `balloon/mod.rs` docs). VZ
+  (measured 2026-07-29, macOS 26.4): inflation releases NOTHING host-side
+  (15.35 GB inflated, daemon `phys_footprint` byte-identical, pages
+  *compressed as live data* under real host pressure) — guest RAM lives in
+  Apple's XPC process, so measure that process, not the daemon, and nothing
+  the daemon does can release it. HV (since 2026-09-25): the guest's free
+  page reporting returns idle memory continuously with no host-side target —
+  the device releases each reported range by refreshing its stage-2 mapping
+  (`virt/arcbox-vmm/AGENTS.md` "Releasing guest RAM") — so a host-driven
+  shrink would only starve a guest that was already giving the memory back.
+  Host footprint is NOT the configured `memory_mb` — guest RAM is committed
+  lazily, so the cost is the high-water mark of guest-*touched* pages (a
+  fresh idle 16 GB VM ≈ 718MB); on VZ that mark only ratchets upward, on HV
+  it follows the guest's free memory back down. Do not flip a backend to
+  reclaim-capable without a measured host `phys_footprint` drop on inflate.
+- `set_resources` has the same shape as `set_backend` below: it changes the
+  CPU/memory the next (re)boot creates the machine with, the boot's drift check
+  recreates a machine that differs, and `Runtime::resize_system_vm` is the
+  apply-now path — validate against the host, write `[vm]` in the user's
+  `config.toml` (`config::persist`, in place via `toml_edit`), `shutdown`,
+  `set_resources`, `ensure_ready`. Persist *before* the restart: a size the
+  daemon applied but forgot on its next start is worse than one it refused.
 - `set_backend` only changes the backend used on the next (re)boot; it does
   NOT stop or restart a running VM. To apply immediately the caller forces a
   recreate via `Runtime::switch_system_vm_backend`. The backend is seeded
@@ -299,6 +314,15 @@ above). When editing either side, keep in lockstep:
   host-globals). A low (<1024) host port simply fails to bind under the
   non-root daemon — there is no helper fallback — so keep published test ports
   ephemeral.
+- The host bind address of a publish with no particular address (`-p 8080:80`,
+  `-p 0.0.0.0:8080:80`) follows `[docker] expose_ports_to_lan`
+  (`DockerConfig::default_publish_address`): every interface by default,
+  loopback when off. A binding that names an address is honoured either way,
+  and sandbox exposures are loopback-only regardless. The relay then dials the
+  guest at its *uplink* address, which dockerd's own DNAT for an
+  address-pinned binding does not match — the guest agent mirrors those
+  (`guest/AGENTS.md`); without the mirror `0.0.0.0` publishes work and
+  `127.0.0.1:` publishes RST.
 - Image pull is NOT an ArcBox code path: `POST /images/create` (docker pull) is
   proxied verbatim to guest dockerd, which does the registry pull. This is what
   `runtime/AGENTS.md` means by "the pull path elsewhere" — there is no host-side
@@ -366,7 +390,7 @@ reachable mirror rather than weakening a test.
   is the HV teardown ordering (`virt/arcbox-vmm/AGENTS.md` "Teardown
   ordering") — do not misdiagnose it as a new regression from your change.
 - ABX-416: no PL031 RTC on HV (see the clock-sync failure signature above).
-- Current HV daemon perf is far from targets (root CLAUDE.md table):
+- Current HV daemon perf is far from targets (root AGENTS.md table):
   daemon-ready ~11s (target <1.5s), idle CPU ~3.87% (<0.05%), idle RSS
   ~1.04GB (<150MB). These are known baselines, not per-change regressions.
 - Per-boot counters (~2301 unpark-broadcasts / ~71 kick-broadcasts) drive

@@ -155,6 +155,28 @@ arithmetic on every guest-programmed value, tests near `u64::MAX`). HV-specific
 coverage: the near-`u64::MAX` ring-address snapshot regression in
 `device/tests.rs` — keep it green.
 
+## Releasing guest RAM (`vmm/darwin_hv/page_release.rs`)
+
+Guest RAM is an anonymous mapping exposed to the guest through stage-2
+(`hv_vm_map`). Once the guest has dirtied a page through that mapping, **no
+`madvise` from the host releases it**: `MADV_DONTNEED` and `MADV_FREE_REUSABLE`
+both leave `phys_footprint` untouched, with or without an `hv_vm_unmap` first
+(measured 2026-09-25, macOS 26.4, with a probe that dirtied the range from a
+real vCPU — a host-side `memset` calibration says `MADV_FREE_REUSABLE` works,
+and is the wrong experiment). The one sequence that returns memory is
+`hv_vm_unmap` → `mmap(MAP_FIXED)` a fresh anonymous mapping over the same host
+address → `hv_vm_map` it back: footprint and resident size drop together, the
+range reads back zero, and a later guest write is billed honestly (~40 µs per
+2 MiB). `Stage2Refresh` is that sequence, installed as the balloon device's
+`PageReleaser` in `setup.rs`; the guest's free page reporting drives it with
+no host-side target. Two constraints: ranges are aligned *inward* to the
+16 KiB host page (XNU rounds a misaligned range outward, `hv_vm_unmap`
+refuses sub-page ranges — either would discard the guest's neighbouring 4 KiB
+pages), and `hv_vm_unmap`/`hv_vm_map` on a sub-range of a live mapping is
+fine only when the *same* host address is mapped back; the DAX window's
+no-overlap rule (`setup.rs`) is about mapping a different host range into a
+used IPA.
+
 ## Platform Gaps
 
 - No RTC: guest wall time comes from the post-readiness agent ping

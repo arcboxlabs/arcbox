@@ -20,4 +20,4 @@
 - `sockaddr` module is `pub(crate)` — public API uses `Ipv4Net`, not raw libc types
 - EEXIST replacement must delete then add; XNU's `RTM_CHANGE` cannot clear a conflicting route's `RTF_GATEWAY` flag
 - Error type: `Result<(), String>` to match helper's tarpc interface; `Ipv4NetError` for construction
-- Follow root `CLAUDE.md` for all general conventions (clippy, fmt, English comments, no section dividers)
+- Follow root `AGENTS.md` for all general conventions (clippy, fmt, English comments, no section dividers)

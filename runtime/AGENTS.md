@@ -61,7 +61,7 @@ silently unify them. WHY: wrong import / lost state distinctions.
   `State::with_generated_id` keeps the full dashed 36-char UUID
   (`oci/src/state.rs:59`).
 - `config.rs` was split into `config/` (mod + one file per unit, commit
-  `03e81c0d`). Per the root CLAUDE.md section-divider rule, keep new spec
+  `03e81c0d`). Per the root AGENTS.md section-divider rule, keep new spec
   types one-per-file — do not re-monolithize.
 - Guest-controlled numeric fields (limits, sizes from an untrusted spec)
   must use checked arithmetic and cover near-`u64::MAX` in tests — debug
