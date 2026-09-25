@@ -19,14 +19,20 @@
 /// assets onto the guest Btrfs data disk before execution. Sandbox
 /// Stop/Remove responses also carry a durable cleanup generation, completed
 /// through Prepare/Finalize after host listeners are gone.
-pub const AGENT_PROTOCOL_VERSION: u32 = 3;
+///
+/// v4: the Docker API vsock channel (`ports::DOCKER_API_VSOCK_PORT`) carries
+/// length-prefixed frames with a zero-length frame as the in-band half-close
+/// marker (`arcbox_transport::vsock::HalfCloseStream`) instead of raw bytes.
+/// A v3 agent would feed the frame headers to dockerd as HTTP, so the two
+/// sides must agree.
+pub const AGENT_PROTOCOL_VERSION: u32 = 4;
 
 /// Oldest agent protocol version this host still accepts.
 ///
 /// Agents reporting less (including `0` — agents that predate the
 /// handshake field) are rejected at boot with an actionable error
 /// instead of silently misbehaving under field skew.
-pub const MIN_AGENT_PROTOCOL_VERSION: u32 = 3;
+pub const MIN_AGENT_PROTOCOL_VERSION: u32 = 4;
 
 /// Number of bytes in the fixed RPC frame header (`length` + `type`).
 pub const FRAME_HEADER_SIZE: usize = 8;

@@ -24,6 +24,12 @@ At startup, the agent detects and launches the bundled runtime stack
 (`containerd` / `dockerd` / `runc`) so the host-side Docker API proxy can
 target a healthy guest `dockerd` endpoint.
 
+The proxy itself listens on vsock port 2375 and relays each connection to
+`/var/run/docker.sock`. The vsock leg is framed with
+`arcbox_transport::vsock::HalfCloseStream` (agent protocol v4): a
+zero-length frame is one side's EOF, which is how a `docker run -i`'s stdin
+EOF reaches the container when the vsock fd itself cannot half-close.
+
 ## Cross-Compilation
 
 ```bash

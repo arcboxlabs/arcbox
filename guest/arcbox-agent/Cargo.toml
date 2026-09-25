@@ -65,6 +65,7 @@ tower.workspace = true
 http = "1"
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 toml.workspace = true
+arcbox-transport.workspace = true
 
 [dev-dependencies]
 arcbox-computer-runtime.workspace = true

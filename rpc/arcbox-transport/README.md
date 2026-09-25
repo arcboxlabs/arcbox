@@ -49,6 +49,26 @@ half:
 - `CloseOnDropOnly` treats shutdown as a no-op and closes only on drop. Use this
   for macOS vsock tunnels where half-close tears down the full connection.
 
+Neither macOS backend delivers a host-side half-close to the guest at all, so a
+tunnel whose two directions must end independently — the Docker attach channel,
+where stdin EOF has to reach the container while its output keeps flowing —
+wraps both ends in `HalfCloseStream`. It frames every write and sends a
+zero-length frame as EOF, so the peer sees end of stream while the fd stays open
+for the other direction:
+
+```rust
+use arcbox_transport::vsock::{HalfCloseStream, VsockShutdown, VsockStream};
+use std::os::fd::OwnedFd;
+
+fn wrap_attach_channel(fd: OwnedFd) -> std::io::Result<HalfCloseStream<VsockStream>> {
+    let raw = VsockStream::from_fd_with_shutdown(fd, VsockShutdown::CloseOnDropOnly)?;
+    Ok(HalfCloseStream::new(raw))
+}
+```
+
+Both peers must agree on the framing; the guest agent's Docker API proxy speaks
+it from agent protocol v4.
+
 ## Port Notes
 
 - `1024` is the guest agent RPC port used by `arcbox-agent`.

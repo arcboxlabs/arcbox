@@ -50,6 +50,16 @@ This file is only the non-obvious operational knowledge.
   `guest/arcbox-agent/src/rpc.rs` and driven by `AgentClient`
   (`engine/arcbox-engine/src/agent_client.rs`). Editing the tonic `AgentService`
   does nothing at runtime.
+- **The Docker API vsock channel (port 2375) is framed too, but differently.**
+  It carries HTTP bytes inside `arcbox_transport::vsock::HalfCloseStream`
+  frames — `[u32 BE len][payload]`, a zero length being that side's EOF —
+  because neither macOS backend delivers a host half-close to the guest and
+  `docker run -i` needs stdin EOF to reach the container (#268). Both ends
+  must speak it: the host proxy's `GuestConnector` and the guest agent's
+  `proxy_docker_api_connection`; the mock guest in
+  `app/arcbox-docker/tests/support` does as well. The Kubernetes (16443) and
+  NFS (2049) relays stay raw bytes. Changing this framing is a
+  `AGENT_PROTOCOL_VERSION` bump (v4 introduced it).
 - The `arcbox-protocol/src/lib.rs` top-of-file doc says "ttrpc" — **stale**.
   There is no ttrpc dependency; trust this file over that comment.
 

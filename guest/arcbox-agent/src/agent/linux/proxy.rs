@@ -1,13 +1,19 @@
 //! Guest-side vsock proxies that bridge host traffic to local Unix / TCP
 //! sockets:
 //!
-//! - **Docker API**: vsock listener → `/var/run/docker.sock` (Unix).
+//! - **Docker API**: vsock listener → `/var/run/docker.sock` (Unix). The
+//!   channel is framed with [`HalfCloseStream`] so each direction can close
+//!   on its own: the vsock fd cannot half-close on macOS, and without an
+//!   in-band EOF a `docker run -i` never delivered stdin EOF to its
+//!   container (arcboxlabs/arcbox#268). The host proxy speaks the same
+//!   framing (agent protocol v4).
 //! - **Kubernetes API**: vsock listener → `127.0.0.1:KUBERNETES_API_GUEST_PORT`
-//!   (TCP, k3s API server bound to localhost).
+//!   (TCP, k3s API server bound to localhost). Raw bytes; TLS closes itself.
 
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 use anyhow::{Context, Result};
+use arcbox_transport::vsock::HalfCloseStream;
 use tokio::net::{TcpStream, UnixStream};
 use tokio_vsock::VsockStream;
 
@@ -40,103 +46,45 @@ pub(super) async fn run_docker_api_proxy() -> Result<()> {
 }
 
 async fn proxy_docker_api_connection(vsock_stream: VsockStream) -> Result<()> {
-    let unix_stream = UnixStream::connect(DOCKER_API_UNIX_SOCKET)
+    let mut unix_stream = UnixStream::connect(DOCKER_API_UNIX_SOCKET)
         .await
         .context("failed to connect guest docker unix socket")?;
     tracing::info!("Docker proxy: connected to {}", DOCKER_API_UNIX_SOCKET);
 
-    let (mut vsock_rd, mut vsock_wr) = tokio::io::split(vsock_stream);
-    let (mut unix_rd, mut unix_wr) = tokio::io::split(unix_stream);
-
-    // vsock → unix (host HTTP request → dockerd)
-    let v2u = tokio::spawn(async move {
-        let mut total: u64 = 0;
-        let mut buf = [0u8; 8192];
-        loop {
-            let n = match tokio::io::AsyncReadExt::read(&mut vsock_rd, &mut buf).await {
-                Ok(0) => {
-                    tracing::info!("Docker proxy vsock→unix: EOF after {} bytes", total);
-                    break;
-                }
-                Ok(n) => n,
-                Err(e) => {
-                    tracing::warn!(
-                        "Docker proxy vsock→unix: read error after {} bytes: {}",
-                        total,
-                        e
-                    );
-                    break;
-                }
-            };
-            if total == 0 {
-                tracing::debug!(
-                    "Docker proxy vsock→unix: first chunk received ({} bytes, payload redacted)",
-                    n
-                );
-            }
-            if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut unix_wr, &buf[..n]).await {
-                tracing::warn!(
-                    "Docker proxy vsock→unix: write error after {} bytes: {}",
-                    total,
-                    e
-                );
-                break;
-            }
-            total += n as u64;
+    // `copy_bidirectional` shuts down the write half of one side when the
+    // other side's reader hits EOF. Towards dockerd that is a real
+    // `SHUT_WR` on the Unix socket, which is how a container learns its
+    // stdin is done; towards the host it is the framed EOF marker, since
+    // the vsock fd would swallow a plain shutdown.
+    let mut host = HalfCloseStream::new(vsock_stream);
+    let result = tokio::io::copy_bidirectional(&mut host, &mut unix_stream).await;
+    match result {
+        Ok((host_to_docker, docker_to_host)) => {
+            tracing::info!(
+                "Docker proxy session done: vsock→unix={} bytes, unix→vsock={} bytes",
+                host_to_docker,
+                docker_to_host,
+            );
+            Ok(())
         }
-        let _ = tokio::io::AsyncWriteExt::shutdown(&mut unix_wr).await;
-        total
-    });
-
-    // unix → vsock (dockerd response → host)
-    let u2v = tokio::spawn(async move {
-        let mut total: u64 = 0;
-        let mut buf = [0u8; 8192];
-        loop {
-            let n = match tokio::io::AsyncReadExt::read(&mut unix_rd, &mut buf).await {
-                Ok(0) => {
-                    tracing::info!("Docker proxy unix→vsock: EOF after {} bytes", total);
-                    break;
-                }
-                Ok(n) => n,
-                Err(e) => {
-                    tracing::warn!(
-                        "Docker proxy unix→vsock: read error after {} bytes: {}",
-                        total,
-                        e
-                    );
-                    break;
-                }
-            };
-            if total == 0 {
-                tracing::debug!(
-                    "Docker proxy unix→vsock: first chunk received ({} bytes, payload redacted)",
-                    n
-                );
-            }
-            if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut vsock_wr, &buf[..n]).await {
-                tracing::warn!(
-                    "Docker proxy unix→vsock: write error after {} bytes: {}",
-                    total,
-                    e
-                );
-                break;
-            }
-            total += n as u64;
+        Err(e) if is_peer_closed_io_error(&e) => {
+            tracing::debug!("Docker proxy session ended by peer: {}", e);
+            Ok(())
         }
-        let _ = tokio::io::AsyncWriteExt::shutdown(&mut vsock_wr).await;
-        total
-    });
+        Err(e) => Err(e).context("docker api proxy copy failed"),
+    }
+}
 
-    let (v2u_result, u2v_result) = tokio::join!(v2u, u2v);
-    let v2u_bytes = v2u_result.unwrap_or(0);
-    let u2v_bytes = u2v_result.unwrap_or(0);
-    tracing::info!(
-        "Docker proxy session done: vsock→unix={} bytes, unix→vsock={} bytes",
-        v2u_bytes,
-        u2v_bytes,
-    );
-    Ok(())
+/// A peer dropping its end mid-session is routine teardown (the CLI was
+/// killed, dockerd restarted), not a proxy fault.
+fn is_peer_closed_io_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::UnexpectedEof
+    )
 }
 
 pub(super) async fn run_kubernetes_api_proxy() -> Result<()> {

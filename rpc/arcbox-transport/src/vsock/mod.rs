@@ -43,6 +43,7 @@ mod addr;
 pub mod blocking;
 #[cfg(target_os = "macos")]
 pub(crate) mod darwin;
+mod half_close;
 #[cfg(target_os = "linux")]
 pub(crate) mod linux;
 mod listener;
@@ -53,6 +54,7 @@ pub use addr::{DEFAULT_AGENT_PORT, VsockAddr};
 pub use blocking::BlockingVsockTransport;
 #[cfg(target_os = "macos")]
 pub use darwin::IncomingVsockConnection;
+pub use half_close::{HalfCloseStream, MAX_FRAME_PAYLOAD};
 pub use listener::VsockListener;
 pub use stream::{VsockShutdown, VsockStream};
 pub use transport::{VsockReceiver, VsockSender, VsockTransport};

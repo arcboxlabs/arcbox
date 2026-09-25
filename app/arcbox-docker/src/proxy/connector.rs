@@ -1,10 +1,10 @@
 //! Production guest connector via vsock.
 
-use super::GuestConnector;
+use super::{GuestConnector, GuestStream};
 use crate::error::{DockerError, Result};
 use arcbox_core::Runtime;
 use arcbox_error::CommonError;
-use arcbox_transport::vsock::{VsockShutdown, VsockStream};
+use arcbox_transport::vsock::{HalfCloseStream, VsockShutdown, VsockStream};
 use hyper_util::rt::TokioIo;
 use std::future::Future;
 use std::os::fd::{FromRawFd, OwnedFd};
@@ -39,7 +39,7 @@ impl VsockConnector {
 }
 
 impl GuestConnector for VsockConnector {
-    fn connect(&self) -> Pin<Box<dyn Future<Output = Result<TokioIo<VsockStream>>> + Send + '_>> {
+    fn connect(&self) -> Pin<Box<dyn Future<Output = Result<TokioIo<GuestStream>>> + Send + '_>> {
         let span = tracing::debug_span!(
             "docker.guest.vsock.connect",
             utility_vm = "native",
@@ -100,6 +100,8 @@ impl GuestConnector for VsockConnector {
                     }
                 };
 
+                // The fd itself cannot half-close (see `GuestStream`), so
+                // the shutdown mode is moot; EOF is carried by the framing.
                 let stream =
                     VsockStream::from_fd_with_shutdown(owned_fd, VsockShutdown::CloseOnDropOnly)
                         .map_err(|e| {
@@ -107,7 +109,7 @@ impl GuestConnector for VsockConnector {
                                 "failed to create guest stream: {e}"
                             ))
                         })?;
-                Ok(TokioIo::new(stream))
+                Ok(TokioIo::new(HalfCloseStream::new(stream)))
             }
             .instrument(span),
         )
