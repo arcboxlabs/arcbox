@@ -5,24 +5,22 @@
 //! - Two virtqueues: `inflateq` (0) and `deflateq` (1).
 //! - Feature bit `VIRTIO_BALLOON_F_DEFLATE_ON_OOM` (bit 2) — the guest may
 //!   reclaim balloon pages on OOM without host permission. Safe for us
-//!   because we use `madvise(MADV_DONTNEED)` which does not unmap the
-//!   guest-visible region; reclaimed pages stay accessible (on Linux they
-//!   re-fault zero-filled, on Darwin the original contents survive — see
-//!   the inflate section), matching the balloon contract either way.
+//!   because releasing never removes the guest-visible mapping (see
+//!   [`release`]); a reclaimed page re-faults, zero-filled or with its old
+//!   contents, matching the balloon contract either way.
 //! - Two config-space fields: `num_pages` (host → guest target, read-only
 //!   from the guest) and `actual` (guest → host current, written by the
 //!   guest as pages are inflated/deflated).
-//!
 //! - Free page reporting (`VIRTIO_BALLOON_F_REPORTING`, bit 5) — the guest
 //!   kernel periodically hands batches of currently-free pages to the host
 //!   on `reporting_vq` (transport index computed from the negotiated
-//!   feature set — see [`reporting_queue_index`]); the host
-//!   `madvise(MADV_DONTNEED)`s the ranges and completes the buffers.
-//!   Combined with `DEFLATE_ON_OOM` this is designed to let the guest
-//!   kernel self-manage — idle memory draining back to the host with no
-//!   balloon-target policy at all — but that drain is real only where
-//!   `MADV_DONTNEED` reclaims (Linux hosts); on Darwin it is a
-//!   deactivation hint and nothing is released (see the inflate section).
+//!   feature set — see [`reporting_queue_index`]); the host releases the
+//!   ranges and completes the buffers. Combined with `DEFLATE_ON_OOM` this
+//!   lets the guest kernel self-manage: idle memory drains back to the host
+//!   continuously with no balloon-target policy at all. The ranges arrive
+//!   at `page_reporting_order` granularity — the pageblock order, 2 MiB
+//!   for a 4 KiB-page arm64 guest with THP — so they cover whole host
+//!   pages.
 //!
 //! Not implemented (all optional per spec):
 //! - Stats virtqueue (`VIRTIO_BALLOON_F_STATS_VQ`)
@@ -30,29 +28,34 @@
 //!   aid, distinct from reporting)
 //! - Page poisoning
 //!
+//! ## Releasing pages
+//!
+//! Both paths hand host-page-aligned ranges to a [`PageReleaser`]
+//! ([`release`] has the alignment rules). The default,
+//! [`MadviseReleaser`], is `madvise(MADV_DONTNEED)`: real reclaim on Linux
+//! hosts, inert on Darwin, where a VMM that maps guest RAM through a
+//! stage-2 table must release through that table instead and installs its
+//! own releaser with [`VirtioBalloon::with_releaser`].
+//!
 //! ## Inflate semantics
 //!
 //! When the guest inflates the balloon, it writes a descriptor chain
-//! containing `u32` PFNs (4 KiB granularity) into the inflate queue.
-//! For each PFN, the host calls `madvise(MADV_DONTNEED)` on the
-//! corresponding page of the guest RAM mapping. On Linux hosts this
-//! releases the physical page back to the kernel's free pool and a
-//! subsequent guest access re-faults a zero page — acceptable per
-//! §5.5.1: the guest has promised not to use the page until it tells
-//! the host via the deflate queue. On Darwin, `MADV_DONTNEED` is only
-//! a deactivation hint: page contents are preserved (compressed, not
-//! discarded, under host pressure) and `phys_footprint` never drops
-//! (calibrated 2026-07-29 on macOS 26.4). Real Darwin reclaim needs
-//! `MADV_FREE_REUSABLE`, so macOS HV ballooning reclaims nothing yet
-//! and `vm_lifecycle` keeps its idle balloon disabled there
-//! (`BalloonDeps::reclaim_capable`).
+//! containing `u32` PFNs (4 KiB granularity) into the inflate queue. The
+//! PFNs are coalesced into runs and every whole host page inside a run is
+//! released. Guest pages that do not fill a host page stay billed: the
+//! guest allocates balloon pages one at a time, so on a 16 KiB-page host
+//! inflation reclaims only the runs that happen to be contiguous —
+//! reporting, not inflation, is the path that returns memory in bulk.
 //!
 //! ## Deflate semantics
 //!
-//! Deflate requests are no-ops on our side: because we used
-//! `MADV_DONTNEED` (not `munmap`), the pages remain mapped and re-fault
-//! automatically on guest access. We still consume the descriptors and
-//! write the used ring so the guest's queue does not stall.
+//! Deflate requests are no-ops on our side: the mapping was never removed,
+//! so the pages re-fault on guest access. We still consume the descriptors
+//! and write the used ring so the guest's queue does not stall.
+
+mod release;
+
+pub use release::{GuestRam, MadviseReleaser, PageReleaser};
 
 use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 
@@ -108,6 +111,8 @@ const BALLOON_PAGE_SIZE: u64 = 1 << BALLOON_PFN_SHIFT;
 /// taking a lock. The queue processing itself runs on the vCPU thread
 /// via [`VirtioDevice::process_queue`].
 pub struct VirtioBalloon {
+    /// How released ranges reach the host.
+    releaser: Box<dyn PageReleaser>,
     /// Negotiated features. Starts as advertised features; narrowed by
     /// `ack_features`.
     features: u64,
@@ -123,7 +128,7 @@ pub struct VirtioBalloon {
     /// Guest-reported current inflated count in 4 KiB pages. Written by
     /// the guest via config-space writes at offset 4..8.
     actual: AtomicU32,
-    /// Advisory counter of total pages reclaimed via `MADV_DONTNEED`
+    /// Advisory counter of total 4 KiB guest pages released to the host
     /// since the device was created. Purely observational.
     inflated_total: AtomicU32,
     /// Lightweight bump counter to flag config-space updates to the
@@ -136,12 +141,20 @@ impl VirtioBalloon {
     /// VirtIO 1.0 feature — required.
     pub const FEATURE_VERSION_1: u64 = 1 << virtio_bindings::virtio_config::VIRTIO_F_VERSION_1;
 
-    /// Creates a new balloon device in the reset state.
+    /// Creates a new balloon device in the reset state, releasing pages
+    /// with [`MadviseReleaser`].
     ///
     /// Advertises `VIRTIO_F_VERSION_1`, `VIRTIO_BALLOON_F_DEFLATE_ON_OOM`
     /// and `VIRTIO_BALLOON_F_REPORTING`.
     pub fn new() -> Self {
+        Self::with_releaser(Box::new(MadviseReleaser))
+    }
+
+    /// Creates a new balloon device in the reset state that returns pages
+    /// to the host through `releaser`.
+    pub fn with_releaser(releaser: Box<dyn PageReleaser>) -> Self {
         Self {
+            releaser,
             features: Self::FEATURE_VERSION_1
                 | VIRTIO_BALLOON_F_DEFLATE_ON_OOM
                 | VIRTIO_BALLOON_F_REPORTING,
@@ -172,8 +185,8 @@ impl VirtioBalloon {
         self.actual.load(Ordering::Acquire)
     }
 
-    /// Returns the cumulative number of pages reclaimed via madvise
-    /// since this device was created.
+    /// Returns the cumulative number of 4 KiB guest pages released to the
+    /// host since this device was created.
     pub fn inflated_total(&self) -> u32 {
         self.inflated_total.load(Ordering::Acquire)
     }
@@ -262,16 +275,24 @@ impl VirtioDevice for VirtioBalloon {
             return Ok(Vec::new());
         }
 
-        let gpa_base = queue_config.gpa_base as usize;
         // SAFETY: `memory` is the guest RAM slice; the queue accesses it only
         // through the GuestMemWriter built here, and `memory` is not touched
         // directly while the queue is alive.
         let mem = std::sync::Arc::new(unsafe {
-            arcbox_virtio_core::GuestMemWriter::new(memory.as_mut_ptr(), memory.len(), gpa_base)
+            arcbox_virtio_core::GuestMemWriter::new(
+                memory.as_mut_ptr(),
+                memory.len(),
+                queue_config.gpa_base as usize,
+            )
         });
         let mut queue = arcbox_virtio_core::SplitQueue::new(mem, queue_idx, queue_config, false);
         let idx_slot = queue_idx as usize;
         queue.set_last_avail_idx(self.last_avail[idx_slot]);
+        let ram = GuestRam {
+            base: queue.mem().ptr(),
+            len: queue.mem().len(),
+            gpa_base: queue_config.gpa_base,
+        };
 
         let mut completions = Vec::new();
         while let Some(chain) = queue.pop_avail() {
@@ -289,27 +310,22 @@ impl VirtioDevice for VirtioBalloon {
                             continue;
                         };
                         let pfn_bytes = buf.to_vec();
-                        let ram_ptr = queue.mem().ptr();
-                        let ram_len = queue.mem().len();
-                        chain_pages_handled +=
-                            handle_pfn_list(&pfn_bytes, ram_ptr, ram_len, gpa_base);
+                        chain_pages_handled += release_pfns(&*self.releaser, ram, &pfn_bytes);
                     }
                     // Reporting buffers ARE the free pages: each
                     // device-writable descriptor directly addresses a free
                     // range the guest promises not to touch until the chain
                     // completes. Release the backing and complete.
                     q if q == queue_reporting && desc.is_write() => {
-                        let ram_ptr = queue.mem().ptr();
-                        let ram_len = queue.mem().len();
                         chain_pages_handled +=
-                            handle_reported_range(desc.addr, desc.len, ram_ptr, ram_len, gpa_base);
+                            release_reported(&*self.releaser, ram, desc.addr, desc.len);
                     }
                     _ => {}
                 }
             }
             // Balloon completions write 0 bytes (nothing is written into the
             // descriptor buffer). Deflate just completes the descriptor —
-            // MADV_DONTNEED pages re-fault naturally, so no explicit remap.
+            // released pages re-fault naturally, so no explicit remap.
             queue.push_used(chain.head_idx, 0);
             completions.push((chain.head_idx, 0));
             if chain_pages_handled > 0 {
@@ -323,101 +339,40 @@ impl VirtioDevice for VirtioBalloon {
     }
 }
 
-/// Walks a byte buffer as a little-endian `u32` PFN array and calls
-/// `madvise(MADV_DONTNEED)` on each corresponding guest page. Returns
-/// the number of pages successfully advised. Bad PFNs (out of range or
-/// below `gpa_base`) are logged and skipped — a malicious or buggy
-/// guest cannot affect host memory outside the guest RAM mapping.
-fn handle_pfn_list(buf: &[u8], ram_base: *mut u8, ram_len: usize, gpa_base: usize) -> u32 {
-    let mut handled = 0u32;
-    for chunk in buf.as_chunks::<4>().0 {
-        let pfn = u32::from_le_bytes(*chunk);
-        let gpa = (u64::from(pfn)) << BALLOON_PFN_SHIFT;
-        let Some(offset) = (gpa as usize).checked_sub(gpa_base) else {
-            tracing::warn!("virtio-balloon: PFN {pfn:#x} below ram base");
+/// Releases the guest pages named by a little-endian `u32` PFN array.
+/// Returns the number of 4 KiB pages released. PFNs below the RAM base
+/// are logged and skipped, runs that leave the mapping are refused by
+/// [`release::release`] — a malicious or buggy guest cannot reach host
+/// memory outside the guest RAM mapping.
+fn release_pfns(releaser: &dyn PageReleaser, ram: GuestRam, buf: &[u8]) -> u32 {
+    let mut released = 0u32;
+    for run in release::pfn_runs(buf) {
+        let Some(offset) = run.start.checked_sub(ram.gpa_base) else {
+            tracing::warn!("virtio-balloon: PFN run {:#x} below ram base", run.start);
             continue;
         };
-        let page_size = BALLOON_PAGE_SIZE as usize;
-        if offset + page_size > ram_len {
-            tracing::warn!(
-                "virtio-balloon: PFN {pfn:#x} (offset {offset:#x}) beyond ram ({ram_len:#x})"
-            );
-            continue;
-        }
-        // SAFETY: ram_base points to a live host mapping of the guest
-        // RAM region, valid for ram_len bytes. offset..offset+page_size
-        // was bounds-checked above. MADV_DONTNEED never invalidates the
-        // virtual mapping, so later guest access stays valid: on Linux
-        // it re-faults a zero page (real reclaim); on Darwin the
-        // original contents survive (deactivation hint only — see the
-        // module docs). Either way the balloon contract (§5.5.1) holds:
-        // the guest promised not to read the page while ballooned.
-        let ret =
-            unsafe { libc::madvise(ram_base.add(offset).cast(), page_size, libc::MADV_DONTNEED) };
-        if ret != 0 {
-            tracing::warn!(
-                "virtio-balloon: madvise(MADV_DONTNEED) at offset {:#x} failed: {}",
-                offset,
-                std::io::Error::last_os_error()
-            );
-            continue;
-        }
-        handled += 1;
+        let len = (run.end - run.start) as usize;
+        released = released.saturating_add(release::release(releaser, ram, offset as usize, len));
     }
-    handled
+    released
 }
 
-/// `madvise(MADV_DONTNEED)`s one guest-reported free range, returning the
-/// number of 4 KiB pages madvised (released on Linux; deactivation hint
-/// only on Darwin — see the module docs). The range is guest-controlled:
-/// it must be page-aligned, non-empty, and fully inside the guest RAM
-/// mapping, or it is logged and skipped.
-fn handle_reported_range(
-    addr: u64,
-    len: u32,
-    ram_base: *mut u8,
-    ram_len: usize,
-    gpa_base: usize,
-) -> u32 {
+/// Releases one guest-reported free range, returning the number of 4 KiB
+/// pages released. The range is guest-controlled: it must be page-aligned,
+/// non-empty, and fully inside the guest RAM mapping, or it is logged and
+/// skipped.
+fn release_reported(releaser: &dyn PageReleaser, ram: GuestRam, addr: u64, len: u32) -> u32 {
     let len = len as usize;
     let page_size = BALLOON_PAGE_SIZE as usize;
     if len == 0 || len % page_size != 0 || addr % BALLOON_PAGE_SIZE != 0 {
         tracing::warn!("virtio-balloon: misaligned reported range {addr:#x}+{len:#x}");
         return 0;
     }
-    let Some(offset) = (addr as usize).checked_sub(gpa_base) else {
+    let Some(offset) = addr.checked_sub(ram.gpa_base) else {
         tracing::warn!("virtio-balloon: reported range {addr:#x} below ram base");
         return 0;
     };
-    let Some(end) = offset.checked_add(len) else {
-        tracing::warn!("virtio-balloon: reported range {addr:#x}+{len:#x} overflows");
-        return 0;
-    };
-    if end > ram_len {
-        tracing::warn!(
-            "virtio-balloon: reported range {addr:#x}+{len:#x} beyond ram ({ram_len:#x})"
-        );
-        return 0;
-    }
-    // SAFETY: ram_base points to a live host mapping of the guest RAM
-    // region, valid for ram_len bytes; offset..end was bounds-checked
-    // above. MADV_DONTNEED never invalidates the mapping, so later guest
-    // access stays valid: on Linux it re-faults a zero page (real
-    // reclaim), on Darwin the original contents survive (deactivation
-    // hint only — see the module docs). Either way the reporting contract
-    // holds: the pages are free right now and the guest keeps them
-    // off-limits until the buffer completes.
-    let ret = unsafe { libc::madvise(ram_base.add(offset).cast(), len, libc::MADV_DONTNEED) };
-    if ret != 0 {
-        tracing::warn!(
-            "virtio-balloon: madvise(MADV_DONTNEED) on reported range {:#x}+{:#x} failed: {}",
-            offset,
-            len,
-            std::io::Error::last_os_error()
-        );
-        return 0;
-    }
-    (len / page_size) as u32
+    release::release(releaser, ram, offset as usize, len)
 }
 
 #[cfg(test)]
@@ -503,7 +458,9 @@ mod tests {
         gpa_base: u64,
     }
 
-    // Ring layout within the test RAM (offsets from gpa_base).
+    // Ring layout within the test RAM (offsets from gpa_base). The rings
+    // share the first 16 KiB so the data area starts on a host-page
+    // boundary for any host page size up to 16 KiB.
     const DESC_OFF: u64 = 0x1000;
     const AVAIL_OFF: u64 = 0x2000;
     const USED_OFF: u64 = 0x3000;
@@ -624,20 +581,20 @@ mod tests {
         let mut b = reporting_device();
         let cfg = ram.cfg();
 
-        // One device-writable descriptor covering two free pages.
-        ram.write_desc(
-            0,
-            GPA_BASE + DATA_OFF,
-            2 * BALLOON_PAGE_SIZE as u32,
-            F_WRITE,
-            0,
-        );
+        // One device-writable descriptor covering two whole host pages
+        // (the data area starts host-page aligned; see TestRam).
+        let host = release::host_page_size() as u32;
+        ram.write_desc(0, GPA_BASE + DATA_OFF, 2 * host, F_WRITE, 0);
         ram.publish_avail(0, 0);
 
         let completions = b.process_queue(QUEUE_REPORTING, ram.slice(), &cfg).unwrap();
         assert_eq!(completions, vec![(0, 0)]);
         assert_eq!(ram.used_idx(), 1, "chain must be returned to the guest");
-        assert_eq!(b.inflated_total(), 2, "two pages released");
+        assert_eq!(
+            b.inflated_total(),
+            2 * host / BALLOON_PAGE_SIZE as u32,
+            "both host pages released"
+        );
     }
 
     #[test]
