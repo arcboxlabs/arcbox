@@ -202,7 +202,7 @@ fn handle_dns(
     }
 
     // Slow path: forward to upstream asynchronously.
-    let upstream = dns_forwarder.upstream().to_vec();
+    let upstream = dns_forwarder.upstream();
     let data = dns_data.to_vec();
     let tx = dns_reply_tx.clone();
     let log = dns_log.clone();

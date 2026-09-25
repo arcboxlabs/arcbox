@@ -1,23 +1,27 @@
 //! Built-in DNS server/forwarder.
 //!
 //! This module provides a simple DNS forwarder that can:
-//! - Forward queries to upstream DNS servers
+//! - Forward queries to upstream DNS servers, following the host's resolver
+//!   configuration as it changes (network switches, VPN up/down)
 //! - Resolve local hostnames (VM names)
 //! - Cache DNS responses
 //!
 //! The implementation handles basic A and AAAA record queries.
 
 mod cache;
+mod upstream;
 
 use std::collections::HashMap;
-use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use arcbox_dns::LocalHostsTable;
 
 use crate::error::{NetError, Result};
+
+pub use upstream::{DEFAULT_RESOLVER_RECHECK, SYSTEM_RESOLV_CONF};
 
 /// Default DNS port.
 pub const DNS_PORT: u16 = 53;
@@ -37,40 +41,45 @@ pub struct DnsConfig {
     /// Listen address.
     pub listen_addr: SocketAddr,
     /// Upstream DNS servers.
+    ///
+    /// When [`Self::system_resolver`] is set this is only the fallback used
+    /// while that file yields no usable server; the live list is loaded from
+    /// the file and re-loaded whenever it changes.
     pub upstream: Vec<SocketAddr>,
     /// Cache TTL.
     pub cache_ttl: Duration,
     /// Domain suffix for local names.
     pub local_domain: Option<String>,
+    /// Resolver file whose `nameserver` entries supply the upstream list,
+    /// followed for changes. `None` pins [`Self::upstream`].
+    pub system_resolver: Option<PathBuf>,
+    /// Minimum interval between two `stat`s of [`Self::system_resolver`].
+    pub system_resolver_recheck: Duration,
 }
 
 impl Default for DnsConfig {
     fn default() -> Self {
         Self {
             listen_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DNS_PORT),
-            upstream: DEFAULT_UPSTREAM
-                .iter()
-                .map(|ip| SocketAddr::new(IpAddr::V4(*ip), DNS_PORT))
-                .collect(),
+            upstream: default_upstream(),
             cache_ttl: DEFAULT_CACHE_TTL,
             local_domain: Some("arcbox.local".to_string()),
+            system_resolver: None,
+            system_resolver_recheck: DEFAULT_RESOLVER_RECHECK,
         }
     }
 }
 
 impl DnsConfig {
-    /// Creates a new DNS configuration.
+    /// Creates a configuration that follows the host's resolver file, so the
+    /// guest resolves through whatever the Mac currently uses.
     #[must_use]
     pub fn new(listen_addr: Ipv4Addr) -> Self {
-        let mut config = Self {
+        Self {
             listen_addr: SocketAddr::new(IpAddr::V4(listen_addr), DNS_PORT),
+            system_resolver: Some(PathBuf::from(SYSTEM_RESOLV_CONF)),
             ..Default::default()
-        };
-        let detected = detect_system_upstream();
-        if !detected.is_empty() {
-            config.upstream = detected;
         }
-        config
     }
 
     /// Sets the listen address.
@@ -80,10 +89,12 @@ impl DnsConfig {
         self
     }
 
-    /// Sets the upstream DNS servers.
+    /// Pins the upstream DNS servers; the system resolver is no longer
+    /// followed.
     #[must_use]
     pub fn with_upstream(mut self, servers: Vec<SocketAddr>) -> Self {
         self.upstream = servers;
+        self.system_resolver = None;
         self
     }
 
@@ -102,83 +113,12 @@ impl DnsConfig {
     }
 }
 
-/// Parses `nameserver` entries from resolv.conf text.
-///
-/// Filters out problematic upstreams (loopback, fake-IP VPN ranges) when
-/// better alternatives are available. Falls back to loopback if it's the
-/// only IPv4 option — `forward_dns_async` binds `0.0.0.0:0` so only IPv4
-/// upstreams are usable today.
-fn parse_resolv_conf_nameservers(contents: &str) -> Vec<SocketAddr> {
-    let mut all = Vec::new();
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-            continue;
-        }
-
-        let mut parts = line.split_whitespace();
-        if parts.next() != Some("nameserver") {
-            continue;
-        }
-        let Some(raw_ip) = parts.next() else {
-            continue;
-        };
-
-        let Ok(ip) = raw_ip.parse::<IpAddr>() else {
-            continue;
-        };
-
-        let addr = SocketAddr::new(ip, DNS_PORT);
-        if !all.contains(&addr) {
-            all.push(addr);
-        }
-    }
-
-    // Prefer non-loopback, non-fake-IP IPv4 servers. Keep loopback as
-    // fallback when it's the only IPv4 option (common macOS default).
-    let preferred: Vec<SocketAddr> = all
+/// [`DEFAULT_UPSTREAM`] as socket addresses.
+fn default_upstream() -> Vec<SocketAddr> {
+    DEFAULT_UPSTREAM
         .iter()
-        .copied()
-        .filter(|a| {
-            if a.ip().is_loopback() {
-                return false;
-            }
-            if let IpAddr::V4(v4) = a.ip() {
-                let o = v4.octets();
-                if o[0] == 198 && (o[1] == 18 || o[1] == 19) {
-                    return false;
-                }
-            }
-            // Skip IPv6-only — forward_dns_async binds 0.0.0.0:0 today.
-            a.ip().is_ipv4()
-        })
-        .collect();
-
-    if !preferred.is_empty() {
-        return preferred;
-    }
-
-    // No preferred servers. Fall back to IPv4 entries (including loopback)
-    // but still exclude fake-IP — returning empty lets DnsConfig::new keep
-    // DEFAULT_UPSTREAM (8.8.8.8, 1.1.1.1).
-    all.into_iter()
-        .filter(|a| {
-            if let IpAddr::V4(v4) = a.ip() {
-                let o = v4.octets();
-                !(o[0] == 198 && (o[1] == 18 || o[1] == 19))
-            } else {
-                false
-            }
-        })
+        .map(|ip| SocketAddr::new(IpAddr::V4(*ip), DNS_PORT))
         .collect()
-}
-
-/// Detects system DNS upstream servers from `/etc/resolv.conf`.
-fn detect_system_upstream() -> Vec<SocketAddr> {
-    let Ok(contents) = fs::read_to_string("/etc/resolv.conf") else {
-        return Vec::new();
-    };
-    parse_resolv_conf_nameservers(&contents)
 }
 
 /// DNS record type.
@@ -260,17 +200,16 @@ pub struct DnsForwarder {
     /// `RwLock<DnsForwarder>`, so a slow upstream forward never blocks the fast
     /// local-resolution / cache-hit path.
     cache: std::sync::Mutex<HashMap<cache::DnsCacheKey, cache::CacheEntry>>,
+    /// Live upstream list; re-loaded from the system resolver file when it
+    /// changes.
+    upstream: upstream::Upstreams,
 }
 
 impl DnsForwarder {
     /// Creates a new DNS forwarder with a fresh (empty) hosts table.
     #[must_use]
     pub fn new(config: DnsConfig) -> Self {
-        Self {
-            config,
-            local_hosts: Arc::new(LocalHostsTable::new(HashMap::new())),
-            cache: std::sync::Mutex::new(HashMap::new()),
-        }
+        Self::with_shared_hosts(config, Arc::new(LocalHostsTable::new(HashMap::new())))
     }
 
     /// Creates a DNS forwarder sharing an existing hosts table.
@@ -280,10 +219,12 @@ impl DnsForwarder {
     /// updates both simultaneously.
     #[must_use]
     pub fn with_shared_hosts(config: DnsConfig, local_hosts: Arc<LocalHostsTable>) -> Self {
+        let upstream = upstream::Upstreams::new(&config);
         Self {
             config,
             local_hosts,
             cache: std::sync::Mutex::new(HashMap::new()),
+            upstream,
         }
     }
 
@@ -395,10 +336,20 @@ impl DnsForwarder {
         response
     }
 
-    /// Returns the upstream DNS server addresses.
+    /// Returns the upstream DNS servers currently in effect.
+    ///
+    /// A forwarder following the system resolver file re-reads it here when
+    /// its modification time changed since the last load (rate-limited by
+    /// `system_resolver_recheck`), so a guest query issued after the Mac
+    /// changes networks goes to the new network's resolvers. Changing the
+    /// list also drops the response cache: answers from a VPN's resolver
+    /// must not outlive the VPN.
     #[must_use]
-    pub fn upstream(&self) -> &[SocketAddr] {
-        &self.config.upstream
+    pub fn upstream(&self) -> Vec<SocketAddr> {
+        if self.upstream.refresh() {
+            self.clear_cache();
+        }
+        self.upstream.current()
     }
 
     /// Handles a DNS query packet (synchronous, blocks on upstream forwarding).
@@ -514,7 +465,7 @@ impl DnsForwarder {
         // The query's transaction ID; a valid reply must echo it.
         let query_id = data.get(0..2);
 
-        for upstream in &self.config.upstream {
+        for upstream in self.upstream() {
             let socket = UdpSocket::bind("0.0.0.0:0")
                 .map_err(|e| NetError::Dns(format!("failed to bind socket: {}", e)))?;
             socket
@@ -1128,59 +1079,5 @@ mod tests {
             forwarder.try_resolve_locally_or_nxdomain(&query).is_none(),
             "old default domain should not be handled after domain change"
         );
-    }
-
-    #[test]
-    fn test_parse_resolv_conf_nameservers() {
-        let conf = r"
-# comment
-nameserver 10.0.0.2
-search local
-nameserver 2001:4860:4860::8888
-nameserver invalid
-nameserver 10.0.0.2
-";
-        let servers = parse_resolv_conf_nameservers(conf);
-        // IPv6 servers are filtered because forward_dns_async binds 0.0.0.0:0.
-        // The IPv4 server is preferred; duplicates are deduplicated.
-        assert_eq!(
-            servers,
-            vec![SocketAddr::new(
-                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-                DNS_PORT
-            )]
-        );
-    }
-
-    #[test]
-    fn test_parse_resolv_conf_loopback_fallback() {
-        // When only loopback + IPv6 are available, keep loopback as fallback.
-        let conf = "nameserver 127.0.0.1\nnameserver 2001:4860:4860::8888\n";
-        let servers = parse_resolv_conf_nameservers(conf);
-        assert_eq!(
-            servers,
-            vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DNS_PORT)]
-        );
-    }
-
-    #[test]
-    fn test_parse_resolv_conf_filters_fake_ip() {
-        let conf = "nameserver 198.18.0.2\nnameserver 8.8.8.8\n";
-        let servers = parse_resolv_conf_nameservers(conf);
-        assert_eq!(
-            servers,
-            vec![SocketAddr::new(
-                IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
-                DNS_PORT
-            )]
-        );
-    }
-
-    #[test]
-    fn test_parse_resolv_conf_only_fake_ip_returns_empty() {
-        // Only fake-IP entries → empty list so DnsConfig::new keeps DEFAULT_UPSTREAM.
-        let conf = "nameserver 198.18.0.2\nnameserver 198.19.1.1\n";
-        let servers = parse_resolv_conf_nameservers(conf);
-        assert!(servers.is_empty());
     }
 }
