@@ -158,7 +158,7 @@ pub enum Commands {
     #[command(subcommand, alias = "k8s")]
     Kubernetes(kubernetes::KubernetesCommands),
 
-    /// Manage the single System VM (hypervisor backend)
+    /// Manage the single System VM (hypervisor backend, CPU and memory limits)
     #[command(subcommand)]
     System(system::SystemCommands),
 

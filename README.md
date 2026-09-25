@@ -249,7 +249,8 @@ Most of ArcBox's performance-critical code is custom rather than vendored:
 - **Two hypervisor backends.** ArcBox's own VMM on Hypervisor.framework, with
   manual vCPU execution and a device model we maintain, plus a
   Virtualization.framework backend through a Swift shim. Switch with
-  `abctl system backend hv|vz`.
+  `abctl system backend hv|vz`; size the VM with
+  `abctl system resources --cpus 4 --memory 4096`.
 - **VirtIO devices**: `virtio-net`, `virtio-blk`, `virtio-fs`, `virtio-console`,
   `virtio-vsock`, `virtio-rng`, and a balloon device.
 - **A userspace network datapath on macOS**: DHCP, DNS forwarding, NAT and
