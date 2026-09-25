@@ -289,11 +289,22 @@ async fn init_runtime(ctx: &DaemonContext) -> Result<Arc<Runtime>> {
         runtime.network_manager().set_dns_domain(&ctx.dns_domain);
     }
 
-    let sandbox_cleanup_supported = if runtime.config().vm.autostart {
+    let backend = runtime.system_vm_backend();
+    let sandbox_cleanup_supported = if !runtime.config().vm.autostart {
+        false
+    } else if backend.supports_nested_virt() {
         arcbox_api::initialize_sandbox_cleanup(runtime.as_ref())
             .await
             .context("Failed to initialize sandbox cleanup")?
     } else {
+        // No sandbox can run on this backend, so there is nothing for the
+        // cleanup protocol to reconcile. Asking anyway would fail the boot:
+        // the cleanup watch is a streaming RPC, and the HV backend's
+        // blocking agent transport cannot carry one.
+        info!(
+            backend = backend.as_str(),
+            "sandbox cleanup skipped: the backend does not run sandboxes"
+        );
         false
     };
 
