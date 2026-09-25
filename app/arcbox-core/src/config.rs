@@ -13,7 +13,7 @@
 //! data_dir = "~/.arcbox"
 //!
 //! [vm]
-//! # cpus = 8         # default: host core count
+//! # cpus = 8         # default: host core count; `abctl system resources` writes these
 //! # memory_mb = 8192  # default: half of host RAM (512–16384)
 //! # autostart = true  # boot the default Linux VM (Docker/K8s); false = VM-host only
 //!
@@ -53,6 +53,8 @@ use figment::{
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
+
+pub mod persist;
 
 /// `ArcBox` configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -558,6 +560,16 @@ impl Default for StorageConfig {
 /// was the only path read for a long time, so a file there keeps working
 /// but the documented one wins when both exist. On Linux the two coincide
 /// and the list has one entry.
+/// The config file runtime setting changes are written to: the documented
+/// `~/.config/arcbox/config.toml` (or its `$XDG_CONFIG_HOME` equivalent),
+/// which is also the last one merged and so overrides every other file.
+#[must_use]
+pub fn writable_user_config_path() -> PathBuf {
+    user_config_paths()
+        .pop()
+        .expect("the XDG config path is always resolvable")
+}
+
 fn user_config_paths() -> Vec<PathBuf> {
     let relative = Path::new("arcbox").join("config.toml");
     let xdg = std::env::var_os("XDG_CONFIG_HOME")

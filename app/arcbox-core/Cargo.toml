@@ -48,6 +48,7 @@ arcbox-engine.workspace = true
 arcbox-computer.workspace = true
 arcbox-fakeip.workspace = true
 arcbox-atomic-file.workspace = true
+toml_edit = "0.25.15"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 arcbox-route.workspace = true

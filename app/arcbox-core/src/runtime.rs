@@ -50,6 +50,56 @@ use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard, RwLock as 
 const DEFAULT_GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 64, 2);
 const HOST_DNS_OWNER: &str = "system:host";
 
+/// Smallest memory a System VM may be given, in MiB.
+const MIN_SYSTEM_VM_MEMORY_MB: u64 = 512;
+
+/// The host's capacity, the ceiling for System VM limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostCapacity {
+    /// Logical CPUs.
+    pub cpus: u32,
+    /// Physical memory in MiB.
+    pub memory_mb: u64,
+}
+
+impl HostCapacity {
+    fn probe() -> Self {
+        Self {
+            cpus: arcbox_hypervisor::default_vm_cpu_count(),
+            memory_mb: arcbox_hypervisor::host_memory_size() / (1024 * 1024),
+        }
+    }
+
+    /// Rejects a System VM size the host cannot back.
+    fn check(self, cpus: u32, memory_mb: u64) -> Result<()> {
+        if cpus == 0 || cpus > self.cpus {
+            return Err(CoreError::config(format!(
+                "cpus must be between 1 and {} (the host's logical CPUs), got {cpus}",
+                self.cpus
+            )));
+        }
+        if memory_mb < MIN_SYSTEM_VM_MEMORY_MB || memory_mb > self.memory_mb {
+            return Err(CoreError::config(format!(
+                "memory_mb must be between {MIN_SYSTEM_VM_MEMORY_MB} and {} (the host's \
+                 physical memory), got {memory_mb}",
+                self.memory_mb
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// The System VM's CPU and memory limits and the host's capacity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SystemVmResources {
+    /// vCPUs the System VM boots with.
+    pub cpus: u32,
+    /// Memory the System VM boots with, in MiB.
+    pub memory_mb: u64,
+    /// The host's capacity.
+    pub host: HostCapacity,
+}
+
 /// Resolve a host-IP binding string for a forwarded port.
 ///
 /// Empty or `"0.0.0.0"` means "no particular address" and resolves to
@@ -574,6 +624,65 @@ impl Runtime {
 
         tracing::info!(backend = backend.as_str(), "System VM backend switched");
         Ok(())
+    }
+
+    /// The System VM's CPU and memory limits, with the host's capacity.
+    #[must_use]
+    pub fn system_vm_resources(&self) -> SystemVmResources {
+        let desired = self.vm_lifecycle.default_vm_config();
+        SystemVmResources {
+            cpus: desired.cpus,
+            memory_mb: desired.memory_mb,
+            host: HostCapacity::probe(),
+        }
+    }
+
+    /// Changes the System VM's CPU and memory limits, persists them to the
+    /// user's `config.toml`, and recreates the System VM so they take effect.
+    ///
+    /// A zero field keeps the current value. Nothing is written or restarted
+    /// when the result equals the current limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a limit is outside `1..=host cpus` or
+    /// `512..=host memory` MiB, the config file cannot be written, or the
+    /// System VM fails to stop or boot.
+    pub async fn resize_system_vm(&self, cpus: u32, memory_mb: u64) -> Result<SystemVmResources> {
+        let current = self.system_vm_resources();
+        let cpus = if cpus == 0 { current.cpus } else { cpus };
+        let memory_mb = if memory_mb == 0 {
+            current.memory_mb
+        } else {
+            memory_mb
+        };
+        current.host.check(cpus, memory_mb)?;
+        if cpus == current.cpus && memory_mb == current.memory_mb {
+            return Ok(current);
+        }
+
+        // Persist first: a limit the daemon applied but forgot on restart
+        // would be worse than one it refused to apply.
+        let path = crate::config::writable_user_config_path();
+        crate::config::persist::set_vm_resources(&path, cpus, memory_mb)?;
+
+        let lifecycle = &self.vm_lifecycle;
+        tracing::info!(
+            from_cpus = current.cpus,
+            from_memory_mb = current.memory_mb,
+            cpus,
+            memory_mb,
+            config = %path.display(),
+            "resizing the System VM; restarting it"
+        );
+        // Stop, then change the desired size, then boot: the boot's drift
+        // check sees a persisted machine that no longer matches and
+        // recreates it with the new size.
+        lifecycle.shutdown().await?;
+        lifecycle.set_resources(cpus, memory_mb);
+        lifecycle.ensure_ready().await?;
+        tracing::info!(cpus, memory_mb, "System VM resized");
+        Ok(self.system_vm_resources())
     }
 
     /// Returns the default machine name used for automatic VM lifecycle.

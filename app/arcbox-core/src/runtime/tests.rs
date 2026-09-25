@@ -591,6 +591,23 @@ fn test_runtime_new_propagates_config_vm_defaults() {
 }
 
 #[test]
+fn host_capacity_bounds_system_vm_sizes() {
+    let host = super::HostCapacity {
+        cpus: 8,
+        memory_mb: 16 * 1024,
+    };
+    assert!(host.check(1, 512).is_ok());
+    assert!(host.check(8, 16 * 1024).is_ok());
+    assert!(host.check(0, 4096).is_err(), "zero cpus");
+    assert!(host.check(9, 4096).is_err(), "more cpus than the host");
+    assert!(host.check(4, 511).is_err(), "below the 512 MiB floor");
+    assert!(
+        host.check(4, 16 * 1024 + 1).is_err(),
+        "more memory than the host"
+    );
+}
+
+#[test]
 fn resolve_bind_ip_defaults_and_loopback() {
     use std::net::Ipv4Addr;
     let lan = Ipv4Addr::UNSPECIFIED;
