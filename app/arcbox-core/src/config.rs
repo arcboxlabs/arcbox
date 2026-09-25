@@ -32,6 +32,7 @@
 //! cidr = "172.16.0.0/12"
 //!
 //! [docker]
+//! # expose_ports_to_lan = true     # false: -p 8080:80 binds 127.0.0.1 only
 //! # registry_mirrors = ["https://mirror.example.com"]
 //! # insecure_registries = ["registry.corp:5000"]
 //! # [docker.engine]                # any other dockerd daemon.json key
@@ -50,6 +51,7 @@ use figment::{
     providers::{Env, Format, Serialized, Toml},
 };
 use serde::{Deserialize, Serialize};
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
 /// `ArcBox` configuration.
@@ -375,6 +377,12 @@ pub struct DockerConfig {
     pub socket_path: PathBuf,
     /// Enable Docker API.
     pub enabled: bool,
+    /// Whether a port published without a specific address (`-p 8080:80`,
+    /// `-p 0.0.0.0:8080:80`) is reachable from other devices on the
+    /// network. When `false` such ports bind the Mac's loopback only. A
+    /// binding that names a specific address (`-p 192.168.1.5:8080:80`) is
+    /// honoured either way.
+    pub expose_ports_to_lan: bool,
     /// Registry mirrors `dockerd` pulls through, tried in order before the
     /// upstream registry. Written to `registry-mirrors` in the guest's
     /// `daemon.json`.
@@ -402,9 +410,20 @@ impl DockerConfig {
         Self {
             socket_path: HostLayout::for_profile(profile).docker_socket,
             enabled: true,
+            expose_ports_to_lan: true,
             registry_mirrors: Vec::new(),
             insecure_registries: Vec::new(),
             engine: serde_json::Map::new(),
+        }
+    }
+
+    /// The host address a port published without one binds to.
+    #[must_use]
+    pub const fn default_publish_address(&self) -> Ipv4Addr {
+        if self.expose_ports_to_lan {
+            Ipv4Addr::UNSPECIFIED
+        } else {
+            Ipv4Addr::LOCALHOST
         }
     }
 
@@ -626,6 +645,22 @@ mod tests {
             .extract()
             .expect("config with vm.backend");
         assert_eq!(config.vm.backend, arcbox_vmm::VmBackend::Hv);
+    }
+
+    #[test]
+    fn published_ports_reach_the_lan_unless_turned_off() {
+        let default = Config::default();
+        assert!(default.docker.expose_ports_to_lan);
+        assert_eq!(
+            default.docker.default_publish_address(),
+            Ipv4Addr::UNSPECIFIED
+        );
+        let local: Config = Figment::new()
+            .merge(Serialized::defaults(Config::default()))
+            .merge(Toml::string("[docker]\nexpose_ports_to_lan = false"))
+            .extract()
+            .expect("valid docker config");
+        assert_eq!(local.docker.default_publish_address(), Ipv4Addr::LOCALHOST);
     }
 
     #[test]

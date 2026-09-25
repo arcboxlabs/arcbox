@@ -593,21 +593,26 @@ fn test_runtime_new_propagates_config_vm_defaults() {
 #[test]
 fn resolve_bind_ip_defaults_and_loopback() {
     use std::net::Ipv4Addr;
+    let lan = Ipv4Addr::UNSPECIFIED;
+    let mac_only = Ipv4Addr::LOCALHOST;
     // Sandbox exposures pass "127.0.0.1" and must bind loopback only.
     assert_eq!(
-        super::resolve_bind_ip("127.0.0.1"),
+        super::resolve_bind_ip("127.0.0.1", lan),
         Some(Ipv4Addr::LOCALHOST)
     );
-    // Published container ports (empty / explicit 0.0.0.0) bind all interfaces.
-    assert_eq!(super::resolve_bind_ip(""), Some(Ipv4Addr::UNSPECIFIED));
+    // Published container ports without a particular address (empty or
+    // 0.0.0.0) follow the policy: all interfaces or loopback only.
+    for unspecified in ["", "0.0.0.0"] {
+        assert_eq!(super::resolve_bind_ip(unspecified, lan), Some(lan));
+        assert_eq!(
+            super::resolve_bind_ip(unspecified, mac_only),
+            Some(mac_only)
+        );
+    }
+    // A specific address is honored whatever the policy; garbage is rejected.
     assert_eq!(
-        super::resolve_bind_ip("0.0.0.0"),
-        Some(Ipv4Addr::UNSPECIFIED)
-    );
-    // A specific address is honored; garbage is rejected.
-    assert_eq!(
-        super::resolve_bind_ip("10.0.0.5"),
+        super::resolve_bind_ip("10.0.0.5", mac_only),
         Some(Ipv4Addr::new(10, 0, 0, 5))
     );
-    assert_eq!(super::resolve_bind_ip("not-an-ip"), None);
+    assert_eq!(super::resolve_bind_ip("not-an-ip", lan), None);
 }

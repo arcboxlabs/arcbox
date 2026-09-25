@@ -52,13 +52,15 @@ const HOST_DNS_OWNER: &str = "system:host";
 
 /// Resolve a host-IP binding string for a forwarded port.
 ///
-/// Empty or `"0.0.0.0"` means "all interfaces" (`UNSPECIFIED`); anything else
-/// must parse as an IPv4 address (returns `None` if it does not). Sandbox
-/// exposures pass `"127.0.0.1"` so untrusted workloads are reachable only on
-/// loopback, while published container ports keep binding all interfaces.
-fn resolve_bind_ip(host_ip_str: &str) -> Option<Ipv4Addr> {
+/// Empty or `"0.0.0.0"` means "no particular address" and resolves to
+/// `unspecified` — all interfaces or loopback, per
+/// `DockerConfig::expose_ports_to_lan`; anything else must parse as an IPv4
+/// address (returns `None` if it does not). Sandbox exposures pass
+/// `"127.0.0.1"` so untrusted workloads are reachable only on loopback
+/// whatever the policy says.
+fn resolve_bind_ip(host_ip_str: &str, unspecified: Ipv4Addr) -> Option<Ipv4Addr> {
     if host_ip_str.is_empty() || host_ip_str == "0.0.0.0" {
-        Some(Ipv4Addr::UNSPECIFIED)
+        Some(unspecified)
     } else {
         host_ip_str.parse().ok()
     }
@@ -1157,13 +1159,14 @@ impl Runtime {
         // was previously on a different role.
         self.stop_port_forwarding_by_id(container_id).await;
 
+        let unspecified = self.config.docker.default_publish_address();
         let mut planned_rules = Vec::new();
         for (host_ip_str, host_port, container_port, protocol) in bindings {
             let proto = match protocol.to_lowercase().as_str() {
                 "udp" => InboundProtocol::Udp,
                 _ => InboundProtocol::Tcp,
             };
-            let Some(host_ip) = resolve_bind_ip(host_ip_str) else {
+            let Some(host_ip) = resolve_bind_ip(host_ip_str, unspecified) else {
                 tracing::warn!(
                     "Skipping inbound rule: invalid HostIp '{}' for port {}:{}",
                     host_ip_str,
@@ -1232,10 +1235,11 @@ impl Runtime {
     ) -> Result<()> {
         self.stop_port_forwarding_by_id(container_id).await;
         let guest_ip = self.guest_ip_for_machine(machine_name);
+        let unspecified = self.config.docker.default_publish_address();
         let mut forwarder = PortForwarder::new();
 
         for (host_ip_str, host_port, container_port, protocol) in bindings {
-            let Some(host_ip) = resolve_bind_ip(host_ip_str) else {
+            let Some(host_ip) = resolve_bind_ip(host_ip_str, unspecified) else {
                 tracing::warn!(
                     "Skipping port forward rule: invalid HostIp '{}' for port {}:{}",
                     host_ip_str,

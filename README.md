@@ -84,6 +84,7 @@ applies it:
 
 ```toml
 [docker]
+expose_ports_to_lan = false     # -p 8080:80 binds 127.0.0.1 instead of every interface
 registry_mirrors = ["https://mirror.example.com"]   # tried before Docker Hub
 insecure_registries = ["registry.corp:5000"]
 
