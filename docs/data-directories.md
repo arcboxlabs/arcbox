@@ -214,6 +214,14 @@ Defined in `app/arcbox-docker/src/context.rs`.
 | `~/.docker/contexts/meta/{sha256}/meta.json` | Docker context metadata | cli |
 | `~/.docker/.arcbox-previous-context` | Previous context name (for restore on disable) | cli |
 
+### 5.1 OpenSSH Client Configuration
+
+Opt-in: nothing touches it unless the user runs the command.
+
+| Path | Purpose | Creator |
+|------|---------|---------|
+| `~/.ssh/config` | One `Include ~/.arcbox/ssh/config` line (with a marker comment) at the top, so `ssh <machine>@arcbox` works in every OpenSSH client; the rest of the file, a symlink to it, and its mode are kept | cli (`abctl ssh install`, removed by `abctl ssh uninstall`) |
+
 ---
 
 ## 6. LaunchAgent / LaunchDaemon Plists
@@ -350,7 +358,7 @@ older installations. They can be safely deleted.
 | Component | Paths Managed |
 |-----------|--------------|
 | **daemon** | `~/.arcbox/{run,log,data,boot,runtime,ssh}/`, sockets, PID, boot asset download, bundle seeding |
-| **cli** (`abctl`) | `~/.arcbox/{bin,shell,completions}/`, Docker context, LaunchAgent registration, shell profile injection |
+| **cli** (`abctl`) | `~/.arcbox/{bin,shell,completions}/`, Docker context, LaunchAgent registration, shell profile injection, the opt-in `~/.ssh/config` Include |
 | **helper** (root) | `/etc/resolver/`, `/usr/local/bin/` symlinks, `/var/run/docker.sock` symlink |
 | **desktop** | SMAppService LaunchAgent registration, `~/.arcbox/run/` directory creation, helper install trigger |
 | **agent** (guest) | `/arcbox/` transport mount, `/run/arcbox/data/runtime/`, `/var/lib/{docker,containerd}/`, guest sockets, Btrfs subvolumes |

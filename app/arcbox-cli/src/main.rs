@@ -160,6 +160,7 @@ fn run(cli: Cli) -> Result<()> {
             Commands::Dns(cmd) => commands::dns::execute(cmd, cli.format).await,
             #[cfg(target_os = "macos")]
             Commands::Tls(cmd) => commands::tls::execute(cmd).await,
+            Commands::Ssh(cmd) => commands::ssh::execute(cmd).await,
             Commands::Daemon(args) => commands::daemon::execute(args).await,
             Commands::Logs(args) => commands::logs::execute(args).await,
             Commands::Setup(cmd) => commands::setup::execute(cmd, cli.format).await,

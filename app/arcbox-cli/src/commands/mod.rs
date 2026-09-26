@@ -80,6 +80,7 @@ pub mod macos;
 pub mod migrate;
 pub mod sandbox;
 pub mod setup;
+pub mod ssh;
 pub mod symlink;
 pub mod system;
 #[cfg(target_os = "macos")]
@@ -182,6 +183,9 @@ pub enum Commands {
     #[cfg(target_os = "macos")]
     #[command(subcommand)]
     Tls(tls::TlsCommands),
+    /// Manage OpenSSH client integration (ssh <machine>@arcbox)
+    #[command(subcommand)]
+    Ssh(ssh::SshCommands),
 
     /// Manage the ArcBox daemon
     Daemon(daemon::DaemonArgs),
