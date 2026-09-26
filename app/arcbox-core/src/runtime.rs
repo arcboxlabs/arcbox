@@ -1658,26 +1658,24 @@ impl Runtime {
     }
 
     async fn all_sandbox_authority_keys(&self) -> Vec<String> {
+        self.listener_owner_keys(|key| Self::sandbox_port_key_owner(key).is_some())
+            .await
+    }
+
+    /// Owner keys of the live host listeners that `owns` accepts.
+    async fn listener_owner_keys(&self, owns: impl Fn(&str) -> bool) -> Vec<String> {
         #[cfg(target_os = "macos")]
-        {
-            self.inbound_rules
-                .read()
-                .await
-                .keys()
-                .filter(|key| Self::sandbox_port_key_owner(key).is_some())
-                .cloned()
-                .collect()
-        }
+        let owners = self.inbound_rules.read().await;
         #[cfg(not(target_os = "macos"))]
-        {
-            self.port_forwarders
-                .read()
-                .await
-                .keys()
-                .filter(|key| Self::sandbox_port_key_owner(key).is_some())
-                .cloned()
-                .collect()
-        }
+        let owners = self.port_forwarders.read().await;
+        owners.keys().filter(|key| owns(key)).cloned().collect()
+    }
+
+    /// Whether a listener owner key names a Docker container. Sandbox
+    /// exposures own listeners under keys carrying a prefix a container ID
+    /// never has.
+    fn is_container_owner(key: &str) -> bool {
+        Self::sandbox_port_key_owner(key).is_none()
     }
 
     /// Registers DNS entries for a container.
@@ -1811,24 +1809,7 @@ impl Runtime {
             .cloned()
             .collect();
         ids.extend(self.container_aliases.read().await.values().cloned());
-        #[cfg(target_os = "macos")]
-        ids.extend(
-            self.inbound_rules
-                .read()
-                .await
-                .keys()
-                .filter(|key| Self::sandbox_port_key_owner(key).is_none())
-                .cloned(),
-        );
-        #[cfg(not(target_os = "macos"))]
-        ids.extend(
-            self.port_forwarders
-                .read()
-                .await
-                .keys()
-                .filter(|key| Self::sandbox_port_key_owner(key).is_none())
-                .cloned(),
-        );
+        ids.extend(self.listener_owner_keys(Self::is_container_owner).await);
         ids
     }
 
