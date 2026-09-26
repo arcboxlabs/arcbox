@@ -3,6 +3,7 @@
 mod assets;
 mod engine_config;
 mod kubeconfig;
+mod kubernetes_lb;
 mod progress;
 mod sandbox_host;
 
@@ -184,6 +185,9 @@ pub struct Runtime {
     /// Host listener keys of exposed sandbox ports, keyed by sandbox ID, so
     /// Stop/Remove can tear down every listener a sandbox owns.
     sandbox_port_keys: Arc<TokioRwLock<HashMap<String, Vec<String>>>>,
+    /// How each Kubernetes LoadBalancer port fared on the last reconcile.
+    /// The lock also serializes reconciles against closing the listeners.
+    kubernetes_lb_ports: TokioMutex<kubernetes_lb::LoadBalancerPorts>,
     /// Sandbox DNS owners, kept separate from container DNS so an agent
     /// restart can clear only sandbox host state before relay reuse.
     sandbox_dns_ids: Arc<TokioRwLock<HashSet<String>>>,
@@ -346,6 +350,7 @@ impl Runtime {
             #[cfg(not(target_os = "macos"))]
             port_forwarders: Arc::new(TokioRwLock::new(HashMap::new())),
             sandbox_port_keys: Arc::new(TokioRwLock::new(HashMap::new())),
+            kubernetes_lb_ports: TokioMutex::default(),
             sandbox_dns_ids: Arc::new(TokioRwLock::new(HashSet::new())),
             sandbox_host_state: TokioMutex::new(0),
             dns_entries: Arc::new(TokioRwLock::new(HashMap::new())),
@@ -896,7 +901,7 @@ impl Runtime {
     pub async fn stop_kubernetes(&self) -> Result<KubernetesStopResponse> {
         self.kubernetes_host_endpoint()?;
         if !self.vm_lifecycle.is_running().await {
-            self.vm_lifecycle.set_kubernetes_hold(false).await;
+            self.release_kubernetes().await;
             return Ok(KubernetesStopResponse {
                 stopped: true,
                 detail: "k3s already stopped".to_string(),
@@ -906,7 +911,7 @@ impl Runtime {
 
         let mut agent = self.get_agent(DEFAULT_MACHINE_NAME)?;
         let response = agent.stop_kubernetes().await?;
-        self.vm_lifecycle.set_kubernetes_hold(false).await;
+        self.release_kubernetes().await;
         Ok(response)
     }
 
@@ -920,8 +925,23 @@ impl Runtime {
         self.vm_lifecycle.ensure_ready().await?;
         let mut agent = self.get_agent(DEFAULT_MACHINE_NAME)?;
         let response = agent.delete_kubernetes().await?;
-        self.vm_lifecycle.set_kubernetes_hold(false).await;
+        self.release_kubernetes().await;
         Ok(response)
+    }
+
+    /// Records that the cluster is gone: drops the lifecycle hold, then
+    /// closes the LoadBalancer listeners, in that order, so a reconcile that
+    /// raced the stop finds the hold released and cannot reopen them.
+    async fn release_kubernetes(&self) {
+        self.vm_lifecycle.set_kubernetes_hold(false).await;
+        self.close_kubernetes_load_balancers().await;
+    }
+
+    /// Subscribes to whether the daemon believes Kubernetes runs (the
+    /// lifecycle's Kubernetes hold).
+    #[must_use]
+    pub fn subscribe_kubernetes_hold(&self) -> watch::Receiver<bool> {
+        self.vm_lifecycle.subscribe_kubernetes_hold()
     }
 
     /// Returns Kubernetes cluster status for the default VM.
@@ -950,9 +970,12 @@ impl Runtime {
         let mut agent = self.get_agent(DEFAULT_MACHINE_NAME)?;
         let mut response = agent.get_kubernetes_status().await?;
         response.endpoint = endpoint;
-        self.vm_lifecycle
-            .set_kubernetes_hold(response.running)
-            .await;
+        if response.running {
+            self.vm_lifecycle.set_kubernetes_hold(true).await;
+        } else {
+            self.release_kubernetes().await;
+        }
+        response.host_ports = self.kubernetes_host_ports().await;
         Ok(response)
     }
 
@@ -1671,11 +1694,20 @@ impl Runtime {
         owners.keys().filter(|key| owns(key)).cloned().collect()
     }
 
+    /// Whether `owner` holds a live host listener.
+    async fn has_port_forwarding(&self, owner: &str) -> bool {
+        #[cfg(target_os = "macos")]
+        let owners = self.inbound_rules.read().await;
+        #[cfg(not(target_os = "macos"))]
+        let owners = self.port_forwarders.read().await;
+        owners.contains_key(owner)
+    }
+
     /// Whether a listener owner key names a Docker container. Sandbox
-    /// exposures own listeners under keys carrying a prefix a container ID
-    /// never has.
+    /// exposures and Kubernetes LoadBalancer ports own listeners under keys
+    /// carrying a prefix a container ID never has.
     fn is_container_owner(key: &str) -> bool {
-        Self::sandbox_port_key_owner(key).is_none()
+        Self::sandbox_port_key_owner(key).is_none() && !kubernetes_lb::is_owner_key(key)
     }
 
     /// Registers DNS entries for a container.
