@@ -1029,6 +1029,16 @@ impl Runtime {
         // into the guest, which merges them into daemon.json at init.
         engine_config::stage_engine_config(&self.config.data_dir, &self.config.docker)?;
 
+        // So does the CA behind HTTPS on container domains: generated once,
+        // signed with in the guest, trusted by the user (`abctl tls trust`).
+        let tls_dir = self
+            .config
+            .data_dir
+            .join(arcbox_constants::paths::guest::TLS);
+        if arcbox_local_ca::ensure(&tls_dir)? {
+            tracing::info!(path = %tls_dir.display(), "generated the local CA for container domains");
+        }
+
         // Boot the VM through the lifecycle manager first so the agent
         // handshake is observable on its own: `ensure_vm_ready` below covers
         // the VM *and* the guest container runtime with no boundary between

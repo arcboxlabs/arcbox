@@ -128,6 +128,20 @@ init through the `arcbox` VirtioFS share (`/arcbox/config/`).
 |------|---------|---------|
 | `config/docker-engine.json` | The operator's `dockerd` `daemon.json` overrides from `[docker]` in `config.toml` (`registry_mirrors`, `insecure_registries`, `[docker.engine]`). Absent when the section is empty. The guest merges it over the keys ArcBox manages. | daemon |
 
+### 1.10 `tls/` — Local CA for Container Domains
+
+Generated once by the daemon before the System VM boots, kept across
+restarts; the guest agent reads it through the share (`/arcbox/tls/`) to sign
+a certificate per `https://<name>.arcbox.local` name. Trust model:
+`common/arcbox-local-ca/src/lib.rs`.
+
+| Path | Purpose | Creator |
+|------|---------|---------|
+| `tls/ca.pem` | CA certificate, name-constrained to `arcbox.local`; what `abctl tls trust` adds to the login keychain | daemon |
+| `tls/ca-key.pem` | CA private key (mode 0600) | daemon |
+
+Deleting `tls/` rotates the CA on the next daemon start; trust the new one again.
+
 ---
 
 ## 2. Configuration Files

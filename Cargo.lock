@@ -536,6 +536,7 @@ dependencies = [
  "arcbox-helper",
  "arcbox-hypervisor",
  "arcbox-image",
+ "arcbox-local-ca",
  "arcbox-migration",
  "arcbox-net",
  "arcbox-route",
@@ -955,9 +956,11 @@ dependencies = [
  "arcbox-atomic-file",
  "arcbox-constants",
  "rcgen",
+ "rustls",
  "tempfile",
  "thiserror 2.0.18",
  "time",
+ "tracing",
 ]
 
 [[package]]
