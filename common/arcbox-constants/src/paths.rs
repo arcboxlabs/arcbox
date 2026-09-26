@@ -245,6 +245,11 @@ pub mod host {
     pub const LOG: &str = "log";
     /// Persistent data aggregation (images, containers, volumes, …).
     pub const DATA: &str = "data";
+    /// SSH server state: its host key, the client key it authorizes, and
+    /// the client config generated from them.
+    pub const SSH: &str = "ssh";
+    /// Generated OpenSSH client config (inside `SSH`).
+    pub const SSH_CONFIG: &str = "config";
 
     /// Log file names (written by each component's tracing-appender).
     pub const DAEMON_LOG: &str = "daemon.log";
@@ -275,6 +280,10 @@ pub struct HostLayout {
     pub log_dir: std::path::PathBuf,
     /// `<data_dir>/data` — persistent VM/container data.
     pub data_subdir: std::path::PathBuf,
+    /// `<data_dir>/ssh` — SSH server keys and the generated client config.
+    pub ssh_dir: std::path::PathBuf,
+    /// `<ssh_dir>/config` — the OpenSSH client config `ssh` includes.
+    pub ssh_config: std::path::PathBuf,
     /// `<run_dir>/docker.sock`
     pub docker_socket: std::path::PathBuf,
     /// `<run_dir>/arcbox.sock`
@@ -293,6 +302,8 @@ impl HostLayout {
         let run_dir = data_dir.join(host::RUN);
         let log_dir = data_dir.join(host::LOG);
         let data_subdir = data_dir.join(host::DATA);
+        let ssh_dir = data_dir.join(host::SSH);
+        let ssh_config = ssh_dir.join(host::SSH_CONFIG);
         let docker_socket = run_dir.join(host::DOCKER_SOCKET);
         let grpc_socket = run_dir.join(host::GRPC_SOCKET);
         let lock_file = run_dir.join(host::DAEMON_LOCK);
@@ -302,6 +313,8 @@ impl HostLayout {
             run_dir,
             log_dir,
             data_subdir,
+            ssh_dir,
+            ssh_config,
             docker_socket,
             grpc_socket,
             lock_file,
@@ -432,6 +445,7 @@ mod tests {
         assert_eq!(layout.run_dir, PathBuf::from("/tmp/arcbox/run"));
         assert_eq!(layout.log_dir, PathBuf::from("/tmp/arcbox/log"));
         assert_eq!(layout.data_subdir, PathBuf::from("/tmp/arcbox/data"));
+        assert_eq!(layout.ssh_config, PathBuf::from("/tmp/arcbox/ssh/config"));
         assert_eq!(
             layout.docker_socket,
             PathBuf::from("/tmp/arcbox/run/docker.sock")

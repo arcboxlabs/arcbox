@@ -1126,6 +1126,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "arcbox-ssh"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "arcbox-atomic-file",
+ "arcbox-connect",
+ "arcbox-constants",
+ "arcbox-engine",
+ "buffa",
+ "bytes",
+ "rand 0.10.1",
+ "russh",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "arcbox-tap-net"
 version = "0.7.0"
 dependencies = [
@@ -6066,6 +6085,7 @@ dependencies = [
  "polyval",
  "rand 0.10.1",
  "rand_core 0.10.1",
+ "ring",
  "russh-cryptovec",
  "russh-util",
  "salsa20",

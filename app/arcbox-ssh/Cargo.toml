@@ -1,0 +1,29 @@
+[package]
+name = "arcbox-ssh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The ArcBox SSH server: `ssh <machine>@arcbox` into Linux machines over the machine exec path."
+
+[dependencies]
+anyhow.workspace = true
+arcbox-atomic-file.workspace = true
+arcbox-connect.workspace = true
+arcbox-constants.workspace = true
+arcbox-engine.workspace = true
+buffa = "0.9.1"
+bytes.workspace = true
+rand = "0.10"
+russh = { version = "0.62.1", default-features = false, features = ["ring"] }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -86,6 +86,7 @@ members = [
     "app/arcbox-daemon",
     "app/arcbox-helper",
     "app/arcbox-migration",
+    "app/arcbox-ssh",
 
     # ============================================
     # SDK (client library, MIT OR Apache-2.0)

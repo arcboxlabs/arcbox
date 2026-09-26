@@ -10,6 +10,11 @@ pub const KUBERNETES_API_VSOCK_PORT: u32 = 16443;
 /// Host localhost port for the ArcBox Kubernetes API proxy.
 pub const KUBERNETES_API_HOST_PORT: u16 = 16443;
 
+/// Host loopback port for the ArcBox SSH server (`ssh <machine>@arcbox`).
+/// ArcBox's 16xxx family beside the Kubernetes proxy, and clear of the
+/// 32222 OrbStack uses so both can run side by side.
+pub const SSH_HOST_PORT: u16 = 16022;
+
 /// Guest localhost port for the Kubernetes API server.
 pub const KUBERNETES_API_GUEST_PORT: u16 = 6443;
 
