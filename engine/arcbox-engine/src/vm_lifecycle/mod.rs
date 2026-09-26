@@ -45,7 +45,7 @@ use crate::event::EventBus;
 use crate::machine::{MachineInfo, MachineManager};
 use arcbox_image::boot_assets::BootAssetProvider;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -220,7 +220,7 @@ impl VmLifecycleManager {
             restart_generation: AtomicU64::new(0),
             last_activity_ms: AtomicU64::new(now_ms),
             active_ops: AtomicUsize::new(0),
-            kubernetes_hold: AtomicBool::new(false),
+            kubernetes_hold: watch::Sender::new(false),
         });
 
         // The machine always boots its state graph from `NotExist`; whether a
@@ -400,9 +400,12 @@ impl VmLifecycleManager {
     /// Enables or disables the Kubernetes lifecycle hold.
     #[allow(clippy::unused_async, reason = "public API compatibility")]
     pub async fn set_kubernetes_hold(&self, active: bool) {
-        self.shared
-            .kubernetes_hold
-            .store(active, std::sync::atomic::Ordering::Relaxed);
+        // Only a change wakes subscribers; status polls re-assert the value.
+        self.shared.kubernetes_hold.send_if_modified(|held| {
+            let changed = *held != active;
+            *held = active;
+            changed
+        });
         self.shared.record_activity();
 
         if active {
@@ -411,6 +414,21 @@ impl VmLifecycleManager {
             self.ensure_actor();
             let _ = self.cmd_tx.send(Command::Activity);
         }
+    }
+
+    /// Whether Kubernetes holds the VM active; see
+    /// [`Self::subscribe_kubernetes_hold`].
+    #[must_use]
+    pub fn kubernetes_hold(&self) -> bool {
+        *self.shared.kubernetes_hold.borrow()
+    }
+
+    /// Subscribes to the Kubernetes lifecycle hold: `true` while the daemon
+    /// believes the cluster runs, i.e. from a successful start (or a status
+    /// that finds k3s running) until a stop, delete, or status that does not.
+    #[must_use]
+    pub fn subscribe_kubernetes_hold(&self) -> watch::Receiver<bool> {
+        self.shared.kubernetes_hold.subscribe()
     }
 
     /// Gracefully stops the VM.

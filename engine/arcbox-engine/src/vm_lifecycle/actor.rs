@@ -126,8 +126,10 @@ pub(super) struct LifecycleShared {
     /// idle gate never fires while this is non-zero — a VM serving a pull
     /// or build is not idle no matter how old the last activity stamp is.
     pub(super) active_ops: std::sync::atomic::AtomicUsize,
-    /// Whether Kubernetes holds the VM in the active state.
-    pub(super) kubernetes_hold: std::sync::atomic::AtomicBool,
+    /// Whether Kubernetes holds the VM in the active state. A watch, so
+    /// whatever follows the cluster (the LoadBalancer port reconcile) can
+    /// wait for it instead of polling.
+    pub(super) kubernetes_hold: tokio::sync::watch::Sender<bool>,
 }
 
 impl LifecycleShared {
@@ -722,7 +724,7 @@ impl LifecycleActor {
 
     fn on_idle_tick(&mut self, machine: &mut Machine) {
         if !self.shared.config.auto_stop
-            || self.shared.kubernetes_hold.load(Ordering::Relaxed)
+            || *self.shared.kubernetes_hold.borrow()
             || self.shared.active_ops.load(Ordering::Acquire) > 0
             || self.public() != VmLifecycleState::Running
         {
