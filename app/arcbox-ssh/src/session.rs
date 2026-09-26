@@ -3,22 +3,22 @@
 //! output streaming back.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use arcbox_connect::v1::{MachineExecOutput, MachineExecRequest, TerminalSize};
-use arcbox_engine::agent_client::ExecSessionInput;
 use russh::ChannelWriteHalf;
 use russh::server::{Handle, Msg};
-use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
 use crate::host::ExecOutput;
+use crate::input::{Outbound, SessionInput};
 use crate::signal;
 use crate::target::Target;
 
 /// SSH extended-data stream number of stderr (RFC 4254 §5.2).
-const STDERR: u32 = 1;
+pub const STDERR: u32 = 1;
 /// Exit status reported when a session could not run or lost its process.
-const EXIT_FAILURE: u32 = 255;
+pub const EXIT_FAILURE: u32 = 255;
 
 /// What a session runs once started.
 pub enum Program {
@@ -41,7 +41,7 @@ pub struct SessionChannel {
     pty: Option<Pty>,
     env: HashMap<String, String>,
     /// Input side of the running process.
-    input: Option<mpsc::Sender<ExecSessionInput>>,
+    input: Option<SessionInput>,
     /// The output task. Aborted when the channel goes away — closed by the
     /// client, or with the whole connection — which drops the session's
     /// output receiver and so ends the process in the machine.
@@ -129,33 +129,40 @@ impl SessionChannel {
 
     /// Hands the channel to its process: from here on the client's input
     /// goes to `input`, and a task streams `output` back until the exit
-    /// status. A process that failed to start reports why on stderr and
-    /// exits 255, the way sshd reports a shell it could not exec.
+    /// status, its sends counted on the connection's `outbound`. A process
+    /// that failed to start reports why on stderr and exits 255, the way
+    /// sshd reports a shell it could not exec.
     pub fn start<O: ExecOutput>(
         &mut self,
-        started: anyhow::Result<(O, mpsc::Sender<ExecSessionInput>)>,
+        started: anyhow::Result<(O, SessionInput)>,
         handle: Handle,
+        outbound: Arc<Outbound>,
     ) {
         let Some(writer) = self.writer.take() else {
             return;
         };
-        let newline = if self.pty.is_some() { "\r\n" } else { "\n" };
+        let newline = self.newline();
         let task = match started {
             Ok((output, input)) => {
                 self.input = Some(input);
-                tokio::spawn(forward_output(output, writer, handle, newline))
+                tokio::spawn(forward_output(output, writer, handle, outbound, newline))
             }
             Err(e) => {
                 let exit = Exit::Failed(format!("{e:#}"));
-                tokio::spawn(finish(writer, handle, exit, newline))
+                tokio::spawn(finish(writer, handle, outbound, exit, newline))
             }
         };
         self.output_task = Some(task.abort_handle());
     }
 
     /// Where the client's input for the running process goes.
-    pub fn input(&self) -> Option<mpsc::Sender<ExecSessionInput>> {
-        self.input.clone()
+    pub const fn input(&self) -> Option<&SessionInput> {
+        self.input.as_ref()
+    }
+
+    /// Line ending for messages to the client's terminal, or its stderr.
+    pub const fn newline(&self) -> &'static str {
+        if self.pty.is_some() { "\r\n" } else { "\n" }
     }
 }
 
@@ -191,6 +198,7 @@ async fn forward_output(
     mut output: impl ExecOutput,
     writer: ChannelWriteHalf<Msg>,
     handle: Handle,
+    outbound: Arc<Outbound>,
     newline: &'static str,
 ) {
     let exit = loop {
@@ -199,9 +207,11 @@ async fn forward_output(
                 if !frame.data.is_empty() {
                     let data = std::mem::take(&mut frame.data);
                     let sent = if frame.stream == "stderr" {
-                        writer.extended_data_bytes(STDERR, data).await
+                        outbound
+                            .send(writer.extended_data_bytes(STDERR, data))
+                            .await
                     } else {
-                        writer.data_bytes(data).await
+                        outbound.send(writer.data_bytes(data)).await
                     };
                     if sent.is_err() {
                         // The connection is gone; nobody is left to tell.
@@ -216,28 +226,42 @@ async fn forward_output(
             None => break Exit::Failed("the machine session ended without an exit status".into()),
         }
     };
-    finish(writer, handle, exit, newline).await;
+    finish(writer, handle, outbound, exit, newline).await;
 }
 
 /// Reports `exit` and closes the channel. Send failures are ignored: they
 /// only mean the client already went away.
-async fn finish(writer: ChannelWriteHalf<Msg>, handle: Handle, exit: Exit, newline: &str) {
+async fn finish(
+    writer: ChannelWriteHalf<Msg>,
+    handle: Handle,
+    outbound: Arc<Outbound>,
+    exit: Exit,
+    newline: &str,
+) {
     match exit {
         Exit::Status(code) => {
-            let _ = writer.exit_status(code).await;
+            let _ = outbound.send(writer.exit_status(code)).await;
         }
         Exit::Signal(name) => {
             let sig = signal::from_name(&name);
-            let _ = handle
-                .exit_signal_request(writer.id(), sig, false, String::new(), String::new())
+            let _ = outbound
+                .send(handle.exit_signal_request(
+                    writer.id(),
+                    sig,
+                    false,
+                    String::new(),
+                    String::new(),
+                ))
                 .await;
         }
         Exit::Failed(message) => {
             let message = format!("arcbox: {message}{newline}");
-            let _ = writer.extended_data_bytes(STDERR, message).await;
-            let _ = writer.exit_status(EXIT_FAILURE).await;
+            let _ = outbound
+                .send(writer.extended_data_bytes(STDERR, message))
+                .await;
+            let _ = outbound.send(writer.exit_status(EXIT_FAILURE)).await;
         }
     }
-    let _ = writer.eof().await;
-    let _ = writer.close().await;
+    let _ = outbound.send(writer.eof()).await;
+    let _ = outbound.send(writer.close()).await;
 }

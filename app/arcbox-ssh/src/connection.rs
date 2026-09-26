@@ -12,15 +12,14 @@ use russh::{Channel, ChannelId, Pty, Sig};
 use tokio::sync::mpsc;
 
 use crate::host::MachineHost;
-use crate::session::{Program, SessionChannel};
+use crate::input::{self, Outbound, SessionInput};
+use crate::session::{EXIT_FAILURE, Program, STDERR, SessionChannel};
 use crate::signal;
 use crate::target::Target;
 
-/// Input messages buffered toward one session's process. When they are all
-/// in flight the connection waits for the process: russh returns window to
-/// the client as soon as data arrives, so holding up the handler is the only
-/// backpressure a client sees.
-const INPUT_CAPACITY: usize = 64;
+/// Input messages the machine session holds beyond a session's own queue
+/// (`input.rs`), which is what decides when the connection waits.
+const INPUT_CAPACITY: usize = 4;
 
 pub struct Connection<H> {
     host: Arc<H>,
@@ -30,6 +29,8 @@ pub struct Connection<H> {
     /// The login's machine and account, once authenticated.
     target: Option<Target>,
     sessions: HashMap<ChannelId, SessionChannel>,
+    /// Output sends blocked on this connection, across its channels.
+    outbound: Arc<Outbound>,
 }
 
 impl<H: MachineHost> Connection<H> {
@@ -65,6 +66,7 @@ impl<H: MachineHost> Connection<H> {
             ssh_env,
             target: None,
             sessions: HashMap::new(),
+            outbound: Arc::default(),
         }
     }
 
@@ -90,29 +92,56 @@ impl<H: MachineHost> Connection<H> {
             return session.channel_failure(channel);
         }
         let request = state.exec_request(target, program, &self.ssh_env);
-        let (input, input_rx) = mpsc::channel(INPUT_CAPACITY);
+        let (process, input_rx) = mpsc::channel(INPUT_CAPACITY);
         let started = self
             .host
             .exec(&target.machine, request, input_rx)
             .await
-            .map(|output| (output, input));
+            .map(|output| (output, SessionInput::new(process)));
         if let Err(e) = &started {
             tracing::info!(%target, error = %format!("{e:#}"), "ssh session could not start");
         }
         // Accepted either way: a failure reaches the client on stderr with
         // exit status 255, which says more than a refused request would.
         session.channel_success(channel)?;
-        state.start(started, session.handle());
+        state.start(started, session.handle(), Arc::clone(&self.outbound));
         Ok(())
     }
 
-    /// Passes `input` to `channel`'s process, waiting while its buffer is
-    /// full. Input for a channel without a process is dropped.
-    async fn send_input(&self, channel: ChannelId, input: ExecSessionInput) {
-        if let Some(sender) = self.sessions.get(&channel).and_then(SessionChannel::input) {
-            // A closed receiver only means the process already exited.
-            let _ = sender.send(input).await;
+    /// Passes `input` to `channel`'s process, waiting as `input.rs`
+    /// decides; a session whose queue overflows is ended. Input for a
+    /// channel without a process is dropped.
+    async fn send_input(
+        &mut self,
+        channel: ChannelId,
+        input: ExecSessionInput,
+        session: &mut Session,
+    ) -> Result<(), russh::Error> {
+        let Some(queue) = self.sessions.get(&channel).and_then(SessionChannel::input) else {
+            return Ok(());
+        };
+        if queue.send(input, &self.outbound).await.is_ok() {
+            return Ok(());
         }
+        let Some(state) = self.sessions.remove(&channel) else {
+            return Ok(());
+        };
+        tracing::warn!(
+            target = ?self.target,
+            "ssh session ended: its input backlog overflowed while output waited on the client"
+        );
+        let message = format!(
+            "arcbox: over {} MiB of input queued while the session's output waited on this \
+             client; ending the session{}",
+            input::LIMIT >> 20,
+            state.newline()
+        );
+        // Ends the process and the output task.
+        drop(state);
+        session.extended_data(channel, STDERR, message)?;
+        session.exit_status_request(channel, EXIT_FAILURE)?;
+        session.eof(channel)?;
+        session.close(channel)
     }
 }
 
@@ -146,7 +175,8 @@ impl<H: MachineHost> Handler for Connection<H> {
         // Accepting goes through the session's own queue, which this
         // callback is holding up: hand it off instead of waiting on a queue
         // that may be full.
-        tokio::spawn(reply.accept());
+        let outbound = Arc::clone(&self.outbound);
+        tokio::spawn(async move { outbound.send(reply.accept()).await });
         Ok(())
     }
 
@@ -217,51 +247,48 @@ impl<H: MachineHost> Handler for Connection<H> {
         row_height: u32,
         _pix_width: u32,
         _pix_height: u32,
-        _session: &mut Session,
+        session: &mut Session,
     ) -> Result<(), Self::Error> {
         let resize = ExecSessionInput::Resize {
             width: u16::try_from(col_width).unwrap_or(u16::MAX),
             height: u16::try_from(row_height).unwrap_or(u16::MAX),
         };
-        self.send_input(channel, resize).await;
-        Ok(())
+        self.send_input(channel, resize, session).await
     }
 
     async fn signal(
         &mut self,
         channel: ChannelId,
         signal: Sig,
-        _session: &mut Session,
+        session: &mut Session,
     ) -> Result<(), Self::Error> {
         let name = signal::name(&signal).to_owned();
-        self.send_input(channel, ExecSessionInput::Signal(name))
-            .await;
-        Ok(())
+        self.send_input(channel, ExecSessionInput::Signal(name), session)
+            .await
     }
 
     async fn data(
         &mut self,
         channel: ChannelId,
         data: &[u8],
-        _session: &mut Session,
+        session: &mut Session,
     ) -> Result<(), Self::Error> {
         // An empty stdin message means EOF downstream; an empty SSH data
         // packet means nothing.
-        if !data.is_empty() {
-            self.send_input(channel, ExecSessionInput::Stdin(data.to_vec()))
-                .await;
+        if data.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        self.send_input(channel, ExecSessionInput::Stdin(data.to_vec()), session)
+            .await
     }
 
     async fn channel_eof(
         &mut self,
         channel: ChannelId,
-        _session: &mut Session,
+        session: &mut Session,
     ) -> Result<(), Self::Error> {
-        self.send_input(channel, ExecSessionInput::Stdin(Vec::new()))
-            .await;
-        Ok(())
+        self.send_input(channel, ExecSessionInput::Stdin(Vec::new()), session)
+            .await
     }
 
     async fn channel_close(

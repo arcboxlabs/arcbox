@@ -14,6 +14,7 @@ mod client_config;
 mod connection;
 mod error;
 mod host;
+mod input;
 mod keys;
 mod server;
 mod session;
