@@ -5,7 +5,8 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
 use super::RULE_OWNER;
-use super::http_port::{self, HTTP_PORT, Pin};
+use super::http_port::{self, HTTP_PORT, HTTPS_PORT, Pin};
+use super::https::PROXY_PORT;
 use crate::iptables::NatRule;
 
 /// A running container, as far as its domain is concerned.
@@ -78,26 +79,45 @@ impl ContainerFacts {
         })
     }
 
-    /// The rules that route port 80 of each of the container's addresses
-    /// to `http_port`; none when that is 80 itself or there is none.
-    pub(super) fn rules(&self, http_port: Option<u16>) -> Vec<NatRule> {
-        let Some(port) = http_port.filter(|&port| port != HTTP_PORT) else {
+    /// The container's IPv4 addresses.
+    pub(super) fn ips(&self) -> &[Ipv4Addr] {
+        &self.ips
+    }
+
+    /// The rules for each of the container's addresses: port 80 DNATed to
+    /// `http_port` unless that is 80 itself, and with `https` port 443
+    /// redirected to the HTTPS proxy. None without an HTTP port.
+    pub(super) fn rules(&self, http_port: Option<u16>, https: bool) -> Vec<NatRule> {
+        let Some(port) = http_port else {
             return Vec::new();
         };
-        let dport = HTTP_PORT.to_string();
-        self.ips
-            .iter()
-            .map(|ip| {
-                let ip = ip.to_string();
+        let (http, tls, proxy) = (
+            HTTP_PORT.to_string(),
+            HTTPS_PORT.to_string(),
+            PROXY_PORT.to_string(),
+        );
+        let mut rules = Vec::new();
+        for ip in &self.ips {
+            let ip = ip.to_string();
+            if port != HTTP_PORT {
                 let destination = format!("{ip}:{port}");
-                NatRule::new(
+                rules.push(NatRule::new(
                     RULE_OWNER,
                     &self.id,
-                    &["-d", &ip, "-p", "tcp", "--dport", &dport],
+                    &["-d", &ip, "-p", "tcp", "--dport", &http],
                     &["-j", "DNAT", "--to-destination", &destination],
-                )
-            })
-            .collect()
+                ));
+            }
+            if https {
+                rules.push(NatRule::new(
+                    RULE_OWNER,
+                    &self.id,
+                    &["-d", &ip, "-p", "tcp", "--dport", &tls],
+                    &["-j", "REDIRECT", "--to-ports", &proxy],
+                ));
+            }
+        }
+        rules
     }
 }
 
@@ -172,12 +192,15 @@ mod tests {
         assert_eq!(ContainerFacts::from_inspect(&pinned).unwrap().pin, None);
     }
 
+    fn specs(rules: &[NatRule]) -> Vec<String> {
+        rules.iter().map(NatRule::spec).collect()
+    }
+
     #[test]
     fn port_80_of_every_address_routes_to_the_http_port() {
         let facts = ContainerFacts::from_inspect(&inspect()).unwrap();
-        let specs: Vec<String> = facts.rules(Some(3000)).iter().map(NatRule::spec).collect();
         assert_eq!(
-            specs,
+            specs(&facts.rules(Some(3000), false)),
             [
                 "-d 172.17.0.2 -p tcp --dport 80 -m comment --comment arcbox-domain:abc123 \
                  -j DNAT --to-destination 172.17.0.2:3000",
@@ -185,7 +208,24 @@ mod tests {
                  -j DNAT --to-destination 172.18.0.3:3000",
             ]
         );
-        assert!(facts.rules(Some(80)).is_empty(), "80 needs no rule");
-        assert!(facts.rules(None).is_empty());
+        assert!(facts.rules(Some(80), false).is_empty(), "80 needs no rule");
+        assert!(facts.rules(None, false).is_empty());
+    }
+
+    #[test]
+    fn port_443_goes_to_the_proxy_whatever_the_http_port() {
+        let facts = ContainerFacts::from_inspect(&inspect()).unwrap();
+        let redirect = "-d 172.17.0.2 -p tcp --dport 443 -m comment --comment \
+                        arcbox-domain:abc123 -j REDIRECT --to-ports 61443";
+        let served_on_80 = specs(&facts.rules(Some(80), true));
+        assert_eq!(served_on_80.len(), 2, "one redirect per address");
+        assert_eq!(served_on_80[0], redirect);
+        let served_on_3000 = specs(&facts.rules(Some(3000), true));
+        assert_eq!(served_on_3000.len(), 4);
+        assert!(served_on_3000.contains(&redirect.to_owned()));
+        assert!(
+            facts.rules(None, true).is_empty(),
+            "no HTTP port, nothing to relay to"
+        );
     }
 }

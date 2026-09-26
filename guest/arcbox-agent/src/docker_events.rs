@@ -4,8 +4,8 @@
 //! running containers, then subscribes to container events (start, die,
 //! destroy, rename) to keep the guest DNS server registry in sync, to
 //! mirror host-address-pinned port publishes for the inbound relay
-//! (`publish_mirror`), and to route each container's domain port 80 to the
-//! port it serves (`domains`).
+//! (`publish_mirror`), and to serve each container's domain over HTTP and
+//! HTTPS without a port (`domains`).
 
 use std::net::Ipv4Addr;
 use std::path::Path;

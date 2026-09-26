@@ -261,8 +261,8 @@ async fn main() -> Result<()> {
         })
     };
 
-    // Container domains: routes each container's port 80 to the port it
-    // serves, sweeping a previous agent's rules before it follows anyone.
+    // Container domains: routes each container's ports 80 and 443 to what
+    // it serves, sweeping a previous agent's rules before it follows anyone.
     let (domains, domains_handle) = domains::DomainRoutes::spawn(cancel.clone());
 
     // Start Docker event listener for auto-registering container DNS,

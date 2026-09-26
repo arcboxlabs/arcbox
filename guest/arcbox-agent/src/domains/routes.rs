@@ -6,8 +6,10 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use super::http_port::HTTPS_PORT;
+use super::https::Https;
 use super::scans::Scans;
-use super::{Command, ContainerFacts, RULE_OWNER, http_port, listeners};
+use super::{Command, ContainerFacts, HttpPorts, RULE_OWNER, http_port, listeners};
 use crate::iptables::{self, NatRule, TaggedRules};
 
 /// Whether bridged frames traverse iptables (see the module docs).
@@ -17,6 +19,10 @@ const BRIDGE_NF_CALL_IPTABLES: &str = "/proc/sys/net/bridge/bridge-nf-call-iptab
 pub(super) struct Routes {
     rules: TaggedRules,
     containers: HashMap<String, Tracked>,
+    /// The HTTP port behind each address, for the HTTPS proxy.
+    ports: HttpPorts,
+    /// Whether the HTTPS proxy is up, so port 443 has somewhere to go.
+    https: bool,
 }
 
 struct Tracked {
@@ -31,6 +37,8 @@ impl Routes {
         Self {
             rules: TaggedRules::new(RULE_OWNER),
             containers: HashMap::new(),
+            ports: HttpPorts::default(),
+            https: false,
         }
     }
 
@@ -52,26 +60,49 @@ impl Routes {
             }
         }
         warn_unless_bridged_traffic_is_filtered();
+        let proxy = match Https::bind().await {
+            Ok(https) => {
+                self.https = true;
+                Some(tokio::spawn(
+                    https.serve(self.ports.clone(), cancel.clone()),
+                ))
+            }
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "container domains serve no HTTPS");
+                None
+            }
+        };
         loop {
             let due = self.containers.values().filter_map(|c| c.scans.next).min();
             tokio::select! {
-                () = cancel.cancelled() => return,
+                () = cancel.cancelled() => break,
                 command = inbox.recv() => match command {
                     Some(Command::Track(facts)) => self.track(facts),
                     Some(Command::Forget(id)) => self.forget(&id).await,
-                    None => return,
+                    None => break,
                 },
                 () = sleep_until(due) => self.scan_due().await,
             }
         }
+        if let Some(proxy) = proxy {
+            let _ = proxy.await;
+        }
     }
 
     fn track(&mut self, facts: ContainerFacts) {
-        let installed = self
-            .containers
-            .remove(&facts.id)
-            .map(|tracked| tracked.installed)
-            .unwrap_or_default();
+        let installed = if let Some(known) = self.containers.remove(&facts.id) {
+            let gone: Vec<_> = known
+                .facts
+                .ips()
+                .iter()
+                .filter(|ip| !facts.ips().contains(ip))
+                .copied()
+                .collect();
+            self.ports.route(&gone, None);
+            known.installed
+        } else {
+            Vec::new()
+        };
         let tracked = Tracked {
             facts,
             scans: Scans::starting(Instant::now()),
@@ -81,7 +112,9 @@ impl Routes {
     }
 
     async fn forget(&mut self, container_id: &str) {
-        self.containers.remove(container_id);
+        if let Some(tracked) = self.containers.remove(container_id) {
+            self.ports.route(tracked.facts.ips(), None);
+        }
         if let Err(e) = self.rules.remove(container_id).await {
             tracing::warn!(container_id, error = %format!("{e:#}"), "failed to remove container domain rules");
         }
@@ -111,7 +144,10 @@ impl Routes {
             }
             let http_port =
                 http_port::choose(tracked.facts.pin, &listening, &tracked.facts.exposed);
-            let wanted = tracked.facts.rules(http_port);
+            self.ports.route(tracked.facts.ips(), http_port);
+            // A container serving TLS on 443 itself keeps it.
+            let https = self.https && !listening.contains(&HTTPS_PORT);
+            let wanted = tracked.facts.rules(http_port, https);
             if wanted == tracked.installed {
                 continue;
             }
@@ -120,13 +156,14 @@ impl Routes {
                     tracing::info!(
                         container_id = id,
                         ?http_port,
+                        https,
                         ?listening,
-                        "container domain port 80 rerouted"
+                        "container domain rerouted"
                     );
                     tracked.installed = wanted;
                 }
                 Err(e) => {
-                    tracing::warn!(container_id = id, error = %format!("{e:#}"), "failed to route container domain port 80");
+                    tracing::warn!(container_id = id, error = %format!("{e:#}"), "failed to route container domain");
                 }
             }
         }

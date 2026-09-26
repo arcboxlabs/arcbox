@@ -47,6 +47,8 @@ sha2.workspace = true
 arcbox-connect.workspace = true
 buffa = "0.9.1"
 buffa-types = "0.9.1"
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12", "logging"] }
+arcbox-local-ca.workspace = true
 
 # vsock, the sandbox runtime, the VM-driver port it speaks, and the two
 # adapters this crate composes it over (the Firecracker driver and the TAP
