@@ -824,12 +824,12 @@ impl FuseOutHeader {
         }
     }
 
-    /// Creates an error response header.
+    /// Creates an error response header from a host errno.
     #[must_use]
     pub const fn error(unique: u64, errno: i32) -> Self {
         Self {
             len: Self::SIZE as u32,
-            error: -errno,
+            error: -arcbox_virtio::fs::linux_errno(errno),
             unique,
         }
     }

@@ -111,12 +111,16 @@ impl FuseDispatcher {
         let header = unsafe { std::ptr::read_unaligned(request.as_ptr() as *const FuseInHeader) };
         let body = &request[FuseInHeader::SIZE..];
 
-        // Parse opcode
-        let opcode = FuseOpcode::from_u32(header.opcode)
-            .ok_or_else(|| FsError::Fuse(format!("unknown opcode: {}", header.opcode)))?;
-
         let ctx = RequestContext::from(&header);
         let mut response = ResponseBuilder::new();
+
+        let Some(opcode) = FuseOpcode::from_u32(header.opcode) else {
+            // The guest kernel falls back only on ENOSYS, for example from
+            // FUSE_STATX to FUSE_GETATTR.
+            tracing::warn!("FUSE: unknown opcode {}, returning ENOSYS", header.opcode);
+            response.write_error(ctx.unique, libc::ENOSYS);
+            return Ok(response.finish());
+        };
 
         tracing::debug!(
             "FUSE: {:?} nodeid={} unique={}",

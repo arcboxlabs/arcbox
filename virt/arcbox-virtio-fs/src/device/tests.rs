@@ -6,6 +6,8 @@ use arcbox_virtio_core::queue::flags;
 use arcbox_virtio_core::{VirtioDevice, VirtioDeviceId, virtio_bindings};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+const LINUX_ENOSYS: i32 = 38;
+
 #[test]
 fn test_fs_config_default() {
     let config = FsConfig::default();
@@ -406,7 +408,7 @@ fn test_fs_process_request_no_handler() {
     let response = fs.process_request(&request).unwrap();
 
     let error = i32::from_le_bytes([response[4], response[5], response[6], response[7]]);
-    assert_eq!(error, -libc::ENOSYS);
+    assert_eq!(error, -LINUX_ENOSYS);
 }
 
 #[test]
