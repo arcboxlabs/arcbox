@@ -369,6 +369,10 @@ message MachineExecOutput {
     // empty when it exited on its own. Only set on completion, where
     // `exit_code` is then -1.
     string exit_signal = 5;
+    // The output has ended: the process closed its stdout and stderr (or
+    // the TCP peer of a machine connection stopped sending). Carries no
+    // data; the final frame still follows.
+    bool eof = 6;
 }
 
 // Request for SSH connection info.

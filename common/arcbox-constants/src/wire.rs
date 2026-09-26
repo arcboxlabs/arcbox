@@ -269,6 +269,10 @@ pub enum MessageType {
     /// session as its consumer takes output (payload:
     /// `arcbox.v1.MachineExecWindow`). No reply.
     MachineExecOutputWindow = 0x0081,
+    /// Opens a TCP connection inside the machine, then carries it like a
+    /// flow-controlled machine exec session (payload:
+    /// `arcbox.v1.MachineTcpConnectRequest`).
+    MachineTcpConnectRequest = 0x0082,
 
     // Response types (0x1000 - 0x1FFF).
     PingResponse = 0x1001,
@@ -505,6 +509,7 @@ impl MessageType {
             0x0052 => Some(Self::MachineExecResize),
             0x0080 => Some(Self::MachineExecSignal),
             0x0081 => Some(Self::MachineExecOutputWindow),
+            0x0082 => Some(Self::MachineTcpConnectRequest),
             // Responses.
             0x1001 => Some(Self::PingResponse),
             0x1002 => Some(Self::GetSystemInfoResponse),
@@ -811,6 +816,7 @@ mod tests {
             (0x0052, MessageType::MachineExecResize),
             (0x0080, MessageType::MachineExecSignal),
             (0x0081, MessageType::MachineExecOutputWindow),
+            (0x0082, MessageType::MachineTcpConnectRequest),
             (0x1050, MessageType::MachineExecOutput),
             (0x1081, MessageType::MachineExecInputWindow),
         ];

@@ -678,3 +678,18 @@ message MachineExecSignal {
 message MachineExecWindow {
     uint32 bytes = 1;
 }
+
+// Open a TCP connection from inside the machine (SSH `direct-tcpip`). On
+// success the connection runs like a flow-controlled machine exec session:
+// the agent's first frame grants its window, MachineExecInput carries bytes
+// to the peer (empty: shut down the sending side), MachineExecOutput bytes
+// from it, an `eof` frame when the peer stops sending, and a `done` frame
+// once both directions are closed. A connect failure is an Error frame.
+message MachineTcpConnectRequest {
+    // Host name or address, resolved inside the machine ("localhost" is the
+    // machine itself).
+    string host = 1;
+    uint32 port = 2;
+    // As MachineExecRequest.output_window; required.
+    uint32 output_window = 3;
+}

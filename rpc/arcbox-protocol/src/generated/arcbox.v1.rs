@@ -1849,6 +1849,11 @@ pub struct MachineExecOutput {
     /// `exit_code` is then -1.
     #[prost(string, tag = "5")]
     pub exit_signal: ::prost::alloc::string::String,
+    /// The output has ended: the process closed its stdout and stderr (or
+    /// the TCP peer of a machine connection stopped sending). Carries no
+    /// data; the final frame still follows.
+    #[prost(bool, tag = "6")]
+    pub eof: bool,
 }
 /// Request for SSH connection info.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -3787,6 +3792,24 @@ pub struct MachineExecSignal {
 pub struct MachineExecWindow {
     #[prost(uint32, tag = "1")]
     pub bytes: u32,
+}
+/// Open a TCP connection from inside the machine (SSH `direct-tcpip`). On
+/// success the connection runs like a flow-controlled machine exec session:
+/// the agent's first frame grants its window, MachineExecInput carries bytes
+/// to the peer (empty: shut down the sending side), MachineExecOutput bytes
+/// from it, an `eof` frame when the peer stops sending, and a `done` frame
+/// once both directions are closed. A connect failure is an Error frame.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MachineTcpConnectRequest {
+    /// Host name or address, resolved inside the machine ("localhost" is the
+    /// machine itself).
+    #[prost(string, tag = "1")]
+    pub host: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub port: u32,
+    /// As MachineExecRequest.output_window; required.
+    #[prost(uint32, tag = "3")]
+    pub output_window: u32,
 }
 /// Transport protocol of a forwarded sandbox port.
 ///
