@@ -438,17 +438,23 @@ impl pb::MachineService for MachineServiceImpl {
     }
 
     /// Runs a command in the machine root via the guest agent, streaming
-    /// stdout/stderr frames and a final exit-code frame.
+    /// stdout/stderr frames and a final exit-status frame.
     ///
-    /// Non-interactive: the agent rejects `tty` requests until the bidi exec
-    /// session lands. Streaming requires the async agent transport (VZ);
-    /// the HV blocking transport shares the sandbox-streaming limitation.
+    /// Stdin is closed: there is no input stream to attach, so a request
+    /// asking for one belongs on ExecSession. Streaming requires the async
+    /// agent transport (VZ); the HV blocking transport shares the
+    /// sandbox-streaming limitation.
     async fn exec(
         &self,
         _ctx: RequestContext,
         request: ServiceRequest<'_, pb::MachineExecRequest>,
     ) -> ServiceResult<ServiceStream<pb::MachineExecOutput>> {
         let req = request.to_owned_message();
+        if req.attach_stdin {
+            return Err(ConnectError::invalid_argument(
+                "exec has no stdin to attach; use ExecSession",
+            ));
+        }
         let agent = self
             .runtime
             .ready()?

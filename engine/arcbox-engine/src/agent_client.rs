@@ -37,12 +37,13 @@ use arcbox_connect::v1::{
     KubernetesLoadBalancersRequest, KubernetesLoadBalancersResponse, KubernetesStartRequest,
     KubernetesStartResponse, KubernetesStatusRequest, KubernetesStatusResponse,
     KubernetesStopRequest, KubernetesStopResponse, MachineExecOutput, MachineExecRequest,
-    MachineStats, MemoryPressureEvent, MmapReadFileRequest, MmapReadFileResponse, ReadinessEvent,
-    RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse,
-    SandboxCleanupResponse, SandboxCleanupTicket, SandboxPortForwardRemoveRequest,
-    SandboxPortForwardRequest, SandboxPortForwardResponse, SandboxResumeCommand,
-    SandboxResumeResponse, SystemInfo, TerminalSize, WatchMemoryPressureRequest,
-    WatchReadinessRequest, WatchSandboxCleanupRequest, WatchStatsRequest,
+    MachineExecSignal, MachineStats, MemoryPressureEvent, MmapReadFileRequest,
+    MmapReadFileResponse, ReadinessEvent, RuntimeEnsureRequest, RuntimeEnsureResponse,
+    RuntimeStatusRequest, RuntimeStatusResponse, SandboxCleanupResponse, SandboxCleanupTicket,
+    SandboxPortForwardRemoveRequest, SandboxPortForwardRequest, SandboxPortForwardResponse,
+    SandboxResumeCommand, SandboxResumeResponse, SystemInfo, TerminalSize,
+    WatchMemoryPressureRequest, WatchReadinessRequest, WatchSandboxCleanupRequest,
+    WatchStatsRequest,
 };
 use arcbox_constants::ports::AGENT_PORT;
 use arcbox_constants::wire::MessageType;
@@ -59,7 +60,7 @@ use tokio::sync::mpsc;
 #[derive(Debug)]
 pub enum ExecSessionInput {
     /// Raw bytes for the process's stdin. An empty payload signals EOF;
-    /// resizes may still follow it.
+    /// resizes and signals may still follow it.
     Stdin(Vec<u8>),
     /// Resize the pseudo-TTY (only meaningful for `tty = true` sessions).
     Resize {
@@ -68,6 +69,9 @@ pub enum ExecSessionInput {
         /// Terminal height in rows.
         height: u16,
     },
+    /// Deliver a signal to the process, named without the `SIG` prefix
+    /// (`"INT"`) as SSH names it — the guest numbers signals differently.
+    Signal(String),
 }
 
 impl ExecSessionInput {
@@ -82,6 +86,13 @@ impl ExecSessionInput {
                     ..Default::default()
                 };
                 wire::build_message(MessageType::MachineExecResize, "", &size.encode_to_vec())
+            }
+            Self::Signal(name) => {
+                let signal = MachineExecSignal {
+                    name: name.clone(),
+                    ..Default::default()
+                };
+                wire::build_message(MessageType::MachineExecSignal, "", &signal.encode_to_vec())
             }
         }
     }
@@ -1612,7 +1623,7 @@ impl AgentClient {
     ///
     /// Consumes the client because the stream task requires exclusive
     /// transport access. The caller supplies a receiver of
-    /// [`ExecSessionInput`]s (stdin bytes, EOF, TTY resizes) and gets
+    /// [`ExecSessionInput`]s (stdin bytes, EOF, TTY resizes, signals) and gets
     /// an output receiver of [`MachineExecOutput`] frames whose last one
     /// carries the exit status. Dropping that receiver ends the session: the
     /// connection closes, and the guest kills the process group.
