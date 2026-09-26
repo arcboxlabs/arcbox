@@ -172,3 +172,133 @@ fn stdin_len(input: &ExecSessionInput) -> usize {
         ExecSessionInput::Resize { .. } | ExecSessionInput::Signal(_) => 0,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    const CHUNK: usize = 256 * 1024;
+
+    fn stdin() -> ExecSessionInput {
+        ExecSessionInput::Stdin(vec![0; CHUNK])
+    }
+
+    /// Queues stdin until the queue is past [`HIGH_WATER`], into a process
+    /// that takes none.
+    async fn backlogged(input: &SessionInput, outbound: &Outbound) {
+        while input.backlog.bytes.load(Ordering::Acquire) <= HIGH_WATER {
+            let queued =
+                tokio::time::timeout(Duration::from_millis(100), input.send(stdin(), outbound))
+                    .await;
+            if queued.is_err() {
+                return;
+            }
+        }
+    }
+
+    async fn completes<F: Future>(future: F) -> bool {
+        tokio::time::timeout(Duration::from_millis(100), future)
+            .await
+            .is_ok()
+    }
+
+    #[tokio::test]
+    async fn stdin_past_the_high_water_mark_waits_for_the_process() {
+        let (process, mut taken) = mpsc::channel(1);
+        let input = SessionInput::new(process);
+        let outbound = Outbound::default();
+        backlogged(&input, &outbound).await;
+
+        let send = input.send(stdin(), &outbound);
+        let mut send = pin!(send);
+        assert!(
+            !completes(send.as_mut()).await,
+            "the queue is past the mark"
+        );
+        while input.backlog.bytes.load(Ordering::Acquire) > HIGH_WATER {
+            taken.recv().await.unwrap();
+        }
+        assert!(completes(send).await, "the process caught up");
+    }
+
+    #[tokio::test]
+    async fn control_input_never_waits() {
+        let (process, _taken) = mpsc::channel(1);
+        let input = SessionInput::new(process);
+        let outbound = Outbound::default();
+        backlogged(&input, &outbound).await;
+
+        let resize = ExecSessionInput::Resize {
+            width: 80,
+            height: 24,
+        };
+        assert!(completes(input.send(resize, &outbound)).await);
+    }
+
+    #[tokio::test]
+    async fn output_blocked_on_the_connection_releases_waiting_input() {
+        let (process, _taken) = mpsc::channel(1);
+        let input = SessionInput::new(process);
+        let outbound = Outbound::default();
+        backlogged(&input, &outbound).await;
+
+        let send = input.send(stdin(), &outbound);
+        let mut send = pin!(send);
+        assert!(!completes(send.as_mut()).await);
+        // An output send that cannot complete: the handler must go back to
+        // the connection for it.
+        let never = outbound.send(std::future::pending::<()>());
+        let mut never = pin!(never);
+        assert!(!completes(never.as_mut()).await);
+        assert!(completes(send).await);
+        // And input does not wait while it stays blocked.
+        assert!(completes(input.send(stdin(), &outbound)).await);
+    }
+
+    #[tokio::test]
+    async fn output_that_completes_at_once_does_not_count_as_blocked() {
+        let outbound = Outbound::default();
+        outbound.send(std::future::ready(())).await;
+        assert!(!outbound.any_blocked());
+    }
+
+    #[tokio::test]
+    async fn a_session_past_the_limit_overflows() {
+        let (process, _taken) = mpsc::channel(1);
+        let input = SessionInput::new(process);
+        let outbound = Outbound::default();
+        let never = outbound.send(std::future::pending::<()>());
+        let mut never = pin!(never);
+        assert!(!completes(never.as_mut()).await);
+
+        let chunk = vec![0; 4 * 1024 * 1024];
+        let mut queued = 0;
+        loop {
+            queued += chunk.len();
+            let send = input.send(ExecSessionInput::Stdin(chunk.clone()), &outbound);
+            let sent = tokio::time::timeout(Duration::from_secs(1), send)
+                .await
+                .expect("input does not wait while output is blocked");
+            if sent.is_err() {
+                break;
+            }
+        }
+        assert!(queued > LIMIT);
+    }
+
+    #[tokio::test]
+    async fn a_process_that_is_gone_releases_waiting_input() {
+        let (process, taken) = mpsc::channel(1);
+        let input = SessionInput::new(process);
+        let outbound = Outbound::default();
+        backlogged(&input, &outbound).await;
+
+        let send = input.send(stdin(), &outbound);
+        let mut send = pin!(send);
+        assert!(!completes(send.as_mut()).await);
+        drop(taken);
+        assert!(completes(send).await);
+    }
+}
