@@ -20,10 +20,10 @@
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::process::Output;
 
 use anyhow::{Context, Result, bail};
-use tokio::process::Command;
+
+use crate::iptables::{self, is_installed, nat_prerouting, run};
 
 /// iptables `--comment` tag prefix; the suffix is the container's full ID.
 const RULE_COMMENT_PREFIX: &str = "arcbox-publish:";
@@ -137,14 +137,6 @@ fn rule_spec(uplink: &str, container_id: &str, publish: &PinnedPublish) -> Vec<S
     ]
 }
 
-fn nat_prerouting(verb: &str, spec: &[String]) -> Vec<String> {
-    ["-t", "nat", "-w", "2", verb, "PREROUTING"]
-        .iter()
-        .map(|s| (*s).to_owned())
-        .chain(spec.iter().cloned())
-        .collect()
-}
-
 /// Installed mirror rules, keyed by container ID.
 #[derive(Default)]
 pub struct PublishMirror {
@@ -173,8 +165,8 @@ impl PublishMirror {
         let mut installed = Vec::with_capacity(publishes.len());
         for publish in publishes {
             let spec = rule_spec(&self.uplink, container_id, publish);
-            if !rule_is_installed(&nat_prerouting("-C", &spec)).await? {
-                run_iptables(&nat_prerouting("-I", &spec))
+            if !is_installed(&nat_prerouting("-C", &spec)).await? {
+                run(&nat_prerouting("-I", &spec))
                     .await
                     .with_context(|| format!("mirroring publish {publish:?}"))?;
             }
@@ -197,9 +189,9 @@ impl PublishMirror {
         };
         let mut failures = Vec::new();
         for spec in &specs {
-            match rule_is_installed(&nat_prerouting("-C", spec)).await {
+            match is_installed(&nat_prerouting("-C", spec)).await {
                 Ok(true) => {
-                    if let Err(e) = run_iptables(&nat_prerouting("-D", spec)).await {
+                    if let Err(e) = run(&nat_prerouting("-D", spec)).await {
                         failures.push(e.to_string());
                     }
                 }
@@ -226,95 +218,9 @@ impl PublishMirror {
 /// process's rules, and dockerd re-creates its own on restart, so the
 /// event reconciliation that follows reinstalls what is still needed.
 pub async fn remove_all_orphans() -> Result<()> {
-    let listing = Command::new("/sbin/iptables")
-        .args(["-t", "nat", "-w", "2", "-S", "PREROUTING"])
-        .output()
-        .await
-        .context("listing nat PREROUTING")?;
-    if !listing.status.success() {
-        bail!(
-            "iptables -t nat -S PREROUTING failed: {}",
-            String::from_utf8_lossy(&listing.stderr).trim()
-        );
-    }
-    let listing = String::from_utf8_lossy(&listing.stdout);
-    let mut failures = Vec::new();
-    let mut removed = 0usize;
-    for args in listing.lines().filter_map(orphan_delete_args) {
-        match run_iptables(&args).await {
-            Ok(()) => removed += 1,
-            Err(e) => failures.push(e.to_string()),
-        }
-    }
+    let removed = iptables::sweep(RULE_COMMENT_PREFIX).await?;
     if removed > 0 {
         tracing::info!(removed, "swept publish mirror rules from a previous agent");
-    }
-    if !failures.is_empty() {
-        bail!(
-            "failed to remove {} stale publish mirror rule(s): {}",
-            failures.len(),
-            failures.join("; ")
-        );
-    }
-    Ok(())
-}
-
-/// If `line` (from `iptables -S PREROUTING`) is one of ours, the argv that
-/// deletes it.
-fn orphan_delete_args(line: &str) -> Option<Vec<String>> {
-    let spec = line.strip_prefix("-A PREROUTING ")?;
-    let fields: Vec<String> = spec.split_whitespace().map(unquote).collect();
-    let ours = fields
-        .windows(2)
-        .any(|pair| pair[0] == "--comment" && pair[1].starts_with(RULE_COMMENT_PREFIX));
-    ours.then(|| nat_prerouting("-D", &fields))
-}
-
-/// `iptables -S` quotes comments; `-D` wants them bare.
-fn unquote(field: &str) -> String {
-    field
-        .strip_prefix('"')
-        .and_then(|f| f.strip_suffix('"'))
-        .unwrap_or(field)
-        .to_owned()
-}
-
-async fn rule_is_installed(check_args: &[String]) -> Result<bool> {
-    let output = Command::new("/sbin/iptables")
-        .args(check_args)
-        .output()
-        .await
-        .context("failed to run iptables")?;
-    classify_rule_check(output, check_args)
-}
-
-fn classify_rule_check(output: Output, args: &[String]) -> Result<bool> {
-    if output.status.success() {
-        return Ok(true);
-    }
-    // Exit 1 is iptables' "no such rule"; anything else is a real failure.
-    if output.status.code() == Some(1) {
-        return Ok(false);
-    }
-    bail!(
-        "iptables {} failed: {}",
-        args.join(" "),
-        String::from_utf8_lossy(&output.stderr).trim()
-    )
-}
-
-async fn run_iptables(args: &[String]) -> Result<()> {
-    let output = Command::new("/sbin/iptables")
-        .args(args)
-        .output()
-        .await
-        .context("failed to run iptables")?;
-    if !output.status.success() {
-        bail!(
-            "iptables {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
     }
     Ok(())
 }
@@ -397,40 +303,5 @@ mod tests {
             nat_prerouting("-I", &spec)[..6],
             ["-t", "nat", "-w", "2", "-I", "PREROUTING"]
         );
-    }
-
-    #[test]
-    fn orphan_sweep_recognises_only_our_rules() {
-        let ours = "-A PREROUTING -i eth0 -p tcp -m tcp --dport 32768 -m comment \
-                    --comment \"arcbox-publish:abc123\" -j DNAT --to-destination 172.17.0.2:80";
-        let args = orphan_delete_args(ours).expect("our rule is swept");
-        assert_eq!(&args[..6], ["-t", "nat", "-w", "2", "-D", "PREROUTING"]);
-        assert!(
-            args.contains(&"arcbox-publish:abc123".to_string()),
-            "comment unquoted"
-        );
-
-        let docker = "-A PREROUTING -m addrtype --dst-type LOCAL -j DOCKER";
-        assert!(orphan_delete_args(docker).is_none());
-        let sandbox = "-A PREROUTING -p tcp -m tcp --dport 40000 -m comment \
-                       --comment \"arcbox-sbx:gen\" -j DNAT --to-destination 172.20.0.2:80";
-        assert!(
-            orphan_delete_args(sandbox).is_none(),
-            "sandbox rules belong elsewhere"
-        );
-    }
-
-    #[test]
-    fn rule_check_distinguishes_absent_from_broken() {
-        use std::os::unix::process::ExitStatusExt as _;
-        let ok = |code: i32| Output {
-            status: std::process::ExitStatus::from_raw(code << 8),
-            stdout: Vec::new(),
-            stderr: b"err".to_vec(),
-        };
-        let args = vec!["-C".to_string()];
-        assert!(classify_rule_check(ok(0), &args).unwrap());
-        assert!(!classify_rule_check(ok(1), &args).unwrap());
-        assert!(classify_rule_check(ok(2), &args).is_err());
     }
 }

@@ -86,6 +86,7 @@ mod dns;
 mod dns_server;
 mod docker_config;
 mod docker_events;
+mod iptables;
 mod publish_mirror;
 
 /// Max bytes for `agent.log` before it rotates (matches the daemon's 10 MiB).
