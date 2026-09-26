@@ -47,6 +47,11 @@ const SYSTEMD_TARGET_DROP_IN: &str =
     "/etc/systemd/system/multi-user.target.d/arcbox-boot-done.conf";
 const OPENRC_SERVICE: &str = "/etc/init.d/arcbox-boot-done";
 const OPENRC_RUNLEVEL: &str = "/etc/runlevels/default/arcbox-boot-done";
+const SYSVINIT_INITTAB: &str = "/etc/inittab";
+const SYSVINIT_RC: &str = "/etc/init.d/rc";
+/// The id field of the hook's inittab entry, which is how an install on a
+/// later boot finds it already there.
+const SYSVINIT_ENTRY_ID: &str = "abd";
 
 /// The unit that writes the sentinel.
 ///
@@ -108,6 +113,24 @@ stop() {{
     )
 }
 
+/// The inittab entry that writes the sentinel.
+///
+/// sysvinit runs a runlevel's `wait` entries one at a time, in file order, so
+/// an entry appended after the `rc N` lines runs once every script of the
+/// runlevel has finished — sysvinit's way to say "last". Devuan needs it: its
+/// image ships the build host's `resolv.conf` (`nameserver 127.0.0.53`, with
+/// no resolver behind it), and until `rc 2` has run dhclient, a started
+/// machine could not resolve anything.
+fn sysvinit_entry() -> String {
+    format!("{SYSVINIT_ENTRY_ID}:2345:wait:/bin/sh -c 'cat {BOOT_ID} > {SENTINEL}'")
+}
+
+fn has_sysvinit_entry(inittab: &str) -> bool {
+    inittab
+        .lines()
+        .any(|line| line.split(':').next() == Some(SYSVINIT_ENTRY_ID))
+}
+
 /// The filesystem the hook is installed into.
 ///
 /// Rooted rather than hardcoded so the install path — the half with the
@@ -139,10 +162,13 @@ impl Layout {
     ///
     /// This is what tells readiness to wait: an image whose init we do not
     /// recognize gets no hook, and readiness must not block on a signal
-    /// nothing will ever send. The hook file *is* the marker — there is no
+    /// nothing will ever send. The hook itself *is* the marker — there is no
     /// second piece of state to keep in sync with it.
     fn hook_installed(&self) -> bool {
-        self.path(SYSTEMD_UNIT).exists() || self.path(OPENRC_SERVICE).exists()
+        self.path(SYSTEMD_UNIT).exists()
+            || self.path(OPENRC_SERVICE).exists()
+            || fs::read_to_string(self.path(SYSVINIT_INITTAB))
+                .is_ok_and(|inittab| has_sysvinit_entry(&inittab))
     }
 
     /// Whether the sentinel was written by the boot that is running now.
@@ -206,6 +232,11 @@ impl Layout {
         if self.path("/sbin/openrc").exists() || self.path("/usr/libexec/rc").is_dir() {
             return self.install_openrc();
         }
+        // `/etc/init.d/rc` tells sysv-rc apart from BusyBox init, which reads
+        // an inittab too but has neither runlevels nor that script.
+        if self.path(SYSVINIT_INITTAB).is_file() && self.path(SYSVINIT_RC).is_file() {
+            return self.install_sysvinit();
+        }
         tracing::info!(
             "no recognized distro init; machine readiness will not wait for boot to settle"
         );
@@ -253,6 +284,31 @@ impl Layout {
             return false;
         }
         tracing::info!("installed the openrc boot-completion hook");
+        true
+    }
+
+    /// Appends the entry once; the overlay keeps it for later boots.
+    fn install_sysvinit(&self) -> bool {
+        let path = self.path(SYSVINIT_INITTAB);
+        let mut inittab = match fs::read_to_string(&path) {
+            Ok(inittab) => inittab,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to read /etc/inittab");
+                return false;
+            }
+        };
+        if !has_sysvinit_entry(&inittab) {
+            if !inittab.is_empty() && !inittab.ends_with('\n') {
+                inittab.push('\n');
+            }
+            inittab.push_str(&sysvinit_entry());
+            inittab.push('\n');
+            if let Err(e) = write_file(&path, &inittab, 0o644) {
+                tracing::warn!(error = %e, "failed to add the boot-done entry to /etc/inittab");
+                return false;
+            }
+        }
+        tracing::info!("installed the sysvinit boot-completion hook");
         true
     }
 }
@@ -351,6 +407,43 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o755, "openrc runs the service as a program");
+    }
+
+    /// The entry must land after the `rc N` lines, since sysvinit runs `wait`
+    /// entries in file order, and a later boot must find it rather than
+    /// append a second one.
+    #[test]
+    fn a_sysvinit_image_gets_one_inittab_entry_after_the_runlevels() {
+        let (_dir, layout) = image();
+        touch(&layout, SYSVINIT_RC);
+        let inittab = layout.path(SYSVINIT_INITTAB);
+        fs::write(
+            &inittab,
+            "id:2:initdefault:\nl2:2:wait:/etc/init.d/rc 2\nl3:3:wait:/etc/init.d/rc 3",
+        )
+        .expect("write");
+
+        assert!(layout.install());
+        assert!(layout.install());
+        assert!(layout.hook_installed());
+        let lines: Vec<String> = fs::read_to_string(&inittab)
+            .expect("inittab")
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(lines.len(), 4, "{lines:?}");
+        assert_eq!(lines[2], "l3:3:wait:/etc/init.d/rc 3");
+        assert_eq!(lines[3], sysvinit_entry());
+    }
+
+    /// BusyBox init reads an inittab too, but has no runlevels to order
+    /// against; without sysv-rc's `rc` script the image gets no hook.
+    #[test]
+    fn a_busybox_inittab_alone_is_not_sysvinit() {
+        let (_dir, layout) = image();
+        touch(&layout, SYSVINIT_INITTAB);
+        assert!(!layout.install());
+        assert!(!layout.hook_installed());
     }
 
     /// A half-installed hook is the expensive failure: it never fires and
