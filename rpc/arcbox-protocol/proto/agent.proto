@@ -667,3 +667,14 @@ message MachineExecSignal {
     // differently (SIGUSR1 is 30 on macOS, 10 on Linux).
     string name = 1;
 }
+
+// Flow-control window on a machine exec session's connection: the receiver
+// of a stream lets its sender send `bytes` more of it. The host returns
+// output window (counted in encoded MachineExecOutput payload bytes) as its
+// consumer takes output; the agent grants its stdin window (in stdin bytes)
+// in its first frame, then returns it as the process reads stdin. Neither
+// side may send beyond the window it holds, so both can always keep
+// reading the connection.
+message MachineExecWindow {
+    uint32 bytes = 1;
+}

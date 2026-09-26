@@ -265,6 +265,10 @@ pub enum MessageType {
     /// `arcbox.v1.MachineExecSignal`). Like [`Self::MachineExecInput`] it
     /// travels on the session's own connection and has no reply.
     MachineExecSignal = 0x0080,
+    /// Output window the host returns to a flow-controlled machine exec
+    /// session as its consumer takes output (payload:
+    /// `arcbox.v1.MachineExecWindow`). No reply.
+    MachineExecOutputWindow = 0x0081,
 
     // Response types (0x1000 - 0x1FFF).
     PingResponse = 0x1001,
@@ -415,6 +419,10 @@ pub enum MessageType {
     /// One machine exec output frame (payload: `arcbox.v1.MachineExecOutput`;
     /// `done == true` on the final frame carrying the exit code).
     MachineExecOutput = 0x1050,
+    /// Stdin window the agent grants a flow-controlled machine exec
+    /// session: first as its opening frame, then as the process reads
+    /// stdin (payload: `arcbox.v1.MachineExecWindow`).
+    MachineExecInputWindow = 0x1081,
 
     // Special types.
     Empty = 0x0000,
@@ -496,6 +504,7 @@ impl MessageType {
             0x0051 => Some(Self::MachineExecInput),
             0x0052 => Some(Self::MachineExecResize),
             0x0080 => Some(Self::MachineExecSignal),
+            0x0081 => Some(Self::MachineExecOutputWindow),
             // Responses.
             0x1001 => Some(Self::PingResponse),
             0x1002 => Some(Self::GetSystemInfoResponse),
@@ -564,6 +573,7 @@ impl MessageType {
             0x1073 => Some(Self::SandboxTemplateListResponse),
             0x1074 => Some(Self::SandboxTemplateDeleteResponse),
             0x1050 => Some(Self::MachineExecOutput),
+            0x1081 => Some(Self::MachineExecInputWindow),
             0x0000 => Some(Self::Empty),
             0xFFFF => Some(Self::Error),
             _ => None,
@@ -800,7 +810,9 @@ mod tests {
             (0x0051, MessageType::MachineExecInput),
             (0x0052, MessageType::MachineExecResize),
             (0x0080, MessageType::MachineExecSignal),
+            (0x0081, MessageType::MachineExecOutputWindow),
             (0x1050, MessageType::MachineExecOutput),
+            (0x1081, MessageType::MachineExecInputWindow),
         ];
 
         for (raw, expected) in CASES {

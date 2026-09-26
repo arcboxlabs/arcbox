@@ -1798,6 +1798,15 @@ pub struct MachineExecRequest {
     /// spaces.
     #[prost(bool, tag = "9")]
     pub login: bool,
+    /// Flow control between the daemon and the guest agent, set by the
+    /// daemon when it forwards the request (a client's value is ignored):
+    /// the agent keeps at most this many bytes of MachineExecOutput frames
+    /// (encoded payloads, the final frame excepted) unreturned, grants its
+    /// own stdin window in its first frame, and each side returns window as
+    /// it consumes (MachineExecWindow frames). 0 streams without flow
+    /// control.
+    #[prost(uint32, tag = "10")]
+    pub output_window: u32,
 }
 /// One client message on an interactive machine session.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -3766,6 +3775,18 @@ pub struct MachineExecSignal {
     /// differently (SIGUSR1 is 30 on macOS, 10 on Linux).
     #[prost(string, tag = "1")]
     pub name: ::prost::alloc::string::String,
+}
+/// Flow-control window on a machine exec session's connection: the receiver
+/// of a stream lets its sender send `bytes` more of it. The host returns
+/// output window (counted in encoded MachineExecOutput payload bytes) as its
+/// consumer takes output; the agent grants its stdin window (in stdin bytes)
+/// in its first frame, then returns it as the process reads stdin. Neither
+/// side may send beyond the window it holds, so both can always keep
+/// reading the connection.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MachineExecWindow {
+    #[prost(uint32, tag = "1")]
+    pub bytes: u32,
 }
 /// Transport protocol of a forwarded sandbox port.
 ///

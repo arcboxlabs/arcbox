@@ -333,6 +333,14 @@ message MachineExecRequest {
     // shell when `cmd` is empty, otherwise `shell -c` over `cmd` joined with
     // spaces.
     bool login = 9;
+    // Flow control between the daemon and the guest agent, set by the
+    // daemon when it forwards the request (a client's value is ignored):
+    // the agent keeps at most this many bytes of MachineExecOutput frames
+    // (encoded payloads, the final frame excepted) unreturned, grants its
+    // own stdin window in its first frame, and each side returns window as
+    // it consumes (MachineExecWindow frames). 0 streams without flow
+    // control.
+    uint32 output_window = 10;
 }
 
 // One client message on an interactive machine session.
