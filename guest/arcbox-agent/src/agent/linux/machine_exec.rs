@@ -23,6 +23,9 @@ mod control;
 mod flow;
 mod process;
 mod session;
+mod tcp;
+
+pub(super) use tcp::handle_tcp_connect;
 
 use std::io::Read;
 use std::os::fd::AsRawFd;

@@ -1,10 +1,12 @@
-//! The loop that runs a started process's session over the connection:
-//! output frames within the host's window, stdin window returned as the
-//! process reads, host frames applied as they arrive — then the exit frame.
+//! The loop that runs a session — a started process, or a TCP connection
+//! (`tcp.rs`) — over the connection: output frames within the host's
+//! window, then an EOF frame; stdin window returned as the target reads;
+//! host frames applied as they arrive; and last the final frame.
 
 use std::io::Write as _;
 use std::os::fd::OwnedFd;
 use std::os::unix::process::ExitStatusExt as _;
+use std::pin::pin;
 use std::process::ExitStatus;
 
 use anyhow::Context as _;
@@ -12,8 +14,9 @@ use arcbox_connect::v1::{MachineExecOutput, MachineExecWindow};
 use buffa::Message as _;
 use nix::sys::signal::Signal;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
-use tokio::process::{Child, ChildStdin};
+use tokio::process::Child;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use super::control::{self, Control};
 use super::flow::Flow;
@@ -49,6 +52,14 @@ pub(super) struct Streams {
     pub(super) delivered: mpsc::UnboundedReceiver<usize>,
 }
 
+/// How a session's target ended, as its final frame reports.
+pub(super) enum Ended {
+    /// The process exited.
+    Exited(ExitStatus),
+    /// The TCP connection is closed both ways.
+    Closed,
+}
+
 /// Runs a started process's session to its end. Once the process exits
 /// with its output drained, the exit frame goes out; if the host goes away
 /// (or breaks flow control) first, the process group is killed instead.
@@ -64,48 +75,76 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let pid = child.id();
+    let exited = async {
+        let status = child
+            .wait()
+            .await
+            .context("failed to wait for exec child")?;
+        Ok(Ended::Exited(status))
+    };
+    if !relay(stream, trace_id, flow, streams, terminal, pid, exited).await? {
+        kill_session(pid);
+        let _ = child.wait().await;
+    }
+    Ok(())
+}
+
+/// Carries a session over the connection until its output is drained and
+/// `ended` resolves, then writes the final frame. Returns `false` when the
+/// host went away (or broke flow control) first.
+pub(super) async fn relay<S>(
+    stream: &mut S,
+    trace_id: &str,
+    flow: &Flow,
+    streams: Streams,
+    terminal: Option<&OwnedFd>,
+    pid: Option<u32>,
+    ended: impl Future<Output = anyhow::Result<Ended>>,
+) -> anyhow::Result<bool>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let (mut conn_rd, mut conn_wr) = tokio::io::split(stream);
-    let exited = {
+    let ended = {
         let output = pump(
             &mut conn_wr,
             trace_id,
             flow,
             streams.output,
             streams.delivered,
-            child,
+            ended,
         );
         let control = serve_control(&mut conn_rd, streams.stdin, flow, terminal, pid);
         tokio::select! {
             // An error here is a failed write: the host went away.
-            status = output => status.ok(),
+            ended = output => ended.ok(),
             () = control => None,
         }
     };
-    match exited {
-        Some(status) => write_exit(&mut conn_wr, trace_id, status).await,
-        None => {
-            kill_session(pid);
-            let _ = child.wait().await;
-            Ok(())
-        }
+    match ended {
+        Some(ended) => write_end(&mut conn_wr, trace_id, ended)
+            .await
+            .map(|()| true),
+        None => Ok(false),
     }
 }
 
-/// Streams output as the host's window allows and returns stdin window as
-/// the writer finishes with it, until the output is drained and the process
-/// has exited. Stdin window keeps flowing while output waits for the host,
-/// and after the process closes its output.
+/// Streams output as the host's window allows — then an EOF frame — and
+/// returns stdin window as the writer finishes with it, until the output is
+/// drained and `ended` resolves. Stdin window keeps flowing while output
+/// waits for the host, and after the output has ended.
 async fn pump<W>(
     conn: &mut W,
     trace_id: &str,
     flow: &Flow,
     mut output: mpsc::Receiver<Chunk>,
     mut delivered: mpsc::UnboundedReceiver<usize>,
-    child: &mut Child,
-) -> anyhow::Result<ExitStatus>
+    ended: impl Future<Output = anyhow::Result<Ended>>,
+) -> anyhow::Result<Ended>
 where
     W: AsyncWrite + Unpin,
 {
+    let mut ended = pin!(ended);
     // An encoded output frame waiting for window.
     let mut pending: Option<Vec<u8>> = None;
     let mut output_open = true;
@@ -127,11 +166,16 @@ where
             }
             chunk = output.recv(), if output_open && pending.is_none() => match chunk {
                 Some(chunk) => pending = Some(encode_output(chunk)),
-                None => output_open = false,
+                None => {
+                    output_open = false;
+                    let eof = MachineExecOutput {
+                        eof: true,
+                        ..Default::default()
+                    };
+                    pending = Some(eof.encode_to_vec());
+                }
             },
-            status = child.wait(), if !output_open && pending.is_none() => {
-                return status.context("failed to wait for exec child");
-            }
+            ended = ended.as_mut(), if !output_open && pending.is_none() => return ended,
         }
     }
 }
@@ -178,8 +222,13 @@ async fn serve_control<R>(
     }
 }
 
-/// Reads one of the process's pipes into `chunks` until it closes.
-pub(super) fn read_output<R>(mut pipe: R, stream: &'static str, chunks: mpsc::Sender<Chunk>)
+/// Reads one of the process's pipes (or a socket) into `chunks` until it
+/// closes.
+pub(super) fn read_output<R>(
+    mut pipe: R,
+    stream: &'static str,
+    chunks: mpsc::Sender<Chunk>,
+) -> JoinHandle<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
@@ -203,17 +252,20 @@ where
                 }
             }
         }
-    });
+    })
 }
 
-/// Writes host stdin into the process's pipe. Every chunk is reported done
-/// once written, or dropped: the process closed its stdin, the host ended
-/// it, or none was attached.
-pub(super) async fn write_stdin(
-    mut pipe: Option<ChildStdin>,
+/// Writes host stdin into the process's pipe (or a socket) until the host
+/// ends it, which shuts the writing side down. Every chunk is reported done
+/// once written, or dropped: the reader closed its end, or none was
+/// attached.
+pub(super) async fn write_stdin<W>(
+    mut pipe: Option<W>,
     mut items: mpsc::UnboundedReceiver<StdinItem>,
     delivered: mpsc::UnboundedSender<usize>,
-) {
+) where
+    W: AsyncWrite + Unpin,
+{
     while let Some(item) = items.recv().await {
         match item {
             StdinItem::Data(data) => {
@@ -224,7 +276,12 @@ pub(super) async fn write_stdin(
                 }
                 let _ = delivered.send(data.len());
             }
-            StdinItem::Eof => pipe = None,
+            StdinItem::Eof => {
+                if let Some(mut open) = pipe {
+                    let _ = open.shutdown().await;
+                }
+                return;
+            }
         }
     }
 }
@@ -298,16 +355,22 @@ fn encode_output(chunk: Chunk) -> Vec<u8> {
     .encode_to_vec()
 }
 
-/// Writes the final frame reporting how the process ended.
-async fn write_exit<W>(writer: &mut W, trace_id: &str, status: ExitStatus) -> anyhow::Result<()>
+/// Writes the final frame reporting how the session ended.
+async fn write_end<W>(writer: &mut W, trace_id: &str, ended: Ended) -> anyhow::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    let out = MachineExecOutput {
-        done: true,
-        exit_code: status.code().unwrap_or(-1),
-        exit_signal: status.signal().map(signal_name).unwrap_or_default(),
-        ..Default::default()
+    let out = match ended {
+        Ended::Exited(status) => MachineExecOutput {
+            done: true,
+            exit_code: status.code().unwrap_or(-1),
+            exit_signal: status.signal().map(signal_name).unwrap_or_default(),
+            ..Default::default()
+        },
+        Ended::Closed => MachineExecOutput {
+            done: true,
+            ..Default::default()
+        },
     };
     write_message(
         writer,

@@ -95,6 +95,15 @@ where
             }
             return Ok(());
         }
+        // So does a TCP connection opened inside the machine.
+        if matches!(msg_type, crate::rpc::MessageType::MachineTcpConnectRequest) {
+            if let Err(e) =
+                super::machine_exec::handle_tcp_connect(&mut stream, &trace_id, &payload).await
+            {
+                tracing::warn!(trace_id = %trace_id, error = %e, "machine tcp handler error");
+            }
+            return Ok(());
+        }
 
         // Parse and handle the request.
         let result = match parse_request(msg_type, &payload) {
