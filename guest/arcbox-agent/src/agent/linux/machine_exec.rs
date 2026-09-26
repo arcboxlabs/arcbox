@@ -2,7 +2,8 @@
 //!
 //! Handles [`MessageType::MachineExecRequest`] by spawning the command in the
 //! agent's own mount namespace — which for a distro machine is the machine's
-//! overlay root.
+//! overlay root. A `login` request runs the account's shell the way sshd
+//! would (`process.rs`, `login_session.rs`).
 //!
 //! Two modes share the entry point:
 //! - **piped** (`tty == false`): stdin closed, stdout/stderr streamed as

@@ -12,6 +12,8 @@ use arcbox_constants::cmdline::MACHINE_ROOTFS_KEY;
 pub mod ensure_runtime;
 #[cfg(any(target_os = "linux", test))]
 mod exec_error;
+#[cfg(any(target_os = "linux", test))]
+mod login_session;
 
 #[cfg(target_os = "linux")]
 mod linux;
