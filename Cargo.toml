@@ -10,6 +10,7 @@ members = [
     "common/arcbox-dns",
     "common/arcbox-asset",
     "common/arcbox-atomic-file",
+    "common/arcbox-local-ca",
     "common/arcbox-logging",
     "common/arcbox-route",
     "common/arcbox-xnu-net",

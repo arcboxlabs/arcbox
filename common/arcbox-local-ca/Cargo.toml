@@ -1,0 +1,22 @@
+[package]
+name = "arcbox-local-ca"
+description = "The name-constrained local CA behind HTTPS for ArcBox container domains"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+arcbox-atomic-file.workspace = true
+arcbox-constants.workspace = true
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
+thiserror.workspace = true
+time = "0.3.53"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

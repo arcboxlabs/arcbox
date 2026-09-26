@@ -400,6 +400,18 @@ pub mod guest {
     /// System VM boot; the guest agent merges it over the keys it manages.
     pub const DOCKER_ENGINE_CONFIG: &str = "docker-engine.json";
 
+    /// The local CA behind HTTPS for container domains.
+    ///
+    /// Relative to [`MOUNT`] on the guest side and to the data directory on
+    /// the host. The daemon generates it once; the guest agent signs with it.
+    pub const TLS: &str = "tls";
+
+    /// The CA certificate (PEM) inside [`TLS`], which users trust.
+    pub const TLS_CA_CERT: &str = "ca.pem";
+
+    /// The CA private key (PKCS#8 PEM, mode 0600) inside [`TLS`].
+    pub const TLS_CA_KEY: &str = "ca-key.pem";
+
     /// Host-built artifacts the guest reads back.
     ///
     /// Currently unused: the sandbox image staging that lived here moved
