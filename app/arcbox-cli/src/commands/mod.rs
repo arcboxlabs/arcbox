@@ -9,6 +9,7 @@
 //! - Boot asset management
 //! - Docker CLI integration
 //! - DNS resolver management
+//! - Local CA trust for HTTPS on container domains
 //! - System information and version output
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -81,6 +82,8 @@ pub mod sandbox;
 pub mod setup;
 pub mod symlink;
 pub mod system;
+#[cfg(target_os = "macos")]
+pub mod tls;
 pub mod top;
 #[cfg(target_os = "macos")]
 pub mod uninstall;
@@ -174,6 +177,11 @@ pub enum Commands {
     #[cfg(target_os = "macos")]
     #[command(subcommand)]
     Dns(dns::DnsCommands),
+
+    /// Manage trust in the local CA behind https://*.arcbox.local
+    #[cfg(target_os = "macos")]
+    #[command(subcommand)]
+    Tls(tls::TlsCommands),
 
     /// Manage the ArcBox daemon
     Daemon(daemon::DaemonArgs),
@@ -325,6 +333,7 @@ mod tests {
         #[cfg(target_os = "macos")]
         cases.extend([
             (&["dns", "status"][..], true, false),
+            (&["tls", "trust"][..], false, false),
             (&["macos", "ls"][..], false, false),
             (&["macos", "ip", "guest"][..], false, false),
             (
