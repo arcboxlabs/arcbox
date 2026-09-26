@@ -27,8 +27,6 @@
 //! depend on the developer's installed ArcBox having placed the route — host
 //! state, not product behavior. It needs a helper-aware harness first.
 
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -46,8 +44,6 @@ const MARKER: &str = "arcbox-smoke-ok";
 /// How long to wait for the in-container server to bind. The
 /// container is already running by then — this only covers process start.
 const HTTPD_READY: Duration = Duration::from_secs(30);
-/// Per-attempt budget for a host→container HTTP request.
-const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Default ceiling for the `VmStarting → VmReady` span (ABX-309).
 ///
 /// **A regression backstop, not the performance target.** The span is the
@@ -282,7 +278,7 @@ fn published_port_reaches_container(
         .with_context(|| format!("parsing `docker port` output: {mapping:?}"))?;
 
     let addr = format!("127.0.0.1:{host_port}");
-    let body = http_get_with_retry(&addr, HTTPD_READY)
+    let body = arcbox_e2e::http::get_with_retry(&addr, HTTPD_READY)
         .with_context(|| format!("host could not reach the published port at {addr}"))?;
     if !body.contains(MARKER) {
         bail!("published port answered but body lacked {MARKER:?}; got: {body:?}");
@@ -342,38 +338,6 @@ fn parse_host_port(mapping: &str) -> Option<u16> {
         .lines()
         .filter_map(|line| line.trim().rsplit_once(':'))
         .find_map(|(_, port)| port.trim().parse::<u16>().ok())
-}
-
-/// Retries [`http_get`] until `deadline` elapses — the container is running
-/// before httpd has necessarily bound.
-fn http_get_with_retry(addr: &str, grace: Duration) -> Result<String> {
-    let started = Instant::now();
-    let mut last: Option<anyhow::Error> = None;
-    while started.elapsed() < grace {
-        match http_get(addr) {
-            Ok(body) => return Ok(body),
-            Err(e) => last = Some(e),
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-    Err(last.unwrap_or_else(|| anyhow::anyhow!("no attempt was made")))
-        .with_context(|| format!("no successful response within {grace:?}"))
-}
-
-/// Minimal HTTP/1.0 GET — avoids depending on `curl` being installed on the
-/// runner, and keeps the host side dependency-free like `net_fixtures`.
-fn http_get(addr: &str) -> Result<String> {
-    let mut stream = TcpStream::connect(addr).context("connect")?;
-    stream.set_read_timeout(Some(HTTP_TIMEOUT))?;
-    stream.set_write_timeout(Some(HTTP_TIMEOUT))?;
-    stream
-        .write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .context("write request")?;
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .context("read response")?;
-    Ok(response)
 }
 
 /// Removes a container on drop so a failed assertion cannot leak it into the

@@ -116,6 +116,14 @@ kubectl get nodes
 `abctl k8s kubeconfig` prints the managed kubeconfig on its own, if you would
 rather wire it into your own tooling than let `enable` touch `~/.kube/config`.
 
+A Service of type LoadBalancer answers on its port on the Mac, like a published
+container port, and `abctl k8s status` shows where each port is forwarded:
+
+```bash
+kubectl expose deployment web --type=LoadBalancer --port=8080
+curl http://localhost:8080/
+```
+
 ### Container files in Finder
 
 The guest's Docker data is mounted read-only on the host at `~/ArcBox`, served

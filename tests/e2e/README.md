@@ -82,6 +82,16 @@ pump stops when the last one leaves):
 cargo test -p arcbox-e2e --test stats_watch -- --ignored --nocapture
 ```
 
+Kubernetes LoadBalancer forwarding — boots a VZ daemon, starts k3s, and
+follows a LoadBalancer Service's port on the host: it answers and is reported
+forwarded, moves with the Service, closes when the Service is deleted, and is
+gone when a Kubernetes stop returns. k3s pulls klipper-lb and the workload
+image (`ARCBOX_E2E_IMAGE`) itself, so the guest needs registry access:
+
+```bash
+cargo test -p arcbox-e2e --test kubernetes_lb -- --ignored --nocapture
+```
+
 Dual-backend matrix — the boot-assets scenario once per backend, VZ first.
 VZ is the oracle: HV-only red means an HV implementation bug, double red means
 the bug is above the hypervisor layer:

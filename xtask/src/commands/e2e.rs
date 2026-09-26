@@ -255,9 +255,10 @@ fn prebuild(root: &std::path::Path, test: &str) -> Result<bool> {
             xshell::cmd!(shell, "cargo build --release -p arcbox-e2e --bin hv_e2e").run()?;
             Ok(true)
         }
-        // Must match tests/e2e/tests/stats_watch.rs's own build: the daemon
-        // plus the musl guest agent (the scenario needs WatchStats support).
-        "stats_watch" => {
+        // Must match the targets' own builds: the daemon plus the musl guest
+        // agent, whose RPCs the scenarios exercise (WatchStats in stats_watch,
+        // KubernetesLoadBalancers in kubernetes_lb).
+        "stats_watch" | "kubernetes_lb" => {
             xshell::cmd!(shell, "cargo build --release -p arcbox-daemon").run()?;
             xshell::cmd!(
                 shell,
