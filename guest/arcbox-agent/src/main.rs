@@ -86,6 +86,7 @@ mod dns;
 mod dns_server;
 mod docker_config;
 mod docker_events;
+mod domains;
 mod iptables;
 mod publish_mirror;
 
@@ -260,9 +261,14 @@ async fn main() -> Result<()> {
         })
     };
 
-    // Start Docker event listener for auto-registering container DNS and
-    // mirroring host-address-pinned publishes. Rules a previous agent left in
-    // the kernel go first; reconciliation reinstalls what still applies.
+    // Container domains: routes each container's port 80 to the port it
+    // serves, sweeping a previous agent's rules before it follows anyone.
+    let (domains, domains_handle) = domains::DomainRoutes::spawn(cancel.clone());
+
+    // Start Docker event listener for auto-registering container DNS,
+    // mirroring host-address-pinned publishes, and following containers for
+    // their domains. Rules a previous agent left in the kernel go first;
+    // reconciliation reinstalls what still applies.
     let docker_handle = {
         let dns = Arc::clone(&dns);
         let cancel = cancel.clone();
@@ -274,6 +280,7 @@ async fn main() -> Result<()> {
             let sync = docker_events::ContainerSync {
                 dns: &dns,
                 mirror: publish_mirror::PublishMirror::new(uplink),
+                domains,
             };
             docker_events::reconcile_and_watch(sync, cancel).await;
         })
@@ -295,7 +302,7 @@ async fn main() -> Result<()> {
 
     // Shut down background tasks.
     cancel.cancel();
-    let _ = tokio::join!(dns_handle, docker_handle);
+    let _ = tokio::join!(dns_handle, docker_handle, domains_handle);
     #[cfg(target_os = "linux")]
     let _ = nfs_handle.await;
 

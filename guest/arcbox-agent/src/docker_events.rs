@@ -2,9 +2,10 @@
 //!
 //! Connects to `/var/run/docker.sock`, performs initial reconciliation of
 //! running containers, then subscribes to container events (start, die,
-//! destroy, rename) to keep the guest DNS server registry in sync and to
+//! destroy, rename) to keep the guest DNS server registry in sync, to
 //! mirror host-address-pinned port publishes for the inbound relay
-//! (`publish_mirror`).
+//! (`publish_mirror`), and to route each container's domain port 80 to the
+//! port it serves (`domains`).
 
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -14,6 +15,7 @@ use tokio::net::UnixStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::dns_server::GuestDnsServer;
+use crate::domains::{ContainerFacts, DomainRoutes};
 use crate::publish_mirror::{PublishMirror, pinned_publishes};
 
 const DOCKER_SOCK: &str = "/var/run/docker.sock";
@@ -23,6 +25,7 @@ const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 pub struct ContainerSync<'a> {
     pub dns: &'a GuestDnsServer,
     pub mirror: PublishMirror,
+    pub domains: DomainRoutes,
 }
 
 /// Runs initial reconciliation then watches Docker events indefinitely.
@@ -160,6 +163,7 @@ async fn handle_event(sync: &mut ContainerSync<'_>, json_str: &str) -> anyhow::R
                 }
             }
             if !id_full.is_empty() {
+                sync.domains.forget(id_full);
                 sync.mirror.remove(id_full).await?;
             }
         }
@@ -185,12 +189,17 @@ async fn handle_event(sync: &mut ContainerSync<'_>, json_str: &str) -> anyhow::R
 }
 
 /// Inspects a container and registers its name + IP in the DNS server,
-/// and mirrors its host-address-pinned publishes for the inbound relay.
+/// mirrors its host-address-pinned publishes for the inbound relay, and
+/// hands it to the domain routes.
 async fn register_container_by_id(sync: &mut ContainerSync<'_>, id: &str) -> anyhow::Result<()> {
     let info = docker_get(&format!("/containers/{id}/json")).await?;
 
     // Keyed by the full ID: the die/destroy events carry that, not the name.
     if let Some(full_id) = info["Id"].as_str() {
+        match ContainerFacts::from_inspect(&info) {
+            Some(facts) => sync.domains.track(facts),
+            None => sync.domains.forget(full_id),
+        }
         sync.mirror.apply(full_id, &pinned_publishes(&info)).await?;
     }
 
