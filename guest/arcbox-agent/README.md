@@ -41,6 +41,23 @@ PREROUTING rule matching the uplink interface instead (`publish_mirror.rs`).
 The rules are tagged `arcbox-publish:<container id>`, removed when the
 container dies, and swept at agent startup.
 
+## Container Domains
+
+`http://<container>.arcbox.local` (and `<service>.<project>.arcbox.local`)
+resolves to the container's IP, and the agent makes port 80 there reach the
+port the container actually serves (`domains/`). The HTTP port is, in order:
+the `dev.arcbox.http-port` label (a port number, or `off`); 80 when the
+container listens on it; the lowest listening port the container exposes;
+the lowest listening port. 443 never counts. Listeners are read from
+`/proc/<pid>/net/tcp{,6}` of the container's init process, repeatedly for two
+minutes after `start` because servers bind late. The agent then DNATs port 80
+of each of the container's IPv4 addresses to that port in nat PREROUTING,
+tagged `arcbox-domain:<container id>`, removes the rules on `die`/`destroy`,
+and sweeps a previous agent's at startup. A rule matches the destination
+only, so it serves both the Mac (routed in over the bridge NIC) and sibling
+containers (switched on a Docker bridge, which reaches iptables through the
+kernel's built-in `br_netfilter`).
+
 ## Cross-Compilation
 
 ```bash
