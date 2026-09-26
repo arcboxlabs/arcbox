@@ -7,7 +7,8 @@
 //! path — the guest agent runs the account's shell the way sshd would — with
 //! `pty-req`, `env`, `window-change`, stdin, signals and the exit status
 //! carried over its frames. `direct-tcpip` channels (`ssh -L`) become TCP
-//! connections the agent opens inside the machine, carried the same way.
+//! connections the agent opens inside the machine, carried the same way,
+//! and the `sftp` subsystem runs the machine's own `sftp-server`.
 //! [`MachineHost`] is the seam to the daemon's runtime, and
 //! [`write_client_config`] the OpenSSH config clients use to find the
 //! server.
@@ -21,6 +22,7 @@ mod keys;
 mod server;
 mod session;
 mod signal;
+mod subsystem;
 mod target;
 mod tunnel;
 

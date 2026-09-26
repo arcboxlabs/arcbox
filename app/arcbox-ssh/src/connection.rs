@@ -15,6 +15,7 @@ use crate::host::MachineHost;
 use crate::input::{self, Outbound, SessionInput};
 use crate::session::{EXIT_FAILURE, Program, STDERR, SessionChannel};
 use crate::signal;
+use crate::subsystem;
 use crate::target::Target;
 use crate::tunnel::{self, Destination};
 
@@ -270,13 +271,28 @@ impl<H: MachineHost> Handler for Connection<H> {
             .await
     }
 
+    /// `sftp` runs the machine's own `sftp-server`; a machine without one,
+    /// or any other subsystem, gets the request refused.
     async fn subsystem_request(
         &mut self,
         channel: ChannelId,
-        _name: &str,
+        name: &str,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        session.channel_failure(channel)
+        let Some(target) = self.target.as_ref().filter(|_| name == "sftp") else {
+            return session.channel_failure(channel);
+        };
+        match subsystem::find_sftp_server(&*self.host, &target.machine).await {
+            Ok(Some(server)) => self.start(channel, Program::Command(server), session).await,
+            Ok(None) => {
+                tracing::info!(%target, "sftp refused: the machine has no sftp-server");
+                session.channel_failure(channel)
+            }
+            Err(e) => {
+                tracing::info!(%target, error = %format!("{e:#}"), "sftp refused");
+                session.channel_failure(channel)
+            }
+        }
     }
 
     async fn window_change_request(

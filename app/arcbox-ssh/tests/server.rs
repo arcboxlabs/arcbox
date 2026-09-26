@@ -2,6 +2,7 @@
 //! so the protocol mapping is checked without a VM.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arcbox_connect::v1::{MachineExecOutput, MachineExecRequest};
@@ -12,12 +13,17 @@ use russh::{ChannelMsg, ChannelOpenFailure, Sig, client};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 
+/// Where the scripted machine has its `sftp-server`, when it has one.
+const SFTP_SERVER: &str = "/usr/lib/openssh/sftp-server";
+
 /// A machine that runs nothing: it answers from the command line.
 #[derive(Default)]
 struct ScriptedMachine {
     requests: Mutex<Vec<(String, MachineExecRequest)>>,
     /// Told when a session's input side closes.
     input_closed: Mutex<Option<oneshot::Sender<()>>>,
+    /// Whether a lookup for `sftp-server` finds [`SFTP_SERVER`].
+    has_sftp_server: AtomicBool,
 }
 
 fn output(stream: &str, data: &[u8]) -> MachineExecOutput {
@@ -64,11 +70,19 @@ impl MachineHost for ScriptedMachine {
             .push((machine.to_owned(), request.clone()));
         let input_closed = self.input_closed.lock().unwrap().take();
         let command = request.cmd.first().cloned().unwrap_or_default();
+        let has_sftp_server = self.has_sftp_server.load(Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(16);
         tokio::spawn(async move {
             let last = match command.as_str() {
+                // The lookup for `sftp-server`.
+                "/bin/sh" if has_sftp_server => {
+                    let found = format!("{SFTP_SERVER}\n");
+                    let _ = tx.send(Ok(output("stdout", found.as_bytes()))).await;
+                    exit(0, "")
+                }
+                "/bin/sh" => exit(1, ""),
                 // Echo stdin until EOF.
-                "cat" => loop {
+                "cat" | SFTP_SERVER => loop {
                     match input.recv().await {
                         Some(ExecSessionInput::Stdin(data)) if data.is_empty() => {
                             break exit(0, "");
@@ -458,4 +472,51 @@ async fn a_peer_that_stops_sending_reaches_the_client_as_eof() {
         drain(&mut channel).await.last(),
         Some(ChannelMsg::Close)
     ));
+}
+
+#[tokio::test]
+async fn sftp_runs_the_machines_sftp_server_as_the_login() {
+    let fixture = start_server().await;
+    fixture
+        .machine
+        .has_sftp_server
+        .store(true, Ordering::Relaxed);
+    let (handle, _) = login(fixture.addr, "dev@ubuntu", fixture.client_key).await;
+
+    let mut channel = handle.channel_open_session().await.unwrap();
+    channel.request_subsystem(true, "sftp").await.unwrap();
+    channel.data(&b"\0\0\0\x05\x01"[..]).await.unwrap();
+    channel.eof().await.unwrap();
+    let messages = drain(&mut channel).await;
+    assert!(matches!(messages.first(), Some(ChannelMsg::Success)));
+    assert_eq!(data(&messages, None), b"\0\0\0\x05\x01");
+
+    let (machine, request) = fixture.machine.requests.lock().unwrap()[1].clone();
+    assert_eq!(machine, "ubuntu");
+    assert_eq!(request.cmd, [SFTP_SERVER]);
+    assert!(request.login);
+    assert_eq!(request.user, "dev");
+}
+
+#[tokio::test]
+async fn sftp_is_refused_on_a_machine_without_sftp_server() {
+    let fixture = start_server().await;
+    let (handle, _) = login(fixture.addr, "ubuntu", fixture.client_key).await;
+
+    let mut channel = handle.channel_open_session().await.unwrap();
+    channel.request_subsystem(true, "sftp").await.unwrap();
+    assert!(matches!(channel.wait().await, Some(ChannelMsg::Failure)));
+    // Only the lookup ran.
+    assert_eq!(fixture.machine.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn other_subsystems_are_refused() {
+    let fixture = start_server().await;
+    let (handle, _) = login(fixture.addr, "ubuntu", fixture.client_key).await;
+
+    let mut channel = handle.channel_open_session().await.unwrap();
+    channel.request_subsystem(true, "netconf").await.unwrap();
+    assert!(matches!(channel.wait().await, Some(ChannelMsg::Failure)));
+    assert!(fixture.machine.requests.lock().unwrap().is_empty());
 }
