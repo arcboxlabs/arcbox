@@ -1,9 +1,9 @@
-//! Host frames on a running session's connection: stdin, terminal resizes
-//! and signals.
+//! Host frames on a running session's connection: stdin, terminal resizes,
+//! signals and returned output window.
 //!
-//! The reader runs concurrently with the output pump, so a stalled stdin
-//! consumer never stops output — and output never stops the reader from
-//! noticing that the host went away.
+//! The reader runs concurrently with the output pump and never waits on the
+//! process, so a stalled stdin consumer never stops output, and output never
+//! stops the reader from noticing that the host went away.
 
 use buffa::Message as _;
 use nix::sys::signal::Signal;
@@ -21,10 +21,12 @@ pub(super) enum Control {
     Resize(arcbox_pty::WinSize),
     /// A signal for the process.
     Signal(Signal),
+    /// Output window the host returned (`flow.rs`).
+    OutputWindow(u32),
 }
 
 /// Reads the next instruction; `None` once the host has closed the
-/// connection, which ends the session.
+/// connection or broken the protocol, which ends the session.
 ///
 /// Not cancel-safe — a frame read half-way is lost — so a session keeps one
 /// reader loop alive for its whole life instead of racing a fresh call
@@ -61,6 +63,17 @@ pub(super) async fn next<R: AsyncRead + Unpin>(conn: &mut R) -> Option<Control> 
                         }
                     },
                     Err(e) => tracing::warn!(error = %e, "bad machine exec signal frame"),
+                }
+            }
+            MessageType::MachineExecOutputWindow => {
+                match arcbox_connect::v1::MachineExecWindow::decode_from_slice(&payload) {
+                    Ok(frame) => return Some(Control::OutputWindow(frame.bytes)),
+                    // A lost grant would stall output for good: end the
+                    // session instead.
+                    Err(e) => {
+                        tracing::warn!(error = %e, "bad machine exec window frame");
+                        return None;
+                    }
                 }
             }
             other => tracing::warn!(?other, "unexpected frame during machine exec session"),

@@ -84,14 +84,16 @@ where
             continue;
         }
 
-        // Machine-level exec also streams multiple frames on this connection.
+        // Machine-level exec streams on this connection and then ends it:
+        // host frames still in flight when the process exited (stdin,
+        // returned window) must not be read as requests.
         if matches!(msg_type, crate::rpc::MessageType::MachineExecRequest) {
             if let Err(e) =
                 super::machine_exec::handle_machine_exec(&mut stream, &trace_id, &payload).await
             {
                 tracing::warn!(trace_id = %trace_id, error = %e, "machine exec handler error");
             }
-            continue;
+            return Ok(());
         }
 
         // Parse and handle the request.

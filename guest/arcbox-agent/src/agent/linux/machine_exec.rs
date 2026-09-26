@@ -12,13 +12,15 @@
 //! - **interactive** (`tty == true`): the command runs as a session leader on
 //!   a PTY (primitives from `arcbox-pty`) and output is one merged stream.
 //!
-//! While the process runs, the host sends stdin, resize and signal frames on
-//! the same connection (`control.rs`), applied beside the output pump
-//! (`session.rs`); a closed connection means the host is gone and the
-//! session's process group is killed. Both modes end with a `done == true` frame
-//! carrying the exit code, or the signal that ended the process.
+//! While the process runs, the host sends stdin, resize, signal and window
+//! frames on the same connection (`control.rs`), applied beside the output
+//! pump (`session.rs`) under the flow control the request asks for
+//! (`flow.rs`); a closed connection means the host is gone and the
+//! session's process group is killed. Both modes end with a `done == true`
+//! frame carrying the exit code, or the signal that ended the process.
 
 mod control;
+mod flow;
 mod process;
 mod session;
 
@@ -33,12 +35,14 @@ use buffa::Message;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 
-use crate::rpc::{ErrorResponse, MessageType, write_message};
+use crate::rpc::ErrorResponse;
 
+use flow::Flow;
 use process::ProcessSpec;
-use session::{Chunk, Streams};
+use session::{Chunk, OUTPUT_CHANNEL_CAPACITY, OUTPUT_CHUNK, Streams};
 
-/// Handles a machine-level exec request on the current connection.
+/// Handles a machine-level exec request; the session owns the rest of the
+/// connection.
 pub(super) async fn handle_machine_exec<S>(
     stream: &mut S,
     trace_id: &str,
@@ -50,17 +54,22 @@ where
     let req = MachineExecRequest::decode_from_slice(payload)
         .context("failed to decode MachineExecRequest")?;
 
+    let flow = match Flow::new(req.output_window) {
+        Ok(flow) => flow,
+        Err(err) => return session::write_error(stream, trace_id, &err).await,
+    };
+    // Before any other frame, so the host knows flow control is on.
+    if let Some(window) = flow.initial_stdin_window() {
+        session::write_window(stream, trace_id, window).await?;
+    }
     let spec = match ProcessSpec::resolve(&req) {
         Ok(spec) => spec,
-        Err(err) => {
-            write_message(stream, MessageType::Error, trace_id, &err.encode()).await?;
-            return Ok(());
-        }
+        Err(err) => return session::write_error(stream, trace_id, &err).await,
     };
     if req.tty {
-        tty_session(stream, trace_id, &req, spec).await
+        tty_session(stream, trace_id, &req, spec, &flow).await
     } else {
-        piped_session(stream, trace_id, &req, spec).await
+        piped_session(stream, trace_id, &req, spec, &flow).await
     }
 }
 
@@ -70,6 +79,7 @@ async fn piped_session<S>(
     trace_id: &str,
     req: &MachineExecRequest,
     spec: ProcessSpec,
+    flow: &Flow,
 ) -> anyhow::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -96,22 +106,27 @@ where
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
-        Err(e) => {
-            let err = spec.spawn_error(e);
-            write_message(stream, MessageType::Error, trace_id, &err.encode()).await?;
-            return Ok(());
-        }
+        Err(e) => return session::write_error(stream, trace_id, &spec.spawn_error(e)).await,
     };
-    let (output_tx, output) = mpsc::channel(session::CHANNEL_CAPACITY);
+    let (output_tx, output) = mpsc::channel(OUTPUT_CHANNEL_CAPACITY);
     let stdout = child.stdout.take().context("stdout not piped")?;
     let stderr = child.stderr.take().context("stderr not piped")?;
     session::read_output(stdout, "stdout", output_tx.clone());
     session::read_output(stderr, "stderr", output_tx);
-    let (stdin, stdin_rx) = mpsc::channel(session::CHANNEL_CAPACITY);
-    tokio::spawn(session::write_stdin(child.stdin.take(), stdin_rx));
+    let (stdin, stdin_rx) = mpsc::unbounded_channel();
+    let (delivered_tx, delivered) = mpsc::unbounded_channel();
+    tokio::spawn(session::write_stdin(
+        child.stdin.take(),
+        stdin_rx,
+        delivered_tx,
+    ));
 
-    let streams = Streams { output, stdin };
-    session::run(stream, trace_id, streams, None, &mut child).await
+    let streams = Streams {
+        output,
+        stdin,
+        delivered,
+    };
+    session::run(stream, trace_id, flow, streams, None, &mut child).await
 }
 
 /// Interactive session: the process runs as a session leader with the PTY
@@ -122,6 +137,7 @@ async fn tty_session<S>(
     trace_id: &str,
     req: &MachineExecRequest,
     spec: ProcessSpec,
+    flow: &Flow,
 ) -> anyhow::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -134,8 +150,7 @@ where
         Ok(pty) => pty,
         Err(e) => {
             let err = ErrorResponse::new(500, format!("openpty: {e}"));
-            write_message(stream, MessageType::Error, trace_id, &err.encode()).await?;
-            return Ok(());
+            return session::write_error(stream, trace_id, &err).await;
         }
     };
 
@@ -157,11 +172,7 @@ where
     }
     let mut child = match cmd.spawn() {
         Ok(child) => child,
-        Err(e) => {
-            let err = spec.spawn_error(e);
-            write_message(stream, MessageType::Error, trace_id, &err.encode()).await?;
-            return Ok(());
-        }
+        Err(e) => return session::write_error(stream, trace_id, &spec.spawn_error(e)).await,
     };
     // The child holds its own slave via the controlling-terminal dup2s; the
     // parent copy must close so master read hits EOF when the child exits.
@@ -170,25 +181,38 @@ where
     // PTY master I/O is blocking, so each direction gets a thread of its
     // own: a child that stops reading its terminal then stalls only its
     // input, never the output or the host's resizes and signals.
-    let (output_tx, output) = mpsc::channel(session::CHANNEL_CAPACITY);
+    let (output_tx, output) = mpsc::channel(OUTPUT_CHANNEL_CAPACITY);
     drop(tokio::task::spawn_blocking({
         let master = std::fs::File::from(pty.master.try_clone()?);
         move || read_terminal(master, &output_tx)
     }));
-    let (stdin, stdin_rx) = mpsc::channel(session::CHANNEL_CAPACITY);
+    let (stdin, stdin_rx) = mpsc::unbounded_channel();
+    let (delivered_tx, delivered) = mpsc::unbounded_channel();
     // Detached: it ends once `stdin` drops with the session.
     drop(tokio::task::spawn_blocking({
         let master = std::fs::File::from(pty.master.try_clone()?);
-        move || session::write_terminal(master, stdin_rx)
+        move || session::write_terminal(master, stdin_rx, delivered_tx)
     }));
 
-    let streams = Streams { output, stdin };
-    session::run(stream, trace_id, streams, Some(&pty.master), &mut child).await
+    let streams = Streams {
+        output,
+        stdin,
+        delivered,
+    };
+    session::run(
+        stream,
+        trace_id,
+        flow,
+        streams,
+        Some(&pty.master),
+        &mut child,
+    )
+    .await
 }
 
 /// Blocking PTY reads into the session loop until the master reports EOF.
 fn read_terminal(mut master: std::fs::File, output: &mpsc::Sender<Chunk>) {
-    let mut buf = [0u8; session::OUTPUT_CHUNK];
+    let mut buf = [0u8; OUTPUT_CHUNK];
     loop {
         match master.read(&mut buf) {
             // EIO is the normal PTY EOF once the child exits.
