@@ -16,12 +16,13 @@ use arcbox_connect::v1::{
     ContainerFsPathsResponse, DiskTrimRequest, DiskTrimResponse, Empty, EnsureNfsExportRequest,
     EnsureNfsExportResponse, ImageFsPathsRequest, ImageFsPathsResponse, KubernetesDeleteRequest,
     KubernetesDeleteResponse, KubernetesKubeconfigRequest, KubernetesKubeconfigResponse,
-    KubernetesStartRequest, KubernetesStartResponse, KubernetesStatusRequest,
-    KubernetesStatusResponse, KubernetesStopRequest, KubernetesStopResponse, MemoryPressureEvent,
-    MmapReadFileRequest, MmapReadFileResponse, PortBindingsChanged, PortBindingsRemoved,
-    ReadinessEvent, RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest,
-    RuntimeStatusResponse, ShutdownRequest, ShutdownResponse, SystemInfo,
-    WatchMemoryPressureRequest, WatchReadinessRequest, WatchStatsRequest,
+    KubernetesLoadBalancersRequest, KubernetesLoadBalancersResponse, KubernetesStartRequest,
+    KubernetesStartResponse, KubernetesStatusRequest, KubernetesStatusResponse,
+    KubernetesStopRequest, KubernetesStopResponse, MemoryPressureEvent, MmapReadFileRequest,
+    MmapReadFileResponse, PortBindingsChanged, PortBindingsRemoved, ReadinessEvent,
+    RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse,
+    ShutdownRequest, ShutdownResponse, SystemInfo, WatchMemoryPressureRequest,
+    WatchReadinessRequest, WatchStatsRequest,
 };
 pub use arcbox_constants::wire::MessageType;
 
@@ -79,6 +80,7 @@ pub enum RpcRequest {
     DeleteKubernetes(KubernetesDeleteRequest),
     KubernetesStatus(KubernetesStatusRequest),
     KubernetesKubeconfig(KubernetesKubeconfigRequest),
+    KubernetesLoadBalancers(KubernetesLoadBalancersRequest),
     Shutdown(ShutdownRequest),
     MmapReadFile(MmapReadFileRequest),
     DiskTrim(DiskTrimRequest),
@@ -104,6 +106,7 @@ pub enum RpcResponse {
     KubernetesDelete(KubernetesDeleteResponse),
     KubernetesStatus(KubernetesStatusResponse),
     KubernetesKubeconfig(KubernetesKubeconfigResponse),
+    KubernetesLoadBalancers(KubernetesLoadBalancersResponse),
     Shutdown(ShutdownResponse),
     DiskTrim(DiskTrimResponse),
     Empty,
@@ -133,6 +136,7 @@ impl RpcResponse {
             Self::KubernetesDelete(_) => MessageType::KubernetesDeleteResponse,
             Self::KubernetesStatus(_) => MessageType::KubernetesStatusResponse,
             Self::KubernetesKubeconfig(_) => MessageType::KubernetesKubeconfigResponse,
+            Self::KubernetesLoadBalancers(_) => MessageType::KubernetesLoadBalancersResponse,
             Self::Shutdown(_) => MessageType::ShutdownResponse,
             Self::DiskTrim(_) => MessageType::DiskTrimResponse,
             Self::Empty => MessageType::Empty,
@@ -161,6 +165,7 @@ impl RpcResponse {
             Self::KubernetesDelete(msg) => msg.encode_to_vec(),
             Self::KubernetesStatus(msg) => msg.encode_to_vec(),
             Self::KubernetesKubeconfig(msg) => msg.encode_to_vec(),
+            Self::KubernetesLoadBalancers(msg) => msg.encode_to_vec(),
             Self::Shutdown(msg) => msg.encode_to_vec(),
             Self::DiskTrim(msg) => msg.encode_to_vec(),
             Self::Empty => Empty::default().encode_to_vec(),
@@ -338,6 +343,10 @@ pub fn parse_request(msg_type: MessageType, payload: &[u8]) -> Result<RpcRequest
         MessageType::KubernetesKubeconfigRequest => {
             let req = KubernetesKubeconfigRequest::decode_from_slice(payload)?;
             Ok(RpcRequest::KubernetesKubeconfig(req))
+        }
+        MessageType::KubernetesLoadBalancersRequest => {
+            let req = KubernetesLoadBalancersRequest::decode_from_slice(payload)?;
+            Ok(RpcRequest::KubernetesLoadBalancers(req))
         }
         MessageType::ShutdownRequest => {
             let req = ShutdownRequest::decode_from_slice(payload)?;

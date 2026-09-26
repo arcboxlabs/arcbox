@@ -20,8 +20,8 @@ use crate::rpc::{
 
 use super::disk::handle_disk_trim;
 use super::kubernetes::{
-    handle_delete_kubernetes, handle_kubernetes_kubeconfig, handle_kubernetes_status,
-    handle_start_kubernetes, handle_stop_kubernetes,
+    handle_delete_kubernetes, handle_kubernetes_kubeconfig, handle_kubernetes_load_balancers,
+    handle_kubernetes_status, handle_start_kubernetes, handle_stop_kubernetes,
 };
 use super::runtime::{handle_ensure_runtime, handle_runtime_status};
 use super::sandbox::handle_sandbox_message;
@@ -57,12 +57,16 @@ where
             }
         };
 
-        tracing::info!(
-            trace_id = %trace_id,
-            "Received message type {:?}, payload_len={}",
-            msg_type,
-            payload.len()
-        );
+        if msg_type.is_periodic_poll() {
+            tracing::debug!(trace_id = %trace_id, "Received message type {:?}", msg_type);
+        } else {
+            tracing::info!(
+                trace_id = %trace_id,
+                "Received message type {:?}, payload_len={}",
+                msg_type,
+                payload.len()
+            );
+        }
 
         // Sandbox requests are handled separately — they bypass the normal
         // RPC request/response cycle because streaming operations hold the
@@ -144,6 +148,9 @@ async fn handle_request(request: RpcRequest) -> RequestResult {
         }
         RpcRequest::KubernetesKubeconfig(req) => {
             RequestResult::Single(handle_kubernetes_kubeconfig(req).await)
+        }
+        RpcRequest::KubernetesLoadBalancers(req) => {
+            RequestResult::Single(handle_kubernetes_load_balancers(req).await)
         }
         RpcRequest::Shutdown(req) => RequestResult::Single(handle_shutdown(req)),
         RpcRequest::MmapReadFile(req) => RequestResult::Single(handle_mmap_read_file(req)),

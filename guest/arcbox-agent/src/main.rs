@@ -40,6 +40,11 @@ mod memory_pressure;
 #[cfg(target_os = "linux")]
 mod stats;
 
+// Same arrangement for the LoadBalancer Service listing the host forwards
+// ports from.
+#[cfg(target_os = "linux")]
+mod kubernetes_services;
+
 // Same arrangement for the ext4 metadata-volume migration state machine
 // (pure std::fs; the mount syscalls live in agent/linux/metadata_volume.rs).
 #[cfg(target_os = "linux")]

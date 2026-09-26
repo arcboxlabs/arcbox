@@ -2,8 +2,9 @@
 //!
 //! Provisions a single-node cluster via the bundled `k3s` binary, sharing
 //! the containerd socket and Btrfs data volume with the Docker runtime.
-//! Serves Start/Stop/Delete/Status/Kubeconfig requests and tracks the
-//! k3s pid via a flat `/run/arcbox/k3s.pid` file.
+//! Serves Start/Stop/Delete/Status/Kubeconfig requests, lists the
+//! LoadBalancer Services whose ports the host forwards, and tracks the k3s
+//! pid via a flat `/run/arcbox/k3s.pid` file.
 
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
@@ -11,13 +12,14 @@ use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
 use arcbox_connect::v1::{
     KubernetesDeleteRequest, KubernetesDeleteResponse, KubernetesKubeconfigRequest,
-    KubernetesKubeconfigResponse, KubernetesStartRequest, KubernetesStartResponse,
+    KubernetesKubeconfigResponse, KubernetesLoadBalancer, KubernetesLoadBalancersRequest,
+    KubernetesLoadBalancersResponse, KubernetesStartRequest, KubernetesStartResponse,
     KubernetesStatusRequest, KubernetesStatusResponse, KubernetesStopRequest,
     KubernetesStopResponse,
 };
@@ -131,6 +133,63 @@ pub(super) async fn handle_kubernetes_kubeconfig(_req: KubernetesKubeconfigReque
     }
 }
 
+/// Deliberately not under `kubernetes_control_lock`: a start holds it while
+/// k3s comes up — longer than the host's RPC deadline — and a listing that
+/// races a start or stop only reflects that moment; the host polls again.
+pub(super) async fn handle_kubernetes_load_balancers(
+    _req: KubernetesLoadBalancersRequest,
+) -> RpcResponse {
+    if k3s_pid().is_none() {
+        return RpcResponse::KubernetesLoadBalancers(KubernetesLoadBalancersResponse::default());
+    }
+    match list_load_balancers().await {
+        Ok(load_balancers) => {
+            RpcResponse::KubernetesLoadBalancers(KubernetesLoadBalancersResponse {
+                running: true,
+                load_balancers,
+                ..Default::default()
+            })
+        }
+        Err(e) => RpcResponse::Error(ErrorResponse::new(
+            503,
+            format!("listing Services failed: {e:#}"),
+        )),
+    }
+}
+
+/// Lists the cluster's LoadBalancer Services through the API server.
+///
+/// Bounded well inside the host's 5 s deadline for a unary RPC on the HV
+/// transport, so a wedged API server yields an error the host can retry
+/// instead of a dropped connection.
+async fn list_load_balancers() -> Result<Vec<KubernetesLoadBalancer>> {
+    const LIST_TIMEOUT: Duration = Duration::from_secs(4);
+
+    let k3s_bin = PathBuf::from(ARCBOX_RUNTIME_BIN_DIR).join("k3s");
+    let output = tokio::time::timeout(
+        LIST_TIMEOUT,
+        Command::new(&k3s_bin)
+            .arg("kubectl")
+            .arg(format!("--kubeconfig={K3S_KUBECONFIG_PATH}"))
+            .arg("--request-timeout=3s")
+            .args(["get", "--raw", "/api/v1/services"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .context("kubectl did not answer in time")?
+    .context("failed to run kubectl")?;
+    if !output.status.success() {
+        bail!(
+            "kubectl exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    crate::kubernetes_services::load_balancers(&output.stdout)
+        .context("kubectl returned an unexpected Service list")
+}
+
 async fn do_start_kubernetes() -> KubernetesStartResponse {
     let _guard = kubernetes_control_lock().lock().await;
     let mut notes = ensure_runtime_prerequisites();
@@ -182,7 +241,6 @@ async fn do_start_kubernetes() -> KubernetesStartResponse {
             .arg(format!("--write-kubeconfig={K3S_KUBECONFIG_PATH}"))
             .arg("--write-kubeconfig-mode=0600")
             .arg("--disable=traefik")
-            .arg("--disable=servicelb")
             .env("PATH", runtime_path_env(&runtime_bin_dir))
             .stdin(Stdio::null())
             .stdout(daemon_log_file("k3s"))
