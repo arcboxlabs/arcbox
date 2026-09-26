@@ -17,8 +17,8 @@
 //!   resolve to the gateway via the in-VMM `DnsForwarder`.
 //! - **M3 egress volume**: a larger download, hashed in-guest against the
 //!   origin's SHA-256 and bounded.
-//! - **M4 metadata**: `inspect` reports gateway `10.0.2.1` and that gateway
-//!   as a DNS server.
+//! - **M4 metadata**: `inspect` reports gateway `10.0.2.1`, that gateway as a
+//!   DNS server, and a machine address inside `10.0.2.0/24`.
 //! - **M5 SSH contract**: `ssh_info` is still `unimplemented` — pins the
 //!   documented gap so a future SSH feature flags this test to grow.
 //!
@@ -435,36 +435,20 @@ async fn m4_network_metadata(machines: &mut MachineServiceClient<Channel>) -> Re
             net.dns_servers
         );
     }
-    // `ip_address` is characterized, NOT gated, and the weak check below is
-    // deliberate: the field's producer is broken, so gating would pin the bug.
-    // `select_routable_ip` (`engine/arcbox-engine/src/machine.rs`) picks the first
-    // usable address out of `SystemInfo.ip_addresses`, which the guest agent
-    // fills from `hostname -I` falling back to `hostname -i`
-    // (`guest/arcbox-agent/src/agent/linux/system_info.rs`). Alpine ships
-    // busybox `hostname`, which has no `-I`; its `-i` does not enumerate
-    // interfaces at all — it *resolves the guest's own hostname through DNS*.
-    // So on this host the field came back 198.18.11.51 (a Surge/Clash fake-IP
-    // answer) while the datapath address is 10.0.2.2: a resolver artifact, not
-    // an address the Machine holds. Asserting datapath membership would fail
-    // for that reason rather than a datapath reason, and asserting the address
-    // against the guest's real interfaces would fail too — so assert only what
-    // holds regardless (syntactically valid, not a special-use address) and
-    // WARN the mismatch. Fixing the producer is a guest-agent change, tracked
-    // separately; when it lands, tighten this to the datapath subnet.
+    // `select_routable_ip` (`engine/arcbox-engine/src/machine.rs`) picks the
+    // first usable address out of `SystemInfo.ip_addresses`, which the guest
+    // agent reads off its interfaces (`getifaddrs`,
+    // `guest/arcbox-agent/src/agent/linux/system_info.rs`), so it must be the
+    // datapath address. It used to come from `hostname -i`, which busybox
+    // answers by resolving the guest's own hostname through DNS — on this host
+    // a Surge/Clash fake-IP answer (198.18.11.51), not an address the Machine
+    // holds.
     let addr: Ipv4Addr = net
         .ip_address
         .parse()
         .with_context(|| format!("machine IP {:?} is not a valid IPv4", net.ip_address))?;
-    if addr.is_loopback() || addr.is_unspecified() || addr.is_link_local() {
-        bail!("machine reported a non-routable IP {addr}");
-    }
-    if !net.ip_address.starts_with("10.0.2.") {
-        tracing::warn!(
-            ip = %net.ip_address,
-            "machine's reported IP is outside the datapath 10.0.2.0/24 (gateway 10.0.2.1, \
-             guest 10.0.2.2) — busybox `hostname -i` resolved the guest hostname via DNS \
-             instead of enumerating interfaces"
-        );
+    if addr.octets()[..3] != [10, 0, 2] {
+        bail!("machine reported {addr}, outside the datapath 10.0.2.0/24 (gateway {GATEWAY})");
     }
     Ok(())
 }

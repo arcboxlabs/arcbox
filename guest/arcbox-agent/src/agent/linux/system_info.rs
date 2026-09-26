@@ -26,34 +26,45 @@ pub(super) async fn handle_get_system_info() -> RpcResponse {
     RpcResponse::SystemInfo(info)
 }
 
+/// Every address on the guest's interfaces, in interface order, minus
+/// loopback and IPv6 link-local — the set `hostname -I` prints.
+///
+/// Read from the kernel rather than from a `hostname` binary: a distro image
+/// need not ship one (NixOS and Oracle Linux do not, and machine readiness
+/// then never saw an address), and BusyBox's `hostname -i` resolves the host
+/// *name* instead of listing interfaces — through a proxy's fake-IP DNS it
+/// reported 198.18.19.141 for a machine whose only address was 10.0.2.2.
+fn interface_addresses() -> Vec<String> {
+    let interfaces = match nix::ifaddrs::getifaddrs() {
+        Ok(interfaces) => interfaces,
+        Err(e) => {
+            tracing::warn!(error = %e, "getifaddrs failed; reporting no addresses");
+            return Vec::new();
+        }
+    };
+    let mut ips = Vec::new();
+    for address in interfaces.filter_map(|interface| interface.address) {
+        let ip = if let Some(v4) = address.as_sockaddr_in() {
+            IpAddr::V4(v4.ip())
+        } else if let Some(v6) = address.as_sockaddr_in6() {
+            IpAddr::V6(v6.ip())
+        } else {
+            continue;
+        };
+        let link_local = matches!(ip, IpAddr::V6(v6) if v6.is_unicast_link_local());
+        if ip.is_loopback() || link_local {
+            continue;
+        }
+        let ip = ip.to_string();
+        if !ips.contains(&ip) {
+            ips.push(ip);
+        }
+    }
+    ips
+}
+
 /// Collects system information from the guest.
 fn collect_system_info() -> SystemInfo {
-    fn parse_ip_output(stdout: &[u8]) -> Vec<String> {
-        let mut ips = Vec::new();
-        let output = String::from_utf8_lossy(stdout);
-
-        for token in output.split(|c: char| c.is_whitespace() || c == ',') {
-            let token = token.trim();
-            if token.is_empty() {
-                continue;
-            }
-
-            let Ok(addr) = token.parse::<IpAddr>() else {
-                continue;
-            };
-            if addr.is_loopback() {
-                continue;
-            }
-
-            let ip = addr.to_string();
-            if !ips.iter().any(|existing| existing == &ip) {
-                ips.push(ip);
-            }
-        }
-
-        ips
-    }
-
     let mut info = SystemInfo::default();
 
     // Kernel version
@@ -114,24 +125,7 @@ fn collect_system_info() -> SystemInfo {
         }
     }
 
-    // IP addresses (excluding loopback).
-    // Coreutils `hostname` supports `-I`, BusyBox supports `-i`.
-    for flag in ["-I", "-i"] {
-        let Ok(output) = std::process::Command::new("hostname").arg(flag).output() else {
-            continue;
-        };
-
-        if !output.status.success() {
-            continue;
-        }
-
-        let ips = parse_ip_output(&output.stdout);
-        if !ips.is_empty() {
-            info.ip_addresses = ips;
-            break;
-        }
-    }
-
+    info.ip_addresses = interface_addresses();
     info.distro_init_pending = distro_init_pending();
 
     info
