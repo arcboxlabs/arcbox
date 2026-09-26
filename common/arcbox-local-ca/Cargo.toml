@@ -11,9 +11,11 @@ authors.workspace = true
 [dependencies]
 arcbox-atomic-file.workspace = true
 arcbox-constants.workspace = true
-rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
+rustls = { version = "0.23.37", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 thiserror.workspace = true
 time = "0.3.53"
+tracing.workspace = true
 
 [lints]
 workspace = true

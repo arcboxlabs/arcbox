@@ -2,8 +2,10 @@
 //!
 //! The daemon generates the CA once into the data directory ([`ensure`]):
 //! `tls/ca.pem` and `tls/ca-key.pem`, the key mode 0600. The data directory
-//! is the System VM's `/arcbox` share, so the guest agent can sign with the
-//! same pair. Users trust `ca.pem` once (`abctl tls trust`).
+//! is the System VM's `/arcbox` share, so the guest agent loads the same
+//! pair ([`LeafMinter::load`]) and mints a short-lived certificate per
+//! server name as TLS clients ask for it. Users trust `ca.pem` once
+//! (`abctl tls trust`).
 //!
 //! # Trust model
 //!
@@ -24,16 +26,18 @@
 //!   containers the key holder could already replace.
 //! - **What trusting it means.** `abctl tls trust` adds the certificate to
 //!   the user's login keychain with trust limited to TLS servers, behind
-//!   the macOS authorization prompt.
+//!   the macOS authorization prompt. Leaf keys never leave guest memory.
 //! - **Rotation.** Delete `tls/` in the data directory: the daemon writes a
 //!   new CA on its next start, and it must be trusted again.
 
 mod authority;
+mod minter;
 
 use arcbox_atomic_file::AtomicWriteError;
 pub use arcbox_constants::dns::LOCAL_DOMAIN;
 
 pub use self::authority::ensure;
+pub use self::minter::LeafMinter;
 
 /// Why the CA could not be created, loaded, or used.
 #[derive(Debug, thiserror::Error)]
@@ -51,6 +55,12 @@ pub enum Error {
     /// Generating or parsing a certificate or key failed.
     #[error("certificate: {0}")]
     Certificate(#[from] rcgen::Error),
+    /// rustls refused a minted key.
+    #[error("tls: {0}")]
+    Tls(#[from] rustls::Error),
+    /// A server name the CA does not sign for.
+    #[error("{0:?} is not a name under {LOCAL_DOMAIN}")]
+    ForeignName(String),
 }
 
 impl Error {
