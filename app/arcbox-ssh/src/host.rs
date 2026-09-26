@@ -3,25 +3,41 @@
 use std::future::Future;
 
 use arcbox_connect::v1::{MachineExecOutput, MachineExecRequest};
-use arcbox_engine::agent_client::ExecSessionInput;
+use arcbox_engine::agent_client::{ExecSessionInput, ExecSessionOutput};
 use tokio::sync::mpsc;
-
-/// Output of a running machine exec session: frames until the one with
-/// `done`, or an error.
-pub type ExecOutput = mpsc::Receiver<arcbox_engine::Result<MachineExecOutput>>;
 
 /// The machines an SSH login can reach.
 ///
 /// The seam between the protocol handling and the daemon's runtime: the
 /// daemon runs sessions through the machine exec path
-/// (`AgentClient::machine_exec_session`), tests through local processes.
+/// (`AgentClient::machine_exec_session`), tests through scripted ones.
 pub trait MachineHost: Send + Sync + 'static {
+    /// Output of the sessions this host starts.
+    type Output: ExecOutput;
+
     /// Starts `request` in `machine`, fed from `input`. Dropping the returned
-    /// receiver ends the session and the process with it.
+    /// output ends the session and the process with it.
     fn exec(
         &self,
         machine: &str,
         request: MachineExecRequest,
         input: mpsc::Receiver<ExecSessionInput>,
-    ) -> impl Future<Output = anyhow::Result<ExecOutput>> + Send;
+    ) -> impl Future<Output = anyhow::Result<Self::Output>> + Send;
+}
+
+/// Output of a running machine exec session.
+pub trait ExecOutput: Send + 'static {
+    /// The next frame: output until the one with `done`, or the error that
+    /// ended the session; `None` after either.
+    fn recv(
+        &mut self,
+    ) -> impl Future<Output = Option<arcbox_engine::Result<MachineExecOutput>>> + Send;
+}
+
+impl ExecOutput for ExecSessionOutput {
+    fn recv(
+        &mut self,
+    ) -> impl Future<Output = Option<arcbox_engine::Result<MachineExecOutput>>> + Send {
+        Self::recv(self)
+    }
 }

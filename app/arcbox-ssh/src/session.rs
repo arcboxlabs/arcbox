@@ -131,9 +131,9 @@ impl SessionChannel {
     /// goes to `input`, and a task streams `output` back until the exit
     /// status. A process that failed to start reports why on stderr and
     /// exits 255, the way sshd reports a shell it could not exec.
-    pub fn start(
+    pub fn start<O: ExecOutput>(
         &mut self,
-        started: anyhow::Result<(ExecOutput, mpsc::Sender<ExecSessionInput>)>,
+        started: anyhow::Result<(O, mpsc::Sender<ExecSessionInput>)>,
         handle: Handle,
     ) {
         let Some(writer) = self.writer.take() else {
@@ -188,7 +188,7 @@ impl From<&MachineExecOutput> for Exit {
 /// Streams the process's output to the client — stderr as extended data —
 /// then reports how it ended and closes the channel.
 async fn forward_output(
-    mut output: ExecOutput,
+    mut output: impl ExecOutput,
     writer: ChannelWriteHalf<Msg>,
     handle: Handle,
     newline: &'static str,

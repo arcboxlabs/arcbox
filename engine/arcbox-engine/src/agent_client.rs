@@ -12,7 +12,7 @@ mod machine_exec;
 mod transport;
 mod wire;
 
-pub use self::machine_exec::ExecSessionInput;
+pub use self::machine_exec::{ExecSessionInput, ExecSessionOutput};
 use self::transport::{AgentTransport, BLOCKING_RPC_TIMEOUT};
 use crate::error::{EngineError, Result};
 use arcbox_connect::sandbox_v1::{

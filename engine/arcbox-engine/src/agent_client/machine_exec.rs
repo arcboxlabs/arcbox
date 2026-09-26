@@ -56,20 +56,29 @@ impl ExecSessionInput {
     }
 }
 
+/// The output side of a machine exec session. Dropping it ends the
+/// session: the connection closes, and the guest kills the process group.
+pub struct ExecSessionOutput {
+    frames: mpsc::Receiver<Result<MachineExecOutput>>,
+}
+
+impl ExecSessionOutput {
+    /// The next output frame; the last one carries the exit status, or is
+    /// the error that ended the session. `None` after that.
+    pub async fn recv(&mut self) -> Option<Result<MachineExecOutput>> {
+        self.frames.recv().await
+    }
+}
+
 impl AgentClient {
     /// Runs a command in the machine root (the agent's own mount namespace)
-    /// with no input, and returns a channel of streaming output.
-    ///
-    /// A [`Self::machine_exec_session`] whose input ends at once: the guest
-    /// reads it as stdin EOF.
+    /// with no input: a [`Self::machine_exec_session`] whose input ends at
+    /// once, which the guest reads as stdin EOF.
     ///
     /// # Errors
     ///
     /// Returns an error if the initial send fails.
-    pub async fn machine_exec(
-        self,
-        req: MachineExecRequest,
-    ) -> Result<mpsc::Receiver<Result<MachineExecOutput>>> {
+    pub async fn machine_exec(self, req: MachineExecRequest) -> Result<ExecSessionOutput> {
         let (_, no_input) = mpsc::channel(1);
         self.machine_exec_session(req, no_input).await
     }
@@ -80,9 +89,7 @@ impl AgentClient {
     /// Consumes the client because the stream task requires exclusive
     /// transport access. The caller supplies a receiver of
     /// [`ExecSessionInput`]s (stdin bytes, EOF, TTY resizes, signals) and gets
-    /// an output receiver of [`MachineExecOutput`] frames whose last one
-    /// carries the exit status. Dropping that receiver ends the session: the
-    /// connection closes, and the guest kills the process group.
+    /// the session's output.
     ///
     /// # Errors
     ///
@@ -91,7 +98,7 @@ impl AgentClient {
         mut self,
         req: MachineExecRequest,
         mut input_rx: mpsc::Receiver<ExecSessionInput>,
-    ) -> Result<mpsc::Receiver<Result<MachineExecOutput>>> {
+    ) -> Result<ExecSessionOutput> {
         if !self.connected {
             self.connect().await?;
         }
@@ -142,7 +149,7 @@ impl AgentClient {
             input_pump.abort();
         });
 
-        Ok(out_rx)
+        Ok(ExecSessionOutput { frames: out_rx })
     }
 }
 

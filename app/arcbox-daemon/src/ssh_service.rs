@@ -8,11 +8,9 @@ use arcbox_connect::v1::MachineExecRequest;
 use arcbox_constants::paths::HostLayout;
 use arcbox_constants::ports::SSH_HOST_PORT;
 use arcbox_core::error::CoreError;
-use arcbox_core::{ExecSessionInput, Runtime};
+use arcbox_core::{ExecSessionInput, ExecSessionOutput, Runtime};
 use arcbox_error::CommonError;
-use arcbox_ssh::{
-    ExecOutput, MachineHost, SshKeys, SshServer, remove_client_config, write_client_config,
-};
+use arcbox_ssh::{MachineHost, SshKeys, SshServer, remove_client_config, write_client_config};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -102,12 +100,14 @@ impl SshService {
 struct RuntimeMachines(Arc<Runtime>);
 
 impl MachineHost for RuntimeMachines {
+    type Output = ExecSessionOutput;
+
     async fn exec(
         &self,
         machine: &str,
         request: MachineExecRequest,
         input: mpsc::Receiver<ExecSessionInput>,
-    ) -> Result<ExecOutput> {
+    ) -> Result<ExecSessionOutput> {
         let runtime = Arc::clone(&self.0);
         let name = machine.to_owned();
         // Connecting to a guest agent is a blocking hypervisor call.

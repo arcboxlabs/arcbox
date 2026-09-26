@@ -48,7 +48,9 @@ pub use arcbox_engine::{agent_client, event, machine, persistence, trace, vm, vm
 pub use arcbox_image::{boot_assets, machine_image, remote_image};
 
 pub use arcbox_computer::NestedVirtCapability;
-pub use arcbox_engine::agent_client::{AgentClient, ExecSessionInput, WriteFileChunk};
+pub use arcbox_engine::agent_client::{
+    AgentClient, ExecSessionInput, ExecSessionOutput, WriteFileChunk,
+};
 pub use arcbox_image::boot_assets::{
     BootAssetConfig, BootAssetManifest, BootAssetProvider, BootAssets, DownloadProgress,
     PreparePhase, boot_asset_version,

@@ -37,13 +37,26 @@ fn exit(code: i32, signal: &str) -> MachineExecOutput {
     }
 }
 
+/// A scripted session's output.
+struct Scripted(mpsc::Receiver<arcbox_engine::Result<MachineExecOutput>>);
+
+impl ExecOutput for Scripted {
+    fn recv(
+        &mut self,
+    ) -> impl Future<Output = Option<arcbox_engine::Result<MachineExecOutput>>> + Send {
+        self.0.recv()
+    }
+}
+
 impl MachineHost for ScriptedMachine {
+    type Output = Scripted;
+
     async fn exec(
         &self,
         machine: &str,
         request: MachineExecRequest,
         mut input: mpsc::Receiver<ExecSessionInput>,
-    ) -> anyhow::Result<ExecOutput> {
+    ) -> anyhow::Result<Scripted> {
         anyhow::ensure!(machine != "missing", "no machine named 'missing'");
         self.requests
             .lock()
@@ -103,7 +116,7 @@ impl MachineHost for ScriptedMachine {
             };
             let _ = tx.send(Ok(last)).await;
         });
-        Ok(rx)
+        Ok(Scripted(rx))
     }
 }
 
