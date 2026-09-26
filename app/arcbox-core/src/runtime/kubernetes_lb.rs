@@ -27,6 +27,9 @@ use super::Runtime;
 use crate::error::CoreError;
 use crate::vm_lifecycle::DEFAULT_MACHINE_NAME;
 
+#[cfg(test)]
+mod tests;
+
 /// Prefix of every listener owner key this module creates. Container IDs are
 /// hex and sandbox keys start with `sandbox:`, so neither can collide.
 const OWNER_PREFIX: &str = "k8s:";
