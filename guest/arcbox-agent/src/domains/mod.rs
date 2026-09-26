@@ -18,11 +18,18 @@
 //! VM kernel builds `br_netfilter` in, and the built-in default is on: a
 //! sibling's connection meets the rule, and conntrack un-NATs the reply on
 //! the same switched path. The task warns at startup if that ever changes.
+//!
+//! Servers bind late, so a started container's listeners are read again
+//! and again for two minutes ([`scans`]), and the rule follows every change
+//! of choice. A read that finds nothing listening (a server between two
+//! binds) changes nothing, and the rule stays as chosen once the window
+//! closes.
 
 mod facts;
 mod http_port;
 mod listeners;
 mod routes;
+mod scans;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -54,7 +61,7 @@ impl DomainRoutes {
         (Self { commands }, task)
     }
 
-    /// Starts following a running container, or refreshes what it knows.
+    /// Starts following a running container, or restarts its scan window.
     pub fn track(&self, facts: ContainerFacts) {
         // The inbox closes only once the task has stopped for shutdown.
         let _ = self.commands.send(Command::Track(facts));

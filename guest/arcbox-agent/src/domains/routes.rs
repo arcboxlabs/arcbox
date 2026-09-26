@@ -3,8 +3,10 @@
 use std::collections::HashMap;
 
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use super::scans::Scans;
 use super::{Command, ContainerFacts, RULE_OWNER, http_port, listeners};
 use crate::iptables::{self, NatRule, TaggedRules};
 
@@ -14,15 +16,21 @@ const BRIDGE_NF_CALL_IPTABLES: &str = "/proc/sys/net/bridge/bridge-nf-call-iptab
 /// The rules in the kernel and the containers they follow.
 pub(super) struct Routes {
     rules: TaggedRules,
-    /// The rules last installed per container ID.
-    installed: HashMap<String, Vec<NatRule>>,
+    containers: HashMap<String, Tracked>,
+}
+
+struct Tracked {
+    facts: ContainerFacts,
+    scans: Scans,
+    /// The rules last installed for the container.
+    installed: Vec<NatRule>,
 }
 
 impl Routes {
     pub(super) fn new() -> Self {
         Self {
             rules: TaggedRules::new(RULE_OWNER),
-            installed: HashMap::new(),
+            containers: HashMap::new(),
         }
     }
 
@@ -45,55 +53,90 @@ impl Routes {
         }
         warn_unless_bridged_traffic_is_filtered();
         loop {
+            let due = self.containers.values().filter_map(|c| c.scans.next).min();
             tokio::select! {
                 () = cancel.cancelled() => return,
                 command = inbox.recv() => match command {
-                    Some(Command::Track(facts)) => self.track(facts).await,
+                    Some(Command::Track(facts)) => self.track(facts),
                     Some(Command::Forget(id)) => self.forget(&id).await,
                     None => return,
                 },
+                () = sleep_until(due) => self.scan_due().await,
             }
         }
     }
 
-    /// Makes the container's rules follow the HTTP port it serves now.
-    async fn track(&mut self, facts: ContainerFacts) {
-        let id = facts.id.as_str();
-        let listening = match listeners::read(facts.pid, &facts.netns).await {
-            Ok(listening) => listening,
-            Err(e) => {
-                // An exiting container (its die event follows) or an init
-                // process gone to another network namespace.
-                tracing::debug!(container_id = id, error = %e, "cannot read container listeners");
-                return;
-            }
+    fn track(&mut self, facts: ContainerFacts) {
+        let installed = self
+            .containers
+            .remove(&facts.id)
+            .map(|tracked| tracked.installed)
+            .unwrap_or_default();
+        let tracked = Tracked {
+            facts,
+            scans: Scans::starting(Instant::now()),
+            installed,
         };
-        let http_port = http_port::choose(facts.pin, &listening, &facts.exposed);
-        let wanted = facts.rules(http_port);
-        if self.installed.get(id) == Some(&wanted) {
-            return;
-        }
-        match self.rules.replace(id, wanted.clone()).await {
-            Ok(()) => {
-                tracing::info!(
-                    container_id = id,
-                    ?http_port,
-                    ?listening,
-                    "container domain port 80 rerouted"
-                );
-                self.installed.insert(facts.id.clone(), wanted);
-            }
-            Err(e) => {
-                tracing::warn!(container_id = id, error = %format!("{e:#}"), "failed to route container domain port 80");
-            }
-        }
+        self.containers.insert(tracked.facts.id.clone(), tracked);
     }
 
     async fn forget(&mut self, container_id: &str) {
-        self.installed.remove(container_id);
+        self.containers.remove(container_id);
         if let Err(e) = self.rules.remove(container_id).await {
             tracing::warn!(container_id, error = %format!("{e:#}"), "failed to remove container domain rules");
         }
+    }
+
+    /// Rescans every container whose scan is due and follows its choice.
+    async fn scan_due(&mut self) {
+        let now = Instant::now();
+        for tracked in self.containers.values_mut() {
+            if tracked.scans.next.is_none_or(|due| due > now) {
+                continue;
+            }
+            tracked.scans.advance(now);
+            let id = tracked.facts.id.as_str();
+            let listening = match listeners::read(tracked.facts.pid, &tracked.facts.netns).await {
+                Ok(listening) => listening,
+                Err(e) => {
+                    // An exiting container (its die event follows) or an
+                    // init process gone to another network namespace.
+                    tracing::debug!(container_id = id, error = %e, "cannot read container listeners");
+                    continue;
+                }
+            };
+            // A server between two binds lists nothing: keep what it served.
+            if listening.is_empty() && tracked.facts.pin.is_none() {
+                continue;
+            }
+            let http_port =
+                http_port::choose(tracked.facts.pin, &listening, &tracked.facts.exposed);
+            let wanted = tracked.facts.rules(http_port);
+            if wanted == tracked.installed {
+                continue;
+            }
+            match self.rules.replace(id, wanted.clone()).await {
+                Ok(()) => {
+                    tracing::info!(
+                        container_id = id,
+                        ?http_port,
+                        ?listening,
+                        "container domain port 80 rerouted"
+                    );
+                    tracked.installed = wanted;
+                }
+                Err(e) => {
+                    tracing::warn!(container_id = id, error = %format!("{e:#}"), "failed to route container domain port 80");
+                }
+            }
+        }
+    }
+}
+
+async fn sleep_until(due: Option<Instant>) {
+    match due {
+        Some(due) => tokio::time::sleep_until(due).await,
+        None => std::future::pending().await,
     }
 }
 
