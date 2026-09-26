@@ -1,6 +1,7 @@
 //! Machine exec sessions against a fake guest on the far end of a
 //! socketpair — the fd shape VZ hands the async transport.
 
+use std::io::Write as _;
 use std::os::fd::IntoRawFd;
 use std::time::Duration;
 
@@ -9,8 +10,20 @@ use tokio::net::UnixStream;
 
 use super::*;
 
+/// A client and the fake guest behind it, which has already granted a
+/// stdin window: the frame a flow-controlled agent opens with.
 fn session_pair() -> (AgentClient, UnixStream) {
-    let (host, guest) = std::os::unix::net::UnixStream::pair().unwrap();
+    let (host, mut guest) = std::os::unix::net::UnixStream::pair().unwrap();
+    let window = MachineExecWindow {
+        bytes: 64 * 1024,
+        ..Default::default()
+    };
+    let opening = wire::build_message(
+        MessageType::MachineExecInputWindow,
+        "",
+        &window.encode_to_vec(),
+    );
+    guest.write_all(&opening).unwrap();
     guest.set_nonblocking(true).unwrap();
     let client = AgentClient::from_fd_async(3, host.into_raw_fd()).unwrap();
     (client, UnixStream::from_std(guest).unwrap())
