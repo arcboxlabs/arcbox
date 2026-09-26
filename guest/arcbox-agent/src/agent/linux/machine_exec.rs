@@ -13,15 +13,20 @@
 //!   and the host feeds [`MessageType::MachineExecInput`] /
 //!   [`MessageType::MachineExecResize`] frames on the same connection.
 //!
-//! Both end with a `done == true` frame carrying the exit code.
+//! Both end with a `done == true` frame carrying the exit code, or the
+//! signal that ended the process.
 
 mod process;
 
-use std::process::Stdio;
+use std::os::unix::process::ExitStatusExt as _;
+use std::process::{ExitStatus, Stdio};
 
 use anyhow::Context;
+use arcbox_connect::v1::MachineExecRequest;
 use buffa::Message;
+use nix::sys::signal::Signal;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
+use tokio::process::{Child, ChildStderr, ChildStdout};
 
 use crate::rpc::{ErrorResponse, MessageType, write_message};
 
@@ -36,7 +41,7 @@ pub(super) async fn handle_machine_exec<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let req = arcbox_connect::v1::MachineExecRequest::decode_from_slice(payload)
+    let req = MachineExecRequest::decode_from_slice(payload)
         .context("failed to decode MachineExecRequest")?;
 
     let spec = match ProcessSpec::resolve(&req) {
@@ -47,9 +52,18 @@ where
         }
     };
     if req.tty {
-        return tty_session(stream, trace_id, &req, spec).await;
+        tty_session(stream, trace_id, &req, spec).await
+    } else {
+        piped_session(stream, trace_id, spec).await
     }
+}
 
+/// Piped session: stdout and stderr stream as separate frames; stdin is
+/// /dev/null.
+async fn piped_session<S>(stream: &mut S, trace_id: &str, spec: ProcessSpec) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut cmd = spec.command();
     if let Some(run_as) = spec.run_as.clone() {
         // SAFETY: runs post-fork, pre-exec; `RunAs::apply` is
@@ -63,90 +77,57 @@ where
     cmd.stderr(Stdio::piped());
 
     let mut child = match cmd.spawn() {
-        Ok(c) => c,
+        Ok(child) => child,
         Err(e) => {
             let err = spec.spawn_error(e);
             write_message(stream, MessageType::Error, trace_id, &err.encode()).await?;
             return Ok(());
         }
     };
-
-    let mut stdout = child.stdout.take().expect("stdout piped");
-    let mut stderr = child.stderr.take().expect("stderr piped");
-
-    let mut stdout_buf = [0u8; 8192];
-    let mut stderr_buf = [0u8; 8192];
-    let mut stdout_done = false;
-    let mut stderr_done = false;
-
-    while !stdout_done || !stderr_done {
-        tokio::select! {
-            res = stdout.read(&mut stdout_buf), if !stdout_done => {
-                match res {
-                    Ok(0) => stdout_done = true,
-                    Ok(n) => {
-                        write_output(stream, trace_id, "stdout", &stdout_buf[..n]).await?;
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "machine exec stdout read error");
-                        stdout_done = true;
-                    }
-                }
-            }
-            res = stderr.read(&mut stderr_buf), if !stderr_done => {
-                match res {
-                    Ok(0) => stderr_done = true,
-                    Ok(n) => {
-                        write_output(stream, trace_id, "stderr", &stderr_buf[..n]).await?;
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "machine exec stderr read error");
-                        stderr_done = true;
-                    }
-                }
-            }
-        }
-    }
-
-    let status = child.wait().await.context("failed to wait for child")?;
-    let final_out = arcbox_connect::v1::MachineExecOutput {
-        done: true,
-        exit_code: status.code().unwrap_or(-1),
-        ..Default::default()
-    };
-    write_message(
-        stream,
-        MessageType::MachineExecOutput,
-        trace_id,
-        &final_out.encode_to_vec(),
-    )
-    .await?;
-
-    Ok(())
+    let stdout = child.stdout.take().context("stdout not piped")?;
+    let stderr = child.stderr.take().context("stderr not piped")?;
+    let status = pump_pipes(stream, trace_id, stdout, stderr, &mut child).await?;
+    write_exit(stream, trace_id, status).await
 }
 
-async fn write_output<S>(
-    stream: &mut S,
+/// Streams stdout and stderr until both close, then reaps the process.
+async fn pump_pipes<W>(
+    conn: &mut W,
     trace_id: &str,
-    name: &str,
-    data: &[u8],
-) -> anyhow::Result<()>
+    mut stdout: ChildStdout,
+    mut stderr: ChildStderr,
+    child: &mut Child,
+) -> anyhow::Result<ExitStatus>
 where
-    S: AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin,
 {
-    let out = arcbox_connect::v1::MachineExecOutput {
-        stream: name.to_string(),
-        data: data.to_vec(),
-        ..Default::default()
-    };
-    write_message(
-        stream,
-        MessageType::MachineExecOutput,
-        trace_id,
-        &out.encode_to_vec(),
-    )
-    .await?;
-    Ok(())
+    // On the heap: two stack buffers held across awaits would make every
+    // session future 16 KiB larger.
+    let mut stdout_buf = vec![0u8; 8192];
+    let mut stderr_buf = vec![0u8; 8192];
+    let mut stdout_done = false;
+    let mut stderr_done = false;
+    while !stdout_done || !stderr_done {
+        tokio::select! {
+            res = stdout.read(&mut stdout_buf), if !stdout_done => match res {
+                Ok(0) => stdout_done = true,
+                Ok(n) => write_output(conn, trace_id, "stdout", &stdout_buf[..n]).await?,
+                Err(e) => {
+                    tracing::warn!(error = %e, "machine exec stdout read error");
+                    stdout_done = true;
+                }
+            },
+            res = stderr.read(&mut stderr_buf), if !stderr_done => match res {
+                Ok(0) => stderr_done = true,
+                Ok(n) => write_output(conn, trace_id, "stderr", &stderr_buf[..n]).await?,
+                Err(e) => {
+                    tracing::warn!(error = %e, "machine exec stderr read error");
+                    stderr_done = true;
+                }
+            },
+        }
+    }
+    child.wait().await.context("failed to wait for exec child")
 }
 
 /// Interactive PTY session on the current connection.
@@ -305,29 +286,65 @@ where
         }
     }
 
-    let exit_code = match child.wait().await {
-        Ok(status) => status.code().unwrap_or(-1),
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to wait for exec child");
-            -1
-        }
-    };
+    let status = child.wait().await;
     let _ = reader.await;
 
     if !host_gone {
-        let final_out = arcbox_connect::v1::MachineExecOutput {
-            done: true,
-            exit_code,
-            ..Default::default()
-        };
-        let _ = write_message(
-            &mut conn_wr,
-            MessageType::MachineExecOutput,
-            trace_id,
-            &final_out.encode_to_vec(),
-        )
-        .await;
+        let status = status.context("failed to wait for exec child")?;
+        let _ = write_exit(&mut conn_wr, trace_id, status).await;
     }
 
     Ok(())
+}
+
+/// Writes one output frame (`stream` is `"stdout"` or `"stderr"`).
+async fn write_output<W>(
+    writer: &mut W,
+    trace_id: &str,
+    stream: &str,
+    data: &[u8],
+) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let out = arcbox_connect::v1::MachineExecOutput {
+        stream: stream.to_owned(),
+        data: data.to_vec(),
+        ..Default::default()
+    };
+    write_message(
+        writer,
+        MessageType::MachineExecOutput,
+        trace_id,
+        &out.encode_to_vec(),
+    )
+    .await
+}
+
+/// Writes the final frame reporting how the process ended.
+async fn write_exit<W>(writer: &mut W, trace_id: &str, status: ExitStatus) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let out = arcbox_connect::v1::MachineExecOutput {
+        done: true,
+        exit_code: status.code().unwrap_or(-1),
+        exit_signal: status.signal().map(signal_name).unwrap_or_default(),
+        ..Default::default()
+    };
+    write_message(
+        writer,
+        MessageType::MachineExecOutput,
+        trace_id,
+        &out.encode_to_vec(),
+    )
+    .await
+}
+
+/// A signal's name without the `SIG` prefix, as SSH reports it (`"KILL"`).
+fn signal_name(signal: i32) -> String {
+    Signal::try_from(signal).map_or_else(
+        |_| signal.to_string(),
+        |s| s.as_str().trim_start_matches("SIG").to_owned(),
+    )
 }
