@@ -6,17 +6,17 @@
 //! would (`process.rs`, `login_session.rs`).
 //!
 //! Two modes share the entry point:
-//! - **piped** (`tty == false`): stdin closed, stdout/stderr streamed as
-//!   separate [`MessageType::MachineExecOutput`] frames;
+//! - **piped** (`tty == false`): stdout/stderr stream as separate
+//!   [`MessageType::MachineExecOutput`] frames; stdin is /dev/null unless the
+//!   request attaches it;
 //! - **interactive** (`tty == true`): the command runs as a session leader on
 //!   a PTY (primitives from `arcbox-pty`) and output is one merged stream.
-//!   While it runs, the host sends stdin, resize and signal frames on the
-//!   same connection (`control.rs`), read concurrently with the output pump;
-//!   a closed connection means the host is gone and the session's process
-//!   group is killed.
 //!
-//! Both end with a `done == true` frame carrying the exit code, or the
-//! signal that ended the process.
+//! While the process runs, the host sends stdin, resize and signal frames on
+//! the same connection (`control.rs`), read concurrently with the output
+//! pump; a closed connection means the host is gone and the session's
+//! process group is killed. Both modes end with a `done == true` frame
+//! carrying the exit code, or the signal that ended the process.
 
 mod control;
 mod process;
@@ -28,10 +28,11 @@ use std::process::{ExitStatus, Stdio};
 
 use anyhow::Context;
 use arcbox_connect::v1::MachineExecRequest;
+use arcbox_pty::RunAs;
 use buffa::Message;
 use nix::sys::signal::Signal;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
-use tokio::process::{Child, ChildStderr, ChildStdout};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 use tokio::sync::mpsc;
 
 use crate::rpc::{ErrorResponse, MessageType, write_message};
@@ -65,27 +66,39 @@ where
     if req.tty {
         tty_session(stream, trace_id, &req, spec).await
     } else {
-        piped_session(stream, trace_id, spec).await
+        piped_session(stream, trace_id, &req, spec).await
     }
 }
 
-/// Piped session: stdout and stderr stream as separate frames; stdin is
-/// /dev/null.
-async fn piped_session<S>(stream: &mut S, trace_id: &str, spec: ProcessSpec) -> anyhow::Result<()>
+/// Piped session: stdout and stderr stream as separate frames.
+async fn piped_session<S>(
+    stream: &mut S,
+    trace_id: &str,
+    req: &MachineExecRequest,
+    spec: ProcessSpec,
+) -> anyhow::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut cmd = spec.command();
-    if let Some(run_as) = spec.run_as.clone() {
-        // SAFETY: runs post-fork, pre-exec; `RunAs::apply` is
-        // async-signal-safe and `run_as` was resolved before the fork.
-        unsafe {
-            cmd.pre_exec(move || run_as.apply());
-        }
-    }
-    cmd.stdin(Stdio::null());
+    cmd.stdin(if req.attach_stdin {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    let run_as = spec.run_as.clone();
+    // SAFETY: runs post-fork, pre-exec; setsid and the credential syscalls
+    // are async-signal-safe, and `run_as` was resolved before the fork.
+    unsafe {
+        cmd.pre_exec(move || {
+            // Lead a session of its own, as sshd's children do, so the whole
+            // tree can be killed when the host goes away.
+            nix::unistd::setsid()?;
+            run_as.as_ref().map_or(Ok(()), RunAs::apply)
+        });
+    }
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -95,10 +108,29 @@ where
             return Ok(());
         }
     };
+    let pid = child.id();
+    let stdin = child.stdin.take();
     let stdout = child.stdout.take().context("stdout not piped")?;
     let stderr = child.stderr.take().context("stderr not piped")?;
-    let status = pump_pipes(stream, trace_id, stdout, stderr, &mut child).await?;
-    write_exit(stream, trace_id, status).await
+
+    let (mut conn_rd, mut conn_wr) = tokio::io::split(stream);
+    let exited = {
+        let output = pump_pipes(&mut conn_wr, trace_id, stdout, stderr, &mut child);
+        let control = serve_piped_control(&mut conn_rd, stdin, pid);
+        tokio::select! {
+            // An error here is a failed write: the host went away.
+            status = output => status.ok(),
+            () = control => None,
+        }
+    };
+    match exited {
+        Some(status) => write_exit(&mut conn_wr, trace_id, status).await?,
+        None => {
+            kill_session(pid);
+            let _ = child.wait().await;
+        }
+    }
+    Ok(())
 }
 
 /// Streams stdout and stderr until both close, then reaps the process.
@@ -139,6 +171,30 @@ where
         }
     }
     child.wait().await.context("failed to wait for exec child")
+}
+
+/// Applies host instructions to a piped session until the host closes the
+/// connection.
+async fn serve_piped_control<R>(conn: &mut R, mut stdin: Option<ChildStdin>, pid: Option<u32>)
+where
+    R: AsyncRead + Unpin,
+{
+    while let Some(control) = control::next(conn).await {
+        match control {
+            Control::Stdin(data) => {
+                if let Some(pipe) = stdin.as_mut() {
+                    if pipe.write_all(&data).await.is_err() {
+                        // The process closed its stdin; later input is dropped.
+                        stdin = None;
+                    }
+                }
+            }
+            Control::Eof => stdin = None,
+            // No terminal to resize.
+            Control::Resize(_) => {}
+            Control::Signal(signal) => signal_process(pid, signal),
+        }
+    }
 }
 
 /// Interactive session: the process runs as a session leader with the PTY
