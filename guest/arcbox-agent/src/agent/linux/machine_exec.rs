@@ -14,15 +14,17 @@
 //!
 //! Both end with a `done == true` frame carrying the exit code.
 
+mod process;
+
 use std::process::Stdio;
 
 use anyhow::Context;
 use buffa::Message;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
-use tokio::process::Command;
 
-use super::super::exec_error::spawn_error;
 use crate::rpc::{ErrorResponse, MessageType, write_message};
+
+use process::ProcessSpec;
 
 /// Handles a machine-level exec request on the current connection.
 pub(super) async fn handle_machine_exec<S>(
@@ -36,70 +38,33 @@ where
     let req = arcbox_connect::v1::MachineExecRequest::decode_from_slice(payload)
         .context("failed to decode MachineExecRequest")?;
 
-    if req.cmd.is_empty() {
-        let err = ErrorResponse::new(400, "cmd must not be empty");
-        write_message(stream, MessageType::Error, trace_id, &err.encode()).await?;
-        return Ok(());
-    }
+    let spec = match ProcessSpec::resolve(&req) {
+        Ok(spec) => spec,
+        Err(err) => {
+            write_message(stream, MessageType::Error, trace_id, &err.encode()).await?;
+            return Ok(());
+        }
+    };
     if req.tty {
-        return tty_session(stream, trace_id, &req).await;
+        return tty_session(stream, trace_id, &req, spec).await;
     }
 
-    let mut cmd = Command::new(&req.cmd[0]);
-    if req.cmd.len() > 1 {
-        cmd.args(&req.cmd[1..]);
-    }
-    if !req.working_dir.is_empty() {
-        cmd.current_dir(&req.working_dir);
-    }
-    for (k, v) in &req.env {
-        cmd.env(k, v);
-    }
-
-    if !req.user.is_empty() {
-        let (uid, gid) = match resolve_user(&req.user) {
-            Ok(ids) => ids,
-            Err(e) => {
-                let err = ErrorResponse::new(400, e.to_string());
-                write_message(stream, MessageType::Error, trace_id, &err.encode()).await?;
-                return Ok(());
-            }
-        };
-        // Full privilege drop, in the one order that works: supplementary
-        // groups, then gid, then uid — the reverse would lose the right to
-        // change groups before using it (setuid alone would leave the child
-        // in root's group).
-        // SAFETY: async-signal-safe syscalls; the ids came from the passwd
-        // database (or a numeric literal) above.
+    let mut cmd = spec.command();
+    if let Some(run_as) = spec.run_as.clone() {
+        // SAFETY: runs post-fork, pre-exec; `RunAs::apply` is
+        // async-signal-safe and `run_as` was resolved before the fork.
         unsafe {
-            cmd.pre_exec(move || {
-                if libc::setgroups(1, &raw const gid) != 0
-                    || libc::setgid(gid) != 0
-                    || libc::setuid(uid) != 0
-                {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
+            cmd.pre_exec(move || run_as.apply());
         }
     }
-
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    // A host disconnect mid-stream aborts this handler via `?`; the dropped
-    // child must not keep running detached in the machine.
-    cmd.kill_on_drop(true);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            let err = spawn_error(
-                &req.cmd[0],
-                &req.working_dir,
-                req.env.get("PATH").map(String::as_str),
-                e,
-            );
+            let err = spec.spawn_error(e);
             write_message(stream, MessageType::Error, trace_id, &err.encode()).await?;
             return Ok(());
         }
@@ -194,25 +159,13 @@ async fn tty_session<S>(
     stream: &mut S,
     trace_id: &str,
     req: &arcbox_connect::v1::MachineExecRequest,
+    spec: ProcessSpec,
 ) -> anyhow::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     use std::io::{Read, Write};
     use std::os::fd::AsRawFd;
-
-    let run_as = if req.user.is_empty() {
-        None
-    } else {
-        match arcbox_pty::resolve_user(&req.user) {
-            Ok(r) => Some(r),
-            Err(e) => {
-                let err = ErrorResponse::new(400, e.to_string());
-                write_message(stream, MessageType::Error, trace_id, &err.encode()).await?;
-                return Ok(());
-            }
-        }
-    };
 
     let size = req.tty_size.as_option().map(|s| arcbox_pty::WinSize {
         cols: u16::try_from(s.width).unwrap_or(80),
@@ -227,41 +180,26 @@ where
         }
     };
 
-    let mut cmd = Command::new(&req.cmd[0]);
-    if req.cmd.len() > 1 {
-        cmd.args(&req.cmd[1..]);
-    }
-    if !req.working_dir.is_empty() {
-        cmd.current_dir(&req.working_dir);
-    }
-    for (k, v) in &req.env {
-        cmd.env(k, v);
-    }
+    let mut cmd = spec.command();
     // The pre_exec closure dup2s the slave over stdin/stdout/stderr, so the
     // Command-level stdio configuration is irrelevant (pre_exec runs after
     // it); null keeps no stray pipes open.
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());
-    cmd.kill_on_drop(true);
     // SAFETY: the closure runs post-fork pre-exec and only makes
     // async-signal-safe calls; the slave stays open in the parent until
     // after spawn.
     unsafe {
         cmd.pre_exec(arcbox_pty::child_terminal_setup(
             pty.slave.as_raw_fd(),
-            run_as,
+            spec.run_as.clone(),
         ));
     }
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            let err = spawn_error(
-                &req.cmd[0],
-                &req.working_dir,
-                req.env.get("PATH").map(String::as_str),
-                e,
-            );
+            let err = spec.spawn_error(e);
             write_message(stream, MessageType::Error, trace_id, &err.encode()).await?;
             return Ok(());
         }
@@ -391,22 +329,4 @@ where
     }
 
     Ok(())
-}
-
-/// Resolves a username or numeric UID string to `(uid, gid)`.
-///
-/// A numeric string is taken as a UID with GID equal to it.
-fn resolve_user(user: &str) -> anyhow::Result<(libc::uid_t, libc::gid_t)> {
-    if let Ok(uid) = user.parse::<libc::uid_t>() {
-        return Ok((uid, uid));
-    }
-    let c_name = std::ffi::CString::new(user).context("invalid user name")?;
-    // SAFETY: `c_name` is a valid nul-terminated C string; `getpwnam` returns
-    // a pointer to a static passwd struct (or null).
-    let pw = unsafe { libc::getpwnam(c_name.as_ptr()) };
-    if pw.is_null() {
-        anyhow::bail!("unknown user: {user}");
-    }
-    // SAFETY: `pw` is non-null and points to a valid passwd struct.
-    Ok(unsafe { ((*pw).pw_uid, (*pw).pw_gid) })
 }
