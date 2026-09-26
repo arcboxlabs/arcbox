@@ -13,9 +13,9 @@
 //!   a PTY (primitives from `arcbox-pty`) and output is one merged stream.
 //!
 //! While the process runs, the host sends stdin, resize and signal frames on
-//! the same connection (`control.rs`), read concurrently with the output
-//! pump; a closed connection means the host is gone and the session's
-//! process group is killed. Both modes end with a `done == true` frame
+//! the same connection (`control.rs`), applied beside the output pump
+//! (`session.rs`); a closed connection means the host is gone and the
+//! session's process group is killed. Both modes end with a `done == true` frame
 //! carrying the exit code, or the signal that ended the process.
 
 mod control;
@@ -30,14 +30,15 @@ use anyhow::Context;
 use arcbox_connect::v1::MachineExecRequest;
 use arcbox_pty::RunAs;
 use buffa::Message;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::process::Child;
 use tokio::sync::mpsc;
 
 use crate::rpc::{ErrorResponse, MessageType, write_message};
 
 use control::Control;
 use process::ProcessSpec;
+use session::Streams;
 
 /// Chunks buffered between the PTY threads and the session loop; the bound
 /// is what gives each direction backpressure.
@@ -107,93 +108,16 @@ where
             return Ok(());
         }
     };
-    let pid = child.id();
-    let stdin = child.stdin.take();
+    let (output_tx, output) = mpsc::channel(session::CHANNEL_CAPACITY);
     let stdout = child.stdout.take().context("stdout not piped")?;
     let stderr = child.stderr.take().context("stderr not piped")?;
+    session::read_output(stdout, "stdout", output_tx.clone());
+    session::read_output(stderr, "stderr", output_tx);
+    let (stdin, stdin_rx) = mpsc::channel(session::CHANNEL_CAPACITY);
+    tokio::spawn(session::write_stdin(child.stdin.take(), stdin_rx));
 
-    let (mut conn_rd, mut conn_wr) = tokio::io::split(stream);
-    let exited = {
-        let output = pump_pipes(&mut conn_wr, trace_id, stdout, stderr, &mut child);
-        let control = serve_piped_control(&mut conn_rd, stdin, pid);
-        tokio::select! {
-            // An error here is a failed write: the host went away.
-            status = output => status.ok(),
-            () = control => None,
-        }
-    };
-    match exited {
-        Some(status) => session::write_exit(&mut conn_wr, trace_id, status).await?,
-        None => {
-            session::kill_session(pid);
-            let _ = child.wait().await;
-        }
-    }
-    Ok(())
-}
-
-/// Streams stdout and stderr until both close, then reaps the process.
-async fn pump_pipes<W>(
-    conn: &mut W,
-    trace_id: &str,
-    mut stdout: ChildStdout,
-    mut stderr: ChildStderr,
-    child: &mut Child,
-) -> anyhow::Result<ExitStatus>
-where
-    W: AsyncWrite + Unpin,
-{
-    // On the heap: two stack buffers held across awaits would make every
-    // session future 16 KiB larger.
-    let mut stdout_buf = vec![0u8; 8192];
-    let mut stderr_buf = vec![0u8; 8192];
-    let mut stdout_done = false;
-    let mut stderr_done = false;
-    while !stdout_done || !stderr_done {
-        tokio::select! {
-            res = stdout.read(&mut stdout_buf), if !stdout_done => match res {
-                Ok(0) => stdout_done = true,
-                Ok(n) => write_output(conn, trace_id, "stdout", &stdout_buf[..n]).await?,
-                Err(e) => {
-                    tracing::warn!(error = %e, "machine exec stdout read error");
-                    stdout_done = true;
-                }
-            },
-            res = stderr.read(&mut stderr_buf), if !stderr_done => match res {
-                Ok(0) => stderr_done = true,
-                Ok(n) => write_output(conn, trace_id, "stderr", &stderr_buf[..n]).await?,
-                Err(e) => {
-                    tracing::warn!(error = %e, "machine exec stderr read error");
-                    stderr_done = true;
-                }
-            },
-        }
-    }
-    child.wait().await.context("failed to wait for exec child")
-}
-
-/// Applies host instructions to a piped session until the host closes the
-/// connection.
-async fn serve_piped_control<R>(conn: &mut R, mut stdin: Option<ChildStdin>, pid: Option<u32>)
-where
-    R: AsyncRead + Unpin,
-{
-    while let Some(control) = control::next(conn).await {
-        match control {
-            Control::Stdin(data) => {
-                if let Some(pipe) = stdin.as_mut() {
-                    if pipe.write_all(&data).await.is_err() {
-                        // The process closed its stdin; later input is dropped.
-                        stdin = None;
-                    }
-                }
-            }
-            Control::Eof => stdin = None,
-            // No terminal to resize.
-            Control::Resize(_) => {}
-            Control::Signal(signal) => session::signal_process(pid, signal),
-        }
-    }
+    let streams = Streams { output, stdin };
+    session::run(stream, trace_id, streams, None, &mut child).await
 }
 
 /// Interactive session: the process runs as a session leader with the PTY
