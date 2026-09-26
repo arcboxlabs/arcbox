@@ -92,3 +92,113 @@ async fn connect(req: &MachineTcpConnectRequest) -> Result<TcpStream, ErrorRespo
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use arcbox_connect::v1::{MachineExecOutput, MachineExecWindow};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, DuplexStream};
+    use tokio::net::TcpListener;
+
+    use super::*;
+    use crate::rpc::{MessageType, read_message, write_message};
+
+    fn request(port: u16) -> Vec<u8> {
+        MachineTcpConnectRequest {
+            host: "127.0.0.1".to_owned(),
+            port: port.into(),
+            output_window: 64 * 1024,
+            ..Default::default()
+        }
+        .encode_to_vec()
+    }
+
+    /// Starts a relay whose host side is the returned stream.
+    fn relay(port: u16) -> (DuplexStream, tokio::task::JoinHandle<anyhow::Result<()>>) {
+        let (host, mut agent) = tokio::io::duplex(64 * 1024);
+        let task =
+            tokio::spawn(async move { handle_tcp_connect(&mut agent, "", &request(port)).await });
+        (host, task)
+    }
+
+    async fn next(host: &mut DuplexStream) -> (MessageType, Vec<u8>) {
+        let (msg_type, _, payload) = read_message(host).await.unwrap();
+        (msg_type, payload)
+    }
+
+    async fn next_output(host: &mut DuplexStream) -> MachineExecOutput {
+        let (msg_type, payload) = next(host).await;
+        assert_eq!(msg_type, MessageType::MachineExecOutput);
+        MachineExecOutput::decode_from_slice(&payload).unwrap()
+    }
+
+    #[tokio::test]
+    async fn relays_both_ways_and_carries_each_half_close() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // A peer that answers, stops sending, and then reads until the
+        // host stops sending too.
+        let peer = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket.write_all(b"hello").await.unwrap();
+            socket.shutdown().await.unwrap();
+            let mut received = Vec::new();
+            socket.read_to_end(&mut received).await.unwrap();
+            received
+        });
+        let (mut host, relay) = relay(port);
+
+        assert_eq!(next(&mut host).await.0, MessageType::MachineExecInputWindow);
+        assert_eq!(next_output(&mut host).await.data, b"hello");
+        assert!(next_output(&mut host).await.eof, "the peer's half-close");
+
+        write_message(&mut host, MessageType::MachineExecInput, "", b"world")
+            .await
+            .unwrap();
+        write_message(&mut host, MessageType::MachineExecInput, "", b"")
+            .await
+            .unwrap();
+        assert_eq!(peer.await.unwrap(), b"world");
+
+        // Both directions closed: the final frame, maybe after the stdin
+        // window comes back.
+        loop {
+            let (msg_type, payload) = next(&mut host).await;
+            if msg_type == MessageType::MachineExecInputWindow {
+                let returned = MachineExecWindow::decode_from_slice(&payload).unwrap();
+                assert_eq!(returned.bytes, 5);
+                continue;
+            }
+            assert_eq!(msg_type, MessageType::MachineExecOutput);
+            assert!(MachineExecOutput::decode_from_slice(&payload).unwrap().done);
+            break;
+        }
+        relay.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_is_the_error_frame() {
+        let port = {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let (mut host, relay) = relay(port);
+
+        let (msg_type, _) = next(&mut host).await;
+        assert_eq!(msg_type, MessageType::Error);
+        relay.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_host_leaving_closes_the_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (mut host, relay) = relay(port);
+        let (mut socket, _) = listener.accept().await.unwrap();
+        assert_eq!(next(&mut host).await.0, MessageType::MachineExecInputWindow);
+
+        drop(host);
+        relay.await.unwrap().unwrap();
+        let mut buf = [0u8; 1];
+        assert_eq!(socket.read(&mut buf).await.unwrap(), 0, "the relay hung up");
+    }
+}
