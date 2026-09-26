@@ -8,7 +8,7 @@ use arcbox_connect::v1::{MachineExecOutput, MachineExecRequest};
 use arcbox_engine::agent_client::ExecSessionInput;
 use arcbox_ssh::{CLIENT_KEY_FILE, ExecOutput, MachineHost, SshKeys, SshServer};
 use russh::keys::{Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKey};
-use russh::{ChannelMsg, Sig, client};
+use russh::{ChannelMsg, ChannelOpenFailure, Sig, client};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 
@@ -117,6 +117,48 @@ impl MachineHost for ScriptedMachine {
             let _ = tx.send(Ok(last)).await;
         });
         Ok(Scripted(rx))
+    }
+
+    /// A peer that greets, then echoes until the client stops sending —
+    /// or, as host `closer`, stops sending first and then waits for the
+    /// client to stop too.
+    async fn connect_tcp(
+        &self,
+        machine: &str,
+        host: &str,
+        port: u16,
+        mut input: mpsc::Receiver<ExecSessionInput>,
+    ) -> anyhow::Result<Scripted> {
+        anyhow::ensure!(host != "refused", "connect to {host}:{port}: refused");
+        let greeting = format!("{machine} {host}:{port}\n");
+        let closer = host == "closer";
+        let (tx, rx) = mpsc::channel(16);
+        tokio::spawn(async move {
+            let _ = tx.send(Ok(output("stdout", greeting.as_bytes()))).await;
+            if closer {
+                let _ = tx.send(Ok(eof())).await;
+            }
+            while let Some(ExecSessionInput::Stdin(data)) = input.recv().await {
+                if data.is_empty() {
+                    break;
+                }
+                if !closer {
+                    let _ = tx.send(Ok(output("stdout", &data))).await;
+                }
+            }
+            if !closer {
+                let _ = tx.send(Ok(eof())).await;
+            }
+            let _ = tx.send(Ok(exit(0, ""))).await;
+        });
+        Ok(Scripted(rx))
+    }
+}
+
+fn eof() -> MachineExecOutput {
+    MachineExecOutput {
+        eof: true,
+        ..Default::default()
     }
 }
 
@@ -348,4 +390,72 @@ async fn a_user_name_naming_no_machine_is_refused() {
     let fixture = start_server().await;
     let (_, ok) = login(fixture.addr, "dev@", fixture.client_key).await;
     assert!(!ok);
+}
+
+#[tokio::test]
+async fn a_forward_reaches_a_port_in_the_machine() {
+    let fixture = start_server().await;
+    let (handle, _) = login(fixture.addr, "dev@ubuntu", fixture.client_key).await;
+
+    let mut channel = handle
+        .channel_open_direct_tcpip("localhost", 8080, "127.0.0.1", 50000)
+        .await
+        .unwrap();
+    channel.data(&b"ping"[..]).await.unwrap();
+    channel.eof().await.unwrap();
+    let messages = drain(&mut channel).await;
+    assert_eq!(data(&messages, None), b"ubuntu localhost:8080\nping");
+    assert!(messages.iter().any(|m| matches!(m, ChannelMsg::Eof)));
+    assert_eq!(exit_status(&messages), None, "a forward has no exit status");
+}
+
+#[tokio::test]
+async fn a_forward_the_machine_cannot_connect_is_refused() {
+    let fixture = start_server().await;
+    let (handle, _) = login(fixture.addr, "ubuntu", fixture.client_key).await;
+
+    let refused = handle
+        .channel_open_direct_tcpip("refused", 80, "127.0.0.1", 50000)
+        .await
+        .expect_err("the channel must not open");
+    assert!(
+        matches!(
+            refused,
+            russh::Error::ChannelOpenFailure(ChannelOpenFailure::ConnectFailed)
+        ),
+        "{refused:?}"
+    );
+    // The connection carries on.
+    let mut channel = handle.channel_open_session().await.unwrap();
+    channel.exec(true, "exit 3").await.unwrap();
+    assert_eq!(exit_status(&drain(&mut channel).await), Some(3));
+}
+
+#[tokio::test]
+async fn a_peer_that_stops_sending_reaches_the_client_as_eof() {
+    let fixture = start_server().await;
+    let (handle, _) = login(fixture.addr, "ubuntu", fixture.client_key).await;
+
+    let mut channel = handle
+        .channel_open_direct_tcpip("closer", 80, "127.0.0.1", 50000)
+        .await
+        .unwrap();
+    // The peer's EOF arrives while the client has not stopped sending...
+    let mut received = Vec::new();
+    loop {
+        match channel.wait().await.expect("EOF before the channel closes") {
+            ChannelMsg::Data { data } => received.extend_from_slice(&data),
+            ChannelMsg::Eof => break,
+            ChannelMsg::Close => panic!("closed before the client stopped sending"),
+            _ => {}
+        }
+    }
+    assert_eq!(received, b"ubuntu closer:80\n");
+    // ...which it still may, until it stops too.
+    channel.data(&b"late"[..]).await.unwrap();
+    channel.eof().await.unwrap();
+    assert!(matches!(
+        drain(&mut channel).await.last(),
+        Some(ChannelMsg::Close)
+    ));
 }

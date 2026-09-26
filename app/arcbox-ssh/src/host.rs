@@ -23,6 +23,18 @@ pub trait MachineHost: Send + Sync + 'static {
         request: MachineExecRequest,
         input: mpsc::Receiver<ExecSessionInput>,
     ) -> impl Future<Output = anyhow::Result<Self::Output>> + Send;
+
+    /// Opens a TCP connection to `host:port` as `machine` sees it, carried
+    /// like a session: stdin from `input` goes to the peer (an empty one
+    /// ends it), the output is the peer's bytes, then an `eof` frame, then
+    /// `done` once both directions are closed.
+    fn connect_tcp(
+        &self,
+        machine: &str,
+        host: &str,
+        port: u16,
+        input: mpsc::Receiver<ExecSessionInput>,
+    ) -> impl Future<Output = anyhow::Result<Self::Output>> + Send;
 }
 
 /// Output of a running machine exec session.

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use arcbox_engine::agent_client::ExecSessionInput;
 use russh::keys::PublicKey;
 use russh::server::{Auth, ChannelOpenHandle, Handler, Msg, Session};
-use russh::{Channel, ChannelId, Pty, Sig};
+use russh::{Channel, ChannelId, ChannelOpenFailure, Pty, Sig};
 use tokio::sync::mpsc;
 
 use crate::host::MachineHost;
@@ -16,10 +16,7 @@ use crate::input::{self, Outbound, SessionInput};
 use crate::session::{EXIT_FAILURE, Program, STDERR, SessionChannel};
 use crate::signal;
 use crate::target::Target;
-
-/// Input messages the machine session holds beyond a session's own queue
-/// (`input.rs`), which is what decides when the connection waits.
-const INPUT_CAPACITY: usize = 4;
+use crate::tunnel::{self, Destination};
 
 pub struct Connection<H> {
     host: Arc<H>,
@@ -28,9 +25,15 @@ pub struct Connection<H> {
     ssh_env: Vec<(String, String)>,
     /// The login's machine and account, once authenticated.
     target: Option<Target>,
+    /// Session and `direct-tcpip` channels.
     sessions: HashMap<ChannelId, SessionChannel>,
     /// Output sends blocked on this connection, across its channels.
     outbound: Arc<Outbound>,
+    /// Forwards that never opened, whose channels are to be forgotten.
+    refused: (
+        mpsc::UnboundedSender<ChannelId>,
+        mpsc::UnboundedReceiver<ChannelId>,
+    ),
 }
 
 impl<H: MachineHost> Connection<H> {
@@ -67,6 +70,7 @@ impl<H: MachineHost> Connection<H> {
             target: None,
             sessions: HashMap::new(),
             outbound: Arc::default(),
+            refused: mpsc::unbounded_channel(),
         }
     }
 
@@ -92,12 +96,12 @@ impl<H: MachineHost> Connection<H> {
             return session.channel_failure(channel);
         }
         let request = state.exec_request(target, program, &self.ssh_env);
-        let (process, input_rx) = mpsc::channel(INPUT_CAPACITY);
+        let (input, taken) = SessionInput::new();
         let started = self
             .host
-            .exec(&target.machine, request, input_rx)
+            .exec(&target.machine, request, taken)
             .await
-            .map(|output| (output, SessionInput::new(process)));
+            .map(|output| (output, input));
         if let Err(e) = &started {
             tracing::info!(%target, error = %format!("{e:#}"), "ssh session could not start");
         }
@@ -177,6 +181,41 @@ impl<H: MachineHost> Handler for Connection<H> {
         // that may be full.
         let outbound = Arc::clone(&self.outbound);
         tokio::spawn(async move { outbound.send(reply.accept()).await });
+        Ok(())
+    }
+
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        channel: Channel<Msg>,
+        host_to_connect: &str,
+        port_to_connect: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: ChannelOpenHandle,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        while let Ok(refused) = self.refused.1.try_recv() {
+            self.sessions.remove(&refused);
+        }
+        let (Some(target), Ok(port)) = (&self.target, u16::try_from(port_to_connect)) else {
+            tokio::spawn(reply.reject(ChannelOpenFailure::ConnectFailed));
+            return Ok(());
+        };
+        let destination = Destination {
+            machine: target.machine.clone(),
+            host: host_to_connect.to_owned(),
+            port,
+        };
+        let id = channel.id();
+        let state = tunnel::open(
+            Arc::clone(&self.host),
+            destination,
+            channel,
+            reply,
+            Arc::clone(&self.outbound),
+            self.refused.0.clone(),
+        );
+        self.sessions.insert(id, state);
         Ok(())
     }
 

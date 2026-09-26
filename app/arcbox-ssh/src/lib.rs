@@ -6,9 +6,11 @@
 //! machine: each `shell`/`exec` becomes a login session on the machine exec
 //! path — the guest agent runs the account's shell the way sshd would — with
 //! `pty-req`, `env`, `window-change`, stdin, signals and the exit status
-//! carried over its frames. [`MachineHost`] is the seam to the daemon's
-//! runtime, and [`write_client_config`] the OpenSSH config clients use to
-//! find the server.
+//! carried over its frames. `direct-tcpip` channels (`ssh -L`) become TCP
+//! connections the agent opens inside the machine, carried the same way.
+//! [`MachineHost`] is the seam to the daemon's runtime, and
+//! [`write_client_config`] the OpenSSH config clients use to find the
+//! server.
 
 mod client_config;
 mod connection;
@@ -20,6 +22,7 @@ mod server;
 mod session;
 mod signal;
 mod target;
+mod tunnel;
 
 pub use client_config::{KNOWN_HOSTS_FILE, remove_client_config, write_client_config};
 pub use error::SetupError;

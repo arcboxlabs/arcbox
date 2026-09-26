@@ -8,7 +8,7 @@ use arcbox_connect::v1::MachineExecRequest;
 use arcbox_constants::paths::HostLayout;
 use arcbox_constants::ports::SSH_HOST_PORT;
 use arcbox_core::error::CoreError;
-use arcbox_core::{ExecSessionInput, ExecSessionOutput, Runtime};
+use arcbox_core::{AgentClient, ExecSessionInput, ExecSessionOutput, Runtime};
 use arcbox_error::CommonError;
 use arcbox_ssh::{MachineHost, SshKeys, SshServer, remove_client_config, write_client_config};
 use tokio::net::TcpListener;
@@ -99,6 +99,18 @@ impl SshService {
 /// The daemon's machines, reached through their guest agents.
 struct RuntimeMachines(Arc<Runtime>);
 
+impl RuntimeMachines {
+    async fn agent(&self, machine: &str) -> Result<AgentClient> {
+        let runtime = Arc::clone(&self.0);
+        let name = machine.to_owned();
+        // Connecting to a guest agent is a blocking hypervisor call.
+        tokio::task::spawn_blocking(move || runtime.get_agent(&name))
+            .await
+            .context("agent connect task panicked")?
+            .map_err(|e| unreachable_machine(machine, e))
+    }
+}
+
 impl MachineHost for RuntimeMachines {
     type Output = ExecSessionOutput;
 
@@ -108,14 +120,19 @@ impl MachineHost for RuntimeMachines {
         request: MachineExecRequest,
         input: mpsc::Receiver<ExecSessionInput>,
     ) -> Result<ExecSessionOutput> {
-        let runtime = Arc::clone(&self.0);
-        let name = machine.to_owned();
-        // Connecting to a guest agent is a blocking hypervisor call.
-        let agent = tokio::task::spawn_blocking(move || runtime.get_agent(&name))
-            .await
-            .context("agent connect task panicked")?
-            .map_err(|e| unreachable_machine(machine, e))?;
+        let agent = self.agent(machine).await?;
         Ok(agent.machine_exec_session(request, input).await?)
+    }
+
+    async fn connect_tcp(
+        &self,
+        machine: &str,
+        host: &str,
+        port: u16,
+        input: mpsc::Receiver<ExecSessionInput>,
+    ) -> Result<ExecSessionOutput> {
+        let agent = self.agent(machine).await?;
+        Ok(agent.machine_tcp_connect(host, port, input).await?)
     }
 }
 

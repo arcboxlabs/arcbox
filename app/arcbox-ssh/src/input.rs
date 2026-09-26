@@ -27,6 +27,10 @@ const HIGH_WATER: usize = 1024 * 1024;
 /// Queued stdin past which a session is ended.
 pub const LIMIT: usize = 64 * 1024 * 1024;
 
+/// Input messages the machine session holds beyond this queue, which is
+/// what decides when the connection waits.
+const PROCESS_CAPACITY: usize = 4;
+
 /// A session's queued input passed [`LIMIT`].
 #[derive(Debug)]
 pub struct Overflow;
@@ -93,12 +97,14 @@ struct Backlog {
 }
 
 impl SessionInput {
-    /// Starts handing input to `process` as fast as it takes it.
-    pub fn new(process: mpsc::Sender<ExecSessionInput>) -> Self {
+    /// A session's input and the receiver its machine session reads, which
+    /// is handed input as fast as it takes it.
+    pub fn new() -> (Self, mpsc::Receiver<ExecSessionInput>) {
+        let (process, taken) = mpsc::channel(PROCESS_CAPACITY);
         let (queue, pending) = mpsc::unbounded_channel();
         let backlog = Arc::new(Backlog::default());
         tokio::spawn(hand_on(pending, process, Arc::clone(&backlog)));
-        Self { queue, backlog }
+        (Self { queue, backlog }, taken)
     }
 
     /// Queues `input`. Stdin past [`HIGH_WATER`] then waits for the process
@@ -206,8 +212,7 @@ mod tests {
 
     #[tokio::test]
     async fn stdin_past_the_high_water_mark_waits_for_the_process() {
-        let (process, mut taken) = mpsc::channel(1);
-        let input = SessionInput::new(process);
+        let (input, mut taken) = SessionInput::new();
         let outbound = Outbound::default();
         backlogged(&input, &outbound).await;
 
@@ -225,8 +230,7 @@ mod tests {
 
     #[tokio::test]
     async fn control_input_never_waits() {
-        let (process, _taken) = mpsc::channel(1);
-        let input = SessionInput::new(process);
+        let (input, _taken) = SessionInput::new();
         let outbound = Outbound::default();
         backlogged(&input, &outbound).await;
 
@@ -239,8 +243,7 @@ mod tests {
 
     #[tokio::test]
     async fn output_blocked_on_the_connection_releases_waiting_input() {
-        let (process, _taken) = mpsc::channel(1);
-        let input = SessionInput::new(process);
+        let (input, _taken) = SessionInput::new();
         let outbound = Outbound::default();
         backlogged(&input, &outbound).await;
 
@@ -266,8 +269,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_session_past_the_limit_overflows() {
-        let (process, _taken) = mpsc::channel(1);
-        let input = SessionInput::new(process);
+        let (input, _taken) = SessionInput::new();
         let outbound = Outbound::default();
         let never = outbound.send(std::future::pending::<()>());
         let mut never = pin!(never);
@@ -290,8 +292,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_process_that_is_gone_releases_waiting_input() {
-        let (process, taken) = mpsc::channel(1);
-        let input = SessionInput::new(process);
+        let (input, taken) = SessionInput::new();
         let outbound = Outbound::default();
         backlogged(&input, &outbound).await;
 

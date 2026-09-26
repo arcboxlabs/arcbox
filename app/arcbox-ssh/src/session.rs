@@ -59,6 +59,19 @@ impl SessionChannel {
         }
     }
 
+    /// A channel that runs from the start with its own output task: a
+    /// `direct-tcpip` forward. Session requests are refused on it as on a
+    /// started session.
+    pub fn running(input: SessionInput, output_task: AbortHandle) -> Self {
+        Self {
+            writer: None,
+            pty: None,
+            env: HashMap::new(),
+            input: Some(input),
+            output_task: Some(output_task),
+        }
+    }
+
     /// Whether a process was started (or failed to start) on this channel.
     pub fn started(&self) -> bool {
         self.writer.is_none()
@@ -149,7 +162,7 @@ impl SessionChannel {
             }
             Err(e) => {
                 let exit = Exit::Failed(format!("{e:#}"));
-                tokio::spawn(finish(writer, handle, outbound, exit, newline))
+                tokio::spawn(finish(writer, handle, outbound, exit, newline, false))
             }
         };
         self.output_task = Some(task.abort_handle());
@@ -201,6 +214,9 @@ async fn forward_output(
     outbound: Arc<Outbound>,
     newline: &'static str,
 ) {
+    // Sent once the process has closed its output, as sshd does, ahead of
+    // the exit status.
+    let mut eof_sent = false;
     let exit = loop {
         match output.recv().await {
             Some(Ok(mut frame)) => {
@@ -218,6 +234,10 @@ async fn forward_output(
                         return;
                     }
                 }
+                if frame.eof && !eof_sent {
+                    eof_sent = true;
+                    let _ = outbound.send(writer.eof()).await;
+                }
                 if frame.done {
                     break Exit::from(&frame);
                 }
@@ -226,7 +246,7 @@ async fn forward_output(
             None => break Exit::Failed("the machine session ended without an exit status".into()),
         }
     };
-    finish(writer, handle, outbound, exit, newline).await;
+    finish(writer, handle, outbound, exit, newline, eof_sent).await;
 }
 
 /// Reports `exit` and closes the channel. Send failures are ignored: they
@@ -237,6 +257,7 @@ async fn finish(
     outbound: Arc<Outbound>,
     exit: Exit,
     newline: &str,
+    eof_sent: bool,
 ) {
     match exit {
         Exit::Status(code) => {
@@ -255,13 +276,20 @@ async fn finish(
                 .await;
         }
         Exit::Failed(message) => {
-            let message = format!("arcbox: {message}{newline}");
-            let _ = outbound
-                .send(writer.extended_data_bytes(STDERR, message))
-                .await;
+            // No data may follow an EOF, not even the reason.
+            if eof_sent {
+                tracing::info!(%message, "ssh session broke after its output ended");
+            } else {
+                let message = format!("arcbox: {message}{newline}");
+                let _ = outbound
+                    .send(writer.extended_data_bytes(STDERR, message))
+                    .await;
+            }
             let _ = outbound.send(writer.exit_status(EXIT_FAILURE)).await;
         }
     }
-    let _ = outbound.send(writer.eof()).await;
+    if !eof_sent {
+        let _ = outbound.send(writer.eof()).await;
+    }
     let _ = outbound.send(writer.close()).await;
 }
