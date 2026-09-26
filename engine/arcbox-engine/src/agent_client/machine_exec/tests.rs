@@ -2,6 +2,7 @@
 //! socketpair — the fd shape VZ hands the async transport.
 
 use std::os::fd::IntoRawFd;
+use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
