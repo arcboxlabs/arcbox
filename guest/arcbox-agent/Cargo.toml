@@ -70,6 +70,7 @@ arcbox-transport.workspace = true
 [dev-dependencies]
 arcbox-computer-runtime.workspace = true
 tempfile = "3"
+toml.workspace = true
 
 [features]
 default = []
