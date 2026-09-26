@@ -195,11 +195,24 @@ const fn boot_console() -> &'static str {
     }
 }
 
+/// Keeps the kernel's `eth0` name for the machine's NIC.
+///
+/// The mirrored images are the linuxcontainers `default` variant, whose
+/// network config — networkd's `eth0.network`, netplan, `ifcfg-eth0`,
+/// ifupdown — is written for the name a container's NIC has. In a VM, udev's
+/// predictable naming renames the virtio NIC to `enp0s1`, that config then
+/// matches nothing, and the distro never takes over DHCP, the default route
+/// or its resolver's upstream from what the boot shim set up before init.
+const KEEP_KERNEL_NIC_NAMES: &str = "net.ifnames=0";
+
 /// Kernel command line for a shim-less distro machine: root on the read-only
 /// rootfs image at vda (custom-kernel testing).
 fn default_distro_cmdline(rootfs_format: &str) -> String {
     let console = boot_console();
-    format!("console={console} root=/dev/vda ro rootfstype={rootfs_format} earlycon")
+    format!(
+        "console={console} root=/dev/vda ro rootfstype={rootfs_format} earlycon \
+         {KEEP_KERNEL_NIC_NAMES}"
+    )
 }
 
 /// Kernel command line for the machine boot shim: the shim EROFS boots as
@@ -214,7 +227,7 @@ fn machine_shim_cmdline(rootfs_format: &str, mounts: &[MachineMount]) -> String 
     let console = boot_console();
     let mut cmdline = format!(
         "console={console} root=/dev/vda ro rootfstype=erofs earlycon \
-         init={MACHINE_INIT_PATH} \
+         {KEEP_KERNEL_NIC_NAMES} init={MACHINE_INIT_PATH} \
          {MACHINE_ROOTFS_KEY}/dev/vdb {MACHINE_ROOTFS_TYPE_KEY}{rootfs_format} \
          {MACHINE_DATA_KEY}/dev/vdc"
     );
