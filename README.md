@@ -210,7 +210,7 @@ abctl machine ls
 ```
 
 Create, start, stop, inspect, directory mounts, interactive shells, and command
-execution work today for Ubuntu and Alpine.
+execution work today for Alpine, Arch Linux, Debian, Fedora, and Ubuntu.
 
 ## macOS guests
 
