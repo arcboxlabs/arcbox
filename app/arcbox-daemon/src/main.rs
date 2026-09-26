@@ -3,6 +3,7 @@
 mod context;
 mod control_plane;
 mod dns_service;
+mod kubernetes_lb;
 mod kubernetes_proxy;
 mod nfs_mount;
 mod power;

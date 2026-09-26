@@ -147,6 +147,7 @@ impl RuntimeBooted {
             recovery::run(&self.ctx, &self.runtime, handles.dns_port).await?;
             if linux_vm {
                 services::enable_docker_integration(&self.ctx);
+                crate::kubernetes_lb::spawn(&self.ctx, &self.runtime);
             }
             crate::nfs_mount::spawn(&self.ctx, &self.runtime);
             Ok(handles)

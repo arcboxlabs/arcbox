@@ -528,8 +528,28 @@ async fn execute_status() -> Result<()> {
     for svc in status.services {
         println!("Service {}: {} ({})", svc.name, svc.status, svc.detail);
     }
+    for port in &status.host_ports {
+        println!("{}", host_port_line(port));
+    }
 
     Ok(())
+}
+
+/// One `abctl kubernetes status` line for a LoadBalancer port.
+fn host_port_line(port: &pb::KubernetesHostPort) -> String {
+    use pb::kubernetes_host_port::State;
+
+    let service = format!(
+        "LoadBalancer {}/{} {}/{}",
+        port.namespace, port.name, port.port, port.protocol
+    );
+    match port.state.as_known() {
+        Some(State::Forwarded) => format!("{service}: forwarded on {}:{}", port.host_ip, port.port),
+        Some(State::Pending) => format!("{service}: pending ({})", port.detail),
+        Some(State::Skipped) => format!("{service}: not forwarded ({})", port.detail),
+        Some(State::Failed) => format!("{service}: bind failed, retrying ({})", port.detail),
+        Some(State::StateUnspecified) | None => format!("{service}: unknown"),
+    }
 }
 
 async fn execute_enable() -> Result<()> {
