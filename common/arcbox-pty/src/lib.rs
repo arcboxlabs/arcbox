@@ -72,33 +72,79 @@ mod linux {
         Ok(())
     }
 
-    /// Credentials to drop to before exec, resolved via [`resolve_user`].
-    #[derive(Debug, Clone, Copy)]
+    /// Credentials to drop to before exec, resolved via [`resolve_user`] or
+    /// [`RunAs::for_account`].
+    #[derive(Debug, Clone)]
     pub struct RunAs {
         pub uid: libc::uid_t,
         pub gid: libc::gid_t,
+        /// Supplementary groups, as `initgroups` would set them.
+        pub groups: Vec<libc::gid_t>,
+    }
+
+    impl RunAs {
+        /// Credentials of a passwd entry: its uid, its primary group, and
+        /// every group that lists the account — what a login gets.
+        ///
+        /// # Errors
+        /// Returns an error if the group database cannot be read.
+        pub fn for_account(name: &str, uid: libc::uid_t, gid: libc::gid_t) -> io::Result<Self> {
+            let c_name = std::ffi::CString::new(name)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+            let groups = nix::unistd::getgrouplist(&c_name, nix::unistd::Gid::from_raw(gid))
+                .map_err(io::Error::from)?
+                .into_iter()
+                .map(nix::unistd::Gid::as_raw)
+                .collect();
+            Ok(Self { uid, gid, groups })
+        }
+
+        /// Drops the calling process to these credentials: `setgroups →
+        /// setgid → setuid`, the one order that works — the reverse would
+        /// give up the right to change groups before using it.
+        ///
+        /// Async-signal-safe (raw syscalls over memory allocated before the
+        /// fork), so it may run in a `pre_exec` closure.
+        ///
+        /// # Errors
+        /// Returns the failing syscall's error; the caller must abort the
+        /// exec rather than run the workload with the wrong identity.
+        pub fn apply(&self) -> io::Result<()> {
+            // SAFETY: plain credential syscalls; `groups` outlives the call.
+            unsafe {
+                if libc::setgroups(self.groups.len(), self.groups.as_ptr()) != 0
+                    || libc::setgid(self.gid) != 0
+                    || libc::setuid(self.uid) != 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        }
     }
 
     /// Resolves a username or numeric UID to run-as credentials.
     ///
     /// A numeric string is taken as a UID with GID equal to it — matching the
-    /// behavior both agents shipped historically.
+    /// behavior both agents shipped historically — and no supplementary
+    /// groups; a name gets its account's groups.
     ///
     /// # Errors
     /// Returns an error for an unknown user name.
     pub fn resolve_user(user: &str) -> io::Result<RunAs> {
         if let Ok(uid) = user.parse::<libc::uid_t>() {
-            return Ok(RunAs { uid, gid: uid });
+            return Ok(RunAs {
+                uid,
+                gid: uid,
+                groups: vec![uid],
+            });
         }
         let entry = nix::unistd::User::from_name(user)
             .map_err(io::Error::from)?
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotFound, format!("unknown user: {user}"))
             })?;
-        Ok(RunAs {
-            uid: entry.uid.as_raw(),
-            gid: entry.gid.as_raw(),
-        })
+        RunAs::for_account(&entry.name, entry.uid.as_raw(), entry.gid.as_raw())
     }
 
     /// Builds a `pre_exec`-compatible closure that turns the child into an
@@ -109,9 +155,8 @@ mod linux {
     /// 2. `TIOCSCTTY` — the PTY slave becomes the controlling terminal.
     /// 3. `dup2` the slave over stdin/stdout/stderr (and close the original
     ///    when it lies above fd 2).
-    /// 4. `setgroups → setgid → setuid` — the reverse order would drop the
-    ///    right to change groups before using it. Any failure aborts the
-    ///    exec rather than running the workload with the wrong identity.
+    /// 4. [`RunAs::apply`]. Any failure aborts the exec rather than running
+    ///    the workload with the wrong identity.
     ///
     /// The returned closure is async-signal-safe: raw syscalls only.
     ///
@@ -138,16 +183,8 @@ mod linux {
                 if slave > libc::STDERR_FILENO && libc::close(slave) != 0 {
                     return Err(io::Error::last_os_error());
                 }
-                if let Some(RunAs { uid, gid }) = run_as {
-                    if libc::setgroups(1, &raw const gid) != 0
-                        || libc::setgid(gid) != 0
-                        || libc::setuid(uid) != 0
-                    {
-                        return Err(io::Error::last_os_error());
-                    }
-                }
             }
-            Ok(())
+            run_as.as_ref().map_or(Ok(()), RunAs::apply)
         }
     }
 
@@ -193,8 +230,18 @@ mod linux {
         #[test]
         fn resolve_user_accepts_numeric_and_rejects_unknown() {
             let run_as = resolve_user("1234").unwrap();
-            assert_eq!((run_as.uid, run_as.gid), (1234, 1234));
+            assert_eq!(
+                (run_as.uid, run_as.gid, run_as.groups),
+                (1234, 1234, vec![1234])
+            );
             assert!(resolve_user("no-such-user-arcbox").is_err());
+        }
+
+        #[test]
+        fn named_user_gets_its_account_groups() {
+            let run_as = resolve_user("root").unwrap();
+            assert_eq!((run_as.uid, run_as.gid), (0, 0));
+            assert!(run_as.groups.contains(&0));
         }
     }
 }
