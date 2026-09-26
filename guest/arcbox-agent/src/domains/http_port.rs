@@ -1,5 +1,6 @@
 //! Which of a container's ports its domain serves over plain HTTP.
 
+use std::collections::BTreeSet;
 use std::str::FromStr;
 
 /// Container label that pins the HTTP port: a port number, or `off`.
@@ -7,6 +8,9 @@ pub const LABEL: &str = "dev.arcbox.http-port";
 
 /// The port a container's domain answers plain HTTP on.
 pub const HTTP_PORT: u16 = 80;
+
+/// The port a container's domain answers HTTPS on.
+pub const HTTPS_PORT: u16 = 443;
 
 /// What [`LABEL`] asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,18 +38,82 @@ impl FromStr for Pin {
     }
 }
 
-/// The container's HTTP port, as its label pins it.
+/// The container's HTTP port, given the label, the ports it listens on, and
+/// the ports it exposes (`EXPOSE`, `--expose`, `-p`). In order:
+///
+/// 1. the label, when set (`off`: none);
+/// 2. [`HTTP_PORT`], when the container listens there itself;
+/// 3. the lowest listening port the container exposes;
+/// 4. the lowest listening port.
+///
+/// [`HTTPS_PORT`] never counts: whatever listens there speaks TLS, and the
+/// container keeps it.
 #[must_use]
-pub fn choose(pin: Option<Pin>) -> Option<u16> {
+pub fn choose(pin: Option<Pin>, listening: &BTreeSet<u16>, exposed: &BTreeSet<u16>) -> Option<u16> {
     match pin {
+        Some(Pin::Off) => None,
         Some(Pin::Port(port)) => Some(port),
-        Some(Pin::Off) | None => None,
+        None if listening.contains(&HTTP_PORT) => Some(HTTP_PORT),
+        None => {
+            let mut candidates = listening.iter().copied().filter(|&p| p != HTTPS_PORT);
+            candidates
+                .clone()
+                .find(|port| exposed.contains(port))
+                .or_else(|| candidates.next())
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ports(list: &[u16]) -> BTreeSet<u16> {
+        list.iter().copied().collect()
+    }
+
+    #[test]
+    fn the_label_wins_over_what_the_container_listens_on() {
+        let listening = ports(&[80, 3000]);
+        assert_eq!(choose(Some(Pin::Off), &listening, &ports(&[])), None);
+        assert_eq!(
+            choose(Some(Pin::Port(8080)), &listening, &ports(&[])),
+            Some(8080)
+        );
+    }
+
+    #[test]
+    fn a_container_listening_on_80_keeps_it() {
+        assert_eq!(choose(None, &ports(&[3000, 80]), &ports(&[3000])), Some(80));
+    }
+
+    #[test]
+    fn an_exposed_listener_beats_a_lower_unexposed_one() {
+        assert_eq!(
+            choose(None, &ports(&[2112, 8080, 9000]), &ports(&[8080, 9000])),
+            Some(8080)
+        );
+    }
+
+    #[test]
+    fn without_exposed_listeners_the_lowest_port_serves() {
+        assert_eq!(choose(None, &ports(&[9229, 3000]), &ports(&[])), Some(3000));
+        assert_eq!(
+            choose(None, &ports(&[9229, 3000]), &ports(&[5000])),
+            Some(3000),
+            "an exposed port nothing listens on does not count"
+        );
+    }
+
+    #[test]
+    fn a_tls_listener_on_443_is_never_the_http_port() {
+        assert_eq!(choose(None, &ports(&[443]), &ports(&[443])), None);
+        assert_eq!(
+            choose(None, &ports(&[443, 8080]), &ports(&[443])),
+            Some(8080)
+        );
+        assert_eq!(choose(None, &ports(&[]), &ports(&[3000])), None);
+    }
 
     #[test]
     fn label_values_parse_strictly() {

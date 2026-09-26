@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::{Command, ContainerFacts, RULE_OWNER, http_port};
+use super::{Command, ContainerFacts, RULE_OWNER, http_port, listeners};
 use crate::iptables::{self, NatRule, TaggedRules};
 
 /// Whether bridged frames traverse iptables (see the module docs).
@@ -56,20 +56,35 @@ impl Routes {
         }
     }
 
-    /// Makes the container's rules follow its HTTP port.
+    /// Makes the container's rules follow the HTTP port it serves now.
     async fn track(&mut self, facts: ContainerFacts) {
-        let http_port = http_port::choose(facts.pin);
+        let id = facts.id.as_str();
+        let listening = match listeners::read(facts.pid, &facts.netns).await {
+            Ok(listening) => listening,
+            Err(e) => {
+                // An exiting container (its die event follows) or an init
+                // process gone to another network namespace.
+                tracing::debug!(container_id = id, error = %e, "cannot read container listeners");
+                return;
+            }
+        };
+        let http_port = http_port::choose(facts.pin, &listening, &facts.exposed);
         let wanted = facts.rules(http_port);
-        if self.installed.get(&facts.id) == Some(&wanted) {
+        if self.installed.get(id) == Some(&wanted) {
             return;
         }
-        match self.rules.replace(&facts.id, wanted.clone()).await {
+        match self.rules.replace(id, wanted.clone()).await {
             Ok(()) => {
-                tracing::info!(container_id = %facts.id, ?http_port, "container domain port 80 rerouted");
-                self.installed.insert(facts.id, wanted);
+                tracing::info!(
+                    container_id = id,
+                    ?http_port,
+                    ?listening,
+                    "container domain port 80 rerouted"
+                );
+                self.installed.insert(facts.id.clone(), wanted);
             }
             Err(e) => {
-                tracing::warn!(container_id = %facts.id, error = %format!("{e:#}"), "failed to route container domain port 80");
+                tracing::warn!(container_id = id, error = %format!("{e:#}"), "failed to route container domain port 80");
             }
         }
     }

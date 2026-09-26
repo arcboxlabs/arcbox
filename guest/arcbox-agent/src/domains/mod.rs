@@ -2,12 +2,12 @@
 //!
 //! `http://web.arcbox.local` reaches the container's IP, so it reaches the
 //! container only if it serves port 80, which most development servers do
-//! not. For each running container whose HTTP port (the
-//! `dev.arcbox.http-port` label, [`http_port`]) is not 80, the agent DNATs
-//! port 80 of every IPv4 address the container has to that port, in nat
-//! PREROUTING, tagged `arcbox-domain:<container id>`. The rules go when the
-//! container dies, and the ones a previous agent left behind are swept when
-//! this one starts.
+//! not. For each running container whose HTTP port ([`http_port::choose`]:
+//! the `dev.arcbox.http-port` label, or what it listens on) is not 80, the
+//! agent DNATs port 80 of every IPv4 address the container has to that
+//! port, in nat PREROUTING, tagged `arcbox-domain:<container id>`. The rules
+//! go when the container dies, and the ones a previous agent left behind are
+//! swept when this one starts.
 //!
 //! A rule matches the destination and nothing else, so it covers both ways
 //! traffic reaches a container: routed from the Mac, arriving on the bridge
@@ -21,6 +21,7 @@
 
 mod facts;
 mod http_port;
+mod listeners;
 mod routes;
 
 use tokio::sync::mpsc;

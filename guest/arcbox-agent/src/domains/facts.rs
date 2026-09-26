@@ -1,6 +1,8 @@
 //! What the domain rules need to know about a container.
 
+use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
+use std::path::PathBuf;
 
 use super::RULE_OWNER;
 use super::http_port::{self, HTTP_PORT, Pin};
@@ -10,8 +12,13 @@ use crate::iptables::NatRule;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContainerFacts {
     pub(super) id: String,
+    /// Its init process, whose `/proc` entry shows the container's sockets.
+    pub(super) pid: u32,
+    /// Its network namespace (`SandboxKey`).
+    pub(super) netns: PathBuf,
     ips: Vec<Ipv4Addr>,
     pub(super) pin: Option<Pin>,
+    pub(super) exposed: BTreeSet<u16>,
 }
 
 impl ContainerFacts {
@@ -20,10 +27,16 @@ impl ContainerFacts {
     #[must_use]
     pub fn from_inspect(inspect: &serde_json::Value) -> Option<Self> {
         let id = inspect.get("Id")?.as_str()?.to_owned();
-        inspect
+        let pid = inspect
             .pointer("/State/Pid")?
             .as_u64()
+            .and_then(|pid| u32::try_from(pid).ok())
             .filter(|&pid| pid != 0)?;
+        let netns = inspect
+            .pointer("/NetworkSettings/SandboxKey")?
+            .as_str()
+            .filter(|key| !key.is_empty())?
+            .into();
         let mut ips: Vec<Ipv4Addr> = inspect
             .pointer("/NetworkSettings/Networks")?
             .as_object()?
@@ -41,11 +54,28 @@ impl ContainerFacts {
             .and_then(|value| match value.parse() {
                 Ok(pin) => Some(pin),
                 Err(e) => {
-                    tracing::warn!(container_id = %id, "{e}; ignoring the label");
+                    tracing::warn!(container_id = %id, "{e}; choosing the HTTP port by itself");
                     None
                 }
             });
-        Some(Self { id, ips, pin })
+        let exposed = inspect
+            .pointer("/Config/ExposedPorts")
+            .and_then(|ports| ports.as_object())
+            .map(|ports| {
+                ports
+                    .keys()
+                    .filter_map(|spec| spec.strip_suffix("/tcp")?.parse().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(Self {
+            id,
+            pid,
+            netns,
+            ips,
+            pin,
+            exposed,
+        })
     }
 
     /// The rules that route port 80 of each of the container's addresses
@@ -79,8 +109,12 @@ mod tests {
         serde_json::json!({
             "Id": "abc123",
             "State": { "Pid": 4242 },
-            "Config": { "Labels": { "com.example": "x" } },
+            "Config": {
+                "Labels": { "com.example": "x" },
+                "ExposedPorts": { "8080/tcp": {}, "53/udp": {} }
+            },
             "NetworkSettings": {
+                "SandboxKey": "/var/run/docker/netns/f6f5a3c09806",
                 "Networks": {
                     "bridge": { "IPAddress": "172.17.0.2" },
                     "app": { "IPAddress": "172.18.0.3" },
@@ -94,6 +128,11 @@ mod tests {
     fn facts_come_from_inspect() {
         let facts = ContainerFacts::from_inspect(&inspect()).unwrap();
         assert_eq!(facts.id, "abc123");
+        assert_eq!(facts.pid, 4242);
+        assert_eq!(
+            facts.netns,
+            PathBuf::from("/var/run/docker/netns/f6f5a3c09806")
+        );
         assert_eq!(
             facts.ips,
             [
@@ -102,6 +141,7 @@ mod tests {
             ]
         );
         assert_eq!(facts.pin, None);
+        assert_eq!(facts.exposed, BTreeSet::from([8080]));
     }
 
     #[test]
@@ -109,6 +149,10 @@ mod tests {
         let mut stopped = inspect();
         stopped["State"]["Pid"] = 0.into();
         assert_eq!(ContainerFacts::from_inspect(&stopped), None);
+
+        let mut no_sandbox = inspect();
+        no_sandbox["NetworkSettings"]["SandboxKey"] = "".into();
+        assert_eq!(ContainerFacts::from_inspect(&no_sandbox), None);
 
         let mut host = inspect();
         host["NetworkSettings"]["Networks"] = serde_json::json!({ "host": { "IPAddress": "" } });
