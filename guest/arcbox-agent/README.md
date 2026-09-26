@@ -58,6 +58,14 @@ only, so it serves both the Mac (routed in over the bridge NIC) and sibling
 containers (switched on a Docker bridge, which reaches iptables through the
 kernel's built-in `br_netfilter`).
 
+`https://` works the same way once the daemon has written its local CA to
+`/arcbox/tls/` (`arcbox-local-ca`): port 443 of each container with an HTTP
+port is REDIRECTed to a proxy on port 61443 of the VM's namespace, unless the
+container listens on 443 itself. The proxy finds the container the client
+dialled through conntrack, presents a certificate minted for the SNI name, and
+relays plain HTTP/1.1 to the container's HTTP port. Port 61443 is therefore
+not available to container publishes.
+
 ## Cross-Compilation
 
 ```bash
