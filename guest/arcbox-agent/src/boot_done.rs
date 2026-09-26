@@ -43,23 +43,31 @@ pub const SENTINEL: &str = "/run/arcbox-boot-done";
 
 const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
 const SYSTEMD_UNIT: &str = "/etc/systemd/system/arcbox-boot-done.service";
-const SYSTEMD_WANTS: &str = "/etc/systemd/system/multi-user.target.wants/arcbox-boot-done.service";
+const SYSTEMD_TARGET_DROP_IN: &str =
+    "/etc/systemd/system/multi-user.target.d/arcbox-boot-done.conf";
 const OPENRC_SERVICE: &str = "/etc/init.d/arcbox-boot-done";
 const OPENRC_RUNLEVEL: &str = "/etc/runlevels/default/arcbox-boot-done";
 
 /// The unit that writes the sentinel.
 ///
-/// `WantedBy=multi-user.target` pulls it into the boot; `After=` on the same
+/// [`SYSTEMD_TARGET_DROP_IN`] pulls it into the boot; `After=` on the same
 /// target orders it after that target is *reached*. Be precise about what
-/// that buys: a `.wants` symlink adds no ordering of its own, so the target
-/// is reached once the units that declare `Before=multi-user.target` are
-/// done — conventional for distro service units, but not something the
-/// symlink guarantees. `After=network-online.target` is listed as well and
-/// costs nothing: without a matching `Wants=` it constrains ordering only on
-/// images where something else already activates that target, and imposes
-/// nothing where nothing does. Deliberately no `Wants=network-online.target`
-/// — on an image with no wait-online provider the target never activates,
-/// and the hook would never run.
+/// that buys: `Wants=` adds no ordering of its own, so the target is reached
+/// once the units that declare `Before=multi-user.target` are done —
+/// conventional for distro service units, but not something `Wants=`
+/// guarantees. `After=network-online.target` is listed as well and costs
+/// nothing: without a matching `Wants=` it constrains ordering only on images
+/// where something else already activates that target, and imposes nothing
+/// where nothing does. Deliberately no `Wants=network-online.target` — on an
+/// image with no wait-online provider the target never activates, and the
+/// hook would never run.
+///
+/// Deliberately no `[Install]` section either, which makes the unit static:
+/// the first boot of an image with an uninitialized machine id applies the
+/// preset policy, and on a `disable *` distro (Fedora, the RHEL family) that
+/// removed a `multi-user.target.wants` link before the unit ever ran —
+/// readiness then waited out its whole timeout. Presets act on `[Install]`
+/// sections, never on a target's drop-in.
 fn systemd_unit_body() -> String {
     format!(
         "[Unit]
@@ -71,12 +79,12 @@ After=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/bin/sh -c 'cat {BOOT_ID} > {SENTINEL}'
-
-[Install]
-WantedBy=multi-user.target
 "
     )
 }
+
+/// The drop-in through which `multi-user.target` wants the unit.
+const SYSTEMD_TARGET_DROP_IN_BODY: &str = "[Unit]\nWants=arcbox-boot-done.service\n";
 
 /// `after *` orders this behind every other service in the runlevel, which
 /// is openrc's own way to say "last".
@@ -210,26 +218,16 @@ impl Layout {
             tracing::warn!(error = %e, "failed to write the systemd boot-done unit");
             return false;
         }
-        // Enabled by symlink rather than `systemctl enable`: systemd is not
-        // running yet at this point in the boot shim, so there is nothing to
-        // ask. The link target is the in-guest absolute path, which is what
-        // systemd itself will resolve.
-        if let Err(e) = self.symlink_into_wants() {
-            tracing::warn!(error = %e, "failed to enable the systemd boot-done unit");
+        // Wired in by file rather than `systemctl`: systemd is not running
+        // yet at this point in the boot shim, so there is nothing to ask.
+        let drop_in = self.path(SYSTEMD_TARGET_DROP_IN);
+        if let Err(e) = write_file(&drop_in, SYSTEMD_TARGET_DROP_IN_BODY, 0o644) {
+            tracing::warn!(error = %e, "failed to wire the systemd boot-done unit into the boot");
             let _ = fs::remove_file(&unit);
             return false;
         }
         tracing::info!("installed the systemd boot-completion hook");
         true
-    }
-
-    fn symlink_into_wants(&self) -> std::io::Result<()> {
-        let wants = self.path(SYSTEMD_WANTS);
-        if let Some(parent) = wants.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let _ = fs::remove_file(&wants);
-        std::os::unix::fs::symlink(SYSTEMD_UNIT, &wants)
     }
 
     fn install_openrc(&self) -> bool {
@@ -316,20 +314,24 @@ mod tests {
         assert!(!layout.hook_installed());
     }
 
+    /// The unit must be pulled in by the target's drop-in and carry no
+    /// `[Install]` section: a first boot applies the distro's preset policy,
+    /// and `disable *` (Fedora, the RHEL family) removed the `.wants` link
+    /// this used to rely on, leaving an inert unit and a readiness timeout.
     #[test]
-    fn a_systemd_image_gets_an_enabled_unit() {
+    fn a_systemd_image_gets_a_unit_presets_cannot_disable() {
         let (_dir, layout) = image();
         touch(&layout, "/usr/lib/systemd/systemd");
 
         assert!(layout.install());
         assert!(layout.hook_installed());
-        // Enablement is the symlink; without it the unit is inert and
-        // readiness would wait out its full timeout.
-        let wants = layout.path(SYSTEMD_WANTS);
-        assert_eq!(
-            fs::read_link(&wants).expect("symlink"),
-            Path::new(SYSTEMD_UNIT)
+        let drop_in = fs::read_to_string(layout.path(SYSTEMD_TARGET_DROP_IN)).expect("drop-in");
+        assert!(
+            drop_in.contains("Wants=arcbox-boot-done.service"),
+            "{drop_in}"
         );
+        let unit = fs::read_to_string(layout.path(SYSTEMD_UNIT)).expect("unit");
+        assert!(!unit.contains("[Install]"), "{unit}");
     }
 
     #[test]
@@ -352,15 +354,15 @@ mod tests {
     }
 
     /// A half-installed hook is the expensive failure: it never fires and
-    /// burns the readiness timeout. A failed enable must therefore roll the
+    /// burns the readiness timeout. A failed drop-in must therefore roll the
     /// unit back, leaving `hook_installed` false — the pre-hook behaviour.
     #[test]
     fn a_failed_enable_rolls_the_unit_back() {
         let (_dir, layout) = image();
         touch(&layout, "/usr/lib/systemd/systemd");
-        // A regular file where the .wants directory must go: create_dir_all
-        // fails, so enablement cannot succeed.
-        touch(&layout, "/etc/systemd/system/multi-user.target.wants");
+        // A regular file where the drop-in directory must go: create_dir_all
+        // fails, so the target can never want the unit.
+        touch(&layout, "/etc/systemd/system/multi-user.target.d");
 
         assert!(!layout.install_systemd());
         assert!(!layout.path(SYSTEMD_UNIT).exists());
