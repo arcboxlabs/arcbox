@@ -656,3 +656,14 @@ message SandboxResumeResponse {
     // sandbox has no network). The daemon re-registers host DNS from it.
     string ip_address = 1;
 }
+
+// --- Machine exec session control (host↔guest vsock only) ---
+
+// Deliver a signal to a running machine exec process, sent on the session's
+// connection after its MachineExecRequest (SSH `signal` requests). No reply.
+message MachineExecSignal {
+    // Signal name without the SIG prefix, as SSH names it ("INT", "TERM").
+    // Named rather than numbered because host and guest number signals
+    // differently (SIGUSR1 is 30 on macOS, 10 on Linux).
+    string name = 1;
+}

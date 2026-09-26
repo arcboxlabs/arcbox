@@ -322,6 +322,17 @@ message MachineExecRequest {
     bool tty = 6;
     // Initial terminal size (interactive sessions).
     TerminalSize tty_size = 7;
+    // Feed the process the session's stdin messages (ExecSession only):
+    // without a TTY, stdin is /dev/null unless this is set. A TTY session
+    // always reads stdin from its terminal.
+    bool attach_stdin = 8;
+    // Run as a login session of `user` (root when empty), the way sshd does:
+    // the environment starts empty and gets HOME, USER, LOGNAME, SHELL and
+    // PATH from the account before `env` is applied, the working directory
+    // defaults to HOME, and the process is the account's shell — a login
+    // shell when `cmd` is empty, otherwise `shell -c` over `cmd` joined with
+    // spaces.
+    bool login = 9;
 }
 
 // One client message on an interactive machine session.
@@ -346,6 +357,10 @@ message MachineExecOutput {
     int32 exit_code = 3;
     // Is this the final message.
     bool done = 4;
+    // Signal that terminated the process, without the SIG prefix ("KILL");
+    // empty when it exited on its own. Only set on completion, where
+    // `exit_code` is then -1.
+    string exit_signal = 5;
 }
 
 // Request for SSH connection info.

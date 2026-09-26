@@ -1785,6 +1785,19 @@ pub struct MachineExecRequest {
     /// Initial terminal size (interactive sessions).
     #[prost(message, optional, tag = "7")]
     pub tty_size: ::core::option::Option<TerminalSize>,
+    /// Feed the process the session's stdin messages (ExecSession only):
+    /// without a TTY, stdin is /dev/null unless this is set. A TTY session
+    /// always reads stdin from its terminal.
+    #[prost(bool, tag = "8")]
+    pub attach_stdin: bool,
+    /// Run as a login session of `user` (root when empty), the way sshd does:
+    /// the environment starts empty and gets HOME, USER, LOGNAME, SHELL and
+    /// PATH from the account before `env` is applied, the working directory
+    /// defaults to HOME, and the process is the account's shell — a login
+    /// shell when `cmd` is empty, otherwise `shell -c` over `cmd` joined with
+    /// spaces.
+    #[prost(bool, tag = "9")]
+    pub login: bool,
 }
 /// One client message on an interactive machine session.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1822,6 +1835,11 @@ pub struct MachineExecOutput {
     /// Is this the final message.
     #[prost(bool, tag = "4")]
     pub done: bool,
+    /// Signal that terminated the process, without the SIG prefix ("KILL");
+    /// empty when it exited on its own. Only set on completion, where
+    /// `exit_code` is then -1.
+    #[prost(string, tag = "5")]
+    pub exit_signal: ::prost::alloc::string::String,
 }
 /// Request for SSH connection info.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -3738,6 +3756,16 @@ pub struct SandboxResumeResponse {
     /// sandbox has no network). The daemon re-registers host DNS from it.
     #[prost(string, tag = "1")]
     pub ip_address: ::prost::alloc::string::String,
+}
+/// Deliver a signal to a running machine exec process, sent on the session's
+/// connection after its MachineExecRequest (SSH `signal` requests). No reply.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MachineExecSignal {
+    /// Signal name without the SIG prefix, as SSH names it ("INT", "TERM").
+    /// Named rather than numbered because host and guest number signals
+    /// differently (SIGUSR1 is 30 on macOS, 10 on Linux).
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
 }
 /// Transport protocol of a forwarded sandbox port.
 ///

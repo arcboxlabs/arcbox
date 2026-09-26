@@ -261,6 +261,10 @@ pub enum MessageType {
     /// Terminal resize for an interactive machine session (payload:
     /// `arcbox.v1.TerminalSize`).
     MachineExecResize = 0x0052,
+    /// Signal for a running machine exec process (payload:
+    /// `arcbox.v1.MachineExecSignal`). Like [`Self::MachineExecInput`] it
+    /// travels on the session's own connection and has no reply.
+    MachineExecSignal = 0x0080,
 
     // Response types (0x1000 - 0x1FFF).
     PingResponse = 0x1001,
@@ -491,6 +495,7 @@ impl MessageType {
             0x0050 => Some(Self::MachineExecRequest),
             0x0051 => Some(Self::MachineExecInput),
             0x0052 => Some(Self::MachineExecResize),
+            0x0080 => Some(Self::MachineExecSignal),
             // Responses.
             0x1001 => Some(Self::PingResponse),
             0x1002 => Some(Self::GetSystemInfoResponse),
@@ -794,6 +799,7 @@ mod tests {
             (0x0050, MessageType::MachineExecRequest),
             (0x0051, MessageType::MachineExecInput),
             (0x0052, MessageType::MachineExecResize),
+            (0x0080, MessageType::MachineExecSignal),
             (0x1050, MessageType::MachineExecOutput),
         ];
 
