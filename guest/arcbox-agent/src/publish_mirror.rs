@@ -18,15 +18,14 @@
 //! injected, and the relay only injects what its own address-bound listener
 //! accepted, the host-side restriction the user asked for still holds.
 
-use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 
-use crate::iptables::{self, is_installed, nat_prerouting, run};
+use crate::iptables::{self, NatRule, TaggedRules};
 
 /// iptables `--comment` tag prefix; the suffix is the container's full ID.
-const RULE_COMMENT_PREFIX: &str = "arcbox-publish:";
+const RULE_OWNER: &str = "arcbox-publish:";
 
 /// One published port whose dockerd rule is pinned to a specific host IP.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -116,33 +115,24 @@ fn container_ipv4(inspect: &serde_json::Value) -> Option<Ipv4Addr> {
         .find_map(|net| net.get("IPAddress")?.as_str()?.parse().ok())
 }
 
-/// The PREROUTING spec (everything after the chain name) that mirrors one
-/// binding for traffic arriving on `uplink`.
-fn rule_spec(uplink: &str, container_id: &str, publish: &PinnedPublish) -> Vec<String> {
-    vec![
-        "-i".into(),
-        uplink.into(),
-        "-p".into(),
-        publish.protocol.clone(),
-        "--dport".into(),
-        publish.host_port.to_string(),
-        "-m".into(),
-        "comment".into(),
-        "--comment".into(),
-        format!("{RULE_COMMENT_PREFIX}{container_id}"),
-        "-j".into(),
-        "DNAT".into(),
-        "--to-destination".into(),
-        format!("{}:{}", publish.container_ip, publish.container_port),
-    ]
+/// The PREROUTING rule that mirrors one binding for traffic arriving on
+/// `uplink`.
+fn rule(uplink: &str, container_id: &str, publish: &PinnedPublish) -> NatRule {
+    let host_port = publish.host_port.to_string();
+    let destination = format!("{}:{}", publish.container_ip, publish.container_port);
+    NatRule::new(
+        RULE_OWNER,
+        container_id,
+        &["-i", uplink, "-p", &publish.protocol, "--dport", &host_port],
+        &["-j", "DNAT", "--to-destination", &destination],
+    )
 }
 
 /// Installed mirror rules, keyed by container ID.
-#[derive(Default)]
 pub struct PublishMirror {
     /// Uplink interface the relay's traffic arrives on.
     uplink: String,
-    rules: HashMap<String, Vec<Vec<String>>>,
+    rules: TaggedRules,
 }
 
 impl PublishMirror {
@@ -151,64 +141,32 @@ impl PublishMirror {
     pub fn new(uplink: String) -> Self {
         Self {
             uplink,
-            rules: HashMap::new(),
+            rules: TaggedRules::new(RULE_OWNER),
         }
     }
 
     /// Installs the mirror rules for a container's pinned publishes,
     /// replacing whatever this mirror previously held for it.
     pub async fn apply(&mut self, container_id: &str, publishes: &[PinnedPublish]) -> Result<()> {
-        self.remove(container_id).await?;
-        if publishes.is_empty() {
-            return Ok(());
+        let rules = publishes
+            .iter()
+            .map(|publish| rule(&self.uplink, container_id, publish))
+            .collect();
+        self.rules.replace(container_id, rules).await?;
+        if !publishes.is_empty() {
+            tracing::info!(
+                container_id,
+                count = publishes.len(),
+                uplink = %self.uplink,
+                "mirrored host-address-pinned publishes for the inbound relay"
+            );
         }
-        let mut installed = Vec::with_capacity(publishes.len());
-        for publish in publishes {
-            let spec = rule_spec(&self.uplink, container_id, publish);
-            if !is_installed(&nat_prerouting("-C", &spec)).await? {
-                run(&nat_prerouting("-I", &spec))
-                    .await
-                    .with_context(|| format!("mirroring publish {publish:?}"))?;
-            }
-            installed.push(spec);
-        }
-        tracing::info!(
-            container_id,
-            count = installed.len(),
-            uplink = %self.uplink,
-            "mirrored host-address-pinned publishes for the inbound relay"
-        );
-        self.rules.insert(container_id.to_owned(), installed);
         Ok(())
     }
 
     /// Removes the mirror rules for a container. Missing rules are fine.
     pub async fn remove(&mut self, container_id: &str) -> Result<()> {
-        let Some(specs) = self.rules.remove(container_id) else {
-            return Ok(());
-        };
-        let mut failures = Vec::new();
-        for spec in &specs {
-            match is_installed(&nat_prerouting("-C", spec)).await {
-                Ok(true) => {
-                    if let Err(e) = run(&nat_prerouting("-D", spec)).await {
-                        failures.push(e.to_string());
-                    }
-                }
-                Ok(false) => {}
-                Err(e) => failures.push(e.to_string()),
-            }
-        }
-        if !failures.is_empty() {
-            // Keep the record so a later remove retries the kernel side.
-            self.rules.insert(container_id.to_owned(), specs);
-            bail!(
-                "failed to remove {} publish mirror rule(s) for {container_id}: {}",
-                failures.len(),
-                failures.join("; ")
-            );
-        }
-        Ok(())
+        self.rules.remove(container_id).await
     }
 }
 
@@ -218,7 +176,7 @@ impl PublishMirror {
 /// process's rules, and dockerd re-creates its own on restart, so the
 /// event reconciliation that follows reinstalls what is still needed.
 pub async fn remove_all_orphans() -> Result<()> {
-    let removed = iptables::sweep(RULE_COMMENT_PREFIX).await?;
+    let removed = iptables::sweep(RULE_OWNER).await?;
     if removed > 0 {
         tracing::info!(removed, "swept publish mirror rules from a previous agent");
     }
@@ -286,22 +244,17 @@ mod tests {
     }
 
     #[test]
-    fn rule_spec_matches_the_uplink_and_names_the_container() {
+    fn rule_matches_the_uplink_and_names_the_container() {
         let publish = PinnedPublish {
             protocol: "tcp".into(),
             host_port: 32768,
             container_port: 80,
             container_ip: "172.17.0.2".parse().unwrap(),
         };
-        let spec = rule_spec("eth0", "abc123", &publish);
         assert_eq!(
-            spec.join(" "),
+            rule("eth0", "abc123", &publish).spec(),
             "-i eth0 -p tcp --dport 32768 -m comment --comment arcbox-publish:abc123 \
              -j DNAT --to-destination 172.17.0.2:80"
-        );
-        assert_eq!(
-            nat_prerouting("-I", &spec)[..6],
-            ["-t", "nat", "-w", "2", "-I", "PREROUTING"]
         );
     }
 }

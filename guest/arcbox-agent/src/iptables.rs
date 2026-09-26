@@ -1,18 +1,125 @@
 //! Container rules the agent owns in the guest's nat PREROUTING chain.
 //!
-//! Agent components rewrite the destination of traffic bound for
-//! containers. Every such rule carries an iptables comment
-//! `<owner><container id>`, which is what lets [`sweep`] find an owner's
-//! rules again after an agent restart, when the record of what the previous
-//! process installed is gone. The owner's event reconciliation then
-//! reinstalls what still applies.
+//! Agent components rewrite the destination of traffic bound for containers:
+//! `publish_mirror` for publishes pinned to a host address, `domains` for
+//! container domains served without a port. Every such rule carries an
+//! iptables comment `<owner><container id>`, which is what lets
+//!
+//! - [`TaggedRules`] replace or remove one container's rules as a set, with
+//!   `-C` before every insert or delete so that a rule is never doubled and
+//!   a missing one is not an error, and
+//! - [`sweep`] find an owner's rules again after an agent restart, when the
+//!   record of what the previous process installed is gone. The owner's
+//!   event reconciliation then reinstalls what still applies.
 
+use std::collections::HashMap;
 use std::process::Output;
 
 use anyhow::{Context, Result, bail};
 use tokio::process::Command;
 
 const IPTABLES: &str = "/sbin/iptables";
+
+/// One agent-owned nat PREROUTING rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NatRule {
+    /// Everything after the chain name: matches, the comment tag, the target.
+    spec: Vec<String>,
+}
+
+impl NatRule {
+    /// A rule applying `target` to traffic matching `matches`, tagged as
+    /// `owner`'s rule for `container_id`.
+    #[must_use]
+    pub fn new(owner: &str, container_id: &str, matches: &[&str], target: &[&str]) -> Self {
+        let tag = format!("{owner}{container_id}");
+        let spec = matches
+            .iter()
+            .chain(&["-m", "comment", "--comment", tag.as_str()])
+            .chain(target)
+            .map(|arg| (*arg).to_owned())
+            .collect();
+        Self { spec }
+    }
+
+    /// The rule as `iptables -S` would print it after `-A PREROUTING`.
+    #[cfg(test)]
+    pub fn spec(&self) -> String {
+        self.spec.join(" ")
+    }
+
+    /// Inserts the rule at the top of the chain unless it is there already.
+    async fn ensure(&self) -> Result<()> {
+        if !is_installed(&nat_prerouting("-C", &self.spec)).await? {
+            run(&nat_prerouting("-I", &self.spec)).await?;
+        }
+        Ok(())
+    }
+
+    /// Deletes the rule if it is present.
+    async fn delete(&self) -> Result<()> {
+        if is_installed(&nat_prerouting("-C", &self.spec)).await? {
+            run(&nat_prerouting("-D", &self.spec)).await?;
+        }
+        Ok(())
+    }
+}
+
+/// The rules one owner holds in the kernel, per container ID.
+pub struct TaggedRules {
+    owner: &'static str,
+    held: HashMap<String, Vec<NatRule>>,
+}
+
+impl TaggedRules {
+    /// An empty record for rules tagged with `owner`.
+    #[must_use]
+    pub fn new(owner: &'static str) -> Self {
+        Self {
+            owner,
+            held: HashMap::new(),
+        }
+    }
+
+    /// Makes `rules` the container's whole set.
+    ///
+    /// New rules go in before stale ones come out, so a container whose rule
+    /// changes is never briefly without one. A stale rule that fails to come
+    /// out stays recorded for the next call to retry.
+    pub async fn replace(&mut self, container_id: &str, rules: Vec<NatRule>) -> Result<()> {
+        let previous = self.held.remove(container_id).unwrap_or_default();
+        let mut held = Vec::with_capacity(rules.len());
+        let mut failures = Vec::new();
+        for rule in &rules {
+            match rule.ensure().await {
+                Ok(()) => held.push(rule.clone()),
+                Err(e) => failures.push(format!("{e:#}")),
+            }
+        }
+        for stale in previous.into_iter().filter(|rule| !rules.contains(rule)) {
+            if let Err(e) = stale.delete().await {
+                failures.push(format!("{e:#}"));
+                held.push(stale);
+            }
+        }
+        if !held.is_empty() {
+            self.held.insert(container_id.to_owned(), held);
+        }
+        if !failures.is_empty() {
+            bail!(
+                "{} rule change(s) failed for {container_id}: {}",
+                self.owner,
+                failures.join("; ")
+            );
+        }
+        Ok(())
+    }
+
+    /// Removes every rule held for the container. Missing rules are fine.
+    pub async fn remove(&mut self, container_id: &str) -> Result<()> {
+        self.replace(container_id, Vec::new()).await
+    }
+}
 
 /// Deletes every nat PREROUTING rule tagged by `owner`, whoever installed
 /// it, and returns how many went.
@@ -67,8 +174,7 @@ fn unquote(field: &str) -> String {
         .to_owned()
 }
 
-/// The argv applying `verb` (`-C`, `-I`, `-D`) to a nat PREROUTING rule.
-pub fn nat_prerouting(verb: &str, spec: &[String]) -> Vec<String> {
+fn nat_prerouting(verb: &str, spec: &[String]) -> Vec<String> {
     ["-t", "nat", "-w", "2", verb, "PREROUTING"]
         .iter()
         .map(|s| (*s).to_owned())
@@ -76,8 +182,7 @@ pub fn nat_prerouting(verb: &str, spec: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Runs an `iptables -C` argv: whether the rule is installed.
-pub async fn is_installed(check_args: &[String]) -> Result<bool> {
+async fn is_installed(check_args: &[String]) -> Result<bool> {
     let output = Command::new(IPTABLES)
         .args(check_args)
         .output()
@@ -101,8 +206,7 @@ fn classify_check(output: &Output, args: &[String]) -> Result<bool> {
     )
 }
 
-/// Runs an iptables argv that must succeed.
-pub async fn run(args: &[String]) -> Result<()> {
+async fn run(args: &[String]) -> Result<()> {
     let output = Command::new(IPTABLES)
         .args(args)
         .output()
@@ -121,6 +225,25 @@ pub async fn run(args: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rule_carries_its_owner_tag_between_matches_and_target() {
+        let rule = NatRule::new(
+            "arcbox-test:",
+            "abc123",
+            &["-p", "tcp", "--dport", "80"],
+            &["-j", "DNAT", "--to-destination", "172.17.0.2:3000"],
+        );
+        assert_eq!(
+            rule.spec(),
+            "-p tcp --dport 80 -m comment --comment arcbox-test:abc123 \
+             -j DNAT --to-destination 172.17.0.2:3000"
+        );
+        assert_eq!(
+            nat_prerouting("-I", &rule.spec)[..6],
+            ["-t", "nat", "-w", "2", "-I", "PREROUTING"]
+        );
+    }
 
     #[test]
     fn sweep_recognises_only_the_owners_rules() {
