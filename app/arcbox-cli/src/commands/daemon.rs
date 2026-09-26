@@ -62,6 +62,10 @@ pub struct DaemonArgs {
     #[arg(long)]
     pub kubernetes_context: Option<String>,
 
+    /// Host loopback TCP port for the SSH server; 0 asks the OS to allocate one.
+    #[arg(long)]
+    pub ssh_port: Option<u16>,
+
     /// Private IPv4 pool used by this instance's container networks.
     #[arg(long)]
     pub container_cidr: Option<ContainerNetwork>,
@@ -453,6 +457,10 @@ fn build_daemon_args(args: &DaemonArgs) -> Vec<OsString> {
         daemon_args.push(OsString::from("--kubernetes-context"));
         daemon_args.push(OsString::from(context));
     }
+    if let Some(port) = args.ssh_port {
+        daemon_args.push(OsString::from("--ssh-port"));
+        daemon_args.push(OsString::from(port.to_string()));
+    }
     if let Some(network) = args.container_cidr {
         daemon_args.push(OsString::from("--container-cidr"));
         daemon_args.push(OsString::from(network.to_string()));
@@ -587,6 +595,7 @@ mod tests {
             install_dns_resolver: true,
             kubernetes_port: Some(0),
             kubernetes_context: Some("arcbox-dev-feature".to_string()),
+            ssh_port: Some(0),
             container_cidr: Some("10.64.16.0/20".parse().unwrap()),
             profile: Some(ArcboxProfile::Development),
             kernel: None,
@@ -609,6 +618,8 @@ mod tests {
                 "0",
                 "--kubernetes-context",
                 "arcbox-dev-feature",
+                "--ssh-port",
+                "0",
                 "--container-cidr",
                 "10.64.16.0/20",
                 "--profile",

@@ -142,6 +142,16 @@ a certificate per `https://<name>.arcbox.local` name. Trust model:
 
 Deleting `tls/` rotates the CA on the next daemon start; trust the new one again.
 
+### 1.11 `ssh/` — SSH Server
+
+Created by the daemon (0700) the first time its SSH server starts
+(`ssh <machine>@arcbox`, `app/arcbox-ssh`). Keys are generated once and kept.
+
+| Path | Purpose | Creator |
+|------|---------|---------|
+| `ssh/ssh_host_ed25519_key` | Server host key (0600) | daemon |
+| `ssh/id_ed25519` | The one client key the server accepts (0600) | daemon |
+
 ---
 
 ## 2. Configuration Files
@@ -337,7 +347,7 @@ older installations. They can be safely deleted.
 
 | Component | Paths Managed |
 |-----------|--------------|
-| **daemon** | `~/.arcbox/{run,log,data,boot,runtime}/`, sockets, PID, boot asset download, bundle seeding |
+| **daemon** | `~/.arcbox/{run,log,data,boot,runtime,ssh}/`, sockets, PID, boot asset download, bundle seeding |
 | **cli** (`abctl`) | `~/.arcbox/{bin,shell,completions}/`, Docker context, LaunchAgent registration, shell profile injection |
 | **helper** (root) | `/etc/resolver/`, `/usr/local/bin/` symlinks, `/var/run/docker.sock` symlink |
 | **desktop** | SMAppService LaunchAgent registration, `~/.arcbox/run/` directory creation, helper install trigger |

@@ -300,6 +300,7 @@ arcbox-computer-runtime = { version = "0.7.0", path = "computer/arcbox-computer-
 arcbox-core = { version = "0.7.0", path = "app/arcbox-core" } # x-release-please-version
 arcbox-api = { version = "0.7.0", path = "app/arcbox-api" } # x-release-please-version
 arcbox-migration = { version = "0.7.0", path = "app/arcbox-migration" } # x-release-please-version
+arcbox-ssh = { version = "0.7.0", path = "app/arcbox-ssh" } # x-release-please-version
 arcbox-logging = { version = "0.7.0", path = "common/arcbox-logging", default-features = false } # x-release-please-version
 
 # Temporary files and directories (tests, staging paths)

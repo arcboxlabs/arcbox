@@ -58,9 +58,12 @@ startup failure.
   `arcbox-api/src/system.rs`).
 - `NETWORK_READY` covers whichever host services this daemon promises. A
   `--no-linux-vm` daemon reaches it with DNS alone. DNS, Docker, and an
-  explicitly requested Kubernetes proxy are *bound* by then; a bind failure
-  becomes `FAILED`. The canonical best-effort port 16443 remains the exception:
-  a conflict leaves Kubernetes RPCs unavailable without failing startup.
+  explicitly requested Kubernetes proxy or SSH server (`--kubernetes-port`,
+  `--ssh-port`) are *bound* by then; a bind failure becomes `FAILED`. The
+  canonical best-effort ports 16443 and 16022 remain the exception: a
+  conflict leaves Kubernetes RPCs, or `ssh <machine>@arcbox`, unavailable
+  without failing startup. The SSH server runs with or without the Linux VM:
+  machines are VMs of their own.
 - A non-default container CIDR is reconciled before runtime services start;
   an existing route owned by another interface fails startup. The canonical
   production CIDR keeps its existing background recovery behavior.

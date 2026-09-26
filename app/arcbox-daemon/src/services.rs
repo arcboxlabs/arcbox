@@ -133,6 +133,14 @@ pub async fn start_services(
         None
     };
 
+    // Machines are VMs of their own, so SSH does not depend on the Linux VM.
+    let ssh = crate::ssh_service::SshService::bind_requested(
+        ctx.ssh_port,
+        &ctx.layout,
+        Arc::clone(runtime),
+    )
+    .await?;
+
     // Normal RPCs become available only after their advertised listeners are
     // bound. Kubernetes RPCs remain unavailable when its best-effort default
     // listener could not bind; an explicit listener is required to succeed.
@@ -159,6 +167,7 @@ pub async fn start_services(
     });
 
     let kubernetes_proxy = kubernetes_proxy.map(|proxy| proxy.start(Arc::clone(runtime)));
+    let ssh = ssh.map(|service| service.start(ctx.shutdown.clone()));
 
     // Mirror route-install events into SetupStatus. VM (re)starts install
     // the container route from vm_lifecycle, outside the cold-start
@@ -190,6 +199,7 @@ pub async fn start_services(
         docker,
         grpc,
         kubernetes_proxy,
+        ssh,
         route_guard,
     })
 }

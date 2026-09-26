@@ -130,10 +130,13 @@ impl DaemonHandle {
             .arg("--data-dir")
             .arg(&config.data_dir)
             .arg("--foreground")
-            // The Kubernetes proxy is fail-fast so an occupied production
-            // port can never be mistaken for this daemon. Let the kernel pick
-            // an isolated endpoint for every harness process.
+            // The Kubernetes proxy and the SSH server are fail-fast on an
+            // explicit port, so an occupied production port can never be
+            // mistaken for this daemon. Let the kernel pick isolated
+            // endpoints for every harness process.
             .arg("--kubernetes-port")
+            .arg("0")
+            .arg("--ssh-port")
             .arg("0")
             // Keep the guest-data NFS mount off the shared ~/ArcBox by pointing
             // it inside the isolated data dir. A caller can override via env.

@@ -11,6 +11,7 @@ mod recovery;
 mod self_setup;
 mod services;
 mod shutdown;
+mod ssh_service;
 mod startup;
 
 use std::sync::Arc;
@@ -63,6 +64,11 @@ pub struct DaemonArgs {
     /// Name written into the Kubernetes kubeconfig (default: profile context).
     #[arg(long)]
     pub kubernetes_context: Option<String>,
+
+    /// Host loopback TCP port for the SSH server; 0 asks the OS to allocate
+    /// one (default: 16022).
+    #[arg(long)]
+    pub ssh_port: Option<u16>,
 
     /// Private IPv4 pool used by this instance's container networks.
     #[arg(long)]

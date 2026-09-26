@@ -86,6 +86,7 @@ async fn init_early(args: DaemonArgs, handles: StartupHandles) -> Result<EarlyCo
         install_dns_resolver: args.install_dns_resolver,
         kubernetes_port: args.kubernetes_port,
         kubernetes_context,
+        ssh_port: args.ssh_port,
         docker_integration: args.docker_integration,
         mount_nfs: !args.no_mount_nfs,
         vm_args: VmArgs {
@@ -144,6 +145,7 @@ async fn acquire_lock(early: EarlyContext) -> Result<DaemonContext> {
         install_dns_resolver: early.install_dns_resolver,
         kubernetes_port: early.kubernetes_port,
         kubernetes_context: early.kubernetes_context,
+        ssh_port: early.ssh_port,
         docker_integration: early.docker_integration,
         mount_nfs: early.mount_nfs,
         vm_args: early.vm_args,

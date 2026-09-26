@@ -255,6 +255,9 @@ async fn drain(handles: &mut ServiceHandles) {
         if let Some(h) = handles.kubernetes_proxy.as_mut() {
             let _ = h.await;
         }
+        if let Some(h) = handles.ssh.as_mut() {
+            let _ = h.await;
+        }
         if let Some(h) = handles.route_guard.as_mut() {
             let _ = h.await;
         }
@@ -272,6 +275,9 @@ async fn drain(handles: &mut ServiceHandles) {
             h.abort();
         }
         if let Some(h) = handles.kubernetes_proxy.as_mut() {
+            h.abort();
+        }
+        if let Some(h) = handles.ssh.as_mut() {
             h.abort();
         }
         if let Some(h) = handles.route_guard.as_mut() {

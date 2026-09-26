@@ -97,6 +97,9 @@ pub struct EarlyContext {
     /// `None` preserves the canonical best-effort 16443 listener.
     pub kubernetes_port: Option<u16>,
     pub kubernetes_context: String,
+    /// Explicit SSH server port; 0 lets the bound service choose one.
+    /// `None` preserves the canonical best-effort 16022 listener.
+    pub ssh_port: Option<u16>,
     pub docker_integration: bool,
     /// Mount the guest Docker data export at the configured host directory once ready.
     pub mount_nfs: bool,
@@ -132,6 +135,8 @@ pub struct DaemonContext {
     /// Explicit Kubernetes proxy port; `None` uses best-effort port 16443.
     pub kubernetes_port: Option<u16>,
     pub kubernetes_context: String,
+    /// Explicit SSH server port; `None` uses best-effort port 16022.
+    pub ssh_port: Option<u16>,
     pub docker_integration: bool,
     /// Mount the guest Docker data export at the configured host directory once ready.
     pub mount_nfs: bool,
@@ -156,6 +161,8 @@ pub struct ServiceHandles {
     pub docker: Option<tokio::task::JoinHandle<()>>,
     pub grpc: tokio::task::JoinHandle<()>,
     pub kubernetes_proxy: Option<tokio::task::JoinHandle<()>>,
+    /// SSH server task; `None` when its best-effort default port was taken.
+    pub ssh: Option<tokio::task::JoinHandle<()>>,
     /// Host container-route guard; present only on macOS with the Linux VM enabled.
     pub route_guard: Option<tokio::task::JoinHandle<()>>,
 }

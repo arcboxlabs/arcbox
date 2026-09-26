@@ -42,6 +42,8 @@ hyper-util = { version = "0.1.20", features = ["server", "server-auto", "server-
 hyper = { workspace = true, features = ["server", "http1", "http2"] }
 connectrpc-reflection = { package = "arcbox-connectrpc-reflection", version = "0.9.0-arcbox.1" }
 arcbox-connect.workspace = true
+arcbox-ssh.workspace = true
+arcbox-error.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 arcbox-route.workspace = true
