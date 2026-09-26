@@ -240,7 +240,11 @@ async fn main() -> Result<()> {
         supervisor::spawn_reaper(sv);
     }
 
-    tracing::info!("ArcBox agent starting...");
+    let guest = agent::Guest::detect();
+    tracing::info!(?guest, "ArcBox agent starting...");
+    if guest == agent::Guest::DistroMachine {
+        return agent::run(guest).await;
+    }
 
     let cancel = tokio_util::sync::CancellationToken::new();
 
@@ -286,7 +290,7 @@ async fn main() -> Result<()> {
     ));
 
     // Run the agent (vsock listener + RPC handler).
-    let result = agent::run().await;
+    let result = agent::run(guest).await;
 
     // Shut down background tasks.
     cancel.cancel();

@@ -7,6 +7,8 @@ use anyhow::Result;
 
 use arcbox_constants::ports::AGENT_PORT;
 
+use super::Guest;
+
 /// The Guest Agent (stub for non-Linux platforms).
 pub struct Agent;
 
@@ -20,7 +22,7 @@ impl Agent {
     ///
     /// On non-Linux platforms (e.g., macOS), vsock is not available.
     /// This stub allows development and testing on the host.
-    pub async fn run(&self) -> Result<()> {
+    pub async fn run(&self, _guest: Guest) -> Result<()> {
         tracing::warn!("Agent is running in stub mode (non-Linux platform)");
         tracing::info!("Agent would listen on vsock port {}", AGENT_PORT);
 

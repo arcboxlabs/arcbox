@@ -7,6 +7,7 @@
 //! [`stub`] (a no-op kept buildable on non-Linux hosts for development).
 
 use anyhow::Result;
+use arcbox_constants::cmdline::MACHINE_ROOTFS_KEY;
 
 pub mod ensure_runtime;
 #[cfg(any(target_os = "linux", test))]
@@ -26,10 +27,50 @@ pub use linux::container_network;
 #[cfg(not(target_os = "linux"))]
 pub use stub::Agent;
 
-/// Runs the agent.
-pub async fn run() -> Result<()> {
+/// The guest the agent serves, which decides what runs beside the vsock RPC
+/// listener.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Guest {
+    /// The System VM: dockerd and every service around it.
+    SystemVm,
+    /// A distro machine. Its own init owns its services, so the agent serves
+    /// RPC and nothing else: the System VM's DNS server on `0.0.0.0:53`
+    /// shadowed systemd-resolved's `127.0.0.53` stub (resolved turns the stub
+    /// off, and every glibc lookup then reached a server that does not answer
+    /// the internet), and its reconcilers would rewrite the machine's own
+    /// NAT table the moment the user installed dockerd there.
+    DistroMachine,
+}
+
+impl Guest {
+    /// Reads the guest off the kernel command line, where the machine boot
+    /// shim's contract key (`arcbox.machine_rootfs=`) marks a distro machine.
+    pub fn detect() -> Self {
+        match std::fs::read_to_string("/proc/cmdline") {
+            Ok(cmdline) => Self::from_cmdline(&cmdline),
+            Err(e) => {
+                tracing::warn!(error = %e, "cannot read the kernel cmdline; serving as the System VM");
+                Self::SystemVm
+            }
+        }
+    }
+
+    fn from_cmdline(cmdline: &str) -> Self {
+        if cmdline
+            .split_whitespace()
+            .any(|token| token.starts_with(MACHINE_ROOTFS_KEY))
+        {
+            Self::DistroMachine
+        } else {
+            Self::SystemVm
+        }
+    }
+}
+
+/// Runs the agent for `guest`.
+pub async fn run(guest: Guest) -> Result<()> {
     let agent = Agent::new();
-    agent.run().await
+    agent.run(guest).await
 }
 
 #[cfg(test)]
@@ -132,5 +173,18 @@ mod tests {
     #[test]
     fn test_agent_creation() {
         let _agent = Agent::new();
+    }
+
+    /// The host marks a distro machine only through the shim's cmdline
+    /// contract; the System VM's cmdline carries `arcbox.*` keys too.
+    #[test]
+    fn the_machine_shim_key_selects_a_distro_machine() {
+        let machine = "console=hvc0 root=/dev/vda ro rootfstype=erofs net.ifnames=0 \
+                       init=/sbin/arcbox-machine-init arcbox.machine_rootfs=/dev/vdb \
+                       arcbox.machine_data=/dev/vdc";
+        assert_eq!(Guest::from_cmdline(machine), Guest::DistroMachine);
+        let system_vm = "console=hvc0 root=/dev/vda ro arcbox.guest_docker_vsock_port=2375 \
+                         arcbox.container_network=172.16.0.0/12";
+        assert_eq!(Guest::from_cmdline(system_vm), Guest::SystemVm);
     }
 }
