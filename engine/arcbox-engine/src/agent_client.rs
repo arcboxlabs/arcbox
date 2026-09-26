@@ -8,6 +8,8 @@
 //! (prost) and new (buffa) guest agents: same length-prefixed
 //! `MessageType` frames, same `AGENT_PROTOCOL_VERSION`, no wire change.
 
+#[cfg(all(test, target_os = "macos"))]
+mod exec_session_tests;
 mod transport;
 mod wire;
 
@@ -47,7 +49,7 @@ use arcbox_constants::wire::MessageType;
 use arcbox_transport::Transport;
 #[cfg(target_os = "macos")]
 use arcbox_transport::vsock::BlockingVsockTransport;
-use arcbox_transport::vsock::{VsockAddr, VsockTransport};
+use arcbox_transport::vsock::{VsockAddr, VsockReceiver, VsockTransport};
 use buffa::Message;
 use bytes::Bytes;
 use std::time::{Duration, Instant};
@@ -56,8 +58,8 @@ use tokio::sync::mpsc;
 /// A single client→guest message during an interactive machine exec session.
 #[derive(Debug)]
 pub enum ExecSessionInput {
-    /// Raw bytes for the process's stdin. An empty payload signals EOF and
-    /// ends the input stream.
+    /// Raw bytes for the process's stdin. An empty payload signals EOF;
+    /// resizes may still follow it.
     Stdin(Vec<u8>),
     /// Resize the pseudo-TTY (only meaningful for `tty = true` sessions).
     Resize {
@@ -66,6 +68,23 @@ pub enum ExecSessionInput {
         /// Terminal height in rows.
         height: u16,
     },
+}
+
+impl ExecSessionInput {
+    /// The wire frame carrying this input to the guest.
+    fn frame(&self) -> Bytes {
+        match self {
+            Self::Stdin(data) => wire::build_message(MessageType::MachineExecInput, "", data),
+            Self::Resize { width, height } => {
+                let size = TerminalSize {
+                    width: u32::from(*width),
+                    height: u32::from(*height),
+                    ..Default::default()
+                };
+                wire::build_message(MessageType::MachineExecResize, "", &size.encode_to_vec())
+            }
+        }
+    }
 }
 
 /// Bound on frames buffered between the guest transport and a streaming RPC's
@@ -1572,103 +1591,31 @@ impl AgentClient {
     }
 
     /// Runs a command in the machine root (the agent's own mount namespace)
-    /// and returns a channel of streaming output.
+    /// with no input, and returns a channel of streaming output.
     ///
-    /// Consumes the client because the stream task requires exclusive
-    /// transport access. Non-interactive: the guest rejects `tty` requests
-    /// until the bidi exec session lands.
+    /// A [`Self::machine_exec_session`] whose input ends at once: the guest
+    /// reads it as stdin EOF.
     ///
     /// # Errors
     ///
     /// Returns an error if the initial send fails.
     pub async fn machine_exec(
-        mut self,
+        self,
         req: MachineExecRequest,
     ) -> Result<mpsc::Receiver<Result<MachineExecOutput>>> {
-        if !self.connected {
-            self.connect().await?;
-        }
-
-        let payload = req.encode_to_vec();
-        let buf = wire::build_message(MessageType::MachineExecRequest, "", &payload);
-        self.transport
-            .async_send(buf)
-            .await
-            .map_err(|source| EngineError::Transport {
-                context: "failed to send exec request",
-                source,
-            })?;
-
-        let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
-        tokio::spawn(async move {
-            loop {
-                let raw = match self.transport.async_recv().await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(EngineError::Transport {
-                                context: "failed to receive exec output",
-                                source: e,
-                            }))
-                            .await;
-                        break;
-                    }
-                };
-
-                let (resp_type, _, resp_payload) = match wire::parse_response(&raw) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        let _ = tx.send(Err(e)).await;
-                        break;
-                    }
-                };
-
-                if resp_type == MessageType::Error as u32 {
-                    let (code, message) = wire::parse_error_response(&resp_payload)
-                        .unwrap_or_else(|_| (500, "unknown error".to_string()));
-                    let _ = tx.send(Err(EngineError::Agent { code, message })).await;
-                    break;
-                }
-
-                if resp_type != MessageType::MachineExecOutput as u32 {
-                    let _ = tx
-                        .send(Err(EngineError::Machine(format!(
-                            "unexpected response type: 0x{:04x}",
-                            resp_type
-                        ))))
-                        .await;
-                    break;
-                }
-
-                match MachineExecOutput::decode_from_slice(&resp_payload) {
-                    Ok(output) => {
-                        let done = output.done;
-                        // Stop reading if the consumer dropped, so a spewing
-                        // process isn't drained into the void indefinitely.
-                        if tx.send(Ok(output)).await.is_err() || done {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(EngineError::Machine(format!("decode error: {}", e))))
-                            .await;
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(rx)
+        let (_, no_input) = mpsc::channel(1);
+        self.machine_exec_session(req, no_input).await
     }
 
-    /// Starts an interactive exec session in the machine root (PTY-backed).
+    /// Starts an exec session in the machine root (the agent's own mount
+    /// namespace), PTY-backed when the request asks for a TTY.
     ///
     /// Consumes the client because the stream task requires exclusive
     /// transport access. The caller supplies a receiver of
-    /// [`ExecSessionInput`]s (stdin bytes, TTY resizes, or EOF) and gets an
-    /// output receiver of [`MachineExecOutput`] frames
-    /// (stdout/stderr merged by the PTY; final frame carries the exit code).
+    /// [`ExecSessionInput`]s (stdin bytes, EOF, TTY resizes) and gets
+    /// an output receiver of [`MachineExecOutput`] frames whose last one
+    /// carries the exit status. Dropping that receiver ends the session: the
+    /// connection closes, and the guest kills the process group.
     ///
     /// # Errors
     ///
@@ -1702,100 +1649,30 @@ impl AgentClient {
 
         let (out_tx, out_rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
 
-        // Input pump: channel → MachineExecInput / MachineExecResize frames.
-        let stdin_handle = tokio::spawn(async move {
-            loop {
-                match input_rx.recv().await {
-                    Some(ExecSessionInput::Stdin(data)) => {
-                        let is_eof = data.is_empty();
-                        let frame = wire::build_message(MessageType::MachineExecInput, "", &data);
-                        if sender.send(frame).await.is_err() || is_eof {
-                            break;
-                        }
-                    }
-                    Some(ExecSessionInput::Resize { width, height }) => {
-                        let size = TerminalSize {
-                            width: u32::from(width),
-                            height: u32::from(height),
-                            ..Default::default()
-                        };
-                        let frame = wire::build_message(
-                            MessageType::MachineExecResize,
-                            "",
-                            &size.encode_to_vec(),
-                        );
-                        if sender.send(frame).await.is_err() {
-                            break;
-                        }
-                    }
-                    None => {
-                        // Channel closed without explicit EOF; best-effort EOF
-                        // frame so the guest session doesn't hang on stdin.
-                        let eof = wire::build_message(MessageType::MachineExecInput, "", &[]);
-                        let _ = sender.send(eof).await;
-                        break;
-                    }
+        // Input pump: channel → MachineExecInput/Resize/Signal frames. A
+        // closed channel still gets an EOF frame, so a guest process
+        // reading stdin cannot hang on it.
+        let input_pump = tokio::spawn(async move {
+            while let Some(input) = input_rx.recv().await {
+                if sender.send(input.frame()).await.is_err() {
+                    return;
                 }
             }
+            let _ = sender
+                .send(ExecSessionInput::Stdin(Vec::new()).frame())
+                .await;
         });
 
-        // Output pump: MachineExecOutput frames → channel.
+        // Output pump: MachineExecOutput frames → channel, until the final
+        // frame, an error, or the consumer going away. Either way the input
+        // pump is aborted and both transport halves drop, closing the
+        // connection — which the guest reads as the host leaving.
         tokio::spawn(async move {
-            loop {
-                let raw = match receiver.recv().await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let _ = out_tx
-                            .send(Err(EngineError::Transport {
-                                context: "failed to receive exec session output",
-                                source: e,
-                            }))
-                            .await;
-                        break;
-                    }
-                };
-
-                let (resp_type, _, resp_payload) = match wire::parse_response(&raw) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        let _ = out_tx.send(Err(e)).await;
-                        break;
-                    }
-                };
-
-                if resp_type == MessageType::Error as u32 {
-                    let (code, message) = wire::parse_error_response(&resp_payload)
-                        .unwrap_or_else(|_| (500, "unknown error".to_string()));
-                    let _ = out_tx.send(Err(EngineError::Agent { code, message })).await;
-                    break;
-                }
-
-                if resp_type != MessageType::MachineExecOutput as u32 {
-                    let _ = out_tx
-                        .send(Err(EngineError::Machine(format!(
-                            "unexpected response type: 0x{:04x}",
-                            resp_type
-                        ))))
-                        .await;
-                    break;
-                }
-
-                match MachineExecOutput::decode_from_slice(&resp_payload) {
-                    Ok(output) => {
-                        let done = output.done;
-                        if out_tx.send(Ok(output)).await.is_err() || done {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = out_tx
-                            .send(Err(EngineError::Machine(format!("decode error: {}", e))))
-                            .await;
-                        break;
-                    }
-                }
+            tokio::select! {
+                () = pump_exec_output(&mut receiver, &out_tx) => {}
+                () = out_tx.closed() => {}
             }
-            stdin_handle.abort();
+            input_pump.abort();
         });
 
         Ok(out_rx)
@@ -2318,6 +2195,41 @@ fn readiness_event_is_terminal(event: &ReadinessEvent) -> bool {
         Some(Kind::RuntimeReady | Kind::RuntimeFailed)
     )
 }
+
+/// Forwards a machine exec session's output frames until the final one or
+/// an error — which is forwarded too — or until the consumer is gone.
+async fn pump_exec_output(
+    receiver: &mut VsockReceiver,
+    out: &mpsc::Sender<Result<MachineExecOutput>>,
+) {
+    loop {
+        let item = match receiver.recv().await {
+            Ok(raw) => decode_exec_output(&raw),
+            Err(source) => Err(EngineError::Transport {
+                context: "failed to receive exec session output",
+                source,
+            }),
+        };
+        let last = item.as_ref().map_or(true, |output| output.done);
+        if out.send(item).await.is_err() || last {
+            return;
+        }
+    }
+}
+
+/// Decodes one frame of a machine exec session.
+fn decode_exec_output(raw: &[u8]) -> Result<MachineExecOutput> {
+    let (resp_type, _, payload) = wire::parse_response(raw)?;
+    if resp_type == MessageType::Error as u32 {
+        let (code, message) = wire::parse_error_response(&payload)
+            .unwrap_or_else(|_| (500, "unknown error".to_string()));
+        return Err(EngineError::Agent { code, message });
+    }
+    AgentClient::expect_response_type(resp_type, MessageType::MachineExecOutput)?;
+    MachineExecOutput::decode_from_slice(&payload)
+        .map_err(|e| EngineError::Machine(format!("decode error: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
