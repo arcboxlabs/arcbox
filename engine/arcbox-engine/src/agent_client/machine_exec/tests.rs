@@ -295,3 +295,49 @@ async fn an_agent_that_overruns_the_output_window_ends_the_session() {
 fn write_cost(len: usize) -> usize {
     data(len).encode_to_vec().len()
 }
+
+#[tokio::test]
+async fn a_tcp_connection_asks_for_its_peer_and_streams_like_a_session() {
+    let (client, mut guest) = session_pair();
+    write_window(&mut guest, STDIN_WINDOW).await;
+    let (input, input_rx) = mpsc::channel(4);
+    let mut output = client
+        .machine_tcp_connect("localhost", 8080, input_rx)
+        .await
+        .unwrap();
+
+    let (msg_type, payload) = read_frame(&mut guest).await;
+    assert_eq!(msg_type, MessageType::MachineTcpConnectRequest as u32);
+    let request = MachineTcpConnectRequest::decode_from_slice(&payload).unwrap();
+    assert_eq!(
+        (request.host.as_str(), request.port, request.output_window),
+        ("localhost", 8080, OUTPUT_WINDOW)
+    );
+
+    input
+        .send(ExecSessionInput::Stdin(b"GET /".to_vec()))
+        .await
+        .unwrap();
+    let stdin = MessageType::MachineExecInput as u32;
+    assert_eq!(read_frame(&mut guest).await, (stdin, b"GET /".to_vec()));
+    write_output(&mut guest, data(2)).await;
+    let eof = MachineExecOutput {
+        eof: true,
+        ..Default::default()
+    };
+    write_output(&mut guest, eof).await;
+    assert_eq!(output.recv().await.unwrap().unwrap().data, b"xx");
+    assert!(output.recv().await.unwrap().unwrap().eof);
+}
+
+#[tokio::test]
+async fn a_refused_tcp_connection_fails_to_open() {
+    let (client, mut guest) = session_pair();
+    write_error(&mut guest, 503, "connect to localhost:1: refused").await;
+    let (_input, input_rx) = mpsc::channel(1);
+    match client.machine_tcp_connect("localhost", 1, input_rx).await {
+        Err(EngineError::Agent { code, .. }) => assert_eq!(code, 503),
+        Ok(_) => panic!("the connection must not open"),
+        Err(other) => panic!("expected the agent error, got {other:?}"),
+    }
+}

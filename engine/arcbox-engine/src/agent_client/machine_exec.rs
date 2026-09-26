@@ -1,6 +1,7 @@
-//! Machine exec sessions: a process in the machine root, streamed over one
-//! agent connection under the session's flow control (`MachineExecWindow`
-//! in agent.proto).
+//! Machine exec sessions: a process in the machine root — or a TCP
+//! connection opened from inside the machine — streamed over one agent
+//! connection under the session's flow control (`MachineExecWindow` in
+//! agent.proto).
 //!
 //! The connection is always read to the end. A host that stops draining one
 //! vsock connection stalls every new connection to that VM, so backpressure
@@ -16,7 +17,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arcbox_connect::v1::{
-    MachineExecOutput, MachineExecRequest, MachineExecSignal, MachineExecWindow, TerminalSize,
+    MachineExecOutput, MachineExecRequest, MachineExecSignal, MachineExecWindow,
+    MachineTcpConnectRequest, TerminalSize,
 };
 use arcbox_constants::wire::MessageType;
 use arcbox_transport::vsock::{VsockReceiver, VsockSender};
@@ -210,19 +212,59 @@ impl AgentClient {
     /// Returns an error if the session cannot start: the request fails to
     /// send, or the agent refuses it or does not speak flow control.
     pub async fn machine_exec_session(
-        mut self,
+        self,
         mut req: MachineExecRequest,
+        input: mpsc::Receiver<ExecSessionInput>,
+    ) -> Result<ExecSessionOutput> {
+        req.output_window = OUTPUT_WINDOW;
+        let request =
+            wire::build_message(MessageType::MachineExecRequest, "", &req.encode_to_vec());
+        self.open_session(request, input).await
+    }
+
+    /// Opens a TCP connection to `host:port` as seen from inside the
+    /// machine (`"localhost"` is the machine itself), carried like an exec
+    /// session: [`ExecSessionInput::Stdin`] bytes go to the peer and an
+    /// empty one shuts the sending side down; the output is the peer's
+    /// bytes, then an `eof` frame once it stops sending, then a `done`
+    /// frame once both directions are closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection cannot be opened: the agent
+    /// reports why (refused, timed out, unknown host) as for a refused exec.
+    pub async fn machine_tcp_connect(
+        self,
+        host: &str,
+        port: u16,
+        input: mpsc::Receiver<ExecSessionInput>,
+    ) -> Result<ExecSessionOutput> {
+        let req = MachineTcpConnectRequest {
+            host: host.to_owned(),
+            port: port.into(),
+            output_window: OUTPUT_WINDOW,
+            ..Default::default()
+        };
+        let request = wire::build_message(
+            MessageType::MachineTcpConnectRequest,
+            "",
+            &req.encode_to_vec(),
+        );
+        self.open_session(request, input).await
+    }
+
+    /// Sends a session's opening `request` and, once the agent grants its
+    /// stdin window, runs the session over the connection.
+    async fn open_session(
+        mut self,
+        request: Bytes,
         input: mpsc::Receiver<ExecSessionInput>,
     ) -> Result<ExecSessionOutput> {
         if !self.connected {
             self.connect().await?;
         }
-
-        req.output_window = OUTPUT_WINDOW;
-        let payload = req.encode_to_vec();
-        let buf = wire::build_message(MessageType::MachineExecRequest, "", &payload);
         self.transport
-            .async_send(buf)
+            .async_send(request)
             .await
             .map_err(|source| EngineError::Transport {
                 context: "failed to send exec session request",
