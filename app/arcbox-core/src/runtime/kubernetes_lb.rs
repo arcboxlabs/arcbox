@@ -16,7 +16,6 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::net::Ipv4Addr;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arcbox_connect::v1::{
@@ -24,7 +23,6 @@ use arcbox_connect::v1::{
 };
 
 use super::Runtime;
-use crate::error::CoreError;
 use crate::vm_lifecycle::DEFAULT_MACHINE_NAME;
 
 #[cfg(test)]
@@ -174,25 +172,6 @@ fn relay_protocol(protocol: &str) -> Option<&'static str> {
 }
 
 impl Runtime {
-    /// Lists the guest cluster's Services of type LoadBalancer.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the agent is unreachable or cannot list Services.
-    pub async fn kubernetes_load_balancers(
-        &self,
-    ) -> crate::Result<KubernetesLoadBalancersResponse> {
-        // `connect_agent` is a blocking hypervisor call; this runs on a timer,
-        // so keep it off the async workers (`container_fs_paths` pattern).
-        let machine_manager = Arc::clone(&self.machine_manager);
-        let mut agent = tokio::task::spawn_blocking(move || {
-            machine_manager.connect_agent(DEFAULT_MACHINE_NAME)
-        })
-        .await
-        .map_err(|e| CoreError::Vm(format!("agent connect task panicked: {e}")))??;
-        Ok(agent.list_kubernetes_load_balancers().await?)
-    }
-
     /// Opens and closes host listeners so that exactly the published ports
     /// of `listing` are forwarded, and records each port's outcome.
     ///

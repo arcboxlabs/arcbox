@@ -9,12 +9,11 @@
 //! leaves nothing bound. Polling a unary agent RPC rather than watching is
 //! deliberate: the HV backend's blocking agent transport carries no streams.
 
-use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
 use arcbox_connect::v1::KubernetesLoadBalancersResponse;
-use arcbox_core::{Runtime, VmLifecycleState};
+use arcbox_core::{AgentClient, Runtime, VmLifecycleState};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -35,34 +34,71 @@ pub fn spawn(ctx: &DaemonContext, runtime: &Arc<Runtime>) {
     let vm = runtime.subscribe_system_vm_state();
     let hold = runtime.subscribe_kubernetes_hold();
     let shutdown = ctx.shutdown.clone();
+    let source = AgentSource {
+        runtime: Arc::clone(runtime),
+        agent: None,
+    };
     let runtime = Arc::clone(runtime);
     drop(tokio::spawn(async move {
-        let list = || runtime.kubernetes_load_balancers();
-        reconcile_loop(&runtime, vm, hold, shutdown, list).await;
+        reconcile_loop(&runtime, vm, hold, shutdown, source).await;
     }));
 }
 
-/// Polls `list` and applies each listing while the VM is ready and the
+/// Where the loop gets its listings; a seam so the gating is testable
+/// without a guest.
+trait ServiceSource {
+    /// Lists the cluster's LoadBalancer Services.
+    async fn list(&mut self) -> arcbox_core::Result<KubernetesLoadBalancersResponse>;
+
+    /// Forgets any connection to a VM that is going away.
+    fn disconnect(&mut self);
+}
+
+/// Lists through the System VM's agent over one kept connection, so a
+/// poll does not pay for (and log) a new vsock connection every interval.
+struct AgentSource {
+    runtime: Arc<Runtime>,
+    agent: Option<AgentClient>,
+}
+
+impl ServiceSource for AgentSource {
+    async fn list(&mut self) -> arcbox_core::Result<KubernetesLoadBalancersResponse> {
+        let agent = match &mut self.agent {
+            Some(agent) => agent,
+            None => self
+                .agent
+                .insert(self.runtime.connect_system_agent().await?),
+        };
+        let listing = agent.list_kubernetes_load_balancers().await;
+        if listing.is_err() {
+            // The connection may be what failed; the next poll dials afresh.
+            self.agent = None;
+        }
+        Ok(listing?)
+    }
+
+    fn disconnect(&mut self) {
+        self.agent = None;
+    }
+}
+
+/// Polls `source` and applies each listing while the VM is ready and the
 /// hold is taken; closes the listeners whenever either is not.
 ///
-/// Generic over the listing so the gating is testable without a guest. A
-/// failed listing leaves the listeners as they were: a transient API server
-/// hiccup must not unpublish every Service.
-async fn reconcile_loop<F, Fut>(
+/// A failed listing leaves the listeners as they were: a transient API
+/// server hiccup must not unpublish every Service.
+async fn reconcile_loop(
     runtime: &Runtime,
     mut vm: watch::Receiver<VmLifecycleState>,
     mut hold: watch::Receiver<bool>,
     shutdown: CancellationToken,
-    mut list: F,
-) where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = arcbox_core::Result<KubernetesLoadBalancersResponse>>,
-{
+    mut source: impl ServiceSource,
+) {
     let mut failures = 0u32;
     loop {
         let active = vm.borrow_and_update().is_ready() && *hold.borrow_and_update();
         if active {
-            match list().await {
+            match source.list().await {
                 Ok(listing) => {
                     failures = 0;
                     runtime.apply_kubernetes_load_balancers(&listing).await;
@@ -78,6 +114,7 @@ async fn reconcile_loop<F, Fut>(
             }
         } else {
             failures = 0;
+            source.disconnect();
             runtime.close_kubernetes_load_balancers().await;
         }
         tokio::select! {
@@ -98,6 +135,18 @@ mod tests {
     use arcbox_core::Config;
 
     use super::*;
+
+    /// Counts listings and answers each with an empty cluster.
+    struct CountingSource(Arc<AtomicUsize>);
+
+    impl ServiceSource for CountingSource {
+        async fn list(&mut self) -> arcbox_core::Result<KubernetesLoadBalancersResponse> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(KubernetesLoadBalancersResponse::default())
+        }
+
+        fn disconnect(&mut self) {}
+    }
 
     /// Lets the loop run until it parks again, advancing paused time by
     /// `elapsed` on the way.
@@ -122,14 +171,9 @@ mod tests {
         let polls = Arc::new(AtomicUsize::new(0));
 
         let task = tokio::spawn({
-            let (runtime, polls, shutdown) = (runtime.clone(), polls.clone(), shutdown.clone());
-            async move {
-                let list = || {
-                    polls.fetch_add(1, Ordering::SeqCst);
-                    std::future::ready(Ok(KubernetesLoadBalancersResponse::default()))
-                };
-                reconcile_loop(&runtime, vm, hold, shutdown, list).await;
-            }
+            let (runtime, shutdown) = (Arc::clone(&runtime), shutdown.clone());
+            let source = CountingSource(Arc::clone(&polls));
+            async move { reconcile_loop(&runtime, vm, hold, shutdown, source).await }
         });
 
         settle(POLL_INTERVAL * 3).await;
