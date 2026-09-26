@@ -177,6 +177,7 @@ without the others reintroduces a failure already paid for.
 - Requires Developer ID certificate (`.p12`) + provisioning profile (`.provisionprofile`). See `CONTRIBUTING.md` "Code Signing" section for setup.
 - Requires Xcode Command Line Tools
 - Some tasks require a running daemon. Start it in a background terminal: `abctl daemon start`
+- Keep git worktrees outside the checkout. A worktree nested inside it (e.g. `.claude/worktrees/`) makes cargo merge both `.cargo/config.toml` files, and the duplicated `-Wl,-rpath,/usr/lib/swift` makes dyld refuse every host build script and test binary (`duplicate LC_RPATH`). If one must be nested, build from outside the tree with `--manifest-path <wt>/Cargo.toml --config <wt>/.cargo/config.toml`.
 
 ## Guest Agent Cross-Compilation
 

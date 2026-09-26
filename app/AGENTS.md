@@ -150,6 +150,13 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   `.git/HEAD`, so a rebuild that changes no package source file reuses the
   cached SHA — a new commit alone logs a STALE sha (the build.rs comment
   claiming it stays "fresh" holds only when a package file also changed).
+- Daemon logs "ArcBox daemon stopped" but the process never exits, typically
+  after a VM restart (resize, backend switch). First: look for a `mount_nfs`
+  child of the daemon. Likely cause: the `~/ArcBox` remount
+  (`nfs_mount::run_mount`) runs `mount_nfs` in `spawn_blocking` with no
+  per-attempt timeout (`MOUNT_TIMEOUT` bounds only the retries between
+  attempts), so a hung `mount_nfs` holds a blocking thread the runtime waits
+  for at exit; killing the child lets the daemon exit (open).
 
 ## Backend transport & agent
 
@@ -169,6 +176,22 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   to replay. A new startup RPC either has a blocking variant or a per-backend
   skip. CI runs no HV daemon-level scenario, so the check is manual:
   `ARCBOX_VM_BACKEND=hv cargo test -p arcbox-e2e --test boot_assets -- --ignored`.
+- **On VZ, one guest→host vsock stream the host stops reading stalls the
+  whole VM**: every new vsock connection to it times out until that stream is
+  read or closed (measured 2026-09-26: before machine exec had a window,
+  `abctl machine ping` failed during `ssh … 'cat /dev/zero' | sleep 40`;
+  `docker version` still hangs during `docker run … cat /dev/zero | sleep 30`).
+  The host must never stop draining a guest stream,
+  so a streaming RPC needs an application-level window, not a bounded
+  channel. Machine exec has one: the host grants output in encoded-frame bytes
+  (`OUTPUT_WINDOW`, `engine/arcbox-engine/src/agent_client/machine_exec.rs`),
+  the agent grants stdin (`STDIN_WINDOW`,
+  `guest/arcbox-agent/src/agent/linux/machine_exec/flow.rs`), and neither side
+  sends past its window, so both can always keep reading. An agent that
+  grants no window is refused at exec time ("restart the machine to update
+  it"). The Docker API channel (2375) and the sandbox streams still have no
+  window, so a paused `docker attach` or `docker logs -f | less` can wedge the
+  System VM (open).
 
 ## VM lifecycle internals (`engine/arcbox-engine/src/vm_lifecycle`)
 
@@ -242,8 +265,15 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   `wait_for_machine_ready` therefore also gates on
   `SystemInfo.distro_init_pending`, which the agent reads from a sentinel
   (`guest/arcbox-agent/src/boot_done.rs`) written by a hook `machine_init`
-  installs into the distro — a systemd unit ordered `After=multi-user.target`
-  or an openrc service that `depend()`s `after *`. Do NOT replace it with an
+  installs into the distro — a static systemd unit ordered
+  `After=multi-user.target` and pulled in by a `multi-user.target.d` drop-in,
+  an openrc service that `depend()`s `after *`, or a sysvinit inittab `wait`
+  entry appended after the `rc N` lines; runit and BusyBox-only images get no
+  hook, and readiness does not wait for them. Never give the systemd unit an
+  `[Install]` section: a first boot applies the preset policy, and on
+  `disable *` distros (Fedora, the RHEL family, openSUSE) that removed the
+  `.wants` link before the unit ever ran, so every start burned the 60 s
+  readiness timeout. Do NOT replace the hook with an
   inspection of the init system's runtime state: `/run/openrc/rc.starting` is
   absent both *before* openrc runs and after it finishes, so that check
   reports "settled" during exactly the window it exists to catch — a version
@@ -254,8 +284,30 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   `default` variant, which does not ship it. Two consequences worth knowing:
   the field is phrased as *pending* so an agent predating it decodes false and
   behaves exactly as before; and readiness now costs what the distro's boot
-  costs — ~2.2 s on alpine/openrc, **~14 s on ubuntu/systemd** — because that
-  is when the machine actually becomes usable.
+  costs — 2–5 s on alpine, debian, fedora and ubuntu, up to ~10 s on arch and
+  rocky (measured 2026-09-26) — because that is when the machine actually
+  becomes usable.
+- **Distro machines boot with `net.ifnames=0`, and their agent serves RPC
+  only.** The mirrored images' own network config (networkd `eth0.network`,
+  netplan, `ifcfg-eth0`, ifupdown) names `eth0`, the name a container's NIC
+  has. With udev renaming the virtio NIC to `enp0s1`, that config matched
+  nothing: the distro never took over DHCP, systemd-resolved had no upstream,
+  and ubuntu's start took ~14 s instead of ~4 s. The flag is part of the
+  machine cmdline, which is fixed at create, so existing machines keep the old
+  naming until they are recreated. The agent tells a machine from the System
+  VM by `arcbox.machine_rootfs=` on the kernel cmdline (`agent::Guest`) and
+  then starts none of the System VM's services (`guest/AGENTS.md`).
+  `SystemInfo.ip_addresses` comes from `getifaddrs`, never from `hostname`:
+  NixOS and Oracle ship none, and BusyBox's `-i` resolves the host name
+  through DNS, which behind a proxy reported a fake IP. Not ArcBox bugs, and
+  not mirrored: the kali and openSUSE Tumbleweed `default` images ship no
+  udev, so no device unit ever appears in a VM, and systemd waits 90 s for
+  `dev-hvc0.device` (the `serial-getty@hvc0` that `console=hvc0` generates)
+  before `multi-user.target` — seen on kali's console; openSUSE times out
+  the same way. The boot-test
+  loop that found all of this: `ARCBOX_MACHINE_IMAGE_BASE=<dir>` pointing at
+  a local `machine-images sync` output (the directory, not its `index.json`),
+  and `abctl machine exec` into the machine while `start` is still waiting.
 - **`restart_generation` reports departures, not arrivals.** It is bumped on
   VM *stop* (`Effect::BumpGeneration`, fired from `stopping` on
   `VmEvent::Stopped`), so a task that waits for it to advance wakes at the
@@ -311,9 +363,12 @@ above). When editing either side, keep in lockstep:
   per rule (`virt/arcbox-net/src/port_forward.rs`), reachable via loopback. No
   privileged helper is involved, so a high/ephemeral host port is safe to
   publish under an isolated test daemon (it touches none of the three e2e
-  host-globals). A low (<1024) host port simply fails to bind under the
-  non-root daemon — there is no helper fallback — so keep published test ports
-  ephemeral.
+  host-globals). A host port below 1024 binds as non-root only on `0.0.0.0`:
+  XNU asks for the reserved-port privilege only when the bind names a specific
+  address (measured 2026-09-26 as uid 501: `0.0.0.0:999` binds,
+  `127.0.0.1:999` is EACCES, TCP and UDP alike). There is no helper fallback,
+  so a low port works in the default LAN-exposed mode and fails in loopback
+  mode (`expose_ports_to_lan = false`); keep published test ports ephemeral.
 - The host bind address of a publish with no particular address (`-p 8080:80`,
   `-p 0.0.0.0:8080:80`) follows `[docker] expose_ports_to_lan`
   (`DockerConfig::default_publish_address`): every interface by default,
@@ -327,6 +382,46 @@ above). When editing either side, keep in lockstep:
   proxied verbatim to guest dockerd, which does the registry pull. This is what
   `runtime/AGENTS.md` means by "the pull path elsewhere" — there is no host-side
   pull module to call; drive it through the Docker API proxy.
+
+## Kubernetes LoadBalancer forwarding
+
+- k3s runs servicelb (traefik stays disabled), so a LoadBalancer Service gets
+  a svclb pod and the node IP, 10.0.2.2, as its ingress. The daemon
+  (`arcbox-daemon/src/kubernetes_lb.rs`) polls the agent's
+  `KubernetesLoadBalancers` every 2 s over one kept connection, only while the
+  VM is ready *and* the Kubernetes hold is set, and applies each listing
+  through `Runtime::apply_kubernetes_load_balancers`
+  (`arcbox-core/src/runtime/kubernetes_lb.rs`): one host listener per port of
+  a Service that has an ingress, keyed `k8s:<ns>/<name>:<port>/<PROTO>`, bound
+  on `default_publish_address()`. The relay's traffic to `10.0.2.2:<port>` is
+  DNATed by kube-proxy's loadbalancer-IP rule, so unlike Docker's
+  address-pinned publishes it needs no guest mirror.
+- Every host listener that is not a container's needs an owner key
+  `Runtime::is_container_owner` rejects; otherwise the Docker host-networking
+  reconcile treats it as a vanished container's and closes it.
+- Stop and delete release the hold *before* closing the listeners, and
+  `apply` does nothing without the hold, so a listing that raced a stop cannot
+  reopen them. `abctl kubernetes status` prints each port's outcome
+  (forwarded, pending, skipped, failed).
+
+## SSH server (`arcbox-ssh`)
+
+- `ssh [user@]<machine>@arcbox` reaches a loopback server in the daemon
+  (`app/arcbox-ssh`, wired in `arcbox-daemon/src/ssh_service.rs`). It binds
+  like the Kubernetes proxy: `--ssh-port` (0 for any) must bind or startup
+  fails, while the default 16022 (`SSH_HOST_PORT`) is best-effort. The host
+  key and the one accepted client key are generated once under
+  `<data_dir>/ssh/`, next to the `config` and a `known_hosts` that pins the
+  host key; `abctl ssh install` adds one `Include` line to `~/.ssh/config`.
+- Sessions run on the machine exec path (login sessions, signals, PTY
+  resize), `direct-tcpip` on `MachineTcpConnectRequest`, and `sftp` on the
+  machine's own `sftp-server` (absent from the mirrored images until the user
+  installs it).
+- Never block a russh `Handler` callback on the process: russh returns window
+  to the client as soon as data arrives, so the handler is the only
+  backpressure, and the same connection carries all output. Input goes
+  through `input::SessionInput` and output through `Outbound`; blocking the
+  handler instead deadlocked `cat big | ssh m cat | slow`.
 
 ## Boot-asset pin (`engine/arcbox-image`)
 

@@ -124,6 +124,13 @@ run fails, and which paths must change together.
   `boot-assets/dev` or `ARCBOX_HV_E2E_KERNEL`/`_ROOTFS`.
 - Guest cannot reach docker.io -> point `ARCBOX_E2E_IMAGE` at a reachable
   mirror instead of weakening the test.
+- The test body passes, then the process hangs in `TempDir::drop`
+  (`remove_dir_all` → `openat` under `<data_dir>/ArcBox`) -> the `~/ArcBox`
+  NFS view outlived its daemon. For a data dir under `/var/folders`,
+  `nfs_mount::current_mount_info` compares the requested path with the
+  kernel's `/private/var/folders/...` mountpoint, never matches, and the
+  daemon never unmounts it (open). `KEEP_TEST_DIR=1` sidesteps the removal;
+  the run's `metrics.json` lives in that data dir, so a killed run loses it.
 
 ## Contracts to keep honest
 

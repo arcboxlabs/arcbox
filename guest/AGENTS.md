@@ -10,10 +10,16 @@ non-obvious invariants and failure signatures.
 ## Build & validate
 
 - **Musl cross-compile is mandatory.** On a macOS dev host `agent::Agent` is
-  the 39-line no-op `stub.rs` (`agent/mod.rs` cfg-selects `linux` vs `stub`), so
+  the no-op `stub.rs` (`agent/mod.rs` cfg-selects `linux` vs `stub`), so
   `cargo test -p arcbox-agent` only exercises the stub + pure helpers and proves
   *nothing* about guest behavior. Build for `aarch64-unknown-linux-musl` (recipe
   in `guest/arcbox-agent/README.md` / root AGENTS.md) and validate through e2e.
+  The unit tests do run on Linux: build them with
+  `cargo test -p arcbox-agent --target aarch64-unknown-linux-musl --bin arcbox-agent --no-run`
+  and run the static binary in any Linux guest of a dev daemon —
+  `docker run -i alpine sh -c 'cat >/t; chmod +x /t; /t <filter>'`, or an
+  alpine machine with the binary's directory mounted (`abctl machine create
+  … -m <dir>:/mnt/t`). The crate's `tests/` targets build for Linux only.
 - **CI never lints the agent — you must, locally.** The workspace gate excludes
   it (`cargo clippy --workspace --exclude arcbox-agent -- -D warnings`,
   `.github/workflows/ci.yml`; the build and test steps exclude it too) and no
@@ -101,6 +107,47 @@ non-obvious invariants and failure signatures.
   `OWNED_KEYS` (`dns`, `bip`, `default-address-pools`, `allow-direct-routing`,
   `default-ulimits`, `features`) are refused with a warning; a key the runtime
   depends on goes there, or an operator can break it from config.
+- **A distro machine's agent serves RPC and nothing else.** The machine boot
+  shim starts the same `arcbox-agent serve` as the System VM;
+  `agent::Guest::detect` tells them apart by `arcbox.machine_rootfs=` on the
+  kernel cmdline, and a `DistroMachine` returns into `agent::run` before any
+  System VM service starts — the DNS server on `0.0.0.0:53`, container
+  domains, docker events and the publish mirror, the NFS relay, the standard
+  VirtioFS shares, the Docker and Kubernetes API proxies, fstrim, the
+  direct-routing reconciler, the sandbox service. The DNS socket alone made
+  systemd-resolved turn its `127.0.0.53`
+  stub off ("Another process is already listening on UDP socket
+  127.0.0.53:53"), which broke every lookup on Debian and Ubuntu; the
+  reconcilers would rewrite the machine's own NAT table as soon as the user
+  installed dockerd there. A new background service has to say which guest
+  it belongs to. Machine readiness also reads `SystemInfo.ip_addresses`,
+  which comes from `getifaddrs`: never shell out to `hostname` for it (some
+  images ship none, and BusyBox's `-i` resolves the name through DNS).
+- **Container domains ride nat PREROUTING, and bridged siblings reach them
+  only through the kernel's built-in `br_netfilter`.** `domains/` DNATs
+  `<ip>:80` to the container's HTTP port and REDIRECTs `<ip>:443` to the
+  agent's TLS proxy on 61443 (`domains/https.rs`, CA from `/arcbox/tls/`),
+  tagged `arcbox-domain:<id>`, removed on `die`/`destroy`, swept at agent
+  start. The rules match the destination only; switched sibling traffic meets
+  them because the System VM kernel builds `br_netfilter` in and
+  `bridge-nf-call-iptables` defaults to 1 — dockerd turns it on only for
+  `icc=false` or without the userland proxy, neither of which ArcBox runs. A
+  kernel config that makes it a module, or an operator setting it to 0,
+  silently breaks sibling-to-sibling domain traffic; the agent warns at
+  startup. A container's listeners are read through its init pid only while
+  that pid is in the container's netns (`SandboxKey`): an `nsenter -t 1 -n`
+  container otherwise reports the VM's own sockets as its own. The design
+  lives in `domains/mod.rs`. Regression signature: siblings get RST on
+  `<name>.arcbox.local:80` while the Mac works — check
+  `iptables -t nat -S PREROUTING | grep arcbox-domain` and
+  `/proc/sys/net/bridge/bridge-nf-call-iptables`.
+- **k3s runs servicelb (traefik stays disabled), and `KubernetesLoadBalancers`
+  lists through `k3s kubectl get --raw /api/v1/services`,** bounded at 4 s to
+  stay inside the HV blocking transport's 5 s unary limit
+  (`BLOCKING_RPC_TIMEOUT`), and deliberately not under
+  `kubernetes_control_lock`, which a start holds for up to 30 s. The daemon
+  polls it every 2 s, so `MessageType::is_periodic_poll` requests and
+  per-connection accepts log at debug.
 
 ## Debugging (symptom → first commands → likely cause)
 
@@ -162,9 +209,12 @@ proto file splits by audience: public sandbox API messages live in the
 internal frame through the public schema. A new sandbox-family message
 needs: the proto (in the right file per that split), the `MessageType`
 variant + `is_sandbox_request()` arm, a `handle_sandbox_message` dispatch
-arm, and the `AgentClient` method. `MachineExecRequest` is the one other
-codec bypass: dispatched by name before `parse_request`
-(`agent/linux/rpc.rs`), so it has no `rpc.rs` arms either. Streaming
+arm, and the `AgentClient` method. `MachineExecRequest` and
+`MachineTcpConnectRequest` are the other codec bypasses: dispatched by name
+before `parse_request` (`agent/linux/rpc.rs`), so they have no `rpc.rs` arms
+either, and each owns the rest of its connection — the agent closes it when
+the session ends, so host frames still in flight are never read as
+requests. Streaming
 alone does not waive step 3 — `WatchReadiness`/`WatchStats`/
 `WatchMemoryPressure` stream too and keep their codec arms (step 4's
 `handle_watch_readiness` pattern).
