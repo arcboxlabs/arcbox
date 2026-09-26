@@ -2,6 +2,7 @@
 //! output frames as the process writes, host frames applied as they arrive
 //! — then the exit frame.
 
+use std::io::Write as _;
 use std::os::fd::OwnedFd;
 use std::os::unix::process::ExitStatusExt as _;
 use std::process::ExitStatus;
@@ -169,6 +170,22 @@ pub(super) async fn write_stdin(
     }
 }
 
+/// [`write_stdin`] for a PTY master, whose writes block: runs on a thread
+/// of its own.
+pub(super) fn write_terminal(mut master: std::fs::File, mut items: mpsc::Receiver<StdinItem>) {
+    while let Some(item) = items.blocking_recv() {
+        // A terminal ends its input in-band (^D); the host's EOF has
+        // nothing to close.
+        let StdinItem::Data(data) = item else {
+            continue;
+        };
+        if let Err(e) = master.write_all(&data) {
+            tracing::debug!(error = %e, "pty stdin write ended");
+            break;
+        }
+    }
+}
+
 /// Writes one output frame.
 async fn write_output<W>(writer: &mut W, trace_id: &str, chunk: Chunk) -> anyhow::Result<()>
 where
@@ -189,11 +206,7 @@ where
 }
 
 /// Writes the final frame reporting how the process ended.
-pub(super) async fn write_exit<W>(
-    writer: &mut W,
-    trace_id: &str,
-    status: ExitStatus,
-) -> anyhow::Result<()>
+async fn write_exit<W>(writer: &mut W, trace_id: &str, status: ExitStatus) -> anyhow::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
@@ -222,7 +235,7 @@ fn signal_name(signal: i32) -> String {
 
 /// Delivers a host-requested signal to the session's process, as sshd does
 /// for an SSH `signal` request (the process itself, not its group).
-pub(super) fn signal_process(pid: Option<u32>, signal: Signal) {
+fn signal_process(pid: Option<u32>, signal: Signal) {
     if let Some(pid) = pid.and_then(|p| i32::try_from(p).ok()) {
         if let Err(e) = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), signal) {
             tracing::debug!(error = %e, ?signal, "machine exec signal not delivered");
@@ -232,7 +245,7 @@ pub(super) fn signal_process(pid: Option<u32>, signal: Signal) {
 
 /// Kills a session's whole process group: the child leads its own session,
 /// so descendants must not outlive a host that went away.
-pub(super) fn kill_session(pid: Option<u32>) {
+fn kill_session(pid: Option<u32>) {
     if let Some(pid) = pid.and_then(|p| i32::try_from(p).ok()) {
         let _ = nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pid), Signal::SIGKILL);
     }
