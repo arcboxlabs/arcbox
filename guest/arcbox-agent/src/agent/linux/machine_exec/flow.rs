@@ -95,3 +95,58 @@ impl Flow {
         self.output.as_ref().map(|_| len as u32)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WINDOW: u32 = MIN_OUTPUT_WINDOW as u32;
+
+    #[test]
+    fn rejects_a_window_that_cannot_hold_a_full_output_frame() {
+        assert!(Flow::new(WINDOW - 1).is_err());
+        assert!(Flow::new(WINDOW).is_ok());
+        assert!(Flow::new(0).is_ok());
+    }
+
+    #[tokio::test]
+    async fn output_waits_for_the_window_the_host_returns() {
+        let flow = Flow::new(WINDOW).unwrap();
+        flow.reserve_output(WINDOW as usize).await;
+        let blocked =
+            tokio::time::timeout(std::time::Duration::from_millis(20), flow.reserve_output(1))
+                .await;
+        assert!(blocked.is_err(), "the window is used up");
+
+        flow.return_output(WINDOW).unwrap();
+        flow.reserve_output(WINDOW as usize).await;
+    }
+
+    #[test]
+    fn a_host_cannot_return_more_window_than_it_gave() {
+        let flow = Flow::new(WINDOW).unwrap();
+        assert!(flow.return_output(1).is_err());
+        assert!(Flow::new(0).unwrap().return_output(1).is_err());
+    }
+
+    #[test]
+    fn stdin_beyond_the_granted_window_is_refused() {
+        let flow = Flow::new(WINDOW).unwrap();
+        let window = STDIN_WINDOW as usize;
+        flow.admit_stdin(window).unwrap();
+        assert!(flow.admit_stdin(1).is_err());
+
+        let flow = Flow::new(WINDOW).unwrap();
+        flow.admit_stdin(window).unwrap();
+        assert_eq!(flow.stdin_delivered(window), Some(STDIN_WINDOW));
+        flow.admit_stdin(window).unwrap();
+    }
+
+    #[test]
+    fn without_flow_control_stdin_is_unlimited_and_never_acknowledged() {
+        let flow = Flow::new(0).unwrap();
+        assert_eq!(flow.initial_stdin_window(), None);
+        flow.admit_stdin(STDIN_WINDOW as usize + 1).unwrap();
+        assert_eq!(flow.stdin_delivered(1), None);
+    }
+}
