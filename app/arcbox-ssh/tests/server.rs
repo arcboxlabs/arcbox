@@ -8,7 +8,7 @@ use arcbox_connect::v1::{MachineExecOutput, MachineExecRequest};
 use arcbox_engine::agent_client::ExecSessionInput;
 use arcbox_ssh::{CLIENT_KEY_FILE, ExecOutput, MachineHost, SshKeys, SshServer};
 use russh::keys::{Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKey};
-use russh::{ChannelMsg, client};
+use russh::{ChannelMsg, Sig, client};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 
@@ -79,6 +79,13 @@ impl MachineHost for ScriptedMachine {
                             let _ = tx.send(Ok(output("stdout", size.as_bytes()))).await;
                             break exit(0, "");
                         }
+                        Some(_) => {}
+                        None => return,
+                    }
+                },
+                "wait-signal" => loop {
+                    match input.recv().await {
+                        Some(ExecSessionInput::Signal(name)) => break exit(-1, &name),
                         Some(_) => {}
                         None => return,
                     }
@@ -263,6 +270,27 @@ async fn window_changes_resize_the_terminal() {
     channel.window_change(120, 40, 0, 0).await.unwrap();
     let messages = drain(&mut channel).await;
     assert_eq!(data(&messages, None), b"120x40");
+}
+
+#[tokio::test]
+async fn a_signal_reaches_the_process_and_its_death_is_reported() {
+    let fixture = start_server().await;
+    let (handle, _) = login(fixture.addr, "ubuntu", fixture.client_key).await;
+
+    let mut channel = handle.channel_open_session().await.unwrap();
+    channel.exec(true, "wait-signal").await.unwrap();
+    // USR2 has no russh variant: it must still travel by name both ways.
+    channel
+        .signal(Sig::Custom("USR2".to_owned()))
+        .await
+        .unwrap();
+    let messages = drain(&mut channel).await;
+    let signal = messages.iter().find_map(|m| match m {
+        ChannelMsg::ExitSignal { signal_name, .. } => Some(format!("{signal_name:?}")),
+        _ => None,
+    });
+    assert_eq!(signal.as_deref(), Some(r#"Custom("USR2")"#));
+    assert_eq!(exit_status(&messages), None);
 }
 
 #[tokio::test]

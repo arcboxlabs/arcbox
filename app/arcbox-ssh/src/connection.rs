@@ -8,11 +8,12 @@ use std::sync::Arc;
 use arcbox_engine::agent_client::ExecSessionInput;
 use russh::keys::PublicKey;
 use russh::server::{Auth, ChannelOpenHandle, Handler, Msg, Session};
-use russh::{Channel, ChannelId, Pty};
+use russh::{Channel, ChannelId, Pty, Sig};
 use tokio::sync::mpsc;
 
 use crate::host::MachineHost;
 use crate::session::{Program, SessionChannel};
+use crate::signal;
 use crate::target::Target;
 
 /// Input messages buffered toward one session's process. When they are all
@@ -101,7 +102,7 @@ impl<H: MachineHost> Connection<H> {
         // Accepted either way: a failure reaches the client on stderr with
         // exit status 255, which says more than a refused request would.
         session.channel_success(channel)?;
-        state.start(started);
+        state.start(started, session.handle());
         Ok(())
     }
 
@@ -223,6 +224,18 @@ impl<H: MachineHost> Handler for Connection<H> {
             height: u16::try_from(row_height).unwrap_or(u16::MAX),
         };
         self.send_input(channel, resize).await;
+        Ok(())
+    }
+
+    async fn signal(
+        &mut self,
+        channel: ChannelId,
+        signal: Sig,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let name = signal::name(&signal).to_owned();
+        self.send_input(channel, ExecSessionInput::Signal(name))
+            .await;
         Ok(())
     }
 

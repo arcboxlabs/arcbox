@@ -7,11 +7,12 @@ use std::collections::HashMap;
 use arcbox_connect::v1::{MachineExecOutput, MachineExecRequest, TerminalSize};
 use arcbox_engine::agent_client::ExecSessionInput;
 use russh::ChannelWriteHalf;
-use russh::server::Msg;
+use russh::server::{Handle, Msg};
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
 use crate::host::ExecOutput;
+use crate::signal;
 use crate::target::Target;
 
 /// SSH extended-data stream number of stderr (RFC 4254 §5.2).
@@ -23,7 +24,7 @@ const EXIT_FAILURE: u32 = 255;
 pub enum Program {
     /// The account's login shell (`shell`).
     Shell,
-    /// A command line for the account's shell (`exec`, and subsystems).
+    /// A command line for the account's shell (`exec`).
     Command(String),
 }
 
@@ -130,7 +131,11 @@ impl SessionChannel {
     /// goes to `input`, and a task streams `output` back until the exit
     /// status. A process that failed to start reports why on stderr and
     /// exits 255, the way sshd reports a shell it could not exec.
-    pub fn start(&mut self, started: anyhow::Result<(ExecOutput, mpsc::Sender<ExecSessionInput>)>) {
+    pub fn start(
+        &mut self,
+        started: anyhow::Result<(ExecOutput, mpsc::Sender<ExecSessionInput>)>,
+        handle: Handle,
+    ) {
         let Some(writer) = self.writer.take() else {
             return;
         };
@@ -138,11 +143,11 @@ impl SessionChannel {
         let task = match started {
             Ok((output, input)) => {
                 self.input = Some(input);
-                tokio::spawn(forward_output(output, writer, newline))
+                tokio::spawn(forward_output(output, writer, handle, newline))
             }
             Err(e) => {
                 let exit = Exit::Failed(format!("{e:#}"));
-                tokio::spawn(finish(writer, exit, newline))
+                tokio::spawn(finish(writer, handle, exit, newline))
             }
         };
         self.output_task = Some(task.abort_handle());
@@ -165,13 +170,18 @@ impl Drop for SessionChannel {
 /// How a session ended.
 enum Exit {
     Status(u32),
+    Signal(String),
     /// The session broke before the process reported an exit.
     Failed(String),
 }
 
 impl From<&MachineExecOutput> for Exit {
     fn from(last: &MachineExecOutput) -> Self {
-        Self::Status(u32::try_from(last.exit_code).unwrap_or(EXIT_FAILURE))
+        if last.exit_signal.is_empty() {
+            Self::Status(u32::try_from(last.exit_code).unwrap_or(EXIT_FAILURE))
+        } else {
+            Self::Signal(last.exit_signal.clone())
+        }
     }
 }
 
@@ -180,6 +190,7 @@ impl From<&MachineExecOutput> for Exit {
 async fn forward_output(
     mut output: ExecOutput,
     writer: ChannelWriteHalf<Msg>,
+    handle: Handle,
     newline: &'static str,
 ) {
     let exit = loop {
@@ -205,15 +216,21 @@ async fn forward_output(
             None => break Exit::Failed("the machine session ended without an exit status".into()),
         }
     };
-    finish(writer, exit, newline).await;
+    finish(writer, handle, exit, newline).await;
 }
 
 /// Reports `exit` and closes the channel. Send failures are ignored: they
 /// only mean the client already went away.
-async fn finish(writer: ChannelWriteHalf<Msg>, exit: Exit, newline: &str) {
+async fn finish(writer: ChannelWriteHalf<Msg>, handle: Handle, exit: Exit, newline: &str) {
     match exit {
         Exit::Status(code) => {
             let _ = writer.exit_status(code).await;
+        }
+        Exit::Signal(name) => {
+            let sig = signal::from_name(&name);
+            let _ = handle
+                .exit_signal_request(writer.id(), sig, false, String::new(), String::new())
+                .await;
         }
         Exit::Failed(message) => {
             let message = format!("arcbox: {message}{newline}");
