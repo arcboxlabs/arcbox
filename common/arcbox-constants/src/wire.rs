@@ -92,6 +92,13 @@ pub enum MessageType {
     /// sends it, so the guest runs no nfsd.
     EnsureNfsExportRequest = 0x0013,
 
+    // Kubernetes host-integration request types (0x0090 - 0x0097).
+    /// List the guest cluster's Services of type LoadBalancer (payload:
+    /// `arcbox.v1.KubernetesLoadBalancersRequest`). Answered with
+    /// [`Self::KubernetesLoadBalancersResponse`]. The host polls it while
+    /// Kubernetes runs to keep its LoadBalancer listeners in step.
+    KubernetesLoadBalancersRequest = 0x0090,
+
     // Sandbox CRUD request types (0x0020 - 0x0026).
     SandboxCreateRequest = 0x0020,
     SandboxStopRequest = 0x0021,
@@ -288,6 +295,9 @@ pub enum MessageType {
     /// Answers [`Self::EnsureNfsExportRequest`] (payload:
     /// `arcbox.agent.EnsureNfsExportResponse`).
     EnsureNfsExportResponse = 0x1013,
+    /// Answers [`Self::KubernetesLoadBalancersRequest`] (payload:
+    /// `arcbox.v1.KubernetesLoadBalancersResponse`).
+    KubernetesLoadBalancersResponse = 0x1090,
     PortBindingsChanged = 0x1030,
     PortBindingsRemoved = 0x1031,
 
@@ -431,6 +441,7 @@ impl MessageType {
             0x0011 => Some(Self::ContainerFsPathsRequest),
             0x0012 => Some(Self::ImageFsPathsRequest),
             0x0013 => Some(Self::EnsureNfsExportRequest),
+            0x0090 => Some(Self::KubernetesLoadBalancersRequest),
             // Sandbox CRUD requests.
             0x0020 => Some(Self::SandboxCreateRequest),
             0x0021 => Some(Self::SandboxStopRequest),
@@ -500,6 +511,7 @@ impl MessageType {
             0x1011 => Some(Self::ContainerFsPathsResponse),
             0x1012 => Some(Self::ImageFsPathsResponse),
             0x1013 => Some(Self::EnsureNfsExportResponse),
+            0x1090 => Some(Self::KubernetesLoadBalancersResponse),
             0x1030 => Some(Self::PortBindingsChanged),
             0x1031 => Some(Self::PortBindingsRemoved),
             // Sandbox CRUD responses.
@@ -612,7 +624,16 @@ impl MessageType {
                 | Self::KubernetesDeleteRequest
                 | Self::KubernetesStatusRequest
                 | Self::KubernetesKubeconfigRequest
+                | Self::KubernetesLoadBalancersRequest
         )
+    }
+
+    /// Returns true for requests the host sends on a timer rather than on
+    /// someone's behalf. The agent logs them at debug level: at the host's
+    /// poll rate an info line per request would drown `agent.log`.
+    #[must_use]
+    pub const fn is_periodic_poll(self) -> bool {
+        matches!(self, Self::KubernetesLoadBalancersRequest)
     }
 }
 
@@ -659,11 +680,13 @@ mod tests {
             (0x0011, MessageType::ContainerFsPathsRequest),
             (0x0012, MessageType::ImageFsPathsRequest),
             (0x0013, MessageType::EnsureNfsExportRequest),
+            (0x0090, MessageType::KubernetesLoadBalancersRequest),
             (0x100F, MessageType::MemoryPressureEvent),
             (0x1010, MessageType::MachineStats),
             (0x1011, MessageType::ContainerFsPathsResponse),
             (0x1012, MessageType::ImageFsPathsResponse),
             (0x1013, MessageType::EnsureNfsExportResponse),
+            (0x1090, MessageType::KubernetesLoadBalancersResponse),
             (0x1001, MessageType::PingResponse),
             (0x1002, MessageType::GetSystemInfoResponse),
             (0x1003, MessageType::EnsureRuntimeResponse),
@@ -823,6 +846,7 @@ mod tests {
     fn is_kubernetes_request_classifies_correctly() {
         assert!(MessageType::KubernetesStartRequest.is_kubernetes_request());
         assert!(MessageType::KubernetesKubeconfigRequest.is_kubernetes_request());
+        assert!(MessageType::KubernetesLoadBalancersRequest.is_kubernetes_request());
         assert!(!MessageType::PingRequest.is_kubernetes_request());
         assert!(!MessageType::KubernetesStatusResponse.is_kubernetes_request());
     }

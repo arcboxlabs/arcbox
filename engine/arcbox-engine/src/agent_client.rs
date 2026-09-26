@@ -32,15 +32,15 @@ use arcbox_connect::v1::{
     ContainerFsPathsResponse, DiskTrimRequest, DiskTrimResponse, EnsureNfsExportRequest,
     EnsureNfsExportResponse, ImageFsPathsRequest, ImageFsPathsResponse, KubernetesDeleteRequest,
     KubernetesDeleteResponse, KubernetesKubeconfigRequest, KubernetesKubeconfigResponse,
-    KubernetesStartRequest, KubernetesStartResponse, KubernetesStatusRequest,
-    KubernetesStatusResponse, KubernetesStopRequest, KubernetesStopResponse, MachineExecOutput,
-    MachineExecRequest, MachineStats, MemoryPressureEvent, MmapReadFileRequest,
-    MmapReadFileResponse, ReadinessEvent, RuntimeEnsureRequest, RuntimeEnsureResponse,
-    RuntimeStatusRequest, RuntimeStatusResponse, SandboxCleanupResponse, SandboxCleanupTicket,
-    SandboxPortForwardRemoveRequest, SandboxPortForwardRequest, SandboxPortForwardResponse,
-    SandboxResumeCommand, SandboxResumeResponse, SystemInfo, TerminalSize,
-    WatchMemoryPressureRequest, WatchReadinessRequest, WatchSandboxCleanupRequest,
-    WatchStatsRequest,
+    KubernetesLoadBalancersRequest, KubernetesLoadBalancersResponse, KubernetesStartRequest,
+    KubernetesStartResponse, KubernetesStatusRequest, KubernetesStatusResponse,
+    KubernetesStopRequest, KubernetesStopResponse, MachineExecOutput, MachineExecRequest,
+    MachineStats, MemoryPressureEvent, MmapReadFileRequest, MmapReadFileResponse, ReadinessEvent,
+    RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse,
+    SandboxCleanupResponse, SandboxCleanupTicket, SandboxPortForwardRemoveRequest,
+    SandboxPortForwardRequest, SandboxPortForwardResponse, SandboxResumeCommand,
+    SandboxResumeResponse, SystemInfo, TerminalSize, WatchMemoryPressureRequest,
+    WatchReadinessRequest, WatchSandboxCleanupRequest, WatchStatsRequest,
 };
 use arcbox_constants::ports::AGENT_PORT;
 use arcbox_constants::wire::MessageType;
@@ -905,6 +905,26 @@ impl AgentClient {
             MessageType::KubernetesKubeconfigRequest,
             &payload,
             MessageType::KubernetesKubeconfigResponse,
+        )
+        .await
+    }
+
+    /// Lists the guest cluster's Services of type LoadBalancer.
+    ///
+    /// Unary, so it works over the blocking HV transport too.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the guest cannot list
+    /// Services (code 503 while the API server is not answering).
+    pub async fn list_kubernetes_load_balancers(
+        &mut self,
+    ) -> Result<KubernetesLoadBalancersResponse> {
+        let payload = KubernetesLoadBalancersRequest::default().encode_to_vec();
+        self.unary_rpc(
+            MessageType::KubernetesLoadBalancersRequest,
+            &payload,
+            MessageType::KubernetesLoadBalancersResponse,
         )
         .await
     }

@@ -101,14 +101,16 @@ pub mod agent {
         AgentPingRequest, AgentPingResponse, ContainerFsPathsRequest, ContainerFsPathsResponse,
         ContainerStats, DiskTrimRequest, DiskTrimResponse, EnsureNfsExportRequest,
         EnsureNfsExportResponse, ImageFsPathsRequest, ImageFsPathsResponse,
-        KubernetesDeleteRequest, KubernetesDeleteResponse, KubernetesKubeconfigRequest,
-        KubernetesKubeconfigResponse, KubernetesStartRequest, KubernetesStartResponse,
-        KubernetesStatusRequest, KubernetesStatusResponse, KubernetesStopRequest,
-        KubernetesStopResponse, MachineStats, MemoryPressureEvent, MmapReadFileRequest,
-        MmapReadFileResponse, PortBindingsChanged, PortBindingsRemoved, ReadinessEvent,
-        RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse,
-        ServiceStatus, ShutdownRequest, ShutdownResponse, SystemInfo, WatchMemoryPressureRequest,
-        WatchReadinessRequest, WatchStatsRequest, memory_pressure_event, readiness_event,
+        KubernetesDeleteRequest, KubernetesDeleteResponse, KubernetesHostPort,
+        KubernetesKubeconfigRequest, KubernetesKubeconfigResponse, KubernetesLoadBalancer,
+        KubernetesLoadBalancersRequest, KubernetesLoadBalancersResponse, KubernetesServicePort,
+        KubernetesStartRequest, KubernetesStartResponse, KubernetesStatusRequest,
+        KubernetesStatusResponse, KubernetesStopRequest, KubernetesStopResponse, MachineStats,
+        MemoryPressureEvent, MmapReadFileRequest, MmapReadFileResponse, PortBindingsChanged,
+        PortBindingsRemoved, ReadinessEvent, RuntimeEnsureRequest, RuntimeEnsureResponse,
+        RuntimeStatusRequest, RuntimeStatusResponse, ServiceStatus, ShutdownRequest,
+        ShutdownResponse, SystemInfo, WatchMemoryPressureRequest, WatchReadinessRequest,
+        WatchStatsRequest, kubernetes_host_port, memory_pressure_event, readiness_event,
     };
 
     // Backward compatibility type aliases (short names without Agent prefix).
@@ -119,10 +121,12 @@ pub mod agent {
 /// Kubernetes types (from kubernetes.proto).
 pub mod kubernetes {
     pub use super::v1::{
-        KubernetesDeleteRequest, KubernetesDeleteResponse, KubernetesKubeconfigRequest,
-        KubernetesKubeconfigResponse, KubernetesStartRequest, KubernetesStartResponse,
-        KubernetesStatusRequest, KubernetesStatusResponse, KubernetesStopRequest,
-        KubernetesStopResponse,
+        KubernetesDeleteRequest, KubernetesDeleteResponse, KubernetesHostPort,
+        KubernetesKubeconfigRequest, KubernetesKubeconfigResponse, KubernetesLoadBalancer,
+        KubernetesLoadBalancersRequest, KubernetesLoadBalancersResponse, KubernetesServicePort,
+        KubernetesStartRequest, KubernetesStartResponse, KubernetesStatusRequest,
+        KubernetesStatusResponse, KubernetesStopRequest, KubernetesStopResponse,
+        kubernetes_host_port,
     };
 }
 
@@ -200,11 +204,13 @@ pub use v1::{
 // Agent types
 pub use v1::{
     AgentPingRequest, AgentPingResponse, KubernetesDeleteRequest, KubernetesDeleteResponse,
-    KubernetesKubeconfigRequest, KubernetesKubeconfigResponse, KubernetesStartRequest,
-    KubernetesStartResponse, KubernetesStatusRequest, KubernetesStatusResponse,
-    KubernetesStopRequest, KubernetesStopResponse, PortBindingsChanged, PortBindingsRemoved,
-    RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse,
-    ServiceStatus, ShutdownRequest, ShutdownResponse, SystemInfo,
+    KubernetesHostPort, KubernetesKubeconfigRequest, KubernetesKubeconfigResponse,
+    KubernetesLoadBalancer, KubernetesLoadBalancersRequest, KubernetesLoadBalancersResponse,
+    KubernetesServicePort, KubernetesStartRequest, KubernetesStartResponse,
+    KubernetesStatusRequest, KubernetesStatusResponse, KubernetesStopRequest,
+    KubernetesStopResponse, PortBindingsChanged, PortBindingsRemoved, RuntimeEnsureRequest,
+    RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse, ServiceStatus,
+    ShutdownRequest, ShutdownResponse, SystemInfo,
 };
 
 // API types - Network

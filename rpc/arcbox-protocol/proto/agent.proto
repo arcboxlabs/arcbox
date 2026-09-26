@@ -37,6 +37,9 @@ service AgentService {
     // Returns kubeconfig content exported from the guest cluster.
     rpc GetKubeconfig(KubernetesKubeconfigRequest) returns (KubernetesKubeconfigResponse);
 
+    // Lists the guest cluster's Services of type LoadBalancer.
+    rpc ListKubernetesLoadBalancers(KubernetesLoadBalancersRequest) returns (KubernetesLoadBalancersResponse);
+
     // Requests graceful guest shutdown. The agent responds immediately,
     // then performs orderly process teardown and powers off the VM.
     rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
@@ -400,6 +403,74 @@ message KubernetesStatusResponse {
     string detail = 4;
     // Per-service status entries for fine-grained observability.
     repeated ServiceStatus services = 5;
+    // How each port of each LoadBalancer Service reaches the host, one entry
+    // per port. Reported by the daemon, which owns the host listeners; the
+    // guest agent leaves it empty.
+    repeated KubernetesHostPort host_ports = 6;
+}
+
+// How one port of a Service of type LoadBalancer reaches the host.
+message KubernetesHostPort {
+    enum State {
+        STATE_UNSPECIFIED = 0;
+        // A host listener is bound and relays to the port on the node.
+        FORWARDED = 1;
+        // servicelb has not published the port on the node yet.
+        PENDING = 2;
+        // Deliberately not bound; `detail` says why.
+        SKIPPED = 3;
+        // The host listener failed to bind; retried periodically.
+        FAILED = 4;
+    }
+
+    // Namespace of the Service.
+    string namespace = 1;
+    // Name of the Service.
+    string name = 2;
+    // Protocol as the Service spells it: "TCP", "UDP" or "SCTP".
+    string protocol = 3;
+    // Service port, which is also the host port.
+    uint32 port = 4;
+    // Host address the listener binds, per `[docker] expose_ports_to_lan`.
+    string host_ip = 5;
+    // Forwarding state.
+    State state = 6;
+    // Why the port is not forwarded; empty when it is.
+    string detail = 7;
+}
+
+// Request for the cluster's Services of type LoadBalancer.
+message KubernetesLoadBalancersRequest {}
+
+// The cluster's Services of type LoadBalancer.
+message KubernetesLoadBalancersResponse {
+    // Whether k3s is running. False means the list is empty because there
+    // is no cluster, not because the cluster has no load balancers.
+    bool running = 1;
+    // Every Service of type LoadBalancer, in any namespace.
+    repeated KubernetesLoadBalancer load_balancers = 2;
+}
+
+// A Service of type LoadBalancer.
+message KubernetesLoadBalancer {
+    // Namespace of the Service.
+    string namespace = 1;
+    // Name of the Service.
+    string name = 2;
+    // The Service's ports.
+    repeated KubernetesServicePort ports = 3;
+    // Addresses in the Service's `status.loadBalancer.ingress`. k3s
+    // servicelb lists a node once its svclb pod is ready, i.e. once the
+    // ports are published on the node; until then the list is empty.
+    repeated string ingress = 4;
+}
+
+// One port of a Service.
+message KubernetesServicePort {
+    // Protocol as the Service spells it: "TCP", "UDP" or "SCTP".
+    string protocol = 1;
+    // Service port.
+    uint32 port = 2;
 }
 
 // Request for managed kubeconfig content.

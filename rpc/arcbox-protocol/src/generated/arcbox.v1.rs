@@ -3429,6 +3429,120 @@ pub struct KubernetesStatusResponse {
     /// Per-service status entries for fine-grained observability.
     #[prost(message, repeated, tag = "5")]
     pub services: ::prost::alloc::vec::Vec<ServiceStatus>,
+    /// How each port of each LoadBalancer Service reaches the host, one entry
+    /// per port. Reported by the daemon, which owns the host listeners; the
+    /// guest agent leaves it empty.
+    #[prost(message, repeated, tag = "6")]
+    pub host_ports: ::prost::alloc::vec::Vec<KubernetesHostPort>,
+}
+/// How one port of a Service of type LoadBalancer reaches the host.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KubernetesHostPort {
+    /// Namespace of the Service.
+    #[prost(string, tag = "1")]
+    pub namespace: ::prost::alloc::string::String,
+    /// Name of the Service.
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+    /// Protocol as the Service spells it: "TCP", "UDP" or "SCTP".
+    #[prost(string, tag = "3")]
+    pub protocol: ::prost::alloc::string::String,
+    /// Service port, which is also the host port.
+    #[prost(uint32, tag = "4")]
+    pub port: u32,
+    /// Host address the listener binds, per `\[docker\] expose_ports_to_lan`.
+    #[prost(string, tag = "5")]
+    pub host_ip: ::prost::alloc::string::String,
+    /// Forwarding state.
+    #[prost(enumeration = "kubernetes_host_port::State", tag = "6")]
+    pub state: i32,
+    /// Why the port is not forwarded; empty when it is.
+    #[prost(string, tag = "7")]
+    pub detail: ::prost::alloc::string::String,
+}
+/// Nested message and enum types in `KubernetesHostPort`.
+pub mod kubernetes_host_port {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum State {
+        Unspecified = 0,
+        /// A host listener is bound and relays to the port on the node.
+        Forwarded = 1,
+        /// servicelb has not published the port on the node yet.
+        Pending = 2,
+        /// Deliberately not bound; `detail` says why.
+        Skipped = 3,
+        /// The host listener failed to bind; retried periodically.
+        Failed = 4,
+    }
+    impl State {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unspecified => "STATE_UNSPECIFIED",
+                Self::Forwarded => "FORWARDED",
+                Self::Pending => "PENDING",
+                Self::Skipped => "SKIPPED",
+                Self::Failed => "FAILED",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "STATE_UNSPECIFIED" => Some(Self::Unspecified),
+                "FORWARDED" => Some(Self::Forwarded),
+                "PENDING" => Some(Self::Pending),
+                "SKIPPED" => Some(Self::Skipped),
+                "FAILED" => Some(Self::Failed),
+                _ => None,
+            }
+        }
+    }
+}
+/// Request for the cluster's Services of type LoadBalancer.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KubernetesLoadBalancersRequest {}
+/// The cluster's Services of type LoadBalancer.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KubernetesLoadBalancersResponse {
+    /// Whether k3s is running. False means the list is empty because there
+    /// is no cluster, not because the cluster has no load balancers.
+    #[prost(bool, tag = "1")]
+    pub running: bool,
+    /// Every Service of type LoadBalancer, in any namespace.
+    #[prost(message, repeated, tag = "2")]
+    pub load_balancers: ::prost::alloc::vec::Vec<KubernetesLoadBalancer>,
+}
+/// A Service of type LoadBalancer.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KubernetesLoadBalancer {
+    /// Namespace of the Service.
+    #[prost(string, tag = "1")]
+    pub namespace: ::prost::alloc::string::String,
+    /// Name of the Service.
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+    /// The Service's ports.
+    #[prost(message, repeated, tag = "3")]
+    pub ports: ::prost::alloc::vec::Vec<KubernetesServicePort>,
+    /// Addresses in the Service's `status.loadBalancer.ingress`. k3s
+    /// servicelb lists a node once its svclb pod is ready, i.e. once the
+    /// ports are published on the node; until then the list is empty.
+    #[prost(string, repeated, tag = "4")]
+    pub ingress: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// One port of a Service.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KubernetesServicePort {
+    /// Protocol as the Service spells it: "TCP", "UDP" or "SCTP".
+    #[prost(string, tag = "1")]
+    pub protocol: ::prost::alloc::string::String,
+    /// Service port.
+    #[prost(uint32, tag = "2")]
+    pub port: u32,
 }
 /// Request for managed kubeconfig content.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
