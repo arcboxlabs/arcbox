@@ -3,10 +3,27 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use arcbox_ssh::{CLIENT_KEY_FILE, SshKeys, SshServer};
+use arcbox_connect::v1::MachineExecRequest;
+use arcbox_engine::agent_client::ExecSessionInput;
+use arcbox_ssh::{CLIENT_KEY_FILE, ExecOutput, MachineHost, SshKeys, SshServer};
 use russh::client;
 use russh::keys::{Algorithm, PrivateKey, PrivateKeyWithHashAlg, PublicKey};
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
+
+/// No machine to log into: these tests stop at authentication.
+struct NoMachines;
+
+impl MachineHost for NoMachines {
+    async fn exec(
+        &self,
+        machine: &str,
+        _request: MachineExecRequest,
+        _input: mpsc::Receiver<ExecSessionInput>,
+    ) -> anyhow::Result<ExecOutput> {
+        anyhow::bail!("no machine named '{machine}'")
+    }
+}
 
 struct TrustingClient;
 
@@ -31,7 +48,8 @@ async fn start_server() -> Fixture {
     let client_key = Arc::new(PrivateKey::from_openssh(pem).unwrap());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(SshServer::new(keys).serve(listener, std::future::pending()));
+    let server = SshServer::new(Arc::new(NoMachines), keys);
+    tokio::spawn(server.serve(listener, std::future::pending()));
     Fixture {
         addr,
         client_key,

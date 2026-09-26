@@ -11,18 +11,20 @@ use russh::{MethodKind, MethodSet, SshId};
 use tokio::net::TcpListener;
 
 use crate::connection::Connection;
+use crate::host::MachineHost;
 use crate::keys::SshKeys;
 
-/// The ArcBox SSH server.
-pub struct SshServer {
+/// An SSH server whose logins land in the machines `H` reaches.
+pub struct SshServer<H> {
+    host: Arc<H>,
     config: Arc<Config>,
     client_key: Arc<PublicKey>,
 }
 
-impl SshServer {
+impl<H: MachineHost> SshServer<H> {
     /// A server identifying with `keys.host` that lets in `keys.client` only.
     #[must_use]
-    pub fn new(keys: SshKeys) -> Self {
+    pub fn new(host: Arc<H>, keys: SshKeys) -> Self {
         let config = Config {
             server_id: SshId::Standard(
                 format!("SSH-2.0-ArcBox_{}", env!("CARGO_PKG_VERSION")).into(),
@@ -40,6 +42,7 @@ impl SshServer {
             ..Config::default()
         };
         Self {
+            host,
             config: Arc::new(config),
             client_key: Arc::new(keys.client),
         }
@@ -57,6 +60,7 @@ impl SshServer {
         shutdown: impl Future<Output = ()>,
     ) -> std::io::Result<()> {
         let mut acceptor = Acceptor {
+            host: self.host,
             client_key: self.client_key,
         };
         let server = acceptor.run_on_socket(self.config, &listener);
@@ -72,15 +76,16 @@ impl SshServer {
 }
 
 /// Hands each accepted connection its own [`Connection`].
-struct Acceptor {
+struct Acceptor<H> {
+    host: Arc<H>,
     client_key: Arc<PublicKey>,
 }
 
-impl russh::server::Server for Acceptor {
-    type Handler = Connection;
+impl<H: MachineHost> russh::server::Server for Acceptor<H> {
+    type Handler = Connection<H>;
 
-    fn new_client(&mut self, _peer: Option<SocketAddr>) -> Connection {
-        Connection::new(Arc::clone(&self.client_key))
+    fn new_client(&mut self, _peer: Option<SocketAddr>) -> Connection<H> {
+        Connection::new(Arc::clone(&self.host), Arc::clone(&self.client_key))
     }
 
     fn handle_session_error(&mut self, error: russh::Error) {
