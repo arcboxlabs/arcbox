@@ -151,6 +151,8 @@ Created by the daemon (0700) the first time its SSH server starts
 |------|---------|---------|
 | `ssh/ssh_host_ed25519_key` | Server host key (0600) | daemon |
 | `ssh/id_ed25519` | The one client key the server accepts (0600) | daemon |
+| `ssh/config` | OpenSSH client config: `Host arcbox` (`arcbox-dev` for the development profile) with the bound port and that key; rewritten on every start, removed when the server cannot bind | daemon |
+| `ssh/known_hosts` | Pins the host key for the `config` above (`HostKeyAlias`) | daemon |
 
 ---
 

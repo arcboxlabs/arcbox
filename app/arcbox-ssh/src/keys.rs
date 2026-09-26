@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use russh::keys::ssh_key::LineEnding;
 use russh::keys::{Algorithm, PrivateKey, PublicKey};
 
+use crate::error::SetupError;
+
 /// Host key file inside the SSH directory.
 pub const HOST_KEY_FILE: &str = "ssh_host_ed25519_key";
 /// Client private key file inside the SSH directory — the `IdentityFile`
@@ -17,25 +19,6 @@ pub const CLIENT_KEY_FILE: &str = "id_ed25519";
 const PRIVATE_KEY_MODE: u32 = 0o600;
 /// Mode of the SSH directory itself.
 const SSH_DIR_MODE: u32 = 0o700;
-
-/// Why the keys could not be loaded or created.
-#[derive(Debug, thiserror::Error)]
-pub enum KeyError {
-    #[error("{}: {source}", path.display())]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("{}: {source}", path.display())]
-    Key {
-        path: PathBuf,
-        #[source]
-        source: russh::keys::ssh_key::Error,
-    },
-    #[error(transparent)]
-    Write(#[from] arcbox_atomic_file::AtomicWriteError),
-}
 
 /// The key material the server runs with.
 pub struct SshKeys {
@@ -55,12 +38,12 @@ impl SshKeys {
     ///
     /// Returns an error if the directory or a key cannot be read, parsed or
     /// written.
-    pub fn load_or_generate(dir: &Path) -> Result<Self, KeyError> {
+    pub fn load_or_generate(dir: &Path) -> Result<Self, SetupError> {
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(SSH_DIR_MODE)
             .create(dir)
-            .map_err(|source| KeyError::Io {
+            .map_err(|source| SetupError::Io {
                 path: dir.to_path_buf(),
                 source,
             })?;
@@ -77,12 +60,12 @@ impl SshKeys {
 
 /// Reads the OpenSSH private key at `path`, or creates it. Either way the
 /// file ends up 0600: it is the daemon's own, and `ssh` rejects a looser one.
-fn load_or_generate_key(path: &Path, comment: &str) -> Result<PrivateKey, KeyError> {
-    let io_error = |source| KeyError::Io {
+fn load_or_generate_key(path: &Path, comment: &str) -> Result<PrivateKey, SetupError> {
+    let io_error = |source| SetupError::Io {
         path: path.to_path_buf(),
         source,
     };
-    let key_error = |source| KeyError::Key {
+    let key_error = |source| SetupError::Key {
         path: path.to_path_buf(),
         source,
     };
@@ -154,6 +137,6 @@ mod tests {
         std::fs::write(dir.path().join(HOST_KEY_FILE), "not a key").unwrap();
 
         let err = SshKeys::load_or_generate(dir.path()).err().unwrap();
-        assert!(matches!(err, KeyError::Key { .. }), "{err}");
+        assert!(matches!(err, SetupError::Key { .. }), "{err}");
     }
 }

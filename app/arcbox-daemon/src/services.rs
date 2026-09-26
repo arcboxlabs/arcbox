@@ -137,6 +137,7 @@ pub async fn start_services(
     let ssh = crate::ssh_service::SshService::bind_requested(
         ctx.ssh_port,
         &ctx.layout,
+        ctx.profile.ssh_host(),
         Arc::clone(runtime),
     )
     .await?;

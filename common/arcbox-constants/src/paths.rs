@@ -110,6 +110,16 @@ impl ArcboxProfile {
         }
     }
 
+    /// Returns the SSH host alias for this profile (`ssh <machine>@arcbox`),
+    /// distinct per profile so both can be included from `~/.ssh/config`.
+    #[must_use]
+    pub const fn ssh_host(self) -> &'static str {
+        match self {
+            Self::Production => "arcbox",
+            Self::Development => "arcbox-dev",
+        }
+    }
+
     /// Returns the launchd daemon label for this profile.
     #[must_use]
     pub const fn daemon_label(self) -> &'static str {

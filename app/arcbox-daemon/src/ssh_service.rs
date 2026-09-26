@@ -10,7 +10,9 @@ use arcbox_constants::ports::SSH_HOST_PORT;
 use arcbox_core::error::CoreError;
 use arcbox_core::{ExecSessionInput, Runtime};
 use arcbox_error::CommonError;
-use arcbox_ssh::{ExecOutput, MachineHost, SshKeys, SshServer};
+use arcbox_ssh::{
+    ExecOutput, MachineHost, SshKeys, SshServer, remove_client_config, write_client_config,
+};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -35,22 +37,34 @@ impl SshService {
     pub async fn bind_requested(
         requested: Option<u16>,
         layout: &HostLayout,
+        host_alias: &str,
         runtime: Arc<Runtime>,
     ) -> Result<Option<Self>> {
         let port = requested.unwrap_or(SSH_HOST_PORT);
-        match Self::bind(port, layout, runtime).await {
+        match Self::bind(port, layout, host_alias, runtime).await {
             Ok(service) => Ok(Some(service)),
             Err(error) if requested.is_some() => Err(error.context("Failed to start SSH server")),
             Err(error) => {
                 tracing::warn!(error = %format!("{error:#}"), "SSH server unavailable");
+                // A config from an earlier start would send clients to a
+                // port this daemon is not serving.
+                if let Err(error) = remove_client_config(&layout.ssh_dir) {
+                    tracing::warn!(%error, "stale SSH client config left in place");
+                }
                 Ok(None)
             }
         }
     }
 
-    /// Loads (or first generates) the keys under the data dir's `ssh/` and
-    /// binds the loopback listener. Port `0` asks the OS for an unused port.
-    async fn bind(port: u16, layout: &HostLayout, runtime: Arc<Runtime>) -> Result<Self> {
+    /// Loads (or first generates) the keys under the data dir's `ssh/`,
+    /// binds the loopback listener — port `0` asks the OS for an unused
+    /// one — and writes the client config that reaches it as `host_alias`.
+    async fn bind(
+        port: u16,
+        layout: &HostLayout,
+        host_alias: &str,
+        runtime: Arc<Runtime>,
+    ) -> Result<Self> {
         let keys = SshKeys::load_or_generate(&layout.ssh_dir).context("Failed to load SSH keys")?;
         let listener = TcpListener::bind(("127.0.0.1", port))
             .await
@@ -59,7 +73,13 @@ impl SshService {
             .local_addr()
             .context("Failed to read SSH server address")?
             .port();
-        info!(host_port, "SSH server bound");
+        write_client_config(&layout.ssh_dir, host_alias, host_port, &keys)
+            .context("Failed to write the SSH client config")?;
+        info!(
+            host_port,
+            config = %layout.ssh_config.display(),
+            "SSH server bound"
+        );
         Ok(Self {
             listener,
             server: SshServer::new(Arc::new(RuntimeMachines(runtime)), keys),
