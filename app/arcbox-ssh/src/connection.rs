@@ -2,12 +2,13 @@
 //! client key, then the connection's session channels.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use arcbox_engine::agent_client::ExecSessionInput;
 use russh::keys::PublicKey;
 use russh::server::{Auth, ChannelOpenHandle, Handler, Msg, Session};
-use russh::{Channel, ChannelId};
+use russh::{Channel, ChannelId, Pty};
 use tokio::sync::mpsc;
 
 use crate::host::MachineHost;
@@ -23,16 +24,44 @@ const INPUT_CAPACITY: usize = 64;
 pub struct Connection<H> {
     host: Arc<H>,
     client_key: Arc<PublicKey>,
+    /// `SSH_CLIENT` and `SSH_CONNECTION`, the way sshd sets them.
+    ssh_env: Vec<(String, String)>,
     /// The login's machine and account, once authenticated.
     target: Option<Target>,
     sessions: HashMap<ChannelId, SessionChannel>,
 }
 
 impl<H: MachineHost> Connection<H> {
-    pub fn new(host: Arc<H>, client_key: Arc<PublicKey>) -> Self {
+    pub fn new(
+        host: Arc<H>,
+        client_key: Arc<PublicKey>,
+        peer: Option<SocketAddr>,
+        local: SocketAddr,
+    ) -> Self {
+        let ssh_env = peer
+            .map(|peer| {
+                vec![
+                    (
+                        "SSH_CLIENT".to_owned(),
+                        format!("{} {} {}", peer.ip(), peer.port(), local.port()),
+                    ),
+                    (
+                        "SSH_CONNECTION".to_owned(),
+                        format!(
+                            "{} {} {} {}",
+                            peer.ip(),
+                            peer.port(),
+                            local.ip(),
+                            local.port()
+                        ),
+                    ),
+                ]
+            })
+            .unwrap_or_default();
         Self {
             host,
             client_key,
+            ssh_env,
             target: None,
             sessions: HashMap::new(),
         }
@@ -59,7 +88,7 @@ impl<H: MachineHost> Connection<H> {
         if state.started() {
             return session.channel_failure(channel);
         }
-        let request = state.exec_request(target, program);
+        let request = state.exec_request(target, program, &self.ssh_env);
         let (input, input_rx) = mpsc::channel(INPUT_CAPACITY);
         let started = self
             .host
@@ -120,6 +149,38 @@ impl<H: MachineHost> Handler for Connection<H> {
         Ok(())
     }
 
+    async fn pty_request(
+        &mut self,
+        channel: ChannelId,
+        term: &str,
+        col_width: u32,
+        row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        _modes: &[(Pty, u32)],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let accepted = self
+            .sessions
+            .get_mut(&channel)
+            .is_some_and(|state| state.request_pty(term, col_width, row_height));
+        reply(session, channel, accepted)
+    }
+
+    async fn env_request(
+        &mut self,
+        channel: ChannelId,
+        variable_name: &str,
+        variable_value: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let accepted = self
+            .sessions
+            .get_mut(&channel)
+            .is_some_and(|state| state.request_env(variable_name, variable_value));
+        reply(session, channel, accepted)
+    }
+
     async fn shell_request(
         &mut self,
         channel: ChannelId,
@@ -146,6 +207,23 @@ impl<H: MachineHost> Handler for Connection<H> {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         session.channel_failure(channel)
+    }
+
+    async fn window_change_request(
+        &mut self,
+        channel: ChannelId,
+        col_width: u32,
+        row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let resize = ExecSessionInput::Resize {
+            width: u16::try_from(col_width).unwrap_or(u16::MAX),
+            height: u16::try_from(row_height).unwrap_or(u16::MAX),
+        };
+        self.send_input(channel, resize).await;
+        Ok(())
     }
 
     async fn data(
@@ -188,5 +266,13 @@ fn auth(accepted: bool) -> Auth {
         Auth::Accept
     } else {
         Auth::reject()
+    }
+}
+
+fn reply(session: &mut Session, channel: ChannelId, accepted: bool) -> Result<(), russh::Error> {
+    if accepted {
+        session.channel_success(channel)
+    } else {
+        session.channel_failure(channel)
     }
 }

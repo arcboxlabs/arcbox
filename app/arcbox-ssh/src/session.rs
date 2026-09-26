@@ -1,7 +1,10 @@
-//! A session channel: the request that starts its process (`shell`,
-//! `exec`), then the process's output streaming back.
+//! A session channel: the requests that shape its process (`pty-req`,
+//! `env`), the one that starts it (`shell`, `exec`), and then the process's
+//! output streaming back.
 
-use arcbox_connect::v1::{MachineExecOutput, MachineExecRequest};
+use std::collections::HashMap;
+
+use arcbox_connect::v1::{MachineExecOutput, MachineExecRequest, TerminalSize};
 use arcbox_engine::agent_client::ExecSessionInput;
 use russh::ChannelWriteHalf;
 use russh::server::Msg;
@@ -20,13 +23,22 @@ const EXIT_FAILURE: u32 = 255;
 pub enum Program {
     /// The account's login shell (`shell`).
     Shell,
-    /// A command line for the account's shell (`exec`).
+    /// A command line for the account's shell (`exec`, and subsystems).
     Command(String),
+}
+
+/// The terminal a `pty-req` asked for.
+struct Pty {
+    term: String,
+    cols: u32,
+    rows: u32,
 }
 
 pub struct SessionChannel {
     /// Output side, until the process starts and its output task takes it.
     writer: Option<ChannelWriteHalf<Msg>>,
+    pty: Option<Pty>,
+    env: HashMap<String, String>,
     /// Input side of the running process.
     input: Option<mpsc::Sender<ExecSessionInput>>,
     /// The output task. Aborted when the channel goes away — closed by the
@@ -36,22 +48,68 @@ pub struct SessionChannel {
 }
 
 impl SessionChannel {
-    pub const fn new(writer: ChannelWriteHalf<Msg>) -> Self {
+    pub fn new(writer: ChannelWriteHalf<Msg>) -> Self {
         Self {
             writer: Some(writer),
+            pty: None,
+            env: HashMap::new(),
             input: None,
             output_task: None,
         }
     }
 
     /// Whether a process was started (or failed to start) on this channel.
-    pub const fn started(&self) -> bool {
+    pub fn started(&self) -> bool {
         self.writer.is_none()
     }
 
+    /// Records a `pty-req`; refused once the process runs.
+    pub fn request_pty(&mut self, term: &str, cols: u32, rows: u32) -> bool {
+        if self.started() {
+            return false;
+        }
+        self.pty = Some(Pty {
+            term: term.to_owned(),
+            cols,
+            rows,
+        });
+        true
+    }
+
+    /// Records an `env` request; refused once the process runs, or for a
+    /// name no environment can hold.
+    pub fn request_env(&mut self, name: &str, value: &str) -> bool {
+        let valid = !name.is_empty() && !name.contains(['=', '\0']) && !value.contains('\0');
+        if self.started() || !valid {
+            return false;
+        }
+        self.env.insert(name.to_owned(), value.to_owned());
+        true
+    }
+
     /// The machine exec request that runs `program` for `target` as a login
-    /// session.
-    pub fn exec_request(&self, target: &Target, program: Program) -> MachineExecRequest {
+    /// session with this channel's terminal and environment; `ssh_env`
+    /// (the `SSH_*` variables) goes on top of the client's.
+    pub fn exec_request(
+        &self,
+        target: &Target,
+        program: Program,
+        ssh_env: &[(String, String)],
+    ) -> MachineExecRequest {
+        let mut env = self.env.clone();
+        env.extend(ssh_env.iter().cloned());
+        if let Some(pty) = &self.pty {
+            env.insert("TERM".to_owned(), pty.term.clone());
+        }
+        let tty_size = self
+            .pty
+            .as_ref()
+            .filter(|pty| pty.cols > 0 && pty.rows > 0)
+            .map(|pty| TerminalSize {
+                width: pty.cols,
+                height: pty.rows,
+                ..Default::default()
+            });
         MachineExecRequest {
             id: target.machine.clone(),
             cmd: match program {
@@ -59,6 +117,9 @@ impl SessionChannel {
                 Program::Command(line) => vec![line],
             },
             user: target.user.clone().unwrap_or_default(),
+            env: env.into_iter().collect(),
+            tty: self.pty.is_some(),
+            tty_size: tty_size.into(),
             attach_stdin: true,
             login: true,
             ..Default::default()
@@ -73,12 +134,16 @@ impl SessionChannel {
         let Some(writer) = self.writer.take() else {
             return;
         };
+        let newline = if self.pty.is_some() { "\r\n" } else { "\n" };
         let task = match started {
             Ok((output, input)) => {
                 self.input = Some(input);
-                tokio::spawn(forward_output(output, writer))
+                tokio::spawn(forward_output(output, writer, newline))
             }
-            Err(e) => tokio::spawn(finish(writer, Exit::Failed(format!("{e:#}")))),
+            Err(e) => {
+                let exit = Exit::Failed(format!("{e:#}"));
+                tokio::spawn(finish(writer, exit, newline))
+            }
         };
         self.output_task = Some(task.abort_handle());
     }
@@ -112,7 +177,11 @@ impl From<&MachineExecOutput> for Exit {
 
 /// Streams the process's output to the client — stderr as extended data —
 /// then reports how it ended and closes the channel.
-async fn forward_output(mut output: ExecOutput, writer: ChannelWriteHalf<Msg>) {
+async fn forward_output(
+    mut output: ExecOutput,
+    writer: ChannelWriteHalf<Msg>,
+    newline: &'static str,
+) {
     let exit = loop {
         match output.recv().await {
             Some(Ok(mut frame)) => {
@@ -136,18 +205,18 @@ async fn forward_output(mut output: ExecOutput, writer: ChannelWriteHalf<Msg>) {
             None => break Exit::Failed("the machine session ended without an exit status".into()),
         }
     };
-    finish(writer, exit).await;
+    finish(writer, exit, newline).await;
 }
 
 /// Reports `exit` and closes the channel. Send failures are ignored: they
 /// only mean the client already went away.
-async fn finish(writer: ChannelWriteHalf<Msg>, exit: Exit) {
+async fn finish(writer: ChannelWriteHalf<Msg>, exit: Exit, newline: &str) {
     match exit {
         Exit::Status(code) => {
             let _ = writer.exit_status(code).await;
         }
         Exit::Failed(message) => {
-            let message = format!("arcbox: {message}\n");
+            let message = format!("arcbox: {message}{newline}");
             let _ = writer.extended_data_bytes(STDERR, message).await;
             let _ = writer.exit_status(EXIT_FAILURE).await;
         }

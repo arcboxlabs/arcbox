@@ -72,6 +72,17 @@ impl MachineHost for ScriptedMachine {
                         }
                     }
                 },
+                "wait-resize" => loop {
+                    match input.recv().await {
+                        Some(ExecSessionInput::Resize { width, height }) => {
+                            let size = format!("{width}x{height}");
+                            let _ = tx.send(Ok(output("stdout", size.as_bytes()))).await;
+                            break exit(0, "");
+                        }
+                        Some(_) => {}
+                        None => return,
+                    }
+                },
                 "stderr" => {
                     let _ = tx.send(Ok(output("stderr", b"oops"))).await;
                     exit(1, "")
@@ -176,6 +187,7 @@ async fn exec_runs_a_login_command_in_the_selected_machine() {
     assert!(ok);
 
     let mut channel = handle.channel_open_session().await.unwrap();
+    channel.set_env(true, "LANG", "C.UTF-8").await.unwrap();
     channel.exec(true, "exit 7").await.unwrap();
     let messages = drain(&mut channel).await;
     assert_eq!(exit_status(&messages), Some(7));
@@ -185,6 +197,8 @@ async fn exec_runs_a_login_command_in_the_selected_machine() {
     assert_eq!(request.user, "dev");
     assert_eq!(request.cmd, ["exit 7"]);
     assert!(request.login && request.attach_stdin && !request.tty);
+    assert_eq!(request.env.get("LANG").map(String::as_str), Some("C.UTF-8"));
+    assert!(request.env.contains_key("SSH_CONNECTION"));
 }
 
 #[tokio::test]
@@ -211,6 +225,44 @@ async fn stderr_arrives_as_extended_data() {
     let messages = drain(&mut channel).await;
     assert_eq!(data(&messages, Some(1)), b"oops");
     assert_eq!(exit_status(&messages), Some(1));
+}
+
+#[tokio::test]
+async fn a_shell_with_a_pty_gets_the_terminal_it_asked_for() {
+    let fixture = start_server().await;
+    let (handle, _) = login(fixture.addr, "ubuntu", fixture.client_key).await;
+
+    let mut channel = handle.channel_open_session().await.unwrap();
+    channel
+        .request_pty(true, "xterm-256color", 100, 30, 0, 0, &[])
+        .await
+        .unwrap();
+    channel.request_shell(true).await.unwrap();
+    drain(&mut channel).await;
+
+    let (_, request) = fixture.machine.requests.lock().unwrap()[0].clone();
+    assert!(request.tty && request.cmd.is_empty());
+    assert_eq!((request.tty_size.width, request.tty_size.height), (100, 30));
+    assert_eq!(
+        request.env.get("TERM").map(String::as_str),
+        Some("xterm-256color")
+    );
+}
+
+#[tokio::test]
+async fn window_changes_resize_the_terminal() {
+    let fixture = start_server().await;
+    let (handle, _) = login(fixture.addr, "ubuntu", fixture.client_key).await;
+
+    let mut channel = handle.channel_open_session().await.unwrap();
+    channel
+        .request_pty(true, "xterm", 80, 24, 0, 0, &[])
+        .await
+        .unwrap();
+    channel.exec(true, "wait-resize").await.unwrap();
+    channel.window_change(120, 40, 0, 0).await.unwrap();
+    let messages = drain(&mut channel).await;
+    assert_eq!(data(&messages, None), b"120x40");
 }
 
 #[tokio::test]

@@ -5,8 +5,8 @@
 //! selects the machine ([`Target`]). Sessions do not run an sshd in the
 //! machine: each `shell`/`exec` becomes a login session on the machine exec
 //! path — the guest agent runs the account's shell the way sshd would — with
-//! stdin and the exit status carried over its frames. [`MachineHost`] is the
-//! seam to the daemon's runtime.
+//! `pty-req`, `env`, `window-change`, stdin and the exit status carried over
+//! its frames. [`MachineHost`] is the seam to the daemon's runtime.
 
 mod connection;
 mod host;

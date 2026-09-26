@@ -62,6 +62,7 @@ impl<H: MachineHost> SshServer<H> {
         let mut acceptor = Acceptor {
             host: self.host,
             client_key: self.client_key,
+            local: listener.local_addr()?,
         };
         let server = acceptor.run_on_socket(self.config, &listener);
         let handle = server.handle();
@@ -79,13 +80,19 @@ impl<H: MachineHost> SshServer<H> {
 struct Acceptor<H> {
     host: Arc<H>,
     client_key: Arc<PublicKey>,
+    local: SocketAddr,
 }
 
 impl<H: MachineHost> russh::server::Server for Acceptor<H> {
     type Handler = Connection<H>;
 
-    fn new_client(&mut self, _peer: Option<SocketAddr>) -> Connection<H> {
-        Connection::new(Arc::clone(&self.host), Arc::clone(&self.client_key))
+    fn new_client(&mut self, peer: Option<SocketAddr>) -> Connection<H> {
+        Connection::new(
+            Arc::clone(&self.host),
+            Arc::clone(&self.client_key),
+            peer,
+            self.local,
+        )
     }
 
     fn handle_session_error(&mut self, error: russh::Error) {
