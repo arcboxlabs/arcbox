@@ -20,17 +20,16 @@
 
 mod control;
 mod process;
+mod session;
 
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::os::unix::process::ExitStatusExt as _;
 use std::process::{ExitStatus, Stdio};
 
 use anyhow::Context;
 use arcbox_connect::v1::MachineExecRequest;
 use arcbox_pty::RunAs;
 use buffa::Message;
-use nix::sys::signal::Signal;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 use tokio::sync::mpsc;
@@ -124,9 +123,9 @@ where
         }
     };
     match exited {
-        Some(status) => write_exit(&mut conn_wr, trace_id, status).await?,
+        Some(status) => session::write_exit(&mut conn_wr, trace_id, status).await?,
         None => {
-            kill_session(pid);
+            session::kill_session(pid);
             let _ = child.wait().await;
         }
     }
@@ -192,7 +191,7 @@ where
             Control::Eof => stdin = None,
             // No terminal to resize.
             Control::Resize(_) => {}
-            Control::Signal(signal) => signal_process(pid, signal),
+            Control::Signal(signal) => session::signal_process(pid, signal),
         }
     }
 }
@@ -279,10 +278,10 @@ where
     match exited {
         Some(status) => {
             let _ = reader.await;
-            write_exit(&mut conn_wr, trace_id, status).await?;
+            session::write_exit(&mut conn_wr, trace_id, status).await?;
         }
         None => {
-            kill_session(pid);
+            session::kill_session(pid);
             let _ = child.wait().await;
         }
     }
@@ -354,7 +353,7 @@ async fn serve_terminal_control<R>(
                     tracing::debug!(error = %e, "pty resize failed");
                 }
             }
-            Control::Signal(signal) => signal_process(pid, signal),
+            Control::Signal(signal) => session::signal_process(pid, signal),
         }
     }
 }
@@ -381,50 +380,4 @@ where
         &out.encode_to_vec(),
     )
     .await
-}
-
-/// Writes the final frame reporting how the process ended.
-async fn write_exit<W>(writer: &mut W, trace_id: &str, status: ExitStatus) -> anyhow::Result<()>
-where
-    W: AsyncWrite + Unpin,
-{
-    let out = arcbox_connect::v1::MachineExecOutput {
-        done: true,
-        exit_code: status.code().unwrap_or(-1),
-        exit_signal: status.signal().map(signal_name).unwrap_or_default(),
-        ..Default::default()
-    };
-    write_message(
-        writer,
-        MessageType::MachineExecOutput,
-        trace_id,
-        &out.encode_to_vec(),
-    )
-    .await
-}
-
-/// A signal's name without the `SIG` prefix, as SSH reports it (`"KILL"`).
-fn signal_name(signal: i32) -> String {
-    Signal::try_from(signal).map_or_else(
-        |_| signal.to_string(),
-        |s| s.as_str().trim_start_matches("SIG").to_owned(),
-    )
-}
-
-/// Delivers a host-requested signal to the session's process, as sshd does
-/// for an SSH `signal` request (the process itself, not its group).
-fn signal_process(pid: Option<u32>, signal: Signal) {
-    if let Some(pid) = pid.and_then(|p| i32::try_from(p).ok()) {
-        if let Err(e) = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), signal) {
-            tracing::debug!(error = %e, ?signal, "machine exec signal not delivered");
-        }
-    }
-}
-
-/// Kills a session's whole process group: the child leads its own session,
-/// so descendants must not outlive a host that went away.
-fn kill_session(pid: Option<u32>) {
-    if let Some(pid) = pid.and_then(|p| i32::try_from(p).ok()) {
-        let _ = nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pid), Signal::SIGKILL);
-    }
 }
