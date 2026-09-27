@@ -466,6 +466,12 @@ above). When editing either side, keep in lockstep:
   checked-arithmetic rule for virtqueue/ring values (ring GPA, descriptor
   field, queue index) lives in `virt/AGENTS.md` "Guest-controlled input" —
   that surface belongs to `virt/`, not this layer.
+- A background loop that talks to a guest agent follows `kubernetes_lb.rs`
+  / `disk_reclaim.rs`: gate on `subscribe_system_vm_state`, dispatch on the
+  transport (`Runtime::trim_machine_disk` is the pattern for a unary RPC
+  that must also work on the HV blocking socketpair), and keep the
+  scheduling behind a trait so the timing is unit-tested with
+  `start_paused`.
 
 ## Validation ladder (cheapest first)
 

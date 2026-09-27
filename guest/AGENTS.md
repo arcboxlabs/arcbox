@@ -113,8 +113,8 @@ non-obvious invariants and failure signatures.
   kernel cmdline, and a `DistroMachine` returns into `agent::run` before any
   System VM service starts — the DNS server on `0.0.0.0:53`, container
   domains, docker events and the publish mirror, the NFS relay, the standard
-  VirtioFS shares, the Docker and Kubernetes API proxies, fstrim, the
-  direct-routing reconciler, the sandbox service. The DNS socket alone made
+  VirtioFS shares, the Docker and Kubernetes API proxies, the direct-routing
+  reconciler, the sandbox service. The DNS socket alone made
   systemd-resolved turn its `127.0.0.53`
   stub off ("Another process is already listening on UDP socket
   127.0.0.53:53"), which broke every lookup on Debian and Ubuntu; the
@@ -123,6 +123,11 @@ non-obvious invariants and failure signatures.
   it belongs to. Machine readiness also reads `SystemInfo.ip_addresses`,
   which comes from `getifaddrs`: never shell out to `hostname` for it (some
   images ship none, and BusyBox's `-i` resolves the name through DNS).
+  Disk trimming is host-driven for both guests: `arcbox-daemon`'s
+  `disk_reclaim` asks the System VM for a `FITRIM` when it goes idle and
+  every running machine hourly; the agent issues the ioctl
+  (`agent/linux/disk.rs`) and runs no loop of its own. The rootfs ships no
+  `fstrim` binary — never shell out to it.
 - **Container domains ride nat PREROUTING, and bridged siblings reach them
   only through the kernel's built-in `br_netfilter`.** `domains/` DNATs
   `<ip>:80` to the container's HTTP port and REDIRECTs `<ip>:443` to the

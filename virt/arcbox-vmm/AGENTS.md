@@ -60,6 +60,20 @@ Worker-specific coupling not in the shared doc:
   following FLUSH returns before its data hits disk.
 - Tests must exercise the worker parser/executor, not just shared leaf helpers.
 
+## HVC block fast path is the System VM's data-disk path
+
+On HV the agent picks `/dev/arcboxhvc1` (HVC hypercalls,
+`vmm/darwin_hv/hvc_blk.rs`; driver `drivers/arcbox_hvc_blk.c` in
+`arcboxlabs/kernel`) over `/dev/vdb`; `blk_worker.rs` serves only the rootfs
+and the ext4 metadata disk. A block feature the data disk needs must exist in
+**both** the worker and `hvc_blk.rs` + the driver — DISCARD
+(`ARCBOX_HVC_BLK_DISCARD`, 0xC2000005) was missing there while the worker's
+hole punch was correct and unused, so no freed block ever left `docker.img`
+on HV (`docs/disk-reclaim.md`). The driver probes each hypercall with a
+zero-length call at bind time; an unknown function ID must keep falling
+through to `handle_psci` and answer `PSCI_NOT_SUPPORTED`, which is what keeps
+an old host and a new guest (or the reverse) inert rather than broken.
+
 ## macOS HV Net RX Worker Contract
 
 RX injection has two flavors — the channel-based `RxInjectThread`
