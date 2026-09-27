@@ -81,8 +81,9 @@ disk drops on unmount.
 ## After this change
 
 Same procedure, same host, 2026-09-27. The HV row ran the CI-built kernel
-from arcboxlabs/kernel PR #20 (merged as `2c041107`; passed with `--kernel`
-because boot assets 0.8.6 predate it); the daemon was the rebuilt one.
+from arcboxlabs/kernel PR #20 (merged as `2c041107`, released as kernel
+v0.0.25 and shipped by boot assets 0.8.7; this run passed it with `--kernel`
+because the pinned bundle was still 0.8.6); the daemon was the rebuilt one.
 
 | backend × guest | after write | rm +0 s | +15 s | +30 s | +60 s | +120 s | +180 s | manual `abctl disk compact` |
 |---|---|---|---|---|---|---|---|---|
