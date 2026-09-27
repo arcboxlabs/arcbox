@@ -303,6 +303,13 @@ pub enum MessageType {
     /// flow-controlled machine exec session (payload:
     /// `arcbox.v1.MachineTcpConnectRequest`).
     MachineTcpConnectRequest = 0x0082,
+    /// Starts a container-debug exec: like [`Self::MachineExecRequest`] but
+    /// the process enters the target container's PID, network, IPC and UTS
+    /// namespaces before exec, so it shares the container's process and
+    /// network view while keeping the agent's own tools (payload:
+    /// `arcbox.v1.MachineExecRequest` with `container` set). Streamed back
+    /// as [`Self::DebugExecResponse`] frames.
+    DebugExecRequest = 0x00C8,
 
     // Response types (0x1000 - 0x1FFF).
     PingResponse = 0x1001,
@@ -457,6 +464,12 @@ pub enum MessageType {
     /// session: first as its opening frame, then as the process reads
     /// stdin (payload: `arcbox.v1.MachineExecWindow`).
     MachineExecInputWindow = 0x1081,
+    /// One container-debug exec output frame: the response half of
+    /// [`Self::DebugExecRequest`] (`0x00C8 + 0x1000`), carrying the same
+    /// `arcbox.v1.MachineExecOutput` payload as [`Self::MachineExecOutput`]
+    /// but tagged for the debug session so its request and response types
+    /// stay symmetric.
+    DebugExecResponse = 0x10C8,
 
     // Special types.
     Empty = 0x0000,
@@ -541,6 +554,7 @@ impl MessageType {
             0x0080 => Some(Self::MachineExecSignal),
             0x0081 => Some(Self::MachineExecOutputWindow),
             0x0082 => Some(Self::MachineTcpConnectRequest),
+            0x00C8 => Some(Self::DebugExecRequest),
             // Responses.
             0x1001 => Some(Self::PingResponse),
             0x1002 => Some(Self::GetSystemInfoResponse),
@@ -610,6 +624,7 @@ impl MessageType {
             0x1074 => Some(Self::SandboxTemplateDeleteResponse),
             0x1050 => Some(Self::MachineExecOutput),
             0x1081 => Some(Self::MachineExecInputWindow),
+            0x10C8 => Some(Self::DebugExecResponse),
             0x0000 => Some(Self::Empty),
             0xFFFF => Some(Self::Error),
             _ => None,
@@ -850,8 +865,10 @@ mod tests {
             (0x0080, MessageType::MachineExecSignal),
             (0x0081, MessageType::MachineExecOutputWindow),
             (0x0082, MessageType::MachineTcpConnectRequest),
+            (0x00C8, MessageType::DebugExecRequest),
             (0x1050, MessageType::MachineExecOutput),
             (0x1081, MessageType::MachineExecInputWindow),
+            (0x10C8, MessageType::DebugExecResponse),
         ];
 
         for (raw, expected) in CASES {

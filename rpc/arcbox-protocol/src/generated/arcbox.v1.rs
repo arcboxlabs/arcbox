@@ -1807,6 +1807,12 @@ pub struct MachineExecRequest {
     /// control.
     #[prost(uint32, tag = "10")]
     pub output_window: u32,
+    /// Container-debug target (see the DebugExecRequest wire message): when
+    /// set, the exec enters this container's PID, network, IPC and UTS
+    /// namespaces instead of running in the machine root. Empty for a normal
+    /// machine exec.
+    #[prost(string, tag = "11")]
+    pub container: ::prost::alloc::string::String,
 }
 /// One client message on an interactive machine session.
 #[derive(Clone, PartialEq, ::prost::Message)]

@@ -344,6 +344,11 @@ message MachineExecRequest {
     // it consumes (MachineExecWindow frames). 0 streams without flow
     // control.
     uint32 output_window = 10;
+    // Container-debug target (see the DebugExecRequest wire message): when
+    // set, the exec enters this container's PID, network, IPC and UTS
+    // namespaces instead of running in the machine root. Empty for a normal
+    // machine exec.
+    string container = 11;
 }
 
 // One client message on an interactive machine session.
