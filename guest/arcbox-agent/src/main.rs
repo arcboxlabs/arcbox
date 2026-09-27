@@ -68,6 +68,10 @@ mod mount;
 #[cfg(target_os = "linux")]
 mod nfs;
 
+// SSH agent forwarding into containers (Linux-only: guest Unix + vsock relay).
+#[cfg(target_os = "linux")]
+mod ssh_auth;
+
 // containerd snapshots client for container filesystem-path resolution.
 #[cfg(target_os = "linux")]
 mod containerd;
@@ -302,6 +306,12 @@ async fn main() -> Result<()> {
         nfs::NFSD_PORT,
     ));
 
+    // Forward container SSH-agent connections to the daemon over vsock. The
+    // daemon parks a pool of connections here and pairs each with a container
+    // that opens the forwarded socket; see the `ssh_auth` module.
+    #[cfg(target_os = "linux")]
+    let ssh_auth_handle = tokio::spawn(ssh_auth::run_ssh_auth_relay(cancel.clone()));
+
     // Run the agent (vsock listener + RPC handler).
     let result = agent::run(guest).await;
 
@@ -310,6 +320,8 @@ async fn main() -> Result<()> {
     let _ = tokio::join!(dns_handle, docker_handle, domains_handle);
     #[cfg(target_os = "linux")]
     let _ = nfs_handle.await;
+    #[cfg(target_os = "linux")]
+    let _ = ssh_auth_handle.await;
 
     result
 }
