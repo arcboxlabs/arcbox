@@ -189,9 +189,19 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   `guest/arcbox-agent/src/agent/linux/machine_exec/flow.rs`), and neither side
   sends past its window, so both can always keep reading. An agent that
   grants no window is refused at exec time ("restart the machine to update
-  it"). The Docker API channel (2375) and the sandbox streams still have no
-  window, so a paused `docker attach` or `docker logs -f | less` can wedge the
-  System VM (open).
+  it"). The Docker API channel (2375) has one too since protocol v5:
+  `HalfCloseStream` grants each direction 1 MiB in-band (`WINDOW`, header
+  top bit set) and keeps a reader task on the connection, so a paused
+  `docker attach` backs up into dockerd's socket, not the vsock. The sandbox
+  streams open with `SANDBOX_STREAM_WINDOW` (4 MiB, `wire.rs`) returned by
+  `SandboxStreamWindow` frames; the guest's `sandbox/window.rs` never sends
+  past it and the host's `agent_client/sandbox_stream.rs` returns it as the
+  consumer takes frames. A writer whose peer has gone fails with
+  `BrokenPipe` instead of waiting for a grant that cannot come — without
+  that, dropping an attach hung the container's stop. Only the Kubernetes
+  (16443) and NFS (2049) raw relays have no window; their host-side
+  consumers (kubectl, the kernel NFS client) do not stop reading in
+  practice.
 
 ## VM lifecycle internals (`engine/arcbox-engine/src/vm_lifecycle`)
 
