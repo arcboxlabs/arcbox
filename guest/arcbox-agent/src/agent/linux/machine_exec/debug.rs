@@ -39,6 +39,15 @@
 //! private remount of `/`), so nothing propagates back to the agent: the
 //! session leaves no residue, and there is nothing to unmount when it ends.
 //!
+//! ## Tools
+//!
+//! The agent rootfs links only the handful of busybox applets its boot
+//! sequence runs, so the session puts a link for every applet busybox was
+//! built with last on the shell's `PATH` ([`tools_dir`]): `ps`, `grep`, `wget`
+//! and the rest resolve by name, and nothing the agent root ships is
+//! shadowed. The links grant nothing new — a root shell can run any applet as
+//! `busybox <name>` anyway.
+//!
 //! ## The extra fork and `Command`'s spawn protocol
 //!
 //! `Command::spawn` forks a child that reports exec success or failure to the
@@ -58,8 +67,17 @@
 
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::path::Path;
+
+use anyhow::Context as _;
 
 use crate::rpc::ErrorResponse;
+
+/// Where [`tools_dir`] links the applets: tmpfs, so they go with the machine.
+const TOOLS_DIR: &str = "/run/arcbox/debug-tools";
+
+/// The agent root's multi-call busybox.
+const BUSYBOX: &str = "/bin/busybox";
 
 /// A resolved debug target: open handles to the container's namespaces and its
 /// root directory. Everything the async-signal-unsafe pre-exec closure needs is
@@ -208,6 +226,43 @@ fn reap_and_exit(grandchild: libc::pid_t) -> ! {
     unsafe { libc::_exit(libc::WEXITSTATUS(status)) }
 }
 
+/// The directory of busybox applet links for the shell's `PATH`, populated by
+/// the agent's first debug session.
+pub(super) async fn tools_dir() -> Result<&'static str, ErrorResponse> {
+    static INSTALLED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+    INSTALLED
+        .get_or_try_init(|| install_tools(Path::new(BUSYBOX), Path::new(TOOLS_DIR)))
+        .await
+        .map_err(|e| ErrorResponse::new(500, format!("install debug tools: {e:#}")))?;
+    Ok(TOOLS_DIR)
+}
+
+/// Links every applet `busybox --list` reports into `dir`, keeping the links
+/// an earlier agent left on the same boot.
+async fn install_tools(busybox: &Path, dir: &Path) -> anyhow::Result<()> {
+    let list = tokio::process::Command::new(busybox)
+        .arg("--list")
+        .output()
+        .await
+        .with_context(|| format!("run {} --list", busybox.display()))?;
+    anyhow::ensure!(
+        list.status.success(),
+        "{} --list: {}",
+        busybox.display(),
+        list.status
+    );
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    for applet in String::from_utf8_lossy(&list.stdout).lines() {
+        match std::os::unix::fs::symlink(busybox, dir.join(applet)) {
+            Err(e) if e.kind() != io::ErrorKind::AlreadyExists => {
+                return Err(e).with_context(|| format!("link {applet}"));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Inspects `container` over the Docker Engine API and returns its init PID.
 async fn container_init_pid(container: &str) -> Result<u32, ErrorResponse> {
     let info = crate::docker_events::docker_get(&format!("/containers/{container}/json"))
@@ -251,5 +306,30 @@ fn cvt(ret: libc::c_int) -> io::Result<()> {
         Err(io::Error::last_os_error())
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn every_listed_applet_is_linked_again_after_an_agent_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let busybox = root.path().join("busybox");
+        std::fs::write(&busybox, "#!/bin/sh\nprintf 'ps\\ngrep\\n'\n").unwrap();
+        std::fs::set_permissions(&busybox, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let dir = root.path().join("tools");
+
+        install_tools(&busybox, &dir).await.unwrap();
+        // A respawned agent finds the links its predecessor made.
+        install_tools(&busybox, &dir).await.unwrap();
+
+        for applet in ["ps", "grep"] {
+            assert_eq!(std::fs::read_link(dir.join(applet)).unwrap(), busybox);
+        }
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
     }
 }

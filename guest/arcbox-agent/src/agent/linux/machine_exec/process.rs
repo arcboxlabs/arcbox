@@ -98,6 +98,21 @@ impl ProcessSpec {
         })
     }
 
+    /// Puts `dir` last on the process's `PATH` — after the request's or the
+    /// login account's, else after the agent's own — so it only adds commands.
+    pub(super) fn append_path(&mut self, dir: &str) {
+        let current = match self.env.iter().position(|(k, _)| k == "PATH") {
+            Some(i) => Some(self.env.swap_remove(i).1),
+            None if self.clear_env => None,
+            None => std::env::var("PATH").ok(),
+        };
+        let path = match current {
+            Some(path) if !path.is_empty() => format!("{path}:{dir}"),
+            _ => dir.to_owned(),
+        };
+        self.env.push(("PATH".to_owned(), path));
+    }
+
     /// A command for this spec: program, arguments, environment and working
     /// directory.
     pub(super) fn command(&self) -> Command {
@@ -143,4 +158,39 @@ fn lookup_account(user: &str) -> Result<nix::unistd::User, String> {
     entry
         .map_err(|e| format!("look up user {user}: {e}"))?
         .ok_or_else(|| format!("unknown user: {user}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(env: &[(&str, &str)]) -> ProcessSpec {
+        ProcessSpec::resolve(&MachineExecRequest {
+            cmd: vec!["sh".to_owned()],
+            env: env
+                .iter()
+                .map(|&(k, v)| (k.to_owned(), v.to_owned()))
+                .collect(),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    fn path(spec: &ProcessSpec) -> Option<&str> {
+        spec.env
+            .iter()
+            .find_map(|(k, v)| (k == "PATH").then_some(v.as_str()))
+    }
+
+    #[test]
+    fn an_appended_dir_goes_last_on_the_path_the_process_would_get() {
+        let mut requested = spec(&[("PATH", "/opt/bin")]);
+        requested.append_path("/tools");
+        assert_eq!(path(&requested), Some("/opt/bin:/tools"));
+
+        let mut inherited = spec(&[]);
+        inherited.append_path("/tools");
+        let agent = std::env::var("PATH").unwrap();
+        assert_eq!(path(&inherited), Some(format!("{agent}:/tools").as_str()));
+    }
 }

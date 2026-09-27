@@ -303,6 +303,7 @@ Tags defined in `common/arcbox-constants/src/virtiofs.rs`.
 | `/run/arcbox/data/runtime/{generation}` | Verified runtime generation persisted on Btrfs | agent |
 | `/run/arcbox/runtime` | Stable symlink to the active Btrfs runtime generation | agent |
 | `/run/arcbox/vmm.sock` | Guest VMM gRPC socket | agent |
+| `/run/arcbox/debug-tools` | One busybox applet link per applet, last on the `PATH` of `abctl debug` shells | agent |
 | `/var/lib/arcbox/sandbox` | Persistent Btrfs `@sandboxes` subvolume | agent |
 | `/var/lib/arcbox/sandbox/sandboxes` | Firecracker runtime files and crash-cleanup journals | agent |
 | `/var/lib/arcbox/sandbox/sandbox-records` | Durable Sandbox lifecycle records | agent |

@@ -3,10 +3,11 @@
 //! `abctl debug <container>` opens an interactive shell that shares the target
 //! container's namespaces: network, IPC and UTS, plus real membership in its
 //! PID namespace (so `ps` and `kill` speak the container's PIDs), with the
-//! container root as the working directory. The shell and its tools come from
-//! the guest agent, so it works even against shell-less images such as
-//! `gcr.io/distroless/static`, and never modifies the container image. See the
-//! agent's `machine_exec::debug` module for the mechanism and its trade-offs.
+//! container root as the working directory. The shell and its tools (every
+//! busybox applet, by name) come from the guest agent, so it works even against
+//! shell-less images such as `gcr.io/distroless/static`, and never modifies the
+//! container image. See the agent's `machine_exec::debug` module for the
+//! mechanism and its trade-offs.
 
 use anyhow::Result;
 use arcbox_core::vm_lifecycle::DEFAULT_MACHINE_NAME;

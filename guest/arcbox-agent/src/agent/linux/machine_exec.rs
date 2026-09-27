@@ -104,10 +104,14 @@ where
         Ok(ns) => ns,
         Err(err) => return session::write_error(stream, trace_id, &err).await,
     };
-    let spec = match ProcessSpec::resolve(&req) {
+    let mut spec = match ProcessSpec::resolve(&req) {
         Ok(spec) => spec,
         Err(err) => return session::write_error(stream, trace_id, &err).await,
     };
+    match debug::tools_dir().await {
+        Ok(dir) => spec.append_path(dir),
+        Err(err) => return session::write_error(stream, trace_id, &err).await,
+    }
     run_session(stream, trace_id, &req, spec, &flow, Some(nsenter)).await
 }
 
