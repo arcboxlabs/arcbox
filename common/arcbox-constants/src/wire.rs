@@ -65,8 +65,8 @@ pub enum MessageType {
     /// DAX path issues `FUSE_SETUPMAPPING`. Used by the ABX-362 E2E
     /// harness; not wired to any production CLI path.
     MmapReadFileRequest = 0x000B,
-    /// Request the guest to run `fstrim` on data mount points so the host
-    /// sparse image reclaims freed blocks.
+    /// Request the guest to trim its data filesystems (`FITRIM`) so the
+    /// host sparse image reclaims freed blocks.
     DiskTrimRequest = 0x000C,
     /// Opens a guest-driven readiness event stream.
     WatchReadinessRequest = 0x000D,
