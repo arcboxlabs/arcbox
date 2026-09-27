@@ -11,7 +11,9 @@
 //!   never go unread on Virtualization.framework. The host proxy speaks the
 //!   same framing (agent protocol v5).
 //! - **Kubernetes API**: vsock listener → `127.0.0.1:KUBERNETES_API_GUEST_PORT`
-//!   (TCP, k3s API server bound to localhost). Raw bytes; TLS closes itself.
+//!   (TCP, k3s API server bound to localhost). Framed the same way since
+//!   protocol v6, so a `kubectl logs -f` the host is slow to read waits in
+//!   k3s rather than in the vsock.
 
 use std::net::{Ipv4Addr, SocketAddrV4};
 
@@ -117,14 +119,16 @@ pub(super) async fn run_kubernetes_api_proxy() -> Result<()> {
     }
 }
 
-async fn proxy_kubernetes_api_connection(mut vsock_stream: VsockStream) -> Result<()> {
+async fn proxy_kubernetes_api_connection(vsock_stream: VsockStream) -> Result<()> {
     let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, KUBERNETES_API_GUEST_PORT);
     let mut tcp_stream = TcpStream::connect(addr)
         .await
         .context("failed to connect guest kubernetes api socket")?;
 
-    let _ = tokio::io::copy_bidirectional(&mut vsock_stream, &mut tcp_stream)
-        .await
-        .context("kubernetes api proxy copy failed")?;
-    Ok(())
+    let mut host = HalfCloseStream::new(vsock_stream);
+    match tokio::io::copy_bidirectional(&mut host, &mut tcp_stream).await {
+        Ok(_) => Ok(()),
+        Err(e) if is_peer_closed_io_error(&e) => Ok(()),
+        Err(e) => Err(e).context("kubernetes api proxy copy failed"),
+    }
 }

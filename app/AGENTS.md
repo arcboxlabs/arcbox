@@ -198,10 +198,10 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   past it and the host's `agent_client/sandbox_stream.rs` returns it as the
   consumer takes frames. A writer whose peer has gone fails with
   `BrokenPipe` instead of waiting for a grant that cannot come — without
-  that, dropping an attach hung the container's stop. Only the Kubernetes
-  (16443) and NFS (2049) raw relays have no window; their host-side
-  consumers (kubectl, the kernel NFS client) do not stop reading in
-  practice.
+  that, dropping an attach hung the container's stop. The Kubernetes
+  (16443) and NFS (2049) relays wrap the same `HalfCloseStream` around
+  their TCP bytes since v6, so every guest→host vsock the daemon opens is
+  windowed.
 
 ## VM lifecycle internals (`engine/arcbox-engine/src/vm_lifecycle`)
 

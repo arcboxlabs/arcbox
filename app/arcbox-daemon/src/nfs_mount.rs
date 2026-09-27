@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! mount_nfs -o vers=4,port=<nfsd> 127.0.0.1:/ ~/ArcBox
-//!   └─ 127.0.0.1:<nfsd> → vsock NFS_NFSD_RELAY_PORT → guest 127.0.0.1:2049
+//!   └─ 127.0.0.1:<nfsd> → vsock NFS_NFSD_RELAY_PORT (HalfCloseStream-framed) → guest 127.0.0.1:2049
 //! ```
 //!
 //! Readiness needs no separate probe: the reconcile simply retries `mount_nfs`
@@ -22,7 +22,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use arcbox_constants::ports::NFS_NFSD_RELAY_PORT;
 use arcbox_core::{DEFAULT_MACHINE_NAME, Runtime, VmLifecycleState};
-use arcbox_transport::vsock::{VsockShutdown, VsockStream};
+use arcbox_transport::vsock::{HalfCloseStream, VsockShutdown, VsockStream};
 use tokio::io::copy_bidirectional;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -366,7 +366,13 @@ async fn relay_connection(
     // SAFETY: `fd` is a valid, newly-opened vsock fd handed over by the
     // hypervisor layer; ownership transfers to the OwnedFd here.
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-    let mut vsock = VsockStream::from_fd_with_shutdown(owned, VsockShutdown::CloseOnDropOnly)?;
+    // Framed like the Docker API channel: nfsd's replies come only within
+    // the window this side grants, so this end never leaves the vsock
+    // unread (which stalls the whole VM on Virtualization.framework).
+    let mut vsock = HalfCloseStream::new(VsockStream::from_fd_with_shutdown(
+        owned,
+        VsockShutdown::CloseOnDropOnly,
+    )?);
 
     copy_bidirectional(&mut tcp, &mut vsock).await?;
     Ok(())

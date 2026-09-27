@@ -33,14 +33,19 @@
 /// guest→host stream stalls every new connection to the VM. Sandbox
 /// streaming RPCs (`SandboxStreamWindow`) gained the same window. A v4 agent
 /// reads a grant header as an oversized frame, so the two sides must agree.
-pub const AGENT_PROTOCOL_VERSION: u32 = 5;
+///
+/// v6: the Kubernetes API (`ports::KUBERNETES_API_VSOCK_PORT`) and NFS
+/// (`ports::NFS_NFSD_RELAY_PORT`) relays carry the same `HalfCloseStream`
+/// frames instead of raw bytes, for the same reason. A v5 agent would feed
+/// the frame headers to k3s and nfsd.
+pub const AGENT_PROTOCOL_VERSION: u32 = 6;
 
 /// Oldest agent protocol version this host still accepts.
 ///
 /// Agents reporting less (including `0` — agents that predate the
 /// handshake field) are rejected at boot with an actionable error
 /// instead of silently misbehaving under field skew.
-pub const MIN_AGENT_PROTOCOL_VERSION: u32 = 5;
+pub const MIN_AGENT_PROTOCOL_VERSION: u32 = 6;
 
 /// Window each sandbox streaming RPC opens with.
 ///

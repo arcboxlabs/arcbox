@@ -57,11 +57,13 @@ This file is only the non-obvious operational knowledge.
   `docker run -i` needs stdin EOF to reach the container (#268). Both ends
   must speak it: the host proxy's `GuestConnector` and the guest agent's
   `proxy_docker_api_connection`; the mock guest in
-  `app/arcbox-docker/tests/support` does as well. The Kubernetes (16443) and
-  NFS (2049) relays stay raw bytes. Changing this framing is a
+  `app/arcbox-docker/tests/support` does as well. Since v6 the Kubernetes
+  (16443) and NFS (2049) relays wrap the same framing around their raw TCP
+  bytes (`kubernetes_proxy.rs` / `nfs_mount.rs` host-side, `proxy.rs` /
+  `nfs.rs` in the agent). Changing this framing is a
   `AGENT_PROTOCOL_VERSION` bump (v4 introduced the half-close, v5 the
   flow-control window: a header with the top bit set is a grant, not a
-  length).
+  length; v6 extended it to the two relays).
 - The `arcbox-protocol/src/lib.rs` top-of-file doc says "ttrpc" — **stale**.
   There is no ttrpc dependency; trust this file over that comment.
 
