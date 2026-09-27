@@ -11,7 +11,7 @@
 
 use std::io;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
 /// Window bytes still open, bounded by the window's size.
@@ -19,6 +19,8 @@ use std::task::{Context, Poll, Waker};
 pub struct Credit {
     available: AtomicUsize,
     limit: usize,
+    /// No more grants can come: the peer is gone.
+    closed: AtomicBool,
     /// A sender waiting for the window to reopen.
     waiter: Mutex<Option<Waker>>,
 }
@@ -29,8 +31,17 @@ impl Credit {
         Self {
             available: AtomicUsize::new(limit),
             limit,
+            closed: AtomicBool::new(false),
             waiter: Mutex::new(None),
         }
+    }
+
+    /// Marks the window as one nothing will reopen — the peer that grants
+    /// it is gone — and fails every sender waiting on it, now and later.
+    /// Bytes still open stay usable.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.wake();
     }
 
     /// Bytes still open.
@@ -39,29 +50,26 @@ impl Credit {
     }
 
     /// Takes up to `want` bytes (at least one) once any are open. The
-    /// sender's side: the caller sends only what this returns.
-    pub fn poll_take(&self, cx: &mut Context<'_>, want: usize) -> Poll<usize> {
+    /// sender's side: the caller sends only what this returns. Fails once
+    /// the window is closed with nothing open: no grant can come.
+    pub fn poll_take(&self, cx: &mut Context<'_>, want: usize) -> Poll<io::Result<usize>> {
         debug_assert!(want > 0);
         if let Some(taken) = self.try_take(want) {
-            return Poll::Ready(taken);
+            return Poll::Ready(Ok(taken));
         }
         *self.waiter.lock().unwrap_or_else(|e| e.into_inner()) = Some(cx.waker().clone());
-        // A grant between the first attempt and the waker store must not
-        // be lost.
-        match self.try_take(want) {
-            Some(taken) => Poll::Ready(taken),
-            None => Poll::Pending,
+        // A grant or close between the first attempt and the waker store
+        // must not be lost.
+        if let Some(taken) = self.try_take(want) {
+            return Poll::Ready(Ok(taken));
         }
-    }
-
-    /// Waits until exactly `len` bytes have been taken. The sender's side
-    /// for a frame that must go out whole. Not cancel-safe: bytes taken
-    /// before a cancellation stay taken.
-    pub async fn reserve(&self, len: usize) {
-        let mut left = len;
-        while left > 0 {
-            left -= std::future::poll_fn(|cx| self.poll_take(cx, left)).await;
+        if self.closed.load(Ordering::Acquire) {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "peer gone while waiting for flow-control window",
+            )));
         }
+        Poll::Pending
     }
 
     fn try_take(&self, want: usize) -> Option<usize> {
@@ -95,11 +103,15 @@ impl Credit {
                 left.checked_add(len).filter(|total| *total <= self.limit)
             })
             .map_err(|_| protocol_error("peer granted more flow-control window than exists"))?;
+        self.wake();
+        Ok(())
+    }
+
+    fn wake(&self) {
         let waker = self.waiter.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(waker) = waker {
             waker.wake();
         }
-        Ok(())
     }
 }
 
@@ -113,21 +125,48 @@ mod tests {
     use std::future::poll_fn;
     use std::time::Duration;
 
+    async fn take(credit: &Credit, want: usize) -> io::Result<usize> {
+        poll_fn(|cx| credit.poll_take(cx, want)).await
+    }
+
     #[tokio::test]
     async fn take_waits_for_a_grant_and_takes_at_most_what_is_open() {
         let credit = Credit::new(10);
-        assert_eq!(poll_fn(|cx| credit.poll_take(cx, 4)).await, 4);
-        assert_eq!(poll_fn(|cx| credit.poll_take(cx, 100)).await, 6);
+        assert_eq!(take(&credit, 4).await.unwrap(), 4);
+        assert_eq!(take(&credit, 100).await.unwrap(), 6);
 
-        let blocked = tokio::time::timeout(
-            Duration::from_millis(20),
-            poll_fn(|cx| credit.poll_take(cx, 1)),
-        )
-        .await;
+        let blocked = tokio::time::timeout(Duration::from_millis(20), take(&credit, 1)).await;
         assert!(blocked.is_err(), "the window is used up");
 
         credit.grant(3).unwrap();
-        assert_eq!(poll_fn(|cx| credit.poll_take(cx, 5)).await, 3);
+        assert_eq!(take(&credit, 5).await.unwrap(), 3);
+    }
+
+    /// A sender blocked on a window nobody will ever reopen must fail, not
+    /// wait forever: this is how a proxy learns its peer is gone when the
+    /// only thing it does is write.
+    #[tokio::test]
+    async fn closing_fails_waiting_and_later_senders_but_keeps_open_bytes() {
+        let credit = std::sync::Arc::new(Credit::new(4));
+        credit.take(4).unwrap();
+        let waiter = tokio::spawn({
+            let credit = std::sync::Arc::clone(&credit);
+            async move { take(&credit, 1).await }
+        });
+        tokio::task::yield_now().await;
+        credit.close();
+        assert_eq!(
+            waiter.await.unwrap().unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        assert_eq!(
+            take(&credit, 1).await.unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+
+        let credit = Credit::new(4);
+        credit.close();
+        assert_eq!(take(&credit, 8).await.unwrap(), 4);
     }
 
     #[tokio::test]
@@ -136,11 +175,11 @@ mod tests {
         credit.take(1).unwrap();
         let waiter = tokio::spawn({
             let credit = std::sync::Arc::clone(&credit);
-            async move { poll_fn(|cx| credit.poll_take(cx, 1)).await }
+            async move { take(&credit, 1).await }
         });
         tokio::task::yield_now().await;
         credit.grant(1).unwrap();
-        assert_eq!(waiter.await.unwrap(), 1);
+        assert_eq!(waiter.await.unwrap().unwrap(), 1);
     }
 
     #[test]

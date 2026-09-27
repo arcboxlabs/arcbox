@@ -152,23 +152,48 @@ where
 /// Reads the connection until the peer closes it or the consumer is gone:
 /// grants reopen the send window, payloads go to the consumer within the
 /// window this side granted, and a zero-length frame is the peer's EOF —
-/// after which grants may still arrive for this side's writes.
+/// after which grants may still arrive for this side's writes. Once it
+/// stops, no grant can come, so a writer waiting for one fails instead of
+/// waiting forever: a write-only proxy would otherwise never notice its
+/// peer left.
 async fn read_frames<R: AsyncRead + Unpin>(
     mut reader: R,
     out: mpsc::UnboundedSender<Incoming>,
     send: Arc<Credit>,
     recv: Arc<Credit>,
 ) {
+    let result = read_frames_inner(&mut reader, &out, &send, &recv).await;
+    send.close();
+    let Some(result) = result else {
+        return;
+    };
+    // A closed fd is EOF unless the peer already said so; anything else the
+    // consumer learns on its next read.
+    let _ = out.send(match result {
+        Ok(true) => return,
+        Ok(false) => Incoming::Eof,
+        Err(e) => Incoming::Failed(e),
+    });
+}
+
+/// The frame loop; `None` when the consumer went away, else whether the
+/// peer's EOF frame was seen before its fd closed.
+async fn read_frames_inner<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    out: &mpsc::UnboundedSender<Incoming>,
+    send: &Credit,
+    recv: &Credit,
+) -> Option<io::Result<bool>> {
     let mut eof = false;
     let result = loop {
         let mut header = [0u8; HEADER_LEN];
         let read = tokio::select! {
             read = reader.read_exact(&mut header) => read,
-            () = out.closed() => return,
+            () = out.closed() => return None,
         };
         match read {
             Ok(_) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break Ok(eof),
             Err(e) => break Err(e),
         }
         let header = u32::from_be_bytes(header);
@@ -202,7 +227,7 @@ async fn read_frames<R: AsyncRead + Unpin>(
         let mut payload = BytesMut::zeroed(len);
         let read = tokio::select! {
             read = reader.read_exact(&mut payload) => read,
-            () = out.closed() => return,
+            () = out.closed() => return None,
         };
         if let Err(e) = read {
             break Err(if e.kind() == io::ErrorKind::UnexpectedEof {
@@ -212,16 +237,10 @@ async fn read_frames<R: AsyncRead + Unpin>(
             });
         }
         if out.send(Incoming::Data(payload.freeze())).is_err() {
-            return;
+            return None;
         }
     };
-    // A closed fd is EOF unless the peer already said so; anything else the
-    // consumer learns on its next read.
-    let _ = out.send(match result {
-        Ok(()) if eof => return,
-        Ok(()) => Incoming::Eof,
-        Err(e) => Incoming::Failed(e),
-    });
+    Some(result)
 }
 
 fn protocol_error(message: &str) -> io::Error {
@@ -296,7 +315,7 @@ where
         // wire before the next is accepted, so a slow peer slows the writer.
         ready!(this.poll_drain(cx))?;
         // And never past the window the peer holds open.
-        let len = ready!(this.send.poll_take(cx, data.len().min(MAX_FRAME_PAYLOAD)));
+        let len = ready!(this.send.poll_take(cx, data.len().min(MAX_FRAME_PAYLOAD)))?;
         this.outgoing.reserve(HEADER_LEN + len);
         this.outgoing.put_u32(len as u32);
         this.outgoing.extend_from_slice(&data[..len]);
@@ -450,6 +469,25 @@ mod tests {
         writer.await.unwrap();
         // The timed-out write took no window, so it sent nothing.
         assert_eq!(got.len(), WINDOW + MAX_FRAME_PAYLOAD);
+    }
+
+    /// A proxy that only writes (dockerd output towards a host that left)
+    /// must learn the peer is gone: the window it waits for will never
+    /// reopen, so the write fails rather than hanging the session forever.
+    #[tokio::test]
+    async fn a_writer_blocked_on_the_window_fails_when_the_peer_drops_its_fd() {
+        let (mut a, b) = pair();
+        let chunk = vec![7u8; MAX_FRAME_PAYLOAD];
+        for _ in 0..(WINDOW / MAX_FRAME_PAYLOAD) {
+            a.write_all(&chunk).await.unwrap();
+        }
+        let blocked = tokio::spawn(async move {
+            let err = a.write_all(&chunk).await.unwrap_err();
+            err.kind()
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(b);
+        assert_eq!(blocked.await.unwrap(), io::ErrorKind::BrokenPipe);
     }
 
     #[tokio::test]
