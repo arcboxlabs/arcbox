@@ -538,10 +538,14 @@ impl pb::MachineService for MachineServiceImpl {
             let _ = in_tx.send(ExecSessionInput::Stdin(Vec::new())).await;
         });
 
-        let mut out_rx = agent
-            .machine_exec_session(exec_req, in_rx)
-            .await
-            .map_err(ApiError::from)?;
+        // A non-empty `container` selects the debug path (enter that
+        // container's namespaces); otherwise the exec runs in the machine root.
+        let mut out_rx = if exec_req.container.is_empty() {
+            agent.machine_exec_session(exec_req, in_rx).await
+        } else {
+            agent.machine_debug_session(exec_req, in_rx).await
+        }
+        .map_err(ApiError::from)?;
 
         let out_stream = async_stream::stream! {
             while let Some(item) = out_rx.recv().await {

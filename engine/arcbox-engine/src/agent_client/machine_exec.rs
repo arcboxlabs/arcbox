@@ -213,13 +213,55 @@ impl AgentClient {
     /// send, or the agent refuses it or does not speak flow control.
     pub async fn machine_exec_session(
         self,
+        req: MachineExecRequest,
+        input: mpsc::Receiver<ExecSessionInput>,
+    ) -> Result<ExecSessionOutput> {
+        self.exec_session_with(
+            MessageType::MachineExecRequest,
+            MessageType::MachineExecOutput,
+            req,
+            input,
+        )
+        .await
+    }
+
+    /// Starts a debug-exec session that enters `req.container`'s namespaces
+    /// (network/IPC/UTS plus a bind-mounted view of its PID tree and root
+    /// filesystem) instead of running in the machine root; PTY-backed when
+    /// the request asks for a TTY. Behaves like [`Self::machine_exec_session`]
+    /// otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session cannot start: the request fails to
+    /// send, or the agent refuses it (e.g. the container is missing or not
+    /// running) or does not speak flow control.
+    pub async fn machine_debug_session(
+        self,
+        req: MachineExecRequest,
+        input: mpsc::Receiver<ExecSessionInput>,
+    ) -> Result<ExecSessionOutput> {
+        self.exec_session_with(
+            MessageType::DebugExecRequest,
+            MessageType::DebugExecResponse,
+            req,
+            input,
+        )
+        .await
+    }
+
+    /// Shared session builder for machine-root and container-debug execs: the
+    /// only difference is the request's wire [`MessageType`].
+    async fn exec_session_with(
+        self,
+        request_type: MessageType,
+        response_type: MessageType,
         mut req: MachineExecRequest,
         input: mpsc::Receiver<ExecSessionInput>,
     ) -> Result<ExecSessionOutput> {
         req.output_window = OUTPUT_WINDOW;
-        let request =
-            wire::build_message(MessageType::MachineExecRequest, "", &req.encode_to_vec());
-        self.open_session(request, input).await
+        let request = wire::build_message(request_type, "", &req.encode_to_vec());
+        self.open_session(request, response_type, input).await
     }
 
     /// Opens a TCP connection to `host:port` as seen from inside the
@@ -250,7 +292,8 @@ impl AgentClient {
             "",
             &req.encode_to_vec(),
         );
-        self.open_session(request, input).await
+        self.open_session(request, MessageType::MachineExecOutput, input)
+            .await
     }
 
     /// Sends a session's opening `request` and, once the agent grants its
@@ -258,6 +301,7 @@ impl AgentClient {
     async fn open_session(
         mut self,
         request: Bytes,
+        response_type: MessageType,
         input: mpsc::Receiver<ExecSessionInput>,
     ) -> Result<ExecSessionOutput> {
         if !self.connected {
@@ -278,7 +322,7 @@ impl AgentClient {
                     context: "failed to split exec session transport",
                     source,
                 })?;
-        let stdin_window = match next_frame(&mut receiver).await? {
+        let stdin_window = match next_frame(&mut receiver, response_type).await? {
             Frame::StdinWindow(bytes) => Arc::new(StdinWindow::new(bytes)?),
             Frame::Output { .. } => {
                 return Err(EngineError::Machine(
@@ -306,7 +350,7 @@ impl AgentClient {
             let available = Arc::clone(&available);
             async move {
                 tokio::select! {
-                    () = pump_output(&mut receiver, &out_tx, &available, &stdin_window) => {}
+                    () = pump_output(&mut receiver, response_type, &out_tx, &available, &stdin_window) => {}
                     () = out_tx.closed() => {}
                 }
                 input_pump.abort();
@@ -368,12 +412,13 @@ async fn pump_input(
 /// handed over too — or until the consumer is gone.
 async fn pump_output(
     receiver: &mut VsockReceiver,
+    expected: MessageType,
     out: &mpsc::UnboundedSender<(usize, Result<MachineExecOutput>)>,
     output_window: &AtomicUsize,
     stdin_window: &StdinWindow,
 ) {
     loop {
-        let (cost, item) = match next_frame(receiver).await {
+        let (cost, item) = match next_frame(receiver, expected).await {
             Ok(Frame::StdinWindow(bytes)) => match stdin_window.grant(bytes) {
                 Ok(()) => continue,
                 Err(e) => (0, Err(e)),
@@ -403,7 +448,7 @@ enum Frame {
 }
 
 /// Reads and decodes the next frame; an agent `Error` frame is the error.
-async fn next_frame(receiver: &mut VsockReceiver) -> Result<Frame> {
+async fn next_frame(receiver: &mut VsockReceiver, expected: MessageType) -> Result<Frame> {
     let raw = receiver
         .recv()
         .await
@@ -421,7 +466,7 @@ async fn next_frame(receiver: &mut VsockReceiver) -> Result<Frame> {
         let window = MachineExecWindow::decode_from_slice(&payload).map_err(decode_error)?;
         return Ok(Frame::StdinWindow(window.bytes));
     }
-    AgentClient::expect_response_type(resp_type, MessageType::MachineExecOutput)?;
+    AgentClient::expect_response_type(resp_type, expected)?;
     let output = MachineExecOutput::decode_from_slice(&payload).map_err(decode_error)?;
     let cost = if output.done { 0 } else { payload.len() };
     Ok(Frame::Output { output, cost })
