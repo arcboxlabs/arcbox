@@ -674,3 +674,48 @@ fn test_process_queue_guest_memory_op_rst() {
     assert_eq!(mock_guard.removed.len(), 1);
     assert_eq!(mock_guard.removed[0], (1024, 50000));
 }
+
+/// A host→guest RW is sized to the buffer it lands in. The Linux driver
+/// posts `SKB_WITH_OVERHEAD(4 KiB)` buffers (3776 bytes on a 4 KiB-page
+/// arm64 kernel) and drops a packet whose used length is shorter than its
+/// header's `len`; sizing reads from the guest's window alone overflowed
+/// every full packet, which the guest then never credited back.
+#[test]
+fn next_rx_capacity_reads_the_next_chains_writable_bytes_without_consuming_it() {
+    let q_size = 8usize;
+    let mut memory = vec![0u8; 0x10000];
+    let (desc_addr, avail_addr, used_addr) = setup_virtqueue_layout(&mut memory, 0x4000, q_size);
+    let write = arcbox_virtio_core::queue::flags::WRITE;
+    let next = arcbox_virtio_core::queue::flags::NEXT;
+
+    // Empty ring: nothing to land in.
+    assert_eq!(
+        VirtioVsock::next_rx_capacity(&mut memory, desc_addr, avail_addr, used_addr, q_size, 0),
+        0
+    );
+
+    // One 3776-byte buffer, as the driver posts.
+    write_descriptor(&mut memory, desc_addr, 0, 0x8000, 3776, write, 0);
+    avail_ring_push(&mut memory, avail_addr, q_size, 0);
+    assert_eq!(
+        VirtioVsock::next_rx_capacity(&mut memory, desc_addr, avail_addr, used_addr, q_size, 0),
+        3776
+    );
+    // Reading again consumes nothing.
+    assert_eq!(
+        VirtioVsock::next_rx_capacity(&mut memory, desc_addr, avail_addr, used_addr, q_size, 0),
+        3776
+    );
+
+    // A chain sums its writable descriptors and skips read-only ones.
+    let mut memory2 = vec![0u8; 0x10000];
+    let (d2, a2, u2) = setup_virtqueue_layout(&mut memory2, 0x4000, q_size);
+    write_descriptor(&mut memory2, d2, 0, 0x8000, 100, next, 1);
+    write_descriptor(&mut memory2, d2, 1, 0x9000, 1000, write | next, 2);
+    write_descriptor(&mut memory2, d2, 2, 0xa000, 24, write, 0);
+    avail_ring_push(&mut memory2, a2, q_size, 0);
+    assert_eq!(
+        VirtioVsock::next_rx_capacity(&mut memory2, d2, a2, u2, q_size, 0),
+        1024
+    );
+}

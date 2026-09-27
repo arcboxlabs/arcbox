@@ -18,8 +18,8 @@ mod ops;
 mod tests;
 
 pub use connection::{
-    CREDIT_UPDATE_THRESHOLD, RX_PAYLOAD_MAX, TX_BUFFER_SIZE, VSOCK_SHUTDOWN_F_BOTH,
-    VSOCK_SHUTDOWN_F_RECEIVE, VSOCK_SHUTDOWN_F_SEND, VsockConnection, VsockConnectionId,
+    CREDIT_UPDATE_THRESHOLD, TX_BUFFER_SIZE, VSOCK_SHUTDOWN_F_BOTH, VSOCK_SHUTDOWN_F_RECEIVE,
+    VSOCK_SHUTDOWN_F_SEND, VsockConnection, VsockConnectionId,
 };
 pub use ops::RxOps;
 

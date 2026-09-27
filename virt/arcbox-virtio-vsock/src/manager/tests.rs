@@ -426,13 +426,3 @@ fn rw_parked_on_empty_window_returns_when_the_peer_opens_it() {
     mgr.update_peer_credit(id.guest_port, id.host_port, 8192, 16384);
     assert_eq!(mgr.backend_rxq.pop_front(), Some(id));
 }
-
-/// The Linux driver's RX buffers are 4 KiB and a packet must fit one of
-/// them whole: a payload of 4096 bytes plus the 44-byte header was silently
-/// dropped by the guest, which never credited it back, and host→guest bulk
-/// transfers on HV stalled after the first 64 KiB. The cap keeps header +
-/// payload inside one buffer.
-#[test]
-fn rx_payload_fits_the_guest_rx_buffer_with_its_header() {
-    assert_eq!(RX_PAYLOAD_MAX + crate::protocol::VsockHeader::SIZE, 4096);
-}

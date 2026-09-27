@@ -30,7 +30,7 @@ impl VirtioVsock {
     ) -> bool {
         use std::os::fd::AsRawFd;
 
-        use crate::manager::{RX_PAYLOAD_MAX, RxOps, TX_BUFFER_SIZE};
+        use crate::manager::{RxOps, TX_BUFFER_SIZE};
 
         let Some(ctx) = self.ctx.clone() else {
             return false;
@@ -157,6 +157,17 @@ impl VirtioVsock {
             let Some(conn_id) = conn_id else {
                 break; // No pending connections.
             };
+            // The packet built below must fit the buffer it lands in: the
+            // guest drops one whose used length is shorter than its header
+            // says, and never credits it back.
+            let rx_capacity = Self::next_rx_capacity(
+                guest_mem,
+                rx_desc,
+                rx_avail,
+                rx_used,
+                q_size,
+                gpa_base_usize,
+            );
 
             // Build the packet for this connection's highest-priority op.
             let packet = {
@@ -259,7 +270,15 @@ impl VirtioVsock {
                                     hdr.to_bytes().to_vec()
                                 } else {
                                     let fd = conn.internal_fd.as_raw_fd();
-                                    let max_read = credit.min(RX_PAYLOAD_MAX);
+                                    let max_read =
+                                        credit.min(rx_capacity.saturating_sub(VsockHeader::SIZE));
+                                    if max_read == 0 {
+                                        // The posted buffer cannot hold a
+                                        // header and a byte: leave the RW
+                                        // queued for a usable one.
+                                        conn.rx_queue.enqueue(RxOps::RW);
+                                        continue;
+                                    }
                                     let mut buf = vec![0u8; max_read];
                                     // SAFETY: `fd` is borrowed from
                                     // `conn.internal_fd`, live for the call.
@@ -441,6 +460,56 @@ impl VirtioVsock {
         }
 
         injected
+    }
+
+    /// Writable bytes in the next available RX descriptor chain, without
+    /// consuming it; `0` when the ring is empty.
+    ///
+    /// The Linux driver posts one `SKB_WITH_OVERHEAD(4 KiB)` buffer per
+    /// packet (3776 bytes on the System VM's 4 KiB-page kernel) and drops a
+    /// packet whose used length is shorter than its header's `len`. A
+    /// host→guest RW is sized to this so it always fits: when the device
+    /// read 4096 payload bytes per packet, every full packet overflowed the
+    /// buffer, the guest discarded it without crediting it back, and a
+    /// 1 GiB `docker run -i` pipe on HV moved nothing while small replies
+    /// kept flowing.
+    pub(super) fn next_rx_capacity(
+        guest_mem: &mut [u8],
+        desc_addr: usize,
+        avail_addr: usize,
+        used_addr: usize,
+        q_size: usize,
+        gpa_base: usize,
+    ) -> usize {
+        let cfg = QueueConfig {
+            desc_addr: (desc_addr + gpa_base) as u64,
+            avail_addr: (avail_addr + gpa_base) as u64,
+            used_addr: (used_addr + gpa_base) as u64,
+            size: q_size as u16,
+            ready: true,
+            gpa_base: gpa_base as u64,
+        };
+        // SAFETY: as in `write_to_rx_descriptor` — the queue reads guest RAM
+        // only through this writer while `guest_mem` is not touched directly.
+        let mem = std::sync::Arc::new(unsafe {
+            arcbox_virtio_core::GuestMemWriter::new(
+                guest_mem.as_mut_ptr(),
+                guest_mem.len(),
+                gpa_base,
+            )
+        });
+        let mut queue = arcbox_virtio_core::SplitQueue::new(mem, 0, &cfg, false);
+        let used0 = queue.mem().read_u16(cfg.used_addr as usize + 2);
+        queue.set_last_avail_idx(used0);
+        // The queue is transient, so advancing its cursor consumes nothing.
+        let Some(head) = queue.next_avail_head() else {
+            return 0;
+        };
+        queue
+            .chain_iter(head)
+            .filter(|desc| desc.is_write())
+            .map(|desc| desc.len as usize)
+            .sum()
     }
 
     /// Writes `packet` into the next available RX descriptor chain.
