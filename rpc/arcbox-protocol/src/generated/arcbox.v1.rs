@@ -3754,6 +3754,17 @@ pub struct SandboxCleanupResponse {
 /// first replays its durable snapshot, then streams new terminal generations.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WatchSandboxCleanupRequest {}
+/// Flow-control window on a sandbox streaming RPC's connection (host↔guest
+/// vsock only): the host lets the agent stream `bytes` more, counted in
+/// encoded payload bytes of the frames it sends back. Every such stream opens
+/// with a fixed window (`SANDBOX_STREAM_WINDOW` in arcbox-constants) and the
+/// host returns it as its consumer takes frames, so the agent never sends
+/// what the host has no room for and the host never leaves the vsock unread.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SandboxStreamWindow {
+    #[prost(uint32, tag = "1")]
+    pub bytes: u32,
+}
 /// Ask the guest agent to resume a paused sandbox in place (CORE-21).
 ///
 /// Internal wire message rather than the public ResumeSandboxRequest: the

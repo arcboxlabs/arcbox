@@ -9,10 +9,13 @@
 //! `MessageType` frames, same `AGENT_PROTOCOL_VERSION`, no wire change.
 
 mod machine_exec;
+mod sandbox_stream;
 mod transport;
 mod wire;
 
 pub use self::machine_exec::{ExecSessionInput, ExecSessionOutput};
+pub use self::sandbox_stream::SandboxStream;
+use self::sandbox_stream::StreamKind;
 use self::transport::{AgentTransport, BLOCKING_RPC_TIMEOUT};
 use crate::error::{EngineError, Result};
 use arcbox_connect::sandbox_v1::{
@@ -54,12 +57,6 @@ use buffa::Message;
 use bytes::Bytes;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-
-/// Bound on frames buffered between the guest transport and a streaming RPC's
-/// consumer. When the consumer stalls, the relay task blocks on a full channel,
-/// which propagates backpressure to the guest (vsock flow control) instead of
-/// letting an untrusted sandbox's output grow daemon memory without limit.
-const STREAM_CHANNEL_CAPACITY: usize = 64;
 
 /// A chunk in a sandbox file-write stream.
 #[derive(Debug)]
@@ -1275,77 +1272,25 @@ impl AgentClient {
     /// Streams a file out of a sandbox as decoded [`FileChunk`]s.
     ///
     /// The final chunk carries `done == true`. Consumes the client because
-    /// the stream task requires exclusive transport access.
+    /// the stream owns the connection.
     ///
     /// # Errors
     ///
     /// Returns an error if the initial send fails.
-    pub async fn sandbox_read_file(
-        mut self,
-        req: ReadFileRequest,
-    ) -> Result<mpsc::Receiver<Result<FileChunk>>> {
-        if !self.connected {
-            self.connect().await?;
-        }
-
-        let payload = req.encode_to_vec();
-        let buf = wire::build_message(MessageType::SandboxFileReadRequest, "", &payload);
-        self.transport
-            .async_send(buf)
-            .await
-            .map_err(|e| EngineError::Machine(format!("failed to send read-file request: {e}")))?;
-
-        let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
-        tokio::spawn(async move {
-            loop {
-                let raw = match self.transport.async_recv().await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(EngineError::Machine(format!("recv error: {e}"))))
-                            .await;
-                        break;
-                    }
-                };
-                let (resp_type, _, resp_payload) = match wire::parse_response(&raw) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        let _ = tx.send(Err(e)).await;
-                        break;
-                    }
-                };
-                if resp_type == MessageType::Error as u32 {
-                    let (code, message) = wire::parse_error_response(&resp_payload)
-                        .unwrap_or_else(|_| (500, "unknown error".to_string()));
-                    let _ = tx.send(Err(EngineError::Agent { code, message })).await;
-                    break;
-                }
-                if resp_type != MessageType::SandboxFileData as u32 {
-                    let _ = tx
-                        .send(Err(EngineError::Machine(format!(
-                            "unexpected response type: 0x{resp_type:04x}"
-                        ))))
-                        .await;
-                    break;
-                }
-                match FileChunk::decode_from_slice(&resp_payload) {
-                    Ok(chunk) => {
-                        let done = chunk.done;
-                        if tx.send(Ok(chunk)).await.is_err() || done {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(EngineError::Machine(format!("decode error: {e}"))))
-                            .await;
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(rx)
+    pub async fn sandbox_read_file(self, req: ReadFileRequest) -> Result<SandboxStream<FileChunk>> {
+        self.open_sandbox_stream(
+            MessageType::SandboxFileReadRequest,
+            &req.encode_to_vec(),
+            StreamKind {
+                frame: MessageType::SandboxFileData,
+                end: None,
+                decode: |payload| {
+                    FileChunk::decode_from_slice(payload).map_err(sandbox_stream::decode_error)
+                },
+                is_last: |chunk| chunk.done,
+            },
+        )
+        .await
     }
 
     /// Writes a file into a sandbox from a channel of data chunks.
@@ -1496,82 +1441,32 @@ impl AgentClient {
     /// Opens a directory watch stream inside a sandbox.
     ///
     /// The guest confirms establishment with an immediate keepalive frame
-    /// and interleaves further keepalives while idle; the channel closes
-    /// cleanly when the guest ends the stream (sandbox stop). Consumes the
-    /// client because the stream task requires exclusive transport access.
+    /// and interleaves further keepalives while idle; the stream ends
+    /// cleanly when the guest ends it (sandbox stop). Consumes the client
+    /// because the stream owns the connection.
     ///
     /// # Errors
     ///
     /// Returns an error if the initial send fails; in-stream failures
-    /// arrive as `Err` items on the channel.
+    /// arrive as `Err` items.
     pub async fn sandbox_watch_dir(
-        mut self,
+        self,
         req: WatchDirRequest,
-    ) -> Result<mpsc::Receiver<Result<WatchDirResponse>>> {
-        if !self.connected {
-            self.connect().await?;
-        }
-
-        let payload = req.encode_to_vec();
-        let buf = wire::build_message(MessageType::SandboxFileWatchRequest, "", &payload);
-        self.transport
-            .async_send(buf)
-            .await
-            .map_err(|e| EngineError::Machine(format!("failed to send watch-dir request: {e}")))?;
-
-        let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
-        tokio::spawn(async move {
-            loop {
-                let raw = match self.transport.async_recv().await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(EngineError::Machine(format!("recv error: {e}"))))
-                            .await;
-                        break;
-                    }
-                };
-                let (resp_type, _, resp_payload) = match wire::parse_response(&raw) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        let _ = tx.send(Err(e)).await;
-                        break;
-                    }
-                };
-                if resp_type == MessageType::SandboxFileWatchEnd as u32 {
-                    break; // clean end: the sandbox stopped
-                }
-                if resp_type == MessageType::Error as u32 {
-                    let (code, message) = wire::parse_error_response(&resp_payload)
-                        .unwrap_or_else(|_| (500, "unknown error".to_string()));
-                    let _ = tx.send(Err(EngineError::Agent { code, message })).await;
-                    break;
-                }
-                if resp_type != MessageType::SandboxFileWatchEvent as u32 {
-                    let _ = tx
-                        .send(Err(EngineError::Machine(format!(
-                            "unexpected response type: 0x{resp_type:04x}"
-                        ))))
-                        .await;
-                    break;
-                }
-                match WatchDirResponse::decode_from_slice(&resp_payload) {
-                    Ok(frame) => {
-                        if tx.send(Ok(frame)).await.is_err() {
-                            break; // consumer gone: dropping self cancels the watch
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(EngineError::Machine(format!("decode error: {e}"))))
-                            .await;
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(rx)
+    ) -> Result<SandboxStream<WatchDirResponse>> {
+        self.open_sandbox_stream(
+            MessageType::SandboxFileWatchRequest,
+            &req.encode_to_vec(),
+            StreamKind {
+                frame: MessageType::SandboxFileWatchEvent,
+                end: Some(MessageType::SandboxFileWatchEnd),
+                decode: |payload| {
+                    WatchDirResponse::decode_from_slice(payload)
+                        .map_err(sandbox_stream::decode_error)
+                },
+                is_last: |_| false,
+            },
+        )
+        .await
     }
 
     /// Starts an addressable execution inside a sandbox.
@@ -1699,243 +1594,76 @@ impl AgentClient {
         Self::expect_ack_response_type(resp_type, MessageType::SandboxWaitForPortResponse)
     }
 
-    /// Attaches to an execution's output and returns a channel of
-    /// [`ExecutionEvent`]s. The stream ends after the `exited` event.
+    /// Attaches to an execution's output as a stream of
+    /// [`ExecutionEvent`]s, ending after the `exited` event.
     ///
-    /// Consumes the client because the stream task requires exclusive
-    /// transport access.
+    /// Consumes the client because the stream owns the connection.
     ///
     /// # Errors
     ///
     /// Returns an error if the initial send fails.
     pub async fn sandbox_exec_attach(
-        mut self,
+        self,
         req: AttachExecutionRequest,
-    ) -> Result<mpsc::Receiver<Result<ExecutionEvent>>> {
-        if !self.connected {
-            self.connect().await?;
-        }
-
-        let payload = req.encode_to_vec();
-        let buf = wire::build_message(MessageType::SandboxExecAttachRequest, "", &payload);
-        self.transport
-            .async_send(buf)
-            .await
-            .map_err(|e| EngineError::Machine(format!("failed to send attach request: {}", e)))?;
-
-        let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
-        tokio::spawn(async move {
-            loop {
-                let raw = match self.transport.async_recv().await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(EngineError::Machine(format!("recv error: {}", e))))
-                            .await;
-                        break;
-                    }
-                };
-
-                let (resp_type, _, resp_payload) = match wire::parse_response(&raw) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        let _ = tx.send(Err(e)).await;
-                        break;
-                    }
-                };
-
-                if resp_type == MessageType::Error as u32 {
-                    let (code, message) = wire::parse_error_response(&resp_payload)
-                        .unwrap_or_else(|_| (500, "unknown error".to_string()));
-                    let _ = tx.send(Err(EngineError::Agent { code, message })).await;
-                    break;
-                }
-
-                if resp_type != MessageType::SandboxExecEvent as u32 {
-                    let _ = tx
-                        .send(Err(EngineError::Machine(format!(
-                            "unexpected response type: 0x{:04x}",
-                            resp_type
-                        ))))
-                        .await;
-                    break;
-                }
-
-                match ExecutionEvent::decode_from_slice(&resp_payload) {
-                    Ok(event) => {
-                        let done = matches!(event.event, Some(execution_event::Event::Exited(_)));
-                        // Stop reading if the consumer dropped, so a spewing
-                        // sandbox isn't drained into the void indefinitely.
-                        if tx.send(Ok(event)).await.is_err() || done {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(EngineError::Machine(format!("decode error: {}", e))))
-                            .await;
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(rx)
+    ) -> Result<SandboxStream<ExecutionEvent>> {
+        self.open_sandbox_stream(
+            MessageType::SandboxExecAttachRequest,
+            &req.encode_to_vec(),
+            StreamKind {
+                frame: MessageType::SandboxExecEvent,
+                end: None,
+                decode: |payload| {
+                    ExecutionEvent::decode_from_slice(payload).map_err(sandbox_stream::decode_error)
+                },
+                is_last: |event| matches!(event.event, Some(execution_event::Event::Exited(_))),
+            },
+        )
+        .await
     }
 
-    /// Subscribes to sandbox lifecycle events and returns a channel of streaming events.
+    /// Subscribes to sandbox lifecycle events.
     ///
-    /// Consumes the client because the stream task requires exclusive transport access.
+    /// Consumes the client because the stream owns the connection.
     ///
     /// # Errors
     ///
     /// Returns an error if the initial send fails.
     pub async fn sandbox_events(
-        mut self,
+        self,
         req: SandboxEventsRequest,
-    ) -> Result<mpsc::Receiver<Result<SandboxEvent>>> {
-        if !self.connected {
-            self.connect().await?;
-        }
-
-        let payload = req.encode_to_vec();
-        let buf = wire::build_message(MessageType::SandboxEventsRequest, "", &payload);
-        self.transport
-            .async_send(buf)
-            .await
-            .map_err(|e| EngineError::Machine(format!("failed to send events request: {}", e)))?;
-
-        let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
-        tokio::spawn(async move {
-            loop {
-                let raw = match self.transport.async_recv().await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(EngineError::Machine(format!("recv error: {}", e))))
-                            .await;
-                        break;
-                    }
-                };
-
-                let (resp_type, _, resp_payload) = match wire::parse_response(&raw) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        let _ = tx.send(Err(e)).await;
-                        break;
-                    }
-                };
-
-                if resp_type == MessageType::Error as u32 {
-                    let (code, message) = wire::parse_error_response(&resp_payload)
-                        .unwrap_or_else(|_| (500, "unknown error".to_string()));
-                    let _ = tx.send(Err(EngineError::Agent { code, message })).await;
-                    break;
-                }
-
-                if resp_type != MessageType::SandboxEvent as u32 {
-                    let _ = tx
-                        .send(Err(EngineError::Machine(format!(
-                            "unexpected response type: 0x{:04x}",
-                            resp_type
-                        ))))
-                        .await;
-                    break;
-                }
-
-                match SandboxEvent::decode_from_slice(&resp_payload) {
-                    Ok(event) => {
-                        // Stop when the subscriber drops instead of draining the
-                        // event stream forever.
-                        if tx.send(Ok(event)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(EngineError::Machine(format!("decode error: {}", e))))
-                            .await;
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(rx)
+    ) -> Result<SandboxStream<SandboxEvent>> {
+        self.open_sandbox_stream(
+            MessageType::SandboxEventsRequest,
+            &req.encode_to_vec(),
+            StreamKind {
+                frame: MessageType::SandboxEvent,
+                end: None,
+                decode: |payload| {
+                    SandboxEvent::decode_from_slice(payload).map_err(sandbox_stream::decode_error)
+                },
+                is_last: |_| false,
+            },
+        )
+        .await
     }
 
     /// Stream durable sandbox cleanup tickets. Reconnecting replays every
     /// generation that has not finalized.
-    pub async fn sandbox_cleanup_events(
-        mut self,
-    ) -> Result<mpsc::Receiver<Result<SandboxCleanupTicket>>> {
-        if !self.connected {
-            self.connect().await?;
-        }
-
-        let request = WatchSandboxCleanupRequest::default();
-        let buffer = wire::build_message(
+    pub async fn sandbox_cleanup_events(self) -> Result<SandboxStream<SandboxCleanupTicket>> {
+        self.open_sandbox_stream(
             MessageType::WatchSandboxCleanupRequest,
-            "",
-            &request.encode_to_vec(),
-        );
-        self.transport.async_send(buffer).await.map_err(|error| {
-            EngineError::Machine(format!("failed to send sandbox cleanup watch: {error}"))
-        })?;
-
-        let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
-        tokio::spawn(async move {
-            loop {
-                let raw = match self.transport.async_recv().await {
-                    Ok(raw) => raw,
-                    Err(error) => {
-                        let _ = tx
-                            .send(Err(EngineError::Machine(format!(
-                                "sandbox cleanup watch receive failed: {error}"
-                            ))))
-                            .await;
-                        break;
-                    }
-                };
-                let (response_type, _, payload) = match wire::parse_response(&raw) {
-                    Ok(frame) => frame,
-                    Err(error) => {
-                        let _ = tx.send(Err(error)).await;
-                        break;
-                    }
-                };
-                if response_type == MessageType::Error as u32 {
-                    let (code, message) = wire::parse_error_response(&payload)
-                        .unwrap_or_else(|_| (500, "unknown error".to_owned()));
-                    let _ = tx.send(Err(EngineError::Agent { code, message })).await;
-                    break;
-                }
-                if response_type != MessageType::SandboxCleanupEvent as u32 {
-                    let _ = tx
-                        .send(Err(EngineError::Machine(format!(
-                            "unexpected sandbox cleanup response: 0x{response_type:04x}"
-                        ))))
-                        .await;
-                    break;
-                }
-                match SandboxCleanupTicket::decode_from_slice(&payload) {
-                    Ok(ticket) => {
-                        if tx.send(Ok(ticket)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(error) => {
-                        let _ = tx
-                            .send(Err(EngineError::Machine(format!(
-                                "sandbox cleanup ticket decode failed: {error}"
-                            ))))
-                            .await;
-                        break;
-                    }
-                }
-            }
-        });
-        Ok(rx)
+            &WatchSandboxCleanupRequest::default().encode_to_vec(),
+            StreamKind {
+                frame: MessageType::SandboxCleanupEvent,
+                end: None,
+                decode: |payload| {
+                    SandboxCleanupTicket::decode_from_slice(payload)
+                        .map_err(sandbox_stream::decode_error)
+                },
+                is_last: |_| false,
+            },
+        )
+        .await
     }
 
     /// Checkpoints a sandbox (creates a snapshot).

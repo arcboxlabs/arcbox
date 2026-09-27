@@ -28,6 +28,7 @@ statig = "0.4.1"
 tempfile = "3"
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-stream.workspace = true
 tokio-util = "0.7"
 toml = { workspace = true }
 tracing = { workspace = true }

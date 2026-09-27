@@ -9,8 +9,9 @@ use std::time::Duration;
 use arcbox_computer_runtime::ExecutionSpec;
 use arcbox_connect::sandbox_v1;
 use buffa::Message;
-use tokio::io::AsyncWrite;
+use tokio::io::{AsyncRead, AsyncWrite};
 
+use super::window::Windowed;
 use super::{SandboxService, convert};
 use crate::error::SandboxError;
 use crate::rpc::{ErrorResponse, MessageType, write_message};
@@ -57,7 +58,9 @@ impl SandboxService {
 
     /// Stream `SandboxExecEvent` frames for an attach request: a `started`
     /// preamble, output chunks from the requested offsets, then a terminal
-    /// `exited` frame carrying the final state.
+    /// `exited` frame carrying the final state — each within the host's
+    /// window, so a consumer that stops taking output stops the execution's
+    /// output buffer from draining rather than the vsock from being read.
     pub async fn handle_attach<S>(
         &self,
         stream: &mut S,
@@ -65,7 +68,7 @@ impl SandboxService {
         payload: &[u8],
     ) -> anyhow::Result<()>
     where
-        S: AsyncWrite + Unpin,
+        S: AsyncRead + AsyncWrite + Unpin,
     {
         let req = match sandbox_v1::AttachExecutionRequest::decode_from_slice(payload) {
             Ok(r) => r,
@@ -91,6 +94,7 @@ impl SandboxService {
             }
         };
         let tty = snapshot.tty;
+        let mut stream = Windowed::new(stream);
 
         let started = sandbox_v1::ExecutionEvent {
             event: sandbox_v1::ExecutionStarted {
@@ -100,13 +104,13 @@ impl SandboxService {
             .into(),
             ..Default::default()
         };
-        write_message(
-            stream,
-            MessageType::SandboxExecEvent,
-            trace_id,
-            &started.encode_to_vec(),
-        )
-        .await?;
+        stream
+            .write(
+                MessageType::SandboxExecEvent,
+                trace_id,
+                &started.encode_to_vec(),
+            )
+            .await?;
 
         while let Some(chunk) = rx.recv().await {
             let event = sandbox_v1::ExecutionEvent {
@@ -119,13 +123,13 @@ impl SandboxService {
                 .into(),
                 ..Default::default()
             };
-            write_message(
-                stream,
-                MessageType::SandboxExecEvent,
-                trace_id,
-                &event.encode_to_vec(),
-            )
-            .await?;
+            stream
+                .write(
+                    MessageType::SandboxExecEvent,
+                    trace_id,
+                    &event.encode_to_vec(),
+                )
+                .await?;
         }
 
         // The receiver closes once the execution exited and both channels are
@@ -153,13 +157,13 @@ impl SandboxService {
             .into(),
             ..Default::default()
         };
-        write_message(
-            stream,
-            MessageType::SandboxExecEvent,
-            trace_id,
-            &exited.encode_to_vec(),
-        )
-        .await?;
+        stream
+            .write(
+                MessageType::SandboxExecEvent,
+                trace_id,
+                &exited.encode_to_vec(),
+            )
+            .await?;
         Ok(())
     }
 

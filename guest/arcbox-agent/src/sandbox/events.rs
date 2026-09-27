@@ -6,9 +6,10 @@ use std::time::Duration;
 use arcbox_connect::sandbox_v1;
 use arcbox_connect::v1::{SandboxCleanupTicket, WatchSandboxCleanupRequest};
 use buffa::Message;
-use tokio::io::AsyncWrite;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 
+use super::window::Windowed;
 use super::{SandboxService, convert};
 use crate::error::SandboxError;
 use crate::rpc::{ErrorResponse, MessageType, write_message};
@@ -28,7 +29,7 @@ impl SandboxService {
         payload: &[u8],
     ) -> anyhow::Result<()>
     where
-        S: AsyncWrite + Unpin,
+        S: AsyncRead + AsyncWrite + Unpin,
     {
         WatchSandboxCleanupRequest::decode_from_slice(payload)
             .map_err(|error| anyhow::anyhow!("decode cleanup watch: {error}"))?;
@@ -48,9 +49,10 @@ impl SandboxService {
                 .then_with(|| left.id.cmp(&right.id))
         });
 
+        let mut stream = Windowed::new(stream);
         let mut sent = HashSet::<(String, String)>::new();
         for ticket in snapshot {
-            write_cleanup_ticket(stream, trace_id, &mut sent, ticket).await?;
+            write_cleanup_ticket(&mut stream, trace_id, &mut sent, ticket).await?;
         }
 
         let mut rescan = tokio::time::interval(Duration::from_secs(1));
@@ -70,7 +72,7 @@ impl SandboxService {
                             .await
                             .map_err(|error| anyhow::anyhow!(error.to_string()))?
                         {
-                            write_cleanup_ticket(stream, trace_id, &mut sent, ticket).await?;
+                            write_cleanup_ticket(&mut stream, trace_id, &mut sent, ticket).await?;
                         }
                     }
                     Ok(_) => {}
@@ -93,14 +95,15 @@ impl SandboxService {
                         .await
                         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
                     for ticket in unseen_rescan_tickets(&mut sent, tickets) {
-                        write_cleanup_ticket(stream, trace_id, &mut sent, ticket).await?;
+                        write_cleanup_ticket(&mut stream, trace_id, &mut sent, ticket).await?;
                     }
                 }
             }
         }
     }
 
-    /// Stream `SandboxEvent` frames from [`SandboxService::subscribe_events`].
+    /// Stream `SandboxEvent` frames from [`SandboxService::subscribe_events`],
+    /// each within the host's window.
     pub async fn handle_events<S>(
         &self,
         stream: &mut S,
@@ -108,7 +111,7 @@ impl SandboxService {
         payload: &[u8],
     ) -> anyhow::Result<()>
     where
-        S: AsyncWrite + Unpin,
+        S: AsyncRead + AsyncWrite + Unpin,
     {
         let mut rx = match self.subscribe_events(payload) {
             Ok(r) => r,
@@ -119,8 +122,11 @@ impl SandboxService {
             }
         };
 
+        let mut stream = Windowed::new(stream);
         while let Some(encoded) = rx.recv().await {
-            write_message(stream, MessageType::SandboxEvent, trace_id, &encoded).await?;
+            stream
+                .write(MessageType::SandboxEvent, trace_id, &encoded)
+                .await?;
         }
 
         Ok(())
@@ -180,22 +186,22 @@ impl SandboxService {
 }
 
 async fn write_cleanup_ticket<S>(
-    stream: &mut S,
+    stream: &mut Windowed<'_, S>,
     trace_id: &str,
     sent: &mut HashSet<(String, String)>,
     ticket: SandboxCleanupTicket,
 ) -> anyhow::Result<()>
 where
-    S: AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin,
 {
     if sent.insert((ticket.id.clone(), ticket.token.clone())) {
-        write_message(
-            stream,
-            MessageType::SandboxCleanupEvent,
-            trace_id,
-            &ticket.encode_to_vec(),
-        )
-        .await?;
+        stream
+            .write(
+                MessageType::SandboxCleanupEvent,
+                trace_id,
+                &ticket.encode_to_vec(),
+            )
+            .await?;
     }
     Ok(())
 }

@@ -13,6 +13,7 @@ mod files;
 mod snapshots;
 mod template;
 mod templates;
+mod window;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};

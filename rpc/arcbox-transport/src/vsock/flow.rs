@@ -54,6 +54,16 @@ impl Credit {
         }
     }
 
+    /// Waits until exactly `len` bytes have been taken. The sender's side
+    /// for a frame that must go out whole. Not cancel-safe: bytes taken
+    /// before a cancellation stay taken.
+    pub async fn reserve(&self, len: usize) {
+        let mut left = len;
+        while left > 0 {
+            left -= std::future::poll_fn(|cx| self.poll_take(cx, left)).await;
+        }
+    }
+
     fn try_take(&self, want: usize) -> Option<usize> {
         let mut taken = 0;
         self.available
@@ -85,7 +95,8 @@ impl Credit {
                 left.checked_add(len).filter(|total| *total <= self.limit)
             })
             .map_err(|_| protocol_error("peer granted more flow-control window than exists"))?;
-        if let Some(waker) = self.waiter.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        let waker = self.waiter.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(waker) = waker {
             waker.wake();
         }
         Ok(())

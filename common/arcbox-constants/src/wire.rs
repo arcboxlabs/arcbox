@@ -42,6 +42,14 @@ pub const AGENT_PROTOCOL_VERSION: u32 = 5;
 /// instead of silently misbehaving under field skew.
 pub const MIN_AGENT_PROTOCOL_VERSION: u32 = 5;
 
+/// Window each sandbox streaming RPC opens with.
+///
+/// Counted in encoded payload bytes of the frames the agent streams back;
+/// [`MessageType::SandboxStreamWindow`] returns it. Larger than the biggest
+/// frame any of those streams sends (a 1 MiB `SandboxFileData` chunk), or
+/// that frame could never go out.
+pub const SANDBOX_STREAM_WINDOW: u32 = 4 * 1024 * 1024;
+
 /// Number of bytes in the fixed RPC frame header (`length` + `type`).
 pub const FRAME_HEADER_SIZE: usize = 8;
 
@@ -129,6 +137,15 @@ pub enum MessageType {
     /// Opens the internal durable cleanup ticket stream (payload:
     /// `arcbox.v1.WatchSandboxCleanupRequest`).
     WatchSandboxCleanupRequest = 0x0029,
+    /// Window the host returns on a sandbox streaming RPC's connection as
+    /// its consumer takes frames (payload: `arcbox.v1.SandboxStreamWindow`).
+    /// Every guest→host stream ([`Self::SandboxExecEvent`],
+    /// [`Self::SandboxEvent`], [`Self::SandboxCleanupEvent`],
+    /// [`Self::SandboxFileData`], [`Self::SandboxFileWatchEvent`]) opens
+    /// with [`SANDBOX_STREAM_WINDOW`] bytes of window, counted in encoded
+    /// payload bytes; the agent never sends past it, so the host can keep
+    /// reading the connection however slow its consumer is. No reply.
+    SandboxStreamWindow = 0x00A0,
 
     // Sandbox workload request types.
     // 0x0030 (SandboxRunRequest), 0x0031 (SandboxExecRequest),
@@ -477,6 +494,7 @@ impl MessageType {
             0x0027 => Some(Self::SandboxCleanupPrepareRequest),
             0x0028 => Some(Self::SandboxCleanupFinalizeRequest),
             0x0029 => Some(Self::WatchSandboxCleanupRequest),
+            0x00A0 => Some(Self::SandboxStreamWindow),
             // Sandbox workload requests.
             0x0032 => Some(Self::SandboxEventsRequest),
             0x0035 => Some(Self::SandboxFileReadRequest),
@@ -618,6 +636,7 @@ impl MessageType {
                 | Self::SandboxCleanupPrepareRequest
                 | Self::SandboxCleanupFinalizeRequest
                 | Self::WatchSandboxCleanupRequest
+                | Self::SandboxStreamWindow
                 | Self::SandboxCheckpointRequest
                 | Self::SandboxRestoreRequest
                 | Self::SandboxListSnapshotsRequest
@@ -749,6 +768,7 @@ mod tests {
             (0x0027, MessageType::SandboxCleanupPrepareRequest),
             (0x0028, MessageType::SandboxCleanupFinalizeRequest),
             (0x0029, MessageType::WatchSandboxCleanupRequest),
+            (0x00A0, MessageType::SandboxStreamWindow),
             (0x1025, MessageType::SandboxPortForwardResponse),
             (0x1026, MessageType::SandboxPortForwardRemoveResponse),
             (0x1027, MessageType::SandboxCleanupPrepareResponse),
