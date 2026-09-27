@@ -95,6 +95,16 @@ where
             }
             return Ok(());
         }
+        // A debug exec is a machine exec that first enters a container's
+        // namespaces; it owns the connection the same way.
+        if matches!(msg_type, crate::rpc::MessageType::DebugExecRequest) {
+            if let Err(e) =
+                super::machine_exec::handle_debug_exec(&mut stream, &trace_id, &payload).await
+            {
+                tracing::warn!(trace_id = %trace_id, error = %e, "debug exec handler error");
+            }
+            return Ok(());
+        }
         // So does a TCP connection opened inside the machine.
         if matches!(msg_type, crate::rpc::MessageType::MachineTcpConnectRequest) {
             if let Err(e) =

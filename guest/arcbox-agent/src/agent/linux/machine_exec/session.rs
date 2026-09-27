@@ -52,6 +52,16 @@ pub(super) struct Streams {
     pub(super) delivered: mpsc::UnboundedReceiver<usize>,
 }
 
+/// The header stamped on every output frame of a session: the trace id it
+/// carries and the message type it is tagged with — `MachineExecOutput` for a
+/// machine-root exec, `DebugExecResponse` for a container-debug session. The
+/// window and error frames keep their own fixed types but share the trace id.
+#[derive(Clone, Copy)]
+pub(super) struct OutFrame<'a> {
+    pub(super) trace_id: &'a str,
+    pub(super) msg_type: MessageType,
+}
+
 /// How a session's target ended, as its final frame reports.
 pub(super) enum Ended {
     /// The process exited.
@@ -65,7 +75,7 @@ pub(super) enum Ended {
 /// (or breaks flow control) first, the process group is killed instead.
 pub(super) async fn run<S>(
     stream: &mut S,
-    trace_id: &str,
+    out: OutFrame<'_>,
     flow: &Flow,
     streams: Streams,
     terminal: Option<&OwnedFd>,
@@ -82,7 +92,7 @@ where
             .context("failed to wait for exec child")?;
         Ok(Ended::Exited(status))
     };
-    if !relay(stream, trace_id, flow, streams, terminal, pid, exited).await? {
+    if !relay(stream, out, flow, streams, terminal, pid, exited).await? {
         kill_session(pid);
         let _ = child.wait().await;
     }
@@ -94,7 +104,7 @@ where
 /// host went away (or broke flow control) first.
 pub(super) async fn relay<S>(
     stream: &mut S,
-    trace_id: &str,
+    out: OutFrame<'_>,
     flow: &Flow,
     streams: Streams,
     terminal: Option<&OwnedFd>,
@@ -108,7 +118,7 @@ where
     let ended = {
         let output = pump(
             &mut conn_wr,
-            trace_id,
+            out,
             flow,
             streams.output,
             streams.delivered,
@@ -122,9 +132,7 @@ where
         }
     };
     match ended {
-        Some(ended) => write_end(&mut conn_wr, trace_id, ended)
-            .await
-            .map(|()| true),
+        Some(ended) => write_end(&mut conn_wr, out, ended).await.map(|()| true),
         None => Ok(false),
     }
 }
@@ -135,7 +143,7 @@ where
 /// waits for the host, and after the output has ended.
 async fn pump<W>(
     conn: &mut W,
-    trace_id: &str,
+    out: OutFrame<'_>,
     flow: &Flow,
     mut output: mpsc::Receiver<Chunk>,
     mut delivered: mpsc::UnboundedReceiver<usize>,
@@ -156,12 +164,12 @@ where
                     len += more;
                 }
                 if let Some(bytes) = flow.stdin_delivered(len) {
-                    write_window(conn, trace_id, bytes).await?;
+                    write_window(conn, out.trace_id, bytes).await?;
                 }
             }
             () = flow.reserve_output(pending_len), if pending.is_some() => {
                 if let Some(frame) = pending.take() {
-                    write_message(conn, MessageType::MachineExecOutput, trace_id, &frame).await?;
+                    write_message(conn, out.msg_type, out.trace_id, &frame).await?;
                 }
             }
             chunk = output.recv(), if output_open && pending.is_none() => match chunk {
@@ -356,11 +364,11 @@ fn encode_output(chunk: Chunk) -> Vec<u8> {
 }
 
 /// Writes the final frame reporting how the session ended.
-async fn write_end<W>(writer: &mut W, trace_id: &str, ended: Ended) -> anyhow::Result<()>
+async fn write_end<W>(writer: &mut W, out: OutFrame<'_>, ended: Ended) -> anyhow::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    let out = match ended {
+    let frame = match ended {
         Ended::Exited(status) => MachineExecOutput {
             done: true,
             exit_code: status.code().unwrap_or(-1),
@@ -372,13 +380,7 @@ where
             ..Default::default()
         },
     };
-    write_message(
-        writer,
-        MessageType::MachineExecOutput,
-        trace_id,
-        &out.encode_to_vec(),
-    )
-    .await
+    write_message(writer, out.msg_type, out.trace_id, &frame.encode_to_vec()).await
 }
 
 /// A signal's name without the `SIG` prefix, as SSH reports it (`"KILL"`).

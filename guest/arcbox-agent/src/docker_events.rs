@@ -241,7 +241,7 @@ async fn register_container_by_id(sync: &mut ContainerSync<'_>, id: &str) -> any
 }
 
 /// Performs a GET request to the Docker Engine API via Unix socket.
-async fn docker_get(path: &str) -> anyhow::Result<serde_json::Value> {
+pub async fn docker_get(path: &str) -> anyhow::Result<serde_json::Value> {
     let stream = UnixStream::connect(DOCKER_SOCK).await?;
     let (reader, mut writer) = tokio::io::split(stream);
 

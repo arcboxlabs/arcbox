@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 
 use super::flow::Flow;
 use super::session::{self, Ended, OUTPUT_CHANNEL_CAPACITY, Streams};
-use crate::rpc::ErrorResponse;
+use crate::rpc::{ErrorResponse, MessageType};
 
 /// How long a connect may take before the host is told it failed.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -65,7 +65,19 @@ where
         stdin,
         delivered,
     };
-    let finished = session::relay(stream, trace_id, &flow, streams, None, None, closed).await;
+    let finished = session::relay(
+        stream,
+        session::OutFrame {
+            trace_id,
+            msg_type: MessageType::MachineExecOutput,
+        },
+        &flow,
+        streams,
+        None,
+        None,
+        closed,
+    )
+    .await;
     // Either way the socket goes: a peer that never sends again must not
     // keep it open.
     reader.abort();
