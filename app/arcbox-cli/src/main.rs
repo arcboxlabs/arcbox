@@ -148,6 +148,7 @@ fn run(cli: Cli) -> Result<()> {
             Commands::Macos(cmd) => commands::macos::execute(cmd).await,
             Commands::Migrate(cmd) => commands::migrate::execute(cmd).await,
             Commands::Sandbox(cmd) => commands::sandbox::execute(cmd).await,
+            Commands::Debug(args) => commands::debug::execute(args).await,
             Commands::Claude(args) => {
                 commands::agent::execute(&commands::agent::CLAUDE, args).await
             }

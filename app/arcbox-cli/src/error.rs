@@ -136,6 +136,26 @@ pub fn machine_exec_output(error: ConnectError, name: &str, command: &str) -> Er
     actionable(message, error)
 }
 
+pub fn debug_exec(error: ConnectError, container: &str) -> Error {
+    let message = if connection_lost(&error) {
+        format!("Connection to the debug session for container '{container}' was lost.")
+    } else {
+        match error.code {
+            ErrorCode::NotFound => format!(
+                "Container '{container}' was not found. List containers with `docker ps -a`."
+            ),
+            ErrorCode::FailedPrecondition => format!(
+                "Container '{container}' is not running. Start it with `docker start {container}`."
+            ),
+            _ => format!(
+                "Could not start a debug session in container '{container}'. Re-run with --debug \
+                 for details."
+            ),
+        }
+    };
+    actionable(message, error)
+}
+
 fn actionable(message: String, source: ConnectError) -> Error {
     Error::new(ActionableError { message, source })
 }
@@ -287,6 +307,40 @@ mod tests {
         assert_eq!(
             output.to_string(),
             "Could not read output from 'date' in machine 'dev'. Re-run with --debug for details."
+        );
+    }
+
+    #[test]
+    fn debug_exec_maps_container_states_to_actionable_messages() {
+        let missing = debug_exec(
+            ConnectError::not_found("core error: No such container: nope"),
+            "nope",
+        );
+        assert_eq!(
+            missing.to_string(),
+            "Container 'nope' was not found. List containers with `docker ps -a`."
+        );
+        assert!(render(&missing, true).contains("No such container: nope"));
+
+        let stopped = debug_exec(
+            ConnectError::failed_precondition("container 'db' is not running"),
+            "db",
+        );
+        assert_eq!(
+            stopped.to_string(),
+            "Container 'db' is not running. Start it with `docker start db`."
+        );
+
+        let lost = debug_exec(ConnectError::unavailable("h2 connection closed"), "web");
+        assert_eq!(
+            lost.to_string(),
+            "Connection to the debug session for container 'web' was lost."
+        );
+
+        let other = debug_exec(ConnectError::internal("raw"), "web");
+        assert_eq!(
+            other.to_string(),
+            "Could not start a debug session in container 'web'. Re-run with --debug for details."
         );
     }
 

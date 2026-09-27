@@ -528,15 +528,22 @@ async fn execute_info(args: InfoArgs) -> Result<()> {
 
 async fn execute_ssh(args: SshArgs) -> Result<()> {
     if args.command.is_empty() {
-        return exec_session_interactive(&args.name, vec!["/bin/sh".to_string(), "-l".to_string()])
-            .await;
+        return exec_session_interactive(
+            &args.name,
+            "",
+            vec!["/bin/sh".to_string(), "-l".to_string()],
+        )
+        .await;
     }
     exec_via_grpc(&args.name, args.command, HashMap::new(), false).await
 }
 
 /// Runs an interactive PTY session in a machine: local terminal in raw mode,
 /// stdin and SIGWINCH resizes pumped up, merged PTY output written to stdout.
-async fn exec_session_interactive(name: &str, cmd: Vec<String>) -> Result<()> {
+///
+/// A non-empty `container` runs the session inside that container's namespaces
+/// (the `abctl debug` path); empty runs it in the machine root.
+pub async fn exec_session_interactive(name: &str, container: &str, cmd: Vec<String>) -> Result<()> {
     let command = cmd.first().cloned().unwrap_or_default();
     let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel::<MachineExecInput>(16);
 
@@ -551,6 +558,7 @@ async fn exec_session_interactive(name: &str, cmd: Vec<String>) -> Result<()> {
         .send(MachineExecInput {
             payload: MachineExecRequest {
                 id: name.to_string(),
+                container: container.to_string(),
                 cmd,
                 tty: true,
                 tty_size: tty_size.into(),
@@ -638,7 +646,13 @@ async fn exec_session_interactive(name: &str, cmd: Vec<String>) -> Result<()> {
     while let Some(item) = recv
         .message::<pb::MachineExecOutput>()
         .await
-        .map_err(|error| crate::error::machine_exec_output(error, name, &command))?
+        .map_err(|error| {
+            if container.is_empty() {
+                crate::error::machine_exec_output(error, name, &command)
+            } else {
+                crate::error::debug_exec(error, container)
+            }
+        })?
     {
         let output = item.to_owned_message();
         if !output.data.is_empty() {

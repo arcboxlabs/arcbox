@@ -63,6 +63,7 @@ pub mod agent;
 pub mod boot;
 pub mod cli_plugins;
 pub mod daemon;
+pub mod debug;
 pub mod disk;
 #[cfg(target_os = "macos")]
 pub mod dns;
@@ -153,6 +154,9 @@ pub enum Commands {
 
     /// Open Claude Code in a dedicated sandbox
     Claude(agent::AgentArgs),
+
+    /// Debug a running container with a shell and tools from the guest
+    Debug(debug::DebugArgs),
 
     /// Manage Docker CLI integration
     #[command(subcommand)]
