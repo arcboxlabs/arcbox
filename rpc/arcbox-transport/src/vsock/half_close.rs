@@ -541,30 +541,25 @@ mod tests {
 
     #[tokio::test]
     async fn a_peer_overrunning_the_window_is_an_error() {
-        let (mut raw, mut framed) = raw_pair();
+        // Room for the whole overrun frame, so the feeder finishes without
+        // the reader task's help and the probe below cannot race it.
+        let (mut raw, framed) = tokio::io::duplex(WINDOW + 2 * MAX_FRAME_PAYLOAD);
+        let mut framed = HalfCloseStream::new(framed);
         let frames = WINDOW / MAX_FRAME_PAYLOAD + 1;
-        let mut feeder = tokio::spawn(async move {
-            let payload = vec![0u8; MAX_FRAME_PAYLOAD];
-            for _ in 0..frames {
-                raw.write_all(&(MAX_FRAME_PAYLOAD as u32).to_be_bytes())
-                    .await
-                    .unwrap();
-                raw.write_all(&payload).await.unwrap();
-            }
-            raw
-        });
-        // Nothing is consumed until the reader task has taken the whole
-        // window and hit the extra frame's header: the feeder is then stuck
-        // on that frame's payload, which the task no longer reads.
-        assert!(is_pending(&mut feeder).await);
+        let payload = vec![0u8; MAX_FRAME_PAYLOAD];
+        for _ in 0..frames {
+            raw.write_all(&(MAX_FRAME_PAYLOAD as u32).to_be_bytes())
+                .await
+                .unwrap();
+            raw.write_all(&payload).await.unwrap();
+        }
+        // Nothing is consumed, so no window goes back: the whole window
+        // arrives and the extra frame's header overruns it.
         let mut got = vec![0u8; WINDOW];
         framed.read_exact(&mut got).await.unwrap();
         let mut probe = [0u8; 1];
         let err = framed.read(&mut probe).await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        // The reader task stopped at the bad header, so the feeder's last
-        // payload never drains.
-        feeder.abort();
     }
 
     #[tokio::test]
