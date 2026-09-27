@@ -43,6 +43,7 @@ mod setup;
 mod vcpu_loop;
 mod vsock;
 
+pub(super) use hvc_blk::HvcBlkTable;
 pub(super) use pl011::Pl011;
 #[cfg(test)]
 use pl011::{PL011_BASE, PL011_DR, PL011_FR, PL011_SIZE};

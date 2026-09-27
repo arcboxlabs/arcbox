@@ -378,18 +378,23 @@ impl Vmm {
             }
         }
 
-        // Build HVC fast-path fd table from all block devices.
+        // Build the HVC fast-path device table from all block devices.
         // device_idx 0 = first block device (vda), 1 = second (vdb), etc.
-        {
-            let fds: Vec<(i32, u32, u64)> = self
-                .hv_blk_devices
+        self.hvc_blk_fds = Arc::new(
+            self.hv_blk_devices
                 .iter()
-                .map(|(_, raw_fd, blk_size, capacity_sectors, _, _, _)| {
-                    (*raw_fd, *blk_size, *capacity_sectors)
-                })
-                .collect();
-            self.hvc_blk_fds = Arc::new(fds);
-        }
+                .map(
+                    |&(_, raw_fd, blk_size, capacity_sectors, read_only, _, _)| {
+                        super::hvc_blk::HvcBlkDevice {
+                            raw_fd,
+                            blk_size,
+                            capacity_sectors,
+                            read_only,
+                        }
+                    },
+                )
+                .collect(),
+        );
 
         // Network (TSO-enabled) with custom socket-proxy datapath.
         // Creates a SOCK_DGRAM socketpair: one end feeds the VirtioNet device
