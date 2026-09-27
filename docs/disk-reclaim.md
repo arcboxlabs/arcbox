@@ -80,8 +80,54 @@ disk drops on unmount.
 
 ## After this change
 
-See the "verification" section of the change's report for the re-measured
-matrix; the expected shape is the VZ rows unchanged (they already reclaimed)
-and the HV System VM row following the VZ System VM row within the same
-3-minute Btrfs cadence, with the manual compact returning everything at once
-on every backend.
+Same procedure, same host, 2026-09-27. The HV row ran the CI-built kernel
+from arcboxlabs/kernel PR #20 (merged as `2c041107`; passed with `--kernel`
+because boot assets 0.8.6 predate it); the daemon was the rebuilt one.
+
+| backend × guest | after write | rm +0 s | +15 s | +30 s | +60 s | +120 s | +180 s | manual `abctl disk compact` |
+|---|---|---|---|---|---|---|---|---|
+| VZ · System VM | 5367 MiB | 5367 | 5367 | 5369 | 1145 | 1145 | **249** | 230 |
+| VZ · machine (alpine) | 5140 MiB | 5141 | **21** | 21 | 21 | 21 | 21 | 0 |
+| HV · System VM | 5356 MiB | 5357 | **1133** | 1133 | 1133 | 237 | **219** | 219 |
+
+The HV System VM now follows the VZ System VM's Btrfs cadence (the first
+drop even lands a step earlier, because the HVC path has no per-request
+size cap the guest has to split against). The manual compact works on every
+backend and returns whatever `discard=async` had not yet: `abctl disk
+compact` on the VZ System VM went 249 → 230 MiB, and `abctl disk compact m1`
+took the machine from 21 MiB to 0. The trim mount a machine uses is gone
+afterwards (`/run/arcbox/trim` is an empty directory in the machine's
+namespace; nothing is mounted on it).
+
+The scheduler was observed end to end with `ARCBOX_IDLE_TIMEOUT_SECS=60`:
+`VM entered idle state after 64s of inactivity`, then one second later
+`trimmed the idle System VM's disks bytes_trimmed=8795751194624` from the
+daemon and `trimmed mount="/run/arcbox/data"` / `"/run/arcbox/metadata"`
+from the agent. The machine sweep fired at the one-minute mark
+(`trimmed the machine's data disk machine=m1 bytes_trimmed=20936884224`).
+
+### I/O while a trim runs
+
+Inside an alpine container on the System VM: 1 GiB sequential write with
+fsync, then 256 MiB of 64 KiB random-data rewrites with fsync, both `dd`
+(no fio in the image and no network in the dev guests). Two baseline runs,
+then the same with six back-to-back `abctl disk compact` calls overlapping
+the run — far more trimming than the scheduler ever issues.
+
+| backend | run | 1 GiB seq write | 256 MiB rewrite |
+|---|---|---|---|
+| VZ | baseline | 3.4 GB/s, 1.9 GB/s | 485 MB/s, 483 MB/s |
+| VZ | six trims overlapping | 3.6 GB/s, 2.9 GB/s | 351 MB/s, 335 MB/s |
+| VZ | one trim overlapping (the scheduler's shape) | 2.8, 3.2, 3.2 GB/s | 370, 430, 157 MB/s |
+| HV | baseline | 1.8 GB/s, 1.7 GB/s | 120 MB/s, 144 MB/s |
+| HV | eight trims overlapping | 1.7 GB/s, 1.8 GB/s | 135 MB/s, 113 MB/s |
+
+A full trim of the 8 TiB data volume takes 85–150 ms wall clock end to end
+(`abctl disk compact`, including the RPC). The rewrite pass on VZ loses ~25%
+while six trims are stacked on it and is within run-to-run noise otherwise;
+the one 157 MB/s sample is a single fsync stall of the kind the baseline also
+shows between runs. On HV, where the trim rides the same HVC path as the
+I/O, eight stacked trims move neither number outside the baseline spread.
+The sequential write is unaffected on both. Nothing here
+approaches "noticeably slower", and the scheduler runs the trim only when
+the VM has been idle for five minutes.
