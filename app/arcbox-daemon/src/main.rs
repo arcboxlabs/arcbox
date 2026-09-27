@@ -2,6 +2,7 @@
 
 mod context;
 mod control_plane;
+mod disk_reclaim;
 mod dns_service;
 mod kubernetes_lb;
 mod kubernetes_proxy;

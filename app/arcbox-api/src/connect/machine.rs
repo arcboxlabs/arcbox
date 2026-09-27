@@ -419,20 +419,18 @@ impl pb::MachineService for MachineServiceImpl {
     ) -> ServiceResult<pb::Empty> {
         let id = request.to_owned_message().id;
 
-        // Trigger an immediate fstrim in the guest. The discards flow through
-        // virtio-blk, which punches holes in the host data image, shrinking its
-        // physical footprint. The caller measures host usage before/after.
-        //
-        // If fstrim fails in the guest, the agent replies with a generic error
-        // response, so `disk_trim()` surfaces it as an `Err` here — no need to
-        // inspect the result text.
-        let mut agent = self
+        // The guest trims its data filesystems; the discards reach the host
+        // through virtio-blk or the HVC fast path, which punch the freed
+        // ranges out of the sparse image. The caller measures host usage
+        // before and after. A filesystem that refuses the trim comes back as
+        // an agent error, so this surfaces it as an `Err`.
+        let bytes = self
             .runtime
             .ready()?
-            .get_agent(&id)
+            .trim_machine_disk(&id)
+            .await
             .map_err(ApiError::from)?;
-        let resp = agent.disk_trim().await.map_err(ApiError::from)?;
-        tracing::debug!(machine = %id, result = %resp.result, "disk compact: fstrim done");
+        tracing::debug!(machine = %id, bytes_trimmed = bytes, "disk compact: trim done");
 
         Response::ok(pb::Empty::default())
     }

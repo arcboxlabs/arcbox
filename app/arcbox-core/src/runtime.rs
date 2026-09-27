@@ -736,6 +736,20 @@ impl Runtime {
         Ok(true)
     }
 
+    /// Trims a machine's data filesystems so the host reclaims the space
+    /// they freed; returns the bytes the guest reported trimmed. The System
+    /// VM is `DEFAULT_MACHINE_NAME`.
+    ///
+    /// # Errors
+    /// Returns an error if the machine is not running, its agent is
+    /// unreachable, or a filesystem refused the trim.
+    pub async fn trim_machine_disk(&self, machine_name: &str) -> Result<u64> {
+        Arc::clone(&self.machine_manager)
+            .trim_disk(machine_name.to_owned())
+            .await
+            .map_err(CoreError::from)
+    }
+
     /// Returns the guest dockerd vsock port for the System VM.
     #[must_use]
     pub const fn system_vm_docker_vsock_port(&self) -> u32 {

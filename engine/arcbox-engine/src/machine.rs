@@ -944,6 +944,37 @@ impl MachineManager {
         }
     }
 
+    /// Connects to the machine's agent and trims its data filesystems,
+    /// returning the bytes the guest reported trimmed. Same transport
+    /// dispatch as [`Self::ping_agent`]: the HV socketpair is blocking, VZ
+    /// and Linux vsock are async.
+    ///
+    /// # Errors
+    /// Returns an error if the machine is not running, the agent is
+    /// unreachable, or a filesystem refused the trim.
+    pub async fn trim_disk(self: Arc<Self>, machine_name: String) -> Result<u64> {
+        let manager = Arc::clone(&self);
+        let name = machine_name.clone();
+        let connected = tokio::task::spawn_blocking(move || manager.connect_agent(&name)).await;
+        let response = match connected {
+            Ok(Ok(mut agent)) => {
+                if agent.is_blocking() {
+                    tokio::task::spawn_blocking(move || agent.disk_trim_blocking())
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(EngineError::Vm(format!("disk trim task panicked: {e}")))
+                        })?
+                } else {
+                    agent.disk_trim().await?
+                }
+            }
+            Ok(Err(e)) => return Err(e),
+            Err(e) => return Err(EngineError::Vm(format!("agent connect task panicked: {e}"))),
+        };
+        tracing::debug!(machine = %machine_name, result = %response.result, "disk trim done");
+        Ok(response.bytes_trimmed)
+    }
+
     /// Reads serial console output for a running machine (macOS only).
     #[cfg(target_os = "macos")]
     pub fn read_console_output(&self, name: &str) -> Result<String> {

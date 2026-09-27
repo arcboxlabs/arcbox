@@ -1038,11 +1038,12 @@ impl AgentClient {
         )
     }
 
-    /// Triggers an immediate fstrim on guest data mount points.
+    /// Asks the guest to trim its data filesystems now (`FITRIM`), so the
+    /// host reclaims every block they freed.
     ///
     /// # Errors
     ///
-    /// Returns an error if the request fails.
+    /// Returns an error if the request fails or a filesystem refused the trim.
     pub async fn disk_trim(&mut self) -> Result<DiskTrimResponse> {
         let payload = DiskTrimRequest::default().encode_to_vec();
         self.unary_rpc(
@@ -1051,6 +1052,21 @@ impl AgentClient {
             MessageType::DiskTrimResponse,
         )
         .await
+    }
+
+    /// Blocking variant of [`Self::disk_trim`] for the HV socketpair
+    /// transport. Call from `spawn_blocking`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or a filesystem refused the trim.
+    pub fn disk_trim_blocking(&mut self) -> Result<DiskTrimResponse> {
+        let payload = DiskTrimRequest::default().encode_to_vec();
+        self.unary_rpc_blocking(
+            MessageType::DiskTrimRequest,
+            &payload,
+            MessageType::DiskTrimResponse,
+        )
     }
 
     /// Creates a new sandbox in the guest VM.

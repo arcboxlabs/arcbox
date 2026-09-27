@@ -139,7 +139,8 @@ grep -r "panic" ~/ArcBox/volumes/my-app-data/_data
 
 ```bash
 abctl top          # streaming CPU, memory, disk, and network for the System VM
-abctl disk usage   # Docker data image usage; `abctl disk compact` reclaims free blocks
+abctl disk usage   # Docker data image usage; `abctl disk compact [machine]` returns freed space now
+                   # (it also returns on its own: idle System VM, hourly per machine)
 ```
 
 `abctl top` adds a per-container table — CPU, memory against the limit, disk and
