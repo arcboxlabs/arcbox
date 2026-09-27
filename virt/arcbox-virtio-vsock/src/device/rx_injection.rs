@@ -30,7 +30,7 @@ impl VirtioVsock {
     ) -> bool {
         use std::os::fd::AsRawFd;
 
-        use crate::manager::{RxOps, TX_BUFFER_SIZE};
+        use crate::manager::{RX_PAYLOAD_MAX, RxOps, TX_BUFFER_SIZE};
 
         let Some(ctx) = self.ctx.clone() else {
             return false;
@@ -259,7 +259,7 @@ impl VirtioVsock {
                                     hdr.to_bytes().to_vec()
                                 } else {
                                     let fd = conn.internal_fd.as_raw_fd();
-                                    let max_read = credit.min(4096);
+                                    let max_read = credit.min(RX_PAYLOAD_MAX);
                                     let mut buf = vec![0u8; max_read];
                                     // SAFETY: `fd` is borrowed from
                                     // `conn.internal_fd`, live for the call.

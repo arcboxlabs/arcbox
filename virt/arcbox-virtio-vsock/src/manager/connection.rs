@@ -17,6 +17,17 @@ pub struct VsockConnectionId {
 /// Default host-side TX buffer size (also advertised as `buf_alloc` to guest).
 pub const TX_BUFFER_SIZE: u32 = 64 * 1024;
 
+/// Most payload one host→guest RW packet carries.
+///
+/// The Linux driver posts `VIRTIO_VSOCK_DEFAULT_RX_BUF_SIZE` (4 KiB)
+/// buffers and drops a packet whose used length is shorter than its
+/// header's `len` — so a packet must fit one buffer, header included. A
+/// 4096-byte payload overflowed it by the header: the guest discarded every
+/// such packet, never returned credit for it, and the host waited on a
+/// window that could not reopen, which is how a 1 GiB `docker run -i` pipe
+/// on HV moved nothing while small replies kept flowing.
+pub const RX_PAYLOAD_MAX: usize = 4096 - crate::protocol::VsockHeader::SIZE;
+
 /// Bytes consumed since the last credit packet before we send a proactive
 /// `CREDIT_UPDATE`.
 ///
