@@ -24,3 +24,14 @@ pub const KUBERNETES_API_GUEST_PORT: u16 = 6443;
 /// forwards it to `127.0.0.1:2049`. NFSv4 serves everything on this one port,
 /// so no separate MOUNT-protocol relay is needed.
 pub const NFS_NFSD_RELAY_PORT: u32 = 2049;
+
+/// Guest vsock port for the SSH-auth agent-forwarding relay.
+///
+/// Unlike the other relays, the host is the party that must reach a resource
+/// on its own side (the user's `ssh-agent`), while the connection originates
+/// in the guest (a container talks to the forwarded socket). VZ exposes only
+/// host→guest dialing, so the daemon instead pre-dials a pool of connections
+/// to this port and parks them; the guest agent hands each parked connection
+/// to the next container that opens the forwarded socket. See
+/// `arcbox_constants::paths::HOST_SERVICES_SSH_AUTH_SOCK`.
+pub const SSH_AUTH_RELAY_PORT: u32 = 2201;

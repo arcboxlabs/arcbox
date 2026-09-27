@@ -40,6 +40,16 @@ pub const DOCKER_API_UNIX_SOCKET: &str = "/var/run/docker.sock";
 /// containerd gRPC socket path in guest.
 pub const CONTAINERD_SOCKET: &str = "/run/containerd/containerd.sock";
 
+/// Guest Unix socket for SSH agent-forwarding into containers.
+///
+/// The System VM agent listens here; a container bind-mounts it with
+/// `-v /run/host-services/ssh-auth.sock:/run/host-services/ssh-auth.sock` and
+/// points `SSH_AUTH_SOCK` at it, matching OrbStack and Docker Desktop. The
+/// agent relays each accepted connection over
+/// [`crate::ports::SSH_AUTH_RELAY_PORT`] to the daemon, which in turn connects
+/// to the user's real `ssh-agent` on the Mac.
+pub const HOST_SERVICES_SSH_AUTH_SOCK: &str = "/run/host-services/ssh-auth.sock";
+
 /// K3s-generated kubeconfig path inside the guest.
 pub const K3S_KUBECONFIG_PATH: &str = "/var/lib/rancher/k3s/k3s.yaml";
 
