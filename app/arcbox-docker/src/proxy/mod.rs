@@ -37,9 +37,13 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// The byte stream a guest dockerd connection is spoken over.
 ///
 /// The vsock fd underneath cannot half-close on macOS, so EOF travels
-/// in-band: the guest agent wraps its end of the same channel in the same
-/// framing (agent protocol v4). Anything that must close one direction of
-/// an attach or exec session while the other keeps flowing depends on this.
+/// in-band, and an unread guest→host vsock stalls the whole VM on
+/// Virtualization.framework, so each direction's backpressure travels
+/// in-band too: the guest agent wraps its end of the same channel in the
+/// same framing (agent protocol v5). Anything that must close one direction
+/// of an attach or exec session while the other keeps flowing depends on
+/// the first; `docker version` answering during a paused `docker attach`
+/// depends on the second.
 pub type GuestStream = HalfCloseStream<VsockStream>;
 
 /// Abstraction over guest connection establishment.

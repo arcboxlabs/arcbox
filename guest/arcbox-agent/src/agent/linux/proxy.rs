@@ -3,10 +3,13 @@
 //!
 //! - **Docker API**: vsock listener → `/var/run/docker.sock` (Unix). The
 //!   channel is framed with [`HalfCloseStream`] so each direction can close
-//!   on its own: the vsock fd cannot half-close on macOS, and without an
+//!   on its own — the vsock fd cannot half-close on macOS, and without an
 //!   in-band EOF a `docker run -i` never delivered stdin EOF to its
-//!   container (arcboxlabs/arcbox#268). The host proxy speaks the same
-//!   framing (agent protocol v4).
+//!   container (arcboxlabs/arcbox#268) — and so neither side sends past
+//!   the window the other holds open: a container's output the host is
+//!   slow to take waits in dockerd, not in the vsock, whose host end must
+//!   never go unread on Virtualization.framework. The host proxy speaks the
+//!   same framing (agent protocol v5).
 //! - **Kubernetes API**: vsock listener → `127.0.0.1:KUBERNETES_API_GUEST_PORT`
 //!   (TCP, k3s API server bound to localhost). Raw bytes; TLS closes itself.
 
@@ -55,7 +58,9 @@ async fn proxy_docker_api_connection(vsock_stream: VsockStream) -> Result<()> {
     // other side's reader hits EOF. Towards dockerd that is a real
     // `SHUT_WR` on the Unix socket, which is how a container learns its
     // stdin is done; towards the host it is the framed EOF marker, since
-    // the vsock fd would swallow a plain shutdown.
+    // the vsock fd would swallow a plain shutdown. Its dockerd→host copy
+    // blocks on the host's window, not on the vsock, so a paused `docker
+    // attach` leaves dockerd's socket full and the vsock drained.
     let mut host = HalfCloseStream::new(vsock_stream);
     let result = tokio::io::copy_bidirectional(&mut host, &mut unix_stream).await;
     match result {

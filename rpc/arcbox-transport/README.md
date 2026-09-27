@@ -54,7 +54,11 @@ tunnel whose two directions must end independently — the Docker attach channel
 where stdin EOF has to reach the container while its output keeps flowing —
 wraps both ends in `HalfCloseStream`. It frames every write and sends a
 zero-length frame as EOF, so the peer sees end of stream while the fd stays open
-for the other direction:
+for the other direction. It also keeps the fd read at all times: on
+Virtualization.framework one unread guest→host stream stalls every new vsock
+connection to the VM, so each side sends only within a window
+(`HalfCloseStream::WINDOW`) the other grants back in-band as its consumer takes
+the bytes, and a slow consumer stops the sender rather than the vsock:
 
 ```rust
 use arcbox_transport::vsock::{HalfCloseStream, VsockShutdown, VsockStream};
@@ -67,7 +71,7 @@ fn wrap_attach_channel(fd: OwnedFd) -> std::io::Result<HalfCloseStream<VsockStre
 ```
 
 Both peers must agree on the framing; the guest agent's Docker API proxy speaks
-it from agent protocol v4.
+it from agent protocol v5 (v4 had the half-close without the window).
 
 ## Port Notes
 

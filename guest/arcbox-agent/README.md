@@ -26,9 +26,12 @@ target a healthy guest `dockerd` endpoint.
 
 The proxy itself listens on vsock port 2375 and relays each connection to
 `/var/run/docker.sock`. The vsock leg is framed with
-`arcbox_transport::vsock::HalfCloseStream` (agent protocol v4): a
+`arcbox_transport::vsock::HalfCloseStream` (agent protocol v5): a
 zero-length frame is one side's EOF, which is how a `docker run -i`'s stdin
-EOF reaches the container when the vsock fd itself cannot half-close.
+EOF reaches the container when the vsock fd itself cannot half-close, and a
+frame with the top header bit set grants the peer window, which is how a
+paused `docker attach` backs up into dockerd instead of leaving the vsock
+unread and stalling the VM.
 
 ## Published Ports
 
