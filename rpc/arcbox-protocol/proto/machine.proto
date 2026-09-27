@@ -64,8 +64,11 @@ service MachineService {
     // Gets guest system information for a machine.
     rpc GetSystemInfo(MachineAgentRequest) returns (MachineSystemInfo);
 
-    // Compacts a machine's data disk by running fstrim in the guest, which
-    // discards free blocks so the host punches them out of the sparse image.
+    // Compacts a machine's data disk: the guest trims its data filesystems
+    // (FITRIM), which discards every free block so the host punches them out
+    // of the sparse image. The daemon also does this on its own when the
+    // System VM goes idle and hourly for every running machine; this is the
+    // on-demand path behind `abctl disk compact`.
     rpc CompactDisk(MachineAgentRequest) returns (Empty);
 
     // Executes a command in a machine (non-interactive: stdin closed).

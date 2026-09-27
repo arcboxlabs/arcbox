@@ -165,7 +165,9 @@ async fn handle_request(request: RpcRequest) -> RequestResult {
         }
         RpcRequest::Shutdown(req) => RequestResult::Single(handle_shutdown(req)),
         RpcRequest::MmapReadFile(req) => RequestResult::Single(handle_mmap_read_file(req)),
-        RpcRequest::DiskTrim(_) => RequestResult::Single(handle_disk_trim().await),
+        RpcRequest::DiskTrim(_) => {
+            RequestResult::Single(handle_disk_trim(crate::agent::Guest::detect()).await)
+        }
         RpcRequest::ContainerFsPaths(req) => {
             RequestResult::Single(handle_container_fs_paths(req).await)
         }

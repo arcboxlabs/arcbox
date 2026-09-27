@@ -320,13 +320,20 @@ message RuntimeStatusResponse {
     repeated ServiceStatus services = 5;
 }
 
-// Request to trigger an immediate fstrim on data mount points.
+// Request to trim the guest's data filesystems now: the guest issues a
+// discard for every free block so the host punches it out of the sparse
+// image. The System VM trims its Btrfs data and ext4 metadata volumes; a
+// distro machine trims the Btrfs data disk under its overlay root.
 message DiskTrimRequest {}
 
 // Response from a disk trim operation.
 message DiskTrimResponse {
-    // Human-readable result summary (e.g. bytes trimmed per mount).
+    // Human-readable result summary (bytes trimmed per filesystem).
     string result = 1;
+    // Bytes the guest reported trimmed, summed over the filesystems. This is
+    // what the filesystem discarded, not what the host reclaimed: a range
+    // that was already a hole counts here and frees nothing.
+    uint64 bytes_trimmed = 2;
 }
 
 // Notification that a container's published port bindings changed.

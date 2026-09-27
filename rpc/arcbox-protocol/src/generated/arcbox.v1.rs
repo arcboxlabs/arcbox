@@ -3358,15 +3358,23 @@ pub struct RuntimeStatusResponse {
     #[prost(message, repeated, tag = "5")]
     pub services: ::prost::alloc::vec::Vec<ServiceStatus>,
 }
-/// Request to trigger an immediate fstrim on data mount points.
+/// Request to trim the guest's data filesystems now: the guest issues a
+/// discard for every free block so the host punches it out of the sparse
+/// image. The System VM trims its Btrfs data and ext4 metadata volumes; a
+/// distro machine trims the Btrfs data disk under its overlay root.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DiskTrimRequest {}
 /// Response from a disk trim operation.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DiskTrimResponse {
-    /// Human-readable result summary (e.g. bytes trimmed per mount).
+    /// Human-readable result summary (bytes trimmed per filesystem).
     #[prost(string, tag = "1")]
     pub result: ::prost::alloc::string::String,
+    /// Bytes the guest reported trimmed, summed over the filesystems. This is
+    /// what the filesystem discarded, not what the host reclaimed: a range
+    /// that was already a hole counts here and frees nothing.
+    #[prost(uint64, tag = "2")]
+    pub bytes_trimmed: u64,
 }
 /// Notification that a container's published port bindings changed.
 #[derive(Clone, PartialEq, ::prost::Message)]
