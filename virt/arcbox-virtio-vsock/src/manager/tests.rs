@@ -384,3 +384,45 @@ fn shutdown_flags_zero_removes_connection_conservatively() {
     mgr.handle_shutdown(id.guest_port, id.host_port, 0);
     assert!(mgr.get(&id).is_none());
 }
+
+/// A host→guest RW that finds the peer's window empty is parked, not
+/// retried: retrying re-sent a CREDIT_REQUEST per injection round, and with
+/// the round re-armed by the readable fd that was millions of requests per
+/// session while the guest's window stayed full. The peer's next packet
+/// re-queues the RW once it opens window.
+#[test]
+fn rw_parked_on_empty_window_returns_when_the_peer_opens_it() {
+    let mut mgr = VsockConnectionManager::new();
+    let (_, internal) = make_socketpair();
+    let (id, _rx) = mgr.allocate(1024, 3, internal);
+    let conn = mgr.get_mut(&id).unwrap();
+    conn.rx_queue.dequeue();
+    conn.update_peer_credit(8192, 0);
+    conn.record_rx(8192);
+    assert_eq!(conn.peer_avail_credit(), 0);
+
+    conn.park_rw();
+    conn.note_credit_request_sent();
+    assert!(!conn.rx_queue.pending(), "a parked RW is off the queue");
+
+    // A packet that leaves the window full changes nothing.
+    assert!(!conn.update_peer_credit(8192, 0));
+    assert!(!conn.rx_queue.pending());
+
+    // One that frees window puts the RW back and asks for a fill.
+    assert!(conn.update_peer_credit(8192, 4096));
+    assert_eq!(conn.rx_queue.dequeue(), RxOps::RW);
+    assert!(!conn.credit_request_pending());
+    assert!(!conn.update_peer_credit(8192, 8192), "nothing parked now");
+
+    // Through the trait, the fill lands on the backend queue. The window is
+    // fully open after the acks, so 8192 more in flight closes it and the
+    // peer acking all 16384 reopens it.
+    let conn = mgr.get_mut(&id).unwrap();
+    conn.record_rx(8192);
+    assert_eq!(conn.peer_avail_credit(), 0);
+    conn.park_rw();
+    mgr.backend_rxq.clear();
+    mgr.update_peer_credit(id.guest_port, id.host_port, 8192, 16384);
+    assert_eq!(mgr.backend_rxq.pop_front(), Some(id));
+}

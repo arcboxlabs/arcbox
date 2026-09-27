@@ -234,6 +234,19 @@ impl VirtioVsock {
                             } else {
                                 let credit = conn.peer_avail_credit();
                                 if credit == 0 {
+                                    // The RW waits for the peer to refresh our
+                                    // view; `update_peer_credit` re-queues it.
+                                    // Ask once: with a request already in
+                                    // flight, another one just draws another
+                                    // CREDIT_UPDATE, and this loop re-armed by
+                                    // the readable fd sent millions of them
+                                    // per session while the guest's window
+                                    // stayed full (a 1 GiB `docker run -i`
+                                    // pipe never finished).
+                                    if conn.credit_request_pending() {
+                                        conn.park_rw();
+                                        continue;
+                                    }
                                     let mut hdr = VsockHeader::new(
                                         VsockAddr::host(conn_id.host_port),
                                         VsockAddr::new(conn.guest_cid, conn_id.guest_port),
@@ -241,11 +254,7 @@ impl VirtioVsock {
                                     );
                                     hdr.buf_alloc = TX_BUFFER_SIZE;
                                     hdr.fwd_cnt = conn.fwd_cnt.0;
-                                    // Re-queue the RW so we retry once the peer
-                                    // refreshes our view; mark the request as
-                                    // pending so maybe_request_credit below
-                                    // doesn't also enqueue a duplicate.
-                                    conn.rx_queue.enqueue(RxOps::RW);
+                                    conn.park_rw();
                                     conn.note_credit_request_sent();
                                     hdr.to_bytes().to_vec()
                                 } else {

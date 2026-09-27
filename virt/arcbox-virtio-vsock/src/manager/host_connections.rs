@@ -61,7 +61,12 @@ impl VsockHostConnections for VsockConnectionManager {
             guest_port,
         };
         if let Some(conn) = self.connections.get_mut(&id) {
-            conn.update_peer_credit(buf_alloc, fwd_cnt);
+            if conn.update_peer_credit(buf_alloc, fwd_cnt) {
+                // The peer reopened its window: the parked host→guest data
+                // can go out on the next injection round.
+                self.backend_rxq.push_back(id);
+                self.ring_doorbell();
+            }
         }
     }
 

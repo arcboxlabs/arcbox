@@ -91,6 +91,11 @@ pub struct VsockConnection {
     /// accept any more data. We must stop emitting `RW` for this connection
     /// but keep the fd open so pending peer→host data can still drain.
     peer_no_recv: bool,
+
+    /// Host→guest data is waiting for the peer to open its window: the RW
+    /// is held here, off `rx_queue`, so the injection loop stops retrying
+    /// it until a peer packet refreshes the credit view.
+    rw_parked: bool,
 }
 
 impl VsockConnection {
@@ -115,6 +120,7 @@ impl VsockConnection {
             rx_cnt: Wrapping(0),
             credit_request_pending: false,
             peer_no_recv: false,
+            rw_parked: false,
         };
         // Enqueue OP_REQUEST to be sent to guest on the next RX fill.
         conn.rx_queue.enqueue(RxOps::REQUEST);
@@ -131,11 +137,24 @@ impl VsockConnection {
 
     /// Updates peer credit state from an incoming guest packet. Also clears
     /// any in-flight `CREDIT_REQUEST` marker: the peer has just told us the
-    /// fresh state, so whatever we asked about is answered.
-    pub fn update_peer_credit(&mut self, buf_alloc: u32, fwd_cnt: u32) {
+    /// fresh state, so whatever we asked about is answered. Returns whether
+    /// an RW parked on an empty window may now be retried, in which case the
+    /// caller re-queues the connection.
+    pub fn update_peer_credit(&mut self, buf_alloc: u32, fwd_cnt: u32) -> bool {
         self.peer_buf_alloc = buf_alloc;
         self.peer_fwd_cnt = Wrapping(fwd_cnt);
         self.credit_request_pending = false;
+        if self.rw_parked && self.peer_avail_credit() > 0 {
+            self.rw_parked = false;
+            self.rx_queue.enqueue(RxOps::RW);
+            return true;
+        }
+        false
+    }
+
+    /// Holds the RW until the peer's next packet reopens its window.
+    pub fn park_rw(&mut self) {
+        self.rw_parked = true;
     }
 
     /// Enqueues a `CREDIT_REQUEST` op if peer credit has fallen below half
