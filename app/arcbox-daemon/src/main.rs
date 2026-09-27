@@ -11,6 +11,7 @@ mod recovery;
 mod self_setup;
 mod services;
 mod shutdown;
+mod ssh_agent;
 mod ssh_service;
 mod startup;
 

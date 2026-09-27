@@ -150,6 +150,7 @@ impl RuntimeBooted {
                 crate::kubernetes_lb::spawn(&self.ctx, &self.runtime);
             }
             crate::nfs_mount::spawn(&self.ctx, &self.runtime);
+            crate::ssh_agent::spawn(&self.ctx, &self.runtime);
             Ok(handles)
         })
         .await?;
