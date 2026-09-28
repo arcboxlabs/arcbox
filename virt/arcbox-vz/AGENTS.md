@@ -81,6 +81,17 @@ the ABI.
   HV returns idle memory on its own through free page reporting and needs
   no host-side target either — see `app/AGENTS.md` and
   `virt/arcbox-vmm/AGENTS.md` "Releasing guest RAM".
+- **Only the System VM asks for nested virtualization**
+  (`VmConfig::nested_virt`, set in `engine/.../vm_lifecycle/boot.rs`).
+  Hypervisor.framework backs each nested-capable VM with its own guest
+  hypervisor address space and the host has about a dozen (measured
+  2026-09-28, M5 Max, macOS 26.4: 12); the 13th `hv_vm_create` asserts in
+  `GuestHypervisorSpaceManager::create`, the VZ helper dies with SIGTRAP,
+  and the daemon reports `Internal Virtualization error` on every VM
+  start. Plain VMs share one space (28 more fit beside 12 nested). Never
+  enable it on a user machine. The reason shows up in the crash report,
+  not the unified log:
+  `~/Library/Logs/DiagnosticReports/com.apple.Virtualization.VirtualMachine-*.ips`.
 - `VZLinuxRosettaAvailability` raw values are notSupported=0, notInstalled=1,
   installed=2 (a hand-written mapping once had 1 and 2 swapped; the shim now
   returns raw values and Rust maps them — keep them aligned with the SDK).
