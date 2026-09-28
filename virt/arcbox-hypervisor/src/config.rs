@@ -19,6 +19,13 @@ pub struct VmConfig {
     pub initrd_path: Option<String>,
     /// Enable Rosetta 2 translation (macOS ARM only).
     pub enable_rosetta: bool,
+    /// Let the guest run its own hypervisor (macOS ARM only).
+    ///
+    /// Each nested-capable VM pins a hypervisor address space that plain
+    /// VMs share among themselves, and Hypervisor.framework asserts inside
+    /// `hv_vm_create` once they run out (about a dozen per host). Only a
+    /// VM that will host sandboxes should ask for it.
+    pub nested_virt: bool,
 }
 
 impl Default for VmConfig {
@@ -31,6 +38,7 @@ impl Default for VmConfig {
             kernel_cmdline: None,
             initrd_path: None,
             enable_rosetta: false,
+            nested_virt: false,
         }
     }
 }
@@ -96,6 +104,13 @@ impl VmConfigBuilder {
     #[must_use]
     pub const fn enable_rosetta(mut self, enable: bool) -> Self {
         self.config.enable_rosetta = enable;
+        self
+    }
+
+    /// Lets the guest run its own hypervisor.
+    #[must_use]
+    pub const fn nested_virt(mut self, enable: bool) -> Self {
+        self.config.nested_virt = enable;
         self
     }
 

@@ -53,6 +53,11 @@ pub struct PersistedMachine {
     /// (`Vz`) for configs written before the field existed.
     #[serde(default)]
     pub backend: arcbox_vmm::VmBackend,
+    /// Whether the guest may run its own hypervisor. Records written before
+    /// the field existed load as `false`; the System VM's drift check
+    /// recreates its record, and no other machine ever needed it.
+    #[serde(default)]
+    pub nested_virt: bool,
     /// Creation timestamp.
     #[serde(default = "default_created_at")]
     pub created_at: DateTime<Utc>,
@@ -145,6 +150,7 @@ impl From<&MachineInfo> for PersistedMachine {
             state: info.state.into(),
             vm_id: info.vm_id.to_string(),
             backend: info.backend,
+            nested_virt: info.nested_virt,
             created_at: info.created_at,
             started_at: info.started_at,
             mounts: info.mounts.clone(),
@@ -341,6 +347,7 @@ mod tests {
             ip_address: None,
             cid: None,
             backend: arcbox_vmm::VmBackend::Hv,
+            nested_virt: false,
             created_at,
         };
 
@@ -384,6 +391,7 @@ mod tests {
                 ip_address: None,
                 cid: None,
                 backend: arcbox_vmm::VmBackend::default(),
+                nested_virt: false,
                 created_at: Utc::now(),
             };
             persistence.save(&info).unwrap();
@@ -420,6 +428,7 @@ mod tests {
             ip_address: None,
             cid: None,
             backend: arcbox_vmm::VmBackend::default(),
+            nested_virt: false,
             created_at: Utc::now(),
         };
 
@@ -454,6 +463,7 @@ mod tests {
             ip_address: None,
             cid: None,
             backend: arcbox_vmm::VmBackend::default(),
+            nested_virt: false,
             created_at: Utc::now(),
         };
 
@@ -503,6 +513,7 @@ mod tests {
             ip_address: Some("10.0.2.15".to_string()),
             cid: None,
             backend: arcbox_vmm::VmBackend::default(),
+            nested_virt: false,
             created_at: Utc::now(),
         };
         persistence.save(&info).unwrap();

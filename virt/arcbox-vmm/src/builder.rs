@@ -287,6 +287,7 @@ impl VmBuilder {
             kernel_cmdline: self.kernel_cmdline,
             initrd_path: self.initrd_path,
             enable_rosetta: self.enable_rosetta,
+            nested_virt: false,
             serial_console: self.console_config.is_some(),
             virtio_console: self.console_config.is_some(),
             shared_dirs: self

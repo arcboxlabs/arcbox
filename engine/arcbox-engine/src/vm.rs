@@ -178,6 +178,7 @@ impl VmManager {
             // config) keeps it correct after `set_backend` switches HV<->VZ.
             enable_rosetta: entry.config.rosetta
                 && matches!(entry.config.backend, arcbox_vmm::VmBackend::Vz),
+            nested_virt: entry.config.nested_virt,
             serial_console: true,
             virtio_console: true,
             shared_dirs,

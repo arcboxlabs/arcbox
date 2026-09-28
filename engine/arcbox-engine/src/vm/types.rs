@@ -157,6 +157,13 @@ pub struct VmConfig {
     /// Rosetta binary and registers it via binfmt_misc in the guest.
     /// This allows near-native execution of x86_64 Linux binaries.
     pub rosetta: bool,
+    /// Let the guest run its own hypervisor (VZ only).
+    ///
+    /// Only the System VM, which hosts sandboxes, needs it. A nested-capable
+    /// VM pins one of the host's few hypervisor address spaces, so a plain
+    /// machine asking for it would eventually stop every VM on the host from
+    /// starting (`hv_vm_create` asserts).
+    pub nested_virt: bool,
     /// macOS hypervisor backend selection.
     ///
     /// `Vz` (default) drives Apple's Virtualization.framework managed
@@ -179,6 +186,7 @@ impl Default for VmConfig {
             guest_cid: None,
             balloon: true,
             rosetta: cfg!(all(target_os = "macos", target_arch = "aarch64")),
+            nested_virt: false,
             backend: arcbox_vmm::VmBackend::default(),
         }
     }

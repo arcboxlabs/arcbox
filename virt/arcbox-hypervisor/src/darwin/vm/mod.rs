@@ -130,7 +130,7 @@ impl DarwinVm {
         let platform = GenericPlatform::new().map_err(|e| {
             HypervisorError::VmCreationFailed(format!("Failed to create platform: {e}"))
         })?;
-        if GenericPlatform::is_nested_virt_supported() {
+        if config.nested_virt && GenericPlatform::is_nested_virt_supported() {
             platform.set_nested_virt_enabled(true);
             tracing::info!("Nested virtualization enabled");
         }

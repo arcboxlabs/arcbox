@@ -74,6 +74,8 @@ pub struct MachineInfo {
     pub ip_address: Option<String>,
     /// macOS hypervisor backend this machine boots on.
     pub backend: arcbox_vmm::VmBackend,
+    /// Whether the guest may run its own hypervisor.
+    pub nested_virt: bool,
     /// Creation time.
     pub created_at: DateTime<Utc>,
     /// Last successful start time.
@@ -160,6 +162,12 @@ pub struct MachineConfig {
     /// drops it because Hypervisor.framework does not host the Rosetta
     /// share. Defaults to `false`.
     pub enable_rosetta: bool,
+    /// Whether the guest may run its own hypervisor (sandboxes).
+    ///
+    /// Only the System VM sets this. Hypervisor.framework has about a dozen
+    /// nested-capable address spaces per host, and a machine that pins one
+    /// for nothing eventually makes every later VM start fail.
+    pub nested_virt: bool,
 }
 
 impl Default for MachineConfig {
@@ -178,6 +186,7 @@ impl Default for MachineConfig {
             distro_version: None,
             backend: arcbox_vmm::VmBackend::default(),
             enable_rosetta: false,
+            nested_virt: false,
         }
     }
 }
@@ -349,6 +358,7 @@ impl MachineManager {
                 shared_dirs: vm_shared_dirs,
                 block_devices: persisted.block_devices.clone(),
                 backend: persisted.backend,
+                nested_virt: persisted.nested_virt,
                 ..Default::default()
             };
 
@@ -371,6 +381,7 @@ impl MachineManager {
                     ssh_key_path: persisted.ssh_key_path.clone().map(PathBuf::from),
                     ip_address: persisted.ip_address.clone(),
                     backend: persisted.backend,
+                    nested_virt: persisted.nested_virt,
                     created_at: persisted.created_at,
                     started_at: persisted.started_at,
                     mounts: persisted.mounts.clone(),
@@ -547,6 +558,7 @@ impl MachineManager {
             shared_dirs,
             block_devices: block_devices.clone(),
             rosetta: config.enable_rosetta,
+            nested_virt: config.nested_virt,
             backend: config.backend,
             ..Default::default()
         };
@@ -569,6 +581,7 @@ impl MachineManager {
             ssh_key_path: None,
             ip_address: None,
             backend: config.backend,
+            nested_virt: config.nested_virt,
             created_at: Utc::now(),
             started_at: None,
             mounts: config.mounts,
@@ -1439,6 +1452,7 @@ impl MachineManager {
             ssh_key_path: None,
             ip_address: None,
             backend: arcbox_vmm::VmBackend::default(),
+            nested_virt: false,
             created_at: Utc::now(),
             started_at: None,
             mounts: Vec::new(),

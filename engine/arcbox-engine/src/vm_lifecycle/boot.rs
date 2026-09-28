@@ -350,6 +350,10 @@ impl LifecycleShared {
             // value stays correct across a backend switch — see
             // `VmManager::build_vmm_config`.
             enable_rosetta: desired_vm.rosetta,
+            // The System VM hosts sandboxes, so it is the one machine that
+            // may run a hypervisor. The VZ build honours it only when the
+            // host supports nested virtualization.
+            nested_virt: true,
         };
 
         tracing::info!(

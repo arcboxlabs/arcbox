@@ -160,6 +160,7 @@ impl pb::MachineService for MachineServiceImpl {
                 .collect(),
             backend: arcbox_core::VmBackend::default(),
             enable_rosetta: false,
+            nested_virt: false,
         };
 
         runtime
