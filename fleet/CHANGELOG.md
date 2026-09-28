@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/arcboxlabs/arcbox/compare/fleet-agent-v0.1.5...fleet-agent-v0.1.6) (2026-09-28)
+
+
+### Tests
+
+* **fleet-agent:** keep the control test off the developer's arcbox-daemon ([715e1e4](https://github.com/arcboxlabs/arcbox/commit/715e1e49484a75143f4de160296b552476d1f766))
+
 ## [0.1.5](https://github.com/arcboxlabs/arcbox/compare/fleet-agent-v0.1.4...fleet-agent-v0.1.5) (2026-09-11)
 
 
