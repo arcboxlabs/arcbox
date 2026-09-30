@@ -46,7 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **daemon:** forward ssh-agent into containers over a vsock slot pool ([70369dd](https://github.com/arcboxlabs/arcbox/commit/70369dd8f16c6f658fef6fbe9bdc19b4904eb970))
 * **daemon:** keep LoadBalancer listeners in step with the cluster ([9d1df4f](https://github.com/arcboxlabs/arcbox/commit/9d1df4f66941b606e6a3d1d76deefdb2472534d0))
 * **daemon:** reclaim freed disk space on idle and per machine ([2323d4c](https://github.com/arcboxlabs/arcbox/commit/2323d4c5d5402df98b07343dbbc110c028e65f33))
-* **daemon:** serve ssh &lt;machine&gt;[@arcbox](https://github.com/arcbox) on a loopback port ([10fd1eb](https://github.com/arcboxlabs/arcbox/commit/10fd1eb5a50a4d0e16d66710f011241815640b3d))
+* **daemon:** serve `ssh <machine>@arcbox` on a loopback port ([10fd1eb](https://github.com/arcboxlabs/arcbox/commit/10fd1eb5a50a4d0e16d66710f011241815640b3d))
 * **docker:** let operators configure the guest dockerd ([2b55f17](https://github.com/arcboxlabs/arcbox/commit/2b55f1790750fd139e3bfb2ad8b5443690209e8d))
 * **docker:** let operators keep published ports off the LAN ([514666c](https://github.com/arcboxlabs/arcbox/commit/514666c9597f9d25c5f2d88b563ccd6bcfdbf1ce))
 * **engine:** deliver signals through machine exec sessions ([3ab1c7e](https://github.com/arcboxlabs/arcbox/commit/3ab1c7e26c57ffa008c2f21e076f726440e2f856))
