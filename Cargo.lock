@@ -176,7 +176,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-connect",
  "arcbox-connectrpc",
@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-agent"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "arcbox-computer-runtime",
@@ -251,7 +251,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-api"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-computer",
  "arcbox-connect",
@@ -281,7 +281,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-asset"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "futures-util",
  "reqwest 0.12.28",
@@ -293,7 +293,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-atomic-file"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "tempfile",
  "thiserror 2.0.18",
@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-cli"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anstream",
  "anyhow",
@@ -362,7 +362,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-computer"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-connect",
  "arcbox-engine",
@@ -372,7 +372,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-computer-runtime"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "arcbox-atomic-file",
@@ -403,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-connect"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-connectrpc",
  "arcbox-connectrpc-build",
@@ -495,7 +495,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-conntrack"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-datapath",
  "arcbox-packet",
@@ -504,14 +504,14 @@ dependencies = [
 
 [[package]]
 name = "arcbox-constants"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "dirs",
 ]
 
 [[package]]
 name = "arcbox-container"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-error",
  "async-trait",
@@ -525,7 +525,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-core"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-atomic-file",
  "arcbox-computer",
@@ -576,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-daemon"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "arcbox-api",
@@ -625,14 +625,14 @@ dependencies = [
 
 [[package]]
 name = "arcbox-datapath"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "arcbox-dhcp"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "thiserror 2.0.18",
  "tracing",
@@ -640,14 +640,14 @@ dependencies = [
 
 [[package]]
 name = "arcbox-dns"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "arcbox-docker"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-core",
  "arcbox-error",
@@ -680,7 +680,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-docker-tools"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-asset",
  "flate2",
@@ -696,7 +696,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-e2e"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "arcbox-connect",
@@ -724,7 +724,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-engine"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-connect",
  "arcbox-constants",
@@ -754,7 +754,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-error"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "thiserror 2.0.18",
 ]
@@ -772,7 +772,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-fakeip"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "thiserror 2.0.18",
  "tracing",
@@ -780,7 +780,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-fc-driver"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-constants",
  "arcbox-vm-driver",
@@ -837,7 +837,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-fleet-control-proto"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "prost",
  "tonic",
@@ -847,7 +847,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-fleet-proto"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "prost",
  "tonic",
@@ -857,7 +857,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-fs"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-error",
  "arcbox-virtio",
@@ -873,7 +873,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-grpc"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-protocol",
  "pbjson-types",
@@ -919,7 +919,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-hypervisor"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-error",
  "arcbox-vz",
@@ -939,7 +939,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-image"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-boot",
  "arcbox-constants",
@@ -959,7 +959,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-local-ca"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-atomic-file",
  "arcbox-constants",
@@ -973,7 +973,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-logging"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "parking_lot",
  "sentry",
@@ -985,7 +985,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-migration"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "chrono",
  "dirs",
@@ -999,7 +999,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-net"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "arcbox-conntrack",
@@ -1037,7 +1037,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-net-inject"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-virtio-core",
  "crossbeam-channel",
@@ -1047,7 +1047,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-net-virtio"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-conntrack",
  "arcbox-virtio",
@@ -1057,7 +1057,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-oci"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-error",
  "chrono",
@@ -1072,11 +1072,11 @@ dependencies = [
 
 [[package]]
 name = "arcbox-packet"
-version = "0.8.0"
+version = "0.8.1"
 
 [[package]]
 name = "arcbox-protocol"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "pbjson-types",
  "prost",
@@ -1086,7 +1086,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-proxy"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-fakeip",
  "arcbox-packet",
@@ -1099,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-pty"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "libc",
  "nix 0.29.0",
@@ -1107,7 +1107,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-route"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "libc",
  "tracing",
@@ -1115,7 +1115,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-snapshot"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-atomic-file",
  "arcbox-error",
@@ -1133,7 +1133,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-ssh"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "arcbox-atomic-file",
@@ -1152,7 +1152,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-tap-net"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-vm-driver",
  "async-trait",
@@ -1170,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-transport"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-constants",
  "arcbox-error",
@@ -1185,7 +1185,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-virtio"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-error",
  "arcbox-hypervisor",
@@ -1211,7 +1211,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-virtio-balloon"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-virtio-core",
  "libc",
@@ -1220,7 +1220,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-virtio-blk"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-virtio-core",
  "async-trait",
@@ -1232,7 +1232,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-virtio-console"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-virtio-core",
  "async-trait",
@@ -1243,7 +1243,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-virtio-core"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-error",
  "thiserror 2.0.18",
@@ -1253,7 +1253,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-virtio-fs"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-virtio-core",
  "bytes",
@@ -1264,7 +1264,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-virtio-net"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-virtio-core",
  "async-trait",
@@ -1276,7 +1276,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-virtio-rng"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-virtio-core",
  "getrandom 0.2.17",
@@ -1285,7 +1285,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-virtio-vsock"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-virtio-core",
  "libc",
@@ -1295,7 +1295,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-vm-agent"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-vm-proto",
  "libc",
@@ -1307,7 +1307,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-vm-driver"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-vm-driver",
  "async-trait",
@@ -1320,7 +1320,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-vm-proto"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1328,7 +1328,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-vmm"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-constants",
  "arcbox-dns",
@@ -1364,7 +1364,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-vmnet"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "libc",
  "thiserror 2.0.18",
@@ -1376,7 +1376,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-vz"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "libc",
  "thiserror 2.0.18",
@@ -1387,7 +1387,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-xnu-net"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "criterion",
  "libc",
@@ -6858,7 +6858,7 @@ dependencies = [
 
 [[package]]
 name = "splicetcp"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-datapath",
  "arcbox-fakeip",
@@ -8742,7 +8742,7 @@ checksum = "32ac00cd3f8ec9c1d33fb3e7958a82df6989c42d747bd326c822b1d625283547"
 
 [[package]]
 name = "xtask"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "arcbox-constants",
