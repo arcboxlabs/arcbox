@@ -44,7 +44,7 @@ lists it as a non-required legacy artifact.
 
 1. Build EROFS rootfs from Alpine static binaries
 2. Download pre-built kernels from `arcboxlabs/kernel`
-3. Sync upstream runtime binaries (Docker 29.7.2 static package)
+3. Sync upstream runtime binaries (Docker 29.8.2 static package)
 4. Package tarball + checksum + manifest
 5. Publish to GitHub Releases and the Cloudflare R2-backed CDN
 
