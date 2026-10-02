@@ -8,10 +8,10 @@ repository [`arcboxlabs/boot-assets`](https://github.com/arcboxlabs/boot-assets)
 Each release contains per-architecture artifacts plus a unified multi-target manifest:
 
 - `kernel` — pre-built Linux kernel (all drivers built-in, `CONFIG_MODULES=n`)
-- `rootfs.erofs` — minimal read-only EROFS rootfs (busybox + mkfs.btrfs + iptables-legacy + ebtables + ethtool + socat + CA certs)
+- `rootfs.erofs` — minimal read-only EROFS rootfs: busybox with every applet linked into `/bin`, mkfs.btrfs, mkfs.ext4/e2fsck, mkfs.erofs, iptables-legacy, the NFS server utilities, and CA certs
 - `manifest.json` — manifest with SHA256 checksums and kernel cmdline (`schema_version` = major of `asset_version`)
-- Runtime binaries — dockerd, containerd-shim-runc-v2, runc, docker-init (from the Docker 29.7.2 static package, shipping runc 1.4.3) plus k3s, firecracker/jailer, and the microVM vmlinux
-- `containerd` — the one runtime binary **not** taken from Docker's package. boot-assets builds it from the same upstream tag Docker bundles (v2.3.3) plus [containerd#13805](https://github.com/containerd/containerd/pull/13805), which stops the overlay snapshotter appending `index=off` over a configured `index=on` — without it the `index=on,nfs_export=on` mount options the `~/ArcBox` live-container view needs are silently overridden and every overlay mount fails with `EINVAL`. It is versioned `29.7.2-arcbox.<patch>-<release>` and reports `v2.3.3-arcbox.<patch>-<release>` for itself, so a guest log names both the patch set and the build. It goes back to the stock package once the fix reaches a containerd release Docker ships
+- Runtime binaries — dockerd, containerd-shim-runc-v2, runc, docker-init (from the Docker 29.8.2 static package, shipping runc 1.5.2) plus k3s, firecracker/jailer, and the microVM vmlinux
+- `containerd` — the one runtime binary **not** taken from Docker's package. boot-assets builds it from the same upstream tag Docker bundles (v2.3.6) plus [containerd#13805](https://github.com/containerd/containerd/pull/13805), which stops the overlay snapshotter appending `index=off` over a configured `index=on` — without it the `index=on,nfs_export=on` mount options the `~/ArcBox` live-container view needs are silently overridden and every overlay mount fails with `EINVAL`. It is versioned `29.8.2-arcbox.<patch>-<release>` and reports `v2.3.6-arcbox.<patch>-<release>` for itself, so a guest log names both the patch set and the build. It goes back to the stock package once the fix reaches a containerd release Docker ships
 
 No initramfs. The kernel boots directly into the EROFS rootfs (`root=/dev/vda ro rootfstype=erofs`).
 Agent and runtime binaries reach the guest through VirtioFS. Runtime binaries
