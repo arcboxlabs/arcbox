@@ -5,6 +5,83 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1](https://github.com/arcboxlabs/arcbox/compare/v0.8.0...v0.8.1) (2026-10-02)
+
+
+### Features
+
+* **agent:** give distro machines their name, their bridge NIC and one default route ([b00f585](https://github.com/arcboxlabs/arcbox/commit/b00f585a11491e21560f3fe32af1a8cc3f41c49e))
+* **agent:** write a distro machine's hostname and claim its bridge NIC ([61cfc18](https://github.com/arcboxlabs/arcbox/commit/61cfc18c5808e37eef809d016ae04ea1dae379d2))
+* **cli:** add the uninstall steps, each reporting what it did ([#716](https://github.com/arcboxlabs/arcbox/issues/716)) ([57cb429](https://github.com/arcboxlabs/arcbox/commit/57cb42995534e9cf58fc680228e75f4c3846748a))
+* **cli:** rebuild abctl uninstall on the inventory and report every step ([#710](https://github.com/arcboxlabs/arcbox/issues/710), [#716](https://github.com/arcboxlabs/arcbox/issues/716)) ([bf9216b](https://github.com/arcboxlabs/arcbox/commit/bf9216b5f8db1c171aa6daaac2fb325d8f364686))
+* **cli:** show a machine's bridge address and DNS name ([11371a1](https://github.com/arcboxlabs/arcbox/commit/11371a1ffb91c056eed3ad8b5fd486325d7d8cfe))
+* **daemon:** give the development profile its own DNS port and survive a taken default ([bccf5c4](https://github.com/arcboxlabs/arcbox/commit/bccf5c411e981a5313371d822cce6aa4edb99821))
+* **daemon:** publish &lt;machine&gt;.arcbox.local at the machine's bridge address ([e10d49f](https://github.com/arcboxlabs/arcbox/commit/e10d49f6578562630c22c5b0a9fb892e7e091132))
+* **engine:** name machines on their cmdline and keep their bridge address ([4a1dcfb](https://github.com/arcboxlabs/arcbox/commit/4a1dcfb7786e03dee7861549c48cec68f0937d1b))
+* **machine:** derive the hostname from the name and publish the System VM too ([c7bbfda](https://github.com/arcboxlabs/arcbox/commit/c7bbfda5319c951bebb19ed362f7c0813dac10c9))
+* **machine:** refuse a name whose hostname another machine already has ([efbf7cb](https://github.com/arcboxlabs/arcbox/commit/efbf7cb1b3430497a279041c1dc51c1e4618b456))
+* **protocol:** carry a machine's name on the cmdline and its bridge address in SystemInfo ([c237a83](https://github.com/arcboxlabs/arcbox/commit/c237a83ba02c72f185c658eb5ed690f58ee2b209))
+
+
+### Bug Fixes
+
+* **agent:** give machine exec the machine's login PATH ([4e3876a](https://github.com/arcboxlabs/arcbox/commit/4e3876a9239dc3bc9dddc646267e4b378feabcb4))
+* **agent:** log why the bundled runtime failed to start ([2750cd4](https://github.com/arcboxlabs/arcbox/commit/2750cd405df7870c4e20a3e2b5411153537bbe2b))
+* **cli:** find the daemon from the resolved abctl, inside the app bundle too ([#644](https://github.com/arcboxlabs/arcbox/issues/644)) ([70620c8](https://github.com/arcboxlabs/arcbox/commit/70620c8844c84d64001648eaf528c129265b5900))
+* **constants:** recognize only ArcBox bundles as owners of CLI links ([#715](https://github.com/arcboxlabs/arcbox/issues/715)) ([a7b167c](https://github.com/arcboxlabs/arcbox/commit/a7b167cd2998a9bd1d6b262a58906492f64327cf))
+* **core:** retire the previous VM incarnation's inbound listeners on restart ([8ab5666](https://github.com/arcboxlabs/arcbox/commit/8ab5666fed0cb637e906a4fe90ff92dedc2ee35f))
+* **daemon:** follow the VM lifecycle with the sandbox cleanup watch ([51b7bf2](https://github.com/arcboxlabs/arcbox/commit/51b7bf2266b06c4fc052cf83447d8479a3545e34))
+* **daemon:** unlock the container network lease before its descriptor closes ([b945367](https://github.com/arcboxlabs/arcbox/commit/b945367f70df9ab9e0ab3f1c021f282ec1642d92))
+* **docker:** close idle connections on shutdown instead of waiting for them ([ed99ad0](https://github.com/arcboxlabs/arcbox/commit/ed99ad0c742889ba3e1dcfe421790613bf43cffe))
+
+
+### Performance Improvements
+
+* **hv:** stop kicking vCPUs after device interrupts ([c300458](https://github.com/arcboxlabs/arcbox/commit/c3004580336f87023d492d21982e13b0c9461a11))
+* **vsock:** honor EVENT_IDX on the RX ring ([7acb93a](https://github.com/arcboxlabs/arcbox/commit/7acb93a00832e9d5ff537f654c1512c1c67fbae7))
+
+
+### Code Refactoring
+
+* **agent:** take a debug shell's applets from the rootfs ([c09ad80](https://github.com/arcboxlabs/arcbox/commit/c09ad80d84da22b5c7ac50082c11b96560e734e4))
+* **cli:** give uninstall an inventory of what ArcBox writes ([#710](https://github.com/arcboxlabs/arcbox/issues/710)) ([a3aea43](https://github.com/arcboxlabs/arcbox/commit/a3aea435e2da0a9480c142aa92ba8816b76642a0))
+* **cli:** let uninstall drive the shell, kubectl and ssh removal ([58ce014](https://github.com/arcboxlabs/arcbox/commit/58ce014178ccea51cf1e9a68d8ed647740f35d4a))
+
+
+### Tests
+
+* **cli:** run abctl uninstall against a complete install under a temporary root ([a022d55](https://github.com/arcboxlabs/arcbox/commit/a022d554f4bbef86975978db10ad00c17dcb8837))
+* **cli:** write the uninstall fixture's shell profile for the detected shell ([a5b82f0](https://github.com/arcboxlabs/arcbox/commit/a5b82f0e2ab9de287fd62d06d18c973891c11c78))
+* **fc-driver:** measure the hung-api adopt bound on the runtime clock ([3388655](https://github.com/arcboxlabs/arcbox/commit/33886558c4c3c348eb7018b8f783e2ccbc62459e))
+
+
+### Documentation
+
+* add the ADR and log tree and record the HV wake-path work ([3bf22fa](https://github.com/arcboxlabs/arcbox/commit/3bf22fa65ef50b7fbc8c23957bb3920c95e9e131))
+* **agents:** record the machine identity, bridge NIC and DNS contracts ([e6f4204](https://github.com/arcboxlabs/arcbox/commit/e6f4204d5bbb624f9c04eb4d737642c71d0c12a3))
+* **agents:** record the uninstall contract and the profile-probe test rule ([de258b2](https://github.com/arcboxlabs/arcbox/commit/de258b25eb8ca796ec0fdf4e4e14e7f8df431365))
+* **agents:** the SPI is the whole wake on HV ([646bd27](https://github.com/arcboxlabs/arcbox/commit/646bd2798ea536a9f8da5a5a73223e285232dff5))
+* bring the architecture documents back from the company repo ([ea4e66a](https://github.com/arcboxlabs/arcbox/commit/ea4e66ab5b5fcb44e8baddfd668ae470f2c9cf3a))
+* give experiments and benchmarks their own place in the tree ([767a6ba](https://github.com/arcboxlabs/arcbox/commit/767a6ba0dbc4dc1fc24bedfd5b8971e954a42396))
+* list everything ArcBox writes and how abctl uninstall removes it ([#710](https://github.com/arcboxlabs/arcbox/issues/710)) ([9d5a3e6](https://github.com/arcboxlabs/arcbox/commit/9d5a3e6212ff809dd2eb41ae828751a55728aa85))
+
+
+### Continuous Integration
+
+* **fleet-agent:** add a CDN republish workflow fed from release assets ([21a3552](https://github.com/arcboxlabs/arcbox/commit/21a3552699eacbe2d151a60be08fd8e5f6e41e13))
+* **fleet-agent:** publish release binaries to Cloudflare R2 via r2-publish ([ef94e0b](https://github.com/arcboxlabs/arcbox/commit/ef94e0bfbad170acc41295037752f515bfeb4d04))
+* pin arcboxlabs/actions/r2-publish@v2 ([cc9a275](https://github.com/arcboxlabs/arcbox/commit/cc9a27525943cba88eb244ee8c7ae12bc9612ac1))
+
+
+### Miscellaneous Chores
+
+* compare with an empty collection where clippy 1.99 wants the value shown ([ef8b18b](https://github.com/arcboxlabs/arcbox/commit/ef8b18b222e04f270dc581fb00a6a3e9cc2234f2))
+* **master:** release sdk-python 0.1.3 ([#726](https://github.com/arcboxlabs/arcbox/issues/726)) ([b009598](https://github.com/arcboxlabs/arcbox/commit/b009598edcd9a2b98a68b12095383c567622c985))
+* **master:** release sdk-typescript 0.1.4 ([#722](https://github.com/arcboxlabs/arcbox/issues/722)) ([20cc45f](https://github.com/arcboxlabs/arcbox/commit/20cc45f256217f8f620d59759bfe44f787d63cbd))
+* satisfy clippy 1.99 by updating async-trait and arraying fd tuples ([9c2c2da](https://github.com/arcboxlabs/arcbox/commit/9c2c2dada6a5119e2ee356e3f8721c692da216b5))
+* satisfy clippy 1.99 in transport, engine and xtask ([5147e66](https://github.com/arcboxlabs/arcbox/commit/5147e66428c4b8d86e9d7a2f36b18cee2e09da0e))
+* **tools:** bump the Docker toolchain and pin boot bundle 0.8.8 ([#698](https://github.com/arcboxlabs/arcbox/issues/698)) ([8714c98](https://github.com/arcboxlabs/arcbox/commit/8714c9839b73a1212f78aa7703e2c57dc586a009))
+
 ## [0.8.0](https://github.com/arcboxlabs/arcbox/compare/v0.7.0...v0.8.0) (2026-09-30)
 
 
