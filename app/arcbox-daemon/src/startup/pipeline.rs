@@ -13,7 +13,7 @@ use arcbox_core::Runtime;
 use macos_resolver::FileResolver;
 use tracing::{info, warn};
 
-use crate::context::{DaemonContext, EarlyContext, ServiceHandles, StartupHandles};
+use crate::context::{ControlPlane, DaemonContext, EarlyContext, ServiceHandles, StartupHandles};
 use crate::{DaemonArgs, recovery, services};
 
 use super::{acquire_lock, assets, init_early, init_runtime, prepare_assets, wait_for_resources};
@@ -65,24 +65,25 @@ pub struct DaemonLeased {
 }
 
 impl DaemonLeased {
-    /// Starts gRPC before slow runtime phases so clients can observe progress.
+    /// Starts gRPC and binds the DNS socket before the slow runtime phases,
+    /// so clients can observe progress and a taken DNS port fails startup
+    /// before any VM boots.
     pub async fn start_control_plane(self) -> Result<ControlPlaneStarted> {
-        let shared_runtime = Arc::clone(&self.ctx.shared_runtime);
-        let grpc = record_startup_phase(
+        let control_plane = record_startup_phase(
             "start_control_plane",
-            services::start_grpc(&self.ctx, shared_runtime),
+            services::start_control_plane(&self.ctx),
         )
         .await?;
         Ok(ControlPlaneStarted {
             ctx: self.ctx,
-            grpc,
+            control_plane,
         })
     }
 }
 
 pub struct ControlPlaneStarted {
     ctx: DaemonContext,
-    grpc: tokio::task::JoinHandle<()>,
+    control_plane: ControlPlane,
 }
 
 impl ControlPlaneStarted {
@@ -91,14 +92,14 @@ impl ControlPlaneStarted {
         record_startup_phase("release_stale_resources", wait_for_resources(&self.ctx)).await?;
         Ok(ResourcesReleased {
             ctx: self.ctx,
-            grpc: self.grpc,
+            control_plane: self.control_plane,
         })
     }
 }
 
 pub struct ResourcesReleased {
     ctx: DaemonContext,
-    grpc: tokio::task::JoinHandle<()>,
+    control_plane: ControlPlane,
 }
 
 impl ResourcesReleased {
@@ -108,7 +109,7 @@ impl ResourcesReleased {
         info!(agent = ?assets.agent(), "Startup assets prepared");
         Ok(AssetsPrepared {
             ctx: self.ctx,
-            grpc: self.grpc,
+            control_plane: self.control_plane,
             _assets: assets,
         })
     }
@@ -116,7 +117,7 @@ impl ResourcesReleased {
 
 pub struct AssetsPrepared {
     ctx: DaemonContext,
-    grpc: tokio::task::JoinHandle<()>,
+    control_plane: ControlPlane,
     _assets: assets::PreparedAssets,
 }
 
@@ -126,7 +127,7 @@ impl AssetsPrepared {
         let runtime = record_startup_phase("boot_runtime", init_runtime(&self.ctx)).await?;
         Ok(RuntimeBooted {
             ctx: self.ctx,
-            grpc: self.grpc,
+            control_plane: self.control_plane,
             runtime,
         })
     }
@@ -134,7 +135,7 @@ impl AssetsPrepared {
 
 pub struct RuntimeBooted {
     ctx: DaemonContext,
-    grpc: tokio::task::JoinHandle<()>,
+    control_plane: ControlPlane,
     runtime: Arc<Runtime>,
 }
 
@@ -143,19 +144,27 @@ impl RuntimeBooted {
     pub async fn start_runtime_services(self) -> Result<RuntimeServicesStarted> {
         let linux_vm = self.runtime.config().vm.autostart;
         let handles = record_startup_phase("start_runtime_services", async {
-            let handles = services::start_services(&self.ctx, &self.runtime, self.grpc).await?;
+            let handles =
+                services::start_services(&self.ctx, &self.runtime, self.control_plane).await?;
             recovery::run(&self.ctx, &self.runtime, handles.dns_port).await?;
             if linux_vm {
                 services::enable_docker_integration(&self.ctx);
+                crate::kubernetes_lb::spawn(&self.ctx, &self.runtime);
+                crate::sandbox_cleanup::spawn(&self.ctx, &self.runtime);
             }
+            crate::disk_reclaim::spawn(&self.ctx, &self.runtime);
             crate::nfs_mount::spawn(&self.ctx, &self.runtime);
+            crate::ssh_agent::spawn(&self.ctx, &self.runtime);
+            crate::machine_dns::spawn(&self.ctx, &self.runtime);
+            crate::machine_mount::spawn(&self.ctx, &self.runtime);
             Ok(handles)
         })
         .await?;
-        // DNS and, with a Linux VM, Docker are bound before `start_services`
-        // returns. An explicitly requested Kubernetes endpoint is also required;
-        // the canonical best-effort 16443 listener may remain unavailable. An
-        // explicitly requested DNS resolver is installed before this phase.
+        // DNS was bound in `start_control_plane`; with a Linux VM, Docker is
+        // bound before `start_services` returns. An explicitly requested
+        // Kubernetes endpoint is also required; the canonical best-effort
+        // 16443 listener may remain unavailable. An explicitly requested DNS
+        // resolver is installed before this phase.
         self.ctx
             .setup_state
             .set_phase(SetupPhase::NetworkReady, "Network services ready");

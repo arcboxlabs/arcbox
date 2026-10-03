@@ -6,27 +6,13 @@ use std::io;
 use std::mem;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
-/// Raw `sockaddr_vm` structure for vsock.
-#[repr(C)]
-struct SockaddrVm {
-    svm_family: libc::sa_family_t,
-    svm_reserved1: u16,
-    svm_port: u32,
-    svm_cid: u32,
-    svm_flags: u8,
-    svm_zero: [u8; 3],
-}
-
-impl SockaddrVm {
-    fn new(cid: u32, port: u32) -> Self {
-        Self {
-            svm_family: libc::AF_VSOCK as libc::sa_family_t,
-            svm_reserved1: 0,
-            svm_port: port,
-            svm_cid: cid,
-            svm_flags: 0,
-            svm_zero: [0; 3],
-        }
+fn sockaddr_vm(cid: u32, port: u32) -> libc::sockaddr_vm {
+    libc::sockaddr_vm {
+        svm_family: libc::AF_VSOCK as libc::sa_family_t,
+        svm_reserved1: 0,
+        svm_port: port,
+        svm_cid: cid,
+        svm_zero: [0; 4],
     }
 }
 
@@ -46,15 +32,14 @@ pub fn create_socket() -> Result<OwnedFd> {
 pub fn connect_vsock(addr: VsockAddr) -> Result<VsockStream> {
     let fd = create_socket()?;
 
-    let sockaddr = SockaddrVm::new(addr.cid, addr.port);
-    let sockaddr_ptr = &sockaddr as *const SockaddrVm as *const libc::sockaddr;
+    let sockaddr = sockaddr_vm(addr.cid, addr.port);
 
-    // SAFETY: sockaddr_ptr points to a correctly initialised SockaddrVm.
+    // SAFETY: sockaddr is a fully initialised sockaddr_vm.
     let result = unsafe {
         libc::connect(
             fd.as_raw_fd(),
-            sockaddr_ptr,
-            mem::size_of::<SockaddrVm>() as libc::socklen_t,
+            (&raw const sockaddr).cast::<libc::sockaddr>(),
+            mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t,
         )
     };
 
@@ -70,15 +55,14 @@ pub fn connect_vsock(addr: VsockAddr) -> Result<VsockStream> {
 pub fn bind_vsock(port: u32) -> Result<OwnedFd> {
     let fd = create_socket()?;
 
-    let sockaddr = SockaddrVm::new(VsockAddr::CID_ANY, port);
-    let sockaddr_ptr = &sockaddr as *const SockaddrVm as *const libc::sockaddr;
+    let sockaddr = sockaddr_vm(VsockAddr::CID_ANY, port);
 
-    // SAFETY: sockaddr_ptr points to a correctly initialised SockaddrVm.
+    // SAFETY: sockaddr is a fully initialised sockaddr_vm.
     let result = unsafe {
         libc::bind(
             fd.as_raw_fd(),
-            sockaddr_ptr,
-            mem::size_of::<SockaddrVm>() as libc::socklen_t,
+            (&raw const sockaddr).cast::<libc::sockaddr>(),
+            mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t,
         )
     };
     if result < 0 {
@@ -96,16 +80,16 @@ pub fn bind_vsock(port: u32) -> Result<OwnedFd> {
 
 /// Accepts a connection on a vsock listener.
 pub fn accept_vsock(listener_fd: &OwnedFd) -> Result<(VsockStream, VsockAddr)> {
-    let mut sockaddr = SockaddrVm::new(0, 0);
-    let mut len = mem::size_of::<SockaddrVm>() as libc::socklen_t;
+    let mut sockaddr = sockaddr_vm(0, 0);
+    let mut len = mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t;
 
     // SAFETY: listener_fd is a valid socket; sockaddr is correctly sized.
     // Use accept4 with SOCK_CLOEXEC to prevent fd leaks into child processes.
     let fd = unsafe {
         libc::accept4(
             listener_fd.as_raw_fd(),
-            &mut sockaddr as *mut SockaddrVm as *mut libc::sockaddr,
-            &mut len,
+            (&raw mut sockaddr).cast::<libc::sockaddr>(),
+            &raw mut len,
             libc::SOCK_CLOEXEC,
         )
     };

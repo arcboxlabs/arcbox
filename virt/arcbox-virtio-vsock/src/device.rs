@@ -1,6 +1,7 @@
 //! `VirtioVsock` device — TX/RX queue handling, custom-VMM hot path, `VirtioDevice` impl.
 
 mod rx_injection;
+pub use rx_injection::RxRound;
 #[cfg(test)]
 mod tests;
 mod virtio_device;

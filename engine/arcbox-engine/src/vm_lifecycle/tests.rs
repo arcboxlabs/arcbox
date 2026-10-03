@@ -192,7 +192,9 @@ fn sample_machine(cpus: u32, memory_mb: u64, kernel: &str, cmdline: &str) -> Mac
         disk_path: None,
         ssh_key_path: None,
         ip_address: None,
+        bridge_ip_address: None,
         backend: arcbox_vmm::VmBackend::default(),
+        nested_virt: true,
         created_at: chrono::Utc::now(),
         started_at: None,
         mounts: Vec::new(),
@@ -215,6 +217,15 @@ fn machine_drift_detects_each_overridable_field() {
 
     // Matching machine: no drift.
     assert_eq!(machine_drift_reason(&current, &want, Some(&boot)), None);
+
+    // A record from before the flag existed (serde default) must be
+    // recreated so the System VM can host sandboxes.
+    let mut m = current.clone();
+    m.nested_virt = false;
+    assert_eq!(
+        machine_drift_reason(&m, &want, Some(&boot)),
+        Some("nested_virt")
+    );
 
     // Each overridable field, changed independently, is detected.
     let mut m = current.clone();

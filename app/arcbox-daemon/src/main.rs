@@ -2,14 +2,24 @@
 
 mod context;
 mod control_plane;
+mod disk_reclaim;
 mod dns_service;
+mod host_mount;
+mod kubernetes_lb;
 mod kubernetes_proxy;
+mod machine_dns;
+mod machine_mount;
+#[cfg(target_os = "macos")]
+mod mdns;
 mod nfs_mount;
 mod power;
 mod recovery;
+mod sandbox_cleanup;
 mod self_setup;
 mod services;
 mod shutdown;
+mod ssh_agent;
+mod ssh_service;
 mod startup;
 
 use std::sync::Arc;
@@ -45,7 +55,9 @@ pub struct DaemonArgs {
     #[arg(long)]
     pub dns_domain: Option<arcbox_helper::validate::Domain>,
 
-    /// Host UDP port for DNS; 0 asks the OS to allocate one (default: 5553).
+    /// Host UDP port for DNS; 0 asks the OS to allocate one. Unset, the
+    /// profile's port (5553 production, 5554 development) is tried first and
+    /// an OS-allocated port is used when it is taken.
     #[arg(long)]
     pub dns_port: Option<u16>,
 
@@ -62,6 +74,11 @@ pub struct DaemonArgs {
     /// Name written into the Kubernetes kubeconfig (default: profile context).
     #[arg(long)]
     pub kubernetes_context: Option<String>,
+
+    /// Host loopback TCP port for the SSH server; 0 asks the OS to allocate
+    /// one (default: 16022).
+    #[arg(long)]
+    pub ssh_port: Option<u16>,
 
     /// Private IPv4 pool used by this instance's container networks.
     #[arg(long)]

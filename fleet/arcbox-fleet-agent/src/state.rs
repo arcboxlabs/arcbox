@@ -685,6 +685,7 @@ mod tests {
             job_id: id.to_owned(),
             os: "darwin".to_owned(),
             arch: "arm64".to_owned(),
+            log_path: String::new(),
         }
     }
 
@@ -702,9 +703,9 @@ mod tests {
         assert_eq!(snap.enrollment, Enrollment::Unenrolled as i32);
         assert_eq!(snap.machine_id, "");
         assert!(!snap.draining);
-        assert!(snap.capabilities.is_empty());
-        assert!(snap.in_flight.is_empty());
-        assert!(snap.recent_verdicts.is_empty());
+        assert_eq!(snap.capabilities, []);
+        assert_eq!(snap.in_flight, []);
+        assert_eq!(snap.recent_verdicts, []);
         assert!(snap.telemetry.is_none());
     }
 

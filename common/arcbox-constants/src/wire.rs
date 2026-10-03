@@ -19,14 +19,41 @@
 /// assets onto the guest Btrfs data disk before execution. Sandbox
 /// Stop/Remove responses also carry a durable cleanup generation, completed
 /// through Prepare/Finalize after host listeners are gone.
-pub const AGENT_PROTOCOL_VERSION: u32 = 3;
+///
+/// v4: the Docker API vsock channel (`ports::DOCKER_API_VSOCK_PORT`) carries
+/// length-prefixed frames with a zero-length frame as the in-band half-close
+/// marker (`arcbox_transport::vsock::HalfCloseStream`) instead of raw bytes.
+/// A v3 agent would feed the frame headers to dockerd as HTTP, so the two
+/// sides must agree.
+///
+/// v5: the same channel is flow-controlled. Each side sends payload only
+/// within a window the other has granted (`HalfCloseStream::WINDOW`) and
+/// returns window with frames whose header has the top bit set, so neither
+/// side ever leaves the vsock unread: on Virtualization.framework an unread
+/// guest→host stream stalls every new connection to the VM. Sandbox
+/// streaming RPCs (`SandboxStreamWindow`) gained the same window. A v4 agent
+/// reads a grant header as an oversized frame, so the two sides must agree.
+///
+/// v6: the Kubernetes API (`ports::KUBERNETES_API_VSOCK_PORT`) and NFS
+/// (`ports::NFS_NFSD_RELAY_PORT`) relays carry the same `HalfCloseStream`
+/// frames instead of raw bytes, for the same reason. A v5 agent would feed
+/// the frame headers to k3s and nfsd.
+pub const AGENT_PROTOCOL_VERSION: u32 = 6;
 
 /// Oldest agent protocol version this host still accepts.
 ///
 /// Agents reporting less (including `0` — agents that predate the
 /// handshake field) are rejected at boot with an actionable error
 /// instead of silently misbehaving under field skew.
-pub const MIN_AGENT_PROTOCOL_VERSION: u32 = 3;
+pub const MIN_AGENT_PROTOCOL_VERSION: u32 = 6;
+
+/// Window each sandbox streaming RPC opens with.
+///
+/// Counted in encoded payload bytes of the frames the agent streams back;
+/// [`MessageType::SandboxStreamWindow`] returns it. Larger than the biggest
+/// frame any of those streams sends (a 1 MiB `SandboxFileData` chunk), or
+/// that frame could never go out.
+pub const SANDBOX_STREAM_WINDOW: u32 = 4 * 1024 * 1024;
 
 /// Number of bytes in the fixed RPC frame header (`length` + `type`).
 pub const FRAME_HEADER_SIZE: usize = 8;
@@ -59,8 +86,8 @@ pub enum MessageType {
     /// DAX path issues `FUSE_SETUPMAPPING`. Used by the ABX-362 E2E
     /// harness; not wired to any production CLI path.
     MmapReadFileRequest = 0x000B,
-    /// Request the guest to run `fstrim` on data mount points so the host
-    /// sparse image reclaims freed blocks.
+    /// Request the guest to trim its data filesystems (`FITRIM`) so the
+    /// host sparse image reclaims freed blocks.
     DiskTrimRequest = 0x000C,
     /// Opens a guest-driven readiness event stream.
     WatchReadinessRequest = 0x000D,
@@ -85,6 +112,19 @@ pub enum MessageType {
     /// when the `~/ArcBox` mount is enabled; a `--no-mount-nfs` daemon never
     /// sends it, so the guest runs no nfsd.
     EnsureNfsExportRequest = 0x0013,
+    /// Ask a distro machine's agent to serve the machine's root over NFSv3
+    /// on its bridge NIC (payload: `arcbox.v1.EnsureMachineExportRequest`).
+    /// Answered with [`Self::EnsureMachineExportResponse`]. The host daemon
+    /// sends it when a machine reaches readiness and mounts the endpoint it
+    /// returns; the System VM refuses it.
+    EnsureMachineExportRequest = 0x00A8,
+
+    // Kubernetes host-integration request types (0x0090 - 0x0097).
+    /// List the guest cluster's Services of type LoadBalancer (payload:
+    /// `arcbox.v1.KubernetesLoadBalancersRequest`). Answered with
+    /// [`Self::KubernetesLoadBalancersResponse`]. The host polls it while
+    /// Kubernetes runs to keep its LoadBalancer listeners in step.
+    KubernetesLoadBalancersRequest = 0x0090,
 
     // Sandbox CRUD request types (0x0020 - 0x0026).
     SandboxCreateRequest = 0x0020,
@@ -108,6 +148,15 @@ pub enum MessageType {
     /// Opens the internal durable cleanup ticket stream (payload:
     /// `arcbox.v1.WatchSandboxCleanupRequest`).
     WatchSandboxCleanupRequest = 0x0029,
+    /// Window the host returns on a sandbox streaming RPC's connection as
+    /// its consumer takes frames (payload: `arcbox.v1.SandboxStreamWindow`).
+    /// Every guest→host stream ([`Self::SandboxExecEvent`],
+    /// [`Self::SandboxEvent`], [`Self::SandboxCleanupEvent`],
+    /// [`Self::SandboxFileData`], [`Self::SandboxFileWatchEvent`]) opens
+    /// with [`SANDBOX_STREAM_WINDOW`] bytes of window, counted in encoded
+    /// payload bytes; the agent never sends past it, so the host can keep
+    /// reading the connection however slow its consumer is. No reply.
+    SandboxStreamWindow = 0x00A0,
 
     // Sandbox workload request types.
     // 0x0030 (SandboxRunRequest), 0x0031 (SandboxExecRequest),
@@ -248,6 +297,25 @@ pub enum MessageType {
     /// Terminal resize for an interactive machine session (payload:
     /// `arcbox.v1.TerminalSize`).
     MachineExecResize = 0x0052,
+    /// Signal for a running machine exec process (payload:
+    /// `arcbox.v1.MachineExecSignal`). Like [`Self::MachineExecInput`] it
+    /// travels on the session's own connection and has no reply.
+    MachineExecSignal = 0x0080,
+    /// Output window the host returns to a flow-controlled machine exec
+    /// session as its consumer takes output (payload:
+    /// `arcbox.v1.MachineExecWindow`). No reply.
+    MachineExecOutputWindow = 0x0081,
+    /// Opens a TCP connection inside the machine, then carries it like a
+    /// flow-controlled machine exec session (payload:
+    /// `arcbox.v1.MachineTcpConnectRequest`).
+    MachineTcpConnectRequest = 0x0082,
+    /// Starts a container-debug exec: like [`Self::MachineExecRequest`] but
+    /// the process enters the target container's PID, network, IPC and UTS
+    /// namespaces before exec, so it shares the container's process and
+    /// network view while keeping the agent's own tools (payload:
+    /// `arcbox.v1.MachineExecRequest` with `container` set). Streamed back
+    /// as [`Self::DebugExecResponse`] frames.
+    DebugExecRequest = 0x00C8,
 
     // Response types (0x1000 - 0x1FFF).
     PingResponse = 0x1001,
@@ -282,6 +350,12 @@ pub enum MessageType {
     /// Answers [`Self::EnsureNfsExportRequest`] (payload:
     /// `arcbox.agent.EnsureNfsExportResponse`).
     EnsureNfsExportResponse = 0x1013,
+    /// Answers [`Self::EnsureMachineExportRequest`] (payload:
+    /// `arcbox.v1.EnsureMachineExportResponse`).
+    EnsureMachineExportResponse = 0x10A8,
+    /// Answers [`Self::KubernetesLoadBalancersRequest`] (payload:
+    /// `arcbox.v1.KubernetesLoadBalancersResponse`).
+    KubernetesLoadBalancersResponse = 0x1090,
     PortBindingsChanged = 0x1030,
     PortBindingsRemoved = 0x1031,
 
@@ -395,6 +469,16 @@ pub enum MessageType {
     /// One machine exec output frame (payload: `arcbox.v1.MachineExecOutput`;
     /// `done == true` on the final frame carrying the exit code).
     MachineExecOutput = 0x1050,
+    /// Stdin window the agent grants a flow-controlled machine exec
+    /// session: first as its opening frame, then as the process reads
+    /// stdin (payload: `arcbox.v1.MachineExecWindow`).
+    MachineExecInputWindow = 0x1081,
+    /// One container-debug exec output frame: the response half of
+    /// [`Self::DebugExecRequest`] (`0x00C8 + 0x1000`), carrying the same
+    /// `arcbox.v1.MachineExecOutput` payload as [`Self::MachineExecOutput`]
+    /// but tagged for the debug session so its request and response types
+    /// stay symmetric.
+    DebugExecResponse = 0x10C8,
 
     // Special types.
     Empty = 0x0000,
@@ -425,6 +509,8 @@ impl MessageType {
             0x0011 => Some(Self::ContainerFsPathsRequest),
             0x0012 => Some(Self::ImageFsPathsRequest),
             0x0013 => Some(Self::EnsureNfsExportRequest),
+            0x00A8 => Some(Self::EnsureMachineExportRequest),
+            0x0090 => Some(Self::KubernetesLoadBalancersRequest),
             // Sandbox CRUD requests.
             0x0020 => Some(Self::SandboxCreateRequest),
             0x0021 => Some(Self::SandboxStopRequest),
@@ -436,6 +522,7 @@ impl MessageType {
             0x0027 => Some(Self::SandboxCleanupPrepareRequest),
             0x0028 => Some(Self::SandboxCleanupFinalizeRequest),
             0x0029 => Some(Self::WatchSandboxCleanupRequest),
+            0x00A0 => Some(Self::SandboxStreamWindow),
             // Sandbox workload requests.
             0x0032 => Some(Self::SandboxEventsRequest),
             0x0035 => Some(Self::SandboxFileReadRequest),
@@ -474,6 +561,10 @@ impl MessageType {
             0x0050 => Some(Self::MachineExecRequest),
             0x0051 => Some(Self::MachineExecInput),
             0x0052 => Some(Self::MachineExecResize),
+            0x0080 => Some(Self::MachineExecSignal),
+            0x0081 => Some(Self::MachineExecOutputWindow),
+            0x0082 => Some(Self::MachineTcpConnectRequest),
+            0x00C8 => Some(Self::DebugExecRequest),
             // Responses.
             0x1001 => Some(Self::PingResponse),
             0x1002 => Some(Self::GetSystemInfoResponse),
@@ -494,6 +585,8 @@ impl MessageType {
             0x1011 => Some(Self::ContainerFsPathsResponse),
             0x1012 => Some(Self::ImageFsPathsResponse),
             0x1013 => Some(Self::EnsureNfsExportResponse),
+            0x10A8 => Some(Self::EnsureMachineExportResponse),
+            0x1090 => Some(Self::KubernetesLoadBalancersResponse),
             0x1030 => Some(Self::PortBindingsChanged),
             0x1031 => Some(Self::PortBindingsRemoved),
             // Sandbox CRUD responses.
@@ -541,6 +634,8 @@ impl MessageType {
             0x1073 => Some(Self::SandboxTemplateListResponse),
             0x1074 => Some(Self::SandboxTemplateDeleteResponse),
             0x1050 => Some(Self::MachineExecOutput),
+            0x1081 => Some(Self::MachineExecInputWindow),
+            0x10C8 => Some(Self::DebugExecResponse),
             0x0000 => Some(Self::Empty),
             0xFFFF => Some(Self::Error),
             _ => None,
@@ -572,6 +667,7 @@ impl MessageType {
                 | Self::SandboxCleanupPrepareRequest
                 | Self::SandboxCleanupFinalizeRequest
                 | Self::WatchSandboxCleanupRequest
+                | Self::SandboxStreamWindow
                 | Self::SandboxCheckpointRequest
                 | Self::SandboxRestoreRequest
                 | Self::SandboxListSnapshotsRequest
@@ -606,7 +702,16 @@ impl MessageType {
                 | Self::KubernetesDeleteRequest
                 | Self::KubernetesStatusRequest
                 | Self::KubernetesKubeconfigRequest
+                | Self::KubernetesLoadBalancersRequest
         )
+    }
+
+    /// Returns true for requests the host sends on a timer rather than on
+    /// someone's behalf. The agent logs them at debug level: at the host's
+    /// poll rate an info line per request would drown `agent.log`.
+    #[must_use]
+    pub const fn is_periodic_poll(self) -> bool {
+        matches!(self, Self::KubernetesLoadBalancersRequest)
     }
 }
 
@@ -653,11 +758,15 @@ mod tests {
             (0x0011, MessageType::ContainerFsPathsRequest),
             (0x0012, MessageType::ImageFsPathsRequest),
             (0x0013, MessageType::EnsureNfsExportRequest),
+            (0x00A8, MessageType::EnsureMachineExportRequest),
+            (0x0090, MessageType::KubernetesLoadBalancersRequest),
             (0x100F, MessageType::MemoryPressureEvent),
             (0x1010, MessageType::MachineStats),
             (0x1011, MessageType::ContainerFsPathsResponse),
             (0x1012, MessageType::ImageFsPathsResponse),
             (0x1013, MessageType::EnsureNfsExportResponse),
+            (0x10A8, MessageType::EnsureMachineExportResponse),
+            (0x1090, MessageType::KubernetesLoadBalancersResponse),
             (0x1001, MessageType::PingResponse),
             (0x1002, MessageType::GetSystemInfoResponse),
             (0x1003, MessageType::EnsureRuntimeResponse),
@@ -692,6 +801,7 @@ mod tests {
             (0x0027, MessageType::SandboxCleanupPrepareRequest),
             (0x0028, MessageType::SandboxCleanupFinalizeRequest),
             (0x0029, MessageType::WatchSandboxCleanupRequest),
+            (0x00A0, MessageType::SandboxStreamWindow),
             (0x1025, MessageType::SandboxPortForwardResponse),
             (0x1026, MessageType::SandboxPortForwardRemoveResponse),
             (0x1027, MessageType::SandboxCleanupPrepareResponse),
@@ -765,7 +875,13 @@ mod tests {
             (0x0050, MessageType::MachineExecRequest),
             (0x0051, MessageType::MachineExecInput),
             (0x0052, MessageType::MachineExecResize),
+            (0x0080, MessageType::MachineExecSignal),
+            (0x0081, MessageType::MachineExecOutputWindow),
+            (0x0082, MessageType::MachineTcpConnectRequest),
+            (0x00C8, MessageType::DebugExecRequest),
             (0x1050, MessageType::MachineExecOutput),
+            (0x1081, MessageType::MachineExecInputWindow),
+            (0x10C8, MessageType::DebugExecResponse),
         ];
 
         for (raw, expected) in CASES {
@@ -817,6 +933,7 @@ mod tests {
     fn is_kubernetes_request_classifies_correctly() {
         assert!(MessageType::KubernetesStartRequest.is_kubernetes_request());
         assert!(MessageType::KubernetesKubeconfigRequest.is_kubernetes_request());
+        assert!(MessageType::KubernetesLoadBalancersRequest.is_kubernetes_request());
         assert!(!MessageType::PingRequest.is_kubernetes_request());
         assert!(!MessageType::KubernetesStatusResponse.is_kubernetes_request());
     }

@@ -116,7 +116,7 @@ mod console_device {
 
         // Test output
         let output = console.read_output();
-        assert!(output.is_empty());
+        assert_eq!(output, b"");
 
         // Reset
         console.reset();

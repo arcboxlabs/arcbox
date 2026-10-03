@@ -287,10 +287,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[expect(
-        clippy::float_cmp,
-        reason = "1.5 parses exactly; no arithmetic involved"
-    )]
     fn load_ceiling_requires_positive_finite() {
         assert_eq!(parse_load_ceiling("1.5").unwrap(), 1.5);
         for bad in ["0", "-1.5", "NaN", "inf", "-inf", "nonsense"] {

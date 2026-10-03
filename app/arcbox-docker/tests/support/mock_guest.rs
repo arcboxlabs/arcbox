@@ -5,11 +5,16 @@
 //! - Other normal requests: returns status 200 with the request body echoed
 //! - Upgrade requests (`Upgrade` header present): returns 101 and acts
 //!   as a simple echo server, sending back any data received on the
-//!   upgraded connection
+//!   upgraded connection and half-closing once the client does
+//!
+//! Like the real guest agent it speaks the framed `GuestStream` channel, so
+//! the proxy's in-band half-close is exercised end to end.
 //!
 //! The server runs until the returned [`CancellationToken`] is cancelled.
 
-use arcbox_docker::proxy::{GuestConnector, VsockShutdown, VsockStream};
+use arcbox_docker::proxy::{
+    GuestConnector, GuestStream, HalfCloseStream, VsockShutdown, VsockStream,
+};
 use bytes::Bytes;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -46,7 +51,7 @@ impl UnixSocketConnector {
 impl GuestConnector for UnixSocketConnector {
     fn connect(
         &self,
-    ) -> Pin<Box<dyn Future<Output = arcbox_docker::Result<TokioIo<VsockStream>>> + Send + '_>>
+    ) -> Pin<Box<dyn Future<Output = arcbox_docker::Result<TokioIo<GuestStream>>> + Send + '_>>
     {
         Box::pin(async {
             self.connect_count
@@ -54,9 +59,8 @@ impl GuestConnector for UnixSocketConnector {
             let stream = tokio::net::UnixStream::connect(&self.socket_path)
                 .await
                 .map_err(|e| arcbox_docker::DockerError::Server(e.to_string()))?;
-            Ok(TokioIo::new(VsockStream::from_unix_stream_with_shutdown(
-                stream,
-                VsockShutdown::CloseOnDropOnly,
+            Ok(TokioIo::new(HalfCloseStream::new(
+                VsockStream::from_unix_stream_with_shutdown(stream, VsockShutdown::CloseOnDropOnly),
             )))
         })
     }
@@ -136,7 +140,8 @@ pub async fn start_with_routes(dir: &Path, routes: Vec<MockRoute>) -> MockGuest 
             let uris = Arc::clone(&uri_slot);
             let routes = Arc::clone(&routes);
             tokio::spawn(async move {
-                let io = TokioIo::new(stream);
+                // The guest side of the framed channel, as arcbox-agent does.
+                let io = TokioIo::new(HalfCloseStream::new(stream));
                 let svc = service_fn(move |req| {
                     let slot = Arc::clone(&slot);
                     let uris = Arc::clone(&uris);
@@ -233,7 +238,11 @@ async fn handle(
                 Ok(upgraded) => {
                     let mut io = TokioIo::new(upgraded);
                     let (mut rd, mut wr) = tokio::io::split(&mut io);
+                    // Echo until the client half-closes, then half-close back
+                    // — the shape dockerd gives an attach once stdin ends and
+                    // the container exits.
                     let _ = tokio::io::copy(&mut rd, &mut wr).await;
+                    let _ = tokio::io::AsyncWriteExt::shutdown(&mut wr).await;
                 }
                 Err(e) => tracing::debug!("mock guest upgrade failed: {e}"),
             }

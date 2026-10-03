@@ -15,6 +15,11 @@ pub enum Event {
     MachineStarted { name: String },
     /// Machine entered idle state (still running, reduced resources).
     MachineIdle { name: String },
+    /// Machine is about to stop: its VM still runs, so a consumer that must
+    /// reach the guest before it goes — the host-side unmount of the
+    /// machine's root export — acts on this edge. Internal; the public
+    /// machine event stream does not carry it.
+    MachineStopping { name: String },
     /// Machine stopped.
     MachineStopped { name: String },
     /// Machine removed (record and disks deleted).

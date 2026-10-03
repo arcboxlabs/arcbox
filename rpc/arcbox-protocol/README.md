@@ -48,6 +48,8 @@ skew safe:
 
 ## Usage
 
+`PrepareMigrationResponse.replacements` always contains the target replacement summary, including when empty. For a runnable prepare, the summary describes the plan saved under `plan_id`. Before `RunMigration`, clients must compare the target names with the user's confirmation. If the summary is absent, the daemon cannot provide this check. The full `plan`, including container environments, remains available only for an explicit dry run.
+
 ```rust
 use arcbox_protocol::{CreateContainerRequest, PullImageRequest};
 

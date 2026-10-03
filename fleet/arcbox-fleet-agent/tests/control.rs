@@ -88,7 +88,9 @@ fn wait_for_socket(child: &mut Child, socket_path: &Path) {
 /// Spawn `serve` against a scratch data dir and wait for its control socket.
 /// Forced to the file credential backend so this never touches the real OS
 /// keychain; nothing listens on the gateway, and the states these tests
-/// exercise never dial out to it.
+/// exercise never dial out to it. The VM backend is off: in `auto` the agent
+/// dials the developer's own arcbox-daemon, whose readiness probe
+/// force-removes every `fleet-*` machine on it.
 fn spawn_agent(data_dir: &Path) -> AgentProcess {
     let mut agent = AgentProcess(
         Command::new(env!("CARGO_BIN_EXE_arcbox-fleet-agent"))
@@ -97,6 +99,7 @@ fn spawn_agent(data_dir: &Path) -> AgentProcess {
             .env("ARCBOX_FLEET_CREDENTIAL_STORE", "file")
             .env("ARCBOX_FLEET_GATEWAY", "http://127.0.0.1:1")
             .env("ARCBOX_FLEET_DOCKER", "false")
+            .env("ARCBOX_FLEET_VM", "false")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -125,7 +128,7 @@ async fn unenrolled_agent_reports_status_and_rejects_drain() {
     assert_eq!(info.agent_version, env!("CARGO_PKG_VERSION"));
     assert_eq!(info.api_version, 1);
     assert!(info.features.iter().any(|f| f == "restart"), "{info:?}");
-    assert!(!info.instance_id.is_empty());
+    assert_ne!(info.instance_id, "");
 
     let status = client
         .get_status(GetStatusRequest {})
@@ -159,9 +162,9 @@ async fn unenrolled_agent_reports_status_and_rejects_drain() {
         Enrollment::Unenrolled
     );
     assert_eq!(snapshot.machine_id, "");
-    assert!(snapshot.capabilities.is_empty());
-    assert!(snapshot.in_flight.is_empty());
-    assert!(snapshot.recent_verdicts.is_empty());
+    assert_eq!(snapshot.capabilities, []);
+    assert_eq!(snapshot.in_flight, []);
+    assert_eq!(snapshot.recent_verdicts, []);
 
     // FleetSettingsService.GetSettings: a fresh agent reports current ==
     // target everywhere, seeded from its env configuration.

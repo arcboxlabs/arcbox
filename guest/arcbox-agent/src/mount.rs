@@ -47,21 +47,6 @@ pub fn mount_fs(source: &str, target: &str, fstype: &str, _options: &[String]) -
     anyhow::bail!("mount_fs is only supported on Linux")
 }
 
-/// Unmount a filesystem.
-#[cfg(target_os = "linux")]
-pub fn unmount_fs(target: &str) -> Result<()> {
-    tracing::info!("Unmounting {}", target);
-    nix::mount::umount(target)?;
-    Ok(())
-}
-
-/// Unmount a filesystem (stub for non-Linux platforms).
-#[cfg(not(target_os = "linux"))]
-pub fn unmount_fs(target: &str) -> Result<()> {
-    tracing::warn!("unmount_fs is only supported on Linux (target={})", target);
-    anyhow::bail!("unmount_fs is only supported on Linux")
-}
-
 /// Mount virtiofs share with default options (cache=auto).
 pub fn mount_virtiofs(tag: &str, mountpoint: &str) -> Result<()> {
     mount_fs(tag, mountpoint, "virtiofs", &[])

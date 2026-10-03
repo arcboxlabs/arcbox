@@ -725,13 +725,13 @@ mod tests {
     fn test_find_bundles_empty_dir() {
         let dir = tempfile::tempdir().unwrap();
         let bundles = utils::find_bundles(dir.path()).unwrap();
-        assert!(bundles.is_empty());
+        assert_eq!(bundles, Vec::<PathBuf>::new());
     }
 
     #[test]
     fn test_find_bundles_nonexistent() {
         let bundles = utils::find_bundles("/nonexistent/path").unwrap();
-        assert!(bundles.is_empty());
+        assert_eq!(bundles, Vec::<PathBuf>::new());
     }
 
     #[test]

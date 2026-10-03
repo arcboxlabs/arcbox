@@ -272,14 +272,16 @@ Or skip launchd entirely and use `make run-helper` as described above.
 
 ## Uninstall
 
-The CLI handles full uninstall — daemon, helper, launchd plists, sockets,
-symlinks, Docker context, and data:
+The CLI handles the full uninstall — daemon, helper, launchd plists, sockets,
+symlinks, Docker context, integrations, and data. Run it as yourself; it asks
+for `sudo` once for the privileged paths:
 
 ```bash
-sudo abctl _uninstall
+abctl uninstall
 ```
 
-Use `--keep-data` to preserve container data (`~/.arcbox/data`).
+Use `--keep-data` to preserve container data (`~/.arcbox/data`). The inventory
+it works from is in [docs/data-directories.md](docs/data-directories.md#11-uninstall).
 
 ## License
 

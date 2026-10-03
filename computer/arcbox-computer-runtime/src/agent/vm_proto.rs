@@ -418,7 +418,7 @@ mod tests {
         write_frame(&mut a, MSG_EOF, &[]).await.unwrap();
         let (msg_type, payload) = read_frame(&mut b).await.unwrap();
         assert_eq!(msg_type, MSG_EOF);
-        assert!(payload.is_empty());
+        assert_eq!(payload, b"");
     }
 
     #[tokio::test]

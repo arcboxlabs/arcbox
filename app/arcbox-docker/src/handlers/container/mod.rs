@@ -287,8 +287,11 @@ pub async fn remove_container(
 
 /// Inspect a started container and configure port forwarding + DNS registration.
 ///
-/// Shares a single inspect call for both port forwarding and DNS setup.
-async fn setup_container_networking(state: &AppState, container_id: &str) {
+/// Sets up a running container's host networking from one inspect call: the
+/// name alias, port forwarding, and DNS. The `start` handler's post-start
+/// step, and what the host reconciler runs for a container it finds running
+/// without knowing it.
+pub async fn setup_container_networking(state: &AppState, container_id: &str) {
     let Some(body_bytes) = inspect_container_body(state, container_id).await else {
         tracing::warn!(
             container_id,

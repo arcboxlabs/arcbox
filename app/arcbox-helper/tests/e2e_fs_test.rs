@@ -253,8 +253,9 @@ async fn e2e_cli_link_replaces_stale_arcbox_symlink() {
 
     fs::create_dir_all(fx.bin_dir()).unwrap();
     let link = fx.bin_dir().join("docker");
+    // A link into a bundle that was since moved or deleted.
     symlink(
-        "/Applications/OldArcBox.app/Contents/MacOS/xbin/docker",
+        "/Users/alice/Downloads/ArcBox.app/Contents/MacOS/xbin/docker",
         &link,
     )
     .unwrap();
@@ -265,6 +266,30 @@ async fn e2e_cli_link_replaces_stale_arcbox_symlink() {
         .await
         .unwrap();
     assert_eq!(fs::read_link(&link).unwrap(), target);
+}
+
+/// OrbStack links its CLI tools from the same `xbin` layout (#715): its links
+/// must survive both a link attempt and an unlink.
+#[tokio::test]
+async fn e2e_cli_link_preserves_orbstack_symlink() {
+    let fx = HelperFixture::start().await;
+    let target = fx.install_xbin_tool("docker");
+
+    fs::create_dir_all(fx.bin_dir()).unwrap();
+    let orbstack = PathBuf::from("/Applications/OrbStack.app/Contents/MacOS/xbin/docker");
+    let link = fx.bin_dir().join("docker");
+    symlink(&orbstack, &link).unwrap();
+
+    let client = fx.client().await;
+    let err = client
+        .cli_link("docker", target.to_str().unwrap())
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("not ArcBox-owned"), "got: {err}");
+    assert_eq!(fs::read_link(&link).unwrap(), orbstack);
+
+    client.cli_unlink("docker").await.unwrap();
+    assert_eq!(fs::read_link(&link).unwrap(), orbstack);
 }
 
 #[tokio::test]

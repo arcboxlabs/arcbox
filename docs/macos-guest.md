@@ -21,7 +21,7 @@ and they are a **Machine-tier** capability (no Container or Sandbox tier).
 - The guest macOS version is constrained by the host macOS version.
 - Data directory on an **APFS** volume (copy-on-write clone needs `clonefile`).
 - Developer ID signing for the daemon (`com.apple.security.virtualization`; see
-  `CLAUDE.md` → macOS Development). No additional entitlement is needed for install.
+  `AGENTS.md` → macOS Development). No additional entitlement is needed for install.
 - **At most 2 macOS guests per host** (Apple license cap) — enforced with a clear error.
 
 ## Startup Path Shape

@@ -53,14 +53,12 @@ pub struct NetRxWorkerContext {
     pub irq_callback: Arc<dyn Fn(Irq, bool) -> crate::error::Result<()> + Send + Sync>,
     /// IRQ number for the primary VirtioNet device.
     pub irq: Irq,
-    /// Force-exit all vCPUs from hv_vcpu_run (thread-safe).
-    pub exit_vcpus: Arc<dyn Fn() + Send + Sync>,
     /// VM shutdown flag.
     pub running: Arc<AtomicBool>,
 }
 
-/// Triggers a virtio-net RX interrupt: sets MMIO interrupt_status,
-/// fires the GIC SPI, and kicks all vCPUs out of hv_vcpu_run.
+/// Triggers a virtio-net RX interrupt: sets MMIO interrupt_status and
+/// asserts the GIC SPI.
 fn trigger_net_irq(ctx: &NetRxWorkerContext) {
     // Set interrupt_status on MMIO state.
     if let Ok(mut s) = ctx.mmio_state.write() {
@@ -68,8 +66,6 @@ fn trigger_net_irq(ctx: &NetRxWorkerContext) {
     }
     // Fire GIC SPI (thread-safe — hv_gic_set_spi is global).
     let _ = (ctx.irq_callback)(ctx.irq, true);
-    // Force-exit vCPUs so they pick up the pending interrupt.
-    (ctx.exit_vcpus)();
 }
 
 /// Flushes a batch: republishes `avail_event` (EVENT_IDX only) and fires

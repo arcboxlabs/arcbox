@@ -3,6 +3,7 @@
 pub mod cmdline;
 pub mod container_network;
 pub mod devices;
+pub mod dns;
 pub mod env;
 #[cfg(feature = "std")]
 pub mod helper;

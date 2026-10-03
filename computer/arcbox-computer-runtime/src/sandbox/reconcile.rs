@@ -47,18 +47,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arcbox_vm_driver::net::{AttachMode, GuestNetwork, NetworkIdentity, NetworkLease};
-use arcbox_vm_driver::{ProcessRecord, ShutdownMode, VmDriver, VmHandle, VmId, VmRecord, VmState};
+use arcbox_vm_driver::{
+    JailRecord, ProcessRecord, ShutdownMode, VmDriver, VmHandle, VmId, VmRecord, VmState,
+};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use super::policy::recovery::{self, JournalEvidence, RecoveryAction, SweepAction};
 use super::record::{PersistPhase, SandboxRecord, SandboxRecordStore, SandboxTransition};
 use super::{LeaseExt, SandboxState};
-use crate::config::VmmConfig;
+use crate::config::RuntimeConfig;
 use crate::error::{Result, VmmError};
 use crate::lifecycle::actor::{Deadlines, Seeded};
 use crate::lifecycle::runtime::ComputerRuntime;
-use crate::network::NetworkAllocation;
 use crate::snapshot_cow::{
     COW_FILE_PREFIX, COW_FILE_SUFFIX, CowHandle, CowManager, DM_NAME_PREFIX,
 };
@@ -140,22 +141,21 @@ pub struct SandboxStateRecord {
     /// The VMM's PID at boot time.
     #[serde(default)]
     pub pid: Option<i32>,
-    /// The lease to hand back, in the shape `arcbox-tap-net`'s
-    /// [`NetworkAllocation`] has written since before the guest-network
-    /// port existed.
+    /// The lease to hand back, in the shape this journal has written since
+    /// before the guest-network port existed ([`JournaledAllocation`]).
     ///
     /// The lease is what the sweep actually needs, but the on-disk shape
     /// is a contract in both directions (see the type doc above), and
-    /// `NetworkAllocation`'s `tap_name` and `dns_servers` are not
-    /// `#[serde(default)]`: dropping either would turn one skipped
-    /// sandbox into a sweep that fails to parse and leaks every journaled
-    /// resource on an agent that predates the port. Both are therefore
-    /// reconstructed on write — the TAP name by [`tap_name_for`], the
-    /// same rule [`validate_state_record`] enforces, and the resolvers
-    /// from the network config the pool was built with — and neither is
-    /// read back: [`SandboxStateRecord::lease`] is what the sweep uses.
+    /// `tap_name` and `dns_servers` carry no `#[serde(default)]`: dropping
+    /// either would turn one skipped sandbox into a sweep that fails to
+    /// parse and leaks every journaled resource on an agent that predates
+    /// the port. Both are therefore reconstructed on write — the TAP name
+    /// by [`tap_name_for`], the same rule [`validate_state_record`]
+    /// enforces, and the resolvers from the network config the pool was
+    /// built with — and neither is read back:
+    /// [`SandboxStateRecord::lease`] is what the sweep uses.
     #[serde(default)]
-    pub network: Option<NetworkAllocation>,
+    pub network: Option<JournaledAllocation>,
     /// dm-snapshot CoW resources to tear down.
     #[serde(default)]
     cow: Option<CowRecord>,
@@ -204,6 +204,86 @@ pub struct SandboxStateRecord {
     /// there.
     #[serde(default)]
     pub net_invariant: bool,
+    /// The VMM's API socket, as this host reaches it.
+    ///
+    /// Written because a jailed VMM's socket cannot be re-derived by the
+    /// process that adopts it. The jailer unshares a mount namespace and
+    /// pivots into the chroot, so `/proc/<pid>/root` reads back as `/` from
+    /// outside and nothing there names the jail; it also execs Firecracker
+    /// without `--api-sock`, so the command line does not carry the path
+    /// either. An adopt that cannot reach the API settles for a handle it can
+    /// only kill, and the sweep then takes down a live guest.
+    ///
+    /// `None` for a record with no VMM of its own, and in every record
+    /// written before this field existed — those adopt exactly as before.
+    #[serde(default)]
+    pub api_socket: Option<PathBuf>,
+    /// The jail the VMM runs in, when it runs in one.
+    ///
+    /// Unobservable afterwards for the same reason [`Self::api_socket`] is
+    /// — the jailer has pivoted out of view — and so, like it, the sweep's
+    /// only way to hand the driver the truth. An adopt that has to guess
+    /// concludes the VM is unconfined and rebuilds it that way: a Computer
+    /// that can then neither be reached nor checkpointed (CORE-155).
+    ///
+    /// `None` for a VMM that runs unconfined, for a record with no VMM, and
+    /// for one written before this field existed.
+    #[serde(default)]
+    pub jail: Option<JournaledJail>,
+}
+
+/// The jail a VMM runs in, in the journal's own vocabulary.
+///
+/// A journal-local mirror of [`JailRecord`] rather than that type itself,
+/// on the same rule as [`JournaledAllocation`]: this file's encoding is
+/// frozen (`RECORD_VERSION` 1 has no migration story) and the port's type
+/// is free to grow. It is also `#[non_exhaustive]`'s neighbour in a way
+/// that matters here — a variant or shape added upstream would land in
+/// records this agent must keep reading, and a journal that fails to parse
+/// is a sandbox the sweep cannot reclaim at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournaledJail {
+    /// The chroot the VMM is confined to, as the host names it.
+    pub root: PathBuf,
+    /// The uid the VMM runs as.
+    pub uid: u32,
+    /// The gid the VMM runs as.
+    pub gid: u32,
+}
+
+impl From<JailRecord> for JournaledJail {
+    fn from(jail: JailRecord) -> Self {
+        Self {
+            root: jail.root,
+            uid: jail.uid,
+            gid: jail.gid,
+        }
+    }
+}
+
+impl From<JournaledJail> for JailRecord {
+    fn from(jail: JournaledJail) -> Self {
+        Self {
+            root: jail.root,
+            uid: jail.uid,
+            gid: jail.gid,
+        }
+    }
+}
+
+/// What a live VMM is, beyond the pid: where its API answers and what it is
+/// confined to.
+///
+/// One value rather than two `with_*` calls, because a journal site that
+/// records one without the other is the bug both fields exist to prevent —
+/// and because only the paths that hold a VMM can answer either
+/// ([`SandboxStateRecord::with_vmm`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct JournaledVmm {
+    /// The API socket, as this host reaches it.
+    pub api_socket: Option<PathBuf>,
+    /// The jail it runs in, when it runs in one.
+    pub jail: Option<JournaledJail>,
 }
 
 /// How a lease's host side was attached, in the journal's own vocabulary.
@@ -285,6 +365,46 @@ fn tap_name_for(ip: std::net::Ipv4Addr) -> String {
     format!("vmtap{}-{}", octets[2], octets[3])
 }
 
+/// The `network` object inside [`STATE_FILE`], field for field.
+///
+/// Field-identical to `arcbox_tap_net::NetworkAllocation`, and
+/// deliberately so rather than by reuse: that type is the TAP adapter's own
+/// allocation record, which its quarantine ledger persists to a different
+/// file under a different owner. The two files happen to share a shape
+/// because this journal was written when that adapter was the only network
+/// there was. Sharing the type would tie this journal's on-disk contract —
+/// which `RECORD_VERSION` 1 has no migration story for
+/// (`computer/AGENTS.md`) — to an adapter's freedom to evolve its own.
+///
+/// So the encoding is frozen here: every key name, and the two `serde`
+/// defaults that let a record predating them load
+/// (`a_journal_without_a_prefix_len_or_cleanup_token_loads` pins both).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournaledAllocation {
+    /// TAP interface name (e.g. `vmtap0-7`).
+    pub tap_name: String,
+    /// IP address assigned to the guest.
+    pub ip_address: std::net::Ipv4Addr,
+    /// Network prefix length (e.g. 16 for /16).
+    #[serde(default = "default_prefix_len")]
+    pub prefix_len: u8,
+    /// Gateway IP.
+    pub gateway: std::net::Ipv4Addr,
+    /// MAC address (deterministic from the sandbox id).
+    pub mac_address: String,
+    /// DNS servers.
+    pub dns_servers: Vec<String>,
+    /// Opaque generation token carried through host cleanup finalization.
+    #[serde(default)]
+    pub cleanup_token: String,
+}
+
+/// What a record written before `prefix_len` existed meant: the /16 the
+/// sandbox pool has always been.
+const fn default_prefix_len() -> u8 {
+    16
+}
+
 impl SandboxStateRecord {
     /// Assemble a record from boot/restore results.
     pub fn new(
@@ -292,7 +412,7 @@ impl SandboxStateRecord {
         pid: Option<i32>,
         network: Option<JournaledLease<'_>>,
         cow: Option<&CowHandle>,
-        config: &VmmConfig,
+        config: &RuntimeConfig,
         restore_origin_dir: Option<&Path>,
     ) -> Result<Self> {
         let allocation = network
@@ -308,7 +428,23 @@ impl SandboxStateRecord {
             pool_slot_id: None,
             attach_mode: network.map(|net| net.mode.into()),
             net_invariant: network.is_some_and(|net| net.invariant_identity),
+            api_socket: None,
+            jail: None,
         })
+    }
+
+    /// Record what the VMM is, for the process that adopts it: where its
+    /// API answers, and what it is confined to.
+    ///
+    /// Separate from [`Self::new`] because only the paths that hold a VMM can
+    /// answer it: a cleanup record written after teardown has none. See
+    /// [`Self::api_socket`] and [`Self::jail`] for why neither can be
+    /// re-derived later.
+    pub fn with_vmm(mut self, vmm: Option<JournaledVmm>) -> Self {
+        let vmm = vmm.unwrap_or_default();
+        self.api_socket = vmm.api_socket;
+        self.jail = vmm.jail;
+        self
     }
 
     /// The lease this record's network field stands for, for a sweep that
@@ -348,9 +484,9 @@ impl SandboxStateRecord {
 ///
 /// `tap_name` and `dns_servers` are the two fields a lease does not carry;
 /// see [`SandboxStateRecord::network`] for why they are written anyway.
-fn legacy_allocation(lease: &NetworkLease, dns: &[String]) -> Result<NetworkAllocation> {
+fn legacy_allocation(lease: &NetworkLease, dns: &[String]) -> Result<JournaledAllocation> {
     let ip = lease.ipv4()?;
-    Ok(NetworkAllocation {
+    Ok(JournaledAllocation {
         tap_name: tap_name_for(ip),
         ip_address: ip,
         prefix_len: lease.prefix_len,
@@ -536,7 +672,7 @@ impl OrphanSweep {
 /// teardown → TAP release → the VM's own area, discarded through the
 /// driver → directory removal.
 pub(super) async fn sweep_orphans(
-    config: &VmmConfig,
+    config: &RuntimeConfig,
     driver: &dyn VmDriver,
     network: &dyn GuestNetwork,
     cow_manager: &CowManager,
@@ -689,7 +825,7 @@ async fn reap_orphans(
     retained: &HashSet<String>,
     held: &HashSet<String>,
     phases: &HashMap<&str, super::record::PersistPhase>,
-    config: &VmmConfig,
+    config: &RuntimeConfig,
     driver: &dyn VmDriver,
     network: &dyn GuestNetwork,
     cow_manager: &CowManager,
@@ -1268,7 +1404,8 @@ fn vm_record(
             .and_then(|pid| u32::try_from(pid).ok())
             .map(|pid| ProcessRecord {
                 pid,
-                api_socket: None,
+                api_socket: record.api_socket.clone(),
+                jail: record.jail.clone().map(JailRecord::from),
             }),
     })
 }
@@ -1364,7 +1501,7 @@ async fn remove_dir_if_present(path: &Path) -> Result<()> {
 }
 
 fn validate_state_record(
-    config: &VmmConfig,
+    config: &RuntimeConfig,
     sandboxes_dir: &Path,
     directory: &Path,
     record: &SandboxStateRecord,
@@ -1436,8 +1573,8 @@ mod tests {
     /// `state.json` written before the guest-network port existed, verbatim.
     /// The sweep replays leases out of records like this one, so the shape
     /// is a contract in both directions: this agent must read it, and an
-    /// agent that predates the port must read what this one writes (its
-    /// `NetworkAllocation` has no `#[serde(default)]` on `tap_name` or
+    /// agent that predates the port must read what this one writes (that
+    /// agent's decoder has no `#[serde(default)]` on `tap_name` or
     /// `dns_servers`, and a record missing either fails its whole sweep).
     const LEGACY_RECORD: &str = r#"{
       "id": "box",
@@ -1475,10 +1612,9 @@ mod tests {
         // everything the old shape said, field for field — including the two
         // the lease does not carry, which are reconstructed rather than
         // dropped. What adoption added is purely additive on top.
-        let mut config = VmmConfig::default();
+        let mut config = RuntimeConfig::default();
         config.network.dns = vec!["1.1.1.1".into()];
         config.firecracker.jailer = Some(crate::config::JailerConfig {
-            binary: "/usr/bin/jailer".into(),
             uid: 0,
             gid: 0,
             chroot_base_dir: None,
@@ -1486,7 +1622,6 @@ mod tests {
             new_pid_ns: false,
             cgroup_version: None,
             parent_cgroup: None,
-            resource_limits: vec![],
         });
         let written = SandboxStateRecord::new(
             "box",
@@ -1507,10 +1642,44 @@ mod tests {
             fields.remove("net_invariant"),
             Some(serde_json::json!(true))
         );
+        // Null here rather than absent, and null for exactly the reason a
+        // cleanup record has no socket or jail: the constructor never knows
+        // either, only the boot and restore paths that hold the VMM do.
+        assert_eq!(fields.remove("api_socket"), Some(serde_json::Value::Null));
+        assert_eq!(fields.remove("jail"), Some(serde_json::Value::Null));
         assert_eq!(
             value,
             serde_json::from_str::<serde_json::Value>(LEGACY_RECORD).unwrap()
         );
+    }
+
+    /// The two `serde` defaults inside the `network` object are the whole
+    /// reason [`JournaledAllocation`] spells its encoding out: a journal
+    /// written before either field existed must still yield a lease, with
+    /// the /16 the pool has always been and no cleanup generation to
+    /// finalize. Losing a default here turns one such record into a sweep
+    /// that fails to parse and leaks every resource it names.
+    #[test]
+    fn a_journal_without_a_prefix_len_or_cleanup_token_loads() {
+        const OLDEST_RECORD: &str = r#"{
+          "id": "box",
+          "pid": 4242,
+          "network": {
+            "tap_name": "vmtap0-7",
+            "ip_address": "172.20.0.7",
+            "gateway": "172.20.0.1",
+            "mac_address": "02:fc:00:00:00:07",
+            "dns_servers": ["1.1.1.1"]
+          },
+          "jailer": true
+        }"#;
+        let record: SandboxStateRecord = serde_json::from_str(OLDEST_RECORD).unwrap();
+        let network = record.network.as_ref().expect("the record holds a network");
+        assert_eq!(network.prefix_len, 16);
+        assert_eq!(network.cleanup_token, "");
+        let lease = record.lease().unwrap().expect("the record holds a lease");
+        assert_eq!(lease.prefix_len, 16);
+        assert_eq!(lease.cleanup_token, "");
     }
 
     /// The two fields adoption added default the way the record's
@@ -1536,7 +1705,7 @@ mod tests {
             mac: "02:fc:00:00:00:07".parse().unwrap(),
             cleanup_token: "gen-1".into(),
         };
-        let config = VmmConfig::default();
+        let config = RuntimeConfig::default();
         for baked in [true, false] {
             let record = SandboxStateRecord::new(
                 "box",
@@ -1681,11 +1850,35 @@ mod tests {
             pool_slot_id: Some("pool-1".into()),
             attach_mode: Some(JournaledAttachMode::Invariant),
             net_invariant: true,
+            api_socket: Some("/srv/jailer/firecracker/sb-1/root/run/firecracker.socket".into()),
+            jail: Some(JournaledJail {
+                root: "/srv/jailer/firecracker/sb-1/root".into(),
+                uid: 123,
+                gid: 456,
+            }),
         };
         let bytes = serde_json::to_vec(&record).unwrap();
         let parsed: SandboxStateRecord = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(parsed.id, "sb-1");
         assert_eq!(parsed.pid, Some(42));
+        // The socket has to survive the round trip: an adopt that cannot read
+        // it back kills the VM it was meant to reclaim.
+        assert_eq!(
+            parsed.api_socket.as_deref(),
+            Some(Path::new(
+                "/srv/jailer/firecracker/sb-1/root/run/firecracker.socket"
+            ))
+        );
+        // As does the jail, for the same reason: a VM adopted back as
+        // unconfined can be neither reached nor checkpointed.
+        assert_eq!(
+            parsed.jail,
+            Some(JournaledJail {
+                root: "/srv/jailer/firecracker/sb-1/root".into(),
+                uid: 123,
+                gid: 456,
+            })
+        );
         assert!(parsed.jailer);
         assert_eq!(parsed.pool_slot_id.as_deref(), Some("pool-1"));
         assert_eq!(parsed.resource_owner(), "pool-1");
@@ -1693,9 +1886,104 @@ mod tests {
         assert_eq!(handle.dm_name, "arcbox-snap-sb-1");
     }
 
+    /// The journal is the only place a jailed VMM's socket and jail
+    /// survive, so the record the sweep hands `Adopt` has to carry both:
+    /// without them the driver re-derives from `/proc/<pid>/root`, which
+    /// reads `/` for a jailed VMM. It then dials a path nothing bound and
+    /// settles for a kill-only handle (CORE-149), and concludes the VM runs
+    /// unconfined, which costs the adopted Computer its exec and its
+    /// checkpoints (CORE-155).
+    #[test]
+    fn the_adopt_record_carries_the_journaled_vmm() {
+        use arcbox_vm_driver::testkit::FakeDriver;
+
+        let socket = Path::new("/srv/jailer/firecracker/box/root/run/firecracker.socket");
+        let journaled = SandboxStateRecord {
+            id: "box".into(),
+            pid: Some(4242),
+            network: None,
+            cow: None,
+            jailer: true,
+            restore_origin_dir: None,
+            pool_slot_id: None,
+            attach_mode: None,
+            net_invariant: false,
+            api_socket: Some(socket.to_path_buf()),
+            jail: Some(JournaledJail {
+                root: "/srv/jailer/firecracker/box/root".into(),
+                uid: 123,
+                gid: 456,
+            }),
+        };
+
+        let record = vm_record(&FakeDriver::new(), Path::new("/data/box"), &journaled).unwrap();
+
+        let process = record.process.expect("a journaled pid is a process");
+        assert_eq!(process.pid, 4242);
+        assert_eq!(process.api_socket.as_deref(), Some(socket));
+        assert_eq!(
+            process.jail,
+            Some(arcbox_vm_driver::JailRecord {
+                root: "/srv/jailer/firecracker/box/root".into(),
+                uid: 123,
+                gid: 456,
+            })
+        );
+    }
+
+    /// The other end of that record: what a journal site actually writes.
+    /// The driver knows the jail because it spawned the VMM there, and the
+    /// whole chain — prepared VM, journal, disk, adopt record — has to
+    /// carry it, since no later process can ask the VMM itself.
+    #[tokio::test]
+    async fn a_jailed_vmms_journal_carries_its_jail_from_the_driver_to_the_adopt() {
+        use arcbox_vm_driver::testkit::FakeDriver;
+        use arcbox_vm_driver::{IsolationSpec, VmId};
+
+        let dir = tempfile::tempdir().unwrap();
+        let driver = FakeDriver::new();
+        let isolation = IsolationSpec::Jailer {
+            uid: 7,
+            gid: 8,
+            chroot_base: dir.path().join("jail"),
+            netns: None,
+            new_pid_ns: false,
+            cgroup: None,
+        };
+        let prepared = driver
+            .prepare()
+            .unwrap()
+            .prepare(&VmId::new("box").unwrap(), &isolation, dir.path())
+            .await
+            .unwrap();
+
+        let journaled = SandboxStateRecord::new(
+            "box",
+            crate::sandbox::journaled_pid(&*prepared),
+            None,
+            None,
+            &RuntimeConfig::default(),
+            None,
+        )
+        .unwrap()
+        .with_vmm(crate::sandbox::journaled_vmm(&*prepared));
+        write_state_record(dir.path(), &journaled).unwrap();
+
+        let bytes = std::fs::read(dir.path().join(STATE_FILE)).unwrap();
+        let reloaded: SandboxStateRecord = serde_json::from_slice(&bytes).unwrap();
+        let process = vm_record(&driver, dir.path(), &reloaded)
+            .unwrap()
+            .process
+            .expect("a journaled pid is a process");
+        assert_eq!(
+            process.jail.map(|jail| jail.root),
+            Some(dir.path().join("jail/box"))
+        );
+    }
+
     #[test]
     fn cleanup_record_validation_keys_cow_resources_by_the_pool_slot() {
-        let config = VmmConfig::default();
+        let config = RuntimeConfig::default();
         let sandboxes_dir = Path::new("/var/lib/firecracker-vmm/sandboxes");
         let directory = sandboxes_dir.join("sb-1");
         let cow_for = |owner: &str| CowRecord {
@@ -1717,6 +2005,8 @@ mod tests {
             pool_slot_id: slot.map(str::to_owned),
             attach_mode: None,
             net_invariant: false,
+            api_socket: None,
+            jail: None,
         };
 
         // Slot-keyed resources validate against the slot id, not the sandbox id.
@@ -1876,7 +2166,7 @@ mod tests {
         std::fs::write(&cow_file, b"overlay").unwrap();
         drop(store);
 
-        let mut config = VmmConfig::default();
+        let mut config = RuntimeConfig::default();
         config.firecracker.data_dir = data_dir.path().to_string_lossy().into_owned();
         let environment = crate::testkit::fake_environment(&config).unwrap();
         let manager = super::super::SandboxManager::new(config, environment).unwrap();
@@ -1931,7 +2221,7 @@ mod tests {
             .unwrap();
         vm.detach().unwrap().detach().await.unwrap();
         let pid = vm.record().process.map(|process| process.pid).unwrap();
-        let mut config = VmmConfig::default();
+        let mut config = RuntimeConfig::default();
         config.firecracker.data_dir = data_dir.path().to_string_lossy().into_owned();
         write_state_record(
             &vm_dir,
@@ -2094,7 +2384,7 @@ mod tests {
         let vm = boot_previous_vm(&driver, &vm_dir, "keeper", case.vsock, true).await;
         let pid = vm.record().process.map(|process| process.pid).unwrap();
 
-        let mut config = VmmConfig::default();
+        let mut config = RuntimeConfig::default();
         config.firecracker.data_dir = data_dir.to_string_lossy().into_owned();
         let store = SandboxRecordStore::new(data_dir).unwrap();
         record_in_phase(&store, "keeper", case.phase);
@@ -2191,7 +2481,7 @@ mod tests {
     #[tokio::test]
     async fn an_unusable_journal_is_skipped_and_the_sweep_goes_on() {
         let data_dir = tempfile::tempdir().unwrap();
-        let mut config = VmmConfig::default();
+        let mut config = RuntimeConfig::default();
         config.firecracker.data_dir = data_dir.path().to_string_lossy().into_owned();
 
         // A journal whose id disagrees with the directory holding it, which
@@ -2244,7 +2534,7 @@ mod tests {
     #[tokio::test]
     async fn a_journal_the_port_cannot_name_is_skipped_at_the_boundary() {
         let data_dir = tempfile::tempdir().unwrap();
-        let mut config = VmmConfig::default();
+        let mut config = RuntimeConfig::default();
         config.firecracker.data_dir = data_dir.path().to_string_lossy().into_owned();
 
         // Directory and id agree, and both are what a pre-#680 process
@@ -2289,7 +2579,7 @@ mod tests {
     #[tokio::test]
     async fn a_skipped_journal_holds_its_disk_and_its_address() {
         let data_dir = tempfile::tempdir().unwrap();
-        let mut config = VmmConfig::default();
+        let mut config = RuntimeConfig::default();
         config.firecracker.data_dir = data_dir.path().to_string_lossy().into_owned();
 
         // The address is the pool's next free one, so a create after the
@@ -2376,7 +2666,7 @@ mod tests {
     #[tokio::test]
     async fn a_skipped_journal_does_not_answer_for_the_id_it_claims() {
         let data_dir = tempfile::tempdir().unwrap();
-        let mut config = VmmConfig::default();
+        let mut config = RuntimeConfig::default();
         config.firecracker.data_dir = data_dir.path().to_string_lossy().into_owned();
 
         // Directory `broken`, journal claiming `ghost` — the disagreement
@@ -2424,7 +2714,7 @@ mod tests {
         let data_dir = tempfile::tempdir().unwrap();
         let driver = FakeDriver::new();
         let network = std::sync::Arc::new(FakeNetwork::new());
-        let mut config = VmmConfig::default();
+        let mut config = RuntimeConfig::default();
         config.firecracker.data_dir = data_dir.path().to_string_lossy().into_owned();
 
         let keeper_dir = data_dir.path().join("sandboxes").join("keeper");
@@ -2729,10 +3019,9 @@ mod tests {
             let probe = driver.clone();
             let network = FakeNetwork::new();
 
-            let mut config = VmmConfig::default();
+            let mut config = RuntimeConfig::default();
             config.firecracker.data_dir = data_dir.path().to_string_lossy().into_owned();
             config.firecracker.jailer = Some(crate::config::JailerConfig {
-                binary: "/usr/bin/jailer".into(),
                 uid: 0,
                 gid: 0,
                 chroot_base_dir: Some(data_dir.path().join("jail").to_string_lossy().into_owned()),
@@ -2740,7 +3029,6 @@ mod tests {
                 new_pid_ns: false,
                 cgroup_version: None,
                 parent_cgroup: None,
-                resource_limits: vec![],
             });
             let isolation = super::super::isolation_spec(&config).unwrap();
 

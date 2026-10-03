@@ -2,6 +2,7 @@
 //!
 //! This module uses arcbox-vz for Virtualization.framework bindings.
 
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::os::unix::io::RawFd;
 use std::sync::{
     RwLock,
@@ -50,6 +51,15 @@ pub enum VmState {
     Error,
 }
 
+/// Host read ends of a VM's console (`hvc0`) and agent-log (`hvc1`) pipes,
+/// duplicated by [`DarwinVm::dup_serial_readers`]. Both are non-blocking.
+pub struct SerialReaders {
+    /// Guest output on `hvc0`.
+    pub console: OwnedFd,
+    /// Guest output on `hvc1`, the agent's log channel.
+    pub agent_log: OwnedFd,
+}
+
 /// Virtual machine implementation for Darwin (macOS).
 ///
 /// This wraps arcbox-vz types for Virtualization.framework and provides the
@@ -75,6 +85,11 @@ pub struct DarwinVm {
     console_fds: Option<(RawFd, RawFd)>,
     /// Agent log serial port file descriptors (hvc1): dedicated agent tracing channel.
     agent_log_fds: Option<(RawFd, RawFd)>,
+    /// The VZ-facing ends of both ports' pipes, held only until the VM has
+    /// started: the helper process has its own copies by then, so these are
+    /// closed in `start` (see [`Self::release_guest_serial_ends`]) or, for
+    /// a VM that never started, in `Drop`.
+    guest_serial_fds: Vec<RawFd>,
     /// Device configuration metadata for snapshots.
     ///
     /// Since Virtualization.framework doesn't expose device state, we store
@@ -130,7 +145,7 @@ impl DarwinVm {
         let platform = GenericPlatform::new().map_err(|e| {
             HypervisorError::VmCreationFailed(format!("Failed to create platform: {e}"))
         })?;
-        if GenericPlatform::is_nested_virt_supported() {
+        if config.nested_virt && GenericPlatform::is_nested_virt_supported() {
             platform.set_nested_virt_enabled(true);
             tracing::info!("Nested virtualization enabled");
         }
@@ -186,6 +201,7 @@ impl DarwinVm {
             vz_vm: None,
             console_fds: None,
             agent_log_fds: None,
+            guest_serial_fds: Vec::new(),
             device_configs: Vec::new(),
             vsock_irq_fd: RwLock::new(None),
             balloon_configured: false,
@@ -202,22 +218,40 @@ impl DarwinVm {
     /// Returns "pipe" on success. Use `read_console_output()` and
     /// `read_agent_log_output()` to read from each port.
     pub fn setup_serial_console(&mut self) -> Result<String, HypervisorError> {
-        let make_port =
-            |label: &str| -> Result<(SerialPortConfiguration, RawFd, RawFd), HypervisorError> {
-                let port = SerialPortConfiguration::virtio_console()
-                    .map_err(|e| HypervisorError::DeviceError(e.to_string()))?;
-                let read_fd = port.read_fd().ok_or_else(|| {
-                    HypervisorError::DeviceError(format!("Failed to get {label} read fd"))
-                })?;
-                let write_fd = port.write_fd().ok_or_else(|| {
-                    HypervisorError::DeviceError(format!("Failed to get {label} write fd"))
-                })?;
-                Ok((port, read_fd, write_fd))
-            };
+        let make_port = |label: &str| -> Result<
+            (SerialPortConfiguration, RawFd, RawFd, (RawFd, RawFd)),
+            HypervisorError,
+        > {
+            let port = SerialPortConfiguration::virtio_console()
+                .map_err(|e| HypervisorError::DeviceError(e.to_string()))?;
+            let read_fd = port.read_fd().ok_or_else(|| {
+                HypervisorError::DeviceError(format!("Failed to get {label} read fd"))
+            })?;
+            let write_fd = port.write_fd().ok_or_else(|| {
+                HypervisorError::DeviceError(format!("Failed to get {label} write fd"))
+            })?;
+            let guest_fds = port.guest_fds().ok_or_else(|| {
+                HypervisorError::DeviceError(format!("Failed to get {label} guest fds"))
+            })?;
+            // The read end is non-blocking for life: the engine's drain
+            // waits on readiness and must never block in `read(2)`.
+            // SAFETY: `read_fd` is a live pipe fd this VM owns.
+            let flags = unsafe { libc::fcntl(read_fd, libc::F_GETFL) };
+            if flags == -1
+                || unsafe { libc::fcntl(read_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
+            {
+                return Err(HypervisorError::DeviceError(format!(
+                    "Failed to make {label} read fd non-blocking: {}",
+                    std::io::Error::last_os_error()
+                )));
+            }
+            Ok((port, read_fd, write_fd, guest_fds))
+        };
 
         // Port 0 (hvc0): kernel/init console
-        let (console_port, console_read, console_write) = make_port("console")?;
+        let (console_port, console_read, console_write, console_guest) = make_port("console")?;
         self.console_fds = Some((console_read, console_write));
+        self.guest_serial_fds.extend(<[_; 2]>::from(console_guest));
         tracing::info!(
             "Console port (hvc0): read_fd={}, write_fd={}",
             console_read,
@@ -225,8 +259,9 @@ impl DarwinVm {
         );
 
         // Port 1 (hvc1): agent log channel
-        let (agent_log_port, agent_read, agent_write) = make_port("agent-log")?;
+        let (agent_log_port, agent_read, agent_write, agent_guest) = make_port("agent-log")?;
         self.agent_log_fds = Some((agent_read, agent_write));
+        self.guest_serial_fds.extend(<[_; 2]>::from(agent_guest));
         tracing::info!(
             "Agent log port (hvc1): read_fd={}, write_fd={}",
             agent_read,
@@ -342,6 +377,13 @@ impl DarwinVm {
 
     /// Non-blocking read of all available data from a serial port file descriptor.
     fn read_serial_fd(read_fd: RawFd) -> String {
+        Self::read_serial_fd_chunked(read_fd, 4096)
+    }
+
+    /// [`Self::read_serial_fd`] reading `chunk` bytes per `read(2)`; the
+    /// tests shrink the chunk so a boundary falls inside what a small pipe
+    /// can hold.
+    fn read_serial_fd_chunked(read_fd: RawFd, chunk: usize) -> String {
         // SAFETY: All fd operations use valid pipe fds from setup_serial_console().
         // Flags are saved and restored to avoid side effects.
         unsafe {
@@ -358,8 +400,8 @@ impl DarwinVm {
                 return String::new();
             }
 
-            let mut buffer = vec![0u8; 4096];
-            let mut output = String::new();
+            let mut buffer = vec![0u8; chunk];
+            let mut bytes = Vec::new();
 
             loop {
                 let bytes_read = libc::read(
@@ -369,9 +411,7 @@ impl DarwinVm {
                 );
 
                 if bytes_read > 0 {
-                    if let Ok(s) = std::str::from_utf8(&buffer[..bytes_read as usize]) {
-                        output.push_str(s);
-                    }
+                    bytes.extend_from_slice(&buffer[..bytes_read as usize]);
                 } else if bytes_read == 0 {
                     break;
                 } else {
@@ -391,8 +431,56 @@ impl DarwinVm {
                     errno
                 );
             }
-            output
+
+            // Decode once over everything read: a multi-byte character that
+            // straddles two reads is whole here (checked per read, it cost
+            // both chunks), and one cut off by the end of the pipe — the
+            // guest mid-write — becomes U+FFFD instead of dropping its chunk.
+            String::from_utf8_lossy(&bytes).into_owned()
         }
+    }
+
+    /// Closes this process's copies of the VZ-facing pipe ends.
+    ///
+    /// Called once the VM runs: VZ has passed the file handles to its helper
+    /// process, which owns copies from then on, so ours only leak two fds per
+    /// port and keep the guest-output pipe from ever reaching EOF. After this
+    /// the VM cannot be started again in place — VZ would hand the closed
+    /// handles to a new helper — which `start` refuses; a new VM gets new
+    /// pipes.
+    fn release_guest_serial_ends(&mut self) {
+        for fd in self.guest_serial_fds.drain(..) {
+            // SAFETY: `fd` is a pipe end this VM created and still owns.
+            unsafe { libc::close(fd) };
+        }
+    }
+
+    /// Duplicates the host read ends of the console (`hvc0`) and agent-log
+    /// (`hvc1`) pipes for a reader that owns them independently of this VM.
+    ///
+    /// The duplicates share the pipes' open file descriptions, so they are
+    /// non-blocking like the originals. They see EOF only once the VZ
+    /// helper, the last holder of the write end after `start`, has exited;
+    /// a reader that must stop earlier needs its own stop signal.
+    pub fn dup_serial_readers(&self) -> Result<SerialReaders, HypervisorError> {
+        let dup = |fd: RawFd, label: &str| -> Result<OwnedFd, HypervisorError> {
+            // SAFETY: `fd` is a live pipe fd this VM owns; the borrow does
+            // not outlive the call.
+            let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+            borrowed.try_clone_to_owned().map_err(|e| {
+                HypervisorError::DeviceError(format!("Failed to dup {label} read fd: {e}"))
+            })
+        };
+        let (console, _) = self
+            .console_fds
+            .ok_or_else(|| HypervisorError::DeviceError("Console not configured".to_string()))?;
+        let (agent_log, _) = self.agent_log_fds.ok_or_else(|| {
+            HypervisorError::DeviceError("Agent log port not configured".to_string())
+        })?;
+        Ok(SerialReaders {
+            console: dup(console, "console")?,
+            agent_log: dup(agent_log, "agent-log")?,
+        })
     }
 
     /// Reads available console output (hvc0) from the guest.

@@ -16,8 +16,9 @@
 //! for an ephemeral one on `127.0.0.1` and reads it back with `docker port`,
 //! per the parallel-safety contract in AGENTS.md.
 //!
-//! Covers ABX-305 (run & exit), ABX-306 (published port), ABX-308 (name
-//! resolution), ABX-309 (boot budget), CORE-67 (setup phase progression).
+//! Covers ABX-305 (run & exit), #268 (stdin EOF reaches the container),
+//! ABX-306 (published port), ABX-308 (name resolution), ABX-309 (boot
+//! budget), CORE-67 (setup phase progression).
 //!
 //! Deliberately **not** covered: **ABX-307** (L3 direct routing to a
 //! container IP via bridge100). The host route is installed by the
@@ -26,13 +27,11 @@
 //! depend on the developer's installed ArcBox having placed the route — host
 //! state, not product behavior. It needs a helper-aware harness first.
 
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use arcbox_e2e::daemon::PhaseMarks;
-use arcbox_e2e::docker::{docker_ignore, docker_output, ensure_image};
+use arcbox_e2e::docker::{docker_ignore, docker_output, docker_output_with_input, ensure_image};
 use arcbox_e2e::metrics::RunMetrics;
 use arcbox_e2e::scenario::run_vz_scenario;
 use arcbox_protocol::v1::setup_status::Phase;
@@ -42,11 +41,9 @@ const DOCKER_TIMEOUT: Duration = Duration::from_secs(60);
 /// Body the in-container httpd serves; distinctive enough that a stray proxy
 /// or a wrong-port connection cannot produce it by accident.
 const MARKER: &str = "arcbox-smoke-ok";
-/// How long to wait for busybox httpd to bind inside the container. The
+/// How long to wait for the in-container server to bind. The
 /// container is already running by then — this only covers process start.
 const HTTPD_READY: Duration = Duration::from_secs(30);
-/// Per-attempt budget for a host→container HTTP request.
-const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Default ceiling for the `VmStarting → VmReady` span (ABX-309).
 ///
 /// **A regression backstop, not the performance target.** The span is the
@@ -108,6 +105,9 @@ fn smoke_suite() -> Result<()> {
         let guard = ContainerGuard::new(data_dir, &server_name);
 
         metrics.time("container_run", || run_and_exit(data_dir, &image))?;
+        metrics.time("stdin_eof", || {
+            stdin_eof_reaches_container(data_dir, &image)
+        })?;
         let host_port = metrics.time("published_port", || {
             published_port_reaches_container(data_dir, &image, &server_name)
         })?;
@@ -213,6 +213,35 @@ fn run_and_exit(data_dir: &std::path::Path, image: &str) -> Result<()> {
     Ok(())
 }
 
+/// #268 — stdin EOF reaches the container.
+///
+/// `docker run -i` fed from a pipe: once the pipe drains the CLI half-closes
+/// the hijacked attach stream, and the container's `cat` must see EOF and
+/// exit. The vsock fd between host and guest cannot half-close on its own,
+/// so the Docker API channel carries EOF in-band (`HalfCloseStream`);
+/// without that `cat` blocks forever and the CLI never returns.
+fn stdin_eof_reaches_container(data_dir: &std::path::Path, image: &str) -> Result<()> {
+    let out = docker_output_with_input(
+        data_dir,
+        &[
+            "run",
+            "--rm",
+            "-i",
+            image,
+            "sh",
+            "-c",
+            "cat; echo stdin-closed",
+        ],
+        b"piped-stdin\n",
+        DOCKER_TIMEOUT,
+    )
+    .context("docker run -i did not return after stdin EOF (#268)")?;
+    if !out.contains("piped-stdin") || !out.contains("stdin-closed") {
+        bail!("expected the piped line and the post-EOF marker; got: {out:?}");
+    }
+    Ok(())
+}
+
 /// ABX-306 — a published port on the host reaches the container.
 ///
 /// Publishes to `127.0.0.1` on an *ephemeral* host port (`-p 127.0.0.1::80`)
@@ -249,7 +278,7 @@ fn published_port_reaches_container(
         .with_context(|| format!("parsing `docker port` output: {mapping:?}"))?;
 
     let addr = format!("127.0.0.1:{host_port}");
-    let body = http_get_with_retry(&addr, HTTPD_READY)
+    let body = arcbox_e2e::http::get_with_retry(&addr, HTTPD_READY)
         .with_context(|| format!("host could not reach the published port at {addr}"))?;
     if !body.contains(MARKER) {
         bail!("published port answered but body lacked {MARKER:?}; got: {body:?}");
@@ -287,12 +316,19 @@ fn name_resolves_from_sibling(data_dir: &std::path::Path, image: &str, target: &
     Ok(())
 }
 
-/// busybox httpd serving a single file containing [`MARKER`].
+/// A one-file HTTP server on busybox `nc`, serving [`MARKER`].
 ///
 /// Uses what alpine already ships rather than pulling nginx, so the suite
-/// needs exactly one image.
+/// needs exactly one image. `nc` rather than `httpd`: alpine 3.22 moved the
+/// `httpd` applet out of the base busybox into `busybox-extras`, and
+/// `alpine:latest` has not carried it since. Each accepted connection gets
+/// one canned response; the loop re-arms for the next.
 fn httpd_command() -> String {
-    format!("mkdir -p /www && printf '%s' '{MARKER}' > /www/index.html && httpd -f -p 80 -h /www")
+    format!(
+        "while true; do printf 'HTTP/1.1 200 OK\\r\\nContent-Length: {len}\\r\\n\
+         Connection: close\\r\\n\\r\\n{MARKER}' | nc -l -p 80; done",
+        len = MARKER.len()
+    )
 }
 
 /// Extracts the host port from `docker port <c> 80/tcp` output, e.g.
@@ -302,38 +338,6 @@ fn parse_host_port(mapping: &str) -> Option<u16> {
         .lines()
         .filter_map(|line| line.trim().rsplit_once(':'))
         .find_map(|(_, port)| port.trim().parse::<u16>().ok())
-}
-
-/// Retries [`http_get`] until `deadline` elapses — the container is running
-/// before httpd has necessarily bound.
-fn http_get_with_retry(addr: &str, grace: Duration) -> Result<String> {
-    let started = Instant::now();
-    let mut last: Option<anyhow::Error> = None;
-    while started.elapsed() < grace {
-        match http_get(addr) {
-            Ok(body) => return Ok(body),
-            Err(e) => last = Some(e),
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-    Err(last.unwrap_or_else(|| anyhow::anyhow!("no attempt was made")))
-        .with_context(|| format!("no successful response within {grace:?}"))
-}
-
-/// Minimal HTTP/1.0 GET — avoids depending on `curl` being installed on the
-/// runner, and keeps the host side dependency-free like `net_fixtures`.
-fn http_get(addr: &str) -> Result<String> {
-    let mut stream = TcpStream::connect(addr).context("connect")?;
-    stream.set_read_timeout(Some(HTTP_TIMEOUT))?;
-    stream.set_write_timeout(Some(HTTP_TIMEOUT))?;
-    stream
-        .write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .context("write request")?;
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .context("read response")?;
-    Ok(response)
 }
 
 /// Removes a container on drop so a failed assertion cannot leak it into the

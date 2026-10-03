@@ -416,18 +416,21 @@ pub fn stage_dev_boot_assets(root: &Path, data_dir: &Path, version: &str) -> Res
     // daemon's checksum check treats matching files as cached, so an
     // unreleased runtime bundle can be validated end-to-end before the CDN
     // carries it — pair with a matching dev manifest and a blanked
-    // assets.lock manifest pin.
+    // assets.lock manifest pin. The seed lands in this generation's
+    // directory, `runtime/<version>/`, which is the one the daemon reads;
+    // a copy in the unversioned `runtime/bin` shadows nothing.
     let seed_dir = dev_boot_dir.join("runtime-bin");
     if seed_dir.is_dir() {
-        let bin_dir = data_dir.join("runtime/bin");
+        let generation = data_dir.join("runtime").join(version);
+        let bin_dir = generation.join("bin");
         fs::create_dir_all(&bin_dir)?;
         for entry in fs::read_dir(&seed_dir)? {
             let entry = entry?;
             if entry.path().is_dir() {
                 // Subdirectories mirror `install_dir` binaries, which land as
                 // siblings of bin/ (e.g. runtime-bin/kernel/vmlinux →
-                // runtime/kernel/vmlinux).
-                let sibling = data_dir.join("runtime").join(entry.file_name());
+                // runtime/<version>/kernel/vmlinux).
+                let sibling = generation.join(entry.file_name());
                 fs::create_dir_all(&sibling)?;
                 for sub in fs::read_dir(entry.path())? {
                     let sub = sub?;
@@ -468,16 +471,27 @@ fn stage_runtime_binaries(data_dir: &Path, version: &str) {
     // directory, which older installs used for guest binaries too. Either
     // way the daemon checksum-verifies what it finds, so a stale file costs
     // a re-download rather than a bad boot.
-    let versioned = installed.join(version).join("bin");
-    let guest_src = if versioned.is_dir() {
-        versioned
+    let versioned = installed.join(version);
+    if versioned.is_dir() {
+        // A generation holds `bin/` plus companion assets the manifest
+        // installs elsewhere (`install_dir`), today the microVM `kernel/`.
+        // Mirror every subdirectory: a companion asset the harness leaves
+        // out is a CDN download the daemon may not be able to make.
+        let Ok(entries) = fs::read_dir(&versioned) else {
+            return;
+        };
+        let dest = data_dir.join("runtime").join(version);
+        for entry in entries.flatten() {
+            if entry.path().is_dir() {
+                stage_binary_dir(&entry.path(), &dest.join(entry.file_name()));
+            }
+        }
     } else {
-        installed.join("bin")
-    };
-    stage_binary_dir(
-        &guest_src,
-        &data_dir.join("runtime").join(version).join("bin"),
-    );
+        stage_binary_dir(
+            &installed.join("bin"),
+            &data_dir.join("runtime").join(version).join("bin"),
+        );
+    }
 }
 
 /// Copies every regular file in `src_dir` into `dest_dir`, warning per file.

@@ -51,7 +51,7 @@ pub struct PreparedSlot {
 /// partial resource before returning.
 pub(super) async fn prepare_slot(
     driver: &dyn VmDriver,
-    config: &VmmConfig,
+    config: &RuntimeConfig,
     cow_manager: &CowManager,
     snapshot: &SnapshotMeta,
 ) -> Result<PreparedSlot> {
@@ -152,9 +152,13 @@ struct StagedSlot {
     image: CheckpointImage,
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "the failure hands back the half-built sandbox's resources; boxing it is a refactor of its own"
+)]
 async fn stage_slot(
     driver: &dyn VmDriver,
-    config: &VmmConfig,
+    config: &RuntimeConfig,
     jc: &JailerConfig,
     cow_manager: &CowManager,
     snapshot: &SnapshotMeta,
@@ -172,10 +176,11 @@ async fn stage_slot(
             .map_err(VmmError::from)?,
     );
     let pid = super::journaled_pid(&*prepared);
+    let vmm = super::journaled_vmm(&*prepared);
     let journal = |cow: Option<&CowHandle>| {
         reconcile::write_state_record(
             vm_dir,
-            &SandboxStateRecord::new(slot_id, pid, None, cow, config, None)?,
+            &SandboxStateRecord::new(slot_id, pid, None, cow, config, None)?.with_vmm(vmm.clone()),
         )
     };
     let carry = |error: VmmError, prepared, cow_handle| SlotFailure {
@@ -324,7 +329,7 @@ fn spawn_slot_teardown(cow_manager: &Arc<CowManager>, slot: PreparedSlot) {
 pub fn spawn_pool_refill(
     pool: &Arc<SlotPool>,
     driver: &Arc<dyn VmDriver>,
-    config: &Arc<VmmConfig>,
+    config: &Arc<RuntimeConfig>,
     cow_manager: &Arc<CowManager>,
     snapshots: &Arc<SnapshotCatalog>,
     snapshot_id: &str,

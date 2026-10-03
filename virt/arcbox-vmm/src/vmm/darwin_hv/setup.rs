@@ -130,8 +130,8 @@ impl Vmm {
         // --- 5. Set up IRQ chip with GIC callback ---
         let irq_chip = Arc::new(IrqChip::new()?);
 
-        // Shared registry for vCPU thread handles — the IRQ callback uses
-        // this to unpark WFI-blocked vCPU threads when an interrupt fires.
+        // Shared registry for vCPU thread handles — `resume` unparks the
+        // threads `pause` parked.
         let vcpu_thread_handles: VcpuThreadHandles = Arc::new(Mutex::new(Vec::new()));
 
         // Shared registry for Hypervisor.framework vCPU IDs. Each
@@ -140,11 +140,17 @@ impl Vmm {
         // with a concrete list (arm64 requires that; see ABX-367).
         let hv_vcpu_ids: HvVcpuIds = Arc::new(Mutex::new(Vec::new()));
 
+        // Asserting the SPI is the whole wake. With the in-kernel GIC the
+        // framework parks an idle vCPU inside `hv_vcpu_run` itself
+        // (`VcpuStateManager::wait_for_interrupt`) — WFI never exits to
+        // this process — and `set_spi` signals that wait; a running vCPU
+        // takes the SPI asynchronously. The vCPU threads are never parked
+        // here except by `pause`, which `resume` unparks (measured
+        // 2026-09-30: 0 WFI exits over a full boot; kicking on top of the
+        // SPI only added latency and idle CPU).
         #[cfg(feature = "gic")]
         if let Some(ref gic_ref) = gic {
             let gic_weak = Arc::downgrade(gic_ref);
-            let threads_weak = Arc::downgrade(&vcpu_thread_handles);
-            let unpark_broadcasts = self.hv_unpark_broadcasts.clone();
             let callback: IrqTriggerCallback = Box::new(move |gsi: Gsi, level: bool| {
                 if let Some(g) = gic_weak.upgrade() {
                     g.set_spi(gsi, level).map_err(|e| {
@@ -154,23 +160,10 @@ impl Vmm {
                 } else {
                     tracing::warn!("GIC: dropped, cannot inject SPI {gsi}");
                 }
-                // Wake any WFI-parked vCPU threads so they can service the
-                // interrupt. Only unpark on assertion (level=true) to avoid
-                // spurious wakeups on de-assertion.
-                if level {
-                    if let Some(handles) = threads_weak.upgrade() {
-                        if let Ok(handles) = handles.lock() {
-                            unpark_broadcasts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            for t in handles.iter() {
-                                t.unpark();
-                            }
-                        }
-                    }
-                }
                 Ok(())
             });
             irq_chip.set_trigger_callback(Arc::new(callback));
-            tracing::debug!("IRQ callback wired to hardware GIC (with WFI unpark)");
+            tracing::debug!("IRQ callback wired to hardware GIC");
         }
 
         // --- 6. Initialize managers ---
@@ -378,18 +371,23 @@ impl Vmm {
             }
         }
 
-        // Build HVC fast-path fd table from all block devices.
+        // Build the HVC fast-path device table from all block devices.
         // device_idx 0 = first block device (vda), 1 = second (vdb), etc.
-        {
-            let fds: Vec<(i32, u32, u64)> = self
-                .hv_blk_devices
+        self.hvc_blk_fds = Arc::new(
+            self.hv_blk_devices
                 .iter()
-                .map(|(_, raw_fd, blk_size, capacity_sectors, _, _, _)| {
-                    (*raw_fd, *blk_size, *capacity_sectors)
-                })
-                .collect();
-            self.hvc_blk_fds = Arc::new(fds);
-        }
+                .map(
+                    |&(_, raw_fd, blk_size, capacity_sectors, read_only, _, _)| {
+                        super::hvc_blk::HvcBlkDevice {
+                            raw_fd,
+                            blk_size,
+                            capacity_sectors,
+                            read_only,
+                        }
+                    },
+                )
+                .collect(),
+        );
 
         // Network (TSO-enabled) with custom socket-proxy datapath.
         // Creates a SOCK_DGRAM socketpair: one end feeds the VirtioNet device
@@ -464,11 +462,14 @@ impl Vmm {
             device_manager.set_vsock(vsock_id, vsock_arc);
         }
 
-        // Memory balloon (ABX-363). Lets the host reclaim unused guest
-        // pages via `madvise(MADV_DONTNEED)` when the daemon's idle
-        // monitor signals via `set_balloon_target`.
+        // Memory balloon (ABX-363). The guest's free page reporting hands
+        // idle ranges to the device, which returns them to the host by
+        // refreshing their stage-2 mapping (`page_release`);
+        // `set_balloon_target` is the traditional inflate path on top.
         if self.config.balloon {
-            let balloon_dev = arcbox_virtio::balloon::VirtioBalloon::new();
+            let balloon_dev = arcbox_virtio::balloon::VirtioBalloon::with_releaser(Box::new(
+                page_release::Stage2Refresh,
+            ));
             let (_balloon_id, balloon_arc) = device_manager.register_virtio_device(
                 DeviceType::VirtioBalloon,
                 "virtio-balloon",

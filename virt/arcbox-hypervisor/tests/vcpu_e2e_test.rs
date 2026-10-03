@@ -244,10 +244,10 @@ mod lifecycle {
             .collect();
 
         // Wait for all vCPUs to complete
-        let mut results: Vec<_> = handles
-            .into_iter()
-            .map(|h| h.join().expect("vCPU thread panicked"))
-            .collect();
+        let mut results = Vec::with_capacity(handles.len());
+        for handle in handles {
+            results.push(handle.join().expect("vCPU thread panicked"));
+        }
 
         results.sort_by_key(|(id, _, _)| *id);
 

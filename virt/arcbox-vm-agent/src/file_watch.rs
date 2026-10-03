@@ -255,7 +255,7 @@ mod tests {
         // A header whose len field overruns the buffer is dropped.
         let mut bogus = encode(&[(1, IN_CREATE, 0, "")]);
         bogus[12..16].copy_from_slice(&u32::MAX.to_ne_bytes());
-        assert!(parse_event_buffer(&bogus).is_empty());
+        assert_eq!(parse_event_buffer(&bogus), []);
     }
 
     #[test]
@@ -319,7 +319,7 @@ mod tests {
             (1, IN_IGNORED, 0, ""),
             (99, IN_CREATE, 0, "orphan"),
         ]));
-        assert!(map_events(&batch, root_only).is_empty());
+        assert_eq!(map_events(&batch, root_only), []);
     }
 
     #[test]

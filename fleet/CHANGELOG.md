@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.1.7](https://github.com/arcboxlabs/arcbox/compare/fleet-agent-v0.1.6...fleet-agent-v0.1.7) (2026-10-03)
+
+
+### Features
+
+* **fleet-agent:** complete the host facts after the handshake instead of waiting for them ([06775e1](https://github.com/arcboxlabs/arcbox/commit/06775e1de1215c5730fe3b480697b9bda14d6a32))
+
+
+### Bug Fixes
+
+* **fleet-agent:** probe host facts off the runtime and never let them hold an attach ([963541a](https://github.com/arcboxlabs/arcbox/commit/963541a98dff267e31dcc751d28fd3a1636f14e6))
+
+
+### Tests
+
+* **fleet:** compare emptiness assertions against an empty value ([b049d30](https://github.com/arcboxlabs/arcbox/commit/b049d30c4a0632847510944c97ff61b6ce8b8e4c))
+
+## [0.1.6](https://github.com/arcboxlabs/arcbox/compare/fleet-agent-v0.1.5...fleet-agent-v0.1.6) (2026-09-28)
+
+
+### Tests
+
+* **fleet-agent:** keep the control test off the developer's arcbox-daemon ([715e1e4](https://github.com/arcboxlabs/arcbox/commit/715e1e49484a75143f4de160296b552476d1f766))
+
+## [0.1.5](https://github.com/arcboxlabs/arcbox/compare/fleet-agent-v0.1.4...fleet-agent-v0.1.5) (2026-09-11)
+
+
+### Features
+
+* **fleet-agent:** capture docker and vm runner output ([e285103](https://github.com/arcboxlabs/arcbox/commit/e28510323450e1bc7a38667b7779b33ed9ad6f52))
+* **fleet-agent:** surface job log paths ([86f22a8](https://github.com/arcboxlabs/arcbox/commit/86f22a893354a3a4532f853cb412084bf56e96f2))
+* **fleet-agent:** write each job's output to its own log file ([ed5249c](https://github.com/arcboxlabs/arcbox/commit/ed5249cf2e3026da4c9be82292716da8f2836311))
+
+
+### Bug Fixes
+
+* **ci:** finish the stable-1.98 clippy sweep the macOS job walks ([ef12b7c](https://github.com/arcboxlabs/arcbox/commit/ef12b7c5da0cb686038033992a05a6b1a9bda704))
+
 ## [0.1.4](https://github.com/arcboxlabs/arcbox/compare/fleet-agent-v0.1.3...fleet-agent-v0.1.4) (2026-08-14)
 
 

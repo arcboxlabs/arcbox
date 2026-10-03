@@ -26,7 +26,7 @@ use arcbox_vm_driver::{
 use tracing::warn;
 
 use crate::agent::{ClockSync, GuestAgent, GuestAgentFactory};
-use crate::config::{JailerConfig, VmmConfig};
+use crate::config::{JailerConfig, RuntimeConfig};
 use crate::error::{Result, VmmError};
 use crate::lifecycle::runtime::ComputerRuntime;
 use crate::sandbox;
@@ -58,7 +58,7 @@ pub struct RestoreVm<'a> {
     /// A pre-warmed slot this restore adopted (CORE-78), when the pool had
     /// one for this checkpoint.
     pub claimed: Option<PreparedSlot>,
-    pub config: &'a VmmConfig,
+    pub config: &'a RuntimeConfig,
     pub cow_manager: &'a CowManager,
     pub driver: &'a dyn VmDriver,
     pub network: &'a dyn GuestNetwork,
@@ -104,6 +104,10 @@ pub struct RestoreFailure {
 /// Every failure returns [`RestoreFailure`] rather than unwinding here: a
 /// pre-commit restore failure is rolled back by force-removing the whole
 /// reservation, which is the caller's transaction to end.
+#[allow(
+    clippy::result_large_err,
+    reason = "the failure hands back the half-built sandbox's resources; boxing it is a refactor of its own"
+)]
 pub async fn restore_vm(inputs: RestoreVm<'_>) -> std::result::Result<RestoredVm, RestoreFailure> {
     let RestoreVm {
         new_id,
@@ -154,7 +158,11 @@ pub async fn restore_vm(inputs: RestoreVm<'_>) -> std::result::Result<RestoredVm
                 config,
                 None,
             )
-            .map(|record| record.with_pool_slot(Some(&slot.slot_id)))
+            .map(|record| {
+                record
+                    .with_vmm(sandbox::journaled_vmm(&*slot.prepared))
+                    .with_pool_slot(Some(&slot.slot_id))
+            })
             .and_then(|record| sandbox::reconcile::write_state_record(vm_dir, &record));
             let PreparedSlot {
                 slot_id,
@@ -235,6 +243,7 @@ pub async fn restore_vm(inputs: RestoreVm<'_>) -> std::result::Result<RestoredVm
             };
 
             let pid = sandbox::journaled_pid(&*spawned_prepared);
+            let vmm = sandbox::journaled_vmm(&*spawned_prepared);
             let journal = |cow: Option<&CowHandle>| {
                 sandbox::reconcile::SandboxStateRecord::new(
                     new_id,
@@ -246,6 +255,7 @@ pub async fn restore_vm(inputs: RestoreVm<'_>) -> std::result::Result<RestoredVm
                     config,
                     None,
                 )
+                .map(|record| record.with_vmm(vmm.clone()))
                 .and_then(|record| sandbox::reconcile::write_state_record(vm_dir, &record))
             };
             if let Err(error) = journal(None) {
@@ -462,7 +472,11 @@ pub async fn restore_vm(inputs: RestoreVm<'_>) -> std::result::Result<RestoredVm
         config,
         None,
     )
-    .map(|record| record.with_pool_slot(adopted_slot.as_deref()))
+    .map(|record| {
+        record
+            .with_vmm(sandbox::journaled_vmm(&*prepared))
+            .with_pool_slot(adopted_slot.as_deref())
+    })
     .and_then(|record| sandbox::reconcile::write_state_record(vm_dir, &record));
     if let Err(error) = final_journal {
         return Err(RestoreFailure {

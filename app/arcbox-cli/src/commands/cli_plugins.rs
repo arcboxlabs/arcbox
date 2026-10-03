@@ -457,7 +457,7 @@ mod tests {
 
         let second = register(&user_bin, &docker_cfg).await.unwrap();
         assert!(!second.config_updated);
-        assert!(second.symlinks.is_empty());
+        assert_eq!(second.symlinks, Vec::<PathBuf>::new());
     }
 
     #[tokio::test]
@@ -518,7 +518,7 @@ mod tests {
 
         let outcome = register(&user_bin, &docker_cfg).await.unwrap();
 
-        assert!(outcome.symlinks.is_empty());
+        assert_eq!(outcome.symlinks, Vec::<PathBuf>::new());
         assert!(
             !outcome.config_updated,
             "config.json must not be mutated when no plugins are present"
@@ -632,7 +632,7 @@ mod tests {
 
         // No ~/.docker at all — must not panic or error.
         let outcome = unregister(&user_bin, &docker_cfg).await.unwrap();
-        assert!(outcome.symlinks.is_empty());
+        assert_eq!(outcome.symlinks, Vec::<PathBuf>::new());
         assert!(!outcome.config_updated);
     }
 
@@ -646,7 +646,7 @@ mod tests {
         touch_exe(&user_bin, "docker-buildx");
 
         let before = status(&user_bin, &docker_cfg).await;
-        assert!(before.symlinked.is_empty());
+        assert_eq!(before.symlinked, Vec::<String>::new());
         assert!(!before.extra_dirs_entry_present);
 
         register(&user_bin, &docker_cfg).await.unwrap();

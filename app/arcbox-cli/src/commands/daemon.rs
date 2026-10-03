@@ -46,7 +46,9 @@ pub struct DaemonArgs {
     #[arg(long)]
     pub dns_domain: Option<Domain>,
 
-    /// Host UDP port for DNS; 0 asks the OS to allocate one (default: 5553).
+    /// Host UDP port for DNS; 0 asks the OS to allocate one. Unset, the
+    /// profile's port (5553 production, 5554 development) is tried first and
+    /// an OS-allocated port is used when it is taken.
     #[arg(long)]
     pub dns_port: Option<u16>,
 
@@ -61,6 +63,10 @@ pub struct DaemonArgs {
     /// Name written into the Kubernetes kubeconfig.
     #[arg(long)]
     pub kubernetes_context: Option<String>,
+
+    /// Host loopback TCP port for the SSH server; 0 asks the OS to allocate one.
+    #[arg(long)]
+    pub ssh_port: Option<u16>,
 
     /// Private IPv4 pool used by this instance's container networks.
     #[arg(long)]
@@ -116,7 +122,8 @@ pub async fn execute(args: DaemonArgs) -> Result<()> {
 }
 
 fn exec_foreground(args: &DaemonArgs) -> Result<()> {
-    let daemon_binary = resolve_daemon_binary()?;
+    let layout = resolve_layout(args);
+    let daemon_binary = super::bundle::locate_daemon(&layout.data_dir)?;
     let daemon_args = build_daemon_args(args);
 
     #[cfg(unix)]
@@ -148,42 +155,59 @@ fn exec_foreground(args: &DaemonArgs) -> Result<()> {
 
 async fn execute_stop(args: &DaemonArgs) -> Result<()> {
     let layout = resolve_layout(args);
-    let lock_file = &layout.lock_file;
-    let grpc_socket = &layout.grpc_socket;
-
-    if !daemon_is_alive(lock_file) {
+    if !daemon_is_alive(&layout.lock_file) {
         println!("Daemon is not running");
         return Ok(());
     }
+    let pid = stop(&layout).await?;
+    println!("ArcBox daemon stopped (PID {pid})");
+    Ok(())
+}
 
-    let Some(pid) = read_lock_file(lock_file)? else {
+/// How long a graceful stop may take: the daemon's own shutdown budget
+/// (NFS unmount, service drain, VM stop) with a little slack.
+const STOP_TIMEOUT: Duration = Duration::from_secs(40);
+
+/// Stops the daemon that holds `daemon.lock` and waits until it has let go
+/// of the lock. Returns the PID it stopped.
+///
+/// The daemon is found through the lock, never by process name: a daemon
+/// started by `abctl daemon start` has no launchd label on its command line,
+/// and the daemon stops its own System VM on SIGTERM, so nothing else needs
+/// killing.
+pub(super) async fn stop(layout: &HostLayout) -> Result<i32> {
+    let Some(pid) = read_lock_file(&layout.lock_file)? else {
         bail!("Daemon is alive (lock held) but lock file has no valid PID");
     };
-
     send_sigterm(pid)?;
-    println!("Stopping ArcBox daemon (PID {pid})...");
+    await_exit(layout, pid).await?;
+    Ok(pid)
+}
 
-    let timeout_window = Duration::from_secs(40);
-    let deadline = Instant::now() + timeout_window;
-    loop {
-        let still_alive = daemon_is_alive(lock_file);
-        let grpc_socket_removed = !grpc_socket.exists();
-        if !still_alive && grpc_socket_removed {
-            println!("ArcBox daemon stopped");
-            return Ok(());
-        }
-
+/// Waits for the daemon with `pid` to release `daemon.lock`, for a stop
+/// someone else already requested (`launchctl bootout`). Sending a second
+/// SIGTERM would skip the graceful VM stop.
+///
+/// The kernel releases the flock when the process exits, so a free lock
+/// means the daemon is gone; its sockets are removed on the way out, and a
+/// socket a crashed daemon left behind is a stale file, not a running one.
+pub(super) async fn await_exit(layout: &HostLayout, pid: i32) -> Result<()> {
+    let deadline = Instant::now() + STOP_TIMEOUT;
+    while daemon_is_alive(&layout.lock_file) {
         if Instant::now() >= deadline {
             bail!(
-                "ArcBox daemon (PID {pid}) did not fully stop within {}s (lock_held={}, grpc_socket_present={})",
-                timeout_window.as_secs(),
-                still_alive,
-                !grpc_socket_removed,
+                "ArcBox daemon (PID {pid}) did not stop within {}s",
+                STOP_TIMEOUT.as_secs(),
             );
         }
-
         sleep(Duration::from_millis(100)).await;
     }
+    Ok(())
+}
+
+/// The PID recorded in `daemon.lock`, when the file holds one.
+pub(super) fn locked_pid(layout: &HostLayout) -> Result<Option<i32>> {
+    read_lock_file(&layout.lock_file)
 }
 
 async fn execute_status(args: &DaemonArgs) -> Result<()> {
@@ -276,7 +300,7 @@ fn spawn_background(args: &DaemonArgs) -> Result<()> {
         bail!("Daemon already running (PID {pid_str})");
     }
 
-    let daemon_binary = resolve_daemon_binary()?;
+    let daemon_binary = super::bundle::locate_daemon(&layout.data_dir)?;
     let daemon_args = build_daemon_args(args);
 
     // Daemon writes its own log files via tracing-appender — no fd
@@ -395,30 +419,6 @@ impl SpawnLock {
     }
 }
 
-fn resolve_daemon_binary() -> Result<PathBuf> {
-    let current_exe = std::env::current_exe().context("Failed to resolve current executable")?;
-
-    if let Some(parent) = current_exe.parent() {
-        let sibling = parent.join("arcbox-daemon");
-        if sibling.is_file() {
-            return Ok(sibling);
-        }
-    }
-
-    if let Some(path) = find_in_path("arcbox-daemon") {
-        return Ok(path);
-    }
-
-    bail!("Failed to locate `arcbox-daemon` next to `abctl` or in PATH");
-}
-
-fn find_in_path(binary: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    std::env::split_paths(&path_var)
-        .map(|entry| entry.join(binary))
-        .find(|candidate| candidate.is_file())
-}
-
 fn build_daemon_args(args: &DaemonArgs) -> Vec<OsString> {
     let mut daemon_args = Vec::new();
 
@@ -452,6 +452,10 @@ fn build_daemon_args(args: &DaemonArgs) -> Vec<OsString> {
     if let Some(context) = &args.kubernetes_context {
         daemon_args.push(OsString::from("--kubernetes-context"));
         daemon_args.push(OsString::from(context));
+    }
+    if let Some(port) = args.ssh_port {
+        daemon_args.push(OsString::from("--ssh-port"));
+        daemon_args.push(OsString::from(port.to_string()));
     }
     if let Some(network) = args.container_cidr {
         daemon_args.push(OsString::from("--container-cidr"));
@@ -587,6 +591,7 @@ mod tests {
             install_dns_resolver: true,
             kubernetes_port: Some(0),
             kubernetes_context: Some("arcbox-dev-feature".to_string()),
+            ssh_port: Some(0),
             container_cidr: Some("10.64.16.0/20".parse().unwrap()),
             profile: Some(ArcboxProfile::Development),
             kernel: None,
@@ -609,6 +614,8 @@ mod tests {
                 "0",
                 "--kubernetes-context",
                 "arcbox-dev-feature",
+                "--ssh-port",
+                "0",
                 "--container-cidr",
                 "10.64.16.0/20",
                 "--profile",

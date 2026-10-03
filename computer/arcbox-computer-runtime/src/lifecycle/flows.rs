@@ -18,7 +18,6 @@ use std::time::Duration;
 use arcbox_vm_driver::NicSpec;
 use arcbox_vm_driver::VmDriver;
 use arcbox_vm_driver::net::{GuestNetwork, NetworkLease};
-use tokio::sync::broadcast;
 
 use async_trait::async_trait;
 
@@ -27,14 +26,14 @@ use super::effect::ReleaseScope;
 use super::event::RestoreOrigin;
 use super::tasks::{CaptureSpec, ComputerTasks, Drain, TaskFailure, TaskResult};
 use crate::agent::{GuestAgent, GuestAgentFactory};
-use crate::config::VmmConfig;
+use crate::config::RuntimeConfig;
 use crate::error::{Result, VmmError};
 use crate::lifecycle::runtime::ComputerRuntime;
 use crate::sandbox::pool::SlotPool;
 use crate::sandbox::record::SandboxProvisionOutcome;
 use crate::sandbox::record::SandboxRecordStore;
 use crate::sandbox::warm::WarmPublishTicket;
-use crate::sandbox::{CheckpointInfo, NetworkAttachment, SandboxEvent, SandboxId};
+use crate::sandbox::{CheckpointInfo, NetworkAttachment, SandboxId};
 use crate::snapshot::{SnapshotCatalog, SnapshotMeta};
 use crate::snapshot_cow::CowManager;
 
@@ -51,11 +50,11 @@ pub struct ComputerServices {
     pub driver: Arc<dyn VmDriver>,
     pub network: Arc<dyn GuestNetwork>,
     pub agents: Arc<dyn GuestAgentFactory>,
-    pub config: Arc<VmmConfig>,
+    pub config: Arc<RuntimeConfig>,
     pub cow_manager: Arc<CowManager>,
     pub records: Arc<SandboxRecordStore>,
     pub snapshots: Arc<SnapshotCatalog>,
-    pub events_tx: broadcast::Sender<SandboxEvent>,
+    pub events: Arc<crate::sandbox::events::EventBus>,
     pub pool: Arc<SlotPool>,
 }
 
@@ -199,6 +198,10 @@ impl ComputerTasks for ComputerFlows {
 
     async fn release(&self, scope: ReleaseScope) -> TaskResult {
         self.release_scope(scope).await
+    }
+
+    async fn detach(&self) -> TaskResult {
+        self.detach_vm().await
     }
 
     fn adopted_agent(&self) -> Option<Arc<dyn GuestAgent>> {

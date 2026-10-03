@@ -767,14 +767,14 @@ async fn inline_dead_flag_reaps_bridge_entry() {
         .expect("conn handed to the sink");
 
     // Alive: the inline-owned entry stays.
-    assert!(bridge.poll_fast_path().is_empty());
+    assert_eq!(bridge.poll_fast_path(), Vec::<Vec<u8>>::new());
     assert_eq!(bridge.fast_path_count(), 1);
 
     // Sink owner marks the flow dead (it already emitted the FIN/RST).
     promoted
         .dead
         .store(true, std::sync::atomic::Ordering::Relaxed);
-    assert!(bridge.poll_fast_path().is_empty());
+    assert_eq!(bridge.poll_fast_path(), Vec::<Vec<u8>>::new());
     assert_eq!(
         bridge.fast_path_count(),
         0,
@@ -2813,7 +2813,7 @@ async fn inline_lost_fin_is_retransmitted() {
     bridge.try_fast_path_intercept(&ack);
     // First poll drains the ACKed data and restarts the RTO clock for the
     // still-unACKed FIN; only then can the timeout be simulated.
-    assert!(bridge.poll_fast_path().is_empty());
+    assert_eq!(bridge.poll_fast_path(), Vec::<Vec<u8>>::new());
 
     backdate_rto_clock(&mut bridge, &key);
     let frames = bridge.poll_fast_path();

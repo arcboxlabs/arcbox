@@ -9,7 +9,6 @@ use connectrpc::{
     ConnectError, RequestContext, Response, ServiceRequest, ServiceResult, ServiceStream,
 };
 use tokio_stream::StreamExt as _;
-use tokio_stream::wrappers::ReceiverStream;
 
 use super::SharedRuntime;
 use crate::ApiError;
@@ -388,7 +387,7 @@ impl pb::SandboxService for SandboxServiceImpl {
                 tracing::warn!(machine = %machine, %error, "sandbox events subscribe failed");
             })
             .map_err(ApiError::from)?;
-        let stream = ReceiverStream::new(rx).map(|r| {
+        let stream = rx.map(|r| {
             r.map(|event| WatchEventsResponse {
                 payload: Some(watch_events_response::Payload::from(event)),
                 ..Default::default()

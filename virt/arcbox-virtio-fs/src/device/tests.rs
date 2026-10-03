@@ -12,7 +12,7 @@ fn test_fs_config_default() {
     assert_eq!(config.tag, "arcbox");
     assert_eq!(config.num_queues, 1);
     assert_eq!(config.queue_size, 1024);
-    assert!(config.shared_dir.is_empty());
+    assert_eq!(config.shared_dir, "");
 }
 
 #[test]
@@ -46,7 +46,7 @@ fn test_fs_config_clone() {
 fn test_fs_new() {
     let fs = VirtioFs::new(FsConfig::default());
     assert_eq!(fs.tag(), "arcbox");
-    assert!(fs.shared_dir().is_empty());
+    assert_eq!(fs.shared_dir(), "");
 }
 
 #[test]

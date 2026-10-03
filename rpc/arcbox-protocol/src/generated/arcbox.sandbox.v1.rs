@@ -324,8 +324,10 @@ pub struct SandboxInfo {
     /// the reason).
     #[prost(message, optional, tag = "16")]
     pub failed_at: ::core::option::Option<::pbjson_types::Timestamp>,
-    /// On-disk footprint of the sandbox's retained state (checkpoint +
-    /// disk overlay). Paused sandboxes keep paying this until removed.
+    /// On-disk footprint of the sandbox's retained state, reported in
+    /// every lifecycle state: the COW disk overlay its writes grow while
+    /// running, plus the pause checkpoint while paused. Meterable —
+    /// paused sandboxes keep paying it until resumed or removed.
     #[prost(uint64, tag = "17")]
     pub storage_bytes: u64,
 }
@@ -396,7 +398,9 @@ pub struct SandboxSummary {
     /// When the sandbox reached FAILED (unset otherwise).
     #[prost(message, optional, tag = "8")]
     pub failed_at: ::core::option::Option<::pbjson_types::Timestamp>,
-    /// On-disk footprint of retained state; nonzero for paused sandboxes.
+    /// On-disk footprint of retained state, in every lifecycle state:
+    /// the COW disk overlay while running, plus the pause checkpoint
+    /// while paused. Agrees with Inspect for the same sandbox.
     #[prost(uint64, tag = "9")]
     pub storage_bytes: u64,
 }
@@ -429,6 +433,12 @@ pub mod watch_events_response {
     }
 }
 /// A sandbox lifecycle event.
+///
+/// Delivery is best-effort: a subscriber that lags loses events, and events
+/// emitted with no subscriber attached are discarded. `sequence` is what
+/// makes that loss detectable — conclusively on an unfiltered subscription
+/// only; see the field. Treat the stream as a latency optimization over
+/// polling Inspect/List, and reconcile when in doubt.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SandboxEvent {
     /// Sandbox ID.
@@ -445,6 +455,20 @@ pub struct SandboxEvent {
     #[prost(map = "string, string", tag = "4")]
     pub attributes:
         ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+    /// Monotonic sequence number: 1-based, global across all sandboxes of
+    /// the emitting daemon, and stamped before any server-side filtering.
+    /// On an unfiltered subscription sequences are contiguous in delivery
+    /// order, so a jump of more than one means events were missed (lag,
+    /// or history from before the subscription) — fall back to
+    /// Inspect/List instead of carrying stale state. On a filtered
+    /// subscription (sandbox_id or kind set) gaps are expected — events
+    /// the filter dropped consumed numbers too — so a gap is
+    /// inconclusive; contiguous sequences still prove nothing was
+    /// missed, and a sequence running backwards reveals a daemon
+    /// restart. Not persisted: a restarted daemon numbers from 1 again,
+    /// and 0 means the daemon predates sequencing.
+    #[prost(uint64, tag = "5")]
+    pub sequence: u64,
 }
 /// Request to expose a sandbox port on the host.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -669,8 +693,8 @@ pub enum IdleAction {
     /// Destroy the sandbox and release all resources (Remove semantics).
     Kill = 1,
     /// Pause: checkpoint to disk under the same ID and release the VM.
-    /// Trades RAM for disk — the sandbox reports `storage_bytes` until
-    /// resumed or removed.
+    /// Trades RAM for disk — the checkpoint joins the disk overlay in
+    /// `storage_bytes` until the sandbox is resumed or removed.
     Pause = 2,
 }
 impl IdleAction {

@@ -150,7 +150,8 @@ impl Adopt for FcDriver {
     /// Finds the VMM `record` names — the recorded pid when it is still a
     /// Firecracker, else a `/proc` scan by `--id`, `--api-sock`, or a
     /// jail root ending in `{firecracker binary name}/{id}/root` — and
-    /// rebuilds a handle over it, its exit tracked by probing. The API is
+    /// rebuilds a handle over it, in the jail the record says it is
+    /// confined to, its exit tracked by probing. The API is
     /// reconnected best-effort within [`adopt::API_TIMEOUT`]: a VMM that
     /// answers yields the full [`FcHandle`](crate::FcHandle) with its
     /// devices and paused state read back; one whose socket is missing,
@@ -160,7 +161,7 @@ impl Adopt for FcDriver {
     async fn adopt(&self, record: &VmRecord) -> Result<Option<Box<dyn VmHandle>>> {
         match discover::find(&self.config, record) {
             Some(found) => Ok(Some(
-                adopt::rebuild(&self.config, found, record, adopt::API_TIMEOUT).await?,
+                adopt::rebuild(found, record, adopt::API_TIMEOUT).await?,
             )),
             None => Ok(None),
         }
@@ -170,16 +171,26 @@ impl Adopt for FcDriver {
     /// it — the jailer's whole per-VM directory,
     /// `{chroot base}/{firecracker binary name}/{id}`, exactly as
     /// [`PreparedVm::discard`] and an adopted handle's `shutdown` remove
-    /// it. Where the jail is comes from `isolation` and this driver's own
-    /// binary path, the same two things a boot builds it from; nothing is
-    /// asked of the VMM, which is gone.
+    /// it. Nothing is asked of the VMM, which is gone.
+    ///
+    /// Where the jail is comes from the record, which names the directory
+    /// the VM's own booter made. Only a record that predates that field
+    /// falls back to `isolation` and this driver's binary path — the two
+    /// things a boot builds a jail root from, and so the right answer only
+    /// while neither has changed since (CORE-152).
     ///
     /// Firecracker run without the jailer reads host paths as they are, has
     /// no area of its own, and leaves nothing to remove.
     async fn discard_area(&self, record: &VmRecord, isolation: &IsolationSpec) -> Result<()> {
-        let layout =
-            render::VmLayout::new(&record.id, isolation, &self.config, &record.runtime_dir)?;
-        match layout.jail() {
+        let jail = match record.process.as_ref().and_then(|p| p.jail.clone()) {
+            Some(jail) => Some(jail.into()),
+            None => {
+                render::VmLayout::new(&record.id, isolation, &self.config, &record.runtime_dir)?
+                    .jail()
+                    .cloned()
+            }
+        };
+        match jail {
             Some(jail) => jail.remove().await,
             None => Ok(()),
         }
@@ -275,6 +286,50 @@ mod tests {
         assert_eq!(
             driver.id_budget(&jailed(&format!("/{}", "d".repeat(200)))),
             Some(0)
+        );
+    }
+
+    /// CORE-140's length half. The layout an ArcBox node deploys must leave
+    /// room for the ids its control plane mints, or every create fails on a
+    /// socket-connect timeout with nothing tying it back to the id.
+    ///
+    /// Measured off the constants the guest agent configures the jail with,
+    /// not off a copy of their values: a fixture holding its own copy would
+    /// keep passing while the node it claims to describe refuses every id.
+    ///
+    /// The id is spelled out because its *length* is the property under
+    /// test: the control plane's `inst_<uuid v7>` with the `_` the VMM
+    /// refuses turned into a `-`, which a bare `Uuid` is 5 bytes short of —
+    /// the gap that let a 39-byte budget look sufficient.
+    #[test]
+    fn the_deployed_jail_layout_admits_the_ids_a_node_mints() {
+        use arcbox_constants::paths::{ARCBOX_RUNTIME_BIN_DIR, JAILER_CHROOT_BASE};
+
+        const CONTROL_PLANE_ID: &str = "inst-019e409e-7546-7a3e-8b2c-1f2e3d4c5b6a";
+        assert_eq!(
+            CONTROL_PLANE_ID.len(),
+            41,
+            "the node's ids are `inst-` plus a UUID"
+        );
+
+        let deployed = FcDriver::new(FcDriverConfig::new(format!(
+            "{ARCBOX_RUNTIME_BIN_DIR}/firecracker"
+        )));
+        let budget = deployed
+            .id_budget(&IsolationSpec::Jailer {
+                uid: 0,
+                gid: 0,
+                chroot_base: JAILER_CHROOT_BASE.into(),
+                netns: None,
+                new_pid_ns: false,
+                cgroup: None,
+            })
+            .expect("a jailed layout bounds the id");
+        assert!(
+            budget >= CONTROL_PLANE_ID.len(),
+            "the deployed jail layout leaves {budget} bytes, short of the {} \
+             the node's ids need",
+            CONTROL_PLANE_ID.len()
         );
     }
 
@@ -380,6 +435,49 @@ mod tests {
         assert!(
             !dir.path().join("firecracker.log").exists(),
             "nothing was spawned"
+        );
+    }
+
+    /// The area a dead VM left is the one its own booter made, and the
+    /// record names it. Recomputing it instead — from `isolation` and this
+    /// driver's binary path — aims the removal at a directory that never
+    /// existed the moment either has changed since the boot, leaving the
+    /// real jail behind for good (CORE-152).
+    #[tokio::test]
+    async fn a_dead_vms_recorded_jail_is_removed_not_the_one_this_config_would_compute() {
+        let dir = tempfile::tempdir().unwrap();
+        // What the VM was booted under: a Firecracker that has since been
+        // renamed, so the jail sits under the *old* binary's name.
+        let recorded = dir.path().join("srv/jailer/firecracker-1.10/box");
+        std::fs::create_dir_all(recorded.join("root/run")).unwrap();
+        let record = VmRecord {
+            id: VmId::new("box").unwrap(),
+            driver: NAME.to_owned(),
+            runtime_dir: dir.path().to_path_buf(),
+            process: Some(arcbox_vm_driver::ProcessRecord {
+                pid: 4242,
+                api_socket: None,
+                jail: Some(arcbox_vm_driver::JailRecord {
+                    root: recorded.join("root"),
+                    uid: 0,
+                    gid: 0,
+                }),
+            }),
+        };
+        let isolation = IsolationSpec::Jailer {
+            uid: 0,
+            gid: 0,
+            chroot_base: dir.path().join("srv/jailer"),
+            netns: None,
+            new_pid_ns: false,
+            cgroup: None,
+        };
+
+        driver().discard_area(&record, &isolation).await.unwrap();
+
+        assert!(
+            !recorded.exists(),
+            "the jail the record named is the one that went"
         );
     }
 }

@@ -2,8 +2,9 @@
 //!
 //! R2 (interrupt-injection rebuild) and R3 (tickless WFI) of the HV
 //! campaign are "reduce exits and wakeups" work — without per-vCPU exit
-//! counts by reason and a broadcast-kick counter, neither can prove an
-//! improvement. Counters are written by each vCPU's own thread with
+//! counts by reason, neither can prove an improvement (the broadcast-kick
+//! counters they also relied on are retired, see
+//! [`VmDebugSnapshot`]). Counters are written by each vCPU's own thread with
 //! `Relaxed` stores (readers only snapshot), and each instance is
 //! cache-line aligned so adjacent vCPUs never share a line.
 
@@ -77,17 +78,19 @@ impl VcpuStats {
 }
 
 /// Full VM scheduling/debug snapshot: virtio device state plus per-vCPU
-/// exit counters and the broadcast-kick total.
+/// exit counters.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct VmDebugSnapshot {
     /// Per-device virtio queue state (see [`crate::device::DeviceDebug`]).
     pub devices: Vec<crate::device::DeviceDebug>,
     /// Per-vCPU exit counters. Empty under VZ.
     pub vcpus: Vec<VcpuStatsSnapshot>,
-    /// Times any component broadcast `hv_vcpus_exit` to ALL vCPUs (the
-    /// R2 target: replace with targeted kicks).
+    /// Retired 2026-09-30, always 0: io workers no longer broadcast
+    /// `hv_vcpus_exit` after a completion. Kept so the wire shape and
+    /// the e2e forensics mirror stay stable.
     pub kick_broadcasts: u64,
-    /// Times the IRQ callback unparked ALL vCPU threads on an SPI
-    /// assertion (the other half of the broadcast-wakeup pattern).
+    /// Retired 2026-09-30, always 0: the IRQ callback no longer unparks
+    /// vCPU threads (WFI never exits to this process with the in-kernel
+    /// GIC). Kept for the same reason as `kick_broadcasts`.
     pub unpark_broadcasts: u64,
 }

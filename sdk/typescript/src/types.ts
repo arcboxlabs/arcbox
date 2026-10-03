@@ -58,7 +58,11 @@ export interface SandboxInfo {
   idleTimeoutMs?: number;
   /** Action applied when the idle timeout expires (unset = daemon default). */
   onIdle?: IdlePolicy;
-  /** On-disk footprint of retained state; paused sandboxes keep paying this. */
+  /**
+   * On-disk footprint of retained state, in every lifecycle state: the
+   * COW disk overlay while running, plus the pause checkpoint while
+   * paused. Paused sandboxes keep paying this until resumed or removed.
+   */
   storageBytes: number;
 }
 
@@ -93,6 +97,19 @@ export interface SandboxEvent {
    * `"failed"`, `reason` on `"pausing"`/`"resumed"`.
    */
   attributes: Record<string, string>;
+  /**
+   * Monotonic sequence number: 1-based, global across all sandboxes of
+   * the emitting daemon, and stamped before the per-sandbox filter
+   * {@link Sandbox.events} subscribes with. On that stream a gap is
+   * therefore inconclusive — other sandboxes' events consumed numbers
+   * too — while contiguous sequences prove nothing for this sandbox was
+   * missed, and a sequence running backwards reveals a daemon restart.
+   * When in doubt, re-derive state from {@link Sandbox.info}. `0` means
+   * the daemon predates sequencing. Carried as a `number` (the SDK's
+   * convention for `uint64` fields): a single daemon would need ~2^53
+   * lifecycle events to reach the precision limit.
+   */
+  sequence: number;
 }
 
 /** Nested-virtualization support on this host. */
@@ -125,6 +142,10 @@ export interface SandboxSummary {
   readyAt?: Date;
   pausedAt?: Date;
   failedAt?: Date;
+  /**
+   * On-disk footprint of retained state; see {@link SandboxInfo.storageBytes},
+   * with which a listing agrees.
+   */
   storageBytes: number;
 }
 
@@ -280,6 +301,7 @@ export function sandboxEventFromProto(event: SandboxEventProto): SandboxEvent {
     sandboxId: event.sandboxId,
     kind: EVENT_KIND_NAMES[event.kind] ?? "unknown",
     attributes: event.attributes,
+    sequence: Number(event.sequence),
   };
   assignIfSet(out, "time", optionalDate(event.time));
   return out;

@@ -567,6 +567,123 @@ async fn conflicting_sandbox_cleanup_does_not_remove_the_existing_listener() {
     runtime.stop_port_forwarding_by_id("sandbox:first").await;
 }
 
+/// Whether something accepts TCP connections on `port` at loopback. A port
+/// whose listener is gone refuses; it is not re-bound here, because macOS
+/// can refuse to re-bind a port for a moment after its listener closed.
+#[cfg(target_os = "macos")]
+async fn accepting(port: u16) -> bool {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)),
+    )
+    .await
+    .is_ok_and(|connected| connected.is_ok())
+}
+
+/// A VM restart (resize, backend switch) hands the runtime a fresh listener
+/// manager. The previous incarnation's listeners must go with it: they
+/// inject into a datapath that is gone, and they hold the very host ports
+/// the same publishes rebind on the new VM.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_fresh_listener_manager_retires_the_previous_incarnations_listeners() {
+    use arcbox_net::darwin::inbound_relay::{InboundListenerManager, InboundProtocol};
+
+    let (runtime, _tmp) = networking_test_runtime();
+    let localhost = std::net::Ipv4Addr::LOCALHOST;
+
+    let (previous_tx, _previous_rx) = tokio::sync::mpsc::channel(4);
+    let mut previous = InboundListenerManager::new(previous_tx);
+    let host_port = previous
+        .add_rule(localhost, 0, 80, InboundProtocol::Tcp)
+        .await
+        .unwrap();
+    runtime
+        .adopt_inbound_listener_manager("test-machine", previous)
+        .await;
+    runtime.inbound_rules.write().await.insert(
+        "web".to_owned(),
+        (
+            "test-machine".to_owned(),
+            vec![(localhost, 0, InboundProtocol::Tcp)],
+        ),
+    );
+    assert!(accepting(host_port).await);
+
+    // The VM comes back: its new VMM hands over a manager of its own.
+    let (fresh_tx, _fresh_rx) = tokio::sync::mpsc::channel(4);
+    runtime
+        .adopt_inbound_listener_manager("test-machine", InboundListenerManager::new(fresh_tx))
+        .await;
+
+    assert!(
+        !accepting(host_port).await,
+        "the previous incarnation's listener must be gone"
+    );
+    assert!(
+        runtime.inbound_rules.read().await.is_empty(),
+        "no ownership record may outlive the listeners it describes"
+    );
+
+    // And publishing binds again, on the new VM.
+    let publish = [("127.0.0.1".to_owned(), 0u16, 80, "tcp".to_owned())];
+    runtime
+        .start_port_forwarding_for("test-machine", "web", &publish)
+        .await
+        .expect("a publish binds on the new incarnation");
+    runtime.stop_port_forwarding_by_id("web").await;
+}
+
+/// When the System VM goes down, everything its containers left on the host
+/// goes with it: listeners (which would otherwise hold their ports while
+/// injecting into a dead datapath), ownership records, DNS and aliases.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn retiring_system_vm_container_networking_drops_every_trace_of_its_containers() {
+    use arcbox_net::darwin::inbound_relay::{InboundListenerManager, InboundProtocol};
+
+    let (runtime, _tmp) = networking_test_runtime();
+    let localhost = std::net::Ipv4Addr::LOCALHOST;
+    let (commands_tx, _commands_rx) = tokio::sync::mpsc::channel(4);
+    let mut manager = InboundListenerManager::new(commands_tx);
+    let host_port = manager
+        .add_rule(localhost, 0, 80, InboundProtocol::Tcp)
+        .await
+        .unwrap();
+    runtime
+        .adopt_inbound_listener_manager(super::DEFAULT_MACHINE_NAME, manager)
+        .await;
+    runtime.inbound_rules.write().await.insert(
+        "web".to_owned(),
+        (
+            super::DEFAULT_MACHINE_NAME.to_owned(),
+            vec![(localhost, 0, InboundProtocol::Tcp)],
+        ),
+    );
+    runtime
+        .register_dns("web", &["web.local".to_owned()], localhost.into())
+        .await;
+    runtime.register_container_alias("web-name", "web").await;
+    assert!(accepting(host_port).await);
+
+    runtime.retire_system_vm_container_networking().await;
+
+    assert!(
+        !accepting(host_port).await,
+        "the listener must be gone with the VM"
+    );
+    assert!(runtime.registered_container_ids().await.is_empty());
+    assert!(runtime.inbound_rules.read().await.is_empty());
+    assert!(
+        !runtime
+            .inbound_listeners
+            .read()
+            .await
+            .contains_key(super::DEFAULT_MACHINE_NAME),
+        "the stopped VM's manager must not be reused"
+    );
+}
+
 #[test]
 fn test_runtime_new_propagates_config_vm_defaults() {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -591,23 +708,201 @@ fn test_runtime_new_propagates_config_vm_defaults() {
 }
 
 #[test]
+fn host_capacity_bounds_system_vm_sizes() {
+    let host = super::HostCapacity {
+        cpus: 8,
+        memory_mb: 16 * 1024,
+    };
+    assert!(host.check(1, 512).is_ok());
+    assert!(host.check(8, 16 * 1024).is_ok());
+    assert!(host.check(0, 4096).is_err(), "zero cpus");
+    assert!(host.check(9, 4096).is_err(), "more cpus than the host");
+    assert!(host.check(4, 511).is_err(), "below the 512 MiB floor");
+    assert!(
+        host.check(4, 16 * 1024 + 1).is_err(),
+        "more memory than the host"
+    );
+}
+
+#[test]
 fn resolve_bind_ip_defaults_and_loopback() {
     use std::net::Ipv4Addr;
+    let lan = Ipv4Addr::UNSPECIFIED;
+    let mac_only = Ipv4Addr::LOCALHOST;
     // Sandbox exposures pass "127.0.0.1" and must bind loopback only.
     assert_eq!(
-        super::resolve_bind_ip("127.0.0.1"),
+        super::resolve_bind_ip("127.0.0.1", lan),
         Some(Ipv4Addr::LOCALHOST)
     );
-    // Published container ports (empty / explicit 0.0.0.0) bind all interfaces.
-    assert_eq!(super::resolve_bind_ip(""), Some(Ipv4Addr::UNSPECIFIED));
+    // Published container ports without a particular address (empty or
+    // 0.0.0.0) follow the policy: all interfaces or loopback only.
+    for unspecified in ["", "0.0.0.0"] {
+        assert_eq!(super::resolve_bind_ip(unspecified, lan), Some(lan));
+        assert_eq!(
+            super::resolve_bind_ip(unspecified, mac_only),
+            Some(mac_only)
+        );
+    }
+    // A specific address is honored whatever the policy; garbage is rejected.
     assert_eq!(
-        super::resolve_bind_ip("0.0.0.0"),
-        Some(Ipv4Addr::UNSPECIFIED)
-    );
-    // A specific address is honored; garbage is rejected.
-    assert_eq!(
-        super::resolve_bind_ip("10.0.0.5"),
+        super::resolve_bind_ip("10.0.0.5", mac_only),
         Some(Ipv4Addr::new(10, 0, 0, 5))
     );
-    assert_eq!(super::resolve_bind_ip("not-an-ip"), None);
+    assert_eq!(super::resolve_bind_ip("not-an-ip", lan), None);
+}
+
+/// A machine's name is published under the local domain at its bridge
+/// address and owned apart from containers: the Docker reconciler must not
+/// see it as a container that stopped running, or every machine would lose
+/// its name within one reconcile interval.
+#[tokio::test]
+async fn machine_dns_is_published_under_the_local_domain_and_owned_apart_from_containers() {
+    let (runtime, _tmp) = networking_test_runtime();
+    let ip: std::net::IpAddr = "192.168.64.5".parse().unwrap();
+    runtime.register_machine_dns("dev", ip).await;
+
+    let hosts = runtime.network_manager.local_hosts_table();
+    assert_eq!(hosts.read().unwrap().get("dev"), Some(&ip));
+    assert_eq!(hosts.read().unwrap().get("dev.arcbox.local"), Some(&ip));
+    assert!(runtime.registered_container_ids().await.is_empty());
+    assert_eq!(runtime.registered_machine_dns_names().await, vec!["dev"]);
+
+    runtime.deregister_machine_dns("dev").await;
+    assert!(hosts.read().unwrap().get("dev.arcbox.local").is_none());
+    assert_eq!(
+        runtime.registered_machine_dns_names().await,
+        Vec::<String>::new()
+    );
+}
+
+/// The published name follows the daemon's DNS domain, not a literal, and
+/// uses the machine's hostname: `_` and `.` in the name become `-`.
+#[tokio::test]
+async fn machine_dns_name_follows_the_configured_domain_and_the_hostname() {
+    let (runtime, _tmp) = networking_test_runtime();
+    assert_eq!(
+        runtime.machine_dns_name("dev").as_deref(),
+        Some("dev.arcbox.local")
+    );
+    assert_eq!(
+        runtime.machine_dns_name("my_box.v2").as_deref(),
+        Some("my-box-v2.arcbox.local")
+    );
+    runtime.network_manager().set_dns_domain("test.local");
+    assert_eq!(
+        runtime.machine_dns_name("dev").as_deref(),
+        Some("dev.test.local")
+    );
+
+    let ip: std::net::IpAddr = "192.168.64.5".parse().unwrap();
+    runtime.register_machine_dns("my_box.v2", ip).await;
+    let hosts = runtime.network_manager.local_hosts_table();
+    assert_eq!(hosts.read().unwrap().get("my-box-v2.test.local"), Some(&ip));
+    assert_eq!(
+        runtime.registered_machine_dns_names().await,
+        vec!["my_box.v2"]
+    );
+}
+
+/// Machines created before `create` refused hostname collisions can still
+/// share a label; the registration must notice the other holder so the
+/// override is logged rather than silent. Containers using the same label
+/// are not machines and do not count.
+#[tokio::test]
+async fn a_machine_sharing_a_hostname_with_another_machine_is_detected() {
+    let (runtime, _tmp) = networking_test_runtime();
+    let ip: std::net::IpAddr = "192.168.64.5".parse().unwrap();
+    runtime.register_machine_dns("my_box", ip).await;
+    runtime.register_dns("c0ffee", &["my-box".into()], ip).await;
+
+    assert_eq!(
+        runtime.machine_holding_hostname("my-box", "my-box").await,
+        Some("my_box".to_owned())
+    );
+    assert_eq!(
+        runtime.machine_holding_hostname("my_box", "my-box").await,
+        None
+    );
+    assert_eq!(
+        runtime.machine_holding_hostname("other", "other").await,
+        None
+    );
+}
+
+#[tokio::test]
+async fn the_default_machine_must_exist_and_lands_in_the_config_file() {
+    let (runtime, temp_dir) = networking_test_runtime();
+    let config = temp_dir.path().join("config.toml");
+    assert_eq!(runtime.default_machine(), None);
+
+    let missing = runtime
+        .store_default_machine(&config, Some("dev"))
+        .unwrap_err();
+    assert!(missing.to_string().contains("dev"), "{missing}");
+    assert!(!config.exists());
+
+    runtime
+        .machine_manager()
+        .create(crate::machine::MachineConfig {
+            name: "dev".to_owned(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    runtime.store_default_machine(&config, Some("dev")).unwrap();
+    assert_eq!(runtime.default_machine().as_deref(), Some("dev"));
+    let written = std::fs::read_to_string(&config).unwrap();
+    assert!(written.contains("default_machine = \"dev\""), "{written}");
+
+    runtime.store_default_machine(&config, None).unwrap();
+    assert_eq!(runtime.default_machine(), None);
+    assert!(
+        !std::fs::read_to_string(&config)
+            .unwrap()
+            .contains("default_machine")
+    );
+}
+
+#[tokio::test]
+async fn machine_resources_are_checked_against_the_host() {
+    let (runtime, _temp_dir) = networking_test_runtime();
+    runtime
+        .machine_manager()
+        .create(crate::machine::MachineConfig {
+            name: "dev".to_owned(),
+            cpus: 1,
+            memory_mb: 1024,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let resources = runtime.set_machine_resources("dev", 0, 2048).unwrap();
+    assert_eq!((resources.cpus, resources.memory_mb), (1, 2048));
+    assert!(!resources.restart_required);
+    assert_eq!(resources.host, super::HostCapacity::probe());
+    assert_eq!(
+        runtime.machine_manager().get("dev").unwrap().memory_mb,
+        2048
+    );
+
+    let too_many = runtime
+        .set_machine_resources("dev", resources.host.cpus + 1, 0)
+        .unwrap_err();
+    assert!(too_many.to_string().contains("cpus must be"), "{too_many}");
+    let too_little = runtime.set_machine_resources("dev", 0, 256).unwrap_err();
+    assert!(
+        too_little.to_string().contains("memory_mb must be"),
+        "{too_little}"
+    );
+    assert_eq!(runtime.machine_manager().get("dev").unwrap().cpus, 1);
+
+    let system_vm = runtime
+        .set_machine_resources(super::DEFAULT_MACHINE_NAME, 2, 0)
+        .unwrap_err();
+    assert!(
+        system_vm.to_string().contains("abctl system resources"),
+        "{system_vm}"
+    );
+    assert!(runtime.set_machine_resources("nope", 1, 0).is_err());
 }

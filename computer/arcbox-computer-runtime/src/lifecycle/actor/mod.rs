@@ -39,7 +39,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use statig::blocking::IntoStateMachineExt;
-use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::debug;
 use uuid::Uuid;
@@ -75,6 +75,18 @@ mod inflight;
 /// before giving up and retrying. Until that signal the task owns resources
 /// the computer does not, so aborting it would strand them.
 const HANDOFF_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the handover's port call may take before it is treated as a failed
+/// handover.
+///
+/// [`Effect::Detach`] is the one port call awaited on the actor task itself, so
+/// this bound is what keeps "releasing ownership has no wait in it" a property
+/// of this crate rather than a promise made about a driver two crates away.
+/// Today's is an atomic store and a oneshot send; one that ever did real work —
+/// an fsync'd adoption record, a remote control plane — would otherwise stall
+/// the command loop unpreemptibly, and every computer behind this one in a
+/// handover pass with it. A timeout leaves the computer exactly where a refused
+/// handover does: ours, usable, and dying with this process.
+const DETACH_TIMEOUT: Duration = Duration::from_secs(5);
 /// Backoff bounds for a teardown that could not take the handoff. Mirrors
 /// `cleanup::TTL_REMOVE_RETRY_*`; PR-F2 puts them on the injected `Clock`.
 const RETRY_INITIAL: Duration = Duration::from_millis(250);
@@ -167,6 +179,13 @@ pub enum Command {
         force: bool,
         reply: Reply,
     },
+    /// Give the VM up without stopping it, so the next process can adopt it
+    /// (`detach_all`, on graceful shutdown). A terminal transition like the two
+    /// above, and here for the same reason: it is the actor that serializes
+    /// them, so a handover cannot race the stop of the same computer.
+    Detach {
+        reply: Reply,
+    },
     /// Take the single-workload slot.
     ClaimWorkload {
         claim: WorkloadClaim,
@@ -241,6 +260,14 @@ pub struct ComputerSnapshot {
     pub last_exit_status: Option<ExitStatus>,
     pub paused_at: Option<DateTime<Utc>>,
     pub pause_snapshot_id: Option<String>,
+    /// The live dm-snapshot overlay file, while the computer holds one.
+    ///
+    /// Carried on the snapshot because storage accounting must read it
+    /// lock-free: a computer that adopted a pre-warmed slot (CORE-78) keeps
+    /// its overlay under the slot's name until pause renames it, so the
+    /// path cannot be derived from the sandbox id alone. `None` in copy
+    /// mode and once pause has detached the overlay.
+    pub cow_file: Option<PathBuf>,
     pub deadlines: Deadlines,
 }
 
@@ -266,6 +293,10 @@ impl ComputerSnapshot {
             last_exit_status: runtime.last_exit_status,
             paused_at: runtime.paused_at,
             pause_snapshot_id: runtime.pause_snapshot_id.clone(),
+            cow_file: runtime
+                .cow_handle
+                .as_ref()
+                .map(|handle| handle.cow_file.clone()),
             deadlines,
         }
     }
@@ -368,7 +399,7 @@ pub struct ComputerActor {
     generation: Option<Uuid>,
     vm_dir: PathBuf,
     records: Arc<SandboxRecordStore>,
-    events_tx: broadcast::Sender<SandboxEvent>,
+    events: Arc<crate::sandbox::events::EventBus>,
     tasks: Arc<dyn ComputerTasks>,
     seeded: Seeded,
     commands: mpsc::UnboundedReceiver<Command>,
@@ -458,7 +489,7 @@ pub struct ComputerSeed {
     pub generation: Option<Uuid>,
     pub vm_dir: PathBuf,
     pub records: Arc<SandboxRecordStore>,
-    pub events_tx: broadcast::Sender<SandboxEvent>,
+    pub events: Arc<crate::sandbox::events::EventBus>,
     pub tasks: Arc<dyn ComputerTasks>,
     pub deadlines: Deadlines,
     pub timers_enabled: watch::Receiver<bool>,
@@ -479,7 +510,7 @@ impl ComputerActor {
             generation: seed.generation,
             vm_dir: seed.vm_dir,
             records: seed.records,
-            events_tx: seed.events_tx,
+            events: seed.events,
             tasks: seed.tasks,
             seeded: seed.seeded,
             commands,

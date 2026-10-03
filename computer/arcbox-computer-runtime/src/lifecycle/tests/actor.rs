@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use crate::agent::{GuestAgent, GuestAgentFactory};
-use crate::config::VmmConfig;
+use crate::config::RuntimeConfig;
 use crate::error::{Result, VmmError};
 use crate::lifecycle::actor::{
     Command, ComputerActor, ComputerSeed, ComputerSnapshot, Deadlines, Seeded, WorkloadOutcome,
@@ -74,6 +74,14 @@ struct Script {
     gate_takes: Mutex<Option<Duration>>,
     /// Whether a boot that never handed off got to finish its own teardown.
     cleanup_finished: AtomicBool,
+    /// The handover the driver refuses: the computer must stay where it was.
+    detach_fails: AtomicBool,
+    /// How long the stop holds the computer in `stopping`, which is how a test
+    /// observes something arriving while a teardown is in flight.
+    stop_takes: Mutex<Option<Duration>>,
+    /// How long the handover's port call takes, which is how a test observes
+    /// the snapshot during the one await that transfers ownership.
+    detach_takes: Mutex<Option<Duration>>,
 }
 
 impl Script {
@@ -90,6 +98,9 @@ impl Script {
             release_takes: Mutex::new(None),
             gate_takes: Mutex::new(None),
             cleanup_finished: AtomicBool::new(false),
+            detach_fails: AtomicBool::new(false),
+            stop_takes: Mutex::new(None),
+            detach_takes: Mutex::new(None),
         })
     }
 
@@ -194,6 +205,24 @@ impl ComputerTasks for Script {
 
     async fn stop(&self, _budget: Duration, _drain: Drain) -> TaskResult {
         self.record("stop");
+        let takes = *self.stop_takes.lock().unwrap();
+        if let Some(takes) = takes {
+            tokio::time::sleep(takes).await;
+        }
+        Ok(())
+    }
+
+    async fn detach(&self) -> TaskResult {
+        self.record("detach");
+        let takes = *self.detach_takes.lock().unwrap();
+        if let Some(takes) = takes {
+            tokio::time::sleep(takes).await;
+        }
+        if self.detach_fails.load(Ordering::SeqCst) {
+            return Err(TaskFailure::recoverable(VmmError::Process(
+                "the vmm would not be handed over".into(),
+            )));
+        }
         Ok(())
     }
 
@@ -250,7 +279,8 @@ impl Harness {
     async fn started(boot: Boot, deadlines: Deadlines, journal: bool, record: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let script = Script::new(boot, agent().await);
-        let (events_tx, events) = broadcast::channel(64);
+        let events_tx = Arc::new(crate::sandbox::events::EventBus::new(64));
+        let events = events_tx.subscribe();
         let (commands, commands_rx) = mpsc::unbounded_channel();
         let runtime = Arc::new(Mutex::new(ComputerRuntime::new(
             "box".to_owned(),
@@ -265,7 +295,7 @@ impl Harness {
         ));
         let (timers, timers_enabled) = watch::channel(true);
         if journal {
-            let config = VmmConfig::default();
+            let config = RuntimeConfig::default();
             let record = SandboxStateRecord::new("box", None, None, None, &config, None).unwrap();
             write_state_record(dir.path(), &record).unwrap();
         }
@@ -299,7 +329,7 @@ impl Harness {
             generation,
             vm_dir: dir.path().to_path_buf(),
             records,
-            events_tx,
+            events: events_tx,
             tasks: Arc::clone(&script) as Arc<dyn ComputerTasks>,
             deadlines,
             timers_enabled,
@@ -1138,7 +1168,7 @@ async fn a_refused_failure_write_still_releases_and_keeps_the_journal() {
     let mut harness = Harness::recorded(Boot::Completes, no_deadlines()).await;
     harness.boot_to_ready().await;
     let journal =
-        SandboxStateRecord::new("box", None, None, None, &VmmConfig::default(), None).unwrap();
+        SandboxStateRecord::new("box", None, None, None, &RuntimeConfig::default(), None).unwrap();
     write_state_record(harness.dir.path(), &journal).unwrap();
 
     let record_path = harness.dir.path().join("sandbox-records").join("box.json");
@@ -1157,4 +1187,468 @@ async fn a_refused_failure_write_still_releases_and_keeps_the_journal() {
         harness.has_journal(),
         "and the journal stays: nothing proved the failure durable"
     );
+}
+
+/// A handover ordered while a stop is in flight is refused (CORE-145).
+///
+/// This is the race the ticket is about: an in-flight `StopSandbox` is the
+/// main reason a composer's drain budget expires, so the trigger for
+/// `detach_all` and the concurrent writer it would race are the same event.
+/// The stop wins because it was asked for first — the guest is meant to go
+/// away — and the actor is what makes that a decision rather than a race.
+#[tokio::test(start_paused = true)]
+async fn a_handover_ordered_during_a_stop_is_refused() {
+    let mut harness = Harness::start(Boot::Completes, no_deadlines()).await;
+    harness.boot_to_ready().await;
+    *harness.script.stop_takes.lock().unwrap() = Some(Duration::from_secs(30));
+
+    let stopping = harness.send(|reply| Command::Stop {
+        budget: Duration::from_secs(60),
+        reply,
+    });
+    harness.settled(SandboxState::Stopping).await;
+
+    let error = harness
+        .send(|reply| Command::Detach { reply })
+        .error()
+        .await;
+    assert!(
+        matches!(error, VmmError::WrongState { .. }),
+        "a handover during a teardown must be refused, not raced: {error}"
+    );
+    assert!(
+        !harness.script.calls().contains(&"detach"),
+        "the port was reached anyway: {:?}",
+        harness.script.calls()
+    );
+
+    // And the stop it stood aside for still finishes.
+    tokio::time::sleep(Duration::from_secs(31)).await;
+    stopping.ok().await;
+}
+
+/// Nothing reaches a VM this process has handed over.
+///
+/// Without the terminal state a stop landing here would drive
+/// `handle.shutdown` into a handle whose reaper has stood down, wait out the
+/// whole budget for an exit that is never published, and then SIGKILL the VM
+/// the successor is adopting.
+#[tokio::test(start_paused = true)]
+async fn a_teardown_after_a_handover_never_reaches_the_vm() {
+    let mut harness = Harness::start(Boot::Completes, no_deadlines()).await;
+    harness.boot_to_ready().await;
+    harness.send(|reply| Command::Detach { reply }).ok().await;
+    assert!(harness.script.calls().contains(&"detach"));
+
+    let stop = harness
+        .send(|reply| Command::Stop {
+            budget: Duration::from_secs(1),
+            reply,
+        })
+        .error()
+        .await;
+    assert!(
+        matches!(stop, VmmError::WrongState { .. }),
+        "a stop after a handover must be refused: {stop}"
+    );
+    let removed = harness
+        .send(|reply| Command::Remove { force: true, reply })
+        .error()
+        .await;
+    assert!(
+        matches!(removed, VmmError::WrongState { .. }),
+        "a forced remove after a handover must be refused: {removed}"
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let calls = harness.script.calls();
+    assert!(
+        !calls.contains(&"stop") && !calls.contains(&"release"),
+        "a handed-over vm was torn down anyway: {calls:?}"
+    );
+    // A second handover is a no-op rather than an error: `detach_all` fans out
+    // over whatever is in the map, and reporting a failure for a computer that
+    // is already the successor's would have a composer log a loss it did not
+    // take.
+    harness.send(|reply| Command::Detach { reply }).ok().await;
+}
+
+/// A handover the driver refuses leaves a computer that is still ours.
+///
+/// It dies with this process, which is what a failed handover has always
+/// meant — but it must not be recorded `Failed` on the way out, because the
+/// successor's sweep reads that record and would reinstate a perfectly good
+/// guest as failed instead of adopting it.
+#[tokio::test(start_paused = true)]
+async fn a_refused_handover_leaves_the_computer_usable() {
+    let mut harness = Harness::start(Boot::Completes, no_deadlines()).await;
+    harness.boot_to_ready().await;
+    harness.script.detach_fails.store(true, Ordering::SeqCst);
+
+    let error = harness
+        .send(|reply| Command::Detach { reply })
+        .error()
+        .await;
+    assert!(
+        error.to_string().contains("would not be handed over"),
+        "{error}"
+    );
+    assert_eq!(
+        harness.snapshot.borrow().state,
+        SandboxState::Ready,
+        "a refused handover moved the computer"
+    );
+    // Usable includes dialable. The agent comes off the snapshot before the
+    // port call, so a handover that then fails has to put it back — nothing
+    // changed hands, and the data plane must not lose a guest to a handover
+    // that did not happen.
+    assert!(
+        harness.snapshot.borrow().agent.is_some(),
+        "a refused handover left the computer undialable"
+    );
+
+    // Still this process's to stop, and the stop still runs.
+    harness
+        .send(|reply| Command::Stop {
+            budget: Duration::from_secs(1),
+            reply,
+        })
+        .ok()
+        .await;
+    assert!(harness.script.calls().contains(&"stop"));
+}
+
+/// A handover drops the guest agent, so the data plane stops reaching a VM
+/// this process no longer owns.
+///
+/// The exec and file verbs read the agent straight off the snapshot and never
+/// round-trip the mailbox — that is the whole point of the seam — so the
+/// terminal state alone cannot stop them. `detached` projects `Ready`, which
+/// is exactly what `require_alive_agent` admits, so without this an exec would
+/// keep landing in a guest the successor had adopted. A stop and a release
+/// forget the agent for the same reason.
+#[tokio::test(start_paused = true)]
+async fn a_handover_takes_the_guest_agent_off_the_snapshot() {
+    let mut harness = Harness::start(Boot::Completes, no_deadlines()).await;
+    harness.boot_to_ready().await;
+    assert!(
+        harness.snapshot.borrow().agent.is_some(),
+        "a ready computer is dialable"
+    );
+
+    harness.send(|reply| Command::Detach { reply }).ok().await;
+    assert!(
+        harness.snapshot.borrow().agent.is_none(),
+        "the data plane can still reach a handed-over guest"
+    );
+}
+
+/// A handed-over computer refuses `SetLifecycle`.
+///
+/// It projects `Ready`, so the public-state gate lets it through, and what it
+/// would reach is not a timer but the record: `persist_lifecycle` fsyncs into
+/// the record the successor has already adopted, under the generation it
+/// adopted with — so the write is accepted rather than fenced. The same race
+/// this transition exists to close, moved from the guest to its record.
+#[tokio::test(start_paused = true)]
+async fn a_handed_over_computer_refuses_a_lifecycle_update() {
+    let mut harness = Harness::recorded(Boot::Completes, no_deadlines()).await;
+    harness.boot_to_ready().await;
+    harness.send(|reply| Command::Detach { reply }).ok().await;
+
+    let error = harness
+        .send(|reply| Command::SetLifecycle {
+            update: LifecycleUpdate {
+                ttl_seconds: Some(60),
+                ..LifecycleUpdate::default()
+            },
+            reply,
+        })
+        .error()
+        .await;
+    assert!(
+        matches!(error, VmmError::WrongState { .. }),
+        "a handed-over record was written: {error}"
+    );
+}
+
+/// A handover ordered while a capture is in flight is refused.
+///
+/// The capture sub-task cloned the handle before it started and the driver's
+/// detach only stands the reaper down, so accepting would leave this process
+/// freezing, snapshotting and resuming a guest the successor had adopted.
+#[tokio::test(start_paused = true)]
+async fn a_handover_during_a_capture_is_refused() {
+    let mut harness = Harness::start(Boot::Completes, no_deadlines()).await;
+    harness.boot_to_ready().await;
+    *harness.script.checkpoint_takes.lock().unwrap() = Some(Duration::from_secs(30));
+
+    let (reply, capture) = oneshot::channel();
+    harness
+        .commands
+        .send(Command::Checkpoint {
+            spec: CaptureSpec {
+                name: "snap".to_owned(),
+                labels: std::collections::HashMap::new(),
+            },
+            reply,
+        })
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let error = harness
+        .send(|reply| Command::Detach { reply })
+        .error()
+        .await;
+    let VmmError::WrongState {
+        expected, actual, ..
+    } = &error
+    else {
+        panic!("a handover during a capture must be refused: {error}");
+    };
+    // `wrong_state` reads `actual` off the public projection, and a capture
+    // projects `Ready` — so an expected side phrased as a state list would say
+    // "expected Ready or Running, actual Ready" and contradict itself. This is
+    // the string `detach_all` folds into the failure someone diagnoses a lost
+    // handover from, so it has to stay legible.
+    let actual_word = actual.to_lowercase();
+    assert!(
+        !expected
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|word| word == actual_word),
+        "the refusal names the state it is refusing: expected {expected}, actual {actual}"
+    );
+    assert!(
+        !harness.script.calls().contains(&"detach"),
+        "the port was reached while a capture held the handle: {:?}",
+        harness.script.calls()
+    );
+
+    // The capture it stood aside for still owns the guest and still answers.
+    tokio::time::sleep(Duration::from_secs(31)).await;
+    capture.await.unwrap().unwrap();
+}
+
+/// The agent comes off the snapshot *before* the port call, not after.
+///
+/// Detach is the one flow whose ownership transfer happens inside an await, so
+/// forgetting afterwards leaves the whole call open for a reader to take the
+/// agent out of the snapshot and dial a VM that has already changed hands. It
+/// does not close the race — a reader holding an `Arc` cloned a moment earlier
+/// still has a working agent, and revoking that would mean routing the data
+/// plane through the mailbox — but it bounds the exposure to callers already
+/// in flight rather than every caller for the duration of the handover.
+#[tokio::test(start_paused = true)]
+async fn the_agent_is_gone_before_the_handover_reaches_the_driver() {
+    let mut harness = Harness::start(Boot::Completes, no_deadlines()).await;
+    harness.boot_to_ready().await;
+    // Slow enough to observe the window, inside `DETACH_TIMEOUT` so the
+    // handover still lands.
+    *harness.script.detach_takes.lock().unwrap() = Some(Duration::from_secs(2));
+
+    let detaching = harness.send(|reply| Command::Detach { reply });
+    // Far enough in for the effect to have reached the port call and parked
+    // there, and nowhere near its completion.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        harness.script.calls().last().copied(),
+        Some("detach"),
+        "the port call has not started yet"
+    );
+    assert!(
+        harness.snapshot.borrow().agent.is_none(),
+        "the data plane could still dial a vm that is changing hands"
+    );
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    detaching.ok().await;
+}
+
+/// A handover answers for itself, not for whatever an earlier flow left behind.
+///
+/// A flow that ends with nobody parked leaves its failure in `answer_error` for
+/// the next caller to hear, and `answer` folds that into whichever reply it
+/// reaches next. Reached by a handover, it reports a guest lost that was in
+/// fact handed over — and unretryably, since the state is terminal by then and
+/// the retry answers `Ok`, contradicting the first answer. A composer told that
+/// logs a loss it did not take, on the one pass whose whole output is the list
+/// of guests it could not save.
+#[tokio::test(start_paused = true)]
+async fn a_handover_is_not_answered_by_an_earlier_flows_failure() {
+    let mut harness = Harness::recorded(
+        Boot::Completes,
+        Deadlines {
+            ttl: None,
+            idle_timeout_seconds: 2,
+            on_idle: IdleAction::Pause,
+        },
+    )
+    .await;
+    harness.boot_to_ready().await;
+
+    // A record at `Starting` refuses `Pausing` (not a durable edge) and admits
+    // the `Ready` the failed pause reverts to — so the idle pause below fails
+    // its write with no caller parked to hear it, and the computer comes back
+    // usable with that failure still owed to someone.
+    let record_path = harness.dir.path().join("sandbox-records").join("box.json");
+    let mut record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&record_path).unwrap()).unwrap();
+    assert_eq!(record["phase"], "ready");
+    record["phase"] = serde_json::Value::String("starting".to_owned());
+    std::fs::write(&record_path, serde_json::to_string(&record).unwrap()).unwrap();
+
+    // Past the idle window: the pause fires, its `Pausing` write is refused,
+    // and the computer reverts to a usable `Ready`.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        !harness.script.calls().contains(&"checkpoint"),
+        "the pause the refused write was recording must not have run"
+    );
+    assert_eq!(harness.snapshot.borrow().state, SandboxState::Ready);
+
+    harness.send(|reply| Command::Detach { reply }).ok().await;
+    assert!(
+        harness.script.calls().contains(&"detach"),
+        "the handover did not reach the driver"
+    );
+    assert_eq!(harness.snapshot.borrow().state, SandboxState::Ready);
+}
+
+/// A port call that does not return is a failed handover, not a wedged actor.
+///
+/// This is the only port call awaited on the actor task itself, so the bound is
+/// what keeps the "releasing ownership has no wait in it" premise inside this
+/// crate: a driver that hung here would otherwise hold the command loop
+/// unpreemptibly, and with it every computer queued behind this one in a
+/// handover pass. The outcome is the refusal's — the computer stays ours,
+/// dialable, and stoppable.
+#[tokio::test(start_paused = true)]
+async fn a_handover_that_does_not_return_fails_the_handover_alone() {
+    let mut harness = Harness::start(Boot::Completes, no_deadlines()).await;
+    harness.boot_to_ready().await;
+    *harness.script.detach_takes.lock().unwrap() = Some(Duration::from_secs(600));
+
+    let error = harness
+        .send(|reply| Command::Detach { reply })
+        .error()
+        .await;
+    assert!(error.to_string().contains("did not finish"), "{error}");
+    assert_eq!(
+        harness.snapshot.borrow().state,
+        SandboxState::Ready,
+        "a handover that timed out moved the computer"
+    );
+    assert!(
+        harness.snapshot.borrow().agent.is_some(),
+        "a handover that timed out left the computer undialable"
+    );
+
+    // And the actor is still serving: the stall cost this computer its
+    // handover, not the mailbox.
+    harness
+        .send(|reply| Command::Stop {
+            budget: Duration::from_secs(1),
+            reply,
+        })
+        .ok()
+        .await;
+    assert!(harness.script.calls().contains(&"stop"));
+}
+
+/// A handed-over computer answers nothing but another handover.
+///
+/// The per-command version of this guard only ever covered the command whose
+/// bug was noticed. `detached` projects `Ready` — the wire has no variant for
+/// "the successor's" — so every gate reading the public state is blind to it:
+/// `Resume` read `Ready`, matched its live-computer arm, and answered `Ok` for
+/// a computer this process no longer owned. This walks the reply-bearing
+/// surface so a command added later cannot quietly inherit that.
+#[tokio::test(start_paused = true)]
+async fn a_handed_over_computer_answers_nothing_but_another_handover() {
+    async fn refused(waiter: Waiter, verb: &str) {
+        let error = waiter.error().await;
+        assert!(
+            matches!(error, VmmError::WrongState { .. }),
+            "{verb} was accepted by a handed-over computer: {error}"
+        );
+    }
+
+    let mut harness = Harness::recorded(Boot::Completes, no_deadlines()).await;
+    harness.boot_to_ready().await;
+    harness.send(|reply| Command::Detach { reply }).ok().await;
+
+    refused(
+        harness.send(|reply| Command::Resume {
+            reason: "test".to_owned(),
+            reply,
+        }),
+        "resume",
+    )
+    .await;
+    refused(
+        harness.send(|reply| Command::Pause {
+            reason: PauseReason::Requested,
+            reply,
+        }),
+        "pause",
+    )
+    .await;
+    refused(
+        harness.send(|reply| Command::ClaimWorkload {
+            claim: WorkloadClaim::Api,
+            reply,
+        }),
+        "claim",
+    )
+    .await;
+    refused(
+        harness.send(|reply| Command::SetLifecycle {
+            update: LifecycleUpdate {
+                ttl_seconds: Some(60),
+                ..LifecycleUpdate::default()
+            },
+            reply,
+        }),
+        "set-lifecycle",
+    )
+    .await;
+    refused(
+        harness.send(|reply| Command::Stop {
+            budget: Duration::from_secs(1),
+            reply,
+        }),
+        "stop",
+    )
+    .await;
+    refused(
+        harness.send(|reply| Command::Remove { force: true, reply }),
+        "remove",
+    )
+    .await;
+
+    // The capture surface too, which carries its own reply type.
+    let (reply, capture) = oneshot::channel();
+    harness
+        .commands
+        .send(Command::Checkpoint {
+            spec: CaptureSpec {
+                name: "snap".to_owned(),
+                labels: std::collections::HashMap::new(),
+            },
+            reply,
+        })
+        .unwrap();
+    assert!(matches!(
+        capture.await.unwrap().unwrap_err(),
+        VmmError::WrongState { .. }
+    ));
+
+    // Nothing reached the guest, and a second handover is still the idempotent
+    // no-op `detach_all` needs it to be.
+    let calls = harness.script.calls();
+    assert!(
+        !calls.contains(&"stop") && !calls.contains(&"release") && !calls.contains(&"checkpoint"),
+        "a handed-over vm was driven anyway: {calls:?}"
+    );
+    harness.send(|reply| Command::Detach { reply }).ok().await;
 }

@@ -40,6 +40,7 @@ fn main() {
             None
         },
         enable_rosetta: false,
+        nested_virt: false,
         serial_console: true,
         virtio_console: true,
         shared_dirs: Vec::new(),

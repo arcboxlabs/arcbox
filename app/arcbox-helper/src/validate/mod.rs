@@ -264,12 +264,14 @@ mod tests {
     }
 
     #[test]
-    fn cli_target_allows_nested_app_structure() {
-        assert!(
-            "/Users/evil/not-really.app/Contents/MacOS/xbin/nested.app/Contents/MacOS/xbin/docker"
-                .parse::<CliTarget>()
-                .is_ok()
-        );
+    fn cli_target_rejects_foreign_bundles_with_the_xbin_layout() {
+        for target in [
+            "/Applications/OrbStack.app/Contents/MacOS/xbin/docker",
+            "/Users/evil/not-really.app/Contents/MacOS/xbin/nested.app/Contents/MacOS/xbin/docker",
+        ] {
+            let err = target.parse::<CliTarget>().unwrap_err();
+            assert!(err.contains("ArcBox app bundle"), "{target}: {err}");
+        }
     }
 
     #[test]
@@ -297,6 +299,7 @@ mod tests {
             "/usr/local/bin/docker",
             "/Applications/ArcBox.app/Contents/MacOS/xbin/../../evil",
             "/tmp/evil.app/Contents/MacOS/xbin/docker",
+            "/Applications/OrbStack.app/Contents/MacOS/xbin/docker",
         ];
         for p in paths {
             assert!(

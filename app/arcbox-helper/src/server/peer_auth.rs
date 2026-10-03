@@ -231,7 +231,7 @@ mod tests {
                 "unexpected allow-listed identifier: {id}"
             );
         }
-        assert!(!super::ALLOWED_IDENTIFIERS.is_empty());
+        assert_ne!(super::ALLOWED_IDENTIFIERS, [] as [&str; 0]);
         assert_eq!(super::TEAM_ID, "422ACSY6Y5");
     }
 

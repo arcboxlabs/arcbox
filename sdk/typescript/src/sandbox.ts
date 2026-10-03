@@ -726,7 +726,8 @@ export class Sandbox {
    * Checkpoint the sandbox to disk under the same id and release its
    * runtime resources. Resume happens on the next {@link Sandbox.connect}
    * (or transparently, daemon-side, on the next data-plane call). Trades
-   * RAM for disk: a paused sandbox keeps paying `storageBytes`. Requires
+   * RAM for disk: the checkpoint joins the disk overlay in
+   * `storageBytes` until the sandbox is resumed or removed. Requires
    * a quiescent sandbox (READY — no running command).
    */
   async pause(): Promise<void> {
@@ -805,6 +806,14 @@ export class Sandbox {
    * loop cancels the subscription. A transport drop mid-stream is
    * surfaced as {@link ConnectionLostError} — re-subscribing is the
    * caller's decision, since missed events cannot be replayed.
+   *
+   * Delivery is best-effort: a slow consumer can lose events, and
+   * history from before the subscription is gone. This stream is
+   * filtered to one sandbox while {@link SandboxEvent.sequence} is
+   * stamped globally before that filter — so a sequence gap is
+   * inconclusive, while contiguous sequences prove nothing was missed
+   * and a sequence running backwards reveals a daemon restart. When in
+   * doubt, re-derive state from {@link Sandbox.info}.
    */
   events(): AsyncIterable<SandboxEvent> {
     return this.#streamEvents();

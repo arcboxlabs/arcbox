@@ -160,5 +160,5 @@ and relies on its READY dial-out for the prepared-listener check). The
 the sandbox manager's own e2e suite, on the assets `firecracker.sh
 install` and the S3 CI bucket put under `/tmp/fc-assets`.
 
-Design: company repo `engineering/arcbox/architecture/vm-stack-redesign.md`
+Design: `docs/architecture/vm-stack-redesign.md`
 (Adapters → `virt/arcbox-fc-driver`; D-VM1, D-VM9).

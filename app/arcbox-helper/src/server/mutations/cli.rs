@@ -182,8 +182,21 @@ mod tests {
             PathBuf::from("/usr/local/bin/real-docker")
         );
 
+        // OrbStack uses the same xbin layout; its link is foreign (#715).
         fs::remove_file(&link).unwrap();
-        symlink("/Applications/Old.app/Contents/MacOS/xbin/docker", &link).unwrap();
+        let orbstack = "/Applications/OrbStack.app/Contents/MacOS/xbin/docker";
+        symlink(orbstack, &link).unwrap();
+        let err = prepare_symlink_slot(&link, want, is_arcbox_owned).unwrap_err();
+        assert!(matches!(err, HelperError::ForeignSymlink { .. }), "{err}");
+        assert_eq!(fs::read_link(&link).unwrap(), PathBuf::from(orbstack));
+
+        // A link from a moved or deleted ArcBox bundle is ours to replace.
+        fs::remove_file(&link).unwrap();
+        symlink(
+            "/Users/alice/Downloads/ArcBox.app/Contents/MacOS/xbin/docker",
+            &link,
+        )
+        .unwrap();
         assert_eq!(
             prepare_symlink_slot(&link, want, is_arcbox_owned).unwrap(),
             Slot::Ready
@@ -206,8 +219,14 @@ mod tests {
         remove_owned_symlink(&link, is_arcbox_owned).unwrap();
         assert!(!link.exists());
 
-        symlink("/usr/local/bin/real-docker", &link).unwrap();
-        remove_owned_symlink(&link, is_arcbox_owned).unwrap();
-        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        for foreign in [
+            "/usr/local/bin/real-docker",
+            "/Applications/OrbStack.app/Contents/MacOS/xbin/docker",
+        ] {
+            symlink(foreign, &link).unwrap();
+            remove_owned_symlink(&link, is_arcbox_owned).unwrap();
+            assert_eq!(fs::read_link(&link).unwrap(), PathBuf::from(foreign));
+            fs::remove_file(&link).unwrap();
+        }
     }
 }

@@ -9,6 +9,7 @@ mod cmdline;
 mod disk;
 mod kubernetes;
 mod machine_exec;
+mod machine_export;
 mod memory_pressure;
 mod metadata_volume;
 mod port_forward;

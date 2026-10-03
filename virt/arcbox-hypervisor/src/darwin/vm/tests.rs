@@ -179,3 +179,42 @@ fn test_balloon_device_pending() {
     // verify that the balloon device can be created and configured.
     println!("Balloon device test skipped: pending arcbox-vz support");
 }
+
+/// Feeds `bytes` through a pipe into the serial reader, `chunk` bytes per
+/// `read(2)`, and returns what it decoded. No VM is involved. The payload
+/// must fit the pipe unread: under host pipe-memory pressure XNU hands out
+/// 512-byte pipe buffers (measured 2026-09-29), so keep it under that.
+fn read_serial_from_pipe(bytes: &[u8], chunk: usize) -> String {
+    assert!(bytes.len() <= 512, "payload must fit a minimum-size pipe");
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: `fds` is a valid two-element array for `pipe(2)`; both ends
+    // are closed below and never used after.
+    unsafe {
+        assert_eq!(libc::pipe(fds.as_mut_ptr()), 0);
+        let written = libc::write(fds[1], bytes.as_ptr().cast(), bytes.len());
+        assert_eq!(usize::try_from(written), Ok(bytes.len()), "pipe write");
+        let output = DarwinVm::read_serial_fd_chunked(fds[0], chunk);
+        libc::close(fds[0]);
+        libc::close(fds[1]);
+        output
+    }
+}
+
+#[test]
+fn serial_read_keeps_a_multibyte_char_split_across_read_chunks() {
+    // 255 ASCII bytes push the 3-byte '中' across a 256-byte read boundary;
+    // a per-chunk UTF-8 check dropped both chunks.
+    let mut bytes = vec![b'a'; 255];
+    bytes.extend_from_slice("中\n".as_bytes());
+    let output = read_serial_from_pipe(&bytes, 256);
+    assert_eq!(output.len(), bytes.len(), "every byte reaches the caller");
+    assert!(output.starts_with(&"a".repeat(255)));
+    assert!(output.ends_with("中\n"));
+}
+
+#[test]
+fn serial_read_spans_several_read_chunks() {
+    let bytes = vec![b'x'; 500];
+    let output = read_serial_from_pipe(&bytes, 64);
+    assert_eq!(output.len(), 500);
+}

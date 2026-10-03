@@ -8,10 +8,12 @@
 //! `abctl setup install`, exposed via `~/.arcbox/bin` on PATH) is the
 //! unprivileged fallback. Both can coexist.
 //!
-//! Coexistence with Docker Desktop / `brew install docker`: if a slot in
-//! `/usr/local/bin/` is already owned by another tool, the helper refuses
-//! to overwrite. We treat that as satisfied — the user keeps their existing
-//! `docker`, and ArcBox remains reachable via `~/.arcbox/bin`.
+//! Coexistence with Docker Desktop, OrbStack, or `brew install docker`: if a
+//! slot in `/usr/local/bin/` is already owned by another tool, the helper
+//! refuses to overwrite. We treat that as satisfied — the user keeps their
+//! existing `docker`, and ArcBox remains reachable via `~/.arcbox/bin`.
+//! Ownership is decided by `is_arcbox_owned`, which checks the bundle name
+//! and not only the `xbin` layout OrbStack shares with us (#715).
 
 use std::path::{Path, PathBuf};
 

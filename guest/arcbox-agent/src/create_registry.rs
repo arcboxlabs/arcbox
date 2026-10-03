@@ -79,7 +79,7 @@ impl CreateRegistry {
         self: &Arc<Self>,
         request: &CreateSandboxRequest,
     ) -> Result<Reserve, Collision> {
-        debug_assert!(!request.id.is_empty());
+        debug_assert_ne!(request.id, "");
         let mut entries = self.entries.lock().unwrap();
         match entries.get(&request.id) {
             Some(Entry::Completed {

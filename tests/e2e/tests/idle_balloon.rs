@@ -3,11 +3,12 @@
 //! History: the 2026-07-15 incident (an unconditional shrink to 128 MB
 //! starved a running compose stack for 18 hours) led to the usage-aware
 //! staged-descent redesign this test originally exercised. The 2026-07-29
-//! measurements then showed no macOS backend actually reclaims ballooned
-//! memory (VZ: Apple applies no madvise at all; HV: `MADV_DONTNEED` is a
-//! Darwin deactivation hint) — shrinking was guest starvation with zero
-//! host benefit, so the idle balloon is disabled on macOS entirely. See
-//! `app/arcbox-core/src/vm_lifecycle/balloon/mod.rs` for the evidence.
+//! measurements then showed no macOS backend benefits from a host-driven
+//! shrink (VZ: Apple applies no madvise at all; HV: the guest's free page
+//! reporting already returns idle memory without a target) — shrinking was
+//! guest starvation with zero host benefit, so the idle balloon is
+//! disabled on macOS entirely. See
+//! `engine/arcbox-engine/src/vm_lifecycle/balloon/mod.rs` for the evidence.
 //!
 //! This scenario pins the new contract on a real VZ daemon with a short
 //! idle timeout, while a container runs in the guest and a persistent

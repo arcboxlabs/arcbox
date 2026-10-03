@@ -3,11 +3,11 @@ use std::str::FromStr;
 
 use arcbox_constants::paths::is_arcbox_owned;
 
-/// A validated CLI symlink target path inside an app bundle.
+/// A validated CLI symlink target path inside an ArcBox app bundle.
 ///
 /// Guarantees match [`is_arcbox_owned`]:
 /// - Absolute path under `/Applications/` or `/Users/`
-/// - Contains `.app/Contents/MacOS/xbin/` structure
+/// - Contains `<ArcBox bundle>.app/Contents/MacOS/xbin/` structure
 /// - No `..` path traversal
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliTarget(String);
@@ -42,7 +42,7 @@ impl FromStr for CliTarget {
             ));
         }
         Err(format!(
-            "CLI target '{s}' must be inside an .app bundle's Contents/MacOS/xbin/"
+            "CLI target '{s}' must be inside an ArcBox app bundle's Contents/MacOS/xbin/"
         ))
     }
 }

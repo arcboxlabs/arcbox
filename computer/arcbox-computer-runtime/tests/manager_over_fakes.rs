@@ -19,6 +19,7 @@
 mod support;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use arcbox_computer_runtime::testkit::agent::Reply;
 use arcbox_computer_runtime::{
@@ -303,13 +304,9 @@ async fn a_create_that_fails_before_activation_hands_the_address_back() {
     // Nothing is quarantined — the lease never reached a TAP — and the
     // address is back in the pool for the next computer, which is only
     // visible in the address that one is given.
-    assert!(
-        fixture
-            .manager
-            .pending_network_cleanups()
-            .await
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        fixture.manager.pending_network_cleanups().await.unwrap(),
+        []
     );
     let (_id, reused) = fixture
         .manager
@@ -322,6 +319,41 @@ async fn a_create_that_fails_before_activation_hands_the_address_back() {
     assert_eq!(
         reused, "10.200.0.2",
         "the pool hands out its lowest free address, so a stranded lease shows up here"
+    );
+}
+
+/// Every event carries a 1-based sequence, contiguous in the order a
+/// subscriber receives them and global across sandboxes (CORE-147) — so a
+/// subscriber that lost nothing sees no gap, and any gap it does see means
+/// loss, never reordering.
+#[tokio::test]
+async fn events_are_sequenced_contiguously_across_sandboxes() {
+    let fixture = Fixture::jailed().await;
+    let mut events = fixture.manager.subscribe_events();
+    let first = fixture.ready("one").await;
+    fixture.ready("two").await;
+    fixture.manager.stop_sandbox(&first, 1).await.unwrap();
+
+    let mut expected = 1;
+    loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(10), events.recv())
+            .await
+            .expect("the stopped event arrives within the deadline")
+            .expect("the event stream stays open");
+        assert_eq!(
+            event.sequence, expected,
+            "a subscriber that lost nothing sees contiguous sequences \
+             (got {} at {:?} for {})",
+            event.sequence, event.action, event.sandbox_id
+        );
+        expected += 1;
+        if event.sandbox_id == first && event.action == action::STOPPED {
+            break;
+        }
+    }
+    assert!(
+        expected > 5,
+        "two boots and a stop produced several sequenced events"
     );
 }
 
@@ -563,6 +595,49 @@ async fn a_pause_records_what_it_retained_and_a_resume_uses_it() {
         fixture.run(&id, &["/bin/hello"]).await,
         b"hi",
         "a resumed computer serves the data plane again"
+    );
+}
+
+/// `storage_bytes` meters disk in every state, not only `Paused`
+/// (CORE-146): a running computer reports its live COW overlay — the one
+/// file its disk writes grow — List agrees with Inspect on it, and the
+/// pause checkpoint is paid *on top of* the overlay, not instead of it.
+#[tokio::test]
+async fn storage_bytes_meters_the_overlay_while_running_and_list_agrees() {
+    let fixture = Setup::jailed().with_cow_probe().build().await;
+    let id = fixture.ready("meter").await;
+
+    // The probe assembles no device, so the overlay costs what the test
+    // writes into it.
+    let overlay = fixture.cow_file(&id);
+    std::fs::create_dir_all(overlay.parent().unwrap()).unwrap();
+    std::fs::write(&overlay, vec![0xA5; 256 * 1024]).unwrap();
+
+    let info = fixture.manager.inspect_sandbox(&id).unwrap();
+    assert!(
+        info.storage_bytes >= 256 * 1024,
+        "a running computer's live overlay is metered, got {}",
+        info.storage_bytes
+    );
+    let listed = fixture
+        .manager
+        .list_sandboxes(None, &HashMap::new())
+        .unwrap();
+    let summary = listed.iter().find(|entry| entry.id == id).unwrap();
+    assert_eq!(
+        summary.storage_bytes, info.storage_bytes,
+        "List and Inspect agree on a running computer's footprint"
+    );
+
+    fixture.manager.pause_sandbox(&id).await.unwrap();
+    fixture.await_state(&id, SandboxState::Paused).await;
+    let paused = fixture.manager.inspect_sandbox(&id).unwrap();
+    assert!(
+        paused.storage_bytes > info.storage_bytes,
+        "pausing adds the checkpoint on top of the retained overlay \
+         ({} vs {})",
+        paused.storage_bytes,
+        info.storage_bytes
     );
 }
 
@@ -1156,6 +1231,90 @@ async fn an_adopted_computer_on_a_copied_rootfs_pauses_and_keeps_its_disk() {
     );
     fixture.await_state(&id, SandboxState::Paused).await;
     assert!(parked.exists(), "a failed resume leaves the disk parked");
+}
+
+/// Nothing this process does may reach a VM it has handed over (CORE-145).
+///
+/// `detach_all` used to clone handles straight out of the map, so a handover
+/// and the `Stop` of the same computer had no mutual exclusion. This is the
+/// expensive half: the stop drives `handle.shutdown` into a handle whose
+/// reaper has stood down, waits out its whole budget for an exit that is never
+/// published, and then SIGKILLs the VM the successor is adopting — while its
+/// release hands TAP and the CoW device back underneath it.
+#[tokio::test]
+async fn a_teardown_after_a_handover_never_reaches_the_vm() {
+    let fixture = Fixture::jailed().await;
+    let id = fixture.ready("handed-over").await;
+    let vm = arcbox_vm_driver::VmId::new(&id).unwrap();
+
+    fixture.manager.detach_all().await.unwrap();
+    assert!(
+        !fixture.driver().owned_vms().contains(&vm),
+        "the handover did not reach the driver"
+    );
+
+    let stopped = fixture.manager.stop_sandbox(&id, 30).await.unwrap_err();
+    assert!(
+        matches!(stopped, VmmError::WrongState { .. }),
+        "a stop after a handover must be refused: {stopped}"
+    );
+    let removed = fixture.manager.remove_sandbox(&id, true).await.unwrap_err();
+    assert!(
+        matches!(removed, VmmError::WrongState { .. }),
+        "a forced remove after a handover must be refused: {removed}"
+    );
+
+    assert!(
+        fixture.driver().shutdowns(&vm).is_empty(),
+        "the handed-over vm was asked to die: {:?}",
+        fixture.driver().shutdowns(&vm)
+    );
+    assert!(
+        fixture.settle_network_cleanups().await.is_empty(),
+        "the successor's guest had its address taken back"
+    );
+}
+
+/// And the handover stands aside for a teardown already in flight.
+///
+/// The trigger and the race are the same event: an in-flight `StopSandbox`
+/// carrying a 30s budget is the main reason a composer's drain deadline
+/// expires and `detach_all` gets called at all. The stop was asked for first
+/// and the guest is meant to go away, so it wins — and the computer is
+/// reported as one that could not be handed over rather than silently raced.
+#[tokio::test]
+async fn a_handover_during_a_stop_is_refused_and_reported() {
+    let fixture = Fixture::jailed().await;
+    fixture.agent().on(&["/bin/wedged"], Reply::NeverExits);
+    let id = fixture.booted(never_exits("draining")).await;
+    fixture.await_state(&id, SandboxState::Running).await;
+
+    // The workload never exits, so the stop sits in its drain for the whole
+    // budget — the window the handover used to be able to reach into.
+    let manager = Arc::clone(&fixture.manager);
+    let stopping = tokio::spawn({
+        let id = id.clone();
+        // Shorter than the 30s a real `StopSandbox` carries: what this test
+        // needs is the window, and the drain polls every 100ms inside it.
+        async move { manager.stop_sandbox(&id, 5).await }
+    });
+    fixture.await_state(&id, SandboxState::Stopping).await;
+
+    let error = fixture.manager.detach_all().await.unwrap_err();
+    assert!(
+        error.to_string().contains(&*id),
+        "the handover failure must name the computer it lost: {error}"
+    );
+    assert!(
+        fixture
+            .driver()
+            .owned_vms()
+            .contains(&arcbox_vm_driver::VmId::new(&id).unwrap()),
+        "a computer mid-teardown was handed over anyway"
+    );
+
+    stopping.await.unwrap().unwrap();
+    fixture.await_state(&id, SandboxState::Stopped).await;
 }
 
 /// A computer whose VMM did not survive the gap comes back `Failed`, not

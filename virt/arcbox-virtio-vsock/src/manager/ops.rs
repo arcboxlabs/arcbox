@@ -6,13 +6,20 @@
 pub struct RxOps(u8);
 
 impl RxOps {
-    // Priority order (lowest bit wins): Request > Rw > Response > CreditUpdate > Reset > CreditRequest
+    // Priority order (lowest bit wins):
+    // Request > CreditRequest > Rw > Response > CreditUpdate > Reset.
+    //
+    // CreditRequest outranks Rw so that a request raised mid-stream (the
+    // half-window refresh in `maybe_request_credit`) goes out on the next
+    // packet: the injection loop keeps Rw pending while a stream drains, and
+    // a lower-ranked request would wait until the window closed — exactly
+    // the stall it exists to prevent.
     pub const REQUEST: u8 = 0x01;
-    pub const RW: u8 = 0x02;
-    pub const RESPONSE: u8 = 0x04;
-    pub const CREDIT_UPDATE: u8 = 0x08;
-    pub const RESET: u8 = 0x10;
-    pub const CREDIT_REQUEST: u8 = 0x20;
+    pub const CREDIT_REQUEST: u8 = 0x02;
+    pub const RW: u8 = 0x04;
+    pub const RESPONSE: u8 = 0x08;
+    pub const CREDIT_UPDATE: u8 = 0x10;
+    pub const RESET: u8 = 0x20;
 
     /// Returns true if any operation is pending.
     pub fn pending(&self) -> bool {

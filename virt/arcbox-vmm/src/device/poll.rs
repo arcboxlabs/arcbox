@@ -1,3 +1,5 @@
+use arcbox_virtio::vsock::RxRound;
+
 use super::*;
 
 impl DeviceManager {
@@ -45,35 +47,36 @@ impl DeviceManager {
         dev.poll_rx(&rx_qcfg)
     }
 
-    /// Called from the vCPU run loop during WFI (guest idle). Returns
-    /// true if any data was injected (caller should trigger interrupt).
+    /// Called from the vsock-io worker. Returns what the round did: the
+    /// caller interrupts the guest on `raise` and keeps draining on `wrote`.
     /// Thin shim that builds RX + TX `QueueConfig` snapshots from the
     /// vsock device's MMIO state and forwards to
     /// `VirtioVsock::poll_rx_injection`. The 400-line body that was here
     /// previously now lives on the device.
-    pub fn poll_vsock_rx(&self) -> bool {
+    pub fn poll_vsock_rx(&self) -> RxRound {
         let Some(vsock_arc) = self.vsock.as_ref() else {
-            return false;
+            return RxRound::default();
         };
         let Some(device) = self
             .devices
             .values()
             .find(|d| d.info.device_type == DeviceType::VirtioVsock)
         else {
-            return false;
+            return RxRound::default();
         };
         let Some(mmio_arc) = device.mmio_state.as_ref() else {
-            return false;
+            return RxRound::default();
         };
 
-        let (rx_qcfg, tx_qcfg) = {
+        let (rx_qcfg, tx_qcfg, event_idx) = {
             let Ok(mmio) = mmio_arc.read() else {
-                return false;
+                return RxRound::default();
             };
             let rxi = 0usize;
             if !mmio.queue_ready[rxi] || mmio.queue_num[rxi] == 0 {
-                return false;
+                return RxRound::default();
             }
+            let event_idx = mmio.driver_features & arcbox_virtio::queue::VIRTIO_F_EVENT_IDX != 0;
             let rx = QueueConfig {
                 desc_addr: mmio.queue_desc[rxi],
                 avail_addr: mmio.queue_driver[rxi],
@@ -95,13 +98,13 @@ impl DeviceManager {
             } else {
                 None
             };
-            (rx, tx)
+            (rx, tx, event_idx)
         };
 
         let Ok(mut dev) = vsock_arc.lock() else {
-            return false;
+            return RxRound::default();
         };
-        dev.poll_rx_injection(&rx_qcfg, tx_qcfg.as_ref())
+        dev.poll_rx_injection(&rx_qcfg, tx_qcfg.as_ref(), event_idx)
     }
 
     /// Queues host operator input (`data`) onto the virtio-console and injects

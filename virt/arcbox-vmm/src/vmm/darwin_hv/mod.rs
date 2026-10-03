@@ -35,6 +35,7 @@ mod hvc_blk;
 mod inline_sink;
 mod lifecycle;
 mod network;
+mod page_release;
 pub(super) mod pl011;
 pub(super) mod pl031;
 mod psci;
@@ -42,16 +43,19 @@ mod setup;
 mod vcpu_loop;
 mod vsock;
 
+pub(super) use hvc_blk::HvcBlkTable;
 pub(super) use pl011::Pl011;
 #[cfg(test)]
 use pl011::{PL011_BASE, PL011_DR, PL011_FR, PL011_SIZE};
 pub(super) use pl031::Pl031;
 pub use psci::CpuPower;
 
-/// Shared registry of vCPU thread handles for WFI unparking.
+/// Shared registry of vCPU thread handles.
 ///
-/// When a GIC interrupt is injected, the IRQ callback iterates this list
-/// and calls `unpark()` on every thread so that WFI-parked vCPUs wake up.
+/// `pause` parks every vCPU thread and `resume` iterates this list to
+/// unpark them. Device interrupts never park a vCPU thread: with the
+/// in-kernel GIC an idle vCPU sleeps inside `hv_vcpu_run` and `set_spi`
+/// wakes it there.
 pub(super) type VcpuThreadHandles = Arc<Mutex<Vec<std::thread::Thread>>>;
 
 /// Shared registry of Hypervisor.framework vCPU IDs (opaque `hv_vcpu_t`
@@ -154,40 +158,6 @@ fn allocate_device_slot(index: u64, name: impl Into<String>) -> Result<DeviceSlo
 /// Convert a `vm_fdt::Error` into our `VmmError`.
 fn fdt_err(e: vm_fdt::Error) -> VmmError {
     VmmError::Memory(format!("FDT error: {e}"))
-}
-
-/// Builds a thread-safe closure that force-exits every registered vCPU out
-/// of `hv_vcpu_run`, used by io-worker threads (net-rx, vsock-io) to wake a
-/// guest that is idle in WFI for interrupt delivery.
-///
-/// On arm64 `hv_vcpus_exit` requires a concrete list of vCPU IDs; NULL/0 is
-/// a silent no-op. The registry is snapshotted on each invocation so
-/// late-arriving secondaries (PSCI CPU_ON) are picked up. Safe to call from
-/// any thread. See ABX-367.
-fn make_exit_vcpus_fn(
-    ids: HvVcpuIds,
-    broadcasts: Arc<std::sync::atomic::AtomicU64>,
-) -> Arc<dyn Fn() + Send + Sync> {
-    Arc::new(move || {
-        let ids_snapshot: Vec<u64> = ids
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if ids_snapshot.is_empty() {
-            return;
-        }
-        broadcasts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // SAFETY: `ids_snapshot` is a live Vec owned by this closure for
-        // the duration of the FFI call; the pointer and length are
-        // consistent.
-        #[allow(clippy::cast_possible_truncation)]
-        let ret = unsafe {
-            arcbox_hv::ffi::hv_vcpus_exit(ids_snapshot.as_ptr(), ids_snapshot.len() as u32)
-        };
-        if let Err(e) = arcbox_hv::check(ret) {
-            tracing::warn!("exit_vcpus: hv_vcpus_exit failed: {e}");
-        }
-    })
 }
 
 #[cfg(test)]
@@ -314,7 +284,7 @@ mod tests {
         assert_eq!(uart.output().len(), 2);
         // Newline flushes the buffer.
         uart.write(PL011_BASE + PL011_DR, 1, b'\n' as u64);
-        assert!(uart.output().is_empty());
+        assert_eq!(uart.output(), b"");
     }
 
     #[test]
@@ -334,7 +304,7 @@ mod tests {
         uart.write(PL011_BASE + PL011_DR, 1, b'X' as u64);
         assert_eq!(uart.output().len(), 1);
         uart.flush();
-        assert!(uart.output().is_empty());
+        assert_eq!(uart.output(), b"");
     }
 
     #[test]

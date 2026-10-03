@@ -6,8 +6,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use arcbox_vm_driver::{
-    CheckpointImage, Error, ExitStatus, IsolationSpec, PreparedVm, ProcessRecord, RestoreSpec,
-    Result, Staging, VmHandle, VmId, VmRecord, VmSpec, VmState, VsockListen, VsockListener,
+    CheckpointImage, Error, ExitStatus, IsolationSpec, JailRecord, PreparedVm, ProcessRecord,
+    RestoreSpec, Result, Staging, VmHandle, VmId, VmRecord, VmSpec, VmState, VsockListen,
+    VsockListener,
 };
 use async_trait::async_trait;
 use fc_sdk::VmBuilder;
@@ -31,6 +32,10 @@ pub struct FcPrepared {
     /// names every path in it. Shared in shape — not in value — with the
     /// handle a boot returns, which builds its own from the same layout.
     staging: JailStaging,
+    /// What the VMM was spawned under, kept to hold the boot or restore
+    /// that follows to the same confinement ([`Self::require_same_identity`]).
+    /// The layout keeps only the paths this implies.
+    isolation: IsolationSpec,
     process: Arc<FcProcess>,
     record: VmRecord,
     /// Where guest dial-outs land: the layout's vsock socket, until a
@@ -62,7 +67,7 @@ impl FcPrepared {
         if let IsolationSpec::Jailer { chroot_base, .. } = isolation {
             tokio::fs::create_dir_all(chroot_base).await?;
         }
-        let plan = layout.spawn_plan();
+        let plan = layout.spawn_plan(isolation);
         let spawned = async {
             let child = spawn::spawn(&plan, &config).await?;
             debug_assert_eq!(
@@ -78,12 +83,14 @@ impl FcPrepared {
                 process: Some(ProcessRecord {
                     pid: process.pid(),
                     api_socket: Some(plan.api_socket.clone()),
+                    jail: layout.jail().map(JailRecord::from),
                 }),
             };
             let vsock = VsockEndpoint::new(layout.vsock_host_uds());
             Ok(Self {
                 config: Arc::clone(&config),
                 staging: JailStaging::new(layout.clone()),
+                isolation: isolation.clone(),
                 process,
                 record,
                 vsock,
@@ -133,7 +140,7 @@ impl FcPrepared {
                 self.record.id
             )));
         }
-        if *isolation != *self.layout().isolation() {
+        if *isolation != self.isolation {
             return Err(Error::InvalidSpec(format!(
                 "spec isolation does not match what vm {} was prepared with",
                 self.record.id

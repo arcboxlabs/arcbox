@@ -370,7 +370,7 @@ mod tests {
         assert!(!backends.interop_active());
         assert!(backends.docker().is_none());
         assert!(backends.vm().is_none());
-        assert!(backends.capabilities().is_empty());
+        assert_eq!(backends.capabilities(), []);
     }
 
     /// Activation must grow the derived capability set (native platform,

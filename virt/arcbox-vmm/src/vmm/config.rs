@@ -37,6 +37,12 @@ pub struct VmmConfig {
     pub initrd_path: Option<PathBuf>,
     /// Enable Rosetta 2 translation (macOS ARM only).
     pub enable_rosetta: bool,
+    /// Let the guest run its own hypervisor (VZ backend only).
+    ///
+    /// Only the System VM, which hosts sandboxes, needs it; see
+    /// [`arcbox_hypervisor::VmConfig::nested_virt`] for why a plain
+    /// machine must not ask.
+    pub nested_virt: bool,
     /// Enable serial console.
     pub serial_console: bool,
     /// Enable virtio-console.
@@ -84,6 +90,7 @@ impl Default for VmmConfig {
             kernel_cmdline: String::new(),
             initrd_path: None,
             enable_rosetta: false,
+            nested_virt: false,
             serial_console: true,
             virtio_console: true,
             shared_dirs: Vec::new(),
@@ -107,7 +114,8 @@ impl VmmConfig {
             .memory_size(self.memory_size)
             .kernel_path(self.kernel_path.to_string_lossy())
             .kernel_cmdline(&self.kernel_cmdline)
-            .enable_rosetta(self.enable_rosetta);
+            .enable_rosetta(self.enable_rosetta)
+            .nested_virt(self.nested_virt);
 
         if let Some(initrd_path) = &self.initrd_path {
             builder = builder.initrd_path(initrd_path.to_string_lossy());

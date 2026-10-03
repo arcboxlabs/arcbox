@@ -18,7 +18,7 @@ fn version_flag_reports_the_helper_version_on_stdout() {
         String::from_utf8(output.stdout).unwrap(),
         format!("arcbox-helper {}\n", env!("CARGO_PKG_VERSION"))
     );
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, b"");
 }
 
 #[tokio::test]

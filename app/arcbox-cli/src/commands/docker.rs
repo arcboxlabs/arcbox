@@ -129,7 +129,7 @@ async fn execute_setup(format: OutputFormat) -> Result<()> {
     let arch = arcbox_asset::current_arch().to_string();
     let mut manager = HostToolManager::new(tools, &arch, runtime_bin.clone());
 
-    if let Some(xbin) = super::symlink::detect_bundle_xbin() {
+    if let Some(xbin) = super::bundle::detect_bundle_xbin() {
         if matches!(format, OutputFormat::Table | OutputFormat::Quiet) {
             println!("Using Docker tools from app bundle: {}", xbin.display());
         }

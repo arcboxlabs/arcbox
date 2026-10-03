@@ -14,10 +14,14 @@ mod create_key;
 mod create_registry;
 pub mod dns;
 pub mod dns_server;
+pub mod docker_config;
 #[cfg(target_os = "linux")]
 pub mod error;
+mod iptables;
+pub mod kubernetes_services;
 pub mod memory_pressure;
 pub mod metadata_migrate;
+pub mod publish_mirror;
 #[cfg(target_os = "linux")]
 pub mod sandbox;
 #[cfg(any(target_os = "linux", test))]

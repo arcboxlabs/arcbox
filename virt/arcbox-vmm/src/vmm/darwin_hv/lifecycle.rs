@@ -139,14 +139,6 @@ impl Vmm {
                         irq,
                         running: self.running.clone(),
                         flush_barrier: flush_barrier.clone(),
-                        // Wake WFI-parked vCPUs on completion (ABX-367), mirroring
-                        // the net/vsock RX workers.
-                        exit_vcpus: make_exit_vcpus_fn(
-                            self.hv_vcpu_ids
-                                .clone()
-                                .expect("hv_vcpu_ids asserted Some above"),
-                            self.hv_kick_broadcasts.clone(),
-                        ),
                     };
 
                     let thread_name = format!("blk-io-{}-q{}", dev_id_str, qi);
@@ -186,37 +178,18 @@ impl Vmm {
         {
             let dm = Arc::get_mut(&mut device_manager).expect("single Arc ref for net-rx hooks");
 
-            // Build IRQ callback for the net-io thread (same GIC + unpark logic).
+            // Build IRQ callback for the net-io thread: assert the SPI on the
+            // GIC, nothing more (see the GIC callback in `setup.rs`).
             #[cfg(feature = "gic")]
             if let Some(ref gic_ref) = self.hv_gic {
                 let gic_clone = Arc::clone(gic_ref);
-                let threads_clone = self
-                    .hv_vcpu_thread_handles
-                    .clone()
-                    .expect("hv_vcpu_thread_handles asserted Some above");
                 let net_irq_cb: crate::device::DeviceIrqCallback =
                     Arc::new(move |gsi: crate::irq::Gsi, level: bool| {
                         gic_clone.set_spi(gsi, level).map_err(|e| {
                             VmmError::Irq(format!("GIC set_spi({gsi}, {level}) failed: {e}"))
-                        })?;
-                        if level {
-                            if let Ok(handles) = threads_clone.lock() {
-                                for t in handles.iter() {
-                                    t.unpark();
-                                }
-                            }
-                        }
-                        Ok(())
+                        })
                     });
-                // Force-exit closure used by the net-rx worker to wake a
-                // guest that is idle in WFI for interrupt delivery (ABX-367).
-                let exit_fn = make_exit_vcpus_fn(
-                    self.hv_vcpu_ids
-                        .clone()
-                        .expect("hv_vcpu_ids asserted Some above"),
-                    self.hv_kick_broadcasts.clone(),
-                );
-                dm.set_net_rx_hooks(net_irq_cb, exit_fn);
+                dm.set_net_rx_hooks(net_irq_cb);
             }
 
             dm.set_running(self.running.clone());

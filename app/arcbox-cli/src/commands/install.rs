@@ -114,7 +114,7 @@ fn install_helper(custom_path: Option<&std::path::Path>) -> Result<()> {
     let helper_src = if let Some(path) = custom_path {
         path.to_path_buf()
     } else {
-        let exe = std::env::current_exe().context("could not determine current executable")?;
+        let exe = super::bundle::current_executable()?;
         let exe_dir = exe.parent().context("executable has no parent directory")?;
         exe_dir.join("arcbox-helper")
     };
@@ -211,21 +211,9 @@ fn register_daemon_service() -> Result<()> {
 
     let plist_path = plist_dir.join(format!("{daemon_label}.plist"));
 
-    // Find the daemon binary.
-    let exe = std::env::current_exe().context("could not determine current executable")?;
-    let exe_dir = exe.parent().context("executable has no parent directory")?;
-    let daemon_bin = exe_dir.join("arcbox-daemon");
-
-    let daemon_path = if daemon_bin.exists() {
-        daemon_bin.to_string_lossy().to_string()
-    } else {
-        let alt = data_dir.join("bin/arcbox-daemon");
-        if alt.exists() {
-            alt.to_string_lossy().to_string()
-        } else {
-            "arcbox-daemon".to_string()
-        }
-    };
+    let daemon_path = super::bundle::locate_daemon(&data_dir)?
+        .to_string_lossy()
+        .into_owned();
 
     // Daemon manages its own log files via tracing-appender, so we no
     // longer set StandardOutPath / StandardErrorPath. Stdout/stderr are

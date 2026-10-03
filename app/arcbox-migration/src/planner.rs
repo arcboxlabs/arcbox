@@ -907,7 +907,7 @@ mod tests {
 
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].export_references, vec!["sha256:dangling"]);
-        assert!(plans[0].repo_tags.is_empty());
+        assert_eq!(plans[0].repo_tags, Vec::<String>::new());
     }
 
     #[test]

@@ -282,7 +282,7 @@ mod tests {
 
         // Handle request
         let response = server.handle_request(&request).unwrap();
-        assert!(!response.is_empty());
+        assert_ne!(response, b"");
     }
 
     #[test]

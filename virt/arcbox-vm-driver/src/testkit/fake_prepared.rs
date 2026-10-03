@@ -15,7 +15,9 @@ use super::lock;
 use crate::capability::{
     CheckpointImage, CheckpointKind, Prepare, PreparedVm, Staging, VsockListen, VsockListener,
 };
-use crate::driver::{ExitStatus, ProcessRecord, RestoreSpec, VmHandle, VmRecord, VmState};
+use crate::driver::{
+    ExitStatus, JailRecord, ProcessRecord, RestoreSpec, VmHandle, VmRecord, VmState,
+};
 use crate::error::{Error, Result};
 use crate::spec::{IsolationSpec, VmId, VmSpec};
 
@@ -43,6 +45,7 @@ impl Preparer {
             process: Some(ProcessRecord {
                 pid: self.0.next_pid(),
                 api_socket: Some(runtime_dir.join("api.sock")),
+                jail: jail_of(id, isolation),
             }),
         };
         PreparedFake {
@@ -53,6 +56,28 @@ impl Preparer {
             record,
             phase: Mutex::new(Phase::Prepared),
         }
+    }
+}
+
+/// The jail a fake VMM would be confined to: `{chroot_base}/{id}`, the
+/// simplest layout that is a *path* rather than a repeat of the spec.
+///
+/// The fake records one because a real driver does, and because a record
+/// that loses it is a VM adopted back as unconfined (CORE-155) — a contract
+/// check can only see that if the fake has a jail to lose.
+fn jail_of(id: &VmId, isolation: &IsolationSpec) -> Option<JailRecord> {
+    match isolation {
+        IsolationSpec::None => None,
+        IsolationSpec::Jailer {
+            uid,
+            gid,
+            chroot_base,
+            ..
+        } => Some(JailRecord {
+            root: chroot_base.join(id.as_str()),
+            uid: *uid,
+            gid: *gid,
+        }),
     }
 }
 
@@ -153,6 +178,21 @@ impl PreparedFake {
         Ok(Box::new(FakeVm::new(vm)))
     }
 
+    /// Parks forever when [`FakeDriver::park_next_boot`] armed it, after
+    /// telling the test the boot got here.
+    ///
+    /// Before the phase lock, deliberately: a park holding that lock would
+    /// block the `discard` the parked boot exists to be torn down by.
+    ///
+    /// [`FakeDriver::park_next_boot`]: super::FakeDriver::park_next_boot
+    async fn park_if_armed(&self) {
+        let reached = lock(&self.driver.park_boot).take();
+        if let Some(reached) = reached {
+            let _ = reached.send(());
+            std::future::pending::<()>().await;
+        }
+    }
+
     /// Kills whatever `phase` says is running: the booted VM, or the bare
     /// process itself.
     fn kill(&self, phase: &mut Phase) -> ExitStatus {
@@ -206,6 +246,7 @@ impl PreparedVm for PreparedFake {
     }
 
     async fn boot(&self, spec: VmSpec) -> Result<Box<dyn VmHandle>> {
+        self.park_if_armed().await;
         let balloon_target_bytes = u64::from(spec.memory_mib) << 20;
         self.launch(spec, balloon_target_bytes, false)
     }
@@ -215,6 +256,7 @@ impl PreparedVm for PreparedFake {
         image: &CheckpointImage,
         spec: RestoreSpec,
     ) -> Result<Box<dyn VmHandle>> {
+        self.park_if_armed().await;
         if !self.driver.caps.checkpoint || image.format.as_str() != CHECKPOINT_FORMAT {
             return Err(Error::ForeignCheckpoint(image.format.clone()));
         }
@@ -253,7 +295,9 @@ impl PreparedVm for PreparedFake {
     }
 
     async fn discard(&self) -> Result<ExitStatus> {
-        Ok(self.kill(&mut lock(&self.phase)))
+        let status = self.kill(&mut lock(&self.phase));
+        lock(&self.driver.discarded_processes).push(self.record.id.clone());
+        Ok(status)
     }
 }
 

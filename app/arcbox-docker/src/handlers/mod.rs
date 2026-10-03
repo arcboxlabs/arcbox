@@ -21,7 +21,7 @@ pub(crate) use proxying::{
 pub(crate) use build::build_image;
 pub(crate) use container::{
     create_container, kill_container, remove_container, rename_container, restart_container,
-    start_container, stop_container,
+    setup_container_networking, start_container, stop_container,
 };
 pub(crate) use network::{network_connect, network_disconnect};
 

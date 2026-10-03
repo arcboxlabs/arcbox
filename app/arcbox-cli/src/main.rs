@@ -148,6 +148,7 @@ fn run(cli: Cli) -> Result<()> {
             Commands::Macos(cmd) => commands::macos::execute(cmd).await,
             Commands::Migrate(cmd) => commands::migrate::execute(cmd).await,
             Commands::Sandbox(cmd) => commands::sandbox::execute(cmd).await,
+            Commands::Debug(args) => commands::debug::execute(args).await,
             Commands::Claude(args) => {
                 commands::agent::execute(&commands::agent::CLAUDE, args).await
             }
@@ -158,6 +159,9 @@ fn run(cli: Cli) -> Result<()> {
             Commands::Disk(cmd) => commands::disk::execute(cmd, cli.format).await,
             #[cfg(target_os = "macos")]
             Commands::Dns(cmd) => commands::dns::execute(cmd, cli.format).await,
+            #[cfg(target_os = "macos")]
+            Commands::Tls(cmd) => commands::tls::execute(cmd).await,
+            Commands::Ssh(cmd) => commands::ssh::execute(cmd).await,
             Commands::Daemon(args) => commands::daemon::execute(args).await,
             Commands::Logs(args) => commands::logs::execute(args).await,
             Commands::Setup(cmd) => commands::setup::execute(cmd, cli.format).await,

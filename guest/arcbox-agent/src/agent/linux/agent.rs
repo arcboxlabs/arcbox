@@ -5,12 +5,12 @@ use anyhow::Result;
 
 use arcbox_constants::ports::AGENT_PORT;
 
-use super::disk::fstrim_loop;
 use super::proxy::{run_docker_api_proxy, run_kubernetes_api_proxy};
 use super::rpc::handle_connection;
 use super::runtime::direct_container_routing_loop;
 use super::sandbox::sandbox_service;
 use super::vsock::{bind_vsock_listener_with_retry, is_peer_closed_error};
+use crate::agent::Guest;
 
 /// The Guest Agent.
 ///
@@ -23,41 +23,11 @@ impl Agent {
         Self
     }
 
-    /// Runs the agent, listening on vsock.
-    pub async fn run(&self) -> Result<()> {
-        // Mount standard VirtioFS shares if not already mounted.
-        crate::mount::mount_standard_shares();
-
-        // Eagerly initialise the sandbox service so its first-time
-        // NetworkManager setup (which requires root) happens at startup
-        // rather than on the first sandbox request.
-        let _ = sandbox_service();
-
-        // Drop half-written rootfs build artifacts from a previous crash.
-        crate::sandbox::rootfs_builder(crate::sandbox::block_tools())
-            .sweep_stale_tmp()
-            .await;
-
-        // Start guest-side Docker API proxy (vsock -> unix socket).
-        tokio::spawn(async {
-            if let Err(e) = run_docker_api_proxy().await {
-                tracing::warn!("Docker API proxy exited: {}", e);
-            }
-        });
-
-        // Start guest-side Kubernetes API proxy (vsock -> localhost:6443).
-        tokio::spawn(async {
-            if let Err(e) = run_kubernetes_api_proxy().await {
-                tracing::warn!("Kubernetes API proxy exited: {}", e);
-            }
-        });
-
-        // Periodic fstrim to reclaim sparse file space on the host.
-        tokio::spawn(fstrim_loop());
-
-        // Docker recreates its firewall chains on restart. Keep the direct
-        // host-to-container rule present after the initial readiness gate.
-        tokio::spawn(direct_container_routing_loop());
+    /// Runs the agent for `guest`, listening on vsock.
+    pub async fn run(&self, guest: Guest) -> Result<()> {
+        if guest == Guest::SystemVm {
+            start_system_vm_services().await;
+        }
 
         let mut listener = bind_vsock_listener_with_retry(AGENT_PORT, "agent rpc listener").await?;
 
@@ -66,7 +36,9 @@ impl Agent {
         loop {
             match listener.accept().await {
                 Ok((stream, peer_addr)) => {
-                    tracing::info!("Accepted connection from {:?}", peer_addr);
+                    // Debug, not info: the host opens a connection per RPC, including
+                    // its periodic polls, and each request is logged on its own.
+                    tracing::debug!("Accepted connection from {:?}", peer_addr);
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(stream).await {
                             // A routine daemon-side teardown (host closes the
@@ -97,4 +69,39 @@ impl Default for Agent {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The System VM's services beside the RPC listener. A distro machine runs
+/// none of them; see [`Guest::DistroMachine`].
+async fn start_system_vm_services() {
+    // Mount standard VirtioFS shares if not already mounted.
+    crate::mount::mount_standard_shares();
+
+    // Eagerly initialise the sandbox service so its first-time
+    // NetworkManager setup (which requires root) happens at startup
+    // rather than on the first sandbox request.
+    let _ = sandbox_service();
+
+    // Drop half-written rootfs build artifacts from a previous crash.
+    crate::sandbox::rootfs_builder(crate::sandbox::block_tools())
+        .sweep_stale_tmp()
+        .await;
+
+    // Start guest-side Docker API proxy (vsock -> unix socket).
+    tokio::spawn(async {
+        if let Err(e) = run_docker_api_proxy().await {
+            tracing::warn!("Docker API proxy exited: {}", e);
+        }
+    });
+
+    // Start guest-side Kubernetes API proxy (vsock -> localhost:6443).
+    tokio::spawn(async {
+        if let Err(e) = run_kubernetes_api_proxy().await {
+            tracing::warn!("Kubernetes API proxy exited: {}", e);
+        }
+    });
+
+    // Docker recreates its firewall chains on restart. Keep the direct
+    // host-to-container rule present after the initial readiness gate.
+    tokio::spawn(direct_container_routing_loop());
 }

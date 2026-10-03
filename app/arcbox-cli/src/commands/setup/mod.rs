@@ -2,9 +2,9 @@
 //!
 //! Manages CLI registration in the user's effective login environment.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use arcbox_constants::paths::HostLayout;
 use clap::{Subcommand, ValueEnum};
 
@@ -15,7 +15,56 @@ mod install;
 mod profile;
 mod status;
 
+pub(super) use install::remove_integration;
 pub(super) use status::{ComponentStatus, shell_integration_status};
+
+/// The files `setup install` writes, and the shell profile it sources them
+/// from, resolved once.
+///
+/// `abctl uninstall` builds one from its own view of the home and data
+/// directories instead of reading the environment again.
+pub(super) struct Integration {
+    /// `<data_dir>/bin`: the `abctl` and Docker tool symlinks.
+    pub(super) bin: PathBuf,
+    /// `<data_dir>/shell`: the init scripts.
+    pub(super) shell: PathBuf,
+    /// `<data_dir>/completions`.
+    pub(super) completions: PathBuf,
+    /// The shell profile that sources the init script.
+    pub(super) profile: PathBuf,
+    pub(super) shell_kind: ShellKind,
+    /// The Docker config directory holding `cli-plugins/` and `config.json`.
+    pub(super) docker_config: PathBuf,
+}
+
+impl Integration {
+    pub(super) async fn from_env() -> Result<Self> {
+        let home = dirs::home_dir().context("could not determine home directory")?;
+        Self::under(
+            &home,
+            &arcbox_home(),
+            super::cli_plugins::default_docker_config_dir()?,
+        )
+        .await
+    }
+
+    /// The integration `setup install` lays out for `home` and `data_dir`.
+    pub(super) async fn under(
+        home: &Path,
+        data_dir: &Path,
+        docker_config: PathBuf,
+    ) -> Result<Self> {
+        let shell_kind = profile::detect_shell();
+        Ok(Self {
+            bin: data_dir.join("bin"),
+            shell: data_dir.join("shell"),
+            completions: data_dir.join("completions"),
+            profile: profile::profile_path_under(shell_kind, home).await?,
+            shell_kind,
+            docker_config,
+        })
+    }
+}
 
 /// Shell integration setup commands.
 #[derive(Subcommand)]
@@ -50,7 +99,7 @@ pub enum ShellKind {
 }
 
 impl ShellKind {
-    const fn as_str(self) -> &'static str {
+    pub(super) const fn as_str(self) -> &'static str {
         match self {
             Self::Zsh => "zsh",
             Self::Bash => "bash",

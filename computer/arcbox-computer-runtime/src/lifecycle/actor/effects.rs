@@ -124,6 +124,59 @@ impl ComputerActor {
                     }
                 });
             }
+            Effect::Detach => {
+                // The data plane reads the agent straight off the snapshot and
+                // never round-trips the mailbox, so the state alone cannot
+                // stop it — and `detached` projects `Ready`, which is exactly
+                // what `require_alive_agent` admits. Dropping the agent is
+                // what keeps an exec or a file write out of a guest the
+                // successor now owns; a stop and a release do the same.
+                //
+                // It goes *before* the port call, not after. Detach is the one
+                // flow whose ownership transfer happens inside an await, so
+                // forgetting afterwards would leave the whole call open for a
+                // reader to take the agent out of the snapshot and dial a VM
+                // that had already changed hands. This does not close the race
+                // — a reader that cloned the `Arc` a moment earlier still
+                // holds a working agent, and revoking that would mean routing
+                // the data plane through the mailbox, which is the hop this
+                // seam exists to avoid — but it bounds the exposure to callers
+                // already in flight rather than every caller for the duration.
+                let agent = self.snapshot_tx.borrow().agent.clone();
+                self.forget_agent();
+                // Bounded because this one is awaited inline; see
+                // [`DETACH_TIMEOUT`]. A driver that hangs here loses this
+                // computer, not the whole pass.
+                let handover = match tokio::time::timeout(DETACH_TIMEOUT, self.tasks.detach()).await
+                {
+                    Ok(handover) => handover,
+                    Err(_) => Err(TaskFailure::recoverable(VmmError::Process(format!(
+                        "handing computer {} over did not finish within {}s",
+                        self.id,
+                        DETACH_TIMEOUT.as_secs()
+                    )))),
+                };
+                match handover {
+                    // The machine has not moved yet: it emitted this effect
+                    // and stayed put, so the handover's outcome is what
+                    // decides.
+                    Ok(()) => self.queued.push_back(Event::Detached),
+                    // Stay where we are. The VM is still ours and still usable
+                    // — it simply dies with this process, which is what a
+                    // failed handover has always meant. Failing the computer
+                    // instead would write `Failed` over a record the
+                    // successor's sweep still has to read as `Ready`. Usable
+                    // includes dialable, so the agent goes back: nothing
+                    // changed hands, and the data plane must not have lost a
+                    // guest to a handover that did not happen.
+                    Err(failure) => {
+                        if let Some(agent) = agent {
+                            self.publish_agent(agent);
+                        }
+                        self.fail_waiters(failure.into_error());
+                    }
+                }
+            }
             Effect::AbortInflight => return self.abort_inflight().await,
             Effect::Publish(notify) => self.publish(notify),
             Effect::ArmTimer(timer) => self.arm(timer, state),
@@ -446,7 +499,7 @@ impl ComputerActor {
             },
             _ => event,
         };
-        let _ = self.events_tx.send(event);
+        self.events.publish(event);
     }
 
     fn arm(&mut self, timer: Timer, state: State) {

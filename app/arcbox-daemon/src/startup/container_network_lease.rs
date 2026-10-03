@@ -12,7 +12,27 @@ use arcbox_constants::container_network::ContainerNetwork;
 pub struct ContainerNetworkLease {
     network: ContainerNetwork,
     route_bridge: Mutex<Option<String>>,
-    _file: File,
+    file: File,
+}
+
+impl Drop for ContainerNetworkLease {
+    /// Unlocks before the descriptor closes.
+    ///
+    /// A `flock` lock belongs to the open file description, and `close`
+    /// releases it only with the description's last reference. A child that
+    /// another thread is spawning holds a copy of every descriptor until it
+    /// execs, so a release left to `close` can outlive the drop and fail the
+    /// next acquire with "already in use".
+    fn drop(&mut self) {
+        // SAFETY: `self.file` owns a valid descriptor for the whole call.
+        if unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) } != 0 {
+            tracing::warn!(
+                error = %std::io::Error::last_os_error(),
+                network = %self.network,
+                "failed to unlock container network lease"
+            );
+        }
+    }
 }
 
 impl ContainerNetworkLease {
@@ -64,7 +84,7 @@ impl ContainerNetworkLease {
             return Ok(Self {
                 network,
                 route_bridge: Mutex::new(None),
-                _file: file,
+                file,
             });
         }
 
@@ -126,5 +146,42 @@ mod tests {
 
         drop(first);
         ContainerNetworkLease::acquire_in(network, directory.path()).unwrap();
+    }
+
+    /// A child forked while the lease is held carries a copy of its
+    /// descriptor until it execs. The release must not wait for that exec.
+    #[test]
+    fn release_does_not_wait_for_a_child_spawned_while_the_lease_was_held() {
+        use std::io::{Read as _, Write as _};
+        use std::os::unix::process::CommandExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let network: ContainerNetwork = "10.64.0.0/20".parse().unwrap();
+        let lease = ContainerNetworkLease::acquire_in(network, directory.path()).unwrap();
+
+        // Parks the child between fork and exec: it reports in on one pipe
+        // and waits for the go-ahead on the other.
+        let (mut forked_rx, forked_tx) = std::io::pipe().unwrap();
+        let (go_rx, mut go_tx) = std::io::pipe().unwrap();
+        let spawner = std::thread::spawn(move || {
+            let mut command = std::process::Command::new("true");
+            // SAFETY: the closure runs in the forked child and only calls
+            // `write` and `read`, both async-signal-safe.
+            unsafe {
+                command.pre_exec(move || {
+                    (&forked_tx).write_all(b"f")?;
+                    (&go_rx).read_exact(&mut [0])
+                });
+            }
+            command.status()
+        });
+        forked_rx.read_exact(&mut [0]).unwrap();
+
+        drop(lease);
+        let reacquired = ContainerNetworkLease::acquire_in(network, directory.path());
+
+        go_tx.write_all(b"g").unwrap();
+        assert!(spawner.join().unwrap().unwrap().success());
+        reacquired.unwrap();
     }
 }

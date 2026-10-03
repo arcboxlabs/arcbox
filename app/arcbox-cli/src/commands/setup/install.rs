@@ -1,9 +1,9 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
 use super::super::OutputFormat;
-use super::{bin_dir, completions, completions_dir, profile, shell_dir};
+use super::{Integration, bin_dir, completions, completions_dir, profile, shell_dir};
 
 pub(super) async fn install(format: OutputFormat) -> Result<()> {
     let selected_shell = profile::detect_shell();
@@ -18,7 +18,7 @@ pub(super) async fn install(format: OutputFormat) -> Result<()> {
         tokio::fs::create_dir_all(completions.join(name)).await?;
     }
 
-    let executable = std::env::current_exe().context("could not determine current executable")?;
+    let executable = super::super::bundle::current_executable()?;
     let abctl_link = bin.join("abctl");
     create_or_update_symlink(&executable, &abctl_link).await?;
 
@@ -83,18 +83,13 @@ pub(super) async fn install(format: OutputFormat) -> Result<()> {
 }
 
 pub(super) async fn uninstall(format: OutputFormat) -> Result<()> {
-    let selected_shell = profile::detect_shell();
-    let profile_path = profile::profile_path(selected_shell).await?;
-    let bin = bin_dir();
-    let (docker_plugins, plugin_error) = unregister_docker_plugins(&bin).await;
-    for path in [bin, shell_dir(), completions_dir()] {
-        if tokio::fs::try_exists(&path).await? {
-            tokio::fs::remove_dir_all(&path)
-                .await
-                .with_context(|| format!("failed to remove {}", path.display()))?;
-        }
-    }
-    let cleaned_profile = profile::remove(selected_shell, profile_path).await?;
+    let integration = Integration::from_env().await?;
+    let removed = remove_integration(&integration).await?;
+    let Removed {
+        docker_plugins,
+        plugin_error,
+        profile: cleaned_profile,
+    } = removed;
 
     match format {
         OutputFormat::Json => println!(
@@ -141,14 +136,46 @@ async fn register_docker_plugins(
 
 async fn unregister_docker_plugins(
     bin: &Path,
+    docker_config: &Path,
 ) -> (super::super::cli_plugins::Outcome, Option<String>) {
-    match super::super::cli_plugins::default_docker_config_dir() {
-        Ok(config) => match super::super::cli_plugins::unregister(bin, &config).await {
-            Ok(outcome) => (outcome, None),
-            Err(error) => (Default::default(), Some(format!("{error:#}"))),
-        },
+    match super::super::cli_plugins::unregister(bin, docker_config).await {
+        Ok(outcome) => (outcome, None),
         Err(error) => (Default::default(), Some(format!("{error:#}"))),
     }
+}
+
+/// What [`remove_integration`] took out.
+pub(in crate::commands) struct Removed {
+    pub(in crate::commands) docker_plugins: super::super::cli_plugins::Outcome,
+    pub(in crate::commands) plugin_error: Option<String>,
+    /// The shell profile the `source` line was removed from, when it had one.
+    pub(in crate::commands) profile: Option<PathBuf>,
+}
+
+/// Reverses `setup install` for the files in `integration`.
+///
+/// Shared by `abctl setup uninstall` and `abctl uninstall`, so the two
+/// cannot drift apart in what they leave behind.
+pub(in crate::commands) async fn remove_integration(integration: &Integration) -> Result<Removed> {
+    let (docker_plugins, plugin_error) =
+        unregister_docker_plugins(&integration.bin, &integration.docker_config).await;
+    for path in [
+        &integration.bin,
+        &integration.shell,
+        &integration.completions,
+    ] {
+        if tokio::fs::try_exists(path).await? {
+            tokio::fs::remove_dir_all(path)
+                .await
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+        }
+    }
+    let profile = profile::remove(integration.shell_kind, integration.profile.clone()).await?;
+    Ok(Removed {
+        docker_plugins,
+        plugin_error,
+        profile,
+    })
 }
 
 async fn write_init_scripts(directory: &Path) -> Result<()> {
@@ -189,7 +216,7 @@ async fn write_init_scripts(directory: &Path) -> Result<()> {
 
 async fn link_docker_tools(executable: &Path, bin: &Path) -> usize {
     let mut candidates = Vec::new();
-    if let Some(xbin) = super::super::symlink::detect_bundle_xbin() {
+    if let Some(xbin) = super::super::bundle::detect_bundle_xbin() {
         candidates.push(xbin);
     } else if let Some(xbin) = executable
         .parent()

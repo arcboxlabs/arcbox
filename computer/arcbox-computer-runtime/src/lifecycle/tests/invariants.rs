@@ -1,7 +1,9 @@
 //! The rules that must hold in every state: recovery's seeding, and the gates
 //! `stop_sandbox`, `cleanup::begin_removal` and the two deadline timers apply.
 
-use super::harness::{ALL_PHASES, BUDGET_MS, explore, ordinal, reach, ready_machine, step};
+use super::harness::{
+    ALL_PHASES, BUDGET_MS, detached_machine, explore, ordinal, reach, ready_machine, step,
+};
 use crate::lifecycle::effect::{
     Answer, Durability, Effect, Effects, Notify, RecordEnd, ReleaseScope, Timer,
 };
@@ -166,20 +168,26 @@ fn a_stop_only_acts_while_the_guest_serves() {
 }
 
 #[test]
-fn a_non_forced_remove_is_refused_exactly_where_the_computer_is_busy() {
+fn a_non_forced_remove_is_refused_where_the_computer_is_busy_or_handed_over() {
     // `cleanup::begin_removal` refuses `!force` on Running and Starting; the
     // machine mirrors that on the states projecting them. A removal already
     // under way (or done) coalesces instead.
     for node in explore() {
         let (mut sm, mut context) = reach(&node.path);
         let (_, effects) = step(&mut sm, &mut context, &Event::Remove { force: false });
-        let busy = matches!(
+        let refused = matches!(
             node.state.to_public(),
             SandboxState::Starting | SandboxState::Running
-        ) || matches!(node.state, State::Removing {} | State::Gone {});
+        ) || matches!(
+            node.state,
+            // Not busy — not ours. A handed-over computer projects `Ready`,
+            // so without its own arm here it would be the one state a
+            // non-forced remove tore down out from under its successor.
+            State::Removing {} | State::Gone {} | State::Detached {}
+        );
         assert_eq!(
             effects.is_empty(),
-            busy,
+            refused,
             "non-forced remove from {:?} emitted {effects:?}",
             node.state
         );
@@ -189,7 +197,14 @@ fn a_non_forced_remove_is_refused_exactly_where_the_computer_is_busy() {
 #[test]
 fn a_forced_remove_tears_down_from_every_live_state() {
     for node in explore() {
-        if matches!(node.state, State::Removing {} | State::Gone {}) {
+        // `detached` is live but not this process's to destroy: the VM belongs
+        // to the successor, and `force` is not a licence to reach into another
+        // process's guest. Pinned by
+        // `a_handed_over_computer_refuses_every_teardown`.
+        if matches!(
+            node.state,
+            State::Removing {} | State::Gone {} | State::Detached {}
+        ) {
             continue;
         }
         let (mut sm, mut context) = reach(&node.path);
@@ -229,15 +244,22 @@ fn a_forced_remove_tears_down_from_every_live_state() {
 }
 
 #[test]
-fn the_ttl_cap_destroys_everywhere_except_a_resting_or_removed_computer() {
+fn the_ttl_cap_destroys_everywhere_except_a_resting_removed_or_handed_over_computer() {
     for node in explore() {
         let (mut sm, mut context) = reach(&node.path);
         let (_, effects) = step(&mut sm, &mut context, &Event::TtlExpired);
         // `deadlines::ttl_due` drops the timer once a computer is terminal,
-        // and a removal in flight coalesces.
+        // and a removal in flight coalesces. A handed-over computer's lifetime
+        // is the successor's to cap — this process's timer firing would
+        // destroy a guest another one is adopting — which is why the handover
+        // cancels both timers on the way in.
         let inert = matches!(
             node.state,
-            State::Stopped {} | State::Failed {} | State::Removing {} | State::Gone {}
+            State::Stopped {}
+                | State::Failed {}
+                | State::Removing {}
+                | State::Gone {}
+                | State::Detached {}
         );
         assert_eq!(
             effects.is_empty(),
@@ -246,6 +268,181 @@ fn the_ttl_cap_destroys_everywhere_except_a_resting_or_removed_computer() {
             node.state
         );
     }
+}
+
+/// A handover only acts where a settled live handle exists (CORE-145).
+///
+/// The complement is the point: a computer mid-launch still has its resources
+/// in the boot task rather than on itself, and one mid-teardown was asked to
+/// go away — handing either over would give the successor something its record
+/// does not describe. `checkpointing` is excluded for a third reason, pinned
+/// by `a_handover_is_refused_while_a_capture_is_in_flight`. Everywhere the
+/// machine declines, the actor answers, so declining must also leave the
+/// computer exactly where it was.
+#[test]
+fn a_handover_only_acts_where_a_live_handle_is_settled() {
+    for node in explore() {
+        let (mut sm, mut context) = reach(&node.path);
+        let (after, effects) = step(&mut sm, &mut context, &Event::Detach);
+        let acts = matches!(node.state, State::Ready {} | State::Running {});
+        assert_eq!(
+            effects.is_empty(),
+            !acts,
+            "detach from {:?} emitted {effects:?}",
+            node.state
+        );
+        if acts {
+            // The port call decides, so the machine must not have moved yet:
+            // a handover that fails leaves a computer that is still ours.
+            assert_eq!(effects, vec![Effect::Detach], "{:?}", node.state);
+        }
+        assert_eq!(
+            ordinal(after),
+            ordinal(node.state),
+            "detach moved {:?} before its port call reported",
+            node.state
+        );
+    }
+}
+
+/// A handover *completion* lands only where the handover was asked for.
+///
+/// The companion to the rule above, and the one that would otherwise go
+/// unstated: `Event::Detached` is in the alphabet, so `explore` drives it into
+/// every state and would record a Checkpointing→Detached edge as legitimate.
+/// It is unreachable only because `Effect::Detach` is awaited inline — spawn it
+/// like every sibling flow and a completion could land on a state that refused
+/// the handover, detaching a guest whose capture sub-task is still driving it.
+#[test]
+fn a_handover_completion_only_lands_where_the_handover_was_asked_for() {
+    for node in explore() {
+        let (mut sm, mut context) = reach(&node.path);
+        let (after, effects) = step(&mut sm, &mut context, &Event::Detached);
+        let asked = matches!(node.state, State::Ready {} | State::Running {});
+        assert_eq!(
+            effects.is_empty(),
+            !asked,
+            "a handover completion in {:?} emitted {effects:?}",
+            node.state
+        );
+        if asked {
+            assert!(matches!(after, State::Detached {}), "{:?}", node.state);
+        } else {
+            assert_eq!(
+                ordinal(after),
+                ordinal(node.state),
+                "a stray handover completion moved {:?}",
+                node.state
+            );
+        }
+    }
+}
+
+/// Nothing this process does may reach a VM it has handed over.
+///
+/// The failure this pins is the expensive half of CORE-145: a `Stop` landing
+/// after the handover drives `handle.shutdown` into a handle whose reaper has
+/// stood down, burns the whole budget waiting for an exit that is never
+/// published, and then SIGKILLs the VM the successor is adopting — while its
+/// release hands back TAP, the CoW device and the jail underneath it.
+#[test]
+fn a_handed_over_computer_refuses_every_teardown() {
+    for event in [
+        Event::Stop {
+            budget_ms: BUDGET_MS,
+        },
+        Event::Remove { force: false },
+        Event::Remove { force: true },
+        Event::TtlExpired,
+        Event::IdleExpired {
+            action: IdleAction::Kill,
+        },
+        Event::IdleExpired {
+            action: IdleAction::Pause,
+        },
+        Event::Pause {
+            reason: crate::lifecycle::event::PauseReason::Requested,
+        },
+        Event::Checkpoint,
+        // Its exit is the successor's to observe; this process stopped
+        // watching when it let go.
+        Event::VmExited,
+        Event::Failure,
+        Event::Detach,
+    ] {
+        let (mut sm, mut context) = detached_machine();
+        assert!(matches!(sm.state(), State::Detached {}));
+        let (after, effects) = step(&mut sm, &mut context, &event);
+        assert!(
+            matches!(after, State::Detached {}),
+            "{event:?} moved a handed-over computer to {after:?}"
+        );
+        assert!(
+            effects.is_empty(),
+            "{event:?} acted on a handed-over computer: {effects:?}"
+        );
+    }
+}
+
+/// A capture in flight refuses the handover.
+///
+/// `checkpointing` sits under `active` beside `ready` and `running`, so it
+/// would otherwise inherit the arm. Its capture runs in a sub-task that cloned
+/// the handle before it started, and the driver's detach only stands the
+/// reaper down — the handle stays fully functional — so the task would go on
+/// to freeze, snapshot and resume a guest the successor had already adopted,
+/// while `detached` silently swallowed its `CaptureDone`. Nothing on the
+/// handover path preempts it: `Effect::Detach` is awaited inline and never
+/// reaches `spawn`, and the arm emits no `AbortInflight`.
+#[test]
+fn a_handover_is_refused_while_a_capture_is_in_flight() {
+    let (mut sm, mut context) = ready_machine();
+    let (state, _) = step(&mut sm, &mut context, &Event::Checkpoint);
+    assert!(matches!(state, State::Checkpointing {}));
+
+    let (after, effects) = step(&mut sm, &mut context, &Event::Detach);
+    assert!(
+        matches!(after, State::Checkpointing {}),
+        "the handover moved a computer mid-capture to {after:?}"
+    );
+    assert!(
+        effects.is_empty(),
+        "the handover acted while a capture held the handle: {effects:?}"
+    );
+
+    // And once the capture is done the computer hands over normally.
+    let (state, _) = step(
+        &mut sm,
+        &mut context,
+        &Event::CaptureDone {
+            snapshot_id: "snap".to_owned(),
+        },
+    );
+    assert!(matches!(state, State::Ready {}));
+    let (_, effects) = step(&mut sm, &mut context, &Event::Detach);
+    assert_eq!(effects, vec![Effect::Detach]);
+}
+
+/// The handover cancels both deadline timers, and answers its caller.
+#[test]
+fn a_handover_drops_the_timers_it_no_longer_owns() {
+    let (mut sm, mut context) = ready_machine();
+    let (_, effects) = step(&mut sm, &mut context, &Event::Detach);
+    assert_eq!(effects, vec![Effect::Detach]);
+
+    let (state, effects) = step(&mut sm, &mut context, &Event::Detached);
+    assert!(matches!(state, State::Detached {}));
+    assert_eq!(
+        effects,
+        vec![
+            Effect::Answer(Answer::Detached),
+            Effect::CancelTimer(Timer::Ttl),
+            Effect::CancelTimer(Timer::Idle),
+        ]
+    );
+    // No durable write: the successor's sweep adopts from a `Ready` record,
+    // and any other phase would have it reinstated as `Failed` instead.
+    assert_eq!(state.durable(), Some(PersistPhase::Ready));
 }
 
 #[test]

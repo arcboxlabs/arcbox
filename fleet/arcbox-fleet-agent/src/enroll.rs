@@ -12,7 +12,7 @@ use tracing::{info, warn};
 use crate::attach::authenticated_request;
 use crate::config::AgentConfig;
 use crate::credentials::Credential;
-use crate::host;
+use crate::host::{self, HostFacts};
 use crate::update::UpdatePayload;
 
 /// Enrollment refused because the gateway pins a different build. Carries
@@ -63,6 +63,7 @@ pub async fn enroll(
     token: String,
     capabilities: Vec<Capability>,
     gateway: &str,
+    facts: &HostFacts,
 ) -> Result<Credential> {
     let channel = config
         .endpoint_for(gateway)?
@@ -78,7 +79,7 @@ pub async fn enroll(
         cpu_cores: host::cpu_cores(),
         mem_mib: host::mem_mib(),
         capabilities,
-        host_info_json: host::host_info_json(),
+        host_info_json: facts.current(),
         agent_version: env!("CARGO_PKG_VERSION").to_owned(),
         host_os: host::host_os(),
     };

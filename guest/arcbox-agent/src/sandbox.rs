@@ -13,6 +13,7 @@ mod files;
 mod snapshots;
 mod template;
 mod templates;
+mod window;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
@@ -20,7 +21,7 @@ use std::sync::{Arc, Mutex, Weak};
 use arcbox_computer_runtime::agent::VmProtoAgentFactory;
 use arcbox_computer_runtime::{
     NodeEnvironment, RootfsBuilder, RootfsPaths, SandboxManager, SandboxMountSpec,
-    SandboxNetworkSpec, SandboxSpec, SandboxState, VmmConfig, VmmError,
+    SandboxNetworkSpec, SandboxSpec, SandboxState, VmmError,
 };
 use arcbox_connect::sandbox_v1;
 use arcbox_fc_driver::{FcDriver, FcDriverConfig};
@@ -29,6 +30,7 @@ use arcbox_tap_net::{IptablesLegacy, TapNetwork};
 use buffa::Message;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
+use crate::config::GuestConfig;
 use crate::create_registry::{CreateRegistry, Reserve as CreateReserve};
 use crate::error::SandboxError;
 
@@ -114,39 +116,40 @@ pub fn rootfs_builder(block_tools: Arc<dyn BlockTools>) -> RootfsBuilder {
 /// the System VM. This is where they are built: `SandboxManager::new`
 /// builds none of them, so the choice of VMM is made here.
 ///
-/// Four components, each from `config`:
+/// Four components, out of the two halves of `config`:
 ///
-/// - the Firecracker driver over the `[firecracker]` binaries and
+/// - the Firecracker driver over the adapter half's binaries and
 ///   process-level flags ([`FcDriverConfig`]);
-/// - the Linux TAP network over the `[network]` pool, with its quarantine
-///   ledger under the data dir, the configured datapath, and
-///   iptables-legacy for the netfilter rendering of the invariant
-///   translation — which is the `Filter` datapath itself and what the
-///   `Ebpf` one falls back to;
+/// - the Linux TAP network over the runtime half's `[network]` pool, with
+///   its quarantine ledger under the data dir, the adapter half's
+///   datapath, and iptables-legacy for the netfilter rendering of the
+///   invariant translation — which is the `Filter` datapath itself and
+///   what the `Ebpf` one falls back to;
 /// - the `arcbox-vm-proto` guest-agent client, which every Firecracker
 ///   sandbox speaks;
 /// - the copy-on-write rootfs manager over the data dir, `block_tools`, and
-///   the config's `dmsetup` search list.
+///   the runtime half's `dmsetup` search list.
 pub fn node_environment(
-    config: &VmmConfig,
+    config: &GuestConfig,
     block_tools: Arc<dyn BlockTools>,
 ) -> anyhow::Result<NodeEnvironment> {
-    let data_dir = std::path::Path::new(&config.firecracker.data_dir);
+    let runtime = &config.runtime;
+    let data_dir = std::path::Path::new(&runtime.firecracker.data_dir);
     let network = TapNetwork::with_quarantine_dir(
-        &config.network.cidr,
-        &config.network.gateway,
-        config.network.dns.clone(),
+        &runtime.network.cidr,
+        &runtime.network.gateway,
+        runtime.network.dns.clone(),
         data_dir.join("sandbox-network-quarantine"),
-        config.firecracker.sandbox_datapath,
+        config.adapters.sandbox_datapath,
         Arc::new(IptablesLegacy::default()),
     )?;
     let mut cow_options = CowOptions::new(data_dir);
     cow_options.block_tools = block_tools;
-    if let Some(candidates) = &config.firecracker.dmsetup_candidates {
+    if let Some(candidates) = &runtime.firecracker.dmsetup_candidates {
         cow_options.dmsetup_candidates = candidates.iter().map(std::path::PathBuf::from).collect();
     }
     Ok(NodeEnvironment {
-        driver: Arc::new(FcDriver::new(FcDriverConfig::from(&config.firecracker))),
+        driver: Arc::new(FcDriver::new(FcDriverConfig::from(&config.adapters))),
         network: Arc::new(network),
         agent: Arc::new(VmProtoAgentFactory::default()),
         cow_manager: Arc::new(CowManager::new(cow_options)?),
@@ -179,21 +182,13 @@ impl SandboxOperationLocks {
 }
 
 impl SandboxService {
-    pub(crate) async fn lock_operation(&self, id: &str) -> Option<OwnedMutexGuard<()>> {
+    pub async fn lock_operation(&self, id: &str) -> Option<OwnedMutexGuard<()>> {
         self.operations.lock(id).await
     }
 
-    pub(crate) fn is_terminal_or_absent(&self, id: &str) -> bool {
-        match self.manager.inspect_sandbox(&id.to_owned()) {
-            Ok(info) => matches!(info.state, SandboxState::Stopped | SandboxState::Failed),
-            Err(VmmError::NotFound(_)) => true,
-            Err(_) => false,
-        }
-    }
-
     /// Create a new [`SandboxService`] from the given config.
-    pub fn new(config: VmmConfig) -> anyhow::Result<Self> {
-        let default_rootfs = config.defaults.rootfs.clone();
+    pub fn new(config: GuestConfig) -> anyhow::Result<Self> {
+        let default_rootfs = config.runtime.defaults.rootfs.clone();
         // The rootfs builder shares the environment's block tooling so both
         // mount through the same busybox.
         let block_tools = block_tools();
@@ -201,7 +196,7 @@ impl SandboxService {
         let environment = node_environment(&config, block_tools)?;
         // `into_shared` starts the lifecycle monitor driving the idle/TTL
         // expiry timers (CORE-21/60).
-        let manager = SandboxManager::new(config, environment)
+        let manager = SandboxManager::new(config.runtime, environment)
             .map_err(|e| anyhow::anyhow!("{e}"))?
             .into_shared();
         let creates = Arc::new(CreateRegistry::default());
@@ -291,7 +286,7 @@ impl SandboxService {
         templates::validate_template_overrides(request)?;
         request.template = resolved.canonical_ref();
         templates::merge_template_defaults(request, &resolved.entry.defaults);
-        Ok(templates::TemplateSource::Catalog(resolved))
+        Ok(templates::TemplateSource::Catalog(Box::new(resolved)))
     }
 
     async fn create_once(
@@ -348,7 +343,8 @@ impl SandboxService {
                         vcpus: warm.vcpus,
                         memory_mib: warm.memory_mib,
                     });
-            spec.ready_probe = resolved.entry.defaults.ready_probe.clone();
+            spec.ready_probe
+                .clone_from(&resolved.entry.defaults.ready_probe);
         }
 
         let (id, ip_address) = self
@@ -422,14 +418,7 @@ impl SandboxService {
     }
 
     /// Stop a sandbox.
-    pub async fn stop(&self, payload: &[u8]) -> Result<(), SandboxError> {
-        let req = sandbox_v1::StopSandboxRequest::decode_from_slice(payload)
-            .map_err(|e| SandboxError::Decode(e.to_string()))?;
-        let _operation = self.operations.lock(&req.id).await;
-        self.stop_request(req).await
-    }
-
-    pub(crate) async fn stop_request(
+    pub async fn stop_request(
         &self,
         req: sandbox_v1::StopSandboxRequest,
     ) -> Result<(), SandboxError> {
@@ -444,7 +433,7 @@ impl SandboxService {
     /// Pause a sandbox: checkpoint, then release its VM while keeping the
     /// record and disk under the same id (CORE-21). The sandbox's DNS entry
     /// is dropped with its released IP; Resume re-registers the fresh one.
-    pub(crate) async fn pause_request(
+    pub async fn pause_request(
         &self,
         req: sandbox_v1::PauseSandboxRequest,
     ) -> Result<(), SandboxError> {
@@ -461,7 +450,7 @@ impl SandboxService {
     /// The wire reason is constrained to the two values the contract
     /// documents; anything else (including empty) reads as an explicit
     /// resume rather than injecting arbitrary event attributes.
-    pub(crate) async fn resume_request(
+    pub async fn resume_request(
         &self,
         req: arcbox_connect::v1::SandboxResumeCommand,
     ) -> Result<arcbox_connect::v1::SandboxResumeResponse, SandboxError> {
@@ -487,7 +476,7 @@ impl SandboxService {
     /// Replace a sandbox's lifecycle deadlines (CORE-60): TTL re-armed from
     /// now, idle timeout/policy replaced. Absent fields are unchanged; an
     /// explicit `UNSPECIFIED` policy restores the daemon default (KILL).
-    pub(crate) async fn set_lifecycle_request(
+    pub async fn set_lifecycle_request(
         &self,
         req: sandbox_v1::SetLifecycleRequest,
     ) -> Result<(), SandboxError> {
@@ -505,14 +494,7 @@ impl SandboxService {
     }
 
     /// Remove a sandbox.
-    pub async fn remove(&self, payload: &[u8]) -> Result<(), SandboxError> {
-        let req = sandbox_v1::RemoveSandboxRequest::decode_from_slice(payload)
-            .map_err(|e| SandboxError::Decode(e.to_string()))?;
-        let _operation = self.operations.lock(&req.id).await;
-        self.remove_request(req).await
-    }
-
-    pub(crate) async fn remove_request(
+    pub async fn remove_request(
         &self,
         req: sandbox_v1::RemoveSandboxRequest,
     ) -> Result<(), SandboxError> {
@@ -557,7 +539,7 @@ impl SandboxService {
 
     /// Return the active generation's network identity (external pool IP,
     /// cleanup token, and addressing mode).
-    pub(crate) fn sandbox_network_identity(
+    pub fn sandbox_network_identity(
         &self,
         sandbox_id: &str,
     ) -> Result<arcbox_computer_runtime::SandboxNetworkIdentity, SandboxError> {
@@ -566,13 +548,13 @@ impl SandboxService {
             .map_err(SandboxError::from)
     }
 
-    pub(crate) async fn wait_startup_cleanup_complete(&self) {
+    pub async fn wait_startup_cleanup_complete(&self) {
         self.manager.wait_startup_cleanup_complete().await;
     }
 
     /// Return the durable cleanup ticket for a terminal generation, if its
     /// sandbox had networking enabled.
-    pub(crate) async fn pending_cleanup_ticket(
+    pub async fn pending_cleanup_ticket(
         &self,
         sandbox_id: &str,
     ) -> Result<Option<arcbox_connect::v1::SandboxCleanupTicket>, SandboxError> {
@@ -593,7 +575,7 @@ impl SandboxService {
     }
 
     /// Snapshot every durable cleanup generation after startup reconciliation.
-    pub(crate) async fn pending_cleanup_tickets(
+    pub async fn pending_cleanup_tickets(
         &self,
     ) -> Result<Vec<arcbox_connect::v1::SandboxCleanupTicket>, SandboxError> {
         let mut tickets = self
@@ -631,7 +613,7 @@ impl SandboxService {
     /// gates are written in: the System VM's DNAT and fwmark rules are
     /// iptables, not ip6tables. A lease from another dataplane would be
     /// one this cleanup path could not express.
-    pub(crate) async fn prepare_cleanup(
+    pub async fn prepare_cleanup(
         &self,
         ticket: &arcbox_connect::v1::SandboxCleanupTicket,
     ) -> Result<std::net::Ipv4Addr, SandboxError> {
@@ -662,7 +644,7 @@ impl SandboxService {
     }
 
     /// Revalidate and recycle one exact generation after guest DNAT cleanup.
-    pub(crate) async fn finalize_cleanup(
+    pub async fn finalize_cleanup(
         &self,
         ticket: &arcbox_connect::v1::SandboxCleanupTicket,
     ) -> Result<(), SandboxError> {

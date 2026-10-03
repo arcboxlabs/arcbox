@@ -79,8 +79,8 @@ message Enrolled {
 // Server → client. "Your build isn't what I expect; here's what you should
 // be running — and where to get it." Fires from
 // `EnrollResponse.result.update_required`, `AttachResponse.msg.attach_rejected`,
-// `AttachAccepted.update`, and `HeartbeatAck.update`, so the client's
-// update-handling code lives in one place. A payload with a `binary_url`
+// and `HeartbeatAck.update`, so the client's update-handling code lives in
+// one place. A payload with a `binary_url`
 // drives the agent's self-update (download → verify → swap → re-exec); an
 // empty `binary_url` (gateway has no registered release for the platform)
 // makes the agent log the expected version and park for the operator.
@@ -137,6 +137,7 @@ message AttachRequest {
     RunnerAccepted runner_accepted = 3;
     RunnerRejected runner_rejected = 4;
     RunnerExited runner_exited = 5;
+    HostFactsUpdate host_facts_update = 6;
   }
 }
 
@@ -157,7 +158,10 @@ message Attach {
   repeated Capability capabilities = 2;
   // Free-form host facts as JSON (macOS version, chip, ...). Same
   // "constant for the process lifetime" reasoning as `capabilities` —
-  // reported once here, not on every Heartbeat.
+  // reported once here, not on every Heartbeat. The agent probes the slow
+  // facts (the volume list) off its runtime and attaches with what it has;
+  // when that probe finishes after the handshake, one `HostFactsUpdate`
+  // completes the set.
   string host_info_json = 3;
   // The platform the agent binary itself runs on (`darwin` | `linux`,
   // lowercase RunnerOs), as opposed to `capabilities`, which describe what
@@ -174,6 +178,13 @@ message Attach {
 // and the server has a fresh utilization snapshot for placement ranking.
 message Heartbeat {
   HostTelemetry telemetry = 1;
+}
+
+// The complete host facts, once the agent's probe has finished after the
+// handshake declared a partial set. Replaces the stored facts whole; at most
+// one per stream — a second one is a protocol violation.
+message HostFactsUpdate {
+  string host_info_json = 1;
 }
 
 // The agent admitted the offer and has started the runner. Echoes the offer

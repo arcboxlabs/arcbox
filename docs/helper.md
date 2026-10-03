@@ -78,14 +78,17 @@ Rejected peers are dropped before any tarpc dispatch; logs include
 
 | Mutation | Create / replace | Delete |
 |----------|------------------|--------|
-| `cli_link` / `cli_unlink` | Target must be a **regular file** under `.app/Contents/MacOS/xbin/` (`/Applications` or `/Users`); existing `/usr/local/bin` entry replaced only if ArcBox-owned symlink | Only ArcBox-owned symlink |
+| `cli_link` / `cli_unlink` | Target must be a **regular file** under `<ArcBox bundle>.app/Contents/MacOS/xbin/` (`/Applications` or `/Users`); existing `/usr/local/bin` entry replaced only if ArcBox-owned symlink | Only ArcBox-owned symlink |
 | `socket_link` / `socket_unlink` | Target must parse as `SocketTarget` (`~/.arcbox` / `~/.arcbox-dev`); replace only ArcBox-owned symlink | Only ArcBox-owned symlink; never real sockets |
 | `dns_install` / `dns_uninstall` | Writes marker `# managed by arcbox-helper`; refuses to overwrite foreign resolvers | Only files carrying the marker |
 | `hosts_alias_*` | Fixed `127.0.0.1 ArcBox # managed by arcbox-helper` line only | Lines carrying the marker only |
 
 `is_arcbox_owned` (shared with `CliTarget`) rejects relative paths, `..`, and
-anything outside `/Applications/` or `/Users/` without a
-`.app/Contents/MacOS/xbin/` segment.
+anything outside `/Applications/` or `/Users/` without an
+`<ArcBox bundle>.app/Contents/MacOS/xbin/` segment. The bundle name is part of
+the rule (`ArcBox.app`, `ArcBox Dev.app`, a Finder-renamed `ArcBox 2.app`):
+OrbStack links its CLI tools from the same `xbin` layout, and an older
+layout-only check replaced and deleted its links (#715).
 
 ### Client-wide compatibility gate
 

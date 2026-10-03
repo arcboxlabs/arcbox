@@ -35,7 +35,7 @@ fn a_cold_create_stages_boots_gates_and_only_then_announces_ready() {
     // The handoff is what makes the boot task safely abortable.
     let (state, effects) = step(&mut sm, &mut context, &Event::ResourcesHandedOff);
     assert!(matches!(state, State::Booting {}));
-    assert!(effects.is_empty());
+    assert_eq!(effects, []);
 
     let (_, effects) = step(&mut sm, &mut context, &Event::AgentReady);
     assert_eq!(effects, vec![Effect::SpawnGate]);
@@ -156,7 +156,7 @@ fn the_boots_own_cmd_claims_the_slot_the_gate_reserved_for_it() {
             claim: WorkloadClaim::Initial,
         },
     );
-    assert!(effects.is_empty());
+    assert_eq!(effects, []);
 
     // READY then announces a computer that is already running its own cmd,
     // and the idle window opens only when that workload exits.
@@ -456,7 +456,7 @@ fn a_stop_drains_through_stopping_and_clears_the_journal() {
     // The VM exiting is what we asked for, not a failure.
     let (state, effects) = step(&mut sm, &mut context, &Event::VmExited);
     assert_eq!(state.to_public(), SandboxState::Stopping);
-    assert!(effects.is_empty());
+    assert_eq!(effects, []);
 
     let (state, effects) = step(&mut sm, &mut context, &Event::StopDone);
     assert_eq!(state.to_public(), SandboxState::Stopped);
