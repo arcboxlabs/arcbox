@@ -138,9 +138,14 @@ impl DaemonHandle {
             .arg("0")
             .arg("--ssh-port")
             .arg("0")
-            // Keep the guest-data NFS mount off the shared ~/ArcBox by pointing
-            // it inside the isolated data dir. A caller can override via env.
+            // Keep the guest-data NFS mount off the shared ~/ArcBox, and the
+            // machine root mounts off ~/ArcBoxMachines, by pointing both inside
+            // the isolated data dir. A caller can override via env.
             .env("ARCBOX_HOST_MOUNT_DIR", config.data_dir.join("ArcBox"))
+            .env(
+                "ARCBOX_MACHINE_MOUNT_DIR",
+                config.data_dir.join("ArcBoxMachines"),
+            )
             .args(&config.args)
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(stderr));

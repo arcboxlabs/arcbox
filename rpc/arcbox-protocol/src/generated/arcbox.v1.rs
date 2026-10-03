@@ -1635,6 +1635,116 @@ pub struct ListMachinesResponse {
     /// List of machines.
     #[prost(message, repeated, tag = "1")]
     pub machines: ::prost::alloc::vec::Vec<MachineSummary>,
+    /// The default machine (see SetDefault); empty when none is set.
+    #[prost(string, tag = "2")]
+    pub default_machine: ::prost::alloc::string::String,
+}
+/// Request to clone a machine.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CloneMachineRequest {
+    /// Machine to clone (ID or name); must be stopped.
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
+    /// Name of the clone.
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+}
+/// Response to clone machine.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CloneMachineResponse {
+    /// The clone's ID.
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
+}
+/// Request to export a machine to an archive.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExportMachineRequest {
+    /// Machine to export (ID or name); must be stopped.
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
+    /// Where to write the archive, on the daemon's host. Must not exist.
+    #[prost(string, tag = "2")]
+    pub path: ::prost::alloc::string::String,
+}
+/// Response to export machine.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExportMachineResponse {
+    /// The archive written.
+    #[prost(string, tag = "1")]
+    pub path: ::prost::alloc::string::String,
+    /// Its size in bytes.
+    #[prost(uint64, tag = "2")]
+    pub size: u64,
+}
+/// Request to import a machine from an archive.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ImportMachineRequest {
+    /// The archive, on the daemon's host.
+    #[prost(string, tag = "1")]
+    pub path: ::prost::alloc::string::String,
+    /// Name for the machine; empty uses the name in the archive.
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+    /// CPUs; 0 uses the archive's value.
+    #[prost(uint32, tag = "3")]
+    pub cpus: u32,
+    /// Memory in bytes; 0 uses the archive's value.
+    #[prost(uint64, tag = "4")]
+    pub memory: u64,
+}
+/// Response to import machine.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ImportMachineResponse {
+    /// The new machine's ID.
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
+    /// Distribution the machine boots (from the archive).
+    #[prost(string, tag = "2")]
+    pub distro: ::prost::alloc::string::String,
+    /// Distribution release.
+    #[prost(string, tag = "3")]
+    pub distro_version: ::prost::alloc::string::String,
+}
+/// Request to change a machine's CPU and memory limits.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetMachineResourcesRequest {
+    /// Machine ID or name.
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
+    /// CPUs, 1 through the host's logical CPU count; 0 keeps the current value.
+    #[prost(uint32, tag = "2")]
+    pub cpus: u32,
+    /// Memory in bytes, 512 MiB through the host's physical memory; 0 keeps
+    /// the current value.
+    #[prost(uint64, tag = "3")]
+    pub memory: u64,
+}
+/// A machine's CPU and memory limits after SetResources.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetMachineResourcesResponse {
+    /// CPUs the machine boots with from now on.
+    #[prost(uint32, tag = "1")]
+    pub cpus: u32,
+    /// Memory in bytes the machine boots with from now on.
+    #[prost(uint64, tag = "2")]
+    pub memory: u64,
+    /// The machine is running with its previous size; the new one applies
+    /// when it is next started.
+    #[prost(bool, tag = "3")]
+    pub restart_required: bool,
+    /// Logical CPUs on the host, the ceiling for `cpus`.
+    #[prost(uint32, tag = "4")]
+    pub host_cpus: u32,
+    /// Physical memory on the host in bytes, the ceiling for `memory`.
+    #[prost(uint64, tag = "5")]
+    pub host_memory: u64,
+}
+/// Request to set or clear the default machine.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetDefaultMachineRequest {
+    /// Machine ID or name; empty clears the default.
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
 }
 /// Summary information about a machine.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -3728,6 +3838,44 @@ pub struct EnsureNfsExportResponse {
     /// threads started).
     #[prost(string, repeated, tag = "1")]
     pub notes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// Ask a distro machine's agent to serve the machine's root filesystem to the
+/// host, read-write, over NFSv3 on the machine's bridge NIC. The host mounts
+/// it under its machine mount root (`~/ArcBoxMachines/<name>` by default). The
+/// System VM answers with an error: its data lives behind `EnsureNfsExportRequest`.
+/// Idempotent: a second request returns the endpoint the first one started.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EnsureMachineExportRequest {
+    /// Addresses the export accepts connections from — the host's own
+    /// addresses on the bridge network. Every other peer is refused, because
+    /// every VM and container on that network can otherwise reach the port
+    /// and the export performs no authentication of its own.
+    #[prost(string, repeated, tag = "1")]
+    pub client_addresses: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// The uid and gid the host mounts as. Files the guest owns as
+    /// `guest_uid`/`guest_gid` are shown with these ids, and files created
+    /// or chowned to these ids from the host land as `guest_uid`/`guest_gid`;
+    /// every other id passes through unchanged.
+    #[prost(uint32, tag = "2")]
+    pub host_uid: u32,
+    #[prost(uint32, tag = "3")]
+    pub host_gid: u32,
+    /// The guest account the host user stands in for: root unless the
+    /// machine has a default user.
+    #[prost(uint32, tag = "4")]
+    pub guest_uid: u32,
+    #[prost(uint32, tag = "5")]
+    pub guest_gid: u32,
+}
+/// Response to `EnsureMachineExportRequest`.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EnsureMachineExportResponse {
+    /// IPv4 address of the bridge NIC the export listens on.
+    #[prost(string, tag = "1")]
+    pub address: ::prost::alloc::string::String,
+    /// TCP port serving both the MOUNT and the NFS protocol.
+    #[prost(uint32, tag = "2")]
+    pub port: u32,
 }
 /// Ask the guest agent to DNAT a reserved guest port to a sandbox port.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

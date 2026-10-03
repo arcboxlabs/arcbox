@@ -188,6 +188,13 @@ async fn run(
         steps::remove_data_export(host, &roots.data_export_mount()),
     );
     step(
+        format!(
+            "Unmounting machines under {}",
+            roots.machine_mount_root().display()
+        ),
+        steps::remove_machine_exports(host, &roots.machine_mount_root()),
+    );
+    step(
         "Removing the Docker context".into(),
         remove_docker_context(roots),
     );

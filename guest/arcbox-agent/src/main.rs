@@ -31,6 +31,11 @@ mod machine_identity;
 mod containerd_config;
 #[cfg(any(target_os = "linux", test))]
 mod live_exports;
+// A distro machine's root served to the host over NFSv3. Gated like
+// `boot_done`: the filesystem logic is unit-tested on a host build, its
+// only caller is the Linux RPC handler.
+#[cfg(any(target_os = "linux", test))]
+mod machine_export;
 #[cfg(any(target_os = "linux", test))]
 pub(crate) mod runtime_materialize;
 mod supervisor;

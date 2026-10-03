@@ -112,6 +112,12 @@ pub enum MessageType {
     /// when the `~/ArcBox` mount is enabled; a `--no-mount-nfs` daemon never
     /// sends it, so the guest runs no nfsd.
     EnsureNfsExportRequest = 0x0013,
+    /// Ask a distro machine's agent to serve the machine's root over NFSv3
+    /// on its bridge NIC (payload: `arcbox.v1.EnsureMachineExportRequest`).
+    /// Answered with [`Self::EnsureMachineExportResponse`]. The host daemon
+    /// sends it when a machine reaches readiness and mounts the endpoint it
+    /// returns; the System VM refuses it.
+    EnsureMachineExportRequest = 0x00A8,
 
     // Kubernetes host-integration request types (0x0090 - 0x0097).
     /// List the guest cluster's Services of type LoadBalancer (payload:
@@ -344,6 +350,9 @@ pub enum MessageType {
     /// Answers [`Self::EnsureNfsExportRequest`] (payload:
     /// `arcbox.agent.EnsureNfsExportResponse`).
     EnsureNfsExportResponse = 0x1013,
+    /// Answers [`Self::EnsureMachineExportRequest`] (payload:
+    /// `arcbox.v1.EnsureMachineExportResponse`).
+    EnsureMachineExportResponse = 0x10A8,
     /// Answers [`Self::KubernetesLoadBalancersRequest`] (payload:
     /// `arcbox.v1.KubernetesLoadBalancersResponse`).
     KubernetesLoadBalancersResponse = 0x1090,
@@ -500,6 +509,7 @@ impl MessageType {
             0x0011 => Some(Self::ContainerFsPathsRequest),
             0x0012 => Some(Self::ImageFsPathsRequest),
             0x0013 => Some(Self::EnsureNfsExportRequest),
+            0x00A8 => Some(Self::EnsureMachineExportRequest),
             0x0090 => Some(Self::KubernetesLoadBalancersRequest),
             // Sandbox CRUD requests.
             0x0020 => Some(Self::SandboxCreateRequest),
@@ -575,6 +585,7 @@ impl MessageType {
             0x1011 => Some(Self::ContainerFsPathsResponse),
             0x1012 => Some(Self::ImageFsPathsResponse),
             0x1013 => Some(Self::EnsureNfsExportResponse),
+            0x10A8 => Some(Self::EnsureMachineExportResponse),
             0x1090 => Some(Self::KubernetesLoadBalancersResponse),
             0x1030 => Some(Self::PortBindingsChanged),
             0x1031 => Some(Self::PortBindingsRemoved),
@@ -747,12 +758,14 @@ mod tests {
             (0x0011, MessageType::ContainerFsPathsRequest),
             (0x0012, MessageType::ImageFsPathsRequest),
             (0x0013, MessageType::EnsureNfsExportRequest),
+            (0x00A8, MessageType::EnsureMachineExportRequest),
             (0x0090, MessageType::KubernetesLoadBalancersRequest),
             (0x100F, MessageType::MemoryPressureEvent),
             (0x1010, MessageType::MachineStats),
             (0x1011, MessageType::ContainerFsPathsResponse),
             (0x1012, MessageType::ImageFsPathsResponse),
             (0x1013, MessageType::EnsureNfsExportResponse),
+            (0x10A8, MessageType::EnsureMachineExportResponse),
             (0x1090, MessageType::KubernetesLoadBalancersResponse),
             (0x1001, MessageType::PingResponse),
             (0x1002, MessageType::GetSystemInfoResponse),

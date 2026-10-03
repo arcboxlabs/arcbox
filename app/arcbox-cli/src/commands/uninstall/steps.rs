@@ -247,6 +247,48 @@ pub(super) fn remove_data_export(host: &dyn Host, mount_point: &Path) -> Result<
     Ok(Outcome::Done)
 }
 
+/// Unmounts the machine roots a daemon left under `~/ArcBoxMachines`, then
+/// removes the empty mount points and the root. The daemon is already
+/// stopped, so the machines serving those mounts are gone: the unmount is
+/// forced, or the NFS client would wait for servers that never answer. A
+/// mount of another shape, or a directory with the user's files in it, is
+/// left alone, and the root stays with it.
+pub(super) fn remove_machine_exports(host: &dyn Host, root: &Path) -> Result<Outcome> {
+    if !root.exists() {
+        return Ok(skipped("absent"));
+    }
+    let mut kept = Vec::new();
+    for entry in
+        std::fs::read_dir(root).with_context(|| format!("could not read {}", root.display()))?
+    {
+        let path = entry?.path();
+        match mount_at(&path) {
+            Some(mount) if mount.is_machine_export() => {
+                run_checked(host, "/sbin/umount", &[OsStr::new("-f"), path.as_os_str()])?;
+            }
+            Some(mount) => {
+                kept.push(format!("{} ({})", mount.source, mount.fstype));
+                continue;
+            }
+            None => {}
+        }
+        match std::fs::remove_dir(&path) {
+            Ok(()) => {}
+            Err(e) if e.raw_os_error() == Some(libc::ENOTEMPTY) => {
+                kept.push(path.display().to_string());
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("could not remove {}", path.display()));
+            }
+        }
+    }
+    if !kept.is_empty() {
+        return Ok(skipped(format!("left alone: {}", kept.join(", "))));
+    }
+    std::fs::remove_dir(root).with_context(|| format!("could not remove {}", root.display()))?;
+    Ok(Outcome::Done)
+}
+
 struct Mount {
     source: String,
     fstype: String,
@@ -259,6 +301,18 @@ impl Mount {
         self.fstype == "nfs"
             && (self.source == "127.0.0.1:/"
                 || self.source == format!("{}:/", arcbox_helper::HOSTS_ALIAS_NAME))
+    }
+
+    /// The shape of a machine root mount: NFS from the root of a server
+    /// named by its bridge address (never loopback, which is the docker
+    /// export's proxy).
+    fn is_machine_export(&self) -> bool {
+        self.fstype == "nfs"
+            && self
+                .source
+                .strip_suffix(":/")
+                .and_then(|host| host.parse::<std::net::Ipv4Addr>().ok())
+                .is_some_and(|host| !host.is_loopback())
     }
 }
 

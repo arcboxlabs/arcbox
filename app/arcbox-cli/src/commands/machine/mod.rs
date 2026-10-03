@@ -1,6 +1,9 @@
 //! Machine management commands.
 
-use anyhow::{Context, Result};
+mod lifecycle;
+mod target;
+
+use anyhow::{Context, Result, bail};
 use arcbox_cli::terminal::{RawModeGuard, TerminalSize};
 use arcbox_connect::v1 as pb;
 use arcbox_connect::v1::MachineServiceClient;
@@ -12,7 +15,6 @@ use arcbox_connect::v1::{
 };
 use clap::{Args, Subcommand};
 use humantime::format_duration;
-use std::collections::HashMap;
 use std::io::Write;
 use tokio::io::AsyncReadExt as _;
 
@@ -84,10 +86,20 @@ pub enum MachineCommands {
     Ping(PingArgs),
     /// Show guest system info
     Info(InfoArgs),
-    /// SSH into a machine
+    /// Open a login shell in a machine, or run a command in one
     Ssh(SshArgs),
     /// Execute a command in a machine
     Exec(ExecArgs),
+    /// Clone a stopped machine (copy-on-write, instant)
+    Clone(lifecycle::CloneArgs),
+    /// Write a stopped machine to a self-contained archive
+    Export(lifecycle::ExportArgs),
+    /// Create a machine from an archive
+    Import(lifecycle::ImportArgs),
+    /// Change a machine's CPU and memory limits (applied at its next start)
+    Resize(lifecycle::ResizeArgs),
+    /// Show or set the machine `exec` and `ssh` use when given no name
+    Default(lifecycle::DefaultArgs),
 }
 
 #[derive(Args)]
@@ -180,19 +192,25 @@ pub struct InfoArgs {
 
 #[derive(Args)]
 pub struct SshArgs {
-    /// Machine name
-    pub name: String,
-    /// Command to run
+    /// User to log in as (default: root)
+    #[arg(short, long)]
+    pub user: Option<String>,
+    /// Machine name; omit to use the default machine (`abctl machine default`)
+    pub name: Option<String>,
+    /// Command to run instead of a login shell
     #[arg(trailing_var_arg = true)]
     pub command: Vec<String>,
 }
 
 #[derive(Args)]
 pub struct ExecArgs {
-    /// Machine name
-    pub name: String,
+    /// User to run as (default: root)
+    #[arg(short, long)]
+    pub user: Option<String>,
+    /// Machine name; omit to use the default machine (`abctl machine default`)
+    pub name: Option<String>,
     /// Command to run
-    #[arg(trailing_var_arg = true, required = true)]
+    #[arg(trailing_var_arg = true)]
     pub command: Vec<String>,
 }
 
@@ -210,6 +228,11 @@ pub async fn execute(cmd: MachineCommands) -> Result<()> {
         MachineCommands::Info(args) => execute_info(args).await,
         MachineCommands::Ssh(args) => execute_ssh(args).await,
         MachineCommands::Exec(args) => execute_exec(args).await,
+        MachineCommands::Clone(args) => lifecycle::execute_clone(args).await,
+        MachineCommands::Export(args) => lifecycle::execute_export(args).await,
+        MachineCommands::Import(args) => lifecycle::execute_import(args).await,
+        MachineCommands::Resize(args) => lifecycle::execute_resize(args).await,
+        MachineCommands::Default(args) => lifecycle::execute_default(args).await,
     }
 }
 
@@ -537,25 +560,36 @@ async fn execute_info(args: InfoArgs) -> Result<()> {
     Ok(())
 }
 
+/// `abctl machine ssh`: what `ssh [user@]<machine>@arcbox` gives, without
+/// the SSH client — a login session as `user` (root by default), the
+/// account's login shell on a PTY when no command is given, `shell -c` of
+/// the command otherwise.
 async fn execute_ssh(args: SshArgs) -> Result<()> {
-    if args.command.is_empty() {
-        return exec_session_interactive(
-            &args.name,
-            "",
-            vec!["/bin/sh".to_string(), "-l".to_string()],
-        )
-        .await;
+    let target::Target { machine, command } = target::resolve(args.name, args.command).await?;
+    let request = MachineExecRequest {
+        id: machine,
+        cmd: command,
+        user: args.user.unwrap_or_default(),
+        login: true,
+        ..Default::default()
+    };
+    if request.cmd.is_empty() {
+        return exec_session_interactive(request).await;
     }
-    exec_via_grpc(&args.name, args.command, HashMap::new(), false).await
+    exec_via_grpc(request).await
 }
 
 /// Runs an interactive PTY session in a machine: local terminal in raw mode,
 /// stdin and SIGWINCH resizes pumped up, merged PTY output written to stdout.
 ///
-/// A non-empty `container` runs the session inside that container's namespaces
-/// (the `abctl debug` path); empty runs it in the machine root.
-pub async fn exec_session_interactive(name: &str, container: &str, cmd: Vec<String>) -> Result<()> {
-    let command = cmd.first().cloned().unwrap_or_default();
+/// `request` names the machine and what to run: a non-empty `container`
+/// runs the session inside that container's namespaces (the `abctl debug`
+/// path), `login` makes it a login session. The terminal — `tty`, its size
+/// and `TERM` — is this function's to fill in.
+pub async fn exec_session_interactive(mut request: MachineExecRequest) -> Result<()> {
+    let name = request.id.clone();
+    let container = request.container.clone();
+    let command = command_label(&request);
     let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel::<MachineExecInput>(16);
 
     let tty_size = TerminalSize::current().ok().map(|s| ProtoTerminalSize {
@@ -563,19 +597,18 @@ pub async fn exec_session_interactive(name: &str, container: &str, cmd: Vec<Stri
         height: u32::from(s.rows),
         ..Default::default()
     });
+    request.tty = true;
+    request.tty_size = tty_size.into();
+    if let Ok(term) = std::env::var("TERM")
+        && !request.env.contains_key("TERM")
+    {
+        request.env.insert("TERM".to_owned(), term);
+    }
 
     // The first message in the stream must be the Init payload.
     msg_tx
         .send(MachineExecInput {
-            payload: MachineExecRequest {
-                id: name.to_string(),
-                container: container.to_string(),
-                cmd,
-                tty: true,
-                tty_size: tty_size.into(),
-                ..Default::default()
-            }
-            .into(),
+            payload: request.into(),
             ..Default::default()
         })
         .await
@@ -636,7 +669,7 @@ pub async fn exec_session_interactive(name: &str, container: &str, cmd: Vec<Stri
     // forwarder task, the receive half stays here.
     let client = machine_client();
     let stream = client.exec_session().await.map_err(|error| {
-        crate::error::machine_request(error, name, "interactive command execution")
+        crate::error::machine_request(error, &name, "interactive command execution")
     })?;
     let (mut send, mut recv) = stream.into_split();
 
@@ -659,9 +692,9 @@ pub async fn exec_session_interactive(name: &str, container: &str, cmd: Vec<Stri
         .await
         .map_err(|error| {
             if container.is_empty() {
-                crate::error::machine_exec_output(error, name, &command)
+                crate::error::machine_exec_output(error, &name, &command)
             } else {
-                crate::error::debug_exec(error, container)
+                crate::error::debug_exec(error, &container)
             }
         })?
     {
@@ -681,7 +714,7 @@ pub async fn exec_session_interactive(name: &str, container: &str, cmd: Vec<Stri
     // Restore the terminal before exiting.
     drop(raw_guard);
 
-    let exit_code = exec_exit_code(exit_code, name, &command)?;
+    let exit_code = exec_exit_code(exit_code, &name, &command)?;
     if exit_code != 0 {
         std::process::exit(exit_code);
     }
@@ -689,36 +722,34 @@ pub async fn exec_session_interactive(name: &str, container: &str, cmd: Vec<Stri
 }
 
 async fn execute_exec(args: ExecArgs) -> Result<()> {
-    exec_via_grpc(&args.name, args.command, HashMap::new(), false).await
+    let target::Target { machine, command } = target::resolve(args.name, args.command).await?;
+    if command.is_empty() {
+        bail!("No command given. Usage: abctl machine exec [NAME] <COMMAND>...");
+    }
+    exec_via_grpc(MachineExecRequest {
+        id: machine,
+        cmd: command,
+        user: args.user.unwrap_or_default(),
+        ..Default::default()
+    })
+    .await
 }
 
-/// Runs a command in a machine via the daemon's gRPC Exec RPC.
-async fn exec_via_grpc(
-    name: &str,
-    cmd: Vec<String>,
-    env: HashMap<String, String>,
-    tty: bool,
-) -> Result<()> {
-    let command = cmd.first().cloned().unwrap_or_default();
+/// Runs a command in a machine via the daemon's gRPC Exec RPC, stdin closed.
+async fn exec_via_grpc(request: MachineExecRequest) -> Result<()> {
+    let name = request.id.clone();
+    let command = command_label(&request);
     let client = machine_client();
     let mut stream = client
-        .exec(MachineExecRequest {
-            id: name.to_string(),
-            cmd,
-            working_dir: String::new(),
-            user: String::new(),
-            env: env.into_iter().collect(),
-            tty,
-            ..Default::default()
-        })
+        .exec(request)
         .await
-        .map_err(|error| crate::error::machine_request(error, name, "command execution"))?;
+        .map_err(|error| crate::error::machine_request(error, &name, "command execution"))?;
 
     let mut exit_code = None;
     while let Some(item) = stream
         .message::<pb::MachineExecOutput>()
         .await
-        .map_err(|error| crate::error::machine_exec_output(error, name, &command))?
+        .map_err(|error| crate::error::machine_exec_output(error, &name, &command))?
     {
         let output = item.to_owned_message();
         if !output.data.is_empty() {
@@ -740,11 +771,21 @@ async fn exec_via_grpc(
         }
     }
 
-    let exit_code = exec_exit_code(exit_code, name, &command)?;
+    let exit_code = exec_exit_code(exit_code, &name, &command)?;
     if exit_code != 0 {
         std::process::exit(exit_code);
     }
     Ok(())
+}
+
+/// What an error message calls the thing that ran: the program, or the
+/// login shell when a login session was given no command.
+fn command_label(request: &MachineExecRequest) -> String {
+    request
+        .cmd
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "login shell".to_owned())
 }
 
 fn exec_exit_code(exit_code: Option<i32>, name: &str, command: &str) -> Result<i32> {

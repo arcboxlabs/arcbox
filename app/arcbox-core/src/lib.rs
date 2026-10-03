@@ -68,7 +68,7 @@ pub use macos::{
 #[cfg(feature = "macos-ipsw-install")]
 pub use macos::{PullPhase, PullSource};
 pub use migration::MigrationManager;
-pub use runtime::{HostCapacity, SystemVmResources};
+pub use runtime::{HostCapacity, MachineResources, SystemVmResources};
 pub use runtime::{
     InitProgress, Runtime, SandboxPortExposure, SandboxPortMapping, SandboxPortProtocol,
 };

@@ -10,6 +10,7 @@
 //! mechanism and its trade-offs.
 
 use anyhow::Result;
+use arcbox_connect::v1::MachineExecRequest;
 use arcbox_core::vm_lifecycle::DEFAULT_MACHINE_NAME;
 use clap::Args;
 
@@ -32,5 +33,11 @@ pub async fn execute(args: DebugArgs) -> Result<()> {
     } else {
         args.command
     };
-    super::machine::exec_session_interactive(DEFAULT_MACHINE_NAME, &args.container, command).await
+    super::machine::exec_session_interactive(MachineExecRequest {
+        id: DEFAULT_MACHINE_NAME.to_owned(),
+        container: args.container,
+        cmd: command,
+        ..Default::default()
+    })
+    .await
 }

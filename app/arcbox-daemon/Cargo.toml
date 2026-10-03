@@ -46,6 +46,7 @@ arcbox-ssh.workspace = true
 arcbox-error.workspace = true
 arcbox-computer.workspace = true
 arcbox-engine.workspace = true
+nix.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 arcbox-route.workspace = true

@@ -154,6 +154,7 @@ impl RuntimeBooted {
             crate::nfs_mount::spawn(&self.ctx, &self.runtime);
             crate::ssh_agent::spawn(&self.ctx, &self.runtime);
             crate::machine_dns::spawn(&self.ctx, &self.runtime);
+            crate::machine_mount::spawn(&self.ctx, &self.runtime);
             Ok(handles)
         })
         .await?;

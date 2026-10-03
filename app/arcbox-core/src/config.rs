@@ -20,6 +20,7 @@
 //! [machine]
 //! disk_gb = 50
 //! default_distro = "ubuntu"
+//! # default_machine = "dev"  # what `abctl machine exec`/`ssh` use without a name; `abctl machine default` writes it
 //!
 //! [network]
 //! subnet = "10.0.2.0/24"
@@ -285,6 +286,10 @@ pub struct MachineDefaults {
     pub default_version: Option<String>,
     /// Auto-mount home directory.
     pub auto_mount_home: bool,
+    /// The machine `abctl machine exec` and `abctl machine ssh` act on when
+    /// given no name. `abctl machine default` writes it; `None` means every
+    /// command needs a name.
+    pub default_machine: Option<String>,
 }
 
 impl Default for MachineDefaults {
@@ -294,6 +299,7 @@ impl Default for MachineDefaults {
             default_distro: "ubuntu".to_string(),
             default_version: None,
             auto_mount_home: true,
+            default_machine: None,
         }
     }
 }

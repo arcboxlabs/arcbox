@@ -828,3 +828,81 @@ async fn a_machine_sharing_a_hostname_with_another_machine_is_detected() {
         None
     );
 }
+
+#[tokio::test]
+async fn the_default_machine_must_exist_and_lands_in_the_config_file() {
+    let (runtime, temp_dir) = networking_test_runtime();
+    let config = temp_dir.path().join("config.toml");
+    assert_eq!(runtime.default_machine(), None);
+
+    let missing = runtime
+        .store_default_machine(&config, Some("dev"))
+        .unwrap_err();
+    assert!(missing.to_string().contains("dev"), "{missing}");
+    assert!(!config.exists());
+
+    runtime
+        .machine_manager()
+        .create(crate::machine::MachineConfig {
+            name: "dev".to_owned(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    runtime.store_default_machine(&config, Some("dev")).unwrap();
+    assert_eq!(runtime.default_machine().as_deref(), Some("dev"));
+    let written = std::fs::read_to_string(&config).unwrap();
+    assert!(written.contains("default_machine = \"dev\""), "{written}");
+
+    runtime.store_default_machine(&config, None).unwrap();
+    assert_eq!(runtime.default_machine(), None);
+    assert!(
+        !std::fs::read_to_string(&config)
+            .unwrap()
+            .contains("default_machine")
+    );
+}
+
+#[tokio::test]
+async fn machine_resources_are_checked_against_the_host() {
+    let (runtime, _temp_dir) = networking_test_runtime();
+    runtime
+        .machine_manager()
+        .create(crate::machine::MachineConfig {
+            name: "dev".to_owned(),
+            cpus: 1,
+            memory_mb: 1024,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let resources = runtime.set_machine_resources("dev", 0, 2048).unwrap();
+    assert_eq!((resources.cpus, resources.memory_mb), (1, 2048));
+    assert!(!resources.restart_required);
+    assert_eq!(resources.host, super::HostCapacity::probe());
+    assert_eq!(
+        runtime.machine_manager().get("dev").unwrap().memory_mb,
+        2048
+    );
+
+    let too_many = runtime
+        .set_machine_resources("dev", resources.host.cpus + 1, 0)
+        .unwrap_err();
+    assert!(too_many.to_string().contains("cpus must be"), "{too_many}");
+    let too_little = runtime.set_machine_resources("dev", 0, 256).unwrap_err();
+    assert!(
+        too_little.to_string().contains("memory_mb must be"),
+        "{too_little}"
+    );
+    assert_eq!(runtime.machine_manager().get("dev").unwrap().cpus, 1);
+
+    let system_vm = runtime
+        .set_machine_resources(super::DEFAULT_MACHINE_NAME, 2, 0)
+        .unwrap_err();
+    assert!(
+        system_vm.to_string().contains("abctl system resources"),
+        "{system_vm}"
+    );
+    assert!(runtime.set_machine_resources("nope", 1, 0).is_err());
+}

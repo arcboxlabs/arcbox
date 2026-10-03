@@ -140,6 +140,27 @@ impl VmManager {
         Ok(())
     }
 
+    /// Sets the CPU and memory a VM boots with.
+    ///
+    /// The `Vmm` is built from `VmConfig` at start, so a stopped VM gets the
+    /// new size on its next start; a running VM keeps the size it booted
+    /// with until it is restarted, which is the caller's to report.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the VM is not found.
+    pub fn set_resources(&self, id: &VmId, cpus: u32, memory_mb: u64) -> Result<()> {
+        let mut vms = self.vms.write().map_err(|_| EngineError::LockPoisoned)?;
+        let entry = vms
+            .get_mut(id)
+            .ok_or_else(|| EngineError::not_found(id.to_string()))?;
+        entry.config.cpus = cpus;
+        entry.config.memory_mb = memory_mb;
+        entry.info.cpus = cpus;
+        entry.info.memory_mb = memory_mb;
+        Ok(())
+    }
+
     fn build_vmm_config(entry: &VmEntry) -> VmmConfig {
         let shared_dirs: Vec<VmmSharedDirConfig> = entry
             .config

@@ -34,18 +34,18 @@ use arcbox_connect::sandbox_v1::{
 };
 use arcbox_connect::v1::{
     AgentPingRequest as PingRequest, AgentPingResponse as PingResponse, ContainerFsPathsRequest,
-    ContainerFsPathsResponse, DiskTrimRequest, DiskTrimResponse, EnsureNfsExportRequest,
-    EnsureNfsExportResponse, ImageFsPathsRequest, ImageFsPathsResponse, KubernetesDeleteRequest,
-    KubernetesDeleteResponse, KubernetesKubeconfigRequest, KubernetesKubeconfigResponse,
-    KubernetesLoadBalancersRequest, KubernetesLoadBalancersResponse, KubernetesStartRequest,
-    KubernetesStartResponse, KubernetesStatusRequest, KubernetesStatusResponse,
-    KubernetesStopRequest, KubernetesStopResponse, MachineStats, MemoryPressureEvent,
-    MmapReadFileRequest, MmapReadFileResponse, ReadinessEvent, RuntimeEnsureRequest,
-    RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse, SandboxCleanupResponse,
-    SandboxCleanupTicket, SandboxPortForwardRemoveRequest, SandboxPortForwardRequest,
-    SandboxPortForwardResponse, SandboxResumeCommand, SandboxResumeResponse, SystemInfo,
-    WatchMemoryPressureRequest, WatchReadinessRequest, WatchSandboxCleanupRequest,
-    WatchStatsRequest,
+    ContainerFsPathsResponse, DiskTrimRequest, DiskTrimResponse, EnsureMachineExportRequest,
+    EnsureMachineExportResponse, EnsureNfsExportRequest, EnsureNfsExportResponse,
+    ImageFsPathsRequest, ImageFsPathsResponse, KubernetesDeleteRequest, KubernetesDeleteResponse,
+    KubernetesKubeconfigRequest, KubernetesKubeconfigResponse, KubernetesLoadBalancersRequest,
+    KubernetesLoadBalancersResponse, KubernetesStartRequest, KubernetesStartResponse,
+    KubernetesStatusRequest, KubernetesStatusResponse, KubernetesStopRequest,
+    KubernetesStopResponse, MachineStats, MemoryPressureEvent, MmapReadFileRequest,
+    MmapReadFileResponse, ReadinessEvent, RuntimeEnsureRequest, RuntimeEnsureResponse,
+    RuntimeStatusRequest, RuntimeStatusResponse, SandboxCleanupResponse, SandboxCleanupTicket,
+    SandboxPortForwardRemoveRequest, SandboxPortForwardRequest, SandboxPortForwardResponse,
+    SandboxResumeCommand, SandboxResumeResponse, SystemInfo, WatchMemoryPressureRequest,
+    WatchReadinessRequest, WatchSandboxCleanupRequest, WatchStatsRequest,
 };
 use arcbox_constants::ports::AGENT_PORT;
 use arcbox_constants::wire::MessageType;
@@ -1032,6 +1032,45 @@ impl AgentClient {
             MessageType::EnsureNfsExportRequest,
             &payload,
             MessageType::EnsureNfsExportResponse,
+        )
+    }
+
+    /// Asks a distro machine's agent to serve the machine's root over NFSv3
+    /// on its bridge NIC, and returns the endpoint to mount. Idempotent on
+    /// the agent's side: a repeat returns the export already running.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails, the guest is the System VM,
+    /// or the machine's bridge NIC has no address yet (`EAGAIN`, retryable).
+    pub async fn ensure_machine_export(
+        &mut self,
+        request: &EnsureMachineExportRequest,
+    ) -> Result<EnsureMachineExportResponse> {
+        let payload = request.encode_to_vec();
+        self.unary_rpc(
+            MessageType::EnsureMachineExportRequest,
+            &payload,
+            MessageType::EnsureMachineExportResponse,
+        )
+        .await
+    }
+
+    /// Blocking variant of [`Self::ensure_machine_export`] for the HV
+    /// socketpair transport. Call from `spawn_blocking`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::ensure_machine_export`].
+    pub fn ensure_machine_export_blocking(
+        &mut self,
+        request: &EnsureMachineExportRequest,
+    ) -> Result<EnsureMachineExportResponse> {
+        let payload = request.encode_to_vec();
+        self.unary_rpc_blocking(
+            MessageType::EnsureMachineExportRequest,
+            &payload,
+            MessageType::EnsureMachineExportResponse,
         )
     }
 

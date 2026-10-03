@@ -22,7 +22,13 @@ This crate provides a thin command-line interface for ArcBox machine management 
 abctl machine create myvm
 abctl machine start myvm
 abctl machine list
+abctl machine ssh -u alice myvm         # login shell as alice; `exec -u` runs a command as a user
+abctl machine default myvm              # `exec`/`ssh` without a name use it
+abctl machine resize myvm --cpus 4      # takes effect at the next start
 abctl machine stop myvm
+abctl machine clone myvm myvm-2         # stopped machines only; copy-on-write
+abctl machine export myvm myvm.tar.zst  # self-contained archive
+abctl machine import myvm.tar.zst --name myvm-3
 
 # Runtime migration
 abctl migrate from orbstack --dry-run          # inspect the plan, change nothing

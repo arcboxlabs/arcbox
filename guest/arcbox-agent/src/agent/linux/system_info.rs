@@ -1,6 +1,6 @@
 //! `GetSystemInfo` RPC handler and the underlying guest-state collector.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use arcbox_connect::v1::SystemInfo;
 
@@ -31,7 +31,13 @@ pub(super) async fn handle_get_system_info() -> RpcResponse {
 /// the bridge NIC's IPv4 address on its own, when the guest has one.
 struct Addresses {
     all: Vec<String>,
-    bridge_v4: Option<String>,
+    bridge_v4: Option<Ipv4Addr>,
+}
+
+/// The bridge NIC's IPv4 address, when the guest has one: the address the
+/// Mac reaches directly, which is where a machine export listens.
+pub(super) fn bridge_ipv4() -> Option<Ipv4Addr> {
+    interface_addresses().bridge_v4
 }
 
 /// Read from the kernel rather than from a `hostname` binary: a distro image
@@ -67,11 +73,11 @@ fn interface_addresses() -> Addresses {
         if ip.is_loopback() || link_local {
             continue;
         }
-        if ip.is_ipv4()
+        if let IpAddr::V4(v4) = ip
             && addresses.bridge_v4.is_none()
             && bridge.as_deref() == Some(interface.interface_name.as_str())
         {
-            addresses.bridge_v4 = Some(ip.to_string());
+            addresses.bridge_v4 = Some(v4);
         }
         let ip = ip.to_string();
         if !addresses.all.contains(&ip) {
@@ -143,7 +149,10 @@ fn collect_system_info() -> SystemInfo {
 
     let addresses = interface_addresses();
     info.ip_addresses = addresses.all;
-    info.bridge_ip_address = addresses.bridge_v4.unwrap_or_default();
+    info.bridge_ip_address = addresses
+        .bridge_v4
+        .map(|ip| ip.to_string())
+        .unwrap_or_default();
     info.distro_init_pending = distro_init_pending();
 
     info

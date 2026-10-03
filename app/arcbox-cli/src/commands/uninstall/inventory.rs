@@ -84,6 +84,11 @@ impl Roots {
         self.home.join("ArcBox")
     }
 
+    /// The directory the daemon mounts each running machine's root under.
+    pub(super) fn machine_mount_root(&self) -> PathBuf {
+        self.home.join("ArcBoxMachines")
+    }
+
     pub(super) fn login_keychain(&self) -> PathBuf {
         self.home.join("Library/Keychains/login.keychain-db")
     }

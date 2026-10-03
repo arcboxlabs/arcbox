@@ -11,8 +11,9 @@
 //! kernel). Until `assets.lock` points there, run with
 //! `ARCBOX_BOOT_ASSET_VERSION=0.6.4`.
 
+use std::path::{Path, PathBuf};
 use std::sync::Once;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use arcbox_e2e::boot_assets::{resolve_boot_version, stage_dev_boot_assets};
@@ -39,6 +40,10 @@ const CREATE_BUDGET: Duration = Duration::from_secs(120);
 const START_BUDGET: Duration = Duration::from_secs(120);
 /// Budget for one RPC against a running machine.
 const RPC_BUDGET: Duration = Duration::from_secs(30);
+/// Budget for the daemon to mount the machine's root after `start` returns:
+/// the mount loop reacts to `MachineStarted`, asks the agent for the export
+/// and runs `mount_nfs`.
+const MOUNT_BUDGET: Duration = Duration::from_secs(30);
 
 const MACHINE: &str = "e2e-alpine";
 
@@ -89,7 +94,7 @@ fn machine_lifecycle_end_to_end() -> Result<()> {
     })?;
 
     let mut metrics = RunMetrics::new("machine_lifecycle", Some("vz"));
-    let result = scenario(&mut daemon, &mut metrics);
+    let result = scenario(&mut daemon, data_dir.path(), &mut metrics);
     metrics.passed = result.is_ok();
     if let Err(error) = metrics.write(Some(data_dir.path())) {
         tracing::warn!("writing run metrics failed: {error:#}");
@@ -101,7 +106,7 @@ fn machine_lifecycle_end_to_end() -> Result<()> {
     result
 }
 
-fn scenario(daemon: &mut DaemonHandle, metrics: &mut RunMetrics) -> Result<()> {
+fn scenario(daemon: &mut DaemonHandle, data_dir: &Path, metrics: &mut RunMetrics) -> Result<()> {
     metrics.time("daemon_ready", || daemon.wait_ready_blocking(READY_TIMEOUT))?;
     let socket = daemon.grpc_socket();
 
@@ -190,6 +195,7 @@ fn scenario(daemon: &mut DaemonHandle, metrics: &mut RunMetrics) -> Result<()> {
         exec_piped(&mut machines).await?;
         exec_interactive(&mut machines).await?;
         stats_first_frame(channel.clone()).await?;
+        let mount = machine_root_mounted_on_the_host(data_dir, &mut machines).await?;
 
         // Graceful stop, then remove; the registry must forget the machine.
         machines
@@ -208,6 +214,17 @@ fn scenario(daemon: &mut DaemonHandle, metrics: &mut RunMetrics) -> Result<()> {
             .into_inner();
         if info.state != "stopped" {
             bail!("machine is {:?} after stop", info.state);
+        }
+        // The mount went with the machine; the daemon removes its mount
+        // point too, so a stopped machine has no directory on the host. The
+        // unmount runs on the daemon's loop, which the stop RPC does not
+        // wait for, so give it a moment.
+        let gone = Instant::now() + Duration::from_secs(10);
+        while mount.exists() {
+            if Instant::now() >= gone {
+                bail!("{} still exists after the machine stopped", mount.display());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
         machines
@@ -229,6 +246,90 @@ fn scenario(daemon: &mut DaemonHandle, metrics: &mut RunMetrics) -> Result<()> {
         }
         Ok(())
     })
+}
+
+/// The machine's root is mounted on the host under the harness's machine
+/// mount root (`ARCBOX_MACHINE_MOUNT_DIR`, pointed into the data dir by
+/// `DaemonHandle::spawn`): `/etc/os-release` reads through it, a file the
+/// host writes is what the machine reads, and a file the machine writes is
+/// what the host reads. Returns the mount point so the stop path can check
+/// it is gone.
+async fn machine_root_mounted_on_the_host(
+    data_dir: &Path,
+    machines: &mut MachineServiceClient<Channel>,
+) -> Result<PathBuf> {
+    let mount = data_dir.join("ArcBoxMachines").join(MACHINE);
+    let os_release = mount.join("etc/os-release");
+    let deadline = Instant::now() + MOUNT_BUDGET;
+    let release = loop {
+        if let Ok(content) = std::fs::read_to_string(&os_release) {
+            break content;
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "{} did not appear within {MOUNT_BUDGET:?}; the daemon did not mount the machine's root",
+                os_release.display()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    if !release.contains("ID=alpine") {
+        bail!("os-release read through the mount is not alpine's: {release:?}");
+    }
+    tracing::info!(mount = %mount.display(), "machine root mounted on the host");
+
+    // Host → machine: a file written on the Mac, read inside the machine.
+    let marker = format!("from-host-{}", std::process::id());
+    std::fs::write(mount.join("root/from-host"), &marker).context("writing through the mount")?;
+    let seen = exec_output(machines, "cat /root/from-host").await?;
+    if seen.trim() != marker {
+        bail!("the machine read {seen:?} from the file the host wrote ({marker:?})");
+    }
+
+    // Machine → host: a file written inside the machine, read on the Mac.
+    exec_output(machines, "echo from-machine > /root/from-machine").await?;
+    let from_machine = std::fs::read_to_string(mount.join("root/from-machine"))
+        .context("reading the machine's file through the mount")?;
+    if from_machine.trim() != "from-machine" {
+        bail!("the host read {from_machine:?} from the file the machine wrote");
+    }
+    Ok(mount)
+}
+
+/// Runs `sh -c <script>` in the machine and returns its stdout; a non-zero
+/// exit is an error.
+async fn exec_output(machines: &mut MachineServiceClient<Channel>, script: &str) -> Result<String> {
+    let mut stream = tokio::time::timeout(
+        RPC_BUDGET,
+        machines.exec(MachineExecRequest {
+            id: MACHINE.to_owned(),
+            cmd: vec!["/bin/sh".to_owned(), "-c".to_owned(), script.to_owned()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .context("exec timed out")?
+    .context("exec failed")?
+    .into_inner();
+
+    let mut stdout = Vec::new();
+    let mut exit_code = None;
+    while let Some(output) = tokio::time::timeout(RPC_BUDGET, stream.message())
+        .await
+        .context("exec output timed out")?
+        .context("exec stream error")?
+    {
+        if output.stream == "stdout" {
+            stdout.extend_from_slice(&output.data);
+        }
+        if output.done {
+            exit_code = Some(output.exit_code);
+        }
+    }
+    if exit_code != Some(0) {
+        bail!("`{script}` exited with {exit_code:?}");
+    }
+    Ok(String::from_utf8_lossy(&stdout).into_owned())
 }
 
 /// Piped exec: separate stdout stream, exit code on the final frame.

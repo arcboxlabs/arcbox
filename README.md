@@ -135,6 +135,21 @@ open ~/ArcBox
 grep -r "panic" ~/ArcBox/volumes/my-app-data/_data
 ```
 
+### Machine files in Finder
+
+A running Linux machine's root filesystem is mounted read-write at
+`~/ArcBoxMachines/<name>`, served over NFSv3 by the machine itself on its
+bridge NIC. Edit a machine's files with any Mac editor; the mount appears
+when the machine starts and goes away when it stops.
+
+```bash
+abctl machine start ubuntu
+code ~/ArcBoxMachines/ubuntu/root/project
+```
+
+Files the Mac creates belong to root inside the machine, and root's files
+show as yours on the Mac; every other owner keeps its numeric id.
+
 ### Live resource usage
 
 ```bash
@@ -213,13 +228,28 @@ Linux VMs, each with its own kernel, persistent disk, and a distro you choose.
 ```bash
 abctl machine create dev --distro ubuntu --disk 50 --mount ~/code:/code
 abctl machine start dev
-abctl machine ssh dev                   # interactive shell
+abctl machine ssh dev                   # login shell (root; -u <user> for another account)
 abctl machine exec dev -- cargo build   # one-shot command
+abctl machine default dev               # then `abctl machine exec cargo build` needs no name
+abctl machine resize dev --cpus 4 --memory 8192   # applies at the next start
 abctl machine ls
 ```
 
 Create, start, stop, inspect, directory mounts, interactive shells, and command
 execution work today for Alpine, Arch Linux, Debian, Fedora, and Ubuntu.
+
+A stopped machine clones in an instant and travels as one file:
+
+```bash
+abctl machine clone dev dev-2            # copy-on-write: no extra space until they diverge
+abctl machine export dev dev.tar.zst     # manifest + sparse data disk; the rootfs stays an image
+abctl machine import dev.tar.zst --name dev-restored
+```
+
+The archive names the published image the machine boots; import requires that
+image in the local registry at the same version, and says which one it needs
+when it is missing. Clone and export refuse a running machine: its data disk
+is a btrfs volume mounted read-write in the guest, so stop it first.
 
 A machine is its name: the guest's hostname is the machine name, and while it
 runs the Mac reaches it as `<name>.arcbox.local` (`ssh user@dev.arcbox.local`,

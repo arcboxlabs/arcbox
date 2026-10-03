@@ -5,12 +5,14 @@ mod engine_config;
 mod kubeconfig;
 mod kubernetes_lb;
 mod machine_dns;
+mod machine_settings;
 mod progress;
 mod sandbox_host;
 
 #[cfg(test)]
 mod tests;
 
+pub use machine_settings::MachineResources;
 pub use progress::InitProgress;
 
 use crate::config::Config;
@@ -26,9 +28,9 @@ use crate::vm_lifecycle::{
     DEFAULT_MACHINE_NAME, VmLifecycleConfig, VmLifecycleManager, VmLifecycleState,
 };
 use arcbox_connect::v1::{
-    ContainerFsPathsResponse, ImageFsPathsResponse, KubernetesDeleteResponse,
-    KubernetesKubeconfigResponse, KubernetesStartResponse, KubernetesStatusResponse,
-    KubernetesStopResponse, ServiceStatus,
+    ContainerFsPathsResponse, EnsureMachineExportRequest, EnsureMachineExportResponse,
+    ImageFsPathsResponse, KubernetesDeleteResponse, KubernetesKubeconfigResponse,
+    KubernetesStartResponse, KubernetesStatusResponse, KubernetesStopResponse, ServiceStatus,
 };
 use arcbox_net::NetworkManager;
 #[cfg(target_os = "macos")]
@@ -55,7 +57,7 @@ const HOST_DNS_OWNER: &str = "system:host";
 /// Smallest memory a System VM may be given, in MiB.
 const MIN_SYSTEM_VM_MEMORY_MB: u64 = 512;
 
-/// The host's capacity, the ceiling for System VM limits.
+/// The host's capacity, the ceiling for a VM's limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostCapacity {
     /// Logical CPUs.
@@ -65,15 +67,21 @@ pub struct HostCapacity {
 }
 
 impl HostCapacity {
-    fn probe() -> Self {
+    /// The host this daemon runs on.
+    #[must_use]
+    pub fn probe() -> Self {
         Self {
             cpus: arcbox_hypervisor::default_vm_cpu_count(),
             memory_mb: arcbox_hypervisor::host_memory_size() / (1024 * 1024),
         }
     }
 
-    /// Rejects a System VM size the host cannot back.
-    fn check(self, cpus: u32, memory_mb: u64) -> Result<()> {
+    /// Rejects a VM size the host cannot back.
+    ///
+    /// # Errors
+    ///
+    /// Returns a config error naming the allowed range.
+    pub fn check(self, cpus: u32, memory_mb: u64) -> Result<()> {
         if cpus == 0 || cpus > self.cpus {
             return Err(CoreError::config(format!(
                 "cpus must be between 1 and {} (the host's logical CPUs), got {cpus}",
@@ -145,6 +153,9 @@ struct KubernetesHostEndpoint {
 pub struct Runtime {
     /// Configuration.
     config: Config,
+    /// The machine `abctl` acts on without a name; seeded from
+    /// `config.machine.default_machine`, changed by `set_default_machine`.
+    default_machine: std::sync::RwLock<Option<String>>,
     /// Actual loopback port owned by the daemon's Kubernetes proxy. Set once
     /// after bind and before this runtime is exposed through the control plane.
     kubernetes_host_endpoint: OnceLock<KubernetesHostEndpoint>,
@@ -332,6 +343,7 @@ impl Runtime {
         ));
 
         Ok(Self {
+            default_machine: std::sync::RwLock::new(config.machine.default_machine.clone()),
             config,
             kubernetes_host_endpoint: OnceLock::new(),
             event_bus,
@@ -747,6 +759,23 @@ impl Runtime {
     pub async fn trim_machine_disk(&self, machine_name: &str) -> Result<u64> {
         Arc::clone(&self.machine_manager)
             .trim_disk(machine_name.to_owned())
+            .await
+            .map_err(CoreError::from)
+    }
+
+    /// Asks a running distro machine to serve its root filesystem to the
+    /// host over NFSv3 and returns the endpoint to mount.
+    ///
+    /// # Errors
+    /// Returns an error if the machine is not running, its agent is
+    /// unreachable, or the agent refused the export.
+    pub async fn ensure_machine_export(
+        &self,
+        machine_name: &str,
+        request: EnsureMachineExportRequest,
+    ) -> Result<EnsureMachineExportResponse> {
+        Arc::clone(&self.machine_manager)
+            .ensure_export(machine_name.to_owned(), request)
             .await
             .map_err(CoreError::from)
     }

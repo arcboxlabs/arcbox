@@ -13,16 +13,17 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use arcbox_connect::v1::{
     AgentPingRequest as PingRequest, AgentPingResponse as PingResponse, ContainerFsPathsRequest,
-    ContainerFsPathsResponse, DiskTrimRequest, DiskTrimResponse, Empty, EnsureNfsExportRequest,
-    EnsureNfsExportResponse, ImageFsPathsRequest, ImageFsPathsResponse, KubernetesDeleteRequest,
-    KubernetesDeleteResponse, KubernetesKubeconfigRequest, KubernetesKubeconfigResponse,
-    KubernetesLoadBalancersRequest, KubernetesLoadBalancersResponse, KubernetesStartRequest,
-    KubernetesStartResponse, KubernetesStatusRequest, KubernetesStatusResponse,
-    KubernetesStopRequest, KubernetesStopResponse, MemoryPressureEvent, MmapReadFileRequest,
-    MmapReadFileResponse, PortBindingsChanged, PortBindingsRemoved, ReadinessEvent,
-    RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse,
-    ShutdownRequest, ShutdownResponse, SystemInfo, WatchMemoryPressureRequest,
-    WatchReadinessRequest, WatchStatsRequest,
+    ContainerFsPathsResponse, DiskTrimRequest, DiskTrimResponse, Empty, EnsureMachineExportRequest,
+    EnsureMachineExportResponse, EnsureNfsExportRequest, EnsureNfsExportResponse,
+    ImageFsPathsRequest, ImageFsPathsResponse, KubernetesDeleteRequest, KubernetesDeleteResponse,
+    KubernetesKubeconfigRequest, KubernetesKubeconfigResponse, KubernetesLoadBalancersRequest,
+    KubernetesLoadBalancersResponse, KubernetesStartRequest, KubernetesStartResponse,
+    KubernetesStatusRequest, KubernetesStatusResponse, KubernetesStopRequest,
+    KubernetesStopResponse, MemoryPressureEvent, MmapReadFileRequest, MmapReadFileResponse,
+    PortBindingsChanged, PortBindingsRemoved, ReadinessEvent, RuntimeEnsureRequest,
+    RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse, ShutdownRequest,
+    ShutdownResponse, SystemInfo, WatchMemoryPressureRequest, WatchReadinessRequest,
+    WatchStatsRequest,
 };
 pub use arcbox_constants::wire::MessageType;
 
@@ -87,6 +88,7 @@ pub enum RpcRequest {
     ContainerFsPaths(ContainerFsPathsRequest),
     ImageFsPaths(ImageFsPathsRequest),
     EnsureNfsExport(EnsureNfsExportRequest),
+    EnsureMachineExport(EnsureMachineExportRequest),
     WatchReadiness(WatchReadinessRequest),
     WatchMemoryPressure(WatchMemoryPressureRequest),
     WatchStats(WatchStatsRequest),
@@ -119,6 +121,7 @@ pub enum RpcResponse {
     ContainerFsPaths(ContainerFsPathsResponse),
     ImageFsPaths(ImageFsPathsResponse),
     EnsureNfsExport(EnsureNfsExportResponse),
+    EnsureMachineExport(EnsureMachineExportResponse),
     /// Test-only: acknowledgement for [`RpcRequest::KillAgent`].
     KillAgent,
 }
@@ -149,6 +152,7 @@ impl RpcResponse {
             Self::ContainerFsPaths(_) => MessageType::ContainerFsPathsResponse,
             Self::ImageFsPaths(_) => MessageType::ImageFsPathsResponse,
             Self::EnsureNfsExport(_) => MessageType::EnsureNfsExportResponse,
+            Self::EnsureMachineExport(_) => MessageType::EnsureMachineExportResponse,
             Self::KillAgent => MessageType::KillAgentResponse,
         }
     }
@@ -178,6 +182,7 @@ impl RpcResponse {
             Self::ContainerFsPaths(msg) => msg.encode_to_vec(),
             Self::ImageFsPaths(msg) => msg.encode_to_vec(),
             Self::EnsureNfsExport(msg) => msg.encode_to_vec(),
+            Self::EnsureMachineExport(msg) => msg.encode_to_vec(),
             Self::KillAgent => Empty::default().encode_to_vec(),
         }
     }
@@ -371,6 +376,10 @@ pub fn parse_request(msg_type: MessageType, payload: &[u8]) -> Result<RpcRequest
         MessageType::EnsureNfsExportRequest => {
             let req = EnsureNfsExportRequest::decode_from_slice(payload)?;
             Ok(RpcRequest::EnsureNfsExport(req))
+        }
+        MessageType::EnsureMachineExportRequest => {
+            let req = EnsureMachineExportRequest::decode_from_slice(payload)?;
+            Ok(RpcRequest::EnsureMachineExport(req))
         }
         MessageType::WatchReadinessRequest => {
             let req = WatchReadinessRequest::decode_from_slice(payload)?;

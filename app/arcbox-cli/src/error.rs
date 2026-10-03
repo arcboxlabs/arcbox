@@ -61,6 +61,32 @@ pub fn machine_operation(error: ConnectError, name: &str, action: &str) -> Error
     actionable(message, error)
 }
 
+/// Clone, export, import, resize and the default machine: the daemon's
+/// message is the explanation — which image an archive needs, why a size
+/// is refused, that the source must be stopped — so a refusal shows it as
+/// is; only a lost connection or an internal failure gets the generic text.
+pub fn machine_lifecycle(error: ConnectError, name: &str, action: &str) -> Error {
+    let message = match error.code {
+        ErrorCode::NotFound
+        | ErrorCode::AlreadyExists
+        | ErrorCode::InvalidArgument
+        | ErrorCode::FailedPrecondition => format!(
+            "Could not {action} machine '{name}': {}.",
+            error
+                .message
+                .as_deref()
+                .unwrap_or("the daemon refused the request")
+                .trim_end_matches('.')
+        ),
+        ErrorCode::Unavailable => format!(
+            "Could not {action} machine '{name}': the daemon is unavailable. Retry the command; \
+             if the problem persists, check `abctl daemon status`."
+        ),
+        _ => format!("Could not {action} machine '{name}'. Re-run with --debug for details."),
+    };
+    actionable(message, error)
+}
+
 pub fn sandbox_request(error: ConnectError, id: &str, operation: &str) -> Error {
     let message = match error.code {
         ErrorCode::NotFound => {
@@ -250,6 +276,28 @@ mod tests {
         let rendered = render(&unmapped, false);
         assert!(rendered.contains("Failed to inspect another resource"));
         assert!(rendered.contains("VM not found"));
+    }
+
+    #[test]
+    fn lifecycle_refusals_show_the_daemons_reason() {
+        let running = machine_lifecycle(
+            ConnectError::failed_precondition(
+                "invalid state: machine 'dev' is running; stop it first",
+            ),
+            "dev",
+            "clone",
+        );
+        assert_eq!(
+            render(&running, false),
+            "Error: Could not clone machine 'dev': invalid state: machine 'dev' is running; stop \
+             it first."
+        );
+        let crashed = machine_lifecycle(ConnectError::internal("boom"), "dev", "export");
+        assert_eq!(
+            render(&crashed, false),
+            "Error: Could not export machine 'dev'. Re-run with --debug for details."
+        );
+        assert!(render(&crashed, true).contains("boom"));
     }
 
     #[test]

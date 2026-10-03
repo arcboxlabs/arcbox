@@ -52,6 +52,39 @@ service MachineService {
     // Removes a machine.
     rpc Remove(RemoveMachineRequest) returns (Empty);
 
+    // Clones a stopped distro machine into a new one. The clone shares the
+    // source's data disk blocks copy-on-write — instant, and no extra space
+    // until the two diverge — under its own name, hostname, DNS record and
+    // bridge MAC. A running source is refused: its data disk is a btrfs
+    // volume mounted read-write in the guest, so stop it first. (Named
+    // CloneMachine, not Clone: a `clone` method collides with `Clone::clone`
+    // on the generated service handle.)
+    rpc CloneMachine(CloneMachineRequest) returns (CloneMachineResponse);
+
+    // Writes a stopped distro machine to a self-contained archive: a
+    // zstd-compressed tar holding a manifest (the machine's settings and
+    // the published image it boots) and its data disk as a sparse entry.
+    // The daemon writes the file, so `path` is a path on its host. A
+    // running machine is refused, as for Clone.
+    rpc Export(ExportMachineRequest) returns (ExportMachineResponse);
+
+    // Creates a machine from an archive Export wrote. The image the
+    // manifest names must be in the local image registry at the same
+    // version; otherwise the error says which image is missing.
+    rpc Import(ImportMachineRequest) returns (ImportMachineResponse);
+
+    // Changes a machine's CPU and memory limits, checked against the host.
+    // The new size is recorded at once and applies at the machine's next
+    // start; a running machine keeps the size it booted with, and the
+    // response says a restart is needed. The System VM is resized through
+    // SystemService.SetSystemVmResources instead, which restarts it.
+    rpc SetResources(SetMachineResourcesRequest) returns (SetMachineResourcesResponse);
+
+    // Sets the default machine — the one `abctl machine exec` and
+    // `abctl machine ssh` act on when given no name — or clears it with an
+    // empty id. The machine must exist. List reports the current one.
+    rpc SetDefault(SetDefaultMachineRequest) returns (Empty);
+
     // Lists machines.
     rpc List(ListMachinesRequest) returns (ListMachinesResponse);
 
@@ -211,6 +244,92 @@ message ListMachinesRequest {
 message ListMachinesResponse {
     // List of machines.
     repeated MachineSummary machines = 1;
+    // The default machine (see SetDefault); empty when none is set.
+    string default_machine = 2;
+}
+
+// Request to clone a machine.
+message CloneMachineRequest {
+    // Machine to clone (ID or name); must be stopped.
+    string id = 1;
+    // Name of the clone.
+    string name = 2;
+}
+
+// Response to clone machine.
+message CloneMachineResponse {
+    // The clone's ID.
+    string id = 1;
+}
+
+// Request to export a machine to an archive.
+message ExportMachineRequest {
+    // Machine to export (ID or name); must be stopped.
+    string id = 1;
+    // Where to write the archive, on the daemon's host. Must not exist.
+    string path = 2;
+}
+
+// Response to export machine.
+message ExportMachineResponse {
+    // The archive written.
+    string path = 1;
+    // Its size in bytes.
+    uint64 size = 2;
+}
+
+// Request to import a machine from an archive.
+message ImportMachineRequest {
+    // The archive, on the daemon's host.
+    string path = 1;
+    // Name for the machine; empty uses the name in the archive.
+    string name = 2;
+    // CPUs; 0 uses the archive's value.
+    uint32 cpus = 3;
+    // Memory in bytes; 0 uses the archive's value.
+    uint64 memory = 4;
+}
+
+// Response to import machine.
+message ImportMachineResponse {
+    // The new machine's ID.
+    string id = 1;
+    // Distribution the machine boots (from the archive).
+    string distro = 2;
+    // Distribution release.
+    string distro_version = 3;
+}
+
+// Request to change a machine's CPU and memory limits.
+message SetMachineResourcesRequest {
+    // Machine ID or name.
+    string id = 1;
+    // CPUs, 1 through the host's logical CPU count; 0 keeps the current value.
+    uint32 cpus = 2;
+    // Memory in bytes, 512 MiB through the host's physical memory; 0 keeps
+    // the current value.
+    uint64 memory = 3;
+}
+
+// A machine's CPU and memory limits after SetResources.
+message SetMachineResourcesResponse {
+    // CPUs the machine boots with from now on.
+    uint32 cpus = 1;
+    // Memory in bytes the machine boots with from now on.
+    uint64 memory = 2;
+    // The machine is running with its previous size; the new one applies
+    // when it is next started.
+    bool restart_required = 3;
+    // Logical CPUs on the host, the ceiling for `cpus`.
+    uint32 host_cpus = 4;
+    // Physical memory on the host in bytes, the ceiling for `memory`.
+    uint64 host_memory = 5;
+}
+
+// Request to set or clear the default machine.
+message SetDefaultMachineRequest {
+    // Machine ID or name; empty clears the default.
+    string id = 1;
 }
 
 // Summary information about a machine.

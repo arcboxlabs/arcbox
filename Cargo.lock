@@ -222,6 +222,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "nfs3_server",
  "nix 0.29.0",
  "notify",
  "num_cpus",
@@ -610,6 +611,7 @@ dependencies = [
  "libc",
  "libproc",
  "macos-resolver",
+ "nix 0.29.0",
  "sentry",
  "serde_json",
  "tempfile",
@@ -741,7 +743,9 @@ dependencies = [
  "chrono",
  "libc",
  "serde",
+ "serde_json",
  "statig",
+ "tar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -750,6 +754,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "uuid",
+ "zstd",
 ]
 
 [[package]]
@@ -4484,6 +4489,38 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "tempfile",
+]
+
+[[package]]
+name = "nfs3_macros"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06d8fb377e6efeb91911a8ed962a69615535e167e675025a2be8fa109751426a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "nfs3_server"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96d135ac708765b71461a1465cf4a25f009a44d33d9d15ab07e0c00d446d4a0c"
+dependencies = [
+ "anyhow",
+ "nfs3_types",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "nfs3_types"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5d5ab1a9fdfeab2f03b36b6300dea4ea3806e6a057cb479628b41d65e356b94"
+dependencies = [
+ "nfs3_macros",
 ]
 
 [[package]]

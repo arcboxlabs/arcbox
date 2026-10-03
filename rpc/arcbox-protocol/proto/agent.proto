@@ -583,6 +583,37 @@ message EnsureNfsExportResponse {
     repeated string notes = 1;
 }
 
+// Ask a distro machine's agent to serve the machine's root filesystem to the
+// host, read-write, over NFSv3 on the machine's bridge NIC. The host mounts
+// it under its machine mount root (`~/ArcBoxMachines/<name>` by default). The
+// System VM answers with an error: its data lives behind `EnsureNfsExportRequest`.
+// Idempotent: a second request returns the endpoint the first one started.
+message EnsureMachineExportRequest {
+    // Addresses the export accepts connections from — the host's own
+    // addresses on the bridge network. Every other peer is refused, because
+    // every VM and container on that network can otherwise reach the port
+    // and the export performs no authentication of its own.
+    repeated string client_addresses = 1;
+    // The uid and gid the host mounts as. Files the guest owns as
+    // `guest_uid`/`guest_gid` are shown with these ids, and files created
+    // or chowned to these ids from the host land as `guest_uid`/`guest_gid`;
+    // every other id passes through unchanged.
+    uint32 host_uid = 2;
+    uint32 host_gid = 3;
+    // The guest account the host user stands in for: root unless the
+    // machine has a default user.
+    uint32 guest_uid = 4;
+    uint32 guest_gid = 5;
+}
+
+// Response to `EnsureMachineExportRequest`.
+message EnsureMachineExportResponse {
+    // IPv4 address of the bridge NIC the export listens on.
+    string address = 1;
+    // TCP port serving both the MOUNT and the NFS protocol.
+    uint32 port = 2;
+}
+
 // --- Sandbox port forwarding (host↔guest vsock only) ---
 //
 // These are host↔guest wire messages, not part of the sandbox product API:

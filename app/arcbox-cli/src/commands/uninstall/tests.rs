@@ -256,6 +256,8 @@ async fn everything_arcbox_wrote_is_removed_and_nothing_else_is_touched() {
     );
     write(&bin.join("docker-credential-pass"), "real binary");
     write(&roots.home.join("ArcBox/README"), "the user's own folder");
+    // A mount point the daemon left behind under the machine mount root.
+    fs::create_dir_all(roots.machine_mount_root().join("ubuntu")).unwrap();
     let shell_profile = install.write_shell_profile().await;
 
     let host = Recorder::new();
@@ -289,6 +291,7 @@ async fn everything_arcbox_wrote_is_removed_and_nothing_else_is_touched() {
         roots.preferences(),
         roots.data_dir.clone(),
         roots.app_bundle(),
+        roots.machine_mount_root(),
     ] {
         assert!(
             absent.symlink_metadata().is_err(),
@@ -341,6 +344,30 @@ async fn everything_arcbox_wrote_is_removed_and_nothing_else_is_touched() {
         !calls.iter().any(|call| call.contains("pkill")),
         "{calls:?}"
     );
+}
+
+/// A directory under the machine mount root that holds the user's own files
+/// is not a mount point the daemon left: it and the root stay.
+#[tokio::test]
+async fn a_machine_mount_root_with_the_users_files_is_left_alone() {
+    let install = Install::new();
+    let roots = install.roots();
+    write(
+        &roots.machine_mount_root().join("ubuntu/notes.txt"),
+        "kept after the mount went away",
+    );
+
+    let steps = uninstall(&install, &Recorder::new(), false).await;
+    assert_eq!(failures(&steps), Vec::<String>::new());
+    let step = steps
+        .iter()
+        .find(|step| step.label.starts_with("Unmounting machines"))
+        .expect("the machines step ran");
+    assert!(
+        matches!(&step.outcome, Ok(Outcome::Skipped(reason)) if reason.contains("left alone")),
+        "{step}"
+    );
+    assert!(roots.machine_mount_root().join("ubuntu/notes.txt").exists());
 }
 
 #[tokio::test]

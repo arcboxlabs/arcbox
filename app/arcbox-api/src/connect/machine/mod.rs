@@ -1,9 +1,11 @@
 //! Machine service gRPC implementation.
 
+mod rootfs;
+mod transfer;
+
 use arcbox_connect::v1 as pb;
 use arcbox_connect::v1::machine_exec_input;
 use arcbox_core::ExecSessionInput;
-use arcbox_core::machine_image;
 use connectrpc::{
     ConnectError, InboundStream, RequestContext, Response, ServiceRequest, ServiceResult,
     ServiceStream,
@@ -27,6 +29,17 @@ fn timestamp(t: chrono::DateTime<chrono::Utc>) -> pb::Timestamp {
         nanos: i32::try_from(t.timestamp_subsec_nanos()).unwrap_or(0),
         ..Default::default()
     }
+}
+
+/// A lifecycle refusal in the engine's own words. `ApiError` decides the
+/// Connect code, but its `Display` prefixes the chain ("core error: …"),
+/// and for clone, export, import, resize and the default machine `abctl`
+/// shows the daemon's message to the user as the explanation.
+fn refusal<E: std::fmt::Display + Into<ApiError>>(error: E) -> ConnectError {
+    let message = error.to_string();
+    let mut connect = ConnectError::from(error.into());
+    connect.message = Some(message);
+    connect
 }
 
 /// Machine service implementation.
@@ -66,55 +79,10 @@ impl pb::MachineService for MachineServiceImpl {
         let rootfs = if req.distro.is_empty() {
             None
         } else {
-            let arch = if req.arch.is_empty() {
-                machine_image::host_image_arch().to_string()
-            } else {
-                machine_image::image_arch(&req.arch).to_string()
-            };
-            let selector = machine_image::ImageSelector::Distro {
-                distro: req.distro.clone(),
-                release: (!req.version.is_empty()).then(|| req.version.clone()),
-                arch,
-            };
-            let image = runtime
-                .machine_image_manager()
-                .pull(&selector, |done, total| {
-                    tracing::debug!(machine = %req.name, done, total, "machine image pull");
-                })
-                .await
-                .map_err(|e| match &e {
-                    arcbox_image::ImageError::Common(c) if c.is_not_found() => {
-                        ConnectError::not_found(e.to_string())
-                    }
-                    _ => ConnectError::internal(e.to_string()),
-                })?;
-            tracing::info!(
-                machine = %req.name,
-                image = %format!("{}@{}", image.manifest.name, image.manifest.version),
-                "machine image ready"
-            );
-
-            // Resolve the boot shim (kernel + EROFS with
-            // /sbin/arcbox-machine-init) from the same boot-assets cache the
-            // daemon populates for the System VM; a warm cache is a no-op.
-            let shim = async {
-                let provider = arcbox_core::boot_assets::BootAssetProvider::new(
-                    runtime.config().data_dir.join("boot"),
-                )?;
-                let assets = provider.get_assets().await?;
-                Ok::<_, arcbox_core::error::CoreError>(arcbox_core::machine::BootShim {
-                    kernel: assets.kernel,
-                    rootfs: assets.rootfs_image,
-                })
-            }
-            .await
-            .map_err(|e| ConnectError::internal(format!("resolve boot shim: {e}")))?;
-
-            Some(arcbox_core::machine::MachineRootfs {
-                path: image.rootfs_path(),
-                format: image.manifest.rootfs.format,
-                shim: Some(shim),
-            })
+            let image =
+                rootfs::pull_image(runtime, &req.name, &req.distro, &req.version, &req.arch)
+                    .await?;
+            Some(rootfs::rootfs_for(runtime, &image).await?)
         };
 
         let config = arcbox_core::machine::MachineConfig {
@@ -248,6 +216,76 @@ impl pb::MachineService for MachineServiceImpl {
         Response::ok(pb::Empty::default())
     }
 
+    async fn clone_machine(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, pb::CloneMachineRequest>,
+    ) -> ServiceResult<pb::CloneMachineResponse> {
+        let req = request.to_owned_message();
+        let runtime = self.runtime.ready()?;
+        let id = runtime
+            .machine_manager()
+            .clone_machine(&req.id, &req.name)
+            .map_err(refusal)?;
+        Response::ok(pb::CloneMachineResponse {
+            id,
+            ..Default::default()
+        })
+    }
+
+    async fn export(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, pb::ExportMachineRequest>,
+    ) -> ServiceResult<pb::ExportMachineResponse> {
+        let req = request.to_owned_message();
+        let runtime = self.runtime.ready()?;
+        Response::ok(transfer::export(runtime, req.id, req.path).await?)
+    }
+
+    async fn import(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, pb::ImportMachineRequest>,
+    ) -> ServiceResult<pb::ImportMachineResponse> {
+        let req = request.to_owned_message();
+        let runtime = self.runtime.ready()?;
+        Response::ok(transfer::import(runtime, req).await?)
+    }
+
+    async fn set_resources(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, pb::SetMachineResourcesRequest>,
+    ) -> ServiceResult<pb::SetMachineResourcesResponse> {
+        let req = request.to_owned_message();
+        let runtime = self.runtime.ready()?;
+        let resources = runtime
+            .set_machine_resources(&req.id, req.cpus, req.memory / (1024 * 1024))
+            .map_err(refusal)?;
+        Response::ok(pb::SetMachineResourcesResponse {
+            cpus: resources.cpus,
+            memory: resources.memory_mb * 1024 * 1024,
+            restart_required: resources.restart_required,
+            host_cpus: resources.host.cpus,
+            host_memory: resources.host.memory_mb * 1024 * 1024,
+            ..Default::default()
+        })
+    }
+
+    async fn set_default(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, pb::SetDefaultMachineRequest>,
+    ) -> ServiceResult<pb::Empty> {
+        let id = request.to_owned_message().id;
+        let runtime = self.runtime.ready()?;
+        runtime
+            .set_default_machine((!id.is_empty()).then_some(id.as_str()))
+            .map_err(refusal)?;
+        Response::ok(pb::Empty::default())
+    }
+
     async fn list(
         &self,
         _ctx: RequestContext,
@@ -276,6 +314,7 @@ impl pb::MachineService for MachineServiceImpl {
 
         Response::ok(pb::ListMachinesResponse {
             machines: summaries,
+            default_machine: runtime.default_machine().unwrap_or_default(),
             ..Default::default()
         })
     }

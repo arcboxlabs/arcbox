@@ -22,7 +22,7 @@ tracing-appender = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-nix = { workspace = true, features = ["mount", "process", "resource", "sched", "signal", "feature", "term", "ioctl", "poll"] }
+nix = { workspace = true, features = ["mount", "process", "resource", "sched", "signal", "feature", "term", "ioctl", "poll", "fs"] }
 libc = { workspace = true }
 prost = { workspace = true }
 uuid = { workspace = true }
@@ -49,6 +49,7 @@ buffa = "0.9.1"
 buffa-types = "0.9.1"
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12", "logging"] }
 arcbox-local-ca.workspace = true
+nfs3_server = "0.11.0"
 
 # vsock, the sandbox runtime, the VM-driver port it speaks, and the two
 # adapters this crate composes it over (the Firecracker driver and the TAP

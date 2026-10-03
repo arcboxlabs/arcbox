@@ -183,6 +183,10 @@ async fn handle_request(request: RpcRequest) -> RequestResult {
         }
         RpcRequest::ImageFsPaths(req) => RequestResult::Single(handle_image_fs_paths(req).await),
         RpcRequest::EnsureNfsExport(_) => RequestResult::Single(handle_ensure_nfs_export().await),
+        RpcRequest::EnsureMachineExport(req) => RequestResult::Single(
+            super::machine_export::handle_ensure_machine_export(req, crate::agent::Guest::detect())
+                .await,
+        ),
         RpcRequest::KillAgent => RequestResult::Single(handle_kill_agent()),
         RpcRequest::WatchReadiness(_) => unreachable!("watch readiness is streaming"),
         RpcRequest::WatchMemoryPressure(_) => {

@@ -67,6 +67,7 @@ from memory. Every new file is added to the index below.
 ### Decisions
 
 - [0001 — On the HV backend, asserting the SPI is the whole wake](adr/0001-hv-spi-is-the-whole-wake.md) (2026-09-30)
+- [0002 — A distro machine's root is served to the host by a userspace NFSv3 server in its agent, mounted over the bridge NIC](adr/0002-machine-root-export-over-userspace-nfsv3.md) (2026-10-03)
 
 ### Plans
 
@@ -74,6 +75,7 @@ from memory. Every new file is added to the index below.
 
 ### Experiments
 
+- [2026-10-03 — Can a machine's root be served to the Mac by its agent, read-write, fast enough to work in?](experiments/2026-10-03-machine-root-export.md)
 - [2026-09-30 — How a guest vCPU actually gets woken on HV](experiments/2026-09-30-hv-wake-path.md)
 - [2026-06-17 — Host tunnel proof: `tun_proxy`](experiments/2026-06-17-surge-tun-proxy.md)
 

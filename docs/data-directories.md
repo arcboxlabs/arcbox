@@ -54,7 +54,7 @@ Defined in `app/arcbox-core/src/config.rs`.
 |------|---------|---------|
 | `data/images/` | Image storage | daemon |
 | `data/containers/` | Container metadata | daemon |
-| `data/machines/` | Virtual machine data | daemon |
+| `data/machines/` | Linux machines: `<name>/config.toml` and `<name>/data.img` (the btrfs data disk; a clone's is a copy-on-write clone of its source's). `.export-*` / `.import-*` are staging directories of an export or import in progress, swept at daemon start | daemon |
 | `data/volumes/` | Named volumes | daemon |
 | `data/docker.img` | Docker persistent disk image (Btrfs) | daemon |
 | `data/docker-meta.img` | Docker metadata disk image (ext4, fsync-hot boltdb state); paired with `docker.img` — back up or move the two together | daemon |
@@ -220,6 +220,7 @@ Not files under a fixed directory, but state ArcBox leaves on the Mac.
 |-------|-----------|------------|
 | `/etc/hosts` line `127.0.0.1 ArcBox # managed by arcbox-helper` | helper (`hosts_alias_install`), so the `~/ArcBox` mount shows `ArcBox` as its source | `abctl uninstall` |
 | `~/ArcBox` NFS mount of the guest's Docker data, and the mount point | daemon (`nfs_mount`) | daemon on shutdown; `abctl uninstall` when a daemon left it |
+| `~/ArcBoxMachines/<name>`: read-write NFSv3 mount of a running machine's root filesystem, served by the machine's agent on its bridge NIC; the mount point exists only while the machine runs. `ARCBOX_MACHINE_MOUNT_DIR` moves the root (test daemons keep it in their data dir) | daemon (`machine_mount`) | daemon when the machine stops or is removed and on shutdown; `abctl uninstall` when a daemon left one |
 | Login keychain: the `ArcBox Local CA` certificate and its TLS trust | user (`abctl tls trust`) | `abctl tls untrust`, `abctl uninstall` |
 | `~/.kube/config`: the `arcbox` context, cluster and user; `~/.arcbox/kube/` | user (`abctl k8s enable`) | `abctl k8s disable`, `abctl uninstall` |
 | Login Items entry for the daemon (BTM database) | desktop (SMAppService) | the Desktop app when it quits |
@@ -426,8 +427,9 @@ What the command does, in order:
    Login Items entry), then stops the daemon: through `launchctl bootout` when
    launchd manages it, otherwise through the PID in `~/.arcbox/run/daemon.lock`.
    The daemon stops its own System VM; no other process is killed by name.
-2. Unregisters the helper LaunchDaemon and unmounts `~/ArcBox` if the daemon
-   left the mount behind.
+2. Unregisters the helper LaunchDaemon, unmounts `~/ArcBox` if the daemon
+   left the mount behind, and unmounts and removes the machine mount points
+   under `~/ArcBoxMachines`.
 3. Removes the Docker context (restoring the previous current context), the
    shell integration (section 1.6, 1.7, 1.8, 7, and the Docker CLI plugin
    registration in section 5), the kubectl integration, the `~/.ssh/config`
