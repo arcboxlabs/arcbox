@@ -87,7 +87,16 @@ jobs:
       - name: Unit tests
         # --bins covers the vm-agent guest handlers, whose tests are
         # target_os = "linux" and never run under the macOS workspace job.
-        run: cargo test --lib --bins -p arcbox-computer-runtime -p arcbox-vm-proto -p arcbox-vm-driver -p arcbox-fc-driver -p arcbox-tap-net -p arcbox-vm-agent -p arcbox-snapshot
+        #
+        # The macOS workspace job excludes arcbox-agent, and its guest
+        # implementation is Linux-only. --bins includes test modules
+        # declared only by main.rs; --lib alone cannot run those tests.
+        #
+        # The crate is deliberately NOT in the clippy step above: it
+        # carries a pre-existing pedantic backlog no gate has ever caught,
+        # and -D warnings on it would fail this job for reasons unrelated
+        # to the change under test (see guest/AGENTS.md).
+        run: cargo test --lib --bins -p arcbox-computer-runtime -p arcbox-vm-proto -p arcbox-vm-driver -p arcbox-fc-driver -p arcbox-tap-net -p arcbox-vm-agent -p arcbox-snapshot -p arcbox-agent
 
       - name: Manager lifecycle over the fakes
         # The manager's own flows (create, boot, exec, files, pause, resume,
@@ -97,6 +106,21 @@ jobs:
         # — `--lib --bins` above does not pick it up, and these tests used
         # to run here as library tests.
         run: cargo test -p arcbox-computer-runtime --test manager_over_fakes
+
+      - name: Container DNS aliases over the public API
+        # Compose-alias extraction, driven through `arcbox_agent::dns`
+        # rather than from inside the crate. Named for the same reason as
+        # the step above: `--lib --bins` selects no `--test` targets, so an
+        # integration target has to be asked for by name or it runs
+        # nowhere. Pure string handling — no KVM, no root, no Firecracker.
+        #
+        # The crate's other unprivileged `--test` target,
+        # port_forward_cleanup, re-includes
+        # src/agent/linux/port_forward.rs by #[path]. On Linux, `--bins`
+        # above already runs those tests. The remaining two (sandbox_manager_e2e,
+        # sandbox_service_manager) need root + KVM + Firecracker and belong
+        # to the jobs below.
+        run: cargo test -p arcbox-agent --test dns_aliases
 
   # ---------------------------------------------------------------------------
   # Job 2: integration tests — requires root (TAP interface creation)

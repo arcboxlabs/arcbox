@@ -20,12 +20,44 @@ non-obvious invariants and failure signatures.
   `docker run -i alpine sh -c 'cat >/t; chmod +x /t; /t <filter>'`, or an
   alpine machine with the binary's directory mounted (`abctl machine create
   … -m <dir>:/mnt/t`). The crate's `tests/` targets build for Linux only.
-- **CI never lints the agent — you must, locally.** The workspace gate excludes
-  it (`cargo clippy --workspace --exclude arcbox-agent -- -D warnings`,
-  `.github/workflows/ci.yml`; the build and test steps exclude it too) and no
-  job runs clippy against `aarch64-unknown-linux-musl` (`release.yml` only
-  `cargo build`s that target). So `agent/linux` carries a pre-existing
-  pedantic/nursery warning backlog no gate catches. Run
+- **CI runs the agent's unit tests on Linux.** The macOS
+  workspace gate excludes the crate by name from clippy, build *and* test
+  (`--workspace --exclude arcbox-agent`, `.github/workflows/ci.yml`), and the
+  substantive modules are `target_os = "linux"` regardless — so the sole gate
+  is the `Unit tests` step of `.github/workflows/test-vm-linux.yml`
+  (`cargo test --lib --bins … -p arcbox-agent`, unprivileged ubuntu).
+  `cargo fmt --check` is the exception to the exclusions: that same macOS job
+  runs it workspace-wide with no `--exclude`, and cargo-fmt walks every
+  member of a virtual manifest, so rustfmt is the one gate this crate has
+  never escaped — do not add it to another job's `-p` list thinking it is
+  ungated.
+  **`--bins` is required.** Test modules declared only by `main.rs`, including
+  the `agent/` tree, are absent from the lib target. The 2026-08-19 job ran
+  108 lib tests and 189 bin tests: 81 test functions were reachable only
+  through the bin target. Counts change when modules change; modules
+  declared by both targets compile and run twice.
+- **One hole left in that gate, by omission rather than design.** The
+  workflow is `paths:`-filtered: it covers `guest/arcbox-agent/**` *and* most
+  of the crate's own workspace dependencies (`arcbox-computer-runtime`,
+  `arcbox-fc-driver`, `arcbox-tap-net`, `arcbox-snapshot`,
+  `arcbox-constants`, `Cargo.lock`), so a change to any of those re-runs the
+  agent's tests — but a dependency *absent* from that list does not:
+  `arcbox-connect`, `arcbox-pty`, `arcbox-dns`, `arcbox-logging`.
+- **An integration target runs nowhere until a step names it.**
+  `--lib --bins` selects no `--test` targets, so each one needs asking for:
+  `dns_aliases`, the 7 compose-alias tests against the public `dns` API, has
+  its own step beside `Manager lifecycle over the fakes`. A bare `--tests` is
+  not the shortcut — it would pull in `sandbox_manager_e2e` and
+  `sandbox_service_manager`, which need root, KVM and Firecracker and are
+  already driven by the privileged jobs below. `port_forward_cleanup`
+  re-includes `agent/linux/port_forward.rs` by `#[path]`. The Linux bin target
+  already runs those tests, so the extra target would duplicate coverage.
+- **CI still never lints the agent — you must, locally.** No job runs clippy
+  on it: the macOS gate excludes it, the Linux `Unit tests` job deliberately
+  keeps it out of the `-D warnings` clippy step (a pre-existing
+  pedantic/nursery backlog would fail that job for reasons unrelated to the
+  change under test), and nothing lints `aarch64-unknown-linux-musl` at all
+  (`release.yml` only `cargo build`s that target). Run
   `cargo clippy -p arcbox-agent --target aarch64-unknown-linux-musl --all-targets`
   and hold *your changed lines* to zero new warnings; do NOT bulk-fix the
   backlog in an unrelated PR — it buries your diff.
