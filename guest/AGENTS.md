@@ -36,13 +36,15 @@ non-obvious invariants and failure signatures.
   108 lib tests and 189 bin tests: 81 test functions were reachable only
   through the bin target. Counts change when modules change; modules
   declared by both targets compile and run twice.
-- **One hole left in that gate, by omission rather than design.** The
-  workflow is `paths:`-filtered: it covers `guest/arcbox-agent/**` *and* most
-  of the crate's own workspace dependencies (`arcbox-computer-runtime`,
-  `arcbox-fc-driver`, `arcbox-tap-net`, `arcbox-snapshot`,
-  `arcbox-constants`, `Cargo.lock`), so a change to any of those re-runs the
-  agent's tests — but a dependency *absent* from that list does not:
-  `arcbox-connect`, `arcbox-pty`, `arcbox-dns`, `arcbox-logging`.
+- **Path filters omit some direct workspace dependencies.** The workflow's
+  `paths:` filters include `guest/arcbox-agent/**` and these direct workspace
+  dependencies: `arcbox-computer-runtime`, `arcbox-vm-driver`,
+  `arcbox-fc-driver`, `arcbox-tap-net`, `arcbox-snapshot`, and
+  `arcbox-constants`. Changes to `Cargo.toml` or `Cargo.lock` also trigger
+  the workflow. The filters omit these direct workspace dependencies:
+  `arcbox-connect`, `arcbox-pty`, `arcbox-dns`, `arcbox-logging`,
+  `arcbox-local-ca`, and `arcbox-transport`. A change confined to those
+  dependency directories does not trigger the agent's tests.
 - **An integration target runs nowhere until a step names it.**
   `--lib --bins` selects no `--test` targets, so each one needs asking for:
   `dns_aliases`, the 7 compose-alias tests against the public `dns` API, has
