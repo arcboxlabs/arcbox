@@ -8,7 +8,7 @@
 //!
 //! This is a proof harness, not a product: it requires root (utun addressing +
 //! routes), best-effort writes (no backpressure queue), and is macOS-only. See
-//! `docs/surge-tun-proxy.md` for the run recipe and the manual verification.
+//! `docs/experiments/2026-06-17-surge-tun-proxy.md` for the run recipe and the manual verification.
 //!
 //! Run: `sudo cargo run -p arcbox-net --example tun_proxy -- --socks 127.0.0.1:1080`
 

@@ -5,15 +5,16 @@ use crate::error::{DockerError, Result};
 use crate::proxy::ProxyState;
 use crate::proxy::VsockConnector;
 use arcbox_core::Runtime;
-use hyper::body::Incoming;
-use hyper::server::conn::http1;
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto;
+use hyper_util::server::graceful::GracefulShutdown;
+use hyper_util::service::TowerToHyperService;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::UnixListener;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tower::{Layer, Service};
+use tower::Layer;
 use tower_http::trace::TraceLayer;
 
 /// Docker API server configuration.
@@ -91,6 +92,15 @@ impl DockerApiServer {
 
     /// Serves on an already-bound listener until `shutdown` is cancelled.
     ///
+    /// Cancellation stops accepting and shuts every connection down
+    /// gracefully: an idle keep-alive connection closes at once, a connection
+    /// with a request in flight finishes that response with
+    /// `Connection: close`, and a connection hijacked by an upgrade
+    /// (`attach`, `exec`) has already left this server for the proxy. The
+    /// future then returns; only requests still running hold it open. The
+    /// caller owns the deadline for those, and aborting this future aborts
+    /// them with it.
+    ///
     /// There is deliberately no `bind`-and-serve convenience wrapper: it
     /// would only be useful from a spawned task, which is exactly the shape
     /// that swallows the bind error and lets startup report READY for a
@@ -117,11 +127,13 @@ impl DockerApiServer {
         };
         let proxy = Arc::new(ProxyState::new(connector).with_activity_hook(activity_hook));
 
-        // Backstop host-networking teardown for containers that stop without a
-        // stop/kill/remove API call (natural exit, --rm, prune, OOM, guest-side
-        // stop). The handlers do immediate teardown; this reconciles the rest.
-        // It shares the router's ProxyState so its queries go through the same
-        // pooled client — including the restart-generation reset.
+        // Keep host container networking in step with the guest for every
+        // change that reaches no handler: containers that stop without a
+        // stop/kill/remove call (natural exit, --rm, prune, OOM, guest-side
+        // stop) and containers dockerd brings back by itself after a System
+        // VM restart. It shares the router's ProxyState so its queries go
+        // through the same pooled client — including the restart-generation
+        // reset.
         crate::host_reconciler::spawn(
             Arc::clone(&self.runtime),
             Arc::clone(&proxy),
@@ -136,6 +148,17 @@ impl DockerApiServer {
             router_with_proxy(Arc::clone(&self.runtime), proxy).layer(TraceLayer::new_for_http()),
         );
 
+        // Docker clients speak HTTP/1.1, and the attach/exec hijack is an
+        // HTTP/1 upgrade, so protocol detection stays off. The auto builder
+        // is here for its graceful-shutdown hook: hyper-util wires
+        // `GracefulShutdown` to its own connection types, not to hyper's
+        // bare `http1::UpgradeableConnection`.
+        let builder = auto::Builder::new(TokioExecutor::new()).http1_only();
+        let graceful = GracefulShutdown::new();
+        // Connection tasks live in a set this future owns, so a caller that
+        // aborts the future once its drain budget runs out aborts the
+        // requests still running with it, instead of leaving them to run
+        // until the process exits.
         let mut connections = JoinSet::new();
 
         loop {
@@ -144,24 +167,18 @@ impl DockerApiServer {
                     let (stream, _) = result.map_err(|e| DockerError::Server(e.to_string()))?;
                     stream
                 }
-                () = shutdown.cancelled() => {
-                    tracing::info!("Docker API server shutting down, waiting for {} in-flight connection(s)", connections.len());
-                    break;
-                }
+                // Reap finished connections as they finish. Without this the
+                // set keeps every handle since startup and its length says
+                // nothing about what is still open.
+                Some(_) = connections.join_next(), if !connections.is_empty() => continue,
+                () = shutdown.cancelled() => break,
             };
 
-            let tower_service = app.clone();
+            let service = TowerToHyperService::new(app.clone());
+            let conn = builder.serve_connection_with_upgrades(TokioIo::new(stream), service);
+            let conn = graceful.watch(conn.into_owned());
             connections.spawn(async move {
-                let hyper_service =
-                    hyper::service::service_fn(move |request: hyper::Request<Incoming>| {
-                        tower_service.clone().call(request)
-                    });
-
-                if let Err(err) = http1::Builder::new()
-                    .serve_connection(TokioIo::new(stream), hyper_service)
-                    .with_upgrades()
-                    .await
-                {
+                if let Err(err) = conn.await {
                     let err_str = err.to_string().to_lowercase();
                     if !err_str.contains("shutting down")
                         && !err_str.contains("connection reset")
@@ -175,8 +192,13 @@ impl DockerApiServer {
             });
         }
 
-        // Drain in-flight connections before returning.
-        while connections.join_next().await.is_some() {}
+        while connections.try_join_next().is_some() {}
+        tracing::info!(
+            open_connections = connections.len(),
+            "Docker API server shutting down, closing idle connections and finishing in-flight requests"
+        );
+        graceful.shutdown().await;
+        tracing::info!("Docker API server drained");
 
         Ok(())
     }

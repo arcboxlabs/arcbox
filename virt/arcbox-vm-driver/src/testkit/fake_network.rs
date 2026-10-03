@@ -664,7 +664,7 @@ mod tests {
             .finalize_cleanup(&id("a"), &a.cleanup_token)
             .await
             .unwrap();
-        assert!(reconcile.pending_cleanups().await.unwrap().is_empty());
+        assert_eq!(reconcile.pending_cleanups().await.unwrap(), []);
         let c = net.reserve(&id("c"), policy()).await.unwrap();
         assert_eq!(c.ip, a.ip);
     }
@@ -697,13 +697,9 @@ mod tests {
         forged.cleanup_token = "forged".into();
         assert!(net.release(forged).await.is_err());
         net.release(a2.clone()).await.unwrap();
-        assert!(
-            net.reconcile()
-                .unwrap()
-                .pending_cleanups()
-                .await
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            net.reconcile().unwrap().pending_cleanups().await.unwrap(),
+            []
         );
         let reused = net.reserve(&id("d"), policy()).await.unwrap();
         assert_eq!(reused.ip, a2.ip);

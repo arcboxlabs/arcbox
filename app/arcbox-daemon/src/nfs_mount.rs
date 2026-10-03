@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! mount_nfs -o vers=4,port=<nfsd> 127.0.0.1:/ ~/ArcBox
-//!   └─ 127.0.0.1:<nfsd> → vsock NFS_NFSD_RELAY_PORT → guest 127.0.0.1:2049
+//!   └─ 127.0.0.1:<nfsd> → vsock NFS_NFSD_RELAY_PORT (HalfCloseStream-framed) → guest 127.0.0.1:2049
 //! ```
 //!
 //! Readiness needs no separate probe: the reconcile simply retries `mount_nfs`
@@ -15,14 +15,13 @@
 
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use arcbox_constants::ports::NFS_NFSD_RELAY_PORT;
 use arcbox_core::{DEFAULT_MACHINE_NAME, Runtime, VmLifecycleState};
-use arcbox_transport::vsock::{VsockShutdown, VsockStream};
+use arcbox_transport::vsock::{HalfCloseStream, VsockShutdown, VsockStream};
 use tokio::io::copy_bidirectional;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -30,12 +29,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::context::DaemonContext;
+use crate::host_mount::{MountInfo, current_mount_info, unmount, unmount_force};
 
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(30);
 const MOUNT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
-/// Shutdown may make two attempts; their 10s total is part of launchd's
-/// 45s budget.
-const UNMOUNT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Pause before retrying a failed incarnation, so a guest that is up but not
 /// yet able to serve the export is retried without spinning.
 const RETRY_BACKOFF: Duration = Duration::from_secs(30);
@@ -81,11 +78,26 @@ pub async fn cleanup(ctx: &DaemonContext) {
 
     // Re-check the shape in case the user replaced the mount since.
     match current_mount_info(mount_path) {
-        Some(info) if is_arcbox_nfs_mount(&info) => match unmount(mount_path).await {
+        Some(info) if is_arcbox_nfs_mount(&info) => match release(mount_path).await {
             Ok(()) => info!(path = %mount_path.display(), "unmounted ~/ArcBox host NFS mount"),
             Err(e) => warn!(path = %mount_path.display(), error = %e, "failed to unmount ~/ArcBox"),
         },
         _ => {}
+    }
+}
+
+/// Unmounts the export, by force if `umount` finds it busy. Its server is
+/// this daemon's and goes with it: a mount that outlived the daemon would
+/// be a dead NFS mount, which hangs every process that touches it — the
+/// daemon's own shutdown included, when it looks at the mount again after
+/// the VM has stopped.
+async fn release(mount_path: &Path) -> Result<()> {
+    match unmount(mount_path).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            warn!(path = %mount_path.display(), error = %e, "umount of ~/ArcBox failed; forcing");
+            unmount_force(mount_path).await
+        }
     }
 }
 
@@ -366,7 +378,13 @@ async fn relay_connection(
     // SAFETY: `fd` is a valid, newly-opened vsock fd handed over by the
     // hypervisor layer; ownership transfers to the OwnedFd here.
     let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-    let mut vsock = VsockStream::from_fd_with_shutdown(owned, VsockShutdown::CloseOnDropOnly)?;
+    // Framed like the Docker API channel: nfsd's replies come only within
+    // the window this side grants, so this end never leaves the vsock
+    // unread (which stalls the whole VM on Virtualization.framework).
+    let mut vsock = HalfCloseStream::new(VsockStream::from_fd_with_shutdown(
+        owned,
+        VsockShutdown::CloseOnDropOnly,
+    )?);
 
     copy_bidirectional(&mut tcp, &mut vsock).await?;
     Ok(())
@@ -395,7 +413,7 @@ async fn mount_with_retry(
         // mount should pick the friendly source up as soon as it lands.
         let source = mount_source();
 
-        match run_mount(&opts, &source, mount_path).await {
+        match crate::host_mount::mount_nfs(&opts, &source, mount_path).await {
             Ok(()) => {
                 let _ = MOUNTED_PATH.set(mount_path.to_path_buf());
                 info!(
@@ -413,34 +431,6 @@ async fn mount_with_retry(
 
         tokio::time::sleep(MOUNT_RETRY_INTERVAL).await;
     }
-}
-
-async fn run_mount(opts: &str, source: &str, mount_path: &Path) -> Result<(), String> {
-    let opts = opts.to_string();
-    let source = source.to_string();
-    let mount_path = mount_path.to_path_buf();
-
-    tokio::task::spawn_blocking(move || {
-        let output = Command::new("/sbin/mount_nfs")
-            .arg("-o")
-            .arg(&opts)
-            .arg(&source)
-            .arg(&mount_path)
-            .output()
-            .map_err(|e| format!("failed to execute mount_nfs: {e}"))?;
-
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(format!(
-                "mount_nfs exited with {}: {}",
-                output.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ))
-        }
-    })
-    .await
-    .map_err(|e| format!("mount_nfs task panicked: {e}"))?
 }
 
 /// The `host:/path` source string for `mount_nfs`. The export carries
@@ -539,65 +529,11 @@ fn is_arcbox_nfs_mount(info: &MountInfo) -> bool {
         && (info.source == mount_source_for(false) || info.source == mount_source_for(true))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MountInfo {
-    source: String,
-    fstype: String,
-}
-
-fn current_mount_info(path: &Path) -> Option<MountInfo> {
-    let output = Command::new("/sbin/mount").output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let target = path.to_string_lossy();
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(|line| match parse_mount_line(line) {
-            Some((mountpoint, info)) if mountpoint == target => Some(info),
-            _ => None,
-        })
-}
-
-/// Parses one `/sbin/mount` line: `SOURCE on MOUNTPOINT (fstype, opts…)`.
-fn parse_mount_line(line: &str) -> Option<(&str, MountInfo)> {
-    let (source, rest) = line.split_once(" on ")?;
-    let (mountpoint, suffix) = rest.split_once(" (")?;
-    let fstype = suffix
-        .split([',', ')'])
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-
-    Some((
-        mountpoint,
-        MountInfo {
-            source: source.to_string(),
-            fstype,
-        },
-    ))
-}
-
-async fn unmount(path: &Path) -> Result<()> {
-    let mut command = tokio::process::Command::new("/sbin/umount");
-    command.arg(path).kill_on_drop(true);
-    let status = tokio::time::timeout(UNMOUNT_TIMEOUT, command.status())
-        .await
-        .context("umount timed out")??;
-    if status.success() {
-        Ok(())
-    } else {
-        bail!("umount exited with {}", status.code().unwrap_or(-1))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        MountInfo, VmLifecycleState, is_arcbox_nfs_mount, mount_source_for, parse_mount_line,
-        render_mount_opts, resolve_mount_path_from_home, wait_for_state,
+        MountInfo, VmLifecycleState, is_arcbox_nfs_mount, mount_source_for, render_mount_opts,
+        resolve_mount_path_from_home, wait_for_state,
     };
     use std::path::{Path, PathBuf};
     use tokio::sync::watch;
@@ -698,20 +634,5 @@ mod tests {
         drop(tx);
         let shutdown = CancellationToken::new();
         assert!(!wait_for_state(&mut rx, &shutdown, VmLifecycleState::is_ready).await);
-    }
-
-    #[test]
-    fn parse_mount_line_extracts_source_and_fstype() {
-        let line =
-            "127.0.0.1:/run/arcbox/nfs-export/docker on /Users/t/ArcBox (nfs, nodev, read-only)";
-        let (mountpoint, info) = parse_mount_line(line).expect("line should parse");
-        assert_eq!(mountpoint, "/Users/t/ArcBox");
-        assert_eq!(
-            info,
-            MountInfo {
-                source: "127.0.0.1:/run/arcbox/nfs-export/docker".to_string(),
-                fstype: "nfs".to_string(),
-            }
-        );
     }
 }

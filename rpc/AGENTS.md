@@ -50,6 +50,20 @@ This file is only the non-obvious operational knowledge.
   `guest/arcbox-agent/src/rpc.rs` and driven by `AgentClient`
   (`engine/arcbox-engine/src/agent_client.rs`). Editing the tonic `AgentService`
   does nothing at runtime.
+- **The Docker API vsock channel (port 2375) is framed too, but differently.**
+  It carries HTTP bytes inside `arcbox_transport::vsock::HalfCloseStream`
+  frames — `[u32 BE len][payload]`, a zero length being that side's EOF —
+  because neither macOS backend delivers a host half-close to the guest and
+  `docker run -i` needs stdin EOF to reach the container (#268). Both ends
+  must speak it: the host proxy's `GuestConnector` and the guest agent's
+  `proxy_docker_api_connection`; the mock guest in
+  `app/arcbox-docker/tests/support` does as well. Since v6 the Kubernetes
+  (16443) and NFS (2049) relays wrap the same framing around their raw TCP
+  bytes (`kubernetes_proxy.rs` / `nfs_mount.rs` host-side, `proxy.rs` /
+  `nfs.rs` in the agent). Changing this framing is a
+  `AGENT_PROTOCOL_VERSION` bump (v4 introduced the half-close, v5 the
+  flow-control window: a header with the top bit set is a grant, not a
+  length; v6 extended it to the two relays).
 - The `arcbox-protocol/src/lib.rs` top-of-file doc says "ttrpc" — **stale**.
   There is no ttrpc dependency; trust this file over that comment.
 
@@ -174,9 +188,13 @@ never expose an internal frame through the public schema. A new
 sandbox-family message needs: the proto (in the right file per that
 split), the `MessageType` variant + `is_sandbox_request()` arm, a
 `handle_sandbox_message` dispatch arm, and the `AgentClient` method.
-`MachineExecRequest` is the one other codec bypass: it is dispatched by
-name before `parse_request` (`guest/arcbox-agent/src/agent/linux/rpc.rs`),
-so it has no `rpc.rs` arms either. Streaming alone does not waive the
+`MachineExecRequest`, `DebugExecRequest` (a `MachineExecRequest` payload
+naming the target `container`; its output comes back as `DebugExecResponse`)
+and `MachineTcpConnectRequest` are the other codec bypasses: they are
+dispatched by name before `parse_request`
+(`guest/arcbox-agent/src/agent/linux/rpc.rs`), so they have no `rpc.rs`
+arms either, and each owns the rest of its connection. Streaming alone does
+not waive the
 codec — `WatchReadiness`/`WatchStats`/`WatchMemoryPressure` stream too and
 keep their `rpc.rs` arms.
 

@@ -72,6 +72,20 @@ pub struct VmInfo {
     pub memory_mb: u64,
 }
 
+/// Host-side networking a VM's datapath is wired to at start.
+///
+/// Everything here belongs to the host, not to the machine: the daemon owns
+/// it and hands the same context to every VM it boots.
+#[derive(Debug, Clone, Default)]
+pub struct HostNetwork {
+    /// Hostname table shared with the host-side DNS service, so names
+    /// registered on the host resolve inside the guest too.
+    pub dns_hosts: Option<std::sync::Arc<arcbox_dns::LocalHostsTable>>,
+    /// Proxy the guest's TCP and UDP egress is tunnelled through; `None`
+    /// connects directly.
+    pub proxy: Option<arcbox_fakeip::proxy_detect::ProxyEnvironment>,
+}
+
 /// Shared directory configuration for `VirtioFS`.
 #[derive(Debug, Clone)]
 pub struct SharedDirConfig {
@@ -143,6 +157,13 @@ pub struct VmConfig {
     /// Rosetta binary and registers it via binfmt_misc in the guest.
     /// This allows near-native execution of x86_64 Linux binaries.
     pub rosetta: bool,
+    /// Let the guest run its own hypervisor (VZ only).
+    ///
+    /// Only the System VM, which hosts sandboxes, needs it. A nested-capable
+    /// VM pins one of the host's few hypervisor address spaces, so a plain
+    /// machine asking for it would eventually stop every VM on the host from
+    /// starting (`hv_vm_create` asserts).
+    pub nested_virt: bool,
     /// macOS hypervisor backend selection.
     ///
     /// `Vz` (default) drives Apple's Virtualization.framework managed
@@ -165,6 +186,7 @@ impl Default for VmConfig {
             guest_cid: None,
             balloon: true,
             rosetta: cfg!(all(target_os = "macos", target_arch = "aarch64")),
+            nested_virt: false,
             backend: arcbox_vmm::VmBackend::default(),
         }
     }

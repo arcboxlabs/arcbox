@@ -186,6 +186,9 @@ impl Vmm {
             cancel,
             net_mtu,
         );
+        if let Some(env) = self.proxy_env.clone() {
+            datapath.set_proxy_env(env);
+        }
 
         // Create bounded channel for RX frame injection. The datapath loop
         // sends frames through the FrameSink; the RxInjectThread (spawned at

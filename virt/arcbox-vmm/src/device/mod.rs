@@ -501,9 +501,8 @@ impl DeviceManager {
     pub fn set_net_rx_hooks(
         &mut self,
         irq_callback: Arc<dyn Fn(crate::irq::Irq, bool) -> crate::error::Result<()> + Send + Sync>,
-        exit_vcpus: Arc<dyn Fn() + Send + Sync>,
     ) {
-        self.net_rx_worker.set_hooks(irq_callback, exit_vcpus);
+        self.net_rx_worker.set_hooks(irq_callback);
     }
 
     /// Stores the VM-wide `running` flag so the DRIVER_OK handler can

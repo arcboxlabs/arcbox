@@ -6,11 +6,28 @@
 //! is also where a caller parks until the effect that answers it lands.
 
 use chrono::Utc;
+use tracing::warn;
 
 use super::*;
 
 impl ComputerActor {
     pub(super) async fn on_command(&mut self, machine: &mut Machine, command: Command) {
+        // A handed-over computer answers nothing but another handover.
+        //
+        // One rule here rather than a guard per command, because the thing
+        // that makes this state easy to miss is systematic: `detached`
+        // projects `Ready` — the wire has no variant for "the successor's" —
+        // so every gate below that reads `self.public()` is blind to it. The
+        // ones that refuse it today do so by luck of their match arms, and
+        // `Resume` did not: it read `Ready` and answered `Ok` for a computer
+        // this process no longer owned. A rule at the door cannot be
+        // forgotten by whatever command is added next.
+        if matches!(machine.state(), State::Detached {})
+            && !matches!(command, Command::Detach { .. })
+        {
+            self.refuse_handed_over(command);
+            return;
+        }
         match command {
             Command::Provision {
                 provision,
@@ -132,6 +149,80 @@ impl ComputerActor {
                     }
                 }
             }
+            Command::Detach { reply } => {
+                // The handover answers on its own outcome and nothing else.
+                //
+                // Answer state that is still set belongs to a flow that ended
+                // with nobody parked to hear it — an idle-driven pause whose
+                // `Pausing` write was refused is the reachable one, since
+                // `Durability::Warn` softens only an unconfirmed write, not a
+                // refused one. `answer` would fold it into this reply and
+                // report a guest lost that was in fact handed over, and
+                // unretryably: the state is terminal by then, so the retry
+                // answers `Ok` and contradicts the first answer. Going through
+                // `park` would report it *instead of* attempting the handover,
+                // which is the same false loss one step earlier. So it is
+                // dropped here, and logged, because nothing else can report it
+                // now. (`Remove` carries the same hazard and predates this;
+                // its answer at least stays consistent under a retry.)
+                let stale_failure = self.answer_error.take();
+                let stale_unconfirmed = self.unconfirmed.take();
+                if let Some(detail) = stale_failure.or(stale_unconfirmed) {
+                    warn!(
+                        sandbox_id = %self.id,
+                        detail,
+                        "dropping an unreported failure from an earlier flow; the handover answers for itself"
+                    );
+                }
+                // Parked *before* the dispatch, like a removal and for a
+                // sharper reason: the handover is awaited inside the effect
+                // rather than spawned, so `Answer::Detached` always lands
+                // before this dispatch returns.
+                self.waiters.push((Answer::Detached, reply));
+                if self.dispatch(machine, Event::Detach).await {
+                    return;
+                }
+                // The machine had nothing to do, which is two different
+                // answers — and the state is what tells them apart, not the
+                // handle: a computer halfway through a stop still holds one.
+                let answer = match machine.state() {
+                    // Nothing to hand over, which is a real success: there is
+                    // no guest here this process would have killed on its way
+                    // out. A paused computer gave its VM up to its checkpoint
+                    // and a resting one has none; `provisioning` has not
+                    // spawned its boot yet, so no VMM exists either. The
+                    // successor reinstates all of them from the record alone.
+                    // An already-detached one is the successor's twice over —
+                    // reporting a failure would have a composer log a loss it
+                    // did not take.
+                    State::Provisioning {}
+                    | State::Paused {}
+                    | State::Stopped {}
+                    | State::Failed {}
+                    | State::Gone {}
+                    | State::Detached {} => Ok(()),
+                    // Mid-launch, mid-capture or mid-teardown — all of which
+                    // do have a VM, and all of which lose it when this process
+                    // exits. That is worth reporting rather than skipping: a
+                    // caller told `Ok` would believe a guest survived a
+                    // handover that never happened.
+                    //
+                    // Phrased as a property rather than a state list, because
+                    // `wrong_state` reads `actual` off the public projection
+                    // and two states here project into any list this arm could
+                    // name: `checkpointing` reads `Ready` and a `gating` whose
+                    // own `cmd` has claimed the slot reads `Running`. Naming
+                    // the states would tell a composer "expected Ready or
+                    // Running, actual Ready" — and `detach_all` folds this
+                    // verbatim into the failure string someone diagnoses a
+                    // lost handover from.
+                    _ => Err(self
+                        .wrong_state("a computer with no launch, capture, or teardown in flight")),
+                };
+                if let Some((_, reply)) = self.waiters.pop() {
+                    let _ = reply.send(answer);
+                }
+            }
             Command::ClaimWorkload { claim, reply } => {
                 let taken = self.dispatch(machine, Event::ClaimWorkload { claim }).await;
                 let _ = reply.send(if taken {
@@ -207,6 +298,40 @@ impl ComputerActor {
                     .get_or_insert_with(|| format!("computer {} exited unexpectedly", self.id));
                 self.dispatch(machine, Event::VmExited).await;
             }
+        }
+    }
+
+    /// Answers every caller of a computer this process has handed over.
+    ///
+    /// What it protects is not one command. `SetLifecycle` was the loud case —
+    /// `persist_lifecycle` fsyncs into the record the successor has already
+    /// adopted, under the generation it adopted with, so the write is accepted
+    /// rather than fenced, which is the VM race this transition closes moved
+    /// onto the record. But `Resume` answered `Ok` for the same reason, and
+    /// the next command would have too.
+    ///
+    /// The match stays exhaustive so that adding one forces a decision here.
+    /// `Detach` cannot reach this — the caller lets it through, because a
+    /// second handover is an idempotent no-op rather than a refusal — and the
+    /// tells have nobody to answer: `detached` swallows them anyway.
+    fn refuse_handed_over(&self, command: Command) {
+        let refused = || self.wrong_state("a computer this process still owns");
+        match command {
+            Command::Provision { reply, .. }
+            | Command::Pause { reply, .. }
+            | Command::Resume { reply, .. }
+            | Command::Stop { reply, .. }
+            | Command::Remove { reply, .. }
+            | Command::ClaimWorkload { reply, .. }
+            | Command::SetLifecycle { reply, .. }
+            | Command::Detach { reply } => {
+                let _ = reply.send(Err(refused()));
+            }
+            // Its own reply type, so it cannot join the arm above.
+            Command::Checkpoint { reply, .. } => {
+                let _ = reply.send(Err(refused()));
+            }
+            Command::WorkloadExited { .. } | Command::ReleaseWorkload | Command::VmExited => {}
         }
     }
 

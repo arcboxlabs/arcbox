@@ -12,8 +12,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use arcbox_hv::{ExceptionClass, HvVcpu, MmioInfo, VcpuExit};
 
 use super::hvc_blk::{
-    ARCBOX_HVC_BLK_CAPACITY, ARCBOX_HVC_BLK_FLUSH, ARCBOX_HVC_BLK_READ, ARCBOX_HVC_BLK_WRITE,
-    ARCBOX_HVC_PROBE, handle_hvc_blk_capacity, handle_hvc_blk_flush, handle_hvc_blk_io,
+    ARCBOX_HVC_BLK_CAPACITY, ARCBOX_HVC_BLK_DISCARD, ARCBOX_HVC_BLK_FLUSH, ARCBOX_HVC_BLK_READ,
+    ARCBOX_HVC_BLK_WRITE, ARCBOX_HVC_PROBE, HvcBlkTable, handle_hvc_blk_capacity,
+    handle_hvc_blk_discard, handle_hvc_blk_flush, handle_hvc_blk_io,
 };
 use super::psci::{CpuPower, PsciExit, handle_psci};
 use super::{HvVcpuIds, Pl011, Pl031, VcpuThreadHandles};
@@ -60,15 +61,15 @@ pub(super) struct VcpuContext {
     /// Per-vCPU power registry (states + CPU_ON wake channels).
     /// `None` when the VM has only one vCPU.
     pub cpu_power: Option<CpuPower>,
-    /// Registry of vCPU thread handles used by the IRQ callback to
-    /// unpark WFI-blocked threads.
+    /// Registry of vCPU thread handles; `resume` unparks the threads
+    /// `pause` parked.
     pub vcpu_thread_handles: VcpuThreadHandles,
     /// Registry of Hypervisor.framework vCPU IDs. Populated by this loop
     /// after `HvVcpu::new()`; read by `pause`/`stop` when calling
     /// `hv_vcpus_exit` (which on arm64 requires a concrete list, not NULL).
     pub hv_vcpu_ids: HvVcpuIds,
-    /// Per-block-device file descriptors and sector sizes for HVC fast path.
-    pub hvc_blk_fds: Arc<Vec<(i32, u32, u64)>>,
+    /// The VM's block devices for the HVC fast path, in device-index order.
+    pub hvc_blk_fds: HvcBlkTable,
     /// This vCPU's exit counters (diagnostics; written Relaxed by this
     /// thread only).
     pub stats: Arc<crate::vcpu_stats::VcpuStats>,
@@ -511,6 +512,11 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, boot: VcpuBoot, ctx: VcpuContext) {
                 } => {
                     crate::vcpu_stats::VcpuStats::bump(&stats.wfi);
                     // Guest executed WFI — it is idle and waiting for an interrupt.
+                    // Not reached with the in-kernel GIC: the framework handles WFI
+                    // inside `hv_vcpu_run` (`VcpuStateManager::wait_for_interrupt`)
+                    // and this counter stays 0 for a whole boot (2026-09-30). Kept
+                    // for a framework that does trap WFI; the 1 ms park below then
+                    // bounds interrupt latency, since nothing unparks on an SPI.
                     // Before parking, poll the bridge for incoming data. vsock and
                     // net injection are handled by their dedicated worker threads.
                     let wfi_has_bridge = device_manager.poll_bridge_rx();
@@ -566,6 +572,10 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, boot: VcpuBoot, ctx: VcpuContext) {
                         }
                         ARCBOX_HVC_BLK_CAPACITY => {
                             let result = handle_hvc_blk_capacity(&vcpu, &hvc_blk_fds);
+                            let _ = vcpu.set_reg(reg::X0, result);
+                        }
+                        ARCBOX_HVC_BLK_DISCARD => {
+                            let result = handle_hvc_blk_discard(&vcpu, &hvc_blk_fds);
                             let _ = vcpu.set_reg(reg::X0, result);
                         }
                         _ => {

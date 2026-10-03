@@ -13,8 +13,11 @@ prepare_host             Create directories, resolve config      ~instant
 acquire_daemon_lease     flock(daemon.lock), terminate stale     ~instant or ≤30 s
     │                    daemon
     │
-start_control_plane      Bind arcbox.sock, SystemService up      ~instant
-    │                    Desktop can connect from this point on.
+start_control_plane      Bind arcbox.sock, SystemService up;     ~instant
+    │                    bind the DNS socket. Desktop can
+    │                    connect from this point on, and a taken
+    │                    explicit --dns-port fails here, before
+    │                    any VM boots.
     │
 release_stale_resources  Wait for disk-image holders to release  0–10 s
     │                    Reported as CLEANING_UP via gRPC.
@@ -28,9 +31,10 @@ boot_runtime             Construct Runtime, boot the System VM   variable
     │                    published from inside Runtime::init so
     │                    the span covers the guest boot alone.
     │
-start_runtime_services   DNS, Docker API, critical recovery      ~instant
-    │                    Then optional production Docker context;
-    │                    reported as NETWORK_READY.
+start_runtime_services   Serve DNS, Docker API, critical         ~instant
+    │                    recovery. Then optional production
+    │                    Docker context; reported as
+    │                    NETWORK_READY.
     │
 mark_ready               SetupPhase::Ready
 ```
@@ -58,9 +62,12 @@ startup failure.
   `arcbox-api/src/system.rs`).
 - `NETWORK_READY` covers whichever host services this daemon promises. A
   `--no-linux-vm` daemon reaches it with DNS alone. DNS, Docker, and an
-  explicitly requested Kubernetes proxy are *bound* by then; a bind failure
-  becomes `FAILED`. The canonical best-effort port 16443 remains the exception:
-  a conflict leaves Kubernetes RPCs unavailable without failing startup.
+  explicitly requested Kubernetes proxy or SSH server (`--kubernetes-port`,
+  `--ssh-port`) are *bound* by then; a bind failure becomes `FAILED`. The
+  canonical best-effort ports 16443 and 16022 remain the exception: a
+  conflict leaves Kubernetes RPCs, or `ssh <machine>@arcbox`, unavailable
+  without failing startup. The SSH server runs with or without the Linux VM:
+  machines are VMs of their own.
 - A non-default container CIDR is reconciled before runtime services start;
   an existing route owned by another interface fails startup. The canonical
   production CIDR keeps its existing background recovery behavior.
@@ -131,6 +138,10 @@ write current PID
 signal received
   ├─ cancel CancellationToken         → all services begin draining
   ├─ drain(DNS, Docker, gRPC)         → 5 s timeout, then abort
+  │   Docker and the control plane close idle keep-alive connections at
+  │   once and finish in-flight requests with `Connection: close`; only
+  │   a request still running can use the budget. A client that parks
+  │   a pooled connection does not hold the daemon.
   ├─ runtime.shutdown()
   │   ├─ stop port forwarders
   │   ├─ vm_lifecycle.shutdown()       → graceful VM stop; bridge routes expire

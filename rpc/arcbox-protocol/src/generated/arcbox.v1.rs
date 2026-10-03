@@ -265,6 +265,33 @@ pub struct SetSystemVmBackendRequest {
     #[prost(enumeration = "SystemVmBackend", tag = "1")]
     pub backend: i32,
 }
+/// The System VM's CPU and memory limits and the host's capacity.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SystemVmResources {
+    /// vCPUs the System VM boots with.
+    #[prost(uint32, tag = "1")]
+    pub cpus: u32,
+    /// Memory the System VM boots with, in MiB.
+    #[prost(uint64, tag = "2")]
+    pub memory_mb: u64,
+    /// Logical CPUs on the host; the ceiling for `cpus`.
+    #[prost(uint32, tag = "3")]
+    pub host_cpus: u32,
+    /// Physical memory on the host in MiB; the ceiling for `memory_mb`.
+    #[prost(uint64, tag = "4")]
+    pub host_memory_mb: u64,
+}
+/// Request to change the System VM's CPU and memory limits. A zero field
+/// keeps the current value.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetSystemVmResourcesRequest {
+    /// vCPUs, 1 through the host's logical CPU count.
+    #[prost(uint32, tag = "1")]
+    pub cpus: u32,
+    /// Memory in MiB, 512 through the host's physical memory.
+    #[prost(uint64, tag = "2")]
+    pub memory_mb: u64,
+}
 /// Request to resolve a container's filesystem layer directories.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ResolveContainerFsRequest {
@@ -774,6 +801,12 @@ pub struct PrepareMigrationResponse {
     /// are blocking: RunMigration refuses to execute a plan that has any.
     #[prost(string, repeated, tag = "11")]
     pub unsupported_resources: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Target resources the prepared plan would replace. Always populated, even
+    /// when empty. For a runnable prepare, this describes the saved plan_id.
+    /// Clients must compare these targets with the user's confirmation before
+    /// RunMigration. An absent summary means the daemon cannot provide this check.
+    #[prost(message, optional, tag = "12")]
+    pub replacements: ::core::option::Option<MigrationReplacementSummary>,
 }
 /// A fully resolved migration plan.
 ///
@@ -1534,6 +1567,9 @@ pub struct MachineSystemInfo {
     /// Guest IP addresses (excluding loopback).
     #[prost(string, repeated, tag = "11")]
     pub ip_addresses: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// IPv4 address of the guest's bridge NIC, empty when it has none.
+    #[prost(string, tag = "12")]
+    pub bridge_ip_address: ::prost::alloc::string::String,
 }
 /// Directory mount configuration.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1599,6 +1635,116 @@ pub struct ListMachinesResponse {
     /// List of machines.
     #[prost(message, repeated, tag = "1")]
     pub machines: ::prost::alloc::vec::Vec<MachineSummary>,
+    /// The default machine (see SetDefault); empty when none is set.
+    #[prost(string, tag = "2")]
+    pub default_machine: ::prost::alloc::string::String,
+}
+/// Request to clone a machine.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CloneMachineRequest {
+    /// Machine to clone (ID or name); must be stopped.
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
+    /// Name of the clone.
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+}
+/// Response to clone machine.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CloneMachineResponse {
+    /// The clone's ID.
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
+}
+/// Request to export a machine to an archive.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExportMachineRequest {
+    /// Machine to export (ID or name); must be stopped.
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
+    /// Where to write the archive, on the daemon's host. Must not exist.
+    #[prost(string, tag = "2")]
+    pub path: ::prost::alloc::string::String,
+}
+/// Response to export machine.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExportMachineResponse {
+    /// The archive written.
+    #[prost(string, tag = "1")]
+    pub path: ::prost::alloc::string::String,
+    /// Its size in bytes.
+    #[prost(uint64, tag = "2")]
+    pub size: u64,
+}
+/// Request to import a machine from an archive.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ImportMachineRequest {
+    /// The archive, on the daemon's host.
+    #[prost(string, tag = "1")]
+    pub path: ::prost::alloc::string::String,
+    /// Name for the machine; empty uses the name in the archive.
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+    /// CPUs; 0 uses the archive's value.
+    #[prost(uint32, tag = "3")]
+    pub cpus: u32,
+    /// Memory in bytes; 0 uses the archive's value.
+    #[prost(uint64, tag = "4")]
+    pub memory: u64,
+}
+/// Response to import machine.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ImportMachineResponse {
+    /// The new machine's ID.
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
+    /// Distribution the machine boots (from the archive).
+    #[prost(string, tag = "2")]
+    pub distro: ::prost::alloc::string::String,
+    /// Distribution release.
+    #[prost(string, tag = "3")]
+    pub distro_version: ::prost::alloc::string::String,
+}
+/// Request to change a machine's CPU and memory limits.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetMachineResourcesRequest {
+    /// Machine ID or name.
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
+    /// CPUs, 1 through the host's logical CPU count; 0 keeps the current value.
+    #[prost(uint32, tag = "2")]
+    pub cpus: u32,
+    /// Memory in bytes, 512 MiB through the host's physical memory; 0 keeps
+    /// the current value.
+    #[prost(uint64, tag = "3")]
+    pub memory: u64,
+}
+/// A machine's CPU and memory limits after SetResources.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetMachineResourcesResponse {
+    /// CPUs the machine boots with from now on.
+    #[prost(uint32, tag = "1")]
+    pub cpus: u32,
+    /// Memory in bytes the machine boots with from now on.
+    #[prost(uint64, tag = "2")]
+    pub memory: u64,
+    /// The machine is running with its previous size; the new one applies
+    /// when it is next started.
+    #[prost(bool, tag = "3")]
+    pub restart_required: bool,
+    /// Logical CPUs on the host, the ceiling for `cpus`.
+    #[prost(uint32, tag = "4")]
+    pub host_cpus: u32,
+    /// Physical memory on the host in bytes, the ceiling for `memory`.
+    #[prost(uint64, tag = "5")]
+    pub host_memory: u64,
+}
+/// Request to set or clear the default machine.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetDefaultMachineRequest {
+    /// Machine ID or name; empty clears the default.
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
 }
 /// Summary information about a machine.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1706,6 +1852,16 @@ pub struct MachineNetwork {
     /// MAC address of the bridge NAT NIC used for host-side vmnet routing on macOS.
     #[prost(string, tag = "5")]
     pub bridge_mac_address: ::prost::alloc::string::String,
+    /// IPv4 address of the bridge NIC: the address the Mac reaches directly
+    /// and the one `<machine>.arcbox.local` resolves to. Empty until the
+    /// machine has reported it.
+    #[prost(string, tag = "6")]
+    pub bridge_ip_address: ::prost::alloc::string::String,
+    /// The name the host's DNS answers for this machine while it runs
+    /// (`<machine>.<local domain>`). Empty when the machine has no bridge
+    /// address to register.
+    #[prost(string, tag = "7")]
+    pub dns_name: ::prost::alloc::string::String,
 }
 /// Machine storage configuration.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1758,6 +1914,34 @@ pub struct MachineExecRequest {
     /// Initial terminal size (interactive sessions).
     #[prost(message, optional, tag = "7")]
     pub tty_size: ::core::option::Option<TerminalSize>,
+    /// Feed the process the session's stdin messages (ExecSession only):
+    /// without a TTY, stdin is /dev/null unless this is set. A TTY session
+    /// always reads stdin from its terminal.
+    #[prost(bool, tag = "8")]
+    pub attach_stdin: bool,
+    /// Run as a login session of `user` (root when empty), the way sshd does:
+    /// the environment starts empty and gets HOME, USER, LOGNAME, SHELL and
+    /// PATH from the account before `env` is applied, the working directory
+    /// defaults to HOME, and the process is the account's shell — a login
+    /// shell when `cmd` is empty, otherwise `shell -c` over `cmd` joined with
+    /// spaces.
+    #[prost(bool, tag = "9")]
+    pub login: bool,
+    /// Flow control between the daemon and the guest agent, set by the
+    /// daemon when it forwards the request (a client's value is ignored):
+    /// the agent keeps at most this many bytes of MachineExecOutput frames
+    /// (encoded payloads, the final frame excepted) unreturned, grants its
+    /// own stdin window in its first frame, and each side returns window as
+    /// it consumes (MachineExecWindow frames). 0 streams without flow
+    /// control.
+    #[prost(uint32, tag = "10")]
+    pub output_window: u32,
+    /// Container-debug target (see the DebugExecRequest wire message): when
+    /// set, the exec enters this container's PID, network, IPC and UTS
+    /// namespaces instead of running in the machine root. Empty for a normal
+    /// machine exec.
+    #[prost(string, tag = "11")]
+    pub container: ::prost::alloc::string::String,
 }
 /// One client message on an interactive machine session.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1795,6 +1979,16 @@ pub struct MachineExecOutput {
     /// Is this the final message.
     #[prost(bool, tag = "4")]
     pub done: bool,
+    /// Signal that terminated the process, without the SIG prefix ("KILL");
+    /// empty when it exited on its own. Only set on completion, where
+    /// `exit_code` is then -1.
+    #[prost(string, tag = "5")]
+    pub exit_signal: ::prost::alloc::string::String,
+    /// The output has ended: the process closed its stdout and stderr (or
+    /// the TCP peer of a machine connection stopped sending). Carries no
+    /// data; the final frame still follows.
+    #[prost(bool, tag = "6")]
+    pub eof: bool,
 }
 /// Request for SSH connection info.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2988,6 +3182,13 @@ pub struct SystemInfo {
     /// still be starting sets it true.
     #[prost(bool, tag = "12")]
     pub distro_init_pending: bool,
+    /// IPv4 address of the guest's bridge NIC (the vmnet interface the Mac
+    /// reaches directly), or empty when the guest has none or it has no
+    /// address yet. The host registers `<machine>.arcbox.local` at this
+    /// address; `ip_addresses` keeps listing every interface, so an older
+    /// host that ignores this field sees exactly what it saw before.
+    #[prost(string, tag = "13")]
+    pub bridge_ip_address: ::prost::alloc::string::String,
 }
 /// Request to ensure runtime services are available.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -3299,15 +3500,23 @@ pub struct RuntimeStatusResponse {
     #[prost(message, repeated, tag = "5")]
     pub services: ::prost::alloc::vec::Vec<ServiceStatus>,
 }
-/// Request to trigger an immediate fstrim on data mount points.
+/// Request to trim the guest's data filesystems now: the guest issues a
+/// discard for every free block so the host punches it out of the sparse
+/// image. The System VM trims its Btrfs data and ext4 metadata volumes; a
+/// distro machine trims the Btrfs data disk under its overlay root.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DiskTrimRequest {}
 /// Response from a disk trim operation.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct DiskTrimResponse {
-    /// Human-readable result summary (e.g. bytes trimmed per mount).
+    /// Human-readable result summary (bytes trimmed per filesystem).
     #[prost(string, tag = "1")]
     pub result: ::prost::alloc::string::String,
+    /// Bytes the guest reported trimmed, summed over the filesystems. This is
+    /// what the filesystem discarded, not what the host reclaimed: a range
+    /// that was already a hole counts here and frees nothing.
+    #[prost(uint64, tag = "2")]
+    pub bytes_trimmed: u64,
 }
 /// Notification that a container's published port bindings changed.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -3402,6 +3611,120 @@ pub struct KubernetesStatusResponse {
     /// Per-service status entries for fine-grained observability.
     #[prost(message, repeated, tag = "5")]
     pub services: ::prost::alloc::vec::Vec<ServiceStatus>,
+    /// How each port of each LoadBalancer Service reaches the host, one entry
+    /// per port. Reported by the daemon, which owns the host listeners; the
+    /// guest agent leaves it empty.
+    #[prost(message, repeated, tag = "6")]
+    pub host_ports: ::prost::alloc::vec::Vec<KubernetesHostPort>,
+}
+/// How one port of a Service of type LoadBalancer reaches the host.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KubernetesHostPort {
+    /// Namespace of the Service.
+    #[prost(string, tag = "1")]
+    pub namespace: ::prost::alloc::string::String,
+    /// Name of the Service.
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+    /// Protocol as the Service spells it: "TCP", "UDP" or "SCTP".
+    #[prost(string, tag = "3")]
+    pub protocol: ::prost::alloc::string::String,
+    /// Service port, which is also the host port.
+    #[prost(uint32, tag = "4")]
+    pub port: u32,
+    /// Host address the listener binds, per `\[docker\] expose_ports_to_lan`.
+    #[prost(string, tag = "5")]
+    pub host_ip: ::prost::alloc::string::String,
+    /// Forwarding state.
+    #[prost(enumeration = "kubernetes_host_port::State", tag = "6")]
+    pub state: i32,
+    /// Why the port is not forwarded; empty when it is.
+    #[prost(string, tag = "7")]
+    pub detail: ::prost::alloc::string::String,
+}
+/// Nested message and enum types in `KubernetesHostPort`.
+pub mod kubernetes_host_port {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum State {
+        Unspecified = 0,
+        /// A host listener is bound and relays to the port on the node.
+        Forwarded = 1,
+        /// servicelb has not published the port on the node yet.
+        Pending = 2,
+        /// Deliberately not bound; `detail` says why.
+        Skipped = 3,
+        /// The host listener failed to bind; retried periodically.
+        Failed = 4,
+    }
+    impl State {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unspecified => "STATE_UNSPECIFIED",
+                Self::Forwarded => "FORWARDED",
+                Self::Pending => "PENDING",
+                Self::Skipped => "SKIPPED",
+                Self::Failed => "FAILED",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "STATE_UNSPECIFIED" => Some(Self::Unspecified),
+                "FORWARDED" => Some(Self::Forwarded),
+                "PENDING" => Some(Self::Pending),
+                "SKIPPED" => Some(Self::Skipped),
+                "FAILED" => Some(Self::Failed),
+                _ => None,
+            }
+        }
+    }
+}
+/// Request for the cluster's Services of type LoadBalancer.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KubernetesLoadBalancersRequest {}
+/// The cluster's Services of type LoadBalancer.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KubernetesLoadBalancersResponse {
+    /// Whether k3s is running. False means the list is empty because there
+    /// is no cluster, not because the cluster has no load balancers.
+    #[prost(bool, tag = "1")]
+    pub running: bool,
+    /// Every Service of type LoadBalancer, in any namespace.
+    #[prost(message, repeated, tag = "2")]
+    pub load_balancers: ::prost::alloc::vec::Vec<KubernetesLoadBalancer>,
+}
+/// A Service of type LoadBalancer.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KubernetesLoadBalancer {
+    /// Namespace of the Service.
+    #[prost(string, tag = "1")]
+    pub namespace: ::prost::alloc::string::String,
+    /// Name of the Service.
+    #[prost(string, tag = "2")]
+    pub name: ::prost::alloc::string::String,
+    /// The Service's ports.
+    #[prost(message, repeated, tag = "3")]
+    pub ports: ::prost::alloc::vec::Vec<KubernetesServicePort>,
+    /// Addresses in the Service's `status.loadBalancer.ingress`. k3s
+    /// servicelb lists a node once its svclb pod is ready, i.e. once the
+    /// ports are published on the node; until then the list is empty.
+    #[prost(string, repeated, tag = "4")]
+    pub ingress: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// One port of a Service.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KubernetesServicePort {
+    /// Protocol as the Service spells it: "TCP", "UDP" or "SCTP".
+    #[prost(string, tag = "1")]
+    pub protocol: ::prost::alloc::string::String,
+    /// Service port.
+    #[prost(uint32, tag = "2")]
+    pub port: u32,
 }
 /// Request for managed kubeconfig content.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -3516,6 +3839,44 @@ pub struct EnsureNfsExportResponse {
     #[prost(string, repeated, tag = "1")]
     pub notes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
+/// Ask a distro machine's agent to serve the machine's root filesystem to the
+/// host, read-write, over NFSv3 on the machine's bridge NIC. The host mounts
+/// it under its machine mount root (`~/ArcBoxMachines/<name>` by default). The
+/// System VM answers with an error: its data lives behind `EnsureNfsExportRequest`.
+/// Idempotent: a second request returns the endpoint the first one started.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EnsureMachineExportRequest {
+    /// Addresses the export accepts connections from — the host's own
+    /// addresses on the bridge network. Every other peer is refused, because
+    /// every VM and container on that network can otherwise reach the port
+    /// and the export performs no authentication of its own.
+    #[prost(string, repeated, tag = "1")]
+    pub client_addresses: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// The uid and gid the host mounts as. Files the guest owns as
+    /// `guest_uid`/`guest_gid` are shown with these ids, and files created
+    /// or chowned to these ids from the host land as `guest_uid`/`guest_gid`;
+    /// every other id passes through unchanged.
+    #[prost(uint32, tag = "2")]
+    pub host_uid: u32,
+    #[prost(uint32, tag = "3")]
+    pub host_gid: u32,
+    /// The guest account the host user stands in for: root unless the
+    /// machine has a default user.
+    #[prost(uint32, tag = "4")]
+    pub guest_uid: u32,
+    #[prost(uint32, tag = "5")]
+    pub guest_gid: u32,
+}
+/// Response to `EnsureMachineExportRequest`.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EnsureMachineExportResponse {
+    /// IPv4 address of the bridge NIC the export listens on.
+    #[prost(string, tag = "1")]
+    pub address: ::prost::alloc::string::String,
+    /// TCP port serving both the MOUNT and the NFS protocol.
+    #[prost(uint32, tag = "2")]
+    pub port: u32,
+}
 /// Ask the guest agent to DNAT a reserved guest port to a sandbox port.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SandboxPortForwardRequest {
@@ -3573,6 +3934,17 @@ pub struct SandboxCleanupResponse {
 /// first replays its durable snapshot, then streams new terminal generations.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WatchSandboxCleanupRequest {}
+/// Flow-control window on a sandbox streaming RPC's connection (host↔guest
+/// vsock only): the host lets the agent stream `bytes` more, counted in
+/// encoded payload bytes of the frames it sends back. Every such stream opens
+/// with a fixed window (`SANDBOX_STREAM_WINDOW` in arcbox-constants) and the
+/// host returns it as its consumer takes frames, so the agent never sends
+/// what the host has no room for and the host never leaves the vsock unread.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SandboxStreamWindow {
+    #[prost(uint32, tag = "1")]
+    pub bytes: u32,
+}
 /// Ask the guest agent to resume a paused sandbox in place (CORE-21).
 ///
 /// Internal wire message rather than the public ResumeSandboxRequest: the
@@ -3597,6 +3969,46 @@ pub struct SandboxResumeResponse {
     /// sandbox has no network). The daemon re-registers host DNS from it.
     #[prost(string, tag = "1")]
     pub ip_address: ::prost::alloc::string::String,
+}
+/// Deliver a signal to a running machine exec process, sent on the session's
+/// connection after its MachineExecRequest (SSH `signal` requests). No reply.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MachineExecSignal {
+    /// Signal name without the SIG prefix, as SSH names it ("INT", "TERM").
+    /// Named rather than numbered because host and guest number signals
+    /// differently (SIGUSR1 is 30 on macOS, 10 on Linux).
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+}
+/// Flow-control window on a machine exec session's connection: the receiver
+/// of a stream lets its sender send `bytes` more of it. The host returns
+/// output window (counted in encoded MachineExecOutput payload bytes) as its
+/// consumer takes output; the agent grants its stdin window (in stdin bytes)
+/// in its first frame, then returns it as the process reads stdin. Neither
+/// side may send beyond the window it holds, so both can always keep
+/// reading the connection.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MachineExecWindow {
+    #[prost(uint32, tag = "1")]
+    pub bytes: u32,
+}
+/// Open a TCP connection from inside the machine (SSH `direct-tcpip`). On
+/// success the connection runs like a flow-controlled machine exec session:
+/// the agent's first frame grants its window, MachineExecInput carries bytes
+/// to the peer (empty: shut down the sending side), MachineExecOutput bytes
+/// from it, an `eof` frame when the peer stops sending, and a `done` frame
+/// once both directions are closed. A connect failure is an Error frame.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MachineTcpConnectRequest {
+    /// Host name or address, resolved inside the machine ("localhost" is the
+    /// machine itself).
+    #[prost(string, tag = "1")]
+    pub host: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub port: u32,
+    /// As MachineExecRequest.output_window; required.
+    #[prost(uint32, tag = "3")]
+    pub output_window: u32,
 }
 /// Transport protocol of a forwarded sandbox port.
 ///

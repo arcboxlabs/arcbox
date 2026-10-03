@@ -3,8 +3,8 @@
 The embeddable, daemon-free engine library. Crates here are the
 platform-neutral core that three shells assemble: the macOS daemon
 (`app/`), the in-guest `vm-agent`, and (future) a bare-Linux node daemon.
-The restructure plan and its locked decisions live in the company repo:
-`engineering/arcbox/architecture-charter.md`.
+The restructure plan and its locked decisions live in
+`docs/architecture/charter.md`.
 
 ## Layer rules (the `common/` "no VM dep" discipline, one level up)
 

@@ -14,6 +14,7 @@ use anyhow::Result;
 use crate::config::AgentConfig;
 use crate::control;
 use crate::handover::{Handover, Outcome};
+use crate::host::HostFacts;
 use crate::settings::SettingsStore;
 use crate::state::AgentState;
 use crate::{backends, init_backends, load_or_seed_settings, shutdown};
@@ -23,6 +24,8 @@ use crate::{backends, init_backends, load_or_seed_settings, shutdown};
 /// [`Outcome::Exec`] when the shutdown was an operator `Restart` or a
 /// gateway-pushed self-update rather than a termination signal.
 pub async fn serve(config: AgentConfig) -> Result<Outcome> {
+    // Started first so the volume walk overlaps the backend probes below.
+    let host_facts = HostFacts::probe();
     let settings_store = SettingsStore::new(config.settings_path());
     let seed = load_or_seed_settings(&settings_store, &config)?;
     let agent_state = AgentState::new(&seed);
@@ -53,6 +56,7 @@ pub async fn serve(config: AgentConfig) -> Result<Outcome> {
             agent_state.clone(),
             settings_store.clone(),
             Arc::clone(&handover),
+            host_facts,
         )
         .await?,
     );

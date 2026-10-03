@@ -63,6 +63,7 @@ fn main() {
                 .to_string(),
         initrd_path: None, // No initramfs — boot from rootfs block device
         enable_rosetta: false,
+        nested_virt: false,
         serial_console: true,
         virtio_console: true,
         shared_dirs: vec![arcbox_vmm::SharedDirConfig {

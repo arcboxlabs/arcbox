@@ -19,6 +19,10 @@ mod agent;
 #[cfg(any(target_os = "linux", test))]
 mod boot_done;
 mod init;
+// The hostname and network-manager files `machine_init` writes into a distro
+// machine's root. Gated like `boot_done`, for the same reason.
+#[cfg(any(target_os = "linux", test))]
+mod machine_identity;
 // Discovery half of the live-container NFS view. Pure parsing and
 // naming, gated like `boot_done` so the tests run on a host build too.
 // The containerd config the agent writes at runtime. Gated like
@@ -27,6 +31,11 @@ mod init;
 mod containerd_config;
 #[cfg(any(target_os = "linux", test))]
 mod live_exports;
+// A distro machine's root served to the host over NFSv3. Gated like
+// `boot_done`: the filesystem logic is unit-tested on a host build, its
+// only caller is the Linux RPC handler.
+#[cfg(any(target_os = "linux", test))]
+mod machine_export;
 #[cfg(any(target_os = "linux", test))]
 pub(crate) mod runtime_materialize;
 mod supervisor;
@@ -39,6 +48,11 @@ mod memory_pressure;
 // Same arrangement for the WatchStats handler's /proc parsers.
 #[cfg(target_os = "linux")]
 mod stats;
+
+// Same arrangement for the LoadBalancer Service listing the host forwards
+// ports from.
+#[cfg(target_os = "linux")]
+mod kubernetes_services;
 
 // Same arrangement for the ext4 metadata-volume migration state machine
 // (pure std::fs; the mount syscalls live in agent/linux/metadata_volume.rs).
@@ -63,6 +77,10 @@ mod mount;
 #[cfg(target_os = "linux")]
 mod nfs;
 
+// SSH agent forwarding into containers (Linux-only: guest Unix + vsock relay).
+#[cfg(target_os = "linux")]
+mod ssh_auth;
+
 // containerd snapshots client for container filesystem-path resolution.
 #[cfg(target_os = "linux")]
 mod containerd;
@@ -84,7 +102,11 @@ mod dns;
 
 // Guest-side DNS server and Docker event-driven container registration.
 mod dns_server;
+mod docker_config;
 mod docker_events;
+mod domains;
+mod iptables;
+mod publish_mirror;
 
 /// Max bytes for `agent.log` before it rotates (matches the daemon's 10 MiB).
 const AGENT_LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
@@ -234,11 +256,14 @@ async fn main() -> Result<()> {
 
         // Install SIGCHLD handler so orphaned grandchildren (containerd shims,
         // etc.) don't accumulate as zombies.
-        let sv = std::sync::Arc::new(tokio::sync::Mutex::new(supervisor::Supervisor::new()));
-        supervisor::spawn_reaper(sv);
+        supervisor::spawn_reaper();
     }
 
-    tracing::info!("ArcBox agent starting...");
+    let guest = agent::Guest::detect();
+    tracing::info!(?guest, "ArcBox agent starting...");
+    if guest == agent::Guest::DistroMachine {
+        return agent::run(guest).await;
+    }
 
     let cancel = tokio_util::sync::CancellationToken::new();
 
@@ -253,12 +278,28 @@ async fn main() -> Result<()> {
         })
     };
 
-    // Start Docker event listener for auto-registering container DNS.
+    // Container domains: routes each container's ports 80 and 443 to what
+    // it serves, sweeping a previous agent's rules before it follows anyone.
+    let (domains, domains_handle) = domains::DomainRoutes::spawn(cancel.clone());
+
+    // Start Docker event listener for auto-registering container DNS,
+    // mirroring host-address-pinned publishes, and following containers for
+    // their domains. Rules a previous agent left in the kernel go first;
+    // reconciliation reinstalls what still applies.
     let docker_handle = {
         let dns = Arc::clone(&dns);
         let cancel = cancel.clone();
         tokio::spawn(async move {
-            docker_events::reconcile_and_watch(&dns, cancel).await;
+            if let Err(e) = publish_mirror::remove_all_orphans().await {
+                tracing::warn!(error = %e, "failed to sweep stale publish mirror rules");
+            }
+            let uplink = uplink_interface();
+            let sync = docker_events::ContainerSync {
+                dns: &dns,
+                mirror: publish_mirror::PublishMirror::new(uplink),
+                domains,
+            };
+            docker_events::reconcile_and_watch(sync, cancel).await;
         })
     };
 
@@ -273,16 +314,34 @@ async fn main() -> Result<()> {
         nfs::NFSD_PORT,
     ));
 
+    // Forward container SSH-agent connections to the daemon over vsock. The
+    // daemon parks a pool of connections here and pairs each with a container
+    // that opens the forwarded socket; see the `ssh_auth` module.
+    #[cfg(target_os = "linux")]
+    let ssh_auth_handle = tokio::spawn(ssh_auth::run_ssh_auth_relay(cancel.clone()));
+
     // Run the agent (vsock listener + RPC handler).
-    let result = agent::run().await;
+    let result = agent::run(guest).await;
 
     // Shut down background tasks.
     cancel.cancel();
-    let _ = tokio::join!(dns_handle, docker_handle);
+    let _ = tokio::join!(dns_handle, docker_handle, domains_handle);
     #[cfg(target_os = "linux")]
     let _ = nfs_handle.await;
+    #[cfg(target_os = "linux")]
+    let _ = ssh_auth_handle.await;
 
     result
+}
+
+/// The NIC the host relay's traffic reaches the guest on; `eth0` when the
+/// probe finds nothing, which is what every ArcBox guest image ships.
+fn uplink_interface() -> String {
+    #[cfg(target_os = "linux")]
+    if let Some(name) = init::detect_primary_interface() {
+        return name;
+    }
+    "eth0".to_owned()
 }
 
 #[cfg(test)]

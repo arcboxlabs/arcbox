@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result, bail};
 use arcbox_constants::paths::HostLayout;
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use super::OutputFormat;
@@ -14,14 +14,22 @@ use super::OutputFormat;
 pub enum DiskCommands {
     /// Show disk usage for the Docker data image.
     Usage,
-    /// Compact the Docker data image by trimming free blocks.
-    Compact,
+    /// Compact a data disk now by trimming its free blocks. The daemon does
+    /// this on its own — when the Docker VM goes idle, and hourly for every
+    /// running machine — so this is for reclaiming space right away.
+    Compact(CompactArgs),
+}
+
+#[derive(Args)]
+pub struct CompactArgs {
+    /// Machine whose data disk to compact (default: the Docker data disk).
+    pub machine: Option<String>,
 }
 
 pub async fn execute(cmd: DiskCommands, format: OutputFormat) -> Result<()> {
     match cmd {
         DiskCommands::Usage => execute_usage(format).await,
-        DiskCommands::Compact => execute_compact().await,
+        DiskCommands::Compact(args) => execute_compact(args).await,
     }
 }
 
@@ -277,33 +285,60 @@ async fn execute_usage(format: OutputFormat) -> Result<()> {
     Ok(())
 }
 
-/// Machine whose data disk `disk compact` targets. The Docker data image
-/// belongs to the default native machine — the same one `disk usage` inspects.
+/// Machine whose data disk `disk compact` targets when none is named. The
+/// Docker data image belongs to the default native machine — the same one
+/// `disk usage` inspects.
 const DEFAULT_MACHINE: &str = "default";
 
-async fn execute_compact() -> Result<()> {
-    let layout = HostLayout::from_env_or_default();
-    let (img_path, _) = docker_image_paths(&layout);
-
-    if !img_path.exists() {
-        println!("Docker data disk not found at {}", img_path.display());
-        return Ok(());
-    }
+async fn execute_compact(args: CompactArgs) -> Result<()> {
+    let client = super::machine::machine_client();
+    let (label, machine, img_path) = match args.machine {
+        Some(name) => {
+            let info: arcbox_connect::v1::MachineInfo = client
+                .inspect(arcbox_connect::v1::InspectMachineRequest {
+                    id: name.clone(),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|error| crate::error::machine_request(error, &name, "inspect"))?
+                .into_owned();
+            let disk_path = Some(info.storage.disk_path.as_str())
+                .filter(|p| !p.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("machine '{name}' has no data disk to compact"))?;
+            (
+                format!("machine '{name}' data disk"),
+                name,
+                std::path::PathBuf::from(disk_path),
+            )
+        }
+        None => {
+            let layout = HostLayout::from_env_or_default();
+            let (img_path, _) = docker_image_paths(&layout);
+            if !img_path.exists() {
+                println!("Docker data disk not found at {}", img_path.display());
+                return Ok(());
+            }
+            (
+                "Docker data disk".to_owned(),
+                DEFAULT_MACHINE.to_owned(),
+                img_path,
+            )
+        }
+    };
 
     let before = read_disk_usage(&img_path)?;
 
-    // Ask the daemon to run fstrim in the guest. The resulting discards flow
-    // through virtio-blk, which punches holes in this sparse image, so the
-    // physical footprint we re-stat below shrinks by the freed amount.
-    println!("Compacting Docker data disk (running fstrim in the guest)...");
-    let client = super::machine::machine_client();
+    // Ask the daemon to trim the guest's data filesystems. The resulting
+    // discards punch holes in this sparse image, so the physical footprint
+    // we re-stat below shrinks by the freed amount.
+    println!("Compacting {label} (trimming free blocks in the guest)...");
     client
         .compact_disk(arcbox_connect::v1::MachineAgentRequest {
-            id: DEFAULT_MACHINE.to_string(),
+            id: machine,
             ..Default::default()
         })
         .await
-        .context("Failed to compact data disk via the daemon")?;
+        .context("Failed to compact the data disk via the daemon")?;
 
     let after = read_disk_usage(&img_path)?;
     let reclaimed = before.physical_bytes.saturating_sub(after.physical_bytes);

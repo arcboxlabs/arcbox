@@ -672,6 +672,15 @@ impl Sandbox {
     /// [`next`](EventStream::next); the stream ends when the daemon
     /// ends it. Events cannot be replayed, so re-subscribing after an
     /// error is the caller's decision.
+    ///
+    /// Delivery is best-effort: a slow consumer can lose events, and
+    /// history from before the subscription is gone. This stream is
+    /// filtered to one sandbox while
+    /// [`SandboxEvent::sequence`](crate::SandboxEvent) is stamped
+    /// globally before that filter — so a sequence gap is inconclusive,
+    /// while contiguous sequences prove nothing was missed and a
+    /// sequence running backwards reveals a daemon restart. When in
+    /// doubt, re-derive state from [`Sandbox::info`].
     #[must_use]
     pub fn events(&self) -> EventStream {
         EventStream {
@@ -755,9 +764,9 @@ impl Sandbox {
     /// Checkpoint the sandbox to disk under the same id and release its
     /// runtime resources. Resume happens on the next [`ArcBox::connect`]
     /// (or transparently, daemon-side, on the next data-plane call).
-    /// Trades RAM for disk: a paused sandbox keeps paying
-    /// `storage_bytes`. Requires a quiescent sandbox (READY — no
-    /// running command).
+    /// Trades RAM for disk: the checkpoint joins the disk overlay in
+    /// `storage_bytes` until the sandbox is resumed or removed. Requires
+    /// a quiescent sandbox (READY — no running command).
     ///
     /// # Errors
     ///

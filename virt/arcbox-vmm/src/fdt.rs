@@ -394,7 +394,7 @@ mod tests {
         fdt.end_node();
 
         let blob = fdt.finish().unwrap();
-        assert!(!blob.is_empty());
+        assert_ne!(blob, b"");
     }
 
     #[test]
@@ -440,7 +440,7 @@ mod tests {
         };
 
         let blob = generate_fdt(&config).unwrap();
-        assert!(!blob.is_empty());
+        assert_ne!(blob, b"");
     }
 
     #[test]
@@ -452,6 +452,6 @@ mod tests {
         };
 
         let blob = generate_fdt(&config).unwrap();
-        assert!(!blob.is_empty());
+        assert_ne!(blob, b"");
     }
 }

@@ -790,7 +790,6 @@ mod tests {
             queue: ram.cfg(),
             irq: IrqHandle {
                 callback: Arc::new(|_, _| Ok(())),
-                exit_vcpus: Arc::new(|| {}),
                 irq: 32,
             },
             set_interrupt_status: Arc::new(|| {}),

@@ -252,7 +252,7 @@ mod tests {
             IsolationSpec::None,
         )
         .unwrap();
-        assert!(vm.nics.is_empty());
+        assert_eq!(vm.nics, []);
         let BootSpec::Kernel { cmdline, .. } = &vm.boot else {
             unreachable!()
         };

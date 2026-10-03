@@ -48,9 +48,6 @@ use arcbox_core::vm_lifecycle::DEFAULT_MACHINE_NAME;
 use connectrpc::{ConnectError, RequestContext};
 use tokio_stream::{Stream, StreamExt as _};
 
-pub use arcbox_computer::cleanup::{
-    initialize as initialize_sandbox_cleanup, spawn as spawn_sandbox_cleanup,
-};
 pub use control::SandboxServiceImpl;
 pub use filesystem::SandboxFilesystemServiceImpl;
 pub use icon::IconServiceImpl;

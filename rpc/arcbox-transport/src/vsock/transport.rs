@@ -4,7 +4,9 @@ use crate::Transport;
 use crate::error::{Result, TransportError};
 use async_trait::async_trait;
 use bytes::Bytes;
+#[cfg(target_os = "macos")]
 use std::io;
+#[cfg(target_os = "macos")]
 use std::os::fd::RawFd;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 

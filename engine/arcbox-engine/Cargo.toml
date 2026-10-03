@@ -13,6 +13,7 @@ arcbox-connect = { workspace = true }
 arcbox-constants = { workspace = true }
 arcbox-dns = { workspace = true }
 arcbox-error = { workspace = true }
+arcbox-fakeip.workspace = true
 arcbox-hypervisor = { workspace = true }
 arcbox-image.workspace = true
 arcbox-net = { workspace = true }
@@ -23,14 +24,18 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 libc = { workspace = true }
 serde = { workspace = true }
+serde_json.workspace = true
 statig = "0.4.1"
+tar = "0.4.46"
 tempfile = "3"
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-stream.workspace = true
 tokio-util = "0.7"
 toml = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+zstd = "0.13.3"
 
 [features]
 default = []

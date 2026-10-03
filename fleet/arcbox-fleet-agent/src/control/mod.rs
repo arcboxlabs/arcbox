@@ -34,6 +34,7 @@ use crate::backends::Backends;
 use crate::config::AgentConfig;
 use crate::credentials::Credential;
 use crate::handover::{Handover, Reason, Requested};
+use crate::host::HostFacts;
 use crate::runner::RunnerSupervisor;
 use crate::settings::SettingsStore;
 use crate::state::AgentState;
@@ -251,6 +252,8 @@ pub struct AgentSupervisor {
     /// a client watching a restart cannot use the PID, which `exec`
     /// preserves, so it compares this instead.
     instance_id: String,
+    /// The host facts every enrollment and attach reports.
+    host_facts: HostFacts,
 }
 
 impl AgentSupervisor {
@@ -262,6 +265,7 @@ impl AgentSupervisor {
         agent_state: AgentState,
         settings_store: SettingsStore,
         handover: Arc<Handover>,
+        host_facts: HostFacts,
     ) -> Result<Self> {
         let this = Self {
             config,
@@ -271,6 +275,7 @@ impl AgentSupervisor {
             settings_store,
             handover,
             instance_id: uuid::Uuid::new_v4().to_string(),
+            host_facts,
         };
         let gateway = this.agent_state.gateway_target();
         let existing = this.config.credential_store_for(&gateway).load()?;
@@ -346,6 +351,7 @@ impl AgentSupervisor {
             shutdown.clone(),
             self.agent_state.clone(),
             Arc::clone(&self.handover),
+            self.host_facts.clone(),
         ));
         Attachment {
             supervisor,
@@ -412,12 +418,18 @@ impl AgentSupervisor {
             control_plane.map_or_else(|| self.agent_state.gateway_target(), str::to_owned);
 
         // The gateway round-trip must not hold `state` locked.
-        let credential =
-            match enroll::enroll(&self.config, token, self.backends.capabilities(), &gateway).await
-            {
-                Ok(credential) => credential,
-                Err(error) => return Err(self.refused_enrollment(error).await),
-            };
+        let credential = match enroll::enroll(
+            &self.config,
+            token,
+            self.backends.capabilities(),
+            &gateway,
+            &self.host_facts,
+        )
+        .await
+        {
+            Ok(credential) => credential,
+            Err(error) => return Err(self.refused_enrollment(error).await),
+        };
 
         let mut state = self.state.lock().await;
         // `check_enrollable` refuses `Enrolling`, so nothing else can
@@ -917,6 +929,7 @@ mod tests {
                 agent_state,
                 SettingsStore::new(dir.join("settings.json")),
                 handover,
+                HostFacts::probe(),
             )
             .await
             .expect("no credential on disk, so no attach on startup"),
@@ -1081,6 +1094,7 @@ mod tests {
         let runner = crate::runner::RunnerSupervisor::new(
             events,
             None,
+            crate::joblog::JobLogs::nowhere(),
             Backends::new(false, None, None, None, agent_state.clone()),
             agent_state.clone(),
             Handover::new(agent_state.clone()),
@@ -1178,6 +1192,7 @@ mod tests {
             agent_state.clone(),
             SettingsStore::new(dir.join("settings.json")),
             Handover::new(agent_state.clone()),
+            HostFacts::probe(),
         )
         .await
         .expect("startup with credential");
@@ -1210,6 +1225,7 @@ mod tests {
                 agent_state.clone(),
                 SettingsStore::new(dir.join("settings.json")),
                 Handover::new(agent_state.clone()),
+                HostFacts::probe(),
             )
             .await
             .expect("no credential on disk, so no attach on startup"),
@@ -1228,6 +1244,7 @@ mod tests {
         let runner = crate::runner::RunnerSupervisor::new(
             events,
             None,
+            crate::joblog::JobLogs::nowhere(),
             Backends::new(false, None, None, None, agent_state.clone()),
             agent_state.clone(),
             Handover::new(agent_state),

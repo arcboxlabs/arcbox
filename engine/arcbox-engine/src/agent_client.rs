@@ -8,9 +8,14 @@
 //! (prost) and new (buffa) guest agents: same length-prefixed
 //! `MessageType` frames, same `AGENT_PROTOCOL_VERSION`, no wire change.
 
+mod machine_exec;
+mod sandbox_stream;
 mod transport;
 mod wire;
 
+pub use self::machine_exec::{ExecSessionInput, ExecSessionOutput};
+pub use self::sandbox_stream::SandboxStream;
+use self::sandbox_stream::StreamKind;
 use self::transport::{AgentTransport, BLOCKING_RPC_TIMEOUT};
 use crate::error::{EngineError, Result};
 use arcbox_connect::sandbox_v1::{
@@ -29,18 +34,18 @@ use arcbox_connect::sandbox_v1::{
 };
 use arcbox_connect::v1::{
     AgentPingRequest as PingRequest, AgentPingResponse as PingResponse, ContainerFsPathsRequest,
-    ContainerFsPathsResponse, DiskTrimRequest, DiskTrimResponse, EnsureNfsExportRequest,
-    EnsureNfsExportResponse, ImageFsPathsRequest, ImageFsPathsResponse, KubernetesDeleteRequest,
-    KubernetesDeleteResponse, KubernetesKubeconfigRequest, KubernetesKubeconfigResponse,
-    KubernetesStartRequest, KubernetesStartResponse, KubernetesStatusRequest,
-    KubernetesStatusResponse, KubernetesStopRequest, KubernetesStopResponse, MachineExecOutput,
-    MachineExecRequest, MachineStats, MemoryPressureEvent, MmapReadFileRequest,
+    ContainerFsPathsResponse, DiskTrimRequest, DiskTrimResponse, EnsureMachineExportRequest,
+    EnsureMachineExportResponse, EnsureNfsExportRequest, EnsureNfsExportResponse,
+    ImageFsPathsRequest, ImageFsPathsResponse, KubernetesDeleteRequest, KubernetesDeleteResponse,
+    KubernetesKubeconfigRequest, KubernetesKubeconfigResponse, KubernetesLoadBalancersRequest,
+    KubernetesLoadBalancersResponse, KubernetesStartRequest, KubernetesStartResponse,
+    KubernetesStatusRequest, KubernetesStatusResponse, KubernetesStopRequest,
+    KubernetesStopResponse, MachineStats, MemoryPressureEvent, MmapReadFileRequest,
     MmapReadFileResponse, ReadinessEvent, RuntimeEnsureRequest, RuntimeEnsureResponse,
     RuntimeStatusRequest, RuntimeStatusResponse, SandboxCleanupResponse, SandboxCleanupTicket,
     SandboxPortForwardRemoveRequest, SandboxPortForwardRequest, SandboxPortForwardResponse,
-    SandboxResumeCommand, SandboxResumeResponse, SystemInfo, TerminalSize,
-    WatchMemoryPressureRequest, WatchReadinessRequest, WatchSandboxCleanupRequest,
-    WatchStatsRequest,
+    SandboxResumeCommand, SandboxResumeResponse, SystemInfo, WatchMemoryPressureRequest,
+    WatchReadinessRequest, WatchSandboxCleanupRequest, WatchStatsRequest,
 };
 use arcbox_constants::ports::AGENT_PORT;
 use arcbox_constants::wire::MessageType;
@@ -52,27 +57,6 @@ use buffa::Message;
 use bytes::Bytes;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-
-/// A single client→guest message during an interactive machine exec session.
-#[derive(Debug)]
-pub enum ExecSessionInput {
-    /// Raw bytes for the process's stdin. An empty payload signals EOF and
-    /// ends the input stream.
-    Stdin(Vec<u8>),
-    /// Resize the pseudo-TTY (only meaningful for `tty = true` sessions).
-    Resize {
-        /// Terminal width in columns.
-        width: u16,
-        /// Terminal height in rows.
-        height: u16,
-    },
-}
-
-/// Bound on frames buffered between the guest transport and a streaming RPC's
-/// consumer. When the consumer stalls, the relay task blocks on a full channel,
-/// which propagates backpressure to the guest (vsock flow control) instead of
-/// letting an untrusted sandbox's output grow daemon memory without limit.
-const STREAM_CHANNEL_CAPACITY: usize = 64;
 
 /// A chunk in a sandbox file-write stream.
 #[derive(Debug)]
@@ -909,6 +893,26 @@ impl AgentClient {
         .await
     }
 
+    /// Lists the guest cluster's Services of type LoadBalancer.
+    ///
+    /// Unary, so it works over the blocking HV transport too.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the guest cannot list
+    /// Services (code 503 while the API server is not answering).
+    pub async fn list_kubernetes_load_balancers(
+        &mut self,
+    ) -> Result<KubernetesLoadBalancersResponse> {
+        let payload = KubernetesLoadBalancersRequest::default().encode_to_vec();
+        self.unary_rpc(
+            MessageType::KubernetesLoadBalancersRequest,
+            &payload,
+            MessageType::KubernetesLoadBalancersResponse,
+        )
+        .await
+    }
+
     /// Resolves a container's filesystem layer directories (guest paths)
     /// from containerd snapshot metadata in the guest.
     ///
@@ -1031,11 +1035,51 @@ impl AgentClient {
         )
     }
 
-    /// Triggers an immediate fstrim on guest data mount points.
+    /// Asks a distro machine's agent to serve the machine's root over NFSv3
+    /// on its bridge NIC, and returns the endpoint to mount. Idempotent on
+    /// the agent's side: a repeat returns the export already running.
     ///
     /// # Errors
     ///
-    /// Returns an error if the request fails.
+    /// Returns an error if the request fails, the guest is the System VM,
+    /// or the machine's bridge NIC has no address yet (`EAGAIN`, retryable).
+    pub async fn ensure_machine_export(
+        &mut self,
+        request: &EnsureMachineExportRequest,
+    ) -> Result<EnsureMachineExportResponse> {
+        let payload = request.encode_to_vec();
+        self.unary_rpc(
+            MessageType::EnsureMachineExportRequest,
+            &payload,
+            MessageType::EnsureMachineExportResponse,
+        )
+        .await
+    }
+
+    /// Blocking variant of [`Self::ensure_machine_export`] for the HV
+    /// socketpair transport. Call from `spawn_blocking`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::ensure_machine_export`].
+    pub fn ensure_machine_export_blocking(
+        &mut self,
+        request: &EnsureMachineExportRequest,
+    ) -> Result<EnsureMachineExportResponse> {
+        let payload = request.encode_to_vec();
+        self.unary_rpc_blocking(
+            MessageType::EnsureMachineExportRequest,
+            &payload,
+            MessageType::EnsureMachineExportResponse,
+        )
+    }
+
+    /// Asks the guest to trim its data filesystems now (`FITRIM`), so the
+    /// host reclaims every block they freed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or a filesystem refused the trim.
     pub async fn disk_trim(&mut self) -> Result<DiskTrimResponse> {
         let payload = DiskTrimRequest::default().encode_to_vec();
         self.unary_rpc(
@@ -1044,6 +1088,21 @@ impl AgentClient {
             MessageType::DiskTrimResponse,
         )
         .await
+    }
+
+    /// Blocking variant of [`Self::disk_trim`] for the HV socketpair
+    /// transport. Call from `spawn_blocking`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or a filesystem refused the trim.
+    pub fn disk_trim_blocking(&mut self) -> Result<DiskTrimResponse> {
+        let payload = DiskTrimRequest::default().encode_to_vec();
+        self.unary_rpc_blocking(
+            MessageType::DiskTrimRequest,
+            &payload,
+            MessageType::DiskTrimResponse,
+        )
     }
 
     /// Creates a new sandbox in the guest VM.
@@ -1252,77 +1311,25 @@ impl AgentClient {
     /// Streams a file out of a sandbox as decoded [`FileChunk`]s.
     ///
     /// The final chunk carries `done == true`. Consumes the client because
-    /// the stream task requires exclusive transport access.
+    /// the stream owns the connection.
     ///
     /// # Errors
     ///
     /// Returns an error if the initial send fails.
-    pub async fn sandbox_read_file(
-        mut self,
-        req: ReadFileRequest,
-    ) -> Result<mpsc::Receiver<Result<FileChunk>>> {
-        if !self.connected {
-            self.connect().await?;
-        }
-
-        let payload = req.encode_to_vec();
-        let buf = wire::build_message(MessageType::SandboxFileReadRequest, "", &payload);
-        self.transport
-            .async_send(buf)
-            .await
-            .map_err(|e| EngineError::Machine(format!("failed to send read-file request: {e}")))?;
-
-        let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
-        tokio::spawn(async move {
-            loop {
-                let raw = match self.transport.async_recv().await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(EngineError::Machine(format!("recv error: {e}"))))
-                            .await;
-                        break;
-                    }
-                };
-                let (resp_type, _, resp_payload) = match wire::parse_response(&raw) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        let _ = tx.send(Err(e)).await;
-                        break;
-                    }
-                };
-                if resp_type == MessageType::Error as u32 {
-                    let (code, message) = wire::parse_error_response(&resp_payload)
-                        .unwrap_or_else(|_| (500, "unknown error".to_string()));
-                    let _ = tx.send(Err(EngineError::Agent { code, message })).await;
-                    break;
-                }
-                if resp_type != MessageType::SandboxFileData as u32 {
-                    let _ = tx
-                        .send(Err(EngineError::Machine(format!(
-                            "unexpected response type: 0x{resp_type:04x}"
-                        ))))
-                        .await;
-                    break;
-                }
-                match FileChunk::decode_from_slice(&resp_payload) {
-                    Ok(chunk) => {
-                        let done = chunk.done;
-                        if tx.send(Ok(chunk)).await.is_err() || done {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(EngineError::Machine(format!("decode error: {e}"))))
-                            .await;
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(rx)
+    pub async fn sandbox_read_file(self, req: ReadFileRequest) -> Result<SandboxStream<FileChunk>> {
+        self.open_sandbox_stream(
+            MessageType::SandboxFileReadRequest,
+            &req.encode_to_vec(),
+            StreamKind {
+                frame: MessageType::SandboxFileData,
+                end: None,
+                decode: |payload| {
+                    FileChunk::decode_from_slice(payload).map_err(sandbox_stream::decode_error)
+                },
+                is_last: |chunk| chunk.done,
+            },
+        )
+        .await
     }
 
     /// Writes a file into a sandbox from a channel of data chunks.
@@ -1473,312 +1480,32 @@ impl AgentClient {
     /// Opens a directory watch stream inside a sandbox.
     ///
     /// The guest confirms establishment with an immediate keepalive frame
-    /// and interleaves further keepalives while idle; the channel closes
-    /// cleanly when the guest ends the stream (sandbox stop). Consumes the
-    /// client because the stream task requires exclusive transport access.
+    /// and interleaves further keepalives while idle; the stream ends
+    /// cleanly when the guest ends it (sandbox stop). Consumes the client
+    /// because the stream owns the connection.
     ///
     /// # Errors
     ///
     /// Returns an error if the initial send fails; in-stream failures
-    /// arrive as `Err` items on the channel.
+    /// arrive as `Err` items.
     pub async fn sandbox_watch_dir(
-        mut self,
+        self,
         req: WatchDirRequest,
-    ) -> Result<mpsc::Receiver<Result<WatchDirResponse>>> {
-        if !self.connected {
-            self.connect().await?;
-        }
-
-        let payload = req.encode_to_vec();
-        let buf = wire::build_message(MessageType::SandboxFileWatchRequest, "", &payload);
-        self.transport
-            .async_send(buf)
-            .await
-            .map_err(|e| EngineError::Machine(format!("failed to send watch-dir request: {e}")))?;
-
-        let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
-        tokio::spawn(async move {
-            loop {
-                let raw = match self.transport.async_recv().await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(EngineError::Machine(format!("recv error: {e}"))))
-                            .await;
-                        break;
-                    }
-                };
-                let (resp_type, _, resp_payload) = match wire::parse_response(&raw) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        let _ = tx.send(Err(e)).await;
-                        break;
-                    }
-                };
-                if resp_type == MessageType::SandboxFileWatchEnd as u32 {
-                    break; // clean end: the sandbox stopped
-                }
-                if resp_type == MessageType::Error as u32 {
-                    let (code, message) = wire::parse_error_response(&resp_payload)
-                        .unwrap_or_else(|_| (500, "unknown error".to_string()));
-                    let _ = tx.send(Err(EngineError::Agent { code, message })).await;
-                    break;
-                }
-                if resp_type != MessageType::SandboxFileWatchEvent as u32 {
-                    let _ = tx
-                        .send(Err(EngineError::Machine(format!(
-                            "unexpected response type: 0x{resp_type:04x}"
-                        ))))
-                        .await;
-                    break;
-                }
-                match WatchDirResponse::decode_from_slice(&resp_payload) {
-                    Ok(frame) => {
-                        if tx.send(Ok(frame)).await.is_err() {
-                            break; // consumer gone: dropping self cancels the watch
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(EngineError::Machine(format!("decode error: {e}"))))
-                            .await;
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(rx)
-    }
-
-    /// Runs a command in the machine root (the agent's own mount namespace)
-    /// and returns a channel of streaming output.
-    ///
-    /// Consumes the client because the stream task requires exclusive
-    /// transport access. Non-interactive: the guest rejects `tty` requests
-    /// until the bidi exec session lands.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the initial send fails.
-    pub async fn machine_exec(
-        mut self,
-        req: MachineExecRequest,
-    ) -> Result<mpsc::Receiver<Result<MachineExecOutput>>> {
-        if !self.connected {
-            self.connect().await?;
-        }
-
-        let payload = req.encode_to_vec();
-        let buf = wire::build_message(MessageType::MachineExecRequest, "", &payload);
-        self.transport
-            .async_send(buf)
-            .await
-            .map_err(|source| EngineError::Transport {
-                context: "failed to send exec request",
-                source,
-            })?;
-
-        let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
-        tokio::spawn(async move {
-            loop {
-                let raw = match self.transport.async_recv().await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(EngineError::Transport {
-                                context: "failed to receive exec output",
-                                source: e,
-                            }))
-                            .await;
-                        break;
-                    }
-                };
-
-                let (resp_type, _, resp_payload) = match wire::parse_response(&raw) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        let _ = tx.send(Err(e)).await;
-                        break;
-                    }
-                };
-
-                if resp_type == MessageType::Error as u32 {
-                    let (code, message) = wire::parse_error_response(&resp_payload)
-                        .unwrap_or_else(|_| (500, "unknown error".to_string()));
-                    let _ = tx.send(Err(EngineError::Agent { code, message })).await;
-                    break;
-                }
-
-                if resp_type != MessageType::MachineExecOutput as u32 {
-                    let _ = tx
-                        .send(Err(EngineError::Machine(format!(
-                            "unexpected response type: 0x{:04x}",
-                            resp_type
-                        ))))
-                        .await;
-                    break;
-                }
-
-                match MachineExecOutput::decode_from_slice(&resp_payload) {
-                    Ok(output) => {
-                        let done = output.done;
-                        // Stop reading if the consumer dropped, so a spewing
-                        // process isn't drained into the void indefinitely.
-                        if tx.send(Ok(output)).await.is_err() || done {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(EngineError::Machine(format!("decode error: {}", e))))
-                            .await;
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(rx)
-    }
-
-    /// Starts an interactive exec session in the machine root (PTY-backed).
-    ///
-    /// Consumes the client because the stream task requires exclusive
-    /// transport access. The caller supplies a receiver of
-    /// [`ExecSessionInput`]s (stdin bytes, TTY resizes, or EOF) and gets an
-    /// output receiver of [`MachineExecOutput`] frames
-    /// (stdout/stderr merged by the PTY; final frame carries the exit code).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the initial send fails.
-    pub async fn machine_exec_session(
-        mut self,
-        req: MachineExecRequest,
-        mut input_rx: mpsc::Receiver<ExecSessionInput>,
-    ) -> Result<mpsc::Receiver<Result<MachineExecOutput>>> {
-        if !self.connected {
-            self.connect().await?;
-        }
-
-        let payload = req.encode_to_vec();
-        let buf = wire::build_message(MessageType::MachineExecRequest, "", &payload);
-        self.transport
-            .async_send(buf)
-            .await
-            .map_err(|source| EngineError::Transport {
-                context: "failed to send exec session request",
-                source,
-            })?;
-
-        let (mut sender, mut receiver) =
-            self.transport
-                .into_split()
-                .map_err(|source| EngineError::Transport {
-                    context: "failed to split exec session transport",
-                    source,
-                })?;
-
-        let (out_tx, out_rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
-
-        // Input pump: channel → MachineExecInput / MachineExecResize frames.
-        let stdin_handle = tokio::spawn(async move {
-            loop {
-                match input_rx.recv().await {
-                    Some(ExecSessionInput::Stdin(data)) => {
-                        let is_eof = data.is_empty();
-                        let frame = wire::build_message(MessageType::MachineExecInput, "", &data);
-                        if sender.send(frame).await.is_err() || is_eof {
-                            break;
-                        }
-                    }
-                    Some(ExecSessionInput::Resize { width, height }) => {
-                        let size = TerminalSize {
-                            width: u32::from(width),
-                            height: u32::from(height),
-                            ..Default::default()
-                        };
-                        let frame = wire::build_message(
-                            MessageType::MachineExecResize,
-                            "",
-                            &size.encode_to_vec(),
-                        );
-                        if sender.send(frame).await.is_err() {
-                            break;
-                        }
-                    }
-                    None => {
-                        // Channel closed without explicit EOF; best-effort EOF
-                        // frame so the guest session doesn't hang on stdin.
-                        let eof = wire::build_message(MessageType::MachineExecInput, "", &[]);
-                        let _ = sender.send(eof).await;
-                        break;
-                    }
-                }
-            }
-        });
-
-        // Output pump: MachineExecOutput frames → channel.
-        tokio::spawn(async move {
-            loop {
-                let raw = match receiver.recv().await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let _ = out_tx
-                            .send(Err(EngineError::Transport {
-                                context: "failed to receive exec session output",
-                                source: e,
-                            }))
-                            .await;
-                        break;
-                    }
-                };
-
-                let (resp_type, _, resp_payload) = match wire::parse_response(&raw) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        let _ = out_tx.send(Err(e)).await;
-                        break;
-                    }
-                };
-
-                if resp_type == MessageType::Error as u32 {
-                    let (code, message) = wire::parse_error_response(&resp_payload)
-                        .unwrap_or_else(|_| (500, "unknown error".to_string()));
-                    let _ = out_tx.send(Err(EngineError::Agent { code, message })).await;
-                    break;
-                }
-
-                if resp_type != MessageType::MachineExecOutput as u32 {
-                    let _ = out_tx
-                        .send(Err(EngineError::Machine(format!(
-                            "unexpected response type: 0x{:04x}",
-                            resp_type
-                        ))))
-                        .await;
-                    break;
-                }
-
-                match MachineExecOutput::decode_from_slice(&resp_payload) {
-                    Ok(output) => {
-                        let done = output.done;
-                        if out_tx.send(Ok(output)).await.is_err() || done {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = out_tx
-                            .send(Err(EngineError::Machine(format!("decode error: {}", e))))
-                            .await;
-                        break;
-                    }
-                }
-            }
-            stdin_handle.abort();
-        });
-
-        Ok(out_rx)
+    ) -> Result<SandboxStream<WatchDirResponse>> {
+        self.open_sandbox_stream(
+            MessageType::SandboxFileWatchRequest,
+            &req.encode_to_vec(),
+            StreamKind {
+                frame: MessageType::SandboxFileWatchEvent,
+                end: Some(MessageType::SandboxFileWatchEnd),
+                decode: |payload| {
+                    WatchDirResponse::decode_from_slice(payload)
+                        .map_err(sandbox_stream::decode_error)
+                },
+                is_last: |_| false,
+            },
+        )
+        .await
     }
 
     /// Starts an addressable execution inside a sandbox.
@@ -1906,243 +1633,76 @@ impl AgentClient {
         Self::expect_ack_response_type(resp_type, MessageType::SandboxWaitForPortResponse)
     }
 
-    /// Attaches to an execution's output and returns a channel of
-    /// [`ExecutionEvent`]s. The stream ends after the `exited` event.
+    /// Attaches to an execution's output as a stream of
+    /// [`ExecutionEvent`]s, ending after the `exited` event.
     ///
-    /// Consumes the client because the stream task requires exclusive
-    /// transport access.
+    /// Consumes the client because the stream owns the connection.
     ///
     /// # Errors
     ///
     /// Returns an error if the initial send fails.
     pub async fn sandbox_exec_attach(
-        mut self,
+        self,
         req: AttachExecutionRequest,
-    ) -> Result<mpsc::Receiver<Result<ExecutionEvent>>> {
-        if !self.connected {
-            self.connect().await?;
-        }
-
-        let payload = req.encode_to_vec();
-        let buf = wire::build_message(MessageType::SandboxExecAttachRequest, "", &payload);
-        self.transport
-            .async_send(buf)
-            .await
-            .map_err(|e| EngineError::Machine(format!("failed to send attach request: {}", e)))?;
-
-        let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
-        tokio::spawn(async move {
-            loop {
-                let raw = match self.transport.async_recv().await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(EngineError::Machine(format!("recv error: {}", e))))
-                            .await;
-                        break;
-                    }
-                };
-
-                let (resp_type, _, resp_payload) = match wire::parse_response(&raw) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        let _ = tx.send(Err(e)).await;
-                        break;
-                    }
-                };
-
-                if resp_type == MessageType::Error as u32 {
-                    let (code, message) = wire::parse_error_response(&resp_payload)
-                        .unwrap_or_else(|_| (500, "unknown error".to_string()));
-                    let _ = tx.send(Err(EngineError::Agent { code, message })).await;
-                    break;
-                }
-
-                if resp_type != MessageType::SandboxExecEvent as u32 {
-                    let _ = tx
-                        .send(Err(EngineError::Machine(format!(
-                            "unexpected response type: 0x{:04x}",
-                            resp_type
-                        ))))
-                        .await;
-                    break;
-                }
-
-                match ExecutionEvent::decode_from_slice(&resp_payload) {
-                    Ok(event) => {
-                        let done = matches!(event.event, Some(execution_event::Event::Exited(_)));
-                        // Stop reading if the consumer dropped, so a spewing
-                        // sandbox isn't drained into the void indefinitely.
-                        if tx.send(Ok(event)).await.is_err() || done {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(EngineError::Machine(format!("decode error: {}", e))))
-                            .await;
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(rx)
+    ) -> Result<SandboxStream<ExecutionEvent>> {
+        self.open_sandbox_stream(
+            MessageType::SandboxExecAttachRequest,
+            &req.encode_to_vec(),
+            StreamKind {
+                frame: MessageType::SandboxExecEvent,
+                end: None,
+                decode: |payload| {
+                    ExecutionEvent::decode_from_slice(payload).map_err(sandbox_stream::decode_error)
+                },
+                is_last: |event| matches!(event.event, Some(execution_event::Event::Exited(_))),
+            },
+        )
+        .await
     }
 
-    /// Subscribes to sandbox lifecycle events and returns a channel of streaming events.
+    /// Subscribes to sandbox lifecycle events.
     ///
-    /// Consumes the client because the stream task requires exclusive transport access.
+    /// Consumes the client because the stream owns the connection.
     ///
     /// # Errors
     ///
     /// Returns an error if the initial send fails.
     pub async fn sandbox_events(
-        mut self,
+        self,
         req: SandboxEventsRequest,
-    ) -> Result<mpsc::Receiver<Result<SandboxEvent>>> {
-        if !self.connected {
-            self.connect().await?;
-        }
-
-        let payload = req.encode_to_vec();
-        let buf = wire::build_message(MessageType::SandboxEventsRequest, "", &payload);
-        self.transport
-            .async_send(buf)
-            .await
-            .map_err(|e| EngineError::Machine(format!("failed to send events request: {}", e)))?;
-
-        let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
-        tokio::spawn(async move {
-            loop {
-                let raw = match self.transport.async_recv().await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(EngineError::Machine(format!("recv error: {}", e))))
-                            .await;
-                        break;
-                    }
-                };
-
-                let (resp_type, _, resp_payload) = match wire::parse_response(&raw) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        let _ = tx.send(Err(e)).await;
-                        break;
-                    }
-                };
-
-                if resp_type == MessageType::Error as u32 {
-                    let (code, message) = wire::parse_error_response(&resp_payload)
-                        .unwrap_or_else(|_| (500, "unknown error".to_string()));
-                    let _ = tx.send(Err(EngineError::Agent { code, message })).await;
-                    break;
-                }
-
-                if resp_type != MessageType::SandboxEvent as u32 {
-                    let _ = tx
-                        .send(Err(EngineError::Machine(format!(
-                            "unexpected response type: 0x{:04x}",
-                            resp_type
-                        ))))
-                        .await;
-                    break;
-                }
-
-                match SandboxEvent::decode_from_slice(&resp_payload) {
-                    Ok(event) => {
-                        // Stop when the subscriber drops instead of draining the
-                        // event stream forever.
-                        if tx.send(Ok(event)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(EngineError::Machine(format!("decode error: {}", e))))
-                            .await;
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(rx)
+    ) -> Result<SandboxStream<SandboxEvent>> {
+        self.open_sandbox_stream(
+            MessageType::SandboxEventsRequest,
+            &req.encode_to_vec(),
+            StreamKind {
+                frame: MessageType::SandboxEvent,
+                end: None,
+                decode: |payload| {
+                    SandboxEvent::decode_from_slice(payload).map_err(sandbox_stream::decode_error)
+                },
+                is_last: |_| false,
+            },
+        )
+        .await
     }
 
     /// Stream durable sandbox cleanup tickets. Reconnecting replays every
     /// generation that has not finalized.
-    pub async fn sandbox_cleanup_events(
-        mut self,
-    ) -> Result<mpsc::Receiver<Result<SandboxCleanupTicket>>> {
-        if !self.connected {
-            self.connect().await?;
-        }
-
-        let request = WatchSandboxCleanupRequest::default();
-        let buffer = wire::build_message(
+    pub async fn sandbox_cleanup_events(self) -> Result<SandboxStream<SandboxCleanupTicket>> {
+        self.open_sandbox_stream(
             MessageType::WatchSandboxCleanupRequest,
-            "",
-            &request.encode_to_vec(),
-        );
-        self.transport.async_send(buffer).await.map_err(|error| {
-            EngineError::Machine(format!("failed to send sandbox cleanup watch: {error}"))
-        })?;
-
-        let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CAPACITY);
-        tokio::spawn(async move {
-            loop {
-                let raw = match self.transport.async_recv().await {
-                    Ok(raw) => raw,
-                    Err(error) => {
-                        let _ = tx
-                            .send(Err(EngineError::Machine(format!(
-                                "sandbox cleanup watch receive failed: {error}"
-                            ))))
-                            .await;
-                        break;
-                    }
-                };
-                let (response_type, _, payload) = match wire::parse_response(&raw) {
-                    Ok(frame) => frame,
-                    Err(error) => {
-                        let _ = tx.send(Err(error)).await;
-                        break;
-                    }
-                };
-                if response_type == MessageType::Error as u32 {
-                    let (code, message) = wire::parse_error_response(&payload)
-                        .unwrap_or_else(|_| (500, "unknown error".to_owned()));
-                    let _ = tx.send(Err(EngineError::Agent { code, message })).await;
-                    break;
-                }
-                if response_type != MessageType::SandboxCleanupEvent as u32 {
-                    let _ = tx
-                        .send(Err(EngineError::Machine(format!(
-                            "unexpected sandbox cleanup response: 0x{response_type:04x}"
-                        ))))
-                        .await;
-                    break;
-                }
-                match SandboxCleanupTicket::decode_from_slice(&payload) {
-                    Ok(ticket) => {
-                        if tx.send(Ok(ticket)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(error) => {
-                        let _ = tx
-                            .send(Err(EngineError::Machine(format!(
-                                "sandbox cleanup ticket decode failed: {error}"
-                            ))))
-                            .await;
-                        break;
-                    }
-                }
-            }
-        });
-        Ok(rx)
+            &WatchSandboxCleanupRequest::default().encode_to_vec(),
+            StreamKind {
+                frame: MessageType::SandboxCleanupEvent,
+                end: None,
+                decode: |payload| {
+                    SandboxCleanupTicket::decode_from_slice(payload)
+                        .map_err(sandbox_stream::decode_error)
+                },
+                is_last: |_| false,
+            },
+        )
+        .await
     }
 
     /// Checkpoints a sandbox (creates a snapshot).
@@ -2298,6 +1858,7 @@ fn readiness_event_is_terminal(event: &ReadinessEvent) -> bool {
         Some(Kind::RuntimeReady | Kind::RuntimeFailed)
     )
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

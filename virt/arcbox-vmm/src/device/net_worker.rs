@@ -26,8 +26,6 @@ pub struct NetRxWorkerSlot {
     handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// IRQ callback for the net-io worker thread.
     irq_callback: Option<IrqCallback>,
-    /// Force-exit all vCPUs closure for the net-io worker thread.
-    exit_vcpus: Option<Arc<dyn Fn() + Send + Sync>>,
     /// VM-wide running flag shared with worker threads.
     running: Option<Arc<AtomicBool>>,
     /// Primary NIC host fd for legacy (kqueue) fallback path.
@@ -45,7 +43,6 @@ impl NetRxWorkerSlot {
         Self {
             handle: Mutex::new(None),
             irq_callback: None,
-            exit_vcpus: None,
             running: None,
             host_fd: Mutex::new(None),
             rx_inject_channel: Mutex::new(None),
@@ -53,14 +50,9 @@ impl NetRxWorkerSlot {
         }
     }
 
-    /// Stores the IRQ callback and vCPU exit closure.
-    pub fn set_hooks(
-        &mut self,
-        irq_callback: IrqCallback,
-        exit_vcpus: Arc<dyn Fn() + Send + Sync>,
-    ) {
+    /// Stores the IRQ callback.
+    pub fn set_hooks(&mut self, irq_callback: IrqCallback) {
         self.irq_callback = Some(irq_callback);
-        self.exit_vcpus = Some(exit_vcpus);
     }
 
     /// Stores the VM-wide `running` flag.
@@ -143,10 +135,6 @@ impl NetRxWorkerSlot {
 
         let Some(irq_callback) = self.irq_callback.clone() else {
             tracing::warn!("net-io: irq_callback not set");
-            return;
-        };
-        let Some(exit_vcpus) = self.exit_vcpus.clone() else {
-            tracing::warn!("net-io: exit_vcpus not set");
             return;
         };
         let Some(running) = self.running.clone() else {
@@ -232,7 +220,6 @@ impl NetRxWorkerSlot {
                 queue,
                 irq: arcbox_net_inject::irq::IrqHandle {
                     callback: inject_callback,
-                    exit_vcpus,
                     irq,
                 },
                 set_interrupt_status,
@@ -278,7 +265,6 @@ impl NetRxWorkerSlot {
                 mmio_state: mmio_arc.clone(),
                 irq_callback,
                 irq,
-                exit_vcpus,
                 running,
             };
 

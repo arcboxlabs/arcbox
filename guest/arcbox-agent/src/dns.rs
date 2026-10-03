@@ -103,7 +103,7 @@ mod tests {
     #[test]
     fn empty_name() {
         let aliases = collect_aliases("", None);
-        assert!(aliases.is_empty());
+        assert_eq!(aliases, Vec::<String>::new());
     }
 
     #[test]

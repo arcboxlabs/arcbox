@@ -20,8 +20,8 @@ use crate::rpc::{
 
 use super::disk::handle_disk_trim;
 use super::kubernetes::{
-    handle_delete_kubernetes, handle_kubernetes_kubeconfig, handle_kubernetes_status,
-    handle_start_kubernetes, handle_stop_kubernetes,
+    handle_delete_kubernetes, handle_kubernetes_kubeconfig, handle_kubernetes_load_balancers,
+    handle_kubernetes_status, handle_start_kubernetes, handle_stop_kubernetes,
 };
 use super::runtime::{handle_ensure_runtime, handle_runtime_status};
 use super::sandbox::handle_sandbox_message;
@@ -57,12 +57,16 @@ where
             }
         };
 
-        tracing::info!(
-            trace_id = %trace_id,
-            "Received message type {:?}, payload_len={}",
-            msg_type,
-            payload.len()
-        );
+        if msg_type.is_periodic_poll() {
+            tracing::debug!(trace_id = %trace_id, "Received message type {:?}", msg_type);
+        } else {
+            tracing::info!(
+                trace_id = %trace_id,
+                "Received message type {:?}, payload_len={}",
+                msg_type,
+                payload.len()
+            );
+        }
 
         // Sandbox requests are handled separately — they bypass the normal
         // RPC request/response cycle because streaming operations hold the
@@ -80,14 +84,35 @@ where
             continue;
         }
 
-        // Machine-level exec also streams multiple frames on this connection.
+        // Machine-level exec streams on this connection and then ends it:
+        // host frames still in flight when the process exited (stdin,
+        // returned window) must not be read as requests.
         if matches!(msg_type, crate::rpc::MessageType::MachineExecRequest) {
             if let Err(e) =
                 super::machine_exec::handle_machine_exec(&mut stream, &trace_id, &payload).await
             {
                 tracing::warn!(trace_id = %trace_id, error = %e, "machine exec handler error");
             }
-            continue;
+            return Ok(());
+        }
+        // A debug exec is a machine exec that first enters a container's
+        // namespaces; it owns the connection the same way.
+        if matches!(msg_type, crate::rpc::MessageType::DebugExecRequest) {
+            if let Err(e) =
+                super::machine_exec::handle_debug_exec(&mut stream, &trace_id, &payload).await
+            {
+                tracing::warn!(trace_id = %trace_id, error = %e, "debug exec handler error");
+            }
+            return Ok(());
+        }
+        // So does a TCP connection opened inside the machine.
+        if matches!(msg_type, crate::rpc::MessageType::MachineTcpConnectRequest) {
+            if let Err(e) =
+                super::machine_exec::handle_tcp_connect(&mut stream, &trace_id, &payload).await
+            {
+                tracing::warn!(trace_id = %trace_id, error = %e, "machine tcp handler error");
+            }
+            return Ok(());
         }
 
         // Parse and handle the request.
@@ -145,14 +170,23 @@ async fn handle_request(request: RpcRequest) -> RequestResult {
         RpcRequest::KubernetesKubeconfig(req) => {
             RequestResult::Single(handle_kubernetes_kubeconfig(req).await)
         }
+        RpcRequest::KubernetesLoadBalancers(req) => {
+            RequestResult::Single(handle_kubernetes_load_balancers(req).await)
+        }
         RpcRequest::Shutdown(req) => RequestResult::Single(handle_shutdown(req)),
         RpcRequest::MmapReadFile(req) => RequestResult::Single(handle_mmap_read_file(req)),
-        RpcRequest::DiskTrim(_) => RequestResult::Single(handle_disk_trim().await),
+        RpcRequest::DiskTrim(_) => {
+            RequestResult::Single(handle_disk_trim(crate::agent::Guest::detect()).await)
+        }
         RpcRequest::ContainerFsPaths(req) => {
             RequestResult::Single(handle_container_fs_paths(req).await)
         }
         RpcRequest::ImageFsPaths(req) => RequestResult::Single(handle_image_fs_paths(req).await),
         RpcRequest::EnsureNfsExport(_) => RequestResult::Single(handle_ensure_nfs_export().await),
+        RpcRequest::EnsureMachineExport(req) => RequestResult::Single(
+            super::machine_export::handle_ensure_machine_export(req, crate::agent::Guest::detect())
+                .await,
+        ),
         RpcRequest::KillAgent => RequestResult::Single(handle_kill_agent()),
         RpcRequest::WatchReadiness(_) => unreachable!("watch readiness is streaming"),
         RpcRequest::WatchMemoryPressure(_) => {
@@ -429,7 +463,7 @@ pub(super) fn sync_clock_from_host(timestamp_secs: i64) -> bool {
     };
     // SAFETY: `ts` points to a valid initialized timespec for this call,
     // and CLOCK_REALTIME is a valid clock ID on Linux guests.
-    let ret = unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &ts) };
+    let ret = unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &raw const ts) };
     if ret != 0 {
         tracing::warn!(
             timestamp_secs,

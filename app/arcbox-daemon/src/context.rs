@@ -5,6 +5,7 @@
 //! ```text
 //! Startup::prepare_host()          → EarlyContext   (no lock, no runtime)
 //! Startup::acquire_daemon_lease()  → DaemonContext  (lock held, no runtime yet)
+//! Startup::start_control_plane()   → ControlPlane   (gRPC serving, DNS socket bound)
 //! Startup::boot_runtime()          → Arc<Runtime>   (also fills SharedRuntime for gRPC)
 //! ```
 //!
@@ -19,6 +20,7 @@ use arcbox_constants::container_network::ContainerNetwork;
 use arcbox_constants::paths::{ArcboxProfile, HostLayout};
 use tokio_util::sync::CancellationToken;
 
+use crate::dns_service::DnsService;
 use crate::startup::{ContainerNetworkLease, DaemonLock};
 
 /// Daemon lock shared between the startup pipeline and `main`.
@@ -89,14 +91,18 @@ pub struct EarlyContext {
     /// Slot filled once the selected non-default container CIDR is known.
     pub container_network_lease_slot: SharedContainerNetworkLease,
     pub dns_domain: String,
-    /// Requested DNS port; 0 lets the bound service choose an ephemeral port.
-    pub dns_port: u16,
+    /// Explicit DNS port; 0 lets the bound service choose one. `None` binds
+    /// the profile's port, falling back to an OS-allocated one when taken.
+    pub dns_port: Option<u16>,
     /// Explicit authorization for a non-canonical resolver domain mutation.
     pub install_dns_resolver: bool,
     /// Explicit Kubernetes proxy port; 0 lets the bound service choose one.
     /// `None` preserves the canonical best-effort 16443 listener.
     pub kubernetes_port: Option<u16>,
     pub kubernetes_context: String,
+    /// Explicit SSH server port; 0 lets the bound service choose one.
+    /// `None` preserves the canonical best-effort 16022 listener.
+    pub ssh_port: Option<u16>,
     pub docker_integration: bool,
     /// Mount the guest Docker data export at the configured host directory once ready.
     pub mount_nfs: bool,
@@ -125,13 +131,16 @@ pub struct DaemonContext {
     /// Holds the same-user CIDR lease until shutdown cleanup completes.
     pub container_network_lease_slot: SharedContainerNetworkLease,
     pub dns_domain: String,
-    /// Requested DNS port; the actual bound port lives in [`ServiceHandles`].
-    pub dns_port: u16,
+    /// Explicit DNS port; `None` binds the profile's port best-effort. The
+    /// actual bound port lives in [`ServiceHandles`].
+    pub dns_port: Option<u16>,
     /// Explicit authorization for a non-canonical resolver domain mutation.
     pub install_dns_resolver: bool,
     /// Explicit Kubernetes proxy port; `None` uses best-effort port 16443.
     pub kubernetes_port: Option<u16>,
     pub kubernetes_context: String,
+    /// Explicit SSH server port; `None` uses best-effort port 16022.
+    pub ssh_port: Option<u16>,
     pub docker_integration: bool,
     /// Mount the guest Docker data export at the configured host directory once ready.
     pub mount_nfs: bool,
@@ -147,6 +156,17 @@ pub struct VmArgs {
     pub no_linux_vm: bool,
 }
 
+/// Host endpoints owned before the runtime boots.
+///
+/// The control-plane socket serves the setup stream from this point on. The
+/// DNS socket is only bound: a taken explicit port fails startup here, before
+/// any VM boots, and the socket is served once the runtime's `NetworkManager`
+/// exists. Consumed by `start_runtime_services`.
+pub struct ControlPlane {
+    pub grpc: tokio::task::JoinHandle<()>,
+    pub dns: DnsService,
+}
+
 /// Handles to spawned services for drain-on-shutdown.
 pub struct ServiceHandles {
     pub dns: tokio::task::JoinHandle<()>,
@@ -156,6 +176,8 @@ pub struct ServiceHandles {
     pub docker: Option<tokio::task::JoinHandle<()>>,
     pub grpc: tokio::task::JoinHandle<()>,
     pub kubernetes_proxy: Option<tokio::task::JoinHandle<()>>,
+    /// SSH server task; `None` when its best-effort default port was taken.
+    pub ssh: Option<tokio::task::JoinHandle<()>>,
     /// Host container-route guard; present only on macOS with the Linux VM enabled.
     pub route_guard: Option<tokio::task::JoinHandle<()>>,
 }

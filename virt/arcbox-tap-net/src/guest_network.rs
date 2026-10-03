@@ -702,7 +702,7 @@ mod tests {
             .finalize_cleanup(&vm("box"), &lease.cleanup_token)
             .await
             .unwrap();
-        assert!(reconcile.pending_cleanups().await.unwrap().is_empty());
+        assert_eq!(reconcile.pending_cleanups().await.unwrap(), []);
         let reused = GuestNetwork::reserve(&network, &vm("box"), policy(NetworkMode::Nat))
             .await
             .unwrap();

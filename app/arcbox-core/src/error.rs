@@ -66,6 +66,10 @@ pub enum CoreError {
     #[error("network error: {0}")]
     Net(#[from] arcbox_net::NetError),
 
+    /// The local CA behind HTTPS for container domains.
+    #[error("local CA error: {0}")]
+    LocalCa(#[from] arcbox_local_ca::Error),
+
     /// Published-image registry error (index/manifest fetch, reference
     /// parsing, name validation) shared by the macOS base-image and Linux
     /// machine-image flows.

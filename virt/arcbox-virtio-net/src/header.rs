@@ -220,7 +220,7 @@ mod tests {
     fn test_packet_empty() {
         let packet = NetPacket::new(vec![]);
         assert_eq!(packet.total_size(), VirtioNetHeader::SIZE);
-        assert!(packet.data.is_empty());
+        assert_eq!(packet.data, b"");
     }
 
     #[test]

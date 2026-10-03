@@ -1,0 +1,69 @@
+name: Fleet Agent Republish CDN
+
+# Re-publishes an already-released fleet-agent version to the release CDN from
+# its GitHub Release assets. The CDN objects are byte-identical to the release
+# assets, so this restores the URLs the gateway pins (see
+# release-fleet-agent.yml's upload-cdn stage for the layout) without a rebuild.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to republish (e.g. fleet-agent-v0.1.6)"
+        required: true
+        type: string
+      update_latest:
+        description: "Point runner/fleet-agent/latest.json at this version (stable only)"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  republish:
+    name: Republish ${{ inputs.tag }}
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Stage release assets
+        id: stage
+        run: |
+          set -eu
+          VERSION="${TAG#fleet-agent-}"
+          DEST="cdn-staging/runner/fleet-agent/${VERSION}"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$DEST" \
+            --pattern 'arcbox-fleet-agent-*'
+          (cd "$DEST" && for f in *.sha256; do shasum -a 256 -c "$f"; done)
+
+          if [ "${{ inputs.update_latest }}" = "true" ]; then
+            if [[ "$VERSION" == *-* ]]; then
+              echo "::error::${VERSION} is a pre-release; latest.json only tracks stable versions"
+              exit 1
+            fi
+            printf '{"version":"%s"}\n' "$VERSION" > cdn-staging/runner/fleet-agent/latest.json
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "=== CDN staging ==="
+          find cdn-staging -type f | sort
+
+      - name: Publish to R2
+        uses: arcboxlabs/actions/r2-publish@v2
+        with:
+          account-id: ${{ vars.R2_ACCOUNT_ID }}
+          access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          bucket: arcboxcdn-release
+          source-dir: cdn-staging
+          index-files: ${{ inputs.update_latest && 'runner/fleet-agent/latest.json' || '' }}
+          strict-verify: "true"
+          verify-urls: |
+            https://release.arcboxcdn.com/runner/fleet-agent/${{ steps.stage.outputs.version }}/arcbox-fleet-agent-darwin-arm64
+            https://release.arcboxcdn.com/runner/fleet-agent/${{ steps.stage.outputs.version }}/arcbox-fleet-agent-darwin-amd64
+            https://release.arcboxcdn.com/runner/fleet-agent/${{ steps.stage.outputs.version }}/arcbox-fleet-agent-linux-amd64
+            https://release.arcboxcdn.com/runner/fleet-agent/${{ steps.stage.outputs.version }}/arcbox-fleet-agent-linux-arm64

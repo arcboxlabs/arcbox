@@ -13,6 +13,7 @@ mod files;
 mod snapshots;
 mod template;
 mod templates;
+mod window;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
@@ -181,16 +182,8 @@ impl SandboxOperationLocks {
 }
 
 impl SandboxService {
-    pub(crate) async fn lock_operation(&self, id: &str) -> Option<OwnedMutexGuard<()>> {
+    pub async fn lock_operation(&self, id: &str) -> Option<OwnedMutexGuard<()>> {
         self.operations.lock(id).await
-    }
-
-    pub(crate) fn is_terminal_or_absent(&self, id: &str) -> bool {
-        match self.manager.inspect_sandbox(&id.to_owned()) {
-            Ok(info) => matches!(info.state, SandboxState::Stopped | SandboxState::Failed),
-            Err(VmmError::NotFound(_)) => true,
-            Err(_) => false,
-        }
     }
 
     /// Create a new [`SandboxService`] from the given config.
@@ -293,7 +286,7 @@ impl SandboxService {
         templates::validate_template_overrides(request)?;
         request.template = resolved.canonical_ref();
         templates::merge_template_defaults(request, &resolved.entry.defaults);
-        Ok(templates::TemplateSource::Catalog(resolved))
+        Ok(templates::TemplateSource::Catalog(Box::new(resolved)))
     }
 
     async fn create_once(
@@ -350,7 +343,8 @@ impl SandboxService {
                         vcpus: warm.vcpus,
                         memory_mib: warm.memory_mib,
                     });
-            spec.ready_probe = resolved.entry.defaults.ready_probe.clone();
+            spec.ready_probe
+                .clone_from(&resolved.entry.defaults.ready_probe);
         }
 
         let (id, ip_address) = self
@@ -424,14 +418,7 @@ impl SandboxService {
     }
 
     /// Stop a sandbox.
-    pub async fn stop(&self, payload: &[u8]) -> Result<(), SandboxError> {
-        let req = sandbox_v1::StopSandboxRequest::decode_from_slice(payload)
-            .map_err(|e| SandboxError::Decode(e.to_string()))?;
-        let _operation = self.operations.lock(&req.id).await;
-        self.stop_request(req).await
-    }
-
-    pub(crate) async fn stop_request(
+    pub async fn stop_request(
         &self,
         req: sandbox_v1::StopSandboxRequest,
     ) -> Result<(), SandboxError> {
@@ -446,7 +433,7 @@ impl SandboxService {
     /// Pause a sandbox: checkpoint, then release its VM while keeping the
     /// record and disk under the same id (CORE-21). The sandbox's DNS entry
     /// is dropped with its released IP; Resume re-registers the fresh one.
-    pub(crate) async fn pause_request(
+    pub async fn pause_request(
         &self,
         req: sandbox_v1::PauseSandboxRequest,
     ) -> Result<(), SandboxError> {
@@ -463,7 +450,7 @@ impl SandboxService {
     /// The wire reason is constrained to the two values the contract
     /// documents; anything else (including empty) reads as an explicit
     /// resume rather than injecting arbitrary event attributes.
-    pub(crate) async fn resume_request(
+    pub async fn resume_request(
         &self,
         req: arcbox_connect::v1::SandboxResumeCommand,
     ) -> Result<arcbox_connect::v1::SandboxResumeResponse, SandboxError> {
@@ -489,7 +476,7 @@ impl SandboxService {
     /// Replace a sandbox's lifecycle deadlines (CORE-60): TTL re-armed from
     /// now, idle timeout/policy replaced. Absent fields are unchanged; an
     /// explicit `UNSPECIFIED` policy restores the daemon default (KILL).
-    pub(crate) async fn set_lifecycle_request(
+    pub async fn set_lifecycle_request(
         &self,
         req: sandbox_v1::SetLifecycleRequest,
     ) -> Result<(), SandboxError> {
@@ -507,14 +494,7 @@ impl SandboxService {
     }
 
     /// Remove a sandbox.
-    pub async fn remove(&self, payload: &[u8]) -> Result<(), SandboxError> {
-        let req = sandbox_v1::RemoveSandboxRequest::decode_from_slice(payload)
-            .map_err(|e| SandboxError::Decode(e.to_string()))?;
-        let _operation = self.operations.lock(&req.id).await;
-        self.remove_request(req).await
-    }
-
-    pub(crate) async fn remove_request(
+    pub async fn remove_request(
         &self,
         req: sandbox_v1::RemoveSandboxRequest,
     ) -> Result<(), SandboxError> {
@@ -559,7 +539,7 @@ impl SandboxService {
 
     /// Return the active generation's network identity (external pool IP,
     /// cleanup token, and addressing mode).
-    pub(crate) fn sandbox_network_identity(
+    pub fn sandbox_network_identity(
         &self,
         sandbox_id: &str,
     ) -> Result<arcbox_computer_runtime::SandboxNetworkIdentity, SandboxError> {
@@ -568,13 +548,13 @@ impl SandboxService {
             .map_err(SandboxError::from)
     }
 
-    pub(crate) async fn wait_startup_cleanup_complete(&self) {
+    pub async fn wait_startup_cleanup_complete(&self) {
         self.manager.wait_startup_cleanup_complete().await;
     }
 
     /// Return the durable cleanup ticket for a terminal generation, if its
     /// sandbox had networking enabled.
-    pub(crate) async fn pending_cleanup_ticket(
+    pub async fn pending_cleanup_ticket(
         &self,
         sandbox_id: &str,
     ) -> Result<Option<arcbox_connect::v1::SandboxCleanupTicket>, SandboxError> {
@@ -595,7 +575,7 @@ impl SandboxService {
     }
 
     /// Snapshot every durable cleanup generation after startup reconciliation.
-    pub(crate) async fn pending_cleanup_tickets(
+    pub async fn pending_cleanup_tickets(
         &self,
     ) -> Result<Vec<arcbox_connect::v1::SandboxCleanupTicket>, SandboxError> {
         let mut tickets = self
@@ -633,7 +613,7 @@ impl SandboxService {
     /// gates are written in: the System VM's DNAT and fwmark rules are
     /// iptables, not ip6tables. A lease from another dataplane would be
     /// one this cleanup path could not express.
-    pub(crate) async fn prepare_cleanup(
+    pub async fn prepare_cleanup(
         &self,
         ticket: &arcbox_connect::v1::SandboxCleanupTicket,
     ) -> Result<std::net::Ipv4Addr, SandboxError> {
@@ -664,7 +644,7 @@ impl SandboxService {
     }
 
     /// Revalidate and recycle one exact generation after guest DNAT cleanup.
-    pub(crate) async fn finalize_cleanup(
+    pub async fn finalize_cleanup(
         &self,
         ticket: &arcbox_connect::v1::SandboxCleanupTicket,
     ) -> Result<(), SandboxError> {

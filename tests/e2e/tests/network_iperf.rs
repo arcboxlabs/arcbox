@@ -1,5 +1,5 @@
 //! iperf3 throughput matrix e2e — the programmatic counterpart to the
-//! manual `docs/net-perf-limits.md` reproducer.
+//! manual `docs/benchmarks/network.md` reproducer.
 //!
 //! `tests/e2e/AGENTS.md` states the boot ladder proves liveness, not
 //! throughput, and that RX/TX regressions are proven by hand. This test

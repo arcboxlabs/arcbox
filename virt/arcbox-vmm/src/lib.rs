@@ -95,6 +95,8 @@ pub mod vsock_manager {
     pub use arcbox_virtio::vsock_manager::*;
 }
 
+#[cfg(target_os = "macos")]
+pub use arcbox_hypervisor::darwin::SerialReaders;
 pub use boot::{BootParams, KernelLoader, KernelType};
 pub use builder::{VmBuilder, VmInstance};
 pub use device::{

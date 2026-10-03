@@ -1,8 +1,5 @@
 //! Host half of durable sandbox network cleanup.
 
-use std::sync::Arc;
-use std::time::Duration;
-
 use arcbox_connect::sandbox_v1::{InspectSandboxRequest, SandboxInfo, SandboxState};
 use arcbox_connect::v1::SandboxCleanupTicket;
 use arcbox_engine::EngineError;
@@ -121,21 +118,21 @@ pub async fn initialize<H: SandboxHost>(host: &H) -> arcbox_engine::Result<bool>
     ))
 }
 
-/// Keep the System VM's durable cleanup stream connected.
+/// Serve the System VM's durable cleanup stream until it ends, returning why.
 ///
-/// Reconnects replay every unfinalized marker.
-pub fn spawn<H: SandboxHost + 'static>(host: Arc<H>) {
-    tokio::spawn(async move {
-        loop {
-            if let Err(error) = watch_once(host.as_ref()).await {
-                tracing::warn!(error = %error, "sandbox cleanup watch disconnected");
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    });
+/// One connected stream: the guest replays every unfinalized marker on
+/// connect, so a caller reconnects whenever the stream ends while a guest
+/// that runs sandboxes is up — and calls nothing while none is. The watch
+/// is a streaming RPC, which a backend without sandboxes (HV) cannot even
+/// carry; a guest that answers [`sandbox_unavailable`] has none to clean.
+pub async fn watch<H: SandboxHost>(host: &H) -> EngineError {
+    match serve(host).await {
+        Ok(never) => match never {},
+        Err(error) => error,
+    }
 }
 
-async fn watch_once<H: SandboxHost>(host: &H) -> arcbox_engine::Result<()> {
+async fn serve<H: SandboxHost>(host: &H) -> arcbox_engine::Result<std::convert::Infallible> {
     let watcher = host.agent(DEFAULT_MACHINE_NAME)?;
     let mut events = watcher.sandbox_cleanup_events().await?;
     while let Some(event) = events.recv().await {
@@ -158,7 +155,10 @@ fn obsolete_ticket(error: &EngineError) -> bool {
     )
 }
 
-fn sandbox_unavailable(error: &EngineError) -> bool {
+/// Whether the guest refused the cleanup watch because it runs no sandboxes
+/// (no nested virtualization). Nothing to reconnect to until the VM restarts.
+#[must_use]
+pub fn sandbox_unavailable(error: &EngineError) -> bool {
     matches!(error, EngineError::Agent { code: 412, .. })
 }
 

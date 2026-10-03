@@ -220,7 +220,7 @@ fn test_hooks_integration() {
     assert_eq!(hooks.create_runtime[0].timeout, Some(30));
 
     assert_eq!(hooks.poststart.len(), 1);
-    assert!(!hooks.poststart[0].env.is_empty());
+    assert_ne!(hooks.poststart[0].env, Vec::<String>::new());
 
     assert_eq!(hooks.poststop.len(), 1);
 

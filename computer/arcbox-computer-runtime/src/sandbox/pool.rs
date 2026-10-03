@@ -152,6 +152,10 @@ struct StagedSlot {
     image: CheckpointImage,
 }
 
+#[allow(
+    clippy::result_large_err,
+    reason = "the failure hands back the half-built sandbox's resources; boxing it is a refactor of its own"
+)]
 async fn stage_slot(
     driver: &dyn VmDriver,
     config: &RuntimeConfig,
@@ -172,10 +176,11 @@ async fn stage_slot(
             .map_err(VmmError::from)?,
     );
     let pid = super::journaled_pid(&*prepared);
+    let vmm = super::journaled_vmm(&*prepared);
     let journal = |cow: Option<&CowHandle>| {
         reconcile::write_state_record(
             vm_dir,
-            &SandboxStateRecord::new(slot_id, pid, None, cow, config, None)?,
+            &SandboxStateRecord::new(slot_id, pid, None, cow, config, None)?.with_vmm(vmm.clone()),
         )
     };
     let carry = |error: VmmError, prepared, cow_handle| SlotFailure {

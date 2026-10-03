@@ -9,6 +9,7 @@
 //! - Boot asset management
 //! - Docker CLI integration
 //! - DNS resolver management
+//! - Local CA trust for HTTPS on container domains
 //! - System information and version output
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -60,8 +61,10 @@ fn select_docker_socket_path(
 
 pub mod agent;
 pub mod boot;
+pub mod bundle;
 pub mod cli_plugins;
 pub mod daemon;
+pub mod debug;
 pub mod disk;
 #[cfg(target_os = "macos")]
 pub mod dns;
@@ -79,8 +82,10 @@ pub mod macos;
 pub mod migrate;
 pub mod sandbox;
 pub mod setup;
-pub mod symlink;
+pub mod ssh;
 pub mod system;
+#[cfg(target_os = "macos")]
+pub mod tls;
 pub mod top;
 #[cfg(target_os = "macos")]
 pub mod uninstall;
@@ -150,6 +155,9 @@ pub enum Commands {
     /// Open Claude Code in a dedicated sandbox
     Claude(agent::AgentArgs),
 
+    /// Debug a running container with a shell and tools from the guest
+    Debug(debug::DebugArgs),
+
     /// Manage Docker CLI integration
     #[command(subcommand)]
     Docker(docker::DockerCommands),
@@ -158,7 +166,7 @@ pub enum Commands {
     #[command(subcommand, alias = "k8s")]
     Kubernetes(kubernetes::KubernetesCommands),
 
-    /// Manage the single System VM (hypervisor backend)
+    /// Manage the single System VM (hypervisor backend, CPU and memory limits)
     #[command(subcommand)]
     System(system::SystemCommands),
 
@@ -174,6 +182,14 @@ pub enum Commands {
     #[cfg(target_os = "macos")]
     #[command(subcommand)]
     Dns(dns::DnsCommands),
+
+    /// Manage trust in the local CA behind https://*.arcbox.local
+    #[cfg(target_os = "macos")]
+    #[command(subcommand)]
+    Tls(tls::TlsCommands),
+    /// Manage OpenSSH client integration (ssh <machine>@arcbox)
+    #[command(subcommand)]
+    Ssh(ssh::SshCommands),
 
     /// Manage the ArcBox daemon
     Daemon(daemon::DaemonArgs),
@@ -196,9 +212,9 @@ pub enum Commands {
     #[command(name = "_install", hide = true)]
     Install(install::InstallArgs),
 
-    /// Internal: uninstall helper + deregister daemon (used by brew/DMG installers)
+    /// Remove ArcBox from this Mac (daemon, helper, links, integrations, data)
     #[cfg(target_os = "macos")]
-    #[command(name = "_uninstall", hide = true)]
+    #[command(alias = "_uninstall")]
     Uninstall(uninstall::UninstallArgs),
 
     /// Internal: package manager hooks (brew postflight/uninstall)
@@ -325,6 +341,7 @@ mod tests {
         #[cfg(target_os = "macos")]
         cases.extend([
             (&["dns", "status"][..], true, false),
+            (&["tls", "trust"][..], false, false),
             (&["macos", "ls"][..], false, false),
             (&["macos", "ip", "guest"][..], false, false),
             (

@@ -72,13 +72,12 @@ fn test_config() -> GuestConfig {
 }
 
 async fn cleanup_sandbox(service: &SandboxService, sandbox_id: &str) {
-    let payload = RemoveSandboxRequest {
+    let request = RemoveSandboxRequest {
         id: sandbox_id.to_string(),
         force: true,
         ..Default::default()
-    }
-    .encode_to_vec();
-    let _ = service.remove(&payload).await;
+    };
+    let _ = service.remove_request(request).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -179,13 +178,15 @@ async fn sandbox_service_calls_sandbox_manager() {
         "execution produced no stdout bytes"
     );
 
-    let stop_payload = StopSandboxRequest {
+    let stop_request = StopSandboxRequest {
         id: sandbox_id.clone(),
         timeout_seconds: 20,
         ..Default::default()
-    }
-    .encode_to_vec();
-    service.stop(&stop_payload).await.expect("stop failed");
+    };
+    service
+        .stop_request(stop_request)
+        .await
+        .expect("stop failed");
 
     let retry_error = match service.create(&create_payload).await {
         Err(error) => error,
@@ -193,14 +194,13 @@ async fn sandbox_service_calls_sandbox_manager() {
     };
     assert!(matches!(retry_error, SandboxError::AlreadyExists(_)));
 
-    let remove_payload = RemoveSandboxRequest {
+    let remove_request = RemoveSandboxRequest {
         id: sandbox_id,
         force: true,
         ..Default::default()
-    }
-    .encode_to_vec();
+    };
     service
-        .remove(&remove_payload)
+        .remove_request(remove_request)
         .await
         .expect("remove failed");
 }

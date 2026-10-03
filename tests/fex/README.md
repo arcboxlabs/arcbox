@@ -14,7 +14,7 @@ where the daemon cannot boot a VM.
    hardware-TSO path (`HV_SYS_REG_ACTLR_EL1`) had a regression on 15.1.1; see
    "Performance / TSO" below.
 2. A Developer-ID-signed `arcbox-daemon` running (ad-hoc signing is killed by
-   the restricted entitlements — see root `CLAUDE.md`).
+   the restricted entitlements — see root `AGENTS.md`).
 3. The FEX interpreter provisioned in the guest runtime assets and registered
    via `binfmt_misc` (see "What must be in the guest" below).
 4. The `arcbox` Docker context active, or pass `--context arcbox` (the script

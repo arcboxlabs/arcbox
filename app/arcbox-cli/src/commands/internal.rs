@@ -5,11 +5,11 @@
 //! `orbctl _internal` pattern.
 //!
 //! Both hooks are idempotent and share the same code paths as the desktop
-//! app's first-launch setup, so the result is identical regardless of
-//! whether the user opens the app first or installs via `brew`.
+//! app's first-launch setup and `abctl uninstall`, so the result is identical
+//! regardless of whether the user opens the app first or installs via `brew`.
 
-use anyhow::{Context, Result};
-use arcbox_constants::paths::{DOCKER_CLI_TOOLS, HostLayout};
+use anyhow::Result;
+use arcbox_constants::paths::HostLayout;
 use clap::Subcommand;
 
 use super::OutputFormat;
@@ -28,9 +28,9 @@ pub enum InternalCommands {
 
     /// Homebrew Cask pre-uninstall hook.
     ///
-    /// Stops the daemon, removes Docker context, and cleans up shell
-    /// integration. Privileged components (helper, DNS resolver) require
-    /// separate `sudo abctl _uninstall` cleanup.
+    /// Stops the daemon, removes the Docker context, the shell integration
+    /// and our `/usr/local/bin/docker*` links. Privileged components (helper,
+    /// DNS resolver, Docker socket) are removed by `abctl uninstall`.
     #[command(name = "brew-uninstall")]
     BrewUninstall,
 }
@@ -38,7 +38,7 @@ pub enum InternalCommands {
 pub async fn execute(cmd: InternalCommands) -> Result<()> {
     match cmd {
         InternalCommands::BrewPostflight => brew_postflight().await,
-        InternalCommands::BrewUninstall => brew_uninstall().await,
+        InternalCommands::BrewUninstall => super::uninstall::brew_hook().await,
     }
 }
 
@@ -76,66 +76,6 @@ async fn brew_postflight() -> Result<()> {
     // Doing it here would EACCES on Apple Silicon since postflight runs
     // unprivileged and `/usr/local/bin` is `root:wheel`. The ~/.arcbox/bin
     // path written by `setup install` above is the user-space fallback.
-
-    Ok(())
-}
-
-/// Pre-uninstall hook for Homebrew Cask.
-///
-/// Cleans up non-privileged, user-level state that the Cask `zap` stanza
-/// does not cover. The existing `_uninstall` is too heavy here: it requires
-/// sudo, removes the app bundle (Cask already does that), and deletes user
-/// data (belongs to `brew zap`).
-async fn brew_uninstall() -> Result<()> {
-    let profile = arcbox_constants::paths::ArcboxProfile::from_env_or_default();
-    let daemon_label = profile.daemon_label();
-    let layout = HostLayout::from_env_or_default();
-
-    // 1. Stop the daemon via launchctl, then best-effort pkill fallback.
-    // SAFETY: getuid() is a trivial POSIX syscall.
-    let uid = unsafe { libc::getuid() };
-    let _ = std::process::Command::new("launchctl")
-        .args(["bootout", &format!("gui/{uid}/{daemon_label}")])
-        .output();
-    // bootout may not immediately stop an already-running process.
-    // Mirror the `_uninstall` flow with a pkill fallback + short wait.
-    let _ = std::process::Command::new("pkill")
-        .args(["-f", daemon_label])
-        .status();
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    // Remove the daemon plist so launchd doesn't try to restart.
-    let plist_path = dirs::home_dir()
-        .context("could not determine home directory")?
-        .join(format!("Library/LaunchAgents/{daemon_label}.plist"));
-    let _ = tokio::fs::remove_file(plist_path).await;
-
-    // 2. Remove Docker context via DockerContextManager — `remove_context()`
-    //    restores the user's previous default context (e.g. desktop-linux)
-    //    instead of hard-coding "default".
-    if let Ok(manager) = super::docker::context_manager() {
-        let _ = manager.remove_context();
-    }
-
-    // 3. Remove shell integration — same code path as `abctl setup uninstall`.
-    super::setup::execute(super::setup::SetupCommands::Uninstall, OutputFormat::Quiet).await?;
-
-    // 4. Remove `/usr/local/bin/docker*` via the helper. The helper plist
-    //    survives this hook (its full removal belongs to `sudo abctl _uninstall`),
-    //    so its launchd-activated socket is still reachable here. Best-effort:
-    //    a missing or incompatible helper makes the checked connection fail;
-    //    the full sudo uninstall removes any remaining owned links directly.
-    //    The helper's `cli_unlink` is gated on `is_arcbox_owned`, so foreign
-    //    symlinks are left alone.
-    if let Ok(client) = arcbox_helper::client::Client::connect().await {
-        for name in DOCKER_CLI_TOOLS {
-            let _ = client.cli_unlink(name).await;
-        }
-    }
-
-    // 5. Remove run directory contents (sockets, pid, lock) so stale files
-    //    don't confuse a future reinstall.
-    let _ = tokio::fs::remove_dir_all(&layout.run_dir).await;
 
     Ok(())
 }

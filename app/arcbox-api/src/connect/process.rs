@@ -10,7 +10,6 @@ use connectrpc::{
     ServiceStream,
 };
 use tokio_stream::StreamExt as _;
-use tokio_stream::wrappers::ReceiverStream;
 
 use super::SharedRuntime;
 use crate::ApiError;
@@ -117,8 +116,7 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
             .sandbox_exec_attach(request.to_owned_message())
             .await
             .map_err(ApiError::from)?;
-        let stream =
-            ReceiverStream::new(rx).map(|r| r.map_err(|e| ConnectError::from(ApiError::from(e))));
+        let stream = rx.map(|r| r.map_err(|e| ConnectError::from(ApiError::from(e))));
         let stream = with_keepalive(stream, || ExecutionEvent {
             event: Some(execution_event::Event::from(KeepAlive::default())),
             ..Default::default()

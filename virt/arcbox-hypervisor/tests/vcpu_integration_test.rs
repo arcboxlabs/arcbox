@@ -346,10 +346,10 @@ mod threading {
             .collect();
 
         // Collect results
-        let mut results: Vec<_> = handles
-            .into_iter()
-            .map(|h| h.join().expect("Thread panicked"))
-            .collect();
+        let mut results = Vec::with_capacity(handles.len());
+        for handle in handles {
+            results.push(handle.join().expect("Thread panicked"));
+        }
 
         results.sort_by_key(|(id, _)| *id);
 

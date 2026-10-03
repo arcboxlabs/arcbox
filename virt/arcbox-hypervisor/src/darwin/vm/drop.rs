@@ -10,7 +10,10 @@ impl Drop for DarwinVm {
             let _ = self.stop();
         }
 
-        // Close serial FDs for both console ports.
+        // A VM that never started still holds the VZ-facing pipe ends.
+        self.release_guest_serial_ends();
+
+        // Close the host-side serial FDs for both console ports.
         for fds in [self.console_fds.take(), self.agent_log_fds.take()]
             .into_iter()
             .flatten()

@@ -101,6 +101,9 @@ pub struct Vmm {
     /// Shared DNS hosts table from NetworkManager.
     #[cfg(target_os = "macos")]
     shared_dns_hosts: Option<std::sync::Arc<arcbox_dns::LocalHostsTable>>,
+    /// Proxy the guest's egress is tunnelled through; `None` is direct.
+    #[cfg(target_os = "macos")]
+    proxy_env: Option<arcbox_fakeip::proxy_detect::ProxyEnvironment>,
     /// Kernel entry address for the custom HV VMM path (stored during
     /// `initialize_darwin_hv`, consumed by `start_darwin_hv`).
     #[cfg(target_os = "macos")]
@@ -111,7 +114,7 @@ pub struct Vmm {
     /// vCPU thread join handles for the custom HV VMM path.
     #[cfg(target_os = "macos")]
     hv_vcpu_threads: Vec<std::thread::JoinHandle<()>>,
-    /// Shared vCPU thread handle registry for WFI unparking (custom HV).
+    /// Shared vCPU thread handle registry for pause/resume (custom HV).
     #[cfg(target_os = "macos")]
     hv_vcpu_thread_handles: Option<darwin_hv::VcpuThreadHandles>,
     /// Shared registry of Hypervisor.framework vCPU IDs (custom HV).
@@ -123,12 +126,6 @@ pub struct Vmm {
     /// kept after stop for post-mortem snapshots.
     #[cfg(target_os = "macos")]
     hv_vcpu_stats: Vec<std::sync::Arc<crate::vcpu_stats::VcpuStats>>,
-    /// Times any component broadcast `hv_vcpus_exit` to all vCPUs.
-    #[cfg(target_os = "macos")]
-    hv_kick_broadcasts: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    /// Times the IRQ callback unparked all vCPU threads.
-    #[cfg(target_os = "macos")]
-    hv_unpark_broadcasts: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// PSCI per-vCPU power registry (custom HV): power states plus the
     /// CPU_ON wake channels for secondary vCPUs.
     #[cfg(target_os = "macos")]
@@ -173,9 +170,9 @@ pub struct Vmm {
     /// Block I/O worker thread handles for join on shutdown.
     #[cfg(target_os = "macos")]
     hv_blk_worker_threads: Vec<std::thread::JoinHandle<()>>,
-    /// HVC fast path: device_idx → (raw_fd, blk_size, capacity_sectors). Shared with vCPU threads.
+    /// HVC fast path: the block devices by device index. Shared with vCPU threads.
     #[cfg(target_os = "macos")]
-    hvc_blk_fds: Arc<Vec<(i32, u32, u64)>>,
+    hvc_blk_fds: darwin_hv::HvcBlkTable,
     /// Per-VirtioFS-share DAX mappers (concrete type).
     ///
     /// One `Arc<HvDaxMapper>` per configured shared directory, in the
@@ -307,6 +304,8 @@ impl Vmm {
             #[cfg(target_os = "macos")]
             shared_dns_hosts: None,
             #[cfg(target_os = "macos")]
+            proxy_env: None,
+            #[cfg(target_os = "macos")]
             hv_kernel_entry: None,
             #[cfg(target_os = "macos")]
             hv_fdt_addr: None,
@@ -318,10 +317,6 @@ impl Vmm {
             hv_vcpu_ids: None,
             #[cfg(target_os = "macos")]
             hv_vcpu_stats: Vec::new(),
-            #[cfg(target_os = "macos")]
-            hv_kick_broadcasts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            #[cfg(target_os = "macos")]
-            hv_unpark_broadcasts: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(target_os = "macos")]
             hv_cpu_power: None,
             #[cfg(all(target_os = "macos", feature = "vmnet"))]
@@ -389,6 +384,15 @@ impl Vmm {
     #[cfg(target_os = "macos")]
     pub fn set_shared_dns_hosts(&mut self, table: std::sync::Arc<arcbox_dns::LocalHostsTable>) {
         self.shared_dns_hosts = Some(table);
+    }
+
+    /// Tunnels the guest's TCP and UDP egress through `env`'s proxy.
+    ///
+    /// Must be called before `initialize()`. Without it every guest flow
+    /// connects directly from the host.
+    #[cfg(target_os = "macos")]
+    pub fn set_proxy_env(&mut self, env: arcbox_fakeip::proxy_detect::ProxyEnvironment) {
+        self.proxy_env = Some(env);
     }
 
     /// Returns vmnet interface info for the bridge NIC, if available.
@@ -709,17 +713,7 @@ impl Vmm {
                 .collect(),
             #[cfg(not(target_os = "macos"))]
             vcpus: Vec::new(),
-            #[cfg(target_os = "macos")]
-            kick_broadcasts: self
-                .hv_kick_broadcasts
-                .load(std::sync::atomic::Ordering::Relaxed),
-            #[cfg(not(target_os = "macos"))]
             kick_broadcasts: 0,
-            #[cfg(target_os = "macos")]
-            unpark_broadcasts: self
-                .hv_unpark_broadcasts
-                .load(std::sync::atomic::Ordering::Relaxed),
-            #[cfg(not(target_os = "macos"))]
             unpark_broadcasts: 0,
         }
     }

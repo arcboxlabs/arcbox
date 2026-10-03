@@ -176,12 +176,12 @@ dependencies = [
 
 [[package]]
 name = "arcbox"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-connect",
  "arcbox-connectrpc",
  "axum",
- "base64",
+ "base64 0.22.1",
  "buffa",
  "buffa-types",
  "futures-core",
@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-agent"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "arcbox-computer-runtime",
@@ -202,10 +202,12 @@ dependencies = [
  "arcbox-constants",
  "arcbox-dns",
  "arcbox-fc-driver",
+ "arcbox-local-ca",
  "arcbox-logging",
  "arcbox-pty",
  "arcbox-snapshot",
  "arcbox-tap-net",
+ "arcbox-transport",
  "arcbox-vm-driver",
  "async-trait",
  "buffa",
@@ -220,6 +222,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "nfs3_server",
  "nix 0.29.0",
  "notify",
  "num_cpus",
@@ -232,6 +235,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tokio-util",
  "tokio-vsock",
@@ -248,7 +252,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-api"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-computer",
  "arcbox-connect",
@@ -261,7 +265,7 @@ dependencies = [
  "arcbox-image",
  "arcbox-transport",
  "async-stream",
- "base64",
+ "base64 0.22.1",
  "buffa",
  "buffa-types",
  "bytes",
@@ -278,7 +282,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-asset"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "futures-util",
  "reqwest 0.12.28",
@@ -290,7 +294,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-atomic-file"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "tempfile",
  "thiserror 2.0.18",
@@ -319,11 +323,12 @@ dependencies = [
 
 [[package]]
 name = "arcbox-cli"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "anstream",
  "anyhow",
  "arcbox-asset",
+ "arcbox-atomic-file",
  "arcbox-connect",
  "arcbox-connectrpc",
  "arcbox-constants",
@@ -358,7 +363,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-computer"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-connect",
  "arcbox-engine",
@@ -368,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-computer-runtime"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "arcbox-atomic-file",
@@ -399,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-connect"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-connectrpc",
  "arcbox-connectrpc-build",
@@ -418,7 +423,7 @@ dependencies = [
  "async-compression",
  "async-trait",
  "axum",
- "base64",
+ "base64 0.22.1",
  "buffa",
  "bytes",
  "flate2",
@@ -470,7 +475,7 @@ dependencies = [
  "prettyplease",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -491,7 +496,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-conntrack"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-datapath",
  "arcbox-packet",
@@ -500,14 +505,14 @@ dependencies = [
 
 [[package]]
 name = "arcbox-constants"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "dirs",
 ]
 
 [[package]]
 name = "arcbox-container"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-error",
  "async-trait",
@@ -521,18 +526,21 @@ dependencies = [
 
 [[package]]
 name = "arcbox-core"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
+ "arcbox-atomic-file",
  "arcbox-computer",
  "arcbox-connect",
  "arcbox-constants",
  "arcbox-dns",
  "arcbox-engine",
  "arcbox-error",
+ "arcbox-fakeip",
  "arcbox-fs",
  "arcbox-helper",
  "arcbox-hypervisor",
  "arcbox-image",
+ "arcbox-local-ca",
  "arcbox-migration",
  "arcbox-net",
  "arcbox-route",
@@ -541,7 +549,7 @@ dependencies = [
  "arcbox-vmm",
  "arcbox-vz",
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "buffa",
  "bytes",
  "chrono",
@@ -560,6 +568,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "toml 0.8.23",
+ "toml_edit 0.25.15+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -568,10 +577,11 @@ dependencies = [
 
 [[package]]
 name = "arcbox-daemon"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "arcbox-api",
+ "arcbox-computer",
  "arcbox-connect",
  "arcbox-connectrpc",
  "arcbox-connectrpc-reflection",
@@ -579,12 +589,15 @@ dependencies = [
  "arcbox-core",
  "arcbox-docker",
  "arcbox-docker-tools",
+ "arcbox-engine",
+ "arcbox-error",
  "arcbox-grpc",
  "arcbox-helper",
  "arcbox-logging",
  "arcbox-net",
  "arcbox-protocol",
  "arcbox-route",
+ "arcbox-ssh",
  "arcbox-transport",
  "async-trait",
  "axum",
@@ -598,6 +611,7 @@ dependencies = [
  "libc",
  "libproc",
  "macos-resolver",
+ "nix 0.29.0",
  "sentry",
  "serde_json",
  "tempfile",
@@ -613,14 +627,14 @@ dependencies = [
 
 [[package]]
 name = "arcbox-datapath"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "arcbox-dhcp"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "thiserror 2.0.18",
  "tracing",
@@ -628,14 +642,14 @@ dependencies = [
 
 [[package]]
 name = "arcbox-dns"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "arcbox-docker"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-core",
  "arcbox-error",
@@ -668,7 +682,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-docker-tools"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-asset",
  "flate2",
@@ -684,7 +698,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-e2e"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "arcbox-connect",
@@ -702,7 +716,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
- "toml_edit 0.25.12+spec-1.1.0",
+ "toml_edit 0.25.15+spec-1.1.0",
  "tonic",
  "tower",
  "tracing",
@@ -712,12 +726,13 @@ dependencies = [
 
 [[package]]
 name = "arcbox-engine"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-connect",
  "arcbox-constants",
  "arcbox-dns",
  "arcbox-error",
+ "arcbox-fakeip",
  "arcbox-hypervisor",
  "arcbox-image",
  "arcbox-net",
@@ -728,19 +743,23 @@ dependencies = [
  "chrono",
  "libc",
  "serde",
+ "serde_json",
  "statig",
+ "tar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "toml 0.8.23",
  "tracing",
  "uuid",
+ "zstd",
 ]
 
 [[package]]
 name = "arcbox-error"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "thiserror 2.0.18",
 ]
@@ -758,14 +777,15 @@ dependencies = [
 
 [[package]]
 name = "arcbox-fakeip"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
+ "thiserror 2.0.18",
  "tracing",
 ]
 
 [[package]]
 name = "arcbox-fc-driver"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-constants",
  "arcbox-vm-driver",
@@ -781,7 +801,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-fleet-agent"
-version = "0.1.4"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "arcbox-connect",
@@ -822,7 +842,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-fleet-control-proto"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "prost",
  "tonic",
@@ -832,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-fleet-proto"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "prost",
  "tonic",
@@ -842,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-fs"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-error",
  "arcbox-virtio",
@@ -858,7 +878,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-grpc"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-protocol",
  "pbjson-types",
@@ -904,7 +924,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-hypervisor"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-error",
  "arcbox-vz",
@@ -924,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-image"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-boot",
  "arcbox-constants",
@@ -943,8 +963,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "arcbox-local-ca"
+version = "0.8.1"
+dependencies = [
+ "arcbox-atomic-file",
+ "arcbox-constants",
+ "rcgen",
+ "rustls",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+ "tracing",
+]
+
+[[package]]
 name = "arcbox-logging"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "parking_lot",
  "sentry",
@@ -956,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-migration"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "chrono",
  "dirs",
@@ -970,7 +1004,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-net"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "arcbox-conntrack",
@@ -997,6 +1031,7 @@ dependencies = [
  "serde_json",
  "socket2 0.5.10",
  "splicetcp",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -1007,7 +1042,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-net-inject"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-virtio-core",
  "crossbeam-channel",
@@ -1017,7 +1052,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-net-virtio"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-conntrack",
  "arcbox-virtio",
@@ -1027,7 +1062,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-oci"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-error",
  "chrono",
@@ -1042,11 +1077,11 @@ dependencies = [
 
 [[package]]
 name = "arcbox-packet"
-version = "0.7.0"
+version = "0.8.1"
 
 [[package]]
 name = "arcbox-protocol"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "pbjson-types",
  "prost",
@@ -1056,7 +1091,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-proxy"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-fakeip",
  "arcbox-packet",
@@ -1069,7 +1104,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-pty"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "libc",
  "nix 0.29.0",
@@ -1077,7 +1112,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-route"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "libc",
  "tracing",
@@ -1085,7 +1120,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-snapshot"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-atomic-file",
  "arcbox-error",
@@ -1102,8 +1137,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "arcbox-ssh"
+version = "0.8.1"
+dependencies = [
+ "anyhow",
+ "arcbox-atomic-file",
+ "arcbox-connect",
+ "arcbox-constants",
+ "arcbox-engine",
+ "buffa",
+ "bytes",
+ "rand 0.10.1",
+ "russh",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "arcbox-tap-net"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-vm-driver",
  "async-trait",
@@ -1121,7 +1175,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-transport"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-constants",
  "arcbox-error",
@@ -1136,7 +1190,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-virtio"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-error",
  "arcbox-hypervisor",
@@ -1162,7 +1216,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-virtio-balloon"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-virtio-core",
  "libc",
@@ -1171,7 +1225,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-virtio-blk"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-virtio-core",
  "async-trait",
@@ -1183,7 +1237,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-virtio-console"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-virtio-core",
  "async-trait",
@@ -1194,7 +1248,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-virtio-core"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-error",
  "thiserror 2.0.18",
@@ -1204,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-virtio-fs"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-virtio-core",
  "bytes",
@@ -1215,7 +1269,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-virtio-net"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-virtio-core",
  "async-trait",
@@ -1227,7 +1281,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-virtio-rng"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-virtio-core",
  "getrandom 0.2.17",
@@ -1236,7 +1290,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-virtio-vsock"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-virtio-core",
  "libc",
@@ -1246,7 +1300,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-vm-agent"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-vm-proto",
  "libc",
@@ -1258,7 +1312,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-vm-driver"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-vm-driver",
  "async-trait",
@@ -1271,7 +1325,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-vm-proto"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1279,11 +1333,12 @@ dependencies = [
 
 [[package]]
 name = "arcbox-vmm"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-constants",
  "arcbox-dns",
  "arcbox-error",
+ "arcbox-fakeip",
  "arcbox-fs",
  "arcbox-hv",
  "arcbox-hypervisor",
@@ -1314,7 +1369,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-vmnet"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "libc",
  "thiserror 2.0.18",
@@ -1326,7 +1381,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-vz"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "libc",
  "thiserror 2.0.18",
@@ -1337,7 +1392,7 @@ dependencies = [
 
 [[package]]
 name = "arcbox-xnu-net"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "criterion",
  "libc",
@@ -1354,6 +1409,45 @@ dependencies = [
  "blake2",
  "cpufeatures 0.3.0",
  "password-hash",
+]
+
+[[package]]
+name = "asn1-rs"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7f43a50ac4fdca5df8e885c21b835997f0a1cdee65494a6847694a98652d9d8"
+dependencies = [
+ "asn1-rs-derive",
+ "asn1-rs-impl",
+ "displaydoc",
+ "nom",
+ "num-traits",
+ "rusticata-macros",
+ "thiserror 2.0.18",
+ "time",
+]
+
+[[package]]
+name = "asn1-rs-derive"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3109e49b1e4909e9db6515a30c633684d68cdeaa252f215214cb4fa1a5bfee2c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+ "synstructure",
+]
+
+[[package]]
+name = "asn1-rs-impl"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b18050c2cd6fe86c3a76584ef5e0baf286d038cda203eb6223df2cc413565f7"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -1467,7 +1561,7 @@ checksum = "3b43422f69d8ff38f95f1b2bb76517c91589a924d1559a0e935d7c8ce0274c11"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -1507,7 +1601,7 @@ checksum = "c7c24de15d275a1ecfd47a380fb4d5ec9bfe0933f309ed5e705b775596a3574d"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -1518,13 +1612,13 @@ checksum = "8b75356056920673b02621b35afd0f7dda9306d03c79a30f5c56c44cf256e3de"
 
 [[package]]
 name = "async-trait"
-version = "0.1.89"
+version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
+checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -1633,7 +1727,7 @@ checksum = "604fde5e028fea851ce1d8570bbdc034bec850d157f7569d10f347d06808c05c"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -1694,6 +1788,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
 name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1734,7 +1834,16 @@ dependencies = [
  "regex",
  "rustc-hash",
  "shlex",
- "syn",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "bit-vec"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b71798fca2c1fe1086445a7258a4bc81e6e49dcd24c8d0dd9a1e57395b603f51"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -1833,7 +1942,7 @@ version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c9d0a013e3d3ee4edd61e779adf117944c08902d375f18630a0c5b8f95659734"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bollard-stubs",
  "bytes",
  "futures-core",
@@ -1876,7 +1985,7 @@ version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf9e6224bc4ee1f189ad257120c156fb05f95b826f5369d620b24984476c200a"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "foldhash 0.1.5",
  "hashbrown 0.15.5",
@@ -1899,7 +2008,7 @@ dependencies = [
  "prettyplease",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
  "thiserror 2.0.18",
 ]
 
@@ -2179,7 +2288,7 @@ dependencies = [
  "heck",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2548,7 +2657,7 @@ checksum = "f46882e17999c6cc590af592290432be3bce0428cb0d5f8b6715e4dc7b383eb3"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2600,7 +2709,7 @@ dependencies = [
  "defmt-parser",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2620,7 +2729,7 @@ checksum = "780eb241654bf097afb00fc5f054a09b687dad862e485fdcf8399bb056565370"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2632,6 +2741,20 @@ dependencies = [
  "const-oid",
  "pem-rfc7468",
  "zeroize",
+]
+
+[[package]]
+name = "der-parser"
+version = "10.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07da5016415d5a3c4dd39b11ed26f915f52fc4e0dc197d87908bc916e51bc1a6"
+dependencies = [
+ "asn1-rs",
+ "displaydoc",
+ "nom",
+ "num-bigint",
+ "num-traits",
+ "rusticata-macros",
 ]
 
 [[package]]
@@ -2726,7 +2849,7 @@ checksum = "97369cbbc041bc366949bc74d34658d6cda5621039731c6310521892a3a20ae0"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2797,7 +2920,7 @@ dependencies = [
  "enum-ordinalize",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2860,7 +2983,7 @@ checksum = "8ca9601fb2d62598ee17836250842873a413586e5d7ed88b356e38ddbb0ec631"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2872,7 +2995,7 @@ dependencies = [
  "once_cell",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2893,7 +3016,7 @@ checksum = "67c78a4d8fdf9953a5c9d458f9efe940fd97a0cab0941c075a813ac594733827"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2953,7 +3076,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -3182,7 +3305,7 @@ checksum = "e835b70203e41293343137df5c0664546da5745f82ec9b84d40be8336958447b"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -3624,7 +3747,7 @@ version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-util",
@@ -3993,7 +4116,7 @@ dependencies = [
  "jiff-core",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -4023,7 +4146,7 @@ dependencies = [
  "quote",
  "rustc_version",
  "simd_cesu8",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -4042,7 +4165,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38c0b942f458fe50cdac086d2f946512305e5631e720728f2a61aabcd47a6264"
 dependencies = [
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -4366,6 +4489,38 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "tempfile",
+]
+
+[[package]]
+name = "nfs3_macros"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06d8fb377e6efeb91911a8ed962a69615535e167e675025a2be8fa109751426a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "nfs3_server"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96d135ac708765b71461a1465cf4a25f009a44d33d9d15ab07e0c00d446d4a0c"
+dependencies = [
+ "anyhow",
+ "nfs3_types",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "nfs3_types"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5d5ab1a9fdfeab2f03b36b6300dea4ea3806e6a057cb479628b41d65e356b94"
+dependencies = [
+ "nfs3_macros",
 ]
 
 [[package]]
@@ -4772,6 +4927,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oid-registry"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12f40cff3dde1b6087cc5d5f5d4d65712f34016a03ed60e9c08dcc392736b5b7"
+dependencies = [
+ "asn1-rs",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4827,7 +4991,7 @@ checksum = "a948666b637a0f465e8564c73e89d4dde00d72d4d473cc972f390fc3dcee7d9c"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -5020,7 +5184,7 @@ version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8edd1efdd8ab23ba9cb9ace3d9987a72663d5d7c9f74fa00b51d6213645cf6c"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "serde",
 ]
 
@@ -5081,7 +5245,17 @@ dependencies = [
  "proc-macro2",
  "proc-macro2-diagnostics",
  "quote",
- "syn",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "pem"
+version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d354a98a3d1251555de99e8fdd8afda05573c31b82f59063a7b0a29b5527f120"
+dependencies = [
+ "base64 0.23.1",
+ "serde_core",
 ]
 
 [[package]]
@@ -5137,7 +5311,7 @@ checksum = "d9b20ed30f105399776b9c883e68e536ef602a16ae6f596d2c473591d6ad64c6"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -5204,7 +5378,7 @@ version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da1d65da6dd5d1e44199ac0f58712d241c0f439f80adea8924d832384087f85"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "indexmap",
  "quick-xml",
  "serde",
@@ -5342,7 +5516,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
 dependencies = [
  "proc-macro2",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -5378,7 +5552,7 @@ version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e67ba7e9b2b56446f1d419b1d807906278ffa1a658a8a5d8a39dcb1f5a78614f"
 dependencies = [
- "toml_edit 0.25.12+spec-1.1.0",
+ "toml_edit 0.25.15+spec-1.1.0",
 ]
 
 [[package]]
@@ -5400,7 +5574,7 @@ dependencies = [
  "proc-macro-error-attr2",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -5420,7 +5594,7 @@ checksum = "af066a9c399a26e020ada66a034357a868728e72cd426f3adcd35f80d88d88c8"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
  "version_check",
  "yansi",
 ]
@@ -5467,7 +5641,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
- "syn",
+ "syn 2.0.117",
  "thiserror 2.0.18",
  "typify",
  "unicode-ident",
@@ -5488,7 +5662,7 @@ dependencies = [
  "serde_json",
  "serde_tokenstream",
  "serde_yaml",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -5516,7 +5690,7 @@ dependencies = [
  "prost",
  "prost-types",
  "regex",
- "syn",
+ "syn 2.0.117",
  "tempfile",
 ]
 
@@ -5530,7 +5704,7 @@ dependencies = [
  "itertools 0.14.0",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -5725,6 +5899,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rcgen"
+version = "0.14.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8774e05a7d0de114588e6a28fe7e71694b82614ed569d86d8b389dfbc98b8ad8"
+dependencies = [
+ "pem",
+ "ring",
+ "rustls-pki-types",
+ "time",
+ "x509-parser",
+ "yasna",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5789,7 +5977,7 @@ version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "encoding_rs",
  "futures-channel",
@@ -5837,7 +6025,7 @@ version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-core",
  "http",
@@ -5940,6 +6128,7 @@ dependencies = [
  "polyval",
  "rand 0.10.1",
  "rand_core 0.10.1",
+ "ring",
  "russh-cryptovec",
  "russh-util",
  "salsa20",
@@ -6003,6 +6192,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
 dependencies = [
  "semver",
+]
+
+[[package]]
+name = "rusticata-macros"
+version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "faf0c4a6ece9950b9abdb62b1cfcf2a68b3b67a10ba445b3bb85be2a293d0632"
+dependencies = [
+ "nom",
 ]
 
 [[package]]
@@ -6158,7 +6356,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "serde_derive_internals",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -6381,7 +6579,7 @@ checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -6392,7 +6590,7 @@ checksum = "18d26a20a969b9e3fdf2fc2d9f21eda6c40e2de84c9408bb5d3b05d499aae711"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -6428,7 +6626,7 @@ checksum = "175ee3e80ae9982737ca543e96133087cbd9a485eecc3bc4de9c1a37b47ea59c"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -6458,7 +6656,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "serde",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -6697,7 +6895,7 @@ dependencies = [
 
 [[package]]
 name = "splicetcp"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "arcbox-datapath",
  "arcbox-fakeip",
@@ -6798,7 +6996,7 @@ dependencies = [
  "proc-macro-error2",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -6825,6 +7023,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "syn"
+version = "3.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8593e8e72159ed2257d083c7a454a85cbf854f37a0966d8d483aff8c8a3ebcee"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
 name = "sync_wrapper"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6841,7 +7050,7 @@ checksum = "728a70f3dbaf5bab7f0c4b1ac8d7ae5ea60a4b5549c8a5914361c99147a709d2"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -6923,7 +7132,7 @@ checksum = "26ef4401b013b1f5218ba33ea8f1eddbfcc00ec8db073ef995c192e71f08f027"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -6965,7 +7174,7 @@ checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -6976,7 +7185,7 @@ checksum = "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -7079,7 +7288,7 @@ checksum = "5c55a2eff8b69ce66c84f85e1da1c233edc36ceb85a2058d11b0d6a3c7e7569c"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -7217,9 +7426,9 @@ dependencies = [
 
 [[package]]
 name = "toml_edit"
-version = "0.25.12+spec-1.1.0"
+version = "0.25.15+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2153edc6955a6c354fad8f5efd38b6a8769bdccf9fe50f8e1329f81b0baa5d7"
+checksum = "1340ea94a5856333492c9064b02c778b191dd2c853778d9609debdcdfea3a614"
 dependencies = [
  "indexmap",
  "toml_datetime 1.1.1+spec-1.1.0",
@@ -7230,9 +7439,9 @@ dependencies = [
 
 [[package]]
 name = "toml_parser"
-version = "1.1.2+spec-1.1.0"
+version = "1.1.3+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526"
+checksum = "1d38ac1cf9b95face32296c0a3ede1fdc270627c9d9c02a7274dd6d960dc4d56"
 dependencies = [
  "winnow 1.0.1",
 ]
@@ -7245,9 +7454,9 @@ checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "toml_writer"
-version = "1.1.1+spec-1.1.0"
+version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
+checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tonic"
@@ -7257,7 +7466,7 @@ checksum = "ac2a5518c70fa84342385732db33fb3f44bc4cc748936eb5833d2df34d6445ef"
 dependencies = [
  "async-trait",
  "axum",
- "base64",
+ "base64 0.22.1",
  "bytes",
  "h2",
  "http",
@@ -7289,7 +7498,7 @@ dependencies = [
  "prettyplease",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -7314,7 +7523,7 @@ dependencies = [
  "prost-build",
  "prost-types",
  "quote",
- "syn",
+ "syn 2.0.117",
  "tempfile",
  "tonic-build",
 ]
@@ -7416,7 +7625,7 @@ checksum = "7490cfa5ec963746568740651ac6781f701c9c5ea257c58e057f3ba8cf69e8da"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -7530,7 +7739,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
- "syn",
+ "syn 2.0.117",
  "thiserror 2.0.18",
  "unicode-ident",
 ]
@@ -7548,7 +7757,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_tokenstream",
- "syn",
+ "syn 2.0.117",
  "typify-impl",
 ]
 
@@ -7627,7 +7836,7 @@ version = "3.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dea7109cdcd5864d4eeb1b58a1648dc9bf520360d7af16ec26d0a9354bafcfc0"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "log",
  "percent-encoding",
  "rustls",
@@ -7643,7 +7852,7 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e994ba84b0bd1b1b0cf92878b7ef898a5c1760108fe7b6010327e274917a808c"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "http",
  "httparse",
  "log",
@@ -7849,7 +8058,7 @@ dependencies = [
  "bumpalo",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
  "wasm-bindgen-shared",
 ]
 
@@ -8053,7 +8262,7 @@ checksum = "9107ddc059d5b6fbfbffdfa7a7fe3e22a226def0b2608f72e9d552763d3e1ad7"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -8064,7 +8273,7 @@ checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -8075,7 +8284,7 @@ checksum = "29bee4b38ea3cde66011baa44dba677c432a78593e202392d1e9070cf2a7fca7"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -8086,7 +8295,7 @@ checksum = "3f316c4a2570ba26bbec722032c4099d8c8bc095efccdc15688708623367e358"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -8450,7 +8659,7 @@ dependencies = [
  "heck",
  "indexmap",
  "prettyplease",
- "syn",
+ "syn 2.0.117",
  "wasm-metadata",
  "wit-bindgen-core",
  "wit-component",
@@ -8466,7 +8675,7 @@ dependencies = [
  "prettyplease",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
  "wit-bindgen-core",
  "wit-bindgen-rust",
 ]
@@ -8526,6 +8735,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
 
 [[package]]
+name = "x509-parser"
+version = "0.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d43b0f71ce057da06bc0851b23ee24f3f86190b07203dd8f567d0b706a185202"
+dependencies = [
+ "asn1-rs",
+ "data-encoding",
+ "der-parser",
+ "lazy_static",
+ "nom",
+ "oid-registry",
+ "ring",
+ "rusticata-macros",
+ "thiserror 2.0.18",
+ "time",
+]
+
+[[package]]
 name = "xattr"
 version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8552,7 +8779,7 @@ checksum = "32ac00cd3f8ec9c1d33fb3e7958a82df6989c42d747bd326c822b1d625283547"
 
 [[package]]
 name = "xtask"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "arcbox-constants",
@@ -8566,7 +8793,7 @@ dependencies = [
  "sha2 0.10.9",
  "tar",
  "tempfile",
- "toml_edit 0.25.12+spec-1.1.0",
+ "toml_edit 0.25.15+spec-1.1.0",
  "xshell",
  "xtask-kit",
 ]
@@ -8590,6 +8817,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cfe53a6657fd280eaa890a3bc59152892ffa3e30101319d168b781ed6529b049"
 
 [[package]]
+name = "yasna"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5f6765e852b9b4dc8e2a76843e4d64d1cea8e79bcde0b6901aea8e7c7f08282"
+dependencies = [
+ "bit-vec",
+ "time",
+]
+
+[[package]]
 name = "yoke"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8608,7 +8845,7 @@ checksum = "b659052874eb698efe5b9e8cf382204678a0086ebf46982b79d6ca3182927e5d"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
  "synstructure",
 ]
 
@@ -8667,7 +8904,7 @@ dependencies = [
  "proc-macro-crate",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
  "zbus_names",
  "zvariant",
  "zvariant_utils",
@@ -8701,7 +8938,7 @@ checksum = "70e3cd084b1788766f53af483dd21f93881ff30d7320490ec3ef7526d203bad4"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -8721,7 +8958,7 @@ checksum = "d71e5d6e06ab090c67b5e44993ec16b72dcbaabc526db883a360057678b48502"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
  "synstructure",
 ]
 
@@ -8761,7 +8998,7 @@ checksum = "eadce39539ca5cb3985590102671f2567e659fca9666581ad3411d59207951f3"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -8827,7 +9064,7 @@ dependencies = [
  "proc-macro-crate",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
  "zvariant_utils",
 ]
 
@@ -8840,6 +9077,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "serde",
- "syn",
+ "syn 2.0.117",
  "winnow 1.0.1",
 ]

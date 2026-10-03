@@ -6,10 +6,20 @@ use std::ffi::c_void;
 use std::os::unix::io::RawFd;
 
 /// Configuration for a serial port.
+///
+/// The pipes behind a [`Self::virtio_console`] port are owned by the caller:
+/// the shim wraps the VZ-facing ends in `FileHandle`s that never close them.
+/// Once the VM has started, the VZ helper process holds its own copies of
+/// those ends, and the caller closes [`Self::guest_fds`]; keeping them open
+/// leaks two fds per port and, worse, keeps the guest-output pipe from ever
+/// delivering EOF to its reader.
 pub struct SerialPortConfiguration {
     inner: *mut c_void,
-    /// File descriptors for the serial port (`read_fd`, `write_fd`).
+    /// Host-side ends (`read_fd`, `write_fd`).
     fds: Option<(RawFd, RawFd)>,
+    /// VZ-facing ends (`read_fd`, `write_fd`): what the guest reads input
+    /// from and writes output to.
+    guest_fds: Option<(RawFd, RawFd)>,
 }
 
 // SAFETY: The inner pointer is an ObjC configuration object created by the
@@ -53,7 +63,19 @@ impl SerialPortConfiguration {
         Ok(Self {
             inner: obj,
             fds: Some((output_pipe[0], input_pipe[1])),
+            guest_fds: Some((input_pipe[0], output_pipe[1])),
         })
+    }
+
+    /// Returns the VZ-facing ends (`read_fd`, `write_fd`) of the pipes: the
+    /// fd VZ reads guest input from and the fd it writes guest output to.
+    ///
+    /// The caller owns them. Close them once the VM has started (the helper
+    /// process has its own copies by then) or when the configuration is
+    /// abandoned; never before `start`, which is when VZ hands them over.
+    #[must_use]
+    pub fn guest_fds(&self) -> Option<(RawFd, RawFd)> {
+        self.guest_fds
     }
 
     /// Returns the file descriptor for reading output from the VM.
@@ -87,5 +109,44 @@ impl Drop for SerialPortConfiguration {
             unsafe { shim_ffi::abx_object_release(self.inner.cast()) };
         }
         // Note: We don't close fds here as they may still be in use
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SerialPortConfiguration;
+
+    /// Writes one byte into `w` and reads it back from `r`.
+    fn crosses(w: libc::c_int, r: libc::c_int) -> bool {
+        let mut byte = 0u8;
+        // SAFETY: both fds are live pipe ends owned by the test.
+        unsafe {
+            libc::write(w, [7u8].as_ptr().cast(), 1) == 1
+                && libc::read(r, (&raw mut byte).cast(), 1) == 1
+                && byte == 7
+        }
+    }
+
+    /// Pins which end of which pipe the caller keeps and which it hands to
+    /// VZ: guest output written to the guest write end arrives at the host
+    /// read end, and host input arrives at the guest read end. Needs no
+    /// entitlement — nothing here initializes a VM.
+    #[test]
+    fn host_and_guest_ends_pair_up_across_the_two_pipes() {
+        let port = SerialPortConfiguration::virtio_console().unwrap();
+        let (host_read, host_write) = (port.read_fd().unwrap(), port.write_fd().unwrap());
+        let (guest_read, guest_write) = port.guest_fds().unwrap();
+        assert!(
+            crosses(guest_write, host_read),
+            "guest output reaches the host"
+        );
+        assert!(
+            crosses(host_write, guest_read),
+            "host input reaches the guest"
+        );
+        for fd in [host_read, host_write, guest_read, guest_write] {
+            // SAFETY: closing fds this test owns, once each.
+            assert_eq!(unsafe { libc::close(fd) }, 0);
+        }
     }
 }

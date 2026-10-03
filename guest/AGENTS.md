@@ -10,10 +10,16 @@ non-obvious invariants and failure signatures.
 ## Build & validate
 
 - **Musl cross-compile is mandatory.** On a macOS dev host `agent::Agent` is
-  the 39-line no-op `stub.rs` (`agent/mod.rs` cfg-selects `linux` vs `stub`), so
+  the no-op `stub.rs` (`agent/mod.rs` cfg-selects `linux` vs `stub`), so
   `cargo test -p arcbox-agent` only exercises the stub + pure helpers and proves
   *nothing* about guest behavior. Build for `aarch64-unknown-linux-musl` (recipe
-  in `guest/arcbox-agent/README.md` / root CLAUDE.md) and validate through e2e.
+  in `guest/arcbox-agent/README.md` / root AGENTS.md) and validate through e2e.
+  The unit tests do run on Linux: build them with
+  `cargo test -p arcbox-agent --target aarch64-unknown-linux-musl --bin arcbox-agent --no-run`
+  and run the static binary in any Linux guest of a dev daemon —
+  `docker run -i alpine sh -c 'cat >/t; chmod +x /t; /t <filter>'`, or an
+  alpine machine with the binary's directory mounted (`abctl machine create
+  … -m <dir>:/mnt/t`). The crate's `tests/` targets build for Linux only.
 - **CI never lints the agent — you must, locally.** The workspace gate excludes
   it (`cargo clippy --workspace --exclude arcbox-agent -- -D warnings`,
   `.github/workflows/ci.yml`; the build and test steps exclude it too) and no
@@ -85,6 +91,96 @@ non-obvious invariants and failure signatures.
   wire types** (see doc comments in `wire.rs`): the ABX-362 DAX path and the
   busybox-respawn supervision test. Keep them, but keep them test-scoped — do
   not wire a CLI to them or "clean them up."
+- **A publish pinned to a host address needs the guest-side mirror.** dockerd's
+  DNAT for `-p 127.0.0.1:8080:80` carries `-d 127.0.0.1`; the host relay dials
+  the guest at its uplink address, so that rule never matches and the publish
+  is unreachable from the Mac while `0.0.0.0` publishes work. `publish_mirror.rs`
+  installs an uplink-matching PREROUTING rule per such binding on container
+  `start` (comment `arcbox-publish:<id>`), removes it on `die`/`destroy`, and
+  sweeps orphans at agent start (`docker_events.rs` drives it next to DNS
+  registration). Regression signature: `127.0.0.1:` publishes RST from the
+  host — check `iptables -t nat -S PREROUTING` in the guest for
+  `arcbox-publish:` rules.
+- **`daemon.json` is merged, not owned.** `docker_config.rs` renders ArcBox's
+  keys, then merges `/arcbox/config/docker-engine.json` — the daemon's
+  rendering of `[docker]` from the user's `config.toml` — over the rest.
+  `OWNED_KEYS` (`dns`, `bip`, `default-address-pools`, `allow-direct-routing`,
+  `default-ulimits`, `features`) are refused with a warning; a key the runtime
+  depends on goes there, or an operator can break it from config.
+- **A distro machine's agent serves RPC and nothing else.** The machine boot
+  shim starts the same `arcbox-agent serve` as the System VM;
+  `agent::Guest::detect` tells them apart by `arcbox.machine_rootfs=` on the
+  kernel cmdline, and a `DistroMachine` returns into `agent::run` before any
+  System VM service starts — the DNS server on `0.0.0.0:53`, container
+  domains, docker events and the publish mirror, the NFS relay, the standard
+  VirtioFS shares, the Docker and Kubernetes API proxies, the direct-routing
+  reconciler, the sandbox service. The DNS socket alone made
+  systemd-resolved turn its `127.0.0.53`
+  stub off ("Another process is already listening on UDP socket
+  127.0.0.53:53"), which broke every lookup on Debian and Ubuntu; the
+  reconcilers would rewrite the machine's own NAT table as soon as the user
+  installed dockerd there. A new background service has to say which guest
+  it belongs to. Machine readiness also reads `SystemInfo.ip_addresses`,
+  which comes from `getifaddrs`: never shell out to `hostname` for it (some
+  images ship none, and BusyBox's `-i` resolves the name through DNS).
+  Disk trimming is host-driven for both guests: `arcbox-daemon`'s
+  `disk_reclaim` asks the System VM for a `FITRIM` when it goes idle and
+  every running machine hourly; the agent issues the ioctl
+  (`agent/linux/disk.rs`) and runs no loop of its own. The rootfs ships no
+  `fstrim` binary — never shell out to it.
+- **A distro machine's identity and second NIC are `machine-init`'s, set up
+  before the distro's init runs** (`init.rs`, `machine_identity.rs`,
+  `boot_done.rs`). The hostname arrives as `arcbox.machine_name=` on the
+  cmdline (the machine name with `_` and `.` turned into `-`, derived on the
+  host by `machine_hostname`) and lands in the kernel nodename,
+  `/etc/hostname` and a `127.0.1.1` line in `/etc/hosts`: every init in
+  scope re-reads `/etc/hostname`, so set it nowhere else. The bridge NIC is
+  declared unmanaged to systemd-networkd and NetworkManager by MAC before it
+  gets its address — arch's `eth.network` and rocky's NetworkManager
+  otherwise configure it and add a default route through it (measured
+  2026-09-27) — and then gets an address only. The agent's DHCP script tags
+  the default route it installs `proto 200` (`AGENT_DHCP_ROUTE_PROTO`); the
+  boot-done hook is one script, `/etc/arcbox/boot-done.sh`, that every init
+  adapter runs, and it removes that route only while a second default route
+  exists on the uplink (alpine's dhcpcd adds its own next to it; networkd
+  and dhclient replace the table), then writes the sentinel. A distro that
+  configured no network keeps the shim's route. `SystemInfo.bridge_ip_address`
+  reports the bridge NIC's IPv4 address from the same `getifaddrs` pass as
+  `ip_addresses`. Regression signatures: two default routes on alpine;
+  `networkctl list` showing eth1 `configured` on arch; `hostname` printing
+  `distrobuilder-<uuid>` on Debian or Devuan.
+- **Container domains ride nat PREROUTING, and bridged siblings reach them
+  only through the kernel's built-in `br_netfilter`.** `domains/` DNATs
+  `<ip>:80` to the container's HTTP port and REDIRECTs `<ip>:443` to the
+  agent's TLS proxy on 61443 (`domains/https.rs`, CA from `/arcbox/tls/`),
+  tagged `arcbox-domain:<id>`, removed on `die`/`destroy`, swept at agent
+  start. The rules match the destination only; switched sibling traffic meets
+  them because the System VM kernel builds `br_netfilter` in and
+  `bridge-nf-call-iptables` defaults to 1 — dockerd turns it on only for
+  `icc=false` or without the userland proxy, neither of which ArcBox runs. A
+  kernel config that makes it a module, or an operator setting it to 0,
+  silently breaks sibling-to-sibling domain traffic; the agent warns at
+  startup. A container's listeners are read through its init pid only while
+  that pid is in the container's netns (`SandboxKey`): an `nsenter -t 1 -n`
+  container otherwise reports the VM's own sockets as its own. The design
+  lives in `domains/mod.rs`. Regression signature: siblings get RST on
+  `<name>.arcbox.local:80` while the Mac works — check
+  `iptables -t nat -S PREROUTING | grep arcbox-domain` and
+  `/proc/sys/net/bridge/bridge-nf-call-iptables`.
+- **k3s runs servicelb (traefik stays disabled), and `KubernetesLoadBalancers`
+  lists through `k3s kubectl get --raw /api/v1/services`,** bounded at 4 s to
+  stay inside the HV blocking transport's 5 s unary limit
+  (`BLOCKING_RPC_TIMEOUT`), and deliberately not under
+  `kubernetes_control_lock`, which a start holds for up to 30 s. The daemon
+  polls it every 2 s, so `MessageType::is_periodic_poll` requests and
+  per-connection accepts log at debug.
+- **The agent rootfs links every busybox applet into `/bin`** (boot bundle
+  0.8.8 on; earlier bundles linked only the 17 applets the boot sequence
+  runs, so a bare `fstrim` exec failed with ENOENT). There is no `/usr`; the
+  rootfs's own binaries are in `/sbin` (`mkfs.btrfs`, `mkfs.ext4`, `e2fsck`,
+  `mkfs.erofs`, `iptables`, the NFS server utilities). An `abctl debug` shell
+  inherits the agent's `PATH`, and machine-root exec puts the machine's login
+  `PATH` in front of it, so both resolve every applet by name.
 
 ## Debugging (symptom → first commands → likely cause)
 
@@ -146,9 +242,13 @@ proto file splits by audience: public sandbox API messages live in the
 internal frame through the public schema. A new sandbox-family message
 needs: the proto (in the right file per that split), the `MessageType`
 variant + `is_sandbox_request()` arm, a `handle_sandbox_message` dispatch
-arm, and the `AgentClient` method. `MachineExecRequest` is the one other
-codec bypass: dispatched by name before `parse_request`
-(`agent/linux/rpc.rs`), so it has no `rpc.rs` arms either. Streaming
+arm, and the `AgentClient` method. `MachineExecRequest`, `DebugExecRequest`
+(a `MachineExecRequest` payload naming the target `container`; its output
+comes back as `DebugExecResponse`) and `MachineTcpConnectRequest` are the
+other codec bypasses: dispatched by name before `parse_request`
+(`agent/linux/rpc.rs`), so they have no `rpc.rs` arms either, and each owns
+the rest of its connection — the agent closes it when the session ends, so
+host frames still in flight are never read as requests. Streaming
 alone does not waive step 3 — `WatchReadiness`/`WatchStats`/
 `WatchMemoryPressure` stream too and keep their codec arms (step 4's
 `handle_watch_readiness` pattern).

@@ -11,7 +11,7 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
 ## Startup & readiness contract
 
 - Startup is a phased, typed pipeline and the order is load-bearing — see
-  root CLAUDE.md "Architecture Principles" and `docs/daemon-lifecycle.md`
+  root AGENTS.md "Architecture Principles" and `docs/daemon-lifecycle.md`
   before reordering. The current chain is 8 steps
   (`prepare_host → acquire_daemon_lease → start_control_plane →
   release_stale_resources → prepare_assets → boot_runtime →
@@ -74,15 +74,72 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   `back_to_back_phases_are_all_delivered`,
   `the_snapshot_is_not_replayed_as_an_update`.
 - **A listener the phase promises is bound before `start_services` returns,
-  never inside its spawned task** (`DnsService::bind`, then
-  `DockerApiServer::bind` + `serve` — CORE-71). WHY: a task that binds and
-  only logs its error cannot fail startup, so the pipeline publishes
-  `NETWORK_READY` and `READY` for a daemon whose primary API no client can
-  reach. `NETWORK_READY` therefore covers whichever services this daemon
-  runs — `--no-linux-vm` reaches it with DNS alone — and the Kubernetes
-  proxy is the deliberate exception: a taken 16443 is tolerated, so it is
-  started here but not promised. Adding a listener means deciding which of
-  those two it is.
+  never inside its spawned task** (`DnsService::bind_requested` in
+  `start_control_plane`, then `DockerApiServer::bind` + `serve` — CORE-71).
+  WHY: a task that binds and only logs its error cannot fail startup, so the
+  pipeline publishes `NETWORK_READY` and `READY` for a daemon whose primary
+  API no client can reach. `NETWORK_READY` therefore covers whichever
+  services this daemon runs — `--no-linux-vm` reaches it with DNS alone —
+  and the Kubernetes proxy is the deliberate exception: a taken 16443 is
+  tolerated, so it is started here but not promised. Adding a listener means
+  deciding which of those two it is. DNS is promised yet never fails on a
+  taken default: it binds the profile's port (`ArcboxProfile::dns_host_port`,
+  5553 production / 5554 development) and falls back to an OS-allocated one,
+  which self-setup publishes through `/etc/resolver/<domain>` and `abctl dns
+  status` reads back from that file; only an explicit `--dns-port` /
+  `ARCBOX_DNS_PORT` must bind. The DNS socket is bound in
+  `start_control_plane`, right after the lease is held, and served from
+  `start_services` once the runtime's `NetworkManager` exists (`ControlPlane`
+  in `context.rs` carries it across). WHY: both profiles' daemons run on one
+  machine, and a development build that shared 5553 with production
+  crash-looped under launchd for three days, a full VM boot per 5 s cycle,
+  because the bind then sat after `boot_runtime`; a bind failure now costs
+  no boot.
+- **An unknown name under the local domain is answered NODATA, never
+  NXDOMAIN** (`DnsForwarder::try_resolve_locally_or_nodata`). WHY: the
+  domain ends in `.local`, which RFC 6762 gives to mDNS, so mDNSResponder
+  multicasts every `*.arcbox.local` question as well and takes the unicast
+  answer only when it is positive or NODATA; NXDOMAIN, SERVFAIL and REFUSED
+  are ignored and the lookup waits out the 5 s mDNS timeout per record type,
+  10 s for a getaddrinfo miss (measured 2026-10-01,
+  `docs/experiments/2026-10-01-local-domain-negative-answers.md`). A bound
+  socket that does not answer yet behaves exactly like no listener, so the
+  startup window between the DNS bind and `start_services` needs no
+  "not ready" answer either. The guest agent's own DNS server
+  (`guest/arcbox-agent/src/dns_server.rs`) keeps NXDOMAIN: its clients are
+  Linux resolvers, which have no mDNS leg.
+- **The resolver-domain owner also registers its names with mDNSResponder**
+  (`arcbox-daemon/src/mdns/`, started from `recovery::run` under the same
+  `owns_dns_resolver` predicate that installs `/etc/resolver/<domain>`, and
+  only for a domain ending in `.local`). Unicast and Bonjour answer from
+  one table: `NetworkManager::subscribe_dns_changes` streams every
+  `register_dns`/`deregister_dns`/`set_dns_domain` as a `DnsChange`, and
+  `local_dns_entries` is the snapshot a lagging subscriber resyncs from. The
+  records are `kDNSServiceFlagsUnique` on the **loopback interface**
+  (`if_nametoindex("lo0")`): nothing leaves the host, and mDNSResponder
+  answers a query for a type the name lacks (AAAA for an IPv4 name) at once,
+  which it does not do for `kDNSServiceInterfaceIndexLocalOnly` records (a
+  Mac without the resolver file then waits 5 s on every AAAA; measured
+  2026-10-01). A second owner of a name gets `NameConflict`, which is why
+  only the resolver owner registers (a development daemon shares
+  `host.arcbox.local` with production).
+  Every Bonjour operation needs the Local Network privilege (TN3179):
+  mDNSResponder answers `kDNSServiceErr_PolicyDenied` (-65570) within a
+  millisecond for a process without it, the mirror logs that once and
+  retries every 60 s, and the unicast server keeps answering. `launchd`
+  daemons, root and Terminal.app children are exempt; a `launchd` *agent*
+  (the production daemon under `SMAppService`) inherits ArcBox.app's
+  privilege, so the first registration raises the system's Local Network
+  alert for ArcBox once, and a daemon started from a third-party terminal
+  inherits that terminal's. The privilege follows the *responsible app
+  bundle*: a Homebrew `python3` execs `Python.app`, so a Python probe is
+  "Python" in System Settings, not the terminal it ran from. The same
+  privilege gates the *clients*: on macOS 15+ a process without it cannot
+  resolve any `.local` name, through the resolver file or otherwise
+  (measured 2026-10-01: getaddrinfo fails in 0.00 s while `dscacheutil`,
+  which asks root's opendirectoryd, answers), so "`curl foo.arcbox.local`
+  fails instantly from my terminal" is that terminal's Local Network
+  setting, not a daemon bug.
 - **`SetupStatus.vm_running` is owned by `services::vm_running_loop`**, which
   mirrors `VmLifecycleState::is_ready` (readiness level 2 below) off
   `Runtime::subscribe_system_vm_state`. WHY: it used to be set once by
@@ -150,6 +207,13 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   `.git/HEAD`, so a rebuild that changes no package source file reuses the
   cached SHA — a new commit alone logs a STALE sha (the build.rs comment
   claiming it stays "fresh" holds only when a package file also changed).
+- Daemon logs "ArcBox daemon stopped" but the process never exits, typically
+  after a VM restart (resize, backend switch). First: look for a `mount_nfs`
+  child of the daemon. Likely cause: the `~/ArcBox` remount
+  (`nfs_mount::run_mount`) runs `mount_nfs` in `spawn_blocking` with no
+  per-attempt timeout (`MOUNT_TIMEOUT` bounds only the retries between
+  attempts), so a hung `mount_nfs` holds a blocking thread the runtime waits
+  for at exit; killing the child lets the daemon exit (open).
 
 ## Backend transport & agent
 
@@ -160,6 +224,41 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   an async RPC on HV) fails deterministically. `sync_guest_clock`
   (`vm_lifecycle/boot.rs`) is the reference pattern: `spawn_blocking` the
   connect, then dispatch `ping_blocking` vs `ping` on `is_blocking()`.
+- **Streaming RPCs do not exist on the HV transport.** `AgentTransport::Blocking`
+  refuses `async_send`/`async_recv`, so a streaming RPC the daemon issues
+  unconditionally at startup kills every HV boot — the sandbox cleanup replay
+  did exactly that (`Failed to initialize sandbox cleanup … streaming RPCs not
+  supported on blocking transport`) until `init_runtime` gated it on
+  `backend.supports_nested_virt()`; HV runs no sandboxes, so there is nothing
+  to replay. A new startup RPC either has a blocking variant or a per-backend
+  skip. CI runs no HV daemon-level scenario, so the check is manual:
+  `ARCBOX_VM_BACKEND=hv cargo test -p arcbox-e2e --test boot_assets -- --ignored`.
+- **On VZ, one guest→host vsock stream the host stops reading stalls the
+  whole VM**: every new vsock connection to it times out until that stream is
+  read or closed (measured 2026-09-26: before machine exec had a window,
+  `abctl machine ping` failed during `ssh … 'cat /dev/zero' | sleep 40`;
+  `docker version` still hangs during `docker run … cat /dev/zero | sleep 30`).
+  The host must never stop draining a guest stream,
+  so a streaming RPC needs an application-level window, not a bounded
+  channel. Machine exec has one: the host grants output in encoded-frame bytes
+  (`OUTPUT_WINDOW`, `engine/arcbox-engine/src/agent_client/machine_exec.rs`),
+  the agent grants stdin (`STDIN_WINDOW`,
+  `guest/arcbox-agent/src/agent/linux/machine_exec/flow.rs`), and neither side
+  sends past its window, so both can always keep reading. An agent that
+  grants no window is refused at exec time ("restart the machine to update
+  it"). The Docker API channel (2375) has one too since protocol v5:
+  `HalfCloseStream` grants each direction 1 MiB in-band (`WINDOW`, header
+  top bit set) and keeps a reader task on the connection, so a paused
+  `docker attach` backs up into dockerd's socket, not the vsock. The sandbox
+  streams open with `SANDBOX_STREAM_WINDOW` (4 MiB, `wire.rs`) returned by
+  `SandboxStreamWindow` frames; the guest's `sandbox/window.rs` never sends
+  past it and the host's `agent_client/sandbox_stream.rs` returns it as the
+  consumer takes frames. A writer whose peer has gone fails with
+  `BrokenPipe` instead of waiting for a grant that cannot come — without
+  that, dropping an attach hung the container's stop. The Kubernetes
+  (16443) and NFS (2049) relays wrap the same `HalfCloseStream` around
+  their TCP bytes since v6, so every guest→host vsock the daemon opens is
+  windowed.
 
 ## VM lifecycle internals (`engine/arcbox-engine/src/vm_lifecycle`)
 
@@ -177,24 +276,30 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   + large `docker.img` mount under CPU/I/O pressure). A tight 30s budget
   raced the cold-boot path into "timeout waiting for agent" loops — do not
   tighten it toward the <1.5s cold-boot target.
-- **The idle balloon never shrinks today: no macOS backend reclaims** —
-  the gate is `BalloonDeps::reclaim_capable` (`balloon/controller.rs`),
-  false on both backends, and it is load-bearing (measured 2026-07-29,
-  macOS 26.4; full evidence in `balloon/mod.rs` docs). VZ inflation
-  releases NOTHING host-side (15.35 GB inflated, daemon `phys_footprint`
-  byte-identical, pages *compressed as live data* under real host
-  pressure). HV inflates via `MADV_DONTNEED`, which Darwin treats as a
-  deactivation hint (calibrated footprint-inert; contents preserved).
-  Host footprint is NOT the configured `memory_mb` — VZ commits guest RAM
-  lazily, so the cost is the high-water mark of guest-*touched* pages
-  (measured 2026-08-01: a fresh idle 16 GB VM = ~718MB; the guest
-  allocating 3GB of tmpfs takes it to 3717MB and freeing it changes
-  nothing). With no reclaim path that mark is a one-way ratchet, and
-  `memory_mb` is a ceiling on the eventual cost rather than an upfront
-  charge. The only macOS levers are `memory_mb`, a VM restart, and the
-  macOS compressor. Do not flip a backend to reclaim-capable without a
-  measured host `phys_footprint` drop on inflate (HV path: switch the
-  device to `MADV_FREE_REUSABLE` first).
+- **The idle balloon never shrinks, on either backend, by design** — the
+  gate is `BalloonDeps::reclaim_capable` (`balloon/controller.rs`), false on
+  both, and load-bearing (full evidence in `balloon/mod.rs` docs). VZ
+  (measured 2026-07-29, macOS 26.4): inflation releases NOTHING host-side
+  (15.35 GB inflated, daemon `phys_footprint` byte-identical, pages
+  *compressed as live data* under real host pressure) — guest RAM lives in
+  Apple's XPC process, so measure that process, not the daemon, and nothing
+  the daemon does can release it. HV (since 2026-09-25): the guest's free
+  page reporting returns idle memory continuously with no host-side target —
+  the device releases each reported range by refreshing its stage-2 mapping
+  (`virt/arcbox-vmm/AGENTS.md` "Releasing guest RAM") — so a host-driven
+  shrink would only starve a guest that was already giving the memory back.
+  Host footprint is NOT the configured `memory_mb` — guest RAM is committed
+  lazily, so the cost is the high-water mark of guest-*touched* pages (a
+  fresh idle 16 GB VM ≈ 718MB); on VZ that mark only ratchets upward, on HV
+  it follows the guest's free memory back down. Do not flip a backend to
+  reclaim-capable without a measured host `phys_footprint` drop on inflate.
+- `set_resources` has the same shape as `set_backend` below: it changes the
+  CPU/memory the next (re)boot creates the machine with, the boot's drift check
+  recreates a machine that differs, and `Runtime::resize_system_vm` is the
+  apply-now path — validate against the host, write `[vm]` in the user's
+  `config.toml` (`config::persist`, in place via `toml_edit`), `shutdown`,
+  `set_resources`, `ensure_ready`. Persist *before* the restart: a size the
+  daemon applied but forgot on its next start is worse than one it refused.
 - `set_backend` only changes the backend used on the next (re)boot; it does
   NOT stop or restart a running VM. To apply immediately the caller forces a
   recreate via `Runtime::switch_system_vm_backend`. The backend is seeded
@@ -227,8 +332,15 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   `wait_for_machine_ready` therefore also gates on
   `SystemInfo.distro_init_pending`, which the agent reads from a sentinel
   (`guest/arcbox-agent/src/boot_done.rs`) written by a hook `machine_init`
-  installs into the distro — a systemd unit ordered `After=multi-user.target`
-  or an openrc service that `depend()`s `after *`. Do NOT replace it with an
+  installs into the distro — a static systemd unit ordered
+  `After=multi-user.target` and pulled in by a `multi-user.target.d` drop-in,
+  an openrc service that `depend()`s `after *`, or a sysvinit inittab `wait`
+  entry appended after the `rc N` lines; runit and BusyBox-only images get no
+  hook, and readiness does not wait for them. Never give the systemd unit an
+  `[Install]` section: a first boot applies the preset policy, and on
+  `disable *` distros (Fedora, the RHEL family, openSUSE) that removed the
+  `.wants` link before the unit ever ran, so every start burned the 60 s
+  readiness timeout. Do NOT replace the hook with an
   inspection of the init system's runtime state: `/run/openrc/rc.starting` is
   absent both *before* openrc runs and after it finishes, so that check
   reports "settled" during exactly the window it exists to catch — a version
@@ -239,8 +351,54 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   `default` variant, which does not ship it. Two consequences worth knowing:
   the field is phrased as *pending* so an agent predating it decodes false and
   behaves exactly as before; and readiness now costs what the distro's boot
-  costs — ~2.2 s on alpine/openrc, **~14 s on ubuntu/systemd** — because that
-  is when the machine actually becomes usable.
+  costs — 2–5 s on alpine, debian, fedora and ubuntu, up to ~10 s on arch and
+  rocky (measured 2026-09-26) — because that is when the machine actually
+  becomes usable.
+- **Distro machines boot with `net.ifnames=0`, and their agent serves RPC
+  only.** The mirrored images' own network config (networkd `eth0.network`,
+  netplan, `ifcfg-eth0`, ifupdown) names `eth0`, the name a container's NIC
+  has. With udev renaming the virtio NIC to `enp0s1`, that config matched
+  nothing: the distro never took over DHCP, systemd-resolved had no upstream,
+  and ubuntu's start took ~14 s instead of ~4 s. The flag is part of the
+  machine cmdline, which is fixed at create, so existing machines keep the old
+  naming until they are recreated. The agent tells a machine from the System
+  VM by `arcbox.machine_rootfs=` on the kernel cmdline (`agent::Guest`) and
+  then starts none of the System VM's services (`guest/AGENTS.md`).
+  `SystemInfo.ip_addresses` comes from `getifaddrs`, never from `hostname`:
+  NixOS and Oracle ship none, and BusyBox's `-i` resolves the host name
+  through DNS, which behind a proxy reported a fake IP. Not ArcBox bugs, and
+  not mirrored: the kali and openSUSE Tumbleweed `default` images ship no
+  udev, so no device unit ever appears in a VM, and systemd waits 90 s for
+  `dev-hvc0.device` (the `serial-getty@hvc0` that `console=hvc0` generates)
+  before `multi-user.target` — seen on kali's console; openSUSE times out
+  the same way. The boot-test
+  loop that found all of this: `ARCBOX_MACHINE_IMAGE_BASE=<dir>` pointing at
+  a local `machine-images sync` output (the directory, not its `index.json`),
+  and `abctl machine exec` into the machine while `start` is still waiting.
+- **A running machine is published as `<hostname>.arcbox.local` at its
+  bridge NIC address** (`arcbox-daemon/src/machine_dns.rs`,
+  `arcbox-core/src/runtime/machine_dns.rs`), the System VM as
+  `default.arcbox.local`. The hostname is `machine_hostname(name)` (`_` and
+  `.` become `-`; `create` refuses a name that cannot become a DNS label),
+  the same string the shim gets on the cmdline, so the guest and the Mac
+  agree. The loop follows machine events and re-derives the answer from
+  `MachineInfo.bridge_ip_address` each time: distro machines record it in
+  `wait_for_machine_ready`, the System VM in the lifecycle boot's
+  `record_bridge_address` (before the actor hears `AgentReady`, so the
+  `MachineStarted` it publishes finds the record filled); every stop path
+  clears it. The record, not the event, is the truth, which is also what
+  repairs a lagged receiver with one pass. Entries carry the `machine:`
+  owner prefix and `registered_container_ids` excludes it — without that
+  the Docker host reconciler tears every machine down as a vanished
+  container within one interval. The entry goes through
+  `Runtime::register_dns`, so the resolver owner's mDNS mirror (above)
+  announces `<hostname>.arcbox.local` on `lo0` like a container's name and
+  withdraws it when the machine stops: `dns-sd -G v4 <hostname>.arcbox.local`
+  shows the record on interface 1 while the machine runs (verified
+  2026-10-04 with a development daemon on an isolated `.local` domain).
+  Regression signature: `dig <name>.arcbox.local` at the daemon's DNS port
+  answers NODATA (NOERROR, no answer) for a running machine whose `inspect`
+  shows a bridge address.
 - **`restart_generation` reports departures, not arrivals.** It is bumped on
   VM *stop* (`Effect::BumpGeneration`, fired from `stopping` on
   `VmEvent::Stopped`), so a task that waits for it to advance wakes at the
@@ -296,13 +454,65 @@ above). When editing either side, keep in lockstep:
   per rule (`virt/arcbox-net/src/port_forward.rs`), reachable via loopback. No
   privileged helper is involved, so a high/ephemeral host port is safe to
   publish under an isolated test daemon (it touches none of the three e2e
-  host-globals). A low (<1024) host port simply fails to bind under the
-  non-root daemon — there is no helper fallback — so keep published test ports
-  ephemeral.
+  host-globals). A host port below 1024 binds as non-root only on `0.0.0.0`:
+  XNU asks for the reserved-port privilege only when the bind names a specific
+  address (measured 2026-09-26 as uid 501: `0.0.0.0:999` binds,
+  `127.0.0.1:999` is EACCES, TCP and UDP alike). There is no helper fallback,
+  so a low port works in the default LAN-exposed mode and fails in loopback
+  mode (`expose_ports_to_lan = false`); keep published test ports ephemeral.
+- The host bind address of a publish with no particular address (`-p 8080:80`,
+  `-p 0.0.0.0:8080:80`) follows `[docker] expose_ports_to_lan`
+  (`DockerConfig::default_publish_address`): every interface by default,
+  loopback when off. A binding that names an address is honoured either way,
+  and sandbox exposures are loopback-only regardless. The relay then dials the
+  guest at its *uplink* address, which dockerd's own DNAT for an
+  address-pinned binding does not match — the guest agent mirrors those
+  (`guest/AGENTS.md`); without the mirror `0.0.0.0` publishes work and
+  `127.0.0.1:` publishes RST.
 - Image pull is NOT an ArcBox code path: `POST /images/create` (docker pull) is
   proxied verbatim to guest dockerd, which does the registry pull. This is what
   `runtime/AGENTS.md` means by "the pull path elsewhere" — there is no host-side
   pull module to call; drive it through the Docker API proxy.
+
+## Kubernetes LoadBalancer forwarding
+
+- k3s runs servicelb (traefik stays disabled), so a LoadBalancer Service gets
+  a svclb pod and the node IP, 10.0.2.2, as its ingress. The daemon
+  (`arcbox-daemon/src/kubernetes_lb.rs`) polls the agent's
+  `KubernetesLoadBalancers` every 2 s over one kept connection, only while the
+  VM is ready *and* the Kubernetes hold is set, and applies each listing
+  through `Runtime::apply_kubernetes_load_balancers`
+  (`arcbox-core/src/runtime/kubernetes_lb.rs`): one host listener per port of
+  a Service that has an ingress, keyed `k8s:<ns>/<name>:<port>/<PROTO>`, bound
+  on `default_publish_address()`. The relay's traffic to `10.0.2.2:<port>` is
+  DNATed by kube-proxy's loadbalancer-IP rule, so unlike Docker's
+  address-pinned publishes it needs no guest mirror.
+- Every host listener that is not a container's needs an owner key
+  `Runtime::is_container_owner` rejects; otherwise the Docker host-networking
+  reconcile treats it as a vanished container's and closes it.
+- Stop and delete release the hold *before* closing the listeners, and
+  `apply` does nothing without the hold, so a listing that raced a stop cannot
+  reopen them. `abctl kubernetes status` prints each port's outcome
+  (forwarded, pending, skipped, failed).
+
+## SSH server (`arcbox-ssh`)
+
+- `ssh [user@]<machine>@arcbox` reaches a loopback server in the daemon
+  (`app/arcbox-ssh`, wired in `arcbox-daemon/src/ssh_service.rs`). It binds
+  like the Kubernetes proxy: `--ssh-port` (0 for any) must bind or startup
+  fails, while the default 16022 (`SSH_HOST_PORT`) is best-effort. The host
+  key and the one accepted client key are generated once under
+  `<data_dir>/ssh/`, next to the `config` and a `known_hosts` that pins the
+  host key; `abctl ssh install` adds one `Include` line to `~/.ssh/config`.
+- Sessions run on the machine exec path (login sessions, signals, PTY
+  resize), `direct-tcpip` on `MachineTcpConnectRequest`, and `sftp` on the
+  machine's own `sftp-server` (absent from the mirrored images until the user
+  installs it).
+- Never block a russh `Handler` callback on the process: russh returns window
+  to the client as soon as data arrives, so the handler is the only
+  backpressure, and the same connection carries all output. Input goes
+  through `input::SessionInput` and output through `Outbound`; blocking the
+  handler instead deadlocked `cat big | ssh m cat | slow`.
 
 ## Boot-asset pin (`engine/arcbox-image`)
 
@@ -321,6 +531,26 @@ above). When editing either side, keep in lockstep:
   of an accidental stale/missing pin: boots keep an old kernel/cmdline with
   only that warn — grep the daemon log for it.
 
+## Uninstall contract (`arcbox-cli` `commands/uninstall/`)
+
+- `uninstall/inventory.rs` and `docs/data-directories.md` "11. Uninstall" are
+  one contract: a new path ArcBox writes on the host lands in both, with its
+  owner check. A privileged path is removed only when it passes the helper's
+  ownership rule, and `is_arcbox_owned` requires an ArcBox bundle name, not
+  only the `xbin` layout: OrbStack links its CLI tools from the same layout,
+  and a layout-only check replaced and deleted its links (#715).
+- Stop the daemon by launchd label or by the PID in `daemon.lock`, never by
+  process name. `pkill -f com.apple.Virtualization.VirtualMachine` stopped
+  every VZ guest on the Mac, other tools' included (#716). The daemon stops
+  its own System VM on SIGTERM; a free flock means the process is gone.
+- Every step reports `Done`, `Skipped(why)` or an error, and the command exits
+  non-zero when any step failed. Never print a checkmark for a step whose
+  body discarded its result (#716).
+- A CLI test that reaches `setup::profile` must inject the home through
+  `setup::Integration::under`. `profile_path()` probes the real login shell's
+  `ZDOTDIR`, and a test that resolved it from the environment rewrote a
+  developer's `~/.config/zsh/.zprofile` (2026-10-01).
+
 ## Extending checklists
 
 - Changing a phase's ordering or adding a phase: update the chain in
@@ -337,6 +567,12 @@ above). When editing either side, keep in lockstep:
   checked-arithmetic rule for virtqueue/ring values (ring GPA, descriptor
   field, queue index) lives in `virt/AGENTS.md` "Guest-controlled input" —
   that surface belongs to `virt/`, not this layer.
+- A background loop that talks to a guest agent follows `kubernetes_lb.rs`
+  / `disk_reclaim.rs`: gate on `subscribe_system_vm_state`, dispatch on the
+  transport (`Runtime::trim_machine_disk` is the pattern for a unary RPC
+  that must also work on the HV blocking socketpair), and keep the
+  scheduling behind a trait so the timing is unit-tested with
+  `start_paused`.
 
 ## Validation ladder (cheapest first)
 
@@ -366,12 +602,14 @@ reachable mirror rather than weakening a test.
   is the HV teardown ordering (`virt/arcbox-vmm/AGENTS.md` "Teardown
   ordering") — do not misdiagnose it as a new regression from your change.
 - ABX-416: no PL031 RTC on HV (see the clock-sync failure signature above).
-- Current HV daemon perf is far from targets (root CLAUDE.md table):
+- Current HV daemon perf is far from targets (root AGENTS.md table):
   daemon-ready ~11s (target <1.5s), idle CPU ~3.87% (<0.05%), idle RSS
   ~1.04GB (<150MB). These are known baselines, not per-change regressions.
-- Per-boot counters (~2301 unpark-broadcasts / ~71 kick-broadcasts) drive
-  R2/R3 acceptance in Linear — a refactor must keep the counter sites honest
-  (see `virt/arcbox-vmm/AGENTS.md`).
+- The `kick_broadcasts` / `unpark_broadcasts` snapshot fields are retired
+  and read 0 (2026-09-30): no io worker kicks vCPUs after an interrupt any
+  more (see `virt/arcbox-vmm/AGENTS.md` "Async-Worker Completion Contract").
+  HV idle CPU is ~6.7%, ~5.6 points of it the `rx-inject` thread's yield/poll
+  loop.
 - ABX-413: tgz-packaged docker-tools are verified only via their sha
   sidecar at download time; the EXTRACTED binary is never re-hashed.
 - ABX-414: lifecycle-hardening umbrella — the three-level readiness split,

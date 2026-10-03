@@ -26,6 +26,17 @@ the failing backend drives before you edit anything.
   - net drain/poll: `virt/arcbox-virtio-net/src/device/hot_path.rs`.
   - blk: `virt/arcbox-vmm/src/blk_worker.rs` (independent parser — see
     `arcbox-vmm/AGENTS.md`).
+  - vsock RX injection: `poll_rx_injection` in
+    `virt/arcbox-virtio-vsock/src/device/rx_injection.rs`, driven by the
+    `vsock-io` thread (`virt/arcbox-vmm/src/vsock_rx_worker.rs`). One round
+    drains every queued stream as far as the peer's credit and the posted RX
+    descriptors allow — RW stays pending after a full read, round-robin
+    across connections — and the worker then raises INT_VRING once, only if
+    the guest's `used_event` asks for it (the round returns `RxRound {
+    wrote, raise }`). Asserting the SPI is the whole wake; no worker kicks
+    vCPUs (`arcbox-vmm/AGENTS.md` "Async-Worker Completion Contract").
+    `RxOps` ranks CreditRequest above Rw so the half-window refresh is not
+    starved behind the data. VZ never runs this: its vsock is Apple's.
 - **VZ + unit-test / local-sim path** — `queue.rs::VirtQueue` local rings,
   driven through `VirtioDevice::process_queue(memory: &mut [u8], ..)` in
   `virt/arcbox-virtio-core/src/lib.rs`, which returns a
@@ -160,6 +171,14 @@ readiness signal.
   until the post-readiness agent ping sets `clock_settime`
   (`AgentPingRequest.timestamp_secs`; ABX-416, PL031 RTC pending). Do not chase
   it in the DNS/net stack.
+- **HV host→guest vsock bulk is slow (multi-second per 100 MiB) while the
+  guest sits idle; VZ is fine.** Diff the vsock device's `interrupts` and
+  RX `used_idx` from `GetVirtioDebug` across one transfer: ~1 interrupt per
+  ≤3776-byte packet means the injection round is back to one packet per
+  connection (19–20 s per GiB before 2026-09-29, 5.4–5.9 s after). A
+  non-zero `kicks_received` delta on any vCPU means a worker is calling
+  `hv_vcpus_exit` again (removed 2026-09-30; it cost ~0.5 ms per RPC).
+  Details in `arcbox-vmm/AGENTS.md` "Async-Worker Completion Contract".
 - **Queue stall that appears only under an EVENT_IDX guest.** Suspect a
   dropped `enable_notification` re-arm in a worker drain loop, or a
   weakened `should_notify` SeqCst fence. Diff against the "One SplitQueue"
@@ -186,10 +205,11 @@ was localized to "vCPU count, threshold exactly 8".
 The e2e targets are `#[ignore]`d: without `-- --ignored` the run reports
 "0 tests run" and validates nothing (`cargo xtask e2e` passes it for you).
 
-R2/R3 acceptance in Linear is read from the cumulative broadcast counters
-(per-boot ≈ 2301 unpark-broadcasts / 71 kick-broadcasts). A refactor must
-keep those counter sites honest (see `arcbox-vmm/AGENTS.md` "Diagnostic
-Counters") or it falsifies the metrics.
+The broadcast counters R2/R3 acceptance used to be read from
+(`kick_broadcasts` / `unpark_broadcasts`) are retired and read 0: no worker
+kicks vCPUs and nothing unparks them (`arcbox-vmm/AGENTS.md` "Diagnostic
+Counters"). Judge a wake-path change by `kicks_received` (must stay flat in
+steady state), the vsock RPC latency probe, and `xtask idle`.
 
 ## Pointers (reference material, not duplicated here)
 
@@ -206,7 +226,7 @@ Counters") or it falsifies the metrics.
   vocabulary — `invariant::GUEST_IP`, `ExposeTarget` — depends on it
   directly. Not part of the HV/VZ VirtIO datapath above.
 
-- `docs/fs-perf-limits.md` — the settled VirtioFS story: the per-op
+- `docs/benchmarks/virtiofs.md` — the settled VirtioFS story: the per-op
   cross-vCPU IPI mechanism, the kernel `fuse-spin-wait` fix (+58%
   metadata_stat), everything ruled out en route (dax was never active on
   VZ; idle=poll, sched features, kernel version all measured), and the
@@ -214,15 +234,18 @@ Counters") or it falsifies the metrics.
   in-process trio is ratio-safe). Read this before any "make file I/O
   faster" work. VZ runs Apple's virtio-fs device — the custom VirtioFS
   is HV-only and still unmeasured.
-- `docs/net-perf-limits.md` — the settled multi-flow Host→VM ceiling
+- `docs/benchmarks/network.md` — the settled multi-flow Host→VM ceiling
   (~10–12 Gbps combined vs ~22–29 Gbps single-flow) and its root cause
   (per-IRQ host-side cost: `hv_vcpus_exit` / `hv_gic_set_spi` /
   `pthread_cond_signal`), with multi-queue / more-CPU / ring-size
   explicitly ruled out by profiling. Read this before any "make net faster"
-  work. NOTE: the doc's recommended next step (EVENT_IDX IRQ suppression)
-  has since shipped in `arcbox-net-inject` (`write_avail_event_current` in
-  `flush_interrupt`), so its "unconditionally fire" claim is stale.
-- `docs/virtio-queue-convergence.md` — historical rationale for the
+  work. NOTE: two of its recommendations have since shipped — EVENT_IDX IRQ
+  suppression (`write_avail_event_current` in `flush_interrupt`) and the
+  removal of the `hv_vcpus_exit` hop (c3004580) — so its "unconditionally
+  fire" claim and its `hv_vcpus_exit` rows are history; the
+  `pthread_cond_signal` it saw is the framework waking the target vCPU
+  inside `hv_vcpu_run`, i.e. the wake itself, not a redundant hop.
+- `docs/architecture/virtio-queue-convergence.md` — historical rationale for the
   SplitQueue unification only. Its `Status: Planned` and the target
   `VirtioDevice` trait it describes (dropping `memory: &mut [u8]`) no longer
   match the shipped code; treat it as history.

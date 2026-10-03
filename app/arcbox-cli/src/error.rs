@@ -61,6 +61,32 @@ pub fn machine_operation(error: ConnectError, name: &str, action: &str) -> Error
     actionable(message, error)
 }
 
+/// Clone, export, import, resize and the default machine: the daemon's
+/// message is the explanation — which image an archive needs, why a size
+/// is refused, that the source must be stopped — so a refusal shows it as
+/// is; only a lost connection or an internal failure gets the generic text.
+pub fn machine_lifecycle(error: ConnectError, name: &str, action: &str) -> Error {
+    let message = match error.code {
+        ErrorCode::NotFound
+        | ErrorCode::AlreadyExists
+        | ErrorCode::InvalidArgument
+        | ErrorCode::FailedPrecondition => format!(
+            "Could not {action} machine '{name}': {}.",
+            error
+                .message
+                .as_deref()
+                .unwrap_or("the daemon refused the request")
+                .trim_end_matches('.')
+        ),
+        ErrorCode::Unavailable => format!(
+            "Could not {action} machine '{name}': the daemon is unavailable. Retry the command; \
+             if the problem persists, check `abctl daemon status`."
+        ),
+        _ => format!("Could not {action} machine '{name}'. Re-run with --debug for details."),
+    };
+    actionable(message, error)
+}
+
 pub fn sandbox_request(error: ConnectError, id: &str, operation: &str) -> Error {
     let message = match error.code {
         ErrorCode::NotFound => {
@@ -129,6 +155,26 @@ pub fn machine_exec_output(error: ConnectError, name: &str, command: &str) -> Er
             }
             _ => format!(
                 "Could not read output from '{command}' in machine '{name}'. Re-run with --debug \
+                 for details."
+            ),
+        }
+    };
+    actionable(message, error)
+}
+
+pub fn debug_exec(error: ConnectError, container: &str) -> Error {
+    let message = if connection_lost(&error) {
+        format!("Connection to the debug session for container '{container}' was lost.")
+    } else {
+        match error.code {
+            ErrorCode::NotFound => format!(
+                "Container '{container}' was not found. List containers with `docker ps -a`."
+            ),
+            ErrorCode::FailedPrecondition => format!(
+                "Container '{container}' is not running. Start it with `docker start {container}`."
+            ),
+            _ => format!(
+                "Could not start a debug session in container '{container}'. Re-run with --debug \
                  for details."
             ),
         }
@@ -233,6 +279,28 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_refusals_show_the_daemons_reason() {
+        let running = machine_lifecycle(
+            ConnectError::failed_precondition(
+                "invalid state: machine 'dev' is running; stop it first",
+            ),
+            "dev",
+            "clone",
+        );
+        assert_eq!(
+            render(&running, false),
+            "Error: Could not clone machine 'dev': invalid state: machine 'dev' is running; stop \
+             it first."
+        );
+        let crashed = machine_lifecycle(ConnectError::internal("boom"), "dev", "export");
+        assert_eq!(
+            render(&crashed, false),
+            "Error: Could not export machine 'dev'. Re-run with --debug for details."
+        );
+        assert!(render(&crashed, true).contains("boom"));
+    }
+
+    #[test]
     fn exec_errors_distinguish_command_transport_and_output_failures() {
         let missing = machine_exec_output(
             ConnectError::not_found("command not found: nope"),
@@ -287,6 +355,40 @@ mod tests {
         assert_eq!(
             output.to_string(),
             "Could not read output from 'date' in machine 'dev'. Re-run with --debug for details."
+        );
+    }
+
+    #[test]
+    fn debug_exec_maps_container_states_to_actionable_messages() {
+        let missing = debug_exec(
+            ConnectError::not_found("core error: No such container: nope"),
+            "nope",
+        );
+        assert_eq!(
+            missing.to_string(),
+            "Container 'nope' was not found. List containers with `docker ps -a`."
+        );
+        assert!(render(&missing, true).contains("No such container: nope"));
+
+        let stopped = debug_exec(
+            ConnectError::failed_precondition("container 'db' is not running"),
+            "db",
+        );
+        assert_eq!(
+            stopped.to_string(),
+            "Container 'db' is not running. Start it with `docker start db`."
+        );
+
+        let lost = debug_exec(ConnectError::unavailable("h2 connection closed"), "web");
+        assert_eq!(
+            lost.to_string(),
+            "Connection to the debug session for container 'web' was lost."
+        );
+
+        let other = debug_exec(ConnectError::internal("raw"), "web");
+        assert_eq!(
+            other.to_string(),
+            "Could not start a debug session in container 'web'. Re-run with --debug for details."
         );
     }
 

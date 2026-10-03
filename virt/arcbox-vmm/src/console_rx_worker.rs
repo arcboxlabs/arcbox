@@ -43,8 +43,6 @@ pub struct ConsoleRxWorkerContext {
     pub socket: Arc<Mutex<SocketConsole>>,
     /// VM shutdown flag.
     pub running: Arc<AtomicBool>,
-    /// Force-exit all vCPUs from `hv_vcpu_run` (thread-safe).
-    pub exit_vcpus: Arc<dyn Fn() + Send + Sync>,
 }
 
 /// Main loop for the debug-console RX worker thread.
@@ -80,7 +78,6 @@ pub fn console_rx_worker_loop(ctx: ConsoleRxWorkerContext) {
         if injected {
             ctx.device_manager
                 .raise_interrupt_for(DeviceType::VirtioConsole, INT_VRING);
-            (ctx.exit_vcpus)();
         }
 
         std::thread::sleep(if connected { POLL_ACTIVE } else { POLL_IDLE });

@@ -36,7 +36,7 @@ fn test_strip_ethernet_header() {
     assert_eq!(payload[0], 0xAB);
 
     // Edge case: frame shorter than header
-    assert!(strip_ethernet_header(&[0; 10]).is_empty());
+    assert_eq!(strip_ethernet_header(&[0; 10]), b"");
 }
 
 #[test]
@@ -285,7 +285,7 @@ fn payload_above_max_yields_no_frames() {
         [2; 6],
         1500,
     );
-    assert!(frames.is_empty());
+    assert_eq!(frames, Vec::<Vec<u8>>::new());
 }
 
 #[test]

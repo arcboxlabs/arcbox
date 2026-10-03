@@ -189,7 +189,7 @@ async fn console_hands_out_pushed_bytes_once() {
     let console = vm.console().unwrap();
     assert_eq!(console.read_output(5).await.unwrap(), b"hello");
     assert_eq!(console.read_output(64).await.unwrap(), b" world");
-    assert!(console.read_output(64).await.unwrap().is_empty());
+    assert_eq!(console.read_output(64).await.unwrap(), b"");
 }
 
 fn restore_spec(id: &str) -> RestoreSpec {
@@ -407,7 +407,7 @@ async fn the_driver_reports_which_vms_came_from_a_checkpoint() {
     let dir = tempfile::tempdir().unwrap();
     let driver = FakeDriver::new();
     let booted = driver.boot(full_spec("vm-1"), dir.path()).await.unwrap();
-    assert!(driver.restored_vms().is_empty());
+    assert_eq!(driver.restored_vms(), []);
 
     let image = booted
         .checkpoint()
@@ -607,7 +607,7 @@ async fn a_parked_boot_never_returns_and_leaves_its_process_to_be_discarded() {
             .is_err(),
         "a parked boot must not return"
     );
-    assert!(driver.discarded_processes().is_empty());
+    assert_eq!(driver.discarded_processes(), []);
 }
 
 /// Only an explicit `discard` is recorded; a prepared VM merely dropped
@@ -625,7 +625,7 @@ async fn only_an_explicit_discard_is_recorded() {
             .await
             .unwrap(),
     );
-    assert!(driver.discarded_processes().is_empty());
+    assert_eq!(driver.discarded_processes(), []);
 
     let prepared = prepare
         .prepare(&id, &IsolationSpec::None, dir.path())

@@ -35,7 +35,7 @@ pub(super) enum TemplateSource {
     DockerImage(String),
     /// A catalog template: pre-built rootfs, defaults already merged into
     /// the request, canonical ref already pinned.
-    Catalog(arcbox_computer_runtime::template_catalog::ResolvedTemplate),
+    Catalog(Box<arcbox_computer_runtime::template_catalog::ResolvedTemplate>),
 }
 
 /// Reject the contradictory override combination the proto calls out:
@@ -72,7 +72,7 @@ pub(super) fn merge_template_defaults(
         .into();
     }
     if !request.no_default_cmd && request.cmd.is_empty() {
-        request.cmd = defaults.cmd.clone();
+        request.cmd.clone_from(&defaults.cmd);
     }
     if !request.no_default_env {
         for (key, value) in &defaults.env {

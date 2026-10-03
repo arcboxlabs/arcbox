@@ -11,6 +11,7 @@
 //!   e2e harness) the agent drives shutdown itself: terminate every process, sync,
 //!   and `reboot(LINUX_REBOOT_CMD_POWER_OFF)` (PSCI SYSTEM_OFF on ARM64).
 
+#[cfg(not(target_os = "linux"))]
 use std::time::Duration;
 
 /// How to power the VM off, selected by whether the agent is PID 1.

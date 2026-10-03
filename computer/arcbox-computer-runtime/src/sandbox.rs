@@ -37,6 +37,7 @@ use crate::lifecycle::actor::{
 use crate::lifecycle::event::{Provision, RestoreOrigin};
 use crate::lifecycle::flows::{BootLaunch, ComputerFlows, ComputerServices, Launch, RestoreLaunch};
 use crate::lifecycle::runtime::{ComputerRuntime, Runtime};
+use crate::sandbox::reconcile::JournaledVmm;
 use crate::snapshot::{SnapshotCatalog, SnapshotMeta};
 use crate::snapshot_cow::{CowHandle, CowManager};
 use crate::template_catalog::TemplateCatalog;
@@ -44,6 +45,7 @@ use crate::template_catalog::TemplateCatalog;
 pub(crate) mod boot;
 mod checkpoint;
 pub(crate) mod cleanup;
+pub(crate) mod events;
 mod execution;
 mod files;
 mod lifecycle;
@@ -53,6 +55,7 @@ pub(crate) mod pool;
 pub(crate) mod reconcile;
 pub(crate) mod record;
 pub(crate) mod spec;
+mod storage;
 mod templates;
 mod timers;
 pub(crate) mod types;
@@ -103,7 +106,7 @@ pub struct SandboxManager {
     /// Template catalog (CORE-107); see `templates.rs` for the manager surface.
     templates: Arc<TemplateCatalog>,
     config: Arc<RuntimeConfig>,
-    events_tx: broadcast::Sender<SandboxEvent>,
+    events: Arc<events::EventBus>,
     cow_manager: Arc<CowManager>,
     /// Pre-warmed restore slots (CORE-78); see `pool.rs`.
     pool: Arc<pool::SlotPool>,
@@ -195,7 +198,7 @@ impl SandboxManager {
         }
         let snapshots = Arc::new(SnapshotCatalog::new(&config.firecracker.data_dir));
         let templates = Arc::new(TemplateCatalog::new(&config.firecracker.data_dir));
-        let (events_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        let events = Arc::new(events::EventBus::new(EVENT_CHANNEL_CAPACITY));
         let config = Arc::new(config);
 
         // Sweep leftovers of a previous agent process (crash / respawn):
@@ -217,7 +220,7 @@ impl SandboxManager {
             cow_manager: Arc::clone(&cow_manager),
             records: Arc::clone(&records),
             snapshots: Arc::clone(&snapshots),
-            events_tx: events_tx.clone(),
+            events: Arc::clone(&events),
             pool: Arc::clone(&pool),
         });
         if tokio::runtime::Handle::try_current().is_ok() {
@@ -275,7 +278,7 @@ impl SandboxManager {
             // Executions die with their sandbox; purge on terminal events so
             // every teardown path (stop / remove / TTL / boot failure) is
             // covered without threading the registry through each of them.
-            execution::spawn_teardown_purge(Arc::clone(&executions), events_tx.subscribe());
+            execution::spawn_teardown_purge(Arc::clone(&executions), events.subscribe());
         } else {
             let mut inactive = Vec::new();
             reconcile::normalize_durable_records(
@@ -296,7 +299,7 @@ impl SandboxManager {
             snapshots,
             templates,
             config,
-            events_tx,
+            events,
             cow_manager,
             pool,
             warm: Arc::new(warm::WarmCache::default()),
@@ -613,6 +616,20 @@ pub(crate) fn journaled_pid(prepared: &dyn PreparedVm) -> Option<i32> {
         .and_then(|process| i32::try_from(process.pid).ok())
 }
 
+/// The VMM as the crash journal records it — its API socket and its jail —
+/// which is what lets the next process adopt this VM instead of killing it.
+///
+/// The driver knows both because it spawned the VMM that way. Nothing else
+/// can work either out afterwards: see
+/// [`SandboxStateRecord::api_socket`](crate::sandbox::reconcile::SandboxStateRecord::api_socket)
+/// and [`SandboxStateRecord::jail`](crate::sandbox::reconcile::SandboxStateRecord::jail).
+pub(crate) fn journaled_vmm(prepared: &dyn PreparedVm) -> Option<JournaledVmm> {
+    prepared.record().process.map(|process| JournaledVmm {
+        api_socket: process.api_socket,
+        jail: process.jail.map(Into::into),
+    })
+}
+
 /// The isolation every sandbox VMM runs under: the jailer's, when one is
 /// configured; none otherwise (direct mode).
 pub(crate) fn isolation_spec(config: &RuntimeConfig) -> Result<IsolationSpec> {
@@ -842,7 +859,7 @@ impl ActorReservation {
                 generation,
                 vm_dir,
                 records: Arc::clone(&services.records),
-                events_tx: services.events_tx.clone(),
+                events: Arc::clone(&services.events),
                 tasks: flows,
                 deadlines,
                 timers_enabled,
@@ -897,6 +914,27 @@ fn forget_computer(computers: &Computers, id: &SandboxId, incarnation: Uuid) {
     {
         map.remove(id);
     }
+}
+
+/// Whether `id`'s entry is still this exact incarnation's — the inverse of
+/// [`forget_computer`], and the question an unanswerable mailbox raises.
+///
+/// Every ending unregisters: the actor's own loop tail whatever stopped it, the
+/// record it forgets on a removal, and [`ActorReservation::drop`] for a create
+/// that unwound before spawning one. A re-created id installs a fresh
+/// incarnation over the departed one, so this is `false` there too. What is
+/// left is an incarnation *still here* whose mailbox no longer answers: an
+/// actor whose task died without finishing, and the one case where a
+/// computer's resources outlive the thing that was managing them.
+///
+/// Reads nothing the actor owns, so it stays answerable for a computer whose
+/// runtime mutex a panic has poisoned.
+fn still_registered(computers: &Computers, id: &SandboxId, incarnation: Uuid) -> bool {
+    computers
+        .read()
+        .unwrap()
+        .get(id)
+        .is_some_and(|current| current.incarnation == incarnation)
 }
 
 #[cfg(test)]
@@ -1120,5 +1158,37 @@ mod tests {
         );
         drop(replacement);
         assert!(!computers.read().unwrap().contains_key("same"));
+    }
+
+    /// Registration is per incarnation, which is what lets a handover pass
+    /// tell an actor that finished from one that died.
+    ///
+    /// `detach_all` reads this after an unanswerable mailbox: `false` means
+    /// the actor ended and unregistered (or its id was re-created since), so
+    /// nothing was lost, while `true` means its task went away without
+    /// finishing and its guest is still out there.
+    #[test]
+    fn registration_is_per_incarnation() {
+        let computers: Computers = Arc::new(RwLock::new(HashMap::new()));
+        let id = "box".to_owned();
+        let departing = reserve_actor(&computers, &id, placeholder("box")).unwrap();
+        let incarnation = departing.incarnation;
+        assert!(still_registered(&computers, &id, incarnation));
+
+        // A different incarnation of a live id is not this one.
+        assert!(!still_registered(&computers, &id, Uuid::new_v4()));
+
+        // An actor still holding its claim while unable to answer: the case
+        // worth reporting.
+        std::mem::forget(departing);
+        assert!(still_registered(&computers, &id, incarnation));
+
+        // And once it has let go — its own exit, or a replacement taking the
+        // id — that incarnation is no longer registered.
+        forget_computer(&computers, &id, incarnation);
+        assert!(!still_registered(&computers, &id, incarnation));
+        let replacement = reserve_actor(&computers, &id, placeholder("box")).unwrap();
+        assert!(!still_registered(&computers, &id, incarnation));
+        assert!(still_registered(&computers, &id, replacement.incarnation));
     }
 }

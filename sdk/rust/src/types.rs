@@ -60,8 +60,9 @@ pub struct SandboxInfo {
     pub idle_timeout: Option<Duration>,
     /// Action applied when the idle timeout expires (unset = daemon default).
     pub on_idle: Option<IdlePolicy>,
-    /// On-disk footprint of retained state; paused sandboxes keep paying
-    /// this.
+    /// On-disk footprint of retained state, in every lifecycle state: the
+    /// COW disk overlay while running, plus the pause checkpoint while
+    /// paused. Paused sandboxes keep paying this until resumed or removed.
     pub storage_bytes: u64,
 }
 
@@ -77,6 +78,8 @@ pub struct SandboxSummary {
     pub ready_at: Option<SystemTime>,
     pub paused_at: Option<SystemTime>,
     pub failed_at: Option<SystemTime>,
+    /// On-disk footprint of retained state; see
+    /// [`SandboxInfo::storage_bytes`], with which a listing agrees.
     pub storage_bytes: u64,
 }
 
@@ -149,6 +152,15 @@ pub struct SandboxEvent {
     /// Per-kind context: `exit_code`/`signal` on `Idle`, `error` on
     /// `Failed`, `reason` on `Pausing`/`Resumed`.
     pub attributes: BTreeMap<String, String>,
+    /// Monotonic sequence number: 1-based, global across all sandboxes
+    /// of the emitting daemon, and stamped before the per-sandbox filter
+    /// `Sandbox::events` subscribes with. On that stream a gap is
+    /// therefore inconclusive — other sandboxes' events consumed numbers
+    /// too — while contiguous sequences prove nothing for this sandbox
+    /// was missed, and a sequence running backwards reveals a daemon
+    /// restart. When in doubt, re-derive state from `Sandbox::info`.
+    /// `0` means the daemon predates sequencing.
+    pub sequence: u64,
 }
 
 /// One knob of a lifecycle update: leave it, clear it to the daemon
@@ -340,6 +352,7 @@ impl From<pb::SandboxEvent> for SandboxEvent {
             kind,
             time: time_from_wire(event.time.as_option()),
             attributes: event.attributes.into_iter().collect(),
+            sequence: event.sequence,
         }
     }
 }

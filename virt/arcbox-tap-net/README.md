@@ -127,5 +127,5 @@ ELF shape the loader depends on (little-endian 64-bit `EM_BPF`, the
 activation; TCX links are file descriptors, so a crashed process leaves no
 kernel state behind beyond the TAP itself.
 
-Design: company repo `engineering/arcbox/architecture/vm-stack-redesign.md`
+Design: `docs/architecture/vm-stack-redesign.md`
 ("`GuestNetwork` and `arcbox-tap-net`", D-VM6, R2).

@@ -239,7 +239,7 @@ mod tests {
     #[test]
     fn test_pty_console_creation() {
         let pty = PtyConsole::new().unwrap();
-        assert!(!pty.slave_path().is_empty());
+        assert_ne!(pty.slave_path(), "");
         assert!(pty.master_fd() >= 0);
     }
 

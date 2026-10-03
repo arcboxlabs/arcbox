@@ -179,8 +179,9 @@ mod tests {
     use serde_json::Value;
     use tokio::net::TcpListener;
 
+    use super::super::GuestStream;
     use super::super::headers::{ForwardedHeaderMode, HeaderMapProxyExt};
-    use arcbox_transport::vsock::{VsockShutdown, VsockStream};
+    use arcbox_transport::vsock::{HalfCloseStream, VsockShutdown, VsockStream};
 
     /// Test connector that connects to a TCP address (used for unit tests).
     struct TcpTestConnector {
@@ -191,7 +192,7 @@ mod tests {
         fn connect(
             &self,
         ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<TokioIo<VsockStream>>> + Send + '_>,
+            Box<dyn std::future::Future<Output = Result<TokioIo<GuestStream>>> + Send + '_>,
         > {
             let addr = self.addr;
             Box::pin(async move {
@@ -206,10 +207,9 @@ mod tests {
                     // SAFETY: we just extracted this fd from a valid TcpStream.
                     unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) }
                 };
-                Ok(TokioIo::new(VsockStream::from_fd_with_shutdown(
-                    owned_fd,
-                    VsockShutdown::CloseOnDropOnly,
-                )?))
+                Ok(TokioIo::new(HalfCloseStream::new(
+                    VsockStream::from_fd_with_shutdown(owned_fd, VsockShutdown::CloseOnDropOnly)?,
+                )))
             })
         }
     }
@@ -246,7 +246,7 @@ mod tests {
                 });
 
             server_http1::Builder::new()
-                .serve_connection(TokioIo::new(stream), service)
+                .serve_connection(TokioIo::new(HalfCloseStream::new(stream)), service)
                 .await
                 .unwrap();
         });
@@ -299,7 +299,7 @@ mod tests {
             });
 
             server_http1::Builder::new()
-                .serve_connection(TokioIo::new(stream), service)
+                .serve_connection(TokioIo::new(HalfCloseStream::new(stream)), service)
                 .await
                 .unwrap();
         });

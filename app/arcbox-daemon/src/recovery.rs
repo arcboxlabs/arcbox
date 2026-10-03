@@ -96,6 +96,13 @@ pub async fn run(ctx: &DaemonContext, runtime: &Arc<Runtime>, dns_port: u16) -> 
             "non-canonical DNS owner; skipping /etc/resolver self-setup"
         );
     }
+    // The owner of the resolver domain is also the one daemon that announces
+    // its names to mDNSResponder; two daemons claiming `host.arcbox.local`
+    // would conflict.
+    #[cfg(target_os = "macos")]
+    if owns_dns {
+        crate::mdns::spawn(runtime, &ctx.dns_domain, &ctx.shutdown);
+    }
     // The `/var/run/docker.sock` symlink belongs to the production daemon
     // running its canonical data dir: the link target embeds the
     // data dir, so a daemon on an overridden one (an e2e harness daemon on

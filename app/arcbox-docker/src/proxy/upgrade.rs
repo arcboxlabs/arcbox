@@ -3,15 +3,20 @@
 //! Uses a raw HTTP exchange for the guest side instead of hyper's
 //! `upgrade::on()` API. hyper's client-side upgrade transfers the IO
 //! through an internal oneshot channel that never delivers for
-//! `TokioIo<VsockStream>`, leaving the bridge future permanently blocked.
+//! `TokioIo<GuestStream>`, leaving the bridge future permanently blocked.
 //! Writing the HTTP exchange directly keeps the vsock fd alive and owned
 //! by the caller for the entire bridge lifetime.
+//!
+//! The bridge relies on `GuestStream` carrying half-close in-band: when the
+//! Docker CLI finishes sending stdin it half-closes the hijacked connection,
+//! `copy_bidirectional` shuts down the guest stream's write half, and the
+//! guest agent turns that into stdin EOF for dockerd. The vsock fd alone
+//! could not deliver it (arcboxlabs/arcbox#268).
 
 use super::uri::GuestPath;
-use super::{GuestConnector, HANDSHAKE_TIMEOUT};
+use super::{GuestConnector, GuestStream, HANDSHAKE_TIMEOUT};
 use crate::error::{DockerError, Result};
 use arcbox_error::CommonError;
-use arcbox_transport::vsock::VsockStream;
 use axum::body::Body;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode, Uri, header};
 use bytes::Bytes;
@@ -69,7 +74,7 @@ impl RawUpgradeRequest<'_> {
 /// After this returns successfully, the stream is positioned right after the
 /// response header block and is ready for direct bidirectional bridging.
 async fn send_raw_upgrade(
-    stream: &mut VsockStream,
+    stream: &mut GuestStream,
     method: &Method,
     path_and_query: &str,
     headers: &HeaderMap,

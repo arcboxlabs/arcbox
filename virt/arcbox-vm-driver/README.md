@@ -88,5 +88,5 @@ runs the same checks against `FakeDriver`, both fully claimed and with no
 capabilities claimed. `FakeDriver` and `FakeNetwork` are what runtime unit
 tests build their real actors and state machines on — no hypervisor needed.
 
-Design: company repo `engineering/arcbox/architecture/vm-stack-redesign.md`
+Design: `docs/architecture/vm-stack-redesign.md`
 (D-VM1, D-VM7, D-VM9).

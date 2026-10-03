@@ -1,23 +1,27 @@
 //! Built-in DNS server/forwarder.
 //!
 //! This module provides a simple DNS forwarder that can:
-//! - Forward queries to upstream DNS servers
+//! - Forward queries to upstream DNS servers, following the host's resolver
+//!   configuration as it changes (network switches, VPN up/down)
 //! - Resolve local hostnames (VM names)
 //! - Cache DNS responses
 //!
 //! The implementation handles basic A and AAAA record queries.
 
 mod cache;
+mod upstream;
 
 use std::collections::HashMap;
-use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use arcbox_dns::LocalHostsTable;
 
 use crate::error::{NetError, Result};
+
+pub use upstream::{DEFAULT_RESOLVER_RECHECK, SYSTEM_RESOLV_CONF};
 
 /// Default DNS port.
 pub const DNS_PORT: u16 = 53;
@@ -37,40 +41,45 @@ pub struct DnsConfig {
     /// Listen address.
     pub listen_addr: SocketAddr,
     /// Upstream DNS servers.
+    ///
+    /// When [`Self::system_resolver`] is set this is only the fallback used
+    /// while that file yields no usable server; the live list is loaded from
+    /// the file and re-loaded whenever it changes.
     pub upstream: Vec<SocketAddr>,
     /// Cache TTL.
     pub cache_ttl: Duration,
     /// Domain suffix for local names.
     pub local_domain: Option<String>,
+    /// Resolver file whose `nameserver` entries supply the upstream list,
+    /// followed for changes. `None` pins [`Self::upstream`].
+    pub system_resolver: Option<PathBuf>,
+    /// Minimum interval between two `stat`s of [`Self::system_resolver`].
+    pub system_resolver_recheck: Duration,
 }
 
 impl Default for DnsConfig {
     fn default() -> Self {
         Self {
             listen_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DNS_PORT),
-            upstream: DEFAULT_UPSTREAM
-                .iter()
-                .map(|ip| SocketAddr::new(IpAddr::V4(*ip), DNS_PORT))
-                .collect(),
+            upstream: default_upstream(),
             cache_ttl: DEFAULT_CACHE_TTL,
             local_domain: Some("arcbox.local".to_string()),
+            system_resolver: None,
+            system_resolver_recheck: DEFAULT_RESOLVER_RECHECK,
         }
     }
 }
 
 impl DnsConfig {
-    /// Creates a new DNS configuration.
+    /// Creates a configuration that follows the host's resolver file, so the
+    /// guest resolves through whatever the Mac currently uses.
     #[must_use]
     pub fn new(listen_addr: Ipv4Addr) -> Self {
-        let mut config = Self {
+        Self {
             listen_addr: SocketAddr::new(IpAddr::V4(listen_addr), DNS_PORT),
+            system_resolver: Some(PathBuf::from(SYSTEM_RESOLV_CONF)),
             ..Default::default()
-        };
-        let detected = detect_system_upstream();
-        if !detected.is_empty() {
-            config.upstream = detected;
         }
-        config
     }
 
     /// Sets the listen address.
@@ -80,10 +89,12 @@ impl DnsConfig {
         self
     }
 
-    /// Sets the upstream DNS servers.
+    /// Pins the upstream DNS servers; the system resolver is no longer
+    /// followed.
     #[must_use]
     pub fn with_upstream(mut self, servers: Vec<SocketAddr>) -> Self {
         self.upstream = servers;
+        self.system_resolver = None;
         self
     }
 
@@ -102,83 +113,12 @@ impl DnsConfig {
     }
 }
 
-/// Parses `nameserver` entries from resolv.conf text.
-///
-/// Filters out problematic upstreams (loopback, fake-IP VPN ranges) when
-/// better alternatives are available. Falls back to loopback if it's the
-/// only IPv4 option — `forward_dns_async` binds `0.0.0.0:0` so only IPv4
-/// upstreams are usable today.
-fn parse_resolv_conf_nameservers(contents: &str) -> Vec<SocketAddr> {
-    let mut all = Vec::new();
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
-            continue;
-        }
-
-        let mut parts = line.split_whitespace();
-        if parts.next() != Some("nameserver") {
-            continue;
-        }
-        let Some(raw_ip) = parts.next() else {
-            continue;
-        };
-
-        let Ok(ip) = raw_ip.parse::<IpAddr>() else {
-            continue;
-        };
-
-        let addr = SocketAddr::new(ip, DNS_PORT);
-        if !all.contains(&addr) {
-            all.push(addr);
-        }
-    }
-
-    // Prefer non-loopback, non-fake-IP IPv4 servers. Keep loopback as
-    // fallback when it's the only IPv4 option (common macOS default).
-    let preferred: Vec<SocketAddr> = all
+/// [`DEFAULT_UPSTREAM`] as socket addresses.
+fn default_upstream() -> Vec<SocketAddr> {
+    DEFAULT_UPSTREAM
         .iter()
-        .copied()
-        .filter(|a| {
-            if a.ip().is_loopback() {
-                return false;
-            }
-            if let IpAddr::V4(v4) = a.ip() {
-                let o = v4.octets();
-                if o[0] == 198 && (o[1] == 18 || o[1] == 19) {
-                    return false;
-                }
-            }
-            // Skip IPv6-only — forward_dns_async binds 0.0.0.0:0 today.
-            a.ip().is_ipv4()
-        })
-        .collect();
-
-    if !preferred.is_empty() {
-        return preferred;
-    }
-
-    // No preferred servers. Fall back to IPv4 entries (including loopback)
-    // but still exclude fake-IP — returning empty lets DnsConfig::new keep
-    // DEFAULT_UPSTREAM (8.8.8.8, 1.1.1.1).
-    all.into_iter()
-        .filter(|a| {
-            if let IpAddr::V4(v4) = a.ip() {
-                let o = v4.octets();
-                !(o[0] == 198 && (o[1] == 18 || o[1] == 19))
-            } else {
-                false
-            }
-        })
+        .map(|ip| SocketAddr::new(IpAddr::V4(*ip), DNS_PORT))
         .collect()
-}
-
-/// Detects system DNS upstream servers from `/etc/resolv.conf`.
-fn detect_system_upstream() -> Vec<SocketAddr> {
-    let Ok(contents) = fs::read_to_string("/etc/resolv.conf") else {
-        return Vec::new();
-    };
-    parse_resolv_conf_nameservers(&contents)
 }
 
 /// DNS record type.
@@ -260,17 +200,16 @@ pub struct DnsForwarder {
     /// `RwLock<DnsForwarder>`, so a slow upstream forward never blocks the fast
     /// local-resolution / cache-hit path.
     cache: std::sync::Mutex<HashMap<cache::DnsCacheKey, cache::CacheEntry>>,
+    /// Live upstream list; re-loaded from the system resolver file when it
+    /// changes.
+    upstream: upstream::Upstreams,
 }
 
 impl DnsForwarder {
     /// Creates a new DNS forwarder with a fresh (empty) hosts table.
     #[must_use]
     pub fn new(config: DnsConfig) -> Self {
-        Self {
-            config,
-            local_hosts: Arc::new(LocalHostsTable::new(HashMap::new())),
-            cache: std::sync::Mutex::new(HashMap::new()),
-        }
+        Self::with_shared_hosts(config, Arc::new(LocalHostsTable::new(HashMap::new())))
     }
 
     /// Creates a DNS forwarder sharing an existing hosts table.
@@ -280,10 +219,12 @@ impl DnsForwarder {
     /// updates both simultaneously.
     #[must_use]
     pub fn with_shared_hosts(config: DnsConfig, local_hosts: Arc<LocalHostsTable>) -> Self {
+        let upstream = upstream::Upstreams::new(&config);
         Self {
             config,
             local_hosts,
             cache: std::sync::Mutex::new(HashMap::new()),
+            upstream,
         }
     }
 
@@ -303,8 +244,7 @@ impl DnsForwarder {
         let hostname = hostname.to_lowercase();
         if let Ok(mut hosts) = self.local_hosts.write() {
             hosts.insert(hostname.clone(), ip);
-            if let Some(ref domain) = self.config.local_domain {
-                let fqdn = format!("{}.{}", hostname, domain);
+            if let Some(fqdn) = self.local_fqdn(&hostname) {
                 hosts.insert(fqdn, ip);
             }
         }
@@ -316,11 +256,38 @@ impl DnsForwarder {
         let hostname = hostname.to_lowercase();
         if let Ok(mut hosts) = self.local_hosts.write() {
             hosts.remove(&hostname);
-            if let Some(ref domain) = self.config.local_domain {
-                let fqdn = format!("{}.{}", hostname, domain);
+            if let Some(fqdn) = self.local_fqdn(&hostname) {
                 hosts.remove(&fqdn);
             }
         }
+    }
+
+    /// The name `hostname` is served under in the local domain
+    /// (`<hostname>.<local_domain>`, lowercased), or `None` without a
+    /// local domain.
+    #[must_use]
+    pub fn local_fqdn(&self, hostname: &str) -> Option<String> {
+        let domain = self.config.local_domain.as_ref()?;
+        Some(format!("{}.{domain}", hostname.to_lowercase()))
+    }
+
+    /// Every `(fqdn, ip)` the table holds under the local domain.
+    #[must_use]
+    pub fn local_domain_entries(&self) -> Vec<(String, IpAddr)> {
+        let Some(domain) = self.config.local_domain.as_ref() else {
+            return Vec::new();
+        };
+        let suffix = format!(".{domain}");
+        self.local_hosts.read().map_or_else(
+            |_| Vec::new(),
+            |hosts| {
+                hosts
+                    .iter()
+                    .filter(|(name, _)| name.ends_with(&suffix))
+                    .map(|(name, ip)| (name.clone(), *ip))
+                    .collect()
+            },
+        )
     }
 
     /// Resolves a local hostname.
@@ -342,25 +309,31 @@ impl DnsForwarder {
         self.build_local_response(&query, ip).ok()
     }
 
-    /// Attempts local resolution, returning NXDOMAIN for unresolved local-domain queries.
+    /// Attempts local resolution, answering authoritatively for the local domain.
     ///
     /// - Registered local host → `Some(A/AAAA response)`
-    /// - Unregistered `*.arcbox.local` (or `*.<local_domain>`) → `Some(NXDOMAIN)`
+    /// - Unregistered `*.<local_domain>` (and the bare domain) → `Some(NODATA)`
     /// - Other domains → `None` (caller should forward to upstream)
-    pub fn try_resolve_locally_or_nxdomain(&self, data: &[u8]) -> Option<Vec<u8>> {
+    ///
+    /// An unknown name under the local domain is answered NODATA (NOERROR
+    /// with no records), never NXDOMAIN. The domain ends in `.local`, which
+    /// RFC 6762 reserves for mDNS, so macOS's mDNSResponder multicasts every
+    /// query for it as well and takes a unicast answer only when it is
+    /// positive or NODATA; NXDOMAIN, SERVFAIL and REFUSED are ignored and the
+    /// lookup waits out the 5 s mDNS timeout per record type (measured
+    /// 2026-10-01, `docs/experiments/2026-10-01-local-domain-negative-answers.md`).
+    /// Either form keeps the name from leaking upstream.
+    pub fn try_resolve_locally_or_nodata(&self, data: &[u8]) -> Option<Vec<u8>> {
         let query = DnsQuery::parse(data).ok()?;
 
-        // Check local hosts first.
         if let Some(ip) = self.resolve_local(&query.name) {
             return self.build_local_response(&query, ip).ok();
         }
 
-        // If the query is for our local domain, return NXDOMAIN instead of
-        // forwarding to upstream (prevents leaking internal names).
         if let Some(ref domain) = self.config.local_domain {
             let name_lower = query.name.to_lowercase();
             if name_lower == *domain || name_lower.ends_with(&format!(".{domain}")) {
-                return Some(Self::build_nxdomain_response(&query));
+                return Some(Self::build_nodata_response(&query));
             }
         }
 
@@ -368,37 +341,40 @@ impl DnsForwarder {
         None
     }
 
-    /// Builds an NXDOMAIN response for a query.
+    /// Builds a NODATA response: NOERROR with an empty answer section.
     ///
-    /// Zeroes all section counts (ANCOUNT, NSCOUNT, ARCOUNT) so that EDNS(0)
-    /// queries (which set ARCOUNT=1 in the header) don't produce malformed
-    /// responses with advertised-but-missing additional records.
-    fn build_nxdomain_response(query: &DnsQuery) -> Vec<u8> {
+    /// Zeroes ANCOUNT, NSCOUNT and ARCOUNT so that an EDNS(0) query (ARCOUNT=1
+    /// for its OPT pseudo-record) does not produce a response advertising a
+    /// record that is not there.
+    fn build_nodata_response(query: &DnsQuery) -> Vec<u8> {
         let mut response = Vec::with_capacity(query.raw_header.len() + query.raw_question.len());
         response.extend_from_slice(&query.raw_header);
 
         // QR=1, Opcode=0, AA=1, TC=0, RD=1
         response[2] = 0x85;
-        // RA=1, Z=0, RCODE=3 (NXDOMAIN)
-        response[3] = 0x83;
-        // ANCOUNT = 0
-        response[6] = 0x00;
-        response[7] = 0x00;
-        // NSCOUNT = 0
-        response[8] = 0x00;
-        response[9] = 0x00;
-        // ARCOUNT = 0 (clears EDNS OPT record count from query)
-        response[10] = 0x00;
-        response[11] = 0x00;
+        // RA=1, Z=0, RCODE=0
+        response[3] = 0x80;
+        // ANCOUNT, NSCOUNT, ARCOUNT = 0; QDCOUNT keeps the question.
+        response[6..12].fill(0);
 
         response.extend_from_slice(&query.raw_question);
         response
     }
 
-    /// Returns the upstream DNS server addresses.
+    /// Returns the upstream DNS servers currently in effect.
+    ///
+    /// A forwarder following the system resolver file re-reads it here when
+    /// its modification time changed since the last load (rate-limited by
+    /// `system_resolver_recheck`), so a guest query issued after the Mac
+    /// changes networks goes to the new network's resolvers. Changing the
+    /// list also drops the response cache: answers from a VPN's resolver
+    /// must not outlive the VPN.
     #[must_use]
-    pub fn upstream(&self) -> &[SocketAddr] {
-        &self.config.upstream
+    pub fn upstream(&self) -> Vec<SocketAddr> {
+        if self.upstream.refresh() {
+            self.clear_cache();
+        }
+        self.upstream.current()
     }
 
     /// Handles a DNS query packet (synchronous, blocks on upstream forwarding).
@@ -444,7 +420,7 @@ impl DnsForwarder {
         // query header) so an EDNS query, which sets ARCOUNT=1 for its OPT
         // pseudo-record, doesn't leave the response advertising a record we
         // dropped — strict resolvers reject that as malformed. ANCOUNT is
-        // set per branch below. Mirrors `build_nxdomain_response`.
+        // set below. Mirrors `build_nodata_response`.
         response[8..12].fill(0);
 
         // Only answer with the address record the client actually asked for.
@@ -456,10 +432,7 @@ impl DnsForwarder {
             (DnsRecordType::A, IpAddr::V4(_)) | (DnsRecordType::Aaaa, IpAddr::V6(_))
         );
         if !qtype_matches {
-            response[6] = 0x00; // ANCOUNT high
-            response[7] = 0x00; // ANCOUNT low — NODATA
-            response.extend_from_slice(&query.raw_question);
-            return Ok(response);
+            return Ok(Self::build_nodata_response(query));
         }
 
         response[6] = 0x00; // ANCOUNT high
@@ -514,7 +487,7 @@ impl DnsForwarder {
         // The query's transaction ID; a valid reply must echo it.
         let query_id = data.get(0..2);
 
-        for upstream in &self.config.upstream {
+        for upstream in self.upstream() {
             let socket = UdpSocket::bind("0.0.0.0:0")
                 .map_err(|e| NetError::Dns(format!("failed to bind socket: {}", e)))?;
             socket
@@ -692,7 +665,7 @@ mod tests {
     fn test_dns_config_default() {
         let config = DnsConfig::default();
         assert_eq!(config.listen_addr.port(), DNS_PORT);
-        assert!(!config.upstream.is_empty());
+        assert_ne!(config.upstream, []);
     }
 
     #[test]
@@ -1040,7 +1013,7 @@ mod tests {
     }
 
     #[test]
-    fn test_try_resolve_locally_or_nxdomain_returns_response_for_registered() {
+    fn test_try_resolve_locally_or_nodata_returns_response_for_registered() {
         let config = DnsConfig::default();
         let mut forwarder = DnsForwarder::new(config);
         let ip = IpAddr::V4(Ipv4Addr::new(172, 17, 0, 2));
@@ -1048,7 +1021,7 @@ mod tests {
 
         let query = build_test_query("my-nginx.arcbox.local");
         let response = forwarder
-            .try_resolve_locally_or_nxdomain(&query)
+            .try_resolve_locally_or_nodata(&query)
             .expect("should resolve registered host");
 
         // Verify QR=1, RCODE=0, ANCOUNT=1.
@@ -1058,49 +1031,52 @@ mod tests {
     }
 
     #[test]
-    fn test_try_resolve_locally_or_nxdomain_returns_nxdomain() {
+    fn test_try_resolve_locally_or_nodata_returns_nodata_for_unregistered() {
         let config = DnsConfig::default();
         let forwarder = DnsForwarder::new(config);
 
         let query = build_test_query("nonexistent.arcbox.local");
         let response = forwarder
-            .try_resolve_locally_or_nxdomain(&query)
-            .expect("should return NXDOMAIN for unregistered local host");
+            .try_resolve_locally_or_nodata(&query)
+            .expect("should answer for an unregistered local host");
 
-        // Verify QR=1, RCODE=3 (NXDOMAIN), ANCOUNT=0.
+        // NODATA, not NXDOMAIN: QR=1, RCODE=0, the question echoed, no records.
         assert_eq!(response[2] & 0x80, 0x80, "QR bit");
-        assert_eq!(response[3] & 0x0F, 3, "RCODE=NXDOMAIN");
-        assert_eq!(response[7], 0, "ANCOUNT=0");
+        assert_eq!(response[3] & 0x0F, 0, "RCODE=NoError");
+        assert_eq!(response[5], 1, "QDCOUNT=1");
+        assert_eq!(&response[6..12], &[0; 6], "ANCOUNT, NSCOUNT, ARCOUNT = 0");
+        assert_eq!(response.len(), query.len(), "header + question only");
     }
 
     #[test]
-    fn test_try_resolve_locally_or_nxdomain_returns_none_for_external() {
+    fn test_try_resolve_locally_or_nodata_returns_none_for_external() {
         let config = DnsConfig::default();
         let forwarder = DnsForwarder::new(config);
 
         let query = build_test_query("google.com");
-        let result = forwarder.try_resolve_locally_or_nxdomain(&query);
+        let result = forwarder.try_resolve_locally_or_nodata(&query);
 
         assert!(result.is_none(), "should return None for non-local domains");
     }
 
     #[test]
-    fn test_try_resolve_locally_or_nxdomain_bare_domain() {
-        // Query for "arcbox.local" itself (no subdomain) should also NXDOMAIN
-        // if not registered.
+    fn test_try_resolve_locally_or_nodata_bare_domain() {
+        // Query for "arcbox.local" itself (no subdomain) is also answered
+        // NODATA when not registered.
         let config = DnsConfig::default();
         let forwarder = DnsForwarder::new(config);
 
         let query = build_test_query("arcbox.local");
         let response = forwarder
-            .try_resolve_locally_or_nxdomain(&query)
-            .expect("bare domain should return NXDOMAIN");
+            .try_resolve_locally_or_nodata(&query)
+            .expect("bare domain should be answered");
 
-        assert_eq!(response[3] & 0x0F, 3, "RCODE=NXDOMAIN");
+        assert_eq!(response[3] & 0x0F, 0, "RCODE=NoError");
+        assert_eq!(response[7], 0, "ANCOUNT=0");
     }
 
     #[test]
-    fn test_custom_domain_nxdomain() {
+    fn test_custom_domain_nodata() {
         let config = DnsConfig::default().with_local_domain("myorg.test");
         let mut forwarder = DnsForwarder::new(config);
 
@@ -1110,77 +1086,24 @@ mod tests {
         // Registered host under custom domain resolves.
         let query = build_test_query("web.myorg.test");
         let response = forwarder
-            .try_resolve_locally_or_nxdomain(&query)
+            .try_resolve_locally_or_nodata(&query)
             .expect("should resolve registered host under custom domain");
         assert_eq!(response[3] & 0x0F, 0, "RCODE=NoError");
         assert_eq!(response[7], 1, "ANCOUNT=1");
 
-        // Unregistered host under custom domain → NXDOMAIN.
+        // Unregistered host under custom domain → NODATA.
         let query = build_test_query("unknown.myorg.test");
         let response = forwarder
-            .try_resolve_locally_or_nxdomain(&query)
-            .expect("should NXDOMAIN for unregistered custom-domain host");
-        assert_eq!(response[3] & 0x0F, 3, "RCODE=NXDOMAIN");
+            .try_resolve_locally_or_nodata(&query)
+            .expect("should answer for an unregistered custom-domain host");
+        assert_eq!(response[3] & 0x0F, 0, "RCODE=NoError");
+        assert_eq!(response[7], 0, "ANCOUNT=0");
 
-        // Query under default arcbox.local → None (forwarded), not NXDOMAIN.
+        // Query under default arcbox.local → None (forwarded), not answered.
         let query = build_test_query("something.arcbox.local");
         assert!(
-            forwarder.try_resolve_locally_or_nxdomain(&query).is_none(),
+            forwarder.try_resolve_locally_or_nodata(&query).is_none(),
             "old default domain should not be handled after domain change"
         );
-    }
-
-    #[test]
-    fn test_parse_resolv_conf_nameservers() {
-        let conf = r"
-# comment
-nameserver 10.0.0.2
-search local
-nameserver 2001:4860:4860::8888
-nameserver invalid
-nameserver 10.0.0.2
-";
-        let servers = parse_resolv_conf_nameservers(conf);
-        // IPv6 servers are filtered because forward_dns_async binds 0.0.0.0:0.
-        // The IPv4 server is preferred; duplicates are deduplicated.
-        assert_eq!(
-            servers,
-            vec![SocketAddr::new(
-                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-                DNS_PORT
-            )]
-        );
-    }
-
-    #[test]
-    fn test_parse_resolv_conf_loopback_fallback() {
-        // When only loopback + IPv6 are available, keep loopback as fallback.
-        let conf = "nameserver 127.0.0.1\nnameserver 2001:4860:4860::8888\n";
-        let servers = parse_resolv_conf_nameservers(conf);
-        assert_eq!(
-            servers,
-            vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), DNS_PORT)]
-        );
-    }
-
-    #[test]
-    fn test_parse_resolv_conf_filters_fake_ip() {
-        let conf = "nameserver 198.18.0.2\nnameserver 8.8.8.8\n";
-        let servers = parse_resolv_conf_nameservers(conf);
-        assert_eq!(
-            servers,
-            vec![SocketAddr::new(
-                IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
-                DNS_PORT
-            )]
-        );
-    }
-
-    #[test]
-    fn test_parse_resolv_conf_only_fake_ip_returns_empty() {
-        // Only fake-IP entries → empty list so DnsConfig::new keeps DEFAULT_UPSTREAM.
-        let conf = "nameserver 198.18.0.2\nnameserver 198.19.1.1\n";
-        let servers = parse_resolv_conf_nameservers(conf);
-        assert!(servers.is_empty());
     }
 }

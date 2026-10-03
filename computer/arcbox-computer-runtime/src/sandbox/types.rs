@@ -223,7 +223,10 @@ pub struct SandboxSummary {
     pub created_at: DateTime<Utc>,
     /// When the sandbox reached `Paused` (None otherwise).
     pub paused_at: Option<DateTime<Utc>>,
-    /// On-disk footprint of retained pause state (checkpoint + overlay).
+    /// On-disk footprint of retained state, in every lifecycle state: the
+    /// COW disk overlay while running, plus the pause checkpoint while
+    /// paused (CORE-146). Copy-mode sandboxes (no overlay) report 0 until
+    /// paused parks their rootfs copy.
     pub storage_bytes: u64,
 }
 
@@ -242,7 +245,10 @@ pub struct SandboxInfo {
     pub error: Option<String>,
     /// When the sandbox reached `Paused` (None otherwise).
     pub paused_at: Option<DateTime<Utc>>,
-    /// On-disk footprint of retained pause state (checkpoint + overlay).
+    /// On-disk footprint of retained state, in every lifecycle state: the
+    /// COW disk overlay while running, plus the pause checkpoint while
+    /// paused (CORE-146). Copy-mode sandboxes (no overlay) report 0 until
+    /// paused parks their rootfs copy.
     pub storage_bytes: u64,
     /// When the hard maximum lifetime fires (None = no limit).
     pub ttl_deadline: Option<DateTime<Utc>>,
@@ -290,6 +296,19 @@ pub struct SandboxEvent {
     pub timestamp_ns: i64,
     /// Extra context (e.g. `"exit_code"` on `"idle"`, `"error"` on `"failed"`).
     pub attributes: HashMap<String, String>,
+    /// Monotonic sequence number, 1-based, global across all sandboxes of
+    /// one manager and stamped in the order subscribers receive events —
+    /// so a subscriber whose received sequences are not contiguous knows
+    /// it missed events (CORE-147). That gap test is conclusive only on
+    /// this unfiltered subscription: the stamp precedes any downstream
+    /// filtering, so a filtered view (the wire API's per-sandbox or
+    /// per-kind subscription) sees legitimate gaps for events its filter
+    /// dropped. Not persisted: a new manager numbers from 1 again. `0`
+    /// only on an event that never went through the bus (or, on the
+    /// wire, one from a daemon predating sequencing). The delivery
+    /// contract this makes checkable is on
+    /// [`SandboxManager::subscribe_events`](crate::SandboxManager::subscribe_events).
+    pub sequence: u64,
 }
 
 impl SandboxEvent {
@@ -299,6 +318,7 @@ impl SandboxEvent {
             action: action.to_owned(),
             timestamp_ns: Utc::now().timestamp_nanos_opt().unwrap_or(0),
             attributes: HashMap::new(),
+            sequence: 0,
         }
     }
 

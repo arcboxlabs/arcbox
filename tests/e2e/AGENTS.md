@@ -46,6 +46,17 @@ run fails, and which paths must change together.
   `target/aarch64-unknown-linux-musl/release`, and `~/.arcbox/bin`, copied
   into `<data_dir>/boot/<version>/arcbox-agent`. A stale agent boots but
   fails confusingly.
+- The same staging seeds guest runtime binaries: first from the installed
+  ArcBox (`~/.arcbox/runtime/<version>/`, or its unversioned `bin/`), then
+  `boot-assets/dev/runtime-bin/` on top — files into
+  `<data_dir>/runtime/<version>/bin/`, subdirectories (`kernel/vmlinux`) as
+  siblings of it. That generation directory is the one the daemon reads;
+  anything left in the unversioned `runtime/bin` shadows nothing. On a host
+  that cannot reach the CDN (403) with an installed ArcBox one generation
+  behind the `assets.lock` pin, the fallback copies the old `dockerd`, the
+  checksum fails, and the daemon dies on the download — stage
+  `boot-assets/dev/{kernel,rootfs.erofs,manifest.json}` and `runtime-bin/`
+  from a bundle of the pinned version first.
 - The `hv_e2e` probe (`--test hv_vmm`) instead shares the real `~/.arcbox`
   (or `ARCBOX_DATA_DIR`) and execs `<share>/bin/arcbox-agent` directly,
   hard-failing if absent. It needs a musl cross-compile placed there
@@ -75,7 +86,7 @@ run fails, and which paths must change together.
   liveness only — VZ throughput is too run-to-run variable for an automated
   Gbps target, so a real floor is opt-in (`ARCBOX_E2E_IPERF_MIN_GBPS`).
   Prove an RX/TX regression fixed (iperf zero -> baseline restored) with
-  that test or the manual reproducer in `docs/net-perf-limits.md`, checked
+  that test or the manual reproducer in `docs/benchmarks/network.md`, checked
   against the doc's baseline on both HV and VZ. Auto-forensics don't help a datapath failure
   (`virtio-debug.json` is HV-only queue/boot state) — preserve the
   scenario's own evidence (assigned `docker port`/inspect, host connect
@@ -124,6 +135,18 @@ run fails, and which paths must change together.
   `boot-assets/dev` or `ARCBOX_HV_E2E_KERNEL`/`_ROOTFS`.
 - Guest cannot reach docker.io -> point `ARCBOX_E2E_IMAGE` at a reachable
   mirror instead of weakening the test.
+- The test body passes, then the process hangs in `TempDir::drop`
+  (`remove_dir_all` → `openat` under `<data_dir>/ArcBox`) -> the `~/ArcBox`
+  NFS view outlived its daemon. For a data dir under `/var/folders`,
+  `nfs_mount::current_mount_info` compares the requested path with the
+  kernel's `/private/var/folders/...` mountpoint, never matches, and the
+  daemon never unmounts it (open). `KEEP_TEST_DIR=1` sidesteps the removal;
+  the run's `metrics.json` lives in that data dir, so a killed run loses it.
+- A unit test that writes more than 512 bytes into a pipe before anything
+  reads it can hang forever on a loaded host: XNU shrinks new pipe buffers
+  under pipe-memory pressure (512 bytes measured 2026-09-29 with ~4300
+  open pipes). Write from another thread, or keep the unread payload under
+  512 bytes.
 
 ## Contracts to keep honest
 

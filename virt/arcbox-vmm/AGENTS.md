@@ -7,21 +7,35 @@ file owns the HV-framework-specific footguns.
 
 ## Async-Worker Completion Contract (read first)
 
-Raising a GIC SPI alone does NOT wake a WFI-parked vCPU on this backend — the
-guest services the IRQ only on its next VM exit. Any async worker that
-completes guest I/O (blk, net-rx, vsock, console, or a future device) MUST do
-all three, in this order:
+Any async worker that completes guest I/O (blk, net-rx, vsock, console, or a
+future device) does exactly two things, in this order:
 
 1. `VirtioMmioState::trigger_interrupt(1)` — set interrupt_status (INT_VRING).
 2. Fire the `DeviceIrqCallback` (`irq_callback(irq, true)`) — assert the SPI.
-3. Call the worker's `exit_vcpus()` closure — kick every vCPU out of WFI.
 
-Omitting step 3 produces intermittent guest hangs (guest sleeps until an
-unrelated exit) that are invisible in logs. Reference: `blk_worker.rs::trigger_irq`
-(blk_worker.rs:719-729, rationale 176-181); the GIC callback's complementary
-unpark-all loop is `setup.rs:145-154`. Worker `exit_vcpus` closures are built by
-`make_exit_vcpus_fn` (`vmm/darwin_hv/mod.rs:157-181`) and wired at
-`console.rs:31`, `vsock.rs:136`, `lifecycle.rs:143,212`.
+Asserting the SPI is the whole wake. With the in-kernel GIC (`hv_gic`, the
+only configuration this VMM boots with) the framework handles WFI inside
+`hv_vcpu_run`: an idle vCPU's thread blocks in
+`HvCore::Hypervisor::VcpuStateManager::wait_for_interrupt`, `hv_gic_set_spi`
+signals that wait, and a vCPU running guest code takes the SPI
+asynchronously. Measured 2026-09-30 on macOS 26.4: every vCPU's `wfi` and
+`vtimer` exit counters stay 0 over a full boot, and guest cross-CPU wakeups
+(FIFO ping-pong between cpuset-pinned containers) take 30–55 µs.
+
+**Do not add an `hv_vcpus_exit` kick after the SPI.** Every worker used to,
+on the belief that a WFI-idle vCPU sat parked on the host; the kick was a
+forced `Canceled` exit for nothing. Removing all of them (c3004580): vsock
+RPC p50 0.81 → 0.30 ms (0.96 → 0.32 ms with the target CPU busy), 1 GiB
+stdin pipe 5.9–6.4 → 5.4–5.9 s, `docker load` 300 MB 3.2–4.4 → 2.7–3.3 s,
+idle daemon CPU 9.3 → 6.7%. The same goes for unparking vCPU threads from
+the IRQ callback: nothing is parked there. `hv_vcpus_exit` remains the right
+tool for `stop`/`pause`, where the point is to leave `hv_vcpu_run`.
+
+Reference: `blk_worker.rs::trigger_irq`; the GIC callback in `setup.rs`
+(step 5) is `set_spi` and nothing else. The vCPU loop's WFI branch
+(`vcpu_loop.rs`) is unreachable in this configuration and kept only for a
+framework that does trap WFI — its 1 ms `park_timeout` bounds latency there,
+since no SPI unparks it.
 
 ## vCPU Exit Loop: PC-advance is asymmetric by exit class
 
@@ -60,6 +74,20 @@ Worker-specific coupling not in the shared doc:
   following FLUSH returns before its data hits disk.
 - Tests must exercise the worker parser/executor, not just shared leaf helpers.
 
+## HVC block fast path is the System VM's data-disk path
+
+On HV the agent picks `/dev/arcboxhvc1` (HVC hypercalls,
+`vmm/darwin_hv/hvc_blk.rs`; driver `drivers/arcbox_hvc_blk.c` in
+`arcboxlabs/kernel`) over `/dev/vdb`; `blk_worker.rs` serves only the rootfs
+and the ext4 metadata disk. A block feature the data disk needs must exist in
+**both** the worker and `hvc_blk.rs` + the driver — DISCARD
+(`ARCBOX_HVC_BLK_DISCARD`, 0xC2000005) was missing there while the worker's
+hole punch was correct and unused, so no freed block ever left `docker.img`
+on HV (`docs/disk-reclaim.md`). The driver probes each hypercall with a
+zero-length call at bind time; an unknown function ID must keep falling
+through to `handle_psci` and answer `PSCI_NOT_SUPPORTED`, which is what keeps
+an old host and a new guest (or the reverse) inert rather than broken.
+
 ## macOS HV Net RX Worker Contract
 
 RX injection has two flavors — the channel-based `RxInjectThread`
@@ -86,21 +114,23 @@ selector > 8) and the near-`u64::MAX` ring-address snapshot test.
 
 - `VirtioMmioState::kicks`/`interrupts` (mmio_state.rs:134,136) and
   `vcpu_stats::VcpuStats` are cumulative across device resets.
-- `hv_kick_broadcasts`: incremented ONLY by `make_exit_vcpus_fn` (mod.rs:169) —
-  i.e. every io-worker all-vCPU wake. Teardown (`stop`/`pause`) calls
-  `vm.exit_vcpus` directly (lifecycle.rs:433,557) and is intentionally NOT
-  counted; do not expect this counter to move during shutdown.
-- `hv_unpark_broadcasts`: incremented by the GIC IRQ callback's unpark-all loop
-  (setup.rs:148).
-- R2/R3 acceptance is measured from these numbers. A refactor that bypasses the
-  counter sites falsifies the metrics.
+- `kick_broadcasts` / `unpark_broadcasts` in the debug snapshot are retired
+  (2026-09-30) and always 0: io workers no longer kick and the IRQ callback
+  no longer unparks. The fields stay on the wire for the e2e forensics
+  mirror. `VcpuStats::kicks_received` still counts `Canceled` exits, which
+  now come only from `stop`/`pause`; a non-zero delta during steady state
+  means someone put a kick back.
+- The R2/R3 acceptance numbers that were read from those counters
+  (~2301 unpark-broadcasts / ~71 kick-broadcasts per boot) describe a
+  mechanism that no longer exists; the campaign's remaining idle-CPU lever
+  is the `rx-inject` thread's yield/poll loop (~5.6 of the ~6.7% idle CPU,
+  `sample`d 2026-09-30), not vCPU wakeups.
 
 ## Debugging: entry points and failure signatures
 
 Two snapshots (HV only; empty/zero under VZ — devices belong to VZ):
 
-- `Vmm::debug_snapshot` (vmm/mod.rs:642) — devices + per-vCPU exit counters +
-  kick/unpark broadcasts.
+- `Vmm::debug_snapshot` (vmm/mod.rs) — devices + per-vCPU exit counters.
 - `DeviceManager::virtio_debug` (device/debug.rs:75) — devices/queues only;
   reads MMIO mirror + live guest ring memory, THROUGH poisoned locks.
 
@@ -113,7 +143,8 @@ archaeology produced multiple WRONG root causes for ABX-386; snapshot first.
 |---|---|---|
 | >8-vCPU cold boot: guest wedges D-state / `folio_wait_bit_common` stall | live snapshot → find a blk queue whose `avail_idx` advances while `used_idx` stays stuck, or config dropped for high `queue_sel` | per-queue register array too small (`MAX_VIRTQUEUES` vs one-queue-per-vCPU), ABX-386 |
 | Guest TLS/cert validation fails right after boot | check whether agent-up ping has fired | no RTC; guest sits at kernel default epoch until the post-readiness ping sets the clock (ABX-416) |
-| Intermittent guest hang just after an I/O completes | audit the worker's completion path | missing `exit_vcpus()` — see Async-Worker Completion Contract |
+| Intermittent guest hang just after an I/O completes | audit the worker's completion path: `trigger_interrupt` then `irq_callback(irq, true)`, and the device must be DRIVER_OK (`sync_irq_level` drops the SPI otherwise) | the SPI was never asserted, or asserted before the guest set DRIVER_OK — see Async-Worker Completion Contract |
+| Host→guest vsock bulk (`docker run -i` pipe, `docker load`) slow on HV with the guest idle | diff the vsock device's `interrupts` and RX `used_idx` from `GetVirtioDebug` across one transfer: ~1 interrupt per ≤3776-byte packet means the injection round is back to one packet per connection; a non-zero `kicks_received` delta means a kick came back | `rx_injection.rs` must keep RW pending after a full read (5de23af4); no worker may call `hv_vcpus_exit` (c3004580) |
 
 For config-dependent boot failures, bisect with the `hv_e2e` config-matrix knobs
 (`ARCBOX_HV_E2E_VCPUS/MEMORY_MB/BALLOON/BOOT_ONLY/...`, all share the
@@ -139,14 +170,12 @@ re-reading every join site's comment.
 ## vCPU registration ordering (ABX-367)
 
 `hv_vcpus_exit` on arm64 is a silent no-op for NULL/0 — it needs a concrete list
-of vCPU IDs (mod.rs:153-156). Each vCPU pushes its raw handle then its `Thread`
-into the shared registries ONLY after all register-setup calls succeed
-(vcpu_loop.rs:152-171); pushing earlier risks a dangling handle (UB in Apple's
-framework) or an unbounded registry across failed boots. `make_exit_vcpus_fn`
-snapshots the registry each call and early-returns when empty (mod.rs:162-168);
-`stop` warns when the registry is empty while threads are alive
-(lifecycle.rs:400-404). Consequence: a worker's `exit_vcpus()` firing before
-secondaries register is a no-op for those vCPUs.
+of vCPU IDs. Each vCPU pushes its raw handle then its `Thread` into the shared
+registries ONLY after all register-setup calls succeed (vcpu_loop.rs);
+pushing earlier risks a dangling handle (UB in Apple's framework) or an
+unbounded registry across failed boots. `stop`/`pause` snapshot the registry
+when they run and `stop` warns when it is empty while threads are alive
+(lifecycle.rs). Only those two paths call `hv_vcpus_exit` now.
 
 ## Guest-controlled input
 
@@ -154,6 +183,28 @@ Parent `virt/AGENTS.md` "Guest-controlled input" owns the rule (checked
 arithmetic on every guest-programmed value, tests near `u64::MAX`). HV-specific
 coverage: the near-`u64::MAX` ring-address snapshot regression in
 `device/tests.rs` — keep it green.
+
+## Releasing guest RAM (`vmm/darwin_hv/page_release.rs`)
+
+Guest RAM is an anonymous mapping exposed to the guest through stage-2
+(`hv_vm_map`). Once the guest has dirtied a page through that mapping, **no
+`madvise` from the host releases it**: `MADV_DONTNEED` and `MADV_FREE_REUSABLE`
+both leave `phys_footprint` untouched, with or without an `hv_vm_unmap` first
+(measured 2026-09-25, macOS 26.4, with a probe that dirtied the range from a
+real vCPU — a host-side `memset` calibration says `MADV_FREE_REUSABLE` works,
+and is the wrong experiment). The one sequence that returns memory is
+`hv_vm_unmap` → `mmap(MAP_FIXED)` a fresh anonymous mapping over the same host
+address → `hv_vm_map` it back: footprint and resident size drop together, the
+range reads back zero, and a later guest write is billed honestly (~40 µs per
+2 MiB). `Stage2Refresh` is that sequence, installed as the balloon device's
+`PageReleaser` in `setup.rs`; the guest's free page reporting drives it with
+no host-side target. Two constraints: ranges are aligned *inward* to the
+16 KiB host page (XNU rounds a misaligned range outward, `hv_vm_unmap`
+refuses sub-page ranges — either would discard the guest's neighbouring 4 KiB
+pages), and `hv_vm_unmap`/`hv_vm_map` on a sub-range of a live mapping is
+fine only when the *same* host address is mapped back; the DAX window's
+no-overlap rule (`setup.rs`) is about mapping a different host range into a
+used IPA.
 
 ## Platform Gaps
 

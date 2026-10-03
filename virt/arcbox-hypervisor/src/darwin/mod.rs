@@ -24,7 +24,7 @@ mod vm;
 pub use hypervisor::DarwinHypervisor;
 pub use memory::DarwinMemory;
 pub use vcpu::DarwinVcpu;
-pub use vm::DarwinVm;
+pub use vm::{DarwinVm, SerialReaders};
 
 /// The MTU the VZ network device will be configured with — the VMM sizes its
 /// datapath from this before the device exists (see `arcbox-vz`).

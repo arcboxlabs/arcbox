@@ -260,7 +260,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(spy.detached().is_empty());
+        assert_eq!(spy.detached(), Vec::<String>::new());
     }
 
     #[test]

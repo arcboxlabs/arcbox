@@ -50,8 +50,8 @@ service SandboxService {
     // relocation constraint documented in `snapshot.proto` (CORE-21).
     // Returns once the sandbox reaches PAUSED; requires READY (no active
     // execution — see the state machine below for why RUNNING cannot
-    // pause). Trades RAM for disk: a paused sandbox keeps paying
-    // `storage_bytes` until removed.
+    // pause). Trades RAM for disk: the checkpoint joins the disk overlay
+    // in `storage_bytes`, paid until the sandbox is resumed or removed.
     rpc Pause(PauseSandboxRequest) returns (google.protobuf.Empty);
 
     // Resume a PAUSED sandbox in place under the same ID; returns once
@@ -189,8 +189,8 @@ enum IdleAction {
     // Destroy the sandbox and release all resources (Remove semantics).
     IDLE_ACTION_KILL = 1;
     // Pause: checkpoint to disk under the same ID and release the VM.
-    // Trades RAM for disk — the sandbox reports `storage_bytes` until
-    // resumed or removed.
+    // Trades RAM for disk — the checkpoint joins the disk overlay in
+    // `storage_bytes` until the sandbox is resumed or removed.
     IDLE_ACTION_PAUSE = 2;
 }
 
@@ -508,8 +508,10 @@ message SandboxInfo {
     // When the sandbox reached FAILED (unset otherwise; `error` carries
     // the reason).
     google.protobuf.Timestamp failed_at = 16;
-    // On-disk footprint of the sandbox's retained state (checkpoint +
-    // disk overlay). Paused sandboxes keep paying this until removed.
+    // On-disk footprint of the sandbox's retained state, reported in
+    // every lifecycle state: the COW disk overlay its writes grow while
+    // running, plus the pause checkpoint while paused. Meterable —
+    // paused sandboxes keep paying it until resumed or removed.
     uint64 storage_bytes = 17;
 }
 
@@ -564,7 +566,9 @@ message SandboxSummary {
     google.protobuf.Timestamp paused_at = 7;
     // When the sandbox reached FAILED (unset otherwise).
     google.protobuf.Timestamp failed_at = 8;
-    // On-disk footprint of retained state; nonzero for paused sandboxes.
+    // On-disk footprint of retained state, in every lifecycle state:
+    // the COW disk overlay while running, plus the pause checkpoint
+    // while paused. Agrees with Inspect for the same sandbox.
     uint64 storage_bytes = 9;
 }
 
@@ -591,6 +595,12 @@ message WatchEventsResponse {
 }
 
 // A sandbox lifecycle event.
+//
+// Delivery is best-effort: a subscriber that lags loses events, and events
+// emitted with no subscriber attached are discarded. `sequence` is what
+// makes that loss detectable — conclusively on an unfiltered subscription
+// only; see the field. Treat the stream as a latency optimization over
+// polling Inspect/List, and reconcile when in doubt.
 message SandboxEvent {
     // Sandbox ID.
     string sandbox_id = 1;
@@ -601,6 +611,19 @@ message SandboxEvent {
     // Additional context (e.g. "exit_code" / "signal" on IDLE,
     // "error" on FAILED).
     map<string, string> attributes = 4;
+    // Monotonic sequence number: 1-based, global across all sandboxes of
+    // the emitting daemon, and stamped before any server-side filtering.
+    // On an unfiltered subscription sequences are contiguous in delivery
+    // order, so a jump of more than one means events were missed (lag,
+    // or history from before the subscription) — fall back to
+    // Inspect/List instead of carrying stale state. On a filtered
+    // subscription (sandbox_id or kind set) gaps are expected — events
+    // the filter dropped consumed numbers too — so a gap is
+    // inconclusive; contiguous sequences still prove nothing was
+    // missed, and a sequence running backwards reveals a daemon
+    // restart. Not persisted: a restarted daemon numbers from 1 again,
+    // and 0 means the daemon predates sequencing.
+    uint64 sequence = 5;
 }
 
 // ---------------------------------------------------------------------------

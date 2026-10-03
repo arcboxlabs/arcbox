@@ -59,40 +59,49 @@ fn kubernetes_client() -> KubernetesServiceClient<connectrpc::client::SharedHttp
     KubernetesServiceClient::new(transport, config)
 }
 
-fn home_dir() -> Result<PathBuf> {
-    dirs::home_dir().context("could not determine home directory")
+/// Where the host integration lives: the user's kubeconfig under `home`,
+/// kubectl and the managed kubeconfig and state under the profile's
+/// `data_dir`.
+pub(super) struct HostPaths {
+    pub(super) home: PathBuf,
+    pub(super) data_dir: PathBuf,
 }
 
-fn profile_dir() -> PathBuf {
-    HostLayout::from_env_or_default().data_dir
+impl HostPaths {
+    fn from_env() -> Result<Self> {
+        Ok(Self {
+            home: dirs::home_dir().context("could not determine home directory")?,
+            data_dir: HostLayout::from_env_or_default().data_dir,
+        })
+    }
+
+    fn managed_kubeconfig(&self) -> PathBuf {
+        self.data_dir.join("kube").join("arcbox.yaml")
+    }
+
+    fn state(&self) -> PathBuf {
+        self.data_dir.join("kube").join("state.json")
+    }
+
+    fn user_kubeconfig(&self) -> PathBuf {
+        self.home.join(".kube").join("config")
+    }
+
+    fn runtime_bin(&self) -> PathBuf {
+        self.data_dir.join("runtime").join("bin")
+    }
+
+    fn kubectl(&self) -> PathBuf {
+        self.runtime_bin().join("kubectl")
+    }
 }
 
 fn managed_context_name() -> &'static str {
     ArcboxProfile::from_env_or_default().docker_context_name()
 }
 
-fn managed_kubeconfig_path(_home: &Path) -> PathBuf {
-    profile_dir().join("kube").join("arcbox.yaml")
-}
-
-fn integration_state_path(_home: &Path) -> PathBuf {
-    profile_dir().join("kube").join("state.json")
-}
-
-fn user_kubeconfig_path(home: &Path) -> PathBuf {
-    home.join(".kube").join("config")
-}
-
-fn runtime_bin_dir(_home: &Path) -> PathBuf {
-    profile_dir().join("runtime").join("bin")
-}
-
-fn kubectl_bin(home: &Path) -> PathBuf {
-    runtime_bin_dir(home).join("kubectl")
-}
-
-async fn load_state(home: &Path) -> Result<KubernetesIntegrationState> {
-    let path = integration_state_path(home);
+async fn load_state(paths: &HostPaths) -> Result<KubernetesIntegrationState> {
+    let path = paths.state();
     if !path.exists() {
         return Ok(KubernetesIntegrationState::default());
     }
@@ -116,8 +125,8 @@ async fn write_private_file(path: &Path, contents: impl AsRef<[u8]>) -> Result<(
     Ok(())
 }
 
-async fn save_state(home: &Path, state: &KubernetesIntegrationState) -> Result<()> {
-    let path = integration_state_path(home);
+async fn save_state(paths: &HostPaths, state: &KubernetesIntegrationState) -> Result<()> {
+    let path = paths.state();
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -126,14 +135,14 @@ async fn save_state(home: &Path, state: &KubernetesIntegrationState) -> Result<(
     Ok(())
 }
 
-async fn install_kubernetes_tools(home: &Path) -> Result<()> {
+async fn install_kubernetes_tools(paths: &HostPaths) -> Result<()> {
     let tools = parse_tools_for_group(LOCK_TOML, ToolGroup::Kubernetes)
         .context("failed to parse assets.lock")?;
     if tools.is_empty() {
         return Ok(());
     }
 
-    let runtime_bin = runtime_bin_dir(home);
+    let runtime_bin = paths.runtime_bin();
     let arch = arcbox_asset::current_arch().to_string();
     let manager = HostToolManager::new(tools, arch, runtime_bin.clone());
     manager
@@ -141,7 +150,7 @@ async fn install_kubernetes_tools(home: &Path) -> Result<()> {
         .await
         .context("failed to install kubectl")?;
 
-    let user_bin = profile_dir().join("bin");
+    let user_bin = paths.data_dir.join("bin");
     tokio::fs::create_dir_all(&user_bin).await?;
     let target = runtime_bin.join("kubectl");
     let link = user_bin.join("kubectl");
@@ -160,9 +169,9 @@ async fn install_kubernetes_tools(home: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn current_context(home: &Path) -> Result<Option<String>> {
-    let kubectl = kubectl_bin(home);
-    let kubeconfig = user_kubeconfig_path(home);
+async fn current_context(paths: &HostPaths) -> Result<Option<String>> {
+    let kubectl = paths.kubectl();
+    let kubeconfig = paths.user_kubeconfig();
     if !kubectl.exists() || !kubeconfig.exists() {
         return Ok(None);
     }
@@ -188,10 +197,10 @@ async fn current_context(home: &Path) -> Result<Option<String>> {
     }
 }
 
-async fn merge_managed_kubeconfig(home: &Path) -> Result<()> {
-    let kubectl = kubectl_bin(home);
-    let managed = managed_kubeconfig_path(home);
-    let user = user_kubeconfig_path(home);
+async fn merge_managed_kubeconfig(paths: &HostPaths) -> Result<()> {
+    let kubectl = paths.kubectl();
+    let managed = paths.managed_kubeconfig();
+    let user = paths.user_kubeconfig();
 
     if let Some(parent) = user.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -272,18 +281,22 @@ fn current_context_restore<'a>(
 }
 
 /// Applies [`current_context_restore`] after a merge.
-async fn restore_current_context(home: &Path, managed: &str, before: Option<&str>) -> Result<()> {
-    let after = current_context(home).await?;
+async fn restore_current_context(
+    paths: &HostPaths,
+    managed: &str,
+    before: Option<&str>,
+) -> Result<()> {
+    let after = current_context(paths).await?;
     match current_context_restore(false, managed, before, after.as_deref()) {
         CurrentContextFix::Keep => Ok(()),
-        CurrentContextFix::Restore(previous) => set_current_context(home, previous).await,
-        CurrentContextFix::Clear => unset_current_context(home).await,
+        CurrentContextFix::Restore(previous) => set_current_context(paths, previous).await,
+        CurrentContextFix::Clear => unset_current_context(paths).await,
     }
 }
 
-async fn unset_current_context(home: &Path) -> Result<()> {
-    let kubectl = kubectl_bin(home);
-    let kubeconfig = user_kubeconfig_path(home);
+async fn unset_current_context(paths: &HostPaths) -> Result<()> {
+    let kubectl = paths.kubectl();
+    let kubeconfig = paths.user_kubeconfig();
     let output = tokio::process::Command::new(&kubectl)
         .arg("config")
         .arg("unset")
@@ -304,9 +317,9 @@ async fn unset_current_context(home: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn set_current_context(home: &Path, context: &str) -> Result<()> {
-    let kubectl = kubectl_bin(home);
-    let kubeconfig = user_kubeconfig_path(home);
+async fn set_current_context(paths: &HostPaths, context: &str) -> Result<()> {
+    let kubectl = paths.kubectl();
+    let kubeconfig = paths.user_kubeconfig();
     let output = tokio::process::Command::new(&kubectl)
         .arg("config")
         .arg("use-context")
@@ -327,9 +340,9 @@ async fn set_current_context(home: &Path, context: &str) -> Result<()> {
     Ok(())
 }
 
-async fn delete_context_entries(home: &Path, managed_context: &str) -> Result<()> {
-    let kubectl = kubectl_bin(home);
-    let kubeconfig = user_kubeconfig_path(home);
+async fn delete_context_entries(paths: &HostPaths, managed_context: &str) -> Result<()> {
+    let kubectl = paths.kubectl();
+    let kubeconfig = paths.user_kubeconfig();
     if !kubectl.exists() || !kubeconfig.exists() {
         return Ok(());
     }
@@ -350,7 +363,7 @@ async fn delete_context_entries(home: &Path, managed_context: &str) -> Result<()
     Ok(())
 }
 
-async fn refresh_managed_kubeconfig(home: &Path) -> Result<String> {
+async fn refresh_managed_kubeconfig(paths: &HostPaths) -> Result<String> {
     let client = kubernetes_client();
     let response: pb::KubernetesKubeconfigResponse = client
         .get_kubeconfig(pb::KubernetesKubeconfigRequest::default())
@@ -358,7 +371,7 @@ async fn refresh_managed_kubeconfig(home: &Path) -> Result<String> {
         .context("failed to get ArcBox kubeconfig; run 'abctl k8s start' first")?
         .into_owned();
 
-    let managed = managed_kubeconfig_path(home);
+    let managed = paths.managed_kubeconfig();
     if let Some(parent) = managed.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -377,13 +390,13 @@ fn resolve_managed_context_name(context_name: String, profile_default: &str) -> 
     }
 }
 
-async fn refresh_if_enabled(home: &Path) -> Result<()> {
-    let state = load_state(home).await?;
+async fn refresh_if_enabled(paths: &HostPaths) -> Result<()> {
+    let state = load_state(paths).await?;
     if !state.enabled {
         return Ok(());
     }
 
-    let current_context = current_context(home).await?;
+    let current_context = current_context(paths).await?;
     let owns_current_context = owns_global_current_context(ArcboxProfile::from_env_or_default());
     let restore_managed_context = owns_current_context
         && should_restore_managed_context(
@@ -391,18 +404,18 @@ async fn refresh_if_enabled(home: &Path) -> Result<()> {
             state.managed_context.as_deref(),
             managed_context_name(),
         );
-    let managed_context = refresh_managed_kubeconfig(home).await?;
-    delete_context_entries(home, &managed_context).await?;
-    merge_managed_kubeconfig(home).await?;
+    let managed_context = refresh_managed_kubeconfig(paths).await?;
+    delete_context_entries(paths, &managed_context).await?;
+    merge_managed_kubeconfig(paths).await?;
     if restore_managed_context {
-        set_current_context(home, &managed_context).await?;
+        set_current_context(paths, &managed_context).await?;
     } else if !owns_current_context {
         // The refresh merges too, so it can activate the development context
         // on a host with no user kubeconfig exactly like `enable` can.
-        restore_current_context(home, &managed_context, current_context.as_deref()).await?;
+        restore_current_context(paths, &managed_context, current_context.as_deref()).await?;
     }
     save_state(
-        home,
+        paths,
         &KubernetesIntegrationState {
             managed_context: Some(managed_context),
             ..state
@@ -445,8 +458,8 @@ async fn execute_start() -> Result<()> {
         println!("Detail:   {}", response.detail);
     }
 
-    let home = home_dir()?;
-    refresh_if_enabled(&home).await?;
+    let paths = HostPaths::from_env()?;
+    refresh_if_enabled(&paths).await?;
     Ok(())
 }
 
@@ -486,9 +499,9 @@ async fn execute_delete() -> Result<()> {
 }
 
 async fn execute_status() -> Result<()> {
-    let home = home_dir()?;
-    let state = load_state(&home).await?;
-    let kubectl_installed = kubectl_bin(&home).exists();
+    let paths = HostPaths::from_env()?;
+    let state = load_state(&paths).await?;
+    let kubectl_installed = paths.kubectl().exists();
 
     let client = kubernetes_client();
     let status: pb::KubernetesStatusResponse = client
@@ -528,30 +541,50 @@ async fn execute_status() -> Result<()> {
     for svc in status.services {
         println!("Service {}: {} ({})", svc.name, svc.status, svc.detail);
     }
+    for port in &status.host_ports {
+        println!("{}", host_port_line(port));
+    }
 
     Ok(())
 }
 
+/// One `abctl kubernetes status` line for a LoadBalancer port.
+fn host_port_line(port: &pb::KubernetesHostPort) -> String {
+    use pb::kubernetes_host_port::State;
+
+    let service = format!(
+        "LoadBalancer {}/{} {}/{}",
+        port.namespace, port.name, port.port, port.protocol
+    );
+    match port.state.as_known() {
+        Some(State::Forwarded) => format!("{service}: forwarded on {}:{}", port.host_ip, port.port),
+        Some(State::Pending) => format!("{service}: pending ({})", port.detail),
+        Some(State::Skipped) => format!("{service}: not forwarded ({})", port.detail),
+        Some(State::Failed) => format!("{service}: bind failed, retrying ({})", port.detail),
+        Some(State::StateUnspecified) | None => format!("{service}: unknown"),
+    }
+}
+
 async fn execute_enable() -> Result<()> {
-    let home = home_dir()?;
-    install_kubernetes_tools(&home).await?;
+    let paths = HostPaths::from_env()?;
+    install_kubernetes_tools(&paths).await?;
 
     let owns_current_context = owns_global_current_context(ArcboxProfile::from_env_or_default());
     // Read unconditionally: a profile that does not own the global
     // current-context still has to know what it was, to put it back after the
     // merge writes one (see `current_context_restore`).
-    let previous_context = current_context(&home).await?;
-    let managed_context = refresh_managed_kubeconfig(&home).await?;
-    delete_context_entries(&home, &managed_context).await?;
-    merge_managed_kubeconfig(&home).await?;
+    let previous_context = current_context(&paths).await?;
+    let managed_context = refresh_managed_kubeconfig(&paths).await?;
+    delete_context_entries(&paths, &managed_context).await?;
+    merge_managed_kubeconfig(&paths).await?;
     if owns_current_context {
-        set_current_context(&home, &managed_context).await?;
+        set_current_context(&paths, &managed_context).await?;
     } else {
-        restore_current_context(&home, &managed_context, previous_context.as_deref()).await?;
+        restore_current_context(&paths, &managed_context, previous_context.as_deref()).await?;
     }
 
     save_state(
-        &home,
+        &paths,
         &KubernetesIntegrationState {
             enabled: true,
             previous_context: previous_context.filter(|ctx| ctx != &managed_context),
@@ -567,38 +600,52 @@ async fn execute_enable() -> Result<()> {
         println!("Context added: {managed_context}");
         println!("Select it explicitly with 'kubectl config use-context {managed_context}'.");
     }
-    println!("kubectl installed to {}", kubectl_bin(&home).display());
+    println!("kubectl installed to {}", paths.kubectl().display());
     Ok(())
 }
 
 async fn execute_disable() -> Result<()> {
-    let home = home_dir()?;
-    let state = load_state(&home).await?;
+    remove_host_integration(&HostPaths::from_env()?).await?;
+    println!("Kubernetes integration disabled.");
+    Ok(())
+}
+
+/// Takes the managed context, cluster and user out of the user's kubeconfig
+/// and puts the previous current-context back, when the integration had
+/// moved it. Returns whether the integration was enabled.
+///
+/// Uninstall runs this before it removes the data directory: the kubectl
+/// that edits `~/.kube/config` lives there.
+pub(super) async fn remove_host_integration(paths: &HostPaths) -> Result<bool> {
+    let state = load_state(paths).await?;
     let managed_context = state
         .managed_context
         .clone()
         .unwrap_or_else(|| managed_context_name().to_owned());
-    let current_context = current_context(&home).await?;
+    let current_context = current_context(paths).await?;
 
-    delete_context_entries(&home, &managed_context).await?;
+    delete_context_entries(paths, &managed_context).await?;
     if current_context.as_deref() == Some(managed_context.as_str())
         && let Some(previous) = state.previous_context.as_deref()
     {
-        let _ = set_current_context(&home, previous).await;
+        let _ = set_current_context(paths, previous).await;
     }
 
-    save_state(
-        &home,
-        &KubernetesIntegrationState {
-            enabled: false,
-            previous_context: state.previous_context,
-            managed_context: state.managed_context,
-        },
-    )
-    .await?;
-
-    println!("Kubernetes integration disabled.");
-    Ok(())
+    let was_enabled = state.enabled;
+    // An integration that was never enabled has no state file; do not
+    // create one on the way out.
+    if was_enabled || paths.state().exists() {
+        save_state(
+            paths,
+            &KubernetesIntegrationState {
+                enabled: false,
+                previous_context: state.previous_context,
+                managed_context: state.managed_context,
+            },
+        )
+        .await?;
+    }
+    Ok(was_enabled)
 }
 
 async fn execute_kubeconfig() -> Result<()> {

@@ -19,6 +19,7 @@ mod platform {
     use std::process::{Command, Stdio};
     use std::time::Duration;
 
+    use arcbox_constants::cmdline::{AGENT_DHCP_ROUTE_PROTO, MACHINE_NAME_KEY};
     use arcbox_constants::paths::JAILER_CHROOT_BASE;
     use nix::mount::{MsFlags, mount};
     use nix::sys::resource::{Resource, setrlimit};
@@ -126,10 +127,10 @@ mod platform {
     fn raise_fd_limits() {
         // Ensure the kernel ceiling (fs.nr_open) is at least the target.
         // The default is already 1048576, but guard against custom kernels.
-        ensure_sysctl_at_least("/proc/sys/fs/nr_open", super::NOFILE_LIMIT);
+        ensure_sysctl_at_least("/proc/sys/fs/nr_open", crate::docker_config::NOFILE_LIMIT);
 
         // Only raise — never lower a previously higher inherited limit.
-        let target = super::NOFILE_LIMIT;
+        let target = crate::docker_config::NOFILE_LIMIT;
         match nix::sys::resource::getrlimit(Resource::RLIMIT_NOFILE) {
             Ok((soft, hard)) if soft >= target && hard >= target => {}
             _ => {
@@ -477,7 +478,23 @@ mod platform {
         // This NIC is connected to Apple's vmnet bridge (bridge100) and
         // provides a real L2 path for host → container traffic.
         // We only take an IP — no default route (outbound stays on eth0).
-        configure_bridge_nic();
+        if let Some(bridge_iface) = detect_bridge_interface() {
+            configure_bridge_nic_address(&bridge_iface);
+            // Proxy ARP on the bridge NIC makes the guest answer ARP for
+            // container IPs (172.17.x.x) on behalf of docker0, so the host
+            // can route `-interface bridge100` without knowing the guest's
+            // bridge address as a gateway.
+            if let Err(e) = fs::write(
+                format!("/proc/sys/net/ipv4/conf/{bridge_iface}/proxy_arp"),
+                b"1\n",
+            ) {
+                tracing::warn!(interface = bridge_iface, error = %e, "failed to enable proxy_arp");
+            } else {
+                tracing::info!(interface = bridge_iface, "proxy ARP enabled");
+            }
+        } else {
+            tracing::debug!("no bridge NIC found");
+        }
 
         // Allow forwarding between the primary interface and sandbox TAP
         // interfaces. Docker/containerd sets the default FORWARD policy to
@@ -488,24 +505,61 @@ mod platform {
     /// One-shot init for distro machines (boot shim path).
     ///
     /// The overlay root is the distro's own filesystem: no tmpfs staging and
-    /// no `/etc` population — the distro init owns those. Only networking is
-    /// brought up here (mirrored images ship without the incus network
-    /// config, so nothing in the guest would configure eth0 otherwise), plus
+    /// no `/etc` population — the distro init owns those. What is set up
+    /// here is what the distro cannot know on its own: its name (the
+    /// machine's, from the kernel cmdline), the uplink (mirrored images
+    /// ship without the incus network config, so nothing in the guest would
+    /// configure eth0 otherwise), the bridge NIC the Mac reaches it on, and
     /// a resolver when the distro image left none.
     pub fn machine_init() {
+        match machine_name() {
+            Some(name) => crate::machine_identity::set_hostname(&name),
+            None => tracing::warn!(
+                "no machine name on the kernel cmdline; keeping the image's hostname"
+            ),
+        }
         run_init_cmd(
             "/bin/busybox",
             &["ip", "link", "set", "lo", "up"],
             "ip link lo up",
             Duration::from_secs(5),
         );
-        configure_primary_interface_dhcp();
+        let primary = configure_primary_interface_dhcp();
+        // The bridge NIC is ArcBox's whether or not its lease arrives: the
+        // distro's network manager is told so by MAC first, then the NIC
+        // gets its address and nothing else — egress stays on the uplink,
+        // and a manager that configured this NIC too would route out of it
+        // (`machine_identity`).
+        if let Some(bridge_iface) = detect_bridge_interface() {
+            match fs::read_to_string(format!("/sys/class/net/{bridge_iface}/address")) {
+                Ok(mac) => crate::machine_identity::claim_bridge_nic(mac.trim()),
+                Err(e) => {
+                    tracing::warn!(interface = bridge_iface, error = %e, "cannot read the bridge NIC's MAC");
+                }
+            }
+            configure_bridge_nic_address(&bridge_iface);
+        }
         write_machine_resolv_conf();
         // Installed last, and before the shim hands off to the distro's init:
         // the hook this writes is what tells the host when that init has
         // settled, so readiness does not return into the window where the
         // distro reconfigures the interface configured just above (CORE-66).
-        crate::boot_done::install();
+        // It also drops the provisional default route above once the distro
+        // has installed its own.
+        crate::boot_done::install(&crate::boot_done::Hook {
+            primary_interface: primary,
+        });
+    }
+
+    /// The machine's name, from the `arcbox.machine_name=` the host put on
+    /// the kernel cmdline.
+    fn machine_name() -> Option<String> {
+        let cmdline = fs::read_to_string("/proc/cmdline").ok()?;
+        cmdline
+            .split_whitespace()
+            .find_map(|token| token.strip_prefix(MACHINE_NAME_KEY))
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
     }
 
     /// Points `/etc/resolv.conf` at the NAT gateway resolver (10.0.2.1), but
@@ -523,10 +577,16 @@ mod platform {
         }
     }
 
-    fn configure_primary_interface_dhcp() {
+    /// Configures the uplink by DHCP; returns the interface it configured.
+    ///
+    /// The default route it installs is tagged [`AGENT_DHCP_ROUTE_PROTO`]:
+    /// in a distro machine that is what lets the boot-done hook tell this
+    /// provisional route from the one the distro's own network manager adds
+    /// next to it (`boot_done`).
+    fn configure_primary_interface_dhcp() -> Option<String> {
         let Some(interface) = detect_primary_interface() else {
             tracing::warn!("no non-loopback network interface found for DHCP");
-            return;
+            return None;
         };
 
         run_init_cmd(
@@ -538,32 +598,33 @@ mod platform {
 
         // BusyBox udhcpc requires a script to apply lease settings.
         let udhcpc_script = "/run/udhcpc.script";
-        let script = r#"#!/bin/sh
+        let script = format!(
+            r#"#!/bin/sh
 set -e
 case "$1" in
   deconfig)
     /bin/busybox ifconfig "$interface" 0.0.0.0 || true
     ;;
   renew|bound)
-    /bin/busybox ifconfig "$interface" "$ip" netmask "${subnet:-255.255.255.0}" broadcast "${broadcast:-+}" up
-    if [ -n "${router:-}" ]; then
-      while /bin/busybox route del default gw 0.0.0.0 dev "$interface" 2>/dev/null; do :; done
+    /bin/busybox ifconfig "$interface" "$ip" netmask "${{subnet:-255.255.255.0}}" broadcast "${{broadcast:-+}}" up
+    if [ -n "${{router:-}}" ]; then
       for r in $router; do
-        /bin/busybox route add default gw "$r" dev "$interface" && break
+        /bin/busybox ip route replace default via "$r" dev "$interface" proto {AGENT_DHCP_ROUTE_PROTO} && break
       done
     fi
     ;;
 esac
 exit 0
-"#;
+"#
+        );
 
         if let Err(e) = fs::write(udhcpc_script, script) {
             tracing::warn!(error = %e, "failed to write udhcpc script");
-            return;
+            return None;
         }
         if let Err(e) = fs::set_permissions(udhcpc_script, fs::Permissions::from_mode(0o755)) {
             tracing::warn!(error = %e, "failed to chmod udhcpc script");
-            return;
+            return None;
         }
 
         if run_init_cmd(
@@ -586,21 +647,17 @@ exit 0
         ) {
             tracing::info!(interface, "DHCP lease acquired");
         }
+        Some(interface)
     }
 
-    /// Configures the bridge NIC (second interface) via DHCP.
+    /// Gives the bridge NIC an address by DHCP and nothing else.
     ///
-    /// Uses a custom udhcpc script that only sets the IP address — no default
-    /// route, no DNS. This ensures outbound traffic still goes through eth0
-    /// (socketpair datapath), while the bridge NIC is reachable from the host
-    /// for inbound container traffic.
-    fn configure_bridge_nic() {
-        let Some(bridge_iface) = detect_bridge_interface() else {
-            tracing::debug!("no bridge NIC found");
-            return;
-        };
-        let bridge_iface = bridge_iface.as_str();
-
+    /// The udhcpc script only sets the IP address — no default route, no
+    /// DNS. Outbound traffic therefore still goes through the uplink, while
+    /// the bridge NIC is reachable from the host: for inbound container
+    /// traffic in the System VM, and as `<machine>.arcbox.local` in a distro
+    /// machine.
+    fn configure_bridge_nic_address(bridge_iface: &str) {
         // Bring up the interface.
         run_init_cmd(
             "/bin/busybox",
@@ -648,19 +705,6 @@ exit 0
             Duration::from_secs(15),
         ) {
             tracing::info!(interface = bridge_iface, "bridge NIC DHCP lease acquired");
-        }
-
-        // Enable proxy ARP on the bridge NIC so the guest answers ARP
-        // requests for container IPs (172.17.x.x) on behalf of docker0.
-        // This lets the host use `-interface bridge100` routing without
-        // needing to know the guest's bridge IP as a gateway.
-        if let Err(e) = fs::write(
-            format!("/proc/sys/net/ipv4/conf/{bridge_iface}/proxy_arp"),
-            b"1\n",
-        ) {
-            tracing::warn!(interface = bridge_iface, error = %e, "failed to enable proxy_arp");
-        } else {
-            tracing::info!(interface = bridge_iface, "proxy ARP enabled");
         }
     }
 
@@ -836,7 +880,9 @@ exit 0
         run_init_cmd("/sbin/iptables", args, desc, Duration::from_secs(10));
     }
 
-    fn detect_primary_interface() -> Option<String> {
+    /// The guest's uplink NIC — the interface the host relay's traffic arrives
+    /// on. The lowest-sorted `eth*`/`en*` name, matching what DHCP configures.
+    pub fn detect_primary_interface() -> Option<String> {
         let entries = fs::read_dir("/sys/class/net").ok()?;
         let mut candidates = Vec::new();
         for entry in entries.flatten() {
@@ -869,15 +915,13 @@ exit 0
         }
     }
 
-    /// Writes Docker daemon configuration (DNS, direct routing, and ulimits).
+    /// Writes `/etc/docker/daemon.json`: the keys ArcBox manages plus the
+    /// operator's overrides from the host (see `crate::docker_config`).
     ///
     /// Containers get their DNS from the Docker daemon config, NOT from the
     /// guest's /etc/resolv.conf. We point them to 10.0.2.1 (the gateway)
     /// so container DNS queries go through the host-side forwarder which can
     /// resolve *.arcbox.local names registered from the host.
-    ///
-    /// Default ulimits ensure containers get a high NOFILE limit even if
-    /// Docker's own heuristics pick a lower value.
     fn write_docker_daemon_config() {
         mkdir_p("/etc/docker");
         let network = match crate::agent::container_network() {
@@ -887,8 +931,24 @@ exit 0
                 return;
             }
         };
-        let content = super::docker_daemon_json(network);
-        if let Err(e) = std::fs::write("/etc/docker/daemon.json", &content) {
+        let overrides_path = crate::docker_config::overrides_path();
+        let overrides = match crate::docker_config::read_overrides(Path::new(&overrides_path)) {
+            Ok(overrides) => overrides,
+            Err(error) => {
+                // Booting with the managed keys alone beats not booting; the
+                // operator sees why their mirrors did not apply.
+                tracing::error!(%error, "ignoring unreadable dockerd overrides from the host");
+                Default::default()
+            }
+        };
+        let rendered = crate::docker_config::render(network, overrides);
+        if !rendered.refused.is_empty() {
+            tracing::warn!(
+                keys = ?rendered.refused,
+                "dropped dockerd overrides for keys ArcBox manages"
+            );
+        }
+        if let Err(e) = std::fs::write("/etc/docker/daemon.json", &rendered.content) {
             tracing::warn!(error = %e, "failed to write /etc/docker/daemon.json");
         }
     }
@@ -942,50 +1002,8 @@ exit 0
     }
 }
 
-/// Target NOFILE limit for the guest VM, matching Docker Desktop / OrbStack.
-/// Used by both `raise_fd_limits()` and `docker_daemon_json()`.
-#[cfg(any(target_os = "linux", test))]
-const NOFILE_LIMIT: u64 = 1_048_576;
-
-/// Returns the Docker daemon.json content as a string.
-///
-/// Extracted as a pure function so the output contract (DNS, direct routing,
-/// default ulimits, and containerd image store) is testable independently of
-/// the filesystem and platform.
-///
-/// `containerd-snapshotter` stays explicitly `true` even though dockerd ≥ 29
-/// defaults to the containerd image store: without the explicit flag, dockerd
-/// falls back to the graphdriver whenever it finds prior graphdriver state on
-/// the data volume (`graphdriver-prior`), which would silently flip a machine
-/// with stale overlay2 remnants back to the legacy store. dockerd 29 logs a
-/// benign "no longer needed" warning for it.
-#[cfg(any(target_os = "linux", test))]
-fn docker_daemon_json(network: arcbox_constants::container_network::ContainerNetwork) -> String {
-    let bridge = format!(
-        "{}/{}",
-        network.docker_bridge_gateway(),
-        network.docker_network_prefix()
-    );
-    serde_json::json!({
-        "dns": ["10.0.2.1"],
-        "allow-direct-routing": true,
-        "bip": bridge,
-        "default-address-pools": [{
-            "base": network.to_string(),
-            "size": network.docker_network_prefix()
-        }],
-        "default-ulimits": {
-            "nofile": { "Name": "nofile", "Soft": NOFILE_LIMIT, "Hard": NOFILE_LIMIT }
-        },
-        "features": {
-            "containerd-snapshotter": true
-        }
-    })
-    .to_string()
-}
-
 #[cfg(target_os = "linux")]
-pub use platform::detect_bridge_interface;
+pub use platform::{detect_bridge_interface, detect_primary_interface};
 #[cfg(target_os = "linux")]
 pub use platform::{init_system, machine_init};
 
@@ -1046,67 +1064,6 @@ fn report_missing_mounts(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    fn default_daemon_json() -> String {
-        docker_daemon_json(arcbox_constants::container_network::ContainerNetwork::default())
-    }
-
-    #[test]
-    fn daemon_json_contains_nofile_ulimit() {
-        let json = default_daemon_json();
-        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
-        let nofile = &v["default-ulimits"]["nofile"];
-        assert_eq!(nofile["Soft"], 1048576);
-        assert_eq!(nofile["Hard"], 1048576);
-        assert_eq!(nofile["Name"], "nofile");
-    }
-
-    #[test]
-    fn daemon_json_contains_dns() {
-        let json = default_daemon_json();
-        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
-        assert_eq!(v["dns"][0], "10.0.2.1");
-    }
-
-    #[test]
-    fn daemon_json_allows_direct_container_routing() {
-        let json = default_daemon_json();
-        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
-        assert_eq!(v["allow-direct-routing"], true);
-    }
-
-    #[test]
-    fn daemon_json_preserves_the_production_docker_bridge() {
-        let json = default_daemon_json();
-        let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
-
-        assert_eq!(value["bip"], "172.17.0.1/16");
-        assert_eq!(value["default-address-pools"][0]["base"], "172.16.0.0/12");
-        assert_eq!(value["default-address-pools"][0]["size"], 16);
-    }
-
-    #[test]
-    fn daemon_json_enables_containerd_snapshotter() {
-        let json = default_daemon_json();
-        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
-        assert_eq!(v["features"]["containerd-snapshotter"], true);
-    }
-
-    #[test]
-    fn daemon_json_uses_the_selected_container_pool() {
-        let network = arcbox_constants::container_network::ContainerNetwork::from_kernel_cmdline(
-            "root=/dev/vda arcbox.container_network=10.80.0.0/20",
-        )
-        .unwrap();
-        let json = docker_daemon_json(network);
-        let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
-
-        assert_eq!(value["bip"], "10.80.1.1/24");
-        assert_eq!(value["default-address-pools"][0]["base"], "10.80.0.0/20");
-        assert_eq!(value["default-address-pools"][0]["size"], 24);
-    }
-
     #[test]
     fn report_missing_mounts_flags_only_unmounted() {
         // All mounted → Ok.

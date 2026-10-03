@@ -574,8 +574,8 @@ fn test_default_process() {
     let process = Process::default();
     assert!(!process.terminal);
     assert_eq!(process.cwd, "/");
-    assert!(!process.args.is_empty());
-    assert!(!process.env.is_empty());
+    assert_ne!(process.args, Vec::<String>::new());
+    assert_ne!(process.env, Vec::<String>::new());
 }
 
 #[test]

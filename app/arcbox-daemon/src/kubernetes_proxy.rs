@@ -1,7 +1,11 @@
 //! Kubernetes API proxy: host TCP → guest vsock.
 //!
 //! Listens on a configured loopback port and forwards each connection to the
-//! k3s API server inside the guest VM via vsock port 16443.
+//! k3s API server inside the guest VM via vsock port 16443. The vsock leg is
+//! framed with [`HalfCloseStream`] like the Docker API channel: the guest
+//! sends only within the window this side grants, so a `kubectl logs -f`
+//! whose reader stalls backs up into k3s, never into an unread vsock, which
+//! on Virtualization.framework would stall every new connection to the VM.
 
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::sync::Arc;
@@ -9,7 +13,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use arcbox_constants::ports::KUBERNETES_API_VSOCK_PORT;
 use arcbox_core::Runtime;
-use arcbox_docker::proxy::{VsockShutdown, VsockStream};
+use arcbox_docker::proxy::{HalfCloseStream, VsockShutdown, VsockStream};
 use tokio::net::TcpListener;
 use tracing::info;
 
@@ -78,7 +82,7 @@ impl KubernetesProxy {
                         owned,
                         VsockShutdown::CloseOnDropOnly,
                     ) {
-                        Ok(stream) => stream,
+                        Ok(stream) => HalfCloseStream::new(stream),
                         Err(e) => {
                             tracing::debug!("failed to wrap Kubernetes API fd: {}", e);
                             return;

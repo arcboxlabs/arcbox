@@ -1,13 +1,18 @@
 //! `ArcBox` runtime.
 
 mod assets;
+mod engine_config;
 mod kubeconfig;
+mod kubernetes_lb;
+mod machine_dns;
+mod machine_settings;
 mod progress;
 mod sandbox_host;
 
 #[cfg(test)]
 mod tests;
 
+pub use machine_settings::MachineResources;
 pub use progress::InitProgress;
 
 use crate::config::Config;
@@ -18,14 +23,14 @@ use crate::machine::{MachineManager, MachineState};
 #[cfg(target_os = "macos")]
 use crate::macos::MacMachineManager;
 use crate::migration::MigrationManager;
-use crate::vm::VmManager;
+use crate::vm::{HostNetwork, VmManager};
 use crate::vm_lifecycle::{
     DEFAULT_MACHINE_NAME, VmLifecycleConfig, VmLifecycleManager, VmLifecycleState,
 };
 use arcbox_connect::v1::{
-    ContainerFsPathsResponse, ImageFsPathsResponse, KubernetesDeleteResponse,
-    KubernetesKubeconfigResponse, KubernetesStartResponse, KubernetesStatusResponse,
-    KubernetesStopResponse, ServiceStatus,
+    ContainerFsPathsResponse, EnsureMachineExportRequest, EnsureMachineExportResponse,
+    ImageFsPathsResponse, KubernetesDeleteResponse, KubernetesKubeconfigResponse,
+    KubernetesStartResponse, KubernetesStatusResponse, KubernetesStopResponse, ServiceStatus,
 };
 use arcbox_net::NetworkManager;
 #[cfg(target_os = "macos")]
@@ -49,15 +54,73 @@ use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard, RwLock as 
 const DEFAULT_GUEST_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 64, 2);
 const HOST_DNS_OWNER: &str = "system:host";
 
+/// Smallest memory a System VM may be given, in MiB.
+const MIN_SYSTEM_VM_MEMORY_MB: u64 = 512;
+
+/// The host's capacity, the ceiling for a VM's limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostCapacity {
+    /// Logical CPUs.
+    pub cpus: u32,
+    /// Physical memory in MiB.
+    pub memory_mb: u64,
+}
+
+impl HostCapacity {
+    /// The host this daemon runs on.
+    #[must_use]
+    pub fn probe() -> Self {
+        Self {
+            cpus: arcbox_hypervisor::default_vm_cpu_count(),
+            memory_mb: arcbox_hypervisor::host_memory_size() / (1024 * 1024),
+        }
+    }
+
+    /// Rejects a VM size the host cannot back.
+    ///
+    /// # Errors
+    ///
+    /// Returns a config error naming the allowed range.
+    pub fn check(self, cpus: u32, memory_mb: u64) -> Result<()> {
+        if cpus == 0 || cpus > self.cpus {
+            return Err(CoreError::config(format!(
+                "cpus must be between 1 and {} (the host's logical CPUs), got {cpus}",
+                self.cpus
+            )));
+        }
+        if memory_mb < MIN_SYSTEM_VM_MEMORY_MB || memory_mb > self.memory_mb {
+            return Err(CoreError::config(format!(
+                "memory_mb must be between {MIN_SYSTEM_VM_MEMORY_MB} and {} (the host's \
+                 physical memory), got {memory_mb}",
+                self.memory_mb
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// The System VM's CPU and memory limits and the host's capacity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SystemVmResources {
+    /// vCPUs the System VM boots with.
+    pub cpus: u32,
+    /// Memory the System VM boots with, in MiB.
+    pub memory_mb: u64,
+    /// The host's capacity.
+    pub host: HostCapacity,
+}
+
 /// Resolve a host-IP binding string for a forwarded port.
 ///
-/// Empty or `"0.0.0.0"` means "all interfaces" (`UNSPECIFIED`); anything else
-/// must parse as an IPv4 address (returns `None` if it does not). Sandbox
-/// exposures pass `"127.0.0.1"` so untrusted workloads are reachable only on
-/// loopback, while published container ports keep binding all interfaces.
-fn resolve_bind_ip(host_ip_str: &str) -> Option<Ipv4Addr> {
+/// Empty or `"0.0.0.0"` means "no particular address" and resolves to
+/// `unspecified` — all interfaces or loopback, per
+/// `DockerConfig::expose_ports_to_lan`; anything else must parse as an IPv4
+/// address (returns `None` if it does not). Sandbox exposures pass
+/// `"127.0.0.1"` so untrusted workloads are reachable only on loopback
+/// whatever the policy says.
+fn resolve_bind_ip(host_ip_str: &str, unspecified: Ipv4Addr) -> Option<Ipv4Addr> {
     if host_ip_str.is_empty() || host_ip_str == "0.0.0.0" {
-        Some(Ipv4Addr::UNSPECIFIED)
+        Some(unspecified)
     } else {
         host_ip_str.parse().ok()
     }
@@ -90,6 +153,9 @@ struct KubernetesHostEndpoint {
 pub struct Runtime {
     /// Configuration.
     config: Config,
+    /// The machine `abctl` acts on without a name; seeded from
+    /// `config.machine.default_machine`, changed by `set_default_machine`.
+    default_machine: std::sync::RwLock<Option<String>>,
     /// Actual loopback port owned by the daemon's Kubernetes proxy. Set once
     /// after bind and before this runtime is exposed through the control plane.
     kubernetes_host_endpoint: OnceLock<KubernetesHostEndpoint>,
@@ -131,6 +197,9 @@ pub struct Runtime {
     /// Host listener keys of exposed sandbox ports, keyed by sandbox ID, so
     /// Stop/Remove can tear down every listener a sandbox owns.
     sandbox_port_keys: Arc<TokioRwLock<HashMap<String, Vec<String>>>>,
+    /// How each Kubernetes LoadBalancer port fared on the last reconcile.
+    /// The lock also serializes reconciles against closing the listeners.
+    kubernetes_lb_ports: TokioMutex<kubernetes_lb::LoadBalancerPorts>,
     /// Sandbox DNS owners, kept separate from container DNS so an agent
     /// restart can clear only sandbox host state before relay reuse.
     sandbox_dns_ids: Arc<TokioRwLock<HashSet<String>>>,
@@ -213,15 +282,19 @@ impl Runtime {
         let vm_manager = Arc::new(VmManager::new(snapshot_dir));
         let network_manager = Arc::new(NetworkManager::new(arcbox_net::NetConfig::default()));
 
-        // Share the host-side DNS hosts table with the VMM so both
-        // the host DnsService and the VMM-side datapath DnsForwarder
-        // resolve from the same table.
-        let shared_dns_table = Some(network_manager.local_hosts_table());
+        // Every VM's datapath is wired to the host the same way: the DNS
+        // hosts table it shares with the host DnsService, and the operator's
+        // egress proxy policy. `system` probes the Mac's proxy settings here,
+        // once per daemon start.
+        let host_network = HostNetwork {
+            dns_hosts: Some(network_manager.local_hosts_table()),
+            proxy: config.network.proxy_settings().resolve(),
+        };
 
         let machine_manager = Arc::new(MachineManager::new(
             Arc::clone(&vm_manager),
             config.data_dir.clone(),
-            shared_dns_table,
+            host_network,
             event_bus.clone(),
         ));
 
@@ -270,6 +343,7 @@ impl Runtime {
         ));
 
         Ok(Self {
+            default_machine: std::sync::RwLock::new(config.machine.default_machine.clone()),
             config,
             kubernetes_host_endpoint: OnceLock::new(),
             event_bus,
@@ -289,6 +363,7 @@ impl Runtime {
             #[cfg(not(target_os = "macos"))]
             port_forwarders: Arc::new(TokioRwLock::new(HashMap::new())),
             sandbox_port_keys: Arc::new(TokioRwLock::new(HashMap::new())),
+            kubernetes_lb_ports: TokioMutex::default(),
             sandbox_dns_ids: Arc::new(TokioRwLock::new(HashSet::new())),
             sandbox_host_state: TokioMutex::new(0),
             dns_entries: Arc::new(TokioRwLock::new(HashMap::new())),
@@ -569,6 +644,65 @@ impl Runtime {
         Ok(())
     }
 
+    /// The System VM's CPU and memory limits, with the host's capacity.
+    #[must_use]
+    pub fn system_vm_resources(&self) -> SystemVmResources {
+        let desired = self.vm_lifecycle.default_vm_config();
+        SystemVmResources {
+            cpus: desired.cpus,
+            memory_mb: desired.memory_mb,
+            host: HostCapacity::probe(),
+        }
+    }
+
+    /// Changes the System VM's CPU and memory limits, persists them to the
+    /// user's `config.toml`, and recreates the System VM so they take effect.
+    ///
+    /// A zero field keeps the current value. Nothing is written or restarted
+    /// when the result equals the current limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a limit is outside `1..=host cpus` or
+    /// `512..=host memory` MiB, the config file cannot be written, or the
+    /// System VM fails to stop or boot.
+    pub async fn resize_system_vm(&self, cpus: u32, memory_mb: u64) -> Result<SystemVmResources> {
+        let current = self.system_vm_resources();
+        let cpus = if cpus == 0 { current.cpus } else { cpus };
+        let memory_mb = if memory_mb == 0 {
+            current.memory_mb
+        } else {
+            memory_mb
+        };
+        current.host.check(cpus, memory_mb)?;
+        if cpus == current.cpus && memory_mb == current.memory_mb {
+            return Ok(current);
+        }
+
+        // Persist first: a limit the daemon applied but forgot on restart
+        // would be worse than one it refused to apply.
+        let path = crate::config::writable_user_config_path();
+        crate::config::persist::set_vm_resources(&path, cpus, memory_mb)?;
+
+        let lifecycle = &self.vm_lifecycle;
+        tracing::info!(
+            from_cpus = current.cpus,
+            from_memory_mb = current.memory_mb,
+            cpus,
+            memory_mb,
+            config = %path.display(),
+            "resizing the System VM; restarting it"
+        );
+        // Stop, then change the desired size, then boot: the boot's drift
+        // check sees a persisted machine that no longer matches and
+        // recreates it with the new size.
+        lifecycle.shutdown().await?;
+        lifecycle.set_resources(cpus, memory_mb);
+        lifecycle.ensure_ready().await?;
+        tracing::info!(cpus, memory_mb, "System VM resized");
+        Ok(self.system_vm_resources())
+    }
+
     /// Returns the default machine name used for automatic VM lifecycle.
     #[must_use]
     pub const fn default_machine_name(&self) -> &'static str {
@@ -613,6 +747,37 @@ impl Runtime {
             .ping_agent(DEFAULT_MACHINE_NAME.to_string())
             .await?;
         Ok(true)
+    }
+
+    /// Trims a machine's data filesystems so the host reclaims the space
+    /// they freed; returns the bytes the guest reported trimmed. The System
+    /// VM is `DEFAULT_MACHINE_NAME`.
+    ///
+    /// # Errors
+    /// Returns an error if the machine is not running, its agent is
+    /// unreachable, or a filesystem refused the trim.
+    pub async fn trim_machine_disk(&self, machine_name: &str) -> Result<u64> {
+        Arc::clone(&self.machine_manager)
+            .trim_disk(machine_name.to_owned())
+            .await
+            .map_err(CoreError::from)
+    }
+
+    /// Asks a running distro machine to serve its root filesystem to the
+    /// host over NFSv3 and returns the endpoint to mount.
+    ///
+    /// # Errors
+    /// Returns an error if the machine is not running, its agent is
+    /// unreachable, or the agent refused the export.
+    pub async fn ensure_machine_export(
+        &self,
+        machine_name: &str,
+        request: EnsureMachineExportRequest,
+    ) -> Result<EnsureMachineExportResponse> {
+        Arc::clone(&self.machine_manager)
+            .ensure_export(machine_name.to_owned(), request)
+            .await
+            .map_err(CoreError::from)
     }
 
     /// Returns the guest dockerd vsock port for the System VM.
@@ -682,6 +847,27 @@ impl Runtime {
             .map_err(CoreError::from)
     }
 
+    /// Opens a connection to the System VM's agent.
+    ///
+    /// `connect_agent` is a blocking hypervisor call, so it runs off the
+    /// async executor. The transport it yields is blocking on the HV
+    /// socketpair and async on VZ/Linux vsock: unary RPCs work on both, a
+    /// caller wanting the `*_blocking` variants dispatches on
+    /// [`AgentClient::is_blocking`](crate::agent_client::AgentClient::is_blocking)
+    /// (`sync_guest_clock` is the reference pattern).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the System VM is not running or the agent cannot
+    /// be reached.
+    pub async fn connect_system_agent(&self) -> Result<crate::agent_client::AgentClient> {
+        let machine_manager = Arc::clone(&self.machine_manager);
+        tokio::task::spawn_blocking(move || machine_manager.connect_agent(DEFAULT_MACHINE_NAME))
+            .await
+            .map_err(|e| CoreError::Vm(format!("agent connect task panicked: {e}")))?
+            .map_err(CoreError::from)
+    }
+
     /// Connects to a machine's guest service via vsock port.
     ///
     /// # Errors
@@ -701,16 +887,7 @@ impl Runtime {
     /// Returns an error if the System VM is not running, the agent is
     /// unreachable, or the container has no snapshot.
     pub async fn container_fs_paths(&self, container_id: &str) -> Result<ContainerFsPathsResponse> {
-        // `connect_agent` is a blocking hypervisor call, so it runs off the
-        // async executor; the transport it yields is blocking on the HV
-        // socketpair and async on VZ/Linux vsock (`sync_guest_clock` is the
-        // reference pattern).
-        let machine_manager = Arc::clone(&self.machine_manager);
-        let mut agent = tokio::task::spawn_blocking(move || {
-            machine_manager.connect_agent(DEFAULT_MACHINE_NAME)
-        })
-        .await
-        .map_err(|e| CoreError::Vm(format!("agent connect task panicked: {e}")))??;
+        let mut agent = self.connect_system_agent().await?;
         if agent.is_blocking() {
             let id = container_id.to_string();
             tokio::task::spawn_blocking(move || agent.container_fs_paths_blocking(&id))
@@ -733,14 +910,7 @@ impl Runtime {
     /// Returns an error if the System VM is not running, the agent is
     /// unreachable, or the image's snapshot chain is absent.
     pub async fn image_fs_paths(&self, top_chain_id: &str) -> Result<ImageFsPathsResponse> {
-        // Same transport contract as `container_fs_paths`: blocking connect
-        // off the executor, then dispatch on the transport kind.
-        let machine_manager = Arc::clone(&self.machine_manager);
-        let mut agent = tokio::task::spawn_blocking(move || {
-            machine_manager.connect_agent(DEFAULT_MACHINE_NAME)
-        })
-        .await
-        .map_err(|e| CoreError::Vm(format!("agent connect task panicked: {e}")))??;
+        let mut agent = self.connect_system_agent().await?;
         if agent.is_blocking() {
             let id = top_chain_id.to_string();
             tokio::task::spawn_blocking(move || agent.image_fs_paths_blocking(&id))
@@ -780,7 +950,7 @@ impl Runtime {
     pub async fn stop_kubernetes(&self) -> Result<KubernetesStopResponse> {
         self.kubernetes_host_endpoint()?;
         if !self.vm_lifecycle.is_running().await {
-            self.vm_lifecycle.set_kubernetes_hold(false).await;
+            self.release_kubernetes().await;
             return Ok(KubernetesStopResponse {
                 stopped: true,
                 detail: "k3s already stopped".to_string(),
@@ -790,7 +960,7 @@ impl Runtime {
 
         let mut agent = self.get_agent(DEFAULT_MACHINE_NAME)?;
         let response = agent.stop_kubernetes().await?;
-        self.vm_lifecycle.set_kubernetes_hold(false).await;
+        self.release_kubernetes().await;
         Ok(response)
     }
 
@@ -804,8 +974,23 @@ impl Runtime {
         self.vm_lifecycle.ensure_ready().await?;
         let mut agent = self.get_agent(DEFAULT_MACHINE_NAME)?;
         let response = agent.delete_kubernetes().await?;
-        self.vm_lifecycle.set_kubernetes_hold(false).await;
+        self.release_kubernetes().await;
         Ok(response)
+    }
+
+    /// Records that the cluster is gone: drops the lifecycle hold, then
+    /// closes the LoadBalancer listeners, in that order, so a reconcile that
+    /// raced the stop finds the hold released and cannot reopen them.
+    async fn release_kubernetes(&self) {
+        self.vm_lifecycle.set_kubernetes_hold(false).await;
+        self.close_kubernetes_load_balancers().await;
+    }
+
+    /// Subscribes to whether the daemon believes Kubernetes runs (the
+    /// lifecycle's Kubernetes hold).
+    #[must_use]
+    pub fn subscribe_kubernetes_hold(&self) -> watch::Receiver<bool> {
+        self.vm_lifecycle.subscribe_kubernetes_hold()
     }
 
     /// Returns Kubernetes cluster status for the default VM.
@@ -834,9 +1019,12 @@ impl Runtime {
         let mut agent = self.get_agent(DEFAULT_MACHINE_NAME)?;
         let mut response = agent.get_kubernetes_status().await?;
         response.endpoint = endpoint;
-        self.vm_lifecycle
-            .set_kubernetes_hold(response.running)
-            .await;
+        if response.running {
+            self.vm_lifecycle.set_kubernetes_hold(true).await;
+        } else {
+            self.release_kubernetes().await;
+        }
+        response.host_ports = self.kubernetes_host_ports().await;
         Ok(response)
     }
 
@@ -908,6 +1096,20 @@ impl Runtime {
 
         // Validate all guest binaries are present and executable (boot-blocking).
         ensure_guest_binaries(&self.config.data_dir, &generation)?;
+
+        // The operator's dockerd overrides ride the shared data directory
+        // into the guest, which merges them into daemon.json at init.
+        engine_config::stage_engine_config(&self.config.data_dir, &self.config.docker)?;
+
+        // So does the CA behind HTTPS on container domains: generated once,
+        // signed with in the guest, trusted by the user (`abctl tls trust`).
+        let tls_dir = self
+            .config
+            .data_dir
+            .join(arcbox_constants::paths::guest::TLS);
+        if arcbox_local_ca::ensure(&tls_dir)? {
+            tracing::info!(path = %tls_dir.display(), "generated the local CA for container domains");
+        }
 
         // Boot the VM through the lifecycle manager first so the agent
         // handshake is observable on its own: `ensure_vm_ready` below covers
@@ -1117,6 +1319,34 @@ impl Runtime {
         }
     }
 
+    /// Installs the manager the machine's VMM created for the running VM.
+    ///
+    /// A manager already cached under the name belongs to the previous
+    /// incarnation of the VM: its listeners inject into a datapath that no
+    /// longer exists, and they hold the host ports the same publishes need
+    /// on the new VM. It is stopped, and the ownership records that pointed
+    /// at its listeners dropped, before the new manager takes its place.
+    #[cfg(target_os = "macos")]
+    async fn adopt_inbound_listener_manager(
+        &self,
+        machine_name: &str,
+        manager: InboundListenerManager,
+    ) {
+        // Ownership map before the listener map, the order every other
+        // path takes.
+        let mut rules = self.inbound_rules.write().await;
+        let mut listeners = self.inbound_listeners.write().await;
+        if let Some(mut stale) = listeners.insert(machine_name.to_owned(), manager) {
+            tracing::info!(
+                machine = machine_name,
+                listeners = stale.len(),
+                "retiring the previous VM incarnation's inbound listeners"
+            );
+            stale.stop_all().await;
+            rules.retain(|_, (machine, _)| machine != machine_name);
+        }
+    }
+
     /// macOS: add inbound rules via the machine's `InboundListenerManager`.
     #[cfg(target_os = "macos")]
     async fn start_port_forwarding_macos(
@@ -1125,20 +1355,24 @@ impl Runtime {
         container_id: &str,
         bindings: &[(String, u16, u16, String)],
     ) -> Result<()> {
-        // Keep the cached manager for this machine fresh across VM restarts.
+        // A manager the VMM still holds belongs to a VM booted since the
+        // last publish: adopt it, retiring the previous incarnation's.
+        if let Some(manager) = self
+            .machine_manager
+            .take_inbound_listener_manager(machine_name)
         {
-            let mut guard = self.inbound_listeners.write().await;
-            if let Some(manager) = self
-                .machine_manager
-                .take_inbound_listener_manager(machine_name)
-            {
-                guard.insert(machine_name.to_string(), manager);
-            }
-            if !guard.contains_key(machine_name) {
-                return Err(CoreError::Machine(format!(
-                    "inbound listener manager not available for machine '{machine_name}'",
-                )));
-            }
+            self.adopt_inbound_listener_manager(machine_name, manager)
+                .await;
+        }
+        if !self
+            .inbound_listeners
+            .read()
+            .await
+            .contains_key(machine_name)
+        {
+            return Err(CoreError::Machine(format!(
+                "inbound listener manager not available for machine '{machine_name}'",
+            )));
         }
 
         // Remove previously tracked listeners for this container before
@@ -1148,13 +1382,14 @@ impl Runtime {
         // was previously on a different role.
         self.stop_port_forwarding_by_id(container_id).await;
 
+        let unspecified = self.config.docker.default_publish_address();
         let mut planned_rules = Vec::new();
         for (host_ip_str, host_port, container_port, protocol) in bindings {
             let proto = match protocol.to_lowercase().as_str() {
                 "udp" => InboundProtocol::Udp,
                 _ => InboundProtocol::Tcp,
             };
-            let Some(host_ip) = resolve_bind_ip(host_ip_str) else {
+            let Some(host_ip) = resolve_bind_ip(host_ip_str, unspecified) else {
                 tracing::warn!(
                     "Skipping inbound rule: invalid HostIp '{}' for port {}:{}",
                     host_ip_str,
@@ -1223,10 +1458,11 @@ impl Runtime {
     ) -> Result<()> {
         self.stop_port_forwarding_by_id(container_id).await;
         let guest_ip = self.guest_ip_for_machine(machine_name);
+        let unspecified = self.config.docker.default_publish_address();
         let mut forwarder = PortForwarder::new();
 
         for (host_ip_str, host_port, container_port, protocol) in bindings {
-            let Some(host_ip) = resolve_bind_ip(host_ip_str) else {
+            let Some(host_ip) = resolve_bind_ip(host_ip_str, unspecified) else {
                 tracing::warn!(
                     "Skipping port forward rule: invalid HostIp '{}' for port {}:{}",
                     host_ip_str,
@@ -1526,26 +1762,33 @@ impl Runtime {
     }
 
     async fn all_sandbox_authority_keys(&self) -> Vec<String> {
+        self.listener_owner_keys(|key| Self::sandbox_port_key_owner(key).is_some())
+            .await
+    }
+
+    /// Owner keys of the live host listeners that `owns` accepts.
+    async fn listener_owner_keys(&self, owns: impl Fn(&str) -> bool) -> Vec<String> {
         #[cfg(target_os = "macos")]
-        {
-            self.inbound_rules
-                .read()
-                .await
-                .keys()
-                .filter(|key| Self::sandbox_port_key_owner(key).is_some())
-                .cloned()
-                .collect()
-        }
+        let owners = self.inbound_rules.read().await;
         #[cfg(not(target_os = "macos"))]
-        {
-            self.port_forwarders
-                .read()
-                .await
-                .keys()
-                .filter(|key| Self::sandbox_port_key_owner(key).is_some())
-                .cloned()
-                .collect()
-        }
+        let owners = self.port_forwarders.read().await;
+        owners.keys().filter(|key| owns(key)).cloned().collect()
+    }
+
+    /// Whether `owner` holds a live host listener.
+    async fn has_port_forwarding(&self, owner: &str) -> bool {
+        #[cfg(target_os = "macos")]
+        let owners = self.inbound_rules.read().await;
+        #[cfg(not(target_os = "macos"))]
+        let owners = self.port_forwarders.read().await;
+        owners.contains_key(owner)
+    }
+
+    /// Whether a listener owner key names a Docker container. Sandbox
+    /// exposures and Kubernetes LoadBalancer ports own listeners under keys
+    /// carrying a prefix a container ID never has.
+    fn is_container_owner(key: &str) -> bool {
+        Self::sandbox_port_key_owner(key).is_none() && !kubernetes_lb::is_owner_key(key)
     }
 
     /// Registers DNS entries for a container.
@@ -1675,28 +1918,15 @@ impl Runtime {
             .read()
             .await
             .keys()
-            .filter(|owner| !owner.starts_with("sandbox:") && !owner.starts_with("system:"))
+            .filter(|owner| {
+                !owner.starts_with("sandbox:")
+                    && !owner.starts_with("system:")
+                    && !owner.starts_with(machine_dns::MACHINE_DNS_OWNER_PREFIX)
+            })
             .cloned()
             .collect();
         ids.extend(self.container_aliases.read().await.values().cloned());
-        #[cfg(target_os = "macos")]
-        ids.extend(
-            self.inbound_rules
-                .read()
-                .await
-                .keys()
-                .filter(|key| Self::sandbox_port_key_owner(key).is_none())
-                .cloned(),
-        );
-        #[cfg(not(target_os = "macos"))]
-        ids.extend(
-            self.port_forwarders
-                .read()
-                .await
-                .keys()
-                .filter(|key| Self::sandbox_port_key_owner(key).is_none())
-                .cloned(),
-        );
+        ids.extend(self.listener_owner_keys(Self::is_container_owner).await);
         ids
     }
 
@@ -1725,6 +1955,37 @@ impl Runtime {
             }
         }
         None
+    }
+
+    /// Drops every piece of host state the System VM's containers left
+    /// behind — their listeners and ownership records, DNS entries and name
+    /// aliases — once the VM has gone down. Nothing it hosted is reachable
+    /// any more, and a listener bound for it would hold its port while
+    /// injecting into a datapath that no longer exists. The Docker layer's
+    /// reconciler rebuilds the state from the guest once it is back.
+    pub async fn retire_system_vm_container_networking(&self) {
+        let containers = self.registered_container_ids().await;
+        for id in &containers {
+            self.stop_port_forwarding_by_id(id).await;
+            self.deregister_dns_by_id(id).await;
+        }
+        if !containers.is_empty() {
+            tracing::info!(
+                containers = containers.len(),
+                "retired the stopped System VM's container networking"
+            );
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // Ownership map before the listener map, the order every other
+            // path takes.
+            let mut rules = self.inbound_rules.write().await;
+            let mut listeners = self.inbound_listeners.write().await;
+            if let Some(mut stale) = listeners.remove(DEFAULT_MACHINE_NAME) {
+                stale.stop_all().await;
+            }
+            rules.retain(|_, (machine, _)| machine != DEFAULT_MACHINE_NAME);
+        }
     }
 
     /// Stops all active port forwarders across every machine.

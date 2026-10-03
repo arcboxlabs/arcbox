@@ -336,7 +336,7 @@ mod tests {
         }];
         let paths = parse_snapshot_paths(&mounts).expect("valid bind mount");
         assert_eq!(paths.upper_dir.as_deref(), Some("/s/7/fs"));
-        assert!(paths.lower_dirs.is_empty());
+        assert_eq!(paths.lower_dirs, Vec::<String>::new());
     }
 
     #[test]

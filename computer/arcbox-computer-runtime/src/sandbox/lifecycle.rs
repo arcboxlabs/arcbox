@@ -12,6 +12,18 @@ pub(super) enum WarmPolicy {
     Disabled,
 }
 
+/// How long a handover pass waits for the startup sweep before going ahead
+/// without it.
+///
+/// The sweep bounds only its adoptions (`reconcile::ADOPT_TIMEOUT`); the kill
+/// and the CoW teardown it may run instead are unbounded. Every other verb
+/// waits for it indefinitely because a slow sweep only delays them, whereas
+/// this is the process's last chance to save the guests it holds — a pass that
+/// waits out an unbounded sweep loses all of them, including the computers the
+/// sweep has nothing to do with. Ten seconds mirrors the sweep's own
+/// per-computer bound: past that it is not about to finish.
+const SWEEP_WAIT_BUDGET: Duration = Duration::from_secs(10);
+
 impl SandboxManager {
     /// Replay a durable Create outcome without resolving its template again.
     pub async fn replay_sandbox_create(
@@ -543,28 +555,98 @@ impl SandboxManager {
     /// nothing to hand over — the same reasoning the sweep applies to
     /// `Adopt`. The `PreparedVm` a booted sandbox also holds needs no such
     /// step: it kills on drop only while it is still unconsumed.
+    ///
+    /// Each handover goes through its computer's actor (CORE-145). Detach is a
+    /// terminal transition, and the actor is what serializes those: taking the
+    /// handles straight out of the map let a handover run concurrently with the
+    /// `Stop` of the same computer — the very stop whose 30s budget is why a
+    /// composer's drain deadline expires and this gets called at all. Either
+    /// order damaged the guest: a stop reaching a detached handle waits out a
+    /// stood-down reaper and then SIGKILLs the VM it was just told had been
+    /// handed over, and its release hands TAP, the CoW device and the jail back
+    /// while the successor is adopting them.
     pub async fn detach_all(&self) -> Result<()> {
-        let live: Vec<(SandboxId, Arc<dyn VmHandle>)> = self
+        // The sweep adopts and kills VMs by the same deterministic names, so
+        // racing it is the same class of bug; `stop_sandbox` and
+        // `remove_sandbox` wait it out for exactly this reason. Neither its
+        // failure nor its slowness is propagated the way theirs is — see
+        // `SWEEP_WAIT_BUDGET`.
+        match tokio::time::timeout(SWEEP_WAIT_BUDGET, self.await_reconcile()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => warn!(%error, "the startup sweep failed; handing over anyway"),
+            Err(_) => warn!(
+                seconds = SWEEP_WAIT_BUDGET.as_secs(),
+                "the startup sweep is still running; handing over anyway"
+            ),
+        }
+        // The incarnation rides along for the one answer the mailbox cannot
+        // tell apart on its own; see the `NotFound` arms below.
+        let computers: Vec<(SandboxId, Mailbox, Uuid)> = self
             .computers
             .read()
             .unwrap()
             .iter()
-            .filter_map(|(id, computer)| {
-                let handle = computer.snapshot.borrow().handle.clone();
-                handle.map(|handle| (id.clone(), handle))
-            })
+            .map(|(id, computer)| (id.clone(), computer.mailbox.clone(), computer.incarnation))
             .collect();
 
+        // Concurrently, because the actor is already the serializer: per
+        // computer these asks are ordered by its mailbox, and between
+        // computers there is nothing to order. Sequentially, one actor that
+        // cannot reach its command loop — a teardown waiting out an in-flight
+        // boot's resource handoff parks the actor for up to two
+        // `HANDOFF_TIMEOUT`s, and a create holds its mailbox unserved until it
+        // spawns — would spend the composer's remaining deadline on behalf of
+        // every computer behind it, and those guests die unasked.
+        let mut asks = tokio::task::JoinSet::new();
+        for (id, mailbox, incarnation) in computers {
+            asks.spawn(async move {
+                let answer = mailbox.ask(&id, |reply| Command::Detach { reply }).await;
+                (id, incarnation, answer)
+            });
+        }
+
+        let mut asked = 0_usize;
         let mut failures = Vec::new();
-        for (id, handle) in live {
-            let Some(detach) = handle.detach() else {
-                continue;
+        while let Some(joined) = asks.join_next().await {
+            asked += 1;
+            let (id, incarnation, answer) = match joined {
+                Ok(answered) => answered,
+                // The ask itself reports everything the actor can do to it, so
+                // a join error is this runtime coming down mid-pass — there is
+                // no computer id left to attribute it to.
+                Err(error) => {
+                    failures.push(format!("a handover could not be asked for: {error}"));
+                    continue;
+                }
             };
-            match detach.detach().await {
-                Ok(_) => info!(sandbox_id = %id, "handed the sandbox's vm to the next process"),
+            match answer {
+                Ok(()) => {}
+                // The mailbox closed, or the reply was dropped. Both arrive as
+                // `NotFound`, and whether either cost a guest is answered by
+                // the registry rather than by the error: every clean ending
+                // unregisters — the actor's own loop tail, the record it
+                // forgets, and the reservation of a create that unwound before
+                // spawning one — so an incarnation still registered is one
+                // whose actor died without finishing. Its VM is live,
+                // unhanded, and dies with this process, which is the one thing
+                // this pass exists to report.
+                Err(VmmError::NotFound(_))
+                    if !super::still_registered(&self.computers, &id, incarnation) => {}
+                Err(VmmError::NotFound(_)) => failures.push(format!(
+                    "{id}: its actor stopped without answering, so the vm was not handed over"
+                )),
                 Err(error) => failures.push(format!("{id}: {error}")),
             }
         }
+        // Deliberately a count of what was *asked*, not of guests saved: an
+        // `Ok` also comes back from a paused, stopped or still-provisioning
+        // computer that had no VM to give up. Only `detach_vm` knows a handle
+        // really changed hands, and that is where each one is logged.
+        info!(
+            computers = asked,
+            failures = failures.len(),
+            "asked every computer to hand its vm to the next process"
+        );
         if failures.is_empty() {
             return Ok(());
         }
@@ -645,12 +727,9 @@ impl SandboxManager {
         // Size the retained artifacts after the read: the sizing stats files
         // and scans the catalog, and the snapshot is a borrow of a `watch`
         // the actor writes.
-        let artifacts = (snapshot.state == SandboxState::Paused)
-            .then(|| super::pause::paused_artifacts(&self.config, id, &snapshot));
+        let artifacts = super::storage::retained_artifacts(&self.config, id, &snapshot);
         let mut info = snapshot_to_info(id, &snapshot);
-        if let Some(artifacts) = artifacts {
-            info.storage_bytes = artifacts.storage_bytes(|id| self.checkpoint_paths(id));
-        }
+        info.storage_bytes = artifacts.storage_bytes(|id| self.checkpoint_paths(id));
         Ok(info)
     }
 
@@ -672,9 +751,11 @@ impl SandboxManager {
             .iter()
             .map(|(id, computer)| (id.clone(), computer.snapshot.borrow().clone()))
             .collect();
-        // The second pass pays one catalog listing for the whole response
-        // instead of one per paused sandbox.
-        let mut summaries: Vec<(SandboxSummary, Option<super::pause::PausedArtifacts>)> = computers
+        // The second pass sizes every row — a couple of `stat` calls each,
+        // which is what keeps List and Inspect agreeing in every state — and
+        // pays one catalog listing for the whole response instead of one per
+        // paused sandbox (only paused rows carry a checkpoint to resolve).
+        let mut summaries: Vec<(SandboxSummary, super::storage::RetainedArtifacts)> = computers
             .iter()
             .filter_map(|(id, snapshot)| {
                 if let Some(sf) = state_filter
@@ -702,32 +783,57 @@ impl SandboxManager {
                     paused_at: snapshot.paused_at,
                     storage_bytes: 0,
                 };
-                let artifacts = (snapshot.state == SandboxState::Paused)
-                    .then(|| super::pause::paused_artifacts(&self.config, id, snapshot));
+                let artifacts = super::storage::retained_artifacts(&self.config, id, snapshot);
                 Some((summary, artifacts))
             })
             .collect();
 
-        if summaries.iter().any(|(_, artifacts)| artifacts.is_some()) {
-            let catalog = self.snapshots.list_all().unwrap_or_default();
-            for (summary, artifacts) in &mut summaries {
-                if let Some(artifacts) = artifacts {
-                    summary.storage_bytes = artifacts.storage_bytes(|id| {
-                        catalog
-                            .iter()
-                            .find(|info| info.id == id)
-                            .map(snapshot_files)
-                            .unwrap_or_default()
-                    });
-                }
-            }
+        let needs_catalog = summaries
+            .iter()
+            .any(|(_, artifacts)| artifacts.has_checkpoint());
+        let catalog = if needs_catalog {
+            self.snapshots.list_all().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        for (summary, artifacts) in &mut summaries {
+            summary.storage_bytes = artifacts.storage_bytes(|id| {
+                catalog
+                    .iter()
+                    .find(|info| info.id == id)
+                    .map(snapshot_files)
+                    .unwrap_or_default()
+            });
         }
         Ok(summaries.into_iter().map(|(summary, _)| summary).collect())
     }
 
     /// Subscribe to sandbox lifecycle events.
+    ///
+    /// **Delivery is best-effort — treat the stream as a latency
+    /// optimization over polling, never as an authoritative log.** Events
+    /// published before this call are gone (with no subscriber at all they
+    /// are discarded outright), and a subscriber that falls more than the
+    /// channel capacity behind gets
+    /// [`RecvError::Lagged`](tokio::sync::broadcast::error::RecvError::Lagged)
+    /// with the overwritten events lost.
+    ///
+    /// What makes the loss *detectable* is [`SandboxEvent::sequence`]
+    /// (CORE-147): 1-based, global across all sandboxes of this manager,
+    /// and contiguous in the order received — so a subscriber that sees
+    /// `sequence` jump by more than one has missed events (including any
+    /// history from before it subscribed) and should fall back to
+    /// [`Self::inspect_sandbox`] / [`Self::list_sandboxes`] to re-derive
+    /// state instead of carrying what it has. That test is conclusive
+    /// precisely because this subscription is unfiltered; a downstream
+    /// view that filters it (the wire API's per-sandbox subscription)
+    /// sees legitimate gaps and must not read them as loss. The counter is not
+    /// persisted: a new manager numbers from 1 again, and events emitted
+    /// while no manager ran were never numbered at all — a consumer that
+    /// outlives the manager must reconcile on reconnect regardless of
+    /// sequence.
     pub fn subscribe_events(&self) -> broadcast::Receiver<SandboxEvent> {
-        self.events_tx.subscribe()
+        self.events.subscribe()
     }
 
     /// Verify the computer is `Ready` and return the agent inside it.
@@ -798,7 +904,7 @@ fn snapshot_to_info(id: &SandboxId, snapshot: &ComputerSnapshot) -> SandboxInfo 
         last_exit_status: snapshot.last_exit_status,
         error: snapshot.error.clone(),
         paused_at: snapshot.paused_at,
-        // Filled by the caller for paused computers (it owns the paths).
+        // Filled by the caller in every state (it owns the paths).
         storage_bytes: 0,
         ttl_deadline: snapshot.deadlines.ttl,
         idle_timeout_seconds: snapshot.deadlines.idle_timeout_seconds,
