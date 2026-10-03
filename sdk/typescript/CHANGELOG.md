@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/arcboxlabs/arcbox/compare/sdk-typescript-v0.1.4...sdk-typescript-v0.1.5) (2026-10-03)
+
+
+### Bug Fixes
+
+* **deps:** update dependencies for disclosed vulnerabilities ([#709](https://github.com/arcboxlabs/arcbox/issues/709)) ([479d630](https://github.com/arcboxlabs/arcbox/commit/479d630d19664363a2ef4a11f06ab01cd58814ec))
+
 ## [0.1.4](https://github.com/arcboxlabs/arcbox/compare/sdk-typescript-v0.1.3...sdk-typescript-v0.1.4) (2026-10-01)
 
 
