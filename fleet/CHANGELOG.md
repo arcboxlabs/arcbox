@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.7](https://github.com/arcboxlabs/arcbox/compare/fleet-agent-v0.1.6...fleet-agent-v0.1.7) (2026-10-03)
+
+
+### Features
+
+* **fleet-agent:** complete the host facts after the handshake instead of waiting for them ([06775e1](https://github.com/arcboxlabs/arcbox/commit/06775e1de1215c5730fe3b480697b9bda14d6a32))
+
+
+### Bug Fixes
+
+* **fleet-agent:** probe host facts off the runtime and never let them hold an attach ([963541a](https://github.com/arcboxlabs/arcbox/commit/963541a98dff267e31dcc751d28fd3a1636f14e6))
+
+
+### Tests
+
+* **fleet:** compare emptiness assertions against an empty value ([b049d30](https://github.com/arcboxlabs/arcbox/commit/b049d30c4a0632847510944c97ff61b6ce8b8e4c))
+
 ## [0.1.6](https://github.com/arcboxlabs/arcbox/compare/fleet-agent-v0.1.5...fleet-agent-v0.1.6) (2026-09-28)
 
 
