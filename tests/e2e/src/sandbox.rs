@@ -82,12 +82,12 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// The same, for a loop whose observation runs a command *inside* the
 /// sandbox being timed.
 ///
-/// Neither interval observes anything host-local — `Inspect` is an RPC that
-/// crosses to the manager in the System VM. The difference is what happens
-/// at the far end: a guest `exec` starts a process in the nested VM under
-/// test, which costs tens of milliseconds and adds load to the very thing
-/// the phase is measuring. Polling it at [`POLL_INTERVAL`] would not observe
-/// sooner; it would only make the measurement worse.
+/// `Inspect` loops cross to the manager in the System VM; the port-release
+/// loop observes a host-local socket bind. A guest `exec` starts a process
+/// in the nested VM under test, which costs tens of milliseconds and adds
+/// load to the phase being measured. Polling guest `exec` at
+/// [`POLL_INTERVAL`] would not observe sooner; the extra process starts
+/// would make the measurement worse.
 const GUEST_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 pub struct SandboxSmokeConfig {
