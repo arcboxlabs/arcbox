@@ -24,6 +24,74 @@ At startup, the agent detects and launches the bundled runtime stack
 (`containerd` / `dockerd` / `runc`) so the host-side Docker API proxy can
 target a healthy guest `dockerd` endpoint.
 
+The proxy itself listens on vsock port 2375 and relays each connection to
+`/var/run/docker.sock`. The vsock leg is framed with
+`arcbox_transport::vsock::HalfCloseStream` (agent protocol v5): a
+zero-length frame is one side's EOF, which is how a `docker run -i`'s stdin
+EOF reaches the container when the vsock fd itself cannot half-close, and a
+frame with the top header bit set grants the peer window, which is how a
+paused `docker attach` backs up into dockerd instead of leaving the vsock
+unread and stalling the VM.
+
+## Published Ports
+
+Host-side, a published port is a userspace listener on the Mac that relays
+into the guest at its uplink address. dockerd's own DNAT rule for a binding
+pinned to a specific host address (`-p 127.0.0.1:8080:80`) carries
+`-d 127.0.0.1` and would never match that relayed traffic, so the agent
+watches Docker container events and mirrors every such binding with a
+PREROUTING rule matching the uplink interface instead (`publish_mirror.rs`).
+The rules are tagged `arcbox-publish:<container id>`, removed when the
+container dies, and swept at agent startup.
+
+## Distro Machines
+
+A distro machine boots through the machine boot shim, which runs
+`arcbox-agent machine-init` before the distro's own init. That one-shot step
+gives the machine the identity and network the distro cannot know on its own
+(`init.rs`, `machine_identity.rs`, `boot_done.rs`):
+
+- the machine name from `arcbox.machine_name=` on the kernel command line
+  becomes the hostname — the kernel nodename, `/etc/hostname`, and a
+  `127.0.1.1` line in `/etc/hosts` — so every init re-applies it at boot;
+- the uplink (`eth0`, ArcBox's own network stack) gets its address by DHCP
+  and a default route tagged `proto 200`; the boot-done hook removes that
+  route once the distro's network manager has installed its own next to it,
+  so a machine ends up with exactly one default route, via the uplink;
+- the bridge NIC (`eth1`, the vmnet interface the Mac reaches directly) gets
+  an address and nothing else, and is declared unmanaged to systemd-networkd
+  and NetworkManager by MAC so the distro never routes out of it. The agent
+  reports that address as `SystemInfo.bridge_ip_address`, and the daemon
+  publishes `<name>.arcbox.local` there while the machine runs.
+
+The agent in a machine then serves RPC and nothing else: none of the System
+VM services below run there.
+
+## Container Domains
+
+`http://<container>.arcbox.local` (and `<service>.<project>.arcbox.local`)
+resolves to the container's IP, and the agent makes port 80 there reach the
+port the container actually serves (`domains/`). The HTTP port is, in order:
+the `dev.arcbox.http-port` label (a port number, or `off`); 80 when the
+container listens on it; the lowest listening port the container exposes;
+the lowest listening port. 443 never counts. Listeners are read from
+`/proc/<pid>/net/tcp{,6}` of the container's init process, repeatedly for two
+minutes after `start` because servers bind late. The agent then DNATs port 80
+of each of the container's IPv4 addresses to that port in nat PREROUTING,
+tagged `arcbox-domain:<container id>`, removes the rules on `die`/`destroy`,
+and sweeps a previous agent's at startup. A rule matches the destination
+only, so it serves both the Mac (routed in over the bridge NIC) and sibling
+containers (switched on a Docker bridge, which reaches iptables through the
+kernel's built-in `br_netfilter`).
+
+`https://` works the same way once the daemon has written its local CA to
+`/arcbox/tls/` (`arcbox-local-ca`): port 443 of each container with an HTTP
+port is REDIRECTed to a proxy on port 61443 of the VM's namespace, unless the
+container listens on 443 itself. The proxy finds the container the client
+dialled through conntrack, presents a certificate minted for the SNI name, and
+relays plain HTTP/1.1 to the container's HTTP port. Port 61443 is therefore
+not available to container publishes.
+
 ## Cross-Compilation
 
 ```bash

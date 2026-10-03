@@ -503,11 +503,8 @@ mod tests {
             &self,
         ) -> std::pin::Pin<
             Box<
-                dyn Future<
-                        Output = Result<
-                            hyper_util::rt::TokioIo<arcbox_transport::vsock::VsockStream>,
-                        >,
-                    > + Send
+                dyn Future<Output = Result<hyper_util::rt::TokioIo<super::super::GuestStream>>>
+                    + Send
                     + '_,
             >,
         > {

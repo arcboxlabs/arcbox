@@ -46,7 +46,7 @@ mod tcp;
 pub use addr::{VsockAddr, VsockHostConnections};
 pub use backend::{LoopbackBackend, VsockBackend};
 pub use connection::{ConnectionState, VsockConnection};
-pub use device::{VirtioVsock, VsockConfig};
+pub use device::{RxRound, VirtioVsock, VsockConfig};
 #[cfg(unix)]
 pub use host::HostVsockBackend;
 pub use protocol::{VsockHeader, VsockOp};

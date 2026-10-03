@@ -428,6 +428,18 @@ impl InboundListenerManager {
             self.remove_rule(ip, port, protocol).await;
         }
     }
+
+    /// How many listeners are live.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.listeners.len()
+    }
+
+    /// Whether no listener is live.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.listeners.is_empty()
+    }
 }
 
 // ---------------------------------------------------------------------------

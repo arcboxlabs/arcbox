@@ -385,7 +385,7 @@ impl Vmm {
         };
 
         // 5. Build the datapath and spawn it on the tokio runtime.
-        let datapath = NetworkDatapath::new(
+        let mut datapath = NetworkDatapath::new(
             host_fd,
             egress,
             reply_rx,
@@ -398,6 +398,9 @@ impl Vmm {
             cancel,
             net_mtu,
         );
+        if let Some(env) = self.proxy_env.clone() {
+            datapath.set_proxy_env(env);
+        }
 
         let runtime = tokio::runtime::Handle::try_current().map_err(|e| {
             VmmError::Device(format!(
@@ -613,6 +616,16 @@ impl Vmm {
                 vm.connect_vsock(port).map_err(VmmError::Hypervisor)
             }
         }
+    }
+
+    /// Duplicates the host read ends of the VZ console pipes for the
+    /// engine's serial drain. `None` on the HV backend, whose console is a
+    /// virtio device this VMM drains itself (`guest_console` target).
+    pub fn dup_serial_readers(&self) -> Result<Option<arcbox_hypervisor::darwin::SerialReaders>> {
+        self.darwin_vm
+            .as_ref()
+            .map(|vm| vm.dup_serial_readers().map_err(VmmError::Hypervisor))
+            .transpose()
     }
 
     /// Reads console output (hvc0) from the VM.

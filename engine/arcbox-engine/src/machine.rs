@@ -5,7 +5,8 @@
 
 use crate::error::{EngineError, Result};
 use crate::persistence::MachinePersistence;
-use crate::vm::{SharedDirConfig, VmConfig, VmId, VmManager};
+use crate::vm::{HostNetwork, SharedDirConfig, VmConfig, VmId, VmManager};
+use arcbox_connect::v1::{EnsureMachineExportRequest, EnsureMachineExportResponse};
 // Only the macOS `connect_agent` dials the agent port — the vsock helper it
 // rides is macOS-only.
 #[cfg(target_os = "macos")]
@@ -16,6 +17,8 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+#[cfg(target_os = "macos")]
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 /// Default machine name used for container operations.
@@ -36,8 +39,16 @@ pub enum MachineState {
     Stopped,
 }
 
+pub mod archive;
+mod clone;
+#[cfg(target_os = "macos")]
+mod serial;
 #[cfg(test)]
 mod tests;
+mod transfer;
+
+pub use clone::clone_file;
+use transfer::DataDisk;
 
 /// Machine information.
 #[derive(Debug, Clone)]
@@ -72,14 +83,32 @@ pub struct MachineInfo {
     pub ssh_key_path: Option<PathBuf>,
     /// Guest IP address (reported by agent via vsock).
     pub ip_address: Option<String>,
+    /// Address of the guest's bridge NIC, the one the Mac reaches directly
+    /// and `<name>.arcbox.local` resolves to. Reported by the agent at
+    /// readiness; `None` while stopped or when the guest has no bridge NIC.
+    pub bridge_ip_address: Option<String>,
     /// macOS hypervisor backend this machine boots on.
     pub backend: arcbox_vmm::VmBackend,
+    /// Whether the guest may run its own hypervisor.
+    pub nested_virt: bool,
     /// Creation time.
     pub created_at: DateTime<Utc>,
     /// Last successful start time.
     pub started_at: Option<DateTime<Utc>>,
     /// Host directories shared into the machine (shim machines).
     pub mounts: Vec<MachineMount>,
+}
+
+/// The outcome of [`MachineManager::set_resources`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MachineResize {
+    /// vCPUs the machine boots with from now on.
+    pub cpus: u32,
+    /// Memory the machine boots with from now on, in MiB.
+    pub memory_mb: u64,
+    /// The machine is running with its previous size; the new one applies
+    /// when it is next started.
+    pub restart_required: bool,
 }
 
 /// A pulled distro rootfs image a machine boots from.
@@ -160,6 +189,12 @@ pub struct MachineConfig {
     /// drops it because Hypervisor.framework does not host the Rosetta
     /// share. Defaults to `false`.
     pub enable_rosetta: bool,
+    /// Whether the guest may run its own hypervisor (sandboxes).
+    ///
+    /// Only the System VM sets this. Hypervisor.framework has about a dozen
+    /// nested-capable address spaces per host, and a machine that pins one
+    /// for nothing eventually makes every later VM start fail.
+    pub nested_virt: bool,
 }
 
 impl Default for MachineConfig {
@@ -178,6 +213,7 @@ impl Default for MachineConfig {
             distro_version: None,
             backend: arcbox_vmm::VmBackend::default(),
             enable_rosetta: false,
+            nested_virt: false,
         }
     }
 }
@@ -195,28 +231,59 @@ const fn boot_console() -> &'static str {
     }
 }
 
+/// Keeps the kernel's `eth0` name for the machine's NIC.
+///
+/// The mirrored images are the linuxcontainers `default` variant, whose
+/// network config — networkd's `eth0.network`, netplan, `ifcfg-eth0`,
+/// ifupdown — is written for the name a container's NIC has. In a VM, udev's
+/// predictable naming renames the virtio NIC to `enp0s1`, that config then
+/// matches nothing, and the distro never takes over DHCP, the default route
+/// or its resolver's upstream from what the boot shim set up before init.
+const KEEP_KERNEL_NIC_NAMES: &str = "net.ifnames=0";
+
+/// Caps the kernel console at `err` and above, matching the
+/// `console_loglevel` Ubuntu's image already sets in `sysctl.d`.
+///
+/// `console=hvc0` (above) routes every kernel `printk` to the host pipe. A
+/// distro whose kernel default is the noisier `7` — Debian is the notable
+/// one — then streams `info`-level records there forever: an idle machine's
+/// systemd unit churn alone emits an `audit:` line on `hvc0` every unit
+/// start/stop (~285 KiB/day, measured 2026-09-29), while Ubuntu at `4` stays
+/// silent after boot. The host now drains that pipe per machine
+/// (`machine::serial`), so a full pipe no longer wedges the VM, but a
+/// machine that trickles for nothing still costs the drain its idle backoff.
+/// Pinning the level on the command line brings every distro down to
+/// Ubuntu's near-silent console regardless of its own default. `err` and
+/// above still reach the console, so a genuine boot failure is not hidden.
+const QUIET_KERNEL_CONSOLE: &str = "loglevel=4";
+
 /// Kernel command line for a shim-less distro machine: root on the read-only
 /// rootfs image at vda (custom-kernel testing).
 fn default_distro_cmdline(rootfs_format: &str) -> String {
     let console = boot_console();
-    format!("console={console} root=/dev/vda ro rootfstype={rootfs_format} earlycon")
+    format!(
+        "console={console} root=/dev/vda ro rootfstype={rootfs_format} earlycon \
+         {KEEP_KERNEL_NIC_NAMES} {QUIET_KERNEL_CONSOLE}"
+    )
 }
 
 /// Kernel command line for the machine boot shim: the shim EROFS boots as
 /// root and stages the distro rootfs + data disk named by the `arcbox.*`
 /// keys (see `../company/engineering/arcbox/plans/machine-boot-shim.md`). User mounts ride
-/// along as a `tag=guest_path[:ro]` table the shim replays.
-fn machine_shim_cmdline(rootfs_format: &str, mounts: &[MachineMount]) -> String {
+/// along as a `tag=guest_path[:ro]` table the shim replays, and the
+/// machine's hostname ([`machine_hostname`]) rides along for the shim to
+/// give the guest.
+fn machine_shim_cmdline(hostname: &str, rootfs_format: &str, mounts: &[MachineMount]) -> String {
     use arcbox_constants::cmdline::{
-        MACHINE_DATA_KEY, MACHINE_INIT_PATH, MACHINE_MOUNTS_KEY, MACHINE_ROOTFS_KEY,
-        MACHINE_ROOTFS_TYPE_KEY,
+        MACHINE_DATA_KEY, MACHINE_INIT_PATH, MACHINE_MOUNTS_KEY, MACHINE_NAME_KEY,
+        MACHINE_ROOTFS_KEY, MACHINE_ROOTFS_TYPE_KEY,
     };
     let console = boot_console();
     let mut cmdline = format!(
         "console={console} root=/dev/vda ro rootfstype=erofs earlycon \
-         init={MACHINE_INIT_PATH} \
+         {KEEP_KERNEL_NIC_NAMES} {QUIET_KERNEL_CONSOLE} init={MACHINE_INIT_PATH} \
          {MACHINE_ROOTFS_KEY}/dev/vdb {MACHINE_ROOTFS_TYPE_KEY}{rootfs_format} \
-         {MACHINE_DATA_KEY}/dev/vdc"
+         {MACHINE_DATA_KEY}/dev/vdc {MACHINE_NAME_KEY}{hostname}"
     );
     if !mounts.is_empty() {
         let table = mounts
@@ -238,6 +305,91 @@ fn machine_shim_cmdline(rootfs_format: &str, mounts: &[MachineMount]) -> String 
 /// VirtioFS tag for the machine's `i`-th user mount.
 fn mount_tag(index: usize) -> String {
     format!("m{index}")
+}
+
+/// The VirtioFS shares every machine gets, plus one per user mount.
+///
+/// The `arcbox` tag shares the data directory (boot assets, logs, runtime);
+/// `users` shares `/Users` so macOS paths work transparently in the guest
+/// (`docker run -v /Users/foo/project:/app` just works), and `private`
+/// shares `/private` for the symlink targets under it. User mounts follow
+/// as `m0`, `m1`, …, the tags the cmdline mount table names.
+fn vm_shared_dirs(data_dir: &std::path::Path, mounts: &[MachineMount]) -> Vec<SharedDirConfig> {
+    let mut shared_dirs = vec![SharedDirConfig::new(
+        data_dir.to_string_lossy().to_string(),
+        TAG_ARCBOX,
+    )];
+    if std::path::Path::new(MOUNT_USERS).is_dir() {
+        shared_dirs.push(SharedDirConfig::new(MOUNT_USERS, TAG_USERS));
+    }
+    if std::path::Path::new(MOUNT_PRIVATE).is_dir() {
+        shared_dirs.push(SharedDirConfig::new(MOUNT_PRIVATE, TAG_PRIVATE));
+    }
+    for (i, mount) in mounts.iter().enumerate() {
+        let mut share = SharedDirConfig::new(mount.host_path.clone(), mount_tag(i));
+        share.read_only = mount.read_only;
+        shared_dirs.push(share);
+    }
+    shared_dirs
+}
+
+/// Checks that `name` is free to register and returns the hostname it would
+/// get.
+///
+/// The hostname is a key too: `my_box` and `my-box` would answer to one
+/// `my-box.arcbox.local`, and the DNS table keeps whichever started last,
+/// so a user's `ssh` lands on the wrong machine with nothing to say why.
+/// The second name is refused instead.
+fn reserve_hostname(machines: &HashMap<String, MachineInfo>, name: &str) -> Result<String> {
+    let hostname = machine_hostname(name)?;
+    if machines.contains_key(name) {
+        return Err(EngineError::already_exists(name.to_owned()));
+    }
+    if let Some(other) = machines
+        .keys()
+        .find(|existing| machine_hostname(existing).ok().as_deref() == Some(hostname.as_str()))
+    {
+        return Err(EngineError::already_exists(format!(
+            "machine name '{name}' would take hostname '{hostname}', which machine '{other}' \
+             already has"
+        )));
+    }
+    Ok(hostname)
+}
+
+/// The hostname a machine named `name` gets, which is also the label of
+/// its `<hostname>.arcbox.local` record and what the shim is handed on the
+/// kernel command line.
+///
+/// A machine name may carry `_` and `.`, which a DNS label may not; both
+/// become `-`, so `my_box.v2` answers as `my-box-v2`. What remains must be
+/// a label (RFC 1123): 1 to 63 ASCII letters, digits and hyphens, not
+/// starting or ending with a hyphen. Two names that map to one hostname
+/// share the DNS record; the ownership table keeps the latest.
+///
+/// # Errors
+///
+/// Returns an error when the name cannot become a hostname.
+pub fn machine_hostname(name: &str) -> Result<String> {
+    let hostname: String = name
+        .chars()
+        .map(|c| if c == '_' || c == '.' { '-' } else { c })
+        .collect();
+    let is_label = !hostname.is_empty()
+        && hostname.len() <= 63
+        && hostname
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        && !hostname.starts_with('-')
+        && !hostname.ends_with('-');
+    if is_label {
+        Ok(hostname)
+    } else {
+        Err(EngineError::config(format!(
+            "machine name '{name}' cannot be a hostname: use 1-63 letters, digits, \
+             hyphens, underscores and dots, not starting or ending with a separator"
+        )))
+    }
 }
 
 /// Validates a user mount: the host path must exist and the guest path must
@@ -273,12 +425,16 @@ pub struct MachineManager {
     data_dir: PathBuf,
     /// Machine-specific directory (`data_dir/machines`/).
     machines_dir: PathBuf,
-    /// Shared DNS hosts table from NetworkManager, passed to VMM on start.
-    shared_dns_hosts: Option<std::sync::Arc<arcbox_dns::LocalHostsTable>>,
+    /// Host networking every machine's datapath is wired to on start.
+    host_network: HostNetwork,
     /// System-wide event bus. User-machine lifecycle events are published here
     /// so watchers (`MachineService.Events`) see them; the default System VM's
     /// events are published by its own lifecycle actor instead.
     event_bus: crate::event::EventBus,
+    /// The serial drain of every running machine, by name (see [`serial`]).
+    /// Dropping an entry stops its drain.
+    #[cfg(target_os = "macos")]
+    serial_drains: Mutex<HashMap<String, serial::DrainHandle>>,
 }
 
 impl MachineManager {
@@ -287,26 +443,12 @@ impl MachineManager {
     pub fn new(
         vm_manager: Arc<VmManager>,
         data_dir: PathBuf,
-        shared_dns_hosts: Option<std::sync::Arc<arcbox_dns::LocalHostsTable>>,
+        host_network: HostNetwork,
         event_bus: crate::event::EventBus,
     ) -> Self {
         let machines_dir = data_dir.join("machines");
         let persistence = MachinePersistence::new(&machines_dir);
-
-        // Create the default shared directory config for VirtioFS.
-        // "arcbox" shares the data_dir; "users" shares /Users for transparent paths.
-        let mut shared_dirs = vec![SharedDirConfig::new(
-            data_dir.to_string_lossy().to_string(),
-            TAG_ARCBOX,
-        )];
-        let users_dir = std::path::Path::new(MOUNT_USERS);
-        if users_dir.is_dir() {
-            shared_dirs.push(SharedDirConfig::new(MOUNT_USERS, TAG_USERS));
-        }
-        let private_dir = std::path::Path::new(MOUNT_PRIVATE);
-        if private_dir.is_dir() {
-            shared_dirs.push(SharedDirConfig::new(MOUNT_PRIVATE, TAG_PRIVATE));
-        }
+        Self::sweep_staging(&machines_dir);
 
         // Load persisted machines
         let mut machines = HashMap::new();
@@ -322,20 +464,15 @@ impl MachineManager {
             // Reconstruct VmConfig from persisted data, including the
             // machine's own VirtioFS shares (tags must match what the
             // persisted cmdline mount table references).
-            let mut vm_shared_dirs = shared_dirs.clone();
-            for (i, mount) in persisted.mounts.iter().enumerate() {
-                let mut share = SharedDirConfig::new(mount.host_path.clone(), mount_tag(i));
-                share.read_only = mount.read_only;
-                vm_shared_dirs.push(share);
-            }
             let vm_config = VmConfig {
                 cpus: persisted.cpus,
                 memory_mb: persisted.memory_mb,
                 kernel: persisted.kernel.clone(),
                 cmdline: persisted.cmdline.clone(),
-                shared_dirs: vm_shared_dirs,
+                shared_dirs: vm_shared_dirs(&data_dir, &persisted.mounts),
                 block_devices: persisted.block_devices.clone(),
                 backend: persisted.backend,
+                nested_virt: persisted.nested_virt,
                 ..Default::default()
             };
 
@@ -357,7 +494,9 @@ impl MachineManager {
                     disk_path: persisted.disk_path.clone().map(PathBuf::from),
                     ssh_key_path: persisted.ssh_key_path.clone().map(PathBuf::from),
                     ip_address: persisted.ip_address.clone(),
+                    bridge_ip_address: persisted.bridge_ip_address.clone(),
                     backend: persisted.backend,
+                    nested_virt: persisted.nested_virt,
                     created_at: persisted.created_at,
                     started_at: persisted.started_at,
                     mounts: persisted.mounts.clone(),
@@ -386,8 +525,10 @@ impl MachineManager {
             persistence,
             data_dir,
             machines_dir,
-            shared_dns_hosts,
+            host_network,
             event_bus,
+            #[cfg(target_os = "macos")]
+            serial_drains: Mutex::new(HashMap::new()),
         }
     }
 
@@ -412,6 +553,13 @@ impl MachineManager {
     ///
     /// Returns an error if the machine cannot be created.
     pub async fn create(&self, config: MachineConfig) -> Result<String> {
+        self.create_machine(config, DataDisk::Sparse)
+    }
+
+    /// Registers a machine from `config`, provisioning its data disk as
+    /// `data_disk` says: fresh and sparse for `create`, moved in from a
+    /// staging directory for `import`.
+    fn create_machine(&self, config: MachineConfig, data_disk: DataDisk) -> Result<String> {
         // Hold the write lock for the entire create operation to prevent TOCTOU
         // races: without this, two concurrent creates with the same name could
         // both pass the existence check before either inserts. `create` is rare
@@ -422,30 +570,10 @@ impl MachineManager {
             .machines
             .write()
             .map_err(|_| EngineError::LockPoisoned)?;
-
-        if machines.contains_key(&config.name) {
-            return Err(EngineError::already_exists(config.name));
-        }
+        let hostname = reserve_hostname(&machines, &config.name)?;
 
         let machine_dir = self.machines_dir.join(&config.name);
         std::fs::create_dir_all(&machine_dir)?;
-
-        // Set up shared directories for VirtioFS.
-        // "arcbox" tag provides internal data (boot assets, logs, runtime).
-        // "users" tag shares /Users so macOS paths work transparently in guest
-        // (e.g. `docker run -v /Users/foo/project:/app` just works).
-        let mut shared_dirs = vec![SharedDirConfig::new(
-            self.data_dir.to_string_lossy().to_string(),
-            TAG_ARCBOX,
-        )];
-        let users_dir = std::path::Path::new(MOUNT_USERS);
-        if users_dir.is_dir() {
-            shared_dirs.push(SharedDirConfig::new(MOUNT_USERS, TAG_USERS));
-        }
-        let private_dir = std::path::Path::new(MOUNT_PRIVATE);
-        if private_dir.is_dir() {
-            shared_dirs.push(SharedDirConfig::new(MOUNT_PRIVATE, TAG_PRIVATE));
-        }
 
         // User mounts become per-machine VirtioFS shares (tags m0, m1, …);
         // the shim replays the cmdline mount table into the new root. Only
@@ -457,13 +585,11 @@ impl MachineManager {
                     "mounts require a shim-booted distro machine",
                 ));
             }
-            for (i, mount) in config.mounts.iter().enumerate() {
+            for mount in &config.mounts {
                 validate_mount(mount)?;
-                let mut share = SharedDirConfig::new(mount.host_path.clone(), mount_tag(i));
-                share.read_only = mount.read_only;
-                shared_dirs.push(share);
             }
         }
+        let shared_dirs = vm_shared_dirs(&self.data_dir, &config.mounts);
 
         // Distro machines boot the pulled rootfs image (behind the boot shim
         // when configured) with a sparse per-machine data disk; plain VMs
@@ -481,11 +607,17 @@ impl MachineManager {
                          kernel (pass --kernel)",
                     ));
                 }
-                let data_disk = machine_dir.join("data.img");
+                let data_disk_path = machine_dir.join(clone::DATA_DISK);
+                if let DataDisk::Staged(staged) = &data_disk {
+                    std::fs::rename(staged, &data_disk_path)?;
+                }
+                // Never shrinks an existing image, so a restored disk keeps
+                // its size and only a larger `disk_gb` grows it.
                 crate::vm::ensure_sparse_block_image(
-                    &data_disk,
+                    &data_disk_path,
                     config.disk_gb.saturating_mul(1024 * 1024 * 1024),
                 )?;
+                let data_disk = data_disk_path;
                 let mut devices = Vec::new();
                 if let Some(shim) = &rootfs.shim {
                     devices.push(crate::vm::BlockDeviceConfig {
@@ -511,18 +643,25 @@ impl MachineManager {
                 });
                 let cmdline = config.cmdline.clone().or_else(|| {
                     Some(match &rootfs.shim {
-                        Some(_) => machine_shim_cmdline(&rootfs.format, &config.mounts),
+                        Some(_) => machine_shim_cmdline(&hostname, &rootfs.format, &config.mounts),
                         None => default_distro_cmdline(&rootfs.format),
                     })
                 });
                 (kernel, devices, cmdline, Some(data_disk))
             }
-            None => (
-                config.kernel.clone(),
-                config.block_devices.clone(),
-                config.cmdline.clone(),
-                None,
-            ),
+            None => {
+                if matches!(data_disk, DataDisk::Staged(_)) {
+                    return Err(EngineError::config(
+                        "a restored data disk needs a distro rootfs to boot under",
+                    ));
+                }
+                (
+                    config.kernel.clone(),
+                    config.block_devices.clone(),
+                    config.cmdline.clone(),
+                    None,
+                )
+            }
         };
 
         // Create underlying VM
@@ -534,6 +673,7 @@ impl MachineManager {
             shared_dirs,
             block_devices: block_devices.clone(),
             rosetta: config.enable_rosetta,
+            nested_virt: config.nested_virt,
             backend: config.backend,
             ..Default::default()
         };
@@ -555,24 +695,33 @@ impl MachineManager {
             disk_path,
             ssh_key_path: None,
             ip_address: None,
+            bridge_ip_address: None,
             backend: config.backend,
+            nested_virt: config.nested_virt,
             created_at: Utc::now(),
             started_at: None,
             mounts: config.mounts,
         };
+        self.register(&mut machines, info)
+    }
 
-        // Persist the machine config
+    /// Records a newly built machine: persists it, adds it to the registry
+    /// and publishes `MachineCreated`. The caller holds the registry's write
+    /// lock from its name check through this call, so no other create can
+    /// take the name in between.
+    fn register(
+        &self,
+        machines: &mut HashMap<String, MachineInfo>,
+        info: MachineInfo,
+    ) -> Result<String> {
+        let name = info.name.clone();
         self.persistence.save(&info)?;
-
-        machines.insert(config.name.clone(), info);
-
+        machines.insert(name.clone(), info);
         self.publish_event(
-            &config.name,
-            crate::event::Event::MachineCreated {
-                name: config.name.clone(),
-            },
+            &name,
+            crate::event::Event::MachineCreated { name: name.clone() },
         );
-        Ok(config.name)
+        Ok(name)
     }
 
     /// Starts a machine.
@@ -583,7 +732,11 @@ impl MachineManager {
     /// # Errors
     ///
     /// Returns an error if the machine cannot be started.
-    pub async fn start(&self, name: &str) -> Result<()> {
+    ///
+    /// On macOS this also starts the machine's serial drain, which keeps the
+    /// guest's console pipes empty for as long as it runs; see [`serial`] for
+    /// why a VM cannot go without one.
+    pub async fn start(self: &Arc<Self>, name: &str) -> Result<()> {
         let (vm_id, cid) = self.assign_cid_for_start(name)?;
 
         // Check if this is a distro-based machine VM.
@@ -596,8 +749,7 @@ impl MachineManager {
             .is_some();
 
         // Start underlying VM
-        self.vm_manager
-            .start(&vm_id, self.shared_dns_hosts.clone())?;
+        self.vm_manager.start(&vm_id, self.host_network.clone())?;
 
         // Update machine state
         let started_at = Utc::now();
@@ -611,16 +763,21 @@ impl MachineManager {
                 machine.state = MachineState::Running;
                 machine.cid = Some(cid);
                 machine.ip_address = None;
+                machine.bridge_ip_address = None;
                 machine.started_at = Some(started_at);
 
                 tracing::info!("Machine '{}' started with CID {}", name, cid);
             }
         }
 
+        #[cfg(target_os = "macos")]
+        self.start_serial_drain(name, &vm_id);
+
         // Update persisted state (single read-modify-write)
         if let Err(e) = self.persistence.update(name, |m| {
             m.state = MachineState::Running.into();
             m.ip_address = None;
+            m.bridge_ip_address = None;
             m.started_at = Some(started_at);
         }) {
             tracing::warn!("Failed to persist state for machine '{}': {}", name, e);
@@ -668,7 +825,7 @@ impl MachineManager {
         let mut delay_ms = INITIAL_DELAY_MS;
         let mut attempt: u32 = 0;
 
-        let ip = loop {
+        let addresses = loop {
             attempt += 1;
 
             let probed = match self.connect_agent(name) {
@@ -681,8 +838,8 @@ impl MachineManager {
                     None
                 }
             };
-            if let Some(ip) = probed {
-                break ip;
+            if let Some(addresses) = probed {
+                break addresses;
             }
 
             if std::time::Instant::now() >= deadline {
@@ -702,13 +859,22 @@ impl MachineManager {
                 .write()
                 .map_err(|_| EngineError::LockPoisoned)?;
             if let Some(machine) = machines.get_mut(name) {
-                machine.ip_address = Some(ip.clone());
+                machine.ip_address = Some(addresses.ip.clone());
+                machine.bridge_ip_address.clone_from(&addresses.bridge_ip);
             }
         }
-        if let Err(e) = self.persistence.update_ip(name, Some(&ip)) {
+        if let Err(e) = self.persistence.update(name, |m| {
+            m.ip_address = Some(addresses.ip.clone());
+            m.bridge_ip_address.clone_from(&addresses.bridge_ip);
+        }) {
             tracing::warn!("Failed to persist IP for machine '{}': {}", name, e);
         }
-        tracing::info!("Machine '{}' ready with IP {}", name, ip);
+        tracing::info!(
+            machine = name,
+            ip = %addresses.ip,
+            bridge_ip = addresses.bridge_ip.as_deref().unwrap_or("none"),
+            "machine ready"
+        );
         Ok(())
     }
 
@@ -932,53 +1098,207 @@ impl MachineManager {
         }
     }
 
-    /// Reads serial console output for a running machine (macOS only).
-    #[cfg(target_os = "macos")]
-    pub fn read_console_output(&self, name: &str) -> Result<String> {
-        let machines = self
-            .machines
-            .read()
-            .map_err(|_| EngineError::LockPoisoned)?;
-
-        let machine = machines
-            .get(name)
-            .ok_or_else(|| EngineError::not_found(name.to_string()))?;
-
-        if machine.state != MachineState::Running {
-            return Err(EngineError::invalid_state(format!(
-                "machine '{name}' is not running"
-            )));
+    /// Asks a running machine's agent for its addresses and records the
+    /// bridge NIC's on the machine, returning it.
+    ///
+    /// Distro machines record it in their own readiness probe; the System
+    /// VM's readiness lives in the lifecycle actor, which calls this once
+    /// the agent answers so `default.arcbox.local` can be published from
+    /// the same record as every other machine. Same transport dispatch as
+    /// [`Self::ping_agent`].
+    ///
+    /// # Errors
+    /// Returns an error if the machine is not running or the agent is
+    /// unreachable.
+    pub async fn record_bridge_address(
+        self: Arc<Self>,
+        machine_name: String,
+    ) -> Result<Option<String>> {
+        let manager = Arc::clone(&self);
+        let name = machine_name.clone();
+        let connected = tokio::task::spawn_blocking(move || manager.connect_agent(&name)).await;
+        let info = match connected {
+            Ok(Ok(mut agent)) => {
+                if agent.is_blocking() {
+                    tokio::task::spawn_blocking(move || agent.get_system_info_blocking())
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(EngineError::Vm(format!("system info task panicked: {e}")))
+                        })?
+                } else {
+                    agent.get_system_info().await?
+                }
+            }
+            Ok(Err(e)) => return Err(e),
+            Err(e) => {
+                return Err(EngineError::Vm(format!("agent connect task panicked: {e}")));
+            }
+        };
+        let bridge_ip = Some(info.bridge_ip_address).filter(|ip| !ip.is_empty());
+        {
+            let mut machines = self
+                .machines
+                .write()
+                .map_err(|_| EngineError::LockPoisoned)?;
+            if let Some(machine) = machines.get_mut(&machine_name) {
+                machine.bridge_ip_address.clone_from(&bridge_ip);
+            }
         }
-
-        self.vm_manager.read_console_output(&machine.vm_id)
+        if let Err(e) = self.persistence.update(&machine_name, |m| {
+            m.bridge_ip_address.clone_from(&bridge_ip);
+        }) {
+            tracing::warn!(
+                "Failed to persist bridge address for machine '{}': {}",
+                machine_name,
+                e
+            );
+        }
+        Ok(bridge_ip)
     }
 
-    /// Logs the tail of a machine's console and agent-log pipes at WARN, for
+    /// Asks a running distro machine's agent to serve the machine's root
+    /// filesystem to the host and returns the endpoint to mount; see
+    /// `EnsureMachineExportRequest` for what the request carries. Same
+    /// transport dispatch as [`Self::ping_agent`].
+    ///
+    /// # Errors
+    /// Returns an error if the machine is not running, the agent is
+    /// unreachable, or the agent refused the export.
+    pub async fn ensure_export(
+        self: Arc<Self>,
+        machine_name: String,
+        request: EnsureMachineExportRequest,
+    ) -> Result<EnsureMachineExportResponse> {
+        let manager = Arc::clone(&self);
+        let name = machine_name.clone();
+        let connected = tokio::task::spawn_blocking(move || manager.connect_agent(&name)).await;
+        match connected {
+            Ok(Ok(mut agent)) => {
+                if agent.is_blocking() {
+                    tokio::task::spawn_blocking(move || {
+                        agent.ensure_machine_export_blocking(&request)
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(EngineError::Vm(format!(
+                            "machine export task panicked: {e}"
+                        )))
+                    })
+                } else {
+                    agent.ensure_machine_export(&request).await
+                }
+            }
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(EngineError::Vm(format!("agent connect task panicked: {e}"))),
+        }
+    }
+
+    /// Connects to the machine's agent and trims its data filesystems,
+    /// returning the bytes the guest reported trimmed. Same transport
+    /// dispatch as [`Self::ping_agent`]: the HV socketpair is blocking, VZ
+    /// and Linux vsock are async.
+    ///
+    /// # Errors
+    /// Returns an error if the machine is not running, the agent is
+    /// unreachable, or a filesystem refused the trim.
+    pub async fn trim_disk(self: Arc<Self>, machine_name: String) -> Result<u64> {
+        let manager = Arc::clone(&self);
+        let name = machine_name.clone();
+        let connected = tokio::task::spawn_blocking(move || manager.connect_agent(&name)).await;
+        let response = match connected {
+            Ok(Ok(mut agent)) => {
+                if agent.is_blocking() {
+                    tokio::task::spawn_blocking(move || agent.disk_trim_blocking())
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(EngineError::Vm(format!("disk trim task panicked: {e}")))
+                        })?
+                } else {
+                    agent.disk_trim().await?
+                }
+            }
+            Ok(Err(e)) => return Err(e),
+            Err(e) => return Err(EngineError::Vm(format!("agent connect task panicked: {e}"))),
+        };
+        tracing::debug!(machine = %machine_name, result = %response.result, "disk trim done");
+        Ok(response.bytes_trimmed)
+    }
+
+    /// Starts the serial drain for a machine that just entered `Running`,
+    /// replacing (and thereby stopping) any earlier one under the same name.
+    #[cfg(target_os = "macos")]
+    fn start_serial_drain(&self, name: &str, vm_id: &VmId) {
+        let handle = match self.vm_manager.dup_serial_readers(vm_id) {
+            Ok(Some(readers)) => serial::spawn(name, readers),
+            Ok(None) => {
+                tracing::debug!(machine = name, "no host console pipes to drain");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    machine = name,
+                    "console pipes unavailable, not draining: {e}"
+                );
+                return;
+            }
+        };
+        self.serial_drains
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(name.to_owned(), handle);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn stop_serial_drain(&self, name: &str) {
+        self.serial_drains
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(name);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn stop_serial_drain(&self, _name: &str) {}
+
+    /// Logs the tail of a machine's console and agent-log output at WARN, for
     /// diagnosing a boot that never reached agent readiness.
     ///
-    /// Machine VMs (unlike the System VM) have no background serial drain, so
-    /// early-boot output — including a kernel panic or a shim `poweroff` —
-    /// sits unread in the host-side console pipe buffer and is recoverable
-    /// here even after the guest has died.
+    /// The serial drain owns the pipes from the moment `start` marks the
+    /// machine `Running`, so the tail is what it kept; a machine without a
+    /// drain (no host pipes on its backend) falls back to whatever is still
+    /// unread in the pipes, which survives even an early guest death.
     #[cfg(target_os = "macos")]
     fn log_console_tail(&self, name: &str) {
-        // Read the vm_id directly: the machine may already be non-Running
-        // (an early guest death), which the state-gated readers reject.
-        let vm_id = match self.machines.read() {
-            Ok(machines) => machines.get(name).map(|m| m.vm_id.clone()),
-            Err(_) => None,
-        };
-        let Some(vm_id) = vm_id else { return };
-        for (label, output) in [
-            ("console", self.vm_manager.read_console_output(&vm_id)),
-            ("agent-log", self.vm_manager.read_agent_log_output(&vm_id)),
-        ] {
-            let Ok(text) = output else { continue };
-            let tail: Vec<&str> = text.lines().rev().take(40).collect();
-            if tail.is_empty() {
-                continue;
+        let kept = self
+            .serial_drains
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(name)
+            .map(serial::DrainHandle::tail);
+        let (console, agent_log) = match kept {
+            Some(tail) => tail,
+            None => {
+                // Read the vm_id directly: the machine may already be
+                // non-Running (an early guest death).
+                let vm_id = match self.machines.read() {
+                    Ok(machines) => machines.get(name).map(|m| m.vm_id.clone()),
+                    Err(_) => None,
+                };
+                let Some(vm_id) = vm_id else { return };
+                let last_lines = |output: Result<String>| -> Vec<String> {
+                    let Ok(text) = output else { return Vec::new() };
+                    let mut lines: Vec<String> =
+                        text.lines().rev().take(40).map(str::to_owned).collect();
+                    lines.reverse();
+                    lines
+                };
+                (
+                    last_lines(self.vm_manager.read_console_output(&vm_id)),
+                    last_lines(self.vm_manager.read_agent_log_output(&vm_id)),
+                )
             }
-            for line in tail.iter().rev() {
+        };
+        for (label, lines) in [("console", console), ("agent-log", agent_log)] {
+            for line in lines {
                 tracing::warn!(machine = %name, "machine {label}: {line}");
             }
         }
@@ -986,27 +1306,6 @@ impl MachineManager {
 
     #[cfg(not(target_os = "macos"))]
     fn log_console_tail(&self, _name: &str) {}
-
-    /// Reads agent log output (hvc1) for a running machine (macOS only).
-    #[cfg(target_os = "macos")]
-    pub fn read_agent_log_output(&self, name: &str) -> Result<String> {
-        let machines = self
-            .machines
-            .read()
-            .map_err(|_| EngineError::LockPoisoned)?;
-
-        let machine = machines
-            .get(name)
-            .ok_or_else(|| EngineError::not_found(name.to_string()))?;
-
-        if machine.state != MachineState::Running {
-            return Err(EngineError::invalid_state(format!(
-                "machine '{name}' is not running"
-            )));
-        }
-
-        self.vm_manager.read_agent_log_output(&machine.vm_id)
-    }
 
     /// Captures a debug snapshot (virtio queues + vCPU exit counters)
     /// for a machine.
@@ -1060,6 +1359,13 @@ impl MachineManager {
             )));
         }
 
+        self.publish_event(
+            name,
+            crate::event::Event::MachineStopping {
+                name: name.to_string(),
+            },
+        );
+
         // Stop underlying VM
         #[cfg(target_os = "macos")]
         self.vm_manager
@@ -1069,9 +1375,10 @@ impl MachineManager {
 
         machine.state = MachineState::Stopped;
         machine.cid = None;
+        machine.bridge_ip_address = None;
+        self.stop_serial_drain(name);
 
-        // Update persisted state
-        if let Err(e) = self.persistence.update_state(name, MachineState::Stopped) {
+        if let Err(e) = self.persist_stopped(name) {
             tracing::warn!(
                 "Failed to persist stopped state for machine '{}': {}",
                 name,
@@ -1122,6 +1429,74 @@ impl MachineManager {
         self.vm_manager.reboot(&vm_id)?;
         tracing::info!("Rebooted machine '{}'", name);
         Ok(())
+    }
+
+    /// Sets the CPU and memory a machine boots with; `None` keeps the
+    /// current value.
+    ///
+    /// The new size is written to the VM config and the persisted record
+    /// right away. A stopped machine boots with it next; a running machine
+    /// keeps the size it booted with, and the result says a restart is
+    /// needed. Persisting before the restart is deliberate: a size the user
+    /// set and the daemon forgot on its next start would be worse than one
+    /// it refused.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the machine is not found, is starting or
+    /// stopping, a value is zero, or the record cannot be persisted.
+    pub fn set_resources(
+        &self,
+        name: &str,
+        cpus: Option<u32>,
+        memory_mb: Option<u64>,
+    ) -> Result<MachineResize> {
+        let mut machines = self
+            .machines
+            .write()
+            .map_err(|_| EngineError::LockPoisoned)?;
+        let machine = machines
+            .get_mut(name)
+            .ok_or_else(|| EngineError::not_found(name.to_string()))?;
+        if matches!(
+            machine.state,
+            MachineState::Starting | MachineState::Stopping
+        ) {
+            return Err(EngineError::invalid_state(format!(
+                "cannot resize machine '{name}' while it is {:?}",
+                machine.state
+            )));
+        }
+        let cpus = cpus.unwrap_or(machine.cpus);
+        let memory_mb = memory_mb.unwrap_or(machine.memory_mb);
+        if cpus == 0 || memory_mb == 0 {
+            return Err(EngineError::config(
+                "a machine needs at least one CPU and some memory",
+            ));
+        }
+        let restart_required = machine.state == MachineState::Running;
+        if (cpus, memory_mb) != (machine.cpus, machine.memory_mb) {
+            self.vm_manager
+                .set_resources(&machine.vm_id, cpus, memory_mb)?;
+            machine.cpus = cpus;
+            machine.memory_mb = memory_mb;
+            self.persistence.update(name, |m| {
+                m.cpus = cpus;
+                m.memory_mb = memory_mb;
+            })?;
+            tracing::info!(
+                machine = name,
+                cpus,
+                memory_mb,
+                restart_required,
+                "machine resized"
+            );
+        }
+        Ok(MachineResize {
+            cpus,
+            memory_mb,
+            restart_required,
+        })
     }
 
     /// Switches a stopped machine's hypervisor backend.
@@ -1202,6 +1577,12 @@ impl MachineManager {
             machine.state = MachineState::Stopping;
             machine.vm_id.clone()
         };
+        self.publish_event(
+            name,
+            crate::event::Event::MachineStopping {
+                name: name.to_string(),
+            },
+        );
 
         match self.vm_manager.graceful_stop(&vm_id, timeout) {
             Ok(true) => {
@@ -1215,8 +1596,10 @@ impl MachineManager {
                     .ok_or_else(|| EngineError::not_found(name.to_string()))?;
                 machine.state = MachineState::Stopped;
                 machine.cid = None;
+                machine.bridge_ip_address = None;
+                self.stop_serial_drain(name);
 
-                if let Err(e) = self.persistence.update_state(name, MachineState::Stopped) {
+                if let Err(e) = self.persist_stopped(name) {
                     tracing::warn!(
                         "Failed to persist stopped state for machine '{}': {}",
                         name,
@@ -1241,6 +1624,16 @@ impl MachineManager {
                 Err(e)
             }
         }
+    }
+
+    /// Records a stop: the state, and the bridge address, which is only
+    /// meaningful while the machine runs (the uplink address is kept, as
+    /// it always was, for `inspect` on a stopped machine).
+    fn persist_stopped(&self, name: &str) -> Result<()> {
+        self.persistence.update(name, |m| {
+            m.state = MachineState::Stopped.into();
+            m.bridge_ip_address = None;
+        })
     }
 
     /// Rolls a failed graceful stop back to `Running` — but only if the
@@ -1305,7 +1698,14 @@ impl MachineManager {
         if machine.state == MachineState::Running {
             let vm_id = machine.vm_id.clone();
             drop(machines); // Release lock before stopping
+            self.publish_event(
+                name,
+                crate::event::Event::MachineStopping {
+                    name: name.to_string(),
+                },
+            );
             self.vm_manager.stop(&vm_id)?;
+            self.stop_serial_drain(name);
             machines = self
                 .machines
                 .write()
@@ -1395,7 +1795,9 @@ impl MachineManager {
             disk_path: None,
             ssh_key_path: None,
             ip_address: None,
+            bridge_ip_address: None,
             backend: arcbox_vmm::VmBackend::default(),
+            nested_virt: false,
             created_at: Utc::now(),
             started_at: None,
             mounts: Vec::new(),
@@ -1405,6 +1807,16 @@ impl MachineManager {
         tracing::debug!("Registered mock machine '{}' with CID {}", name, cid);
         Ok(())
     }
+}
+
+/// The addresses a ready machine reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GuestAddresses {
+    /// The routable address on the machine's uplink (`10.0.2.x`).
+    ip: String,
+    /// The bridge NIC's address, when the guest has one; see
+    /// [`MachineInfo::bridge_ip_address`].
+    bridge_ip: Option<String>,
 }
 
 /// The readiness verdict for one `SystemInfo` snapshot: `None` means "not
@@ -1418,14 +1830,24 @@ impl MachineManager {
 /// would otherwise have returned. Waiting for the guest's init to settle is
 /// what makes readiness mean "usable" rather than "the agent is alive"
 /// (CORE-66).
-fn readiness_ip(info: &arcbox_connect::v1::SystemInfo, name: &str, attempt: u32) -> Option<String> {
+///
+/// The bridge address is taken as reported and never waited for: the shim
+/// acquires it before the distro's init runs, so by the time that init has
+/// settled it is either there or not coming (no bridge NIC, no lease).
+fn readiness_addresses(
+    info: &arcbox_connect::v1::SystemInfo,
+    name: &str,
+    attempt: u32,
+) -> Option<GuestAddresses> {
     if info.distro_init_pending {
         tracing::trace!(
             "Machine '{name}' distro init still starting (attempt {attempt}); not ready",
         );
         return None;
     }
-    select_routable_ip(&info.ip_addresses)
+    let ip = select_routable_ip(&info.ip_addresses)?;
+    let bridge_ip = Some(info.bridge_ip_address.clone()).filter(|ip| !ip.is_empty());
+    Some(GuestAddresses { ip, bridge_ip })
 }
 
 /// One readiness attempt over the blocking (HV) transport: ping, protocol
@@ -1436,7 +1858,7 @@ fn probe_ip_blocking(
     mut agent: crate::agent_client::AgentClient,
     name: &str,
     attempt: u32,
-) -> Result<Option<String>> {
+) -> Result<Option<GuestAddresses>> {
     let resp = match agent.ping_blocking() {
         Ok(resp) => resp,
         Err(e) => {
@@ -1452,7 +1874,7 @@ fn probe_ip_blocking(
         attempt,
     );
     match agent.get_system_info_blocking() {
-        Ok(info) => Ok(readiness_ip(&info, name, attempt)),
+        Ok(info) => Ok(readiness_addresses(&info, name, attempt)),
         Err(e) => {
             tracing::trace!(
                 "Machine '{}' get_system_info failed (attempt {attempt}): {e}",
@@ -1469,7 +1891,7 @@ async fn probe_ip_async(
     mut agent: crate::agent_client::AgentClient,
     name: &str,
     attempt: u32,
-) -> Result<Option<String>> {
+) -> Result<Option<GuestAddresses>> {
     let resp = match agent.ping().await {
         Ok(resp) => resp,
         Err(e) => {
@@ -1485,7 +1907,7 @@ async fn probe_ip_async(
         attempt,
     );
     match agent.get_system_info().await {
-        Ok(info) => Ok(readiness_ip(&info, name, attempt)),
+        Ok(info) => Ok(readiness_addresses(&info, name, attempt)),
         Err(e) => {
             tracing::trace!(
                 "Machine '{}' get_system_info failed (attempt {attempt}): {e}",

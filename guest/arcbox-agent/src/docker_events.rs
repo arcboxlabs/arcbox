@@ -2,7 +2,10 @@
 //!
 //! Connects to `/var/run/docker.sock`, performs initial reconciliation of
 //! running containers, then subscribes to container events (start, die,
-//! destroy, rename) to keep the guest DNS server registry in sync.
+//! destroy, rename) to keep the guest DNS server registry in sync, to
+//! mirror host-address-pinned port publishes for the inbound relay
+//! (`publish_mirror`), and to serve each container's domain over HTTP and
+//! HTTPS without a port (`domains`).
 
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -12,15 +15,24 @@ use tokio::net::UnixStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::dns_server::GuestDnsServer;
+use crate::domains::{ContainerFacts, DomainRoutes};
+use crate::publish_mirror::{PublishMirror, pinned_publishes};
 
 const DOCKER_SOCK: &str = "/var/run/docker.sock";
 const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// What the watcher keeps in sync for each container.
+pub struct ContainerSync<'a> {
+    pub dns: &'a GuestDnsServer,
+    pub mirror: PublishMirror,
+    pub domains: DomainRoutes,
+}
 
 /// Runs initial reconciliation then watches Docker events indefinitely.
 ///
 /// Retries connection with backoff until the Docker socket appears.
 /// Blocks until `cancel` is triggered.
-pub async fn reconcile_and_watch(dns: &GuestDnsServer, cancel: CancellationToken) {
+pub async fn reconcile_and_watch(mut sync: ContainerSync<'_>, cancel: CancellationToken) {
     loop {
         // Wait for socket to exist.
         while !Path::new(DOCKER_SOCK).exists() {
@@ -30,7 +42,7 @@ pub async fn reconcile_and_watch(dns: &GuestDnsServer, cancel: CancellationToken
             }
         }
 
-        match run_once(dns, &cancel).await {
+        match run_once(&mut sync, &cancel).await {
             Ok(()) => return, // cancelled
             Err(e) => {
                 tracing::warn!(error = %e, "docker event listener disconnected, retrying");
@@ -44,9 +56,9 @@ pub async fn reconcile_and_watch(dns: &GuestDnsServer, cancel: CancellationToken
 }
 
 /// Single connection lifecycle: reconcile + event stream.
-async fn run_once(dns: &GuestDnsServer, cancel: &CancellationToken) -> anyhow::Result<()> {
+async fn run_once(sync: &mut ContainerSync<'_>, cancel: &CancellationToken) -> anyhow::Result<()> {
     // Phase 1: list all running containers and register them.
-    if let Err(e) = reconcile_existing(dns).await {
+    if let Err(e) = reconcile_existing(sync).await {
         tracing::warn!(error = %e, "initial container reconciliation failed");
     }
 
@@ -83,7 +95,7 @@ async fn run_once(dns: &GuestDnsServer, cancel: &CancellationToken) -> anyhow::R
             continue;
         }
 
-        if let Err(e) = handle_event(dns, trimmed).await {
+        if let Err(e) = handle_event(sync, trimmed).await {
             tracing::debug!(error = %e, "failed to process docker event");
         }
     }
@@ -106,7 +118,7 @@ async fn read_line_or_cancel(
 }
 
 /// Lists running containers and registers them in the DNS server.
-async fn reconcile_existing(dns: &GuestDnsServer) -> anyhow::Result<()> {
+async fn reconcile_existing(sync: &mut ContainerSync<'_>) -> anyhow::Result<()> {
     let containers = docker_get("/containers/json").await?;
     let arr = containers
         .as_array()
@@ -117,7 +129,7 @@ async fn reconcile_existing(dns: &GuestDnsServer) -> anyhow::Result<()> {
             continue;
         };
         let short_id = &id[..12.min(id.len())];
-        if let Err(e) = register_container_by_id(dns, short_id).await {
+        if let Err(e) = register_container_by_id(sync, short_id).await {
             tracing::debug!(id = short_id, error = %e, "failed to register container");
         }
     }
@@ -127,7 +139,7 @@ async fn reconcile_existing(dns: &GuestDnsServer) -> anyhow::Result<()> {
 }
 
 /// Handles a single Docker event JSON line.
-async fn handle_event(dns: &GuestDnsServer, json_str: &str) -> anyhow::Result<()> {
+async fn handle_event(sync: &mut ContainerSync<'_>, json_str: &str) -> anyhow::Result<()> {
     let event: serde_json::Value = serde_json::from_str(json_str)?;
 
     let action = event["Action"].as_str().unwrap_or_default();
@@ -136,7 +148,7 @@ async fn handle_event(dns: &GuestDnsServer, json_str: &str) -> anyhow::Result<()
 
     match action {
         "start" => {
-            register_container_by_id(dns, id).await?;
+            register_container_by_id(sync, id).await?;
         }
         "die" | "destroy" => {
             // Deregister this container's ownership of all its aliases.
@@ -147,8 +159,12 @@ async fn handle_event(dns: &GuestDnsServer, json_str: &str) -> anyhow::Result<()
             if !name.is_empty() {
                 let compose = attrs.as_object().and_then(crate::dns::extract_compose_info);
                 for alias in crate::dns::collect_aliases(name, compose.as_ref()) {
-                    dns.deregister_container(&alias, name).await;
+                    sync.dns.deregister_container(&alias, name).await;
                 }
+            }
+            if !id_full.is_empty() {
+                sync.domains.forget(id_full);
+                sync.mirror.remove(id_full).await?;
             }
         }
         "rename" => {
@@ -161,10 +177,10 @@ async fn handle_event(dns: &GuestDnsServer, json_str: &str) -> anyhow::Result<()
             if !old_name.is_empty() {
                 let compose = attrs.as_object().and_then(crate::dns::extract_compose_info);
                 for alias in crate::dns::collect_aliases(old_name, compose.as_ref()) {
-                    dns.deregister_container(&alias, old_name).await;
+                    sync.dns.deregister_container(&alias, old_name).await;
                 }
             }
-            register_container_by_id(dns, id).await?;
+            register_container_by_id(sync, id).await?;
         }
         _ => {}
     }
@@ -172,9 +188,20 @@ async fn handle_event(dns: &GuestDnsServer, json_str: &str) -> anyhow::Result<()
     Ok(())
 }
 
-/// Inspects a container and registers its name + IP in the DNS server.
-async fn register_container_by_id(dns: &GuestDnsServer, id: &str) -> anyhow::Result<()> {
+/// Inspects a container and registers its name + IP in the DNS server,
+/// mirrors its host-address-pinned publishes for the inbound relay, and
+/// hands it to the domain routes.
+async fn register_container_by_id(sync: &mut ContainerSync<'_>, id: &str) -> anyhow::Result<()> {
     let info = docker_get(&format!("/containers/{id}/json")).await?;
+
+    // Keyed by the full ID: the die/destroy events carry that, not the name.
+    if let Some(full_id) = info["Id"].as_str() {
+        match ContainerFacts::from_inspect(&info) {
+            Some(facts) => sync.domains.track(facts),
+            None => sync.domains.forget(full_id),
+        }
+        sync.mirror.apply(full_id, &pinned_publishes(&info)).await?;
+    }
 
     let name = info["Name"]
         .as_str()
@@ -206,7 +233,7 @@ async fn register_container_by_id(dns: &GuestDnsServer, id: &str) -> anyhow::Res
     // service names) are ref-counted per owner in the DNS server.
     let aliases = crate::dns::collect_aliases(name, compose.as_ref());
     for alias in &aliases {
-        dns.register_container(alias, name, ip).await;
+        sync.dns.register_container(alias, name, ip).await;
     }
 
     tracing::debug!(name, %ip, aliases = ?aliases, "registered container DNS");
@@ -214,7 +241,7 @@ async fn register_container_by_id(dns: &GuestDnsServer, id: &str) -> anyhow::Res
 }
 
 /// Performs a GET request to the Docker Engine API via Unix socket.
-async fn docker_get(path: &str) -> anyhow::Result<serde_json::Value> {
+pub async fn docker_get(path: &str) -> anyhow::Result<serde_json::Value> {
     let stream = UnixStream::connect(DOCKER_SOCK).await?;
     let (reader, mut writer) = tokio::io::split(stream);
 

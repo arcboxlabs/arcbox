@@ -21,6 +21,7 @@ arcbox-constants.workspace = true
 arcbox-vm-driver = { workspace = true, features = ["testkit"] }
 arcbox-vm-proto.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

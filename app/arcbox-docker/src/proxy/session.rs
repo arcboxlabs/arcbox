@@ -126,7 +126,7 @@ impl Service<Uri> for GuestClientConnector {
     }
 }
 
-struct GuestIo(TokioIo<super::VsockStream>);
+struct GuestIo(TokioIo<super::GuestStream>);
 
 impl Unpin for GuestIo {}
 

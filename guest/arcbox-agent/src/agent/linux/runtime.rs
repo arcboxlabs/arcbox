@@ -80,6 +80,7 @@ async fn do_ensure_runtime_start() -> RuntimeEnsureResponse {
     let note = match try_start_bundled_runtime().await {
         Ok(note) => note,
         Err(message) => {
+            tracing::warn!(%message, "bundled runtime start failed");
             return RuntimeEnsureResponse {
                 ready: false,
                 endpoint: format!("vsock:{}", docker_api_vsock_port()),
@@ -122,6 +123,9 @@ async fn do_ensure_runtime_start() -> RuntimeEnsureResponse {
     }
 
     let ready = status.docker_ready && routing_error.is_none();
+    if !ready {
+        tracing::warn!(%message, "bundled runtime did not become ready");
+    }
     let result_status = if ready {
         ensure_runtime::STATUS_STARTED.to_string()
     } else {
@@ -673,14 +677,13 @@ pub(super) fn ensure_runtime_prerequisites() -> Vec<String> {
     // this with the real host time.
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
     let min_epoch = option_env!("SOURCE_DATE_EPOCH")
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0)
         .max(MIN_SANE_EPOCH);
     if now_secs < min_epoch {
-        if sync_clock_from_host(min_epoch as i64) {
+        if sync_clock_from_host(min_epoch.cast_signed()) {
             notes.push("clock guard: set to minimum sane time (pre-ping fallback)".to_string());
         } else {
             notes.push("clock guard: failed to set clock (pre-ping fallback)".to_string());

@@ -8,9 +8,9 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 #[test]
 fn test_default_config() {
     let config = BootAssetConfig::default();
-    assert!(!config.cdn_base_url.is_empty());
-    assert!(!config.version.is_empty());
-    assert!(!config.arch.is_empty());
+    assert_ne!(config.cdn_base_url, "");
+    assert_ne!(config.version, "");
+    assert_ne!(config.arch, "");
 }
 
 #[test]

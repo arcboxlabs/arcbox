@@ -48,7 +48,9 @@ pub use arcbox_engine::{agent_client, event, machine, persistence, trace, vm, vm
 pub use arcbox_image::{boot_assets, machine_image, remote_image};
 
 pub use arcbox_computer::NestedVirtCapability;
-pub use arcbox_engine::agent_client::{AgentClient, ExecSessionInput, WriteFileChunk};
+pub use arcbox_engine::agent_client::{
+    AgentClient, ExecSessionInput, ExecSessionOutput, WriteFileChunk,
+};
 pub use arcbox_image::boot_assets::{
     BootAssetConfig, BootAssetManifest, BootAssetProvider, BootAssets, DownloadProgress,
     PreparePhase, boot_asset_version,
@@ -66,10 +68,11 @@ pub use macos::{
 #[cfg(feature = "macos-ipsw-install")]
 pub use macos::{PullPhase, PullSource};
 pub use migration::MigrationManager;
+pub use runtime::{HostCapacity, MachineResources, SystemVmResources};
 pub use runtime::{
     InitProgress, Runtime, SandboxPortExposure, SandboxPortMapping, SandboxPortProtocol,
 };
-pub use vm::{SharedDirConfig, VmConfig, VmManager};
+pub use vm::{HostNetwork, SharedDirConfig, VmConfig, VmManager};
 pub use vm_lifecycle::{
     ActivityScope, DEFAULT_MACHINE_NAME, DefaultVmConfig, HealthMonitor, VmLifecycleConfig,
     VmLifecycleManager, VmLifecycleState,

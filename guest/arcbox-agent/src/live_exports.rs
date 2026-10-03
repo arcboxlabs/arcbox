@@ -136,7 +136,7 @@ mod tests {
         let misleading = "\
 74 31 0:11 / /run/arcbox/nfs-export/docker/rootfs/overlayfs/abc ro,noatime - btrfs /dev/overlay ro
 ";
-        assert!(rootfs_mountpoints(misleading).is_empty());
+        assert_eq!(rootfs_mountpoints(misleading), Vec::<String>::new());
     }
 
     #[test]

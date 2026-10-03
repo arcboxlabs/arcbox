@@ -13,21 +13,31 @@
 //! data_dir = "~/.arcbox"
 //!
 //! [vm]
-//! # cpus = 8         # default: host core count
+//! # cpus = 8         # default: host core count; `abctl system resources` writes these
 //! # memory_mb = 8192  # default: half of host RAM (512–16384)
 //! # autostart = true  # boot the default Linux VM (Docker/K8s); false = VM-host only
 //!
 //! [machine]
 //! disk_gb = 50
 //! default_distro = "ubuntu"
+//! # default_machine = "dev"  # what `abctl machine exec`/`ssh` use without a name; `abctl machine default` writes it
 //!
 //! [network]
 //! subnet = "10.0.2.0/24"
 //! dns = ["8.8.8.8", "8.8.4.4"]
+//! # proxy = "system"                 # or "none", or "socks5://127.0.0.1:1080"
+//! # proxy_exclude = [".corp.example"] # NO_PROXY-style hosts that stay direct
 //!
 //! [container]
 //! guest_docker_vsock_port = 2375
 //! cidr = "172.16.0.0/12"
+//!
+//! [docker]
+//! # expose_ports_to_lan = true     # false: -p 8080:80 binds 127.0.0.1 only
+//! # registry_mirrors = ["https://mirror.example.com"]
+//! # insecure_registries = ["registry.corp:5000"]
+//! # [docker.engine]                # any other dockerd daemon.json key
+//! # max-concurrent-downloads = 6
 //!
 //! [logging]
 //! level = "info"
@@ -36,12 +46,16 @@
 use arcbox_constants::container_network::ContainerNetwork;
 use arcbox_constants::paths::{ArcboxProfile, HostLayout};
 use arcbox_constants::ports::DOCKER_API_VSOCK_PORT;
+use arcbox_fakeip::proxy_policy::{ProxyPolicy, ProxySettings};
 use figment::{
     Figment,
     providers::{Env, Format, Serialized, Toml},
 };
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::net::Ipv4Addr;
+use std::path::{Path, PathBuf};
+
+pub mod persist;
 
 /// `ArcBox` configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,10 +126,13 @@ impl Config {
     /// Explicit `ARCBOX_*` environment values and config file values override
     /// profile defaults.
     pub fn load_for_profile(profile: ArcboxProfile) -> Result<Self, Box<figment::Error>> {
-        let mut config: Self = Figment::new()
+        let mut figment = Figment::new()
             .merge(Serialized::defaults(Self::for_profile(profile)))
-            .merge(Toml::file(system_config_path()))
-            .merge(Toml::file(user_config_path()))
+            .merge(Toml::file(system_config_path()));
+        for path in user_config_paths() {
+            figment = figment.merge(Toml::file(path));
+        }
+        let mut config: Self = figment
             .merge(Env::prefixed("ARCBOX_").split("_"))
             .extract()
             .map_err(Box::new)?;
@@ -269,6 +286,10 @@ pub struct MachineDefaults {
     pub default_version: Option<String>,
     /// Auto-mount home directory.
     pub auto_mount_home: bool,
+    /// The machine `abctl machine exec` and `abctl machine ssh` act on when
+    /// given no name. `abctl machine default` writes it; `None` means every
+    /// command needs a name.
+    pub default_machine: Option<String>,
 }
 
 impl Default for MachineDefaults {
@@ -278,6 +299,7 @@ impl Default for MachineDefaults {
             default_distro: "ubuntu".to_string(),
             default_version: None,
             auto_mount_home: true,
+            default_machine: None,
         }
     }
 }
@@ -296,6 +318,29 @@ pub struct NetworkConfig {
     pub ipv6: bool,
     /// MTU for virtual network interfaces.
     pub mtu: u16,
+    /// Where guest egress goes: `system` (follow the Mac's proxy settings,
+    /// the default), `none` (always direct), or a proxy URL such as
+    /// `socks5://127.0.0.1:1080` or `http://proxy.corp:3128`.
+    #[serde(
+        serialize_with = "serialize_proxy_policy",
+        deserialize_with = "deserialize_proxy_policy"
+    )]
+    pub proxy: ProxyPolicy,
+    /// Hosts that bypass the proxy, in `NO_PROXY` form (`example.com`,
+    /// `.example.com`, `*.example.com`). Added to the Mac's own exclusions
+    /// under `proxy = "system"`.
+    pub proxy_exclude: Vec<String>,
+}
+
+impl NetworkConfig {
+    /// The guest egress policy as the datapath consumes it.
+    #[must_use]
+    pub fn proxy_settings(&self) -> ProxySettings {
+        ProxySettings {
+            policy: self.proxy.clone(),
+            exclude: self.proxy_exclude.clone(),
+        }
+    }
 }
 
 impl Default for NetworkConfig {
@@ -306,8 +351,28 @@ impl Default for NetworkConfig {
             dns: vec!["8.8.8.8".to_string(), "8.8.4.4".to_string()],
             ipv6: false,
             mtu: 1500,
+            proxy: ProxyPolicy::System,
+            proxy_exclude: Vec::new(),
         }
     }
+}
+
+fn serialize_proxy_policy<S>(policy: &ProxyPolicy, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.collect_str(policy)
+}
+
+fn deserialize_proxy_policy<'de, D>(deserializer: D) -> Result<ProxyPolicy, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    String::deserialize(deserializer)?
+        .parse()
+        .map_err(D::Error::custom)
 }
 
 /// Docker API configuration.
@@ -320,6 +385,24 @@ pub struct DockerConfig {
     pub socket_path: PathBuf,
     /// Enable Docker API.
     pub enabled: bool,
+    /// Whether a port published without a specific address (`-p 8080:80`,
+    /// `-p 0.0.0.0:8080:80`) is reachable from other devices on the
+    /// network. When `false` such ports bind the Mac's loopback only. A
+    /// binding that names a specific address (`-p 192.168.1.5:8080:80`) is
+    /// honoured either way.
+    pub expose_ports_to_lan: bool,
+    /// Registry mirrors `dockerd` pulls through, tried in order before the
+    /// upstream registry. Written to `registry-mirrors` in the guest's
+    /// `daemon.json`.
+    pub registry_mirrors: Vec<String>,
+    /// Registries reached over plain HTTP or with an untrusted certificate.
+    /// Written to `insecure-registries`.
+    pub insecure_registries: Vec<String>,
+    /// Further `daemon.json` keys, merged last. ArcBox owns `dns`, `bip`,
+    /// `default-address-pools`, `allow-direct-routing`, the `nofile` ulimit
+    /// and `features.containerd-snapshotter`; a value for one of those here
+    /// is ignored with a warning in the guest log.
+    pub engine: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Default for DockerConfig {
@@ -335,7 +418,43 @@ impl DockerConfig {
         Self {
             socket_path: HostLayout::for_profile(profile).docker_socket,
             enabled: true,
+            expose_ports_to_lan: true,
+            registry_mirrors: Vec::new(),
+            insecure_registries: Vec::new(),
+            engine: serde_json::Map::new(),
         }
+    }
+
+    /// The host address a port published without one binds to.
+    #[must_use]
+    pub const fn default_publish_address(&self) -> Ipv4Addr {
+        if self.expose_ports_to_lan {
+            Ipv4Addr::UNSPECIFIED
+        } else {
+            Ipv4Addr::LOCALHOST
+        }
+    }
+
+    /// The `daemon.json` fragment the guest merges over its own keys.
+    ///
+    /// The two typed lists win over same-named keys in `engine`, so an
+    /// operator who set both cannot be surprised by which one applied.
+    #[must_use]
+    pub fn engine_overrides(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut overrides = self.engine.clone();
+        if !self.registry_mirrors.is_empty() {
+            overrides.insert(
+                "registry-mirrors".into(),
+                serde_json::Value::from(self.registry_mirrors.clone()),
+            );
+        }
+        if !self.insecure_registries.is_empty() {
+            overrides.insert(
+                "insecure-registries".into(),
+                serde_json::Value::from(self.insecure_registries.clone()),
+            );
+        }
+        overrides
     }
 }
 
@@ -439,11 +558,36 @@ impl Default for StorageConfig {
     }
 }
 
-fn user_config_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("~/.config"))
-        .join("arcbox")
-        .join("config.toml")
+/// User configuration files, lowest precedence first.
+///
+/// The documented location is `~/.config/arcbox/config.toml`
+/// (`$XDG_CONFIG_HOME` when set). `dirs::config_dir()` is the platform
+/// convention instead — `~/Library/Application Support` on macOS — and
+/// was the only path read for a long time, so a file there keeps working
+/// but the documented one wins when both exist. On Linux the two coincide
+/// and the list has one entry.
+/// The config file runtime setting changes are written to: the documented
+/// `~/.config/arcbox/config.toml` (or its `$XDG_CONFIG_HOME` equivalent),
+/// which is also the last one merged and so overrides every other file.
+#[must_use]
+pub fn writable_user_config_path() -> PathBuf {
+    user_config_paths()
+        .pop()
+        .expect("the XDG config path is always resolvable")
+}
+
+fn user_config_paths() -> Vec<PathBuf> {
+    let relative = Path::new("arcbox").join("config.toml");
+    let xdg = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .or_else(|| dirs::home_dir().map(|home| home.join(".config")))
+        .map(|dir| dir.join(&relative));
+    let platform = dirs::config_dir().map(|dir| dir.join(&relative));
+
+    let mut paths: Vec<PathBuf> = platform.into_iter().chain(xdg).collect();
+    paths.dedup();
+    paths
 }
 
 fn system_config_path() -> PathBuf {
@@ -522,6 +666,110 @@ mod tests {
     }
 
     #[test]
+    fn published_ports_reach_the_lan_unless_turned_off() {
+        let default = Config::default();
+        assert!(default.docker.expose_ports_to_lan);
+        assert_eq!(
+            default.docker.default_publish_address(),
+            Ipv4Addr::UNSPECIFIED
+        );
+        let local: Config = Figment::new()
+            .merge(Serialized::defaults(Config::default()))
+            .merge(Toml::string("[docker]\nexpose_ports_to_lan = false"))
+            .extract()
+            .expect("valid docker config");
+        assert_eq!(local.docker.default_publish_address(), Ipv4Addr::LOCALHOST);
+    }
+
+    #[test]
+    fn docker_engine_overrides_merge_typed_lists_over_free_form_keys() {
+        let config: Config = Figment::new()
+            .merge(Serialized::defaults(Config::default()))
+            .merge(Toml::string(
+                r#"
+[docker]
+registry_mirrors = ["https://mirror.example.com"]
+insecure_registries = ["registry.corp:5000"]
+
+[docker.engine]
+max-concurrent-downloads = 6
+registry-mirrors = ["https://ignored.example.com"]
+"#,
+            ))
+            .extract()
+            .expect("valid docker engine config");
+
+        let overrides = config.docker.engine_overrides();
+        assert_eq!(overrides["max-concurrent-downloads"], 6);
+        assert_eq!(
+            overrides["registry-mirrors"],
+            serde_json::json!(["https://mirror.example.com"])
+        );
+        assert_eq!(
+            overrides["insecure-registries"],
+            serde_json::json!(["registry.corp:5000"])
+        );
+        assert!(Config::default().docker.engine_overrides().is_empty());
+    }
+
+    #[test]
+    fn network_proxy_defaults_to_following_the_system() {
+        let network = Config::default().network;
+        assert_eq!(network.proxy, ProxyPolicy::System);
+        assert_eq!(network.proxy_exclude, Vec::<String>::new());
+    }
+
+    #[test]
+    fn network_proxy_parses_keywords_and_urls_from_toml() {
+        let load = |toml: &str| -> Config {
+            Figment::new()
+                .merge(Serialized::defaults(Config::default()))
+                .merge(Toml::string(toml))
+                .extract()
+                .expect("valid network proxy config")
+        };
+
+        assert_eq!(
+            load("[network]\nproxy = \"none\"").network.proxy,
+            ProxyPolicy::None
+        );
+
+        let custom = load(
+            "[network]\nproxy = \"socks5://127.0.0.1:1080\"\nproxy_exclude = [\".corp.example\"]",
+        );
+        assert_eq!(custom.network.proxy.to_string(), "socks5://127.0.0.1:1080");
+        assert_eq!(custom.network.proxy_exclude, vec![".corp.example"]);
+
+        let settings = custom.network.proxy_settings();
+        let env = settings.resolve().expect("a custom proxy resolves");
+        assert_eq!(env.socks_proxy.as_ref().map(|p| p.port), Some(1080));
+        assert!(env.should_bypass("api.corp.example"));
+    }
+
+    #[test]
+    fn network_proxy_rejects_an_unusable_url() {
+        let invalid = Figment::new()
+            .merge(Serialized::defaults(Config::default()))
+            .merge(Toml::string("[network]\nproxy = \"ftp://proxy.corp:21\""))
+            .extract::<Config>();
+        assert!(invalid.is_err());
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err, reason = "figment::Jail closure signature")]
+    fn network_proxy_parses_from_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("ARCBOX_NETWORK_PROXY", "none");
+            let config: Config = Figment::new()
+                .merge(Serialized::defaults(Config::default()))
+                .merge(Env::prefixed("ARCBOX_").split("_"))
+                .extract()?;
+            assert_eq!(config.network.proxy, ProxyPolicy::None);
+            Ok(())
+        });
+    }
+
+    #[test]
     fn container_cidr_is_validated_while_loading_config() {
         let config: Config = Figment::new()
             .merge(Serialized::defaults(Config::default()))
@@ -577,5 +825,31 @@ mod tests {
         assert!(config.run_dir().ends_with("run"));
         assert!(config.log_dir().ends_with("log"));
         assert!(config.docker_img_path().ends_with("data/docker.img"));
+    }
+
+    /// The documented `~/.config/arcbox/config.toml` must be read — on macOS
+    /// `dirs::config_dir()` is `~/Library/Application Support`, and reading
+    /// only that silently ignored the file every doc tells users to write.
+    #[test]
+    #[allow(clippy::result_large_err, reason = "figment::Jail closure signature")]
+    fn user_config_reads_the_xdg_path_and_it_wins_over_the_platform_path() {
+        figment::Jail::expect_with(|jail| {
+            let xdg = jail.directory().join("xdg");
+            std::fs::create_dir_all(xdg.join("arcbox")).unwrap();
+            jail.set_env("XDG_CONFIG_HOME", xdg.to_str().unwrap());
+
+            let paths = user_config_paths();
+            let documented = xdg.join("arcbox").join("config.toml");
+            assert_eq!(
+                paths.last(),
+                Some(&documented),
+                "XDG path has the last word"
+            );
+
+            std::fs::write(&documented, "[network]\nproxy = \"none\"\n").unwrap();
+            let config = Config::load_for_profile(ArcboxProfile::Production).unwrap();
+            assert_eq!(config.network.proxy, ProxyPolicy::None);
+            Ok(())
+        });
     }
 }

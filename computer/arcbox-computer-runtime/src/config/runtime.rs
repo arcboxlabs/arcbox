@@ -146,8 +146,8 @@ mod tests {
         assert_eq!(cfg.defaults.vcpus, 1);
         assert_eq!(cfg.defaults.memory_mib, 512);
         assert!(cfg.defaults.boot_args.contains("console=ttyS0"));
-        assert!(!cfg.network.cidr.is_empty());
-        assert!(!cfg.firecracker.data_dir.is_empty());
+        assert_ne!(cfg.network.cidr, "");
+        assert_ne!(cfg.firecracker.data_dir, "");
     }
 
     #[test]

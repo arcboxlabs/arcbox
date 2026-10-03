@@ -60,9 +60,9 @@ fn parse_cputime(text: &str) -> Result<f64> {
         Some((d, rest)) => (d.parse::<f64>().context("parsing cputime days")?, rest),
         None => (0.0, text),
     };
-    let mut seconds = 0.0;
+    let mut seconds: f64 = 0.0;
     for part in rest.split(':') {
-        seconds = seconds * 60.0 + part.parse::<f64>().context("parsing cputime field")?;
+        seconds = seconds.mul_add(60.0, part.parse::<f64>().context("parsing cputime field")?);
     }
     Ok(days.mul_add(86_400.0, seconds))
 }

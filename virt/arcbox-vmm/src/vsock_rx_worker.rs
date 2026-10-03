@@ -12,10 +12,12 @@
 //!   enqueue RX work (new connection, handshake completion, credit grants);
 //! - readability of every connected socketpair fd (daemon→guest data).
 //!
-//! On wakeup it runs the existing injection path (`poll_vsock_rx`), raises
-//! `INT_VRING`, and force-exits vCPUs via `hv_vcpus_exit` so a WFI-idle
-//! guest services the interrupt immediately — the same delivery scheme the
-//! net-rx worker uses (ABX-367).
+//! On wakeup it runs the existing injection path (`poll_vsock_rx`), which
+//! drains every queued stream as far as credit and RX descriptors allow,
+//! then raises `INT_VRING` once. Asserting the SPI is the whole wake: with
+//! the in-kernel GIC the hypervisor wakes a vCPU sleeping in WFI and
+//! injects into a running one on its own (measured 2026-09-30 — a
+//! `hv_vcpus_exit` kick on top only added ~0.5 ms to every RPC).
 
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
@@ -44,8 +46,6 @@ pub struct VsockRxWorkerContext {
     pub doorbell_rd: OwnedFd,
     /// VM shutdown flag.
     pub running: Arc<AtomicBool>,
-    /// Force-exit all vCPUs from `hv_vcpu_run` (thread-safe).
-    pub exit_vcpus: Arc<dyn Fn() + Send + Sync>,
 }
 
 /// Main loop for the vsock-io worker thread.
@@ -142,12 +142,12 @@ pub fn vsock_rx_worker_loop(ctx: VsockRxWorkerContext) {
             }
         }
 
-        let injected = ctx.device_manager.poll_vsock_rx();
-        if injected {
+        let round = ctx.device_manager.poll_vsock_rx();
+        if round.raise {
             ctx.device_manager
                 .raise_interrupt_for(DeviceType::VirtioVsock, INT_VRING);
-            (ctx.exit_vcpus)();
-        } else if had_fd_data {
+        }
+        if !round.wrote && had_fd_data {
             // Data is buffered but the guest must free descriptors or grant
             // credit first; back off so level-triggered kevent doesn't spin.
             std::thread::sleep(NO_PROGRESS_BACKOFF);

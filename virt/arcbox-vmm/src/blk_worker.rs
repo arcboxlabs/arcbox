@@ -172,13 +172,6 @@ pub struct BlkWorkerContext {
     pub running: Arc<AtomicBool>,
     /// Shared flush barrier for multi-queue flush synchronization.
     pub flush_barrier: Arc<FlushBarrier>,
-    /// Force-exits all vCPUs from `hv_vcpu_run`. Injecting the completion IRQ
-    /// alone does not wake a WFI-parked vCPU on this HV backend — the guest only
-    /// services it on the next VM exit. A guest blocked in WFI waiting for this
-    /// very block read (e.g. an early-boot fault on the EROFS rootfs) would
-    /// otherwise stall until an unrelated exit. Mirrors the net/vsock RX workers
-    /// (ABX-367).
-    pub exit_vcpus: Arc<dyn Fn() + Send + Sync>,
     /// Index of the virtqueue this worker owns. The worker reads the queue's
     /// live config from `mmio_state[queue_idx]` each drain.
     pub queue_idx: u16,
@@ -721,11 +714,9 @@ fn trigger_irq(ctx: &BlkWorkerContext) {
     if let Ok(mut s) = ctx.mmio_state.write() {
         s.trigger_interrupt(1); // INT_VRING
     }
-    // Fire GIC SPI.
+    // Fire GIC SPI. That is the whole wake: the hypervisor wakes a vCPU
+    // sleeping in WFI and injects into a running one on its own.
     let _ = (ctx.irq_callback)(ctx.irq, true);
-    // Kick vCPUs out of WFI so a guest blocked waiting for this completion
-    // services the IRQ immediately instead of at the next unrelated exit.
-    (ctx.exit_vcpus)();
 }
 
 // ============================================================================
@@ -805,7 +796,6 @@ mod tests {
             irq: 32,
             running: Arc::new(AtomicBool::new(true)),
             flush_barrier: Arc::new(FlushBarrier::new()),
-            exit_vcpus: Arc::new(|| {}),
             queue_idx: 0,
         }
     }

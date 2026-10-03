@@ -79,6 +79,19 @@ mounts, named volumes, and interactive `exec` all work today. `abctl docker setu
 installs and manages the matching `docker`, `buildx`, and `compose` binaries for
 you.
 
+The engine is configured from `~/.config/arcbox/config.toml`; a daemon restart
+applies it:
+
+```toml
+[docker]
+expose_ports_to_lan = false     # -p 8080:80 binds 127.0.0.1 instead of every interface
+registry_mirrors = ["https://mirror.example.com"]   # tried before Docker Hub
+insecure_registries = ["registry.corp:5000"]
+
+[docker.engine]                 # any other dockerd daemon.json key
+max-concurrent-downloads = 6
+```
+
 ### amd64 and arm64 images
 
 ArcBox runs `linux/amd64` images on Apple Silicon next to native arm64. x86-64 is
@@ -103,6 +116,14 @@ kubectl get nodes
 `abctl k8s kubeconfig` prints the managed kubeconfig on its own, if you would
 rather wire it into your own tooling than let `enable` touch `~/.kube/config`.
 
+A Service of type LoadBalancer answers on its port on the Mac, like a published
+container port, and `abctl k8s status` shows where each port is forwarded:
+
+```bash
+kubectl expose deployment web --type=LoadBalancer --port=8080
+curl http://localhost:8080/
+```
+
 ### Container files in Finder
 
 The guest's Docker data is mounted read-only on the host at `~/ArcBox`, served
@@ -114,11 +135,27 @@ open ~/ArcBox
 grep -r "panic" ~/ArcBox/volumes/my-app-data/_data
 ```
 
+### Machine files in Finder
+
+A running Linux machine's root filesystem is mounted read-write at
+`~/ArcBoxMachines/<name>`, served over NFSv3 by the machine itself on its
+bridge NIC. Edit a machine's files with any Mac editor; the mount appears
+when the machine starts and goes away when it stops.
+
+```bash
+abctl machine start ubuntu
+code ~/ArcBoxMachines/ubuntu/root/project
+```
+
+Files the Mac creates belong to root inside the machine, and root's files
+show as yours on the Mac; every other owner keeps its numeric id.
+
 ### Live resource usage
 
 ```bash
 abctl top          # streaming CPU, memory, disk, and network for the System VM
-abctl disk usage   # Docker data image usage; `abctl disk compact` reclaims free blocks
+abctl disk usage   # Docker data image usage; `abctl disk compact [machine]` returns freed space now
+                   # (it also returns on its own: idle System VM, hourly per machine)
 ```
 
 `abctl top` adds a per-container table — CPU, memory against the limit, disk and
@@ -191,13 +228,35 @@ Linux VMs, each with its own kernel, persistent disk, and a distro you choose.
 ```bash
 abctl machine create dev --distro ubuntu --disk 50 --mount ~/code:/code
 abctl machine start dev
-abctl machine ssh dev                   # interactive shell
+abctl machine ssh dev                   # login shell (root; -u <user> for another account)
 abctl machine exec dev -- cargo build   # one-shot command
+abctl machine default dev               # then `abctl machine exec cargo build` needs no name
+abctl machine resize dev --cpus 4 --memory 8192   # applies at the next start
 abctl machine ls
 ```
 
 Create, start, stop, inspect, directory mounts, interactive shells, and command
-execution work today for Ubuntu and Alpine.
+execution work today for Alpine, Arch Linux, Debian, Fedora, and Ubuntu.
+
+A stopped machine clones in an instant and travels as one file:
+
+```bash
+abctl machine clone dev dev-2            # copy-on-write: no extra space until they diverge
+abctl machine export dev dev.tar.zst     # manifest + sparse data disk; the rootfs stays an image
+abctl machine import dev.tar.zst --name dev-restored
+```
+
+The archive names the published image the machine boots; import requires that
+image in the local registry at the same version, and says which one it needs
+when it is missing. Clone and export refuse a running machine: its data disk
+is a btrfs volume mounted read-write in the guest, so stop it first.
+
+A machine is its name: the guest's hostname is the machine name, and while it
+runs the Mac reaches it as `<name>.arcbox.local` (`ssh user@dev.arcbox.local`,
+`curl http://dev.arcbox.local:3000`). `_` and `.` in a name become `-` in the
+hostname (`my_box.v2` answers as `my-box-v2`); what is left must be a DNS label
+of up to 63 letters, digits and hyphens. The System VM behind `docker` is
+`default.arcbox.local`.
 
 ## macOS guests
 
@@ -236,21 +295,29 @@ Most of ArcBox's performance-critical code is custom rather than vendored:
 - **Two hypervisor backends.** ArcBox's own VMM on Hypervisor.framework, with
   manual vCPU execution and a device model we maintain, plus a
   Virtualization.framework backend through a Swift shim. Switch with
-  `abctl system backend hv|vz`.
+  `abctl system backend hv|vz`; size the VM with
+  `abctl system resources --cpus 4 --memory 4096`.
 - **VirtIO devices**: `virtio-net`, `virtio-blk`, `virtio-fs`, `virtio-console`,
   `virtio-vsock`, `virtio-rng`, and a balloon device.
 - **A userspace network datapath on macOS**: DHCP, DNS forwarding, NAT and
   connection tracking, batched socket I/O, and userspace TCP termination that
   splices guest flows onto real host sockets — no `pf` NAT and no `utun` device.
   Containers are reachable by IP, and `abctl dns install` adds
-  `*.arcbox.local` name resolution.
+  `*.arcbox.local` name resolution: `http://<container>.arcbox.local` reaches
+  whatever port the container serves (or its `dev.arcbox.http-port` label),
+  and `https://` works too once `abctl tls trust` has trusted the local,
+  name-constrained CA. Guest DNS follows the Mac's resolvers as
+  they change (Wi-Fi switch, VPN up or down), and guest egress follows the
+  Mac's proxy settings by default; `proxy = "none"` or a proxy URL under
+  `[network]` in `~/.config/arcbox/config.toml` overrides that, with
+  `proxy_exclude` for hosts that stay direct.
 - **VirtioFS/FUSE filesystem sharing**, an NFSv4 export for `~/ArcBox`, and a
   vsock guest agent that speaks protobuf.
 - **x86 translation through FEX**, so `linux/amd64` images run on Apple Silicon.
 - A privileged helper with code-signature-based peer authentication for the few
   operations that need root, so the daemon itself does not run as root.
 
-Measured, and documented in [docs/net-perf-limits.md](docs/net-perf-limits.md):
+Measured, and documented in [docs/benchmarks/network.md](docs/benchmarks/network.md):
 single-stream host→VM throughput of 22.7 Gbps on the custom backend, about twice
 Apple's VirtIO-net in the same test (multi-flow saturation currently tops out at
 10–12 Gbps combined).
@@ -289,6 +356,19 @@ container, image, and volume filesystems. Source:
   macOS 15+; macOS guests need an APFS data directory.
 - The Docker CLI. ArcBox replaces the engine, not the CLI; `abctl docker setup`
   can install it for you.
+
+## Uninstall
+
+```bash
+abctl uninstall                 # daemon, helper, links, integrations, data
+brew uninstall --cask arcbox    # then, if the app came from Homebrew
+```
+
+Add `--keep-data` to keep containers, images and volumes for a reinstall. The
+command lists what it found, asks once, reports every step, and leaves anything
+that belongs to another tool (OrbStack's or Docker Desktop's links) alone. The
+full inventory of what ArcBox writes is in
+[docs/data-directories.md](docs/data-directories.md#11-uninstall).
 
 ## Contributing
 

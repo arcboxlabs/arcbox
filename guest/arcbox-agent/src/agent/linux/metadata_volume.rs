@@ -19,7 +19,7 @@ use super::cmdline::declared_docker_metadata_device;
 use crate::metadata_migrate::{EntryKind, Prepared, prepare_entry};
 
 /// Mount point of the raw ext4 volume (`/run` is tmpfs, writable).
-const METADATA_MOUNT: &str = "/run/arcbox/metadata";
+pub(super) const METADATA_MOUNT: &str = "/run/arcbox/metadata";
 /// Both binaries are baked into the EROFS rootfs (static e2fsprogs).
 const MKFS_EXT4: &str = "/sbin/mkfs.ext4";
 const E2FSCK: &str = "/sbin/e2fsck";

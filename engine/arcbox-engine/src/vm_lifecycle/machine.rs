@@ -393,7 +393,7 @@ mod machine_tests {
         step(&mut sm, &mut fx, start(true));
         let (state, effects) = step(&mut sm, &mut fx, VmEvent::Failure);
         assert_eq!(state, VmLifecycleState::Failed);
-        assert!(effects.is_empty());
+        assert_eq!(effects, []);
     }
 
     #[test]
@@ -446,7 +446,7 @@ mod machine_tests {
 
         let (state, effects) = step(&mut sm, &mut fx, VmEvent::Activity);
         assert_eq!(state, VmLifecycleState::Running);
-        assert!(effects.is_empty());
+        assert_eq!(effects, []);
     }
 
     #[test]
@@ -455,7 +455,7 @@ mod machine_tests {
         let mut sm = running_machine(&mut fx);
         let (state, effects) = step(&mut sm, &mut fx, VmEvent::Activity);
         assert_eq!(state, VmLifecycleState::Running);
-        assert!(effects.is_empty());
+        assert_eq!(effects, []);
     }
 
     #[test]
@@ -484,7 +484,7 @@ mod machine_tests {
         step(&mut sm, &mut fx, start(false));
         let (state, effects) = step(&mut sm, &mut fx, VmEvent::Stop);
         assert_eq!(state, VmLifecycleState::Starting);
-        assert!(effects.is_empty());
+        assert_eq!(effects, []);
     }
 
     #[test]

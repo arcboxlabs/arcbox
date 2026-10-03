@@ -28,9 +28,6 @@ use crate::context::{DaemonContext, EarlyContext, StartupHandles, VmArgs};
 
 const DNS_PREFIX: &str = "arcbox";
 pub const DEFAULT_DNS_DOMAIN: &str = "arcbox.local";
-/// Canonical production DNS port. Isolated instances may request port 0 and
-/// publish the actual bound port through their unique resolver domain.
-pub const DEFAULT_DNS_PORT: u16 = 5553;
 
 /// Phase 1: directories, config, sockets. No runtime, no lock yet.
 ///
@@ -86,6 +83,7 @@ async fn init_early(args: DaemonArgs, handles: StartupHandles) -> Result<EarlyCo
         install_dns_resolver: args.install_dns_resolver,
         kubernetes_port: args.kubernetes_port,
         kubernetes_context,
+        ssh_port: args.ssh_port,
         docker_integration: args.docker_integration,
         mount_nfs: !args.no_mount_nfs,
         vm_args: VmArgs {
@@ -144,6 +142,7 @@ async fn acquire_lock(early: EarlyContext) -> Result<DaemonContext> {
         install_dns_resolver: early.install_dns_resolver,
         kubernetes_port: early.kubernetes_port,
         kubernetes_context: early.kubernetes_context,
+        ssh_port: early.ssh_port,
         docker_integration: early.docker_integration,
         mount_nfs: early.mount_nfs,
         vm_args: early.vm_args,
@@ -289,16 +288,27 @@ async fn init_runtime(ctx: &DaemonContext) -> Result<Arc<Runtime>> {
         runtime.network_manager().set_dns_domain(&ctx.dns_domain);
     }
 
-    let sandbox_cleanup_supported = if runtime.config().vm.autostart {
-        arcbox_api::initialize_sandbox_cleanup(runtime.as_ref())
+    // Replay the startup cleanup before the runtime is published, so no
+    // sandbox state from a previous daemon outlives it. The stream is a
+    // streaming RPC, which the HV backend's blocking agent transport cannot
+    // carry; HV runs no sandboxes, so there is nothing to replay there. The
+    // same gate, re-evaluated per VM incarnation, keeps the long-lived watch
+    // (`sandbox_cleanup::spawn`) off backends that cannot carry it.
+    let backend = runtime.system_vm_backend();
+    if !runtime.config().vm.autostart {
+        // No guest, nothing to clean.
+    } else if backend.supports_nested_virt() {
+        let replayed = arcbox_computer::cleanup::initialize(runtime.as_ref())
             .await
-            .context("Failed to initialize sandbox cleanup")?
+            .context("Failed to initialize sandbox cleanup")?;
+        if !replayed {
+            info!("sandbox cleanup skipped: the guest runs no sandboxes");
+        }
     } else {
-        false
-    };
-
-    if sandbox_cleanup_supported {
-        arcbox_api::spawn_sandbox_cleanup(Arc::clone(&runtime));
+        info!(
+            backend = backend.as_str(),
+            "sandbox cleanup skipped: the backend does not run sandboxes"
+        );
     }
     Ok(runtime)
 }
@@ -340,15 +350,17 @@ pub fn resolve_data_dir(profile: ArcboxProfile, data_dir: Option<&PathBuf>) -> P
     HostLayout::resolve_for_profile_from_env(profile, data_dir.map(PathBuf::as_path)).data_dir
 }
 
-fn dns_port(cli_port: Option<u16>) -> u16 {
-    if let Some(port) = cli_port {
-        return port;
-    }
-    let key = format!("{}_DNS_PORT", to_env_prefix(DNS_PREFIX));
-    std::env::var(key)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_DNS_PORT)
+/// The explicitly requested DNS port: `--dns-port`, then `ARCBOX_DNS_PORT`.
+///
+/// `None` leaves the choice to the DNS service, which binds the profile's
+/// port and falls back to an OS-allocated one when it is taken. Isolated
+/// instances request `0` and publish the bound port through their unique
+/// resolver domain.
+fn dns_port(cli_port: Option<u16>) -> Option<u16> {
+    cli_port.or_else(|| {
+        let key = format!("{}_DNS_PORT", to_env_prefix(DNS_PREFIX));
+        std::env::var(key).ok().and_then(|s| s.parse().ok())
+    })
 }
 
 fn dns_domain(cli_domain: Option<Domain>) -> Result<String> {

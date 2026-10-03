@@ -339,6 +339,13 @@ impl SplitQueue {
         self.avail_idx() != self.last_avail_idx
     }
 
+    /// Whether the guest wants an interrupt for the used entries published
+    /// in `(old_used, new_used]` — for a caller that advanced the ring
+    /// through several transient queues and decides once per batch.
+    pub fn notify_needed(&self, old_used: u16, new_used: u16) -> bool {
+        self.should_notify(old_used, new_used)
+    }
+
     /// Decides whether to interrupt the guest after advancing `used.idx` from
     /// `old_used` to `new_used`.
     fn should_notify(&self, old_used: u16, new_used: u16) -> bool {

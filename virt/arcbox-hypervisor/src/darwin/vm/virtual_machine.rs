@@ -190,6 +190,18 @@ impl VirtualMachine for DarwinVm {
             });
         }
 
+        // A VM whose console pipes were handed to a helper cannot be started
+        // again in place: VZ would pass the closed handles to the new helper.
+        if state == VmState::Stopped
+            && self.console_fds.is_some()
+            && self.guest_serial_fds.is_empty()
+        {
+            return Err(HypervisorError::VmError(
+                "VZ VM cannot be restarted in place once its console pipes were released; create a new VM"
+                    .to_string(),
+            ));
+        }
+
         self.set_state(VmState::Starting);
 
         // Finalize configuration if VM hasn't been created yet
@@ -227,6 +239,7 @@ impl VirtualMachine for DarwinVm {
                 Ok(()) => {
                     self.running.store(true, Ordering::SeqCst);
                     self.set_state(VmState::Running);
+                    self.release_guest_serial_ends();
                     tracing::info!("Started VM {}", self.id);
                     if let Some(path) = self.console_path() {
                         tracing::info!("Serial console attached at {}", path);

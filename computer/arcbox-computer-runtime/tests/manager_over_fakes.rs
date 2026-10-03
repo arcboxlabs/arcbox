@@ -304,13 +304,9 @@ async fn a_create_that_fails_before_activation_hands_the_address_back() {
     // Nothing is quarantined — the lease never reached a TAP — and the
     // address is back in the pool for the next computer, which is only
     // visible in the address that one is given.
-    assert!(
-        fixture
-            .manager
-            .pending_network_cleanups()
-            .await
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        fixture.manager.pending_network_cleanups().await.unwrap(),
+        []
     );
     let (_id, reused) = fixture
         .manager

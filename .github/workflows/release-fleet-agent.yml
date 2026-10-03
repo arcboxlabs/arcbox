@@ -57,7 +57,7 @@ jobs:
           - arch: amd64
             runner: macos-26-intel
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       # Check out the tag being released, not the dispatching ref — a
@@ -76,19 +76,6 @@ jobs:
       - name: Install Protobuf compiler
         timeout-minutes: 5
         run: brew install protobuf
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-fleet-agent-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-fleet-agent-${{ matrix.arch }}-
 
       - name: Import signing certificate
         env:
@@ -121,7 +108,6 @@ jobs:
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
 
       - name: Build arcbox-fleet-agent (release)
-        timeout-minutes: 15
         run: cargo build --release --locked -p arcbox-fleet-agent
 
       - name: Codesign arcbox-fleet-agent
@@ -171,7 +157,7 @@ jobs:
             # sha256 of https://musl.cc/aarch64-linux-musl-cross.tgz
             musl_sha256: c909817856d6ceda86aa510894fa3527eac7989f0ef6e87b5721c58737a06c38
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       # Same tag-ref discipline as build-macos.
@@ -224,21 +210,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
 
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-fleet-agent-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-fleet-agent-${{ matrix.arch }}-
-
       - name: Build arcbox-fleet-agent
-        timeout-minutes: 10
         run: cargo build --release --locked -p arcbox-fleet-agent --target ${{ matrix.target }}
 
       - name: Verify artifact is fully static
@@ -264,7 +236,7 @@ jobs:
           retention-days: 5
 
   # Mirror the fleet-agent binaries to the release CDN
-  # (release.arcboxcdn.com, backed by Backblaze B2). This is the primary
+  # (release.arcboxcdn.com, a Cloudflare R2 bucket). This is the primary
   # distribution channel the gateway resolves for AgentUpdate.binary_url —
   # the URL is a pure function of (version, host_os, host_arch):
   #
@@ -274,10 +246,10 @@ jobs:
   # components; `fleet-agent/` is this specific component, leaving room
   # for sibling components at `runner/<other>/...` without collision.
   # `${version}` is the git tag with the `fleet-agent-` prefix stripped
-  # (so `fleet-agent-v0.1.0` → `v0.1.0`). `--size-only` on the sync is
-  # safe because the artifacts under a version are immutable;
-  # re-releasing the same version is a workflow re-dispatch, not a
-  # content-differs replace.
+  # (so `fleet-agent-v0.1.0` → `v0.1.0`). The publish skips keys whose size
+  # and mtime already match, which is safe because the artifacts under a
+  # version are immutable; re-releasing the same version is a workflow
+  # re-dispatch, not a content-differs replace.
   upload-cdn:
     name: Upload to CDN
     needs: [version, build-macos, build-linux]
@@ -329,31 +301,17 @@ jobs:
           echo "=== CDN staging ==="
           find "cdn-staging/runner/fleet-agent" -type f | sort
 
-      - name: Upload binaries to B2 (size-only, immutable)
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_B2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_B2_SECRET_ACCESS_KEY }}
-          AWS_REGION: ${{ secrets.RELEASE_B2_REGION }}
-        run: |
-          VERSION="${{ steps.stage.outputs.version }}"
-          aws s3 sync \
-            "cdn-staging/runner/fleet-agent/${VERSION}/" \
-            "s3://${{ secrets.RELEASE_B2_BUCKET }}/runner/fleet-agent/${VERSION}/" \
-            --endpoint-url "https://s3.${{ secrets.RELEASE_B2_REGION }}.backblazeb2.com" \
-            --size-only
-
-      - name: Upload latest.json to B2
-        if: steps.stage.outputs.is_stable == 'true'
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_B2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_B2_SECRET_ACCESS_KEY }}
-          AWS_REGION: ${{ secrets.RELEASE_B2_REGION }}
-        run: |
-          aws s3 cp \
-            "cdn-staging/runner/fleet-agent/latest.json" \
-            "s3://${{ secrets.RELEASE_B2_BUCKET }}/runner/fleet-agent/latest.json" \
-            --endpoint-url "https://s3.${{ secrets.RELEASE_B2_REGION }}.backblazeb2.com" \
-            --content-type "application/json"
+      # Binaries first, latest.json last. A pre-release stages no latest.json,
+      # so the pointer only moves for stable versions.
+      - name: Publish to R2
+        uses: arcboxlabs/actions/r2-publish@v2
+        with:
+          account-id: ${{ vars.R2_ACCOUNT_ID }}
+          access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          bucket: arcboxcdn-release
+          source-dir: cdn-staging
+          index-files: ${{ steps.stage.outputs.is_stable == 'true' && 'runner/fleet-agent/latest.json' || '' }}
 
       - name: Verify CDN URLs
         uses: actions/github-script@v7

@@ -11,7 +11,8 @@ use std::sync::RwLock;
 use std::time::Duration;
 
 pub use types::{
-    BlockDeviceConfig, SharedDirConfig, VmConfig, VmId, VmInfo, bridge_nic_mac_for_vm_id,
+    BlockDeviceConfig, HostNetwork, SharedDirConfig, VmConfig, VmId, VmInfo,
+    bridge_nic_mac_for_vm_id,
 };
 
 use arcbox_vmm::{
@@ -139,6 +140,27 @@ impl VmManager {
         Ok(())
     }
 
+    /// Sets the CPU and memory a VM boots with.
+    ///
+    /// The `Vmm` is built from `VmConfig` at start, so a stopped VM gets the
+    /// new size on its next start; a running VM keeps the size it booted
+    /// with until it is restarted, which is the caller's to report.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the VM is not found.
+    pub fn set_resources(&self, id: &VmId, cpus: u32, memory_mb: u64) -> Result<()> {
+        let mut vms = self.vms.write().map_err(|_| EngineError::LockPoisoned)?;
+        let entry = vms
+            .get_mut(id)
+            .ok_or_else(|| EngineError::not_found(id.to_string()))?;
+        entry.config.cpus = cpus;
+        entry.config.memory_mb = memory_mb;
+        entry.info.cpus = cpus;
+        entry.info.memory_mb = memory_mb;
+        Ok(())
+    }
+
     fn build_vmm_config(entry: &VmEntry) -> VmmConfig {
         let shared_dirs: Vec<VmmSharedDirConfig> = entry
             .config
@@ -177,6 +199,7 @@ impl VmManager {
             // config) keeps it correct after `set_backend` switches HV<->VZ.
             enable_rosetta: entry.config.rosetta
                 && matches!(entry.config.backend, arcbox_vmm::VmBackend::Vz),
+            nested_virt: entry.config.nested_virt,
             serial_console: true,
             virtio_console: true,
             shared_dirs,
@@ -202,16 +225,12 @@ impl VmManager {
         }
     }
 
-    /// Starts a VM.
+    /// Starts a VM, wiring its datapath to `host_network`.
     ///
     /// # Errors
     ///
     /// Returns an error if the VM cannot be started.
-    pub fn start(
-        &self,
-        id: &VmId,
-        shared_dns_hosts: Option<std::sync::Arc<arcbox_dns::LocalHostsTable>>,
-    ) -> Result<()> {
+    pub fn start(&self, id: &VmId, host_network: HostNetwork) -> Result<()> {
         let mut vms = self.vms.write().map_err(|_| EngineError::LockPoisoned)?;
 
         let entry = vms
@@ -238,13 +257,19 @@ impl VmManager {
             }
         };
 
-        // Share the host DNS hosts table with the VMM-side DnsForwarder.
+        // Wire the datapath to the host: the shared DNS hosts table and the
+        // operator's egress proxy policy.
         #[cfg(target_os = "macos")]
-        if let Some(table) = shared_dns_hosts {
-            vmm.set_shared_dns_hosts(table);
+        {
+            if let Some(table) = host_network.dns_hosts {
+                vmm.set_shared_dns_hosts(table);
+            }
+            if let Some(proxy) = host_network.proxy {
+                vmm.set_proxy_env(proxy);
+            }
         }
         #[cfg(not(target_os = "macos"))]
-        let _ = shared_dns_hosts;
+        let _ = host_network;
 
         if let Err(e) = vmm.start() {
             entry.info.state = MachineState::Created;
@@ -867,7 +892,28 @@ impl VmManager {
         vmm.connect_vsock(port).map_err(EngineError::from)
     }
 
+    /// Duplicates a running VM's console pipe read ends for a serial drain;
+    /// `None` when the backend has no host-side pipes (HV).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the VM is unknown or the pipes cannot be duplicated.
+    #[cfg(target_os = "macos")]
+    pub fn dup_serial_readers(&self, id: &VmId) -> Result<Option<arcbox_vmm::SerialReaders>> {
+        let vms = self.vms.read().map_err(|_| EngineError::LockPoisoned)?;
+        let entry = vms
+            .get(id)
+            .ok_or_else(|| EngineError::not_found(id.to_string()))?;
+        let Some(vmm) = entry.vmm.as_ref() else {
+            return Ok(None);
+        };
+        vmm.dup_serial_readers().map_err(EngineError::from)
+    }
+
     /// Reads serial console output from a running VM (macOS only).
+    ///
+    /// While the machine's serial drain runs it owns the pipe; a concurrent
+    /// read here takes bytes away from it. Meant for a VM without a drain.
     #[cfg(target_os = "macos")]
     pub fn read_console_output(&self, id: &VmId) -> Result<String> {
         let vms = self.vms.read().map_err(|_| EngineError::LockPoisoned)?;

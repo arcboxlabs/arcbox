@@ -440,8 +440,8 @@ mod tests {
         let plan = plan_with(ContainerSpec::default());
         let spec = spec_of(&plan);
 
-        assert!(spec.hostname.is_empty());
-        assert!(spec.working_dir.is_empty());
+        assert_eq!(spec.hostname, "");
+        assert_eq!(spec.working_dir, "");
         assert_eq!(spec.memory, 0);
         assert_eq!(spec.nano_cpus, 0);
         assert!(spec.restart_policy.is_unset());

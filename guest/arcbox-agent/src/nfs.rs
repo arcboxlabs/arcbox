@@ -777,12 +777,16 @@ pub use platform::ensure_docker_export;
 /// `127.0.0.1:tcp_target_port` (the guest-local nfsd or rpc.mountd). This lets
 /// the host daemon reach the guest NFS services over vsock, independent of any
 /// guest NIC. NFSv3 needs two of these — one for nfsd, one for rpc.mountd.
+/// The vsock leg is framed with `HalfCloseStream` (protocol v6): nfsd's
+/// replies go out only within the host's window, so the host never has to
+/// leave the vsock unread.
 #[cfg(target_os = "linux")]
 pub async fn run_nfs_relay(
     cancel: tokio_util::sync::CancellationToken,
     vsock_port: u32,
     tcp_target_port: u16,
 ) {
+    use arcbox_transport::vsock::HalfCloseStream;
     use tokio::io::copy_bidirectional;
     use tokio::net::TcpStream;
     use tokio_vsock::{VMADDR_CID_ANY, VsockAddr, VsockListener};
@@ -818,7 +822,7 @@ pub async fn run_nfs_relay(
         tokio::spawn(async move {
             match TcpStream::connect(("127.0.0.1", tcp_target_port)).await {
                 Ok(mut tcp) => {
-                    let mut vsock = stream;
+                    let mut vsock = HalfCloseStream::new(stream);
                     if let Err(e) = copy_bidirectional(&mut vsock, &mut tcp).await {
                         tracing::debug!(tcp_target_port, error = %e, "NFS relay copy error");
                     }

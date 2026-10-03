@@ -222,6 +222,10 @@ pub(super) fn machine_drift_reason(
 ) -> Option<&'static str> {
     if persisted.cpus != want.cpus {
         Some("cpus")
+    } else if !persisted.nested_virt {
+        // Written before the flag existed (or by a build that dropped it):
+        // the System VM must be nested-capable for sandboxes.
+        Some("nested_virt")
     } else if persisted.memory_mb != want.memory_mb {
         Some("memory_mb")
     } else if persisted.block_devices.len() != BASE_MACHINE_DISK_COUNT {

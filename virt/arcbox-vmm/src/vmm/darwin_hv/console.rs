@@ -28,12 +28,6 @@ impl Vmm {
             device_manager: Arc::clone(device_manager),
             socket,
             running: self.running.clone(),
-            exit_vcpus: make_exit_vcpus_fn(
-                self.hv_vcpu_ids
-                    .clone()
-                    .expect("hv_vcpu_ids asserted Some above"),
-                self.hv_kick_broadcasts.clone(),
-            ),
         };
         let handle = std::thread::Builder::new()
             .name("console-io".to_string())

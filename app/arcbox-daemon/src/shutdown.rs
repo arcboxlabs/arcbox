@@ -41,7 +41,10 @@ pub async fn run(ctx: DaemonContext, mut handles: ServiceHandles) -> Result<()> 
 
     // Keep the NFS proxy and guest alive until macOS has detached the mount.
     // Cutting either connection first triggers its interrupted-server alert.
+    // The machine mounts go first for the same reason: their servers are
+    // the machines `stop_runtime` is about to stop.
     crate::nfs_mount::cleanup(&ctx).await;
+    crate::machine_mount::cleanup().await;
     ctx.shutdown.cancel();
 
     drain(&mut handles).await;
@@ -134,6 +137,7 @@ async fn cleanup(ctx: &DaemonContext) {
 
     // Retry if shutdown raced a mount that was still being established.
     crate::nfs_mount::cleanup(ctx).await;
+    crate::machine_mount::cleanup().await;
 
     cleanup_container_route(ctx.container_network_lease_slot.get()).await;
 
@@ -255,6 +259,9 @@ async fn drain(handles: &mut ServiceHandles) {
         if let Some(h) = handles.kubernetes_proxy.as_mut() {
             let _ = h.await;
         }
+        if let Some(h) = handles.ssh.as_mut() {
+            let _ = h.await;
+        }
         if let Some(h) = handles.route_guard.as_mut() {
             let _ = h.await;
         }
@@ -272,6 +279,9 @@ async fn drain(handles: &mut ServiceHandles) {
             h.abort();
         }
         if let Some(h) = handles.kubernetes_proxy.as_mut() {
+            h.abort();
+        }
+        if let Some(h) = handles.ssh.as_mut() {
             h.abort();
         }
         if let Some(h) = handles.route_guard.as_mut() {

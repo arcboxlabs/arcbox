@@ -194,6 +194,9 @@ mod tests {
         kill_through(&*vm, child).await;
     }
 
+    /// Measured on the runtime clock: paused time advances only through the
+    /// timers the code awaits, so the interval is the bound itself and not
+    /// the host's scheduling of this thread under load.
     #[tokio::test]
     async fn an_orphan_whose_api_hangs_is_adopted_within_the_bound() {
         let dir = tempfile::tempdir().unwrap();
@@ -212,13 +215,18 @@ mod tests {
         });
         let (child, found, record) = orphan(socket, dir.path(), None);
         let bound = Duration::from_millis(300);
+
+        tokio::time::pause();
         let started = tokio::time::Instant::now();
-        let vm = rebuild(found, &record, bound)
+        let vm = tokio::time::timeout(API_TIMEOUT * 2, rebuild(found, &record, bound))
             .await
+            .expect("a wedged api does not hang the adopt")
             .expect("a wedged api does not fail the adopt");
+        let elapsed = started.elapsed();
+        tokio::time::resume();
         assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "settled for the process within the bound, not the hang"
+            (bound..bound * 2).contains(&elapsed),
+            "settled when the bound elapsed, not for the hang or the default api timeout: {elapsed:?}"
         );
         assert!(vm.vsock().is_none() && vm.checkpoint().is_none());
         kill_through(&*vm, child).await;

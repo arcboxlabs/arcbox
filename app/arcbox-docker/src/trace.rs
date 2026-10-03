@@ -124,7 +124,7 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let body_trace = String::from_utf8_lossy(&body).to_string();
 
-        assert!(!header_value.is_empty());
+        assert_ne!(header_value, "");
         assert_eq!(body_trace, header_value);
     }
 }

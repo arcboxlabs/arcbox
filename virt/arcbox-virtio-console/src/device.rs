@@ -613,14 +613,14 @@ mod tests {
         console.activate().unwrap();
 
         let output = console.read_output();
-        assert!(output.is_empty());
+        assert_eq!(output, b"");
 
         console.handle_tx(b"test output").unwrap();
         let output = console.read_output();
         assert_eq!(&output, b"test output");
 
         let output2 = console.read_output();
-        assert!(output2.is_empty());
+        assert_eq!(output2, b"");
     }
 
     #[test]

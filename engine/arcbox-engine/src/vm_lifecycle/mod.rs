@@ -34,8 +34,6 @@ mod boot;
 mod health;
 mod machine;
 mod recovery;
-#[cfg(target_os = "macos")]
-mod serial;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -45,7 +43,7 @@ use crate::event::EventBus;
 use crate::machine::{MachineInfo, MachineManager};
 use arcbox_image::boot_assets::BootAssetProvider;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -213,12 +211,14 @@ impl VmLifecycleManager {
             boot_assets,
             recovery,
             health_monitor,
+            desired_cpus: AtomicU32::new(config.default_vm.cpus),
+            desired_memory_mb: AtomicU64::new(config.default_vm.memory_mb),
             config,
             backend: AtomicU8::new(seeded_backend as u8),
             restart_generation: AtomicU64::new(0),
             last_activity_ms: AtomicU64::new(now_ms),
             active_ops: AtomicUsize::new(0),
-            kubernetes_hold: AtomicBool::new(false),
+            kubernetes_hold: watch::Sender::new(false),
         });
 
         // The machine always boots its state graph from `NotExist`; whether a
@@ -398,9 +398,12 @@ impl VmLifecycleManager {
     /// Enables or disables the Kubernetes lifecycle hold.
     #[allow(clippy::unused_async, reason = "public API compatibility")]
     pub async fn set_kubernetes_hold(&self, active: bool) {
-        self.shared
-            .kubernetes_hold
-            .store(active, std::sync::atomic::Ordering::Relaxed);
+        // Only a change wakes subscribers; status polls re-assert the value.
+        self.shared.kubernetes_hold.send_if_modified(|held| {
+            let changed = *held != active;
+            *held = active;
+            changed
+        });
         self.shared.record_activity();
 
         if active {
@@ -409,6 +412,21 @@ impl VmLifecycleManager {
             self.ensure_actor();
             let _ = self.cmd_tx.send(Command::Activity);
         }
+    }
+
+    /// Whether Kubernetes holds the VM active; see
+    /// [`Self::subscribe_kubernetes_hold`].
+    #[must_use]
+    pub fn kubernetes_hold(&self) -> bool {
+        *self.shared.kubernetes_hold.borrow()
+    }
+
+    /// Subscribes to the Kubernetes lifecycle hold: `true` while the daemon
+    /// believes the cluster runs, i.e. from a successful start (or a status
+    /// that finds k3s running) until a stop, delete, or status that does not.
+    #[must_use]
+    pub fn subscribe_kubernetes_hold(&self) -> watch::Receiver<bool> {
+        self.shared.kubernetes_hold.subscribe()
     }
 
     /// Gracefully stops the VM.
@@ -457,10 +475,25 @@ impl VmLifecycleManager {
         &self.shared.boot_assets
     }
 
-    /// Returns the resolved default VM configuration used by lifecycle.
+    /// Returns the VM configuration the next (re)boot creates the machine
+    /// with: the configured defaults under the live CPU and memory limits.
     #[must_use]
     pub fn default_vm_config(&self) -> DefaultVmConfig {
-        self.shared.config.default_vm.clone()
+        self.shared.desired_vm()
+    }
+
+    /// Sets the CPU and memory limits used on the next (re)boot of the
+    /// System VM.
+    ///
+    /// Does not stop or restart a running VM; the next boot's drift check
+    /// recreates the machine when either differs from the persisted record.
+    /// To apply immediately the caller forces that boot (see
+    /// `Runtime::resize_system_vm`).
+    pub fn set_resources(&self, cpus: u32, memory_mb: u64) {
+        self.shared.desired_cpus.store(cpus, Ordering::Release);
+        self.shared
+            .desired_memory_mb
+            .store(memory_mb, Ordering::Release);
     }
 
     /// Returns the health monitor.

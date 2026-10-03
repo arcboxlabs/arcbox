@@ -34,6 +34,7 @@ Current recipe ↔ self-build mapping (keep both columns identical):
 | `backend_matrix` | same as above                                     | `build_release_binaries` (same)              |
 | `hv_vmm`         | `cargo build --release -p arcbox-e2e --bin hv_e2e`| `hv_vmm.rs` (same)                           |
 | `stats_watch`    | release daemon + musl `arcbox-agent`              | `stats_watch.rs` (same)                      |
+| `kubernetes_lb`  | release daemon + musl `arcbox-agent`              | `kubernetes_lb.rs` (agent) + `scenario.rs` (daemon) |
 | `sandbox`        | release cli+daemon + musl `arcbox-agent`/`arcbox-vm-agent` bins | `sandbox.rs::build_binaries` (same)   |
 | `egress_throughput` | `cargo build --release -p arcbox-daemon`       | `scenario.rs::run_vz_scenario_with_log` (same) |
 | `docker_build`   | same as above                                     | `scenario.rs::run_vz_scenario_with_log` (same) |
@@ -177,19 +178,22 @@ decaying average that lies on short windows) — keep it that way. It does
 NOT launch anything: it requires an already-running `--pid` (e.g. a live
 `arcbox-daemon`) and samples cputime/RSS over `--seconds` (default 30). The
 verdict thresholds (`cpu <0.05%`, `rss <150MB`) are hardcoded in
-`commands/idle.rs` and must track the root CLAUDE.md performance table;
+`commands/idle.rs` and must track the root AGENTS.md performance table;
 change them together.
 
-MISS is EXPECTED today, not a regression. HV baselines from the 2026-07 HV
-fix campaign sit far from target (idle CPU ~3.87%, RSS ~1.04GB vs
-0.05%/150MB). The sampler exists to measure R3 (tickless WFI /
-event-driven workers) progress toward those numbers; read MISS as
-"distance to go", not "you broke it".
+MISS is EXPECTED today, not a regression. HV baselines sit far from target
+(idle CPU 6.7% after c3004580, RSS ~0.7–1.9 GB depending on what the guest
+touched, vs 0.05%/150MB). The sampler exists to measure event-driven-worker
+progress toward those numbers; read MISS as "distance to go", not "you
+broke it". Where the idle CPU goes (2026-09-30, `sample` + `ps -M`): ~5.6
+points are the `rx-inject` thread's `cthread_yield`/`semaphore_timedwait`
+loop, all 18 vCPU threads together ~0.1 — "tickless WFI" is not a lever,
+the vCPU threads already sleep inside `hv_vcpu_run`.
 
 ## Counters honesty (campaign metrics)
 
-R2/R3 acceptance in Linear is measured from the HV broadcast counters
-(per-boot ~2301 unpark-broadcasts / ~71 kick-broadcasts) surfaced through
-the debug snapshot, not from anything xtask computes. A refactor that
-bypasses those counter sites falsifies the metrics — see
-`virt/arcbox-vmm/AGENTS.md`.
+The HV broadcast counters (`kick_broadcasts` / `unpark_broadcasts`) that
+R2/R3 acceptance used to read are retired and always 0 (see
+`virt/arcbox-vmm/AGENTS.md` "Diagnostic Counters"). Judge a wake-path
+change by the per-vCPU `kicks_received` deltas (flat in steady state), the
+vsock RPC latency, and `xtask idle`.

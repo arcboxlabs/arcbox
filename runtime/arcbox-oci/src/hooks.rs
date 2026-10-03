@@ -503,8 +503,8 @@ mod tests {
     #[test]
     fn test_hook_empty_args_and_env() {
         let hook = Hook::new("/usr/bin/hook");
-        assert!(hook.args.is_empty());
-        assert!(hook.env.is_empty());
+        assert_eq!(hook.args, Vec::<String>::new());
+        assert_eq!(hook.env, Vec::<String>::new());
     }
 
     #[test]

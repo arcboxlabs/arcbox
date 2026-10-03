@@ -223,6 +223,7 @@ impl MigrationManager {
             // Only indicates actual ArcBox resource replacements; blockers
             // are surfaced via `warnings`.
             replacements_required: !plan.replacements.is_empty(),
+            replacements: plan.replacements.to_wire().into(),
             warnings,
             // Only for an explicit dry run: the plan embeds each container's
             // environment verbatim, so it is not worth shipping on a prepare
@@ -422,6 +423,7 @@ fn map_migration_error(error: MigrationError) -> CoreError {
 mod tests {
     use super::*;
     use arcbox_migration::{MigrationPlan, ReplacementSummary, SourceInfo};
+    use buffa::Message as _;
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::Path;
 
@@ -472,6 +474,21 @@ exit 0
 "#;
 
     const FAILING_SHIM: &str = "#!/bin/sh\nexit 1\n";
+
+    const REPLACED_VOLUME_SHIM: &str = r#"#!/bin/sh
+case "$*" in
+  *"info --format"*)
+    echo '{"Name":"orbstack","ServerVersion":"29.0","OperatingSystem":"OrbStack","Architecture":"aarch64"}'
+    ;;
+  *"volume ls -q"*)
+    echo 'pgdata'
+    ;;
+  *"volume inspect pgdata"*)
+    echo '[{"Name":"pgdata","Driver":"local"}]'
+    ;;
+esac
+exit 0
+"#;
 
     /// Builds a prepare request against a source socket that exists.
     fn prepare_request(socket: &Path, dry_run: bool) -> PrepareMigrationRequest {
@@ -791,7 +808,9 @@ exit 0
         let response = response.unwrap();
 
         assert!(response.plan_id.is_empty(), "a dry run issues no plan id");
+        assert!(response.replacements.is_set());
         let plan = response.plan.expect("a dry run ships the plan");
+        assert_eq!(response.replacements, plan.replacements);
         assert!(
             plan.source.is_set(),
             "the plan's source is always projected"
@@ -817,14 +836,49 @@ exit 0
 
         restore_path(previous_path);
         let response = response.unwrap();
+        let response =
+            PrepareMigrationResponse::decode_from_slice(&response.encode_to_vec()).unwrap();
 
-        assert!(!response.plan_id.is_empty());
+        assert_ne!(response.plan_id, "");
         assert_eq!(manager.prepared.read().await.len(), 1);
+        assert_eq!(
+            response
+                .replacements
+                .expect("an empty summary must retain presence on the wire"),
+            ReplacementSummary::default().to_wire()
+        );
         // The plan embeds container environments; it ships only when a caller
         // explicitly asked to inspect it.
         assert!(
             response.plan.is_unset(),
             "a runnable prepare must not ship the plan payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_real_prepare_reports_replacements_from_the_saved_plan() {
+        let _env_lock = ENV_LOCK.lock().await;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let previous_path = install_docker_shim(temp_dir.path(), REPLACED_VOLUME_SHIM);
+        let socket = temp_dir.path().join("docker.sock");
+        std::fs::write(&socket, "").unwrap();
+
+        let manager = MigrationManager::new(temp_dir.path().join("arcbox-docker.sock"));
+        let response = manager
+            .prepare_migration(prepare_request(&socket, false))
+            .await;
+
+        restore_path(previous_path);
+        let response = response.unwrap();
+
+        let replacements = response.replacements.expect("a prepare ships the summary");
+        assert_eq!(replacements.volumes, vec!["pgdata"]);
+        assert!(response.replacements_required);
+        assert!(response.plan.is_unset());
+        let prepared = manager.prepared.read().await;
+        assert_eq!(
+            replacements,
+            prepared[&response.plan_id].plan.replacements.to_wire()
         );
     }
 }

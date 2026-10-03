@@ -531,7 +531,7 @@ mod tests {
             runtime.detail.as_deref(),
             Some("executable bit missing on dockerd; the daemon repairs this on its next start")
         );
-        assert!(report.reasons.is_empty());
+        assert_eq!(report.reasons, Vec::<String>::new());
     }
 
     #[tokio::test]

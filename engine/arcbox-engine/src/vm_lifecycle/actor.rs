@@ -112,6 +112,12 @@ pub(super) struct LifecycleShared {
     /// Live hypervisor backend, encoded as `VmBackend as u8`. Seeded from the
     /// persisted machine; updated by `set_backend` for the next (re)boot.
     pub(super) backend: std::sync::atomic::AtomicU8,
+    /// vCPUs the next (re)boot creates the machine with. Seeded from
+    /// `config.default_vm`; updated by `set_resources`.
+    pub(super) desired_cpus: std::sync::atomic::AtomicU32,
+    /// Memory in MiB the next (re)boot creates the machine with. Seeded from
+    /// `config.default_vm`; updated by `set_resources`.
+    pub(super) desired_memory_mb: std::sync::atomic::AtomicU64,
     /// VM incarnation counter, bumped on every stop (see `restart_generation`).
     pub(super) restart_generation: std::sync::atomic::AtomicU64,
     /// Timestamp of last activity (epoch millis, for idle detection).
@@ -120,8 +126,10 @@ pub(super) struct LifecycleShared {
     /// idle gate never fires while this is non-zero — a VM serving a pull
     /// or build is not idle no matter how old the last activity stamp is.
     pub(super) active_ops: std::sync::atomic::AtomicUsize,
-    /// Whether Kubernetes holds the VM in the active state.
-    pub(super) kubernetes_hold: std::sync::atomic::AtomicBool,
+    /// Whether Kubernetes holds the VM in the active state. A watch, so
+    /// whatever follows the cluster (the LoadBalancer port reconcile) can
+    /// wait for it instead of polling.
+    pub(super) kubernetes_hold: tokio::sync::watch::Sender<bool>,
 }
 
 impl LifecycleShared {
@@ -142,6 +150,16 @@ impl LifecycleShared {
             .as_millis() as u64;
         let last = self.last_activity_ms.load(Ordering::Relaxed);
         now_ms.saturating_sub(last) / 1000
+    }
+
+    /// The VM configuration the next (re)boot creates the machine with:
+    /// `config.default_vm` under the live CPU and memory limits.
+    pub(super) fn desired_vm(&self) -> super::DefaultVmConfig {
+        super::DefaultVmConfig {
+            cpus: self.desired_cpus.load(Ordering::Acquire),
+            memory_mb: self.desired_memory_mb.load(Ordering::Acquire),
+            ..self.config.default_vm.clone()
+        }
     }
 
     /// Returns the System VM's current hypervisor backend.
@@ -178,18 +196,16 @@ impl RealBalloonDeps {
 impl BalloonDeps for RealBalloonDeps {
     type Watch = AgentPressureWatch;
 
-    /// No macOS backend reclaims ballooned memory today (measured and
-    /// calibrated 2026-07-29 on macOS 26.4):
-    /// - VZ: Apple applies neither `vm_deallocate` nor any `madvise` to
-    ///   inflated pages — a 15.35 GB inflation left the daemon's
-    ///   `phys_footprint` byte-identical, and real host pressure
-    ///   *compressed* the pages as live data.
-    /// - HV: `arcbox-virtio-balloon` inflates with `MADV_DONTNEED`, which
-    ///   Darwin treats as a deactivation hint — calibrated
-    ///   footprint-inert, contents preserved (compressed, not discarded,
-    ///   under pressure). Flip HV to `true` only after the device switches
-    ///   to `MADV_FREE_REUSABLE` and a real HV boot shows the host
-    ///   footprint dropping on inflate.
+    /// The host-driven idle descent has no macOS backend to serve:
+    /// - VZ (measured 2026-07-29, macOS 26.4): Apple applies neither
+    ///   `vm_deallocate` nor any `madvise` to inflated pages — a 15.35 GB
+    ///   inflation left the daemon's `phys_footprint` byte-identical, and
+    ///   real host pressure *compressed* the pages as live data.
+    /// - HV: reclaims, but without a target. The guest's free page
+    ///   reporting hands idle ranges to `arcbox-virtio-balloon`, which
+    ///   the HV backend releases by refreshing their stage-2 mapping
+    ///   (2026-09-25); a host-side shrink would only starve the guest of
+    ///   memory it was already giving back. See the `balloon` module docs.
     fn reclaim_capable(&self) -> bool {
         false
     }
@@ -708,7 +724,7 @@ impl LifecycleActor {
 
     fn on_idle_tick(&mut self, machine: &mut Machine) {
         if !self.shared.config.auto_stop
-            || self.shared.kubernetes_hold.load(Ordering::Relaxed)
+            || *self.shared.kubernetes_hold.borrow()
             || self.shared.active_ops.load(Ordering::Acquire) > 0
             || self.public() != VmLifecycleState::Running
         {

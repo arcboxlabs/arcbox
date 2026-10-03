@@ -54,7 +54,7 @@ cargo run --manifest-path tests/bench-virtiofs/Cargo.toml --release -- \
 ```
 
 Guest-vs-native comparison methodology (which ratios are meaningful, the
-same-context rule, and current numbers) lives in `docs/fs-perf-limits.md`.
+same-context rule, and current numbers) lives in `docs/benchmarks/virtiofs.md`.
 
 ## Benchmarks
 
@@ -80,7 +80,7 @@ same-context rule, and current numbers) lives in `docs/fs-perf-limits.md`.
 
 ## Performance Targets (legacy — do not gate on these)
 
-> **Superseded by `docs/fs-perf-limits.md`.** These percent-of-native
+> **Superseded by `docs/benchmarks/virtiofs.md`.** These percent-of-native
 > targets (and the same table printed by `--list`; the binary's runtime
 > check is inert — nothing populates `percent_of_native`) predate the
 > CORE-48 methodology work, which showed that

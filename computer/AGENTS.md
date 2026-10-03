@@ -4,8 +4,8 @@ Two different things live here, and most rules below bind only one of
 them: `arcbox-computer`, the transport-free protocols, and
 `arcbox-computer-runtime`, the runtime that actually boots Computers. Read
 the Crates section before assuming a rule applies to your crate. The
-restructure plan and its locked decisions live in the company repo:
-`engineering/arcbox/architecture-charter.md`.
+restructure plan and its locked decisions live in
+`docs/architecture/charter.md`.
 
 ## Layer rules
 

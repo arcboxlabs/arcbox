@@ -744,7 +744,7 @@ mod tests {
         // The delete commits and reports success; the scan failure only
         // suppresses artifact release (logged orphan, safe direction).
         let released = c.delete("code").unwrap();
-        assert!(released.snapshot_ids.is_empty());
+        assert_eq!(released.snapshot_ids, Vec::<String>::new());
         assert!(matches!(
             c.resolve("code").unwrap_err(),
             SnapshotError::TemplateNotFound(_)
@@ -800,7 +800,7 @@ mod tests {
         c.publish("a", "1.0").unwrap();
         c.put_draft("b", warm_entry("sha256:d2", "shared")).unwrap();
 
-        assert!(c.delete("a").unwrap().snapshot_ids.is_empty());
+        assert_eq!(c.delete("a").unwrap().snapshot_ids, Vec::<String>::new());
         assert_eq!(
             c.delete("b").unwrap().snapshot_ids,
             vec!["shared".to_string()]

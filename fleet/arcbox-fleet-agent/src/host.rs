@@ -1,6 +1,8 @@
 //! Host facts reported to the gateway at enrollment and in heartbeats.
 
 use arcbox_fleet_proto::v1::{Backend, Capability, HostTelemetry};
+use serde::Serialize;
+use tokio::sync::watch;
 
 /// Map Rust's `target_os` to the gateway's lowercase `RunnerOs` naming.
 pub fn map_os(os: &str) -> &str {
@@ -49,57 +51,148 @@ pub fn mem_mib() -> u64 {
     sys.total_memory() / 1024 / 1024
 }
 
-/// Free-form host facts as a JSON string. Descriptive only — nothing here
-/// influences placement (that's [`telemetry`]). Fields are best-effort and
-/// may be `null` on platforms sysinfo doesn't populate them for.
-pub fn host_info_json() -> String {
-    let mut sys = sysinfo::System::new();
-    sys.refresh_cpu_all();
-    let cpu_model = sys.cpus().first().map(|c| c.brand().to_string());
+/// Free-form host facts, the `host_info_json` of enrollment and of every
+/// `Attach`. Descriptive only — nothing here influences placement (that's
+/// [`telemetry`]). Fields are best-effort: `null` where the platform does
+/// not report them, and `disks` also while the probe is still running (see
+/// [`HostFacts`]).
+#[derive(Debug, Serialize)]
+pub struct HostInfo {
+    os: Option<String>,
+    os_version: Option<String>,
+    kernel: Option<String>,
+    arch: &'static str,
+    cpu_model: Option<String>,
+    hostname: Option<String>,
+    boot_time_unix: u64,
+    agent_pid: u32,
+    disks: Option<Vec<DiskInfo>>,
+    lan_ips: Vec<LanIp>,
+}
 
-    let disks = sysinfo::Disks::new_with_refreshed_list()
-        .iter()
-        .map(|d| {
-            serde_json::json!({
-                "name": d.name().to_string_lossy(),
-                "mount_point": d.mount_point().display().to_string(),
-                "file_system": d.file_system().to_string_lossy(),
-                "total_bytes": d.total_space(),
-            })
-        })
-        .collect::<Vec<_>>();
+#[derive(Debug, Serialize)]
+struct DiskInfo {
+    name: String,
+    mount_point: String,
+    file_system: String,
+    total_bytes: u64,
+}
 
-    let hostname = hostname::get().ok().and_then(|h| h.into_string().ok());
+#[derive(Debug, Serialize)]
+struct LanIp {
+    interface: String,
+    ip: String,
+    prefix: u8,
+}
 
-    let lan_ips = sysinfo::Networks::new_with_refreshed_list()
-        .iter()
-        .flat_map(|(iface, data)| {
-            data.ip_networks()
-                .iter()
-                .filter(|net| !net.addr.is_loopback() && !net.addr.is_unspecified())
-                .map(move |net| {
-                    serde_json::json!({
-                        "interface": iface,
-                        "ip": net.addr.to_string(),
-                        "prefix": net.prefix,
+impl HostInfo {
+    /// The facts that answer at once — `sysctl`-backed values and the
+    /// interface list. `disks` is left to [`Self::probe`].
+    fn quick() -> Self {
+        let mut sys = sysinfo::System::new();
+        sys.refresh_cpu_all();
+        let cpu_model = sys.cpus().first().map(|c| c.brand().to_string());
+
+        let lan_ips = sysinfo::Networks::new_with_refreshed_list()
+            .iter()
+            .flat_map(|(iface, data)| {
+                data.ip_networks()
+                    .iter()
+                    .filter(|net| !net.addr.is_loopback() && !net.addr.is_unspecified())
+                    .map(move |net| LanIp {
+                        interface: iface.clone(),
+                        ip: net.addr.to_string(),
+                        prefix: net.prefix,
                     })
-                })
-        })
-        .collect::<Vec<_>>();
+            })
+            .collect();
 
-    let info = serde_json::json!({
-        "os": sysinfo::System::name(),
-        "os_version": sysinfo::System::long_os_version(),
-        "kernel": sysinfo::System::kernel_version(),
-        "arch": std::env::consts::ARCH,
-        "cpu_model": cpu_model,
-        "hostname": hostname,
-        "boot_time_unix": sysinfo::System::boot_time(),
-        "agent_pid": std::process::id(),
-        "disks": disks,
-        "lan_ips": lan_ips,
-    });
-    info.to_string()
+        Self {
+            os: sysinfo::System::name(),
+            os_version: sysinfo::System::long_os_version(),
+            kernel: sysinfo::System::kernel_version(),
+            arch: std::env::consts::ARCH,
+            cpu_model,
+            hostname: hostname::get().ok().and_then(|h| h.into_string().ok()),
+            boot_time_unix: sysinfo::System::boot_time(),
+            agent_pid: std::process::id(),
+            disks: None,
+            lan_ips,
+        }
+    }
+
+    /// The full picture. Walking the volumes blocks for as long as the
+    /// slowest one takes to answer — a stalled network mount was measured
+    /// at 20 s — so this runs on the [`HostFacts`] thread, never on the
+    /// runtime.
+    fn probe() -> Self {
+        let disks = sysinfo::Disks::new_with_refreshed_list()
+            .iter()
+            .map(|d| DiskInfo {
+                name: d.name().to_string_lossy().into_owned(),
+                mount_point: d.mount_point().display().to_string(),
+                file_system: d.file_system().to_string_lossy().into_owned(),
+                total_bytes: d.total_space(),
+            })
+            .collect();
+        Self {
+            disks: Some(disks),
+            ..Self::quick()
+        }
+    }
+
+    fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("host facts are plain data")
+    }
+}
+
+/// The host facts, probed once per process on a thread of their own.
+///
+/// A reader never waits for the probe: [`Self::current`] answers with the
+/// probed facts once they exist and with the quick facts (`disks` null)
+/// until then, and [`Self::subscribe`] tells when they arrive — the attach
+/// handshake sends what it has and completes the set with one
+/// `HostFactsUpdate` when the probe finishes afterwards.
+#[derive(Clone)]
+pub struct HostFacts {
+    probed: watch::Receiver<Option<String>>,
+}
+
+impl HostFacts {
+    /// Start the probe. On a plain thread rather than `spawn_blocking`: the
+    /// runtime's drop waits for blocking tasks, and a stalled probe must not
+    /// hold up the exec handover of a self-update.
+    pub fn probe() -> Self {
+        let (tx, rx) = watch::channel(None);
+        std::thread::Builder::new()
+            .name("host-facts".to_owned())
+            .spawn(move || {
+                let _ = tx.send(Some(HostInfo::probe().to_json()));
+            })
+            .expect("spawn the host facts thread");
+        Self { probed: rx }
+    }
+
+    /// Facts fed by the caller instead of the probe; `tx` completes them.
+    #[cfg(test)]
+    pub(crate) fn pending() -> (watch::Sender<Option<String>>, Self) {
+        let (tx, rx) = watch::channel(None);
+        (tx, Self { probed: rx })
+    }
+
+    /// The probed facts, or — while the probe has not answered — the quick
+    /// facts with `disks` null.
+    pub fn current(&self) -> String {
+        self.probed
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| HostInfo::quick().to_json())
+    }
+
+    /// Where the probe's answer lands: `Some(json)` once, then unchanged.
+    pub fn subscribe(&self) -> watch::Receiver<Option<String>> {
+        self.probed.clone()
+    }
 }
 
 /// Live host utilization for the heartbeat — a placement ranking hint for the
@@ -308,5 +401,19 @@ mod tests {
         let caps = build_capabilities("darwin", "arm64", false, &[], true, false);
         assert_eq!(caps.len(), 1);
         assert_eq!(triple(&caps[0]), ("darwin", "arm64", Backend::Vm as i32));
+    }
+
+    /// Until the probe answers, the quick facts stand in; once it has, the
+    /// probed set is what every reader gets.
+    #[tokio::test]
+    async fn facts_are_the_quick_set_until_the_probe_answers() {
+        let (probe, facts) = HostFacts::pending();
+
+        let quick: serde_json::Value = serde_json::from_str(&facts.current()).unwrap();
+        assert!(quick["disks"].is_null(), "{quick}");
+        assert_eq!(quick["agent_pid"], std::process::id());
+
+        probe.send_replace(Some(r#"{"probed":true}"#.to_owned()));
+        assert_eq!(facts.current(), r#"{"probed":true}"#);
     }
 }

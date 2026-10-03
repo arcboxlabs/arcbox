@@ -183,10 +183,8 @@ pub(super) fn ensure_data_mount() -> Result<String, String> {
     }
 
     // Step 1: Format if not Btrfs.
-    match ensure_btrfs_format(&device) {
-        Ok(note) => tracing::info!("{}", note),
-        Err(e) => return Err(e),
-    }
+    let note = ensure_btrfs_format(&device)?;
+    tracing::info!("{}", note);
 
     // Step 1.5: Fail loudly if the device is smaller than its filesystem — Btrfs
     // would otherwise reject the mount below with an opaque error on every retry.

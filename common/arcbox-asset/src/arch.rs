@@ -19,6 +19,6 @@ mod tests {
 
     #[test]
     fn current_arch_is_non_empty() {
-        assert!(!current_arch().is_empty());
+        assert_ne!(current_arch(), "");
     }
 }

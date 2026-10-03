@@ -509,7 +509,7 @@ mod tests {
             vec!["running", "stopped"]
         );
         assert_eq!(Status::Running.valid_transitions(), vec!["stopped"]);
-        assert!(Status::Stopped.valid_transitions().is_empty());
+        assert_eq!(Status::Stopped.valid_transitions(), Vec::<&str>::new());
     }
 
     #[test]
@@ -527,7 +527,7 @@ mod tests {
     #[test]
     fn test_state_with_generated_id() {
         let state = State::with_generated_id(PathBuf::from("/bundle"));
-        assert!(!state.id.is_empty());
+        assert_ne!(state.id, "");
         // UUID v4 format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
         assert_eq!(state.id.len(), 36);
         assert!(state.id.contains('-'));
@@ -709,7 +709,7 @@ mod tests {
         let store = StateStore::new(dir.path()).unwrap();
 
         // Initially empty.
-        assert!(store.list().unwrap().is_empty());
+        assert_eq!(store.list().unwrap(), Vec::<String>::new());
 
         // Add some containers.
         for i in 1..=3 {

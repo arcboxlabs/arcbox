@@ -34,6 +34,7 @@ vm-superio = "0.8"
 arcbox-fs = { workspace = true }
 arcbox-net-inject = { workspace = true }
 crossbeam-channel = "0.5"
+arcbox-fakeip.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 arcbox-vmnet = { workspace = true }

@@ -14,8 +14,7 @@ pub use connect::SharedRuntime;
 pub use connect::{
     IconServiceImpl, KubernetesServiceImpl, MachineServiceImpl, MigrationServiceImpl,
     SandboxFilesystemServiceImpl, SandboxProcessServiceImpl, SandboxServiceImpl,
-    SandboxSnapshotServiceImpl, StatsServiceImpl, initialize_sandbox_cleanup,
-    spawn_sandbox_cleanup,
+    SandboxSnapshotServiceImpl, StatsServiceImpl,
 };
 pub use connect::{SetupState, SystemServiceImpl};
 pub use error::{ApiError, Result};

@@ -482,7 +482,7 @@ mod tests {
         let items: Vec<String> = (0..250).map(|i| format!("{i:04}")).collect();
         let (page, token) = paginate(items.clone(), |s| s, 0, "");
         assert_eq!(page.len(), 100);
-        assert!(!token.is_empty());
+        assert_ne!(token, "");
 
         let (page, _) = paginate(items, |s| s, 5000, "");
         assert_eq!(page.len(), 250);

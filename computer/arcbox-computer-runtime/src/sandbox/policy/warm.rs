@@ -418,7 +418,7 @@ mod tests {
         ];
 
         // Within the cap: nothing to evict.
-        assert!(cache.plan_evictions(&catalog[..2]).is_empty());
+        assert_eq!(cache.plan_evictions(&catalog[..2]), Vec::<String>::new());
 
         // No recency recorded: the oldest snapshot goes.
         assert_eq!(cache.plan_evictions(&catalog), vec!["a".to_owned()]);

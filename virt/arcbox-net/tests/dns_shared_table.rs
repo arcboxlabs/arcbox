@@ -52,13 +52,13 @@ fn shared_table_visible_to_both_forwarders() {
         "VMM forwarder should resolve from shared table"
     );
 
-    // NXDOMAIN for unregistered local name.
+    // NODATA for an unregistered local name.
     let query = build_query("missing.arcbox.local");
-    let resp = forwarder2.try_resolve_locally_or_nxdomain(&query);
+    let resp = forwarder2.try_resolve_locally_or_nodata(&query);
     assert!(resp.is_some());
-    // Check RCODE=3 (NXDOMAIN).
     let r = resp.unwrap();
-    assert_eq!(r[3] & 0x0F, 3, "should be NXDOMAIN");
+    assert_eq!(r[3] & 0x0F, 0, "should be NOERROR");
+    assert_eq!(r[7], 0, "should carry no answer");
 
     // Remove via forwarder1, both should see it gone.
     forwarder1.remove_local_host("my-nginx");

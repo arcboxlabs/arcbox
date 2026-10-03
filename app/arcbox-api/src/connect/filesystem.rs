@@ -10,7 +10,6 @@ use connectrpc::{
     ServiceStream,
 };
 use tokio_stream::StreamExt as _;
-use tokio_stream::wrappers::ReceiverStream;
 
 use arcbox_core::WriteFileChunk;
 
@@ -89,7 +88,7 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
         };
 
         let stream = tokio_stream::iter(first)
-            .chain(ReceiverStream::new(rx))
+            .chain(rx)
             .map(|r| r.map_err(|e| ConnectError::from(ApiError::from(e))));
         // Keepalives are empty non-final chunks, as documented in the proto.
         let stream = with_keepalive(stream, FileChunk::default);
@@ -337,7 +336,7 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
         };
 
         let stream = tokio_stream::iter(first)
-            .chain(ReceiverStream::new(rx))
+            .chain(rx)
             .map(|r| r.map_err(|e| ConnectError::from(ApiError::from(e))));
         // The guest already interleaves its own keepalives; this adds the
         // daemon-side ones the proto promises even if that hop stalls.

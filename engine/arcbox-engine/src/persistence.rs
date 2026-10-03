@@ -45,6 +45,10 @@ pub struct PersistedMachine {
     /// Last known IP address.
     #[serde(default)]
     pub ip_address: Option<String>,
+    /// Last known bridge NIC address; `None` for records written before the
+    /// field existed and for guests without a bridge NIC.
+    #[serde(default)]
+    pub bridge_ip_address: Option<String>,
     /// Last known state.
     pub state: PersistedState,
     /// VM ID (for correlation).
@@ -53,6 +57,11 @@ pub struct PersistedMachine {
     /// (`Vz`) for configs written before the field existed.
     #[serde(default)]
     pub backend: arcbox_vmm::VmBackend,
+    /// Whether the guest may run its own hypervisor. Records written before
+    /// the field existed load as `false`; the System VM's drift check
+    /// recreates its record, and no other machine ever needed it.
+    #[serde(default)]
+    pub nested_virt: bool,
     /// Creation timestamp.
     #[serde(default = "default_created_at")]
     pub created_at: DateTime<Utc>,
@@ -142,9 +151,11 @@ impl From<&MachineInfo> for PersistedMachine {
                 .as_ref()
                 .map(|p| p.to_string_lossy().to_string()),
             ip_address: info.ip_address.clone(),
+            bridge_ip_address: info.bridge_ip_address.clone(),
             state: info.state.into(),
             vm_id: info.vm_id.to_string(),
             backend: info.backend,
+            nested_virt: info.nested_virt,
             created_at: info.created_at,
             started_at: info.started_at,
             mounts: info.mounts.clone(),
@@ -280,17 +291,6 @@ impl MachinePersistence {
         })
     }
 
-    /// Updates the IP address of a persisted machine.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the IP cannot be updated.
-    pub fn update_ip(&self, name: &str, ip: Option<&str>) -> Result<()> {
-        self.update(name, |machine| {
-            machine.ip_address = ip.map(ToString::to_string);
-        })
-    }
-
     /// Applies a mutation to a persisted machine config in a single
     /// load→mutate→write cycle.
     ///
@@ -339,8 +339,10 @@ mod tests {
             disk_path: None,
             ssh_key_path: None,
             ip_address: None,
+            bridge_ip_address: None,
             cid: None,
             backend: arcbox_vmm::VmBackend::Hv,
+            nested_virt: false,
             created_at,
         };
 
@@ -382,8 +384,10 @@ mod tests {
                 disk_path: None,
                 ssh_key_path: None,
                 ip_address: None,
+                bridge_ip_address: None,
                 cid: None,
                 backend: arcbox_vmm::VmBackend::default(),
+                nested_virt: false,
                 created_at: Utc::now(),
             };
             persistence.save(&info).unwrap();
@@ -418,8 +422,10 @@ mod tests {
             disk_path: None,
             ssh_key_path: None,
             ip_address: None,
+            bridge_ip_address: None,
             cid: None,
             backend: arcbox_vmm::VmBackend::default(),
+            nested_virt: false,
             created_at: Utc::now(),
         };
 
@@ -452,8 +458,10 @@ mod tests {
             disk_path: None,
             ssh_key_path: None,
             ip_address: None,
+            bridge_ip_address: None,
             cid: None,
             backend: arcbox_vmm::VmBackend::default(),
+            nested_virt: false,
             created_at: Utc::now(),
         };
 
@@ -501,8 +509,10 @@ mod tests {
             disk_path: None,
             ssh_key_path: None,
             ip_address: Some("10.0.2.15".to_string()),
+            bridge_ip_address: None,
             cid: None,
             backend: arcbox_vmm::VmBackend::default(),
+            nested_virt: false,
             created_at: Utc::now(),
         };
         persistence.save(&info).unwrap();

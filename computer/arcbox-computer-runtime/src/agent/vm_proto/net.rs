@@ -167,10 +167,12 @@ mod tests {
         // Layout mirror of vm-agent's handle_net_reconfig response builder.
         let mut payload = [0u8; 32];
         for (slot, us) in payload[8..]
-            .chunks_exact_mut(4)
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
             .zip([1_u32, 2, 3, 4, 30_000, 40_000])
         {
-            slot.copy_from_slice(&us.to_le_bytes());
+            *slot = us.to_le_bytes();
         }
 
         assert_eq!(

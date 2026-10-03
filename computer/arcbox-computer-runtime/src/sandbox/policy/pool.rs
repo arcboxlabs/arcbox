@@ -218,7 +218,7 @@ mod tests {
         let pool = SlotPool::<u32>::default();
         let plan = pool.begin_fill("a", 0);
         assert_eq!(plan.spawn, 0);
-        assert!(plan.evicted.is_empty());
+        assert_eq!(plan.evicted, Vec::<u32>::new());
         assert_eq!(pool.claim("a"), None);
     }
 
@@ -275,7 +275,7 @@ mod tests {
         // A fill in flight across the drain is rejected on delivery.
         let plan = pool.begin_fill("a", 1);
         assert_eq!(plan.spawn, 1);
-        assert!(pool.drain(Some("a")).is_empty());
+        assert_eq!(pool.drain(Some("a")), Vec::<u32>::new());
         assert_eq!(pool.offer("a", 12), Some(12));
 
         assert_eq!(pool.drain(None), vec![20]);

@@ -15,7 +15,7 @@ distribution".
   `arcbox-fakeip`, `arcbox-proxy`, `splicetcp`, `arcbox-xnu-net`). WHY: two
   independent consumers depend on that purity — the VM datapath
   (`virt/arcbox-net`, `virt/arcbox-net-virtio`) and the host-only proxy harness
-  (`virt/arcbox-net/examples/tun_proxy.rs`, docs/surge-tun-proxy.md). Every
+  (`virt/arcbox-net/examples/tun_proxy.rs`, docs/experiments/2026-06-17-surge-tun-proxy.md). Every
   change must serve **both**; adding a VM type here silently breaks the host
   harness. Most net-crate `lib.rs` headers restate this (arcbox-xnu-net's
   does not) — keep them true. The dependency half is checked mechanically
@@ -204,11 +204,11 @@ receives. A semantics change here lands on both directions at once.
 ## Validation ladder (cheapest first)
 
 1. `cargo test -p <crate>` — per-crate unit tests (every module has them).
-2. Host-only end-to-end: the `tun_proxy` harness (Gate C, docs/surge-tun-proxy.md)
+2. Host-only end-to-end: the `tun_proxy` harness (Gate C, docs/experiments/2026-06-17-surge-tun-proxy.md)
    exercises classifier + TcpBridge + proxy **without booting a VM**.
 3. VM datapath: run through `virt/arcbox-net` / `virt/arcbox-net-virtio`.
 4. Full-path throughput / regressions: iperf3 reproducer and measured caps in
-   docs/net-perf-limits.md.
+   docs/benchmarks/network.md.
 
 Because these crates are pure and have a host-only harness, a NAT/classifier/
 proxy change is validatable on the host — far cheaper than the HV e2e ladder in
@@ -218,5 +218,5 @@ virt/AGENTS.md.
 
 - Routing: `common/arcbox-route/AGENTS.md` (authoritative).
 - splicetcp architecture: `common/splicetcp/README.md`.
-- Perf numbers & throughput-collapse analysis: docs/net-perf-limits.md.
-- Host tunnel proof: docs/surge-tun-proxy.md.
+- Perf numbers & throughput-collapse analysis: docs/benchmarks/network.md.
+- Host tunnel proof: docs/experiments/2026-06-17-surge-tun-proxy.md.

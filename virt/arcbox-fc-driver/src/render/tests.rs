@@ -122,7 +122,7 @@ fn jailer_layout_relativizes_inside_paths_and_stages_outside_ones() {
             .unwrap(),
         "/rootfs.ext4"
     );
-    assert!(stage.is_empty());
+    assert_eq!(stage, []);
     // Outside: staged to `/{name}` by the given kind.
     assert_eq!(
         layout
@@ -435,7 +435,7 @@ fn a_disk_id_cannot_reach_out_of_the_jail() {
         ))
         .contains("inside the jail")
     );
-    assert!(stage.is_empty());
+    assert_eq!(stage, []);
     assert!(invalid(layout.jail_path("../rootfs.ext4")).contains("inside the jail"));
     // A staging caller's disk id is refused without reference to a jail:
     // `place` guards the destination only when there is one to escape
@@ -607,7 +607,7 @@ fn restore_stages_the_image_and_disks_into_a_jail_by_name() {
         Path::new("/run/vms/box2"),
     )
     .unwrap();
-    assert!(plan.stage.is_empty());
+    assert_eq!(plan.stage, []);
     assert!(plan.aliases.is_empty(), "at the recorded name already");
     assert_eq!(plan.load.snapshot_path, "/snapshots/abc/vmstate");
     assert_eq!(plan.drives[0].path_on_host.as_deref(), Some("/rootfs.ext4"));

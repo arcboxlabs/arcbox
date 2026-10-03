@@ -88,7 +88,7 @@ impl PsiTrigger {
                 };
                 // SAFETY: pfd is a valid pollfd for the duration of the call;
                 // `file` (and thus fd) lives for the whole loop.
-                let n = unsafe { libc::poll(&mut pfd, 1, tick_ms) };
+                let n = unsafe { libc::poll(&raw mut pfd, 1, tick_ms) };
                 if n < 0
                     && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
                 {

@@ -171,6 +171,18 @@ fn backend_from_proto(backend: SystemVmBackend) -> Option<arcbox_core::VmBackend
     }
 }
 
+/// Maps the System VM's limits onto the wire message. (A `From` impl is
+/// impossible here — both types are foreign to this crate.)
+fn resources_to_proto(resources: arcbox_core::SystemVmResources) -> pb::SystemVmResources {
+    pb::SystemVmResources {
+        cpus: resources.cpus,
+        memory_mb: resources.memory_mb,
+        host_cpus: resources.host.cpus,
+        host_memory_mb: resources.host.memory_mb,
+        ..Default::default()
+    }
+}
+
 /// Maps the core backend to the wire enum.
 fn backend_to_proto(backend: arcbox_core::VmBackend) -> SystemVmBackend {
     match backend {
@@ -406,6 +418,36 @@ impl pb::SystemService for SystemServiceImpl {
         Response::ok(resp)
     }
 
+    async fn get_system_vm_resources(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, pb::Empty>,
+    ) -> ServiceResult<pb::SystemVmResources> {
+        let runtime = self.runtime.ready()?;
+        Response::ok(resources_to_proto(runtime.system_vm_resources()))
+    }
+
+    async fn set_system_vm_resources(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, pb::SetSystemVmResourcesRequest>,
+    ) -> ServiceResult<pb::SystemVmResources> {
+        let req = request.to_owned_message();
+        let runtime = self.runtime.ready()?;
+        let resources = runtime
+            .resize_system_vm(req.cpus, req.memory_mb)
+            .await
+            .map_err(|e| match e {
+                // Out-of-range limits and an unwritable config are the
+                // caller's to fix; a failed stop or boot is not.
+                arcbox_core::CoreError::Common(arcbox_error::CommonError::Config(_)) => {
+                    ConnectError::invalid_argument(e.to_string())
+                }
+                other => ConnectError::internal(other.to_string()),
+            })?;
+        Response::ok(resources_to_proto(resources))
+    }
+
     async fn set_system_vm_backend(
         &self,
         _ctx: RequestContext,
@@ -470,7 +512,7 @@ mod tests {
         let (snapshot, mut updates) = state.subscribe();
 
         assert_eq!(snapshot.phase, setup_status::Phase::AssetsReady);
-        assert!(drain(&mut updates).is_empty());
+        assert_eq!(drain(&mut updates), []);
     }
 
     /// Flags travel the same path as phases: a client watching for the route

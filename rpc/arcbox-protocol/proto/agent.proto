@@ -37,6 +37,9 @@ service AgentService {
     // Returns kubeconfig content exported from the guest cluster.
     rpc GetKubeconfig(KubernetesKubeconfigRequest) returns (KubernetesKubeconfigResponse);
 
+    // Lists the guest cluster's Services of type LoadBalancer.
+    rpc ListKubernetesLoadBalancers(KubernetesLoadBalancersRequest) returns (KubernetesLoadBalancersResponse);
+
     // Requests graceful guest shutdown. The agent responds immediately,
     // then performs orderly process teardown and powers off the VM.
     rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
@@ -114,6 +117,12 @@ message SystemInfo {
     // signal the agent never sends. Only a recognized init that is known to
     // still be starting sets it true.
     bool distro_init_pending = 12;
+    // IPv4 address of the guest's bridge NIC (the vmnet interface the Mac
+    // reaches directly), or empty when the guest has none or it has no
+    // address yet. The host registers `<machine>.arcbox.local` at this
+    // address; `ip_addresses` keeps listing every interface, so an older
+    // host that ignores this field sees exactly what it saw before.
+    string bridge_ip_address = 13;
 }
 
 // Request to ensure runtime services are available.
@@ -317,13 +326,20 @@ message RuntimeStatusResponse {
     repeated ServiceStatus services = 5;
 }
 
-// Request to trigger an immediate fstrim on data mount points.
+// Request to trim the guest's data filesystems now: the guest issues a
+// discard for every free block so the host punches it out of the sparse
+// image. The System VM trims its Btrfs data and ext4 metadata volumes; a
+// distro machine trims the Btrfs data disk under its overlay root.
 message DiskTrimRequest {}
 
 // Response from a disk trim operation.
 message DiskTrimResponse {
-    // Human-readable result summary (e.g. bytes trimmed per mount).
+    // Human-readable result summary (bytes trimmed per filesystem).
     string result = 1;
+    // Bytes the guest reported trimmed, summed over the filesystems. This is
+    // what the filesystem discarded, not what the host reclaimed: a range
+    // that was already a hole counts here and frees nothing.
+    uint64 bytes_trimmed = 2;
 }
 
 // Notification that a container's published port bindings changed.
@@ -400,6 +416,74 @@ message KubernetesStatusResponse {
     string detail = 4;
     // Per-service status entries for fine-grained observability.
     repeated ServiceStatus services = 5;
+    // How each port of each LoadBalancer Service reaches the host, one entry
+    // per port. Reported by the daemon, which owns the host listeners; the
+    // guest agent leaves it empty.
+    repeated KubernetesHostPort host_ports = 6;
+}
+
+// How one port of a Service of type LoadBalancer reaches the host.
+message KubernetesHostPort {
+    enum State {
+        STATE_UNSPECIFIED = 0;
+        // A host listener is bound and relays to the port on the node.
+        FORWARDED = 1;
+        // servicelb has not published the port on the node yet.
+        PENDING = 2;
+        // Deliberately not bound; `detail` says why.
+        SKIPPED = 3;
+        // The host listener failed to bind; retried periodically.
+        FAILED = 4;
+    }
+
+    // Namespace of the Service.
+    string namespace = 1;
+    // Name of the Service.
+    string name = 2;
+    // Protocol as the Service spells it: "TCP", "UDP" or "SCTP".
+    string protocol = 3;
+    // Service port, which is also the host port.
+    uint32 port = 4;
+    // Host address the listener binds, per `[docker] expose_ports_to_lan`.
+    string host_ip = 5;
+    // Forwarding state.
+    State state = 6;
+    // Why the port is not forwarded; empty when it is.
+    string detail = 7;
+}
+
+// Request for the cluster's Services of type LoadBalancer.
+message KubernetesLoadBalancersRequest {}
+
+// The cluster's Services of type LoadBalancer.
+message KubernetesLoadBalancersResponse {
+    // Whether k3s is running. False means the list is empty because there
+    // is no cluster, not because the cluster has no load balancers.
+    bool running = 1;
+    // Every Service of type LoadBalancer, in any namespace.
+    repeated KubernetesLoadBalancer load_balancers = 2;
+}
+
+// A Service of type LoadBalancer.
+message KubernetesLoadBalancer {
+    // Namespace of the Service.
+    string namespace = 1;
+    // Name of the Service.
+    string name = 2;
+    // The Service's ports.
+    repeated KubernetesServicePort ports = 3;
+    // Addresses in the Service's `status.loadBalancer.ingress`. k3s
+    // servicelb lists a node once its svclb pod is ready, i.e. once the
+    // ports are published on the node; until then the list is empty.
+    repeated string ingress = 4;
+}
+
+// One port of a Service.
+message KubernetesServicePort {
+    // Protocol as the Service spells it: "TCP", "UDP" or "SCTP".
+    string protocol = 1;
+    // Service port.
+    uint32 port = 2;
 }
 
 // Request for managed kubeconfig content.
@@ -499,6 +583,37 @@ message EnsureNfsExportResponse {
     repeated string notes = 1;
 }
 
+// Ask a distro machine's agent to serve the machine's root filesystem to the
+// host, read-write, over NFSv3 on the machine's bridge NIC. The host mounts
+// it under its machine mount root (`~/ArcBoxMachines/<name>` by default). The
+// System VM answers with an error: its data lives behind `EnsureNfsExportRequest`.
+// Idempotent: a second request returns the endpoint the first one started.
+message EnsureMachineExportRequest {
+    // Addresses the export accepts connections from — the host's own
+    // addresses on the bridge network. Every other peer is refused, because
+    // every VM and container on that network can otherwise reach the port
+    // and the export performs no authentication of its own.
+    repeated string client_addresses = 1;
+    // The uid and gid the host mounts as. Files the guest owns as
+    // `guest_uid`/`guest_gid` are shown with these ids, and files created
+    // or chowned to these ids from the host land as `guest_uid`/`guest_gid`;
+    // every other id passes through unchanged.
+    uint32 host_uid = 2;
+    uint32 host_gid = 3;
+    // The guest account the host user stands in for: root unless the
+    // machine has a default user.
+    uint32 guest_uid = 4;
+    uint32 guest_gid = 5;
+}
+
+// Response to `EnsureMachineExportRequest`.
+message EnsureMachineExportResponse {
+    // IPv4 address of the bridge NIC the export listens on.
+    string address = 1;
+    // TCP port serving both the MOUNT and the NFS protocol.
+    uint32 port = 2;
+}
+
 // --- Sandbox port forwarding (host↔guest vsock only) ---
 //
 // These are host↔guest wire messages, not part of the sandbox product API:
@@ -564,6 +679,16 @@ message SandboxCleanupResponse {
 // first replays its durable snapshot, then streams new terminal generations.
 message WatchSandboxCleanupRequest {}
 
+// Flow-control window on a sandbox streaming RPC's connection (host↔guest
+// vsock only): the host lets the agent stream `bytes` more, counted in
+// encoded payload bytes of the frames it sends back. Every such stream opens
+// with a fixed window (`SANDBOX_STREAM_WINDOW` in arcbox-constants) and the
+// host returns it as its consumer takes frames, so the agent never sends
+// what the host has no room for and the host never leaves the vsock unread.
+message SandboxStreamWindow {
+    uint32 bytes = 1;
+}
+
 // Ask the guest agent to resume a paused sandbox in place (CORE-21).
 //
 // Internal wire message rather than the public ResumeSandboxRequest: the
@@ -584,4 +709,41 @@ message SandboxResumeResponse {
     // IP address of the resumed sandbox's new allocation (empty when the
     // sandbox has no network). The daemon re-registers host DNS from it.
     string ip_address = 1;
+}
+
+// --- Machine exec session control (host↔guest vsock only) ---
+
+// Deliver a signal to a running machine exec process, sent on the session's
+// connection after its MachineExecRequest (SSH `signal` requests). No reply.
+message MachineExecSignal {
+    // Signal name without the SIG prefix, as SSH names it ("INT", "TERM").
+    // Named rather than numbered because host and guest number signals
+    // differently (SIGUSR1 is 30 on macOS, 10 on Linux).
+    string name = 1;
+}
+
+// Flow-control window on a machine exec session's connection: the receiver
+// of a stream lets its sender send `bytes` more of it. The host returns
+// output window (counted in encoded MachineExecOutput payload bytes) as its
+// consumer takes output; the agent grants its stdin window (in stdin bytes)
+// in its first frame, then returns it as the process reads stdin. Neither
+// side may send beyond the window it holds, so both can always keep
+// reading the connection.
+message MachineExecWindow {
+    uint32 bytes = 1;
+}
+
+// Open a TCP connection from inside the machine (SSH `direct-tcpip`). On
+// success the connection runs like a flow-controlled machine exec session:
+// the agent's first frame grants its window, MachineExecInput carries bytes
+// to the peer (empty: shut down the sending side), MachineExecOutput bytes
+// from it, an `eof` frame when the peer stops sending, and a `done` frame
+// once both directions are closed. A connect failure is an Error frame.
+message MachineTcpConnectRequest {
+    // Host name or address, resolved inside the machine ("localhost" is the
+    // machine itself).
+    string host = 1;
+    uint32 port = 2;
+    // As MachineExecRequest.output_window; required.
+    uint32 output_window = 3;
 }

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 pub mod boot_assets;
 pub mod daemon;
 pub mod docker;
+pub mod http;
 pub mod metrics;
 pub mod net_fixtures;
 pub mod sandbox;

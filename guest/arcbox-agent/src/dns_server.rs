@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
+use arcbox_constants::dns::LOCAL_DOMAIN;
 use arcbox_dns::{DEFAULT_TTL, DnsQuery, DnsRecordType};
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
@@ -18,10 +19,6 @@ use tokio_util::sync::CancellationToken;
 
 /// Gateway address where the host-side DNS forwarder runs.
 const GATEWAY: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)), 53);
-
-/// Local domain suffix — queries for `*.arcbox.local` that miss the
-/// registries get an authoritative NXDOMAIN instead of forwarding.
-const LOCAL_DOMAIN: &str = "arcbox.local";
 
 /// Maximum DNS UDP packet size.
 const MAX_PACKET: usize = 512;

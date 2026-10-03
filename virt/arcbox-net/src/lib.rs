@@ -52,8 +52,6 @@ pub mod error;
 pub use arcbox_packet::ethernet;
 #[cfg(target_os = "linux")]
 pub mod linux;
-pub mod mdns;
-pub mod mdns_protocol;
 pub mod nat;
 pub mod nat_engine;
 pub mod port_forward;
@@ -111,6 +109,8 @@ impl Default for NetConfig {
 use std::net::IpAddr;
 use std::sync::RwLock;
 
+use tokio::sync::broadcast;
+
 /// Network manager state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkState {
@@ -123,6 +123,24 @@ pub enum NetworkState {
     /// Network manager is stopping.
     Stopping,
 }
+
+/// A change to the names served under the local DNS domain.
+///
+/// Emitted by [`NetworkManager::register_dns`], [`NetworkManager::deregister_dns`]
+/// and [`NetworkManager::set_dns_domain`] for a mirror that announces the same
+/// names elsewhere (the daemon's mDNS mirror). `fqdn` is the lowercased
+/// `<hostname>.<local_domain>` the table serves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DnsChange {
+    /// `fqdn` now resolves to `ip` (also sent when the address changes).
+    Registered { fqdn: String, ip: IpAddr },
+    /// `fqdn` no longer resolves.
+    Removed { fqdn: String },
+}
+
+/// Changes a slow subscriber may fall behind by before it must resync from
+/// [`NetworkManager::local_dns_entries`].
+const DNS_CHANGE_CAPACITY: usize = 256;
 
 /// Network manager.
 ///
@@ -139,6 +157,8 @@ pub struct NetworkManager {
     ip_allocator: RwLock<Option<nat::IpAllocator>>,
     /// DNS forwarder with local hostname resolution.
     dns_forwarder: RwLock<dns::DnsForwarder>,
+    /// Local-domain name changes, for mirrors of the DNS table.
+    dns_changes: broadcast::Sender<DnsChange>,
 }
 
 impl NetworkManager {
@@ -150,6 +170,7 @@ impl NetworkManager {
             state: RwLock::new(NetworkState::Stopped),
             ip_allocator: RwLock::new(None),
             dns_forwarder: RwLock::new(dns::DnsForwarder::new(dns::DnsConfig::default())),
+            dns_changes: broadcast::channel(DNS_CHANGE_CAPACITY).0,
         }
     }
 
@@ -161,6 +182,7 @@ impl NetworkManager {
     pub fn set_dns_domain(&self, domain: &str) {
         if let Ok(mut forwarder) = self.dns_forwarder.write() {
             // Remove FQDN entries belonging to the old domain.
+            let dropped = forwarder.local_domain_entries();
             if let Some(ref old_domain) = forwarder.config().local_domain {
                 let suffix = format!(".{old_domain}");
                 let table = forwarder.local_hosts_table();
@@ -172,7 +194,21 @@ impl NetworkManager {
             cfg.local_domain = Some(domain.to_string());
             let shared_table = forwarder.local_hosts_table();
             *forwarder = dns::DnsForwarder::with_shared_hosts(cfg, shared_table);
+            for (fqdn, _) in dropped {
+                let _ = self.dns_changes.send(DnsChange::Removed { fqdn });
+            }
         }
+    }
+
+    /// The domain local names are published under (`arcbox.local` unless
+    /// [`Self::set_dns_domain`] changed it); `None` when no local domain is
+    /// configured and every name is forwarded upstream.
+    #[must_use]
+    pub fn dns_domain(&self) -> Option<String> {
+        self.dns_forwarder
+            .read()
+            .ok()
+            .and_then(|forwarder| forwarder.config().local_domain.clone())
     }
 
     /// Returns the network configuration.
@@ -370,6 +406,9 @@ impl NetworkManager {
     pub fn register_dns(&self, hostname: &str, ip: IpAddr) {
         if let Ok(forwarder) = self.dns_forwarder.read() {
             forwarder.add_local_host(hostname, ip);
+            if let Some(fqdn) = forwarder.local_fqdn(hostname) {
+                let _ = self.dns_changes.send(DnsChange::Registered { fqdn, ip });
+            }
         }
     }
 
@@ -377,15 +416,36 @@ impl NetworkManager {
     pub fn deregister_dns(&self, hostname: &str) {
         if let Ok(forwarder) = self.dns_forwarder.read() {
             forwarder.remove_local_host(hostname);
+            if let Some(fqdn) = forwarder.local_fqdn(hostname) {
+                let _ = self.dns_changes.send(DnsChange::Removed { fqdn });
+            }
         }
     }
 
-    /// Tries to resolve a DNS query locally, returning NXDOMAIN for unresolved
-    /// `*.arcbox.local` queries. Returns `None` only when the query should be
-    /// forwarded to upstream DNS.
-    pub fn try_resolve_dns_or_nxdomain(&self, query: &[u8]) -> Option<Vec<u8>> {
+    /// Streams every later change to the names under the local domain.
+    ///
+    /// Subscribe first, then read [`Self::local_dns_entries`], so no change
+    /// falls between the two; on `Lagged` read the entries again.
+    #[must_use]
+    pub fn subscribe_dns_changes(&self) -> broadcast::Receiver<DnsChange> {
+        self.dns_changes.subscribe()
+    }
+
+    /// Every `(fqdn, ip)` currently served under the local domain.
+    #[must_use]
+    pub fn local_dns_entries(&self) -> Vec<(String, IpAddr)> {
+        self.dns_forwarder
+            .read()
+            .map_or_else(|_| Vec::new(), |forwarder| forwarder.local_domain_entries())
+    }
+
+    /// Tries to resolve a DNS query locally, answering NODATA for unresolved
+    /// names under the local domain (see
+    /// `DnsForwarder::try_resolve_locally_or_nodata` for why not NXDOMAIN).
+    /// Returns `None` only when the query should be forwarded to upstream DNS.
+    pub fn try_resolve_dns_or_nodata(&self, query: &[u8]) -> Option<Vec<u8>> {
         let forwarder = self.dns_forwarder.read().ok()?;
-        forwarder.try_resolve_locally_or_nxdomain(query)
+        forwarder.try_resolve_locally_or_nodata(query)
     }
 
     /// Handles a full DNS query: local resolution first, then upstream forwarding.
@@ -405,6 +465,48 @@ impl NetworkManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dns_changes_name_the_fqdn_and_follow_a_domain_switch() {
+        let manager = NetworkManager::new(NetConfig::default());
+        let mut changes = manager.subscribe_dns_changes();
+        let ip = IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 2, 5));
+
+        manager.register_dns("Web", ip);
+        assert_eq!(
+            changes.try_recv().unwrap(),
+            DnsChange::Registered {
+                fqdn: "web.arcbox.local".into(),
+                ip
+            }
+        );
+        assert_eq!(
+            manager.local_dns_entries(),
+            vec![("web.arcbox.local".to_owned(), ip)],
+            "only the FQDN entry is listed, not the bare hostname"
+        );
+
+        manager.deregister_dns("web");
+        assert_eq!(
+            changes.try_recv().unwrap(),
+            DnsChange::Removed {
+                fqdn: "web.arcbox.local".into()
+            }
+        );
+
+        manager.register_dns("db", ip);
+        changes.try_recv().unwrap();
+        manager.set_dns_domain("custom.test");
+        assert_eq!(
+            changes.try_recv().unwrap(),
+            DnsChange::Removed {
+                fqdn: "db.arcbox.local".into()
+            },
+            "a domain switch retracts the old domain's names"
+        );
+        assert!(manager.local_dns_entries().is_empty());
+        assert!(changes.try_recv().is_err());
+    }
 
     #[test]
     fn test_network_manager_lifecycle() {
@@ -442,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn test_set_dns_domain_switches_nxdomain_scope() {
+    fn test_set_dns_domain_switches_local_domain_scope() {
         let manager = NetworkManager::new(NetConfig::default());
         let ip = IpAddr::V4(std::net::Ipv4Addr::new(172, 17, 0, 2));
         manager.register_dns("web", ip);
@@ -462,8 +564,9 @@ mod tests {
 
         // Default domain: web.arcbox.local resolves.
         let q = build_query("web.arcbox.local");
-        let resp = manager.try_resolve_dns_or_nxdomain(&q).unwrap();
+        let resp = manager.try_resolve_dns_or_nodata(&q).unwrap();
         assert_eq!(resp[3] & 0x0F, 0, "should resolve under default domain");
+        assert_eq!(resp[7], 1, "ANCOUNT=1");
 
         // Switch to custom domain — old registrations are gone (forwarder rebuilt).
         manager.set_dns_domain("custom.test");
@@ -471,22 +574,24 @@ mod tests {
         // Re-register under new domain.
         manager.register_dns("web", ip);
         let q = build_query("web.custom.test");
-        let resp = manager.try_resolve_dns_or_nxdomain(&q).unwrap();
+        let resp = manager.try_resolve_dns_or_nodata(&q).unwrap();
         assert_eq!(resp[3] & 0x0F, 0, "should resolve under custom domain");
+        assert_eq!(resp[7], 1, "ANCOUNT=1");
 
-        // Unknown under custom domain → NXDOMAIN.
+        // Unknown under custom domain → NODATA.
         let q = build_query("nope.custom.test");
-        let resp = manager.try_resolve_dns_or_nxdomain(&q).unwrap();
+        let resp = manager.try_resolve_dns_or_nodata(&q).unwrap();
         assert_eq!(
             resp[3] & 0x0F,
-            3,
-            "NXDOMAIN for unregistered custom-domain host"
+            0,
+            "NOERROR for unregistered custom-domain host"
         );
+        assert_eq!(resp[7], 0, "no answer for unregistered custom-domain host");
 
-        // Old default domain → forwarded (None), not NXDOMAIN.
+        // Old default domain → forwarded (None), not answered.
         let q = build_query("web.arcbox.local");
         assert!(
-            manager.try_resolve_dns_or_nxdomain(&q).is_none(),
+            manager.try_resolve_dns_or_nodata(&q).is_none(),
             "old domain queries should not match after set_dns_domain"
         );
     }

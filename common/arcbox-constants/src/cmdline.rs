@@ -64,3 +64,23 @@ pub const HV_EARLYCON_DIRECTIVE: &str = "earlycon=pl011,0x0b000000";
 /// shim mounts into the new root after staging the overlay. Guest paths are
 /// validated host-side to contain neither `,` nor `=`.
 pub const MACHINE_MOUNTS_KEY: &str = "arcbox.machine_mounts=";
+
+/// Kernel cmdline key carrying the machine's name.
+///
+/// The boot shim's `machine-init` makes it the guest's hostname (kernel
+/// nodename plus `/etc/hostname`, which every distro init in scope re-reads
+/// at boot), so a shell prompt inside `abctl machine ssh dev` says `dev`
+/// and the host's `<name>.arcbox.local` record names the same thing the
+/// guest calls itself. Fixed at create like the rest of the machine cmdline.
+pub const MACHINE_NAME_KEY: &str = "arcbox.machine_name=";
+
+/// Kernel routing protocol (`rtm_protocol`) tagging the routes the agent's
+/// own DHCP client installs.
+///
+/// Values 5 and up are free for userspace; this one is outside the ranges
+/// `/etc/iproute2/rt_protos` names, so nothing else on a stock image claims
+/// it. In a distro machine the tag is what lets the boot-done hook remove
+/// *only* the provisional default route `machine-init` installed once the
+/// distro's own network manager has added its own — deleting by prefix and
+/// device alone would take the distro's route with it.
+pub const AGENT_DHCP_ROUTE_PROTO: u32 = 200;

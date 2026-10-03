@@ -76,8 +76,78 @@ the ABI.
   — host `phys_footprint` stays at the configured memory size from boot,
   and under host memory pressure the kernel compresses ballooned pages as
   live data. `set_target_memory_size` only resizes what the *guest* may
-  use. This is one half of why the idle balloon never engages on macOS
-  (the other is HV's Darwin-inert `MADV_DONTNEED` — see `app/AGENTS.md`).
+  use. This is why the idle balloon never engages on VZ, and why VZ can
+  never be made to release: the guest's RAM is Apple's, not the daemon's.
+  HV returns idle memory on its own through free page reporting and needs
+  no host-side target either — see `app/AGENTS.md` and
+  `virt/arcbox-vmm/AGENTS.md` "Releasing guest RAM".
+- **Only the System VM asks for nested virtualization**
+  (`VmConfig::nested_virt`, set in `engine/.../vm_lifecycle/boot.rs`).
+  Hypervisor.framework backs each nested-capable VM with its own guest
+  hypervisor address space and the host has about a dozen (measured
+  2026-09-28, M5 Max, macOS 26.4: 12); the 13th `hv_vm_create` asserts in
+  `GuestHypervisorSpaceManager::create`, the VZ helper dies with SIGTRAP,
+  and the daemon reports `Internal Virtualization error` on every VM
+  start. Plain VMs share one space (28 more fit beside 12 nested). Never
+  enable it on a user machine. The reason shows up in the crash report,
+  not the unified log:
+  `~/Library/Logs/DiagnosticReports/com.apple.Virtualization.VirtualMachine-*.ips`.
+- **A VZ console pipe with no reader wedges the whole VM.**
+  `VZFileHandleSerialPortAttachment` writes guest output into a host pipe;
+  when it fills, the guest's virtio-console write never completes, every
+  vCPU spins at 100% in `hv_vcpu_run`, and the VM's vsock stops answering
+  (exec/ssh/stop all time out). `MachineManager::start` therefore starts
+  `machine/serial.rs` for every machine, not only the System VM — one
+  `AsyncFd` task per port on `DarwinVm::dup_serial_readers`, reading on
+  readiness, never on a timer — and stops it when the machine stops; never
+  add a VZ console the daemon does not drain. The pipe is not a fixed
+  64 KiB: XNU sizes pipe buffers to what it can spare, and under host
+  pipe-memory pressure (measured 2026-09-29 with ~4300 open pipes) a fresh
+  pipe holds 512 bytes, which is why the drain must not be a poll (one pipe
+  per poll interval was 650 KB/s at 64 KiB and ~5 KB/s at 512 B, with the
+  guest spinning for the whole write). The VZ-facing pipe ends are closed
+  in this process as soon as the VM runs (`DarwinVm::release_guest_serial_ends`;
+  the helper holds its own copies), so the drain sees EOF when the helper
+  exits and the manager's cancellation covers everything before that; a
+  VZ VM cannot be restarted in place after that, and `VmManager` never
+  does.
+  Reproduce the wedge with 200 KB of text to `/dev/hvc0` (the
+  `machine_console` e2e); do not use a 2 MB flood on a machine you care
+  about: on kernel 6.18.38-arcbox it corrupted guest memory (oops / btrfs /
+  `Bad rss-counter`) in 5 of 12 systemd machines, and no-flood controls did
+  not.
+- **A distro's own `console_loglevel` decides how fast it fills that pipe.**
+  Every machine boots `console=hvc0` (`engine/.../machine.rs`), so all
+  kernel `printk` lands in the pipe above. A distro whose kernel default is
+  the noisier `7` — Debian — streams every `info`-level record there; the
+  loudest steady source is the audit subsystem, one `audit:` line per
+  systemd unit start/stop (~285 KiB/day on an idle machine, measured
+  2026-09-29), which crosses the 64 KiB pipe within a day. Ubuntu ships
+  `console_loglevel=4` in `sysctl.d` and is silent after boot; the other
+  mirrored distros sit between. The machine cmdline now pins `loglevel=4`
+  (`QUIET_KERNEL_CONSOLE` in `engine/.../machine.rs`) so every distro
+  matches Ubuntu regardless of its own default — `err` and above still
+  reach the console. The drain above is the correctness backstop; this cap
+  keeps a distro's `info` chatter out of the daemon log.
+- **A machine that Oopses in `__seccomp_filter` under heavy churn is a known
+  guest-kernel bug, not a hypervisor or arcbox regression.** Under sustained
+  fork / cgroup / seccomp-scope / mount-namespace churn a machine's guest
+  kernel (6.18.38-arcbox) occasionally hits a use-after-free of a seccomp
+  cBPF filter: `__seccomp_filter` calls `bpf_func` = `0x0`, and the dying
+  task's `bpf_prog_free` then faults on a `bpf_prog` whose memory was
+  reallocated and overwritten with pointer-formatted ASCII (freed-then-reused
+  slab). It is stochastic and heap-timing-dependent — one machine crashed at
+  ~586 s uptime, another survived 1338 s under 2x the load (measured
+  2026-09-29). It is NOT the v0.0.24→v0.0.25 (0.8.6→0.8.7) kernel bump: that
+  diff is only the inert `arcbox_hvc_blk` DISCARD driver (machines use
+  virtio-blk), the config fragment is identical, and the 0.8.6 kernel is not
+  proven immune. Reproduce with concurrent in-guest churn
+  (`while :; do for i in $(seq 300); do /bin/true & done; wait; done` plus a
+  `systemd-run --scope -p SystemCallFilter=…` loop) driven for ~10 min;
+  the full trace is captured off `Guest[<name>]` console lines. The real fix
+  is kernel-side (KASAN-instrumented build + this reproducer on bare KVM to
+  pin the UAF, then a 6.18.z bump or backport); re-pinning to 0.8.6 is not
+  a proven mitigation.
 - `VZLinuxRosettaAvailability` raw values are notSupported=0, notInstalled=1,
   installed=2 (a hand-written mapping once had 1 and 2 swapped; the shim now
   returns raw values and Rust maps them — keep them aligned with the SDK).

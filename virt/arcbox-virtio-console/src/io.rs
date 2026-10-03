@@ -156,6 +156,6 @@ mod tests {
     fn test_buffer_console_default() {
         let buffer = BufferConsole::default();
         assert!(buffer.input.is_empty());
-        assert!(buffer.output.is_empty());
+        assert_eq!(buffer.output, b"");
     }
 }

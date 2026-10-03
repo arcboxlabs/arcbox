@@ -43,6 +43,7 @@ arcbox-vmnet = { workspace = true }
 anyhow.workspace = true
 arcbox-route.workspace = true
 clap.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true
 

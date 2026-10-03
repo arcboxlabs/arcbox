@@ -8,7 +8,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use arcbox_api::{SharedRuntime, SystemServiceImpl};
+use arcbox_api::SystemServiceImpl;
 #[cfg(target_os = "macos")]
 use arcbox_constants::container_network::ContainerNetwork;
 use arcbox_constants::ports::KUBERNETES_API_HOST_PORT;
@@ -17,7 +17,7 @@ use arcbox_docker::{DockerApiServer, DockerContextManager, ServerConfig};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-use crate::context::{DaemonContext, ServiceHandles};
+use crate::context::{ControlPlane, DaemonContext, ServiceHandles};
 use crate::dns_service::DnsService;
 
 #[cfg(target_os = "macos")]
@@ -25,15 +25,27 @@ const ROUTE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(
 #[cfg(target_os = "macos")]
 const ROUTE_EVENT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// Starts the control plane and binds the DNS socket.
+///
+/// Called before `init_runtime()`. gRPC comes first so a client watching
+/// the setup stream sees a DNS bind failure as `FAILED` with its cause;
+/// the DNS socket is bound here, before the VM boots, so an explicitly
+/// requested port that is taken costs no boot, and the previous daemon
+/// has already released its socket because the lease is held.
+pub async fn start_control_plane(ctx: &DaemonContext) -> Result<ControlPlane> {
+    let grpc = start_grpc(ctx).await?;
+    let dns = DnsService::bind_requested(ctx.dns_port, ctx.profile.dns_host_port())
+        .await
+        .context("Failed to start DNS service")?;
+    Ok(ControlPlane { grpc, dns })
+}
+
 /// Starts the gRPC server with all services.
 ///
-/// Called before `init_runtime()` — Machine/Sandbox/Snapshot services will
-/// return `UNAVAILABLE` until the runtime is set. SystemService works
-/// immediately so clients can observe setup progress.
-pub async fn start_grpc(
-    ctx: &DaemonContext,
-    shared_runtime: SharedRuntime,
-) -> Result<tokio::task::JoinHandle<()>> {
+/// Machine/Sandbox/Snapshot services return `UNAVAILABLE` until
+/// `init_runtime()` sets the runtime. SystemService works immediately so
+/// clients can observe setup progress.
+async fn start_grpc(ctx: &DaemonContext) -> Result<tokio::task::JoinHandle<()>> {
     let socket_path = &ctx.layout.grpc_socket;
     let listener = crate::control_plane::bind(socket_path)?;
 
@@ -41,7 +53,7 @@ pub async fn start_grpc(
 
     let system_service = SystemServiceImpl::new(
         Arc::clone(&ctx.setup_state),
-        Arc::clone(&shared_runtime),
+        Arc::clone(&ctx.shared_runtime),
         Arc::clone(&ctx.early_runtime),
     );
     // Every service is served over Connect (CORE-53, CORE-68). The sandbox
@@ -49,7 +61,7 @@ pub async fn start_grpc(
     // deployment can still host those halves in different processes.
     // Reflection rides along and answers over all three wire formats.
     let app = crate::control_plane::into_app(crate::control_plane::connect_router(
-        Arc::clone(&shared_runtime),
+        Arc::clone(&ctx.shared_runtime),
         system_service,
     )?);
 
@@ -65,8 +77,12 @@ pub async fn start_grpc(
 pub async fn start_services(
     ctx: &DaemonContext,
     runtime: &Arc<Runtime>,
-    grpc: tokio::task::JoinHandle<()>,
+    control_plane: ControlPlane,
 ) -> Result<ServiceHandles> {
+    let ControlPlane {
+        grpc,
+        dns: dns_service,
+    } = control_plane;
     let linux_vm = runtime.config().vm.autostart;
 
     // A custom instance pool must be routable before any API reports ready.
@@ -81,10 +97,6 @@ pub async fn start_services(
         .await?;
     }
 
-    // DNS service.
-    let dns_service = DnsService::bind(Arc::clone(runtime.network_manager()), ctx.dns_port)
-        .await
-        .context("Failed to start DNS service")?;
     let dns_port = dns_service.host_port()?;
 
     // VM-host-only mode: the Docker API, Docker CLI integration, and the
@@ -133,6 +145,15 @@ pub async fn start_services(
         None
     };
 
+    // Machines are VMs of their own, so SSH does not depend on the Linux VM.
+    let ssh = crate::ssh_service::SshService::bind_requested(
+        ctx.ssh_port,
+        &ctx.layout,
+        ctx.profile.ssh_host(),
+        Arc::clone(runtime),
+    )
+    .await?;
+
     // Normal RPCs become available only after their advertised listeners are
     // bound. Kubernetes RPCs remain unavailable when its best-effort default
     // listener could not bind; an explicit listener is required to succeed.
@@ -143,8 +164,9 @@ pub async fn start_services(
     register_host_dns(runtime).await;
 
     let dns_shutdown = ctx.shutdown.clone();
+    let network_manager = Arc::clone(runtime.network_manager());
     let dns = tokio::spawn(async move {
-        if let Err(e) = dns_service.run(dns_shutdown).await {
+        if let Err(e) = dns_service.run(network_manager, dns_shutdown).await {
             tracing::error!("DNS service error: {}", e);
         }
     });
@@ -159,6 +181,7 @@ pub async fn start_services(
     });
 
     let kubernetes_proxy = kubernetes_proxy.map(|proxy| proxy.start(Arc::clone(runtime)));
+    let ssh = ssh.map(|service| service.start(ctx.shutdown.clone()));
 
     // Mirror route-install events into SetupStatus. VM (re)starts install
     // the container route from vm_lifecycle, outside the cold-start
@@ -190,6 +213,7 @@ pub async fn start_services(
         docker,
         grpc,
         kubernetes_proxy,
+        ssh,
         route_guard,
     })
 }

@@ -128,6 +128,7 @@ impl LifecycleShared {
         self.spawn_route_reconciler();
         self.wait_for_agent(timeout).await?;
         self.sync_guest_clock().await;
+        self.record_bridge_address().await;
         Ok(())
     }
 
@@ -156,9 +157,10 @@ impl LifecycleShared {
                 None
             }
         };
-        let drift_reason = existing_machine.as_ref().and_then(|machine| {
-            machine_drift_reason(machine, &self.config.default_vm, desired_boot.as_ref())
-        });
+        let desired_vm = self.desired_vm();
+        let drift_reason = existing_machine
+            .as_ref()
+            .and_then(|machine| machine_drift_reason(machine, &desired_vm, desired_boot.as_ref()));
         if let Some(field) = drift_reason {
             let m = existing_machine.as_ref().unwrap();
             tracing::warn!(
@@ -166,8 +168,8 @@ impl LifecycleShared {
                 persisted_cpus = m.cpus,
                 persisted_memory = m.memory_mb,
                 persisted_kernel = m.kernel.as_deref().unwrap_or("none"),
-                desired_cpus = self.config.default_vm.cpus,
-                desired_memory = self.config.default_vm.memory_mb,
+                desired_cpus = desired_vm.cpus,
+                desired_memory = desired_vm.memory_mb,
                 "default machine config drifted from desired defaults; recreating"
             );
             let _ = self.machine_manager.remove(&self.machine_name, true);
@@ -192,6 +194,7 @@ impl LifecycleShared {
             "guest boot ready"
         );
         self.sync_guest_clock().await;
+        self.record_bridge_address().await;
 
         // Reset recovery counters on a fully successful boot.
         self.recovery.reset();
@@ -217,6 +220,22 @@ impl LifecycleShared {
         match result {
             Ok(()) => tracing::info!("guest wall clock synced from host"),
             Err(e) => tracing::warn!(error = %e, "guest clock sync ping failed"),
+        }
+    }
+
+    /// Records the guest's bridge NIC address on the machine record, which
+    /// is what publishes the System VM as `default.arcbox.local`. Runs
+    /// before the actor hears `AgentReady`, so the `MachineStarted` it then
+    /// publishes finds the address already on the record. Best effort: a
+    /// VM without a bridge NIC simply has no name on the Mac.
+    async fn record_bridge_address(&self) {
+        let result = Arc::clone(&self.machine_manager)
+            .record_bridge_address(self.machine_name.clone())
+            .await;
+        match result {
+            Ok(Some(ip)) => tracing::info!(bridge_ip = %ip, "guest bridge address recorded"),
+            Ok(None) => tracing::info!("guest reports no bridge address"),
+            Err(e) => tracing::warn!(error = %e, "could not read the guest's bridge address"),
         }
     }
 
@@ -330,11 +349,12 @@ impl LifecycleShared {
             read_only: false,
         });
 
+        let desired_vm = self.desired_vm();
         let config = MachineConfig {
             name: self.machine_name.clone(),
-            cpus: self.config.default_vm.cpus,
-            memory_mb: self.config.default_vm.memory_mb,
-            disk_gb: self.config.default_vm.disk_gb,
+            cpus: desired_vm.cpus,
+            memory_mb: desired_vm.memory_mb,
+            disk_gb: desired_vm.disk_gb,
             kernel: Some(boot.kernel),
             cmdline: Some(boot.cmdline),
             block_devices,
@@ -347,7 +367,11 @@ impl LifecycleShared {
             // wired is decided per-backend at VM build time (VZ only), so the
             // value stays correct across a backend switch — see
             // `VmManager::build_vmm_config`.
-            enable_rosetta: self.config.default_vm.rosetta,
+            enable_rosetta: desired_vm.rosetta,
+            // The System VM hosts sandboxes, so it is the one machine that
+            // may run a hypervisor. The VZ build honours it only when the
+            // host supports nested virtualization.
+            nested_virt: true,
         };
 
         tracing::info!(
@@ -505,15 +529,6 @@ impl LifecycleShared {
             let mut last_readiness_err: Option<String> = None;
 
             while std::time::Instant::now() < deadline {
-                // Console output (best-effort, non-blocking).
-                #[cfg(target_os = "macos")]
-                if let Ok(output) = mm.read_console_output(&machine_name) {
-                    let trimmed = output.trim_matches('\0');
-                    if !trimmed.is_empty() {
-                        tracing::info!("{}", trimmed.trim_end());
-                    }
-                }
-
                 // connect_agent discovers when the guest starts listening on
                 // the agent vsock port, then the readiness event stream waits
                 // for the guest to report a terminal state.
@@ -646,11 +661,6 @@ impl LifecycleShared {
         // Back on async context — do async follow-up work.
         tracing::info!(boot_id = %boot_id, "Agent is ready");
         self.health_monitor.record_success();
-        #[cfg(target_os = "macos")]
-        {
-            let mm = Arc::clone(&self.machine_manager);
-            tokio::spawn(super::serial::serial_read_adaptive(mm));
-        }
 
         Ok(())
     }

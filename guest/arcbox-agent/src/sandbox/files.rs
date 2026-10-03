@@ -6,6 +6,7 @@ use arcbox_connect::sandbox_v1;
 use buffa::Message;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use super::window::Windowed;
 use super::{SandboxService, convert};
 use crate::error::SandboxError;
 use crate::rpc::{ErrorResponse, MessageType, read_message, write_message};
@@ -16,7 +17,8 @@ use crate::rpc::{ErrorResponse, MessageType, read_message, write_message};
 const WATCH_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 
 impl SandboxService {
-    /// Stream a file out of a sandbox as `SandboxFileData` frames.
+    /// Stream a file out of a sandbox as `SandboxFileData` frames, each
+    /// within the host's window.
     ///
     /// The final frame carries `done == true`. Errors (missing sandbox,
     /// missing file, wrong state) are reported as a single `Error` frame.
@@ -27,7 +29,7 @@ impl SandboxService {
         payload: &[u8],
     ) -> anyhow::Result<()>
     where
-        S: AsyncWrite + Unpin,
+        S: AsyncRead + AsyncWrite + Unpin,
     {
         let req = match sandbox_v1::ReadFileRequest::decode_from_slice(payload) {
             Ok(r) => r,
@@ -49,30 +51,27 @@ impl SandboxService {
         };
 
         const CHUNK_SIZE: usize = 1024 * 1024;
+        let mut stream = Windowed::new(stream);
         for chunk in data.chunks(CHUNK_SIZE) {
             let msg = sandbox_v1::FileChunk {
                 data: chunk.to_vec(),
                 ..Default::default()
             };
-            write_message(
-                stream,
-                MessageType::SandboxFileData,
-                trace_id,
-                &msg.encode_to_vec(),
-            )
-            .await?;
+            stream
+                .write(MessageType::SandboxFileData, trace_id, &msg.encode_to_vec())
+                .await?;
         }
         let done = sandbox_v1::FileChunk {
             done: true,
             ..Default::default()
         };
-        write_message(
-            stream,
-            MessageType::SandboxFileData,
-            trace_id,
-            &done.encode_to_vec(),
-        )
-        .await?;
+        stream
+            .write(
+                MessageType::SandboxFileData,
+                trace_id,
+                &done.encode_to_vec(),
+            )
+            .await?;
         Ok(())
     }
 
@@ -220,7 +219,8 @@ impl SandboxService {
             .map_err(SandboxError::from)
     }
 
-    /// Stream `SandboxFileWatchEvent` frames for a directory watch.
+    /// Stream `SandboxFileWatchEvent` frames for a directory watch, each
+    /// within the host's window.
     ///
     /// An immediate keepalive frame confirms the watch is established (it
     /// also lets the daemon's paused-sandbox first-frame peek return fast);
@@ -236,7 +236,7 @@ impl SandboxService {
         payload: &[u8],
     ) -> anyhow::Result<()>
     where
-        S: AsyncWrite + Unpin,
+        S: AsyncRead + AsyncWrite + Unpin,
     {
         let req = match sandbox_v1::WatchDirRequest::decode_from_slice(payload) {
             Ok(r) => r,
@@ -291,7 +291,8 @@ impl SandboxService {
             }
         });
 
-        write_watch_keepalive(stream, trace_id).await?;
+        let mut stream = Windowed::new(stream);
+        write_watch_keepalive(&mut stream, trace_id).await?;
         let mut keepalive = tokio::time::interval_at(
             tokio::time::Instant::now() + WATCH_KEEPALIVE_INTERVAL,
             WATCH_KEEPALIVE_INTERVAL,
@@ -304,47 +305,53 @@ impl SandboxService {
                             payload: convert::fs_event_to_proto(event).into(),
                             ..Default::default()
                         };
-                        write_message(
-                            stream,
-                            MessageType::SandboxFileWatchEvent,
-                            trace_id,
-                            &frame.encode_to_vec(),
-                        )
-                        .await?;
+                        stream
+                            .write(
+                                MessageType::SandboxFileWatchEvent,
+                                trace_id,
+                                &frame.encode_to_vec(),
+                            )
+                            .await?;
                     }
                     // Clean EOF from the vm-agent: the sandbox stopped.
                     Some(Ok(None)) | None => {
-                        write_message(stream, MessageType::SandboxFileWatchEnd, trace_id, &[])
+                        stream
+                            .write(MessageType::SandboxFileWatchEnd, trace_id, &[])
                             .await?;
                         return Ok(());
                     }
                     Some(Err(e)) => {
                         let e = SandboxError::from(e);
                         let err = ErrorResponse::new(e.status_code(), e.to_string());
-                        write_message(stream, MessageType::Error, trace_id, &err.encode()).await?;
+                        stream
+                            .write(MessageType::Error, trace_id, &err.encode())
+                            .await?;
                         return Ok(());
                     }
                 },
-                _ = keepalive.tick() => write_watch_keepalive(stream, trace_id).await?,
+                _ = keepalive.tick() => write_watch_keepalive(&mut stream, trace_id).await?,
             }
         }
     }
 }
 
 /// One `SandboxFileWatchEvent` frame carrying a keepalive payload.
-async fn write_watch_keepalive<S>(stream: &mut S, trace_id: &str) -> anyhow::Result<()>
+async fn write_watch_keepalive<S>(
+    stream: &mut Windowed<'_, S>,
+    trace_id: &str,
+) -> anyhow::Result<()>
 where
-    S: AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin,
 {
     let frame = sandbox_v1::WatchDirResponse {
         payload: sandbox_v1::KeepAlive::default().into(),
         ..Default::default()
     };
-    write_message(
-        stream,
-        MessageType::SandboxFileWatchEvent,
-        trace_id,
-        &frame.encode_to_vec(),
-    )
-    .await
+    stream
+        .write(
+            MessageType::SandboxFileWatchEvent,
+            trace_id,
+            &frame.encode_to_vec(),
+        )
+        .await
 }

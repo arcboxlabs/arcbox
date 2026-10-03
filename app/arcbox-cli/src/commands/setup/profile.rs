@@ -56,8 +56,22 @@ pub(super) fn completion_path(shell: ShellKind) -> PathBuf {
 
 pub(super) async fn profile_path(shell: ShellKind) -> Result<PathBuf> {
     let home = dirs::home_dir().context("could not determine home directory")?;
+    profile_path_under(shell, &home).await
+}
+
+/// The profile of a login shell whose home is `home`.
+///
+/// zsh is asked for its effective `ZDOTDIR`. For a home other than this
+/// process's own, the probe runs with `HOME` set to it, so the answer comes
+/// from that home's `.zshenv` and not from the caller's environment.
+pub(super) async fn profile_path_under(shell: ShellKind, home: &Path) -> Result<PathBuf> {
     Ok(match shell {
-        ShellKind::Zsh => effective_zdotdir(&home).await?.join(".zprofile"),
+        ShellKind::Zsh => {
+            let isolated = (dirs::home_dir().as_deref() != Some(home)).then_some(home);
+            effective_zdotdir_with(&shell_binary(ShellKind::Zsh), home, isolated)
+                .await?
+                .join(".zprofile")
+        }
         ShellKind::Bash => home.join(".bash_profile"),
         ShellKind::Fish => home.join(".config/fish/config.fish"),
     })
@@ -191,11 +205,6 @@ async fn read(path: &Path) -> Result<Option<String>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error).with_context(|| format!("failed to read {}", path.display())),
     }
-}
-
-async fn effective_zdotdir(home: &Path) -> Result<PathBuf> {
-    let shell = shell_binary(ShellKind::Zsh);
-    effective_zdotdir_with(&shell, home, None).await
 }
 
 async fn effective_zdotdir_with(
