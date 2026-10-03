@@ -801,6 +801,12 @@ pub struct PrepareMigrationResponse {
     /// are blocking: RunMigration refuses to execute a plan that has any.
     #[prost(string, repeated, tag = "11")]
     pub unsupported_resources: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Target resources the prepared plan would replace. Always populated, even
+    /// when empty. For a runnable prepare, this describes the saved plan_id.
+    /// Clients must compare these targets with the user's confirmation before
+    /// RunMigration. An absent summary means the daemon cannot provide this check.
+    #[prost(message, optional, tag = "12")]
+    pub replacements: ::core::option::Option<MigrationReplacementSummary>,
 }
 /// A fully resolved migration plan.
 ///

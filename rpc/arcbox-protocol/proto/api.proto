@@ -691,6 +691,11 @@ message PrepareMigrationResponse {
     // Source resources this migration cannot reproduce. Unlike warnings these
     // are blocking: RunMigration refuses to execute a plan that has any.
     repeated string unsupported_resources = 11;
+    // Target resources the prepared plan would replace. Always populated, even
+    // when empty. For a runnable prepare, this describes the saved plan_id.
+    // Clients must compare these targets with the user's confirmation before
+    // RunMigration. An absent summary means the daemon cannot provide this check.
+    MigrationReplacementSummary replacements = 12;
 }
 
 // A fully resolved migration plan.
