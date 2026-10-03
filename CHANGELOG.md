@@ -5,6 +5,101 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.2](https://github.com/arcboxlabs/arcbox/compare/v0.8.1...v0.8.2) (2026-10-03)
+
+
+### Features
+
+* **agent:** add an in-memory table for the Mac's AppleDouble sidecars ([9e5dfa4](https://github.com/arcboxlabs/arcbox/commit/9e5dfa4d963d1585eb856f947f8a287cc9bfc4e5))
+* **agent:** add the machine export's id table ([c83e606](https://github.com/arcboxlabs/arcbox/commit/c83e606e48078be8ea6274323533d64ca1d770d8))
+* **agent:** answer EnsureMachineExport with an export on the bridge NIC ([4e80448](https://github.com/arcboxlabs/arcbox/commit/4e804489b403dc9bde7829a79d48bfbdc62e631d))
+* **agent:** keep the Mac's AppleDouble sidecars out of the machine ([76b127d](https://github.com/arcboxlabs/arcbox/commit/76b127d7361615cafa6745ed7a0b1d263ae878d5))
+* **agent:** map machine export attributes and ownership ([2c44340](https://github.com/arcboxlabs/arcbox/commit/2c4434071cc2d07fbd1f7c16979069a6a24a4275))
+* **agent:** serve the machine root as an NFSv3 filesystem ([9ed3b53](https://github.com/arcboxlabs/arcbox/commit/9ed3b539c39a261f3df171b99124a0c89da31a38))
+* **agent:** write through the machine root export ([b325e39](https://github.com/arcboxlabs/arcbox/commit/b325e39c6a66548eb0fa5ad6a088ddf3a0f541b1))
+* **cli:** add machine clone, export, import, resize and default ([7b56e3b](https://github.com/arcboxlabs/arcbox/commit/7b56e3ba9df104e3d03705864c2798a8fc6515cd))
+* **cli:** let machine exec and ssh pick the default machine and a user ([5702361](https://github.com/arcboxlabs/arcbox/commit/5702361d780f92f29788b07c61ca917ed696892f))
+* **cli:** uninstall the host mount root and the layout before it ([3d17602](https://github.com/arcboxlabs/arcbox/commit/3d1760283b676c93ea8e97e15bff0e74363ecae3))
+* **cli:** unmount machine roots a daemon left on uninstall ([d45b33b](https://github.com/arcboxlabs/arcbox/commit/d45b33b1de229bb1f907737e910c47dc6c1b2c4a))
+* **constants:** derive the docker and machine mount points from one host mount root ([fe37506](https://github.com/arcboxlabs/arcbox/commit/fe375069975feb5cbbe13438bbeeb15d081d8981))
+* **core:** resize user machines against the host and keep a default machine ([85d42fa](https://github.com/arcboxlabs/arcbox/commit/85d42fa4f187e49c5f29691f72ce245687948fa0))
+* **daemon:** add the machine export mount mechanics ([ed9d01b](https://github.com/arcboxlabs/arcbox/commit/ed9d01b08cba2388c127d322b4508cf222a9511f))
+* **daemon:** mount running machines' roots under ~/ArcBoxMachines ([93f1c67](https://github.com/arcboxlabs/arcbox/commit/93f1c67acdab7215040b0756db047b27b64474bb))
+* **daemon:** mount the docker export and machine roots under one host root ([2cafe0c](https://github.com/arcboxlabs/arcbox/commit/2cafe0c27592d016843798d2fddcf7a921fdb31c))
+* **daemon:** register the local-domain names with mDNSResponder ([6c32222](https://github.com/arcboxlabs/arcbox/commit/6c322224fac7187797c4038687f741c153a3fc87))
+* **daemon:** release the mounts a previous daemon left under the host root ([8fb75a1](https://github.com/arcboxlabs/arcbox/commit/8fb75a1d4de55feda6306e6e0b33c014949443fc))
+* **engine:** ask a machine for its root export and announce its stop ([d88b6c5](https://github.com/arcboxlabs/arcbox/commit/d88b6c56c27fe83b6d469c5b2baff15de92b4d3e))
+* **engine:** change a machine's CPU and memory after it is created ([320879b](https://github.com/arcboxlabs/arcbox/commit/320879b53949093032d1c494888d5089776c8368))
+* **engine:** clone a stopped machine with a copy-on-write data disk ([8e7e0e5](https://github.com/arcboxlabs/arcbox/commit/8e7e0e543365c6f2f80f8861dbc2540697e4a682))
+* **engine:** export and import machines through the archive ([d9728e2](https://github.com/arcboxlabs/arcbox/commit/d9728e277abc3cbe876ad16fd1b1956b2591ef94))
+* **engine:** read a machine archive's manifest and restore its data disk ([8142d2d](https://github.com/arcboxlabs/arcbox/commit/8142d2df64e0212058d2e4d76c3a78e66e53b5b2))
+* **engine:** write machines to a sparse tar.zst archive ([0eec7bb](https://github.com/arcboxlabs/arcbox/commit/0eec7bbc7d375627f1818b6d36cb57bcedbfecd7))
+* **net:** stream local-domain DNS changes for a mirror of the table ([86273f1](https://github.com/arcboxlabs/arcbox/commit/86273f1b46a5b52e8326b5242fb4bf53084f07b2))
+* **protocol,api:** add machine clone, export, import, resize and default RPCs ([0ee9bca](https://github.com/arcboxlabs/arcbox/commit/0ee9bca0ec1f73964ebd1828fa972c1445665096))
+* **protocol:** add the EnsureMachineExport agent RPC ([c75c0ea](https://github.com/arcboxlabs/arcbox/commit/c75c0ea6e4da8528b0991abed30f4b81bc7b9b39))
+
+
+### Bug Fixes
+
+* **agent:** power a distro machine off through its own poweroff command ([6020a63](https://github.com/arcboxlabs/arcbox/commit/6020a639ca120c0375abaeb05a890239e9a7b909))
+* **daemon:** bind the DNS socket before the VM boots ([420d1fe](https://github.com/arcboxlabs/arcbox/commit/420d1fe40fda8e57fc572b521620a003112d7ce6))
+* **daemon:** recognize the ~/ArcBox mount behind a symlink and bound mount_nfs ([bf3705f](https://github.com/arcboxlabs/arcbox/commit/bf3705f7349364e9a38bc7717d289b2571b457a3))
+* **daemon:** retry a machine root unmount that failed ([b5411f2](https://github.com/arcboxlabs/arcbox/commit/b5411f24b96f67e9c6ec4decda0f385bed488934))
+* **daemon:** unmount ~/ArcBox without stat'ing it and force it when busy ([3044b3f](https://github.com/arcboxlabs/arcbox/commit/3044b3f739f5ee1362dcbe12a334495631d45c2e))
+* **deps:** update dependencies for disclosed vulnerabilities ([#709](https://github.com/arcboxlabs/arcbox/issues/709)) ([479d630](https://github.com/arcboxlabs/arcbox/commit/479d630d19664363a2ef4a11f06ab01cd58814ec))
+* **docker:** republish container ports after a System VM restart ([02abbb0](https://github.com/arcboxlabs/arcbox/commit/02abbb0bd93dadefff3a98882f29299a10933fac))
+* **engine:** let a force stop wait for the host to release a machine's root ([0b3116c](https://github.com/arcboxlabs/arcbox/commit/0b3116c0bafad97d4be1d9f94bd4959af3e4dd2f))
+* **engine:** wait for the host's release before a graceful stop too ([a1515ee](https://github.com/arcboxlabs/arcbox/commit/a1515ee1e657638e97921a962bb40af08af20549))
+* **fs:** send Linux errno values in FUSE replies ([#718](https://github.com/arcboxlabs/arcbox/issues/718)) ([032942d](https://github.com/arcboxlabs/arcbox/commit/032942d77d48d17fcfe6826a640972c3525b55d7))
+* **migration:** expose prepared replacement targets ([#729](https://github.com/arcboxlabs/arcbox/issues/729)) ([fc1cbca](https://github.com/arcboxlabs/arcbox/commit/fc1cbcae745499114afef20bb3be5b54b00d2e9e))
+* **net:** answer unknown local-domain names with NODATA, not NXDOMAIN ([0b27750](https://github.com/arcboxlabs/arcbox/commit/0b27750390694fc37e73fd1fe5ff6e4a2ad6dfea))
+* **transport:** describe the vsock address with libc::sockaddr_vm ([dc8f3d8](https://github.com/arcboxlabs/arcbox/commit/dc8f3d82b07b4b1074ce6f00f7221b32e8309a79))
+
+
+### Code Refactoring
+
+* **agent:** clear the clippy 1.99 findings on the musl target ([af91385](https://github.com/arcboxlabs/arcbox/commit/af91385868e971b39a2f66eab960b619cd377efc))
+* **api:** split the machine service's rootfs resolution out of create ([1ea055c](https://github.com/arcboxlabs/arcbox/commit/1ea055c01d9e11018a97686a7fd73a23308fff79))
+* **core:** read the host mount table where the daemon and abctl share it ([a62d2e7](https://github.com/arcboxlabs/arcbox/commit/a62d2e788d230946953943dc99ac93601ba9b22d))
+* **daemon:** read the mount table through arcbox-core ([43a9192](https://github.com/arcboxlabs/arcbox/commit/43a9192a72143460dd603b813ab0d05e4c0e8829))
+* **engine:** share the machine name check and VirtioFS share list ([4c81641](https://github.com/arcboxlabs/arcbox/commit/4c81641aed62f4eaa15815a38dd0e25ec10b07d6))
+
+
+### Tests
+
+* **app:** compare emptiness assertions against an empty value ([426352d](https://github.com/arcboxlabs/arcbox/commit/426352d8c62822c4c8940704441ead381bd804ba))
+* **computer:** compare emptiness assertions against an empty value ([8dd3914](https://github.com/arcboxlabs/arcbox/commit/8dd3914564c852805152f370d61c6bb8c2ed6871))
+* **e2e:** follow the single host mount root ([1c23dd2](https://github.com/arcboxlabs/arcbox/commit/1c23dd2a43eb4e6974646deb8bfa7d300c55f632))
+* **e2e:** improve sandbox phase polling resolution ([#690](https://github.com/arcboxlabs/arcbox/issues/690)) ([550f94b](https://github.com/arcboxlabs/arcbox/commit/550f94b23b30297c26048cc912579d70575f3b6c))
+* **e2e:** read and write a machine's root through its host mount ([abdefeb](https://github.com/arcboxlabs/arcbox/commit/abdefeb57a6d617ff9abca4f1d24cdaa48282f35))
+* **engine:** compare emptiness assertions against an empty value ([1a471e6](https://github.com/arcboxlabs/arcbox/commit/1a471e6cec1d8de42bb8cba49c7f505a1272d0aa))
+* **runtime:** compare emptiness assertions against an empty value ([aae51fa](https://github.com/arcboxlabs/arcbox/commit/aae51fa7e8ff358d9d3aa7269902d32bc14a5d54))
+* **virt:** compare emptiness assertions against an empty value ([fcabbcd](https://github.com/arcboxlabs/arcbox/commit/fcabbcd0d0167152faadb9f8cca62712288fc687))
+
+
+### Documentation
+
+* **agents:** name the single host mount root in the mount notes ([3b9283d](https://github.com/arcboxlabs/arcbox/commit/3b9283dc2101538b85625e6cb082fe94e20ea82b))
+* **agents:** record machine root mounts, lifecycle verbs and the fixed NFS teardown ([2b7dbfd](https://github.com/arcboxlabs/arcbox/commit/2b7dbfdaf64c113e7e188f8b4faaae313b00ff7f))
+* **agents:** record the vendored fleet proto contract ([f7df107](https://github.com/arcboxlabs/arcbox/commit/f7df10734edd29b0db1571fb988aa399d0f4180c))
+* describe machine clone, export, import, resize and the default machine ([9e64496](https://github.com/arcboxlabs/arcbox/commit/9e64496de4c095e622b3b60cc3945af389edf326))
+* name the machine directory contents and the transfer staging directories ([6e6d85b](https://github.com/arcboxlabs/arcbox/commit/6e6d85bdb27523b872e550e10a32df7b5de3ea40))
+* **readme:** name the docker export mount point in the feature list ([ba330e5](https://github.com/arcboxlabs/arcbox/commit/ba330e5595bf294bec2b6a6bbb6548a0538da97e))
+* record the machine root export decision and measurements ([7e0b01b](https://github.com/arcboxlabs/arcbox/commit/7e0b01bdc5eaf42a2b9ec8c70d9dc4c36dc79534))
+* record the single host mount root (ADR 0003) ([5d46007](https://github.com/arcboxlabs/arcbox/commit/5d46007f788388fce43389c1de7baac3973b2576))
+
+
+### Continuous Integration
+
+* **guest:** run the agent's unit tests on the Linux runner ([#689](https://github.com/arcboxlabs/arcbox/issues/689)) ([60a9004](https://github.com/arcboxlabs/arcbox/commit/60a9004a9a0bb1d6564a72e86d5289373a156d2b))
+
+
+### Miscellaneous Chores
+
+* **master:** release fleet-agent 0.1.7 ([#727](https://github.com/arcboxlabs/arcbox/issues/727)) ([65594b3](https://github.com/arcboxlabs/arcbox/commit/65594b3f14c6643fc6c79e78ecf4f48bfad18d64))
+* **master:** release sdk-typescript 0.1.5 ([#730](https://github.com/arcboxlabs/arcbox/issues/730)) ([91d85b8](https://github.com/arcboxlabs/arcbox/commit/91d85b81e20735b8f8c4a4b3a392be53e86b9c47))
+* **net:** remove the unused multicast mDNS responder ([79f41d3](https://github.com/arcboxlabs/arcbox/commit/79f41d39ab42bb074df24e8ca6901a25d5c0a1d8))
+
 ## [0.8.1](https://github.com/arcboxlabs/arcbox/compare/v0.8.0...v0.8.1) (2026-10-02)
 
 
