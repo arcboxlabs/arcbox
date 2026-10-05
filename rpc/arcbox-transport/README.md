@@ -75,6 +75,10 @@ fn wrap_attach_channel(fd: OwnedFd) -> std::io::Result<HalfCloseStream<VsockStre
 Both peers must agree on the framing; the guest agent's Docker API proxy speaks
 it from agent protocol v5 (v4 had the half-close without the window).
 
+## Blocking Transport Cancellation
+
+`BlockingVsockTransport::shutdown_handle()` returns an owned `BlockingVsockShutdown` handle. Dropping the handle shuts down the connected socket and interrupts pending blocking I/O. Retain the handle for the full lifetime of a cancellable operation; aborting a `spawn_blocking` task alone does not interrupt the task's I/O.
+
 ## Port Notes
 
 - `1024` is the guest agent RPC port used by `arcbox-agent`.

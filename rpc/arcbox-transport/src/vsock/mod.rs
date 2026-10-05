@@ -52,7 +52,7 @@ pub(crate) mod stream;
 mod transport;
 
 pub use addr::{DEFAULT_AGENT_PORT, VsockAddr};
-pub use blocking::BlockingVsockTransport;
+pub use blocking::{BlockingVsockShutdown, BlockingVsockTransport};
 #[cfg(target_os = "macos")]
 pub use darwin::IncomingVsockConnection;
 pub use flow::Credit;

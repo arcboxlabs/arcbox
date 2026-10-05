@@ -28,7 +28,27 @@ pub struct BlockingVsockTransport {
     stream: Option<UnixStream>,
 }
 
+/// Cancels pending I/O on a blocking transport when the owner drops this handle.
+/// The duplicate socket keeps the file descriptor valid until cancellation.
+pub struct BlockingVsockShutdown(UnixStream);
+
+impl Drop for BlockingVsockShutdown {
+    fn drop(&mut self) {
+        // An already-disconnected socket needs no further cleanup.
+        let _ = self.0.shutdown(std::net::Shutdown::Both);
+    }
+}
+
 impl BlockingVsockTransport {
+    /// Returns a handle whose drop interrupts blocking send/receive operations.
+    pub fn shutdown_handle(&self) -> io::Result<BlockingVsockShutdown> {
+        self.stream
+            .as_ref()
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected))?
+            .try_clone()
+            .map(BlockingVsockShutdown)
+    }
+
     /// Closes the owned stream. A closed transport cannot reconnect.
     pub fn close(&mut self) {
         self.stream.take();
@@ -184,6 +204,10 @@ mod tests {
             client.recv(deadline),
             Err(TransportError::NotConnected)
         ));
+        assert_eq!(
+            client.shutdown_handle().err().unwrap().kind(),
+            io::ErrorKind::NotConnected
+        );
         assert_eq!(guest.read(&mut [0]).unwrap(), 0);
     }
 

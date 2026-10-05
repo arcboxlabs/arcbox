@@ -11,6 +11,7 @@
 mod machine_exec;
 mod sandbox_stream;
 mod shutdown;
+mod storage_health;
 mod transport;
 mod wire;
 
@@ -20,6 +21,7 @@ mod admission_tests;
 pub use self::machine_exec::{ExecSessionInput, ExecSessionOutput};
 pub use self::sandbox_stream::SandboxStream;
 use self::sandbox_stream::StreamKind;
+pub use self::storage_health::StorageHealthStream;
 use self::transport::{AgentTransport, BLOCKING_RPC_TIMEOUT};
 use crate::error::{EngineError, Result};
 use arcbox_connect::sandbox_v1::{
