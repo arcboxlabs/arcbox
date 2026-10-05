@@ -24,6 +24,8 @@ At startup, the agent detects and launches the bundled runtime stack
 (`containerd` / `dockerd` / `runc`) so the host-side Docker API proxy can
 target a healthy guest `dockerd` endpoint.
 
+In a normal System VM, `WatchReadiness` with `start_runtime_if_needed=true` starts or joins one runtime-start attempt. The watch reports a failed attempt immediately and does not retry within that request. A new `WatchReadiness` or explicit `EnsureRuntime` request may retry. Readiness requires a successful start result and a live Docker API probe.
+
 The proxy itself listens on vsock port 2375 and relays each connection to
 `/var/run/docker.sock`. The vsock leg is framed with
 `arcbox_transport::vsock::HalfCloseStream` (agent protocol v5): a

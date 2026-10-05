@@ -74,6 +74,19 @@ pub(super) async fn handle_ensure_runtime(req: RuntimeEnsureRequest) -> RpcRespo
     RpcResponse::RuntimeEnsure(response)
 }
 
+/// Observes one start attempt and preserves its terminal failure for the host.
+pub(super) async fn watch_runtime_readiness(
+    timeout: Duration,
+) -> arcbox_connect::v1::ReadinessEvent {
+    crate::agent::readiness::watch_runtime(
+        ensure_runtime::runtime_guard(),
+        timeout,
+        do_ensure_runtime_start,
+        collect_runtime_status,
+    )
+    .await
+}
+
 /// Performs the actual runtime start sequence (called only by the driver).
 async fn do_ensure_runtime_start() -> RuntimeEnsureResponse {
     let mut notes = Vec::new();

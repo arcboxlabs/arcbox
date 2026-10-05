@@ -204,8 +204,8 @@ async fn handle_watch_readiness<S>(
 where
     S: AsyncWrite + Unpin,
 {
+    use arcbox_connect::v1::ReadinessEvent;
     use arcbox_connect::v1::readiness_event::Kind;
-    use arcbox_connect::v1::{ReadinessEvent, RuntimeEnsureRequest};
 
     write_readiness_event(
         stream,
@@ -234,80 +234,8 @@ where
     .await?;
 
     let timeout = Duration::from_millis(u64::from(req.timeout_ms).max(1));
-    let deadline = tokio::time::Instant::now() + timeout;
-
-    loop {
-        let response = match super::runtime::handle_ensure_runtime(RuntimeEnsureRequest {
-            start_if_needed: true,
-            ..Default::default()
-        })
-        .await
-        {
-            RpcResponse::RuntimeEnsure(response) => response,
-            other => {
-                anyhow::bail!("unexpected ensure runtime response: {:?}", other);
-            }
-        };
-        let response_message = response.message;
-
-        let status = match super::runtime::handle_runtime_status(
-            arcbox_connect::v1::RuntimeStatusRequest::default(),
-        )
-        .await
-        {
-            RpcResponse::RuntimeStatus(status) => status,
-            other => {
-                anyhow::bail!("unexpected runtime status response: {:?}", other);
-            }
-        };
-
-        // EnsureRuntime settles only after Docker and its post-start routing
-        // setup are ready; RuntimeStatus independently confirms Docker is
-        // still reachable at the point we publish the terminal event.
-        if response.ready && status.docker_ready {
-            return write_readiness_event(
-                stream,
-                trace_id,
-                ReadinessEvent {
-                    kind: Kind::RuntimeReady.into(),
-                    endpoint: if response.endpoint.is_empty() {
-                        status.endpoint
-                    } else {
-                        response.endpoint
-                    },
-                    detail: if response_message.is_empty() {
-                        status.detail
-                    } else {
-                        response_message
-                    },
-                    services: status.services,
-                    ..Default::default()
-                },
-            )
-            .await;
-        }
-
-        if tokio::time::Instant::now() >= deadline {
-            return write_readiness_event(
-                stream,
-                trace_id,
-                ReadinessEvent {
-                    kind: Kind::RuntimeFailed.into(),
-                    endpoint: status.endpoint,
-                    detail: if response_message.is_empty() {
-                        status.detail
-                    } else {
-                        response_message
-                    },
-                    services: status.services,
-                    ..Default::default()
-                },
-            )
-            .await;
-        }
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    let event = super::runtime::watch_runtime_readiness(timeout).await;
+    write_readiness_event(stream, trace_id, event).await
 }
 
 async fn write_readiness_event<S>(

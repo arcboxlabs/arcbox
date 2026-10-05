@@ -14,6 +14,8 @@ pub mod ensure_runtime;
 mod exec_error;
 #[cfg(any(target_os = "linux", test))]
 mod login_session;
+#[cfg(any(target_os = "linux", test))]
+mod readiness;
 
 #[cfg(target_os = "linux")]
 mod linux;
