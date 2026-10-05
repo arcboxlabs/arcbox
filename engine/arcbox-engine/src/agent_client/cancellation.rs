@@ -2,13 +2,31 @@
 
 use std::{future::Future, time::Duration};
 
-use arcbox_connect::v1::ReadinessEvent;
+use arcbox_connect::v1::{
+    AgentPingResponse, ReadinessEvent, StorageCheckRequest, StorageCheckResponse,
+};
 use tokio_util::sync::CancellationToken;
 
 use super::{AgentClient, transport::AgentTransport};
 use crate::error::{EngineError, Result};
 
 impl AgentClient {
+    /// Cancels a dedicated check through `cancelled` and joins its blocking worker.
+    /// The operation owner must await this future after cancellation.
+    pub async fn storage_check_with_cancel(
+        self,
+        request: StorageCheckRequest,
+        cancelled: &CancellationToken,
+    ) -> Result<StorageCheckResponse> {
+        let blocking_request = request.clone();
+        self.cancellable(
+            cancelled,
+            move |client| client.storage_check_blocking(&blocking_request),
+            move |client| async move { client.storage_check(&request).await },
+        )
+        .await
+    }
+
     /// Cancels a dedicated readiness watch and joins its blocking worker.
     /// The operation owner must await this future after cancellation.
     pub async fn watch_readiness_with_cancel(
@@ -23,6 +41,24 @@ impl AgentClient {
             cancelled,
             move |client| client.watch_readiness_blocking(start_runtime, timeout, &blocking_trace),
             move |client| client.watch_readiness(start_runtime, timeout, trace_id),
+        )
+        .await
+    }
+
+    /// Cancels a dedicated handshake and joins its blocking worker.
+    /// The operation owner must await this future after cancellation.
+    pub async fn ping_with_cancel(
+        self,
+        cancelled: &CancellationToken,
+    ) -> Result<AgentPingResponse> {
+        self.cancellable(
+            cancelled,
+            |mut client| client.ping_blocking(),
+            |mut client| async move {
+                tokio::time::timeout(super::transport::BLOCKING_RPC_TIMEOUT, client.ping())
+                    .await
+                    .map_err(|_| EngineError::Machine("agent handshake timed out".into()))?
+            },
         )
         .await
     }

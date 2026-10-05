@@ -12,6 +12,8 @@
 //! come back as [`InternalEvent`]s. Every dispatch drains the machine's
 //! [`Effect`]s and executes them here.
 
+mod storage;
+
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -37,6 +39,14 @@ use super::{
 
 /// A command sent from the facade to the lifecycle actor.
 pub(super) enum Command {
+    CheckStorage {
+        reservation: crate::machine::StorageMaintenance,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    StopStorage {
+        reservation: crate::machine::StorageMaintenance,
+        reply: oneshot::Sender<Result<()>>,
+    },
     /// Restarts an existing checked pair without releasing its maintenance reservation.
     ResumeStorage {
         reservation: crate::machine::StorageMaintenance,
@@ -316,6 +326,9 @@ impl PressureWatch for AgentPressureWatch {
 pub(super) struct LifecycleActor {
     storage_start: Option<crate::machine::StorageMaintenance>,
     storage_cancel: Option<CancellationToken>,
+    storage_stop: Option<crate::machine::StorageMaintenance>,
+    storage_stopping: bool,
+    storage_boot_done: Option<JoinHandle<()>>,
     shared: Arc<LifecycleShared>,
     /// Commands from the facade.
     commands: mpsc::UnboundedReceiver<Command>,
@@ -365,6 +378,9 @@ impl LifecycleActor {
         Self {
             storage_start: None,
             storage_cancel: None,
+            storage_stop: None,
+            storage_stopping: false,
+            storage_boot_done: None,
             shared,
             commands,
             events_rx,
@@ -509,6 +525,7 @@ impl LifecycleActor {
                     }
                 }));
             }
+            Effect::SpawnStorageStop => self.spawn_storage_stop(),
             Effect::SpawnStop => {
                 let epoch = self.abort_inflight();
                 let shared = Arc::clone(&self.shared);
@@ -581,6 +598,12 @@ impl LifecycleActor {
 
     fn on_command(&mut self, machine: &mut Machine, cmd: Command) {
         match cmd {
+            Command::CheckStorage { reservation, reply } => {
+                self.on_storage_check(reservation, reply);
+            }
+            Command::StopStorage { reservation, reply } => {
+                self.on_storage_stop(machine, reservation, reply);
+            }
             Command::ResumeStorage {
                 reservation,
                 cancelled,
@@ -746,8 +769,12 @@ impl LifecycleActor {
             );
             return;
         }
-        self.inflight = None;
-        self.storage_cancel = None;
+        let finished = self.inflight.take();
+        if self.storage_cancel.take().is_some() && !self.storage_stopping {
+            // Keep the recovery boot handle until its maintenance owner joins the stop.
+            self.storage_boot_done = finished;
+        }
+        self.storage_stopping = false;
         match completion.outcome {
             InternalEvent::AgentReady => {
                 self.dispatch(machine, VmEvent::AgentReady);

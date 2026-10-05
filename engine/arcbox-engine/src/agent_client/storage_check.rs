@@ -208,6 +208,25 @@ mod tests {
             .unwrap();
     }
 
+    #[tokio::test]
+    async fn token_cancellation_finishes_a_blocking_check_before_returning() {
+        let (client, mut guest) = connected_client();
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        let requested_cancel = cancelled.clone();
+        let server = std::thread::spawn(move || {
+            handshake(&mut guest, 7);
+            read_request(&mut guest, MessageType::StorageCheckRequest);
+            requested_cancel.cancel();
+            assert_eq!(guest.read(&mut [0; 1]).unwrap(), 0);
+        });
+        let error = client
+            .storage_check_with_cancel(StorageCheckRequest::default(), &cancelled)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        server.join().unwrap();
+    }
+
     #[test]
     fn old_agents_cannot_receive_storage_or_runtime_start_requests() {
         let requests: [fn(AgentClient) -> Result<()>; 3] = [

@@ -366,6 +366,38 @@ impl VmLifecycleManager {
         .await
     }
 
+    /// Checks recovery admission in actor order while the caller retains its reservation.
+    pub async fn check_storage_maintenance(
+        &self,
+        reservation: &crate::machine::StorageMaintenance,
+    ) -> Result<()> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.request(
+            Command::CheckStorage {
+                reservation: reservation.clone(),
+                reply,
+            },
+            reply_rx,
+        )
+        .await
+    }
+
+    /// Cancels and joins recovery boot before stopping the reserved VM. Keeps its configuration.
+    pub async fn stop_storage(
+        &self,
+        reservation: &crate::machine::StorageMaintenance,
+    ) -> Result<()> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.request(
+            Command::StopStorage {
+                reservation: reservation.clone(),
+                reply,
+            },
+            reply_rx,
+        )
+        .await
+    }
+
     /// Ensures VM is ready with custom timeout.
     pub async fn ensure_ready_with_timeout(&self, timeout: Duration) -> Result<u32> {
         // Skip VM check for testing.

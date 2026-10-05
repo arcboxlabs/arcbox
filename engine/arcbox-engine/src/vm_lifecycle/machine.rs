@@ -63,6 +63,8 @@ pub(super) enum VmEvent {
     Removed,
     /// Force-stop request (preempts any in-flight boot/stop).
     ForceStop,
+    /// The maintenance owner stops the VM without removing its configuration.
+    StopStorage,
     /// Stop a physical VM whose boot did not reach a ready lifecycle state.
     StopUnready,
     /// The VM stopped on its own because the guest issued PSCI SYSTEM_RESET
@@ -100,6 +102,8 @@ pub(super) enum Effect {
     },
     /// Spawn the graceful-stop sub-task.
     SpawnStop,
+    /// Join the recovery boot, then stop the VM under the maintenance reservation.
+    SpawnStorageStop,
     /// Spawn the reboot sub-task: reboot the VMM in place, then wait for the
     /// agent, reporting AgentReady / BootFailed like a boot.
     SpawnReboot {
@@ -169,6 +173,11 @@ impl VmLifecycle {
         match event {
             VmEvent::StopUnready => {
                 context.emit(Effect::SpawnStop);
+                Transition(State::stopping())
+            }
+            VmEvent::StopStorage => {
+                context.emit(Effect::SpawnStorageStop);
+                context.emit(Effect::FailWaiters("storage recovery stopped".into()));
                 Transition(State::stopping())
             }
             VmEvent::ForceStop => context.force_stop(),

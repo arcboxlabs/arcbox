@@ -210,6 +210,131 @@ async fn reservation_after_force_stop_admission_blocks_removal() {
     assert!(events.try_recv().is_err());
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_admission_is_ordered_with_normal_boot_commands() {
+    for reserve_first in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, mut machine) = actor(dir.path());
+        let machines = Arc::clone(&actor.shared.machine_manager);
+        let early = reserve_first.then(|| machines.reserve_storage().unwrap());
+        let (reply, ready) = oneshot::channel();
+        actor.on_command(
+            &mut machine,
+            Command::EnsureReady {
+                timeout: Duration::from_secs(90),
+                reply,
+            },
+        );
+        let reservation = early.unwrap_or_else(|| machines.reserve_storage().unwrap());
+        let (reply, admitted) = oneshot::channel();
+        actor.on_command(&mut machine, Command::CheckStorage { reservation, reply });
+        assert_eq!(admitted.await.unwrap().is_ok(), reserve_first);
+        if reserve_first {
+            assert!(
+                ready
+                    .await
+                    .unwrap()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("held for recovery")
+            );
+            assert!(actor.inflight.is_none());
+        } else {
+            actor.abort_inflight();
+        }
+    }
+}
+
+#[tokio::test]
+async fn reserved_stop_joins_cancelled_boot_and_keeps_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut actor, mut machine) = actor(dir.path());
+    let machines = Arc::clone(&actor.shared.machine_manager);
+    machines.create(MachineConfig::default()).await.unwrap();
+    std::fs::create_dir_all(machines.storage_hold_path().parent().unwrap()).unwrap();
+    std::fs::write(machines.storage_hold_path(), "operation").unwrap();
+    let reservation = machines.reserve_storage().unwrap();
+    let cancelled = CancellationToken::new();
+    actor.storage_cancel = Some(cancelled.clone());
+    let (release, cleanup) = oneshot::channel();
+    let (closing, closed) = oneshot::channel();
+    actor.inflight = Some(tokio::spawn(async move {
+        cancelled.cancelled().await;
+        closing.send(()).unwrap();
+        cleanup.await.unwrap();
+    }));
+    let (reply, mut stopped) = oneshot::channel();
+    actor.on_command(
+        &mut machine,
+        Command::StopStorage {
+            reservation: reservation.clone(),
+            reply,
+        },
+    );
+    closed.await.unwrap();
+    assert_eq!(actor.public(), VmLifecycleState::Stopping);
+    assert!(actor.inflight.is_some());
+    assert!(stopped.try_recv().is_err());
+    let epoch = actor.epoch;
+    let (reply, second) = oneshot::channel();
+    actor.on_command(&mut machine, Command::StopStorage { reservation, reply });
+    assert_eq!(actor.epoch, epoch);
+    let (reply, ordinary) = oneshot::channel();
+    actor.on_command(&mut machine, Command::ForceStop { reply });
+    assert!(ordinary.await.unwrap().is_err());
+    release.send(()).unwrap();
+    let event = completion(&mut actor).await;
+    actor.on_internal(&mut machine, event);
+    stopped.await.unwrap().unwrap();
+    second.await.unwrap().unwrap();
+    assert_eq!(actor.public(), VmLifecycleState::Stopped);
+    assert!(actor.inflight.is_none());
+    assert!(machines.get("default").is_some());
+    assert_eq!(
+        std::fs::read_to_string(machines.storage_hold_path()).unwrap(),
+        "operation"
+    );
+}
+
+#[tokio::test]
+async fn reserved_stop_rejects_foreign_owners_and_still_stops_after_a_worker_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut actor, mut machine) = actor(dir.path());
+    let foreign_dir = tempfile::tempdir().unwrap();
+    let (foreign, _) = super::tests::actor(foreign_dir.path());
+    let (reply, denied) = oneshot::channel();
+    actor.on_command(
+        &mut machine,
+        Command::StopStorage {
+            reservation: foreign.shared.machine_manager.reserve_storage().unwrap(),
+            reply,
+        },
+    );
+    assert!(denied.await.unwrap().is_err());
+    assert!(actor.inflight.is_none());
+    let machines = Arc::clone(&actor.shared.machine_manager);
+    machines.register_mock_machine("default", 3).unwrap();
+    let vm_id = machines.get("default").unwrap().vm_id;
+    actor.inflight = Some(tokio::spawn(async { panic!("failed recovery boot") }));
+    let (reply, stopped) = oneshot::channel();
+    actor.on_command(
+        &mut machine,
+        Command::StopStorage {
+            reservation: machines.reserve_storage().unwrap(),
+            reply,
+        },
+    );
+    let event = completion(&mut actor).await;
+    actor.on_internal(&mut machine, event);
+    let error = stopped.await.unwrap().unwrap_err().to_string();
+    assert!(error.contains("failed recovery boot"));
+    assert!(
+        error.contains(&vm_id.to_string()),
+        "the physical stop must run after the join error"
+    );
+    assert_eq!(actor.public(), VmLifecycleState::Failed);
+}
+
 #[tokio::test]
 async fn shutdown_stops_a_physical_vm_after_its_actor_failed_to_boot() {
     let dir = tempfile::tempdir().unwrap();
