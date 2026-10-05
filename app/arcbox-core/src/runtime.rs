@@ -8,6 +8,7 @@ mod machine_dns;
 mod machine_settings;
 mod progress;
 mod sandbox_host;
+mod storage_recovery;
 
 #[cfg(test)]
 mod tests;
@@ -169,6 +170,7 @@ pub struct Runtime {
     /// active backend's translator (VZ→Rosetta, HV→FEX) rather than on a
     /// separate VM.
     vm_lifecycle: Arc<VmLifecycleManager>,
+    storage_recovery: storage_recovery::StorageRecovery,
     /// Container backend that drives ensure-ready / dockerd plumbing for the
     /// System VM.
     container_backend: DynContainerBackend,
@@ -343,6 +345,7 @@ impl Runtime {
         ));
 
         Ok(Self {
+            storage_recovery: storage_recovery::StorageRecovery::load(&config.data_dir)?,
             default_machine: std::sync::RwLock::new(config.machine.default_machine.clone()),
             config,
             kubernetes_host_endpoint: OnceLock::new(),
@@ -1501,7 +1504,7 @@ impl Runtime {
                 forwarder.stop().await;
             }
             forwarders.remove(container_id);
-            return Err(error);
+            return Err(error.into());
         }
 
         Ok(())

@@ -46,6 +46,10 @@ arcbox-api / arcbox-cli
           +-- AgentClient accessors
 ```
 
+## Storage recovery journal
+
+`Runtime::new` reconciles the durable recovery journal before the System VM can start. An interrupted operation becomes a protected failure, and a newer hold takes precedence over an older result. A protected result restores a missing hold. `subscribe_storage_recovery` replays the result, and `storage_writes_protected` reports the restored protection. Journal or hold errors fail runtime creation.
+
 ## License
 
 MIT OR Apache-2.0

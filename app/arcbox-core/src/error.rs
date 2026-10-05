@@ -9,6 +9,13 @@ pub type Result<T> = std::result::Result<T, CoreError>;
 /// Errors that can occur in core operations.
 #[derive(Debug, Error)]
 pub enum CoreError {
+    /// A durable file replacement failed.
+    #[error(transparent)]
+    AtomicFile(#[from] arcbox_atomic_file::AtomicWriteError),
+
+    /// A persisted recovery record could not be encoded or decoded.
+    #[error("storage recovery record: {0}")]
+    RecoveryRecord(#[from] serde_json::Error),
     /// Common errors (I/O, config, not found, etc.).
     #[error(transparent)]
     Common(#[from] CommonError),

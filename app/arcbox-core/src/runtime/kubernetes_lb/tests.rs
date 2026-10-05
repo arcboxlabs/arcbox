@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(target_os = "macos")]
 use crate::config::Config;
 use arcbox_connect::v1::{KubernetesLoadBalancer, KubernetesServicePort};
 
