@@ -13,6 +13,9 @@ mod sandbox_stream;
 mod transport;
 mod wire;
 
+#[cfg(test)]
+mod admission_tests;
+
 pub use self::machine_exec::{ExecSessionInput, ExecSessionOutput};
 pub use self::sandbox_stream::SandboxStream;
 use self::sandbox_stream::StreamKind;
@@ -77,6 +80,39 @@ pub struct AgentClient {
     transport: AgentTransport,
     /// Whether connected.
     connected: bool,
+    /// Whether this connection completed a compatible protocol handshake.
+    protocol_admitted: bool,
+}
+
+/// Incomplete Ping exchanges lose frame boundaries when their future is dropped.
+struct PingHandshake<'a> {
+    client: &'a mut AgentClient,
+    completed: bool,
+}
+
+impl<'a> PingHandshake<'a> {
+    fn new(client: &'a mut AgentClient) -> Self {
+        client.protocol_admitted = false;
+        Self {
+            client,
+            completed: false,
+        }
+    }
+
+    fn finish(mut self, kind: u32, payload: &[u8]) -> Result<PingResponse> {
+        let response = self.client.decode_ping_response(kind, payload)?;
+        self.completed = true;
+        Ok(response)
+    }
+}
+
+impl Drop for PingHandshake<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.client.transport.close();
+            self.client.connected = false;
+        }
+    }
 }
 
 impl AgentClient {
@@ -88,6 +124,7 @@ impl AgentClient {
             cid,
             transport: AgentTransport::Async(VsockTransport::new(addr)),
             connected: false,
+            protocol_admitted: false,
         }
     }
 
@@ -106,6 +143,7 @@ impl AgentClient {
             cid,
             transport: AgentTransport::Blocking(transport),
             connected: true,
+            protocol_admitted: false,
         })
     }
 
@@ -127,6 +165,7 @@ impl AgentClient {
             cid,
             transport: AgentTransport::Async(transport),
             connected: true,
+            protocol_admitted: false,
         })
     }
 
@@ -150,6 +189,7 @@ impl AgentClient {
         if self.connected {
             return Ok(());
         }
+        self.protocol_admitted = false;
 
         match &mut self.transport {
             AgentTransport::Async(t) => {
@@ -159,7 +199,9 @@ impl AgentClient {
                 })?;
             }
             AgentTransport::Blocking(_) => {
-                // Blocking transport is connected at creation time (from_fd).
+                return Err(EngineError::Machine(
+                    "blocking agent connection is closed; obtain a new VM socket".into(),
+                ));
             }
         }
 
@@ -170,14 +212,9 @@ impl AgentClient {
 
     /// Disconnects from the agent.
     pub async fn disconnect(&mut self) -> Result<()> {
-        if self.connected {
-            if let AgentTransport::Async(t) = &mut self.transport {
-                t.disconnect()
-                    .await
-                    .map_err(|e| EngineError::Machine(format!("failed to disconnect: {e}")))?;
-            }
-            self.connected = false;
-        }
+        self.protocol_admitted = false;
+        self.transport.close();
+        self.connected = false;
         Ok(())
     }
 
@@ -193,6 +230,16 @@ impl AgentClient {
 
     /// Sends an RPC request with a `trace_id` and receives a response.
     async fn rpc_call_traced(
+        &mut self,
+        msg_type: MessageType,
+        trace_id: &str,
+        payload: &[u8],
+    ) -> Result<(u32, Vec<u8>)> {
+        self.require_agent_protocol().await?;
+        self.rpc_exchange_traced(msg_type, trace_id, payload).await
+    }
+
+    async fn rpc_exchange_traced(
         &mut self,
         msg_type: MessageType,
         trace_id: &str,
@@ -248,6 +295,15 @@ impl AgentClient {
     /// Synchronous RPC call for blocking transport. No async, no tokio.
     /// Only works with `AgentTransport::Blocking`.
     fn rpc_call_blocking(
+        &mut self,
+        msg_type: MessageType,
+        payload: &[u8],
+    ) -> Result<(u32, Vec<u8>)> {
+        self.require_agent_protocol_blocking()?;
+        self.rpc_exchange_blocking(msg_type, payload)
+    }
+
+    fn rpc_exchange_blocking(
         &mut self,
         msg_type: MessageType,
         payload: &[u8],
@@ -371,9 +427,45 @@ impl AgentClient {
         Ok(())
     }
 
+    async fn require_agent_protocol(&mut self) -> Result<()> {
+        if self.protocol_admitted {
+            return Ok(());
+        }
+        let response = tokio::time::timeout(BLOCKING_RPC_TIMEOUT, self.ping())
+            .await
+            .map_err(|_| EngineError::Machine("agent protocol handshake timed out".to_owned()))??;
+        if self.protocol_admitted {
+            Ok(())
+        } else {
+            Self::check_agent_protocol(&response)
+        }
+    }
+
+    fn require_agent_protocol_blocking(&mut self) -> Result<()> {
+        if self.protocol_admitted {
+            return Ok(());
+        }
+        let response = self.ping_blocking()?;
+        if self.protocol_admitted {
+            Ok(())
+        } else {
+            Self::check_agent_protocol(&response)
+        }
+    }
+
+    fn decode_ping_response(&mut self, kind: u32, payload: &[u8]) -> Result<PingResponse> {
+        Self::expect_response_type(kind, MessageType::PingResponse)?;
+        let response = Self::decode_response(payload)?;
+        // Ping returns incompatible versions so boot probes can report them.
+        // Only compatible responses admit business requests on this connection.
+        self.protocol_admitted = Self::check_agent_protocol(&response).is_ok();
+        Ok(response)
+    }
+
     /// Synchronous ping — uses blocking transport's native deadline.
     /// Call from `spawn_blocking` or any non-async context.
     pub fn ping_blocking(&mut self) -> Result<PingResponse> {
+        let handshake = PingHandshake::new(self);
         let req = PingRequest {
             message: "ping".to_string(),
             timestamp_secs: std::time::SystemTime::now()
@@ -382,11 +474,10 @@ impl AgentClient {
             ..Default::default()
         };
         let payload = req.encode_to_vec();
-        self.unary_rpc_blocking(
-            MessageType::PingRequest,
-            &payload,
-            MessageType::PingResponse,
-        )
+        let (kind, payload) = handshake
+            .client
+            .rpc_exchange_blocking(MessageType::PingRequest, &payload)?;
+        handshake.finish(kind, &payload)
     }
 
     /// Returns true if this client uses the blocking transport (AF_UNIX / HV).
@@ -413,6 +504,7 @@ impl AgentClient {
     ///
     /// Returns an error if the ping fails.
     pub async fn ping(&mut self) -> Result<PingResponse> {
+        let handshake = PingHandshake::new(self);
         let req = PingRequest {
             message: "ping".to_string(),
             timestamp_secs: std::time::SystemTime::now()
@@ -421,12 +513,12 @@ impl AgentClient {
             ..Default::default()
         };
         let payload = req.encode_to_vec();
-        self.unary_rpc(
-            MessageType::PingRequest,
-            &payload,
-            MessageType::PingResponse,
-        )
-        .await
+        let trace_id = crate::trace::current_trace_id();
+        let (kind, payload) = handshake
+            .client
+            .rpc_exchange_traced(MessageType::PingRequest, &trace_id, &payload)
+            .await?;
+        handshake.finish(kind, &payload)
     }
 
     /// Gets system information from the guest.

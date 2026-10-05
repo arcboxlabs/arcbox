@@ -15,6 +15,8 @@ Current request surface includes:
 - Ensure guest runtime stack (`containerd`/`dockerd`/`runc`) is ready
 - Runtime status
 
+Every host interface requires agent protocol version 7 or newer. The host completes protocol admission before sending any business request, including observation, sandbox, and machine session requests. A successful Ping admits only its current connection; disconnecting or reconnecting clears admission. Ping remains available to report incompatible versions during negotiation.
+
 When running as PID 1, the agent also performs basic system initialisation
 (mount filesystems, set hostname, spawn a child reaper).
 

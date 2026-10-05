@@ -31,6 +31,13 @@ pub(super) enum AgentTransport {
 pub(super) const BLOCKING_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl AgentTransport {
+    pub(super) fn close(&mut self) {
+        match self {
+            Self::Async(transport) => transport.close(),
+            Self::Blocking(transport) => transport.close(),
+        }
+    }
+
     /// Async send — only valid for `Async` variant. Streaming RPCs that
     /// consume `self` and spawn async tasks must go through the async path.
     pub(super) async fn async_send(

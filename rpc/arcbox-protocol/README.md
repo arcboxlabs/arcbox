@@ -39,10 +39,9 @@ skew safe:
 - **Additive-only schemas.** CI runs `buf breaking` against `master`
   (`.github/workflows/ci.yml`): never remove or renumber fields; use
   `reserved` when retiring them.
-- **Boot handshake.** The agent reports
+- **Connection handshake.** The agent reports
   `AgentPingResponse.protocol_version`
-  (`arcbox_constants::wire::AGENT_PROTOCOL_VERSION`); the host rejects
-  agents below `MIN_AGENT_PROTOCOL_VERSION` before watching readiness.
+  (`arcbox_constants::wire::AGENT_PROTOCOL_VERSION`). Before sending any business request, the host rejects agents below `MIN_AGENT_PROTOCOL_VERSION`. Unary RPCs, observation watches, sandbox streams, and machine exec/debug/TCP sessions share this admission rule. A compatible Ping admits only its current connection; disconnecting or reconnecting clears admission. Ping remains available for protocol negotiation and reports incompatible versions to boot probes.
   Bump the protocol version when a change alters the *meaning* of
   existing messages; purely additive, ignorable fields don't need one.
 
