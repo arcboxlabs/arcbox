@@ -14,7 +14,7 @@ Current request surface includes:
 - System information
 - Ensure guest runtime stack (`containerd`/`dockerd`/`runc`) is ready
 - Runtime status
-- Read-only storage health observations and explicit offline storage checks
+- Read-only storage health observations and explicit storage verification
 
 Every host interface requires agent protocol version 7 or newer. The host completes protocol admission before sending any business request, including observation, sandbox, and machine session requests. A successful Ping admits only its current connection; disconnecting or reconnecting clears admission. Ping remains available to report incompatible versions during negotiation.
 
@@ -34,6 +34,8 @@ The host starts an isolated recovery guest with `init=/sbin/arcbox-storage-recov
 The `storage-recovery` command requires the recovery kernel flag. A recovery kernel flag also requires that explicit command. Unknown agent commands fail before initialization. The guest keeps both persistent data devices unmounted and starts no runtime services. Its RPC allowlist permits only ping, system information, shutdown, agent readiness, and `StorageCheck`. A readiness request that would start the runtime is rejected.
 
 `StorageCheck.OFFLINE_CHECK` runs `btrfs check --readonly` and `e2fsck -f -n` after verifying that both block devices are unmounted. Each checker has a 30-minute deadline and bounded diagnostic output. Closing the dedicated RPC connection terminates an active offline checker. The agent never requests filesystem repair.
+
+`StorageCheck.VERIFY_WRITES` runs only in the normal System VM after runtime startup. It writes, fsyncs, reads, and removes an owned temporary file on each configured volume. It then imports the guest's static BusyBox into an owned Docker image and runs a container with networking disabled. The container verifies writes and reads in its writable layer. The check passes only after the container exits successfully and both the container and image are removed. Docker cleanup continues within its operation deadlines if the host disconnects.
 
 ## Runtime Bootstrap Role
 

@@ -58,6 +58,8 @@ mod kubernetes_services;
 // (pure std::fs; the mount syscalls live in agent/linux/metadata_volume.rs).
 #[cfg(target_os = "linux")]
 mod metadata_migrate;
+#[cfg(target_os = "linux")]
+mod storage_probe;
 
 #[cfg(target_os = "linux")]
 mod create_key;

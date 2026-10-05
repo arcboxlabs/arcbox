@@ -1,4 +1,4 @@
-//! Controlled offline checks for unmounted runtime storage.
+//! Controlled offline checks and online write verification for runtime storage.
 
 use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
 use std::path::Path;
@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use arcbox_connect::v1::storage_check_request::Action;
-use arcbox_connect::v1::storage_volume_health::Role;
+use arcbox_connect::v1::storage_volume_health::{Role, State};
 use arcbox_connect::v1::{StorageCheckRequest, StorageCheckResponse, StorageCheckResult};
 use tokio::io::{AsyncRead, AsyncReadExt as _};
 
@@ -23,6 +23,14 @@ pub(super) async fn handle(request: StorageCheckRequest, guest: Guest) -> RpcRes
     };
     let checked = match (guest, action) {
         (Guest::StorageRecovery, Action::OfflineCheck) => offline_checks().await,
+        (Guest::SystemVm, Action::VerifyWrites) => {
+            // Preserve cleanup if the host disconnects during a Docker API
+            // mutation. Every Docker operation has its own deadline.
+            tokio::spawn(verify_online())
+                .await
+                .context("write verification task failed")
+                .and_then(std::convert::identity)
+        }
         _ => {
             return RpcResponse::Error(ErrorResponse::new(
                 403,
@@ -164,6 +172,42 @@ async fn bounded_output(mut stream: impl AsyncRead + Unpin) -> std::io::Result<V
         let keep = read.min(OUTPUT_LIMIT.saturating_sub(output.len()));
         output.extend_from_slice(&bytes[..keep]);
     }
+}
+
+async fn verify_online() -> Result<Vec<StorageCheckResult>> {
+    let health = super::storage_health::snapshot().await;
+    let mut checks = tokio::task::spawn_blocking(move || verify_volumes(health)).await?;
+    if !checks.is_empty() && checks.iter().all(|check| check.passed) {
+        checks.push(check_result(
+            Role::RoleUnspecified.into(),
+            super::storage_docker_probe::verify(Path::new("/bin/busybox")).await,
+        ));
+    }
+    Ok(checks)
+}
+
+fn verify_volumes(health: arcbox_connect::v1::StorageHealth) -> Vec<StorageCheckResult> {
+    let mut checks = Vec::new();
+    for volume in health.volumes {
+        if volume.state == State::NotConfigured {
+            continue;
+        }
+        let outcome = if volume.state == State::MountedReadWrite {
+            crate::storage_probe::verify_writes(Path::new(&volume.mount_point))
+                .map(|()| {
+                    "write, fsync, read-back, removal, and directory fsync succeeded".to_owned()
+                })
+                .map_err(anyhow::Error::from)
+        } else {
+            Err(anyhow::anyhow!(
+                "{} is not mounted read-write: {}",
+                volume.mount_point,
+                volume.detail
+            ))
+        };
+        checks.push(check_result(volume.role, outcome));
+    }
+    checks
 }
 
 fn check_result(role: buffa::EnumValue<Role>, outcome: Result<String>) -> StorageCheckResult {
