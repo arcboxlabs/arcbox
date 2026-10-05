@@ -440,8 +440,12 @@ impl VmLifecycleManager {
 
     /// Forces VM termination, preempting any in-flight boot or graceful stop.
     ///
+    /// Waits for machine removal before reporting success. A missing machine
+    /// is already stopped. Concurrent stop requests share the removal result.
+    /// Readiness requests received during removal wait for the removal result.
+    ///
     /// # Errors
-    /// Returns an error if the VM cannot be terminated.
+    /// Returns an error if the VM or its machine record cannot be removed.
     pub async fn force_stop(&self) -> Result<()> {
         let (reply, reply_rx) = oneshot::channel();
         self.request(Command::ForceStop { reply }, reply_rx).await

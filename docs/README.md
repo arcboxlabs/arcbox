@@ -48,6 +48,7 @@ from memory. Every new file is added to the index below.
 ### Reference
 
 - [Daemon lifecycle](daemon-lifecycle.md) — startup pipeline, lock/handoff, residual state
+- [ArcBox Engine](../engine/arcbox-engine/README.md) — machine lifecycle and force-stop completion
 - [Data directories](data-directories.md) — every path the daemon writes
 - [Boot assets](boot-assets.md) — the kernel/rootfs bundle and its pin
 - [Disk reclaim](disk-reclaim.md) — how freed guest space returns to the host

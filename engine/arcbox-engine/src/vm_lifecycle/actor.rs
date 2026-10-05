@@ -29,7 +29,7 @@ use super::balloon;
 use super::balloon::controller::{
     BalloonCommand, BalloonController, BalloonDeps, PressureWatch, WatchFrame,
 };
-use super::machine::{Effect, Effects, Notify, VmEvent, VmLifecycle};
+use super::machine::{Effect, Effects, Notify, State, VmEvent, VmLifecycle};
 use super::{
     BALLOON_SHRINK_DELAY_SECS, HealthMonitor, RecoveryPolicy, VmLifecycleConfig, VmLifecycleState,
 };
@@ -68,6 +68,10 @@ pub(super) enum InternalEvent {
     Stopped,
     /// The stop sub-task failed.
     StopFailed(String),
+    /// The removal sub-task finished successfully.
+    Removed,
+    /// The removal sub-task failed, including a blocking-task join failure.
+    RemoveFailed(String),
 }
 
 /// An [`InternalEvent`] tagged with the epoch of the sub-task that sent it.
@@ -324,14 +328,11 @@ pub(super) struct LifecycleActor {
     /// soon as the boot resolves (the actor-model equivalent of the old
     /// `transition_lock` making `shutdown` wait for the boot).
     pending_stop: bool,
-    /// The in-flight boot or stop sub-task, aborted on `ForceStop`.
+    /// The in-flight boot, stop, or removal sub-task.
     inflight: Option<JoinHandle<()>>,
     /// Epoch of the live sub-task; bumped on every spawn and abort so stale
     /// completions from superseded tasks are recognized and dropped.
     epoch: u64,
-    /// The detached machine-removal task of a force stop, joined by the
-    /// force-stop reply so callers still observe "removed" on return.
-    removal: Option<JoinHandle<()>>,
     /// Command sender back into this actor, cloned into the balloon
     /// controller's activity callback so pressure exits ride the state
     /// machine like any other activity.
@@ -365,7 +366,6 @@ impl LifecycleActor {
             pending_stop: false,
             inflight: None,
             epoch: 0,
-            removal: None,
             cmd_tx,
             balloon_tx,
             balloon_seed: Some(balloon_rx),
@@ -507,12 +507,25 @@ impl LifecycleActor {
             Effect::RemoveMachine => {
                 // `remove(force = true)` tears the VM down synchronously (a
                 // hypervisor stop that can block for seconds); keep it off the
-                // actor so the command loop stays responsive. The force-stop
-                // reply joins `removal`, preserving the caller-visible
-                // "returned ⇒ removed" contract.
+                // actor. Publish completion only after the blocking task joins.
+                let epoch = self.epoch;
                 let shared = Arc::clone(&self.shared);
-                self.removal = Some(tokio::task::spawn_blocking(move || {
-                    let _ = shared.machine_manager.remove(&shared.machine_name, true);
+                let events = self.events_tx.clone();
+                self.inflight = Some(tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        shared
+                            .machine_manager
+                            .remove_if_present(&shared.machine_name, true)
+                    })
+                    .await;
+                    let outcome = match result {
+                        Ok(Ok(_)) => InternalEvent::Removed,
+                        Ok(Err(error)) => InternalEvent::RemoveFailed(error.to_string()),
+                        Err(error) => InternalEvent::RemoveFailed(format!(
+                            "machine removal task failed: {error}"
+                        )),
+                    };
+                    let _ = events.send(Completion { epoch, outcome });
                 }));
             }
             Effect::BumpGeneration => {
@@ -548,27 +561,16 @@ impl LifecycleActor {
             }
             Command::Shutdown { reply } => self.on_shutdown(machine, reply),
             Command::ForceStop { reply } => {
+                self.stop_waiters.push(reply);
+                if matches!(machine.state(), State::Removing {}) {
+                    return;
+                }
                 // Match the old force_stop ordering: silence health checks
                 // before tearing the machine down.
                 self.shared.health_monitor.stop();
                 self.dispatch(machine, VmEvent::ForceStop);
-                // A graceful stop preempted mid-flight has reached its goal:
-                // the VM is down.
-                for waiter in self.stop_waiters.drain(..) {
-                    let _ = waiter.send(Ok(()));
-                }
                 self.pending_timeout = None;
                 self.pending_stop = false;
-                // Reply once the detached removal finishes, so callers keep
-                // the old "force_stop returned ⇒ machine removed" contract
-                // without the removal blocking the actor.
-                let removal = self.removal.take();
-                drop(tokio::spawn(async move {
-                    if let Some(handle) = removal {
-                        let _ = handle.await;
-                    }
-                    let _ = reply.send(Ok(()));
-                }));
             }
             Command::Activity => {
                 self.dispatch(machine, VmEvent::Activity);
@@ -683,8 +685,14 @@ impl LifecycleActor {
                     }
                 }
             }
-            InternalEvent::Stopped => {
-                self.dispatch(machine, VmEvent::Stopped);
+            outcome @ (InternalEvent::Stopped | InternalEvent::Removed) => {
+                self.dispatch(
+                    machine,
+                    match outcome {
+                        InternalEvent::Removed => VmEvent::Removed,
+                        _ => VmEvent::Stopped,
+                    },
+                );
                 for waiter in self.stop_waiters.drain(..) {
                     let _ = waiter.send(Ok(()));
                 }
@@ -694,6 +702,14 @@ impl LifecycleActor {
                 for waiter in self.stop_waiters.drain(..) {
                     let _ = waiter.send(Err(EngineError::Vm(reason.clone())));
                 }
+            }
+            InternalEvent::RemoveFailed(reason) => {
+                self.dispatch(machine, VmEvent::Failure);
+                for waiter in self.stop_waiters.drain(..) {
+                    let _ = waiter.send(Err(EngineError::Vm(reason.clone())));
+                }
+                self.apply(Effect::FailWaiters(reason));
+                self.pending_timeout = None;
             }
         }
         self.start_if_pending(machine);
@@ -790,3 +806,6 @@ impl LifecycleActor {
 
 /// The initialized statig machine driven by the actor.
 type Machine = statig::blocking::InitializedStateMachine<VmLifecycle>;
+
+#[cfg(test)]
+mod tests;

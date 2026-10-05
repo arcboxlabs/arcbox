@@ -15,6 +15,7 @@
 //!  ├─ booting ── creating, starting       AgentReady → running
 //!  ├─ active  ── running, idle            Stop → stopping; IdleTimeout ⇄ Activity
 //!  ├─ stopping                            Stopped → stopped
+//!  ├─ removing                            Removed → not_exist
 //!  └─ resting ── not_exist, created,      Start → creating | starting
 //!                stopped, failed
 //! ```
@@ -58,6 +59,8 @@ pub(super) enum VmEvent {
     Stop,
     /// Stop sub-task: the machine stopped.
     Stopped,
+    /// Removal sub-task: the machine record and VM were removed.
+    Removed,
     /// Force-stop request (preempts any in-flight boot/stop).
     ForceStop,
     /// The VM stopped on its own because the guest issued PSCI SYSTEM_RESET
@@ -137,14 +140,12 @@ impl Effects {
         std::mem::take(&mut self.items)
     }
 
-    /// Shared `ForceStop` handling: tear everything down and fail any waiters.
+    /// Start removal and fail callers waiting for the superseded boot.
     fn force_stop(&mut self) -> Outcome {
         self.emit(Effect::AbortInflight);
         self.emit(Effect::RemoveMachine);
-        self.emit(Effect::BumpGeneration);
-        self.emit(Effect::Publish(Notify::Stopped));
         self.emit(Effect::FailWaiters("force stopped".to_owned()));
-        Transition(State::not_exist())
+        Transition(State::removing())
     }
 }
 
@@ -299,6 +300,20 @@ impl VmLifecycle {
             _ => Super,
         }
     }
+
+    #[state(superstate = "managed")]
+    fn removing(event: &VmEvent, context: &mut Effects) -> Outcome {
+        match event {
+            VmEvent::Removed => {
+                context.emit(Effect::BumpGeneration);
+                context.emit(Effect::Publish(Notify::Stopped));
+                Transition(State::not_exist())
+            }
+            // A blocking removal cannot be aborted; overlapping requests join it.
+            VmEvent::ForceStop => Handled,
+            _ => Super,
+        }
+    }
 }
 
 impl State {
@@ -311,7 +326,7 @@ impl State {
             Self::Starting {} => VmLifecycleState::Starting,
             Self::Running {} => VmLifecycleState::Running,
             Self::Idle {} => VmLifecycleState::Idle,
-            Self::Stopping {} => VmLifecycleState::Stopping,
+            Self::Stopping {} | Self::Removing {} => VmLifecycleState::Stopping,
             Self::Stopped {} => VmLifecycleState::Stopped,
             Self::Failed {} => VmLifecycleState::Failed,
         }
@@ -502,18 +517,27 @@ mod machine_tests {
             let (state, effects) = step(&mut sm, &mut fx, VmEvent::ForceStop);
             assert_eq!(
                 state,
-                VmLifecycleState::NotExist,
-                "force stop from {reach:?} must reach NotExist"
+                VmLifecycleState::Stopping,
+                "force stop from {reach:?} must wait for removal"
             );
             assert_eq!(
                 effects,
                 vec![
                     Effect::AbortInflight,
                     Effect::RemoveMachine,
-                    Effect::BumpGeneration,
-                    Effect::Publish(Notify::Stopped),
                     Effect::FailWaiters("force stopped".to_owned()),
                 ]
+            );
+
+            let (state, effects) = step(&mut sm, &mut fx, VmEvent::ForceStop);
+            assert_eq!(state, VmLifecycleState::Stopping);
+            assert!(effects.is_empty(), "overlapping removal must not restart");
+
+            let (state, effects) = step(&mut sm, &mut fx, VmEvent::Removed);
+            assert_eq!(state, VmLifecycleState::NotExist);
+            assert_eq!(
+                effects,
+                vec![Effect::BumpGeneration, Effect::Publish(Notify::Stopped)]
             );
         }
     }

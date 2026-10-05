@@ -1731,14 +1731,24 @@ impl MachineManager {
     ///
     /// Returns an error if the machine cannot be removed.
     pub fn remove(&self, name: &str, force: bool) -> Result<()> {
+        self.remove_if_present(name, force)?
+            .then_some(())
+            .ok_or_else(|| EngineError::not_found(name.to_string()))
+    }
+
+    /// Removes a registered machine; returns false if no record exists.
+    ///
+    /// Check absence under the registry lock. Errors from removing an existing
+    /// machine must propagate, including a missing VM or a persistence failure.
+    pub(crate) fn remove_if_present(&self, name: &str, force: bool) -> Result<bool> {
         let mut machines = self
             .machines
             .write()
             .map_err(|_| EngineError::LockPoisoned)?;
 
-        let machine = machines
-            .get(name)
-            .ok_or_else(|| EngineError::not_found(name.to_string()))?;
+        let Some(machine) = machines.get(name) else {
+            return Ok(false);
+        };
 
         // Check if machine is running
         if machine.state == MachineState::Running && !force {
@@ -1795,7 +1805,7 @@ impl MachineManager {
             },
         );
         tracing::info!("Removed machine '{}'", name);
-        Ok(())
+        Ok(true)
     }
 
     /// Takes the inbound listener manager from a running machine's VM (Darwin only).
