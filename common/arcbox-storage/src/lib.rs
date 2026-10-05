@@ -204,6 +204,23 @@ impl StorageManifest {
         Ok(())
     }
 
+    /// Rebinds a verified recovery copy to its new host file identities.
+    ///
+    /// The caller must stop the VM and clone both images before this operation.
+    /// This operation does not persist the result or alter filesystem identities.
+    ///
+    /// # Errors
+    /// Returns an error unless both copies retain the expected filesystem identity.
+    pub fn rebind_images(&self, directory: &Path) -> Result<Self> {
+        let mut rebound = self.clone();
+        for role in [VolumeRole::Data, VolumeRole::Metadata] {
+            let path = directory.join(&self.volume(role).filename);
+            self.verify_volume(role, &path)?;
+            rebound.volume_mut(role).image = ImageIdentity::read(&path)?;
+        }
+        Ok(rebound)
+    }
+
     /// Verifies a block device or image against its persisted role and state.
     ///
     /// # Errors

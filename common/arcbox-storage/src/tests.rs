@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
@@ -113,4 +113,95 @@ fn completed_format_can_be_recognized_after_manifest_commit_was_interrupted() {
         StorageManifest::load(&path).unwrap().data.state,
         VolumeState::Ready
     );
+}
+
+#[test]
+fn a_missing_paired_member_is_not_recreated() {
+    let dir = tempfile::tempdir().unwrap();
+    let (data, metadata) = pair(dir.path());
+    prepare_pair(&data, &metadata, IMAGE_SIZE, IMAGE_SIZE).unwrap();
+    fs::remove_file(&metadata).unwrap();
+    assert!(prepare_pair(&data, &metadata, IMAGE_SIZE, IMAGE_SIZE).is_err());
+    assert!(!metadata.exists());
+}
+
+#[test]
+fn unknown_and_truncated_existing_images_remain_untouched() {
+    for bytes in [
+        vec![0_u8; IMAGE_SIZE as usize],
+        b"unreadable superblock".to_vec(),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (data, metadata) = pair(dir.path());
+        fs::write(&data, &bytes).unwrap();
+        assert!(prepare_pair(&data, &metadata, IMAGE_SIZE, IMAGE_SIZE).is_err());
+        assert_eq!(fs::read(&data).unwrap(), bytes);
+        assert!(!metadata.exists());
+        assert!(!manifest_path(&data).exists());
+    }
+}
+
+#[test]
+fn replaced_image_requires_explicit_verified_rebind() {
+    let dir = tempfile::tempdir().unwrap();
+    let (data, metadata) = pair(dir.path());
+    let manifest = prepare_pair(&data, &metadata, IMAGE_SIZE, IMAGE_SIZE).unwrap();
+    let copy = dir.path().join("copy");
+    fs::create_dir(&copy).unwrap();
+    fs::copy(&data, copy.join("docker.img")).unwrap();
+    fs::copy(&metadata, copy.join("docker-meta.img")).unwrap();
+    assert!(manifest.verify_images(&copy).is_err());
+    manifest
+        .rebind_images(&copy)
+        .unwrap()
+        .verify_images(&copy)
+        .unwrap();
+    fs::write(copy.join("docker-meta.img"), b"foreign image").unwrap();
+    assert!(manifest.rebind_images(&copy).is_err());
+}
+
+#[test]
+fn data_filesystem_without_metadata_requires_verified_legacy_migration() {
+    let dir = tempfile::tempdir().unwrap();
+    let (data, metadata) = pair(dir.path());
+    let uuid = Uuid::new_v4();
+    write_filesystem(&data, VolumeRole::Data, uuid);
+    let manifest = prepare_pair(&data, &metadata, IMAGE_SIZE, IMAGE_SIZE).unwrap();
+    assert_eq!(manifest.layout, StorageLayout::LegacyMigration);
+    assert_eq!(manifest.data.filesystem_uuid, uuid);
+    let called = Cell::new(false);
+    assert!(
+        ensure_filesystem(
+            &manifest_path(&data),
+            VolumeRole::Metadata,
+            &metadata,
+            |_| {
+                called.set(true);
+                Ok(())
+            }
+        )
+        .is_err()
+    );
+    assert!(!called.get());
+}
+
+#[test]
+fn corrupt_ready_signature_never_invokes_formatter() {
+    let dir = tempfile::tempdir().unwrap();
+    let (data, metadata) = pair(dir.path());
+    write_filesystem(&data, VolumeRole::Data, Uuid::new_v4());
+    write_filesystem(&metadata, VolumeRole::Metadata, Uuid::new_v4());
+    prepare_pair(&data, &metadata, IMAGE_SIZE, IMAGE_SIZE).unwrap();
+    let mut file = OpenOptions::new().write(true).open(&data).unwrap();
+    file.seek(SeekFrom::Start(0x10040)).unwrap();
+    file.write_all(&[0; 8]).unwrap();
+    let called = Cell::new(false);
+    assert!(
+        ensure_filesystem(&manifest_path(&data), VolumeRole::Data, &data, |_| {
+            called.set(true);
+            Ok(())
+        })
+        .is_err()
+    );
+    assert!(!called.get());
 }

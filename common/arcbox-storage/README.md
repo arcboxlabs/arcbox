@@ -19,4 +19,4 @@ The manifest records both image basenames, host file identities, filesystem UUID
 
 `prepare_pair` uses exclusive creation for new images. Existing images with unknown signatures are preserved. A recorded pair with a missing or replaced member is rejected. Valid older pairs can be adopted. A Btrfs-only installation enters `LegacyMigration`; the guest must verify populated original metadata before advancing to `Migrating`. A missing metadata image after prior migration cannot silently produce empty Docker state. `Paired` records that both filesystems and their metadata mappings are ready.
 
-Preserve both stopped images and the manifest before recovery. A filesystem signature alone never authorizes formatting. Do not clear a manifest or change its state to bypass recovery.
+Preserve both stopped images and the manifest before recovery. `rebind_images` verifies a recovery copy against the recorded filesystem UUIDs before replacing its host file identities. The caller must save that manifest in the copy's directory. A filesystem signature alone never authorizes formatting. Do not clear a manifest or change its state to bypass recovery.
