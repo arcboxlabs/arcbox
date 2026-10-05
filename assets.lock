@@ -37,9 +37,9 @@ arch.x86_64.sha256 = "91cfde39945b0a76f0320db72d16f22ddf320da1d7a967b68713690415
 [[tools]]
 name = "docker-compose"
 group = "docker"
-version = "5.5.1"
-arch.arm64.sha256 = "998735c9b6fe68a4f05895e6ea73d71ad06f9fc7046383ad89e47346781b6af5"
-arch.x86_64.sha256 = "a264d61e824bf08a78867e59cdf32eb09f0aee9ecdf9f6ebfa43f76dc52880f1"
+version = "5.6.0"
+arch.arm64.sha256 = "bd714a42b46e51757fc1121085b3096b9064e3f80d3ca5a991e33f44df4f43c9"
+arch.x86_64.sha256 = "c76e3abf5fde1aeb3bd7c7306ff15bef2246afc1f9e54832a0a050dd7cdfb2f8"
 
 [[tools]]
 name = "docker-credential-osxkeychain"
