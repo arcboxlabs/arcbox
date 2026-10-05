@@ -14,7 +14,7 @@ Current request surface includes:
 - System information
 - Ensure guest runtime stack (`containerd`/`dockerd`/`runc`) is ready
 - Runtime status
-- Read-only storage health observations
+- Read-only storage health observations and explicit offline storage checks
 
 Every host interface requires agent protocol version 7 or newer. The host completes protocol admission before sending any business request, including observation, sandbox, and machine session requests. A successful Ping admits only its current connection; disconnecting or reconnecting clears admission. Ping remains available to report incompatible versions during negotiation.
 
@@ -31,7 +31,9 @@ When running as PID 1, the agent also performs basic system initialisation
 
 The host starts an isolated recovery guest with `init=/sbin/arcbox-storage-recovery arcbox.storage_recovery=1`. The dedicated rootfs launcher verifies the `arcbox-storage-recovery-v1` marker in the trusted agent binary before executing `arcbox-agent storage-recovery`. Older rootfs bundles lack this launcher; older agents lack its marker. Both cases stop before normal initialization. The marker declares compatibility with this recovery contract; asset integrity comes from the boot asset verification.
 
-The `storage-recovery` command requires the recovery kernel flag. A recovery kernel flag also requires that explicit command. Unknown agent commands fail before initialization. The guest keeps both persistent data devices unmounted and starts no runtime services. A readiness request that would start the runtime is rejected.
+The `storage-recovery` command requires the recovery kernel flag. A recovery kernel flag also requires that explicit command. Unknown agent commands fail before initialization. The guest keeps both persistent data devices unmounted and starts no runtime services. Its RPC allowlist permits only ping, system information, shutdown, agent readiness, and `StorageCheck`. A readiness request that would start the runtime is rejected.
+
+`StorageCheck.OFFLINE_CHECK` runs `btrfs check --readonly` and `e2fsck -f -n` after verifying that both block devices are unmounted. Each checker has a 30-minute deadline and bounded diagnostic output. Closing the dedicated RPC connection terminates an active offline checker. The agent never requests filesystem repair.
 
 ## Runtime Bootstrap Role
 

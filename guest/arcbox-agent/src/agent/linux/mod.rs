@@ -20,6 +20,7 @@ mod runtime;
 mod runtime_cache;
 mod sandbox;
 mod stats;
+mod storage_check;
 mod storage_health;
 mod storage_volume;
 mod system_info;

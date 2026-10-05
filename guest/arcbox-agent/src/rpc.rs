@@ -22,8 +22,9 @@ use arcbox_connect::v1::{
     KubernetesStopResponse, MemoryPressureEvent, MmapReadFileRequest, MmapReadFileResponse,
     PortBindingsChanged, PortBindingsRemoved, ReadinessEvent, RuntimeEnsureRequest,
     RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse, ShutdownRequest,
-    ShutdownResponse, SystemInfo, WatchMemoryPressureRequest, WatchReadinessRequest,
-    WatchStatsRequest, WatchStorageHealthRequest,
+    ShutdownResponse, StorageCheckRequest, StorageCheckResponse, SystemInfo,
+    WatchMemoryPressureRequest, WatchReadinessRequest, WatchStatsRequest,
+    WatchStorageHealthRequest,
 };
 pub use arcbox_constants::wire::MessageType;
 
@@ -93,6 +94,7 @@ pub enum RpcRequest {
     WatchMemoryPressure(WatchMemoryPressureRequest),
     WatchStats(WatchStatsRequest),
     WatchStorageHealth(WatchStorageHealthRequest),
+    StorageCheck(StorageCheckRequest),
     /// Test-only: exit the agent so PID 1 (busybox init) respawns it.
     KillAgent,
 }
@@ -112,6 +114,7 @@ pub enum RpcResponse {
     KubernetesLoadBalancers(KubernetesLoadBalancersResponse),
     Shutdown(ShutdownResponse),
     DiskTrim(DiskTrimResponse),
+    StorageCheck(StorageCheckResponse),
     Empty,
     PortBindingsChanged(PortBindingsChanged),
     PortBindingsRemoved(PortBindingsRemoved),
@@ -143,6 +146,7 @@ impl RpcResponse {
             Self::KubernetesLoadBalancers(_) => MessageType::KubernetesLoadBalancersResponse,
             Self::Shutdown(_) => MessageType::ShutdownResponse,
             Self::DiskTrim(_) => MessageType::DiskTrimResponse,
+            Self::StorageCheck(_) => MessageType::StorageCheckResponse,
             Self::Empty => MessageType::Empty,
             Self::PortBindingsChanged(_) => MessageType::PortBindingsChanged,
             Self::PortBindingsRemoved(_) => MessageType::PortBindingsRemoved,
@@ -173,6 +177,7 @@ impl RpcResponse {
             Self::KubernetesLoadBalancers(msg) => msg.encode_to_vec(),
             Self::Shutdown(msg) => msg.encode_to_vec(),
             Self::DiskTrim(msg) => msg.encode_to_vec(),
+            Self::StorageCheck(msg) => msg.encode_to_vec(),
             Self::Empty => Empty::default().encode_to_vec(),
             Self::PortBindingsChanged(msg) => msg.encode_to_vec(),
             Self::PortBindingsRemoved(msg) => msg.encode_to_vec(),
@@ -398,6 +403,9 @@ pub fn parse_request(msg_type: MessageType, payload: &[u8]) -> Result<RpcRequest
             let req = WatchStorageHealthRequest::decode_from_slice(payload)?;
             Ok(RpcRequest::WatchStorageHealth(req))
         }
+        MessageType::StorageCheckRequest => Ok(RpcRequest::StorageCheck(
+            StorageCheckRequest::decode_from_slice(payload)?,
+        )),
         MessageType::KillAgentRequest => Ok(RpcRequest::KillAgent),
         _ => anyhow::bail!("unexpected message type: {:?}", msg_type),
     }

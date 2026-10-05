@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite};
 
 use crate::agent::Guest;
 use arcbox_connect::v1::AgentPingResponse as PingResponse;
@@ -148,6 +148,22 @@ where
                 super::storage_health::watch(&mut stream, &trace_id).await?;
                 return Ok(());
             }
+            Ok(RpcRequest::StorageCheck(req)) => {
+                // Closing this dedicated connection cancels the response and
+                // kills an active offline checker.
+                let mut incoming = [0_u8; 1];
+                tokio::select! {
+                    response = super::storage_check::handle(req, guest) => {
+                        write_response(&mut stream, &response, &trace_id).await?;
+                    }
+                    result = stream.read(&mut incoming) => {
+                        if result? != 0 {
+                            anyhow::bail!("storage check connections accept only one request");
+                        }
+                    }
+                }
+                return Ok(());
+            }
             Ok(request) => handle_request(request, guest).await,
             Err(e) => {
                 tracing::warn!(trace_id = %trace_id, "Failed to parse request: {}", e);
@@ -206,6 +222,7 @@ async fn handle_request(request: RpcRequest, guest: Guest) -> RequestResult {
         RpcRequest::Shutdown(req) => RequestResult::Single(handle_shutdown(req, guest)),
         RpcRequest::MmapReadFile(req) => RequestResult::Single(handle_mmap_read_file(req)),
         RpcRequest::DiskTrim(_) => RequestResult::Single(handle_disk_trim(guest).await),
+        RpcRequest::StorageCheck(_) => unreachable!("storage check owns the connection"),
         RpcRequest::ContainerFsPaths(req) => {
             RequestResult::Single(handle_container_fs_paths(req).await)
         }
@@ -619,5 +636,59 @@ mod recovery_tests {
         }
         drop(client);
         dispatcher.await.unwrap().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod storage_check_tests {
+    use super::*;
+    use crate::rpc::MessageType;
+    use arcbox_connect::v1::StorageCheckRequest;
+    use arcbox_connect::v1::storage_check_request::Action;
+
+    #[tokio::test]
+    async fn storage_checks_echo_errors_and_close_the_dedicated_connection() {
+        for (guest, action, expected_code) in [
+            (
+                Guest::StorageRecovery,
+                buffa::EnumValue::Unknown(i32::MAX),
+                400,
+            ),
+            (Guest::SystemVm, buffa::EnumValue::Unknown(i32::MAX), 400),
+            (
+                Guest::DistroMachine,
+                buffa::EnumValue::Unknown(i32::MAX),
+                400,
+            ),
+            (Guest::SystemVm, Action::OfflineCheck.into(), 403),
+            (Guest::StorageRecovery, Action::VerifyWrites.into(), 403),
+            (Guest::DistroMachine, Action::OfflineCheck.into(), 403),
+            (Guest::DistroMachine, Action::VerifyWrites.into(), 403),
+        ] {
+            let (mut client, server) = tokio::io::duplex(4096);
+            let dispatcher = tokio::spawn(handle_connection(server, guest));
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let request = StorageCheckRequest {
+                    action,
+                    ..Default::default()
+                };
+                write_message(
+                    &mut client,
+                    MessageType::StorageCheckRequest,
+                    "storage-check-boundary",
+                    &request.encode_to_vec(),
+                )
+                .await
+                .unwrap();
+                let (kind, trace, payload) = read_message(&mut client).await.unwrap();
+                assert_eq!(kind, MessageType::Error);
+                assert_eq!(trace, "storage-check-boundary");
+                assert_eq!(ErrorResponse::decode(&payload).unwrap().code, expected_code);
+                assert_eq!(client.read(&mut [0_u8; 1]).await.unwrap(), 0);
+                dispatcher.await.unwrap().unwrap();
+            })
+            .await
+            .expect("storage check response and connection close exceeded five seconds");
+        }
     }
 }
