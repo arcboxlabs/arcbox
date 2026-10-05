@@ -307,6 +307,7 @@ impl AgentClient {
         if !self.connected {
             self.connect().await?;
         }
+        self.require_agent_protocol().await?;
         self.transport
             .async_send(request)
             .await

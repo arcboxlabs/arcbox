@@ -110,6 +110,7 @@ impl AgentClient {
         if !self.connected {
             self.connect().await?;
         }
+        self.require_agent_protocol().await?;
         let buf = wire::build_message(request, "", payload);
         self.transport
             .async_send(buf)

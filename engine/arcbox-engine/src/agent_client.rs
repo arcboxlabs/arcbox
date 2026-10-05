@@ -648,6 +648,7 @@ impl AgentClient {
         if !self.connected {
             self.connect().await?;
         }
+        self.require_agent_protocol().await?;
 
         let req = WatchReadinessRequest {
             start_runtime_if_needed,
@@ -718,6 +719,7 @@ impl AgentClient {
         timeout: Duration,
         trace_id: &str,
     ) -> Result<ReadinessEvent> {
+        self.require_agent_protocol_blocking()?;
         let req = WatchReadinessRequest {
             start_runtime_if_needed,
             timeout_ms: u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX),
@@ -758,6 +760,7 @@ impl AgentClient {
         if !self.connected {
             self.connect().await?;
         }
+        self.require_agent_protocol().await?;
 
         let payload = req.encode_to_vec();
         let buf = Self::build_message(MessageType::WatchMemoryPressureRequest, "", &payload);
@@ -821,6 +824,7 @@ impl AgentClient {
         if !self.connected {
             self.connect().await?;
         }
+        self.require_agent_protocol().await?;
 
         let payload = req.encode_to_vec();
         let buf = Self::build_message(MessageType::WatchStatsRequest, "", &payload);
@@ -1440,6 +1444,7 @@ impl AgentClient {
         if !self.connected {
             self.connect().await?;
         }
+        self.require_agent_protocol().await?;
 
         let payload = open.encode_to_vec();
         let buf = wire::build_message(MessageType::SandboxFileWriteRequest, "", &payload);

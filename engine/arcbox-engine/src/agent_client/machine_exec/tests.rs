@@ -12,11 +12,31 @@ use super::*;
 /// Stdin window the fake guest grants unless a test says otherwise.
 const STDIN_WINDOW: u32 = 64 * 1024;
 
-fn session_pair() -> (AgentClient, UnixStream) {
+async fn session_pair() -> (AgentClient, UnixStream) {
     let (host, guest) = std::os::unix::net::UnixStream::pair().unwrap();
     guest.set_nonblocking(true).unwrap();
-    let client = AgentClient::from_fd_async(3, host.into_raw_fd()).unwrap();
-    (client, UnixStream::from_std(guest).unwrap())
+    let mut client = AgentClient::from_fd_async(3, host.into_raw_fd()).unwrap();
+    let mut guest = UnixStream::from_std(guest).unwrap();
+    let (response, ()) = tokio::join!(client.ping(), async {
+        assert_eq!(
+            read_frame(&mut guest).await.0,
+            MessageType::PingRequest as u32
+        );
+        let response = arcbox_connect::v1::AgentPingResponse {
+            protocol_version: arcbox_constants::wire::AGENT_PROTOCOL_VERSION,
+            ..Default::default()
+        };
+        guest
+            .write_all(&wire::build_message(
+                MessageType::PingResponse,
+                "",
+                &response.encode_to_vec(),
+            ))
+            .await
+            .unwrap();
+    });
+    AgentClient::check_agent_protocol(&response.unwrap()).unwrap();
+    (client, guest)
 }
 
 /// A session whose guest granted `stdin_window`, with the request frame
@@ -28,7 +48,7 @@ async fn start(
     mpsc::Sender<ExecSessionInput>,
     UnixStream,
 ) {
-    let (client, mut guest) = session_pair();
+    let (client, mut guest) = session_pair().await;
     write_window(&mut guest, stdin_window).await;
     let (input, input_rx) = mpsc::channel(4);
     let output = client
@@ -132,7 +152,7 @@ async fn session_forwards_input_and_ends_at_the_final_output() {
 
 #[tokio::test]
 async fn exec_without_input_sends_stdin_eof() {
-    let (client, mut guest) = session_pair();
+    let (client, mut guest) = session_pair().await;
     write_window(&mut guest, STDIN_WINDOW).await;
     let _output = client
         .machine_exec(MachineExecRequest::default())
@@ -177,7 +197,7 @@ async fn an_agent_error_frame_ends_the_session_with_that_error() {
 
 #[tokio::test]
 async fn a_request_the_agent_refuses_fails_to_start() {
-    let (client, mut guest) = session_pair();
+    let (client, mut guest) = session_pair().await;
     write_error(&mut guest, 400, "bad user").await;
     let (_input, input_rx) = mpsc::channel(1);
     match client
@@ -194,7 +214,7 @@ async fn a_request_the_agent_refuses_fails_to_start() {
 
 #[tokio::test]
 async fn an_agent_without_flow_control_is_refused() {
-    let (client, mut guest) = session_pair();
+    let (client, mut guest) = session_pair().await;
     write_output(&mut guest, data(1)).await;
     let (_input, input_rx) = mpsc::channel(1);
     let err = client
@@ -298,7 +318,7 @@ fn write_cost(len: usize) -> usize {
 
 #[tokio::test]
 async fn a_tcp_connection_asks_for_its_peer_and_streams_like_a_session() {
-    let (client, mut guest) = session_pair();
+    let (client, mut guest) = session_pair().await;
     write_window(&mut guest, STDIN_WINDOW).await;
     let (input, input_rx) = mpsc::channel(4);
     let mut output = client
@@ -332,7 +352,7 @@ async fn a_tcp_connection_asks_for_its_peer_and_streams_like_a_session() {
 
 #[tokio::test]
 async fn a_refused_tcp_connection_fails_to_open() {
-    let (client, mut guest) = session_pair();
+    let (client, mut guest) = session_pair().await;
     write_error(&mut guest, 503, "connect to localhost:1: refused").await;
     let (_input, input_rx) = mpsc::channel(1);
     match client.machine_tcp_connect("localhost", 1, input_rx).await {

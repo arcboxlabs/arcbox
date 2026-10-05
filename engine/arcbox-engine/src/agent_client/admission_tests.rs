@@ -248,4 +248,116 @@ mod asynchronous {
             }
         }
     }
+
+    async fn open(mut client: AgentClient, kind: MessageType) -> Result<()> {
+        match kind {
+            MessageType::WatchReadinessRequest if client.is_blocking() => client
+                .watch_readiness_blocking(false, Duration::from_secs(1), "")
+                .map(drop),
+            MessageType::WatchReadinessRequest => client
+                .watch_readiness(false, Duration::from_secs(1), "")
+                .await
+                .map(drop),
+            MessageType::WatchStatsRequest => {
+                client.watch_stats(WatchStatsRequest::default()).await
+            }
+            MessageType::WatchMemoryPressureRequest => {
+                client
+                    .watch_memory_pressure(WatchMemoryPressureRequest::default())
+                    .await
+            }
+            MessageType::SandboxFileReadRequest => client
+                .sandbox_read_file(ReadFileRequest::default())
+                .await
+                .map(drop),
+            MessageType::SandboxFileWriteRequest => {
+                let (input, receiver) = mpsc::channel(1);
+                drop(input);
+                client
+                    .sandbox_write_file(WriteFileOpen::default(), receiver)
+                    .await
+            }
+            MessageType::MachineExecRequest
+            | MessageType::DebugExecRequest
+            | MessageType::MachineTcpConnectRequest => {
+                let (_input, receiver) = mpsc::channel(1);
+                match kind {
+                    MessageType::MachineExecRequest => client
+                        .machine_exec_session(Default::default(), receiver)
+                        .await
+                        .map(drop),
+                    MessageType::DebugExecRequest => client
+                        .machine_debug_session(Default::default(), receiver)
+                        .await
+                        .map(drop),
+                    _ => client
+                        .machine_tcp_connect("localhost", 80, receiver)
+                        .await
+                        .map(drop),
+                }
+            }
+            _ => unreachable!("the test covers direct stream entry points"),
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_stream_entry_points_require_v7_before_business_frames() {
+        for kind in [
+            MessageType::WatchReadinessRequest,
+            MessageType::WatchStatsRequest,
+            MessageType::WatchMemoryPressureRequest,
+            MessageType::SandboxFileReadRequest,
+            MessageType::SandboxFileWriteRequest,
+            MessageType::MachineExecRequest,
+            MessageType::DebugExecRequest,
+            MessageType::MachineTcpConnectRequest,
+        ] {
+            for (version, blocking) in [(6, false), (7, false), (6, true), (7, true)] {
+                if blocking && kind != MessageType::WatchReadinessRequest {
+                    continue;
+                }
+                let (client, mut guest) = if blocking {
+                    blocking_pair()
+                } else {
+                    async_pair()
+                };
+                let peer = std::thread::spawn(move || {
+                    handshake(&mut guest, version);
+                    if version == 6 {
+                        assert_eq!(guest.read(&mut [0; 1]).unwrap(), 0, "v6 received {kind:?}");
+                        return;
+                    }
+                    receive(&mut guest, kind);
+                    match kind {
+                        MessageType::WatchReadinessRequest => {
+                            respond(&mut guest, MessageType::ReadinessEvent, &[]);
+                        }
+                        MessageType::SandboxFileWriteRequest => {
+                            receive(&mut guest, MessageType::SandboxFileChunk);
+                            respond(&mut guest, MessageType::SandboxFileWriteResponse, &[]);
+                        }
+                        MessageType::MachineExecRequest
+                        | MessageType::DebugExecRequest
+                        | MessageType::MachineTcpConnectRequest => respond(
+                            &mut guest,
+                            MessageType::MachineExecInputWindow,
+                            &arcbox_connect::v1::MachineExecWindow {
+                                bytes: 1024,
+                                ..Default::default()
+                            }
+                            .encode_to_vec(),
+                        ),
+                        _ => {}
+                    }
+                });
+                let result = open(client, kind).await;
+                if version == 6 {
+                    assert!(result.unwrap_err().to_string().contains("requires >= 7"));
+                } else {
+                    result.unwrap();
+                }
+                peer.join().unwrap();
+            }
+        }
+    }
 }
