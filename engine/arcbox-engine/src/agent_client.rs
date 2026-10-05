@@ -11,6 +11,7 @@
 mod machine_exec;
 mod sandbox_stream;
 mod shutdown;
+mod storage_check;
 mod storage_health;
 mod transport;
 mod wire;

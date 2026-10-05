@@ -26,3 +26,9 @@ drop(reservation);
 ```
 
 The recovery owner must retain any durable hold after failure. Remove the durable hold only after write verification succeeds. The engine reservation does not repair filesystems or verify runtime writes.
+
+Use `AgentClient::storage_check` on a dedicated connection to a running guest. The client requires agent protocol v7 before sending the request.
+
+Dropping the async future closes the connection. The guest contract cancels offline checks and retains online Docker cleanup after disconnect. Interrupting `storage_check_blocking` requires the caller to stop the recovery VM.
+
+A successful RPC returns the guest's check results. Callers must require `StorageCheckResponse.passed` before treating verification as successful. The client does not remove storage protection or start runtime services.
