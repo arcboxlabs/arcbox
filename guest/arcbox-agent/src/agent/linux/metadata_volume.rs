@@ -20,9 +20,8 @@ use crate::metadata_migrate::{EntryKind, Prepared, prepare_entry};
 
 /// Mount point of the raw ext4 volume (`/run` is tmpfs, writable).
 pub(super) const METADATA_MOUNT: &str = "/run/arcbox/metadata";
-/// Both binaries are baked into the EROFS rootfs (static e2fsprogs).
+/// The formatter is baked into the EROFS rootfs (static e2fsprogs).
 const MKFS_EXT4: &str = "/sbin/mkfs.ext4";
-const E2FSCK: &str = "/sbin/e2fsck";
 
 /// ext4 superblock magic `0xEF53`, little-endian at byte 56 of the
 /// superblock (which starts at byte 1024).
@@ -85,7 +84,7 @@ fn mappings() -> Vec<Mapping> {
 ///   third disk) → `Ok`, btrfs-only boot, zero probe delay;
 /// - mkfs binary absent AND device blank (older rootfs) → `Ok`, skip;
 /// - device declared but never appears, or present but unusable after an
-///   `e2fsck -y` retry → `Err` — booting dockerd against the stale shadowed
+///   attempted mount → `Err` — booting dockerd against the stale shadowed
 ///   btrfs state would fork it.
 pub(super) fn ensure_metadata_mount() -> Result<String, String> {
     let maps = mappings();
@@ -124,7 +123,7 @@ pub(super) fn ensure_metadata_mount() -> Result<String, String> {
         notes.push(format_ext4(&device)?);
     }
 
-    mount_metadata(&device, &mut notes)?;
+    mount_metadata(&device)?;
 
     for mapping in &maps {
         if crate::mount::is_mounted(&mapping.target) {
@@ -206,9 +205,8 @@ fn format_ext4(device: &str) -> Result<String, String> {
     }
 }
 
-/// Mounts the volume; on failure runs `e2fsck -y` once (journal replay is
-/// in-kernel — fsck covers the residual corruption class) and retries once.
-fn mount_metadata(device: &str, notes: &mut Vec<String>) -> Result<(), String> {
+/// Mounts the volume without running destructive repair during ordinary boot.
+fn mount_metadata(device: &str) -> Result<(), String> {
     if crate::mount::is_mounted(METADATA_MOUNT) {
         return Ok(());
     }
@@ -219,34 +217,9 @@ fn mount_metadata(device: &str, notes: &mut Vec<String>) -> Result<(), String> {
         return Ok(());
     }
 
-    if !Path::new(E2FSCK).exists() {
-        return Err(format!(
-            "mount {device} on {METADATA_MOUNT} failed and {E2FSCK} is unavailable"
-        ));
-    }
-    // e2fsck exit codes 0/1/2 mean clean or corrected; >=4 is a real failure.
-    match std::process::Command::new(E2FSCK)
-        .args(["-y", device])
-        .status()
-    {
-        Ok(status) if status.code().is_some_and(|c| c <= 2) => {
-            notes.push(format!("e2fsck repaired {device}"));
-        }
-        Ok(status) => {
-            return Err(format!(
-                "e2fsck failed on {device} (exit={})",
-                status.code().unwrap_or(-1)
-            ));
-        }
-        Err(e) => return Err(format!("failed to execute e2fsck: {e}")),
-    }
-    if try_mount(device) {
-        Ok(())
-    } else {
-        Err(format!(
-            "mount {device} on {METADATA_MOUNT} failed even after e2fsck"
-        ))
-    }
+    Err(format!(
+        "runtime storage needs recovery: mount {device} on {METADATA_MOUNT} failed; preserve both images before offline repair"
+    ))
 }
 
 fn try_mount(device: &str) -> bool {

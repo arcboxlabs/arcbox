@@ -26,6 +26,8 @@ target a healthy guest `dockerd` endpoint.
 
 In a normal System VM, `WatchReadiness` with `start_runtime_if_needed=true` starts or joins one runtime-start attempt. The watch reports a failed attempt immediately and does not retry within that request. A new `WatchReadiness` or explicit `EnsureRuntime` request may retry. Readiness requires a successful start result and a live Docker API probe.
 
+Runtime startup stops if Btrfs capacity cannot be read or metadata entries cannot be inspected. If an ext4 metadata entry is missing while a retired `.pre-ext4` backup exists, the agent returns an error without recreating that entry. Ordinary boot does not run `e2fsck -y` after an ext4 mount failure. Preserve both `docker.img` and `docker-meta.img` before offline repair.
+
 The proxy itself listens on vsock port 2375 and relays each connection to
 `/var/run/docker.sock`. The vsock leg is framed with
 `arcbox_transport::vsock::HalfCloseStream` (agent protocol v5): a

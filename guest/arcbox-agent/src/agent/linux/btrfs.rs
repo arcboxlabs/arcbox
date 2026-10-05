@@ -66,20 +66,19 @@ fn has_btrfs_superblock(device: &str) -> bool {
     magic == BTRFS_MAGIC
 }
 
-/// Reads the Btrfs superblock's `total_bytes` (the device size the filesystem
-/// was last resized to). `None` if the field can't be read.
-fn btrfs_total_bytes(device: &str) -> Option<u64> {
-    let mut file = std::fs::File::open(device).ok()?;
-    file.seek(SeekFrom::Start(BTRFS_TOTAL_BYTES_OFFSET)).ok()?;
+/// Reads the device size recorded in the Btrfs superblock.
+fn btrfs_total_bytes(device: &str) -> std::io::Result<u64> {
+    let mut file = std::fs::File::open(device)?;
+    file.seek(SeekFrom::Start(BTRFS_TOTAL_BYTES_OFFSET))?;
     let mut buf = [0_u8; 8];
-    file.read_exact(&mut buf).ok()?;
-    Some(u64::from_le_bytes(buf))
+    file.read_exact(&mut buf)?;
+    Ok(u64::from_le_bytes(buf))
 }
 
 /// Reads a block device's size in bytes by seeking to its end.
-fn block_device_size(device: &str) -> Option<u64> {
-    let mut file = std::fs::File::open(device).ok()?;
-    file.seek(SeekFrom::End(0)).ok()
+fn block_device_size(device: &str) -> std::io::Result<u64> {
+    let mut file = std::fs::File::open(device)?;
+    file.seek(SeekFrom::End(0))
 }
 
 /// Fails loudly when the block device is smaller than the Btrfs filesystem it
@@ -90,10 +89,10 @@ fn block_device_size(device: &str) -> Option<u64> {
 /// exposes a smaller disk than the one the filesystem was grown against (the
 /// VZ→HV capacity bug). The data is intact; switching the engine back recovers.
 fn check_device_fits_filesystem(device: &str) -> Result<(), String> {
-    let (Some(fs_bytes), Some(dev_bytes)) = (btrfs_total_bytes(device), block_device_size(device))
-    else {
-        return Ok(());
-    };
+    let fs_bytes = btrfs_total_bytes(device)
+        .map_err(|error| format!("read {device} filesystem capacity: {error}"))?;
+    let dev_bytes = block_device_size(device)
+        .map_err(|error| format!("read {device} block device capacity: {error}"))?;
     if dev_bytes < fs_bytes {
         return Err(format!(
             "data disk is {dev_bytes} bytes but its Btrfs filesystem was grown to \

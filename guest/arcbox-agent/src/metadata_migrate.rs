@@ -47,9 +47,10 @@ const PARTIAL_SUFFIX: &str = ".partial";
 /// Prepares one metadata entry on the volume and retires its btrfs-side
 /// source. Idempotent and crash-safe:
 ///
-/// 1. If `<volume_root>/<name>` is absent: discard any stale `.partial`,
-///    then either copy the source into `.partial` and atomically rename it
-///    into place, or create the entry empty when no source content exists.
+/// 1. If `<volume_root>/<name>` is absent and a retired source exists, fail.
+///    Otherwise, discard any stale `.partial`, then copy the source into
+///    `.partial` and atomically rename it into place, or create the entry
+///    empty when no source content exists. Propagate inspection errors.
 /// 2. If the final entry exists while the source still has content at its
 ///    canonical path, rename the source to `*.pre-ext4` (also covers a crash
 ///    between the copy and this retire).
@@ -66,18 +67,24 @@ pub fn prepare_entry(
     let final_path = volume_root.join(name);
     let partial = volume_root.join(format!("{name}{PARTIAL_SUFFIX}"));
 
-    let prepared = if final_path.symlink_metadata().is_ok() {
+    let prepared = if final_path.try_exists()? {
         Prepared::Existing
     } else {
+        if retired_exists(target)? {
+            return Err(io::Error::other(format!(
+                "metadata entry {} is missing after migration; restore the paired volumes",
+                final_path.display()
+            )));
+        }
         remove_existing(&partial)?;
-        if has_content(target, kind) {
+        if has_content(target, kind)? {
             copy_entry(target, &partial, kind)?;
             fs::rename(&partial, &final_path)?;
             // The publish rename MUST be durable before the retire below:
             // the two renames live on different filesystems (volume vs
             // btrfs source), so without this barrier a crash could persist
-            // the retire while losing the publish — next boot would then
-            // see neither and start empty.
+            // the retire while losing the publish. The next boot would then
+            // require recovery because the metadata entry is missing.
             fs::File::open(volume_root)?.sync_all()?;
             Prepared::Migrated
         } else {
@@ -86,7 +93,7 @@ pub fn prepare_entry(
         }
     };
 
-    if has_content(target, kind) {
+    if has_content(target, kind)? {
         fs::rename(target, free_retired_path(target)?)?;
     }
     ensure_stub(target, kind)?;
@@ -95,11 +102,40 @@ pub fn prepare_entry(
 
 /// Whether the canonical source still carries data worth migrating/retiring:
 /// a non-empty directory or a non-empty file.
-fn has_content(path: &Path, kind: EntryKind) -> bool {
-    match kind {
-        EntryKind::Dir => fs::read_dir(path).is_ok_and(|mut dir| dir.next().is_some()),
-        EntryKind::File => fs::metadata(path).is_ok_and(|meta| meta.len() > 0),
+fn has_content(path: &Path, kind: EntryKind) -> io::Result<bool> {
+    let result = match kind {
+        EntryKind::Dir => fs::read_dir(path)
+            .and_then(|mut dir| dir.next().transpose().map(|entry| entry.is_some())),
+        EntryKind::File => fs::metadata(path).map(|meta| meta.len() > 0),
+    };
+    match result {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        other => other,
     }
+}
+
+fn retired_exists(target: &Path) -> io::Result<bool> {
+    let Some(parent) = target.parent() else {
+        return Ok(false);
+    };
+    let retired = path_with_suffix(target, RETIRED_SUFFIX);
+    let retired_name = retired
+        .file_name()
+        .ok_or_else(|| io::Error::other("metadata target has no filename"))?
+        .to_string_lossy();
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let name = entry?.file_name();
+        let name = name.to_string_lossy();
+        if name == retired_name || name.starts_with(&format!("{retired_name}.")) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn remove_existing(path: &Path) -> io::Result<()> {
@@ -178,12 +214,12 @@ fn copy_file_synced(src: &Path, dst: &Path) -> io::Result<()> {
 /// ran without the metadata volume.
 fn free_retired_path(target: &Path) -> io::Result<PathBuf> {
     let base = path_with_suffix(target, RETIRED_SUFFIX);
-    if base.symlink_metadata().is_err() {
+    if !base.try_exists()? {
         return Ok(base);
     }
     for n in 1..100u32 {
         let candidate = path_with_suffix(target, &format!("{RETIRED_SUFFIX}.{n}"));
-        if candidate.symlink_metadata().is_err() {
+        if !candidate.try_exists()? {
             return Ok(candidate);
         }
     }
@@ -202,6 +238,16 @@ fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_inspection_errors_do_not_create_empty_metadata() {
+        let (_tmp, volume, data) = setup();
+        let target = data.join("network");
+        std::os::unix::fs::symlink(&target, &target).unwrap();
+        let error = prepare_entry(&volume, &target, "docker-network", EntryKind::Dir).unwrap_err();
+        assert_ne!(error.kind(), io::ErrorKind::NotFound);
+        assert!(!volume.join("docker-network").exists());
+    }
 
     fn setup() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
@@ -317,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn blank_volume_after_retire_starts_fresh_not_stale() {
+    fn blank_volume_after_retire_requires_recovery() {
         let (_tmp, volume, data) = setup();
         let target = data.join("network");
         seed_dir(&target);
@@ -327,16 +373,15 @@ mod tests {
         // empty, retired backup still on btrfs.
         fs::remove_dir_all(volume.join("docker-network")).unwrap();
 
-        let out = prepare_entry(&volume, &target, "docker-network", EntryKind::Dir).unwrap();
+        let error = prepare_entry(&volume, &target, "docker-network", EntryKind::Dir).unwrap_err();
 
         // The retired backup must NOT be resurrected — that state predates
         // whatever the data store has since moved on to.
-        assert_eq!(out, Prepared::Fresh);
-        assert!(
-            fs::read_dir(volume.join("docker-network"))
-                .unwrap()
-                .next()
-                .is_none()
+        assert!(error.to_string().contains("restore the paired volumes"));
+        assert!(!volume.join("docker-network").exists());
+        assert_eq!(
+            fs::read(data.join("network.pre-ext4/meta.db")).unwrap(),
+            b"bolt"
         );
     }
 
