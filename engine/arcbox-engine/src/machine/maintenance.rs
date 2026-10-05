@@ -6,6 +6,8 @@ use std::sync::{Arc, RwLockReadGuard};
 use super::{DEFAULT_MACHINE_NAME, MachineManager};
 use crate::error::{EngineError, Result};
 
+const STORAGE_AGENT_CAPABILITY: &[u8] = b"arcbox-storage-recovery-v1";
+
 /// Reserves the System VM until the recovery owner releases the reservation.
 #[derive(Clone)]
 pub struct StorageMaintenance(Arc<MaintenanceOwner>);
@@ -104,6 +106,24 @@ impl MachineManager {
         };
         arcbox_storage::verify_pair(data.path.as_ref(), metadata.path.as_ref())
             .map_err(|error| EngineError::Machine(error.to_string()))?;
+        // Older agents mount storage before Ping. Check the same binary that
+        // the rootfs executes through its /arcbox VirtioFS share before boot.
+        let agent_path = self.data_dir.join("bin/arcbox-agent");
+        let agent = std::fs::read(&agent_path).map_err(|error| {
+            EngineError::config(format!(
+                "cannot inspect staged agent at {}: {error}; stage the agent from the same ArcBox build before starting the System VM",
+                agent_path.display()
+            ))
+        })?;
+        if !agent
+            .windows(STORAGE_AGENT_CAPABILITY.len())
+            .any(|bytes| bytes == STORAGE_AGENT_CAPABILITY)
+        {
+            return Err(EngineError::config(format!(
+                "staged agent at {} lacks storage-protection support; update the staged agent from the same ArcBox build before starting the System VM",
+                agent_path.display()
+            )));
+        }
         Ok(())
     }
 }

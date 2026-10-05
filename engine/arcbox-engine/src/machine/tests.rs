@@ -66,6 +66,56 @@ async fn direct_start_rejects_unpaired_system_vm_before_starting_process() {
     assert_eq!(manager.get("default").unwrap().state, MachineState::Created);
 }
 
+#[tokio::test]
+async fn system_storage_boot_requires_capable_staged_agent_before_vm_start() {
+    let dir = tempdir().unwrap();
+    let manager = Arc::new(test_machine_manager(dir.path()));
+    let data = dir.path().join("data.img");
+    let metadata = dir.path().join("metadata.img");
+    arcbox_storage::prepare_pair(&data, &metadata, 4096, 4096).unwrap();
+    manager
+        .create(MachineConfig {
+            block_devices: [dir.path().join("rootfs.img"), data, metadata]
+                .into_iter()
+                .map(|path| crate::vm::BlockDeviceConfig {
+                    path: path.to_string_lossy().into_owned(),
+                    read_only: false,
+                })
+                .collect(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    manager.verify_storage_pair("user-machine").unwrap();
+    let agent = dir.path().join("bin/arcbox-agent");
+    std::fs::create_dir(agent.parent().unwrap()).unwrap();
+    for contents in [None, Some(b"\x7fELF old agent".as_slice())] {
+        if let Some(contents) = contents {
+            std::fs::write(&agent, contents).unwrap();
+        }
+        for error in [
+            manager.start("default").await.unwrap_err(),
+            manager.reboot("default").unwrap_err(),
+        ] {
+            let message = error.to_string();
+            assert!(message.contains(agent.to_string_lossy().as_ref()));
+            assert!(message.contains("same ArcBox build"));
+        }
+        let machine = manager.get("default").unwrap();
+        assert_eq!(machine.state, MachineState::Created);
+        assert!(machine.cid.is_none());
+        let reservation = manager.reserve_storage().unwrap();
+        let message = reservation.start("default").unwrap_err().to_string();
+        assert!(message.contains(agent.to_string_lossy().as_ref()));
+        assert!(message.contains("same ArcBox build"));
+        let machine = manager.get("default").unwrap();
+        assert_eq!(machine.state, MachineState::Created);
+        assert!(machine.cid.is_none());
+    }
+    std::fs::write(&agent, b"\x7fELF\0arcbox-storage-recovery-v1\0").unwrap();
+    manager.verify_storage_pair("default").unwrap();
+}
+
 fn test_machine_manager_with_bus(
     data_dir: &std::path::Path,
     event_bus: crate::event::EventBus,

@@ -64,6 +64,8 @@ Runtime storage is a set of two images and one manifest. The Rosetta VM uses `do
 
 Normal startup never reformats an existing image or recreates a missing member of a recorded pair. New images receive an exclusive provisioning identity; the guest consumes that authority durably before formatting. An unreadable signature, damaged filesystem, or interrupted format enters recovery instead of starting an empty Docker state. Ordinary boot does not run `e2fsck -y`.
 
+Every System VM start and reboot requires a staged `bin/arcbox-agent` with the storage recovery capability. The host checks the binary before starting the VM because an older agent can mount storage before the protocol handshake. All agent sessions require protocol version 7 or later; version 6 is incompatible, including for observations.
+
 An upgrade from an older Btrfs-only installation requires readable original metadata databases and no retired `.pre-ext4` sources before the new metadata volume can be formatted. Empty mountpoint stubs are ambiguous and require recovery. The migration retains its existing copy, sync, and retire sequence; a recorded migration resumes without treating retired data as a new installation. See [the storage contract](../common/arcbox-storage/README.md).
 
 ### 1.4 `boot/` — Boot Asset Cache
