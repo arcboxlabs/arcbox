@@ -12,6 +12,8 @@ During removal, the lifecycle state is `Stopping`. Concurrent `force_stop` and `
 
 Successful removal sets `NotExist` and publishes `MachineStopped`. An already absent machine also succeeds. Removal failure sets `Failed`, returns the error to stop and readiness waiters, and publishes no `MachineStopped` event.
 
+`shutdown` stops a running VM even when its lifecycle actor has already failed. The operation keeps the machine configuration and returns the stop result.
+
 Use `MachineManager::reserve_storage` to exclude normal System VM mutations during storage maintenance. The reservation lasts until its last clone is dropped. A durable `storage-recovery/hold` also blocks normal admission after a manager restart.
 
 Reserve storage before stopping workloads. `shutdown` remains available to stop the VM; normal `ensure_ready` and `force_stop` calls are rejected while storage is held. `resume_storage` accepts only a reservation from the same `MachineManager` and starts the existing stopped machine.
@@ -20,10 +22,13 @@ Reserve storage before stopping workloads. `shutdown` remains available to stop 
 let reservation = machines.reserve_storage()?;
 lifecycle.shutdown().await?;
 // Preserve and verify the stopped images before restarting.
-lifecycle.resume_storage(&reservation).await?;
+let cancelled = tokio_util::sync::CancellationToken::new();
+lifecycle.resume_storage(&reservation, cancelled).await?;
 // Verify filesystem and runtime writes before releasing protection.
 drop(reservation);
 ```
+
+`resume_storage` accepts a cancellation token for its readiness and system-info RPCs. Cancelling the token does not stop the VM. After cancellation, await `resume_storage`, then call `shutdown`. Retain the reservation and any durable hold during cleanup.
 
 The recovery owner must retain any durable hold after failure. Remove the durable hold only after write verification succeeds. The engine reservation does not repair filesystems or verify runtime writes.
 

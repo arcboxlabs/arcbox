@@ -209,3 +209,28 @@ async fn reservation_after_force_stop_admission_blocks_removal() {
     assert!(machines.get("default").is_some());
     assert!(events.try_recv().is_err());
 }
+
+#[tokio::test]
+async fn shutdown_stops_a_physical_vm_after_its_actor_failed_to_boot() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut actor, mut machine) = actor(dir.path());
+    let machines = Arc::clone(&actor.shared.machine_manager);
+    machines.register_mock_machine("default", 3).unwrap();
+    let vm_id = machines.get("default").unwrap().vm_id;
+    actor.dispatch(&mut machine, VmEvent::Failure);
+    let (reply, stopped) = oneshot::channel();
+    actor.on_command(&mut machine, Command::Shutdown { reply });
+    assert_eq!(actor.public(), VmLifecycleState::Stopping);
+    let event = completion(&mut actor).await;
+    actor.on_internal(&mut machine, event);
+    assert!(
+        stopped
+            .await
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains(&vm_id.to_string())
+    );
+    assert!(machines.get("default").is_some());
+    assert_eq!(actor.public(), VmLifecycleState::Failed);
+}

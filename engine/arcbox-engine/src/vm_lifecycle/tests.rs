@@ -309,7 +309,10 @@ async fn storage_resume_rejects_a_foreign_manager_before_boot() {
     let (machines, lifecycle) = storage_test_lifecycle(directory.path());
     let (foreign, _foreign_lifecycle) = storage_test_lifecycle(foreign_directory.path());
     let reservation = foreign.reserve_storage().unwrap();
-    let error = lifecycle.resume_storage(&reservation).await.unwrap_err();
+    let error = lifecycle
+        .resume_storage(&reservation, tokio_util::sync::CancellationToken::new())
+        .await
+        .unwrap_err();
     assert!(
         error
             .to_string()

@@ -63,6 +63,8 @@ pub(super) enum VmEvent {
     Removed,
     /// Force-stop request (preempts any in-flight boot/stop).
     ForceStop,
+    /// Stop a physical VM whose boot did not reach a ready lifecycle state.
+    StopUnready,
     /// The VM stopped on its own because the guest issued PSCI SYSTEM_RESET
     /// (reboot). Detected by the liveness tick; triggers an in-place reboot.
     GuestReset {
@@ -165,6 +167,10 @@ impl VmLifecycle {
     #[superstate]
     fn managed(event: &VmEvent, context: &mut Effects) -> Outcome {
         match event {
+            VmEvent::StopUnready => {
+                context.emit(Effect::SpawnStop);
+                Transition(State::stopping())
+            }
             VmEvent::ForceStop => context.force_stop(),
             VmEvent::Failure => Transition(State::failed()),
             _ => Handled,

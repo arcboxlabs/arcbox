@@ -8,6 +8,7 @@
 //! (prost) and new (buffa) guest agents: same length-prefixed
 //! `MessageType` frames, same `AGENT_PROTOCOL_VERSION`, no wire change.
 
+mod cancellation;
 mod machine_exec;
 mod sandbox_stream;
 mod shutdown;

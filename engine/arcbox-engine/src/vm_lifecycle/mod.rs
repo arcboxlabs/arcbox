@@ -352,11 +352,13 @@ impl VmLifecycleManager {
     pub async fn resume_storage(
         &self,
         reservation: &crate::machine::StorageMaintenance,
+        cancelled: tokio_util::sync::CancellationToken,
     ) -> Result<u32> {
         let (reply, reply_rx) = oneshot::channel();
         self.request(
             Command::ResumeStorage {
                 reservation: reservation.clone(),
+                cancelled,
                 reply,
             },
             reply_rx,

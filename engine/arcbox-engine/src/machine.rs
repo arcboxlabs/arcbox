@@ -1163,26 +1163,24 @@ impl MachineManager {
         self: Arc<Self>,
         machine_name: String,
     ) -> Result<Option<String>> {
+        self.record_bridge_address_with_cancel(
+            machine_name,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+    }
+
+    pub(crate) async fn record_bridge_address_with_cancel(
+        self: Arc<Self>,
+        machine_name: String,
+        cancelled: &tokio_util::sync::CancellationToken,
+    ) -> Result<Option<String>> {
         let manager = Arc::clone(&self);
         let name = machine_name.clone();
-        let connected = tokio::task::spawn_blocking(move || manager.connect_agent(&name)).await;
-        let info = match connected {
-            Ok(Ok(mut agent)) => {
-                if agent.is_blocking() {
-                    tokio::task::spawn_blocking(move || agent.get_system_info_blocking())
-                        .await
-                        .unwrap_or_else(|e| {
-                            Err(EngineError::Vm(format!("system info task panicked: {e}")))
-                        })?
-                } else {
-                    agent.get_system_info().await?
-                }
-            }
-            Ok(Err(e)) => return Err(e),
-            Err(e) => {
-                return Err(EngineError::Vm(format!("agent connect task panicked: {e}")));
-            }
-        };
+        let agent = tokio::task::spawn_blocking(move || manager.connect_agent(&name))
+            .await
+            .map_err(|error| EngineError::Vm(format!("agent connect task panicked: {error}")))??;
+        let info = agent.get_system_info_with_cancel(cancelled).await?;
         let bridge_ip = Some(info.bridge_ip_address).filter(|ip| !ip.is_empty());
         {
             let mut machines = self

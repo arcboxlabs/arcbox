@@ -19,6 +19,7 @@ use std::time::Duration;
 use statig::blocking::IntoStateMachineExt;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::{EngineError, Result};
 use crate::event::{Event, EventBus};
@@ -39,6 +40,7 @@ pub(super) enum Command {
     /// Restarts an existing checked pair without releasing its maintenance reservation.
     ResumeStorage {
         reservation: crate::machine::StorageMaintenance,
+        cancelled: CancellationToken,
         reply: oneshot::Sender<Result<u32>>,
     },
     /// Ensure the VM is ready; reply with the agent CID.
@@ -313,6 +315,7 @@ impl PressureWatch for AgentPressureWatch {
 /// The lifecycle actor: owns the statig machine and executes its effects.
 pub(super) struct LifecycleActor {
     storage_start: Option<crate::machine::StorageMaintenance>,
+    storage_cancel: Option<CancellationToken>,
     shared: Arc<LifecycleShared>,
     /// Commands from the facade.
     commands: mpsc::UnboundedReceiver<Command>,
@@ -361,6 +364,7 @@ impl LifecycleActor {
         let (balloon_tx, balloon_rx) = mpsc::unbounded_channel();
         Self {
             storage_start: None,
+            storage_cancel: None,
             shared,
             commands,
             events_rx,
@@ -488,10 +492,17 @@ impl LifecycleActor {
                 let events = self.events_tx.clone();
                 let timeout = Duration::from_millis(timeout_ms);
                 let reservation = self.storage_start.take();
+                let cancelled = self.storage_cancel.clone();
                 self.inflight = Some(tokio::spawn(async move {
                     if let Some(reservation) = reservation {
                         shared
-                            .run_storage_boot(reservation, timeout, epoch, &events)
+                            .run_storage_boot(
+                                reservation,
+                                cancelled.unwrap(),
+                                timeout,
+                                epoch,
+                                &events,
+                            )
                             .await;
                     } else {
                         shared.run_boot(create, timeout, epoch, &events).await;
@@ -570,8 +581,13 @@ impl LifecycleActor {
 
     fn on_command(&mut self, machine: &mut Machine, cmd: Command) {
         match cmd {
-            Command::ResumeStorage { reservation, reply } => {
+            Command::ResumeStorage {
+                reservation,
+                cancelled,
+                reply,
+            } => {
                 if !reservation.belongs_to(&self.shared.machine_manager)
+                    || cancelled.is_cancelled()
                     || !self.public().needs_start()
                     || self.inflight.is_some()
                 {
@@ -581,6 +597,7 @@ impl LifecycleActor {
                     return;
                 }
                 self.storage_start = Some(reservation);
+                self.storage_cancel = Some(cancelled);
                 self.waiters.push(reply);
                 self.dispatch(
                     machine,
@@ -684,8 +701,24 @@ impl LifecycleActor {
                 self.dispatch(machine, VmEvent::Stop);
             }
             _ => {
-                // Not running: nothing to do.
-                let _ = reply.send(Ok(()));
+                if self.inflight.is_none()
+                    && self
+                        .shared
+                        .machine_manager
+                        .get(&self.shared.machine_name)
+                        .is_some_and(|machine| {
+                            matches!(
+                                machine.state,
+                                crate::machine::MachineState::Running
+                                    | crate::machine::MachineState::Stopping
+                            )
+                        })
+                {
+                    self.stop_waiters.push(reply);
+                    self.dispatch(machine, VmEvent::StopUnready);
+                } else {
+                    let _ = reply.send(Ok(()));
+                }
             }
         }
     }
@@ -714,6 +747,7 @@ impl LifecycleActor {
             return;
         }
         self.inflight = None;
+        self.storage_cancel = None;
         match completion.outcome {
             InternalEvent::AgentReady => {
                 self.dispatch(machine, VmEvent::AgentReady);

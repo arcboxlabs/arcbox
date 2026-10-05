@@ -29,6 +29,7 @@ impl LifecycleShared {
     pub(super) async fn run_storage_boot(
         self: Arc<Self>,
         reservation: crate::machine::StorageMaintenance,
+        cancelled: tokio_util::sync::CancellationToken,
         timeout: Duration,
         epoch: u64,
         events: &mpsc::UnboundedSender<Completion>,
@@ -36,16 +37,28 @@ impl LifecycleShared {
         let name = self.machine_name.clone();
         // Keep the reservation through readiness if the caller cancels its request.
         let start_reservation = reservation.clone();
+        let start_cancelled = cancelled.clone();
         let result = async {
-            tokio::task::spawn_blocking(move || start_reservation.start(&name))
-                .await
-                .map_err(|error| {
-                    EngineError::Vm(format!("storage recovery start task: {error}"))
-                })??;
+            tokio::task::spawn_blocking(move || {
+                if start_cancelled.is_cancelled() {
+                    return Err(EngineError::Vm("storage recovery boot cancelled".into()));
+                }
+                start_reservation.start(&name)
+            })
+            .await
+            .map_err(|error| EngineError::Vm(format!("storage recovery start task: {error}")))??;
             self.spawn_route_reconciler();
-            self.wait_for_agent(timeout).await?;
-            self.sync_guest_clock().await;
-            self.record_bridge_address().await;
+            self.wait_for_storage_agent(timeout, &cancelled).await?;
+            // The readiness handshake already synchronizes the guest clock through Ping.
+            if let Err(error) = Arc::clone(&self.machine_manager)
+                .record_bridge_address_with_cancel(self.machine_name.clone(), &cancelled)
+                .await
+            {
+                if cancelled.is_cancelled() {
+                    return Err(error);
+                }
+                tracing::warn!(%error, "could not read the guest's bridge address");
+            }
             Ok::<_, EngineError>(())
         }
         .await;
@@ -55,6 +68,53 @@ impl LifecycleShared {
         };
         let _ = events.send(Completion { epoch, outcome });
         drop(reservation);
+    }
+
+    async fn wait_for_storage_agent(
+        &self,
+        timeout: Duration,
+        cancelled: &tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if cancelled.is_cancelled() {
+                return Err(EngineError::Vm("storage recovery boot cancelled".into()));
+            }
+            let manager = Arc::clone(&self.machine_manager);
+            let name = self.machine_name.clone();
+            let probe = tokio::task::spawn_blocking(move || manager.connect_agent(&name))
+                .await
+                .map_err(|error| EngineError::Vm(format!("storage agent connection: {error}")))?;
+            let result = match probe {
+                Ok(agent) => {
+                    agent
+                        .watch_readiness_with_cancel(
+                            false,
+                            deadline.saturating_duration_since(tokio::time::Instant::now()),
+                            "storage-recovery-boot",
+                            cancelled,
+                        )
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(_) => {
+                    self.health_monitor.record_success();
+                    return Ok(());
+                }
+                Err(error)
+                    if cancelled.is_cancelled() || tokio::time::Instant::now() >= deadline =>
+                {
+                    return Err(error);
+                }
+                Err(error) => tracing::debug!(%error, "storage recovery agent is not ready"),
+            }
+            tokio::select! {
+                () = cancelled.cancelled() => {},
+                () = tokio::time::sleep(Duration::from_millis(25)) => {},
+            }
+        }
     }
 
     /// Boots the VM end-to-end (create if needed, start with retries, wait for
