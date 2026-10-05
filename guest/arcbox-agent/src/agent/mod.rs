@@ -6,7 +6,7 @@
 //! The actual implementation lives in [`linux`] (compiled on Linux guests) or
 //! [`stub`] (a no-op kept buildable on non-Linux hosts for development).
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use arcbox_constants::cmdline::MACHINE_ROOTFS_KEY;
 
 pub mod ensure_runtime;
@@ -44,22 +44,26 @@ pub enum Guest {
     /// the internet), and its reconcilers would rewrite the machine's own
     /// NAT table the moment the user installed dockerd there.
     DistroMachine,
+    /// Isolated offline storage diagnostics; no runtime services may start.
+    StorageRecovery,
 }
 
 impl Guest {
     /// Reads the guest off the kernel command line, where the machine boot
     /// shim's contract key (`arcbox.machine_rootfs=`) marks a distro machine.
-    pub fn detect() -> Self {
-        match std::fs::read_to_string("/proc/cmdline") {
-            Ok(cmdline) => Self::from_cmdline(&cmdline),
-            Err(e) => {
-                tracing::warn!(error = %e, "cannot read the kernel cmdline; serving as the System VM");
-                Self::SystemVm
-            }
-        }
+    pub fn detect() -> Result<Self> {
+        let cmdline = std::fs::read_to_string("/proc/cmdline")
+            .context("read guest mode from kernel command line")?;
+        Ok(Self::from_cmdline(&cmdline))
     }
 
     fn from_cmdline(cmdline: &str) -> Self {
+        if cmdline
+            .split_whitespace()
+            .any(|token| token == "arcbox.storage_recovery=1")
+        {
+            return Self::StorageRecovery;
+        }
         if cmdline
             .split_whitespace()
             .any(|token| token.starts_with(MACHINE_ROOTFS_KEY))
@@ -80,6 +84,26 @@ pub async fn run(guest: Guest) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_requires_the_exact_explicit_cmdline_token() {
+        assert_eq!(
+            Guest::from_cmdline("arcbox.storage_recovery=1"),
+            Guest::StorageRecovery
+        );
+        assert_eq!(
+            Guest::from_cmdline("arcbox.storage_recovery=0"),
+            Guest::SystemVm
+        );
+        assert_eq!(
+            Guest::from_cmdline("arcbox.storage_recovery=10"),
+            Guest::SystemVm
+        );
+        assert_eq!(
+            Guest::from_cmdline("arcbox.storage_recovery=1 arcbox.machine_rootfs=/dev/vdb"),
+            Guest::StorageRecovery
+        );
+    }
 
     /// Helper to parse Docker JSON log line for testing.
     fn parse_docker_log_line(line: &str, stdout: bool, stderr: bool) -> Option<String> {

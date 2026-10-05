@@ -40,7 +40,7 @@ impl Agent {
                     // its periodic polls, and each request is logged on its own.
                     tracing::debug!("Accepted connection from {:?}", peer_addr);
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream).await {
+                        if let Err(e) = handle_connection(stream, guest).await {
                             // A routine daemon-side teardown (host closes the
                             // socketpair while the agent is writing a response)
                             // surfaces as BrokenPipe / ConnectionReset /

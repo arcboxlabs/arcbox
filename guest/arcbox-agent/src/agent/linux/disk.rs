@@ -103,6 +103,7 @@ fn trim_guest(guest: Guest) -> Result<Trimmed, String> {
     match guest {
         Guest::SystemVm => trim_mounts(&[BTRFS_TEMP_MOUNT, METADATA_MOUNT]),
         Guest::DistroMachine => trim_machine_data_disk(),
+        Guest::StorageRecovery => Err("disk trimming is forbidden in storage recovery mode".into()),
     }
 }
 

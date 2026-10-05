@@ -10,6 +10,7 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use crate::agent::Guest;
 use arcbox_connect::v1::AgentPingResponse as PingResponse;
 use buffa::Message as _;
 
@@ -37,7 +38,7 @@ enum RequestResult {
 /// Handles a single vsock connection.
 ///
 /// Reads RPC requests, processes them, and writes responses.
-pub(super) async fn handle_connection<S>(mut stream: S) -> Result<()>
+pub(super) async fn handle_connection<S>(mut stream: S, guest: Guest) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -66,6 +67,19 @@ where
                 msg_type,
                 payload.len()
             );
+        }
+
+        if guest == Guest::StorageRecovery && !allowed_in_recovery(msg_type) {
+            write_response(
+                &mut stream,
+                &RpcResponse::Error(ErrorResponse::new(
+                    403,
+                    "storage recovery mode only permits diagnostic control requests",
+                )),
+                &trace_id,
+            )
+            .await?;
+            continue;
         }
 
         // Sandbox requests are handled separately — they bypass the normal
@@ -118,7 +132,7 @@ where
         // Parse and handle the request.
         let result = match parse_request(msg_type, &payload) {
             Ok(RpcRequest::WatchReadiness(req)) => {
-                handle_watch_readiness(&mut stream, req, &trace_id).await?;
+                handle_watch_readiness(&mut stream, req, &trace_id, guest).await?;
                 continue;
             }
             Ok(RpcRequest::WatchMemoryPressure(req)) => {
@@ -134,7 +148,7 @@ where
                 super::storage_health::watch(&mut stream, &trace_id).await?;
                 return Ok(());
             }
-            Ok(request) => handle_request(request).await,
+            Ok(request) => handle_request(request, guest).await,
             Err(e) => {
                 tracing::warn!(trace_id = %trace_id, "Failed to parse request: {}", e);
                 RequestResult::Single(RpcResponse::Error(ErrorResponse::new(
@@ -154,10 +168,22 @@ where
     }
 }
 
+fn allowed_in_recovery(kind: crate::rpc::MessageType) -> bool {
+    use crate::rpc::MessageType;
+    matches!(
+        kind,
+        MessageType::PingRequest
+            | MessageType::GetSystemInfoRequest
+            | MessageType::ShutdownRequest
+            | MessageType::WatchReadinessRequest
+            | MessageType::StorageCheckRequest
+    )
+}
+
 /// Handles a single RPC request.
-async fn handle_request(request: RpcRequest) -> RequestResult {
+async fn handle_request(request: RpcRequest, guest: Guest) -> RequestResult {
     match request {
-        RpcRequest::Ping(req) => RequestResult::Single(handle_ping(req)),
+        RpcRequest::Ping(req) => RequestResult::Single(handle_ping(req, guest)),
         RpcRequest::GetSystemInfo => RequestResult::Single(handle_get_system_info().await),
         RpcRequest::EnsureRuntime(req) => RequestResult::Single(handle_ensure_runtime(req).await),
         RpcRequest::RuntimeStatus(req) => RequestResult::Single(handle_runtime_status(req).await),
@@ -177,19 +203,16 @@ async fn handle_request(request: RpcRequest) -> RequestResult {
         RpcRequest::KubernetesLoadBalancers(req) => {
             RequestResult::Single(handle_kubernetes_load_balancers(req).await)
         }
-        RpcRequest::Shutdown(req) => RequestResult::Single(handle_shutdown(req)),
+        RpcRequest::Shutdown(req) => RequestResult::Single(handle_shutdown(req, guest)),
         RpcRequest::MmapReadFile(req) => RequestResult::Single(handle_mmap_read_file(req)),
-        RpcRequest::DiskTrim(_) => {
-            RequestResult::Single(handle_disk_trim(crate::agent::Guest::detect()).await)
-        }
+        RpcRequest::DiskTrim(_) => RequestResult::Single(handle_disk_trim(guest).await),
         RpcRequest::ContainerFsPaths(req) => {
             RequestResult::Single(handle_container_fs_paths(req).await)
         }
         RpcRequest::ImageFsPaths(req) => RequestResult::Single(handle_image_fs_paths(req).await),
         RpcRequest::EnsureNfsExport(_) => RequestResult::Single(handle_ensure_nfs_export().await),
         RpcRequest::EnsureMachineExport(req) => RequestResult::Single(
-            super::machine_export::handle_ensure_machine_export(req, crate::agent::Guest::detect())
-                .await,
+            super::machine_export::handle_ensure_machine_export(req, guest).await,
         ),
         RpcRequest::KillAgent => RequestResult::Single(handle_kill_agent()),
         RpcRequest::WatchReadiness(_) => unreachable!("watch readiness is streaming"),
@@ -205,12 +228,26 @@ async fn handle_watch_readiness<S>(
     stream: &mut S,
     req: arcbox_connect::v1::WatchReadinessRequest,
     trace_id: &str,
+    guest: Guest,
 ) -> Result<()>
 where
     S: AsyncWrite + Unpin,
 {
     use arcbox_connect::v1::ReadinessEvent;
     use arcbox_connect::v1::readiness_event::Kind;
+
+    if guest == Guest::StorageRecovery && req.start_runtime_if_needed {
+        write_response(
+            stream,
+            &RpcResponse::Error(ErrorResponse::new(
+                403,
+                "storage recovery mode cannot start the runtime",
+            )),
+            trace_id,
+        )
+        .await?;
+        return Ok(());
+    }
 
     write_readiness_event(
         stream,
@@ -266,7 +303,7 @@ where
 /// shutdown sequence in a background OS thread (not a tokio task) because
 /// [`crate::shutdown::poweroff`] calls blocking libc functions and never
 /// returns.
-fn handle_shutdown(req: arcbox_connect::v1::ShutdownRequest) -> RpcResponse {
+fn handle_shutdown(req: arcbox_connect::v1::ShutdownRequest, guest: Guest) -> RpcResponse {
     let grace = if req.timeout_seconds == 0 {
         Duration::from_secs(u64::from(
             arcbox_constants::timeouts::GUEST_SHUTDOWN_GRACE_SECS,
@@ -275,7 +312,6 @@ fn handle_shutdown(req: arcbox_connect::v1::ShutdownRequest) -> RpcResponse {
         Duration::from_secs(u64::from(req.timeout_seconds))
     };
     tracing::info!(grace_secs = grace.as_secs(), "Shutdown requested by host");
-    let guest = crate::agent::Guest::detect();
     std::thread::spawn(move || {
         // Brief delay so the response frame flushes over vsock.
         std::thread::sleep(Duration::from_millis(100));
@@ -495,9 +531,11 @@ fn handle_mmap_read_file(req: arcbox_connect::v1::MmapReadFileRequest) -> RpcRes
 }
 
 /// Handles a Ping request.
-fn handle_ping(req: arcbox_connect::v1::AgentPingRequest) -> RpcResponse {
+fn handle_ping(req: arcbox_connect::v1::AgentPingRequest, guest: Guest) -> RpcResponse {
     tracing::debug!("Ping request: {:?}", req.message);
-    if let Err(reason) = super::cmdline::validate_runtime_boot_contract() {
+    if guest == Guest::SystemVm
+        && let Err(reason) = super::cmdline::validate_runtime_boot_contract()
+    {
         return RpcResponse::Ping(PingResponse {
             message: format!("incompatible host boot contract: {reason}"),
             version: AGENT_VERSION.to_string(),
@@ -516,4 +554,70 @@ fn handle_ping(req: arcbox_connect::v1::AgentPingRequest) -> RpcResponse {
         protocol_version: arcbox_constants::wire::AGENT_PROTOCOL_VERSION,
         ..Default::default()
     })
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use crate::rpc::MessageType;
+
+    #[tokio::test]
+    async fn recovery_blocks_mutation_requests_before_parsing_or_dispatch() {
+        let (mut client, server) = tokio::io::duplex(4096);
+        let dispatcher = tokio::spawn(handle_connection(server, Guest::StorageRecovery));
+        for kind in [
+            MessageType::EnsureRuntimeRequest,
+            MessageType::MachineExecRequest,
+            MessageType::DebugExecRequest,
+            MessageType::DiskTrimRequest,
+            MessageType::SandboxCreateRequest,
+            MessageType::EnsureNfsExportRequest,
+        ] {
+            write_message(&mut client, kind, "recovery-boundary", &[0xff])
+                .await
+                .unwrap();
+            let (kind, trace, payload) = read_message(&mut client).await.unwrap();
+            assert_eq!(kind, MessageType::Error);
+            assert_eq!(trace, "recovery-boundary");
+            let error = ErrorResponse::decode(&payload).unwrap();
+            assert_eq!(error.code, 403);
+        }
+        drop(client);
+        dispatcher.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_readiness_does_not_require_docker_and_refuses_runtime_start() {
+        let (mut client, server) = tokio::io::duplex(4096);
+        let dispatcher = tokio::spawn(handle_connection(server, Guest::StorageRecovery));
+        for start_runtime_if_needed in [false, true] {
+            let request = arcbox_connect::v1::WatchReadinessRequest {
+                start_runtime_if_needed,
+                ..Default::default()
+            };
+            write_message(
+                &mut client,
+                MessageType::WatchReadinessRequest,
+                "ready",
+                &request.encode_to_vec(),
+            )
+            .await
+            .unwrap();
+            let (kind, _, payload) = read_message(&mut client).await.unwrap();
+            if start_runtime_if_needed {
+                assert_eq!(kind, MessageType::Error);
+                assert_eq!(ErrorResponse::decode(&payload).unwrap().code, 403);
+            } else {
+                assert_eq!(kind, MessageType::ReadinessEvent);
+                assert_eq!(
+                    arcbox_connect::v1::ReadinessEvent::decode_from_slice(&payload)
+                        .unwrap()
+                        .kind,
+                    arcbox_connect::v1::readiness_event::Kind::AgentReady
+                );
+            }
+        }
+        drop(client);
+        dispatcher.await.unwrap().unwrap();
+    }
 }

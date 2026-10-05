@@ -124,6 +124,10 @@ enum Mode {
     /// `switch_root`. Brings networking up and exits; the distro init owns
     /// everything else.
     MachineInit,
+    /// Isolated storage diagnostics entered only through the recovery launcher.
+    StorageRecovery,
+    /// Exposes the marker that the recovery launcher verifies before execution.
+    StorageRecoveryCapability,
     /// Long-running agent (default / `serve`): vsock RPC listener and background
     /// services. busybox init respawns it if it exits.
     Serve,
@@ -131,19 +135,39 @@ enum Mode {
 
 /// Selects the startup [`Mode`] from `args` (typically `std::env::args()`).
 ///
-/// `arcbox-agent init` runs one-shot system initialization, `arcbox-agent
-/// machine-init` the distro-machine variant; anything else — no subcommand or
-/// `serve` — runs the long-running agent.
-fn parse_mode(args: &[String]) -> Mode {
-    match args.get(1).map(String::as_str) {
+/// Unknown commands fail before initialization. The recovery launcher must
+/// never turn an unsupported diagnostic command into a normal runtime boot.
+fn parse_mode(args: &[String]) -> Result<Mode> {
+    Ok(match args.get(1).map(String::as_str) {
         Some("init") => Mode::Init,
         Some("machine-init") => Mode::MachineInit,
-        _ => Mode::Serve,
+        Some("storage-recovery") => Mode::StorageRecovery,
+        Some("storage-recovery-capability") => Mode::StorageRecoveryCapability,
+        None | Some("serve") => Mode::Serve,
+        Some(command) => anyhow::bail!("unknown agent command: {command}"),
+    })
+}
+
+fn validate_guest_mode(mode: Mode, guest: agent::Guest) -> Result<()> {
+    if (mode == Mode::StorageRecovery) != (guest == agent::Guest::StorageRecovery) {
+        anyhow::bail!(
+            "storage recovery requires the storage-recovery command and arcbox.storage_recovery=1"
+        );
     }
+    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let mode = parse_mode(&std::env::args().collect::<Vec<_>>())?;
+    if mode == Mode::StorageRecoveryCapability {
+        // The trusted rootfs launcher checks this marker in the binary before
+        // execution. Older agents accept unknown commands as normal serving.
+        println!("arcbox-storage-recovery-v1");
+        return Ok(());
+    }
+    let guest = agent::Guest::detect()?;
+    validate_guest_mode(mode, guest)?;
     let is_pid1 = std::process::id() == 1;
 
     // Initialize logging early so init_system() has tracing output.
@@ -222,10 +246,18 @@ async fn main() -> Result<()> {
         None
     };
 
+    if mode == Mode::StorageRecovery {
+        init::init_recovery_system();
+        init::verify_critical_mounts().map_err(anyhow::Error::msg)?;
+        // Tokio owns every recovery child. A waitpid(-1) reaper can consume
+        // a checker's exit status before its Child::wait observes the result.
+        return agent::run(guest).await;
+    }
+
     // `arcbox-agent init` is the one-shot system-init entry that busybox init's
     // sysinit (rcS) runs before respawning the long-running agent: it performs the
     // system initialization and exits without starting the serving stack.
-    if parse_mode(&std::env::args().collect::<Vec<_>>()) == Mode::MachineInit {
+    if mode == Mode::MachineInit {
         tracing::info!("Running one-shot machine initialization");
         // No critical-mount verification: the machine root is the distro's
         // own writable overlay, not the tmpfs-staged EROFS layout.
@@ -233,7 +265,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    if parse_mode(&std::env::args().collect::<Vec<_>>()) == Mode::Init {
+    if mode == Mode::Init {
         tracing::info!("Running one-shot system initialization");
         init::init_system();
         // Fail fast (non-zero exit) if a writable layer the agent depends on did
@@ -259,9 +291,8 @@ async fn main() -> Result<()> {
         supervisor::spawn_reaper();
     }
 
-    let guest = agent::Guest::detect();
     tracing::info!(?guest, "ArcBox agent starting...");
-    if guest == agent::Guest::DistroMachine {
+    if guest != agent::Guest::SystemVm {
         return agent::run(guest).await;
     }
 
@@ -346,7 +377,8 @@ fn uplink_interface() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Mode, parse_mode};
+    use super::{Mode, parse_mode, validate_guest_mode};
+    use crate::agent::Guest;
 
     fn argv(extra: &[&str]) -> Vec<String> {
         std::iter::once("arcbox-agent")
@@ -357,26 +389,45 @@ mod tests {
 
     #[test]
     fn init_subcommand_selects_init_mode() {
-        assert_eq!(parse_mode(&argv(&["init"])), Mode::Init);
+        assert_eq!(parse_mode(&argv(&["init"])).unwrap(), Mode::Init);
     }
 
     #[test]
     fn machine_init_subcommand_selects_machine_init_mode() {
-        assert_eq!(parse_mode(&argv(&["machine-init"])), Mode::MachineInit);
+        assert_eq!(
+            parse_mode(&argv(&["machine-init"])).unwrap(),
+            Mode::MachineInit
+        );
     }
 
     #[test]
     fn no_subcommand_defaults_to_serve() {
-        assert_eq!(parse_mode(&argv(&[])), Mode::Serve);
+        assert_eq!(parse_mode(&argv(&[])).unwrap(), Mode::Serve);
     }
 
     #[test]
     fn explicit_serve_subcommand_selects_serve() {
-        assert_eq!(parse_mode(&argv(&["serve"])), Mode::Serve);
+        assert_eq!(parse_mode(&argv(&["serve"])).unwrap(), Mode::Serve);
     }
 
     #[test]
-    fn unknown_subcommand_defaults_to_serve() {
-        assert_eq!(parse_mode(&argv(&["wat"])), Mode::Serve);
+    fn unknown_subcommand_cannot_start_the_runtime() {
+        assert!(parse_mode(&argv(&["wat"])).is_err());
+    }
+
+    #[test]
+    fn recovery_requires_both_the_command_and_kernel_flag() {
+        assert_eq!(
+            parse_mode(&argv(&["storage-recovery"])).unwrap(),
+            Mode::StorageRecovery
+        );
+        assert_eq!(
+            parse_mode(&argv(&["storage-recovery-capability"])).unwrap(),
+            Mode::StorageRecoveryCapability
+        );
+        assert!(validate_guest_mode(Mode::StorageRecovery, Guest::StorageRecovery).is_ok());
+        assert!(validate_guest_mode(Mode::StorageRecovery, Guest::SystemVm).is_err());
+        assert!(validate_guest_mode(Mode::Serve, Guest::StorageRecovery).is_err());
+        assert!(validate_guest_mode(Mode::Init, Guest::StorageRecovery).is_err());
     }
 }

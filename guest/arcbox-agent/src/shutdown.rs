@@ -45,7 +45,7 @@ const fn shutdown_strategy(pid: u32, guest: Guest) -> ShutdownStrategy {
     match guest {
         _ if pid == 1 => ShutdownStrategy::DirectReboot,
         Guest::DistroMachine => ShutdownStrategy::DistroInit,
-        Guest::SystemVm => ShutdownStrategy::SignalInit,
+        Guest::SystemVm | Guest::StorageRecovery => ShutdownStrategy::SignalInit,
     }
 }
 

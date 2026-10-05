@@ -25,6 +25,16 @@ mod platform {
     use nix::sys::resource::{Resource, setrlimit};
     use wait_timeout::ChildExt;
 
+    /// Prepares only volatile scratch space for the offline diagnostic agent.
+    pub fn init_recovery_system() {
+        for target in ["/tmp", "/run", "/var", "/etc"] {
+            mount_tmpfs(target);
+        }
+        mount_devpts();
+        mount_shm();
+        tracing::info!("storage recovery initialization complete; data devices remain unmounted");
+    }
+
     /// Runs one-time system initialization after trampoline hands off to agent.
     ///
     /// Trampoline already mounted: /proc, /sys, /dev, /arcbox (VirtioFS).
@@ -1005,7 +1015,12 @@ exit 0
 #[cfg(target_os = "linux")]
 pub use platform::{detect_bridge_interface, detect_primary_interface};
 #[cfg(target_os = "linux")]
-pub use platform::{init_system, machine_init};
+pub use platform::{init_recovery_system, init_system, machine_init};
+
+#[cfg(not(target_os = "linux"))]
+pub fn init_recovery_system() {
+    tracing::warn!("init_recovery_system is only functional on Linux");
+}
 
 #[cfg(not(target_os = "linux"))]
 pub fn init_system() {

@@ -27,6 +27,12 @@ When running as PID 1, the agent also performs basic system initialisation
 
 `WatchStorageHealth` sends an immediate snapshot and samples mount flags every 5 seconds. The watch sends changed snapshots after sampling and sends a heartbeat every 30 seconds until the host disconnects. Before runtime initialization completes, a missing mount remains unknown; after a completed or failed start, the missing mount is unavailable. Mount inspection errors remain unknown. An unconfigured metadata volume reports `NOT_CONFIGURED`.
 
+## Storage Recovery
+
+The host starts an isolated recovery guest with `init=/sbin/arcbox-storage-recovery arcbox.storage_recovery=1`. The dedicated rootfs launcher verifies the `arcbox-storage-recovery-v1` marker in the trusted agent binary before executing `arcbox-agent storage-recovery`. Older rootfs bundles lack this launcher; older agents lack its marker. Both cases stop before normal initialization. The marker declares compatibility with this recovery contract; asset integrity comes from the boot asset verification.
+
+The `storage-recovery` command requires the recovery kernel flag. A recovery kernel flag also requires that explicit command. Unknown agent commands fail before initialization. The guest keeps both persistent data devices unmounted and starts no runtime services. A readiness request that would start the runtime is rejected.
+
 ## Runtime Bootstrap Role
 
 At startup, the agent detects and launches the bundled runtime stack
