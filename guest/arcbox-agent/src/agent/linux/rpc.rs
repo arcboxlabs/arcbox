@@ -130,6 +130,10 @@ where
                 super::stats::handle_watch_stats(&mut stream, req, &trace_id).await?;
                 continue;
             }
+            Ok(RpcRequest::WatchStorageHealth(_)) => {
+                super::storage_health::watch(&mut stream, &trace_id).await?;
+                return Ok(());
+            }
             Ok(request) => handle_request(request).await,
             Err(e) => {
                 tracing::warn!(trace_id = %trace_id, "Failed to parse request: {}", e);
@@ -193,6 +197,7 @@ async fn handle_request(request: RpcRequest) -> RequestResult {
             unreachable!("watch memory pressure is streaming")
         }
         RpcRequest::WatchStats(_) => unreachable!("watch stats is streaming"),
+        RpcRequest::WatchStorageHealth(_) => unreachable!("storage health is streaming"),
     }
 }
 

@@ -23,7 +23,7 @@ use arcbox_connect::v1::{
     PortBindingsChanged, PortBindingsRemoved, ReadinessEvent, RuntimeEnsureRequest,
     RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse, ShutdownRequest,
     ShutdownResponse, SystemInfo, WatchMemoryPressureRequest, WatchReadinessRequest,
-    WatchStatsRequest,
+    WatchStatsRequest, WatchStorageHealthRequest,
 };
 pub use arcbox_constants::wire::MessageType;
 
@@ -92,6 +92,7 @@ pub enum RpcRequest {
     WatchReadiness(WatchReadinessRequest),
     WatchMemoryPressure(WatchMemoryPressureRequest),
     WatchStats(WatchStatsRequest),
+    WatchStorageHealth(WatchStorageHealthRequest),
     /// Test-only: exit the agent so PID 1 (busybox init) respawns it.
     KillAgent,
 }
@@ -392,6 +393,10 @@ pub fn parse_request(msg_type: MessageType, payload: &[u8]) -> Result<RpcRequest
         MessageType::WatchStatsRequest => {
             let req = WatchStatsRequest::decode_from_slice(payload)?;
             Ok(RpcRequest::WatchStats(req))
+        }
+        MessageType::WatchStorageHealthRequest => {
+            let req = WatchStorageHealthRequest::decode_from_slice(payload)?;
+            Ok(RpcRequest::WatchStorageHealth(req))
         }
         MessageType::KillAgentRequest => Ok(RpcRequest::KillAgent),
         _ => anyhow::bail!("unexpected message type: {:?}", msg_type),

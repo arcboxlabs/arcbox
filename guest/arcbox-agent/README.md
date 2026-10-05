@@ -14,11 +14,18 @@ Current request surface includes:
 - System information
 - Ensure guest runtime stack (`containerd`/`dockerd`/`runc`) is ready
 - Runtime status
+- Read-only storage health observations
 
 Every host interface requires agent protocol version 7 or newer. The host completes protocol admission before sending any business request, including observation, sandbox, and machine session requests. A successful Ping admits only its current connection; disconnecting or reconnecting clears admission. Ping remains available to report incompatible versions during negotiation.
 
 When running as PID 1, the agent also performs basic system initialisation
 (mount filesystems, set hostname, spawn a child reaper).
+
+## Storage Health
+
+`RuntimeStatus` includes read-only observations of the Btrfs data volume and optional ext4 metadata volume. Each observation identifies the device, mount point, filesystem, and mount state. A read-only mount means writes are unavailable; the observation does not identify the cause or verify successful writes.
+
+`WatchStorageHealth` sends an immediate snapshot and samples mount flags every 5 seconds. The watch sends changed snapshots after sampling and sends a heartbeat every 30 seconds until the host disconnects. Before runtime initialization completes, a missing mount remains unknown; after a completed or failed start, the missing mount is unavailable. Mount inspection errors remain unknown. An unconfigured metadata volume reports `NOT_CONFIGURED`.
 
 ## Runtime Bootstrap Role
 

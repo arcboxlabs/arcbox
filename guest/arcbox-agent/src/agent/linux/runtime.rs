@@ -453,6 +453,7 @@ async fn collect_runtime_status() -> RuntimeStatusResponse {
         endpoint: format!("vsock:{}", docker_api_vsock_port()),
         detail,
         services,
+        storage_health: Some(super::storage_health::snapshot().await).into(),
         ..Default::default()
     }
 }
