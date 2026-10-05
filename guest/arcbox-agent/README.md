@@ -37,6 +37,10 @@ frame with the top header bit set grants the peer window, which is how a
 paused `docker attach` backs up into dockerd instead of leaving the vsock
 unread and stalling the VM.
 
+## Storage Write Probe
+
+`arcbox_agent::storage_probe::verify_writes(directory)` checks file creation, write, file and directory sync, read-back, and removal in an existing directory. The caller must verify the intended runtime mount before calling the probe. The probe creates one unique file with exclusive creation, removes only that file, and syncs the directory after removal. Write, sync, read-back, and cleanup failures propagate to the caller. The probe does not create a missing directory or establish filesystem consistency after a crash.
+
 ## Published Ports
 
 Host-side, a published port is a userspace listener on the Mac that relays

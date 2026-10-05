@@ -27,4 +27,5 @@ pub mod sandbox;
 #[cfg(any(target_os = "linux", test))]
 mod sandbox_cleanup_watch;
 pub mod stats;
+pub mod storage_probe;
 pub mod volume_icon;
