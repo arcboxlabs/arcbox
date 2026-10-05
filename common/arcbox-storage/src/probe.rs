@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
@@ -61,6 +61,14 @@ pub fn filesystem_uuid(path: &Path, role: VolumeRole) -> Result<Option<Uuid>> {
     let mut uuid = [0_u8; 16];
     file.read_exact(&mut uuid)?;
     Ok(Some(Uuid::from_bytes(uuid)))
+}
+
+pub fn write_provision_header(file: &mut File, uuid: Uuid) -> Result<()> {
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(PROVISION_MAGIC)?;
+    file.write_all(uuid.as_bytes())?;
+    file.sync_all()?;
+    Ok(())
 }
 
 /// Checks a newly created image's one-time provisioning identity.

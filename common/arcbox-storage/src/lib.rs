@@ -4,6 +4,10 @@
 //! consume the durable, single-use formatting authority.
 
 mod probe;
+mod provision;
+
+#[cfg(test)]
+mod tests;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use probe::{ImageIdentity, filesystem_uuid, verify_new_volume};
+pub use provision::{prepare_pair, verify_pair};
 
 /// Kernel command-line key naming the manifest on the host's VirtioFS share.
 pub const MANIFEST_CMDLINE_KEY: &str = "arcbox.storage_manifest=";
@@ -218,6 +223,40 @@ impl StorageManifest {
             }
         }
     }
+}
+
+/// Formats an authorized new volume exactly once, or verifies an existing one.
+///
+/// The caller must serialize manifest mutations across both volumes. The
+/// formatter must use the supplied UUID. After an interrupted format, only an
+/// already recognizable matching filesystem can advance to `Ready`.
+///
+/// # Errors
+/// Returns an error without invoking `format` for unknown or mismatched disks.
+pub fn ensure_filesystem(
+    manifest_path: &Path,
+    role: VolumeRole,
+    device: &Path,
+    format: impl FnOnce(Uuid) -> Result<()>,
+) -> Result<()> {
+    let mut manifest = StorageManifest::load(manifest_path)?;
+    manifest.verify_volume(role, device)?;
+    if manifest.volume(role).state == VolumeState::Ready {
+        return Ok(());
+    }
+    if manifest.volume(role).state == VolumeState::New {
+        if role == VolumeRole::Metadata && manifest.layout == StorageLayout::LegacyMigration {
+            return Err(Error::RecoveryRequired(
+                "legacy metadata has not been verified".into(),
+            ));
+        }
+        manifest.volume_mut(role).state = VolumeState::Formatting;
+        manifest.save(manifest_path)?;
+        format(manifest.volume(role).filesystem_uuid)?;
+        manifest.verify_volume(role, device)?;
+    }
+    manifest.volume_mut(role).state = VolumeState::Ready;
+    manifest.save(manifest_path)
 }
 
 /// Returns the storage manifest path associated with a data image.
