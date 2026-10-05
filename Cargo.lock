@@ -1157,6 +1157,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "arcbox-storage"
+version = "0.8.2"
+dependencies = [
+ "arcbox-atomic-file",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "arcbox-tap-net"
 version = "0.8.2"
 dependencies = [
