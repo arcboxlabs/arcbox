@@ -1128,4 +1128,43 @@ message SetupStatus {
     // so streaming clients learn the cause instead of seeing a bare
     // disconnect when the daemon exits.
     string error = 8;
+    // Independent of startup phase and daemon liveness. Missing when the
+    // guest is stopped, observation disconnected, or the agent is too old.
+    StorageHealth storage_health = 9;
+    // Current or most recent recovery operation, including terminal results.
+    StorageRecoveryProgress storage_recovery = 10;
+}
+
+// Explicitly starts a storage check or recovery. Both actions stop workloads.
+message RecoverStorageRequest {
+    enum Action {
+        ACTION_UNSPECIFIED = 0;
+        // Preserve and check the disks. Leave the System VM stopped.
+        CHECK_ONLY = 1;
+        // Restart only after offline checks pass, then verify runtime writes.
+        RECOVER = 2;
+    }
+    Action action = 1;
+}
+
+// Progress of one daemon-owned recovery operation.
+message StorageRecoveryProgress {
+    enum Phase {
+        PHASE_UNSPECIFIED = 0;
+        STOPPING = 1;
+        PRESERVING = 2;
+        CHECKING = 3;
+        RESTARTING = 4;
+        VERIFYING = 5;
+        COMPLETE = 6;
+        FAILED = 7;
+    }
+    Phase phase = 1;
+    string message = 2;
+    // Host directory containing preserved disks and diagnostic reports.
+    string recovery_directory = 3;
+    // Stable across reconnects. A terminal result applies only to this ID.
+    string operation_id = 4;
+    // Remains true after CHECK_ONLY, failure, or interruption. Only verified recovery clears it.
+    bool storage_protected = 5;
 }

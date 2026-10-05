@@ -74,6 +74,108 @@ pub struct ResourceLimits {
     #[prost(int64, tag = "6")]
     pub memory_swap: i64,
 }
+/// An observation of the System VM's persistent storage. Absence means the
+/// peer does not report storage health, or the current guest is not observable.
+/// This message does not report daemon liveness or change startup readiness.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct StorageHealth {
+    #[prost(message, repeated, tag = "1")]
+    pub volumes: ::prost::alloc::vec::Vec<StorageVolumeHealth>,
+    /// Guest wall-clock observation time. Zero means the clock is not available.
+    #[prost(uint64, tag = "2")]
+    pub observed_at_unix_ms: u64,
+}
+/// Mount availability and mode for one persistent System VM volume.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StorageVolumeHealth {
+    #[prost(enumeration = "storage_volume_health::Role", tag = "1")]
+    pub role: i32,
+    #[prost(enumeration = "storage_volume_health::State", tag = "2")]
+    pub state: i32,
+    #[prost(string, tag = "3")]
+    pub device: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub mount_point: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub filesystem: ::prost::alloc::string::String,
+    /// Observation error or explanation. Never parse this field for state.
+    #[prost(string, tag = "6")]
+    pub detail: ::prost::alloc::string::String,
+}
+/// Nested message and enum types in `StorageVolumeHealth`.
+pub mod storage_volume_health {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum Role {
+        Unspecified = 0,
+        Data = 1,
+        Metadata = 2,
+    }
+    impl Role {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unspecified => "ROLE_UNSPECIFIED",
+                Self::Data => "DATA",
+                Self::Metadata => "METADATA",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "ROLE_UNSPECIFIED" => Some(Self::Unspecified),
+                "DATA" => Some(Self::Data),
+                "METADATA" => Some(Self::Metadata),
+                _ => None,
+            }
+        }
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum State {
+        /// Observation failed or the peer sent a state the reader does not know.
+        Unspecified = 0,
+        /// The expected filesystem is mounted read-write. This is not a
+        /// successful write/fsync test or a guarantee that future I/O succeeds.
+        MountedReadWrite = 1,
+        /// The expected filesystem is mounted read-only. The mode alone does
+        /// not identify whether the kernel forced it read-only after an error.
+        ReadOnly = 2,
+        /// A configured volume is missing, unmounted, or mounted incorrectly.
+        Unavailable = 3,
+        /// The optional metadata volume is absent from this guest's layout.
+        NotConfigured = 4,
+    }
+    impl State {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unspecified => "STATE_UNSPECIFIED",
+                Self::MountedReadWrite => "MOUNTED_READ_WRITE",
+                Self::ReadOnly => "READ_ONLY",
+                Self::Unavailable => "UNAVAILABLE",
+                Self::NotConfigured => "NOT_CONFIGURED",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "STATE_UNSPECIFIED" => Some(Self::Unspecified),
+                "MOUNTED_READ_WRITE" => Some(Self::MountedReadWrite),
+                "READ_ONLY" => Some(Self::ReadOnly),
+                "UNAVAILABLE" => Some(Self::Unavailable),
+                "NOT_CONFIGURED" => Some(Self::NotConfigured),
+                _ => None,
+            }
+        }
+    }
+}
 /// Request to create a network.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateNetworkRequest {
@@ -1242,7 +1344,7 @@ pub struct TerminalSize {
 /// Daemon startup progress and infrastructure health.
 /// Allows the desktop app (or any gRPC client) to observe daemon readiness
 /// without managing its lifecycle.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SetupStatus {
     /// Current daemon phase.
     #[prost(enumeration = "setup_status::Phase", tag = "1")]
@@ -1276,6 +1378,13 @@ pub struct SetupStatus {
     /// disconnect when the daemon exits.
     #[prost(string, tag = "8")]
     pub error: ::prost::alloc::string::String,
+    /// Independent of startup phase and daemon liveness. Missing when the
+    /// guest is stopped, observation disconnected, or the agent is too old.
+    #[prost(message, optional, tag = "9")]
+    pub storage_health: ::core::option::Option<StorageHealth>,
+    /// Current or most recent recovery operation, including terminal results.
+    #[prost(message, optional, tag = "10")]
+    pub storage_recovery: ::core::option::Option<StorageRecoveryProgress>,
 }
 /// Nested message and enum types in `SetupStatus`.
 pub mod setup_status {
@@ -1359,6 +1468,110 @@ pub mod setup_status {
                 "DEGRADED" => Some(Self::Degraded),
                 "DOWNLOADING_ASSETS" => Some(Self::DownloadingAssets),
                 "CLEANING_UP" => Some(Self::CleaningUp),
+                "FAILED" => Some(Self::Failed),
+                _ => None,
+            }
+        }
+    }
+}
+/// Explicitly starts a storage check or recovery. Both actions stop workloads.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RecoverStorageRequest {
+    #[prost(enumeration = "recover_storage_request::Action", tag = "1")]
+    pub action: i32,
+}
+/// Nested message and enum types in `RecoverStorageRequest`.
+pub mod recover_storage_request {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum Action {
+        Unspecified = 0,
+        /// Preserve and check the disks. Leave the System VM stopped.
+        CheckOnly = 1,
+        /// Restart only after offline checks pass, then verify runtime writes.
+        Recover = 2,
+    }
+    impl Action {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unspecified => "ACTION_UNSPECIFIED",
+                Self::CheckOnly => "CHECK_ONLY",
+                Self::Recover => "RECOVER",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "ACTION_UNSPECIFIED" => Some(Self::Unspecified),
+                "CHECK_ONLY" => Some(Self::CheckOnly),
+                "RECOVER" => Some(Self::Recover),
+                _ => None,
+            }
+        }
+    }
+}
+/// Progress of one daemon-owned recovery operation.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StorageRecoveryProgress {
+    #[prost(enumeration = "storage_recovery_progress::Phase", tag = "1")]
+    pub phase: i32,
+    #[prost(string, tag = "2")]
+    pub message: ::prost::alloc::string::String,
+    /// Host directory containing preserved disks and diagnostic reports.
+    #[prost(string, tag = "3")]
+    pub recovery_directory: ::prost::alloc::string::String,
+    /// Stable across reconnects. A terminal result applies only to this ID.
+    #[prost(string, tag = "4")]
+    pub operation_id: ::prost::alloc::string::String,
+    /// Remains true after CHECK_ONLY, failure, or interruption. Only verified recovery clears it.
+    #[prost(bool, tag = "5")]
+    pub storage_protected: bool,
+}
+/// Nested message and enum types in `StorageRecoveryProgress`.
+pub mod storage_recovery_progress {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum Phase {
+        Unspecified = 0,
+        Stopping = 1,
+        Preserving = 2,
+        Checking = 3,
+        Restarting = 4,
+        Verifying = 5,
+        Complete = 6,
+        Failed = 7,
+    }
+    impl Phase {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unspecified => "PHASE_UNSPECIFIED",
+                Self::Stopping => "STOPPING",
+                Self::Preserving => "PRESERVING",
+                Self::Checking => "CHECKING",
+                Self::Restarting => "RESTARTING",
+                Self::Verifying => "VERIFYING",
+                Self::Complete => "COMPLETE",
+                Self::Failed => "FAILED",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "PHASE_UNSPECIFIED" => Some(Self::Unspecified),
+                "STOPPING" => Some(Self::Stopping),
+                "PRESERVING" => Some(Self::Preserving),
+                "CHECKING" => Some(Self::Checking),
+                "RESTARTING" => Some(Self::Restarting),
+                "VERIFYING" => Some(Self::Verifying),
+                "COMPLETE" => Some(Self::Complete),
                 "FAILED" => Some(Self::Failed),
                 _ => None,
             }
@@ -3499,7 +3712,16 @@ pub struct RuntimeStatusResponse {
     /// Per-service status entries for fine-grained observability.
     #[prost(message, repeated, tag = "5")]
     pub services: ::prost::alloc::vec::Vec<ServiceStatus>,
+    /// Present when this agent supports WatchStorageHealth. Missing on older
+    /// agents; missing must not be interpreted as healthy storage.
+    #[prost(message, optional, tag = "6")]
+    pub storage_health: ::core::option::Option<StorageHealth>,
 }
+/// The agent sends an immediate snapshot, then changes and a 30-second
+/// heartbeat. Mount flags are sampled every 5 seconds until the peer closes.
+/// The watcher performs no writes and holds no host VM activity lease.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WatchStorageHealthRequest {}
 /// Request to trim the guest's data filesystems now: the guest issues a
 /// discard for every free block so the host punches it out of the sparse
 /// image. The System VM trims its Btrfs data and ext4 metadata volumes; a
@@ -4009,6 +4231,60 @@ pub struct MachineTcpConnectRequest {
     /// As MachineExecRequest.output_window; required.
     #[prost(uint32, tag = "3")]
     pub output_window: u32,
+}
+/// Controlled storage checks on the host-to-guest control channel.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StorageCheckRequest {
+    #[prost(enumeration = "storage_check_request::Action", tag = "1")]
+    pub action: i32,
+}
+/// Nested message and enum types in `StorageCheckRequest`.
+pub mod storage_check_request {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum Action {
+        Unspecified = 0,
+        OfflineCheck = 1,
+        VerifyWrites = 2,
+    }
+    impl Action {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unspecified => "UNSPECIFIED",
+                Self::OfflineCheck => "OFFLINE_CHECK",
+                Self::VerifyWrites => "VERIFY_WRITES",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "UNSPECIFIED" => Some(Self::Unspecified),
+                "OFFLINE_CHECK" => Some(Self::OfflineCheck),
+                "VERIFY_WRITES" => Some(Self::VerifyWrites),
+                _ => None,
+            }
+        }
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StorageCheckResult {
+    #[prost(enumeration = "storage_volume_health::Role", tag = "1")]
+    pub role: i32,
+    #[prost(bool, tag = "2")]
+    pub passed: bool,
+    #[prost(string, tag = "3")]
+    pub detail: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct StorageCheckResponse {
+    #[prost(bool, tag = "1")]
+    pub passed: bool,
+    #[prost(message, repeated, tag = "2")]
+    pub checks: ::prost::alloc::vec::Vec<StorageCheckResult>,
 }
 /// Transport protocol of a forwarded sandbox port.
 ///

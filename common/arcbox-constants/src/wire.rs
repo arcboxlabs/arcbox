@@ -38,14 +38,18 @@
 /// (`ports::NFS_NFSD_RELAY_PORT`) relays carry the same `HalfCloseStream`
 /// frames instead of raw bytes, for the same reason. A v5 agent would feed
 /// the frame headers to k3s and nfsd.
-pub const AGENT_PROTOCOL_VERSION: u32 = 6;
+///
+/// v7: adds persistent storage observations and controlled storage checks.
+/// All VM sessions require v7. Recovery boots require the dedicated recovery
+/// init entry and read-only disk attachments.
+pub const AGENT_PROTOCOL_VERSION: u32 = 7;
 
 /// Oldest agent protocol version this host still accepts.
 ///
 /// Agents reporting less (including `0` — agents that predate the
 /// handshake field) are rejected at boot with an actionable error
 /// instead of silently misbehaving under field skew.
-pub const MIN_AGENT_PROTOCOL_VERSION: u32 = 6;
+pub const MIN_AGENT_PROTOCOL_VERSION: u32 = 7;
 
 /// Window each sandbox streaming RPC opens with.
 ///
@@ -112,6 +116,10 @@ pub enum MessageType {
     /// when the `~/ArcBox` mount is enabled; a `--no-mount-nfs` daemon never
     /// sends it, so the guest runs no nfsd.
     EnsureNfsExportRequest = 0x0013,
+    /// Watches System VM persistent volume mount availability and mode.
+    WatchStorageHealthRequest = 0x0014,
+    /// Controlled offline filesystem checks or online write verification.
+    StorageCheckRequest = 0x0015,
     /// Ask a distro machine's agent to serve the machine's root over NFSv3
     /// on its bridge NIC (payload: `arcbox.v1.EnsureMachineExportRequest`).
     /// Answered with [`Self::EnsureMachineExportResponse`]. The host daemon
@@ -341,6 +349,10 @@ pub enum MessageType {
     /// One machine resource sample frame (payload:
     /// `arcbox.v1.MachineStats`).
     MachineStats = 0x1010,
+    /// Snapshot on the persistent storage health watch.
+    StorageHealth = 0x1014,
+    /// Results for the two runtime storage volumes.
+    StorageCheckResponse = 0x1015,
     /// Answers [`Self::ContainerFsPathsRequest`] (payload:
     /// `arcbox.agent.ContainerFsPathsResponse`).
     ContainerFsPathsResponse = 0x1011,
@@ -509,6 +521,8 @@ impl MessageType {
             0x0011 => Some(Self::ContainerFsPathsRequest),
             0x0012 => Some(Self::ImageFsPathsRequest),
             0x0013 => Some(Self::EnsureNfsExportRequest),
+            0x0014 => Some(Self::WatchStorageHealthRequest),
+            0x0015 => Some(Self::StorageCheckRequest),
             0x00A8 => Some(Self::EnsureMachineExportRequest),
             0x0090 => Some(Self::KubernetesLoadBalancersRequest),
             // Sandbox CRUD requests.
@@ -585,6 +599,8 @@ impl MessageType {
             0x1011 => Some(Self::ContainerFsPathsResponse),
             0x1012 => Some(Self::ImageFsPathsResponse),
             0x1013 => Some(Self::EnsureNfsExportResponse),
+            0x1014 => Some(Self::StorageHealth),
+            0x1015 => Some(Self::StorageCheckResponse),
             0x10A8 => Some(Self::EnsureMachineExportResponse),
             0x1090 => Some(Self::KubernetesLoadBalancersResponse),
             0x1030 => Some(Self::PortBindingsChanged),
@@ -755,6 +771,8 @@ mod tests {
             (0x000E, MessageType::KillAgentRequest),
             (0x000F, MessageType::WatchMemoryPressureRequest),
             (0x0010, MessageType::WatchStatsRequest),
+            (0x0014, MessageType::WatchStorageHealthRequest),
+            (0x0015, MessageType::StorageCheckRequest),
             (0x0011, MessageType::ContainerFsPathsRequest),
             (0x0012, MessageType::ImageFsPathsRequest),
             (0x0013, MessageType::EnsureNfsExportRequest),
@@ -780,6 +798,8 @@ mod tests {
             (0x100B, MessageType::MmapReadFileResponse),
             (0x100C, MessageType::DiskTrimResponse),
             (0x100D, MessageType::ReadinessEvent),
+            (0x1014, MessageType::StorageHealth),
+            (0x1015, MessageType::StorageCheckResponse),
             (0x100E, MessageType::KillAgentResponse),
             (0x1030, MessageType::PortBindingsChanged),
             (0x1031, MessageType::PortBindingsRemoved),

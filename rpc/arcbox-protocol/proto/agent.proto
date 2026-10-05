@@ -56,6 +56,9 @@ service AgentService {
 
     // Streams machine-level resource samples (CPU/memory/disk/network).
     rpc WatchStats(WatchStatsRequest) returns (stream MachineStats);
+
+    // Observes persistent storage without starting services or writing files.
+    rpc WatchStorageHealth(WatchStorageHealthRequest) returns (stream StorageHealth);
 }
 
 // Ping request.
@@ -324,7 +327,15 @@ message RuntimeStatusResponse {
     string detail = 4;
     // Per-service status entries for fine-grained observability.
     repeated ServiceStatus services = 5;
+    // Present when this agent supports WatchStorageHealth. Missing on older
+    // agents; missing must not be interpreted as healthy storage.
+    StorageHealth storage_health = 6;
 }
+
+// The agent sends an immediate snapshot, then changes and a 30-second
+// heartbeat. Mount flags are sampled every 5 seconds until the peer closes.
+// The watcher performs no writes and holds no host VM activity lease.
+message WatchStorageHealthRequest {}
 
 // Request to trim the guest's data filesystems now: the guest issues a
 // discard for every free block so the host punches it out of the sparse
@@ -746,4 +757,25 @@ message MachineTcpConnectRequest {
     uint32 port = 2;
     // As MachineExecRequest.output_window; required.
     uint32 output_window = 3;
+}
+
+// Controlled storage checks on the host-to-guest control channel.
+message StorageCheckRequest {
+    enum Action {
+        UNSPECIFIED = 0;
+        OFFLINE_CHECK = 1;
+        VERIFY_WRITES = 2;
+    }
+    Action action = 1;
+}
+
+message StorageCheckResult {
+    StorageVolumeHealth.Role role = 1;
+    bool passed = 2;
+    string detail = 3;
+}
+
+message StorageCheckResponse {
+    bool passed = 1;
+    repeated StorageCheckResult checks = 2;
 }

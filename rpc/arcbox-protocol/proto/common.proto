@@ -67,3 +67,42 @@ message ResourceLimits {
     // Memory swap limit in bytes.
     int64 memory_swap = 6;
 }
+
+// An observation of the System VM's persistent storage. Absence means the
+// peer does not report storage health, or the current guest is not observable.
+// This message does not report daemon liveness or change startup readiness.
+message StorageHealth {
+    repeated StorageVolumeHealth volumes = 1;
+    // Guest wall-clock observation time. Zero means the clock is not available.
+    uint64 observed_at_unix_ms = 2;
+}
+
+// Mount availability and mode for one persistent System VM volume.
+message StorageVolumeHealth {
+    enum Role {
+        ROLE_UNSPECIFIED = 0;
+        DATA = 1;
+        METADATA = 2;
+    }
+    enum State {
+        // Observation failed or the peer sent a state the reader does not know.
+        STATE_UNSPECIFIED = 0;
+        // The expected filesystem is mounted read-write. This is not a
+        // successful write/fsync test or a guarantee that future I/O succeeds.
+        MOUNTED_READ_WRITE = 1;
+        // The expected filesystem is mounted read-only. The mode alone does
+        // not identify whether the kernel forced it read-only after an error.
+        READ_ONLY = 2;
+        // A configured volume is missing, unmounted, or mounted incorrectly.
+        UNAVAILABLE = 3;
+        // The optional metadata volume is absent from this guest's layout.
+        NOT_CONFIGURED = 4;
+    }
+    Role role = 1;
+    State state = 2;
+    string device = 3;
+    string mount_point = 4;
+    string filesystem = 5;
+    // Observation error or explanation. Never parse this field for state.
+    string detail = 6;
+}

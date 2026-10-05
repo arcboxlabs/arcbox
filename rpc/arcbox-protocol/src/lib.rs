@@ -49,7 +49,10 @@ pub use pbjson_types;
 ///
 /// Re-exports all types for backward compatibility.
 pub mod common {
-    pub use super::v1::{Empty, KeyValue, Mount, PortBinding, ResourceLimits, Timestamp};
+    pub use super::v1::{
+        Empty, KeyValue, Mount, PortBinding, ResourceLimits, StorageHealth, StorageVolumeHealth,
+        Timestamp, storage_volume_health,
+    };
 }
 
 /// Machine types (from machine.proto).
@@ -112,9 +115,10 @@ pub mod agent {
         KubernetesStopRequest, KubernetesStopResponse, MachineStats, MemoryPressureEvent,
         MmapReadFileRequest, MmapReadFileResponse, PortBindingsChanged, PortBindingsRemoved,
         ReadinessEvent, RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest,
-        RuntimeStatusResponse, ServiceStatus, ShutdownRequest, ShutdownResponse, SystemInfo,
+        RuntimeStatusResponse, ServiceStatus, ShutdownRequest, ShutdownResponse,
+        StorageCheckRequest, StorageCheckResponse, StorageCheckResult, SystemInfo,
         WatchMemoryPressureRequest, WatchReadinessRequest, WatchStatsRequest, kubernetes_host_port,
-        memory_pressure_event, readiness_event,
+        memory_pressure_event, readiness_event, storage_check_request,
     };
 
     // Backward compatibility type aliases (short names without Agent prefix).
@@ -174,7 +178,10 @@ pub mod api {
 }
 
 // Common types
-pub use v1::{Empty, KeyValue, Mount, PortBinding, ResourceLimits, Timestamp};
+pub use v1::{
+    Empty, KeyValue, Mount, PortBinding, ResourceLimits, StorageHealth, StorageVolumeHealth,
+    Timestamp, WatchStorageHealthRequest, storage_volume_health,
+};
 
 // Machine types
 pub use v1::{
@@ -214,7 +221,8 @@ pub use v1::{
     KubernetesStatusRequest, KubernetesStatusResponse, KubernetesStopRequest,
     KubernetesStopResponse, PortBindingsChanged, PortBindingsRemoved, RuntimeEnsureRequest,
     RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse, ServiceStatus,
-    ShutdownRequest, ShutdownResponse, SystemInfo,
+    ShutdownRequest, ShutdownResponse, StorageCheckRequest, StorageCheckResponse,
+    StorageCheckResult, SystemInfo, storage_check_request,
 };
 
 // API types - Network
