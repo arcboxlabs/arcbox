@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+arcbox-atomic-file = { version = "0.8.2", path = "../../common/arcbox-atomic-file" }
 arcbox-connect = { workspace = true }
 arcbox-constants = { workspace = true }
 arcbox-dns = { workspace = true }
@@ -17,6 +18,7 @@ arcbox-fakeip.workspace = true
 arcbox-hypervisor = { workspace = true }
 arcbox-image.workspace = true
 arcbox-net = { workspace = true }
+arcbox-storage = { version = "0.8.2", path = "../../common/arcbox-storage" }
 arcbox-transport = { workspace = true }
 arcbox-vmm = { workspace = true }
 buffa = "0.9.1"

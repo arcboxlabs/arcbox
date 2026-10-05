@@ -114,6 +114,38 @@ fn has_content(path: &Path, kind: EntryKind) -> io::Result<bool> {
     }
 }
 
+/// Verifies populated original metadata before a Btrfs-only upgrade.
+///
+/// Empty mountpoint stubs do not distinguish a new legacy install from a lost
+/// metadata image. Both original database kinds must provide positive evidence.
+///
+/// # Errors
+/// Returns an error for retired sources, missing evidence, or unreadable entries.
+pub fn verify_legacy_sources(entries: &[(&Path, EntryKind)]) -> io::Result<()> {
+    let mut populated_directory = false;
+    let mut populated_file = false;
+    for &(path, kind) in entries {
+        if retired_exists(path)? {
+            return Err(io::Error::other(format!(
+                "{} was already migrated; its metadata volume is missing",
+                path.display()
+            )));
+        }
+        if has_content(path, kind)? {
+            match kind {
+                EntryKind::Dir => populated_directory = true,
+                EntryKind::File => populated_file = true,
+            }
+        }
+    }
+    if !populated_directory || !populated_file {
+        return Err(io::Error::other(
+            "original metadata cannot be distinguished from empty migrated mountpoints",
+        ));
+    }
+    Ok(())
+}
+
 fn retired_exists(target: &Path) -> io::Result<bool> {
     let Some(parent) = target.parent() else {
         return Ok(false);
@@ -240,6 +272,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_upgrade_requires_original_databases_and_rejects_retired_sources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let directory = tmp.path().join("bolt");
+        let database = tmp.path().join("metadata.db");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("meta.db"), b"original bolt").unwrap();
+        fs::write(&database, b"original snapshot metadata").unwrap();
+        let entries = [(&*directory, EntryKind::Dir), (&*database, EntryKind::File)];
+        verify_legacy_sources(&entries).unwrap();
+
+        fs::create_dir(tmp.path().join("bolt.pre-ext4")).unwrap();
+        assert!(
+            verify_legacy_sources(&entries)
+                .unwrap_err()
+                .to_string()
+                .contains("already migrated")
+        );
+    }
+
+    #[test]
+    fn empty_migration_stubs_do_not_authorize_a_new_metadata_volume() {
+        let tmp = tempfile::tempdir().unwrap();
+        let directory = tmp.path().join("bolt");
+        let database = tmp.path().join("metadata.db");
+        fs::create_dir(&directory).unwrap();
+        fs::write(&database, b"").unwrap();
+        assert!(
+            verify_legacy_sources(&[(&directory, EntryKind::Dir), (&database, EntryKind::File)])
+                .is_err()
+        );
+    }
+
+    #[test]
     fn source_inspection_errors_do_not_create_empty_metadata() {
         let (_tmp, volume, data) = setup();
         let target = data.join("network");
@@ -247,6 +312,7 @@ mod tests {
         let error = prepare_entry(&volume, &target, "docker-network", EntryKind::Dir).unwrap_err();
         assert_ne!(error.kind(), io::ErrorKind::NotFound);
         assert!(!volume.join("docker-network").exists());
+        assert!(verify_legacy_sources(&[(&target, EntryKind::Dir)]).is_err());
     }
 
     fn setup() -> (tempfile::TempDir, PathBuf, PathBuf) {

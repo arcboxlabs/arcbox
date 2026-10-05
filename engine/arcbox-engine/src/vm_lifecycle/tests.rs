@@ -341,3 +341,53 @@ fn storage_test_lifecycle(data_dir: &std::path::Path) -> (Arc<MachineManager>, V
     .unwrap();
     (machines, lifecycle)
 }
+
+#[tokio::test]
+async fn invalid_storage_pair_creates_a_hold_before_any_vm_boot() {
+    for failure in ["missing metadata", "invalid manifest", "corrupt signature"] {
+        let directory = tempfile::tempdir().unwrap();
+        let data = directory.path().join("data/docker.img");
+        let metadata = directory.path().join("data/docker-meta.img");
+        arcbox_storage::prepare_pair(&data, &metadata, 4096, 4096).unwrap();
+        match failure {
+            "missing metadata" => std::fs::remove_file(&metadata).unwrap(),
+            "invalid manifest" => {
+                std::fs::write(arcbox_storage::manifest_path(&data), b"{").unwrap();
+            }
+            "corrupt signature" => std::fs::write(&metadata, [0_u8; 4096]).unwrap(),
+            _ => unreachable!(),
+        }
+        let original_data = std::fs::read(&data).unwrap();
+        let original_metadata = std::fs::read(&metadata).ok();
+        let events = EventBus::new();
+        let machines = Arc::new(MachineManager::new(
+            Arc::new(crate::vm::VmManager::new(
+                directory.path().join("snapshots"),
+            )),
+            directory.path().to_owned(),
+            crate::vm::HostNetwork::default(),
+            events.clone(),
+        ));
+        let lifecycle = VmLifecycleManager::new(
+            Arc::clone(&machines),
+            events,
+            directory.path().to_owned(),
+            VmLifecycleConfig::default(),
+        )
+        .unwrap();
+
+        assert!(lifecycle.ensure_ready().await.is_err(), "{failure}");
+        assert_eq!(lifecycle.state().await, VmLifecycleState::Failed);
+        assert!(machines.get(DEFAULT_MACHINE_NAME).is_none());
+        let operation_id = std::fs::read_to_string(machines.storage_hold_path()).unwrap();
+        uuid::Uuid::parse_str(&operation_id).unwrap();
+        assert!(machines.storage_is_held().unwrap());
+        assert!(lifecycle.ensure_ready().await.is_err());
+        assert_eq!(
+            std::fs::read_to_string(machines.storage_hold_path()).unwrap(),
+            operation_id
+        );
+        assert_eq!(std::fs::read(&data).unwrap(), original_data);
+        assert_eq!(std::fs::read(&metadata).ok(), original_metadata);
+    }
+}

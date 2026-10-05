@@ -58,6 +58,13 @@ Defined in `app/arcbox-core/src/config.rs`.
 | `data/volumes/` | Named volumes | daemon |
 | `data/docker.img` | Docker persistent disk image (Btrfs) | daemon |
 | `data/docker-meta.img` | Docker metadata disk image (ext4, fsync-hot boltdb state); paired with `docker.img` — back up or move the two together | daemon |
+| `data/docker.storage.json` | Paired image identities, filesystem UUIDs, and durable initialization/migration state | daemon and guest agent |
+
+Runtime storage is a set of two images and one manifest. The Rosetta VM uses `docker-rosetta.img`, `docker-rosetta-meta.img`, and `docker-rosetta.storage.json`. Stop the VM before preserving the complete set. A copy has new host file identities; recovery must verify its filesystem UUIDs and explicitly rebind those identities before normal boot. Do not delete a manifest to bypass a failed identity check.
+
+Normal startup never reformats an existing image or recreates a missing member of a recorded pair. New images receive an exclusive provisioning identity; the guest consumes that authority durably before formatting. An unreadable signature, damaged filesystem, or interrupted format enters recovery instead of starting an empty Docker state. Ordinary boot does not run `e2fsck -y`.
+
+An upgrade from an older Btrfs-only installation requires readable original metadata databases and no retired `.pre-ext4` sources before the new metadata volume can be formatted. Empty mountpoint stubs are ambiguous and require recovery. The migration retains its existing copy, sync, and retire sequence; a recorded migration resumes without treating retired data as a new installation. See [the storage contract](../common/arcbox-storage/README.md).
 
 ### 1.4 `boot/` — Boot Asset Cache
 

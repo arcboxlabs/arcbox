@@ -50,6 +50,22 @@ fn storage_hold_survives_manager_restart() {
     manager.ensure_storage_available("storage-check").unwrap();
 }
 
+#[tokio::test]
+async fn direct_start_rejects_unpaired_system_vm_before_starting_process() {
+    let dir = tempdir().unwrap();
+    let manager = Arc::new(test_machine_manager(dir.path()));
+    manager.create(MachineConfig::default()).await.unwrap();
+    assert!(
+        manager
+            .start("default")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("paired data")
+    );
+    assert_eq!(manager.get("default").unwrap().state, MachineState::Created);
+}
+
 fn test_machine_manager_with_bus(
     data_dir: &std::path::Path,
     event_bus: crate::event::EventBus,

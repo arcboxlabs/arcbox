@@ -18,10 +18,6 @@ use arcbox_constants::paths::{
 use super::cmdline::docker_data_device;
 use crate::config::SANDBOX_DATA_DIR;
 
-/// Btrfs primary superblock magic `_BHRfS_M` at absolute disk offset
-/// `0x10040` (superblock starts at `0x10000`, magic at internal offset `0x40`).
-const BTRFS_MAGIC: [u8; 8] = [0x5f, 0x42, 0x48, 0x52, 0x66, 0x53, 0x5f, 0x4d];
-const BTRFS_MAGIC_OFFSET: u64 = 0x10040;
 /// Offset of the `total_bytes` field in the Btrfs superblock (superblock at
 /// 64 KiB + 0x70 within it).
 const BTRFS_TOTAL_BYTES_OFFSET: u64 = 0x10070;
@@ -49,21 +45,6 @@ fn data_mounts_ready(mut is_mounted: impl FnMut(&str) -> bool) -> bool {
         && DATA_SUBVOLUME_MOUNTS
             .iter()
             .all(|(_, target)| is_mounted(target))
-}
-
-fn has_btrfs_superblock(device: &str) -> bool {
-    let mut file = match std::fs::File::open(device) {
-        Ok(file) => file,
-        Err(_) => return false,
-    };
-    if file.seek(SeekFrom::Start(BTRFS_MAGIC_OFFSET)).is_err() {
-        return false;
-    }
-    let mut magic = [0_u8; 8];
-    if file.read_exact(&mut magic).is_err() {
-        return false;
-    }
-    magic == BTRFS_MAGIC
 }
 
 /// Reads the device size recorded in the Btrfs superblock.
@@ -104,31 +85,22 @@ fn check_device_fits_filesystem(device: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Formats the device as Btrfs if it does not already have a Btrfs superblock.
-/// Old ext4 disks are unconditionally wiped (alpha breaking change).
+/// Consumes explicit new-volume authority or verifies the existing Btrfs UUID.
 fn ensure_btrfs_format(device: &str) -> Result<String, String> {
-    if has_btrfs_superblock(device) {
-        return Ok("data device already Btrfs".to_string());
-    }
-
-    // /sbin/mkfs.btrfs is baked into the EROFS rootfs.
-    let binary = "/sbin/mkfs.btrfs";
-    if !Path::new(binary).exists() {
-        return Err(format!("{} not found in EROFS rootfs", binary));
-    }
-
-    match std::process::Command::new(binary)
-        .args(["-f", device])
-        .status()
-    {
-        Ok(status) if status.success() => Ok(format!("formatted {} as Btrfs", device)),
-        Ok(status) => Err(format!(
-            "mkfs.btrfs failed on {} (exit={})",
-            device,
-            status.code().unwrap_or(-1)
-        )),
-        Err(e) => Err(format!("failed to execute mkfs.btrfs: {}", e)),
-    }
+    super::storage_volume::ensure_filesystem(arcbox_storage::VolumeRole::Data, device, |uuid| {
+        let status = std::process::Command::new("/sbin/mkfs.btrfs")
+            .args(["-f", "-U", &uuid.to_string(), device])
+            .status()
+            .map_err(|error| format!("execute mkfs.btrfs: {error}"))?;
+        if !status.success() {
+            return Err(format!(
+                "mkfs.btrfs failed on {device} (exit={})",
+                status.code().unwrap_or(-1)
+            ));
+        }
+        Ok(())
+    })?;
+    Ok(format!("verified Btrfs identity on {device}"))
 }
 
 /// Mounts the data volume (Btrfs), creates subvolumes, and bind-mounts them.

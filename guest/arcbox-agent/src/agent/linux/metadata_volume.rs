@@ -8,7 +8,6 @@
 //! crash-safe migration state machine lives in `crate::metadata_migrate`;
 //! design and failure policy: ../company/engineering/arcbox/plans/ext4-metadata-volume.md.
 
-use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::Path;
 
 use arcbox_constants::paths::{CONTAINERD_DATA_MOUNT_POINT, DOCKER_DATA_MOUNT_POINT};
@@ -16,17 +15,12 @@ use arcbox_constants::paths::{CONTAINERD_DATA_MOUNT_POINT, DOCKER_DATA_MOUNT_POI
 use arcbox_constants::devices::DOCKER_METADATA_BLOCK_DEVICE;
 
 use super::cmdline::declared_docker_metadata_device;
-use crate::metadata_migrate::{EntryKind, Prepared, prepare_entry};
+use crate::metadata_migrate::{EntryKind, Prepared, prepare_entry, verify_legacy_sources};
 
 /// Mount point of the raw ext4 volume (`/run` is tmpfs, writable).
 pub(super) const METADATA_MOUNT: &str = "/run/arcbox/metadata";
 /// The formatter is baked into the EROFS rootfs (static e2fsprogs).
 const MKFS_EXT4: &str = "/sbin/mkfs.ext4";
-
-/// ext4 superblock magic `0xEF53`, little-endian at byte 56 of the
-/// superblock (which starts at byte 1024).
-const EXT4_MAGIC_OFFSET: u64 = 1024 + 56;
-const EXT4_MAGIC: [u8; 2] = [0x53, 0xEF];
 
 /// One fsync-hot metadata location: an entry on the volume bound over its
 /// canonical btrfs-side path. The set is exactly the profiled hot set —
@@ -79,16 +73,16 @@ fn mappings() -> Vec<Mapping> {
 /// on the data subvolumes) and before containerd/dockerd start (their boltdb
 /// files must be closed while entries migrate).
 ///
-/// Failure policy (version-skew safe, see the plan doc):
+/// Failure policy:
 /// - no cmdline declaration and no default node (older daemon without the
 ///   third disk) → `Ok`, btrfs-only boot, zero probe delay;
-/// - mkfs binary absent AND device blank (older rootfs) → `Ok`, skip;
 /// - device declared but never appears, or present but unusable after an
 ///   attempted mount → `Err` — booting dockerd against the stale shadowed
 ///   btrfs state would fork it.
 pub(super) fn ensure_metadata_mount() -> Result<String, String> {
     let maps = mappings();
     if maps.iter().all(|m| crate::mount::is_mounted(&m.target)) {
+        super::storage_volume::finish_metadata_setup()?;
         return Ok("metadata binds already mounted".to_string());
     }
 
@@ -113,15 +107,18 @@ pub(super) fn ensure_metadata_mount() -> Result<String, String> {
 
     let mut notes = Vec::new();
 
-    if !has_ext4_superblock(&device) {
-        if !Path::new(MKFS_EXT4).exists() {
-            // Older rootfs without e2fsprogs and a never-used disk: nothing
-            // was ever migrated, so a btrfs-only boot is consistent.
-            tracing::warn!("mkfs.ext4 missing and metadata device blank; skipping metadata volume");
-            return Ok("metadata volume skipped (no mkfs.ext4)".to_string());
-        }
-        notes.push(format_ext4(&device)?);
-    }
+    let paired = super::storage_volume::authorize_legacy_migration(|| {
+        let entries: Vec<_> = maps
+            .iter()
+            .map(|mapping| (Path::new(&mapping.target), mapping.kind))
+            .collect();
+        verify_legacy_sources(&entries)
+    })?;
+    super::storage_volume::ensure_filesystem(
+        arcbox_storage::VolumeRole::Metadata,
+        &device,
+        |uuid| format_ext4(&device, uuid).map(|note| notes.push(note)),
+    )?;
 
     mount_metadata(&device)?;
 
@@ -130,6 +127,16 @@ pub(super) fn ensure_metadata_mount() -> Result<String, String> {
             continue;
         }
         let volume_entry = Path::new(METADATA_MOUNT).join(mapping.name);
+        if paired
+            && !volume_entry.try_exists().map_err(|error| {
+                format!("inspect metadata entry {}: {error}", volume_entry.display())
+            })?
+        {
+            return Err(format!(
+                "runtime storage needs recovery: paired metadata entry {} is missing",
+                volume_entry.display()
+            ));
+        }
         match prepare_entry(
             Path::new(METADATA_MOUNT),
             Path::new(&mapping.target),
@@ -142,6 +149,7 @@ pub(super) fn ensure_metadata_mount() -> Result<String, String> {
         }
         bind(&volume_entry, &mapping.target)?;
     }
+    super::storage_volume::finish_metadata_setup()?;
 
     if notes.is_empty() {
         Ok("metadata volume mounted".to_string())
@@ -165,18 +173,7 @@ fn wait_for_device(device: &str) -> bool {
     false
 }
 
-fn has_ext4_superblock(device: &str) -> bool {
-    let Ok(mut file) = std::fs::File::open(device) else {
-        return false;
-    };
-    if file.seek(SeekFrom::Start(EXT4_MAGIC_OFFSET)).is_err() {
-        return false;
-    }
-    let mut magic = [0_u8; 2];
-    file.read_exact(&mut magic).is_ok() && magic == EXT4_MAGIC
-}
-
-fn format_ext4(device: &str) -> Result<String, String> {
+fn format_ext4(device: &str, uuid: uuid::Uuid) -> Result<String, String> {
     // Explicit feature list so the result is deterministic regardless of
     // any mke2fs.conf; fast_commit targets exactly the small-metadata-commit
     // fsync pattern boltdb produces, lazy init off pays the one-time cost at
@@ -184,6 +181,8 @@ fn format_ext4(device: &str) -> Result<String, String> {
     match std::process::Command::new(MKFS_EXT4)
         .args([
             "-F",
+            "-U",
+            &uuid.to_string(),
             "-t",
             "ext4",
             "-O",

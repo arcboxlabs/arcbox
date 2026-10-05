@@ -800,6 +800,7 @@ impl MachineManager {
     }
 
     fn start_reserved_process(self: &Arc<Self>, name: &str) -> Result<bool> {
+        self.verify_storage_pair(name)?;
         let (vm_id, cid) = self.assign_cid_for_start(name)?;
 
         // Check if this is a distro-based machine VM.
@@ -1479,6 +1480,7 @@ impl MachineManager {
     /// Returns an error if the machine is unknown or the reboot fails.
     pub fn reboot(&self, name: &str) -> Result<()> {
         let _storage = self.storage_permit(name)?;
+        self.verify_storage_pair(name)?;
         let vm_id = {
             let machines = self
                 .machines

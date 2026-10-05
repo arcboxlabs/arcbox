@@ -146,6 +146,7 @@ impl LifecycleShared {
     /// agent readiness + clock sync — the tail of `boot` without the
     /// create/drift step, since the machine record and disks are unchanged.
     async fn reboot(&self, timeout: Duration) -> Result<()> {
+        self.prepare_storage()?;
         let mm = Arc::clone(&self.machine_manager);
         let name = self.machine_name.clone();
         // `reboot` is a synchronous stop + re-init + start; keep it off the
@@ -166,6 +167,7 @@ impl LifecycleShared {
     /// The boot body: drift check, optional (re)create, start loop with
     /// recovery retries, then agent readiness.
     async fn boot(&self, create_hint: bool, timeout: Duration) -> Result<()> {
+        self.prepare_storage()?;
         let existing_machine = self.machine_manager.get(&self.machine_name);
         let machine_exists = existing_machine.is_some();
         if !create_hint && !machine_exists {
@@ -335,6 +337,31 @@ impl LifecycleShared {
             hook.call();
         }
     }
+
+    fn prepare_storage(&self) -> Result<()> {
+        let directory = self.data_dir.join(arcbox_constants::paths::host::DATA);
+        if let Err(error) = arcbox_storage::prepare_pair(
+            &directory.join(&self.data_image_filename),
+            &directory.join(metadata_image_filename(&self.data_image_filename)),
+            DOCKER_DATA_IMAGE_SIZE_BYTES,
+            DOCKER_METADATA_IMAGE_SIZE_BYTES,
+        ) {
+            // The hold survives lifecycle error conversion and blocks later boot attempts.
+            std::fs::create_dir_all(self.data_dir.join("storage-recovery"))?;
+            std::fs::File::open(&self.data_dir)?.sync_all()?;
+            arcbox_atomic_file::write(
+                &self.machine_manager.storage_hold_path(),
+                uuid::Uuid::new_v4().to_string().as_bytes(),
+            )
+            .map_err(|persist| {
+                EngineError::config(format!(
+                    "{error}; could not persist storage protection: {persist}"
+                ))
+            })?;
+            return Err(EngineError::config(error.to_string()));
+        }
+        Ok(())
+    }
     /// Creates the default machine with EROFS rootfs and no initramfs.
     ///
     /// Block devices:
@@ -356,7 +383,6 @@ impl LifecycleShared {
             .data_dir
             .join(arcbox_constants::paths::host::DATA)
             .join(&self.data_image_filename);
-        crate::vm::ensure_sparse_block_image(&docker_data_image, DOCKER_DATA_IMAGE_SIZE_BYTES)?;
 
         // Don't inject docker_data_device into cmdline — let the agent
         // auto-detect. It prefers /dev/arcboxhvc1 (HVC fast path) when
@@ -374,7 +400,6 @@ impl LifecycleShared {
             .data_dir
             .join(arcbox_constants::paths::host::DATA)
             .join(metadata_image_filename(&self.data_image_filename));
-        crate::vm::ensure_sparse_block_image(&metadata_image, DOCKER_METADATA_IMAGE_SIZE_BYTES)?;
         block_devices.push(crate::vm::BlockDeviceConfig {
             path: metadata_image.to_string_lossy().to_string(),
             read_only: false,
@@ -462,6 +487,18 @@ impl LifecycleShared {
         }
 
         cmdline = with_container_network(cmdline, self.config.container_network);
+
+        let guest_manifest = arcbox_storage::manifest_path(
+            &std::path::Path::new("/arcbox/data").join(&self.data_image_filename),
+        );
+        cmdline = cmdline
+            .split_whitespace()
+            .filter(|token| !token.starts_with(arcbox_storage::MANIFEST_CMDLINE_KEY))
+            .collect::<Vec<_>>()
+            .join(" ");
+        cmdline.push(' ');
+        cmdline.push_str(arcbox_storage::MANIFEST_CMDLINE_KEY);
+        cmdline.push_str(&guest_manifest.to_string_lossy());
 
         // Declare the ext4 metadata device this machine attaches as vdc.
         // Unlike the data device (auto-detected for its HVC fast path), the

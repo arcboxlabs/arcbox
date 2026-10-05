@@ -206,6 +206,7 @@ dependencies = [
  "arcbox-logging",
  "arcbox-pty",
  "arcbox-snapshot",
+ "arcbox-storage",
  "arcbox-tap-net",
  "arcbox-transport",
  "arcbox-vm-driver",
@@ -729,6 +730,7 @@ dependencies = [
 name = "arcbox-engine"
 version = "0.8.2"
 dependencies = [
+ "arcbox-atomic-file",
  "arcbox-connect",
  "arcbox-constants",
  "arcbox-dns",
@@ -737,6 +739,7 @@ dependencies = [
  "arcbox-hypervisor",
  "arcbox-image",
  "arcbox-net",
+ "arcbox-storage",
  "arcbox-transport",
  "arcbox-vmm",
  "buffa",

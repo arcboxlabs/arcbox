@@ -40,6 +40,15 @@ impl MachineManager {
         self.data_dir.join("storage-recovery/hold")
     }
 
+    /// Reports whether System VM storage is reserved or has a durable boot hold.
+    pub fn storage_is_held(&self) -> Result<bool> {
+        let reserved = self
+            .storage_maintenance
+            .read()
+            .map_err(|_| EngineError::LockPoisoned)?;
+        Ok(*reserved || self.storage_hold_path().try_exists()?)
+    }
+
     /// Rejects lifecycle admission while the System VM is reserved for recovery.
     pub fn ensure_storage_available(&self, name: &str) -> Result<()> {
         drop(self.storage_permit(name)?);
@@ -75,6 +84,27 @@ impl MachineManager {
             ));
         }
         Ok(reserved)
+    }
+
+    pub(super) fn verify_storage_pair(&self, name: &str) -> Result<()> {
+        if !is_system_machine(name) {
+            return Ok(());
+        }
+        let machines = self
+            .machines
+            .read()
+            .map_err(|_| EngineError::LockPoisoned)?;
+        let machine = machines
+            .get(name)
+            .ok_or_else(|| EngineError::not_found(name.to_owned()))?;
+        let [_, data, metadata, ..] = machine.block_devices.as_slice() else {
+            return Err(EngineError::invalid_state(
+                "System VM requires its paired data and metadata images",
+            ));
+        };
+        arcbox_storage::verify_pair(data.path.as_ref(), metadata.path.as_ref())
+            .map_err(|error| EngineError::Machine(error.to_string()))?;
+        Ok(())
     }
 }
 
