@@ -51,6 +51,8 @@ let vm = VmBuilder::new()
 vm.run().await?;
 ```
 
+On macOS HV, request guest shutdown before calling `wait_for_stopped(timeout)`. The wait requires exclusive access to the VMM, returns `true` only after the guest issues PSCI `SYSTEM_OFF`, and retains that result until the next start. Call `stop()` afterward to join vCPU and I/O workers and release host resources.
+
 ## Memory Layout (ARM64)
 
 ```

@@ -295,6 +295,7 @@ pub(in crate::vmm) fn handle_psci(
     vcpu: &arcbox_hv::HvVcpu,
     running: &Arc<AtomicBool>,
     reset_requested: &Arc<AtomicBool>,
+    poweroff: &crossbeam_channel::Sender<()>,
     cpu_power: Option<&CpuPower>,
 ) -> PsciExit {
     let x1 = vcpu.get_reg(X1).unwrap_or(0);
@@ -314,6 +315,8 @@ pub(in crate::vmm) fn handle_psci(
         PsciEffect::SystemOff => {
             tracing::info!("vCPU {vcpu_id}: PSCI SYSTEM_OFF");
             running.store(false, Ordering::SeqCst);
+            // The receiver may already be gone during host teardown.
+            let _ = poweroff.send(());
         }
         PsciEffect::SystemReset => {
             tracing::info!("vCPU {vcpu_id}: PSCI SYSTEM_RESET");

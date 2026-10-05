@@ -58,7 +58,9 @@ cargo test -p arcbox-e2e --test boot_assets -- --ignored --nocapture
 ```
 
 VMM-level HV probe — drives the HV backend directly (no daemon): boot, vsock
-agent RPC, DAX, agent supervision, pause/resume, stop:
+agent RPC, DAX, agent supervision, pause/resume, guest PSCI poweroff, worker
+teardown. The `guest_poweroff` phase requires completion after the shutdown
+request; `stop_vm` records the subsequent host teardown:
 
 ```bash
 cargo test -p arcbox-e2e --test hv_vmm -- --ignored --nocapture

@@ -50,6 +50,8 @@ pub(super) struct VcpuContext {
     /// Set (with `running=false`) when the guest issues PSCI SYSTEM_RESET, so
     /// the lifecycle driver reboots the guest instead of powering it off.
     pub reset_requested: Arc<AtomicBool>,
+    /// Reports guest poweroff separately from host stop and vCPU failure.
+    pub poweroff: crossbeam_channel::Sender<()>,
     /// Cooperative pause flag. When `true`, the vCPU parks itself after its
     /// next `vcpu.run()` return instead of re-entering guest execution.
     /// Cleared by `resume`, which also unparks the thread.
@@ -184,6 +186,7 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, boot: VcpuBoot, ctx: VcpuContext) {
         device_manager,
         running,
         reset_requested,
+        poweroff,
         paused,
         pl011,
         pl031,
@@ -586,6 +589,7 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, boot: VcpuBoot, ctx: VcpuContext) {
                                 &vcpu,
                                 &running,
                                 &reset_requested,
+                                &poweroff,
                                 cpu_power.as_ref(),
                             );
                             if !running.load(Ordering::Relaxed) {
@@ -615,6 +619,7 @@ pub(super) fn vcpu_run_loop(vcpu_id: u32, boot: VcpuBoot, ctx: VcpuContext) {
                         &vcpu,
                         &running,
                         &reset_requested,
+                        &poweroff,
                         cpu_power.as_ref(),
                     );
                     if !running.load(Ordering::Relaxed) {

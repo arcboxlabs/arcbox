@@ -573,11 +573,34 @@ impl Vmm {
 
     /// Waits for the guest VM to reach the Stopped state.
     ///
-    /// The actual shutdown is initiated by the vsock shutdown RPC at the
-    /// `VmManager` layer. This method only polls the hypervisor state.
+    /// The shutdown RPC initiates guest teardown. HV completion comes from
+    /// PSCI SYSTEM_OFF; VZ completion comes from the framework's stopped state.
+    /// Exclusive access prevents concurrent consumption of the HV completion.
     ///
     /// Returns `Ok(true)` if the VM stopped within `timeout`, `Ok(false)` on timeout.
-    pub fn wait_for_stopped(&self, timeout: Duration) -> Result<bool> {
+    pub fn wait_for_stopped(&mut self, timeout: Duration) -> Result<bool> {
+        if self.config.backend == VmBackend::Hv {
+            if self.hv_poweroff_observed {
+                return Ok(true);
+            }
+            if self.state != VmmState::Running {
+                return Ok(false);
+            }
+            let receiver = self.hv_poweroff_rx.as_ref().ok_or_else(|| {
+                VmmError::invalid_state("HV poweroff receiver is not initialized")
+            })?;
+            return match receiver.recv_timeout(timeout) {
+                Ok(()) => {
+                    self.hv_poweroff_observed = true;
+                    Ok(true)
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => Ok(false),
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => Err(VmmError::Vcpu(
+                    "HV vCPU threads exited without PSCI SYSTEM_OFF".into(),
+                )),
+            };
+        }
+
         if self.state != VmmState::Running {
             return Ok(false);
         }

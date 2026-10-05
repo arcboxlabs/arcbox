@@ -114,6 +114,12 @@ pub struct Vmm {
     /// vCPU thread join handles for the custom HV VMM path.
     #[cfg(target_os = "macos")]
     hv_vcpu_threads: Vec<std::thread::JoinHandle<()>>,
+    /// Completion emitted only by the guest's PSCI SYSTEM_OFF handler.
+    #[cfg(target_os = "macos")]
+    hv_poweroff_rx: Option<crossbeam_channel::Receiver<()>>,
+    /// Retains the completion after the channel event has been consumed.
+    #[cfg(target_os = "macos")]
+    hv_poweroff_observed: bool,
     /// Shared vCPU thread handle registry for pause/resume (custom HV).
     #[cfg(target_os = "macos")]
     hv_vcpu_thread_handles: Option<darwin_hv::VcpuThreadHandles>,
@@ -311,6 +317,10 @@ impl Vmm {
             hv_fdt_addr: None,
             #[cfg(target_os = "macos")]
             hv_vcpu_threads: Vec::new(),
+            #[cfg(target_os = "macos")]
+            hv_poweroff_rx: None,
+            #[cfg(target_os = "macos")]
+            hv_poweroff_observed: false,
             #[cfg(target_os = "macos")]
             hv_vcpu_thread_handles: None,
             #[cfg(target_os = "macos")]

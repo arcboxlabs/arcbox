@@ -15,6 +15,9 @@ impl Vmm {
     /// in a "parked" state and wait on a channel for a PSCI CPU_ON request
     /// from the BSP before entering their run loop.
     pub(in crate::vmm) fn start_darwin_hv(&mut self) -> Result<()> {
+        let (poweroff_tx, poweroff_rx) = crossbeam_channel::unbounded();
+        self.hv_poweroff_rx = Some(poweroff_rx);
+        self.hv_poweroff_observed = false;
         let kernel_entry = self
             .hv_kernel_entry
             .ok_or_else(|| VmmError::config("HV kernel entry not set".to_string()))?;
@@ -253,6 +256,7 @@ impl Vmm {
                 let r = running.clone();
                 let p = paused.clone();
                 let rr = reset_requested.clone();
+                let poweroff = poweroff_tx.clone();
                 let dm = device_manager.clone();
                 let th = vcpu_thread_handles.clone();
                 let ids = hv_vcpu_ids.clone();
@@ -277,6 +281,7 @@ impl Vmm {
                                 device_manager: dm,
                                 running: r,
                                 reset_requested: rr,
+                                poweroff,
                                 paused: p,
                                 pl011: uart,
                                 pl031: rtc,
@@ -316,6 +321,7 @@ impl Vmm {
                             device_manager,
                             running,
                             reset_requested,
+                            poweroff: poweroff_tx,
                             paused,
                             pl011,
                             pl031,

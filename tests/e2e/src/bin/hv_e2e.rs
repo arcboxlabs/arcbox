@@ -14,7 +14,7 @@
 //! 5. `Vmm::pause()` stops the guest — a ping during pause times out.
 //! 6. `Vmm::resume()` restarts the guest — the next ping succeeds.
 //!    (Exercises ABX-360.)
-//! 7. `Vmm::stop()` shuts down cleanly.
+//! 7. Guest shutdown reaches PSCI SYSTEM_OFF before `Vmm::stop()` tears down workers.
 //!
 //! Usage — via the ignored e2e test, which builds, signs, and runs it:
 //!   cargo test -p arcbox-e2e --test hv_vmm -- --ignored --nocapture
@@ -53,6 +53,9 @@
 //! Exit code 0 = all assertions passed. Non-zero = failure.
 
 use std::fmt::Write;
+use std::io::Write as _;
+use std::os::fd::FromRawFd;
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -300,14 +303,7 @@ fn run_phases(
 
     if boot_only {
         println!("[boot-only] skipping phases 4-6");
-        println!("[phase 7] stop VM");
-        let t = Instant::now();
-        vmm.stop().map_err(|e| format!("Vmm::stop: {e}"))?;
-        metrics.record("stop_vm", t.elapsed().as_secs_f64());
-        println!(
-            "          ok in {:.0}ms",
-            t.elapsed().as_secs_f64() * 1000.0
-        );
+        stop_vm(vmm, metrics)?;
         return Ok(());
     }
 
@@ -352,7 +348,51 @@ fn run_phases(
         }
     }
 
-    println!("[phase 7] stop VM");
+    stop_vm(vmm, metrics)?;
+
+    Ok(())
+}
+
+fn stop_vm(vmm: &mut Vmm, metrics: &mut arcbox_e2e::metrics::RunMetrics) -> Result<(), String> {
+    use arcbox_constants::timeouts::HOST_SHUTDOWN_TIMEOUT_SECS;
+    use arcbox_constants::wire::MessageType;
+
+    println!("[phase 7] wait for guest poweroff, then stop VM");
+    if vmm
+        .wait_for_stopped(Duration::ZERO)
+        .map_err(|e| format!("wait before shutdown: {e}"))?
+    {
+        return Err("guest reported poweroff before the shutdown request".into());
+    }
+
+    let fd = vmm
+        .connect_vsock(AGENT_PORT)
+        .map_err(|e| format!("shutdown connect_vsock: {e}"))?;
+    // SAFETY: connect_vsock returns an owned HV socketpair fd.
+    let mut stream = unsafe { UnixStream::from_raw_fd(fd) };
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("shutdown write timeout: {e}"))?;
+    // An empty protobuf request selects the agent's default shutdown grace.
+    let request = AgentClient::build_message(MessageType::ShutdownRequest, "", &[]);
+    let t = Instant::now();
+    stream
+        .write_all(&request)
+        .map_err(|e| format!("write shutdown request: {e}"))?;
+    if !vmm
+        .wait_for_stopped(Duration::from_secs(HOST_SHUTDOWN_TIMEOUT_SECS))
+        .map_err(|e| format!("wait for guest poweroff: {e}"))?
+    {
+        return Err("guest did not reach PSCI SYSTEM_OFF before the shutdown deadline".into());
+    }
+    metrics.record("guest_poweroff", t.elapsed().as_secs_f64());
+    if !vmm
+        .wait_for_stopped(Duration::ZERO)
+        .map_err(|e| format!("repeat guest poweroff wait: {e}"))?
+    {
+        return Err("guest poweroff completion was lost after the first wait".into());
+    }
+
     let t = Instant::now();
     vmm.stop().map_err(|e| format!("Vmm::stop: {e}"))?;
     metrics.record("stop_vm", t.elapsed().as_secs_f64());

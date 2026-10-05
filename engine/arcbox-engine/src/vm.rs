@@ -401,7 +401,7 @@ impl VmManager {
 
         // Phase 2: Take VMM out under write lock so the blocking wait below
         // doesn't hold the lock for up to `timeout`.
-        let vmm = {
+        let mut vmm = {
             let mut vms = self.vms.write().map_err(|_| EngineError::LockPoisoned)?;
 
             let entry = vms

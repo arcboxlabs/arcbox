@@ -83,3 +83,50 @@ fn test_hv_snapshot_returns_unsupported() {
         Ok(_) => panic!("expected Unsupported for HV capture, got Ok"),
     }
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn hv_stop_wait_requires_guest_poweroff_and_retains_completion() {
+    let mut vmm = Vmm::new(VmmConfig {
+        guest_cid: Some(3),
+        backend: VmBackend::Hv,
+        ..Default::default()
+    })
+    .unwrap();
+    let (poweroff, receiver) = crossbeam_channel::unbounded();
+    vmm.hv_poweroff_rx = Some(receiver);
+    vmm.state = VmmState::Running;
+
+    // Host stop and vCPU failures also clear running; neither proves guest poweroff.
+    vmm.running.store(false, Ordering::SeqCst);
+    assert!(!vmm.wait_for_stopped(Duration::ZERO).unwrap());
+    vmm.state = VmmState::Stopped;
+    assert!(!vmm.wait_for_stopped(Duration::ZERO).unwrap());
+    vmm.state = VmmState::Running;
+
+    poweroff.send(()).unwrap();
+    assert!(vmm.wait_for_stopped(Duration::ZERO).unwrap());
+    assert!(vmm.wait_for_stopped(Duration::ZERO).unwrap());
+    vmm.stop().unwrap();
+    assert!(vmm.wait_for_stopped(Duration::ZERO).unwrap());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn hv_stop_wait_rejects_vcpu_exit_without_guest_poweroff() {
+    let mut vmm = Vmm::new(VmmConfig {
+        guest_cid: Some(3),
+        backend: VmBackend::Hv,
+        ..Default::default()
+    })
+    .unwrap();
+    let (poweroff, receiver) = crossbeam_channel::unbounded();
+    vmm.hv_poweroff_rx = Some(receiver);
+    vmm.state = VmmState::Running;
+    drop(poweroff);
+
+    assert!(matches!(
+        vmm.wait_for_stopped(Duration::ZERO),
+        Err(VmmError::Vcpu(message)) if message.contains("without PSCI SYSTEM_OFF")
+    ));
+}

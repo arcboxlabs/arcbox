@@ -142,7 +142,7 @@ impl Vmm {
     }
 
     /// Waits for the guest VM to reach the Stopped state (not yet supported on Linux).
-    pub fn wait_for_stopped(&self, _timeout: Duration) -> Result<bool> {
+    pub fn wait_for_stopped(&mut self, _timeout: Duration) -> Result<bool> {
         Ok(false)
     }
 
