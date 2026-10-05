@@ -26,6 +26,37 @@ use super::types::{DesiredBoot, machine_drift_reason, metadata_image_filename};
 use super::{DOCKER_DATA_IMAGE_SIZE_BYTES, DOCKER_METADATA_IMAGE_SIZE_BYTES, RecoveryAction};
 
 impl LifecycleShared {
+    pub(super) async fn run_storage_boot(
+        self: Arc<Self>,
+        reservation: crate::machine::StorageMaintenance,
+        timeout: Duration,
+        epoch: u64,
+        events: &mpsc::UnboundedSender<Completion>,
+    ) {
+        let name = self.machine_name.clone();
+        // Keep the reservation through readiness if the caller cancels its request.
+        let start_reservation = reservation.clone();
+        let result = async {
+            tokio::task::spawn_blocking(move || start_reservation.start(&name))
+                .await
+                .map_err(|error| {
+                    EngineError::Vm(format!("storage recovery start task: {error}"))
+                })??;
+            self.spawn_route_reconciler();
+            self.wait_for_agent(timeout).await?;
+            self.sync_guest_clock().await;
+            self.record_bridge_address().await;
+            Ok::<_, EngineError>(())
+        }
+        .await;
+        let outcome = match result {
+            Ok(()) => InternalEvent::AgentReady,
+            Err(error) => InternalEvent::BootFailed(error.to_string()),
+        };
+        let _ = events.send(Completion { epoch, outcome });
+        drop(reservation);
+    }
+
     /// Boots the VM end-to-end (create if needed, start with retries, wait for
     /// the agent) and reports the outcome to the actor, tagged with the epoch
     /// this sub-task was spawned under.

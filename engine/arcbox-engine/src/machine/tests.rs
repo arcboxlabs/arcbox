@@ -5,6 +5,51 @@ fn test_machine_manager(data_dir: &std::path::Path) -> MachineManager {
     test_machine_manager_with_bus(data_dir, crate::event::EventBus::new())
 }
 
+#[tokio::test]
+async fn storage_reservation_blocks_direct_mutations_but_allows_recovery_machine() {
+    let dir = tempdir().unwrap();
+    let manager = Arc::new(test_machine_manager(dir.path()));
+    manager.create(MachineConfig::default()).await.unwrap();
+    let reservation = manager.reserve_storage().unwrap();
+    assert!(manager.reserve_storage().is_err());
+    assert!(
+        manager
+            .start("default")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("held for recovery")
+    );
+    assert!(manager.reboot("default").is_err());
+    assert!(manager.remove("default", true).is_err());
+    assert!(manager.set_resources("default", Some(1), None).is_err());
+    manager
+        .create(MachineConfig {
+            name: "storage-check".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let boot_owner = reservation.clone();
+    drop(reservation);
+    assert!(manager.ensure_storage_available("default").is_err());
+    drop(boot_owner);
+    manager.ensure_storage_available("default").unwrap();
+}
+
+#[test]
+fn storage_hold_survives_manager_restart() {
+    let dir = tempdir().unwrap();
+    let manager = test_machine_manager(dir.path());
+    let hold = manager.storage_hold_path();
+    std::fs::create_dir_all(hold.parent().unwrap()).unwrap();
+    std::fs::write(&hold, b"check required").unwrap();
+    drop(manager);
+    let manager = test_machine_manager(dir.path());
+    assert!(manager.ensure_storage_available("default").is_err());
+    manager.ensure_storage_available("storage-check").unwrap();
+}
+
 fn test_machine_manager_with_bus(
     data_dir: &std::path::Path,
     event_bus: crate::event::EventBus,

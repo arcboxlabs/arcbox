@@ -42,6 +42,7 @@ pub enum MachineState {
 pub mod archive;
 mod clone;
 mod host_hold;
+mod maintenance;
 #[cfg(target_os = "macos")]
 mod serial;
 #[cfg(test)]
@@ -50,6 +51,7 @@ mod transfer;
 
 pub use clone::clone_file;
 pub use host_hold::HostHold;
+pub use maintenance::StorageMaintenance;
 use transfer::DataDisk;
 
 /// How long a stop waits for the host to release what it holds of the
@@ -426,6 +428,7 @@ fn validate_mount(mount: &MachineMount) -> Result<()> {
 
 /// Machine manager.
 pub struct MachineManager {
+    storage_maintenance: RwLock<bool>,
     machines: RwLock<HashMap<String, MachineInfo>>,
     vm_manager: Arc<VmManager>,
     persistence: MachinePersistence,
@@ -531,6 +534,7 @@ impl MachineManager {
         tracing::info!("Loaded {} persisted machines", machines.len());
 
         Self {
+            storage_maintenance: RwLock::new(false),
             machines: RwLock::new(machines),
             vm_manager,
             persistence,
@@ -592,6 +596,7 @@ impl MachineManager {
     /// `data_disk` says: fresh and sparse for `create`, moved in from a
     /// staging directory for `import`.
     fn create_machine(&self, config: MachineConfig, data_disk: DataDisk) -> Result<String> {
+        let _storage = self.storage_permit(&config.name)?;
         // Hold the write lock for the entire create operation to prevent TOCTOU
         // races: without this, two concurrent creates with the same name could
         // both pass the existence check before either inserts. `create` is rare
@@ -769,6 +774,32 @@ impl MachineManager {
     /// guest's console pipes empty for as long as it runs; see [`serial`] for
     /// why a VM cannot go without one.
     pub async fn start(self: &Arc<Self>, name: &str) -> Result<()> {
+        let is_machine_vm = self.start_process(name)?;
+
+        if is_machine_vm {
+            self.wait_for_machine_ready(name).await.map_err(|e| {
+                EngineError::Machine(format!(
+                    "Machine '{name}' started but readiness check failed: {e}"
+                ))
+            })?;
+        }
+
+        self.publish_event(
+            name,
+            crate::event::Event::MachineStarted {
+                name: name.to_string(),
+            },
+        );
+        Ok(())
+    }
+
+    fn start_process(self: &Arc<Self>, name: &str) -> Result<bool> {
+        // The reservation cannot overtake a start before its running state is published.
+        let _storage = self.storage_permit(name)?;
+        self.start_reserved_process(name)
+    }
+
+    fn start_reserved_process(self: &Arc<Self>, name: &str) -> Result<bool> {
         let (vm_id, cid) = self.assign_cid_for_start(name)?;
 
         // Check if this is a distro-based machine VM.
@@ -815,22 +846,7 @@ impl MachineManager {
             tracing::warn!("Failed to persist state for machine '{}': {}", name, e);
         }
 
-        // For machine VMs, wait for agent readiness and discover IP.
-        if is_machine_vm {
-            self.wait_for_machine_ready(name).await.map_err(|e| {
-                EngineError::Machine(format!(
-                    "Machine '{name}' started but readiness check failed: {e}"
-                ))
-            })?;
-        }
-
-        self.publish_event(
-            name,
-            crate::event::Event::MachineStarted {
-                name: name.to_string(),
-            },
-        );
-        Ok(())
+        Ok(is_machine_vm)
     }
 
     /// Waits for the guest agent to become ready and discovers the IP address.
@@ -1462,6 +1478,7 @@ impl MachineManager {
     ///
     /// Returns an error if the machine is unknown or the reboot fails.
     pub fn reboot(&self, name: &str) -> Result<()> {
+        let _storage = self.storage_permit(name)?;
         let vm_id = {
             let machines = self
                 .machines
@@ -1500,6 +1517,7 @@ impl MachineManager {
         cpus: Option<u32>,
         memory_mb: Option<u64>,
     ) -> Result<MachineResize> {
+        let _storage = self.storage_permit(name)?;
         let mut machines = self
             .machines
             .write()
@@ -1563,6 +1581,7 @@ impl MachineManager {
     /// Returns an error if the machine is not found, is running/starting, or
     /// the persisted config cannot be updated.
     pub fn set_backend(&self, name: &str, backend: arcbox_vmm::VmBackend) -> Result<()> {
+        let _storage = self.storage_permit(name)?;
         // Validate and capture the VM id without mutating anything yet.
         let vm_id = {
             let machines = self
@@ -1741,6 +1760,7 @@ impl MachineManager {
     /// Check absence under the registry lock. Errors from removing an existing
     /// machine must propagate, including a missing VM or a persistence failure.
     pub(crate) fn remove_if_present(&self, name: &str, force: bool) -> Result<bool> {
+        let _storage = self.storage_permit(name)?;
         let mut machines = self
             .machines
             .write()

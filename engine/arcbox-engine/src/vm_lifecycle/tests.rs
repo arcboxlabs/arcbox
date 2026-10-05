@@ -283,3 +283,61 @@ fn metadata_image_filename_pairs_with_data_image() {
         "docker-rosetta-meta.img"
     );
 }
+
+#[tokio::test]
+async fn storage_reservation_blocks_lifecycle_start_and_force_stop() {
+    let directory = tempfile::tempdir().unwrap();
+    let (machines, lifecycle) = storage_test_lifecycle(directory.path());
+    let reservation = machines.reserve_storage().unwrap();
+    for error in [
+        lifecycle.ensure_ready().await.unwrap_err(),
+        lifecycle.force_stop().await.unwrap_err(),
+    ] {
+        assert!(error.to_string().contains("held for recovery"));
+    }
+    assert_eq!(lifecycle.state().await, VmLifecycleState::NotExist);
+    assert!(machines.get(DEFAULT_MACHINE_NAME).is_none());
+    lifecycle.shutdown().await.unwrap();
+    drop(reservation);
+    lifecycle.force_stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn storage_resume_rejects_a_foreign_manager_before_boot() {
+    let directory = tempfile::tempdir().unwrap();
+    let foreign_directory = tempfile::tempdir().unwrap();
+    let (machines, lifecycle) = storage_test_lifecycle(directory.path());
+    let (foreign, _foreign_lifecycle) = storage_test_lifecycle(foreign_directory.path());
+    let reservation = foreign.reserve_storage().unwrap();
+    let error = lifecycle.resume_storage(&reservation).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("storage recovery requires its stopped System VM")
+    );
+    assert_eq!(lifecycle.state().await, VmLifecycleState::NotExist);
+    assert!(machines.get(DEFAULT_MACHINE_NAME).is_none());
+    assert!(
+        foreign
+            .ensure_storage_available(DEFAULT_MACHINE_NAME)
+            .is_err()
+    );
+}
+
+fn storage_test_lifecycle(data_dir: &std::path::Path) -> (Arc<MachineManager>, VmLifecycleManager) {
+    let events = EventBus::new();
+    let machines = Arc::new(MachineManager::new(
+        Arc::new(crate::vm::VmManager::new(data_dir.join("snapshots"))),
+        data_dir.to_path_buf(),
+        crate::vm::HostNetwork::default(),
+        events.clone(),
+    ));
+    let lifecycle = VmLifecycleManager::new(
+        Arc::clone(&machines),
+        events,
+        data_dir.to_path_buf(),
+        VmLifecycleConfig::default(),
+    )
+    .unwrap();
+    (machines, lifecycle)
+}

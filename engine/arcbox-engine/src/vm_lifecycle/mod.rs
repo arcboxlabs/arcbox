@@ -348,6 +348,22 @@ impl VmLifecycleManager {
             .await
     }
 
+    /// Restarts the verified existing pair while ordinary machine mutations remain excluded.
+    pub async fn resume_storage(
+        &self,
+        reservation: &crate::machine::StorageMaintenance,
+    ) -> Result<u32> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.request(
+            Command::ResumeStorage {
+                reservation: reservation.clone(),
+                reply,
+            },
+            reply_rx,
+        )
+        .await
+    }
+
     /// Ensures VM is ready with custom timeout.
     pub async fn ensure_ready_with_timeout(&self, timeout: Duration) -> Result<u32> {
         // Skip VM check for testing.

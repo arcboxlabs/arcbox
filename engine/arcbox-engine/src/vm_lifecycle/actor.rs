@@ -36,6 +36,11 @@ use super::{
 
 /// A command sent from the facade to the lifecycle actor.
 pub(super) enum Command {
+    /// Restarts an existing checked pair without releasing its maintenance reservation.
+    ResumeStorage {
+        reservation: crate::machine::StorageMaintenance,
+        reply: oneshot::Sender<Result<u32>>,
+    },
     /// Ensure the VM is ready; reply with the agent CID.
     EnsureReady {
         /// Startup budget for a boot this command may initiate.
@@ -307,6 +312,7 @@ impl PressureWatch for AgentPressureWatch {
 
 /// The lifecycle actor: owns the statig machine and executes its effects.
 pub(super) struct LifecycleActor {
+    storage_start: Option<crate::machine::StorageMaintenance>,
     shared: Arc<LifecycleShared>,
     /// Commands from the facade.
     commands: mpsc::UnboundedReceiver<Command>,
@@ -354,6 +360,7 @@ impl LifecycleActor {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (balloon_tx, balloon_rx) = mpsc::unbounded_channel();
         Self {
+            storage_start: None,
             shared,
             commands,
             events_rx,
@@ -480,8 +487,15 @@ impl LifecycleActor {
                 let shared = Arc::clone(&self.shared);
                 let events = self.events_tx.clone();
                 let timeout = Duration::from_millis(timeout_ms);
+                let reservation = self.storage_start.take();
                 self.inflight = Some(tokio::spawn(async move {
-                    shared.run_boot(create, timeout, epoch, &events).await;
+                    if let Some(reservation) = reservation {
+                        shared
+                            .run_storage_boot(reservation, timeout, epoch, &events)
+                            .await;
+                    } else {
+                        shared.run_boot(create, timeout, epoch, &events).await;
+                    }
                 }));
             }
             Effect::SpawnStop => {
@@ -556,11 +570,39 @@ impl LifecycleActor {
 
     fn on_command(&mut self, machine: &mut Machine, cmd: Command) {
         match cmd {
+            Command::ResumeStorage { reservation, reply } => {
+                if !reservation.belongs_to(&self.shared.machine_manager)
+                    || !self.public().needs_start()
+                    || self.inflight.is_some()
+                {
+                    let _ = reply.send(Err(EngineError::invalid_state(
+                        "storage recovery requires its stopped System VM",
+                    )));
+                    return;
+                }
+                self.storage_start = Some(reservation);
+                self.waiters.push(reply);
+                self.dispatch(
+                    machine,
+                    VmEvent::Start {
+                        create: false,
+                        timeout_ms: self.shared.config.startup_timeout.as_millis() as u64,
+                    },
+                );
+            }
             Command::EnsureReady { timeout, reply } => {
                 self.on_ensure_ready(machine, timeout, reply);
             }
             Command::Shutdown { reply } => self.on_shutdown(machine, reply),
             Command::ForceStop { reply } => {
+                if let Err(error) = self
+                    .shared
+                    .machine_manager
+                    .ensure_storage_available(&self.shared.machine_name)
+                {
+                    let _ = reply.send(Err(error));
+                    return;
+                }
                 self.stop_waiters.push(reply);
                 if matches!(machine.state(), State::Removing {}) {
                     return;
@@ -584,6 +626,14 @@ impl LifecycleActor {
         timeout: Duration,
         reply: oneshot::Sender<Result<u32>>,
     ) {
+        if let Err(error) = self
+            .shared
+            .machine_manager
+            .ensure_storage_available(&self.shared.machine_name)
+        {
+            let _ = reply.send(Err(error));
+            return;
+        }
         self.shared.record_activity();
         let state = self.public();
 
@@ -720,6 +770,17 @@ impl LifecycleActor {
     /// serialization, where a parked `ensure_ready` proceeded to boot as soon
     /// as the shutdown released the lock.
     fn start_if_pending(&mut self, machine: &mut Machine) {
+        if let Err(error) = self
+            .shared
+            .machine_manager
+            .ensure_storage_available(&self.shared.machine_name)
+        {
+            self.pending_timeout = None;
+            for waiter in self.waiters.drain(..) {
+                let _ = waiter.send(Err(EngineError::invalid_state(error.to_string())));
+            }
+            return;
+        }
         let state = self.public();
         if self.waiters.is_empty() || !state.needs_start() || self.inflight.is_some() {
             return;
@@ -768,8 +829,13 @@ impl LifecycleActor {
         if self
             .shared
             .machine_manager
-            .vm_self_stopped(&self.shared.machine_name)
-            == Some(true)
+            .ensure_storage_available(&self.shared.machine_name)
+            .is_ok()
+            && self
+                .shared
+                .machine_manager
+                .vm_self_stopped(&self.shared.machine_name)
+                == Some(true)
         {
             tracing::info!("guest requested reboot (SYSTEM_RESET); rebooting VM in place");
             let timeout_ms =

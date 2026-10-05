@@ -189,3 +189,23 @@ async fn readiness_waits_for_removal_and_stale_completion_cannot_finish_next_boo
     actor.abort_inflight();
     stopped.await.unwrap().unwrap();
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn reservation_after_force_stop_admission_blocks_removal() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut actor, mut machine) = actor(dir.path());
+    let machines = Arc::clone(&actor.shared.machine_manager);
+    machines.create(MachineConfig::default()).await.unwrap();
+    let mut events = actor.shared.event_bus.subscribe();
+    let (reply, stopped) = oneshot::channel();
+    actor.on_command(&mut machine, Command::ForceStop { reply });
+    // The current-thread executor cannot start removal before this test yields.
+    let _reservation = machines.reserve_storage().unwrap();
+    let event = completion(&mut actor).await;
+    actor.on_internal(&mut machine, event);
+    let error = stopped.await.unwrap().unwrap_err();
+    assert!(error.to_string().contains("held for recovery"));
+    assert_eq!(actor.public(), VmLifecycleState::Failed);
+    assert!(machines.get("default").is_some());
+    assert!(events.try_recv().is_err());
+}
