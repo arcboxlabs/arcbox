@@ -112,6 +112,11 @@ impl VsockTransport {
         self.addr
     }
 
+    /// Closes the owned stream immediately, including during future cancellation.
+    pub fn close(&mut self) {
+        self.stream.take();
+    }
+
     /// Creates a transport from an existing stream.
     #[must_use]
     pub fn from_stream(stream: VsockStream, addr: VsockAddr) -> Self {
@@ -200,7 +205,7 @@ impl Transport for VsockTransport {
     }
 
     async fn disconnect(&mut self) -> Result<()> {
-        self.stream.take();
+        self.close();
         Ok(())
     }
 

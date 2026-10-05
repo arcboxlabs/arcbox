@@ -1,4 +1,4 @@
-//! Blocking vsock transport for macOS HV backend.
+//! Blocking transport for connected host-guest stream sockets.
 //!
 //! Uses `std::os::unix::net::UnixStream` with `libc::poll`-based deadlines.
 //! No tokio dependency — safe to use from any thread without risking reactor
@@ -19,25 +19,31 @@ use crate::error::{Result, TransportError};
 /// Maximum frame size (must match async transport).
 const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 
-/// Blocking vsock transport over a Unix domain socketpair.
+/// Blocking transport over an AF_VSOCK or AF_UNIX stream socket.
 ///
 /// All I/O uses `libc::poll` for deadline enforcement. The underlying fd
 /// is set to non-blocking; `poll` + `read`/`write` loops handle partial
 /// transfers and `EAGAIN`.
 pub struct BlockingVsockTransport {
-    stream: UnixStream,
+    stream: Option<UnixStream>,
 }
 
 impl BlockingVsockTransport {
+    /// Closes the owned stream. A closed transport cannot reconnect.
+    pub fn close(&mut self) {
+        self.stream.take();
+    }
     /// Creates a transport from a raw fd (takes ownership).
     ///
     /// # Safety
-    /// `fd` must be a valid, connected Unix socket fd.
+    /// `fd` must be an owned, connected AF_VSOCK or AF_UNIX stream socket fd.
     pub unsafe fn from_raw_fd(fd: RawFd) -> io::Result<Self> {
-        // SAFETY: caller guarantees fd is a valid, connected Unix socket.
+        // SAFETY: the caller transfers ownership of a connected stream socket.
         let stream = unsafe { UnixStream::from_raw_fd(fd) };
         stream.set_nonblocking(true)?;
-        Ok(Self { stream })
+        Ok(Self {
+            stream: Some(stream),
+        })
     }
 
     /// Sends a framed message with a deadline.
@@ -45,10 +51,11 @@ impl BlockingVsockTransport {
     /// `data` must already include the 4-byte length prefix (as produced by
     /// `AgentClient::build_message`).
     pub fn send(&mut self, data: &[u8], deadline: Instant) -> Result<()> {
+        let stream = self.stream.as_mut().ok_or(TransportError::NotConnected)?;
         let mut offset = 0;
         while offset < data.len() {
-            self.poll_ready(libc::POLLOUT, deadline)?;
-            match self.stream.write(&data[offset..]) {
+            Self::poll_ready(stream, libc::POLLOUT, deadline)?;
+            match stream.write(&data[offset..]) {
                 Ok(0) => {
                     return Err(TransportError::io(io::Error::new(
                         io::ErrorKind::WriteZero,
@@ -88,10 +95,11 @@ impl BlockingVsockTransport {
 
     /// Reads exactly `buf.len()` bytes with a deadline.
     fn read_exact(&mut self, buf: &mut [u8], deadline: Instant) -> Result<()> {
+        let stream = self.stream.as_mut().ok_or(TransportError::NotConnected)?;
         let mut offset = 0;
         while offset < buf.len() {
-            self.poll_ready(libc::POLLIN, deadline)?;
-            match self.stream.read(&mut buf[offset..]) {
+            Self::poll_ready(stream, libc::POLLIN, deadline)?;
+            match stream.read(&mut buf[offset..]) {
                 Ok(0) => {
                     return Err(TransportError::io(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
@@ -108,7 +116,7 @@ impl BlockingVsockTransport {
     }
 
     /// Polls the fd for readiness with a deadline.
-    fn poll_ready(&self, events: i16, deadline: Instant) -> Result<()> {
+    fn poll_ready(stream: &UnixStream, events: i16, deadline: Instant) -> Result<()> {
         let now = Instant::now();
         if now >= deadline {
             return Err(TransportError::io(io::Error::new(
@@ -119,7 +127,7 @@ impl BlockingVsockTransport {
         let timeout_ms = (deadline - now).as_millis().min(i32::MAX as u128) as i32;
 
         let mut pfd = libc::pollfd {
-            fd: self.stream.as_raw_fd(),
+            fd: stream.as_raw_fd(),
             events,
             revents: 0,
         };
@@ -157,8 +165,27 @@ impl BlockingVsockTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::io::FromRawFd;
+    use std::os::unix::io::{FromRawFd, IntoRawFd};
     use std::time::Duration;
+
+    #[test]
+    fn closed_transport_rejects_io_and_releases_the_socket() {
+        let (host, mut guest) = UnixStream::pair().unwrap();
+        // SAFETY: the transport receives ownership of a connected stream socket.
+        let mut client =
+            unsafe { BlockingVsockTransport::from_raw_fd(host.into_raw_fd()).unwrap() };
+        client.close();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        assert!(matches!(
+            client.send(&[], deadline),
+            Err(TransportError::NotConnected)
+        ));
+        assert!(matches!(
+            client.recv(deadline),
+            Err(TransportError::NotConnected)
+        ));
+        assert_eq!(guest.read(&mut [0]).unwrap(), 0);
+    }
 
     #[test]
     fn test_blocking_roundtrip() {

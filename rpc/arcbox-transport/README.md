@@ -29,6 +29,8 @@ vsock.send(Bytes::from("ping")).await?;
 
 ## Raw Vsock Streams
 
+`VsockTransport::close()` and `BlockingVsockTransport::close()` immediately release the owned stream. Use `close()` when cancellation can leave an incomplete frame. A closed blocking transport cannot reconnect; create a new transport with a new connected fd.
+
 Use `VsockTransport` for framed ArcBox RPC traffic. Use `VsockStream` when a
 caller already owns a connected fd and needs a transparent `AsyncRead +
 AsyncWrite` byte stream, such as HTTP proxying or bidirectional tunnels.
