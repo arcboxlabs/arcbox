@@ -10,6 +10,7 @@
 
 mod machine_exec;
 mod sandbox_stream;
+mod shutdown;
 mod transport;
 mod wire;
 
@@ -53,7 +54,6 @@ use arcbox_connect::v1::{
 use arcbox_constants::ports::AGENT_PORT;
 use arcbox_constants::wire::MessageType;
 use arcbox_transport::Transport;
-#[cfg(target_os = "macos")]
 use arcbox_transport::vsock::BlockingVsockTransport;
 use arcbox_transport::vsock::{VsockAddr, VsockTransport};
 use buffa::Message;
@@ -131,11 +131,9 @@ impl AgentClient {
     /// Creates an agent client over an existing fd using the **blocking**
     /// transport.
     ///
-    /// For the HV backend's AF_UNIX socketpair: the blocking path avoids the
-    /// tokio/kqueue reactor stall on rapid connect/teardown cycles. Callers
-    /// must route streaming RPCs elsewhere — the blocking transport rejects
-    /// them.
-    #[cfg(target_os = "macos")]
+    /// Use for synchronous RPCs or the HV backend's AF_UNIX socketpair.
+    /// The HV blocking path avoids tokio/kqueue stalls during connection retries.
+    /// The blocking transport rejects streaming RPCs.
     pub fn from_fd_blocking(cid: u32, fd: std::os::unix::io::RawFd) -> Result<Self> {
         let transport = unsafe { BlockingVsockTransport::from_raw_fd(fd) }
             .map_err(|e| EngineError::Machine(format!("invalid vsock fd: {e}")))?;

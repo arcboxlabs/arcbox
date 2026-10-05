@@ -8,22 +8,11 @@ use std::time::Duration;
 /// `Async` is the default for Linux AF_VSOCK and macOS VZ backend (real vsock
 /// fds that tokio/kqueue handles correctly).
 ///
-/// `Blocking` is used for macOS HV backend socketpair fds (AF_UNIX). These fds
-/// trigger a tokio/kqueue reactor stall when rapidly created and torn down in a
-/// retry loop, causing timer wakeups to stop firing. The blocking transport
-/// uses `libc::poll` + `std::os::unix::net::UnixStream` and never touches the
-/// tokio reactor — so it is constructed only on macOS, though its arms stay
-/// compiled everywhere to keep the RPC bodies platform-free.
+/// `Blocking` serves synchronous shutdown and macOS HV socketpair fds.
+/// HV connection retries can stall the tokio/kqueue reactor, so this transport
+/// uses `libc::poll` without registering the socket with tokio.
 pub(super) enum AgentTransport {
     Async(VsockTransport),
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(
-            dead_code,
-            reason = "the HV socketpair is macOS-only, so its sole constructor \
-                      `AgentClient::from_fd_blocking` is too"
-        )
-    )]
     Blocking(BlockingVsockTransport),
 }
 

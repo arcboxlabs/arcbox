@@ -489,84 +489,26 @@ impl VmManager {
 
     /// Sends a shutdown RPC to the guest agent over vsock.
     ///
-    /// Uses synchronous I/O on the raw vsock fd so this can be called from
-    /// a non-async context. The response is read but its content is not
-    /// checked — what matters is that the agent accepted the request and
-    /// will power off the VM via PSCI.
+    /// Protocol admission and shutdown each use the blocking client's deadline.
+    /// The caller's VM-stop timeout starts after the guest accepts shutdown.
     fn send_shutdown_rpc(&self, id: &VmId, timeout_seconds: u32) -> Result<()> {
         use arcbox_constants::ports::AGENT_PORT;
-        use arcbox_constants::wire::MessageType;
-        use buffa::Message;
 
+        let cid = {
+            let vms = self.vms.read().map_err(|_| EngineError::LockPoisoned)?;
+            let entry = vms
+                .get(id)
+                .ok_or_else(|| EngineError::not_found(id.to_string()))?;
+            entry
+                .config
+                .guest_cid
+                .ok_or_else(|| EngineError::invalid_state("VM guest CID is not configured"))?
+        };
         let fd = self.connect_vsock(id, AGENT_PORT)?;
+        crate::agent_client::AgentClient::from_fd_blocking(cid, fd)?
+            .shutdown_blocking(timeout_seconds)?;
 
-        // Build the shutdown request wire frame.
-        let req = arcbox_connect::v1::ShutdownRequest {
-            timeout_seconds,
-            ..Default::default()
-        };
-        let payload = req.encode_to_vec();
-        let frame = crate::agent_client::AgentClient::build_message(
-            MessageType::ShutdownRequest,
-            "",
-            &payload,
-        );
-
-        // Send the request frame.
-        let written = {
-            let ptr = frame.as_ref().as_ptr().cast::<libc::c_void>();
-            let len = frame.len();
-            // SAFETY: fd is a valid connected vsock fd from connect_vsock.
-            // ptr/len describe a valid byte slice.
-            let n = unsafe { libc::write(fd, ptr, len) };
-            if n < 0 {
-                // SAFETY: closing a valid fd.
-                unsafe { libc::close(fd) };
-                return Err(EngineError::Vm(format!(
-                    "vsock write failed: {}",
-                    std::io::Error::last_os_error()
-                )));
-            }
-            n as usize
-        };
-        if written != frame.len() {
-            // SAFETY: closing a valid fd.
-            unsafe { libc::close(fd) };
-            return Err(EngineError::Vm("vsock short write".to_string()));
-        }
-
-        // Wait for the response with a 2s timeout.
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: pfd is a valid, initialized pollfd struct; fd is a valid connected fd.
-        let poll_ret = unsafe { libc::poll(&raw mut pfd, 1, 2000) };
-        if poll_ret <= 0 {
-            // SAFETY: closing a valid fd.
-            unsafe { libc::close(fd) };
-            return if poll_ret == 0 {
-                Err(EngineError::Vm(
-                    "shutdown RPC response timed out".to_string(),
-                ))
-            } else {
-                Err(EngineError::Vm(format!(
-                    "vsock poll failed: {}",
-                    std::io::Error::last_os_error()
-                )))
-            };
-        }
-
-        // Read the response — we only care that it arrived, not its content.
-        let mut buf = [0u8; 256];
-        // SAFETY: fd is a valid connected fd, buf is a valid mutable slice.
-        let _ = unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
-
-        // SAFETY: closing a valid fd.
-        unsafe { libc::close(fd) };
-
-        tracing::info!("Shutdown RPC sent to VM {id}");
+        tracing::info!("Guest accepted shutdown for VM {id}");
         Ok(())
     }
 

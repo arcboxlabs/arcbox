@@ -53,9 +53,6 @@
 //! Exit code 0 = all assertions passed. Non-zero = failure.
 
 use std::fmt::Write;
-use std::io::Write as _;
-use std::os::fd::FromRawFd;
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -355,7 +352,6 @@ fn run_phases(
 
 fn stop_vm(vmm: &mut Vmm, metrics: &mut arcbox_e2e::metrics::RunMetrics) -> Result<(), String> {
     use arcbox_constants::timeouts::HOST_SHUTDOWN_TIMEOUT_SECS;
-    use arcbox_constants::wire::MessageType;
 
     println!("[phase 7] wait for guest poweroff, then stop VM");
     if vmm
@@ -368,17 +364,17 @@ fn stop_vm(vmm: &mut Vmm, metrics: &mut arcbox_e2e::metrics::RunMetrics) -> Resu
     let fd = vmm
         .connect_vsock(AGENT_PORT)
         .map_err(|e| format!("shutdown connect_vsock: {e}"))?;
-    // SAFETY: connect_vsock returns an owned HV socketpair fd.
-    let mut stream = unsafe { UnixStream::from_raw_fd(fd) };
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| format!("shutdown write timeout: {e}"))?;
-    // An empty protobuf request selects the agent's default shutdown grace.
-    let request = AgentClient::build_message(MessageType::ShutdownRequest, "", &[]);
+    let mut client = AgentClient::from_fd_blocking(GUEST_CID, fd)
+        .map_err(|e| format!("shutdown AgentClient::from_fd_blocking: {e}"))?;
+    let response = client
+        .ping_blocking()
+        .map_err(|e| format!("shutdown ping: {e}"))?;
+    AgentClient::check_agent_protocol(&response).map_err(|e| format!("shutdown protocol: {e}"))?;
+
     let t = Instant::now();
-    stream
-        .write_all(&request)
-        .map_err(|e| format!("write shutdown request: {e}"))?;
+    client
+        .shutdown_blocking(0)
+        .map_err(|e| format!("shutdown request: {e}"))?;
     if !vmm
         .wait_for_stopped(Duration::from_secs(HOST_SHUTDOWN_TIMEOUT_SECS))
         .map_err(|e| format!("wait for guest poweroff: {e}"))?
