@@ -104,15 +104,24 @@ impl RuntimeMachines {
         let runtime = Arc::clone(&self.0);
         let name = machine.to_owned();
         // Connecting to a guest agent is a blocking hypervisor call.
-        tokio::task::spawn_blocking(move || runtime.get_agent(&name))
-            .await
-            .context("agent connect task panicked")?
-            .map_err(|e| unreachable_machine(machine, e))
+        tokio::task::spawn_blocking(move || {
+            runtime.ensure_storage_writes_available(&name)?;
+            runtime
+                .get_agent(&name)
+                .map_err(|e| unreachable_machine(&name, e))
+        })
+        .await
+        .context("agent connect task panicked")?
     }
 }
 
 impl MachineHost for RuntimeMachines {
     type Output = ExecSessionOutput;
+
+    fn ensure_writes_available(&self, machine: &str) -> Result<()> {
+        self.0.ensure_storage_writes_available(machine)?;
+        Ok(())
+    }
 
     async fn exec(
         &self,

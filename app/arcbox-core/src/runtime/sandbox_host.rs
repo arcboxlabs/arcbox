@@ -75,4 +75,9 @@ impl SandboxHost for Runtime {
     fn agent(&self, machine: &str) -> arcbox_engine::Result<AgentClient> {
         self.machine_manager().connect_agent(machine)
     }
+
+    fn writable_agent(&self, machine: &str) -> arcbox_engine::Result<AgentClient> {
+        self.ensure_storage_writes_available(machine)?;
+        self.agent(machine)
+    }
 }

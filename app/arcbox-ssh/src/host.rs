@@ -15,6 +15,9 @@ pub trait MachineHost: Send + Sync + 'static {
     /// Output of the sessions this host starts.
     type Output: ExecOutput;
 
+    /// Admits input to an existing session or TCP channel on `machine`.
+    fn ensure_writes_available(&self, machine: &str) -> anyhow::Result<()>;
+
     /// Starts `request` in `machine`, fed from `input`. Dropping the returned
     /// output ends the session and the process with it.
     fn exec(

@@ -93,6 +93,12 @@ pub trait SandboxHost: Send + Sync {
     /// Returns an error if the machine is not running or the agent is
     /// unreachable.
     fn agent(&self, machine: &str) -> arcbox_engine::Result<AgentClient>;
+
+    /// Admits storage writes before connecting to a machine's guest agent.
+    ///
+    /// # Errors
+    /// Returns an error if storage is protected or the agent cannot be connected.
+    fn writable_agent(&self, machine: &str) -> arcbox_engine::Result<AgentClient>;
 }
 
 // Handlers hold the runtime behind an Arc; delegate so generic protocol
@@ -153,5 +159,9 @@ impl<H: SandboxHost> SandboxHost for std::sync::Arc<H> {
 
     fn agent(&self, machine: &str) -> arcbox_engine::Result<AgentClient> {
         (**self).agent(machine)
+    }
+
+    fn writable_agent(&self, machine: &str) -> arcbox_engine::Result<AgentClient> {
+        (**self).writable_agent(machine)
     }
 }

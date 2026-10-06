@@ -24,6 +24,7 @@ struct ScriptedMachine {
     input_closed: Mutex<Option<oneshot::Sender<()>>>,
     /// Whether a lookup for `sftp-server` finds [`SFTP_SERVER`].
     has_sftp_server: AtomicBool,
+    writes_protected: AtomicBool,
 }
 
 fn output(stream: &str, data: &[u8]) -> MachineExecOutput {
@@ -56,6 +57,14 @@ impl ExecOutput for Scripted {
 
 impl MachineHost for ScriptedMachine {
     type Output = Scripted;
+
+    fn ensure_writes_available(&self, _machine: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.writes_protected.load(Ordering::Acquire),
+            "storage is protected"
+        );
+        Ok(())
+    }
 
     async fn exec(
         &self,
@@ -289,6 +298,55 @@ async fn stdin_reaches_the_process_and_eof_ends_it() {
     let messages = drain(&mut channel).await;
     assert_eq!(data(&messages, None), b"hello");
     assert_eq!(exit_status(&messages), Some(0));
+}
+
+#[tokio::test]
+async fn storage_protection_rejects_input_on_existing_sessions_and_tcp_channels() {
+    for kind in ["cat", "wait-resize", "wait-signal", "tcp"] {
+        let fixture = start_server().await;
+        let (handle, _) = login(fixture.addr, "default", fixture.client_key).await;
+        let mut channel = if kind == "tcp" {
+            handle
+                .channel_open_direct_tcpip("localhost", 8080, "127.0.0.1", 50000)
+                .await
+                .unwrap()
+        } else {
+            let channel = handle.channel_open_session().await.unwrap();
+            channel.exec(true, kind).await.unwrap();
+            channel
+        };
+        let started = tokio::time::timeout(std::time::Duration::from_secs(5), channel.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            started,
+            ChannelMsg::Success | ChannelMsg::Data { .. }
+        ));
+        fixture
+            .machine
+            .writes_protected
+            .store(true, Ordering::Release);
+
+        match kind {
+            "wait-resize" => channel.window_change(120, 40, 0, 0).await.unwrap(),
+            "wait-signal" => channel.signal(Sig::Custom("USR2".into())).await.unwrap(),
+            _ => channel
+                .data(&b"must not reach the process"[..])
+                .await
+                .unwrap(),
+        }
+        let messages = tokio::time::timeout(std::time::Duration::from_secs(5), drain(&mut channel))
+            .await
+            .unwrap();
+        assert_eq!(data(&messages, None), [] as [u8; 0]);
+        assert_eq!(data(&messages, Some(1)), b"arcbox: storage is protected\n");
+        assert!(
+            messages
+                .iter()
+                .any(|message| matches!(message, ChannelMsg::Close))
+        );
+    }
 }
 
 #[tokio::test]

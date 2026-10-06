@@ -63,7 +63,6 @@ pub async fn resume<H: SandboxHost>(
     reason: &str,
 ) -> arcbox_engine::Result<()> {
     let _operation = operations.lock(machine, sandbox_id).await;
-    let mut agent = host.agent(machine)?;
     // A resume can race the host finalization of the pause's network
     // quarantine (guest-initiated pauses — the idle detector — publish
     // their cleanup ticket through the async watch stream). The guest
@@ -75,6 +74,7 @@ pub async fn resume<H: SandboxHost>(
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
         let deadline = tokio::time::Instant::now() + RETRY_BUDGET;
         loop {
+            let mut agent = host.writable_agent(machine)?;
             let attempt = agent
                 .sandbox_resume(SandboxResumeCommand {
                     id: sandbox_id.to_owned(),
@@ -131,7 +131,7 @@ pub async fn ensure_resumed_for_write<H: SandboxHost>(
     sandbox_id: &str,
     auto_resume: bool,
 ) -> arcbox_engine::Result<()> {
-    let mut agent = host.agent(machine)?;
+    let mut agent = host.writable_agent(machine)?;
     let info = agent
         .sandbox_inspect(InspectSandboxRequest {
             id: sandbox_id.to_owned(),

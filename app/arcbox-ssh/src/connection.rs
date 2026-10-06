@@ -114,33 +114,38 @@ impl<H: MachineHost> Connection<H> {
     }
 
     /// Passes `input` to `channel`'s process, waiting as `input.rs`
-    /// decides; a session whose queue overflows is ended. Input for a
-    /// channel without a process is dropped.
+    /// decides. A session ends if admission fails or its queue overflows.
+    /// Input for a channel without a process is dropped.
     async fn send_input(
         &mut self,
         channel: ChannelId,
         input: ExecSessionInput,
         session: &mut Session,
     ) -> Result<(), russh::Error> {
-        let Some(queue) = self.sessions.get(&channel).and_then(SessionChannel::input) else {
+        let (Some(target), Some(queue)) = (
+            &self.target,
+            self.sessions.get(&channel).and_then(SessionChannel::input),
+        ) else {
             return Ok(());
         };
-        if queue.send(input, &self.outbound).await.is_ok() {
-            return Ok(());
-        }
+        let failure = match self.host.ensure_writes_available(&target.machine) {
+            Ok(()) => {
+                if queue.send(input, &self.outbound).await.is_ok() {
+                    return Ok(());
+                }
+                format!(
+                    "over {} MiB of input queued while the session's output waited on this \
+                     client; ending the session",
+                    input::LIMIT >> 20
+                )
+            }
+            Err(error) => format!("{error:#}"),
+        };
         let Some(state) = self.sessions.remove(&channel) else {
             return Ok(());
         };
-        tracing::warn!(
-            target = ?self.target,
-            "ssh session ended: its input backlog overflowed while output waited on the client"
-        );
-        let message = format!(
-            "arcbox: over {} MiB of input queued while the session's output waited on this \
-             client; ending the session{}",
-            input::LIMIT >> 20,
-            state.newline()
-        );
+        tracing::warn!(target = ?self.target, %failure, "ssh session input refused");
+        let message = format!("arcbox: {failure}{}", state.newline());
         // Ends the process and the output task.
         drop(state);
         session.extended_data(channel, STDERR, message)?;
