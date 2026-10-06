@@ -546,6 +546,7 @@ dependencies = [
  "arcbox-migration",
  "arcbox-net",
  "arcbox-route",
+ "arcbox-storage",
  "arcbox-transport",
  "arcbox-virtio",
  "arcbox-vmm",

@@ -1,6 +1,7 @@
 //! Host-side runtime migration manager.
 
 mod dto;
+mod recovery;
 
 use crate::error::{CoreError, Result};
 use arcbox_connect::v1::{
@@ -13,7 +14,10 @@ use arcbox_migration::{
 use dto::ToWire;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use tokio::sync::{Mutex, RwLock, broadcast};
 use uuid::Uuid;
@@ -142,6 +146,7 @@ impl MigrationRun {
 /// Host-side migration manager.
 #[derive(Debug)]
 pub struct MigrationManager {
+    storage_recovery: AtomicBool,
     target_socket: PathBuf,
     prepared: RwLock<HashMap<String, PreparedMigration>>,
     runs: RwLock<HashMap<String, MigrationRun>>,
@@ -153,6 +158,7 @@ impl MigrationManager {
     #[must_use]
     pub fn new(target_socket: PathBuf) -> Self {
         Self {
+            storage_recovery: AtomicBool::new(false),
             target_socket,
             prepared: RwLock::new(HashMap::new()),
             runs: RwLock::new(HashMap::new()),
@@ -243,6 +249,9 @@ impl MigrationManager {
         request: RunMigrationRequest,
     ) -> Result<UnboundedReceiver<Result<RunMigrationEvent>>> {
         let _start = self.run_start.lock().await;
+        if self.storage_recovery.load(Ordering::Acquire) {
+            return Err(CoreError::invalid_state("storage recovery is running"));
+        }
         let run_options = MigrationRunOptions::from(&request);
 
         let existing = self.runs.read().await.get(&request.plan_id).cloned();

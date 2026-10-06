@@ -9,6 +9,10 @@ pub type Result<T> = std::result::Result<T, CoreError>;
 /// Errors that can occur in core operations.
 #[derive(Debug, Error)]
 pub enum CoreError {
+    /// Persistent runtime storage identity or initialization failure.
+    #[error(transparent)]
+    Storage(#[from] arcbox_storage::Error),
+
     /// A durable file replacement failed.
     #[error(transparent)]
     AtomicFile(#[from] arcbox_atomic_file::AtomicWriteError),

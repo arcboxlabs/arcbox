@@ -612,6 +612,12 @@ impl Runtime {
     /// Returns an error if the backend cannot be applied or the VM cannot be
     /// restarted on the new backend.
     pub async fn switch_system_vm_backend(&self, backend: arcbox_vmm::VmBackend) -> Result<()> {
+        let _operation = self
+            .storage_recovery
+            .operation
+            .try_lock()
+            .map_err(|_| CoreError::invalid_state("another System VM operation is running"))?;
+        self.ensure_storage_writes_available(DEFAULT_MACHINE_NAME)?;
         let lifecycle = &self.vm_lifecycle;
         if lifecycle.backend() == backend {
             // Already on the requested backend — but an earlier switch may have
@@ -670,6 +676,12 @@ impl Runtime {
     /// `512..=host memory` MiB, the config file cannot be written, or the
     /// System VM fails to stop or boot.
     pub async fn resize_system_vm(&self, cpus: u32, memory_mb: u64) -> Result<SystemVmResources> {
+        let _operation = self
+            .storage_recovery
+            .operation
+            .try_lock()
+            .map_err(|_| CoreError::invalid_state("another System VM operation is running"))?;
+        self.ensure_storage_writes_available(DEFAULT_MACHINE_NAME)?;
         let current = self.system_vm_resources();
         let cpus = if cpus == 0 { current.cpus } else { cpus };
         let memory_mb = if memory_mb == 0 {
@@ -752,6 +764,21 @@ impl Runtime {
         Ok(true)
     }
 
+    /// Rejects writes to System VM storage while recovery protection is active.
+    ///
+    /// # Errors
+    /// Returns an error if storage is protected, reserved, or its hold cannot be read.
+    pub fn ensure_storage_writes_available(&self, machine_name: &str) -> arcbox_engine::Result<()> {
+        if matches!(machine_name, DEFAULT_MACHINE_NAME | "rosetta")
+            && self.storage_writes_protected()
+        {
+            return Err(arcbox_engine::EngineError::invalid_state(
+                "System VM storage is protected; use abctl disk recover",
+            ));
+        }
+        self.machine_manager.ensure_storage_available(machine_name)
+    }
+
     /// Trims a machine's data filesystems so the host reclaims the space
     /// they freed; returns the bytes the guest reported trimmed. The System
     /// VM is `DEFAULT_MACHINE_NAME`.
@@ -760,6 +787,7 @@ impl Runtime {
     /// Returns an error if the machine is not running, its agent is
     /// unreachable, or a filesystem refused the trim.
     pub async fn trim_machine_disk(&self, machine_name: &str) -> Result<u64> {
+        self.ensure_storage_writes_available(machine_name)?;
         Arc::clone(&self.machine_manager)
             .trim_disk(machine_name.to_owned())
             .await
@@ -1168,12 +1196,15 @@ impl Runtime {
     /// Returns an error if shutdown fails.
     pub async fn shutdown(&self) -> Result<()> {
         tracing::info!("ArcBox runtime shutting down");
+        let recovery_closed = self.close_storage_recovery().await;
 
         // 1. Stop all active host port forwarders.
         self.stop_port_forwarding_all().await;
 
         // 2. Shutdown VM lifecycle manager (gracefully stops default VM).
-        if let Err(e) = self.vm_lifecycle.shutdown().await {
+        if matches!(recovery_closed, Ok(false))
+            && let Err(e) = self.vm_lifecycle.shutdown().await
+        {
             tracing::warn!("Failed to shutdown VM lifecycle manager: {}", e);
         }
 
@@ -1231,7 +1262,7 @@ impl Runtime {
         }
 
         tracing::info!("ArcBox runtime shutdown complete");
-        Ok(())
+        recovery_closed.map(|_| ())
     }
 
     /// Shuts down the runtime forcefully.
@@ -1241,11 +1272,14 @@ impl Runtime {
     /// Returns an error if shutdown fails.
     pub async fn shutdown_force(&self) -> Result<()> {
         tracing::warn!("ArcBox runtime force shutdown");
+        let recovery_closed = self.close_storage_recovery().await;
 
         self.stop_port_forwarding_all().await;
 
         // Force stop VM lifecycle manager (immediate VM termination).
-        if let Err(e) = self.vm_lifecycle.force_stop().await {
+        if matches!(recovery_closed, Ok(false))
+            && let Err(e) = self.vm_lifecycle.force_stop().await
+        {
             tracing::warn!("Failed to force stop VM lifecycle manager: {}", e);
         }
 
@@ -1266,7 +1300,7 @@ impl Runtime {
         let _ = self.network_manager.stop();
 
         tracing::info!("ArcBox runtime force shutdown complete");
-        Ok(())
+        recovery_closed.map(|_| ())
     }
 
     /// Gets the VM's IP address from machine state, falling back to the

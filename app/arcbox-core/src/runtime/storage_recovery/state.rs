@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::atomic::AtomicBool,
+    sync::{Arc, atomic::AtomicBool},
 };
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{Mutex, broadcast, watch};
 
 #[derive(Serialize, Deserialize)]
 struct Record {
@@ -32,6 +32,9 @@ impl From<&StorageRecoveryProgress> for Record {
 }
 
 pub(in crate::runtime) struct StorageRecovery {
+    pub(super) owner: super::owner::Owner,
+    pub(in crate::runtime) operation: Arc<Mutex<()>>,
+    pub(in crate::runtime) active: AtomicBool,
     pub(super) protected: AtomicBool,
     pub(in crate::runtime) directory: PathBuf,
     latest: watch::Sender<Option<StorageRecoveryProgress>>,
@@ -95,6 +98,9 @@ impl StorageRecovery {
             None
         };
         let state = Self {
+            owner: super::owner::Owner::default(),
+            operation: Arc::new(Mutex::new(())),
+            active: AtomicBool::new(false),
             protected: AtomicBool::new(directory.join("hold").try_exists()?),
             directory,
             latest: watch::channel(None).0,
@@ -126,11 +132,16 @@ impl StorageRecovery {
             &self.directory.join("status.json"),
             &serde_json::to_vec_pretty(&Record::from(&progress))?,
         )?;
+        self.publish_observation(progress);
+        Ok(())
+    }
+
+    /// A failed journal write must still reach clients, with no claim of durability.
+    pub(super) fn publish_observation(&self, progress: StorageRecoveryProgress) {
         self.latest.send_modify(|latest| {
             *latest = Some(progress.clone());
             let _ = self.updates.send(progress);
         });
-        Ok(())
     }
 }
 

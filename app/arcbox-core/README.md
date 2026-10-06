@@ -46,9 +46,13 @@ arcbox-api / arcbox-cli
           +-- AgentClient accessors
 ```
 
-## Storage recovery journal
+## Storage recovery
 
-`Runtime::new` reconciles the durable recovery journal before the System VM can start. An interrupted operation becomes a protected failure, and a newer hold takes precedence over an older result. A protected result restores a missing hold. `subscribe_storage_recovery` replays the result, and `storage_writes_protected` reports the restored protection. Journal or hold errors fail runtime creation.
+`Runtime::recover_storage` owns recovery independently of the client connection. Recovery requires a stable System VM lifecycle and retains exclusive storage maintenance through checks and write verification. A client disconnect does not cancel recovery.
+
+The recovery owner retains storage maintenance if the durable hold cannot be written or the recovery worker fails. A retry reuses that reservation. Protected shutdown retains the reservation until the runtime is dropped, so a missing hold cannot permit another System VM boot.
+
+Daemon shutdown closes recovery admission, cancels dedicated guest RPCs, and joins recovery work before stopping the reserved VM. Interrupted or unverified recovery retains its durable hold. Cancellation during write verification does not confirm guest Docker probe cleanup; daemon or VM shutdown can interrupt that cleanup. Successful recovery removes protection only after write verification and Docker probe cleanup both complete.
 
 ## License
 
