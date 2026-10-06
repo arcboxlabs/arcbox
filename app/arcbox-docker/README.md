@@ -14,6 +14,8 @@ This crate provides a Docker-compatible API server that allows existing Docker C
 - **Network Operations**: list, inspect, create, remove (basic)
 - **System Operations**: info, version, ping, events, df
 
+When the guest reports read-only or unavailable persistent storage, ArcBox rejects known container, image, build, volume, and network mutations with a Docker JSON error and HTTP 503. Interactive attach requests, including WebSocket attach over GET, also count as mutations because stdin can trigger writes. Read requests, logs, inspection, stop, kill, and wait remain available. A missing observation from an older or disconnected guest does not invent a storage fault; Docker still reports operation errors. During an explicit storage recovery, ArcBox also rejects other mutating requests and prevents requests from starting the System VM. This protection remains after a failed operation or a check that leaves the System VM stopped. Use `abctl disk check` to stop the System VM, preserve its disks, and check them offline, or `abctl disk recover` to additionally restart and verify writes after the checks pass.
+
 ## Usage
 
 The server listens on a Unix socket that can be configured as a Docker context:

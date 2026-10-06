@@ -60,6 +60,10 @@ pub enum DockerError {
     #[error("guest docker unavailable: {0}")]
     GuestUnavailable(String),
 
+    /// Persistent storage cannot accept the requested mutation.
+    #[error("{0}")]
+    StorageProtected(String),
+
     /// Not implemented.
     #[error("Not implemented: {0}")]
     NotImplemented(String),
@@ -84,6 +88,7 @@ impl DockerError {
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Server(_) | Self::Context(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::GuestUnavailable(_) => StatusCode::BAD_GATEWAY,
+            Self::StorageProtected(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
         }
     }

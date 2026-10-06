@@ -54,6 +54,10 @@ pub(crate) fn router_with_proxy(runtime: Arc<Runtime>, proxy: Arc<ProxyState>) -
 
     api_routes()
         .fallback(proxy::proxy_fallback)
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state.runtime),
+            crate::storage_admission::admit,
+        ))
         .layer(middleware::from_fn(trace_id_middleware))
         .with_state(state)
 }

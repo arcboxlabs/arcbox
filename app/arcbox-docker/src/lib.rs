@@ -57,6 +57,7 @@ pub mod port_bindings;
 pub mod proxy;
 pub mod routing;
 pub mod server;
+mod storage_admission;
 mod system_disk_usage;
 pub mod trace;
 
