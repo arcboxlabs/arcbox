@@ -8,6 +8,7 @@ mod machine_dns;
 mod machine_settings;
 mod progress;
 mod sandbox_host;
+mod storage_health;
 mod storage_recovery;
 
 #[cfg(test)]
@@ -170,6 +171,8 @@ pub struct Runtime {
     /// active backend's translator (VZ→Rosetta, HV→FEX) rather than on a
     /// separate VM.
     vm_lifecycle: Arc<VmLifecycleManager>,
+    /// Observation tagged with the guest incarnation that produced it.
+    storage_health: watch::Sender<(u64, Option<arcbox_connect::v1::StorageHealth>)>,
     storage_recovery: storage_recovery::StorageRecovery,
     /// Container backend that drives ensure-ready / dockerd plumbing for the
     /// System VM.
@@ -353,6 +356,7 @@ impl Runtime {
             vm_manager,
             machine_manager,
             vm_lifecycle: system_lifecycle,
+            storage_health: watch::channel((0, None)).0,
             container_backend: system_backend,
             network_manager,
             migration_manager,
@@ -1132,6 +1136,13 @@ impl Runtime {
         // into the guest, which merges them into daemon.json at init.
         engine_config::stage_engine_config(&self.config.data_dir, &self.config.docker)?;
 
+        if self.machine_manager.storage_is_held()? {
+            tracing::warn!(
+                "System VM storage is held for recovery; keeping the control plane available"
+            );
+            return Ok(());
+        }
+
         // So does the CA behind HTTPS on container domains: generated once,
         // signed with in the guest, trusted by the user (`abctl tls trust`).
         let tls_dir = self
@@ -1148,10 +1159,22 @@ impl Runtime {
         // them. With the VM already up it short-circuits on the lifecycle
         // actor's cached CID and only waits for dockerd.
         progress(InitProgress::SystemVmStarting);
-        self.vm_lifecycle.ensure_ready().await?;
+        if let Err(error) = self.vm_lifecycle.ensure_ready().await {
+            if self.protect_failed_storage_boot(&error)? {
+                tracing::warn!(%error, "System VM storage is protected; keeping the control plane available");
+                return Ok(());
+            }
+            return Err(error.into());
+        }
         progress(InitProgress::SystemVmReady);
 
-        self.ensure_vm_ready().await?;
+        if let Err(error) = self.ensure_vm_ready().await {
+            if self.protect_failed_runtime_start(&error).await? {
+                tracing::warn!(%error, "Required storage is unavailable; keeping the stopped System VM protected");
+                return Ok(());
+            }
+            return Err(error);
+        }
 
         tracing::info!(
             backend = self.container_backend.name(),

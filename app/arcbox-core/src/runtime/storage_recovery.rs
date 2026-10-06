@@ -3,6 +3,7 @@
 mod guest;
 mod owner;
 mod preserve;
+mod startup;
 mod state;
 
 #[cfg(test)]
