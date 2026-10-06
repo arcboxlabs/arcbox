@@ -21,13 +21,11 @@ use arcbox_api::SetupPhase;
 use arcbox_constants::paths::{ArcboxProfile, HostLayout, HostMountLayout};
 use arcbox_core::{Config, InitProgress, Runtime};
 use arcbox_helper::validate::Domain;
-use macos_resolver::to_env_prefix;
 use tracing::info;
 
 use crate::DaemonArgs;
 use crate::context::{DaemonContext, EarlyContext, StartupHandles, VmArgs};
 
-const DNS_PREFIX: &str = "arcbox";
 pub const DEFAULT_DNS_DOMAIN: &str = "arcbox.local";
 
 /// Phase 1: directories, config, sockets. No runtime, no lock yet.
@@ -367,8 +365,9 @@ pub fn resolve_data_dir(profile: ArcboxProfile, data_dir: Option<&PathBuf>) -> P
 /// resolver domain.
 fn dns_port(cli_port: Option<u16>) -> Option<u16> {
     cli_port.or_else(|| {
-        let key = format!("{}_DNS_PORT", to_env_prefix(DNS_PREFIX));
-        std::env::var(key).ok().and_then(|s| s.parse().ok())
+        std::env::var("ARCBOX_DNS_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
     })
 }
 
@@ -376,8 +375,7 @@ fn dns_domain(cli_domain: Option<Domain>) -> Result<String> {
     if let Some(domain) = cli_domain {
         return Ok(domain.to_string());
     }
-    let key = format!("{}_DNS_DOMAIN", to_env_prefix(DNS_PREFIX));
-    std::env::var(key)
+    std::env::var("ARCBOX_DNS_DOMAIN")
         .map_or_else(
             |_| Ok(DEFAULT_DNS_DOMAIN.to_string()),
             |domain| domain.parse::<Domain>().map(|domain| domain.to_string()),

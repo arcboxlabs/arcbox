@@ -10,6 +10,7 @@ use std::time::Instant;
 use anyhow::Result;
 use arcbox_api::SetupPhase;
 use arcbox_core::Runtime;
+#[cfg(target_os = "macos")]
 use macos_resolver::FileResolver;
 use tracing::{info, warn};
 
@@ -194,6 +195,7 @@ impl RuntimeServicesStarted {
     /// Marks startup complete and returns handles for the shutdown loop.
     pub async fn mark_ready(self) -> Result<ReadyDaemon> {
         record_startup_phase("mark_ready", async {
+            #[cfg(target_os = "macos")]
             check_resolver_installed(&self.ctx.dns_domain);
             self.ctx
                 .setup_state
@@ -227,6 +229,7 @@ impl RuntimeServicesStarted {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn check_resolver_installed(domain: &str) {
     let resolver = FileResolver::new("arcbox");
     if !resolver.is_registered(domain) {

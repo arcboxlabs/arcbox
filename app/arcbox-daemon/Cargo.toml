@@ -47,11 +47,11 @@ arcbox-error.workspace = true
 arcbox-computer.workspace = true
 arcbox-engine.workspace = true
 nix.workspace = true
+libproc.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 arcbox-route.workspace = true
 macos-resolver = { workspace = true }
-libproc = { workspace = true }
 
 [features]
 # `vmnet` is on by default: the bridge NIC (NIC2) for host→container L3
