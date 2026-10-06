@@ -191,6 +191,11 @@ service SystemService {
     // each time the daemon phase changes (e.g. VM starting → ready).
     rpc WatchSetupStatus(Empty) returns (stream SetupStatus);
 
+    // Stops the System VM, preserves its paired disks, and checks them offline.
+    // The operation continues if the client disconnects. WatchSetupStatus
+    // replays progress and the terminal result for the operation ID.
+    rpc RecoverStorage(RecoverStorageRequest) returns (stream StorageRecoveryProgress);
+
     // Gets the System VM's current hypervisor backend.
     rpc GetSystemVmBackend(Empty) returns (SystemVmBackendInfo);
 

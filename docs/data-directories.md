@@ -68,6 +68,12 @@ Every System VM start and reboot requires a staged `bin/arcbox-agent` with the s
 
 An upgrade from an older Btrfs-only installation requires readable original metadata databases and no retired `.pre-ext4` sources before the new metadata volume can be formatted. Empty mountpoint stubs are ambiguous and require recovery. The migration retains its existing copy, sync, and retire sequence; a recorded migration resumes without treating retired data as a new installation. See [the storage contract](../common/arcbox-storage/README.md).
 
+`storage-recovery/` belongs to the daemon's data directory and is removed with that directory on uninstall. Each operation retains both copy-on-write disk snapshots, the original manifest bytes, and check reports in `storage-recovery/<operation-id>/`. Preservation requires APFS `clonefile` on macOS or a filesystem that supports `FICLONE` on Linux. The daemon does not fall back to a dense copy of a sparse disk.
+
+`abctl disk check` stops workloads, preserves the pair, and checks the unmounted copies with `btrfs check --readonly` and `e2fsck -fn`. The System VM remains stopped. `abctl disk recover` performs the same checks and restarts only after they pass. Recovery then verifies file creation, file and directory `fsync`, read-back, and removal on both original volumes. A local Docker image import and container create/start/write/sync/read/wait/remove cycle must also pass before recovery reports success. Recovery never runs `btrfs check --repair`, reformats a disk, or deletes a preserved pair.
+
+`storage-recovery/hold` prevents automatic and direct System VM starts while an offline check or an unverified recovery needs attention. Do not delete this file to bypass recovery. `storage-recovery/status.json` records the latest operation and outcome. A client disconnect does not cancel the daemon-owned operation; clients recover its outcome through `WatchSetupStatus.storage_recovery`. If the daemon restarts with a nonterminal record, the daemon restores the boot hold and reports an interrupted, unverified result. The control plane remains available for another explicit recovery attempt.
+
 ### 1.4 `boot/` — Boot Asset Cache
 
 See also [boot-assets.md](boot-assets.md).

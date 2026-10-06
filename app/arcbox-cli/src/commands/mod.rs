@@ -314,6 +314,8 @@ mod tests {
             (&["setup", "status"], true, true),
             (&["setup", "completions", "--shell", "zsh"], false, false),
             (&["disk", "usage"], true, false),
+            (&["disk", "check"], false, false),
+            (&["disk", "recover"], false, false),
             (&["boot", "status"], true, false),
             (&["boot", "list"], true, false),
             (&["system", "backend"], false, false),

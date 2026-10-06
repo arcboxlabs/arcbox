@@ -9,6 +9,8 @@ use serde::Serialize;
 
 use super::OutputFormat;
 
+mod recovery;
+
 /// Disk management commands.
 #[derive(Subcommand)]
 pub enum DiskCommands {
@@ -18,6 +20,12 @@ pub enum DiskCommands {
     /// this on its own — when the Docker VM goes idle, and hourly for every
     /// running machine — so this is for reclaiming space right away.
     Compact(CompactArgs),
+    /// Stop the System VM, preserve its disks, and check them offline. Leave
+    /// the System VM stopped when the check finishes.
+    Check,
+    /// Stop the System VM, preserve and check its disks, then restart only
+    /// after checks pass and verify persistent writes.
+    Recover,
 }
 
 #[derive(Args)]
@@ -30,6 +38,12 @@ pub async fn execute(cmd: DiskCommands, format: OutputFormat) -> Result<()> {
     match cmd {
         DiskCommands::Usage => execute_usage(format).await,
         DiskCommands::Compact(args) => execute_compact(args).await,
+        DiskCommands::Check => {
+            recovery::execute(arcbox_connect::v1::recover_storage_request::Action::CheckOnly).await
+        }
+        DiskCommands::Recover => {
+            recovery::execute(arcbox_connect::v1::recover_storage_request::Action::Recover).await
+        }
     }
 }
 

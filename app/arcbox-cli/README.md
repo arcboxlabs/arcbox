@@ -43,6 +43,10 @@ abctl daemon stop               # Stop daemon
 abctl info                      # System info
 abctl version                   # Version info
 
+# Docker storage checks and recovery
+abctl disk check                # Stop the System VM, preserve disks, check offline, leave stopped
+abctl disk recover              # Preserve and check disks, then restart and verify writes
+
 # Docker context integration
 abctl docker enable             # Set ArcBox as Docker context
 abctl docker disable            # Reset to default context
@@ -80,6 +84,8 @@ not as an incomplete cache: `boot status` says so for a runtime binary missing
 its executable bit instead of asking for a re-download.
 If Docker is unavailable, `disk usage` keeps host image facts, sets runtime
 reclaimable fields to `null`, reports the query error, and exits nonzero.
+
+`disk check` and `disk recover` stop running System VM workloads. Both commands print the operation ID and the directory that contains preserved disks and reports. Recovery restarts the System VM only after offline checks pass, then verifies persistent writes. Neither command forces a read-write remount or formats an existing disk. The daemon owns the operation, so closing the CLI does not cancel the operation. The CLI reports success only after a `COMPLETE` result. A failed or disconnected stream exits nonzero; inspect the storage status in ArcBox before starting another operation.
 
 ## Exit status
 

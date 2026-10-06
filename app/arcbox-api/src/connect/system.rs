@@ -108,6 +108,17 @@ impl SetupState {
         self.publish(|s| s.vm_running = running);
     }
 
+    /// Publishes a storage observation without changing startup or VM state.
+    /// `None` means the current guest cannot be observed or is unsupported.
+    pub fn set_storage_health(&self, health: Option<pb::StorageHealth>) {
+        self.publish(|s| s.storage_health = health.into());
+    }
+
+    /// Replays recovery progress independently of startup and VM readiness.
+    pub fn set_storage_recovery(&self, progress: pb::StorageRecoveryProgress) {
+        self.publish(|s| s.storage_recovery = Some(progress).into());
+    }
+
     pub fn set_docker_tools_installed(&self, installed: bool) {
         self.publish(|s| s.docker_tools_installed = installed);
     }
@@ -230,6 +241,54 @@ fn device_debug_to_proto(device: arcbox_core::DeviceDebug) -> pb::VirtioDeviceDe
               Router rather than named by callers"
 )]
 impl pb::SystemService for SystemServiceImpl {
+    async fn recover_storage(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, pb::RecoverStorageRequest>,
+    ) -> ServiceResult<ServiceStream<pb::StorageRecoveryProgress>> {
+        let action = request
+            .to_owned_message()
+            .action
+            .as_known()
+            .filter(|action| {
+                matches!(
+                    *action,
+                    pb::recover_storage_request::Action::CheckOnly
+                        | pb::recover_storage_request::Action::Recover
+                )
+            })
+            .ok_or_else(|| {
+                ConnectError::invalid_argument("action must be CHECK_ONLY or RECOVER")
+            })?;
+        let runtime = self.runtime.ready()?;
+        let (initial, mut updates) = runtime
+            .recover_storage(action)
+            .await
+            .map_err(|error| ConnectError::failed_precondition(error.to_string()))?;
+        let operation_id = initial.operation_id.clone();
+        let stream = async_stream::stream! {
+            yield Ok(initial);
+            loop {
+                match updates.recv().await {
+                    Ok(progress) if progress.operation_id == operation_id => {
+                        let terminal = matches!(progress.phase.as_known(), Some(pb::storage_recovery_progress::Phase::Complete | pb::storage_recovery_progress::Phase::Failed));
+                        yield Ok(progress);
+                        if terminal { break; }
+                    }
+                    Ok(_) => {
+                        yield Err(ConnectError::aborted("recovery operation changed; inspect WatchSetupStatus"));
+                        break;
+                    }
+                    Err(error) => {
+                        yield Err(ConnectError::unavailable(format!("recovery progress interrupted: {error}; inspect WatchSetupStatus")));
+                        break;
+                    }
+                }
+            }
+        };
+        Response::ok(Box::pin(stream))
+    }
+
     async fn get_info(
         &self,
         _ctx: RequestContext,
@@ -526,5 +585,31 @@ mod tests {
 
         let update = updates.try_recv().expect("flag update delivered");
         assert!(update.route_installed);
+    }
+
+    #[test]
+    fn storage_updates_preserve_startup_and_disconnection_clears_observation() {
+        let state = SetupState::new();
+        state.set_phase(setup_status::Phase::Ready, "ready");
+        state.set_vm_running(true);
+        let (_, mut updates) = state.subscribe();
+        state.set_storage_health(Some(pb::StorageHealth {
+            volumes: vec![pb::StorageVolumeHealth {
+                role: pb::storage_volume_health::Role::Data.into(),
+                state: pb::storage_volume_health::State::ReadOnly.into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }));
+        let update = updates.try_recv().unwrap();
+        assert_eq!(update.phase, setup_status::Phase::Ready);
+        assert!(update.vm_running);
+        assert_eq!(
+            update.storage_health.volumes[0].state,
+            pb::storage_volume_health::State::ReadOnly
+        );
+        state.set_storage_health(None);
+        assert!(!updates.try_recv().unwrap().storage_health.is_set());
+        assert_eq!(state.current().phase, setup_status::Phase::Ready);
     }
 }
