@@ -48,6 +48,8 @@ error text in `SetupStatus.error`, waits ~200 ms so connected
 Clients should treat FAILED (or stream EOF plus daemon exit) as
 startup failure.
 
+If Docker runtime startup fails after the agent becomes ready, the host queries a fresh `RuntimeStatus` from that agent. An explicit `READ_ONLY` or `UNAVAILABLE` state for a configured data or metadata volume also enters protected startup. The host writes the hold, preserves the original error and the complete status response in `storage-recovery/<operation>/startup-runtime-status.txt`, and stops the VM before continuing host services. These observations establish that required storage was unavailable for writes; they do not identify filesystem corruption or authorize repair. A failed probe, unknown observation, or read-write observation preserves the ordinary fatal startup behavior.
+
 ### Phase enum caveats
 
 - The observable progression is `INITIALIZING → [CLEANING_UP →

@@ -21,6 +21,7 @@ mod shutdown;
 mod ssh_agent;
 mod ssh_service;
 mod startup;
+mod storage_health;
 
 use std::sync::Arc;
 

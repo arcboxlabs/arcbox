@@ -266,6 +266,8 @@ async fn init_runtime(ctx: &DaemonContext) -> Result<Arc<Runtime>> {
     // a mirror started after it returns would report the VM down across the
     // whole window between the agent answering and dockerd coming up.
     crate::services::spawn_vm_running_mirror(ctx, &runtime);
+    crate::storage_health::spawn(ctx, &runtime);
+    crate::services::spawn_storage_recovery_mirror(ctx, &runtime);
     // Armed here for the same reason: a host sleep can land during the boot
     // below, and the wake that follows must still re-sync the guest clock.
     crate::power::spawn_wake_clock_sync(&runtime, &ctx.shutdown);
@@ -302,7 +304,7 @@ async fn init_runtime(ctx: &DaemonContext) -> Result<Arc<Runtime>> {
     // same gate, re-evaluated per VM incarnation, keeps the long-lived watch
     // (`sandbox_cleanup::spawn`) off backends that cannot carry it.
     let backend = runtime.system_vm_backend();
-    if !runtime.config().vm.autostart {
+    if !runtime.config().vm.autostart || runtime.machine_manager().storage_is_held()? {
         // No guest, nothing to clean.
     } else if backend.supports_nested_virt() {
         let replayed = arcbox_computer::cleanup::initialize(runtime.as_ref())

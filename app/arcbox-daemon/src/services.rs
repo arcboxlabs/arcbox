@@ -88,7 +88,7 @@ pub async fn start_services(
     // A custom instance pool must be routable before any API reports ready.
     // Production keeps its existing best-effort recovery semantics.
     #[cfg(target_os = "macos")]
-    if linux_vm {
+    if linux_vm && !runtime.machine_manager().storage_is_held()? {
         ensure_isolated_container_route(
             runtime,
             &ctx.setup_state,
@@ -258,6 +258,33 @@ pub fn spawn_vm_running_mirror(ctx: &DaemonContext, runtime: &Arc<Runtime>) {
     drop(tokio::spawn(async move {
         vm_running_loop(state, setup_state, shutdown).await;
     }));
+}
+
+/// Replays durable recovery state and every live update into the control plane.
+pub fn spawn_storage_recovery_mirror(ctx: &DaemonContext, runtime: &Arc<Runtime>) {
+    let (initial, mut updates) = runtime.subscribe_storage_recovery();
+    if let Some(initial) = initial {
+        ctx.setup_state.set_storage_recovery(initial);
+    }
+    let runtime = Arc::clone(runtime);
+    let setup = Arc::clone(&ctx.setup_state);
+    let shutdown = ctx.shutdown.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                update = updates.recv() => match update {
+                    Ok(progress) => setup.set_storage_recovery(progress),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let (latest, receiver) = runtime.subscribe_storage_recovery();
+                        updates = receiver;
+                        if let Some(latest) = latest { setup.set_storage_recovery(latest); }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    });
 }
 
 /// Mirrors the System VM's lifecycle state into `SetupState.vm_running`.
