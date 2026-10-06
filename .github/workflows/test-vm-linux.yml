@@ -16,6 +16,7 @@ on:
       # dmsetup and thin pools on real KVM, so it has to follow them.
       - "engine/arcbox-snapshot/**"
       - "common/arcbox-atomic-file/**"
+      - "common/arcbox-storage/**"
       - "common/arcbox-constants/**"
       - "rpc/arcbox-protocol/**"
       - "Cargo.toml"
@@ -36,6 +37,7 @@ on:
       # dmsetup and thin pools on real KVM, so it has to follow them.
       - "engine/arcbox-snapshot/**"
       - "common/arcbox-atomic-file/**"
+      - "common/arcbox-storage/**"
       - "common/arcbox-constants/**"
       - "rpc/arcbox-protocol/**"
       - "Cargo.toml"
@@ -82,7 +84,7 @@ jobs:
         run: cargo fmt -p arcbox-computer-runtime -p arcbox-vm-proto -p arcbox-vm-driver -p arcbox-fc-driver -p arcbox-tap-net -p arcbox-vm-agent -p arcbox-snapshot --check
 
       - name: Clippy
-        run: cargo clippy -p arcbox-computer-runtime -p arcbox-vm-proto -p arcbox-vm-driver -p arcbox-fc-driver -p arcbox-tap-net -p arcbox-vm-agent -p arcbox-snapshot -- -D warnings
+        run: cargo clippy -p arcbox-computer-runtime -p arcbox-vm-proto -p arcbox-vm-driver -p arcbox-fc-driver -p arcbox-tap-net -p arcbox-vm-agent -p arcbox-snapshot -p arcbox-storage -- -D warnings
 
       - name: Unit tests
         # --bins covers the vm-agent guest handlers, whose tests are
@@ -96,7 +98,7 @@ jobs:
         # carries a pre-existing pedantic backlog no gate has ever caught,
         # and -D warnings on it would fail this job for reasons unrelated
         # to the change under test (see guest/AGENTS.md).
-        run: cargo test --lib --bins -p arcbox-computer-runtime -p arcbox-vm-proto -p arcbox-vm-driver -p arcbox-fc-driver -p arcbox-tap-net -p arcbox-vm-agent -p arcbox-snapshot -p arcbox-agent
+        run: cargo test --lib --bins -p arcbox-computer-runtime -p arcbox-vm-proto -p arcbox-vm-driver -p arcbox-fc-driver -p arcbox-tap-net -p arcbox-vm-agent -p arcbox-snapshot -p arcbox-storage -p arcbox-agent
 
       - name: Manager lifecycle over the fakes
         # The manager's own flows (create, boot, exec, files, pause, resume,

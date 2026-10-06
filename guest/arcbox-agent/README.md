@@ -37,6 +37,8 @@ The `storage-recovery` command requires the recovery kernel flag. A recovery ker
 
 `StorageCheck.VERIFY_WRITES` runs only in the normal System VM after runtime startup. It writes, fsyncs, reads, and removes an owned temporary file on each configured volume. It then imports the guest's static BusyBox into an owned Docker image and runs a container with networking disabled. The container verifies writes and reads in its writable layer. The check passes only after the container exits successfully and both the container and image are removed. Docker cleanup continues within its operation deadlines if the host disconnects.
 
+The storage manifest grants one-time formatting authority only to host-created volumes with matching identities. Missing, replaced, unreadable, or corrupted existing volumes require recovery. See [data directories](../../docs/data-directories.md) for the paired backup and initialization contract.
+
 ## Runtime Bootstrap Role
 
 At startup, the agent detects and launches the bundled runtime stack
