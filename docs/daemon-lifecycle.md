@@ -158,6 +158,8 @@ signal received
   └─ process exits
 ```
 
+The daemon completes host cleanup before reporting a runtime shutdown error. A failed graceful stop returns the error to `main`; a failed forced stop exits with status 1. A shutdown task panic also remains a failure, even if the subsequent forced stop succeeds. Forced stops still use `process::exit` after cleanup because an abandoned graceful task can block Tokio runtime destruction.
+
 ### Residual state after graceful exit
 
 | File | State | Next startup |
@@ -197,6 +199,8 @@ pre-pipeline handles when acquired, so cancelling the startup future
 does not release the flock — a concurrent daemon cannot take the lease
 while this process is still tearing down its VM. The flock releases at
 process exit, as in every other path.
+
+Startup interruption follows the same shutdown error contract: route cleanup completes before the daemon reports a stop error or task panic. A forced stop retains direct process exit and uses status 1 when shutdown failed.
 
 ## Crash / SIGKILL
 

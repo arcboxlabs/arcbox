@@ -9,10 +9,14 @@
 //! the whole startup window so a mid-boot SIGTERM cannot fall through to
 //! the default disposition and orphan the VM.
 
+#[cfg(test)]
+mod tests;
+
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use arcbox_core::Runtime;
 use arcbox_docker::DockerContextManager;
 use tokio::signal;
@@ -49,22 +53,37 @@ pub async fn run(ctx: DaemonContext, mut handles: ServiceHandles) -> Result<()> 
 
     drain(&mut handles).await;
 
-    let forced = match ctx.shared_runtime.get() {
+    let stopped = match ctx.shared_runtime.get() {
         Some(runtime) => stop_runtime(Arc::clone(runtime), None).await,
-        None => false,
+        None => RuntimeStop::Graceful(Ok(())),
     };
 
     cleanup(&ctx).await;
     info!("ArcBox daemon stopped");
 
-    if forced {
-        // See `stop_runtime`: the abandoned graceful-stop task may still
-        // occupy a worker thread; process::exit avoids hanging in runtime
-        // drop.
-        std::process::exit(0);
-    }
+    stopped.finish()
+}
 
-    Ok(())
+enum RuntimeStop {
+    Graceful(Result<()>),
+    Forced(Result<()>),
+}
+
+impl RuntimeStop {
+    /// Report the result only after the caller completes daemon cleanup.
+    fn finish(self) -> Result<()> {
+        match self {
+            Self::Graceful(result) => result,
+            Self::Forced(result) => {
+                if let Err(error) = &result {
+                    tracing::error!(?error, "Runtime shutdown failed");
+                    eprintln!("Runtime shutdown failed: {error:#}");
+                }
+                // An abandoned graceful task can block runtime drop. Preserve direct exit.
+                std::process::exit(i32::from(result.is_err()));
+            }
+        }
+    }
 }
 
 /// Stops the runtime, racing the graceful stop against a second signal
@@ -77,16 +96,26 @@ pub async fn run(ctx: DaemonContext, mut handles: ServiceHandles) -> Result<()> 
 /// `shutdown_force` does everything except the graceful VM stop: port
 /// forwarding, force VM kill, other machines, network manager.
 ///
-/// Returns `true` when the stop was forced. The abandoned graceful task
-/// may then still be blocked waiting for the VM (no locks held, but it
-/// occupies a tokio worker thread), so after its remaining cleanup the
-/// caller must leave via `std::process::exit` rather than returning
-/// through runtime drop.
-async fn stop_runtime(runtime: Arc<Runtime>, grace: Option<Duration>) -> bool {
-    let graceful = tokio::spawn({
-        let runtime = Arc::clone(&runtime);
-        async move { runtime.shutdown().await }
-    });
+/// Retains shutdown errors and task panics until daemon cleanup completes.
+/// A forced result must exit directly because the graceful task can remain blocked.
+async fn stop_runtime(runtime: Arc<Runtime>, grace: Option<Duration>) -> RuntimeStop {
+    let graceful_runtime = Arc::clone(&runtime);
+    stop_runtime_with(
+        async move { graceful_runtime.shutdown().await.map_err(Into::into) },
+        async move { runtime.shutdown_force().await.map_err(Into::into) },
+        wait_for_signal(),
+        grace,
+    )
+    .await
+}
+
+async fn stop_runtime_with(
+    graceful: impl Future<Output = Result<()>> + Send + 'static,
+    force: impl Future<Output = Result<()>> + Send + 'static,
+    signal: impl Future<Output = ()>,
+    grace: Option<Duration>,
+) -> RuntimeStop {
+    let graceful = tokio::spawn(graceful);
     let graceful = async move {
         match grace {
             Some(limit) => tokio::time::timeout(limit, graceful)
@@ -96,36 +125,37 @@ async fn stop_runtime(runtime: Arc<Runtime>, grace: Option<Duration>) -> bool {
         }
     };
 
-    let forced = tokio::select! {
+    let graceful_error = tokio::select! {
         result = graceful => match result {
-            Ok(Ok(Ok(()))) => false,
-            Ok(Ok(Err(e))) => {
-                warn!("Runtime shutdown error: {e}");
-                false
-            }
-            Ok(Err(e)) => {
-                warn!("Runtime shutdown task panicked: {e}");
-                true
-            }
+            Ok(Ok(result)) => return RuntimeStop::Graceful(result),
+            Ok(Err(error)) => Some(anyhow::Error::from(error).context("Runtime shutdown task failed")),
             Err(limit) => {
                 warn!(
                     "Graceful stop did not finish within {}s, forcing",
                     limit.as_secs()
                 );
-                true
+                None
             }
         },
-        () = wait_for_signal() => {
+        () = signal => {
             println!("Force shutting down...");
             warn!("Second signal received, forcing shutdown");
-            true
+            None
         }
     };
 
-    if forced {
-        let _ = runtime.shutdown_force().await;
-    }
-    forced
+    let forced = tokio::spawn(force)
+        .await
+        .context("Forced runtime shutdown task failed")
+        .and_then(std::convert::identity);
+    let result = match (graceful_error, forced) {
+        (None, result) => result,
+        (Some(error), Ok(())) => Err(error),
+        (Some(error), Err(forced)) => {
+            Err(error.context(format!("Forced runtime shutdown also failed: {forced:#}")))
+        }
+    };
+    RuntimeStop::Forced(result)
 }
 
 async fn cleanup(ctx: &DaemonContext) {
@@ -195,20 +225,13 @@ pub async fn interrupt_startup(handles: &StartupHandles) -> Result<()> {
         info!("ArcBox daemon stopped");
         return Ok(());
     };
-    let forced = stop_runtime(Arc::clone(runtime), Some(STARTUP_ABORT_GRACE)).await;
+    let stopped = stop_runtime(Arc::clone(runtime), Some(STARTUP_ABORT_GRACE)).await;
 
     cleanup_container_route(handles.container_network_lease.get()).await;
 
     info!("ArcBox daemon stopped");
 
-    if forced {
-        // See `stop_runtime`: the abandoned graceful-stop task may still
-        // occupy a worker thread; exit directly rather than hanging in
-        // runtime drop, mirroring the force path of `run`.
-        std::process::exit(0);
-    }
-
-    Ok(())
+    stopped.finish()
 }
 
 /// Force-cleans a runtime after the startup pipeline itself returns an error.
