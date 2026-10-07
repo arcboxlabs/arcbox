@@ -89,4 +89,5 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-10-07 — SigNoz remains idle after ClickHouse stalls](logs/2026-10-07-signoz-profiler-and-cpu-accounting.md) — Collector nop rollback, profiler period truncation, unresolved guest accounting loss, and a separate CPU parser defect; probes: [SQL](../tests/bench/signoz/diagnose.sql), [CPU parser](../tests/bench/signoz/cpu_ticks_repro.rs)
 - [2026-09-29 — vsock RX: drain a stream per round, aim the kick](logs/2026-09-29-vsock-rx-round-and-targeted-kick.md)
