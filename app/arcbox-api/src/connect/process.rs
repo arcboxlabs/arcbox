@@ -42,10 +42,8 @@ const fn resolve_wait_for_port_budget(requested: u32) -> u32 {
 
 /// Execution service implementation.
 ///
-/// Every call addresses one execution inside one sandbox and carries its
-/// stdio, so this is the half a cloud deployment serves from whatever is
-/// co-located with the sandbox rather than from the control-plane front
-/// door.
+/// The local daemon serves process operations and stdio streams for a
+/// sandbox. Guest operations are forwarded to the System VM's agent.
 ///
 /// Data-plane calls transparently resume a paused sandbox (CORE-21): a
 /// guest answer of SANDBOX_PAUSED triggers one shared resume and one retry,

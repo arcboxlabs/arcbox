@@ -21,10 +21,9 @@ use arcbox_computer::locks::SandboxOperationLocks;
 
 /// Filesystem service implementation.
 ///
-/// Carries file bytes for one sandbox, so it belongs with the data plane
-/// rather than the control-plane front door — and, like the rest of the
-/// data plane, it transparently resumes a paused sandbox (CORE-21) unless
-/// the caller set `x-arcbox-no-auto-resume`.
+/// The local daemon forwards sandbox file operations and file bytes to the
+/// System VM's agent. File operations transparently resume a paused sandbox
+/// (CORE-21) unless the caller set `x-arcbox-no-auto-resume`.
 pub struct SandboxFilesystemServiceImpl {
     runtime: SharedRuntime,
     operations: Arc<SandboxOperationLocks>,

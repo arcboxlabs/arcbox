@@ -48,10 +48,10 @@ class Connection:
 class ResolvedConnection:
     """A fully resolved connection target."""
 
-    #: Base URL handed to the transport. On the Unix-socket tier this is
+    #: Base URL handed to the transport. For a Unix socket this is
     #: the :data:`UDS_BASE_URL` placeholder.
     base_url: str
-    #: Unix socket to dial; ``None`` on the remote (TCP) tier.
+    #: Unix socket to dial; ``None`` when a daemon proxy URL is configured.
     socket_path: str | None
     #: Bearer credential to attach, when set.
     api_key: str | None

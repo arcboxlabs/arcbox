@@ -20,7 +20,7 @@ export interface ClientContext {
 /**
  * Build the connect-es transport for a connection.
  *
- * Unix-socket mechanism (the local tier): `@connectrpc/connect-node`'s
+ * For Unix sockets, `@connectrpc/connect-node`'s
  * HTTP/1.1 transport forwards `nodeOptions` verbatim into Node's
  * `http.request(url, options)` — see connect-node `node-transport-options.d.ts`
  * (`NodeHttp1TransportOptions.nodeOptions: Omit<http.RequestOptions, "signal">`,

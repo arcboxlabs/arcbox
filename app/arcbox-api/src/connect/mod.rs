@@ -3,9 +3,9 @@
 //! One set of handlers answers Connect (HTTP POST, JSON or binary
 //! protobuf), gRPC, and gRPC-Web on a single endpoint (CORE-53).
 //!
-//! The sandbox half keeps the control-plane / data-plane split the proto
-//! draws (CORE-57), so a cloud deployment can serve the two from different
-//! processes:
+//! The sandbox half keeps the proto's control-plane / data-plane split.
+//! The local daemon serves both and forwards guest operations to the
+//! System VM's agent:
 //!
 //! - [`control`] — sandbox lifecycle, events, published ports
 //! - [`template`] — the template catalog (control plane, CORE-21)
@@ -157,10 +157,9 @@ pub(crate) trait ContextExt {
 impl ContextExt for RequestContext {
     /// Reads the optional `x-machine` header.
     ///
-    /// "Which local VM to target" is a host-local concept with no meaning in
-    /// a multi-tenant cloud, so it is transport metadata a local client MAY
-    /// set — never part of the product contract (CORE-54). Absent, requests
-    /// go to the System VM, which is the only machine a sandbox client has.
+    /// Clients may select a local VM through this transport header.
+    /// An absent or empty header selects the System VM. Sandbox V1 accepts
+    /// only the System VM, as enforced by `sandbox_machine_id`.
     fn machine_id(&self) -> Result<String, ConnectError> {
         match self.header("x-machine") {
             None => Ok(DEFAULT_MACHINE_NAME.to_owned()),

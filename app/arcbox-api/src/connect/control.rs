@@ -22,10 +22,9 @@ use arcbox_computer::ports;
 
 /// Sandbox lifecycle service implementation.
 ///
-/// These calls address the sandbox as a resource rather than its running
-/// processes, so in a cloud deployment they are the half served by a
-/// multi-tenant front door. Each routes to the `arcbox-agent` in the target
-/// guest VM over the port-1024 vsock binary-frame protocol.
+/// The local daemon handles sandbox lifecycle, events, and published ports.
+/// Guest operations use the port-1024 vsock binary-frame protocol to reach
+/// `arcbox-agent` inside the System VM.
 pub struct SandboxServiceImpl {
     runtime: SharedRuntime,
     operations: Arc<SandboxOperationLocks>,
