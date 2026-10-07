@@ -7,6 +7,8 @@
 
 ## Current status — 2026-10-07
 
+The [published-asset validation](2026-10-07-storage-recovery-release-validation.md) records the subsequent review fixes, resolved Linux failures, and final boot pin. The results below describe the earlier validation stage.
+
 All four approved test corrections are applied: the API fixture creates its directory, the async heartbeat assertion accounts for Tokio's millisecond deadline rounding, the recovery E2E uses `data/docker.img`, and the privileged Guest harness requires four complete test names with one passing execution each.
 
 | Gate | Latest established result |
