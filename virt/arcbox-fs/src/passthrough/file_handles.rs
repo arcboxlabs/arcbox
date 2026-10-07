@@ -142,6 +142,7 @@ impl PassthroughFs {
     /// # Errors
     ///
     /// - An I/O error wrapped in [`FsError::Common`] if seek fails
+    /// - [`FsError::InvalidPath`] if `whence` is not 0, 1, or 2
     /// - [`FsError::InvalidHandle`] if the handle is invalid
     pub fn lseek(&self, handle: u64, offset: i64, whence: u32) -> Result<u64> {
         let mut handles = self
