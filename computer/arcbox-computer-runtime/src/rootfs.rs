@@ -122,7 +122,7 @@ impl RootfsBuilder {
     /// overlay2 chain-id directory (e.g. `/var/lib/docker/overlay2/<chain-id>`).
     ///
     /// `pinned` are images that must survive the superseded-image sweep
-    /// because a snapshot still needs them as its dm-snapshot origin
+    /// because a durable record, snapshot, or template still needs them
     /// (`SandboxManager::pinned_rootfs_paths`).
     ///
     /// Returns the path to the generated (or cached) ext4 image.

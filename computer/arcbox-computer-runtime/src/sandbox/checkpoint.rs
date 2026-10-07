@@ -30,18 +30,24 @@ pub(super) struct RestoreRequest {
 }
 
 impl SandboxManager {
-    /// Rootfs images that existing snapshots or catalog templates need to
-    /// stay restorable/bootable.
+    /// Rootfs images that durable records, snapshots, or templates still need.
     ///
     /// Exposed so whoever owns the converted-rootfs cache can pin them; see
     /// [`SnapshotCatalog::referenced_rootfs_paths`] and
     /// [`TemplateCatalog::rootfs_paths`](crate::template_catalog::TemplateCatalog::rootfs_paths).
-    /// The union matters: a non-prewarmed template pins no snapshot, so
-    /// without the catalog half a vm-agent update plus a create for the same
-    /// docker layer would sweep the template's ext4 as superseded.
+    /// Records pin their source images until removal, including after adoption
+    /// and before the first checkpoint. Invalid records prevent cache sweeping.
     pub fn pinned_rootfs_paths(&self) -> Result<std::collections::BTreeSet<PathBuf>> {
         let mut pinned = self.snapshots.referenced_rootfs_paths()?;
         pinned.extend(self.templates.rootfs_paths()?);
+        pinned.extend(
+            self.records
+                .load_all()?
+                .into_iter()
+                .map(|record| record.effective_spec.rootfs)
+                .filter(|rootfs| !rootfs.is_empty())
+                .map(PathBuf::from),
+        );
         Ok(pinned)
     }
 

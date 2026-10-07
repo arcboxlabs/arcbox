@@ -999,8 +999,8 @@ async fn removing_a_paused_computer_takes_its_retained_checkpoint() {
     let fixture = Fixture::jailed().await;
     let id = fixture.ready("napper").await;
     assert!(
-        fixture.manager.pinned_rootfs_paths().unwrap().is_empty(),
-        "nothing is pinned before there is a checkpoint"
+        !fixture.manager.pinned_rootfs_paths().unwrap().is_empty(),
+        "the durable record pins the rootfs before the first checkpoint"
     );
 
     fixture.manager.pause_sandbox(&id).await.unwrap();
@@ -1016,6 +1016,44 @@ async fn removing_a_paused_computer_takes_its_retained_checkpoint() {
         fixture.manager.pinned_rootfs_paths().unwrap().is_empty(),
         "the retained checkpoint went with the computer"
     );
+}
+
+#[tokio::test]
+async fn a_durable_record_pins_its_rootfs_until_removal() {
+    let mut fixture = Fixture::jailed().await;
+    assert!(fixture.manager.pinned_rootfs_paths().unwrap().is_empty());
+    let source = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(source.path(), b"rootfs").unwrap();
+    let id = fixture
+        .booted(SandboxSpec {
+            id: Some("pinned".into()),
+            rootfs: source.path().to_str().unwrap().into(),
+            ..SandboxSpec::default()
+        })
+        .await;
+    fixture.await_state(&id, SandboxState::Ready).await;
+    let expected = std::collections::BTreeSet::from([source.path().to_path_buf()]);
+    assert_eq!(fixture.manager.pinned_rootfs_paths().unwrap(), expected);
+
+    fixture.manager.detach_all().await.unwrap();
+    fixture = fixture.restart().await;
+    fixture.await_state(&id, SandboxState::Ready).await;
+    assert_eq!(fixture.manager.pinned_rootfs_paths().unwrap(), expected);
+
+    fixture.manager.stop_sandbox(&id, 0).await.unwrap();
+    fixture.await_state(&id, SandboxState::Stopped).await;
+    assert_eq!(fixture.manager.pinned_rootfs_paths().unwrap(), expected);
+    fixture.manager.remove_sandbox(&id, false).await.unwrap();
+    fixture.await_gone(&id).await;
+    assert!(fixture.manager.pinned_rootfs_paths().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_invalid_record_prevents_rootfs_sweeping() {
+    let fixture = Fixture::jailed().await;
+    let id = fixture.ready("invalid-record").await;
+    std::fs::write(fixture.record_path(&id), b"{").unwrap();
+    assert!(fixture.manager.pinned_rootfs_paths().is_err());
 }
 
 // ---------------------------------------------------------------------
@@ -1191,19 +1229,10 @@ async fn a_detached_computer_is_adopted_by_the_next_process_and_serves_an_exec()
 /// The area is reachable from the handle now: the disk comes out ahead of
 /// the kill and lands where a resume looks for it.
 ///
-/// The resume itself does not yet complete, for a reason of its own that
-/// this pause used to hide: the durable record redacts a computer's boot
-/// inputs when it reaches `Ready` (`redact_runtime_inputs`), so an adopted
-/// computer's `spec.kernel` is empty, and every checkpoint it takes records
-/// no kernel path for the staging that follows to bring in. That is a gap
-/// in adoption, not in pause — a *Checkpoint* of an adopted computer is
-/// unrestorable for the same reason, with no pause involved — and it is
-/// asserted here as it behaves: the resume fails, the computer is left back
-/// at `Paused`, and its retained disk is where the pause put it, so nothing
-/// is lost and a retry has something to succeed with.
 #[tokio::test]
-async fn an_adopted_computer_on_a_copied_rootfs_pauses_and_keeps_its_disk() {
+async fn an_adopted_computer_on_a_copied_rootfs_pauses_and_resumes_with_its_disk() {
     let mut fixture = Fixture::jailed().await;
+    fixture.agent().on(&["/bin/hello"], Reply::stdout(b"hi"));
     let id = fixture.ready("handed-over").await;
 
     fixture.manager.detach_all().await.unwrap();
@@ -1220,17 +1249,14 @@ async fn an_adopted_computer_on_a_copied_rootfs_pauses_and_keeps_its_disk() {
     );
 
     fixture.settle_network_cleanups().await;
-    let error = fixture
+    fixture
         .manager
         .resume_sandbox(&id, pause_reason::RESUME)
         .await
-        .expect_err("an adopted computer's checkpoint records no kernel to stage");
-    assert!(
-        matches!(&error, VmmError::Io(io) if io.kind() == std::io::ErrorKind::NotFound),
-        "the kernel path the checkpoint recorded is empty, so staging it is ENOENT: {error}"
-    );
-    fixture.await_state(&id, SandboxState::Paused).await;
-    assert!(parked.exists(), "a failed resume leaves the disk parked");
+        .unwrap();
+    fixture.await_state(&id, SandboxState::Ready).await;
+    assert!(!parked.exists(), "resume reattaches the parked disk");
+    assert_eq!(fixture.run(&id, &["/bin/hello"]).await, b"hi");
 }
 
 /// Nothing this process does may reach a VM it has handed over (CORE-145).
