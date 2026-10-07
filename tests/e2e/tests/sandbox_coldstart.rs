@@ -26,16 +26,14 @@ use anyhow::{Context, Result, bail, ensure};
 use arcbox_e2e::boot_assets::{resolve_boot_version, stage_dev_boot_assets};
 use arcbox_e2e::daemon::{DaemonConfig, DaemonHandle, connect_unix};
 use arcbox_e2e::metrics::{BootAssets, RunMetrics, percentile};
-use arcbox_e2e::sandbox_bench::{admit, with_machine};
+use arcbox_e2e::sandbox_bench::{admit, run_and_collect, wait_for_ready, with_machine};
 use arcbox_e2e::{env_flag, repo_root};
 use arcbox_grpc::sandbox_v1::sandbox_process_service_client::SandboxProcessServiceClient;
 use arcbox_grpc::sandbox_v1::sandbox_service_client::SandboxServiceClient;
 use arcbox_grpc::sandbox_v1::sandbox_snapshot_service_client::SandboxSnapshotServiceClient;
 use arcbox_protocol::sandbox_v1::{
-    AttachExecutionRequest, CheckpointRequest, CreateSandboxRequest, NetworkMode, NetworkSpec,
-    RemoveSandboxRequest, ResourceLimits, RestoreRequest, SandboxEventKind, SandboxEventsRequest,
-    SandboxState, StartExecutionRequest, StdioChannel, execution_event, exit_status,
-    watch_events_response,
+    CheckpointRequest, CreateSandboxRequest, NetworkMode, NetworkSpec, RemoveSandboxRequest,
+    ResourceLimits, RestoreRequest, SandboxEventsRequest, SandboxState,
 };
 use tonic::Streaming;
 use tonic::transport::Channel;
@@ -43,11 +41,6 @@ use tracing::{info, warn};
 
 /// Generous ceiling for daemon startup (asset staging + VM boot + agent).
 const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(240);
-/// Ceiling for one sandbox to reach READY. The first iteration may build
-/// the default template inside the guest, so this is far above the steady
-/// state it measures.
-const SANDBOX_READY_TIMEOUT: Duration = Duration::from_secs(180);
-
 #[test]
 #[ignore = "requires nested virtualization (VZ on M3+), boot assets, and a signed daemon"]
 fn sandbox_coldstart() -> Result<()> {
@@ -524,105 +517,6 @@ async fn finish_cycle(
         guest_uptime,
         remove: remove_started.elapsed(),
     })
-}
-
-/// Starts one command and drains its attach stream until exit, asserting a
-/// zero exit code.
-async fn run_and_collect(
-    client: &mut SandboxProcessServiceClient<Channel>,
-    id: &str,
-    cmd: &[&str],
-) -> Result<String> {
-    let execution = client
-        .start_execution(with_machine(StartExecutionRequest {
-            sandbox_id: id.to_owned(),
-            cmd: cmd.iter().map(|s| (*s).to_owned()).collect(),
-            stdin: false,
-            ..Default::default()
-        }))
-        .await
-        .context("StartExecution failed")?
-        .into_inner();
-
-    let mut stream = client
-        .attach_execution(with_machine(AttachExecutionRequest {
-            sandbox_id: id.to_owned(),
-            execution_id: execution.id.clone(),
-            stdout_offset: 0,
-            stderr_offset: 0,
-        }))
-        .await
-        .context("AttachExecution failed")?
-        .into_inner();
-
-    // Deadline the drain like wait_for_ready: a wedged exec must fail the
-    // probe (writing metrics + preserving the test dir), not hang it.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let mut stdout = String::new();
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let event = tokio::time::timeout(remaining, stream.message())
-            .await
-            .with_context(|| format!("{id}: command {cmd:?} timed out"))?
-            .context("attach stream error")?;
-        let Some(event) = event else {
-            bail!("{id}: attach stream ended without an exit event");
-        };
-        match event.event {
-            Some(execution_event::Event::Output(output)) => {
-                if output.channel() != StdioChannel::Stderr {
-                    stdout.push_str(&String::from_utf8_lossy(&output.data));
-                }
-            }
-            Some(execution_event::Event::Exited(done)) => {
-                let state = done.execution.context("exit event without execution")?;
-                return match state.exit_status.as_ref().and_then(|s| s.status) {
-                    Some(exit_status::Status::Code(0)) => Ok(stdout),
-                    other => bail!("{id}: command {cmd:?} exit status {other:?}"),
-                };
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Consumes the shared event stream until `id` reports READY.
-///
-/// Frames for other sandboxes are skipped rather than buffered: the bench
-/// is strictly serial, so the only live sandbox is the one being timed.
-async fn wait_for_ready(
-    events: &mut Streaming<arcbox_protocol::sandbox_v1::WatchEventsResponse>,
-    id: &str,
-) -> Result<()> {
-    let deadline = Instant::now() + SANDBOX_READY_TIMEOUT;
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            bail!("{id} did not reach READY within {SANDBOX_READY_TIMEOUT:?}");
-        }
-        let frame = tokio::time::timeout(remaining, events.message())
-            .await
-            .with_context(|| format!("{id}: READY timed out"))?
-            .context("Events stream failed")?
-            .context("Events stream ended before READY")?;
-        let Some(watch_events_response::Payload::Event(event)) = frame.payload else {
-            continue; // keepalive
-        };
-        if event.sandbox_id != id {
-            continue;
-        }
-        match event.kind() {
-            SandboxEventKind::Ready => return Ok(()),
-            SandboxEventKind::Failed => {
-                let reason = event
-                    .attributes
-                    .get("error")
-                    .map_or("unknown", String::as_str);
-                bail!("{id} failed while starting: {reason}");
-            }
-            _ => {}
-        }
-    }
 }
 
 fn report(label: &str, samples: &[Sample], metrics: &mut RunMetrics) {
