@@ -168,3 +168,7 @@ Tracing is controlled with `RUST_LOG`; it defaults to `info` when unset.
 `sandbox_coldstart` records its first iteration separately. Later iterations report p50, p95, and maximum latency. A single-iteration run has no steady-state percentile. `metrics.json` retains phase durations in seconds and records each sample distribution with an explicit unit and sample count. A sample count or a throughput value is never a phase duration.
 
 Sandbox benchmarks retry only explicit network-cleanup admission rejections, for at most 60 seconds between attempts. Each successful attempt has a 180-second RPC deadline. Metrics report admission waiting separately from the successful attempt’s latency; transport failures and uncertain commits fail the run.
+
+The `create-networked` group measures the production Create path, which may boot or restore a cached snapshot. `cold-no-network` always boots without the warm-create cache. `ARCBOX_COLDSTART_UNIQUE_GEOMETRY=1` changes the networked group to `cold-networked-unique-geometry`: each iteration adds one MiB to `ARCBOX_COLDSTART_MEMORY_MIB`, forcing a distinct cache key. This changes the workload; metrics retain each memory size in MiB, and comparisons must use the same geometry sequence. `restore` measures an explicit snapshot restore. No iteration number proves that a Create used a warm snapshot.
+
+`ARCBOX_E2E_REPO_ROOT=<path>` selects the runtime checkout, assets, and binaries for a prebuilt test executable. Metrics record that checkout, which can differ from the test executable’s build revision.

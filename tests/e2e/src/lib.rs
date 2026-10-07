@@ -15,6 +15,9 @@ pub mod signing;
 pub mod virtio_debug;
 
 pub fn repo_root() -> PathBuf {
+    if let Some(root) = std::env::var_os("ARCBOX_E2E_REPO_ROOT").filter(|root| !root.is_empty()) {
+        return PathBuf::from(root);
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|path| path.parent())

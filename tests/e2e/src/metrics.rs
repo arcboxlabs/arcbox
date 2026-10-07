@@ -95,12 +95,13 @@ pub struct Phase {
     pub seconds: f64,
 }
 
-/// Statistics over one set of measurements, excluding separately reported warm-up samples.
+/// Ordered measurements and summary statistics for one explicit unit.
 #[derive(Debug, Serialize)]
 pub struct Distribution {
     pub name: String,
     pub unit: String,
     pub count: usize,
+    pub samples: Vec<f64>,
     pub p50: Option<f64>,
     pub p95: Option<f64>,
     pub max: Option<f64>,
@@ -185,6 +186,7 @@ impl RunMetrics {
             name: name.to_owned(),
             unit: unit.to_owned(),
             count: samples.len(),
+            samples: samples.to_vec(),
             p50: percentile(samples, 0.50),
             p95: percentile(samples, 0.95),
             max: samples.iter().copied().reduce(f64::max),
@@ -253,6 +255,10 @@ mod tests {
         metrics.record_distribution("throughput", "per_second", &[2.0, 4.0]);
         let record = serde_json::to_value(&metrics).expect("JSON");
         assert_eq!(record["distributions"][0]["count"], 20);
+        assert_eq!(
+            record["distributions"][0]["samples"],
+            serde_json::json!(samples)
+        );
         assert_eq!(record["distributions"][0]["p50"], 10.0);
         assert_eq!(record["distributions"][0]["p95"], 19.0);
         assert_eq!(record["distributions"][0]["max"], 20.0);

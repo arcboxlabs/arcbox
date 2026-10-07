@@ -1,9 +1,9 @@
 //! Sandbox cold-start bench: `Create` → `READY` over N serial iterations.
 //!
-//! Measures the user-visible cold start of a sandbox — the wall time from
-//! the `Create` RPC leaving the client until the `READY` lifecycle event
-//! arrives back — against one already-warm daemon, so the System VM boot
-//! is excluded and only the nested Firecracker microVM start is timed.
+//! Measures accepted `Create` → `READY` and synchronous `Restore` latency.
+//! Networked Create may restore a cached snapshot; no-network Create always
+//! boots a kernel. System VM boot is measured separately. Unique geometry
+//! forces networked cache misses with a different memory size per sample.
 //!
 //! Readiness is taken from the `Events` stream, subscribed *before* the
 //! first `Create`, rather than the smoke test's 500ms `Inspect` poll: at
@@ -22,7 +22,7 @@
 
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use arcbox_e2e::boot_assets::{resolve_boot_version, stage_dev_boot_assets};
 use arcbox_e2e::daemon::{DaemonConfig, DaemonHandle, connect_unix};
 use arcbox_e2e::metrics::{BootAssets, RunMetrics, percentile};
@@ -59,10 +59,9 @@ fn sandbox_coldstart() -> Result<()> {
         .with_test_writer()
         .try_init();
 
-    // Floor of 1: `report` assumes at least one sample per group.
-    let iters = env_usize("ARCBOX_COLDSTART_ITERS", 10).max(1);
-    let vcpus = env_usize("ARCBOX_COLDSTART_VCPUS", 1) as u32;
-    let memory_mib = env_usize("ARCBOX_COLDSTART_MEMORY_MIB", 512) as u64;
+    let iters = env_usize("ARCBOX_COLDSTART_ITERS", 10)?;
+    let vcpus = u32::try_from(env_usize("ARCBOX_COLDSTART_VCPUS", 1)?)?;
+    let memory_mib = u64::try_from(env_usize("ARCBOX_COLDSTART_MEMORY_MIB", 512)?)?;
 
     if !env_flag("SKIP_BUILD") {
         arcbox_e2e::sandbox::build_binaries()?;
@@ -93,6 +92,7 @@ fn sandbox_coldstart() -> Result<()> {
             iters,
             vcpus,
             memory_mib,
+            unique_geometry: env_flag("ARCBOX_COLDSTART_UNIQUE_GEOMETRY"),
         },
     );
     metrics.passed = result.is_ok();
@@ -116,6 +116,19 @@ struct Params {
     iters: usize,
     vcpus: u32,
     memory_mib: u64,
+    unique_geometry: bool,
+}
+
+impl Params {
+    fn memory_for(&self, mode: NetworkMode, iteration: usize) -> Result<u64> {
+        if self.unique_geometry && mode == NetworkMode::Enabled {
+            self.memory_mib
+                .checked_add(u64::try_from(iteration)?)
+                .context("unique memory geometry overflow")
+        } else {
+            Ok(self.memory_mib)
+        }
+    }
 }
 
 fn run_bench(
@@ -166,7 +179,7 @@ struct Sample {
     admission_wait: Duration,
     /// `Create` RPC call → response (the sandbox is STARTING at this point).
     create_rpc: Duration,
-    /// `Create` call → `READY` event: the cold start itself.
+    /// Successful `Create` attempt → `READY` event, or synchronous `Restore` completion.
     ready: Duration,
     /// `Create` call → stdout of the first command. READY claims the
     /// sandbox accepts executions; this is what makes that claim
@@ -200,14 +213,23 @@ async fn drive(channel: Channel, metrics: &mut RunMetrics, params: Params) -> Re
         .into_inner();
 
     for (label, mode) in [
-        ("networked", NetworkMode::Enabled),
-        ("no-network", NetworkMode::None),
+        (
+            if params.unique_geometry {
+                "cold-networked-unique-geometry"
+            } else {
+                "create-networked"
+            },
+            NetworkMode::Enabled,
+        ),
+        ("cold-no-network", NetworkMode::None),
     ] {
+        let geometry: Vec<f64> = (0..params.iters)
+            .map(|i| params.memory_for(mode, i).map(|memory| memory as f64))
+            .collect::<Result<_>>()?;
+        metrics.record_distribution(&format!("coldstart_{label}_memory"), "MiB", &geometry);
         let mut samples = Vec::with_capacity(params.iters);
         for i in 0..params.iters {
             let id = format!("cold-{label}-{i}");
-            // dmesg on the second iteration: a steady-state boot timeline,
-            // not the one-time-cost first boot.
             let sample = one_cycle(
                 &mut client,
                 &mut processes,
@@ -215,7 +237,7 @@ async fn drive(channel: Channel, metrics: &mut RunMetrics, params: Params) -> Re
                 &id,
                 mode,
                 &params,
-                i == 1,
+                i,
             )
             .await?;
             log_sample(label, i, &sample);
@@ -366,7 +388,7 @@ fn log_sample(label: &str, iteration: usize, sample: &Sample) {
         second_exec_ms = sample.second_exec.as_millis(),
         guest_uptime_s = sample.guest_uptime,
         remove_ms = sample.remove.as_millis(),
-        "cold start"
+        "sandbox startup"
     );
 }
 
@@ -406,15 +428,16 @@ async fn one_cycle(
     id: &str,
     mode: NetworkMode,
     params: &Params,
-    capture_dmesg: bool,
+    iteration: usize,
 ) -> Result<Sample> {
+    let memory_mib = params.memory_for(mode, iteration)?;
     let admitted = admit(id, async || {
         client
             .create(with_machine(CreateSandboxRequest {
                 id: id.to_owned(),
                 limits: Some(ResourceLimits {
                     vcpus: params.vcpus,
-                    memory_mib: params.memory_mib,
+                    memory_mib,
                 }),
                 network: Some(NetworkSpec { mode: mode.into() }),
                 ..Default::default()
@@ -440,7 +463,7 @@ async fn one_cycle(
         started,
         create_rpc,
         ready,
-        capture_dmesg,
+        iteration == 1,
     )
     .await?;
     sample.admission_wait = admitted.wait;
@@ -649,7 +672,7 @@ fn report(label: &str, samples: &[Sample], metrics: &mut RunMetrics) {
         guest_uptime_p50_s = percentile(&uptime, 0.50),
         create_rpc_p50_ms = ms(percentile(&create, 0.50)),
         remove_p50_ms = ms(percentile(&remove, 0.50)),
-        "cold start summary"
+        "sandbox startup summary"
     );
 
     metrics.record(
@@ -686,9 +709,36 @@ fn max(values: &[f64]) -> Option<f64> {
     values.iter().copied().reduce(f64::max)
 }
 
-fn env_usize(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+fn env_usize(name: &str, default: usize) -> Result<usize> {
+    let value = match std::env::var(name) {
+        Ok(value) => value
+            .parse()
+            .with_context(|| format!("{name} must be an integer"))?,
+        Err(std::env::VarError::NotPresent) => default,
+        Err(error) => return Err(error).with_context(|| format!("reading {name}")),
+    };
+    ensure!(value > 0, "{name} must be positive");
+    Ok(value)
+}
+
+#[test]
+fn unique_geometry_only_changes_networked_create_and_rejects_overflow() {
+    let params = Params {
+        iters: 2,
+        vcpus: 1,
+        memory_mib: u64::MAX,
+        unique_geometry: true,
+    };
+    assert!(params.memory_for(NetworkMode::Enabled, 1).is_err());
+    assert_eq!(params.memory_for(NetworkMode::None, 1).unwrap(), u64::MAX);
+    let params = Params {
+        memory_mib: 512,
+        ..params
+    };
+    assert_eq!(params.memory_for(NetworkMode::Enabled, 1).unwrap(), 513);
+    let params = Params {
+        unique_geometry: false,
+        ..params
+    };
+    assert_eq!(params.memory_for(NetworkMode::Enabled, 1).unwrap(), 512);
 }
