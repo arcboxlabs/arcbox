@@ -270,3 +270,60 @@ The matching built daemon and fixed agent then passed a manual daemon-level stat
 This completes the previously blocked parser validation. The nested-guest regression, Linux Clippy, formatting, full builds, and real daemon stats path have passed. The parser fix is ready to commit; the original CPU accounting amplification and long stall remain separate work.
 
 The dedicated ARM64 image `arcbox-kernel-builder:cpu-accounting-20261007` now contains `bc`, `bison`, `flex`, `cpio`, and `libelf-dev`. It derives from the existing pinned Rust Bookworm image. A container limited to six CPUs and 8 GiB is building Linux 6.18.38 with the deployed kernel repository tag `v0.0.25`. The existing `kernel` checkout remains on its unrelated debug branch.
+
+## Kernel accounting A/B method
+
+Both local kernels use Linux 6.18.38, kernel repository commit `2c041107e599b5e87bcb41f7638ac38a4fc24ac1` (`v0.0.25`), its system ARM64 configuration and patches, and Debian GCC 12.2.0. The Linux source archive matched kernel.org's SHA256 `ac26e508abd56e9f8b89872b6e10c49fc823bcc70d8068a5d8504c1a7c4ff045`. The comparison uses the same compiler for both kernels; it is not a bit-identical rebuild of the deployed GCC 13.3.0 kernel.
+
+The baseline image SHA256 is `713a47dd27c7d2dda14a2f6cca1d040818b0b5ba520be6a4afcba592177d94b5`. The candidate SHA256 is `87888eaa743228ff47520832512cc49e8c173d87f4381ecc638540896906ad7a`. The complete resolved configuration difference is:
+
+```text
+TICK_CPU_ACCOUNTING y -> n
+VIRT_CPU_ACCOUNTING_GEN n -> y
++CONTEXT_TRACKING_USER y
++CONTEXT_TRACKING_USER_FORCE y
++VIRT_CPU_ACCOUNTING y
+```
+
+Each kernel boots through the daemon's supported `--kernel` option with the same 0.8.8 rootfs and runtime, 18 vCPUs, and 16 GiB RAM. The live `/proc/config.gz` matched the respective build configuration exactly. The builder was stopped before measurements. The other user VMs remained running, so absolute performance measurements can include host contention.
+
+Only the disposable profiler-disabled ClickHouse control and its Keeper run during this comparison. Each case measures five overhead repetitions, 45 seconds of idle accounting, and 115 seconds around the same bounded CPU query. After the query becomes active, the identified disposable VZ helper is suspended for ten seconds. A successful query after resumption checks liveness.
+
+The [overhead probe](../../tests/bench/signoz/accounting_overhead.c) pins its parent and child to guest CPU 0. Each repetition measures two million direct `getpid` system calls and 100,000 pipe round trips. Compile it inside the ARM64 builder:
+
+```sh
+gcc -O2 -Wall -Wextra -Werror -static accounting_overhead.c -o accounting_overhead
+```
+
+Copy that executable into the disposable container and run it before the CPU workload. Compare medians across kernels. The counter analysis also includes a pause window from the last completed sample before SIGSTOP to the first fast sample at least three seconds after SIGCONT. This window avoids assigning a cross-file read interrupted by suspension to one short Docker interval. The original per-interval counters remain in the evidence.
+
+### A/B results and baseline recheck — 15:26 UTC
+
+The candidate aligns guest total accounting with cgroup runtime in this workload:
+
+| Measurement | Tick baseline | Generic virtual accounting |
+|---|---:|---:|
+| Busy-window guest total rate | 11.294 cores | 17.990 cores |
+| Busy-window container rate | 17.706 cores | 17.913 cores |
+| Busy-window host VM rate | 12.934 cores | 12.987 cores |
+| Pause-window elapsed time | 16.44 s | 16.27 s |
+| Pause-window guest total | 81.89 CPU s | 292.68 CPU s |
+| Pause-window container time | 275.287648 CPU s | 292.110267 CPU s |
+| Pause-window host VM time | 93.90 CPU s | 93.80 CPU s |
+| Pause-window Docker formula | 6051.02% | 1796.50% |
+| Highest single-interval Docker formula | 12743.56% | 1797.80% |
+
+The busy windows contain only intervals above ten container cores, totaling 80.04 seconds for the baseline and 80.71 seconds for the candidate. The table's Docker percentages are computed from the captured counters, not sampled from a Docker UI. The candidate still charges elapsed host suspension to virtual CPU accounting: its pause window contains 292.11 container CPU seconds but only 93.80 host VM CPU seconds. Matching guest counters therefore does not establish accurate physical-host usage.
+
+The candidate also introduces a large microbenchmark regression:
+
+| Median of five repetitions | Initial baseline | Candidate | Baseline after reverting |
+|---|---:|---:|---:|
+| Direct `getpid` syscall | 128.04 ns | 2224.01 ns | 125.49 ns |
+| Same-CPU pipe round trip | 3625.09 ns | 15712.04 ns | 3585.43 ns |
+
+The candidate costs 17.37 times the initial syscall latency and 4.33 times the initial pipe latency. Returning to the baseline restores both measurements, which supports a kernel-mode effect rather than a transient host-load explanation. These are microbenchmark ratios, not an estimate that every application slows by those factors.
+
+Both kernels completed the bounded CPU workload and answered `SELECT 1` after suspension. Neither reproduced the original prolonged ClickHouse lock stall. Generic virtual accounting is not adopted as a default fix: it aligns the displayed counters while retaining host-suspension charging and imposing a large syscall/context-switch cost on this VZ guest. No production kernel configuration changed. The parser correction is committed as `a2c8edfe`; the original accounting and stall problem remains unresolved.
+
+The final baseline daemon and the builder container are stopped. The disposable container route is absent, and the three pre-existing user VZ helpers remain running. The prepared image, build container filesystem, boot assets, kernel binaries, and raw evidence are retained for subsequent work. The evidence archive contains the build recipes, resolved configs, source checksum, and analysis scripts; the two kernel binaries are preserved separately from that archive.

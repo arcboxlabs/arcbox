@@ -89,5 +89,5 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
-- [2026-10-07 — SigNoz remains idle after ClickHouse stalls](logs/2026-10-07-signoz-profiler-and-cpu-accounting.md) — Collector rollback, profiler truncation, CPU parser correction, and accounting divergence reproduced by host suspension; the original stall remains unresolved. Probes: [SQL](../tests/bench/signoz/diagnose.sql), [CPU parser](../tests/bench/signoz/cpu_ticks_repro.rs), [CPU sampler](../tests/bench/signoz/sample_cpu.py), [workload](../tests/bench/signoz/cpu_workload.sql), [VM suspension](../tests/bench/signoz/pause_vm.py)
+- [2026-10-07 — SigNoz remains idle after ClickHouse stalls](logs/2026-10-07-signoz-profiler-and-cpu-accounting.md) — Collector rollback, profiler truncation, CPU parser correction, and accounting divergence reproduced by host suspension; the original stall remains unresolved. Probes: [SQL](../tests/bench/signoz/diagnose.sql), [CPU parser](../tests/bench/signoz/cpu_ticks_repro.rs), [CPU sampler](../tests/bench/signoz/sample_cpu.py), [workload](../tests/bench/signoz/cpu_workload.sql), [VM suspension](../tests/bench/signoz/pause_vm.py), [accounting overhead](../tests/bench/signoz/accounting_overhead.c)
 - [2026-09-29 — vsock RX: drain a stream per round, aim the kick](logs/2026-09-29-vsock-rx-round-and-targeted-kick.md)
