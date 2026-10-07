@@ -148,6 +148,22 @@ fn mount_is_read_only(mount: &str) -> std::result::Result<bool, String> {
         .map_err(|error| error.to_string())
 }
 
+#[cfg(test)]
+pub(super) fn observe_test_mount(
+    device: &str,
+    mount: &str,
+    filesystem: &str,
+) -> StorageVolumeHealth {
+    let volume = Volume {
+        role: Role::Data,
+        device: Some(device.into()),
+        mount,
+        filesystem,
+    };
+    let mounts = std::fs::read_to_string("/proc/self/mounts").map_err(|error| error.to_string());
+    observe_volume(&volume, mounts.as_deref(), true, mount_is_read_only)
+}
+
 pub(super) async fn watch<S>(stream: &mut S, trace_id: &str) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,

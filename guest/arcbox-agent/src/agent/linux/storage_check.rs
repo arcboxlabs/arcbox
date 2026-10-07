@@ -224,6 +224,9 @@ fn check_result(role: buffa::EnumValue<Role>, outcome: Result<String>) -> Storag
 }
 
 #[cfg(test)]
+mod linux_integration;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
