@@ -57,7 +57,7 @@ impl RootfsBuilder {
         let built = async {
             let path = temporary.clone();
             tokio::task::spawn_blocking(move || {
-                write_image(source, &path, size).and_then(|()| verify_geometry(&path))
+                write_image(source, &path, size).and_then(|()| verify_geometry(&path, size))
             })
             .await
             .context("rootfs conversion task panicked")??;
@@ -103,18 +103,18 @@ fn write_image(source: RootfsSource, out: &Path, size: u64) -> Result<()> {
     Ok(())
 }
 
-/// Inode pressure can add block groups even with an aligned capacity.
-/// Reject an over-declared image before the kernel reports a mount EINVAL.
-fn verify_geometry(image: &Path) -> Result<()> {
+/// File data and inode pressure can make the formatter add block groups.
+/// Require both the declared geometry and file length to match the requested capacity.
+fn verify_geometry(image: &Path, requested_size: u64) -> Result<()> {
     let reader = arcbox_ext4::Reader::new(image).context("read converted ext4 image")?;
     let block = reader.superblock();
     let block_size = 1024u64 << block.log_block_size;
     let declared =
         ((u64::from(block.blocks_count_hi) << 32) | u64::from(block.blocks_count_lo)) * block_size;
     let actual = std::fs::metadata(image)?.len();
-    if declared > actual {
+    if declared != requested_size || actual != requested_size {
         bail!(
-            "ext4 image declares {declared} bytes but its file holds {actual}; increase the rootfs capacity"
+            "ext4 image declares {declared} bytes and its file holds {actual}; requested rootfs capacity is {requested_size} bytes"
         );
     }
     Ok(())
@@ -181,7 +181,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(std::fs::metadata(&out).unwrap().len(), size);
-            let geometry = verify_geometry(&out);
+            let geometry = verify_geometry(&out, size);
             if size < ROOTFS_CAPACITY_GRANULARITY {
                 assert!(geometry.unwrap_err().to_string().contains("declares"));
             } else {
@@ -190,6 +190,34 @@ mod tests {
                 assert!(reader.tree().lookup(Path::new("/etc/hostname")).is_some());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn oversized_source_is_rejected_before_injection_and_preserves_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let layer = overlay2_layer(dir.path());
+        std::fs::File::create(layer.join("diff/payload"))
+            .unwrap()
+            .set_len(ROOTFS_CAPACITY_GRANULARITY + 4096)
+            .unwrap();
+        let out = dir.path().join("images/rootfs.ext4");
+        std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+        std::fs::write(&out, b"existing-image").unwrap();
+
+        let error = builder(dir.path())
+            .build_rootfs(RootfsSpec {
+                source: RootfsSource::Directory(layer),
+                out: out.clone(),
+                size: ROOTFS_CAPACITY_GRANULARITY,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("requested rootfs capacity"),
+            "capacity must be rejected before agent injection: {error}"
+        );
+        assert_eq!(std::fs::read(&out).unwrap(), b"existing-image");
+        assert_eq!(std::fs::read_dir(out.parent().unwrap()).unwrap().count(), 1);
     }
 
     #[tokio::test]

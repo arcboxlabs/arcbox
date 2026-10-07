@@ -12,7 +12,7 @@ The cached rootfs converter fixed capacity at 512 MiB and owned the output path.
 ## What was done
 
 - Added `RootfsSource`, `RootfsSpec`, and `RootfsBuilder::build_rootfs`. The caller supplies a directory or resolved image, the output path, and capacity.
-- Required positive capacities in 128 MiB units. Verified ext4 geometry before injection because the formatter can declare more blocks than the file contains.
+- Required positive capacities in 128 MiB units. Required both the declared ext4 capacity and file length to match the request before injection because the formatter can enlarge the image or declare more blocks than the file contains.
 - Converted into a sibling temporary file. Injected the agent before publishing with an atomic rename. Failed conversion, injection, and publication preserve the destination and remove temporary files.
 - Exposed `inject_vm_agent` and `VM_AGENT_PATH`. Default kernel arguments select `init=/sbin/vm-agent`; converted images retain the distribution's init.
 - Reused publication for cached 512 MiB templates. Preserved the `rootfs-<layer>-<agent>.ext4` name used by template identity.
@@ -57,6 +57,10 @@ The same revision passed:
 - `cargo xtask check-layers`: 68 members and 190 edges checked.
 
 The local-image probes verify 256 MiB caller capacity, unchanged 512 MiB cache capacity and cache hits, destination replacement, repeated agent injection, preservation of distribution init, and cleanup after injection or publication failure. Unit tests reject zero and unaligned capacity, detect over-declared ext4 geometry, and verify cleanup after source-read failure.
+
+A review regression supplies a sparse overlay file of 128 MiB plus 4 KiB with a requested capacity of 128 MiB. The formatter enlarges the image to 256 MiB, so comparing declared geometry only with file length did not reject the oversized output. The regression failed against that implementation because execution reached agent injection. The capacity check now rejects both size mismatches before injection, preserves an existing destination, and removes the temporary image.
+
+After this correction, workspace formatting, strict all-target Clippy with `remote-image` on macOS and Linux, 232 macOS library tests, and 42 macOS manager tests passed. Linux passed all 5 rootfs build unit tests and both exact rootfs integration tests with `ARCBOX_REQUIRE_BLOCK_TOOLS=1`; no selected test was ignored or skipped.
 
 ## Follow-ups
 
