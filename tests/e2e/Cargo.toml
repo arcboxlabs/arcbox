@@ -15,6 +15,7 @@ arcbox-connect.workspace = true
 arcbox-constants.workspace = true
 arcbox-core.workspace = true
 arcbox-grpc.workspace = true
+arcbox-local-ca.workspace = true
 arcbox-protocol.workspace = true
 arcbox-storage.workspace = true
 arcbox-vmm.workspace = true

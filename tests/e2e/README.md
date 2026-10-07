@@ -57,6 +57,15 @@ lifecycle checks over the Docker API socket:
 cargo test -p arcbox-e2e --test boot_assets -- --ignored --nocapture
 ```
 
+Automatic HTTPS with the macOS Keychain CA (VZ):
+
+```bash
+cargo build --release -p arcbox-agent --target aarch64-unknown-linux-musl
+cargo test -p arcbox-e2e --test local_https -- --ignored --nocapture
+```
+
+The test serves HTTP on container port 8080 and verifies HTTPS on port 443 with the exported root. Separate names exercise signing-channel reconnection. The test deletes its isolated CA without changing user trust.
+
 VMM-level HV probe — drives the HV backend directly (no daemon): boot, vsock
 agent RPC, DAX, agent supervision, pause/resume, guest PSCI poweroff, worker
 teardown. The `guest_poweroff` phase requires completion after the shutdown

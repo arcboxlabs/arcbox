@@ -690,6 +690,7 @@ dependencies = [
  "arcbox-constants",
  "arcbox-core",
  "arcbox-grpc",
+ "arcbox-local-ca",
  "arcbox-protocol",
  "arcbox-storage",
  "arcbox-vmm",
