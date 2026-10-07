@@ -1,7 +1,7 @@
 name: SDK TypeScript Release
 
 # Publishes @arcbox/sandbox to npm on its own cadence, independent of the
-# main arcbox release train — mirrors release-fleet-agent.yml. The tag is
+# main arcbox release train. The tag is
 # minted by release-please when the sdk-typescript component's release PR
 # merges (see release-please-config.json).
 #

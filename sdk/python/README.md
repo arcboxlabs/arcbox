@@ -58,7 +58,7 @@ Resolution order: explicit option > environment > default.
 | Environment      | Meaning                                                                                       |
 | ---------------- | --------------------------------------------------------------------------------------------- |
 | `ARCBOX_SOCKET`  | daemon Unix socket (default `$ARCBOX_DATA_DIR/run/arcbox.sock`; data dir default `~/.arcbox`, or `~/.arcbox-dev` under `ARCBOX_PROFILE=development`) |
-| `ARCBOX_API_URL` | remote daemon / cloud front door; setting it selects the remote tier (reserved, CORE-63)      |
+| `ARCBOX_API_URL` | explicit remote daemon endpoint; requires your own proxy in front of the local socket        |
 | `ARCBOX_API_KEY` | bearer credential, attached as `Authorization` when set; unused by the local daemon           |
 
 Every entry point takes a `connection=Connection(...)` slot
@@ -210,7 +210,7 @@ of the main arcbox release train:
 
 1. Conventional commits touching `sdk/python` accumulate on `master`.
 2. release-please maintains a dedicated release PR for the component
-   (separate from the root, fleet-agent, and sdk-typescript PRs) that
+   (separate from the root and sdk-typescript PRs) that
    bumps the `pyproject.toml` version and updates `CHANGELOG.md`.
 3. Merging that PR creates the GitHub release and the tag
    `sdk-python-vX.Y.Z` (same convention as `sdk-typescript-vX.Y.Z`).

@@ -67,6 +67,7 @@ from memory. Every new file is added to the index below.
 
 ### Decisions
 
+- [2026-10-08 — ArcBox is a local macOS product](adr/2026-10-08-macos-local-product.md)
 - [0001 — On the HV backend, asserting the SPI is the whole wake](adr/0001-hv-spi-is-the-whole-wake.md) (2026-09-30)
 - [0002 — A distro machine's root is served to the host by a userspace NFSv3 server in its agent, mounted over the bridge NIC](adr/0002-machine-root-export-over-userspace-nfsv3.md) (2026-10-03; decisions 4 and 5 superseded by ADR 0003)
 - [0003 — One host mount root: `~/ArcBox` is a plain directory, with the docker export at `docker/` and every running machine's root at `machines/<name>`](adr/0003-single-host-mount-root.md) (2026-10-04)

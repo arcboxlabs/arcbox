@@ -47,7 +47,7 @@ Resolution order: explicit option > environment > default.
 | Environment      | Meaning                                                                                       |
 | ---------------- | --------------------------------------------------------------------------------------------- |
 | `ARCBOX_SOCKET`  | daemon Unix socket (default `$ARCBOX_DATA_DIR/run/arcbox.sock`; data dir default `~/.arcbox`, or `~/.arcbox-dev` under `ARCBOX_PROFILE=development`) |
-| `ARCBOX_API_URL` | remote daemon / cloud front door; setting it selects the remote tier (reserved, CORE-63)      |
+| `ARCBOX_API_URL` | explicit remote daemon endpoint; requires your own proxy in front of the local socket        |
 | `ARCBOX_API_KEY` | bearer credential, attached as `Authorization` when set; unused by the local daemon           |
 
 Every entry point takes a `connection` options slot
@@ -148,10 +148,10 @@ of the main arcbox release train:
 1. Conventional commits touching `sdk/typescript` accumulate on
    `master`.
 2. release-please maintains a dedicated release PR for the component
-   (separate from the root and fleet-agent PRs) that bumps
+   (separate from the root and sdk-python PRs) that bumps
    `package.json` and updates `CHANGELOG.md`.
 3. Merging that PR creates the GitHub release and the tag
-   `sdk-typescript-vX.Y.Z` (same convention as `fleet-agent-vX.Y.Z`).
+   `sdk-typescript-vX.Y.Z` (same convention as `sdk-python-vX.Y.Z`).
 4. The tag is what an npm publish workflow
    (`.github/workflows/release-sdk-typescript.yml`) triggers on: it
    re-runs the full gate suite (`lint`, `format:check`, `test`,

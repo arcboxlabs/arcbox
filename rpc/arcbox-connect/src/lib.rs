@@ -13,14 +13,12 @@
 //! `aarch64-unknown-linux-musl` (base `connectrpc` is transport-free) and
 //! must stay musl-clean for the guest agent's sake.
 //!
-//! The fleet agent's daemon client and reflection's descriptor set (see
-//! [`FILE_DESCRIPTOR_SET`]) use these types too. The prost twins in
-//! `arcbox-protocol` remain ONLY as test support: the daemon/e2e tonic
-//! clients that prove the gRPC wire format still answers, and the fleet
-//! agent's tonic mock daemon. buffa and prost encode identical protobuf
-//! bytes, so those mixed-codec test peers interoperate; both
-//! representations are generated from the same `.proto` sources and
-//! therefore cannot drift.
+//! Reflection uses the matching descriptor set (see [`FILE_DESCRIPTOR_SET`]).
+//! The prost twins in `arcbox-protocol` remain ONLY as test support:
+//! daemon/e2e tonic clients prove the gRPC wire format still answers.
+//! buffa and prost encode identical protobuf bytes, so those test peers
+//! interoperate. Both representations are generated from the same `.proto`
+//! sources and therefore cannot drift.
 
 connectrpc::include_generated!();
 

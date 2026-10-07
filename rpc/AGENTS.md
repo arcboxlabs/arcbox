@@ -31,13 +31,12 @@ This file is only the non-obvious operational knowledge.
   speaks Connect only, and `tonic` is absent from its dependency tree.)
   - `connectrpc` is bound to `buffa::Message`, and since CORE-73 the buffa
     types in `arcbox-connect` are the ONE runtime representation: daemon
-    handlers, `abctl`, the fleet agent's daemon client, reflection's
-    descriptor set, and both ends of the vsock wire. The prost twins in
-    `arcbox-protocol` are still generated, but ONLY test support consumes
-    them: the tonic test clients (daemon/e2e wire-format proofs) and the
-    fleet agent's tonic mock daemon. The two codegens emit identical
-    bytes, which is what lets a prost test peer prove the buffa server's
-    wire format.
+    handlers, `abctl`, reflection's descriptor set, and both ends of the
+    vsock wire. The prost twins in `arcbox-protocol` are still generated,
+    but ONLY test support consumes
+    them: the tonic test clients (daemon/e2e wire-format proofs). The two
+    codegens emit identical bytes, which lets a prost test peer prove the
+    buffa server's wire format.
   - Reflection is served by `connectrpc-reflection` from the whole daemon's
     descriptor set. It answers `501` over HTTP/1.1 Connect because
     `ServerReflectionInfo` is bidi-streaming and Connect carries bidi only
@@ -99,9 +98,7 @@ This file is only the non-obvious operational knowledge.
   gate — there are NO exemptions.** The historical sandbox carve-out
   (pre-release CORE-52 redesign) was removed when the template catalog,
   the surface's last piece, shipped in the public SDKs (CORE-107):
-  `arcbox.sandbox.v1` now breaks the gate like everything else. The fleet
-  protos' `fleet/arcbox-fleet-proto/buf.yaml` is a separate, unrelated
-  gate.
+  `arcbox.sandbox.v1` now breaks the gate like everything else.
 - **Well-known types map to `pbjson-types`, not `prost-types`**
   (`extern_path(".google.protobuf", "::pbjson_types")` in BOTH
   `arcbox-protocol/build.rs` and `arcbox-grpc/build.rs` — keep them in

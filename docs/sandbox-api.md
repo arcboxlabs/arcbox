@@ -21,12 +21,9 @@ seam (CORE-57):
 | `snapshot.proto` | `SandboxSnapshotService` | checkpoint / restore |
 | `errors.proto` | — | the `ErrorCode` registry / `ErrorInfo` detail |
 
-The split is what lets a deployment put the two planes in different places:
-control-plane calls address a fleet and can be served by a multi-tenant
-front door, while data-plane calls carry a specific sandbox's stdio and
-file bytes and are served by whatever is co-located with it. Locally the
-daemon serves all four on the same socket, so a client may hold one
-channel and four stubs.
+Control-plane calls manage the local sandbox collection and template catalog.
+Data-plane calls carry a specific sandbox's stdio and file bytes. The daemon
+serves every service on the same local socket, so clients can use one channel.
 
 Server implementation: `app/arcbox-api/src/grpc/sandbox/` (one module per
 service) and `.../grpc/snapshot.rs`.
@@ -48,8 +45,8 @@ message (`/dev/kvm` is absent in the guest).
   `x-machine: default` header targets it; every other value returns
   `INVALID_ARGUMENT`. Supporting sandboxes in multiple VMs later requires
   extending host listener and DNS ownership with a machine identity first.
-  The header remains local transport metadata, not part of the product
-  contract — a cloud client never sends one.
+  The header remains local transport metadata; clients can omit it to use
+  the System VM.
 - **Transport & auth posture (V1)**: UDS only — there is no TCP listener,
   and no authentication beyond the socket's file permissions. This is a
   single-user local API; remote access requires your own proxy in front of

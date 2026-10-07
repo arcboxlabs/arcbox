@@ -34,9 +34,8 @@ One daemon, one CLI, four kinds of workload on the same runtime:
 | **Linux machines** | Full VMs with their own kernel, disk, and distro | `abctl machine` |
 | **macOS guests** | Throwaway macOS VMs, cloned from a base image | `abctl macos` |
 
-The sandbox you run locally is the same primitive ArcBox Platform runs in the
-cloud, so you can build against local sandboxes and scale to a fleet without
-changing your code.
+These workloads run locally on your Mac. ArcBox does not require a Platform
+account or a cloud control plane. The [Sandbox SDKs](sdk/) use the local daemon.
 
 ArcBox is in public beta. Join us on [Discord](https://arcbox.link/discord), or
 [open an issue](https://github.com/arcboxlabs/arcbox/issues).
@@ -279,17 +278,6 @@ macOS no other way — need an APFS data directory, and are capped at **2 guests
 per host** by Apple's license. Details in
 [docs/macos-guest.md](docs/macos-guest.md).
 
-## Bring your own machine
-
-ArcBox Platform turns hardware you already own into cloud capacity. Enroll your
-Macs and Linux boxes into a fleet and they become on-demand runners for your
-team's CI, builds, and sandboxes, at the cost of your own hardware instead of
-premium cloud pricing. The fleet agent takes GitHub Actions jobs: Linux jobs run
-in containers, macOS jobs get a fresh ephemeral macOS guest per job, and Windows
-capability is served through WSL interop. Apple Silicon is first-class, so the
-Mac capacity the big clouds meter at a steep markup is simply yours to pool.
-(In development.)
-
 ## Built from scratch
 
 Most of ArcBox's performance-critical code is custom rather than vendored:
@@ -345,9 +333,8 @@ container, image, and volume filesystems. Source:
 
 ## What's next
 
-- Sandbox SDKs and ArcBox Platform general availability
+- Sandbox SDK general availability
 - Faster x86 translation
-- Linux host support (macOS first)
 - Wider Docker Engine API coverage
 - Lower idle footprint
 

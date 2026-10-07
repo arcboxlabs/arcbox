@@ -1,9 +1,8 @@
 """Connection configuration for reaching an ArcBox daemon.
 
 Resolution order for every field: explicit option > environment > default.
-The default tier is the local daemon's Unix socket; setting an API URL
-(option or ``ARCBOX_API_URL``) selects the remote tier instead (CORE-63,
-reserved — no cloud front door exists yet).
+The default transport uses the local daemon's Unix socket. An explicit API
+URL (option or ``ARCBOX_API_URL``) connects through your own remote proxy.
 """
 
 from __future__ import annotations
@@ -31,8 +30,7 @@ class Connection:
 
     #: Unix socket path of the local daemon (env: ``ARCBOX_SOCKET``).
     socket_path: str | None = None
-    #: Base URL of a remote daemon / cloud front door (env:
-    #: ``ARCBOX_API_URL``). Reserved (CORE-63).
+    #: Base URL of your remote daemon proxy (env: ``ARCBOX_API_URL``).
     api_url: str | None = None
     #: Bearer credential attached as an ``Authorization`` header when set
     #: (env: ``ARCBOX_API_KEY``). Unused by the local daemon, which

@@ -27,14 +27,13 @@ pub enum Layer {
     App,
     Guest,
     Sdk,
-    Fleet,
     Tests,
     Xtask,
 }
 
 impl Layer {
     /// Every layer; keep in step with the variants above.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 11] = [
         Self::Common,
         Self::Virt,
         Self::Rpc,
@@ -44,7 +43,6 @@ impl Layer {
         Self::App,
         Self::Guest,
         Self::Sdk,
-        Self::Fleet,
         Self::Tests,
         Self::Xtask,
     ];
@@ -61,7 +59,6 @@ impl Layer {
             Self::App => "app",
             Self::Guest => "guest",
             Self::Sdk => "sdk",
-            Self::Fleet => "fleet",
             Self::Tests => "tests",
             Self::Xtask => "xtask",
         }
