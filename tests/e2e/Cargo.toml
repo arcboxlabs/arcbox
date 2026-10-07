@@ -16,6 +16,7 @@ arcbox-constants.workspace = true
 arcbox-core.workspace = true
 arcbox-grpc.workspace = true
 arcbox-protocol.workspace = true
+arcbox-storage = { version = "0.8.2", path = "../../common/arcbox-storage" }
 arcbox-vmm.workspace = true
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 libc.workspace = true

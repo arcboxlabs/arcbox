@@ -710,6 +710,7 @@ dependencies = [
  "arcbox-core",
  "arcbox-grpc",
  "arcbox-protocol",
+ "arcbox-storage",
  "arcbox-vmm",
  "hyper-util",
  "libc",
