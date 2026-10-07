@@ -862,6 +862,46 @@ async fn a_checkpoint_restores_onto_a_fresh_address() {
     assert_eq!(fixture.run(&clone, &["/bin/hello"]).await, b"hi");
 }
 
+/// Legacy records remain adoptable, but missing source paths cannot produce
+/// a restorable checkpoint. Refusal must preserve the running guest.
+#[tokio::test]
+async fn an_adopted_computer_with_a_legacy_record_refuses_checkpoint() {
+    for missing in ["kernel", "rootfs"] {
+        let mut fixture = Fixture::jailed().await;
+        fixture.agent().on(&["/bin/hello"], Reply::stdout(b"hi"));
+        let id = fixture.ready("legacy").await;
+        fixture.manager.detach_all().await.unwrap();
+
+        let record_path = fixture.record_path(&id);
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+        assert_eq!(record["version"], 1);
+        record["effective_spec"][missing] = serde_json::Value::String(String::new());
+        std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+
+        fixture = fixture.restart().await;
+        fixture.await_state(&id, SandboxState::Ready).await;
+        let error = fixture
+            .manager
+            .checkpoint_sandbox(&id, "legacy".into(), HashMap::new())
+            .await
+            .expect_err("the record has no safe restore provenance");
+        assert!(
+            matches!(&error, VmmError::FailedPrecondition(message) if message.contains(&format!("no {missing} path"))),
+            "unexpected checkpoint refusal: {error}"
+        );
+        assert!(
+            fixture
+                .manager
+                .list_checkpoints(Some(&id))
+                .unwrap()
+                .is_empty()
+        );
+        fixture.await_state(&id, SandboxState::Ready).await;
+        assert_eq!(fixture.run(&id, &["/bin/hello"]).await, b"hi");
+    }
+}
+
 /// A capture that fails and leaves the guest running is an error the
 /// caller can retry: the computer stays Ready with everything it holds.
 #[tokio::test]

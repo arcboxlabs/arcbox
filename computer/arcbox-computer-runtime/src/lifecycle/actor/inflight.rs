@@ -257,10 +257,15 @@ impl ComputerActor {
                 self.error = Some(failure.message());
                 let event = failure.event();
                 let error = failure.into_error();
-                if let Some(reply) = self.capture_reply.take() {
-                    let _ =
-                        reply.send(Err(VmmError::Other(self.error.clone().unwrap_or_default())));
-                }
+                let error = if let Some(reply) = self.capture_reply.take() {
+                    // VmmError is not Clone. Preserve its type for the capture
+                    // caller and retain its text for secondary waiters.
+                    let text = error.to_string();
+                    let _ = reply.send(Err(error));
+                    VmmError::Other(text)
+                } else {
+                    error
+                };
                 // A launch that failed has nothing left to stop, so a stop
                 // deferred behind it got what it asked for. Answered before
                 // the drain below, which would otherwise hand it the launch's

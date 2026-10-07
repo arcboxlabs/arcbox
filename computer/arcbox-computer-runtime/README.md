@@ -140,6 +140,8 @@ path in every sandbox's chroot.
 
 Durable sandbox records retain kernel and rootfs paths so an adopted sandbox can checkpoint, pause, and resume. The manager pins each record's source rootfs until the record is removed. Snapshots and templates also pin their source rootfs. Workload inputs and SSH keys are redacted when provisioning completes.
 
+Legacy records without kernel or rootfs paths remain adoptable. Their checkpoint requests return `FailedPrecondition` before capture and leave the guest running.
+
 ## Data layout
 
 ```
