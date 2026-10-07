@@ -26,6 +26,7 @@ use anyhow::{Context, Result, bail};
 use arcbox_e2e::boot_assets::{resolve_boot_version, stage_dev_boot_assets};
 use arcbox_e2e::daemon::{DaemonConfig, DaemonHandle, connect_unix};
 use arcbox_e2e::metrics::{BootAssets, RunMetrics, percentile};
+use arcbox_e2e::sandbox_bench::{admit, with_machine};
 use arcbox_e2e::{env_flag, repo_root};
 use arcbox_grpc::sandbox_v1::sandbox_process_service_client::SandboxProcessServiceClient;
 use arcbox_grpc::sandbox_v1::sandbox_service_client::SandboxServiceClient;
@@ -161,6 +162,8 @@ fn run_bench(
 
 /// One iteration's timings.
 struct Sample {
+    /// Rejected-admission attempts and delays before the successful attempt.
+    admission_wait: Duration,
     /// `Create` RPC call → response (the sandbox is STARTING at this point).
     create_rpc: Duration,
     /// `Create` call → `READY` event: the cold start itself.
@@ -287,20 +290,27 @@ async fn one_template(
     id: &str,
     params: &Params,
 ) -> Result<()> {
-    client
-        .create(with_machine(CreateSandboxRequest {
-            id: id.to_owned(),
-            limits: Some(ResourceLimits {
-                vcpus: params.vcpus,
-                memory_mib: params.memory_mib,
-            }),
-            network: Some(NetworkSpec {
-                mode: NetworkMode::Enabled.into(),
-            }),
-            ..Default::default()
-        }))
-        .await
-        .context("Create template failed")?;
+    let admitted = admit(id, async || {
+        client
+            .create(with_machine(CreateSandboxRequest {
+                id: id.to_owned(),
+                limits: Some(ResourceLimits {
+                    vcpus: params.vcpus,
+                    memory_mib: params.memory_mib,
+                }),
+                network: Some(NetworkSpec {
+                    mode: NetworkMode::Enabled.into(),
+                }),
+                ..Default::default()
+            }))
+            .await
+    })
+    .await
+    .context("Create template failed")?;
+    info!(
+        admission_wait_ms = admitted.wait.as_millis(),
+        "template admitted"
+    );
     wait_for_ready(events, id).await?;
     run_and_collect(processes, id, &["/bin/echo", "template-warm"]).await?;
     Ok(())
@@ -316,19 +326,22 @@ async fn one_restore_cycle(
     id: &str,
     snapshot_id: &str,
 ) -> Result<Sample> {
-    let started = Instant::now();
-    snapshots
-        .restore(with_machine(RestoreRequest {
-            id: id.to_owned(),
-            snapshot_id: snapshot_id.to_owned(),
-            network_override: true,
-            ..Default::default()
-        }))
-        .await
-        .with_context(|| format!("Restore {id} failed"))?;
+    let admitted = admit(id, async || {
+        snapshots
+            .restore(with_machine(RestoreRequest {
+                id: id.to_owned(),
+                snapshot_id: snapshot_id.to_owned(),
+                network_override: true,
+                ..Default::default()
+            }))
+            .await
+    })
+    .await
+    .with_context(|| format!("Restore {id} failed"))?;
+    let started = admitted.started;
     let restore_rpc = started.elapsed();
 
-    finish_cycle(
+    let mut sample = finish_cycle(
         client,
         processes,
         id,
@@ -337,13 +350,16 @@ async fn one_restore_cycle(
         restore_rpc,
         false,
     )
-    .await
+    .await?;
+    sample.admission_wait = admitted.wait;
+    Ok(sample)
 }
 
 fn log_sample(label: &str, iteration: usize, sample: &Sample) {
     info!(
         iteration,
         group = label,
+        admission_wait_ms = sample.admission_wait.as_millis(),
         create_ms = sample.create_rpc.as_millis(),
         ready_ms = sample.ready.as_millis(),
         first_exec_ms = sample.first_exec.as_millis(),
@@ -392,20 +408,23 @@ async fn one_cycle(
     params: &Params,
     capture_dmesg: bool,
 ) -> Result<Sample> {
-    let started = Instant::now();
-    let created = client
-        .create(with_machine(CreateSandboxRequest {
-            id: id.to_owned(),
-            limits: Some(ResourceLimits {
-                vcpus: params.vcpus,
-                memory_mib: params.memory_mib,
-            }),
-            network: Some(NetworkSpec { mode: mode.into() }),
-            ..Default::default()
-        }))
-        .await
-        .with_context(|| format!("Create {id} failed"))?
-        .into_inner();
+    let admitted = admit(id, async || {
+        client
+            .create(with_machine(CreateSandboxRequest {
+                id: id.to_owned(),
+                limits: Some(ResourceLimits {
+                    vcpus: params.vcpus,
+                    memory_mib: params.memory_mib,
+                }),
+                network: Some(NetworkSpec { mode: mode.into() }),
+                ..Default::default()
+            }))
+            .await
+    })
+    .await
+    .with_context(|| format!("Create {id} failed"))?;
+    let started = admitted.started;
+    let created = admitted.response.into_inner();
     let create_rpc = started.elapsed();
     if created.state() != SandboxState::Starting {
         bail!("{id}: unexpected create state {:?}", created.state());
@@ -414,7 +433,7 @@ async fn one_cycle(
     wait_for_ready(events, id).await?;
     let ready = started.elapsed();
 
-    finish_cycle(
+    let mut sample = finish_cycle(
         client,
         processes,
         id,
@@ -423,7 +442,9 @@ async fn one_cycle(
         ready,
         capture_dmesg,
     )
-    .await
+    .await?;
+    sample.admission_wait = admitted.wait;
+    Ok(sample)
 }
 
 /// The shared back half of a cycle: first exec (sampling guest uptime),
@@ -472,6 +493,7 @@ async fn finish_cycle(
         .with_context(|| format!("Remove {id} failed"))?;
 
     Ok(Sample {
+        admission_wait: Duration::ZERO,
         create_rpc,
         ready,
         first_exec,
@@ -581,6 +603,21 @@ async fn wait_for_ready(
 }
 
 fn report(label: &str, samples: &[Sample], metrics: &mut RunMetrics) {
+    let admission: Vec<f64> = samples
+        .iter()
+        .map(|s| s.admission_wait.as_secs_f64())
+        .collect();
+    metrics.record_distribution(
+        &format!("coldstart_{label}_admission_wait"),
+        "seconds",
+        &admission,
+    );
+    for (i, sample) in samples.iter().enumerate() {
+        metrics.record(
+            &format!("coldstart_{label}_{i}_admission_wait"),
+            sample.admission_wait.as_secs_f64(),
+        );
+    }
     let ready: Vec<f64> = samples.iter().map(|s| s.ready.as_secs_f64()).collect();
     let exec: Vec<f64> = samples.iter().map(|s| s.first_exec.as_secs_f64()).collect();
     let warm_exec: Vec<f64> = samples
@@ -647,15 +684,6 @@ fn min(values: &[f64]) -> Option<f64> {
 
 fn max(values: &[f64]) -> Option<f64> {
     values.iter().copied().reduce(f64::max)
-}
-
-fn with_machine<T>(msg: T) -> tonic::Request<T> {
-    let mut request = tonic::Request::new(msg);
-    request.metadata_mut().insert(
-        "x-machine",
-        tonic::metadata::MetadataValue::from_static("default"),
-    );
-    request
 }
 
 fn env_usize(name: &str, default: usize) -> usize {

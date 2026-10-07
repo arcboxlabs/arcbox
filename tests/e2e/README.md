@@ -166,3 +166,5 @@ Tracing is controlled with `RUST_LOG`; it defaults to `info` when unset.
 ## Sandbox benchmark statistics
 
 `sandbox_coldstart` records its first iteration separately. Later iterations report p50, p95, and maximum latency. A single-iteration run has no steady-state percentile. `metrics.json` retains phase durations in seconds and records each sample distribution with an explicit unit and sample count. A sample count or a throughput value is never a phase duration.
+
+Sandbox benchmarks retry only explicit network-cleanup admission rejections, for at most 60 seconds between attempts. Each successful attempt has a 180-second RPC deadline. Metrics report admission waiting separately from the successful attempt’s latency; transport failures and uncertain commits fail the run.
