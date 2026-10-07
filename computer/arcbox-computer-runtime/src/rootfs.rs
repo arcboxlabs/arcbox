@@ -44,7 +44,8 @@ use crate::error::VmmError;
 /// bounds a sandbox's writable space, not host disk use.
 const DEFAULT_ROOTFS_SIZE: u64 = 512 * 1024 * 1024;
 
-/// Fixed template capacity. Keep capacity out of the cache key because
+/// Initial template capacity; the formatter can grow the image to fit its source.
+/// Keep capacity out of the cache key because
 /// template catalogs use the existing stem as their image digest input.
 const TEMPLATE_ROOTFS_SIZE: u64 = 512 * 1024 * 1024;
 

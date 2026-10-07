@@ -2,12 +2,13 @@
 
 - Type: change
 - Area: `arcbox-computer-runtime` rootfs construction
-- Commits / PRs: `4ac4d025`, `db573604`, `15cdc217`, `6336c042`; integrates the effective behavior from `f3680d93`
+- PR: [#736 — caller-owned rootfs construction and publication](https://github.com/arcboxlabs/arcbox/pull/736)
+- Source: [`build_rootfs` and publication](../../computer/arcbox-computer-runtime/src/rootfs/build.rs), [cached template conversion](../../computer/arcbox-computer-runtime/src/rootfs.rs)
 - Related: [Runtime README](../../computer/arcbox-computer-runtime/README.md), [kernel-mounted rootfs probes](../../computer/arcbox-computer-runtime/tests/integration/rootfs.rs)
 
 ## Problem or trigger
 
-The cached rootfs converter fixed capacity at 512 MiB and owned the output path. Node image builders need a larger sparse image at a caller-owned path. The caller must also retain the config and manifest digest from the same registry resolution that supplies the image contents.
+The cached rootfs converter started images at 512 MiB, allowed the formatter to grow images to fit their source, and owned the output path. Node image builders need a sparse image with an exact capacity at a caller-owned path. The caller must also retain the config and manifest digest from the same registry resolution that supplies the image contents.
 
 ## What was done
 
@@ -15,7 +16,7 @@ The cached rootfs converter fixed capacity at 512 MiB and owned the output path.
 - Required positive capacities in 128 MiB units. Required both the declared ext4 capacity and file length to match the request before injection because the formatter can enlarge the image or declare more blocks than the file contains.
 - Converted into a sibling temporary file. Injected the agent before publishing with an atomic rename. Failed conversion, injection, and publication preserve the destination and remove temporary files.
 - Exposed `inject_vm_agent` and `VM_AGENT_PATH`. Default kernel arguments select `init=/sbin/vm-agent`; converted images retain the distribution's init.
-- Reused publication for cached 512 MiB templates. Preserved the `rootfs-<layer>-<agent>.ext4` name used by template identity.
+- Reused publication for cached templates, starting at 512 MiB and allowing growth to fit the source. Preserved the `rootfs-<layer>-<agent>.ext4` name used by template identity.
 - Made resolver setup failures return an error. Successful injection requires `/etc/resolv.conf` to link to `../run/resolv.conf`.
 - Added the optional `remote-image` feature, an `oci2rootfs` re-export, and a Linux CI feature compilation gate. Kept registry access outside the default feature set.
 
@@ -56,11 +57,24 @@ The same revision passed:
 - 231 library tests and 6 non-ignored integration tests on Linux, with `ARCBOX_REQUIRE_BLOCK_TOOLS=1`. The separate ignored registry probe passed as shown above.
 - `cargo xtask check-layers`: 68 members and 190 edges checked.
 
-The local-image probes verify 256 MiB caller capacity, unchanged 512 MiB cache capacity and cache hits, destination replacement, repeated agent injection, preservation of distribution init, and cleanup after injection or publication failure. Unit tests reject zero and unaligned capacity, detect over-declared ext4 geometry, and verify cleanup after source-read failure.
+The local-image probes verify 256 MiB caller capacity, 512 MiB capacity for a small cached source and cache hits, destination replacement, repeated agent injection, preservation of distribution init, and cleanup after injection or publication failure. Unit tests reject zero and unaligned capacity, detect over-declared ext4 geometry, and verify cleanup after source-read failure.
 
 A review regression supplies a sparse overlay file of 128 MiB plus 4 KiB with a requested capacity of 128 MiB. The formatter enlarges the image to 256 MiB, so comparing declared geometry only with file length did not reject the oversized output. The regression failed against that implementation because execution reached agent injection. The capacity check now rejects both size mismatches before injection, preserves an existing destination, and removes the temporary image.
 
 After this correction, workspace formatting, strict all-target Clippy with `remote-image` on macOS and Linux, 232 macOS library tests, and 42 macOS manager tests passed. Linux passed all 5 rootfs build unit tests and both exact rootfs integration tests with `ARCBOX_REQUIRE_BLOCK_TOOLS=1`; no selected test was ignored or skipped.
+
+A later review found that sharing this exact-capacity check also imposed a new 512 MiB limit on cached templates. The `cached_templates_can_grow_beyond_the_initial_capacity` regression supplies a sparse source file of 512 MiB plus 4 KiB. Before the fix, the formatter produced matching geometry and file length of 640 MiB, but template conversion rejected that output against 512 MiB. Exact validation now belongs to `build_rootfs`; template conversion accepts formatter growth and retains the same owned worker for injection, cancellation cleanup, and publication.
+
+The regression now passes a Linux kernel mount, verifies the full payload length and tail bytes, checks the distribution init and injected agent, and confirms a cache hit. The same source still fails an explicit 512 MiB `build_rootfs` request, preserves the previous destination, and leaves no temporary image. The template correction passed workspace formatting, strict `remote-image` all-target Clippy on macOS and Linux, 17 macOS rootfs unit tests, 19 Linux rootfs unit tests, and 4 kernel-mounted rootfs tests. The existing registry probe remained ignored in this run; its earlier measurements above were not rerun.
+
+Reproduce the template regression without registry access:
+
+```bash
+sudo -E env ARCBOX_REQUIRE_BLOCK_TOOLS=1 BUSYBOX=/bin/busybox \
+  cargo test --locked -p arcbox-computer-runtime --features remote-image \
+  --test integration rootfs::cached_templates_can_grow_beyond_the_initial_capacity \
+  -- --exact --nocapture
+```
 
 ## Follow-ups
 

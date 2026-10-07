@@ -40,7 +40,7 @@ once, here.
 
 `RootfsBuilder::build_rootfs(RootfsSpec { source, out, size })` builds an image at a caller-owned path and capacity. `RootfsSource` accepts an OCI layout, an overlay2 directory, or a resolved `oci2rootfs::ImageSource`. Capacity must be a positive multiple of `ROOTFS_CAPACITY_GRANULARITY` (128 MiB). Both the declared ext4 capacity and file length must equal the requested capacity; sources that make the formatter enlarge the image fail before agent injection. The builder injects the agent before atomically replacing the destination with a synchronous rename. Failed or cancelled builds preserve an existing destination. On cancellation, an owned task finishes conversion and injection before removing the temporary image. Cleanup failures return an error, or are logged when the caller has gone.
 
-`convert_layer_to_rootfs` uses the same pipeline for cached 512 MiB templates. Cache names remain `rootfs-<layer>-<agent>.ext4`; caller-supplied capacities belong to `build_rootfs` and do not change template identity.
+`convert_layer_to_rootfs` starts cached templates at 512 MiB and lets the formatter grow the image to fit the source. Templates share agent injection, cancellation cleanup, and atomic publication with `build_rootfs`. Only `build_rootfs` enforces an exact caller-supplied capacity. Cache names remain `rootfs-<layer>-<agent>.ext4`; capacity does not change template identity.
 
 These cancellation guarantees require the Tokio runtime to keep running. Runtime shutdown or process termination can leave temporary images, mount directories, or loop devices behind. The default busybox rootfs builder uses a separate pipeline.
 

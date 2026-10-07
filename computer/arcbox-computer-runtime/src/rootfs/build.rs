@@ -41,21 +41,22 @@ impl RootfsBuilder {
                 spec.size
             )));
         }
-        self.write_and_publish(spec.source, &spec.out, spec.size)
-            .await
-            .map_err(rootfs_err)
+        self.write_and_publish_with(&spec.out, move |path| {
+            write_image(spec.source, path, spec.size)
+                .and_then(|()| verify_geometry(path, spec.size))
+        })
+        .await
+        .map_err(rootfs_err)
     }
 
     pub(super) async fn write_and_publish(
         &self,
         source: RootfsSource,
         out: &Path,
-        size: u64,
+        initial_size: u64,
     ) -> Result<()> {
-        self.write_and_publish_with(out, move |path| {
-            write_image(source, path, size).and_then(|()| verify_geometry(path, size))
-        })
-        .await
+        self.write_and_publish_with(out, move |path| write_image(source, path, initial_size))
+            .await
     }
 
     async fn write_and_publish_with(

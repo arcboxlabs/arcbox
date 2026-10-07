@@ -249,6 +249,82 @@ async fn a_caller_sized_build_is_mountable_and_replaces_the_destination() {
     .unwrap();
 }
 
+#[tokio::test]
+async fn cached_templates_can_grow_beyond_the_initial_capacity() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    const INITIAL_SIZE: u64 = 512 * 1024 * 1024;
+    const PAYLOAD_SIZE: u64 = INITIAL_SIZE + 4096;
+    const TAIL: &[u8] = b"template-payload-tail";
+    let tail_offset = -i64::try_from(TAIL.len()).unwrap();
+    let Some(tools) = block_tools() else { return };
+    let _serial = MOUNT_TEST.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let layer = dir.path().join("ABCDEF");
+    std::fs::create_dir_all(layer.join("diff/sbin")).unwrap();
+    std::fs::write(layer.join("diff/sbin/init"), b"distribution-init").unwrap();
+    std::fs::write(layer.join("link"), "ABCDEF").unwrap();
+    let mut payload = std::fs::File::create(layer.join("diff/payload")).unwrap();
+    payload.set_len(PAYLOAD_SIZE).unwrap();
+    payload.seek(SeekFrom::End(tail_offset)).unwrap();
+    payload.write_all(TAIL).unwrap();
+
+    let agent = dir.path().join("vm-agent");
+    std::fs::write(&agent, b"staged-agent").unwrap();
+    let builder = builder(&agent, Arc::clone(&tools));
+    let image = dir.path().join("images/rootfs.ext4");
+    std::fs::create_dir(image.parent().unwrap()).unwrap();
+    std::fs::write(&image, b"previous-image").unwrap();
+    let error = builder
+        .build_rootfs(RootfsSpec {
+            source: RootfsSource::Directory(layer.clone()),
+            out: image.clone(),
+            size: INITIAL_SIZE,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("requested rootfs capacity"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&image).unwrap(), b"previous-image");
+    assert_eq!(
+        std::fs::read_dir(image.parent().unwrap()).unwrap().count(),
+        1
+    );
+
+    let cached = builder
+        .convert_layer_to_rootfs(layer.to_str().unwrap(), &Default::default())
+        .await
+        .unwrap();
+    assert!(std::fs::metadata(&cached).unwrap().len() > INITIAL_SIZE);
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("cache")).unwrap().count(),
+        1
+    );
+    with_mounted(&*tools, Path::new(&cached), |root| {
+        verify_boot_files(root, b"staged-agent")?;
+        let mut payload = std::fs::File::open(root.join("payload"))?;
+        ensure!(
+            payload.metadata()?.len() == PAYLOAD_SIZE,
+            "payload was truncated"
+        );
+        payload.seek(SeekFrom::End(tail_offset))?;
+        let mut tail = vec![0; TAIL.len()];
+        payload.read_exact(&mut tail)?;
+        ensure!(tail == TAIL, "payload tail differs");
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        builder
+            .convert_layer_to_rootfs(layer.to_str().unwrap(), &Default::default())
+            .await
+            .unwrap(),
+        cached
+    );
+}
+
 #[cfg(feature = "remote-image")]
 #[tokio::test]
 #[ignore = "requires root, registry access, and a 32 GiB sparse image"]
