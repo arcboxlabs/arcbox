@@ -5,7 +5,6 @@ mod transfer;
 
 use arcbox_connect::v1 as pb;
 use arcbox_connect::v1::machine_exec_input;
-use arcbox_core::ExecSessionInput;
 use connectrpc::{
     ConnectError, InboundStream, RequestContext, Response, ServiceRequest, ServiceResult,
     ServiceStream,
@@ -14,7 +13,7 @@ use tokio_stream::StreamExt as _;
 
 use crate::error::ApiError;
 
-use super::SharedRuntime;
+use super::{SharedRuntime, stream_input};
 
 use super::ConnectRuntimeExt as _;
 
@@ -566,31 +565,11 @@ impl pb::MachineService for MachineServiceImpl {
             }
         };
 
-        let agent = self
-            .runtime
-            .ready()?
-            .get_agent(&exec_req.id)
-            .map_err(ApiError::from)?;
+        let runtime = std::sync::Arc::clone(self.runtime.ready_for_write(&exec_req.id)?);
+        let machine = exec_req.id.clone();
+        let agent = runtime.get_agent(&exec_req.id).map_err(ApiError::from)?;
 
-        // Feed remaining gRPC input (stdin + TTY resizes) into a channel for
-        // the core layer. Stream end sends the empty-stdin EOF sentinel.
         let (in_tx, in_rx) = tokio::sync::mpsc::channel(16);
-        tokio::spawn(async move {
-            while let Some(Ok(item)) = stream.next().await {
-                let msg = match item.to_owned_message().payload {
-                    Some(machine_exec_input::Payload::Stdin(data)) => ExecSessionInput::Stdin(data),
-                    Some(machine_exec_input::Payload::Resize(size)) => ExecSessionInput::Resize {
-                        width: u16::try_from(size.width).unwrap_or(u16::MAX),
-                        height: u16::try_from(size.height).unwrap_or(u16::MAX),
-                    },
-                    _ => continue,
-                };
-                if in_tx.send(msg).await.is_err() {
-                    return;
-                }
-            }
-            let _ = in_tx.send(ExecSessionInput::Stdin(Vec::new())).await;
-        });
 
         // A non-empty `container` selects the debug path (enter that
         // container's namespaces); otherwise the exec runs in the machine root.
@@ -601,6 +580,7 @@ impl pb::MachineService for MachineServiceImpl {
         }
         .map_err(ApiError::from)?;
 
+        let input = async move { stream_input::machine(&runtime, &machine, stream, in_tx).await };
         let out_stream = async_stream::stream! {
             while let Some(item) = out_rx.recv().await {
                 match item {
@@ -618,7 +598,7 @@ impl pb::MachineService for MachineServiceImpl {
                 }
             }
         };
-        Response::ok(Box::pin(out_stream))
+        Response::ok(stream_input::machine_output(input, Box::pin(out_stream)))
     }
 
     async fn events(

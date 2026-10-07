@@ -11,9 +11,7 @@ use connectrpc::{
 };
 use tokio_stream::StreamExt as _;
 
-use arcbox_core::WriteFileChunk;
-
-use super::SharedRuntime;
+use super::{SharedRuntime, stream_input};
 use crate::ApiError;
 
 use super::sandbox_resume;
@@ -101,7 +99,6 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
         mut requests: InboundStream<pb::WriteFileRequest>,
     ) -> ServiceResult<Empty> {
         let machine = ctx.sandbox_machine_id()?;
-        let runtime = self.runtime.ready()?;
 
         // The first message in the stream must carry the Open payload.
         let first = requests.next().await.ok_or_else(|| {
@@ -116,6 +113,7 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
             }
         };
 
+        let runtime = self.runtime.ready()?;
         // A paused sandbox must be handled before any chunk is consumed —
         // the input stream cannot be replayed for a retry.
         sandbox_resume::ensure_resumed_for_write(
@@ -126,44 +124,17 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
             &open.id,
         )
         .await?;
-        let agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
+        let agent = runtime.writable_agent(&machine).map_err(ApiError::from)?;
 
-        // Bridge Connect chunks into the agent write stream. A clean end (the
-        // client's `done` chunk) closes the channel, which triggers the
-        // terminating frame; a client error or a stream that ends *before*
-        // `done` sends `Abort` so the partial upload is never finalized.
+        // Only a clean `done` closes the channel for commit. An input error
+        // drops the write future and its connection before a terminating frame.
         let (tx, rx) = tokio::sync::mpsc::channel(16);
-        tokio::spawn(async move {
-            loop {
-                match requests.next().await {
-                    Some(Ok(item)) => {
-                        if let Some(write_file_request::Payload::Chunk(chunk)) =
-                            item.to_owned_message().payload
-                        {
-                            let done = chunk.done;
-                            if !chunk.data.is_empty()
-                                && tx.send(WriteFileChunk::Data(chunk.data)).await.is_err()
-                            {
-                                return;
-                            }
-                            if done {
-                                return; // clean completion: drop tx → done frame
-                            }
-                        }
-                    }
-                    // Client RST/cancel, or the stream closed without `done`.
-                    Some(Err(_)) | None => {
-                        let _ = tx.send(WriteFileChunk::Abort).await;
-                        return;
-                    }
-                }
-            }
-        });
-
-        agent
-            .sandbox_write_file(open, rx)
-            .await
-            .map_err(ApiError::from)?;
+        tokio::try_join!(stream_input::file(runtime, &machine, requests, tx), async {
+            agent
+                .sandbox_write_file(open, rx)
+                .await
+                .map_err(|error| ConnectError::from(ApiError::from(error)))
+        })?;
         Response::ok(Empty::default())
     }
 

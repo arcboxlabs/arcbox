@@ -35,6 +35,7 @@ mod sandbox_errors;
 mod sandbox_resume;
 mod snapshot;
 mod stats;
+mod stream_input;
 mod system;
 mod template;
 

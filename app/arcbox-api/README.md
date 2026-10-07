@@ -13,6 +13,8 @@ service implementations.
 - gRPC `MachineService` with machine lifecycle + guest-agent pass-through calls
 - gRPC `MigrationService` with host-side migration planning/execution entrypoints
 
+During storage recovery or a retained recovery hold, public System VM write requests fail with `FailedPrecondition`. Protection covers machine execution, disk compaction, sandbox mutations, template builds, snapshots, and file or stdin writes. Existing streams check each new input, signal, terminal resize, and file commit. Machine execution input continues while the client pauses output consumption and stops when the response stream closes. Read requests and stop operations remain available, but reads cannot automatically resume a paused sandbox while storage is protected. Other machines remain available.
+
 ## Usage
 
 ```rust
