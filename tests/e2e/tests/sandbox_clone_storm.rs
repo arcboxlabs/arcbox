@@ -76,10 +76,14 @@ async fn drive(channel: Channel, metrics: &mut RunMetrics, params: Params) -> Re
     let mut snapshot_id = None;
     let mut warm_snapshot_ids = HashSet::new();
     let result = async {
-        let mut events = client
-            .events(with_machine(SandboxEventsRequest::default()))
-            .await?
-            .into_inner();
+        let mut events = tokio::time::timeout(
+            RPC_TIMEOUT,
+            client.events(with_machine(SandboxEventsRequest::default())),
+        )
+        .await
+        .context("Events subscribe timed out")?
+        .context("Events subscribe failed")?
+        .into_inner();
         let admitted = admit(TEMPLATE_ID, async || {
             client
                 .create(with_machine(CreateSandboxRequest {

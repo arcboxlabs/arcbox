@@ -122,7 +122,7 @@ pub struct RunMetrics {
     pub test: String,
     /// System VM backend label, when the run pinned one.
     pub backend: Option<String>,
-    /// Whether the run passed. Set by the caller before writing.
+    /// Whether the run passed. Set by the caller; archive failures change this to false.
     pub passed: bool,
     /// Unix time the run started.
     pub unix_time: u64,
@@ -196,14 +196,19 @@ impl RunMetrics {
     /// Writes `metrics.json` into `run_dir` (when given) and
     /// `$ARCBOX_E2E_METRICS_DIR/<label>.metrics.json` (when the variable
     /// is set). The label is captured at construction. Returns the written paths.
-    pub fn write(&self, run_dir: Option<&Path>) -> Result<Vec<PathBuf>> {
+    /// Archive failures mark the run failed and update an already-written local record.
+    pub fn write(&mut self, run_dir: Option<&Path>) -> Result<Vec<PathBuf>> {
         let archive_dir = std::env::var_os("ARCBOX_E2E_METRICS_DIR")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from);
         self.write_to(run_dir, archive_dir.as_deref())
     }
 
-    fn write_to(&self, run_dir: Option<&Path>, archive_dir: Option<&Path>) -> Result<Vec<PathBuf>> {
+    fn write_to(
+        &mut self,
+        run_dir: Option<&Path>,
+        archive_dir: Option<&Path>,
+    ) -> Result<Vec<PathBuf>> {
         let json = serde_json::to_vec_pretty(self).context("serializing run metrics")?;
         let mut written = Vec::new();
 
@@ -214,10 +219,28 @@ impl RunMetrics {
         }
 
         if let Some(dir) = archive_dir {
-            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-            let path = dir.join(format!("{}.metrics.json", self.label));
-            std::fs::write(&path, &json).with_context(|| format!("writing {}", path.display()))?;
-            written.push(path);
+            let archived: Result<_> = (|| {
+                std::fs::create_dir_all(dir)
+                    .with_context(|| format!("creating {}", dir.display()))?;
+                let path = dir.join(format!("{}.metrics.json", self.label));
+                std::fs::write(&path, &json)
+                    .with_context(|| format!("writing {}", path.display()))?;
+                Ok(path)
+            })();
+            match archived {
+                Ok(path) => written.push(path),
+                Err(error) => {
+                    self.passed = false;
+                    if let Some(dir) = run_dir
+                        && let Err(local_error) = self.write_to(Some(dir), None)
+                    {
+                        return Err(error.context(format!(
+                            "marking local metrics failed also failed: {local_error:#}"
+                        )));
+                    }
+                    return Err(error);
+                }
+            }
         }
 
         Ok(written)
@@ -284,6 +307,24 @@ mod tests {
             record["provenance"]["boot_assets"]["version"],
             "resolved-bundle"
         );
+    }
+
+    #[test]
+    fn archive_failure_marks_the_local_record_failed() {
+        let run = tempfile::tempdir().expect("run directory");
+        let archive = tempfile::NamedTempFile::new().expect("archive path is a file");
+        let mut metrics = RunMetrics::new("t", None, boot_assets()).expect("provenance");
+        metrics.passed = true;
+        let error = metrics
+            .write_to(Some(run.path()), Some(archive.path()))
+            .expect_err("archive must reject a file as its directory");
+        assert!(format!("{error:#}").contains(archive.path().to_str().unwrap()));
+        let record: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(run.path().join("metrics.json")).expect("local metrics"),
+        )
+        .expect("JSON");
+        assert_eq!(record["passed"], false);
+        assert!(!metrics.passed);
     }
 
     #[test]

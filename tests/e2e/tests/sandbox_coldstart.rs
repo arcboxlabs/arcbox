@@ -39,6 +39,8 @@ use tonic::Streaming;
 use tonic::transport::Channel;
 use tracing::{info, warn};
 
+const RPC_TIMEOUT: Duration = Duration::from_secs(180);
+
 #[test]
 #[ignore = "requires nested virtualization (VZ on M3+), boot assets, and a signed daemon"]
 fn sandbox_coldstart() -> Result<()> {
@@ -105,11 +107,14 @@ async fn drive(channel: Channel, metrics: &mut RunMetrics, params: Params) -> Re
     // Subscribed before the first Create so no READY can be missed. Kind is
     // left unfiltered: a FAILED frame is what turns a hung bench into a
     // reported cause.
-    let mut events = client
-        .events(with_machine(SandboxEventsRequest::default()))
-        .await
-        .context("Events subscribe failed")?
-        .into_inner();
+    let mut events = tokio::time::timeout(
+        RPC_TIMEOUT,
+        client.events(with_machine(SandboxEventsRequest::default())),
+    )
+    .await
+    .context("Events subscribe timed out")?
+    .context("Events subscribe failed")?
+    .into_inner();
 
     for (label, mode) in [
         (

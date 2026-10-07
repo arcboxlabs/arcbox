@@ -153,6 +153,7 @@ Environment variables read by the tests:
   by `cargo xtask e2e`). Runs also write `metrics.json` into their data dir.
   Each record includes the same label, separate argv entries, host OS/kernel/architecture, and Git commit/dirty state. Failed provenance probes return an error before the measured phases.
   The harness records the resolved boot version passed to the daemon; the direct HV probe records its selected kernel/rootfs paths. Checkout state describes the repository at run time, not the build revision of existing binaries. A boot version identifies the selected bundle generation; locally staged binary overrides can differ.
+  Archive write errors propagate to the caller and mark an already-written local record as failed. If updating the local record also fails, the returned error retains both failures.
 - `ARCBOX_E2E_IPERF_IMAGE=<ref>` — guest iperf3 image for the
   `network_iperf` throughput matrix (default `networkstatic/iperf3:latest`).
 - `ARCBOX_E2E_IPERF_MIN_GBPS=<f64>` — `network_iperf` gate floor. Unset (or
@@ -168,6 +169,8 @@ Tracing is controlled with `RUST_LOG`; it defaults to `info` when unset.
 `sandbox_coldstart` records its first iteration separately. Later iterations report p50, p95, and maximum latency. A single-iteration run has no steady-state percentile. `metrics.json` retains phase durations in seconds and records each sample distribution with an explicit unit and sample count. A sample count or a throughput value is never a phase duration.
 
 Sandbox benchmarks retry only explicit network-cleanup admission rejections, for at most 60 seconds between attempts. Each successful attempt has a 180-second RPC deadline. Metrics report admission waiting separately from the successful attempt’s latency; transport failures and uncertain commits fail the run.
+
+Events subscriptions have a 180-second deadline. Each benchmark command has one 60-second deadline covering StartExecution, AttachExecution, and the output stream through exit.
 
 The `create-networked` group measures the production Create path, which may boot or restore a cached snapshot. `cold-no-network` always boots without the warm-create cache. `ARCBOX_COLDSTART_UNIQUE_GEOMETRY=1` changes the networked group to `cold-networked-unique-geometry`: each iteration adds one MiB to `ARCBOX_COLDSTART_MEMORY_MIB`, forcing a distinct cache key. This changes the workload; metrics retain each memory size in MiB, and comparisons must use the same geometry sequence. `restore` measures an explicit snapshot restore. No iteration number proves that a Create used a warm snapshot.
 

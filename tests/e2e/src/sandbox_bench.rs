@@ -162,64 +162,60 @@ pub fn with_machine<T>(msg: T) -> tonic::Request<T> {
     request
 }
 
-/// Starts one command and drains its attach stream until exit, asserting a
-/// zero exit code.
+/// Starts one command and drains its attach stream within 60 seconds, asserting a zero exit code.
 pub async fn run_and_collect(
     client: &mut SandboxProcessServiceClient<Channel>,
     id: &str,
     cmd: &[&str],
 ) -> Result<String> {
-    let execution = client
-        .start_execution(with_machine(StartExecutionRequest {
-            sandbox_id: id.to_owned(),
-            cmd: cmd.iter().map(|s| (*s).to_owned()).collect(),
-            stdin: false,
-            ..Default::default()
-        }))
-        .await
-        .context("StartExecution failed")?
-        .into_inner();
-
-    let mut stream = client
-        .attach_execution(with_machine(AttachExecutionRequest {
-            sandbox_id: id.to_owned(),
-            execution_id: execution.id.clone(),
-            stdout_offset: 0,
-            stderr_offset: 0,
-        }))
-        .await
-        .context("AttachExecution failed")?
-        .into_inner();
-
-    // Deadline the drain like wait_for_ready: a wedged exec must fail the
-    // probe (writing metrics + preserving the test dir), not hang it.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let mut stdout = String::new();
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let event = tokio::time::timeout(remaining, stream.message())
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let execution = client
+            .start_execution(with_machine(StartExecutionRequest {
+                sandbox_id: id.to_owned(),
+                cmd: cmd.iter().map(|s| (*s).to_owned()).collect(),
+                stdin: false,
+                ..Default::default()
+            }))
             .await
-            .with_context(|| format!("{id}: command {cmd:?} timed out"))?
-            .context("attach stream error")?;
-        let Some(event) = event else {
-            bail!("{id}: attach stream ended without an exit event");
-        };
-        match event.event {
-            Some(execution_event::Event::Output(output)) => {
-                if output.channel() != StdioChannel::Stderr {
-                    stdout.push_str(&String::from_utf8_lossy(&output.data));
+            .context("StartExecution failed")?
+            .into_inner();
+
+        let mut stream = client
+            .attach_execution(with_machine(AttachExecutionRequest {
+                sandbox_id: id.to_owned(),
+                execution_id: execution.id.clone(),
+                stdout_offset: 0,
+                stderr_offset: 0,
+            }))
+            .await
+            .context("AttachExecution failed")?
+            .into_inner();
+
+        let mut stdout = String::new();
+        loop {
+            let event = stream.message().await.context("attach stream error")?;
+            let Some(event) = event else {
+                bail!("{id}: attach stream ended without an exit event");
+            };
+            match event.event {
+                Some(execution_event::Event::Output(output)) => {
+                    if output.channel() != StdioChannel::Stderr {
+                        stdout.push_str(&String::from_utf8_lossy(&output.data));
+                    }
                 }
+                Some(execution_event::Event::Exited(done)) => {
+                    let state = done.execution.context("exit event without execution")?;
+                    return match state.exit_status.as_ref().and_then(|s| s.status) {
+                        Some(exit_status::Status::Code(0)) => Ok(stdout),
+                        other => bail!("{id}: command {cmd:?} exit status {other:?}"),
+                    };
+                }
+                _ => {}
             }
-            Some(execution_event::Event::Exited(done)) => {
-                let state = done.execution.context("exit event without execution")?;
-                return match state.exit_status.as_ref().and_then(|s| s.status) {
-                    Some(exit_status::Status::Code(0)) => Ok(stdout),
-                    other => bail!("{id}: command {cmd:?} exit status {other:?}"),
-                };
-            }
-            _ => {}
         }
-    }
+    })
+    .await
+    .with_context(|| format!("{id}: command {cmd:?} timed out"))?
 }
 
 /// Consumes the shared event stream until `id` reports READY.
