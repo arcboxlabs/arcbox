@@ -30,7 +30,7 @@ Both rootfs builds require read-only e2fsck to return `0` for a clean image and 
 
 ## Validation
 
-Runtime source was `4dda96ed78fb46d75dc1ef2fe46e446666198fd9` with the new boot pin. No code changed after the following checks.
+Runtime source was `4dda96ed78fb46d75dc1ef2fe46e446666198fd9` with the new boot pin. The Rust source did not change after the following checks.
 
 | Check | Result |
 |---|---|
@@ -48,3 +48,9 @@ Reproduce the storage fault check with `guest/arcbox-agent/tests/storage-recover
 For VZ, set `ARCBOX_VM_BACKEND=vz ARCBOX_DIAG_DISABLE_BRIDGE_NIC=1`. For HV, build the daemon separately with `cargo build --locked --release -p arcbox-daemon --bin arcbox-daemon --no-default-features --features gic`, sign the new binary, and set `ARCBOX_VM_BACKEND=hv`. Both runs keep the test's isolated NFS behavior. The signed VZ daemon SHA-256 was `68d60a63933f3f8f396b4efe2a59d581b6443c5ed5211e512747519fbd8a71a5`; the signed HV daemon SHA-256 was `34aae91a52e5b6c9d900fddca64282b8812fe1708c2bb6b9bc16e8f80114cd83`.
 
 Local evidence is in `/private/tmp/arcbox-redwhisk-integration.MHIwSg3Y/734-final-host-gates.log`, `734-linux-integrated-root.log`, `734-vz-recovery.log`, and `734-hv-recovery.log`; release verification is in `/private/tmp/arcbox-boot-0.8.9-verification.h0B50MFb/release-validation.json`; privileged Linux verification is in `/private/tmp/arcbox-published-guest.0hk94rf1/validation.json`.
+
+## Side-entry driver input validation
+
+The driver requires the recreation regression and both ignored mount tests before creating a fixture. Each filtered invocation must report at least one passing test. This prevents a library test executable or a stale executable from returning a false success with zero matching tests.
+
+The corrected driver passed 25 ext4 tests, 2 privileged mount tests, and 25 overlay tests with the binary test executable. The library test executable built from the same source returned status 1 because the required recreation regression was absent. A temporary executable that listed the required names but reported zero passing tests also returned status 1. Evidence is in `734-sidecar-runner-positive.log`, `734-sidecar-runner-library-rejection.log`, and `734-sidecar-runner-zero-rejection.log` in the same local evidence directory.
