@@ -95,15 +95,36 @@ impl KeychainAuthority {
         pem::encode(&pem::Pem::new("CERTIFICATE", self.certificate.to_der()))
     }
 
-    /// Returns the profile-specific keychain label, independent of executable path.
-    pub fn label(tls_dir: &Path) -> Result<String, Error> {
-        let dir = tls_dir.canonicalize().map_err(|e| Error::io(tls_dir, e))?;
-        Ok(format!("dev.arcbox.local-ca.v2:{}", dir.display()))
+    // Resolve surviving ancestors so uninstall can find keys after the TLS directory is removed.
+    fn label(tls_dir: &Path) -> Result<String, Error> {
+        let path = std::path::absolute(tls_dir).map_err(|e| Error::io(tls_dir, e))?;
+        for ancestor in path.ancestors() {
+            match ancestor.canonicalize() {
+                Ok(mut root) => {
+                    let suffix = path
+                        .strip_prefix(ancestor)
+                        .expect("ancestor is a path prefix");
+                    if !suffix.as_os_str().is_empty() {
+                        root.push(suffix);
+                    }
+                    return Ok(format!("dev.arcbox.local-ca.v2:{}", root.display()));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(Error::io(ancestor, e)),
+            }
+        }
+        Err(Error::InvalidAuthority("CA path has no existing ancestor"))
     }
 
-    /// Deletes this profile's keys and public certificate after trust removal.
+    /// Revokes this profile's trust and deletes its keys and public certificate.
     pub fn delete(tls_dir: &Path) -> Result<(), Error> {
         let label = Self::label(tls_dir)?;
+        let path = tls_dir.join(arcbox_constants::paths::guest::TLS_CA_CERT);
+        match std::fs::read(&path) {
+            Ok(pem) => crate::migration::delete_certificate(&pem)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Error::io(&path, error)),
+        }
         if let Some(Reference::Key(key)) = find(
             ItemSearchOptions::new()
                 .key_class(KeyClass::private())

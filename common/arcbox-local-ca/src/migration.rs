@@ -6,6 +6,7 @@ use arcbox_constants::paths::guest::{TLS_CA_CERT, TLS_CA_KEY};
 use core_foundation::base::TCFType;
 use rustls::pki_types::{CertificateDer, pem::PemObject};
 use security_framework::certificate::SecCertificate;
+use security_framework::item::{ItemClass, ItemSearchOptions, Limit, Reference, SearchResult};
 use security_framework::trust_settings::{Domain, TrustSettings};
 use security_framework_sys::base::SecCertificateRef;
 
@@ -31,26 +32,65 @@ impl KeychainAuthority {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(Error::io(&path, error)),
         };
-        let certificate = self.certificate_pem();
-        if current.as_deref() == Some(certificate.as_bytes()) {
+        let exported = self.certificate_pem();
+        if current.as_deref() == Some(exported.as_bytes()) {
             return Ok(());
         }
         if let Some(old) = current {
-            remove_trust(&old)?;
+            if certificate(&old)?.to_der() != certificate(exported.as_bytes())?.to_der() {
+                remove_trust(&old)?;
+            }
         }
-        arcbox_atomic_file::write(&path, certificate.as_bytes())?;
+        arcbox_atomic_file::write(&path, exported.as_bytes())?;
         Ok(())
     }
 }
 
 /// Removes only this certificate's user trust, preserving every other profile.
 pub fn remove_trust(pem: &[u8]) -> Result<(), Error> {
+    untrust(&certificate(pem)?)
+}
+
+fn certificate(pem: &[u8]) -> Result<SecCertificate, Error> {
     let der = CertificateDer::from_pem_slice(pem)
         .map_err(|_| Error::InvalidAuthority("invalid public CA certificate"))?;
-    let certificate = SecCertificate::from_der(&der)?;
+    Ok(SecCertificate::from_der(&der)?)
+}
+
+pub fn delete_certificate(pem: &[u8]) -> Result<(), Error> {
+    let certificate = certificate(pem)?;
+    untrust(&certificate)?;
+    // A certificate parsed from DER has no persistent reference. Delete the
+    // matching Keychain reference, never another certificate with the same serial.
+    let found = ItemSearchOptions::new()
+        .class(ItemClass::certificate())
+        .serial_number(&certificate.serial_number_bytes()?)
+        .limit(Limit::All)
+        .load_refs(true)
+        .search();
+    let items = match found {
+        Ok(items) => items,
+        Err(error) if error.code() == security_framework_sys::base::errSecItemNotFound => {
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    for item in items {
+        let SearchResult::Ref(Reference::Certificate(stored)) = item else {
+            return Err(Error::InvalidAuthority("expected a certificate reference"));
+        };
+        if stored.to_der() == certificate.to_der() {
+            stored.delete()?;
+        }
+    }
+    Ok(())
+}
+
+fn untrust(certificate: &SecCertificate) -> Result<(), Error> {
+    let der = certificate.to_der();
     let trusted = TrustSettings::new(Domain::User)
         .iter()?
-        .any(|known| known.to_der() == der.as_ref());
+        .any(|known| known.to_der() == der);
     if trusted {
         // SAFETY: certificate owns a valid SecCertificateRef throughout the call.
         let status = unsafe {
@@ -75,7 +115,12 @@ mod tests {
     #[ignore = "creates and deletes an isolated CA in the user's macOS Keychain"]
     fn migration_rotates_the_exposed_key_and_reopens_the_keychain_ca() {
         let dir = tempfile::tempdir().unwrap();
-        crate::ensure(dir.path()).unwrap();
+        let legacy_key = rcgen::KeyPair::generate().unwrap();
+        let legacy_cert = crate::authority::parameters()
+            .self_signed(&legacy_key)
+            .unwrap();
+        fs::write(dir.path().join(TLS_CA_KEY), legacy_key.serialize_pem()).unwrap();
+        fs::write(dir.path().join(TLS_CA_CERT), legacy_cert.pem()).unwrap();
         let old = fs::read(dir.path().join(TLS_CA_CERT)).unwrap();
         // Clean up even when an assertion fails. No trust is added by this test.
         struct Cleanup<'a>(&'a Path);
@@ -116,5 +161,22 @@ mod tests {
         )
         .unwrap();
         pending.complete(certificate).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let _other_cleanup = Cleanup(other.path());
+        let other_ca = KeychainAuthority::open(other.path()).unwrap();
+        let other_pem = other_ca.certificate_pem();
+        assert_ne!(reopened.certificate_pem(), other_pem);
+        let path = dir.path().to_owned();
+        fs::remove_dir_all(&path).unwrap();
+        KeychainAuthority::delete(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        let replacement = KeychainAuthority::open(&path).unwrap();
+        assert_ne!(replacement.certificate_pem().as_bytes(), new);
+        assert_eq!(
+            KeychainAuthority::open(other.path())
+                .unwrap()
+                .certificate_pem(),
+            other_pem
+        );
     }
 }

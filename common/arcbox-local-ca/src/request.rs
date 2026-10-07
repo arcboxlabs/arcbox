@@ -1,10 +1,13 @@
 //! A guest keeps its leaf key and sends only a signed certificate request.
 
+use rcgen::{CertificateParams, KeyPair};
+#[cfg(any(target_os = "macos", test))]
 use rcgen::{
-    CertificateParams, CertificateSigningRequestParams, ExtendedKeyUsagePurpose, Issuer, KeyPair,
-    KeyUsagePurpose, SanType, SigningKey,
+    CertificateSigningRequestParams, ExtendedKeyUsagePurpose, Issuer, KeyUsagePurpose, SanType,
+    SigningKey,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+#[cfg(any(target_os = "macos", test))]
 use time::{Duration, OffsetDateTime};
 
 use crate::{Error, LOCAL_DOMAIN};
@@ -66,6 +69,7 @@ fn validate_name(name: &str) -> Result<(), Error> {
 }
 
 /// Verifies the CSR signature and applies host-owned certificate policy.
+#[cfg(any(target_os = "macos", test))]
 pub fn sign_request(der: &[u8], issuer: &Issuer<'_, impl SigningKey>) -> Result<Vec<u8>, Error> {
     if der.len() > MAX_CERTIFICATE_SIZE {
         return Err(Error::InvalidRequest(
@@ -104,8 +108,7 @@ mod tests {
     #[test]
     fn csr_policy_keeps_the_guest_key_and_rejects_foreign_names() {
         let key = KeyPair::generate().unwrap();
-        let mut params = CertificateParams::default();
-        params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+        let params = crate::authority::parameters();
         let ca = params.self_signed(&key).unwrap();
         let issuer = Issuer::new(params, key);
         let pending = CertificateRequest::new("dash.signoz.arcbox.local").unwrap();
@@ -137,6 +140,8 @@ mod tests {
             "arcbox.local",
             "evilarcbox.local",
             "*.arcbox.local",
+            "web.arcbox.local.example.com",
+            "127.0.0.1",
         ] {
             assert!(CertificateRequest::new(name).is_err(), "{name}");
             let key = KeyPair::generate().unwrap();
@@ -153,5 +158,80 @@ mod tests {
             .unwrap();
         assert!(sign_request(request.der(), &issuer).is_err());
         assert!(sign_request(&[0; MAX_CERTIFICATE_SIZE + 1], &issuer).is_err());
+    }
+
+    #[test]
+    fn guest_cannot_request_ca_or_client_auth_privileges() {
+        use rustls::server::WebPkiClientVerifier;
+        let ca = rcgen::CertifiedIssuer::self_signed(
+            crate::authority::parameters(),
+            KeyPair::generate().unwrap(),
+        )
+        .unwrap();
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(vec!["web.arcbox.local".into()]).unwrap();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        let request = params.serialize_request(&key).unwrap();
+        let certificate = CertificateDer::from(sign_request(request.der(), &ca).unwrap());
+        let leaf = Issuer::from_ca_cert_der(&certificate, key).unwrap();
+        assert_eq!(leaf.key_usages(), [KeyUsagePurpose::DigitalSignature]);
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(ca.der().clone()).unwrap();
+        let roots = Arc::new(roots);
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        WebPkiServerVerifier::builder_with_provider(Arc::clone(&roots), Arc::clone(&provider))
+            .build()
+            .unwrap()
+            .verify_server_cert(
+                &certificate,
+                &[],
+                &ServerName::try_from("web.arcbox.local").unwrap(),
+                &[],
+                UnixTime::now(),
+            )
+            .unwrap();
+        let error = WebPkiClientVerifier::builder_with_provider(roots, provider)
+            .build()
+            .unwrap()
+            .verify_client_cert(&certificate, &[], UnixTime::now())
+            .unwrap_err();
+        assert!(format!("{error:?}").contains("InvalidPurpose"), "{error:?}");
+    }
+
+    #[test]
+    fn root_constraints_reject_foreign_dns_and_ip_even_if_signed() {
+        let params = crate::authority::parameters();
+        let key = KeyPair::generate().unwrap();
+        let ca = params.self_signed(&key).unwrap();
+        let issuer = Issuer::new(params, key);
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(ca.der().clone()).unwrap();
+        let verifier = WebPkiServerVerifier::builder_with_provider(
+            Arc::new(roots),
+            rustls::crypto::ring::default_provider().into(),
+        )
+        .build()
+        .unwrap();
+        for name in ["example.com", "127.0.0.1", "::1"] {
+            let leaf = CertificateParams::new(vec![name.into()])
+                .unwrap()
+                .signed_by(&KeyPair::generate().unwrap(), &issuer)
+                .unwrap();
+            let error = verifier
+                .verify_server_cert(
+                    leaf.der(),
+                    &[],
+                    &ServerName::try_from(name).unwrap(),
+                    &[],
+                    UnixTime::now(),
+                )
+                .unwrap_err();
+            assert!(
+                format!("{error:?}").contains("NameConstraintViolation"),
+                "{error:?}"
+            );
+        }
     }
 }
