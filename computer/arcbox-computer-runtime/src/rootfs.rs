@@ -44,6 +44,10 @@ use crate::error::VmmError;
 /// bounds a sandbox's writable space, not host disk use.
 const DEFAULT_ROOTFS_SIZE: u64 = 512 * 1024 * 1024;
 
+/// Fixed template capacity. Keep capacity out of the cache key because
+/// template catalogs use the existing stem as their image digest input.
+const TEMPLATE_ROOTFS_SIZE: u64 = 512 * 1024 * 1024;
+
 /// Agent path in every built image. Use this path in the kernel's `init=` argument.
 pub const VM_AGENT_PATH: &str = "/sbin/vm-agent";
 
@@ -171,53 +175,13 @@ impl RootfsBuilder {
             return Ok(ext4_path);
         }
 
-        tokio::fs::create_dir_all(cache_dir)
-            .await
-            .context("failed to create rootfs cache dir")?;
-
-        let req_id = Uuid::new_v4().to_string();
-        let ext4_tmp = cache_dir
-            .join(format!(".rootfs-{req_id}.ext4.tmp"))
-            .to_string_lossy()
-            .into_owned();
-
-        // Convert via the oci2rootfs library (blocking CPU/IO work).
         tracing::info!(layer = %layer_path, ext4 = %ext4_path, "converting image layer to ext4");
-        {
-            let layer = layer_path.to_owned();
-            let out = ext4_tmp.clone();
-            tokio::task::spawn_blocking(move || -> Result<()> {
-                let converter = oci2rootfs::Converter::new(&out);
-                if is_oci_layout(Path::new(&layer)) {
-                    let source = oci2rootfs::OciLayoutSource::open(&layer)
-                        .context("failed to open OCI image layout")?;
-                    converter
-                        .convert(source)
-                        .context("OCI layout → ext4 conversion failed")?;
-                } else {
-                    let source = oci2rootfs::Overlay2Source::open(&layer)
-                        .context("failed to open overlay2 layer")?;
-                    converter
-                        .convert(source)
-                        .context("overlay2 → ext4 conversion failed")?;
-                }
-                Ok(())
-            })
-            .await
-            .context("conversion task panicked")??;
-        }
-
-        // Inject vm-agent.
-        tracing::info!("injecting vm-agent into rootfs");
-        if let Err(e) = self.inject_agent(Path::new(&ext4_tmp)).await {
-            let _ = tokio::fs::remove_file(&ext4_tmp).await;
-            return Err(e);
-        }
-
-        // Atomic rename into cache.
-        tokio::fs::rename(&ext4_tmp, &ext4_path)
-            .await
-            .context("failed to rename ext4 into cache")?;
+        self.write_and_publish(
+            RootfsSource::Directory(PathBuf::from(layer_path)),
+            Path::new(&ext4_path),
+            TEMPLATE_ROOTFS_SIZE,
+        )
+        .await?;
 
         sweep_superseded(cache_dir, &layer_key, &agent_key, pinned).await;
 

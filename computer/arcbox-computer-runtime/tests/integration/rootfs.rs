@@ -153,7 +153,7 @@ async fn a_caller_sized_build_is_mountable_and_replaces_the_destination() {
 
     builder(&agent, Arc::clone(&tools))
         .build_rootfs(RootfsSpec {
-            source: RootfsSource::Directory(layer),
+            source: RootfsSource::Directory(layer.clone()),
             out: image.clone(),
             size,
         })
@@ -166,6 +166,70 @@ async fn a_caller_sized_build_is_mountable_and_replaces_the_destination() {
         1
     );
     assert!(!dir.path().join("cache").exists());
+    with_mounted(&*tools, &image, |root| {
+        verify_boot_files(root, b"staged-agent")
+    })
+    .unwrap();
+
+    let builder = builder(&agent, Arc::clone(&tools));
+    let cached = builder
+        .convert_layer_to_rootfs(layer.to_str().unwrap(), &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(std::fs::metadata(&cached).unwrap().len(), 512 * 1024 * 1024);
+    let stem = Path::new(&cached).file_stem().unwrap().to_str().unwrap();
+    let keys = stem.strip_prefix("rootfs-").unwrap();
+    let (layer_key, agent_key) = keys.split_once('-').unwrap();
+    assert_eq!((layer_key.len(), agent_key.len()), (16, 16));
+    assert_eq!(
+        builder
+            .convert_layer_to_rootfs(layer.to_str().unwrap(), &Default::default())
+            .await
+            .unwrap(),
+        cached
+    );
+    with_mounted(&*tools, Path::new(&cached), |root| {
+        verify_boot_files(root, b"staged-agent")
+    })
+    .unwrap();
+
+    let blocked = image.parent().unwrap().join("directory");
+    std::fs::create_dir(&blocked).unwrap();
+    let error = builder
+        .build_rootfs(RootfsSpec {
+            source: RootfsSource::Directory(layer.clone()),
+            out: blocked.clone(),
+            size,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("publish rootfs image"),
+        "{error}"
+    );
+    assert!(blocked.is_dir());
+    assert_eq!(
+        std::fs::read_dir(image.parent().unwrap()).unwrap().count(),
+        2
+    );
+
+    std::fs::create_dir_all(layer.join("diff/etc/resolv.conf")).unwrap();
+    let error = builder
+        .build_rootfs(RootfsSpec {
+            source: RootfsSource::Directory(layer),
+            out: image.clone(),
+            size,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("replace /etc/resolv.conf"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read_dir(image.parent().unwrap()).unwrap().count(),
+        2
+    );
     with_mounted(&*tools, &image, |root| {
         verify_boot_files(root, b"staged-agent")
     })

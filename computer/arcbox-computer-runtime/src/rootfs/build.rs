@@ -193,6 +193,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_source_read_leaves_no_temporary_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("layout");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("oci-layout"), b"{}").unwrap();
+        let out = dir.path().join("images/rootfs.ext4");
+        let error = builder(dir.path())
+            .build_rootfs(RootfsSpec {
+                source: RootfsSource::Directory(source),
+                out: out.clone(),
+                size: ROOTFS_CAPACITY_GRANULARITY,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("open OCI image layout"),
+            "{error}"
+        );
+        assert!(!out.exists());
+        assert_eq!(std::fs::read_dir(out.parent().unwrap()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
     async fn injection_failure_preserves_the_destination_and_removes_temporary_files() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("images/rootfs.ext4");

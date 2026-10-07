@@ -99,13 +99,18 @@ impl RootfsBuilder {
         // is safe for Docker images — Docker itself never ships meaningful
         // resolv.conf content (it bind-mounts one at run time).
         let etc = mount_dir.join("etc");
-        if tokio::fs::create_dir_all(&etc).await.is_ok() {
-            let resolv = etc.join("resolv.conf");
-            let _ = tokio::fs::remove_file(&resolv).await;
-            if let Err(e) = tokio::fs::symlink("../run/resolv.conf", &resolv).await {
-                tracing::warn!(error = %e, "resolv.conf symlink failed; DNS rewrites will hit the CoW device");
-            }
+        tokio::fs::create_dir_all(&etc)
+            .await
+            .context("create /etc in rootfs")?;
+        let resolv = etc.join("resolv.conf");
+        match tokio::fs::remove_file(&resolv).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("replace /etc/resolv.conf in rootfs"),
         }
+        tokio::fs::symlink("../run/resolv.conf", &resolv)
+            .await
+            .context("link /etc/resolv.conf into the run tmpfs")?;
         Ok(())
     }
 
