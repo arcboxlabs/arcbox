@@ -2,24 +2,24 @@
 
 Privileged root helper for host mutations that the user-space daemon cannot
 perform: `/usr/local/bin` CLI symlinks, `/var/run/docker.sock`, `/etc/resolver`,
-`/etc/hosts` alias, and utun/route setup.
+`/etc/hosts` alias, local HTTPS CA trust, and utun/route setup.
 
 ## Independent version
 
 `arcbox-helper` owns its **own** Cargo package version
-(`app/arcbox-helper/Cargo.toml`), currently `1.0.2`. It is **not** tied to
+(`app/arcbox-helper/Cargo.toml`), currently `1.2.0`. It is **not** tied to
 `workspace.package.version`.
 
 | Pin | Location |
 |-----|----------|
-| Helper package version | `app/arcbox-helper/Cargo.toml` → `version = "1.0.2"` |
-| Workspace path-dep | root `Cargo.toml` → `arcbox-helper = { version = "1.0.2", path = ... }` (**no** `x-release-please-version`) |
+| Helper package version | `app/arcbox-helper/Cargo.toml` → `version = "1.2.0"` |
+| Workspace path-dep | root `Cargo.toml` → `arcbox-helper = { version = "1.2.0", path = ... }` (**no** `x-release-please-version`) |
 | Daemon/CLI floor | `arcbox_constants::helper::MIN_HELPER_VERSION` |
 
 `arcbox-helper --version` and the tarpc `version` RPC both print:
 
 ```text
-arcbox-helper 1.0.2
+arcbox-helper 1.2.0
 ```
 
 Desktop and daemon parse that line with
@@ -82,6 +82,9 @@ Rejected peers are dropped before any tarpc dispatch; logs include
 | `socket_link` / `socket_unlink` | Target must parse as `SocketTarget` (`~/.arcbox` / `~/.arcbox-dev`); replace only ArcBox-owned symlink | Only ArcBox-owned symlink; never real sockets |
 | `dns_install` / `dns_uninstall` | Writes marker `# managed by arcbox-helper`; refuses to overwrite foreign resolvers | Only files carrying the marker |
 | `hosts_alias_*` | Fixed `127.0.0.1 ArcBox # managed by arcbox-helper` line only | Lines carrying the marker only |
+| `ca_install` / `ca_status` / `ca_remove` | Public DER certificate must pass the ArcBox root policy, including verified self-signature, critical DNS/IP constraints, and CA path length zero; stores public certificate in System Keychain with TLS-server-only Admin trust | Exact certificate DER only; preserves other users' and profiles' roots |
+
+The helper never receives a CA private key or a certificate file path. The daemon calls `ca_install` and verifies `ca_status` before the canonical production VM boots. `ca_status` checks both the System Keychain certificate and the precise Admin trust policy; existing User trust cannot satisfy that check. The native Security.framework APIs require no additional authentication from the already-authorized root helper. Legacy User trust remains a separate user-session operation. See [ADR 0005](adr/0005-helper-manages-local-ca-trust.md).
 
 `is_arcbox_owned` (shared with `CliTarget`) rejects relative paths, `..`, and
 anything outside `/Applications/` or `/Users/` without an
@@ -114,6 +117,7 @@ cargo test -p arcbox-helper --test e2e_fs_test
 ```
 
 Release builds **ignore** the env var (production must never be redirected).
+CA trust RPCs reject a filesystem test root because Keychain mutations cannot be redirected into that directory. The ignored native CA lifecycle test requires root and removes its exact temporary certificates after checking installation, policy, idempotency, and sibling isolation.
 
 Also covered by unit tests in the helper binary (`--bins`) and mock tarpc
 integration tests (`--tests` excluding `e2e_fs_test`).

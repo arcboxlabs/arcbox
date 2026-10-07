@@ -122,6 +122,28 @@ impl HelperService for MockHelperServer {
     async fn version(self, _: tarpc::context::Context) -> String {
         self.version
     }
+
+    async fn ca_install(self, _: tarpc::context::Context, der: Vec<u8>) -> Result<(), HelperError> {
+        arcbox_local_ca::PublicAuthority::try_from(der)
+            .map_err(|error| HelperError::validation(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn ca_status(
+        self,
+        _: tarpc::context::Context,
+        der: Vec<u8>,
+    ) -> Result<bool, HelperError> {
+        arcbox_local_ca::PublicAuthority::try_from(der)
+            .map_err(|error| HelperError::validation(error.to_string()))?;
+        Ok(false)
+    }
+
+    async fn ca_remove(self, _: tarpc::context::Context, der: Vec<u8>) -> Result<(), HelperError> {
+        arcbox_local_ca::PublicAuthority::try_from(der)
+            .map_err(|error| HelperError::validation(error.to_string()))?;
+        Ok(())
+    }
 }
 
 /// Starts a mock server on a temp socket and returns a connected `Client`.

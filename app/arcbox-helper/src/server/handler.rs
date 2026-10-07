@@ -9,6 +9,7 @@ use arcbox_helper::HelperService;
 use arcbox_helper::validate::{
     BridgeIface, CliName, CliTarget, DnsPort, Domain, SocketTarget, Subnet,
 };
+use arcbox_local_ca::PublicAuthority;
 
 use super::mutations;
 
@@ -121,5 +122,27 @@ impl HelperService for HelperServer {
         // Same shape as `arcbox-helper --version` so Desktop/doctor can parse
         // one format from either path.
         format!("arcbox-helper {}", env!("CARGO_PKG_VERSION"))
+    }
+
+    async fn ca_install(self, _: tarpc::context::Context, der: Vec<u8>) -> Result<(), HelperError> {
+        let ca = PublicAuthority::try_from(der)
+            .map_err(|error| HelperError::validation(error.to_string()))?;
+        mutations::ca::install(&ca)
+    }
+
+    async fn ca_status(
+        self,
+        _: tarpc::context::Context,
+        der: Vec<u8>,
+    ) -> Result<bool, HelperError> {
+        let ca = PublicAuthority::try_from(der)
+            .map_err(|error| HelperError::validation(error.to_string()))?;
+        mutations::ca::status(&ca)
+    }
+
+    async fn ca_remove(self, _: tarpc::context::Context, der: Vec<u8>) -> Result<(), HelperError> {
+        let ca = PublicAuthority::try_from(der)
+            .map_err(|error| HelperError::validation(error.to_string()))?;
+        mutations::ca::remove(&ca)
     }
 }

@@ -121,6 +121,18 @@ impl HelperError {
     }
 }
 
+impl From<security_framework::base::Error> for HelperError {
+    fn from(error: security_framework::base::Error) -> Self {
+        Self::Other(format!("macOS security: {error}"))
+    }
+}
+
+impl From<core_foundation::error::CFError> for HelperError {
+    fn from(error: core_foundation::error::CFError) -> Self {
+        Self::Other(format!("macOS security: {error}"))
+    }
+}
+
 /// Stable machine-readable code for metrics / Desktop branching.
 impl HelperError {
     #[must_use]

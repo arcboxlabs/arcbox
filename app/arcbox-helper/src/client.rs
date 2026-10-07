@@ -192,6 +192,30 @@ impl Client {
         Ok(self.inner.version(tarpc::context::current()).await?)
     }
 
+    /// Installs TLS-only Admin trust for a public ArcBox CA certificate.
+    pub async fn ca_install(&self, der: &[u8]) -> Result<(), ClientError> {
+        Ok(self
+            .inner
+            .ca_install(tarpc::context::current(), der.into())
+            .await??)
+    }
+
+    /// Checks whether the public CA has TLS-only Admin trust and is installed.
+    pub async fn ca_status(&self, der: &[u8]) -> Result<bool, ClientError> {
+        Ok(self
+            .inner
+            .ca_status(tarpc::context::current(), der.into())
+            .await??)
+    }
+
+    /// Removes only this public CA's Admin trust and System Keychain certificate.
+    pub async fn ca_remove(&self, der: &[u8]) -> Result<(), ClientError> {
+        Ok(self
+            .inner
+            .ca_remove(tarpc::context::current(), der.into())
+            .await??)
+    }
+
     async fn ensure_compatible(&self) -> Result<(), ClientError> {
         let version = self.version().await?;
         let installed = arcbox_constants::helper::parse_helper_version(&version)
