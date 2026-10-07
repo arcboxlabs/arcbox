@@ -67,7 +67,7 @@ pub fn run(
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
-            rt.block_on(async {
+            tokio::task::LocalSet::new().block_on(&rt, async {
                 let channel = connect_unix(&daemon.grpc_socket()).await?;
                 scenario(channel, &mut metrics).await
             })

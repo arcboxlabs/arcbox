@@ -172,3 +172,11 @@ Sandbox benchmarks retry only explicit network-cleanup admission rejections, for
 The `create-networked` group measures the production Create path, which may boot or restore a cached snapshot. `cold-no-network` always boots without the warm-create cache. `ARCBOX_COLDSTART_UNIQUE_GEOMETRY=1` changes the networked group to `cold-networked-unique-geometry`: each iteration adds one MiB to `ARCBOX_COLDSTART_MEMORY_MIB`, forcing a distinct cache key. This changes the workload; metrics retain each memory size in MiB, and comparisons must use the same geometry sequence. `restore` measures an explicit snapshot restore. No iteration number proves that a Create used a warm snapshot.
 
 `ARCBOX_E2E_REPO_ROOT=<path>` selects the runtime checkout, assets, and binaries for a prebuilt test executable. Metrics record that checkout, which can differ from the test executable’s build revision.
+
+## Concurrent snapshot restores
+
+Run `cargo test -p arcbox-e2e --test sandbox_clone_storm -- --ignored --nocapture` on a host with nested virtualization. The benchmark warms one template, checkpoints it, and restores clones concurrently with separate network identities. Synchronous Restore completion is the READY point. Each round checks unique nonempty IP addresses, waits for all requests to finish, and removes every clone before the next round. Template and snapshot cleanup failures fail the run.
+
+`ARCBOX_STORM_DEGREES` selects unique positive concurrency degrees (default `1,2,4,8,16`). `ARCBOX_STORM_ROUNDS` defaults to `3`; `ARCBOX_STORM_VCPUS` defaults to `2`; `ARCBOX_STORM_MEMORY_MIB` defaults to `2048`. Invalid values fail before daemon startup. The first round of each degree is reported separately. A one-round smoke has no steady-state samples.
+
+Metrics retain each round's restore and admission-wait samples, wall time from task launch to the last RPC completion, and throughput in clones per second. Wall time includes admission waiting and excludes cleanup. Steady summaries exclude the first round and retain p50, p95, maximum, units, and sample counts. A failed round preserves its successful samples and stops the workload after cleanup.
