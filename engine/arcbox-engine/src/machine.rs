@@ -597,6 +597,14 @@ impl MachineManager {
     /// staging directory for `import`.
     fn create_machine(&self, config: MachineConfig, data_disk: DataDisk) -> Result<String> {
         let _storage = self.storage_permit(&config.name)?;
+        self.create_machine_admitted(config, data_disk)
+    }
+
+    fn create_machine_admitted(
+        &self,
+        config: MachineConfig,
+        data_disk: DataDisk,
+    ) -> Result<String> {
         // Hold the write lock for the entire create operation to prevent TOCTOU
         // races: without this, two concurrent creates with the same name could
         // both pass the existence check before either inserts. `create` is rare

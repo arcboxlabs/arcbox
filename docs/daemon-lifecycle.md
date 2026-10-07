@@ -52,6 +52,8 @@ A paired storage validation failure enters protected startup after the boot asse
 
 If Docker runtime startup fails after the agent becomes ready, the host queries a fresh `RuntimeStatus` from that agent. An explicit `READ_ONLY` or `UNAVAILABLE` state for a configured data or metadata volume also enters protected startup. The host writes the hold, preserves the original error and the complete status response in `storage-recovery/<operation>/startup-runtime-status.txt`, and stops the VM before continuing host services. These observations establish that required storage was unavailable for writes; they do not identify filesystem corruption or authorize repair. A failed probe, unknown observation, or read-write observation preserves the ordinary fatal startup behavior.
 
+When protected startup has no System VM record, recovery rebuilds that record from verified cached boot assets and the existing validated disk pair. Recovery does not download assets, update the asset cache, provision images, or clear the hold during this step. Missing assets or an invalid pair keep recovery blocked. An existing record remains available for offline checks even when its pair is damaged.
+
 ### Phase enum caveats
 
 - The observable progression is `INITIALIZING → [CLEANING_UP →

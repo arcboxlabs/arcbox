@@ -6,6 +6,7 @@
 //! configuration defaults, error mapping, and the `BootAssets` struct
 //! that `vm_lifecycle` consumes.
 
+mod cached;
 mod config;
 mod lockfile;
 mod provider;

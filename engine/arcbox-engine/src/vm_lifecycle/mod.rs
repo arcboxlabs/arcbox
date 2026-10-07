@@ -34,6 +34,7 @@ mod boot;
 mod health;
 mod machine;
 mod recovery;
+mod storage;
 #[cfg(test)]
 mod tests;
 mod types;

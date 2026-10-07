@@ -16,7 +16,9 @@ use crate::{
 use arcbox_connect::v1::{
     StorageRecoveryProgress, recover_storage_request::Action, storage_recovery_progress::Phase,
 };
-use arcbox_engine::machine::{DEFAULT_MACHINE_NAME, MachineState};
+#[cfg(test)]
+use arcbox_engine::machine::DEFAULT_MACHINE_NAME;
+use arcbox_engine::machine::MachineState;
 pub(super) use state::StorageRecovery;
 use std::{
     fmt::Write as _,
@@ -165,9 +167,10 @@ impl Runtime {
         self.stop_recovery_vm(&reservation).await?;
         self.storage_recovery.owner.check_open()?;
         let machine = self
-            .machine_manager
-            .get(DEFAULT_MACHINE_NAME)
-            .ok_or_else(|| CoreError::not_found("System VM storage configuration"))?;
+            .vm_lifecycle
+            .storage_recovery_machine(&reservation)
+            .await?;
+        self.storage_recovery.owner.check_open()?;
         if !matches!(machine.state, MachineState::Created | MachineState::Stopped) {
             return Err(CoreError::invalid_state(
                 "System VM did not stop; no disk copy was attempted",

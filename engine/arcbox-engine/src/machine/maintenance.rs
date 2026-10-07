@@ -25,6 +25,25 @@ impl Drop for MaintenanceOwner {
 }
 
 impl StorageMaintenance {
+    pub(crate) fn create_system_machine(&self, config: super::MachineConfig) -> Result<()> {
+        if !is_system_machine(&config.name) || config.rootfs.is_some() {
+            return Err(EngineError::invalid_state(
+                "storage recovery requires an existing System VM disk pair",
+            ));
+        }
+        let [_, data, metadata] = config.block_devices.as_slice() else {
+            return Err(EngineError::invalid_state(
+                "storage recovery requires exactly three block devices",
+            ));
+        };
+        arcbox_storage::verify_pair(data.path.as_ref(), metadata.path.as_ref())
+            .map_err(|error| EngineError::Machine(error.to_string()))?;
+        self.0
+            .0
+            .create_machine_admitted(config, super::DataDisk::Sparse)?;
+        Ok(())
+    }
+
     pub(crate) fn belongs_to(&self, manager: &Arc<MachineManager>) -> bool {
         Arc::ptr_eq(&self.0.0, manager)
     }

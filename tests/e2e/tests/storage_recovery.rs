@@ -92,6 +92,9 @@ async fn scenario(
     let status = tokio::task::block_in_place(|| original.shutdown())?;
     ensure!(status.success(), "initial daemon teardown failed: {status}");
 
+    let machine_record = directory.join("machines/default/config.toml");
+    std::fs::remove_file(&machine_record)?;
+
     start(root, directory, version, daemon).await?;
     client = self::client(directory).await?;
     let status = client.get_setup_status(Empty {}).await?.into_inner();
@@ -104,6 +107,10 @@ async fn scenario(
         .context("replayed recovery status")?;
     ensure!(replay.operation_id == checked.operation_id);
     ensure!(replay.storage_protected, "replay lost storage protection");
+    ensure!(
+        !machine_record.exists(),
+        "protected startup recreated the VM record"
+    );
     let recovered = run(&mut client, Action::Recover).await?;
     ensure!(
         recovered.phase() == Phase::Complete,
@@ -111,6 +118,10 @@ async fn scenario(
         recovered.message
     );
     ensure!(!directory.join("storage-recovery/hold").exists());
+    ensure!(
+        machine_record.is_file(),
+        "recovery did not restore the VM record"
+    );
     ensure!(
         !recovered.storage_protected,
         "verified recovery retained typed protection"

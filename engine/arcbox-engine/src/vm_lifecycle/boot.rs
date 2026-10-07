@@ -430,6 +430,13 @@ impl LifecycleShared {
     /// - vdc: docker-meta.img (read-write, ext4 metadata volume)
     async fn create_default_machine(&self) -> Result<()> {
         let boot = self.resolve_desired_boot().await?;
+        self.machine_manager
+            .create(self.default_machine_config(boot))
+            .await?;
+        Ok(())
+    }
+
+    pub(super) fn default_machine_config(&self, boot: DesiredBoot) -> MachineConfig {
         let rootfs_path = boot.rootfs_image.to_string_lossy().to_string();
 
         // Block devices: vda = EROFS rootfs (read-only), vdb = Docker data (read-write).
@@ -498,9 +505,7 @@ impl LifecycleShared {
             rootfs_path,
         );
 
-        self.machine_manager.create(config).await?;
-
-        Ok(())
+        config
     }
 
     /// Resolves the default VM's boot parameters (kernel image, final kernel
@@ -514,6 +519,13 @@ impl LifecycleShared {
     /// HV debug-console token attached.
     async fn resolve_desired_boot(&self) -> Result<DesiredBoot> {
         let assets = self.boot_assets.get_assets().await?;
+        Ok(self.desired_boot(assets))
+    }
+
+    pub(super) fn desired_boot(
+        &self,
+        assets: arcbox_image::boot_assets::BootAssets,
+    ) -> DesiredBoot {
         let mut cmdline = self
             .config
             .default_vm
@@ -616,11 +628,11 @@ impl LifecycleShared {
             cmdline.push_str(&sock.to_string_lossy());
         }
 
-        Ok(DesiredBoot {
+        DesiredBoot {
             kernel: assets.kernel.to_string_lossy().to_string(),
             cmdline,
             rootfs_image: assets.rootfs_image,
-        })
+        }
     }
 
     /// Waits for the agent to become ready.

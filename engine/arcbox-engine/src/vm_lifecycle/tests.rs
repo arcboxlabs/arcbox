@@ -327,7 +327,9 @@ async fn storage_resume_rejects_a_foreign_manager_before_boot() {
     );
 }
 
-fn storage_test_lifecycle(data_dir: &std::path::Path) -> (Arc<MachineManager>, VmLifecycleManager) {
+pub(super) fn storage_test_lifecycle(
+    data_dir: &std::path::Path,
+) -> (Arc<MachineManager>, VmLifecycleManager) {
     let events = EventBus::new();
     let machines = Arc::new(MachineManager::new(
         Arc::new(crate::vm::VmManager::new(data_dir.join("snapshots"))),
