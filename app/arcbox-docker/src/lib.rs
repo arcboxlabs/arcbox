@@ -29,12 +29,24 @@
 //! ## Architecture
 //!
 //! ```text
-//! docker CLI ──► Unix Socket ──► arcbox-docker ──► arcbox-core
-//!                                     │
-//!                                     ▼
-//!                              HTTP REST API
-//!                             (Axum server)
+//! Docker CLI -> Unix socket -> DockerApiServer (Axum router)
+//!                                      |
+//!                             +--------+---------+
+//!                             v                  v
+//!                      ArcBox handlers     proxy fallback
+//!                             |                  |
+//!                             +--------+---------+
+//!                                      v
+//!                         HTTP / upload / upgrade proxy
+//!                                      |
+//!                               VsockConnector
+//!                                      |
+//!                                 guest dockerd
 //! ```
+//!
+//! Host handlers use [`arcbox_core::Runtime`] for VM lifecycle and port state.
+//! Guest HTTP requests share [`proxy::VsockConnector`], including streamed
+//! uploads and upgraded connections.
 //!
 //! ## Usage
 //!
