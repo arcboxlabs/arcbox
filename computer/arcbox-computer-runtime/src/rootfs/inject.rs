@@ -4,13 +4,17 @@ use super::RootfsBuilder;
 #[cfg(target_os = "linux")]
 use anyhow::Context;
 use anyhow::{Result, bail};
+use std::path::Path;
 #[cfg(target_os = "linux")]
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{path::PathBuf, sync::Arc};
 
 impl RootfsBuilder {
+    /// Inject the configured agent at [`super::VM_AGENT_PATH`] and link
+    /// `/etc/resolv.conf` into `/run`. Preserve the image's `/sbin/init`.
+    pub async fn inject_vm_agent(&self, image: &Path) -> crate::error::Result<()> {
+        self.inject_agent(image).await.map_err(super::rootfs_err)
+    }
+
     /// Inject vm-agent into an ext4 image through a loop mount.
     ///
     /// The image is attached as a loop device through the composer's
@@ -21,7 +25,7 @@ impl RootfsBuilder {
     /// a file another mount holds and a leaked `/dev/loopN` per build would
     /// eventually exhaust the pool.
     #[cfg(target_os = "linux")]
-    pub(super) async fn inject_vm_agent(&self, ext4_path: &str, req_id: &str) -> Result<()> {
+    pub(super) async fn inject_agent(&self, image: &Path) -> Result<()> {
         if !self.paths.vm_agent.exists() {
             bail!("vm-agent not found at {}", self.paths.vm_agent.display());
         }
@@ -29,10 +33,11 @@ impl RootfsBuilder {
         // Attach first: a failed attach (no free loop device, tooling
         // missing) then leaves nothing behind.
         let loop_dev = self
-            .attach_loop(ext4_path)
+            .attach_loop(image)
             .await
             .context("failed to attach ext4 image for vm-agent injection")?;
-        let mount_dir = std::env::temp_dir().join(format!("arcbox-inject-{req_id}"));
+        let mount_dir =
+            std::env::temp_dir().join(format!("arcbox-inject-{}", uuid::Uuid::new_v4()));
         let staged = match tokio::fs::create_dir_all(&mount_dir).await {
             Ok(()) => mount_ext4(&loop_dev, &mount_dir)
                 .await
@@ -78,7 +83,7 @@ impl RootfsBuilder {
     #[cfg(target_os = "linux")]
     async fn write_agent_into(&self, mount_dir: &Path) -> Result<()> {
         let sbin = mount_dir.join("sbin");
-        let dest = sbin.join("vm-agent");
+        let dest = mount_dir.join(super::VM_AGENT_PATH.trim_start_matches('/'));
         tokio::fs::create_dir_all(&sbin)
             .await
             .context("failed to create /sbin in rootfs")?;
@@ -107,13 +112,13 @@ impl RootfsBuilder {
     /// Loop mounts are a Linux operation; the builder compiles elsewhere but
     /// cannot inject.
     #[cfg(not(target_os = "linux"))]
-    pub(super) async fn inject_vm_agent(&self, _ext4_path: &str, _req_id: &str) -> Result<()> {
+    pub(super) async fn inject_agent(&self, _image: &Path) -> Result<()> {
         bail!("vm-agent injection needs a Linux loop mount")
     }
 
     /// [`BlockTools::attach_loop`](arcbox_snapshot::snapshot_cow::BlockTools::attach_loop) on a blocking thread.
     #[cfg(target_os = "linux")]
-    async fn attach_loop(&self, image: &str) -> Result<String> {
+    async fn attach_loop(&self, image: &Path) -> Result<String> {
         let tools = Arc::clone(&self.block_tools);
         let image = PathBuf::from(image);
         tokio::task::spawn_blocking(move || tools.attach_loop(&image, false))

@@ -1,4 +1,7 @@
 mod common;
+#[cfg(target_os = "linux")]
+#[path = "integration/rootfs.rs"]
+mod rootfs;
 
 use arcbox_computer_runtime::config::SnapshotType;
 use arcbox_computer_runtime::snapshot::{SnapshotCatalog, SnapshotDraft};

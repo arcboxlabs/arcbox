@@ -76,7 +76,7 @@ pub use agent::{ExecInputMsg, ExitStatus, OutputChunk, PortWait, StartCommand};
 pub use config::{DefaultVmConfig, FirecrackerConfig, GrpcConfig, NetworkConfig, RuntimeConfig};
 pub use environment::NodeEnvironment;
 pub use error::{Result, VmmError};
-pub use rootfs::{RootfsBuilder, RootfsPaths};
+pub use rootfs::{RootfsBuilder, RootfsPaths, VM_AGENT_PATH};
 pub use sandbox::pause_reason;
 pub use sandbox::{
     CheckpointInfo, CheckpointSummary, IdleAction, LifecycleUpdate, RestoreSandboxSpec,

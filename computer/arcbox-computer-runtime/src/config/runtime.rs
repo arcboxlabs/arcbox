@@ -95,6 +95,8 @@ pub struct DefaultVmConfig {
     pub memory_mib: u64,
     pub kernel: String,
     pub rootfs: String,
+    /// Select the agent as PID 1 with `init=` naming [`crate::VM_AGENT_PATH`].
+    /// Converted images retain their distribution's `/sbin/init`.
     pub boot_args: String,
 }
 
@@ -122,7 +124,10 @@ impl Default for RuntimeConfig {
                 memory_mib: 512,
                 kernel: "/var/lib/firecracker-vmm/kernels/vmlinux".into(),
                 rootfs: "/var/lib/firecracker-vmm/images/ubuntu-22.04.ext4".into(),
-                boot_args: "console=ttyS0 reboot=k panic=1 pci=off".into(),
+                boot_args: format!(
+                    "console=ttyS0 reboot=k panic=1 pci=off init={}",
+                    crate::VM_AGENT_PATH
+                ),
             },
         }
     }
@@ -146,6 +151,13 @@ mod tests {
         assert_eq!(cfg.defaults.vcpus, 1);
         assert_eq!(cfg.defaults.memory_mib, 512);
         assert!(cfg.defaults.boot_args.contains("console=ttyS0"));
+        assert!(
+            cfg.defaults
+                .boot_args
+                .split_whitespace()
+                .any(|arg| arg == format!("init={}", crate::VM_AGENT_PATH)),
+            "the default command line must select vm-agent as PID 1"
+        );
         assert_ne!(cfg.network.cidr, "");
         assert_ne!(cfg.firecracker.data_dir, "");
     }

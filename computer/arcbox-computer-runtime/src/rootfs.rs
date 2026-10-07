@@ -13,10 +13,12 @@
 //!   source binaries are newer than the cached image.
 //!
 //! The rootfs convention the boot protocol relies on — the agent binary at
-//! `/sbin/vm-agent` (and `/sbin/init` pointing at it), `/etc/resolv.conf`
+//! `/sbin/vm-agent`, `/etc/resolv.conf`
 //! symlinked into the `/run` tmpfs — is enforced only by the guest failing to
 //! boot, so it is implemented once, here, with the agent binary source and
 //! the output location supplied by the composer through [`RootfsPaths`].
+//! Converted images retain their own `/sbin/init`; select the agent with
+//! `init=/sbin/vm-agent`. The default busybox image also links `/sbin/init`.
 
 mod inject;
 
@@ -38,6 +40,9 @@ use crate::error::VmmError;
 /// sparsely; per-sandbox writes land in the dm-snapshot COW overlay, so this
 /// bounds a sandbox's writable space, not host disk use.
 const DEFAULT_ROOTFS_SIZE: u64 = 512 * 1024 * 1024;
+
+/// Agent path in every built image. Use this path in the kernel's `init=` argument.
+pub const VM_AGENT_PATH: &str = "/sbin/vm-agent";
 
 /// Where the rootfs builder finds its inputs and keeps its outputs.
 #[derive(Debug, Clone)]
@@ -201,7 +206,7 @@ impl RootfsBuilder {
 
         // Inject vm-agent.
         tracing::info!("injecting vm-agent into rootfs");
-        if let Err(e) = self.inject_vm_agent(&ext4_tmp, &req_id).await {
+        if let Err(e) = self.inject_agent(Path::new(&ext4_tmp)).await {
             let _ = tokio::fs::remove_file(&ext4_tmp).await;
             return Err(e);
         }
@@ -488,7 +493,7 @@ fn build_default_rootfs(spec: &DefaultRootfsSpec, out: &Path) -> Result<()> {
     let mut vm_agent = std::fs::File::open(&spec.vm_agent)
         .with_context(|| format!("failed to open {}", spec.vm_agent.display()))?;
     fmt.create(
-        "/sbin/vm-agent",
+        VM_AGENT_PATH,
         EXE,
         None,
         None,

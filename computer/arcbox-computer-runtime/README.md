@@ -36,6 +36,8 @@ directory, and the busybox supplied by the composer as `RootfsPaths`. The
 rootfs convention the boot protocol relies on is therefore implemented
 once, here.
 
+`RootfsBuilder::inject_vm_agent(&image)` also injects the configured agent into an existing ext4 image. Injection requires Linux and loop-mount privileges. Converted images keep their distribution's `/sbin/init`; `RuntimeConfig` selects `VM_AGENT_PATH` with the default `init=` boot argument. Custom boot arguments must select the same path.
+
 ## Usage
 
 ```rust
