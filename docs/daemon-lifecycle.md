@@ -30,6 +30,8 @@ prepare_assets           Seed/download boot assets               variable
     │                    ASSETS_READY.
     │
 boot_runtime             Construct Runtime, boot the System VM   variable
+    │                    Canonical production first verifies
+    │                    helper-managed local HTTPS trust.
     │                    Reported as VM_STARTING → VM_READY,
     │                    published from inside Runtime::init so
     │                    the span covers the guest boot alone.
@@ -83,6 +85,7 @@ When protected startup has no System VM record, recovery rebuilds that record fr
 - `--docker-integration` is production-only. Its global Docker context switch
   runs after startup-critical recovery, so a resolver failure cannot leave a
   dead ArcBox context selected.
+- Local HTTPS trust is required before the canonical production instance boots its Linux VM. The daemon uses helper 1.2.0 or later to install and verify TLS-only Admin trust. Failure is published through `WatchSetupStatus`. Isolated data directories, development profiles, and `--no-linux-vm` do not request automatic trust.
 - Enum ordinal ≠ progression order (`DOWNLOADING_ASSETS = 8` occurs before
   `READY = 6`). Clients must match on the value, never compare ordinals.
   New phases are appended with the next free number regardless of where

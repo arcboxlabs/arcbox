@@ -295,10 +295,12 @@ Most of ArcBox's performance-critical code is custom rather than vendored:
   Containers are reachable by IP, and `abctl dns install` adds
   `*.arcbox.local` name resolution: `http://<container>.arcbox.local` reaches
   whatever port the container serves (or its `dev.arcbox.http-port` label),
-  and `https://` works too once `abctl tls trust` has trusted the local,
-  name-constrained CA. The CA key stays in the macOS Keychain; the host signs
-  guest-generated certificate requests. Upgrades from the file-based CA
-  remove its shared key and revoke its trust; run `abctl tls trust` again.
+  and `https://` works automatically on the production instance after helper
+  setup. The helper trusts the name-constrained public CA for TLS servers
+  in the macOS System Keychain. The private key stays in the user's Keychain;
+  the host signs guest-generated certificate requests. Helper installation
+  or upgrade requires administrator authorization; CA setup adds no separate
+  password prompt. Removing legacy user trust can still require authorization.
   Guest DNS follows the Mac's resolvers as
   they change (Wi-Fi switch, VPN up or down), and guest egress follows the
   Mac's proxy settings by default; `proxy = "none"` or a proxy URL under

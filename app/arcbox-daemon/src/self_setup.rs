@@ -13,6 +13,8 @@ mod cli_tools;
 mod dns_resolver;
 mod docker_socket;
 mod hosts_alias;
+#[cfg(target_os = "macos")]
+pub mod tls;
 
 pub use cli_tools::CliTools;
 pub use dns_resolver::DnsResolver;

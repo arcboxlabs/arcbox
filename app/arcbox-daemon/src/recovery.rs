@@ -207,7 +207,7 @@ fn owns_dns_resolver(
             && data_dir == canonical_data_dir)
 }
 
-fn owns_implicit_host_setup(
+pub fn owns_implicit_host_setup(
     profile: arcbox_constants::paths::ArcboxProfile,
     data_dir: &Path,
     canonical_data_dir: &Path,

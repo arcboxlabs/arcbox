@@ -10,6 +10,7 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
 
 ## Startup & readiness contract
 
+- Canonical production HTTPS trust is required before VM boot (`self_setup/tls.rs`, called from `startup::init_runtime`). Revoke the previous root's Admin trust before replacing `tls/ca.pem`. Verify the helper's TLS-only Admin trust before continuing. Development profiles and isolated data directories must not change host trust automatically. Keep the root private key in the user's Keychain; pass only public certificates to the helper.
 - Startup is a phased, typed pipeline and the order is load-bearing — see
   root AGENTS.md "Architecture Principles" and `docs/daemon-lifecycle.md`
   before reordering. The current chain is 8 steps
