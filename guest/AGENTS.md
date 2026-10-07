@@ -79,7 +79,7 @@ non-obvious invariants and failure signatures.
   misbehaves with zero diagnostics). Bump `AGENT_PROTOCOL_VERSION`
   (`common/arcbox-constants/src/wire.rs`) only when the *meaning* of an existing
   message changes; the host rejects agents below `MIN_AGENT_PROTOCOL_VERSION`
-  (currently 1, so pre-handshake `0` agents are refused). `Ping` is the one
+  (currently 7 for all business APIs, including observation). `Ping` is the one
   message every agent generation understands and carries `protocol_version`.
 - **Daemon and agent must ship from the same master state.** Both binaries are
   built from this repo, and the daemon stages the agent it shipped with into the
