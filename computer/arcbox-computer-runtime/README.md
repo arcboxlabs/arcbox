@@ -38,6 +38,8 @@ once, here.
 
 `RootfsBuilder::inject_vm_agent(&image)` also injects the configured agent into an existing ext4 image. Injection requires Linux and loop-mount privileges. Converted images keep their distribution's `/sbin/init`; `RuntimeConfig` selects `VM_AGENT_PATH` with the default `init=` boot argument. Custom boot arguments must select the same path.
 
+`RootfsBuilder::build_rootfs(RootfsSpec { source, out, size })` builds an image at a caller-owned path and capacity. `RootfsSource` accepts an OCI layout, an overlay2 directory, or a resolved `oci2rootfs::ImageSource`. Capacity must be a positive multiple of `ROOTFS_CAPACITY_GRANULARITY` (128 MiB). The builder verifies the written ext4 geometry and injects the agent before atomically replacing the destination. Failed builds preserve an existing destination and remove their temporary files.
+
 ## Usage
 
 ```rust

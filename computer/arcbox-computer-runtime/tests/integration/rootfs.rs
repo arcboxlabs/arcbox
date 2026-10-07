@@ -6,7 +6,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
 use arcbox_computer_runtime::snapshot_cow::{BlockTools, BusyboxBlockTools};
-use arcbox_computer_runtime::{RootfsBuilder, RootfsPaths, VM_AGENT_PATH};
+use arcbox_computer_runtime::{
+    ROOTFS_CAPACITY_GRANULARITY, RootfsBuilder, RootfsPaths, RootfsSource, RootfsSpec,
+    VM_AGENT_PATH,
+};
 use arcbox_ext4::constants::file_mode;
 use arcbox_ext4::{FormatOptions, Formatter};
 
@@ -131,4 +134,40 @@ async fn injection_preserves_distribution_files_and_can_replace_the_agent() {
             .unwrap();
         with_mounted(&*tools, &image, |root| verify_boot_files(root, contents)).unwrap();
     }
+}
+
+#[tokio::test]
+async fn a_caller_sized_build_is_mountable_and_replaces_the_destination() {
+    let Some(tools) = block_tools() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let layer = dir.path().join("ABCDEF");
+    std::fs::create_dir_all(layer.join("diff/sbin")).unwrap();
+    std::fs::write(layer.join("diff/sbin/init"), b"distribution-init").unwrap();
+    std::fs::write(layer.join("link"), "ABCDEF").unwrap();
+    let image = dir.path().join("images/digest/rootfs.ext4");
+    std::fs::create_dir_all(image.parent().unwrap()).unwrap();
+    std::fs::write(&image, b"previous-image").unwrap();
+    let agent = dir.path().join("vm-agent");
+    std::fs::write(&agent, b"staged-agent").unwrap();
+    let size = 2 * ROOTFS_CAPACITY_GRANULARITY;
+
+    builder(&agent, Arc::clone(&tools))
+        .build_rootfs(RootfsSpec {
+            source: RootfsSource::Directory(layer),
+            out: image.clone(),
+            size,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(std::fs::metadata(&image).unwrap().len(), size);
+    assert_eq!(
+        std::fs::read_dir(image.parent().unwrap()).unwrap().count(),
+        1
+    );
+    assert!(!dir.path().join("cache").exists());
+    with_mounted(&*tools, &image, |root| {
+        verify_boot_files(root, b"staged-agent")
+    })
+    .unwrap();
 }

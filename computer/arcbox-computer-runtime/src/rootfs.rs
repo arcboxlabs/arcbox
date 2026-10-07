@@ -20,7 +20,10 @@
 //! Converted images retain their own `/sbin/init`; select the agent with
 //! `init=/sbin/vm-agent`. The default busybox image also links `/sbin/init`.
 
+mod build;
 mod inject;
+
+pub use build::{ROOTFS_CAPACITY_GRANULARITY, RootfsSource, RootfsSpec};
 
 use std::collections::BTreeSet;
 use std::io::Read;
