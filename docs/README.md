@@ -96,3 +96,4 @@ from memory. Every new file is added to the index below.
 - [2026-10-07 — Side entries distinguish reused inode generations](logs/2026-10-07-sidecar-inode-generation.md)
 - [2026-10-05 — Every agent business request requires protocol v7](logs/2026-10-05-agent-v7-admission.md)
 - [2026-09-29 — vsock RX: drain a stream per round, aim the kick](logs/2026-09-29-vsock-rx-round-and-targeted-kick.md)
+- [2026-10-07 — A restored sandbox can be checkpointed and restored again](logs/2026-10-07-checkpoint-chain-live.md)

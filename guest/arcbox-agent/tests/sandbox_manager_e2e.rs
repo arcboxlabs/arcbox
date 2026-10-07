@@ -40,6 +40,8 @@
 // it boots.
 #![cfg(target_os = "linux")]
 
+#[path = "sandbox_manager_e2e/checkpoint.rs"]
+mod checkpoint;
 mod common;
 
 use std::collections::HashMap;
