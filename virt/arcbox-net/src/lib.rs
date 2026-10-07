@@ -504,7 +504,7 @@ mod tests {
             },
             "a domain switch retracts the old domain's names"
         );
-        assert!(manager.local_dns_entries().is_empty());
+        assert_eq!(manager.local_dns_entries(), [] as [(String, IpAddr); 0]);
         assert!(changes.try_recv().is_err());
     }
 
