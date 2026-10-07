@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.4](https://github.com/arcboxlabs/arcbox/compare/sdk-python-v0.1.3...sdk-python-v0.1.4) (2026-10-07)
+
+
+### Code Refactoring
+
+* **runtime:** archive Platform and Fleet integration ([9473d80](https://github.com/arcboxlabs/arcbox/commit/9473d80ac1c10dad6d8404c80f55255662719151))
+
+
+### Documentation
+
+* **api:** align handler and transport comments with local routing ([f76d9e5](https://github.com/arcboxlabs/arcbox/commit/f76d9e5fb4d8ff1905c8fd649892bccb74139d1e))
+* **sdk:** describe local daemon and user-managed proxy connections ([cae629e](https://github.com/arcboxlabs/arcbox/commit/cae629ec95fb20e786a345aeb6387e4fcdea9e8f))
+
 ## [0.1.3](https://github.com/arcboxlabs/arcbox/compare/sdk-python-v0.1.2...sdk-python-v0.1.3) (2026-10-02)
 
 
