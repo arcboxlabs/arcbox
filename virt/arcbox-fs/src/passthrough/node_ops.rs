@@ -5,7 +5,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if the file cannot be created
+    /// - An I/O error wrapped in [`FsError::Common`] if the file cannot be created
     /// - [`FsError::InvalidHandle`] if the parent inode is invalid
     pub fn create(
         &self,
@@ -60,7 +60,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if the directory cannot be created
+    /// - An I/O error wrapped in [`FsError::Common`] if the directory cannot be created
     /// - [`FsError::InvalidHandle`] if the parent inode is invalid
     pub fn mkdir(
         &self,
@@ -99,7 +99,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if the symlink cannot be created
+    /// - An I/O error wrapped in [`FsError::Common`] if the symlink cannot be created
     /// - [`FsError::InvalidHandle`] if the parent inode is invalid
     pub fn symlink(
         &self,
@@ -136,7 +136,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if the link cannot be created
+    /// - An I/O error wrapped in [`FsError::Common`] if the link cannot be created
     /// - [`FsError::InvalidHandle`] if the source or parent inode is invalid
     pub fn link(
         &self,
@@ -172,7 +172,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if the node cannot be created
+    /// - An I/O error wrapped in [`FsError::Common`] if the node cannot be created
     /// - [`FsError::InvalidHandle`] if the parent inode is invalid
     #[allow(clippy::cast_possible_truncation)]
     pub fn mknod(
@@ -220,7 +220,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if the file cannot be removed
+    /// - An I/O error wrapped in [`FsError::Common`] if the file cannot be removed
     /// - [`FsError::InvalidHandle`] if the parent inode is invalid
     pub fn unlink(&self, parent: u64, name: &OsStr) -> Result<()> {
         let path = self.get_path(parent, name)?;
@@ -236,7 +236,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if the directory cannot be removed
+    /// - An I/O error wrapped in [`FsError::Common`] if the directory cannot be removed
     /// - [`FsError::InvalidHandle`] if the parent inode is invalid
     pub fn rmdir(&self, parent: u64, name: &OsStr) -> Result<()> {
         let path = self.get_path(parent, name)?;
@@ -247,7 +247,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if the rename fails
+    /// - An I/O error wrapped in [`FsError::Common`] if the rename fails
     /// - [`FsError::InvalidHandle`] if the parent inode is invalid
     pub fn rename(
         &self,

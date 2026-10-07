@@ -218,7 +218,7 @@ pub struct Vmm {
     /// and `hv_device_manager`.**
     /// Rust drops fields in declaration order (top to bottom), so fields
     /// declared above this one drop first. This ordering ensures:
-    ///   1. `hv_device_manager` (FsServer → Arc<HvDaxMapper> → hv_vm_unmap)
+    ///   1. `hv_device_manager` (FsServer → `Arc<HvDaxMapper>` → hv_vm_unmap)
     ///   2. `hv_dax_mappers` (remaining mapper refs → hv_vm_unmap)
     ///   3. `hv_gic` (GIC FFI teardown referencing the live VM)
     ///   4. `hv_vm` → `hv_vm_destroy`

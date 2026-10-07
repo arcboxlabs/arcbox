@@ -5,7 +5,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if the operation fails
+    /// - An I/O error wrapped in [`FsError::Common`] if the operation fails
     /// - [`FsError::InvalidHandle`] if the inode is invalid
     #[cfg(target_os = "linux")]
     pub fn getxattr(&self, inode: u64, name: &OsStr, size: u32) -> Result<Vec<u8>> {
@@ -96,7 +96,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if the operation fails
+    /// - An I/O error wrapped in [`FsError::Common`] if the operation fails
     /// - [`FsError::InvalidHandle`] if the inode is invalid
     #[cfg(target_os = "linux")]
     pub fn setxattr(&self, inode: u64, name: &OsStr, value: &[u8], flags: u32) -> Result<()> {
@@ -151,7 +151,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if the operation fails
+    /// - An I/O error wrapped in [`FsError::Common`] if the operation fails
     /// - [`FsError::InvalidHandle`] if the inode is invalid
     #[cfg(target_os = "linux")]
     pub fn removexattr(&self, inode: u64, name: &OsStr) -> Result<()> {
@@ -189,7 +189,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if statfs fails
+    /// - An I/O error wrapped in [`FsError::Common`] if statfs fails
     pub fn statfs(&self) -> Result<crate::fuse::StatFs> {
         let path_cstr = std::ffi::CString::new(self.root.as_os_str().as_bytes())
             .map_err(|_| FsError::InvalidPath("invalid path".to_string()))?;
@@ -221,7 +221,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::PermissionDenied`] if access is denied
+    /// - [`FsError::Common`] if access is denied (see [`FsError::permission_denied`])
     /// - [`FsError::InvalidHandle`] if the inode is invalid
     pub fn access(&self, inode: u64, mask: u32) -> Result<()> {
         let path = self.inode_path(inode)?;

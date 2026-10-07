@@ -5,7 +5,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if the directory cannot be opened
+    /// - An I/O error wrapped in [`FsError::Common`] if the directory cannot be opened
     /// - [`FsError::InvalidHandle`] if the inode is invalid
     pub fn opendir(&self, inode: u64) -> Result<u64> {
         let path = self.inode_path(inode)?;
@@ -121,7 +121,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if sync fails
+    /// - An I/O error wrapped in [`FsError::Common`] if sync fails
     /// - [`FsError::InvalidHandle`] if the handle is invalid
     pub fn fsyncdir(&self, handle: u64, _datasync: bool) -> Result<()> {
         let dir_handles = self

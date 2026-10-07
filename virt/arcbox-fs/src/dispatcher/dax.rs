@@ -9,7 +9,7 @@ use crate::passthrough::PassthroughFs;
 /// (and tests) need to call this method.
 pub trait DaxFsExt {
     /// Opens a short-lived `File` for the given inode, for use in
-    /// `FUSE_SETUPMAPPING` requests that carry the [`FUSE_NO_FH`] sentinel.
+    /// `FUSE_SETUPMAPPING` requests that carry the [`crate::fuse::FUSE_NO_FH`] sentinel.
     ///
     /// When `writable` is `true` the file is opened O_RDWR so that a subsequent
     /// `mmap(MAP_SHARED | PROT_WRITE)` does not get EACCES.  When `writable` is

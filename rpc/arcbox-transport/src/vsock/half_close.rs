@@ -66,8 +66,8 @@ enum Incoming {
 /// A byte stream whose half-close and flow control travel in-band.
 ///
 /// Wire format: `[u32 BE header][payload]`, repeated. A header below
-/// [`GRANT`] is a payload length, zero being this side's EOF, sent exactly
-/// once by `poll_shutdown`; a header with [`GRANT`] set grants the peer that
+/// `GRANT` is a payload length, zero being this side's EOF, sent exactly
+/// once by `poll_shutdown`; a header with `GRANT` set grants the peer that
 /// many more payload bytes. The inner stream is never shut down, only
 /// dropped.
 #[derive(Debug)]

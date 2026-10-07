@@ -5,7 +5,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if the file cannot be opened
+    /// - An I/O error wrapped in [`FsError::Common`] if the file cannot be opened
     /// - [`FsError::InvalidHandle`] if the inode is invalid
     pub fn open(&self, inode: u64, flags: u32) -> Result<u64> {
         let path = self.inode_path(inode)?;
@@ -31,7 +31,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if read fails
+    /// - An I/O error wrapped in [`FsError::Common`] if read fails
     /// - [`FsError::InvalidHandle`] if the handle is invalid
     pub fn read(&self, handle: u64, offset: u64, size: u32) -> Result<Vec<u8>> {
         let mut handles = self
@@ -58,7 +58,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if write fails
+    /// - An I/O error wrapped in [`FsError::Common`] if write fails
     /// - [`FsError::InvalidHandle`] if the handle is invalid
     pub fn write(&self, handle: u64, offset: u64, data: &[u8], _flags: u32) -> Result<u32> {
         let mut handles = self
@@ -84,7 +84,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if flush fails
+    /// - An I/O error wrapped in [`FsError::Common`] if flush fails
     /// - [`FsError::InvalidHandle`] if the handle is invalid
     pub fn flush(&self, handle: u64) -> Result<()> {
         let mut handles = self
@@ -102,7 +102,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if sync fails
+    /// - An I/O error wrapped in [`FsError::Common`] if sync fails
     /// - [`FsError::InvalidHandle`] if the handle is invalid
     pub fn fsync(&self, handle: u64, datasync: bool) -> Result<()> {
         let handles = self
@@ -141,7 +141,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if seek fails
+    /// - An I/O error wrapped in [`FsError::Common`] if seek fails
     /// - [`FsError::InvalidHandle`] if the handle is invalid
     pub fn lseek(&self, handle: u64, offset: i64, whence: u32) -> Result<u64> {
         let mut handles = self
@@ -167,7 +167,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if allocation fails
+    /// - An I/O error wrapped in [`FsError::Common`] if allocation fails
     /// - [`FsError::InvalidHandle`] if the handle is invalid
     #[cfg(target_os = "linux")]
     pub fn fallocate(&self, handle: u64, mode: u32, offset: u64, length: u64) -> Result<()> {

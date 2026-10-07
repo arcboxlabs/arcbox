@@ -606,7 +606,7 @@ pub struct FuseInitOut {
     /// Extended feature flags introduced in FUSE 7.36 (offset 32).  Reserved;
     /// must be zero until ArcBox requires a feature gated behind this field.
     pub flags2: u32,
-    /// Reserved tail per FUSE 7.36+ (unused[7] = 28 bytes, offsets 36..64).
+    /// Reserved tail per FUSE 7.36+ (`unused[7]` = 28 bytes, offsets 36..64).
     pub unused: [u32; 7],
 }
 

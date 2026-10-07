@@ -1,40 +1,30 @@
 //! # arcbox-net
 //!
-//! High-performance network stack for ArcBox.
+//! Network configuration, DNS, and platform packet I/O for ArcBox.
 //!
-//! This crate provides networking capabilities for VMs including:
-//!
-//! - **NAT networking**: Default shared network with host
-//! - **Bridge networking**: Direct L2 connectivity
-//! - **Host-only networking**: Isolated VM networks
-//! - **Port forwarding**: Expose guest services to host
-//!
-//! ## Performance Features
-//!
-//! - Zero-copy packet handling via shared memory
-//! - Kernel bypass using vmnet.framework (macOS)
-//! - Multi-queue virtio-net support
-//! - Hardware checksum offload
+//! [`NetworkManager`] holds network configuration, IP allocation, and local
+//! DNS names. The VMM creates VM network attachments and their packet paths.
 //!
 //! ## Architecture
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────┐
-//! │                  arcbox-net                     │
-//! │  ┌─────────────────────────────────────────┐   │
-//! │  │            NetworkManager               │   │
-//! │  │  - Network lifecycle                    │   │
-//! │  │  - IP allocation                        │   │
-//! │  └─────────────────────────────────────────┘   │
-//! │  ┌──────────┐ ┌──────────┐ ┌──────────────┐   │
-//! │  │  NAT     │ │  Bridge  │ │  Port Forward │   │
-//! │  │ Network  │ │ Network  │ │    Service    │   │
-//! │  └──────────┘ └──────────┘ └──────────────┘   │
-//! │  ┌─────────────────────────────────────────┐   │
-//! │  │              TAP/vmnet                   │   │
-//! │  └─────────────────────────────────────────┘   │
-//! └─────────────────────────────────────────────────┘
+//! NetworkManager
+//!     ├─ nat::IpAllocator
+//!     └─ dns::DnsForwarder and shared local DNS names
+//!
+//! macOS primary NIC (VZ or HV)
+//!     → darwin::datapath_loop::NetworkDatapath
+//!         ├─ ARP, DHCP, DNS replies
+//!         └─ TCP bridge, UDP/ICMP proxies → host sockets
 //! ```
+//!
+//! The macOS primary NIC uses the socket proxy datapath above. A separate
+//! bridge NIC uses `arcbox-vmnet`. Linux TAP and bridge implementations live
+//! in the `linux` module. These are distinct platform paths.
+//!
+//! [`backend::NetworkBackend`] provides a packet I/O interface for the TAP
+//! and vmnet adapters. [`nat_engine`] and [`datapath`] re-export shared
+//! connection-tracking and packet-processing primitives.
 
 #![allow(unused_imports, unused_variables, unused_mut)]
 

@@ -1,37 +1,26 @@
 //! # arcbox-fs
 //!
-//! High-performance filesystem service for `ArcBox`.
+//! FUSE request handling for `ArcBox` VirtioFS shares.
 //!
-//! This crate implements VirtioFS-based file sharing between host and guest,
-//! providing near-native file I/O performance.
-//!
-//! ## Key Features
-//!
-//! - **Zero-copy**: Direct memory mapping when possible
-//! - **Parallel I/O**: Concurrent request handling
-//! - **Intelligent caching**: Host-side metadata and data caching
-//! - **FUSE protocol**: Compatible with standard virtiofs drivers
+//! [`FsServer`] owns each share's lifecycle. [`FuseDispatcher`] decodes guest
+//! requests and calls [`PassthroughFs`] for host filesystem operations.
 //!
 //! ## Architecture
 //!
 //! ```text
-//! Guest: mount -t virtiofs arcbox /mnt/arcbox
-//!                    │
-//!                    ▼
-//! ┌─────────────────────────────────────────┐
-//! │              arcbox-fs                   │
-//! │  ┌─────────────────────────────────┐   │
-//! │  │         FuseServer               │   │
-//! │  │  - Request dispatch              │   │
-//! │  │  - Reply handling                │   │
-//! │  └─────────────────────────────────┘   │
-//! │  ┌─────────────────────────────────┐   │
-//! │  │        PassthroughFs             │   │
-//! │  │  - Direct host filesystem access │   │
-//! │  │  - File handle management        │   │
-//! │  └─────────────────────────────────┘   │
-//! └─────────────────────────────────────────┘
+//! Guest virtiofs driver
+//!     → VirtioFs device (arcbox-virtio)
+//!     → FsServer (FuseRequestHandler)
+//!     → FuseDispatcher
+//!     → PassthroughFs
+//!     → configured host directory
 //! ```
+//!
+//! The macOS HV backend connects each share to this server. The VZ backend
+//! delegates file sharing to Virtualization.framework.
+//!
+//! [`CacheProfile`] controls guest entry and attribute cache timeouts.
+//! [`DaxMapper`] lets the VMM supply host-page mappings for FUSE DAX requests.
 pub mod cache;
 pub mod dispatcher;
 pub mod error;

@@ -4,7 +4,7 @@
 //! No tokio dependency — safe to use from any thread without risking reactor
 //! or timer driver interference.
 //!
-//! Wire format is identical to [`VsockTransport`]: 4-byte BE length prefix
+//! Wire format is identical to [`super::VsockTransport`]: 4-byte BE length prefix
 //! followed by payload. Messages produced by `AgentClient::build_message`
 //! work unchanged.
 

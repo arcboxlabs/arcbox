@@ -5,9 +5,9 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::NotFound`] if the file doesn't exist
+    /// - [`FsError::Common`] if the file does not exist (see [`FsError::not_found`])
     /// - [`FsError::InvalidHandle`] if the parent inode is invalid
-    /// - [`FsError::Io`] for other I/O errors
+    /// - [`FsError::Common`] wrapping other I/O errors
     pub fn lookup(&self, parent: u64, name: &OsStr) -> Result<(u64, crate::fuse::FuseAttr)> {
         let path = self.get_path(parent, name)?;
 
@@ -100,7 +100,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if the attributes cannot be retrieved
+    /// - An I/O error wrapped in [`FsError::Common`] if the attributes cannot be retrieved
     /// - [`FsError::InvalidHandle`] if the inode is invalid
     pub fn getattr(&self, inode: u64) -> Result<crate::fuse::FuseAttr> {
         let path = self.inode_path(inode)?;
@@ -112,7 +112,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if the attributes cannot be set
+    /// - An I/O error wrapped in [`FsError::Common`] if the attributes cannot be set
     /// - [`FsError::InvalidHandle`] if the inode is invalid
     #[allow(clippy::too_many_arguments)]
     pub fn setattr(
@@ -193,7 +193,7 @@ impl PassthroughFs {
     ///
     /// # Errors
     ///
-    /// - [`FsError::Io`] if the link cannot be read
+    /// - An I/O error wrapped in [`FsError::Common`] if the link cannot be read
     /// - [`FsError::InvalidHandle`] if the inode is invalid
     pub fn readlink(&self, inode: u64) -> Result<PathBuf> {
         let path = self.inode_path(inode)?;

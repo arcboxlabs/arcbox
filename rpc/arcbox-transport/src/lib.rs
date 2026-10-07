@@ -2,29 +2,28 @@
 //!
 //! Transport layer abstractions for `ArcBox`.
 //!
-//! This crate provides transport implementations for communication:
+//! This crate provides message transports and raw vsock streams:
 //!
-//! - [`UnixTransport`]: Unix domain sockets (CLI ↔ Daemon, Docker compatibility)
-//! - [`VsockTransport`]: Virtio socket (Host ↔ Guest)
+//! - [`UnixTransport`]: Length-prefixed messages over a caller-selected Unix socket.
+//! - [`VsockTransport`]: Asynchronous framed messages between host and guest.
+//! - [`vsock::BlockingVsockTransport`]: Blocking framed messages over a connected file descriptor.
+//! - [`vsock::VsockStream`]: Raw asynchronous bytes for tunnels and proxies.
 //!
 //! ## Architecture
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────┐
-//! │               arcbox-transport                  │
-//! │                                                 │
-//! │  ┌─────────────┐          ┌─────────────────┐  │
-//! │  │   Unix      │          │     Vsock       │  │
-//! │  │  Transport  │          │   Transport     │  │
-//! │  └──────┬──────┘          └────────┬────────┘  │
-//! │         │                          │           │
-//! │         ▼                          ▼           │
-//! │  ┌─────────────┐          ┌─────────────────┐  │
-//! │  │ /var/run/   │          │    vsock CID    │  │
-//! │  │ arcbox.sock │          │    + port       │  │
-//! │  └─────────────┘          └─────────────────┘  │
-//! └─────────────────────────────────────────────────┘
+//! UnixTransport          → UnixStream → caller-supplied socket path
+//! VsockTransport         → VsockStream → connected vsock file descriptor
+//! BlockingVsockTransport              → connected vsock file descriptor
 //! ```
+//!
+//! Linux can connect to a [`vsock::VsockAddr`] (CID and port). On macOS, the
+//! VMM supplies the connected file descriptor. Socket paths and VM selection
+//! belong to callers, not to this crate.
+//!
+//! [`vsock::HalfCloseStream`] adds EOF and flow-control framing to a byte
+//! stream. Both peers must use this framing for tunnels that need independent
+//! read and write completion, such as the guest Docker API proxy.
 
 pub mod error;
 pub mod unix;

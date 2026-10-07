@@ -2,11 +2,12 @@
 //!
 //! Host-side Virtual Machine Monitor (VMM) for `ArcBox`.
 //!
-//! This is the **primary** VM stack, used by `arcbox-core` to boot and manage
-//! the Linux guest.  Platform-specific backends live in submodules:
+//! The engine uses this crate to boot and manage host-side Linux VMs.
+//! Platform-specific backends live in submodules:
 //!
-//! - **macOS**: Virtualization.framework (managed execution)
-//! - **Linux**: KVM (manual vCPU execution)
+//! - **macOS VZ**: Virtualization.framework manages execution and devices.
+//! - **macOS HV**: Hypervisor.framework runs vCPUs with ArcBox device emulation.
+//! - **Linux KVM**: KVM runs vCPUs through `arcbox-hypervisor`.
 //!
 //! For the guest-side Firecracker sandbox stack, see `arcbox-computer-runtime`.
 //!
@@ -15,33 +16,24 @@
 //! - [`Vmm`]: VM lifecycle/state and device orchestration
 //! - [`VmBuilder`]: Fluent API for VM configuration
 //! - [`VcpuManager`]: Manages vCPU threads and execution
-//! - [`MemoryManager`]: Memory allocation and mapping
+//! - [`memory::MemoryManager`]: Memory allocation and mapping
 //! - [`DeviceManager`]: Device registration and I/O handling
 //! - [`KernelLoader`] and [`FdtBuilder`]: Boot image and device-tree setup
 //!
 //! ## Architecture
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────┐
-//! │                    VMM                           │
-//! │  ┌────────────┐ ┌────────────┐ ┌────────────┐  │
-//! │  │VcpuManager │ │MemoryManager│ │DeviceManager│ │
-//! │  └────────────┘ └────────────┘ └────────────┘  │
-//! │  ┌────────────┐ ┌────────────┐ ┌────────────┐  │
-//! │  │    Boot    │ │    FDT     │ │    IRQ     │  │
-//! │  └────────────┘ └────────────┘ └────────────┘  │
-//! └─────────────────────────────────────────────────┘
-//!                      │
-//!                      ▼
-//!        ┌─────────────────────────┐
-//!        │   arcbox-hypervisor     │
-//!        └─────────────────────────┘
-//!                      │
-//!                      ▼
-//!        ┌─────────────────────────┐
-//!        │    arcbox-virtio        │
-//!        └─────────────────────────┘
+//! arcbox-engine → Vmm
+//!                 ├─ macOS VZ → arcbox-hypervisor → arcbox-vz
+//!                 │                                → Virtualization.framework
+//!                 ├─ macOS HV → arcbox-hv → Hypervisor.framework
+//!                 │           + DeviceManager → arcbox-virtio devices
+//!                 └─ Linux KVM → arcbox-hypervisor::linux → KVM
 //! ```
+//!
+//! [`VmBackend`] selects the macOS backend. Boot loading, memory, IRQ, and
+//! device setup follow the selected backend; VZ does not run the HV device
+//! workers or its vCPU exit loop.
 //!
 //! ## Example
 //!
