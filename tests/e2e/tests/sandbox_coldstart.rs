@@ -22,12 +22,12 @@
 
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail, ensure};
-use arcbox_e2e::boot_assets::{resolve_boot_version, stage_dev_boot_assets};
-use arcbox_e2e::daemon::{DaemonConfig, DaemonHandle, connect_unix};
-use arcbox_e2e::metrics::{BootAssets, RunMetrics, percentile};
-use arcbox_e2e::sandbox_bench::{admit, run_and_collect, wait_for_ready, with_machine};
-use arcbox_e2e::{env_flag, repo_root};
+use anyhow::{Context, Result, bail};
+use arcbox_e2e::env_flag;
+use arcbox_e2e::metrics::{RunMetrics, percentile};
+use arcbox_e2e::sandbox_bench::{
+    admit, env_usize, run, run_and_collect, wait_for_ready, with_machine,
+};
 use arcbox_grpc::sandbox_v1::sandbox_process_service_client::SandboxProcessServiceClient;
 use arcbox_grpc::sandbox_v1::sandbox_service_client::SandboxServiceClient;
 use arcbox_grpc::sandbox_v1::sandbox_snapshot_service_client::SandboxSnapshotServiceClient;
@@ -39,70 +39,18 @@ use tonic::Streaming;
 use tonic::transport::Channel;
 use tracing::{info, warn};
 
-/// Generous ceiling for daemon startup (asset staging + VM boot + agent).
-const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(240);
 #[test]
 #[ignore = "requires nested virtualization (VZ on M3+), boot assets, and a signed daemon"]
 fn sandbox_coldstart() -> Result<()> {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_test_writer()
-        .try_init();
-
-    let iters = env_usize("ARCBOX_COLDSTART_ITERS", 10)?;
-    let vcpus = u32::try_from(env_usize("ARCBOX_COLDSTART_VCPUS", 1)?)?;
-    let memory_mib = u64::try_from(env_usize("ARCBOX_COLDSTART_MEMORY_MIB", 512)?)?;
-
-    if !env_flag("SKIP_BUILD") {
-        arcbox_e2e::sandbox::build_binaries()?;
-    }
-
-    let root = repo_root();
-    let version = resolve_boot_version(&root)?;
-    let temp_dir = tempfile::Builder::new()
-        .prefix("arcbox-sandbox-coldstart-")
-        .tempdir()
-        .context("creating bench directory")?;
-    let data_dir = temp_dir.path().to_owned();
-    stage_dev_boot_assets(&root, &data_dir, &version)?;
-
-    let mut metrics = RunMetrics::new(
-        "sandbox_coldstart",
-        Some("vz"),
-        BootAssets::Bundle {
-            version: version.clone(),
-        },
-    )?;
-    let result = run_bench(
-        &root,
-        &data_dir,
-        &version,
-        &mut metrics,
-        Params {
-            iters,
-            vcpus,
-            memory_mib,
-            unique_geometry: env_flag("ARCBOX_COLDSTART_UNIQUE_GEOMETRY"),
-        },
-    );
-    metrics.passed = result.is_ok();
-    match metrics.write(Some(&data_dir)) {
-        Ok(paths) => {
-            for path in paths {
-                info!(path = %path.display(), "run metrics written");
-            }
-        }
-        Err(error) => warn!("writing run metrics failed: {error:#}"),
-    }
-
-    if result.is_err() || env_flag("KEEP_TEST_DIR") {
-        let path = temp_dir.keep();
-        warn!(path = %path.display(), "preserving test directory");
-    }
-    result
+    let params = Params {
+        iters: env_usize("ARCBOX_COLDSTART_ITERS", 10)?,
+        vcpus: u32::try_from(env_usize("ARCBOX_COLDSTART_VCPUS", 1)?)?,
+        memory_mib: u64::try_from(env_usize("ARCBOX_COLDSTART_MEMORY_MIB", 512)?)?,
+        unique_geometry: env_flag("ARCBOX_COLDSTART_UNIQUE_GEOMETRY"),
+    };
+    run("sandbox_coldstart", async move |channel, metrics| {
+        drive(channel, metrics, params).await
+    })
 }
 
 struct Params {
@@ -122,48 +70,6 @@ impl Params {
             Ok(self.memory_mib)
         }
     }
-}
-
-fn run_bench(
-    root: &std::path::Path,
-    data_dir: &std::path::Path,
-    version: &str,
-    metrics: &mut RunMetrics,
-    params: Params,
-) -> Result<()> {
-    let mut daemon = DaemonHandle::spawn(DaemonConfig {
-        binary: root.join("target/release/arcbox-daemon"),
-        data_dir: data_dir.to_owned(),
-        args: vec![],
-        env: vec![
-            ("ARCBOX_BOOT_ASSET_VERSION".to_owned(), version.to_owned()),
-            ("ARCBOX_VM_BACKEND".to_owned(), "vz".to_owned()),
-        ],
-    })?;
-
-    let ready_started = Instant::now();
-    daemon.wait_ready_blocking(DAEMON_READY_TIMEOUT)?;
-    let daemon_ready = ready_started.elapsed();
-    metrics.record("daemon_ready", daemon_ready.as_secs_f64());
-    info!(seconds = daemon_ready.as_secs_f64(), "daemon ready");
-
-    let socket = daemon.grpc_socket();
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("building bench runtime")?;
-
-    let bench = rt.block_on(async {
-        let channel = connect_unix(&socket).await?;
-        drive(channel, metrics, params).await
-    });
-
-    match daemon.shutdown() {
-        Ok(status) => info!(%status, "daemon stopped"),
-        Err(error) => warn!("daemon shutdown failed: {error:#}"),
-    }
-
-    bench
 }
 
 /// One iteration's timings.
@@ -601,18 +507,6 @@ fn min(values: &[f64]) -> Option<f64> {
 
 fn max(values: &[f64]) -> Option<f64> {
     values.iter().copied().reduce(f64::max)
-}
-
-fn env_usize(name: &str, default: usize) -> Result<usize> {
-    let value = match std::env::var(name) {
-        Ok(value) => value
-            .parse()
-            .with_context(|| format!("{name} must be an integer"))?,
-        Err(std::env::VarError::NotPresent) => default,
-        Err(error) => return Err(error).with_context(|| format!("reading {name}")),
-    };
-    ensure!(value > 0, "{name} must be positive");
-    Ok(value)
 }
 
 #[test]

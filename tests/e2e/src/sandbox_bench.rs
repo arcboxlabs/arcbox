@@ -1,8 +1,8 @@
-//! Admission timing shared by sandbox benchmarks.
+//! Isolated daemon, admission timing, and RPC helpers for sandbox benchmarks.
 
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use arcbox_grpc::sandbox_v1::sandbox_process_service_client::SandboxProcessServiceClient;
 use arcbox_protocol::sandbox_v1::{
     AttachExecutionRequest, SandboxEventKind, StartExecutionRequest, StdioChannel, execution_event,
@@ -10,11 +10,98 @@ use arcbox_protocol::sandbox_v1::{
 };
 use tonic::Streaming;
 use tonic::transport::Channel;
+use tracing::{info, warn};
+
+use crate::boot_assets::{resolve_boot_version, stage_dev_boot_assets};
+use crate::daemon::{DaemonConfig, DaemonHandle, connect_unix};
+use crate::metrics::{BootAssets, RunMetrics};
+use crate::{env_flag, repo_root};
 
 const SANDBOX_READY_TIMEOUT: Duration = Duration::from_secs(180);
 const ADMISSION_TIMEOUT: Duration = Duration::from_secs(60);
 const RPC_TIMEOUT: Duration = Duration::from_secs(180);
 const ADMISSION_POLL: Duration = Duration::from_millis(50);
+
+/// Runs a benchmark against an isolated VZ daemon and preserves every failed run.
+pub fn run(
+    name: &str,
+    scenario: impl AsyncFnOnce(Channel, &mut RunMetrics) -> Result<()>,
+) -> Result<()> {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_test_writer()
+        .try_init();
+    if !env_flag("SKIP_BUILD") {
+        crate::sandbox::build_binaries()?;
+    }
+    let root = repo_root();
+    let version = resolve_boot_version(&root)?;
+    let temp = tempfile::Builder::new()
+        .prefix(&format!("arcbox-{name}-"))
+        .tempdir()?;
+    let mut metrics = RunMetrics::new(
+        name,
+        Some("vz"),
+        BootAssets::Bundle {
+            version: version.clone(),
+        },
+    )?;
+    let result = (|| {
+        stage_dev_boot_assets(&root, temp.path(), &version)?;
+        let mut daemon = DaemonHandle::spawn(DaemonConfig {
+            binary: root.join("target/release/arcbox-daemon"),
+            data_dir: temp.path().to_owned(),
+            args: vec![],
+            env: vec![
+                ("ARCBOX_BOOT_ASSET_VERSION".into(), version),
+                ("ARCBOX_VM_BACKEND".into(), "vz".into()),
+            ],
+        })?;
+        let result = (|| {
+            metrics.time("daemon_ready", || {
+                daemon.wait_ready_blocking(Duration::from_secs(240))
+            })?;
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(async {
+                let channel = connect_unix(&daemon.grpc_socket()).await?;
+                scenario(channel, &mut metrics).await
+            })
+        })();
+        let shutdown = daemon.shutdown().and_then(|status| {
+            ensure!(status.success(), "benchmark daemon exited with {status}");
+            Ok(())
+        });
+        finish(result, shutdown)
+    })();
+    metrics.passed = result.is_ok();
+    let written = metrics.write(Some(temp.path())).map(|paths| {
+        for path in paths {
+            info!(path = %path.display(), "run metrics written");
+        }
+    });
+    let result = finish(result, written);
+    if result.is_err() || env_flag("KEEP_TEST_DIR") {
+        let path = temp.keep();
+        warn!(path = %path.display(), "preserving test directory");
+    }
+    result
+}
+
+/// Preserves both the scenario failure and any later cleanup or artifact failure.
+pub fn finish(result: Result<()>, cleanup: Result<()>) -> Result<()> {
+    match (result, cleanup) {
+        (Err(error), Err(cleanup)) => {
+            Err(error.context(format!("cleanup also failed: {cleanup:#}")))
+        }
+        (result, Ok(())) => result,
+        (Ok(()), Err(cleanup)) => Err(cleanup),
+    }
+}
 
 /// Successful RPC response and the time spent waiting for admission before that attempt.
 pub struct Admitted<T> {
@@ -174,9 +261,35 @@ pub async fn wait_for_ready(
     }
 }
 
+/// Reads a positive integer, rejecting malformed or zero values.
+pub fn env_usize(name: &str, default: usize) -> Result<usize> {
+    let value = match std::env::var(name) {
+        Ok(value) => value
+            .parse()
+            .with_context(|| format!("{name} must be an integer"))?,
+        Err(std::env::VarError::NotPresent) => default,
+        Err(error) => return Err(error).with_context(|| format!("reading {name}")),
+    };
+    ensure!(value > 0, "{name} must be positive");
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_failure_preserves_the_scenario_failure() {
+        let error = finish(
+            Err(anyhow::anyhow!("restore failed")),
+            Err(anyhow::anyhow!("remove failed")),
+        )
+        .expect_err("both failures must surface");
+        let message = format!("{error:#}");
+        assert!(message.contains("restore failed"));
+        assert!(message.contains("remove failed"));
+        assert!(finish(Ok(()), Err(anyhow::anyhow!("remove failed"))).is_err());
+    }
 
     #[tokio::test]
     async fn admission_wait_excludes_the_successful_attempt() {
