@@ -86,6 +86,9 @@ jobs:
       - name: Clippy
         run: cargo clippy -p arcbox-computer-runtime -p arcbox-vm-proto -p arcbox-vm-driver -p arcbox-fc-driver -p arcbox-tap-net -p arcbox-vm-agent -p arcbox-snapshot -p arcbox-storage -- -D warnings
 
+      - name: Check registry image feature
+        run: cargo check -p arcbox-computer-runtime --features remote-image --all-targets
+
       - name: Unit tests
         # --bins covers the vm-agent guest handlers, whose tests are
         # target_os = "linux" and never run under the macOS workspace job.

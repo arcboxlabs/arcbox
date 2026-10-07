@@ -5,7 +5,8 @@
 //! This crate runs **inside** the Linux guest VM, managing nested microVMs
 //! for workload isolation (sandboxes) through a `VmDriver`
 //! (`arcbox_vm_driver`) — the reference driver is `arcbox-fc-driver`,
-//! Firecracker. It is consumed exclusively by `arcbox-agent`.
+//! Firecracker. `arcbox-agent` consumes the orchestration surface. Node image
+//! builders can use [`RootfsBuilder`] independently.
 //!
 //! The **host-side** VMM that boots the guest is [`arcbox-vmm`], which sits on
 //! top of `arcbox-hypervisor` (Virtualization.framework on macOS, KVM on
@@ -60,6 +61,10 @@ pub mod rootfs;
 pub mod sandbox;
 #[cfg(feature = "testkit")]
 pub mod testkit;
+
+/// Image sources for [`RootfsBuilder`]. Enable `remote-image` to use `RemoteRef`
+/// and retain the resolved image's config and manifest digest before conversion.
+pub use oci2rootfs;
 
 /// Boot-parameter vocabulary shared with `vm-agent` (`arcbox_vm_proto::boot`).
 pub use arcbox_vm_proto::boot as boot_proto;

@@ -69,7 +69,7 @@ fn with_mounted(
         .and(result)
 }
 
-fn verify_boot_files(root: &Path, expected_agent: &[u8]) -> Result<()> {
+fn verify_agent_files(root: &Path, expected_agent: &[u8]) -> Result<()> {
     let agent = root.join(VM_AGENT_PATH.trim_start_matches('/'));
     ensure!(
         std::fs::read(&agent)? == expected_agent,
@@ -83,6 +83,11 @@ fn verify_boot_files(root: &Path, expected_agent: &[u8]) -> Result<()> {
         std::fs::read_link(root.join("etc/resolv.conf"))? == Path::new("../run/resolv.conf"),
         "resolver must point into the run tmpfs"
     );
+    Ok(())
+}
+
+fn verify_boot_files(root: &Path, expected_agent: &[u8]) -> Result<()> {
+    verify_agent_files(root, expected_agent)?;
     ensure!(
         std::fs::read(root.join("sbin/init"))? == b"distribution-init",
         "injection must preserve the distribution init"
@@ -232,6 +237,66 @@ async fn a_caller_sized_build_is_mountable_and_replaces_the_destination() {
     );
     with_mounted(&*tools, &image, |root| {
         verify_boot_files(root, b"staged-agent")
+    })
+    .unwrap();
+}
+
+#[cfg(feature = "remote-image")]
+#[tokio::test]
+#[ignore = "requires root, registry access, and a 32 GiB sparse image"]
+async fn a_registry_image_builds_at_sparse_computer_capacity() {
+    use std::os::unix::fs::MetadataExt;
+    use std::time::Instant;
+
+    use arcbox_computer_runtime::oci2rootfs::RemoteRef;
+
+    const CAPACITY: u64 = 32 * 1024 * 1024 * 1024;
+    let Some(tools) = block_tools() else { return };
+    let reference =
+        std::env::var("ARCBOX_TEST_IMAGE").unwrap_or_else(|_| "docker.io/library/debian:12".into());
+    let source = RemoteRef::new(&reference).fetch().await.unwrap();
+    let digest = source
+        .manifest_digest()
+        .expect("a registry image has a manifest digest")
+        .to_string();
+    let config = source
+        .config()
+        .cloned()
+        .expect("a registry image has a config");
+    let dir = tempfile::tempdir().unwrap();
+    let agent = dir.path().join("vm-agent");
+    std::fs::write(&agent, b"staged-agent").unwrap();
+    let image = dir
+        .path()
+        .join("images")
+        .join(digest.replace(':', "-"))
+        .join("rootfs.ext4");
+    let started = Instant::now();
+    builder(&agent, Arc::clone(&tools))
+        .build_rootfs(RootfsSpec {
+            source: RootfsSource::Image(source),
+            out: image.clone(),
+            size: CAPACITY,
+        })
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    let metadata = std::fs::metadata(&image).unwrap();
+    let allocated = metadata.blocks() * 512;
+    eprintln!(
+        "registry_rootfs reference={reference} digest={digest} apparent_bytes={} allocated_bytes={allocated} elapsed_ms={} cmd={:?} entrypoint={:?}",
+        metadata.len(),
+        elapsed.as_millis(),
+        config.cmd(),
+        config.entrypoint(),
+    );
+    assert_eq!(metadata.len(), CAPACITY);
+    assert!(
+        allocated < CAPACITY / 8,
+        "32 GiB registry fixture must be sparse, got {allocated} allocated bytes"
+    );
+    with_mounted(&*tools, &image, |root| {
+        verify_agent_files(root, b"staged-agent")
     })
     .unwrap();
 }

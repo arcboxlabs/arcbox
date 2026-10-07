@@ -92,6 +92,7 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-10-07 — Caller-owned rootfs capacity and publication passed Linux validation](logs/2026-10-07-rootfs-capacity-integration.md)
 - [2026-10-07 — Storage recovery uses published boot assets](logs/2026-10-07-storage-recovery-release-validation.md)
 - [2026-10-07 — Side entries distinguish reused inode generations](logs/2026-10-07-sidecar-inode-generation.md)
 - [2026-10-05 — Every agent business request requires protocol v7](logs/2026-10-05-agent-v7-admission.md)

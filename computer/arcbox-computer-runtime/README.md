@@ -18,9 +18,9 @@ arcbox-daemon  ──vsock──►  arcbox-agent        ──vsock──►  v
                                     └── arcbox-vm-proto ──┘
 ```
 
-`arcbox-agent` is this crate's only consumer: it owns the `sandbox.v1`
+`arcbox-agent` owns the `sandbox.v1`
 surface and the vsock transport, and calls `SandboxManager` underneath.
-There are no service implementations, no tonic, and no daemon here.
+There are no service implementations, no tonic, and no daemon here. Node image builders can use `RootfsBuilder` independently.
 
 The **`vm-agent`** binary that becomes PID 1 *inside* each sandbox is a
 separate crate, [`arcbox-vm-agent`](../../virt/arcbox-vm-agent); the wire
@@ -41,6 +41,13 @@ once, here.
 `RootfsBuilder::build_rootfs(RootfsSpec { source, out, size })` builds an image at a caller-owned path and capacity. `RootfsSource` accepts an OCI layout, an overlay2 directory, or a resolved `oci2rootfs::ImageSource`. Capacity must be a positive multiple of `ROOTFS_CAPACITY_GRANULARITY` (128 MiB). The builder verifies the written ext4 geometry and injects the agent before atomically replacing the destination. Failed builds preserve an existing destination and remove their temporary files.
 
 `convert_layer_to_rootfs` uses the same pipeline for cached 512 MiB templates. Cache names remain `rootfs-<layer>-<agent>.ext4`; caller-supplied capacities belong to `build_rootfs` and do not change template identity.
+
+Enable `remote-image` to resolve registry references with the re-exported `oci2rootfs::RemoteRef`. Keep the resolved source's config and manifest digest before passing `RootfsSource::Image(source)` to `build_rootfs`. Use fully qualified references: the current dependency misparses bare numeric tags such as `debian:12`. The opt-in registry integration test defaults to `docker.io/library/debian:12`, builds a 32 GiB sparse image, and reads the result through the Linux ext4 driver:
+
+```bash
+sudo -E env ARCBOX_REQUIRE_BLOCK_TOOLS=1 cargo test -p arcbox-computer-runtime --features remote-image --test integration \
+  a_registry_image_builds_at_sparse_computer_capacity -- --ignored --nocapture
+```
 
 ## Usage
 

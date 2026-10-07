@@ -59,6 +59,8 @@ restructure plan and its locked decisions live in
   vm-stack-redesign R3 moved it here; the in-sandbox init is
   `arcbox-vm-agent` and the wire vocabulary `arcbox-vm-proto`, both still
   under `virt/`. Its own README has the crate map.
+  - **Rootfs consumers**: node image builders also use `RootfsBuilder`. Keep the agent path and resolver convention in this crate. Use `VM_AGENT_PATH` in `init=` when booting converted images; preserve the distribution's `/sbin/init`.
+  - **Rootfs capacity**: require a positive multiple of `ROOTFS_CAPACITY_GRANULARITY` (128 MiB). Verify written geometry before injection and publication. Keep the cached template capacity at 512 MiB and retain the `rootfs-<layer>-<agent>.ext4` stem because template catalogs use that stem as digest input.
   - **It names no adapter at all** — the last two edges
     (`arcbox-fc-driver`, `arcbox-tap-net`) died in R3's PR-G5 and their
     `EXCEPTIONS` entries with them, so `cargo xtask check-layers` now
