@@ -21,6 +21,7 @@ mod support;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use arcbox_computer_runtime::snapshot::SnapshotGeometry;
 use arcbox_computer_runtime::testkit::agent::Reply;
 use arcbox_computer_runtime::{
     IdleAction, LifecycleUpdate, RestoreSandboxSpec, SandboxSpec, SandboxState, VmmError,
@@ -860,6 +861,168 @@ async fn a_checkpoint_restores_onto_a_fresh_address() {
         "the clone is on an address of its own"
     );
     assert_eq!(fixture.run(&clone, &["/bin/hello"]).await, b"hi");
+}
+
+#[tokio::test]
+async fn an_adopted_computers_checkpoint_restores() {
+    let mut fixture = Fixture::jailed().await;
+    fixture.agent().on(&["/bin/hello"], Reply::stdout(b"hi"));
+    let id = fixture.ready("origin").await;
+    fixture.manager.detach_all().await.unwrap();
+    fixture = fixture.restart().await;
+    fixture.await_state(&id, SandboxState::Ready).await;
+
+    let checkpoint = fixture
+        .manager
+        .checkpoint_sandbox(&id, "adopted".into(), HashMap::new())
+        .await
+        .unwrap();
+    let (clone, _) = fixture
+        .manager
+        .restore_sandbox(RestoreSandboxSpec {
+            id: Some("adopted-clone".into()),
+            snapshot_id: checkpoint.snapshot_id,
+            network_override: true,
+            ..RestoreSandboxSpec::default()
+        })
+        .await
+        .unwrap();
+    fixture.await_state(&clone, SandboxState::Ready).await;
+    assert_eq!(fixture.run(&clone, &["/bin/hello"]).await, b"hi");
+}
+
+#[tokio::test]
+async fn a_restored_computers_checkpoint_restores_again() {
+    let fixture = Fixture::jailed().await;
+    fixture.agent().on(&["/bin/hello"], Reply::stdout(b"hi"));
+    let geometry = SnapshotGeometry {
+        vcpus: 3,
+        memory_mib: 768,
+    };
+    let origin = fixture
+        .booted(SandboxSpec {
+            id: Some("origin".into()),
+            vcpus: geometry.vcpus,
+            memory_mib: geometry.memory_mib,
+            ..SandboxSpec::default()
+        })
+        .await;
+    fixture.await_state(&origin, SandboxState::Ready).await;
+    let first = fixture
+        .manager
+        .checkpoint_sandbox(&origin, "first".into(), HashMap::new())
+        .await
+        .unwrap();
+    let catalog = fixture.snapshot_catalog();
+    let first_meta = catalog.find_by_id(&first.snapshot_id).unwrap();
+    assert_eq!(first_meta.geometry, Some(geometry));
+    let (first_clone, _) = fixture
+        .manager
+        .restore_sandbox(RestoreSandboxSpec {
+            id: Some("first-clone".into()),
+            snapshot_id: first.snapshot_id,
+            network_override: true,
+            ..RestoreSandboxSpec::default()
+        })
+        .await
+        .unwrap();
+    fixture.await_state(&first_clone, SandboxState::Ready).await;
+
+    let second = fixture
+        .manager
+        .checkpoint_sandbox(&first_clone, "second".into(), HashMap::new())
+        .await
+        .unwrap();
+    let second_meta = catalog.find_by_id(&second.snapshot_id).unwrap();
+    assert_eq!(second_meta.geometry, first_meta.geometry);
+    assert_eq!(second_meta.kernel_path, first_meta.kernel_path);
+    assert_eq!(second_meta.rootfs_path, first_meta.rootfs_path);
+    let (second_clone, _) = fixture
+        .manager
+        .restore_sandbox(RestoreSandboxSpec {
+            id: Some("second-clone".into()),
+            snapshot_id: second.snapshot_id,
+            network_override: true,
+            ..RestoreSandboxSpec::default()
+        })
+        .await
+        .unwrap();
+    fixture
+        .await_state(&second_clone, SandboxState::Ready)
+        .await;
+    assert_eq!(fixture.run(&second_clone, &["/bin/hello"]).await, b"hi");
+}
+
+#[tokio::test]
+async fn a_restore_without_valid_geometry_reserves_no_resources() {
+    let fixture = Fixture::jailed().await;
+    let origin = fixture.ready("origin").await;
+    let checkpoint = fixture
+        .manager
+        .checkpoint_sandbox(&origin, "source".into(), HashMap::new())
+        .await
+        .unwrap();
+    let meta = fixture
+        .snapshot_catalog()
+        .find_by_id(&checkpoint.snapshot_id)
+        .unwrap();
+    let meta_path = meta.vmstate_path.parent().unwrap().join("meta.json");
+    let clone = "clone".to_owned();
+    let request = RestoreSandboxSpec {
+        id: Some(clone.clone()),
+        snapshot_id: checkpoint.snapshot_id,
+        network_override: true,
+        ..RestoreSandboxSpec::default()
+    };
+    for geometry in [
+        None,
+        Some(SnapshotGeometry {
+            vcpus: 0,
+            memory_mib: 512,
+        }),
+        Some(SnapshotGeometry {
+            vcpus: 2,
+            memory_mib: 0,
+        }),
+    ] {
+        let mut legacy = serde_json::to_value(&meta).unwrap();
+        match geometry {
+            Some(geometry) => legacy["geometry"] = serde_json::to_value(geometry).unwrap(),
+            None => {
+                legacy.as_object_mut().unwrap().remove("geometry");
+            }
+        }
+        std::fs::write(&meta_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let error = fixture
+            .manager
+            .restore_sandbox(request.clone())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, VmmError::FailedPrecondition(_)), "{error}");
+        assert!(!fixture.record_path(&clone).exists());
+        assert!(!fixture.vm_dir(&clone).exists());
+        assert!(matches!(
+            fixture.manager.inspect_sandbox(&clone),
+            Err(VmmError::NotFound(_))
+        ));
+        assert_eq!(
+            fixture.driver().restored_vms(),
+            Vec::<arcbox_vm_driver::VmId>::new()
+        );
+        assert_eq!(
+            fixture.manager.pending_network_cleanups().await.unwrap(),
+            Vec::<(String, String)>::new()
+        );
+    }
+
+    std::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
+    fixture.manager.restore_sandbox(request).await.unwrap();
+    fixture.await_state(&clone, SandboxState::Ready).await;
+    let journal: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixture.vm_dir(&clone).join("state.json")).unwrap())
+            .unwrap();
+    // The origin reserved generation 1. Rejected restores must not mint leases.
+    assert_eq!(journal["network"]["cleanup_token"], "fake-cleanup-2");
 }
 
 /// Legacy records remain adoptable, but missing source paths cannot produce

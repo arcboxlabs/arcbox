@@ -255,6 +255,10 @@ impl Fixture {
             .join(format!("{id}.json"))
     }
 
+    pub fn snapshot_catalog(&self) -> arcbox_computer_runtime::snapshot::SnapshotCatalog {
+        arcbox_computer_runtime::snapshot::SnapshotCatalog::new(self.dir.path().to_str().unwrap())
+    }
+
     /// A computer's copy-on-write overlay file, as the probe names it
     /// ([`Setup::with_cow_probe`] fixtures only — the probe assembles no
     /// device, so the file exists once the test writes it).

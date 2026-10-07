@@ -193,6 +193,31 @@ impl SandboxManager {
                     .into(),
             ));
         }
+        let geometry = snap_meta.geometry.ok_or_else(|| {
+            VmmError::FailedPrecondition(format!(
+                "snapshot {} predates geometry recording; re-checkpoint the source sandbox with this agent",
+                request.snapshot_id
+            ))
+        })?;
+        if geometry.vcpus == 0 || geometry.memory_mib == 0 {
+            return Err(VmmError::FailedPrecondition(format!(
+                "snapshot {} has invalid geometry ({} vCPUs, {} MiB); re-checkpoint the source sandbox with this agent",
+                request.snapshot_id, geometry.vcpus, geometry.memory_mib
+            )));
+        }
+
+        // The request supplies identity and workload; the snapshot supplies
+        // the boot assets and geometry that later checkpoints must retain.
+        let mut restore_spec = request.spec.clone();
+        restore_spec.id = Some(new_id.clone());
+        if let Some(kernel) = &snap_meta.kernel_path {
+            restore_spec.kernel.clone_from(kernel);
+        }
+        if let Some(rootfs) = &snap_meta.rootfs_path {
+            restore_spec.rootfs.clone_from(rootfs);
+        }
+        restore_spec.vcpus = geometry.vcpus;
+        restore_spec.memory_mib = geometry.memory_mib;
 
         // Claim the id atomically so a concurrent restore/create of the same
         // id fails fast with AlreadyExists instead of both proceeding to set up
@@ -201,8 +226,6 @@ impl SandboxManager {
         let vm_dir = PathBuf::from(&self.config.firecracker.data_dir)
             .join("sandboxes")
             .join(&new_id);
-        let mut restore_spec = request.spec.clone();
-        restore_spec.id = Some(new_id.clone());
         let reservation = super::reserve_actor(
             &self.computers,
             &new_id,

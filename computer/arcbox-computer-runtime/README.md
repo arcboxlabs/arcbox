@@ -142,6 +142,8 @@ Durable sandbox records retain kernel and rootfs paths so an adopted sandbox can
 
 Legacy records without kernel or rootfs paths remain adoptable. Their checkpoint requests return `FailedPrecondition` before capture and leave the guest running.
 
+Restore inherits the source snapshot's kernel, rootfs, vCPU count, and memory size. Snapshots without recorded geometry, or with a zero vCPU count or memory size, return `FailedPrecondition` before reserving resources. Re-checkpoint the source sandbox with the current agent to create a restorable snapshot.
+
 ## Data layout
 
 ```
