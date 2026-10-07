@@ -23,6 +23,8 @@ The test creates a sandbox with 3 vCPUs, 768 MiB of memory, and explicit kernel/
 
 The marker lives on `/run`, which `vm-agent` mounts as tmpfs. The marker checks memory retention, not writable rootfs persistence. The test removes the final VM and both catalog entries.
 
+The test also catches assertion panics before dropping its temporary directory. It removes every sandbox and checkpoint through the manager, attempts the remaining cleanup after an error, and then resumes the original panic. A cleanup error is reported and retains the backing files for diagnosis.
+
 ## Evidence
 
 The final test passed on 2026-10-07: **1 passed, 0 failed, 0 ignored**, in 5.90 seconds. The elapsed time describes one run, not a benchmark.
@@ -49,6 +51,14 @@ Set `FC_BINARY`, `FC_JAILER`, `FC_KERNEL`, and `FC_ROOTFS` to local assets. Exec
 ```
 
 The test asserts its prerequisites. Missing configuration cannot produce a successful early return.
+
+## Failure cleanup verification
+
+The cleanup revision passed the same jailed chain: **1 passed, 0 failed, 0 ignored**, in 6.44 seconds. Strict native Clippy for `sandbox_manager_e2e` and strict musl Clippy for all agent targets passed.
+
+A temporary probe then panicked after the first checkpoint, before the original guest removal. The probe confirmed an active `/dev/dm-0` snapshot and two backing devices, `loop0` and `loop1`. The test preserved the original panic and exited with status 101: **0 passed, 1 failed, 0 ignored**. The cleanup collector found no test process, mount, loop device, dm mapping, or temporary directory. The source fixture hash remained unchanged. The probe was removed after this check; the original test assertions remain unchanged.
+
+The final success and expected-failure reports are `/private/tmp/arcbox-checkpoint-cleanup-final.json` and `/private/tmp/arcbox-checkpoint-cleanup-failure.json`. The retained temporary probe is `/private/tmp/arcbox-checkpoint-cleanup-failure-probe.rs`.
 
 ## Follow-ups
 
