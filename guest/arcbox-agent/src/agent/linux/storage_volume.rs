@@ -34,7 +34,7 @@ pub(super) fn ensure_filesystem(
 
 pub(super) fn authorize_legacy_migration(
     verify_sources: impl FnOnce() -> std::io::Result<()>,
-) -> Result<bool, String> {
+) -> Result<StorageLayout, String> {
     let _guard = MANIFEST_LOCK
         .lock()
         .map_err(|_| "storage manifest lock poisoned".to_string())?;
@@ -47,7 +47,7 @@ pub(super) fn authorize_legacy_migration(
         manifest.layout = StorageLayout::Migrating;
         manifest.save(&path).map_err(|error| error.to_string())?;
     }
-    Ok(manifest.layout == StorageLayout::Paired)
+    Ok(manifest.layout)
 }
 
 pub(super) fn finish_metadata_setup() -> Result<(), String> {

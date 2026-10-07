@@ -51,6 +51,8 @@ In a normal System VM, `WatchReadiness` with `start_runtime_if_needed=true` star
 
 Runtime startup stops if Btrfs capacity cannot be read or metadata entries cannot be inspected. If an ext4 metadata entry is missing while a retired `.pre-ext4` backup exists, the agent returns an error without recreating that entry. Ordinary boot does not run `e2fsck -y` after an ext4 mount failure. Preserve both `docker.img` and `docker-meta.img` before offline repair.
 
+An older formatted pair without a manifest requires metadata migration verification. Existing ext4 entries remain authoritative. Missing entries require explicit recovery because old empty entries left no retired marker; a populated source can be stale state from a later Btrfs-only boot. The guest preserves both volumes and records `Paired` only after all mappings are prepared.
+
 The proxy itself listens on vsock port 2375 and relays each connection to
 `/var/run/docker.sock`. The vsock leg is framed with
 `arcbox_transport::vsock::HalfCloseStream` (agent protocol v5): a

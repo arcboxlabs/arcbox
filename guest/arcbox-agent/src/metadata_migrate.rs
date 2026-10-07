@@ -146,6 +146,24 @@ pub fn verify_legacy_sources(entries: &[(&Path, EntryKind)]) -> io::Result<()> {
     Ok(())
 }
 
+/// Verifies that an older pair completed migration before adopting its mappings.
+///
+/// Old empty entries left no retired marker. A populated source can therefore
+/// be stale data from a later Btrfs-only boot, not proof of an unfinished copy.
+///
+/// # Errors
+/// Returns an error for missing destinations or inspection failures.
+pub fn verify_legacy_pair(volume: &Path, entries: &[&str]) -> io::Result<()> {
+    for name in entries {
+        if !volume.join(name).try_exists()? {
+            return Err(io::Error::other(format!(
+                "legacy metadata entry {name} is missing; source provenance is unknown; preserve both volumes for explicit recovery"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn retired_exists(target: &Path) -> io::Result<bool> {
     let Some(parent) = target.parent() else {
         return Ok(false);
@@ -270,6 +288,65 @@ fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn older_pair_with_complete_destinations_can_be_adopted() {
+        let (_tmp, volume, data) = setup();
+        let first = data.join("bolt");
+        let second = data.join("metadata.db");
+        seed_dir(&first);
+        fs::write(&second, b"current snapshot metadata").unwrap();
+        prepare_entry(&volume, &first, "bolt", EntryKind::Dir).unwrap();
+        prepare_entry(&volume, &second, "snapshot", EntryKind::File).unwrap();
+        let entries = ["bolt", "snapshot"];
+        verify_legacy_pair(&volume, &entries).unwrap();
+        assert_eq!(
+            fs::read(volume.join("snapshot")).unwrap(),
+            b"current snapshot metadata"
+        );
+        fs::remove_file(volume.join("snapshot")).unwrap();
+        fs::write(&second, b"stale state from a later btrfs-only boot").unwrap();
+        assert!(verify_legacy_pair(&volume, &entries).is_err());
+        assert!(!volume.join("snapshot").exists());
+        assert_eq!(
+            fs::read(data.join("metadata.db.pre-ext4")).unwrap(),
+            b"current snapshot metadata"
+        );
+    }
+
+    #[test]
+    fn older_pair_does_not_adopt_reaccumulated_sources_without_retired_markers() {
+        let (_tmp, volume, data) = setup();
+        let target = data.join("metadata.db");
+        assert_eq!(
+            prepare_entry(&volume, &target, "snapshot", EntryKind::File).unwrap(),
+            Prepared::Fresh
+        );
+        fs::write(volume.join("snapshot"), b"authoritative metadata").unwrap();
+        fs::write(&target, b"reaccumulated stale source").unwrap();
+        assert!(!retired_exists(&target).unwrap());
+        fs::remove_file(volume.join("snapshot")).unwrap();
+        assert!(verify_legacy_pair(&volume, &["snapshot"]).is_err());
+        assert!(!volume.join("snapshot").exists());
+        assert_eq!(fs::read(target).unwrap(), b"reaccumulated stale source");
+    }
+
+    #[test]
+    fn older_pair_does_not_initialize_entries_without_source_provenance() {
+        let (_tmp, volume, data) = setup();
+        let target = data.join("metadata.db");
+        for source in [
+            None,
+            Some(b"".as_slice()),
+            Some(b"possible original data".as_slice()),
+        ] {
+            if let Some(bytes) = source {
+                fs::write(&target, bytes).unwrap();
+            }
+            assert!(verify_legacy_pair(&volume, &["snapshot"]).is_err());
+            assert!(!volume.join("snapshot").exists());
+        }
+    }
 
     #[test]
     fn legacy_upgrade_requires_original_databases_and_rejects_retired_sources() {

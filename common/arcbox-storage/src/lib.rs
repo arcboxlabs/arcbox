@@ -73,6 +73,8 @@ pub enum StorageLayout {
     LegacyMigration,
     /// Original legacy metadata was verified before migration began.
     Migrating,
+    /// Both legacy filesystems exist, but metadata migration is not yet verified.
+    LegacyPair,
     /// Both filesystems are initialized and their metadata mappings are prepared.
     Paired,
 }
@@ -156,7 +158,7 @@ impl StorageManifest {
                 self.data.state == VolumeState::Ready && self.metadata.state == VolumeState::New
             }
             StorageLayout::Migrating => self.data.state == VolumeState::Ready,
-            StorageLayout::Paired => {
+            StorageLayout::LegacyPair | StorageLayout::Paired => {
                 self.data.state == VolumeState::Ready && self.metadata.state == VolumeState::Ready
             }
         };

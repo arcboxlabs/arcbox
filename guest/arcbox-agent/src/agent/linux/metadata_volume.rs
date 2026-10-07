@@ -15,7 +15,9 @@ use arcbox_constants::paths::{CONTAINERD_DATA_MOUNT_POINT, DOCKER_DATA_MOUNT_POI
 use arcbox_constants::devices::DOCKER_METADATA_BLOCK_DEVICE;
 
 use super::cmdline::declared_docker_metadata_device;
-use crate::metadata_migrate::{EntryKind, Prepared, prepare_entry, verify_legacy_sources};
+use crate::metadata_migrate::{
+    EntryKind, Prepared, prepare_entry, verify_legacy_pair, verify_legacy_sources,
+};
 
 /// Mount point of the raw ext4 volume (`/run` is tmpfs, writable).
 pub(super) const METADATA_MOUNT: &str = "/run/arcbox/metadata";
@@ -107,7 +109,7 @@ pub(super) fn ensure_metadata_mount() -> Result<String, String> {
 
     let mut notes = Vec::new();
 
-    let paired = super::storage_volume::authorize_legacy_migration(|| {
+    let layout = super::storage_volume::authorize_legacy_migration(|| {
         let entries: Vec<_> = maps
             .iter()
             .map(|mapping| (Path::new(&mapping.target), mapping.kind))
@@ -122,12 +124,18 @@ pub(super) fn ensure_metadata_mount() -> Result<String, String> {
 
     mount_metadata(&device)?;
 
+    if layout == arcbox_storage::StorageLayout::LegacyPair {
+        let entries: Vec<_> = maps.iter().map(|mapping| mapping.name).collect();
+        verify_legacy_pair(Path::new(METADATA_MOUNT), &entries)
+            .map_err(|error| format!("runtime storage needs recovery: {error}"))?;
+    }
+
     for mapping in &maps {
         if crate::mount::is_mounted(&mapping.target) {
             continue;
         }
         let volume_entry = Path::new(METADATA_MOUNT).join(mapping.name);
-        if paired
+        if layout == arcbox_storage::StorageLayout::Paired
             && !volume_entry.try_exists().map_err(|error| {
                 format!("inspect metadata entry {}: {error}", volume_entry.display())
             })?

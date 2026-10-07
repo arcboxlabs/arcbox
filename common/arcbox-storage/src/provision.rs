@@ -97,7 +97,7 @@ pub fn prepare_pair(
             (true, true) => (
                 adopt_image(data, VolumeRole::Data)?,
                 adopt_image(metadata, VolumeRole::Metadata)?,
-                StorageLayout::Paired,
+                StorageLayout::LegacyPair,
             ),
             (true, false) => (
                 adopt_image(data, VolumeRole::Data)?,

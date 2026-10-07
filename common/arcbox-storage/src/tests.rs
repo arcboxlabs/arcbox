@@ -205,3 +205,28 @@ fn corrupt_ready_signature_never_invokes_formatter() {
     );
     assert!(!called.get());
 }
+
+#[test]
+fn recognized_legacy_pair_does_not_assert_completed_metadata_migration() {
+    let dir = tempfile::tempdir().unwrap();
+    let (data, metadata) = pair(dir.path());
+    write_filesystem(&data, VolumeRole::Data, Uuid::new_v4());
+    write_filesystem(&metadata, VolumeRole::Metadata, Uuid::new_v4());
+    let before = [fs::read(&data).unwrap(), fs::read(&metadata).unwrap()];
+    let manifest = prepare_pair(&data, &metadata, IMAGE_SIZE, IMAGE_SIZE).unwrap();
+    assert_eq!(manifest.layout, StorageLayout::LegacyPair);
+    for (role, path) in [(VolumeRole::Data, &data), (VolumeRole::Metadata, &metadata)] {
+        ensure_filesystem(&manifest_path(&data), role, path, |_| {
+            panic!("legacy filesystem must not be reformatted")
+        })
+        .unwrap();
+    }
+    assert_eq!(
+        [fs::read(&data).unwrap(), fs::read(&metadata).unwrap()],
+        before
+    );
+    assert_eq!(
+        prepare_pair(&data, &metadata, IMAGE_SIZE, IMAGE_SIZE).unwrap(),
+        manifest
+    );
+}
