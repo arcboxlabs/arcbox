@@ -540,6 +540,27 @@ fn path_hash(path: &str) -> String {
 mod tests {
     use super::*;
 
+    pub(super) fn isolated_log_test(name: &str) -> bool {
+        const CHILD_TEST: &str = "ARCBOX_ROOTFS_LOG_TEST";
+        if std::env::var(CHILD_TEST).as_deref() == Ok(name) {
+            return true;
+        }
+        // Callsite interest is process-global; another test can register the
+        // cleanup event before the scoped subscriber observes that event.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env(CHILD_TEST, name)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed; 0 failed; 0 ignored"),
+            "isolated log test {name} failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+
     #[test]
     fn test_has_ext4_magic_nonexistent() {
         assert!(!has_ext4_magic(Path::new("/nonexistent")));

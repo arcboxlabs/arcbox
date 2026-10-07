@@ -137,9 +137,14 @@ impl TemporaryImage {
             Ok(()) => Ok(()),
             // The converter can remove its partial output before returning an error.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error).with_context(|| {
-                format!("failed to remove temporary image {}", self.path.display())
-            }),
+            Err(error) => {
+                let error = anyhow::Error::from(error).context(format!(
+                    "failed to remove temporary image {}",
+                    self.path.display()
+                ));
+                tracing::error!(?error, "rootfs build cleanup failed");
+                Err(error)
+            }
         }
     }
 }
@@ -147,9 +152,8 @@ impl TemporaryImage {
 impl Drop for TemporaryImage {
     fn drop(&mut self) {
         // The receiver may disappear before taking an already prepared image.
-        if let Err(error) = self.cleanup() {
-            tracing::error!(?error, "cancelled rootfs build cleanup failed");
-        }
+        // Cleanup records failures before returning, including during Drop.
+        let _ = self.cleanup();
     }
 }
 
@@ -300,6 +304,48 @@ mod tests {
             "{details}"
         );
         assert_eq!(std::fs::read(out).unwrap(), b"existing-image");
+    }
+
+    #[test]
+    fn cleanup_failures_are_logged_once_even_when_the_result_is_dropped() {
+        if !super::super::tests::isolated_log_test(
+            "rootfs::build::tests::cleanup_failures_are_logged_once_even_when_the_result_is_dropped",
+        ) {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let writer = log.reopen().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || writer.try_clone().unwrap())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            for failed_before_delivery in [true, false] {
+                let path = dir
+                    .path()
+                    .join(format!("{failed_before_delivery}.ext4.tmp"));
+                std::fs::create_dir(&path).unwrap();
+                let image = TemporaryImage { path, armed: true };
+                let result = if failed_before_delivery {
+                    Err(image.fail(anyhow::anyhow!("conversion failed")))
+                } else {
+                    Ok(image)
+                };
+                let (reply, prepared) = oneshot::channel();
+                reply.send(result).unwrap();
+                drop(prepared);
+            }
+        });
+        let logged = std::fs::read_to_string(log.path()).unwrap();
+        assert!(logged.contains("true.ext4.tmp"), "{logged}");
+        assert!(logged.contains("false.ext4.tmp"), "{logged}");
+        assert_eq!(
+            logged.matches("rootfs build cleanup failed").count(),
+            2,
+            "{logged}"
+        );
     }
 
     #[tokio::test]

@@ -174,6 +174,7 @@ fn finish_cleanup(injected: Result<()>, failures: Vec<String>) -> Result<()> {
         "vm-agent injection left resources behind: {}",
         failures.join("; ")
     );
+    tracing::error!(error = %cleanup, "vm-agent injection cleanup failed");
     match injected {
         Ok(()) => Err(anyhow::anyhow!(cleanup)),
         Err(error) => Err(error.context(cleanup)),
@@ -257,5 +258,29 @@ mod tests {
         assert!(details.contains("agent copy failed"), "{details}");
         assert!(details.contains("unmount failed"), "{details}");
         assert!(details.contains("loop detach failed"), "{details}");
+    }
+
+    #[test]
+    fn unreceived_injection_cleanup_errors_are_logged() {
+        if !super::super::tests::isolated_log_test(
+            "rootfs::inject::tests::unreceived_injection_cleanup_errors_are_logged",
+        ) {
+            return;
+        }
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let writer = log.reopen().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || writer.try_clone().unwrap())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let result = finish_cleanup(Ok(()), vec!["loop detach failed".into()]);
+            let (reply, completed) = tokio::sync::oneshot::channel();
+            reply.send(result).unwrap();
+            drop(completed);
+        });
+        let logged = std::fs::read_to_string(log.path()).unwrap();
+        assert!(logged.contains("loop detach failed"), "{logged}");
     }
 }
