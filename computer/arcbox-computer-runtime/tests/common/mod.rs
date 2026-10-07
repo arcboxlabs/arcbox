@@ -1,5 +1,9 @@
 //! Helpers shared by the `integration` test binary.
 
+// Serialize loop users so cleanup assertions cannot target another test's reused device.
+#[cfg(target_os = "linux")]
+pub static LOOP_DEVICE_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Returns true if the process is running with effective UID 0 (root).
 #[cfg(target_os = "linux")]
 pub fn is_root() -> bool {

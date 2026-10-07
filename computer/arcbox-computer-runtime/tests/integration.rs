@@ -69,6 +69,7 @@ fn block_device_numbers_round_trip_through_mknod() {
         eprintln!("SKIP block_device_numbers_round_trip_through_mknod — requires root");
         return;
     }
+    let _serial = common::LOOP_DEVICE_TEST.blocking_lock();
     let dir = tempfile::tempdir().unwrap();
     let backing = dir.path().join("backing.img");
     std::fs::File::create(&backing)
@@ -199,6 +200,7 @@ mod block_tools {
     }
 
     fn attach_report_and_detach(tools: &dyn BlockTools) {
+        let _serial = common::LOOP_DEVICE_TEST.blocking_lock();
         let dir = tempfile::tempdir().unwrap();
         let backing = dir.path().join("backing.img");
         std::fs::File::create(&backing)

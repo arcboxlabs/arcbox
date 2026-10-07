@@ -16,8 +16,7 @@ use arcbox_computer_runtime::{
 use arcbox_ext4::constants::file_mode;
 use arcbox_ext4::{FormatOptions, Formatter};
 
-// Cancellation tests compare the shared injection-directory inventory.
-static MOUNT_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+use super::common::LOOP_DEVICE_TEST;
 
 fn block_tools() -> Option<Arc<dyn BlockTools>> {
     let busybox = std::env::var("BUSYBOX").unwrap_or_else(|_| "/bin/busybox".into());
@@ -104,7 +103,7 @@ fn verify_boot_files(root: &Path, expected_agent: &[u8]) -> Result<()> {
 #[tokio::test]
 async fn injection_preserves_distribution_files_and_can_replace_the_agent() {
     let Some(tools) = block_tools() else { return };
-    let _serial = MOUNT_TEST.lock().await;
+    let _serial = LOOP_DEVICE_TEST.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let image = dir.path().join("existing.ext4");
     let mut formatter =
@@ -151,7 +150,7 @@ async fn injection_preserves_distribution_files_and_can_replace_the_agent() {
 #[tokio::test]
 async fn a_caller_sized_build_is_mountable_and_replaces_the_destination() {
     let Some(tools) = block_tools() else { return };
-    let _serial = MOUNT_TEST.lock().await;
+    let _serial = LOOP_DEVICE_TEST.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let layer = dir.path().join("ABCDEF");
     std::fs::create_dir_all(layer.join("diff/sbin")).unwrap();
@@ -258,7 +257,7 @@ async fn cached_templates_can_grow_beyond_the_initial_capacity() {
     const TAIL: &[u8] = b"template-payload-tail";
     let tail_offset = -i64::try_from(TAIL.len()).unwrap();
     let Some(tools) = block_tools() else { return };
-    let _serial = MOUNT_TEST.lock().await;
+    let _serial = LOOP_DEVICE_TEST.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let layer = dir.path().join("ABCDEF");
     std::fs::create_dir_all(layer.join("diff/sbin")).unwrap();
@@ -336,7 +335,7 @@ async fn a_registry_image_builds_at_sparse_computer_capacity() {
 
     const CAPACITY: u64 = 32 * 1024 * 1024 * 1024;
     let Some(tools) = block_tools() else { return };
-    let _serial = MOUNT_TEST.lock().await;
+    let _serial = LOOP_DEVICE_TEST.lock().await;
     let reference =
         std::env::var("ARCBOX_TEST_IMAGE").unwrap_or_else(|_| "docker.io/library/debian:12".into());
     let source = RemoteRef::new(&reference).fetch().await.unwrap();

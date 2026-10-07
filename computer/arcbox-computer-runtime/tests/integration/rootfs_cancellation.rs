@@ -11,7 +11,7 @@ use arcbox_ext4::{FormatOptions, Formatter};
 use arcbox_snapshot::error::{Result, SnapshotError};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
-use super::{MOUNT_TEST, block_tools, builder, verify_agent_files, with_mounted};
+use super::{LOOP_DEVICE_TEST, block_tools, builder, verify_agent_files, with_mounted};
 
 struct PausedAttach {
     inner: Arc<dyn BlockTools>,
@@ -93,7 +93,7 @@ enum Operation {
 #[tokio::test]
 async fn cancellation_before_attach_returns_releases_build_and_injection_resources() {
     let Some(tools) = block_tools() else { return };
-    let _serial = MOUNT_TEST.lock().await;
+    let _serial = LOOP_DEVICE_TEST.lock().await;
     for operation in [Operation::Inject, Operation::Build] {
         let directories_before = injection_directories();
         let dir = tempfile::tempdir().unwrap();
