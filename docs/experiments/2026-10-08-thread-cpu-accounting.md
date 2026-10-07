@@ -54,3 +54,27 @@ Run the sleep control with `--mode sleep`. Before a pause case, verify the VZ he
 The static build passed GCC 14.2.0 with warnings treated as errors. Apple clang-format 21.0.0 passed with `{BasedOnStyle: LLVM, IndentWidth: 4, ColumnLimit: 100}`. Python syntax validation, workspace `cargo fmt --check`, and Clippy for the existing `arcbox-hv` CPU accounting example passed. The meaningful runtime checks are the busy/sleep comparison and the two controlled pause cases.
 
 Raw samples, before/after counters, pause records, the analysis script, and the baseline kernel config are preserved under the task artifact directory `thread-accounting-2026-10-08`. No production kernel or accounting implementation changed.
+
+## Follow-up: CPU timer attribution inside a signal handler
+
+The [timer probe](../../tests/bench/signoz/profiler_attribution.c) tests the effect on CPU timer delivery. A single thread on CPU 1 creates two one-shot timers with four-second thresholds: one uses `CLOCK_THREAD_CPUTIME_ID`, and one uses raw `CPUCLOCK_PROF`. It then raises SIGUSR1. That synthetic Real handler announces entry through an async-signal-safe `write` and computes until raw PROF advances one second. Separate signals record whether each timer fires while the Real handler is active. The handler has a thirty-second monotonic deadline and uses no formatting or locks.
+
+The [driver](../../tests/bench/signoz/run_profiler_attribution.py) waits for the entry marker before pausing the disposable VM. This places the controlled host suspension inside the known handler. The baseline omits suspension. The probe does not run ClickHouse or unwind a stack.
+
+| Case | Elapsed s | Scheduler s | Raw PROF s | SCHED timer signals | PROF timer signals | SCHED signal inside Real handler |
+|---|---:|---:|---:|---:|---:|---|
+| Baseline | 0.999382 | 0.999343 | 1.000 | 0 | 0 | No |
+| Ten-second host pause | 11.015258 | 11.015173 | 1.000 | 1 | 0 | Yes |
+
+The same four-second SCHED timer fires inside a handler that accrued only one second of raw tick CPU time. The PROF timer remains below its threshold. This directly validates false CPU-budget expiry and misleading sample attribution under the controlled suspension. The one-shot timer reports zero overruns; this experiment does not test periodic overrun behavior or reproduce a signal storm.
+
+The deployed ClickHouse [CPU profiler](https://github.com/ClickHouse/ClickHouse/blob/6b09ccf262fd16345434572fb4d45dfd608f86c2/src/Common/QueryProfiler.cpp#L324) uses the affected clock. Its Real and CPU handlers can nest. Therefore, the original concentration of CPU samples in the Real handler is not independent evidence that the handler consumed that much physical CPU. The experiment does not establish that this exact suspension sequence occurred during the original incident or caused its prolonged stall.
+
+To repeat, compile `profiler_attribution.c` with the same static compiler flags, then copy the executable to `/tmp/profiler_attribution` in the existing diagnostic container. Run:
+
+```sh
+python3 tests/bench/signoz/run_profiler_attribution.py --socket "$SOCKET_PATH" --container thread-accounting --output /tmp/profiler-baseline
+python3 tests/bench/signoz/run_profiler_attribution.py --socket "$SOCKET_PATH" --container thread-accounting --pause --host-vm-pid "$VM_PID" --expected-start "$VM_START" --output /tmp/profiler-pause
+```
+
+Both cases satisfied the driver's predictions. GCC strict compilation and static analysis, the same explicit clang-format style, and Python syntax validation passed. Raw records and the probes are preserved under the task artifact directory `profiler-attribution-2026-10-08` with a verified SHA256 manifest. The diagnostic container and daemon were stopped after collection; the previously stopped task builder was returned to its stopped state.
