@@ -235,19 +235,10 @@ impl RootfsBuilder {
 
 /// Delete images for `layer_key` built against a different `vm-agent`.
 ///
-/// Bounds the cache at one image per layer instead of accumulating one per
-/// agent version.
-///
-/// Two kinds of reference survive this:
-///
-/// - a live sandbox's open image, which unlinks fine on Linux and frees its
-///   space when the last reference closes;
-/// - anything in `pinned`, i.e. an image a snapshot records as its
-///   dm-snapshot origin. That reference is durable (it lives in the snapshot
-///   catalog's `meta.json`, so it outlasts reboots) and unrepairable:
-///   re-converting the layer with a different `vm-agent` yields different bytes
-///   than the snapshot's guest memory was captured against, so a regenerated
-///   image is worse than none.
+/// Retain images pinned by snapshots, templates, or durable sandbox records.
+/// These references require the original path and bytes across restarts.
+/// Rebuilding with a different agent cannot reproduce checkpoint provenance.
+/// An unpinned open image survives unlink until its last file reference closes.
 async fn sweep_superseded(
     cache_dir: &Path,
     layer_key: &str,
@@ -265,7 +256,7 @@ async fn sweep_superseded(
         }
         let path = entry.path();
         if pinned.contains(&path) {
-            tracing::debug!(path = %path.display(), "keeping superseded rootfs: pinned by a snapshot");
+            tracing::debug!(path = %path.display(), "keeping superseded rootfs: pinned");
             continue;
         }
         if tokio::fs::remove_file(&path).await.is_ok() {
