@@ -58,7 +58,7 @@ impl pb::SandboxService for SandboxServiceImpl {
         let req = request.to_owned_message();
         let sandbox_id = req.id.clone();
         let _operation = self.operations.lock(&machine, &sandbox_id).await;
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready_for_write(&machine)?;
         // CORE-13 fail-fast: refuse before dialing the guest instead of a
         // boot that wedges into FAILED with an opaque KVM error.
         let capability = runtime.sandbox_nested_virt();
@@ -119,7 +119,7 @@ impl pb::SandboxService for SandboxServiceImpl {
         let req = request.to_owned_message();
         let sandbox_id = req.id.clone();
         let _operation = self.operations.lock(&machine, &sandbox_id).await;
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready_for_write(&machine)?;
         let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         let response = agent
             .sandbox_remove(req)
@@ -150,7 +150,7 @@ impl pb::SandboxService for SandboxServiceImpl {
         let req = request.to_owned_message();
         let sandbox_id = req.id.clone();
         let _operation = self.operations.lock(&machine, &sandbox_id).await;
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready_for_write(&machine)?;
         let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         // Same reason as create/stop/remove: a failed lifecycle mutation must
         // reach the daemon log on its own, not only the caller (CORE-82).
@@ -203,7 +203,7 @@ impl pb::SandboxService for SandboxServiceImpl {
         let machine = ctx.sandbox_machine_id()?;
         let req = request.to_owned_message();
         let _operation = self.operations.lock(&machine, &req.id).await;
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready_for_write(&machine)?;
         let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         agent
             .sandbox_set_lifecycle(req)

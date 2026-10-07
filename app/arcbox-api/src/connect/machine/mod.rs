@@ -68,7 +68,7 @@ impl pb::MachineService for MachineServiceImpl {
         request: ServiceRequest<'_, pb::CreateMachineRequest>,
     ) -> ServiceResult<pb::CreateMachineResponse> {
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready_for_write(&req.name)?;
 
         // Convert bytes to MB for internal config.
         let memory_mb = req.memory / (1024 * 1024);
@@ -149,7 +149,7 @@ impl pb::MachineService for MachineServiceImpl {
         request: ServiceRequest<'_, pb::StartMachineRequest>,
     ) -> ServiceResult<pb::Empty> {
         let id = request.to_owned_message().id;
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready_for_write(&id)?;
 
         runtime
             .machine_manager()
@@ -206,7 +206,7 @@ impl pb::MachineService for MachineServiceImpl {
         request: ServiceRequest<'_, pb::RemoveMachineRequest>,
     ) -> ServiceResult<pb::Empty> {
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready_for_write(&req.id)?;
         let manager = std::sync::Arc::clone(runtime.machine_manager());
 
         // A forced removal stops a running machine first: a synchronous VM
@@ -509,7 +509,7 @@ impl pb::MachineService for MachineServiceImpl {
         }
         let agent = self
             .runtime
-            .ready()?
+            .ready_for_write(&req.id)?
             .get_agent(&req.id)
             .map_err(ApiError::from)?;
 

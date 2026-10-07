@@ -236,7 +236,7 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
             || {
                 let req = req.clone();
                 async {
-                    let mut agent = runtime.agent(&machine)?;
+                    let mut agent = runtime.writable_agent(&machine)?;
                     agent.sandbox_make_dir(req).await
                 }
             },
@@ -262,7 +262,7 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
             || {
                 let req = req.clone();
                 async {
-                    let mut agent = runtime.agent(&machine)?;
+                    let mut agent = runtime.writable_agent(&machine)?;
                     agent.sandbox_remove_entry(req).await
                 }
             },
@@ -288,7 +288,7 @@ impl pb::SandboxFilesystemService for SandboxFilesystemServiceImpl {
             || {
                 let req = req.clone();
                 async {
-                    let mut agent = runtime.agent(&machine)?;
+                    let mut agent = runtime.writable_agent(&machine)?;
                     agent.sandbox_move_entry(req).await
                 }
             },

@@ -8,7 +8,7 @@ use connectrpc::{ConnectError, RequestContext, Response, ServiceRequest, Service
 
 use super::SharedRuntime;
 
-use super::ConnectRuntimeExt as _;
+use super::{ConnectRuntimeExt as _, DEFAULT_MACHINE_NAME};
 
 /// Kubernetes service implementation.
 pub struct KubernetesServiceImpl {
@@ -35,7 +35,7 @@ impl pb::KubernetesService for KubernetesServiceImpl {
         _ctx: RequestContext,
         _request: ServiceRequest<'_, pb::KubernetesStartRequest>,
     ) -> ServiceResult<pb::KubernetesStartResponse> {
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready_for_write(DEFAULT_MACHINE_NAME)?;
         let response = runtime
             .start_kubernetes()
             .await
@@ -61,7 +61,7 @@ impl pb::KubernetesService for KubernetesServiceImpl {
         _ctx: RequestContext,
         _request: ServiceRequest<'_, pb::KubernetesDeleteRequest>,
     ) -> ServiceResult<pb::KubernetesDeleteResponse> {
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready_for_write(DEFAULT_MACHINE_NAME)?;
         let response = runtime
             .delete_kubernetes()
             .await

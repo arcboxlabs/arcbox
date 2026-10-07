@@ -17,7 +17,7 @@ use tokio::sync::{broadcast, watch};
 
 use super::SharedRuntime;
 
-use super::ConnectRuntimeExt as _;
+use super::{ConnectRuntimeExt as _, DEFAULT_MACHINE_NAME};
 
 /// Buffered updates per streaming client. Startup publishes on the order of a
 /// dozen; the margin covers a client that stalls briefly mid-boot without
@@ -492,7 +492,7 @@ impl pb::SystemService for SystemServiceImpl {
         request: ServiceRequest<'_, pb::SetSystemVmResourcesRequest>,
     ) -> ServiceResult<pb::SystemVmResources> {
         let req = request.to_owned_message();
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready_for_write(DEFAULT_MACHINE_NAME)?;
         let resources = runtime
             .resize_system_vm(req.cpus, req.memory_mb)
             .await
@@ -515,7 +515,7 @@ impl pb::SystemService for SystemServiceImpl {
         let req = request.to_owned_message();
         let backend = backend_from_proto(req.backend.as_known().unwrap_or_default())
             .ok_or_else(|| ConnectError::invalid_argument("backend must be HV or VZ"))?;
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready_for_write(DEFAULT_MACHINE_NAME)?;
         runtime
             .switch_system_vm_backend(backend)
             .await

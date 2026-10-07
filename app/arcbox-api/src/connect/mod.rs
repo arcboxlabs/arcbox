@@ -124,12 +124,23 @@ where
 pub(crate) trait ConnectRuntimeExt {
     /// Returns the runtime, or `Unavailable` if it hasn't been initialized.
     fn ready(&self) -> Result<&Arc<Runtime>, ConnectError>;
+
+    /// Returns the runtime after admitting a write to the target machine's storage.
+    fn ready_for_write(&self, machine: &str) -> Result<&Arc<Runtime>, ConnectError>;
 }
 
 impl ConnectRuntimeExt for SharedRuntime {
     fn ready(&self) -> Result<&Arc<Runtime>, ConnectError> {
         self.get()
             .ok_or_else(|| ConnectError::unavailable("daemon is starting, runtime not ready yet"))
+    }
+
+    fn ready_for_write(&self, machine: &str) -> Result<&Arc<Runtime>, ConnectError> {
+        let runtime = self.ready()?;
+        runtime
+            .ensure_storage_writes_available(machine)
+            .map_err(crate::ApiError::from)?;
+        Ok(runtime)
     }
 }
 
@@ -255,6 +266,119 @@ pub fn router_with_system(runtime: SharedRuntime, system: SystemServiceImpl) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    pub(super) fn storage_runtime() -> (std::path::PathBuf, SharedRuntime) {
+        let directory = std::env::temp_dir().join(format!(
+            "arcbox-api-storage-admission-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let runtime = Arc::new(
+            Runtime::new(arcbox_core::config::Config {
+                data_dir: directory.clone(),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        (directory, Arc::new(OnceLock::from(runtime)))
+    }
+
+    #[tokio::test]
+    async fn storage_admission_rejects_reserved_and_held_writes_but_preserves_reads() {
+        let (directory, shared) = storage_runtime();
+        let runtime = shared.ready().unwrap();
+        for machine in [DEFAULT_MACHINE_NAME, "rosetta", "dev"] {
+            assert!(shared.ready_for_write(machine).is_ok());
+        }
+
+        let reservation = runtime.machine_manager().reserve_storage().unwrap();
+        for machine in [DEFAULT_MACHINE_NAME, "rosetta"] {
+            let error = shared.ready_for_write(machine).err().unwrap();
+            assert_eq!(error.code, connectrpc::ErrorCode::FailedPrecondition);
+        }
+        assert!(shared.ready().is_ok());
+        assert!(shared.ready_for_write("dev").is_ok());
+        drop(reservation);
+        assert!(shared.ready_for_write(DEFAULT_MACHINE_NAME).is_ok());
+
+        let hold = runtime.machine_manager().storage_hold_path();
+        std::fs::create_dir_all(hold.parent().unwrap()).unwrap();
+        std::fs::write(&hold, "offline-check").unwrap();
+        assert!(!runtime.storage_writes_protected());
+        for machine in [DEFAULT_MACHINE_NAME, "rosetta"] {
+            let error = shared.ready_for_write(machine).err().unwrap();
+            assert_eq!(error.code, connectrpc::ErrorCode::FailedPrecondition);
+        }
+        assert!(shared.ready().is_ok());
+        assert!(shared.ready_for_write("dev").is_ok());
+        std::fs::remove_file(hold).unwrap();
+        assert!(shared.ready_for_write(DEFAULT_MACHINE_NAME).is_ok());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_hold_write_keeps_public_storage_writes_protected() {
+        let (directory, shared) = storage_runtime();
+        let runtime = shared.ready().unwrap();
+        let hold = runtime.machine_manager().storage_hold_path();
+        std::fs::create_dir_all(&hold).unwrap();
+        assert!(
+            runtime
+                .recover_storage(arcbox_connect::v1::recover_storage_request::Action::CheckOnly)
+                .await
+                .is_err()
+        );
+        std::fs::remove_dir(&hold).unwrap();
+        assert!(!runtime.storage_recovery_active());
+        assert!(runtime.storage_writes_protected());
+        assert!(
+            runtime
+                .machine_manager()
+                .ensure_storage_available(DEFAULT_MACHINE_NAME)
+                .is_err()
+        );
+        for machine in [DEFAULT_MACHINE_NAME, "rosetta"] {
+            let error = shared.ready_for_write(machine).err().unwrap();
+            assert_eq!(error.code, connectrpc::ErrorCode::FailedPrecondition);
+        }
+        assert!(shared.ready().is_ok());
+        assert!(shared.ready_for_write("dev").is_ok());
+        assert!(matches!(
+            runtime.trim_machine_disk(DEFAULT_MACHINE_NAME).await,
+            Err(arcbox_core::CoreError::Common(
+                arcbox_error::CommonError::InvalidState(_)
+            ))
+        ));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn resume_rechecks_storage_admission_after_waiting_for_the_operation_lock() {
+        let (directory, shared) = storage_runtime();
+        let runtime = shared.ready().unwrap();
+        let operations = arcbox_computer::locks::SandboxOperationLocks::default();
+        let operation = operations.lock(DEFAULT_MACHINE_NAME, "sandbox").await;
+        let resumed = sandbox_resume::resume(
+            runtime,
+            &operations,
+            DEFAULT_MACHINE_NAME,
+            "sandbox",
+            sandbox_resume::REASON_RESUME,
+        );
+        tokio::pin!(resumed);
+        tokio::select! {
+            biased;
+            result = &mut resumed => panic!("resume must wait for its operation lock: {result:?}"),
+            () = tokio::task::yield_now() => {}
+        }
+        let reservation = runtime.machine_manager().reserve_storage().unwrap();
+        drop(operation);
+
+        let error = resumed.await.unwrap_err();
+        assert_eq!(error.code, connectrpc::ErrorCode::FailedPrecondition);
+        drop(reservation);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     fn ctx_with(header: Option<&str>) -> RequestContext {
         let mut headers = http::HeaderMap::new();

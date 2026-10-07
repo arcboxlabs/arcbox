@@ -49,9 +49,10 @@ const fn resolve_wait_for_port_budget(requested: u32) -> u32 {
 ///
 /// Data-plane calls transparently resume a paused sandbox (CORE-21): a
 /// guest answer of SANDBOX_PAUSED triggers one shared resume and one retry,
-/// unless the caller opted out via `x-arcbox-no-auto-resume`. Calls that
-/// address execution *history* (attach, wait, stdin status, signal, resize)
-/// are served from the guest's registry without waking the sandbox.
+/// unless the caller opted out via `x-arcbox-no-auto-resume`.
+/// Read calls (attach, wait, stdin status) use the guest's registry without
+/// waking the sandbox. Signal and resize also skip resume, but require
+/// storage write admission because they control a running process.
 pub struct SandboxProcessServiceImpl {
     runtime: SharedRuntime,
     operations: Arc<SandboxOperationLocks>,
@@ -92,7 +93,7 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
             || {
                 let req = req.clone();
                 async {
-                    let mut agent = runtime.agent(&machine)?;
+                    let mut agent = runtime.writable_agent(&machine)?;
                     agent.sandbox_exec_start(req).await
                 }
             },
@@ -141,7 +142,7 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
             || {
                 let req = req.clone();
                 async {
-                    let mut agent = runtime.agent(&machine)?;
+                    let mut agent = runtime.writable_agent(&machine)?;
                     agent.sandbox_stdin_write(req).await
                 }
             },
@@ -173,7 +174,7 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
                 || {
                     let req = req.clone();
                     async {
-                        let mut agent = runtime.agent(&machine)?;
+                        let mut agent = runtime.writable_agent(&machine)?;
                         agent.sandbox_stdin_write(req).await
                     }
                 },
@@ -212,7 +213,7 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
         let machine = ctx.sandbox_machine_id()?;
         let mut agent = self
             .runtime
-            .ready()?
+            .ready_for_write(&machine)?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         agent
@@ -230,7 +231,7 @@ impl pb::SandboxProcessService for SandboxProcessServiceImpl {
         let machine = ctx.sandbox_machine_id()?;
         let mut agent = self
             .runtime
-            .ready()?
+            .ready_for_write(&machine)?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         agent

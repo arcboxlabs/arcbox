@@ -48,7 +48,7 @@ impl pb::SandboxSnapshotService for SandboxSnapshotServiceImpl {
         let _operation = self.operations.lock(&machine, &sandbox_id).await;
         let mut agent = self
             .runtime
-            .ready()?
+            .ready_for_write(&machine)?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         // The RPC error otherwise reaches only the caller; the daemon log
@@ -72,7 +72,7 @@ impl pb::SandboxSnapshotService for SandboxSnapshotServiceImpl {
         let req = request.to_owned_message();
         let sandbox_id = req.id.clone();
         let _operation = self.operations.lock(&machine, &sandbox_id).await;
-        let runtime = self.runtime.ready()?;
+        let runtime = self.runtime.ready_for_write(&machine)?;
         let mut agent = runtime.get_agent(&machine).map_err(ApiError::from)?;
         let resp = agent
             .sandbox_restore(req)
@@ -115,7 +115,7 @@ impl pb::SandboxSnapshotService for SandboxSnapshotServiceImpl {
         let machine = ctx.sandbox_machine_id()?;
         let mut agent = self
             .runtime
-            .ready()?
+            .ready_for_write(&machine)?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         agent

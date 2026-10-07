@@ -45,7 +45,7 @@ impl pb::TemplateService for TemplateServiceImpl {
         let name = req.name.clone();
         let mut agent = self
             .runtime
-            .ready()?
+            .ready_for_write(&machine)?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         // The RPC error otherwise reaches only the caller; the daemon log
@@ -70,7 +70,7 @@ impl pb::TemplateService for TemplateServiceImpl {
         let name = req.name.clone();
         let mut agent = self
             .runtime
-            .ready()?
+            .ready_for_write(&machine)?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         // The RPC error otherwise reaches only the caller; the daemon log
@@ -133,7 +133,7 @@ impl pb::TemplateService for TemplateServiceImpl {
         let reference = req.reference.clone();
         let mut agent = self
             .runtime
-            .ready()?
+            .ready_for_write(&machine)?
             .get_agent(&machine)
             .map_err(ApiError::from)?;
         agent
