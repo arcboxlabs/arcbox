@@ -12,8 +12,9 @@ use arcbox_grpc::sandbox_v1::sandbox_process_service_client::SandboxProcessServi
 use arcbox_grpc::sandbox_v1::sandbox_service_client::SandboxServiceClient;
 use arcbox_grpc::sandbox_v1::sandbox_snapshot_service_client::SandboxSnapshotServiceClient;
 use arcbox_protocol::sandbox_v1::{
-    CheckpointRequest, CreateSandboxRequest, DeleteSnapshotRequest, NetworkMode, NetworkSpec,
-    RemoveSandboxRequest, ResourceLimits, RestoreRequest, SandboxEventsRequest,
+    CheckpointRequest, CreateSandboxRequest, DeleteSnapshotRequest, ListSandboxesRequest,
+    ListSnapshotsRequest, NetworkMode, NetworkSpec, RemoveSandboxRequest, ResourceLimits,
+    RestoreRequest, SandboxEventsRequest,
 };
 use tokio::task::JoinSet;
 use tonic::transport::Channel;
@@ -73,6 +74,7 @@ async fn drive(channel: Channel, metrics: &mut RunMetrics, params: Params) -> Re
     metrics.record_distribution("storm_memory", "MiB", &[params.memory_mib as f64]);
     metrics.record_distribution("storm_vcpus", "vCPUs", &[f64::from(params.vcpus)]);
     let mut snapshot_id = None;
+    let mut warm_snapshot_ids = HashSet::new();
     let result = async {
         let mut events = client
             .events(with_machine(SandboxEventsRequest::default()))
@@ -114,6 +116,24 @@ async fn drive(channel: Channel, metrics: &mut RunMetrics, params: Params) -> Re
         .context("checkpoint timed out")??
         .into_inner();
         snapshot_id = Some(checkpoint.snapshot_id.clone());
+        let catalog = tokio::time::timeout(
+            RPC_TIMEOUT,
+            snapshots.list_snapshots(with_machine(ListSnapshotsRequest::default())),
+        )
+        .await
+        .context("snapshot ownership verification timed out")??
+        .into_inner();
+        ensure!(
+            catalog.next_page_token.is_empty(),
+            "isolated storm snapshot catalog exceeds one page"
+        );
+        // Checkpoint rejects this reserved label; only the runtime can publish these entries.
+        warm_snapshot_ids = catalog
+            .snapshots
+            .into_iter()
+            .filter(|snapshot| snapshot.labels.contains_key("arcbox.warm_key"))
+            .map(|snapshot| snapshot.id)
+            .collect();
         for degree in params.degrees {
             let mut steady = Measurements::default();
             for round in 0..params.rounds {
@@ -141,7 +161,7 @@ async fn drive(channel: Channel, metrics: &mut RunMetrics, params: Params) -> Re
         result,
         remove_all(&mut client, &[TEMPLATE_ID.to_owned()]).await,
     );
-    match snapshot_id {
+    let result = match snapshot_id {
         Some(snapshot_id) => {
             let cleanup = async {
                 tokio::time::timeout(
@@ -157,7 +177,46 @@ async fn drive(channel: Channel, metrics: &mut RunMetrics, params: Params) -> Re
             finish(result, cleanup)
         }
         None => result,
+    };
+    let verified = async {
+        let remaining = tokio::time::timeout(
+            RPC_TIMEOUT,
+            client.list(with_machine(ListSandboxesRequest::default())),
+        )
+        .await
+        .context("sandbox cleanup verification timed out")??
+        .into_inner();
+        ensure!(
+            remaining.sandboxes.is_empty(),
+            "sandboxes remain after storm cleanup: {:?}",
+            remaining.sandboxes
+        );
+        let remaining = tokio::time::timeout(
+            RPC_TIMEOUT,
+            snapshots.list_snapshots(with_machine(ListSnapshotsRequest::default())),
+        )
+        .await
+        .context("snapshot cleanup verification timed out")??
+        .into_inner();
+        ensure!(
+            remaining.next_page_token.is_empty()
+                && remaining
+                    .snapshots
+                    .iter()
+                    .map(|snapshot| snapshot.id.clone())
+                    .collect::<HashSet<_>>()
+                    == warm_snapshot_ids,
+            "storm cleanup must leave exactly the runtime warm snapshots {warm_snapshot_ids:?}: {:?}",
+            remaining.snapshots,
+        );
+        info!(
+            ?warm_snapshot_ids,
+            "storm sandboxes and checkpoint removed; runtime warm snapshots preserved"
+        );
+        Ok(())
     }
+    .await;
+    finish(result, verified)
 }
 
 #[derive(Default)]
