@@ -10,6 +10,7 @@ use security_framework::item::{
     Reference, SearchResult,
 };
 use security_framework::key::{Algorithm, GenerateKeyOptions, KeyType, SecKey};
+use security_framework::os::macos::keychain::SecKeychain;
 use security_framework_sys::base::errSecItemNotFound;
 
 use crate::{Error, authority, request};
@@ -48,16 +49,10 @@ impl KeychainAuthority {
             .and_then(|key| key.external_representation())
             .ok_or(Error::InvalidAuthority("missing EC public key"))?
             .to_vec();
-        let hash = public_key_hash(&key)?;
+        let existing = certificate_for_key(&key)?;
         let key = KeychainKey { key, public };
-        let certificate = match find(
-            ItemSearchOptions::new()
-                .class(ItemClass::certificate())
-                .pub_key_hash(hash.bytes())
-                .load_refs(true),
-        )? {
-            Some(Reference::Certificate(certificate)) => certificate,
-            Some(_) => return Err(Error::InvalidAuthority("expected a certificate")),
+        let certificate = match existing {
+            Some(certificate) => certificate,
             None => {
                 let cert = authority::parameters().self_signed(&key)?;
                 let certificate = SecCertificate::from_der(cert.der())?;
@@ -93,6 +88,20 @@ impl KeychainAuthority {
     #[must_use]
     pub fn certificate_pem(&self) -> String {
         pem::encode(&pem::Pem::new("CERTIFICATE", self.certificate.to_der()))
+    }
+
+    /// Finds this profile's existing public certificate without creating or signing anything.
+    pub fn existing_certificate(tls_dir: &Path) -> Result<Option<Vec<u8>>, Error> {
+        match find(
+            ItemSearchOptions::new()
+                .key_class(KeyClass::private())
+                .label(&Self::label(tls_dir)?)
+                .load_refs(true),
+        )? {
+            Some(Reference::Key(key)) => Ok(certificate_for_key(&key)?.map(|cert| cert.to_der())),
+            Some(_) => Err(Error::InvalidAuthority("expected a private key")),
+            None => Ok(None),
+        }
     }
 
     // Resolve surviving ancestors so uninstall can find keys after the TLS directory is removed.
@@ -131,20 +140,13 @@ impl KeychainAuthority {
                 .label(&label)
                 .load_refs(true),
         )? {
-            let hash = public_key_hash(&key)?;
-            let mut query = ItemSearchOptions::new();
-            query
-                .class(ItemClass::certificate())
-                .pub_key_hash(hash.bytes())
-                .load_refs(true);
-            if let Some(Reference::Certificate(certificate)) = find(&query)? {
-                crate::remove_trust(
-                    pem::encode(&pem::Pem::new("CERTIFICATE", certificate.to_der())).as_bytes(),
-                )?;
+            if let Some(certificate) = certificate_for_key(&key)? {
+                crate::remove_user_trust_der(&certificate.to_der())?;
                 certificate.delete()?;
             }
         }
         match ItemSearchOptions::new()
+            .keychains(&[SecKeychain::default()?])
             .class(ItemClass::key())
             .label(&label)
             .limit(Limit::All)
@@ -155,6 +157,20 @@ impl KeychainAuthority {
             Err(error) => return Err(error.into()),
         }
         Ok(())
+    }
+}
+
+fn certificate_for_key(key: &SecKey) -> Result<Option<SecCertificate>, Error> {
+    let hash = public_key_hash(key)?;
+    match find(
+        ItemSearchOptions::new()
+            .class(ItemClass::certificate())
+            .pub_key_hash(hash.bytes())
+            .load_refs(true),
+    )? {
+        Some(Reference::Certificate(certificate)) => Ok(Some(certificate)),
+        Some(_) => Err(Error::InvalidAuthority("expected a certificate")),
+        None => Ok(None),
     }
 }
 
@@ -169,8 +185,10 @@ fn public_key_hash(key: &SecKey) -> Result<CFData, Error> {
     Ok(unsafe { CFData::wrap_under_get_rule((*value).cast()) })
 }
 
-fn find(query: &ItemSearchOptions) -> Result<Option<Reference>, Error> {
-    match query.search() {
+fn find(query: &mut ItemSearchOptions) -> Result<Option<Reference>, Error> {
+    // The helper stores a public copy in System.keychain. Identity operations
+    // must only find and delete the user's original Keychain items.
+    match query.keychains(&[SecKeychain::default()?]).search() {
         Ok(items) => match items.into_iter().next() {
             Some(SearchResult::Ref(reference)) => Ok(Some(reference)),
             _ => Err(Error::InvalidAuthority("expected a keychain reference")),

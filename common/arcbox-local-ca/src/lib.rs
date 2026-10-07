@@ -3,7 +3,7 @@
 //! On macOS, the daemon creates a per-profile CA in the user's Keychain.
 //! Only the public certificate is published as `tls/ca.pem` on the guest
 //! share. The guest keeps leaf keys in memory and sends signed CSRs to
-//! the host. Users trust the root with `abctl tls trust`.
+//! the host. The privileged helper manages the public root's system trust.
 //!
 //! # Trust model
 //!
@@ -19,12 +19,13 @@
 //!   subtrees from the anchor), as do OpenSSL, NSS and Chrome, so a leaked
 //!   key impersonates only `*.arcbox.local` names, whose traffic reaches
 //!   containers the key holder could already replace.
-//! - **What trusting it means.** `abctl tls trust` adds the certificate to
-//!   the user's login keychain with trust limited to TLS servers, behind
-//!   the macOS authorization prompt. Leaf keys never leave guest memory.
+//! - **What trusting it means.** The helper validates [`PublicAuthority`]
+//!   before installing TLS-server-only Admin trust in the System Keychain.
+//!   The private key stays in the user's Keychain. Leaf keys stay in guest memory.
 //! - **Migration.** A new Keychain CA replaces the old shared CA. The
 //!   daemon removes the shared key and revokes the old root's user trust
-//!   before publishing the new root. Users must trust the new root.
+//!   before publishing the new root. The production daemon asks the helper
+//!   to revoke old Admin trust before publication and trust the new root.
 //! - **Persistence.** Removing `tls/ca.pem` does not rotate the Keychain
 //!   CA. The daemon republishes the same public certificate on startup.
 
@@ -34,6 +35,7 @@ mod authority;
 mod keychain;
 #[cfg(target_os = "macos")]
 mod migration;
+mod public;
 mod request;
 
 use arcbox_atomic_file::AtomicWriteError;
@@ -42,7 +44,8 @@ pub use arcbox_constants::dns::LOCAL_DOMAIN;
 #[cfg(target_os = "macos")]
 pub use self::keychain::KeychainAuthority;
 #[cfg(target_os = "macos")]
-pub use self::migration::remove_trust;
+pub use self::migration::{remove_trust, remove_user_trust_der};
+pub use self::public::PublicAuthority;
 pub use self::request::{CertificateRequest, MAX_CERTIFICATE_SIZE};
 
 /// Why the CA could not be created, loaded, or used.
@@ -78,8 +81,8 @@ pub enum Error {
     #[cfg(target_os = "macos")]
     #[error("security framework: {0}")]
     Security(String),
-    /// A persistent keychain item has an unexpected representation.
-    #[error("invalid keychain CA: {0}")]
+    /// A CA violates the expected identity, constraints, or Keychain representation.
+    #[error("invalid local CA: {0}")]
     InvalidAuthority(&'static str),
 }
 

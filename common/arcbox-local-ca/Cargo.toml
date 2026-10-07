@@ -17,6 +17,7 @@ rustls = { version = "0.23.37", default-features = false, features = ["ring", "s
 thiserror.workspace = true
 time = "0.3.53"
 tracing.workspace = true
+x509-parser = { version = "0.18.1", features = ["verify"] }
 
 [lints]
 workspace = true

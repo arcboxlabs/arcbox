@@ -7,6 +7,7 @@ use core_foundation::base::TCFType;
 use rustls::pki_types::{CertificateDer, pem::PemObject};
 use security_framework::certificate::SecCertificate;
 use security_framework::item::{ItemClass, ItemSearchOptions, Limit, Reference, SearchResult};
+use security_framework::os::macos::keychain::SecKeychain;
 use security_framework::trust_settings::{Domain, TrustSettings};
 use security_framework_sys::base::SecCertificateRef;
 
@@ -51,6 +52,11 @@ pub fn remove_trust(pem: &[u8]) -> Result<(), Error> {
     untrust(&certificate(pem)?)
 }
 
+/// Removes only this DER certificate's user trust, preserving every other profile.
+pub fn remove_user_trust_der(der: &[u8]) -> Result<(), Error> {
+    untrust(&SecCertificate::from_der(der)?)
+}
+
 fn certificate(pem: &[u8]) -> Result<SecCertificate, Error> {
     let der = CertificateDer::from_pem_slice(pem)
         .map_err(|_| Error::InvalidAuthority("invalid public CA certificate"))?;
@@ -63,6 +69,7 @@ pub fn delete_certificate(pem: &[u8]) -> Result<(), Error> {
     // A certificate parsed from DER has no persistent reference. Delete the
     // matching Keychain reference, never another certificate with the same serial.
     let found = ItemSearchOptions::new()
+        .keychains(&[SecKeychain::default()?])
         .class(ItemClass::certificate())
         .serial_number(&certificate.serial_number_bytes()?)
         .limit(Limit::All)
@@ -130,10 +137,21 @@ mod tests {
             }
         }
         let _cleanup = Cleanup(dir.path());
+        assert!(
+            KeychainAuthority::existing_certificate(dir.path())
+                .unwrap()
+                .is_none()
+        );
         let authority = KeychainAuthority::open(dir.path()).unwrap();
         authority.publish(dir.path()).unwrap();
         assert!(!dir.path().join(TLS_CA_KEY).exists());
         let new = fs::read(dir.path().join(TLS_CA_CERT)).unwrap();
+        assert_eq!(
+            KeychainAuthority::existing_certificate(dir.path())
+                .unwrap()
+                .unwrap(),
+            CertificateDer::from_pem_slice(&new).unwrap().as_ref()
+        );
         assert_ne!(new, old);
         drop(authority);
         let reopened = KeychainAuthority::open(dir.path()).unwrap();
@@ -168,7 +186,17 @@ mod tests {
         assert_ne!(reopened.certificate_pem(), other_pem);
         let path = dir.path().to_owned();
         fs::remove_dir_all(&path).unwrap();
+        assert!(
+            KeychainAuthority::existing_certificate(&path)
+                .unwrap()
+                .is_some()
+        );
         KeychainAuthority::delete(&path).unwrap();
+        assert!(
+            KeychainAuthority::existing_certificate(&path)
+                .unwrap()
+                .is_none()
+        );
         let remaining = ItemSearchOptions::new()
             .class(ItemClass::key())
             .label(&KeychainAuthority::label(&path).unwrap())
