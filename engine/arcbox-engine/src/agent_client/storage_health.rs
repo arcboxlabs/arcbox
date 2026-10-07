@@ -146,6 +146,9 @@ fn decode(raw: &[u8]) -> Result<StorageHealth> {
     StorageHealth::decode_from_slice(&payload).map_err(failure)
 }
 
+#[cfg(all(test, target_os = "macos"))]
+mod async_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
