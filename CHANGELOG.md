@@ -5,6 +5,154 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0](https://github.com/arcboxlabs/arcbox/compare/v0.8.2...v0.9.0) (2026-10-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **computer:** expose agent injection and select it at boot
+
+### Features
+
+* **agent:** check unmounted storage without repair ([7cdad1a](https://github.com/arcboxlabs/arcbox/commit/7cdad1a1db123038e506e63919c10a4444772c6e))
+* **agent:** give sidecar images an apply mode, a generation and a quiet period ([9ddcd79](https://github.com/arcboxlabs/arcbox/commit/9ddcd79cc304cdc9bef7e739d8c9a8e56dbbbd2f))
+* **agent:** hold the Mac's sidecar images in flight ([87ac375](https://github.com/arcboxlabs/arcbox/commit/87ac375c45d2c64600b9aebaf237f8b2549f6e09))
+* **agent:** isolate storage recovery from runtime startup ([87cdc3c](https://github.com/arcboxlabs/arcbox/commit/87cdc3c2a81e1926a479c12fdcaf5561fc2cfc0d))
+* **agent:** observe persistent storage mount health ([5d7c234](https://github.com/arcboxlabs/arcbox/commit/5d7c234df7b472e426622143d9cac8aa87d1e5dd))
+* **agent:** parse and build AppleDouble sidecar images ([862beac](https://github.com/arcboxlabs/arcbox/commit/862beacacd0435a95750af156ae1e5ca4cc14455))
+* **agent:** store a sidecar's content as the target's extended attributes ([c5ec5b2](https://github.com/arcboxlabs/arcbox/commit/c5ec5b25fb897fc424a26e6956e194aecc8c66f5))
+* **agent:** translate the Mac's AppleDouble sidecars into real xattrs ([f6db769](https://github.com/arcboxlabs/arcbox/commit/f6db7692f58604f75662f8ddc12ddcdb60afaab8))
+* **agent:** verify durable filesystem writes ([1532f17](https://github.com/arcboxlabs/arcbox/commit/1532f17c2303981c0520bc4096e7383f2f425fa8))
+* **agent:** verify runtime storage writes and Docker lifecycle ([c9ff0d6](https://github.com/arcboxlabs/arcbox/commit/c9ff0d68c9ba94c7c0f747fe4b03968feb75f1a4))
+* **api:** expose explicit storage checks and recovery ([1d5758c](https://github.com/arcboxlabs/arcbox/commit/1d5758c127315bd31dcb92322aa6d041280a73c6))
+* **computer:** build rootfs at caller-owned capacity and path ([c7f9aee](https://github.com/arcboxlabs/arcbox/commit/c7f9aeef11e18c0bc1abd46016a31e99e3609edc))
+* **computer:** expose agent injection and select it at boot ([1ad0d4b](https://github.com/arcboxlabs/arcbox/commit/1ad0d4b66a734b7c889b7b24b9521d02867f28c9))
+* **computer:** expose registry image sources and verify sparse capacity ([e721372](https://github.com/arcboxlabs/arcbox/commit/e721372c86013be49ac1e34a052cc1a46d6559fd))
+* **core:** own storage recovery and verify writable volumes ([d8a7b20](https://github.com/arcboxlabs/arcbox/commit/d8a7b201cc1cf22a5bcd1d0851b67f752a49192b))
+* **core:** preserve storage faults through protected startup ([4d520ba](https://github.com/arcboxlabs/arcbox/commit/4d520bab0056c0ef628efacf05e56657ce5b03d0))
+* **core:** reconcile durable storage recovery protection ([d329f18](https://github.com/arcboxlabs/arcbox/commit/d329f18f7d81c1e0048810b28afabcef277506d7))
+* **daemon:** publish storage health and recovery progress ([693f338](https://github.com/arcboxlabs/arcbox/commit/693f338b71cad71958e6c3df8e607fbe5d11bc80))
+* **docker:** reject writes while storage is protected ([2c9628d](https://github.com/arcboxlabs/arcbox/commit/2c9628d3bc3ce3fc7ad835f3b74543a5e92bf6f7))
+* **engine:** reject stale storage agents before boot ([ecdcf33](https://github.com/arcboxlabs/arcbox/commit/ecdcf33edbdf4a918d750c9d4e9c7dc9167e4ae3))
+* **engine:** reserve system storage during recovery ([55eda49](https://github.com/arcboxlabs/arcbox/commit/55eda4920aa45296c3d1b4630fe2d7364dea7762))
+* **engine:** run cancellable storage verification RPCs ([e187d3b](https://github.com/arcboxlabs/arcbox/commit/e187d3bd9418ee96674b80cf5da027e4d4b36af9))
+* **engine:** stream storage health with cancellation ([2b59c04](https://github.com/arcboxlabs/arcbox/commit/2b59c04e5fefc5a62e5f88df5f1aa94f930396a5))
+* **protocol:** define v7 storage observations and recovery messages ([12474c8](https://github.com/arcboxlabs/arcbox/commit/12474c8cec6d6dafa22b6665ec523d1095262e5b))
+* **storage:** define paired volume identity manifests ([c59fc3d](https://github.com/arcboxlabs/arcbox/commit/c59fc3d95690304ba65612214ddcdbea5ca8b098))
+* **storage:** enforce single-use volume provisioning ([cdfb105](https://github.com/arcboxlabs/arcbox/commit/cdfb1051ac67126470a3bbeaa5efe80ea1fb8696))
+* **storage:** verify recovery copy identities ([25b3ad6](https://github.com/arcboxlabs/arcbox/commit/25b3ad6807d6058cc2fb19b46d05d4bb3c285b4d))
+
+
+### Bug Fixes
+
+* **agent:** identify side entries by inode generation ([c6b993b](https://github.com/arcboxlabs/arcbox/commit/c6b993b752fc18e4e72251d93d756b417f4273a7))
+* **agent:** lay a synthesized sidecar out the way XNU creates one ([623ec79](https://github.com/arcboxlabs/arcbox/commit/623ec79b31725cfb625a3618c361467c69fd9d35))
+* **agent:** preserve metadata inspection and mount failures ([1894b3e](https://github.com/arcboxlabs/arcbox/commit/1894b3e1d258541b104d58c60d95721ad83822cd))
+* **agent:** report one runtime start result per readiness watch ([81a5168](https://github.com/arcboxlabs/arcbox/commit/81a5168172b0e9452cd3267603edef939bdbb0fc))
+* **agent:** scope side-entry handles to filesystems ([56267b6](https://github.com/arcboxlabs/arcbox/commit/56267b634b83288855ef35fcafbf8a6bd08c152d))
+* **api:** enforce storage admission on active input streams ([700200c](https://github.com/arcboxlabs/arcbox/commit/700200c3c8e17596e5a40e5c5b6f0990cea8a878))
+* **api:** reject storage mutations while recovery holds writes ([483d048](https://github.com/arcboxlabs/arcbox/commit/483d048ac19c2e81285242f3d4c278befcb6ee21))
+* **computer:** enforce requested rootfs capacity ([b0eefb2](https://github.com/arcboxlabs/arcbox/commit/b0eefb27a5a2163fc1704717718850427fe73367))
+* **computer:** preserve checkpoint precondition errors ([3b8c8c4](https://github.com/arcboxlabs/arcbox/commit/3b8c8c4621f5e9408edff1ddace058fa2d18fabb))
+* **computer:** preserve growth of cached rootfs templates ([f2dbbcf](https://github.com/arcboxlabs/arcbox/commit/f2dbbcf15d6204128a4f7cb8d0788bbb53ceabc9))
+* **computer:** report cleanup errors before delivering results ([772f41b](https://github.com/arcboxlabs/arcbox/commit/772f41b6067d3c4ec7ed522499af5321fe10cccd))
+* **computer:** require and retain snapshot geometry ([a1045dd](https://github.com/arcboxlabs/arcbox/commit/a1045dd250d76ad3b6fb7bf10ea0b83aa90b60c5))
+* **computer:** retain and pin checkpoint source assets ([6295d5b](https://github.com/arcboxlabs/arcbox/commit/6295d5be0112160af42e736b8d3f52ab886731d1))
+* **computer:** retain rootfs cleanup after cancellation ([d0e11b8](https://github.com/arcboxlabs/arcbox/commit/d0e11b8922b2733a1030cafae3d9cedf98ba1adf))
+* **daemon:** compile startup on Linux ([f5c3a4a](https://github.com/arcboxlabs/arcbox/commit/f5c3a4a7c58e3fce332e4a4c7a9b876550a11efe))
+* **daemon:** propagate shutdown errors after cleanup ([fe540f3](https://github.com/arcboxlabs/arcbox/commit/fe540f3c1f7cf293d43e5fa81fe972395eca5be9))
+* **e2e:** bound benchmark RPCs and preserve failed metrics ([350a7c6](https://github.com/arcboxlabs/arcbox/commit/350a7c62f090eeb2dbc2615ca193ed48fc7dd885))
+* **engine:** enforce v7 admission for agent streams ([2076b86](https://github.com/arcboxlabs/arcbox/commit/2076b865333467422bc5a753c845abff7ea0d726))
+* **engine:** join recovery boot cancellation and stop failed VMs ([cba2f17](https://github.com/arcboxlabs/arcbox/commit/cba2f1736b6ee25074b3d0cda0afafe6192fb5d8))
+* **engine:** report force-stop removal failures ([bd4bc86](https://github.com/arcboxlabs/arcbox/commit/bd4bc86aa0d045fd605365cfb7dfb6a173139416))
+* **engine:** require protocol admission before guest shutdown ([944e47f](https://github.com/arcboxlabs/arcbox/commit/944e47f3769ba1a65079c14b4150931b14848e95))
+* **engine:** require v7 admission for agent RPCs ([06493eb](https://github.com/arcboxlabs/arcbox/commit/06493eb87d3bd21e5c1f4b5520ff71dc8a07da53))
+* **engine:** serialize storage maintenance and join reserved stops ([f606f3b](https://github.com/arcboxlabs/arcbox/commit/f606f3b01f443fb358243900aeee62528cd1631f))
+* **release:** inherit storage dependency versions from workspace ([c38b88f](https://github.com/arcboxlabs/arcbox/commit/c38b88f7008b26749be4a022a6572735ac1e4988))
+* **runtime:** enforce storage protection in computer and SSH sessions ([3c2c5fb](https://github.com/arcboxlabs/arcbox/commit/3c2c5fb701e2d7073a97c54b6de9e49556fcb27f))
+* **storage:** require manifest authority before disk initialization ([96d460c](https://github.com/arcboxlabs/arcbox/commit/96d460c6330ee9e2ea398354166b63accf4db6aa))
+* **storage:** restore missing system VM recovery configuration ([dc028c9](https://github.com/arcboxlabs/arcbox/commit/dc028c9a853282fe1c814f0affb64da83648a9e9))
+* **storage:** resume interrupted pair provisioning safely ([3895f24](https://github.com/arcboxlabs/arcbox/commit/3895f2471750ba5ef47fc357ad2e7c0898bae7d5))
+* **storage:** validate metadata before adopting legacy pairs ([0891099](https://github.com/arcboxlabs/arcbox/commit/0891099a50e43b59d4b0531d155a05302d9e593a))
+* **transport:** close incomplete protocol connections ([c675860](https://github.com/arcboxlabs/arcbox/commit/c6758608cf2c203ddee8ceabbbf156bef9fbd223))
+* **vmm:** wait for guest poweroff before HV teardown ([d4ba771](https://github.com/arcboxlabs/arcbox/commit/d4ba771624615d5ab9c02c12234f095a89333131))
+
+
+### Code Refactoring
+
+* **computer:** finish computer error migration in persistence ([1730d44](https://github.com/arcboxlabs/arcbox/commit/1730d44262ccd3549ab21e70ea68adeea98cc400))
+* **computer:** finish computer query names and naming documentation ([3ed82f4](https://github.com/arcboxlabs/arcbox/commit/3ed82f4851f5b158976cc5a0ded6c144f1dc9a22))
+* **computer:** finish computer state consumer migration ([707aab9](https://github.com/arcboxlabs/arcbox/commit/707aab977ce3b9c88930f1988f039e757c3f7457))
+* **computer:** isolate rootfs agent injection ([ace2c3b](https://github.com/arcboxlabs/arcbox/commit/ace2c3b188ae87407ca2673d039284af0ac2ee3a))
+* **computer:** name computer creation and restore operations ([c45d7a3](https://github.com/arcboxlabs/arcbox/commit/c45d7a35c9077c0e09319d4fa014cc32b1516bab))
+* **computer:** name computer durable records and adoption types ([47b007f](https://github.com/arcboxlabs/arcbox/commit/47b007f295b28696353c9e024deb9a856c687c01))
+* **computer:** name computer errors in runtime foundations ([7385946](https://github.com/arcboxlabs/arcbox/commit/7385946f17f26e77156edae8d4338cd4c92c1a9b))
+* **computer:** name computer identity and network value types ([eeba055](https://github.com/arcboxlabs/arcbox/commit/eeba055e52c9963c8a1596af030486d8343fc746))
+* **computer:** name computer lifecycle and workload operations ([ac15d58](https://github.com/arcboxlabs/arcbox/commit/ac15d584debbbaaf3f6128730d3d2418b54e8634))
+* **computer:** name computer lifecycle transitions ([d3aae10](https://github.com/arcboxlabs/arcbox/commit/d3aae10f49707104cf458d75f9d4091ea81c5c39))
+* **computer:** name computer phases and provision outcomes ([62c199f](https://github.com/arcboxlabs/arcbox/commit/62c199f04774b23073b79a3224d4d82f5f47b593))
+* **computer:** name computer request and configuration types ([354c81e](https://github.com/arcboxlabs/arcbox/commit/354c81e5276bd672868d923ba42c6a9afb28f04a))
+* **computer:** name computer states in lifecycle transitions ([3126bee](https://github.com/arcboxlabs/arcbox/commit/3126bee2516933312bf8a802829bc761e2dba96e))
+* **computer:** name the computer manager and observation types ([6815c2b](https://github.com/arcboxlabs/arcbox/commit/6815c2ba90d7bda8ae07caec6c29315ba1adacc8))
+* **computer:** share validated rootfs publication with templates ([ba47167](https://github.com/arcboxlabs/arcbox/commit/ba47167c335f9a45de5c15bf743c7861690a6a12))
+* **computer:** use computer errors in lifecycle and guest boundaries ([db5d0ac](https://github.com/arcboxlabs/arcbox/commit/db5d0ac73020d1f11ff52e95d1314c3b27063e41))
+* **computer:** use computer errors in manager operations ([bb6154d](https://github.com/arcboxlabs/arcbox/commit/bb6154de894c53beb42691fbf3bc01944159c757))
+* **e2e:** reuse isolated sandbox benchmark harness ([aefdfd6](https://github.com/arcboxlabs/arcbox/commit/aefdfd6cd62927e90ba3657656119ae23f4a7845))
+* **e2e:** share sandbox readiness and execution helpers ([702929b](https://github.com/arcboxlabs/arcbox/commit/702929b76bc6b906131d8787ec7f3f7b1c07f9ab))
+* **runtime:** archive Platform and Fleet integration ([9473d80](https://github.com/arcboxlabs/arcbox/commit/9473d80ac1c10dad6d8404c80f55255662719151))
+
+
+### Tests
+
+* **agent:** check the AppleDouble container against the Mac's own files ([c5486a5](https://github.com/arcboxlabs/arcbox/commit/c5486a54018f122805301432091564ae4d228402))
+* **agent:** keep immediate sidecar recreation coverage ([72bd41d](https://github.com/arcboxlabs/arcbox/commit/72bd41d57152e248e7f395aab2d6fbecc1a6e9df))
+* **agent:** let a clock tick pass before recreating a sidecar file ([1966d6d](https://github.com/arcboxlabs/arcbox/commit/1966d6d2dcfda362af3c690a93b9f1dd607168dd))
+* **agent:** satisfy the pedantic lints in the image table tests ([69f8f47](https://github.com/arcboxlabs/arcbox/commit/69f8f473e47add73cc97990c96663e757d46937d))
+* **agent:** verify storage recovery against real Linux faults ([4fa5cf6](https://github.com/arcboxlabs/arcbox/commit/4fa5cf6a6b0b57d09055d434d8c7581f668a1c1d))
+* **computer:** cover cancellation after rootfs loop attach ([a939305](https://github.com/arcboxlabs/arcbox/commit/a939305020c4765bdb9729eb6074bb1035e26b69))
+* **computer:** isolate loop-device integration fixtures ([cf31e65](https://github.com/arcboxlabs/arcbox/commit/cf31e65f2ba42352e8e6463a2359360b296f4d3e))
+* **e2e:** distinguish sandbox create and cold boot paths ([b0403ad](https://github.com/arcboxlabs/arcbox/commit/b0403ad701fe7ead9347dfa75f4ca265a37d26b5))
+* **e2e:** measure concurrent sandbox snapshot restores ([4568ffd](https://github.com/arcboxlabs/arcbox/commit/4568ffd920ced36234d28122e1c7003e906a56eb))
+* **e2e:** record explicit run and boot provenance ([7cbf56f](https://github.com/arcboxlabs/arcbox/commit/7cbf56fb9b735fb5ff3f27489087d660bcbfb060))
+* **e2e:** report sandbox p95 and sample counts ([2514f80](https://github.com/arcboxlabs/arcbox/commit/2514f80090c74613db73896567d2bc5979d1ef74))
+* **e2e:** separate sandbox admission wait from latency ([c7ff69a](https://github.com/arcboxlabs/arcbox/commit/c7ff69afd7c98a85872fb50783f77d1b084688a9))
+* **e2e:** verify benchmark cleanup by snapshot ownership ([1a9c9a9](https://github.com/arcboxlabs/arcbox/commit/1a9c9a95602742e015f9e6998d71cc9390c448ce))
+* **engine:** verify async storage health stream lifecycle ([d8320f9](https://github.com/arcboxlabs/arcbox/commit/d8320f915f85d29b6b19e908b6e2063a44bdfc6f))
+* **guest:** reject empty sidecar regression runs ([48c222d](https://github.com/arcboxlabs/arcbox/commit/48c222def2530fe34f1184166dc8aeab3643c99a))
+* **net:** show remaining DNS entries in empty assertion ([cd70e56](https://github.com/arcboxlabs/arcbox/commit/cd70e5618fef1fa9e53f8a1cd358ce41bd4d938f))
+* **sandbox:** clean up checkpoints after assertion failures ([d07acec](https://github.com/arcboxlabs/arcbox/commit/d07acec06b0e5e9b434213ce352d2a6a8a0304d7))
+* **sandbox:** verify chained checkpoints with real jailed VMs ([9c3aa25](https://github.com/arcboxlabs/arcbox/commit/9c3aa25e12db0f0831e029bd70f365dfd62fe9aa))
+* **storage:** cover protected restart and metadata recovery faults ([269dc90](https://github.com/arcboxlabs/arcbox/commit/269dc90b08f5154fe8597f9b5f18137361b74752))
+
+
+### Documentation
+
+* **adr:** note the sidecar revision in ADR 0002 ([ef0f8c0](https://github.com/arcboxlabs/arcbox/commit/ef0f8c0deb1a2cc5bbb05057b8b24905443c34c9))
+* **agent:** say when a sidecar image is applied ([914f79d](https://github.com/arcboxlabs/arcbox/commit/914f79d0bff9561aec6c690844801ce8adced1ad))
+* **api:** align handler and transport comments with local routing ([f76d9e5](https://github.com/arcboxlabs/arcbox/commit/f76d9e5fb4d8ff1905c8fd649892bccb74139d1e))
+* **architecture:** align charter with the local macOS product ([2d8b0ea](https://github.com/arcboxlabs/arcbox/commit/2d8b0ea190940d9df223c0674c7185241030336e))
+* **computer:** clarify retained rootfs pins ([2515bc9](https://github.com/arcboxlabs/arcbox/commit/2515bc9a85358815dff783185afca58366cbad6f))
+* **core:** show runtime composition across engine boundaries ([0b47d20](https://github.com/arcboxlabs/arcbox/commit/0b47d209c41331dff02c5f9af54b17329b1293d4))
+* **docker:** show guest proxy request paths ([cb3ebc6](https://github.com/arcboxlabs/arcbox/commit/cb3ebc66bbd054d19b4040238f13d09805f69049))
+* **e2e:** record benchmark validation on merged master ([c6d818a](https://github.com/arcboxlabs/arcbox/commit/c6d818ad11f07c62c955e8b3653cf1ce3cb8df22))
+* **experiments:** record the sidecar translation's measurements ([5270e2c](https://github.com/arcboxlabs/arcbox/commit/5270e2c758d3d8ebde45f3427808703b2a76b159))
+* **fs:** document invalid lseek whence ([164c57f](https://github.com/arcboxlabs/arcbox/commit/164c57fd44efd7c62a0621877089354a707b6362))
+* **guest:** correct the required agent protocol version ([6c06267](https://github.com/arcboxlabs/arcbox/commit/6c062674bc35c00d1e6b9f78dccd5fa92029cb1b))
+* name the single host mount root and the xattr translation in the export docs ([1106545](https://github.com/arcboxlabs/arcbox/commit/1106545ec4b6de7d2643099a88797d5d816d843f))
+* **sdk:** describe local daemon and user-managed proxy connections ([cae629e](https://github.com/arcboxlabs/arcbox/commit/cae629ec95fb20e786a345aeb6387e4fcdea9e8f))
+* **storage:** record verified recovery and fault boundaries ([0d9a5dd](https://github.com/arcboxlabs/arcbox/commit/0d9a5dd1e9241149b5534c5c40514a2de2750810))
+* **virt:** align crate architecture with current backends ([6d73032](https://github.com/arcboxlabs/arcbox/commit/6d73032bb40b3920121946b41281ac74891e1690))
+
+
+### Miscellaneous Chores
+
+* **boot:** pin verified storage recovery assets ([b437257](https://github.com/arcboxlabs/arcbox/commit/b437257d7cadabbab6869381570de87eb39dbd25))
+* **licenses:** regenerate workspace dependency notices ([9802341](https://github.com/arcboxlabs/arcbox/commit/980234190bb4844791903120d7d4ef7626d5e65c))
+* **master:** release sdk-python 0.1.4 ([#744](https://github.com/arcboxlabs/arcbox/issues/744)) ([2d8b2ab](https://github.com/arcboxlabs/arcbox/commit/2d8b2ab84c6c850baa2bfa918fba54b7981811c2))
+* **master:** release sdk-typescript 0.1.6 ([#740](https://github.com/arcboxlabs/arcbox/issues/740)) ([de607c7](https://github.com/arcboxlabs/arcbox/commit/de607c7bcdbd32771daae198e24fce18de555184))
+* **storage:** document format authority and extend Linux checks ([cf40233](https://github.com/arcboxlabs/arcbox/commit/cf402336a52924be8b124802c23a0d9461e6b134))
+* **tools:** bump Docker toolchain to latest stable versions ([#733](https://github.com/arcboxlabs/arcbox/issues/733)) ([097e899](https://github.com/arcboxlabs/arcbox/commit/097e899e3811fa7fcaef845f73083b9dc48e84ae))
+
 ## [0.8.2](https://github.com/arcboxlabs/arcbox/compare/v0.8.1...v0.8.2) (2026-10-03)
 
 
