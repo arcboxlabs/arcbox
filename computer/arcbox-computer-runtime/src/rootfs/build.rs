@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use tokio::sync::oneshot;
 
 use super::{RootfsBuilder, is_oci_layout, rootfs_err};
 use crate::error::VmmError;
@@ -29,8 +30,10 @@ pub struct RootfsSpec {
 impl RootfsBuilder {
     /// Build an ext4 image with the configured agent at the caller's path.
     /// The caller owns the output's lifetime; no cache entry is created.
-    /// Failed builds remove their temporary files. Process termination can
-    /// leave a sibling `.<uuid>.ext4.tmp` for the caller to remove.
+    /// Cancellation leaves the destination unchanged. The owned worker finishes
+    /// conversion and injection before removing its temporary image.
+    /// Runtime shutdown or process termination can leave a sibling
+    /// `.<uuid>.ext4.tmp` for the caller to remove.
     pub async fn build_rootfs(&self, spec: RootfsSpec) -> crate::error::Result<()> {
         if spec.size == 0 || !spec.size.is_multiple_of(ROOTFS_CAPACITY_GRANULARITY) {
             return Err(VmmError::Config(format!(
@@ -49,36 +52,104 @@ impl RootfsBuilder {
         out: &Path,
         size: u64,
     ) -> Result<()> {
-        let parent = out.parent().context("rootfs output path has no parent")?;
-        tokio::fs::create_dir_all(parent)
-            .await
-            .context("create rootfs output directory")?;
-        let temporary = parent.join(format!(".{}.ext4.tmp", uuid::Uuid::new_v4()));
-        let built = async {
-            let path = temporary.clone();
-            tokio::task::spawn_blocking(move || {
-                write_image(source, &path, size).and_then(|()| verify_geometry(&path, size))
-            })
-            .await
-            .context("rootfs conversion task panicked")??;
-            self.inject_agent(&temporary).await?;
-            tokio::fs::rename(&temporary, out)
-                .await
-                .context("publish rootfs image")
+        self.write_and_publish_with(out, move |path| {
+            write_image(source, path, size).and_then(|()| verify_geometry(path, size))
+        })
+        .await
+    }
+
+    async fn write_and_publish_with(
+        &self,
+        out: &Path,
+        write: impl FnOnce(&Path) -> Result<()> + Send + 'static,
+    ) -> Result<()> {
+        let parent = out
+            .parent()
+            .context("rootfs output path has no parent")?
+            .to_owned();
+        let builder = Self::new(self.paths.clone(), self.block_tools.clone());
+        let (reply, prepared) = oneshot::channel();
+        // This task owns every blocking step until injection releases its mount.
+        // Dropping the receiver cancels publication, not resource cleanup.
+        tokio::spawn(async move {
+            let built = async {
+                tokio::fs::create_dir_all(&parent)
+                    .await
+                    .context("create rootfs output directory")?;
+                let temporary = TemporaryImage {
+                    path: parent.join(format!(".{}.ext4.tmp", uuid::Uuid::new_v4())),
+                    armed: true,
+                };
+                let path = temporary.path.clone();
+                let built = async {
+                    tokio::task::spawn_blocking(move || write(&path))
+                        .await
+                        .context("rootfs conversion task panicked")??;
+                    builder.inject_agent(&temporary.path).await
+                }
+                .await;
+                match built {
+                    Ok(()) => Ok(temporary),
+                    Err(error) => Err(temporary.fail(error)),
+                }
+            }
+            .await;
+            if let Err(Err(error)) = reply.send(built) {
+                tracing::error!(?error, "cancelled rootfs build failed");
+            }
+        });
+        let temporary = prepared.await.context("rootfs build task stopped")??;
+        // No await may separate receipt from publication: a cancelled caller
+        // must never leave a detached rename that can replace the destination.
+        temporary.publish(out)
+    }
+}
+
+#[derive(Debug)]
+struct TemporaryImage {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl TemporaryImage {
+    fn publish(mut self, out: &Path) -> Result<()> {
+        match std::fs::rename(&self.path, out).context("publish rootfs image") {
+            Ok(()) => {
+                self.armed = false;
+                Ok(())
+            }
+            Err(error) => Err(self.fail(error)),
         }
-        .await;
-        if let Err(error) = built {
-            return match tokio::fs::remove_file(&temporary).await {
-                Ok(()) => Err(error),
-                // The converter removes partial outputs on its own failures.
-                Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => Err(error),
-                Err(cleanup) => Err(error.context(format!(
-                    "failed to remove temporary image {}: {cleanup}",
-                    temporary.display()
-                ))),
-            };
+    }
+
+    fn fail(mut self, error: anyhow::Error) -> anyhow::Error {
+        match self.cleanup() {
+            Ok(()) => error,
+            Err(cleanup) => error.context(format!("{cleanup:#}")),
         }
-        Ok(())
+    }
+
+    fn cleanup(&mut self) -> Result<()> {
+        if !std::mem::take(&mut self.armed) {
+            return Ok(());
+        }
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            // The converter can remove its partial output before returning an error.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| {
+                format!("failed to remove temporary image {}", self.path.display())
+            }),
+        }
+    }
+}
+
+impl Drop for TemporaryImage {
+    fn drop(&mut self) {
+        // The receiver may disappear before taking an already prepared image.
+        if let Err(error) = self.cleanup() {
+            tracing::error!(?error, "cancelled rootfs build cleanup failed");
+        }
     }
 }
 
@@ -146,6 +217,89 @@ mod tests {
             },
             Arc::new(BusyboxBlockTools::default()),
         )
+    }
+
+    #[tokio::test]
+    async fn cancellation_waits_for_the_writer_before_removing_its_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("images/rootfs.ext4");
+        std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+        std::fs::write(&out, b"existing-image").unwrap();
+        let builder = builder(dir.path());
+        let destination = out.clone();
+        let (started, writing) = tokio::sync::oneshot::channel();
+        let (release, resume) = std::sync::mpsc::channel();
+        let (finished, written) = tokio::sync::oneshot::channel();
+        let caller = tokio::spawn(async move {
+            builder
+                .write_and_publish_with(&destination, move |path| {
+                    std::fs::write(path, b"partial-image")?;
+                    started.send(path.to_path_buf()).unwrap();
+                    resume.recv().unwrap();
+                    assert!(path.exists(), "cleanup must wait for the writer");
+                    std::fs::write(path, b"complete-image")?;
+                    finished.send(()).unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        let temporary = writing.await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert!(temporary.exists());
+        release.send(()).unwrap();
+        written.await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while temporary.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the cancelled build must remove the completed temporary image");
+        assert_eq!(std::fs::read(&out).unwrap(), b"existing-image");
+        assert_eq!(std::fs::read_dir(out.parent().unwrap()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn dropping_a_delivered_image_preserves_the_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("rootfs.ext4");
+        let path = dir.path().join(".prepared.ext4.tmp");
+        std::fs::write(&out, b"existing-image").unwrap();
+        std::fs::write(&path, b"prepared-image").unwrap();
+        let (reply, prepared) = oneshot::channel();
+        reply
+            .send(TemporaryImage {
+                path: path.clone(),
+                armed: true,
+            })
+            .unwrap();
+
+        drop(prepared);
+
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(&out).unwrap(), b"existing-image");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn publication_reports_both_rename_and_cleanup_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("rootfs.ext4");
+        let path = dir.path().join(".invalid.ext4.tmp");
+        std::fs::write(&out, b"existing-image").unwrap();
+        std::fs::create_dir(&path).unwrap();
+
+        let error = TemporaryImage { path, armed: true }
+            .publish(&out)
+            .unwrap_err();
+        let details = format!("{error:#}");
+        assert!(details.contains("publish rootfs image"), "{details}");
+        assert!(
+            details.contains("failed to remove temporary image"),
+            "{details}"
+        );
+        assert_eq!(std::fs::read(out).unwrap(), b"existing-image");
     }
 
     #[tokio::test]

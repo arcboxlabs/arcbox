@@ -1,9 +1,7 @@
 //! Write vm-agent into ext4 images through a loop mount.
 
 use super::RootfsBuilder;
-#[cfg(target_os = "linux")]
-use anyhow::Context;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::{path::PathBuf, sync::Arc};
@@ -11,8 +9,23 @@ use std::{path::PathBuf, sync::Arc};
 impl RootfsBuilder {
     /// Inject the configured agent at [`super::VM_AGENT_PATH`] and link
     /// `/etc/resolv.conf` into `/run`. Preserve the image's `/sbin/init`.
+    /// An owned task completes injection and cleanup after caller cancellation.
+    /// Runtime shutdown or process termination can interrupt resource cleanup.
     pub async fn inject_vm_agent(&self, image: &Path) -> crate::error::Result<()> {
-        self.inject_agent(image).await.map_err(super::rootfs_err)
+        let builder = Self::new(self.paths.clone(), self.block_tools.clone());
+        let image = image.to_owned();
+        let (reply, completed) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let result = builder.inject_agent(&image).await;
+            if let Err(Err(error)) = reply.send(result) {
+                tracing::error!(?error, "cancelled vm-agent injection failed");
+            }
+        });
+        completed
+            .await
+            .context("vm-agent injection task stopped")
+            .and_then(std::convert::identity)
+            .map_err(super::rootfs_err)
     }
 
     /// Inject vm-agent into an ext4 image through a loop mount.
@@ -45,17 +58,15 @@ impl RootfsBuilder {
             Err(e) => Err(e).context("failed to create injection mount dir"),
         };
         if let Err(error) = staged {
-            // Nothing is mounted yet: give the loop device back and report
-            // the original failure (plus the detach's, should it also fail).
+            // Release the device even when staging fails. Preserve every failure.
             let mut failures = Vec::new();
             self.detach_loop(&loop_dev)
                 .await
                 .push_failure(&mut failures);
-            let _ = tokio::fs::remove_dir(&mount_dir).await;
-            return Err(match failures.pop() {
-                Some(detach) => error.context(format!("and then {detach}")),
-                None => error,
-            });
+            remove_mount_dir(&mount_dir)
+                .await
+                .push_failure(&mut failures);
+            return finish_cleanup(Err(error), failures);
         }
 
         let injected = self.write_agent_into(&mount_dir).await;
@@ -67,15 +78,11 @@ impl RootfsBuilder {
         self.detach_loop(&loop_dev)
             .await
             .push_failure(&mut failures);
-        let _ = tokio::fs::remove_dir(&mount_dir).await;
+        remove_mount_dir(&mount_dir)
+            .await
+            .push_failure(&mut failures);
 
-        if !failures.is_empty() {
-            bail!(
-                "vm-agent injection left resources behind: {}",
-                failures.join("; ")
-            );
-        }
-        injected
+        finish_cleanup(injected, failures)
     }
 
     /// Copy the agent to `/sbin/vm-agent` (mode 755) and point
@@ -148,6 +155,31 @@ impl RootfsBuilder {
     }
 }
 
+#[cfg(target_os = "linux")]
+async fn remove_mount_dir(dir: &Path) -> Result<()> {
+    match tokio::fs::remove_dir(dir).await {
+        Ok(()) => Ok(()),
+        // Staging can fail before the directory exists.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove mount dir {}", dir.display())),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn finish_cleanup(injected: Result<()>, failures: Vec<String>) -> Result<()> {
+    if failures.is_empty() {
+        return injected;
+    }
+    let cleanup = format!(
+        "vm-agent injection left resources behind: {}",
+        failures.join("; ")
+    );
+    match injected {
+        Ok(()) => Err(anyhow::anyhow!(cleanup)),
+        Err(error) => Err(error.context(cleanup)),
+    }
+}
+
 /// `mount(2)` an ext4 image's loop device at `dir`, off the executor —
 /// mounting can replay the journal.
 #[cfg(target_os = "linux")]
@@ -207,5 +239,23 @@ impl PushFailure for Result<()> {
         if let Err(e) = self {
             failures.push(format!("{e:#}"));
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_preserves_the_injection_error_and_every_release_failure() {
+        let error = finish_cleanup(
+            Err(anyhow::anyhow!("agent copy failed")),
+            vec!["unmount failed".into(), "loop detach failed".into()],
+        )
+        .unwrap_err();
+        let details = format!("{error:#}");
+        assert!(details.contains("agent copy failed"), "{details}");
+        assert!(details.contains("unmount failed"), "{details}");
+        assert!(details.contains("loop detach failed"), "{details}");
     }
 }
