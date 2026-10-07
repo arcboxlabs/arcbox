@@ -58,9 +58,8 @@ pub mod v1 {
 
 /// gRPC services from the arcbox.sandbox.v1 package.
 ///
-/// Split along the control-plane / data-plane seam (CORE-57), so a cloud
-/// deployment can serve the control plane from a multi-tenant front door
-/// and the data plane from whatever is co-located with the sandbox:
+/// The local daemon serves both control-plane and data-plane services.
+/// Guest operations are forwarded to the System VM's agent:
 /// - SandboxService - control plane: lifecycle, events, published ports
 /// - TemplateService - control plane: the template catalog (CORE-21)
 /// - SandboxProcessService - data plane: executions (exec family)

@@ -8,10 +8,9 @@
 // and exit status go through the execution id, never through a stream.
 //
 // This is **data plane**: every call here touches a specific running
-// sandbox, and carries the process's stdio. It is served by whatever is
-// co-located with the sandbox — the local daemon, or the node agent in a
-// cloud deployment — so bulk stdio never transits the control-plane entry
-// point. See `sandbox.proto` for the control plane.
+// sandbox and carries the process's stdio. The local daemon serves these
+// calls and forwards guest operations to the System VM's agent.
+// See `sandbox.proto` for the control plane.
 
 syntax = "proto3";
 

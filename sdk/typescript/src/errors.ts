@@ -68,7 +68,7 @@ export class ConnectionLostError extends ConnectionFailedError {
   name = "ConnectionLostError";
 }
 
-/** Authentication is required or was rejected. Reserved for the remote tier (CORE-63). */
+/** Authentication is required or was rejected by the endpoint. */
 export class AuthenticationError extends ArcBoxError {
   name = "AuthenticationError";
 }

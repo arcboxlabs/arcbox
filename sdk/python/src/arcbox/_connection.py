@@ -87,10 +87,10 @@ def _default_socket_path(env: Mapping[str, str]) -> str:
 def resolve_connection(options: Connection | None, env: Mapping[str, str]) -> ResolvedConnection:
     """Resolve connection options against the environment.
 
-    Tier selection: an explicit ``socket_path`` and an explicit
+    Transport selection: an explicit ``socket_path`` and an explicit
     ``api_url`` are contradictory and rejected. At the environment level
     ``ARCBOX_API_URL`` wins over ``ARCBOX_SOCKET`` — setting it selects
-    the remote tier.
+    the configured daemon proxy URL.
     """
     options = options or Connection()
     if options.socket_path is not None and options.api_url is not None:

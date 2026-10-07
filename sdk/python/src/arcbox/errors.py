@@ -93,7 +93,7 @@ class ConnectionLostError(ConnectionFailedError):
 
 
 class AuthenticationError(ArcBoxError):
-    """Authentication is required or was rejected. Reserved for the remote tier (CORE-63)."""
+    """Authentication is required or was rejected by the endpoint."""
 
 
 class ProtocolMismatchError(ArcBoxError):

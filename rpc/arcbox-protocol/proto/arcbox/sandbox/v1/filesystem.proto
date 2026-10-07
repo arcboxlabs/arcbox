@@ -1,10 +1,9 @@
 // Sandbox filesystem data plane.
 //
 // File transfer and path operations inside a running sandbox. **Data
-// plane**: the calls carry file bytes and address one specific sandbox,
-// so they are served by whatever is co-located with it rather than
-// routed through the control-plane entry point. See `sandbox.proto` for
-// the control plane.
+// plane**: the calls carry file bytes and address one specific sandbox.
+// The local daemon forwards guest operations to the System VM's agent.
+// See `sandbox.proto` for the control plane.
 //
 // Every verb is a real RPC into the guest agent — never a shelled-out
 // `ls`/`stat` parse. The path verbs (CORE-62) are contract-only until

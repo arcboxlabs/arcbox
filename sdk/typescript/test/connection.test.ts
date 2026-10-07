@@ -68,7 +68,7 @@ describe("resolveConnection", () => {
     expect(conn.baseUrl).toBe(UDS_BASE_URL);
   });
 
-  it("ARCBOX_API_URL selects the remote tier over ARCBOX_SOCKET", () => {
+  it("ARCBOX_API_URL selects a daemon proxy URL over ARCBOX_SOCKET", () => {
     const conn = resolveConnection(
       {},
       { ARCBOX_API_URL: "https://cloud.example", ARCBOX_SOCKET: "/tmp/x.sock" },
@@ -77,7 +77,7 @@ describe("resolveConnection", () => {
     expect(conn.socketPath).toBeUndefined();
   });
 
-  it("an explicit apiUrl selects the remote tier", () => {
+  it("an explicit apiUrl selects a daemon proxy URL", () => {
     const conn = resolveConnection({ apiUrl: "https://cloud.example" }, {});
     expect(conn.baseUrl).toBe("https://cloud.example");
     expect(conn.socketPath).toBeUndefined();

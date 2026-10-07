@@ -35,12 +35,12 @@ export interface ConnectionOptions {
 /** A fully resolved connection target. */
 export interface ResolvedConnection {
   /**
-   * Base URL handed to the transport. On the Unix-socket tier this is a
+   * Base URL handed to the transport. For a Unix socket this is a
    * placeholder (`http://arcbox`) that only supplies the Host header and
    * request paths — the connection itself goes to `socketPath`.
    */
   baseUrl: string;
-  /** Unix socket to dial; unset on the remote (TCP) tier. */
+  /** Unix socket to dial; unset when a daemon proxy URL is configured. */
   socketPath?: string;
   /** Bearer credential to attach, when set. */
   apiKey?: string;
@@ -84,9 +84,9 @@ function profileDataDirName(profile: string | undefined): string {
 /**
  * Resolve connection options against the environment.
  *
- * Tier selection: an explicit `socketPath` and an explicit `apiUrl` are
+ * Transport selection: an explicit `socketPath` and an explicit `apiUrl` are
  * contradictory and rejected. At the environment level `ARCBOX_API_URL`
- * wins over `ARCBOX_SOCKET` — setting it selects the remote tier.
+ * wins over `ARCBOX_SOCKET` and selects the configured daemon proxy URL.
  */
 export function resolveConnection(
   options: ConnectionOptions = {},

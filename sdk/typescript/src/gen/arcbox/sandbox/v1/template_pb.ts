@@ -8,7 +8,7 @@
 // `CreateSandboxRequest.template` resolves `name[:version]` references
 // against this catalog.
 //
-// Control plane: the catalog addresses the fleet, not one sandbox.
+// Control plane: the catalog is shared by the local daemon's sandboxes.
 // Checkpoint/restore of a *live* sandbox stays in `snapshot.proto`;
 // promoting a checkpoint into a reusable template goes through
 // `Build` with a `snapshot_id` source.

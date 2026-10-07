@@ -8,15 +8,12 @@
 //
 // This file is the **control plane**: creating, inspecting, listing, and
 // destroying sandboxes, plus their lifecycle events and published ports.
-// These calls address a fleet — in cloud deployments they are served by a
-// multi-tenant front door that knows which node holds which sandbox.
+// The local macOS daemon serves these calls for its sandboxes.
 //
 // The **data plane** — the calls that touch a running sandbox's processes and
-// files — lives in `process.proto` and `filesystem.proto`, so it can be
-// served by whatever is co-located with the sandbox itself (the local daemon,
-// or the node agent in a cloud deployment) without routing bulk stdio and
-// file bytes through the control-plane entry point. `snapshot.proto` carries
-// checkpoint/restore.
+// files — lives in `process.proto` and `filesystem.proto`. The daemon serves
+// these calls and forwards guest operations to the System VM's agent.
+// `snapshot.proto` carries checkpoint/restore.
 //
 // Shared primitives (enums, resource limits, exit status, keepalive) live
 // here because the control plane defines the sandbox resource itself; the
@@ -318,7 +315,6 @@ export type CreateSandboxRequest = Message<"arcbox.sandbox.v1.CreateSandboxReque
    *                      CORE-21); a bare name resolves to the newest
    *                      published version. Template defaults apply
    *                      per the override rules on the fields above.
-   * Cloud mode resolves names against the tenant's template registry.
    * Anything else is rejected with INVALID_ARGUMENT.
    *
    * @generated from field: string template = 17;

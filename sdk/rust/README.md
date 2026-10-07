@@ -30,7 +30,7 @@ Resolution order: explicit option > environment > default.
 | Environment      | Meaning                                                                 |
 | ---------------- | ----------------------------------------------------------------------- |
 | `ARCBOX_SOCKET`  | daemon Unix socket (default `$ARCBOX_DATA_DIR/run/arcbox.sock`; data dir default `~/.arcbox`, or `~/.arcbox-dev` under `ARCBOX_PROFILE=development`) |
-| `ARCBOX_API_URL` | remote tier (reserved, CORE-63) — **not supported by this SDK yet**; setting it without `ARCBOX_SOCKET` is an error rather than a silent fallback |
+| `ARCBOX_API_URL` | user-managed daemon proxy URL — **unsupported by the Rust SDK**; setting it without a socket override is an error |
 
 `Connection::new().socket_path(...)` overrides everything. Nothing is
 dialled at construction — the socket opens on the first call, so a
@@ -103,5 +103,6 @@ Also shipped, completing the data plane:
 - **events**: `Sandbox::events()` — typed lifecycle events, keepalives
   filtered.
 
-Deferred: `wait_for_log` (filter `output()` directly), the remote tier
-(CORE-63), and Template statics.
+The Rust SDK supports Unix sockets only. Use the TypeScript or Python SDK to connect through a user-managed daemon proxy URL.
+
+Deferred: `wait_for_log` (filter `output()` directly) and Template statics.

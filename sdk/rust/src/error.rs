@@ -49,7 +49,7 @@ pub enum ErrorKind {
     TtyRequired,
     /// The requested host port is already bound.
     PortInUse,
-    /// Authentication is required (reserved for the remote tier).
+    /// Authentication is required by the endpoint.
     Authentication,
     /// Client and daemon protocol levels are incompatible.
     ProtocolMismatch,

@@ -8,7 +8,7 @@
 //! | `ARCBOX_SOCKET`  | daemon Unix socket                                  |
 //! | `ARCBOX_DATA_DIR`| data dir whose `run/arcbox.sock` is the default     |
 //! | `ARCBOX_PROFILE` | `development` switches the default to `~/.arcbox-dev` |
-//! | `ARCBOX_API_URL` | remote tier (reserved, CORE-63) — not supported here yet |
+//! | `ARCBOX_API_URL` | user-managed daemon proxy URL — unsupported by the Rust SDK |
 
 use std::env;
 use std::path::PathBuf;
@@ -40,9 +40,9 @@ impl Connection {
     ///
     /// # Errors
     ///
-    /// [`ErrorKind::InvalidArgument`] when `ARCBOX_API_URL` selects the
-    /// remote tier (this SDK does not speak it yet) or no home directory
-    /// exists to anchor the default data dir.
+    /// [`ErrorKind::InvalidArgument`] when `ARCBOX_API_URL` is set without a
+    /// socket override, or no home directory exists to anchor the default
+    /// data dir. This SDK supports Unix sockets only.
     pub(crate) fn resolve(&self) -> Result<PathBuf, Error> {
         if let Some(path) = &self.socket_path {
             return Ok(path.clone());
@@ -53,8 +53,8 @@ impl Connection {
         if env_non_empty("ARCBOX_API_URL").is_some() {
             return Err(Error::new(
                 ErrorKind::InvalidArgument,
-                "ARCBOX_API_URL selects the remote tier, which the Rust SDK \
-                 does not support yet",
+                "ARCBOX_API_URL configures a daemon proxy URL, but the Rust SDK \
+                 supports Unix sockets only",
                 "connection.resolve",
             )
             .with_suggestion(

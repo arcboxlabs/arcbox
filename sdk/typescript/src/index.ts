@@ -1,6 +1,6 @@
 /**
  * @arcbox/sandbox — run isolated microVM sandboxes on the local ArcBox
- * daemon (and, later, a remote tier) over the Connect protocol.
+ * daemon over the Connect protocol, directly or through your own proxy.
  *
  * Public surface only: everything under `src/gen/` is generated wire
  * code and is deliberately NOT exported — public shapes are hand-written

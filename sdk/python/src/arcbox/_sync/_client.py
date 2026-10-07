@@ -4,8 +4,8 @@
 Unary RPCs are plain POSTs with binary-protobuf bodies
 (``application/proto``); streaming RPCs speak the Connect streaming
 envelope (``application/connect+proto``, framing in ``_envelope``).
-The local tier dials the daemon's Unix socket through httpx's ``uds``
-transport; the same code path serves a future remote tier over HTTPS.
+The default transport dials the daemon's Unix socket through httpx's ``uds``
+transport. An explicit API URL connects through a user-managed daemon proxy.
 """
 
 from __future__ import annotations

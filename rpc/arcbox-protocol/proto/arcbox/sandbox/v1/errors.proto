@@ -63,7 +63,7 @@ enum ErrorCode {
     ERROR_CODE_TTY_REQUIRED = 14;
     // The requested host port is already bound.
     ERROR_CODE_PORT_IN_USE = 15;
-    // Authentication is required. Reserved for the remote tier (CORE-63).
+    // Authentication is required, for example by a user-managed daemon proxy.
     ERROR_CODE_AUTH_REQUIRED = 16;
     // The client and daemon protocol levels are incompatible; the
     // suggestion names which side to upgrade.

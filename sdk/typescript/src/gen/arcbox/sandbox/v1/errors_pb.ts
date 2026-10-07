@@ -197,7 +197,7 @@ export enum ErrorCode {
   PORT_IN_USE = 15,
 
   /**
-   * Authentication is required. Reserved for the remote tier (CORE-63).
+   * Authentication is required, for example by a user-managed daemon proxy.
    *
    * @generated from enum value: ERROR_CODE_AUTH_REQUIRED = 16;
    */

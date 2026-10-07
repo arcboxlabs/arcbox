@@ -142,7 +142,6 @@ pub struct CreateSandboxRequest {
     ///                       CORE-21); a bare name resolves to the newest
     ///                       published version. Template defaults apply
     ///                       per the override rules on the fields above.
-    /// Cloud mode resolves names against the tenant's template registry.
     /// Anything else is rejected with INVALID_ARGUMENT.
     #[prost(string, tag = "17")]
     pub template: ::prost::alloc::string::String,
@@ -1791,7 +1790,7 @@ pub enum ErrorCode {
     TtyRequired = 14,
     /// The requested host port is already bound.
     PortInUse = 15,
-    /// Authentication is required. Reserved for the remote tier (CORE-63).
+    /// Authentication is required, for example by a user-managed daemon proxy.
     AuthRequired = 16,
     /// The client and daemon protocol levels are incompatible; the
     /// suggestion names which side to upgrade.
