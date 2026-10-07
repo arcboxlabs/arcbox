@@ -1,12 +1,12 @@
 # ArcBox Architecture Charter — the Engine/Computer Restructure
 
-Status: **active** (2026-08-13; moved back from the company repo 2026-09-30). This document is the anchor for the
+Status: **active** (2026-08-13; product scope revised 2026-10-08 by [ADR 0004](../adr/0004-macos-local-product.md)). This document is the anchor for the
 workspace restructure: every restructure PR cites it, and changes to the
 decisions below happen here first.
 
 ## Vision
 
-ArcBox becomes the cross-platform **library stack for agent computers** —
+ArcBox is a local macOS product built on a **library stack for agent computers** —
 the base capabilities (VM lifecycle, images, snapshots, networking, agent
 channel, sandbox semantics) packaged as embeddable Rust crates, with thin
 product shells assembling them. "Agent computer" supersedes "sandbox" as
@@ -17,12 +17,13 @@ The unlock is anatomical, not greenfield: the repo already contains a
 production Linux microVM engine (`virt/arcbox-vm`, the frozen guest-side
 Firecracker sandbox manager) and a macOS engine (welded into
 `app/arcbox-core`'s daemon `Runtime`). The restructure extracts one
-platform-neutral engine from both hosts and re-assembles it at three
+platform-neutral engine for the macOS host and its Linux guests at two
 points:
 
 1. `app/arcbox-daemon` — macOS desktop product (today's shape)
-2. `guest/` `vm-agent` — inside the System VM (today's sandbox shape)
-3. a bare-Linux node daemon profile — the cocoon-equivalent (new)
+2. `guest/arcbox-agent` — inside the System VM, managing nested Firecracker sandboxes
+
+Linux guest support, KVM, Firecracker, TAP networking, and portable libraries remain part of the local product. Fleet and the former bare-Linux node product expansion are archived under ADR 0004. The completed extraction phases below remain architectural history; they do not authorize those product expansions.
 
 ## Locked decisions
 
@@ -38,11 +39,7 @@ points:
   in-process (existing skeleton, demoted to R&D). The "performance paths
   are custom-built" doctrine stays scoped to macOS, where it is the moat;
   on Linux differentiation lives above the VMM.
-- **D3 — Repo boundary mirrors cocoonstack's split.** In this repo: the
-  Rust library stack, node daemon, CLI, guest agent, protocol, SDKs.
-  Sibling repos: K8s operators / virtual-kubelet provider (Go ecosystem),
-  snapshot registry service, guest image pipelines (boot-assets already
-  is one), desktop app (already is one).
+- **D3 — Repo boundary follows the local product.** This repo contains the Rust library stack, macOS daemon, CLI, guest agent, protocol, and SDKs. Sibling repos provide the desktop app and guest image pipelines. Fleet services, K8s operators, and a cloud snapshot registry are outside the current product scope.
 - **D4 — Layer dependency rules** (enforced the way `common/`'s "no VM
   dep" rule is): `engine/` and `computer/` crates depend on macOS-only
   crates (VZ/vmnet/HV) only through the hypervisor trait, and never on
@@ -58,7 +55,7 @@ points:
 - **D6 — Strangler-fig migration.** Each extraction leaves compatibility
   re-exports in `arcbox-core` so consumers keep compiling; consumers then
   migrate in follow-up commits and the re-exports die. Commits stay
-  atomic and reviewable per repo CLAUDE.md discipline; every move updates
+  atomic and reviewable per repo AGENTS.md discipline; every move updates
   the AGENTS.md files that describe the moved code.
 
 ## Target workspace tree
@@ -78,7 +75,6 @@ arcbox/
 │   ├── arcbox-image       # boot_assets + machine_image + remote_image
 │   ├── arcbox-engine      # vm_lifecycle + machine + vm
 │   └── arcbox-snapshot    # arcbox-vm snapshot/snapshot_cow/template_catalog
-│                          #   + future registry client
 ├── computer/          # L3 agent-computer domain (platform-neutral)
 │   ├── arcbox-computer    # sandbox_capability + business logic distilled
 │   │                      #   from arcbox-api sandbox services
@@ -87,10 +83,10 @@ arcbox/
 │                          #   pool/claim, checkpoint, exec, files, timers
 ├── rpc/               # protocol + transport (unchanged); arcbox-api
 │                      #   Connect handlers become thin adapters
-├── app/               # L4 product shells: daemon (desktop|node profiles),
+├── app/               # L4 product shells: macOS daemon,
 │                      #   cli, docker compat, helper, migration
 ├── guest/             # arcbox-agent; vm-agent recomposed over engine/
-├── sdk/  fleet/  runtime/  tests/  xtask/
+├── sdk/  runtime/  tests/  xtask/
 ```
 
 `runtime/` (arcbox-container, arcbox-oci — currently zero consumers) is
@@ -111,7 +107,6 @@ does not stay as dead weight.
 | `virt/arcbox-vm/src/network` | `virt/arcbox-tap-net` (Linux `GuestNetwork` adapter) | P4b (R2) |
 | `virt/arcbox-vm` remainder (`SandboxManager` cluster) | `computer/arcbox-computer-runtime` over the VM port; `arcbox-vm` deleted | P4b (R3) |
 | `virt/arcbox-vmm` VZ path, engine `VmManager` on `Vmm` | `virt/arcbox-vz-driver`, `arcbox-vmm::HvDriver`, engine `VmRegistry` over `dyn VmHandle` | P4b (R4) |
-| `app/arcbox-daemon` | gains `node` profile (no docker-compat/vmnet/magic-mount deps) | P5 |
 
 ## Phases and acceptance criteria
 
@@ -288,8 +283,7 @@ does not stay as dead weight.
     sandbox cold-start baselines ~22/~180/~640 ms held, `rg fc_sdk
     virt/arcbox-vm` empty) → R2 tap-net → R3 runtime → R4 engine/vmm
     (accept: both-backend e2e green, per-boot counters ~2301/~71
-    unchanged) → R5 node composition (platform agent + daemon node
-    profile). Datapath (SplitQueue, HV workers, `arcbox-net`), vsock
+    unchanged). The former R5 node composition is outside the product scope under ADR 0004. Datapath (SplitQueue, HV workers, `arcbox-net`), vsock
     framing and `arcbox.sandbox.v1` are out of scope by decision.
 
 - **D2 clarified (2026-08-13): the FC driver is not a `Hypervisor` impl.**
@@ -335,17 +329,14 @@ does not stay as dead weight.
   renamed, and `vm-agent` itself stays small and separate — it depends
   only on `arcbox-vm-proto`, never on `arcbox-vm` (or its successor
   `arcbox-computer-runtime`).
-- **P5 — Linux node.** `node` daemon profile boots a computer on bare
-  Linux/KVM via FC-driver; ubuntu KVM CI job. *Accept: a sandbox claim +
-  exec round-trips on a Linux host in CI.* Sibling repos (registry, K8s
-  provider) start only after P5.
+- **P5 — Linux node (archived).** ADR 0004 removes the bare-Linux daemon profile and dependent cloud services from the product plan. Linux validation continues for the System VM, nested sandboxes, and portable libraries.
 
 ## Risks / standing rules
 
 - **Desktop-dep leakage** into the library tree is the failure mode D4
   exists for; the Linux CI compile gate is the tripwire.
 - **macOS P0 performance targets are unaffected** by this charter; the
-  restructure must not regress the CLAUDE.md perf table, and macOS work
+  restructure must not regress the AGENTS.md perf table, and macOS work
   keeps priority until those targets converge.
 - **Docs move with code**: every extraction updates the AGENTS.md set in
   the same PR, or the handbook rots.

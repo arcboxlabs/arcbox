@@ -60,17 +60,17 @@ from memory. Every new file is added to the index below.
 
 ### Architecture
 
-- [Architecture charter — the engine/computer restructure](architecture/charter.md) (active, 2026-08-13)
+- [Architecture charter — the engine/computer restructure](architecture/charter.md) (active, product scope revised 2026-10-08)
 - [VM stack redesign — the P4b execution design](architecture/vm-stack-redesign.md) (locked, 2026-08-16)
 - [HV backend architecture](architecture/hv-backend.md) (current, 2026-08-13; interrupt flow amended by ADR 0001)
 - [VirtIO queue abstraction convergence](architecture/virtio-queue-convergence.md) (historical, 2026-06)
 
 ### Decisions
 
-- [2026-10-08 — ArcBox is a local macOS product](adr/2026-10-08-macos-local-product.md)
 - [0001 — On the HV backend, asserting the SPI is the whole wake](adr/0001-hv-spi-is-the-whole-wake.md) (2026-09-30)
 - [0002 — A distro machine's root is served to the host by a userspace NFSv3 server in its agent, mounted over the bridge NIC](adr/0002-machine-root-export-over-userspace-nfsv3.md) (2026-10-03; decisions 4 and 5 superseded by ADR 0003)
 - [0003 — One host mount root: `~/ArcBox` is a plain directory, with the docker export at `docker/` and every running machine's root at `machines/<name>`](adr/0003-single-host-mount-root.md) (2026-10-04)
+- [0004 — ArcBox is a local macOS product](adr/0004-macos-local-product.md) (2026-10-08)
 
 ### Plans
 

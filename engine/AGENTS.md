@@ -1,8 +1,9 @@
 # engine/ — Engine Layer Agent Guidance
 
 The embeddable, daemon-free engine library. Crates here are the
-platform-neutral core that three shells assemble: the macOS daemon
-(`app/`), the in-guest `vm-agent`, and (future) a bare-Linux node daemon.
+platform-neutral core used by the macOS daemon (`app/`) and the System VM's
+`guest/arcbox-agent`. Linux guest support remains part of the local product.
+ADR 0004 archives the former bare-Linux node product expansion.
 The restructure plan and its locked decisions live in
 `docs/architecture/charter.md`.
 
@@ -50,8 +51,7 @@ The restructure plan and its locked decisions live in
   (`snapshot`), the device-mapper copy-on-write rootfs manager checkpoints
   are cloned through (`snapshot_cow`), and the template catalog that
   promotes a snapshot into a versioned base image (`template_catalog`).
-  Consumed by `computer/arcbox-computer-runtime` guest-side today; the
-  charter's snapshot registry client belongs here rather than above it.
+  Consumed by `computer/arcbox-computer-runtime` guest-side today.
   - The device-mapper paths only *do* anything on Linux (`dmsetup`, thin
     pools) but compile everywhere, which is what lets the layer above
     keep its own platform-neutrality promise.

@@ -1,4 +1,4 @@
-# ADR: ArcBox is a local macOS product
+# ADR 0004: ArcBox is a local macOS product
 
 - Status: accepted (2026-10-08)
 - Deciders: ArcBox product owner
