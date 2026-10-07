@@ -2,7 +2,7 @@
 //! inode lives, next to its target.
 //!
 //! `.arcbox-xattrs/<name>` in the target's own directory is a hidden file
-//! of this module's format that records the inode it belongs to. Next to
+//! of this module's format that records the file handle it belongs to. Next to
 //! the target rather than in one store under the root because the entry
 //! then follows its directory through every rename for free, `rm -rf` of
 //! a tree inside the machine takes the entries with it, and a stale entry
@@ -10,21 +10,23 @@
 //! directory wherever the Mac has put a value that large, which is a
 //! resource fork in practice. An entry whose inode is gone — the file was
 //! renamed or recreated inside the machine — is dropped when next seen,
-//! and one the export cannot read is dropped too: a torn write left it,
-//! and the Mac writes the values again when it next sets them. The export
+//! and a malformed entry is dropped too: a torn write left it,
+//! and the Mac writes the values again when it next sets them. Unsupported
+//! versions return an error and preserve the entry. The export
 //! root has no directory above it, so nothing can hold its overflow.
 
-use std::fs::{self, Metadata};
+use std::fs;
 use std::io;
-use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+
+mod identity;
+pub use identity::Identity;
 
 /// The hidden directory holding side entries, reserved in every directory.
 pub const SIDE_STORE_DIR: &str = ".arcbox-xattrs";
 
 const SIDE_MAGIC: &[u8; 4] = b"ABXA";
-const SIDE_VERSION: u16 = 1;
+const SIDE_VERSION: u16 = 2;
 
 /// The attributes a side entry holds: Mac names and values.
 pub type SideAttrs = Vec<(Vec<u8>, Vec<u8>)>;
@@ -74,33 +76,6 @@ fn only_side_store(dir: &Path) -> io::Result<bool> {
     Ok(first?.file_name() == SIDE_STORE_DIR && entries.next().is_none())
 }
 
-/// What tells one inode's side entry from a successor's under the same
-/// name: the inode number, and its birth time where the filesystem has one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Identity {
-    ino: u64,
-    birth: Option<(i64, u32)>,
-}
-
-impl Identity {
-    pub fn of(meta: &Metadata) -> Self {
-        let birth = meta
-            .created()
-            .ok()
-            .map(|time| match time.duration_since(UNIX_EPOCH) {
-                Ok(after) => (after.as_secs().cast_signed(), after.subsec_nanos()),
-                Err(before) => (
-                    -before.duration().as_secs().cast_signed(),
-                    before.duration().subsec_nanos(),
-                ),
-            });
-        Self {
-            ino: meta.ino(),
-            birth,
-        }
-    }
-}
-
 /// `<dir>/.arcbox-xattrs/<name>` for a target; `None` for the export root.
 pub fn of(target: &Path) -> Option<PathBuf> {
     let name = target.file_name()?;
@@ -109,14 +84,13 @@ pub fn of(target: &Path) -> Option<PathBuf> {
 
 /// A side entry: magic, version, the identity, then `count` attributes as
 /// (name length, value length, name, value), little-endian throughout.
-pub fn write(entry: &Path, identity: Identity, attrs: &[(&[u8], &[u8])]) -> io::Result<()> {
+pub fn write(entry: &Path, identity: &Identity, attrs: &[(&[u8], &[u8])]) -> io::Result<()> {
     let mut out = Vec::new();
     out.extend_from_slice(SIDE_MAGIC);
     out.extend_from_slice(&SIDE_VERSION.to_le_bytes());
-    out.extend_from_slice(&identity.ino.to_le_bytes());
-    let (secs, nanos) = identity.birth.unwrap_or((i64::MIN, u32::MAX));
-    out.extend_from_slice(&secs.to_le_bytes());
-    out.extend_from_slice(&nanos.to_le_bytes());
+    out.extend_from_slice(&identity.kind.to_le_bytes());
+    out.extend_from_slice(&(identity.bytes.len() as u16).to_le_bytes());
+    out.extend_from_slice(&identity.bytes);
     out.extend_from_slice(&(attrs.len() as u32).to_le_bytes());
     for (name, value) in attrs {
         out.extend_from_slice(&(name.len() as u16).to_le_bytes());
@@ -131,8 +105,8 @@ pub fn write(entry: &Path, identity: Identity, attrs: &[(&[u8], &[u8])]) -> io::
 }
 
 /// The side entry at `entry`, or `None` when there is none. One that does
-/// not parse is removed: a torn write left it, and the Mac will write the
-/// values again when it next sets them.
+/// not parse is removed. Unsupported versions preserve the file and return
+/// an error because their attributes cannot be matched to the target safely.
 pub fn read(entry: &Path) -> io::Result<Option<(Identity, SideAttrs)>> {
     let bytes = match fs::read(entry) {
         Ok(bytes) => bytes,
@@ -140,29 +114,53 @@ pub fn read(entry: &Path) -> io::Result<Option<(Identity, SideAttrs)>> {
         Err(e) => return Err(e),
     };
     match parse(&bytes) {
-        Some(parsed) => Ok(Some(parsed)),
-        None => {
+        Ok(Some(parsed)) => Ok(Some(parsed)),
+        Ok(None) => {
             tracing::warn!(entry = %entry.display(), "machine export: removing an unreadable side entry");
             remove(entry)?;
             Ok(None)
         }
+        Err(version) => {
+            let error = io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "machine export: side entry {} uses version {version}; expected {SIDE_VERSION}; preserving the file",
+                    entry.display()
+                ),
+            );
+            tracing::warn!(error = %error, "machine export: unsupported side-entry version");
+            Err(error)
+        }
     }
 }
 
-fn parse(bytes: &[u8]) -> Option<(Identity, SideAttrs)> {
+fn parse(bytes: &[u8]) -> Result<Option<(Identity, SideAttrs)>, u16> {
+    let Some((header, body)) = bytes.split_first_chunk::<6>() else {
+        return Ok(None);
+    };
+    if &header[..4] != SIDE_MAGIC {
+        return Ok(None);
+    }
+    let version = u16::from_le_bytes([header[4], header[5]]);
+    if version != SIDE_VERSION {
+        return Err(version);
+    }
+    Ok(parse_body(body))
+}
+
+fn parse_body(bytes: &[u8]) -> Option<(Identity, SideAttrs)> {
     let mut at = 0usize;
     let mut take = |n: usize| {
         let field = bytes.get(at..at.checked_add(n)?)?;
         at += n;
         Some(field)
     };
-    if take(4)? != SIDE_MAGIC || u16::from_le_bytes(take(2)?.try_into().ok()?) != SIDE_VERSION {
-        return None;
-    }
-    let ino = u64::from_le_bytes(take(8)?.try_into().ok()?);
-    let secs = i64::from_le_bytes(take(8)?.try_into().ok()?);
-    let nanos = u32::from_le_bytes(take(4)?.try_into().ok()?);
-    let birth = (secs != i64::MIN || nanos != u32::MAX).then_some((secs, nanos));
+    let kind = i32::from_le_bytes(take(4)?.try_into().ok()?);
+    let handle_len = usize::from(u16::from_le_bytes(take(2)?.try_into().ok()?));
+    let identity = Identity {
+        kind,
+        bytes: take(handle_len)?.to_vec(),
+    };
     let count = u32::from_le_bytes(take(4)?.try_into().ok()?);
     let mut attrs = Vec::new();
     for _ in 0..count {
@@ -172,7 +170,7 @@ fn parse(bytes: &[u8]) -> Option<(Identity, SideAttrs)> {
         let value = take(value_len)?.to_vec();
         attrs.push((name, value));
     }
-    Some((Identity { ino, birth }, attrs))
+    Some((identity, attrs))
 }
 
 /// Removes an entry, and the side store with it when that was the last.
@@ -212,12 +210,12 @@ mod tests {
             Some(PathBuf::from("/root/.arcbox-xattrs/x"))
         );
         let identity = Identity {
-            ino: 7,
-            birth: Some((1_700_000_000, 5)),
+            kind: 1,
+            bytes: vec![7, 0, 0, 0, 3, 0, 0, 0],
         };
         let dir = tempfile::tempdir().unwrap();
         let entry = dir.path().join(SIDE_STORE_DIR).join("x");
-        write(&entry, identity, &[(b"a", b"1"), (b"b", &[0u8; 300])]).unwrap();
+        write(&entry, &identity, &[(b"a", b"1"), (b"b", &[0u8; 300])]).unwrap();
         let (read_identity, attrs) = read(&entry).unwrap().unwrap();
         assert_eq!(read_identity, identity);
         assert_eq!(
@@ -287,5 +285,79 @@ mod tests {
             "a directory with real content stays, side store and all"
         );
         assert!(dir.path().join(SIDE_STORE_DIR).exists());
+    }
+
+    #[test]
+    fn an_unsupported_version_preserves_side_and_inline_attributes() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("x");
+        fs::write(&target, b"body").unwrap();
+        xattr::set(&target, "user.note", b"original").unwrap();
+        let entry = of(&target).unwrap();
+        fs::create_dir(entry.parent().unwrap()).unwrap();
+        let legacy = b"ABXA\x01\x00legacy side-entry contents";
+        fs::write(&entry, legacy).unwrap();
+
+        let error = STORE.load(&target).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("uses version 1; expected 2"));
+        assert_eq!(fs::read(&entry).unwrap(), legacy);
+
+        let replacement = AppleDouble {
+            attrs: vec![attr("note", b"replacement")],
+            ..AppleDouble::default()
+        };
+        for mode in [Mode::Replace, Mode::Merge] {
+            assert_eq!(
+                STORE.store(&target, &replacement, mode).unwrap_err().kind(),
+                io::ErrorKind::Unsupported
+            );
+            assert_eq!(fs::read(&entry).unwrap(), legacy);
+            assert_eq!(
+                xattr::get(&target, "user.note").unwrap().unwrap(),
+                b"original"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn content_and_mode_changes_preserve_the_side_entry() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("x");
+        fs::write(&target, b"body").unwrap();
+        let content = AppleDouble {
+            resource_fork: Some(vec![9u8; 100]),
+            ..AppleDouble::default()
+        };
+        STORE.store(&target, &content, Mode::Replace).unwrap();
+        fs::write(&target, b"changed content").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(STORE.load(&target).unwrap().unwrap(), content);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_recreated_symlink_does_not_inherit_its_side_entry() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        let link = dir.path().join("link");
+        fs::write(&target, b"body").unwrap();
+        symlink(&target, &link).unwrap();
+        let content = AppleDouble {
+            resource_fork: Some(vec![9u8; 100]),
+            ..AppleDouble::default()
+        };
+        STORE.store(&link, &content, Mode::Replace).unwrap();
+        fs::write(&target, b"changed target").unwrap();
+        assert_eq!(STORE.load(&link).unwrap().unwrap(), content);
+        fs::remove_file(&link).unwrap();
+        symlink(&target, &link).unwrap();
+        assert_eq!(STORE.load(&link).unwrap(), None);
+        assert!(!of(&link).unwrap().exists());
     }
 }

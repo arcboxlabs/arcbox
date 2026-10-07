@@ -66,7 +66,6 @@ impl Store {
     /// The target's sidecar content, or `None` when it has none. `ENOENT`
     /// when there is no target.
     pub fn load(self, target: &Path) -> io::Result<Option<AppleDouble>> {
-        let meta = fs::symlink_metadata(target)?;
         let mut content = AppleDouble::default();
         for name in user_xattrs(target)? {
             let Some(mac) = mac_name(&name) else {
@@ -79,7 +78,7 @@ impl Store {
         }
         if let Some(entry) = side_entry::of(target) {
             match side_entry::read(&entry)? {
-                Some((identity, attrs)) if identity == Identity::of(&meta) => {
+                Some((identity, attrs)) if identity == Identity::of(target)? => {
                     for (name, value) in attrs {
                         place(&mut content, &name, value);
                     }
@@ -115,18 +114,17 @@ impl Store {
 
         let existing = user_xattrs(target)?;
         let entry = side_entry::of(target);
+        let stored = entry
+            .as_deref()
+            .map(side_entry::read)
+            .transpose()?
+            .flatten();
         // Side values that stay: in a merge, those the image does not name.
-        let kept: Vec<(Vec<u8>, Vec<u8>)> = match (mode, &entry) {
-            (Mode::Merge, Some(entry)) => {
-                let meta = fs::symlink_metadata(target)?;
-                match side_entry::read(entry)? {
-                    Some((identity, attrs)) if identity == Identity::of(&meta) => attrs
-                        .into_iter()
-                        .filter(|(name, _)| !wanted.iter().any(|(w, _)| mac_name(w) == Some(name)))
-                        .collect(),
-                    _ => Vec::new(),
-                }
-            }
+        let kept: Vec<(Vec<u8>, Vec<u8>)> = match (mode, stored) {
+            (Mode::Merge, Some((identity, attrs))) if identity == Identity::of(target)? => attrs
+                .into_iter()
+                .filter(|(name, _)| !wanted.iter().any(|(w, _)| mac_name(w) == Some(name)))
+                .collect(),
             _ => Vec::new(),
         };
         let mut overflow: Vec<(&[u8], &[u8])> = Vec::new();
@@ -160,8 +158,7 @@ impl Store {
             (Some(entry), false) => {
                 // After the inode writes: the first write to a lower-layer
                 // file copies it up and renumbers it.
-                let meta = fs::symlink_metadata(target)?;
-                side_entry::write(&entry, Identity::of(&meta), &overflow)
+                side_entry::write(&entry, &Identity::of(target)?, &overflow)
             }
         }
     }
