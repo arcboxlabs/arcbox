@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use core_foundation::{base::TCFType, data::CFData};
 use rcgen::{Issuer, PKCS_ECDSA_P256_SHA256, PublicKeyData, SignatureAlgorithm, SigningKey};
 use security_framework::certificate::SecCertificate;
 use security_framework::item::{
@@ -47,11 +48,12 @@ impl KeychainAuthority {
             .and_then(|key| key.external_representation())
             .ok_or(Error::InvalidAuthority("missing EC public key"))?
             .to_vec();
+        let hash = public_key_hash(&key)?;
         let key = KeychainKey { key, public };
         let certificate = match find(
             ItemSearchOptions::new()
                 .class(ItemClass::certificate())
-                .label(&label)
+                .pub_key_hash(hash.bytes())
                 .load_refs(true),
         )? {
             Some(Reference::Certificate(certificate)) => certificate,
@@ -102,15 +104,47 @@ impl KeychainAuthority {
     /// Deletes this profile's keys and public certificate after trust removal.
     pub fn delete(tls_dir: &Path) -> Result<(), Error> {
         let label = Self::label(tls_dir)?;
-        for class in [ItemClass::key(), ItemClass::certificate()] {
-            match ItemSearchOptions::new().class(class).label(&label).delete() {
-                Ok(()) => {}
-                Err(error) if error.code() == errSecItemNotFound => {}
-                Err(error) => return Err(error.into()),
+        if let Some(Reference::Key(key)) = find(
+            ItemSearchOptions::new()
+                .key_class(KeyClass::private())
+                .label(&label)
+                .load_refs(true),
+        )? {
+            let hash = public_key_hash(&key)?;
+            let mut query = ItemSearchOptions::new();
+            query
+                .class(ItemClass::certificate())
+                .pub_key_hash(hash.bytes())
+                .load_refs(true);
+            if let Some(Reference::Certificate(certificate)) = find(&query)? {
+                crate::remove_trust(
+                    pem::encode(&pem::Pem::new("CERTIFICATE", certificate.to_der())).as_bytes(),
+                )?;
+                certificate.delete()?;
             }
+        }
+        match ItemSearchOptions::new()
+            .class(ItemClass::key())
+            .label(&label)
+            .delete()
+        {
+            Ok(()) => {}
+            Err(error) if error.code() == errSecItemNotFound => {}
+            Err(error) => return Err(error.into()),
         }
         Ok(())
     }
+}
+
+fn public_key_hash(key: &SecKey) -> Result<CFData, Error> {
+    let attributes = key.attributes();
+    // SAFETY: Security.framework defines this constant as a CFString dictionary key.
+    let label = unsafe { security_framework_sys::item::kSecAttrApplicationLabel };
+    let value = attributes
+        .find(label.cast())
+        .ok_or(Error::InvalidAuthority("missing public key hash"))?;
+    // SAFETY: SecKeyCopyAttributes returns kSecAttrApplicationLabel as CFData.
+    Ok(unsafe { CFData::wrap_under_get_rule((*value).cast()) })
 }
 
 fn find(query: &ItemSearchOptions) -> Result<Option<Reference>, Error> {

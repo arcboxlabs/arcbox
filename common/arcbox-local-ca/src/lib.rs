@@ -33,6 +33,8 @@
 mod authority;
 #[cfg(target_os = "macos")]
 mod keychain;
+#[cfg(target_os = "macos")]
+mod migration;
 mod minter;
 mod request;
 
@@ -42,6 +44,8 @@ pub use arcbox_constants::dns::LOCAL_DOMAIN;
 pub use self::authority::ensure;
 #[cfg(target_os = "macos")]
 pub use self::keychain::KeychainAuthority;
+#[cfg(target_os = "macos")]
+pub use self::migration::remove_trust;
 pub use self::minter::LeafMinter;
 pub use self::request::{CertificateRequest, MAX_CERTIFICATE_SIZE};
 
