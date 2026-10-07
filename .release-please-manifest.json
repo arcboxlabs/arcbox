@@ -1,5 +1,5 @@
 {
   ".": "0.8.2",
-  "sdk/typescript": "0.1.5",
+  "sdk/typescript": "0.1.6",
   "sdk/python": "0.1.3"
 }
