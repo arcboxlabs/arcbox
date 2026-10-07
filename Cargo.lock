@@ -892,8 +892,12 @@ version = "0.8.2"
 dependencies = [
  "arcbox-atomic-file",
  "arcbox-constants",
+ "core-foundation 0.10.1",
+ "pem",
  "rcgen",
  "rustls",
+ "security-framework",
+ "security-framework-sys",
  "tempfile",
  "thiserror 2.0.18",
  "time",

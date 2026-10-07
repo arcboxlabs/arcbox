@@ -31,13 +31,19 @@
 //!   new CA on its next start, and it must be trusted again.
 
 mod authority;
+#[cfg(target_os = "macos")]
+mod keychain;
 mod minter;
+mod request;
 
 use arcbox_atomic_file::AtomicWriteError;
 pub use arcbox_constants::dns::LOCAL_DOMAIN;
 
 pub use self::authority::ensure;
+#[cfg(target_os = "macos")]
+pub use self::keychain::KeychainAuthority;
 pub use self::minter::LeafMinter;
+pub use self::request::{CertificateRequest, MAX_CERTIFICATE_SIZE};
 
 /// Why the CA could not be created, loaded, or used.
 #[derive(Debug, thiserror::Error)]
@@ -61,6 +67,20 @@ pub enum Error {
     /// A server name the CA does not sign for.
     #[error("{0:?} is not a name under {LOCAL_DOMAIN}")]
     ForeignName(String),
+    /// A request violates the host's certificate policy.
+    #[error("invalid certificate request: {0}")]
+    InvalidRequest(&'static str),
+    /// A Keychain operation failed. No file-backed key is substituted.
+    #[cfg(target_os = "macos")]
+    #[error("keychain: {0}")]
+    Keychain(#[from] security_framework::base::Error),
+    /// Security.framework could not perform a cryptographic operation.
+    #[cfg(target_os = "macos")]
+    #[error("security framework: {0}")]
+    Security(String),
+    /// A persistent keychain item has an unexpected representation.
+    #[error("invalid keychain CA: {0}")]
+    InvalidAuthority(&'static str),
 }
 
 impl Error {
@@ -69,5 +89,12 @@ impl Error {
             path: path.to_path_buf(),
             source,
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl From<core_foundation::error::CFError> for Error {
+    fn from(error: core_foundation::error::CFError) -> Self {
+        Self::Security(error.to_string())
     }
 }

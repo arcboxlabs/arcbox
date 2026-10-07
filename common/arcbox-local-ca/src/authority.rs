@@ -43,6 +43,11 @@ pub fn ensure(dir: &Path) -> Result<bool, Error> {
 /// A fresh CA, as `(certificate PEM, PKCS#8 key PEM)`.
 fn generate() -> Result<(String, String), rcgen::Error> {
     let key = KeyPair::generate()?;
+    let cert = parameters().self_signed(&key)?;
+    Ok((cert.pem(), key.serialize_pem()))
+}
+
+pub fn parameters() -> CertificateParams {
     let mut params = CertificateParams::default();
     let mut name = DistinguishedName::new();
     name.push(DnType::CommonName, LOCAL_CA_COMMON_NAME);
@@ -60,8 +65,7 @@ fn generate() -> Result<(String, String), rcgen::Error> {
     let now = OffsetDateTime::now_utc();
     params.not_before = now - Duration::days(1);
     params.not_after = now + LIFETIME;
-    let cert = params.self_signed(&key)?;
-    Ok((cert.pem(), key.serialize_pem()))
+    params
 }
 
 #[cfg(test)]
