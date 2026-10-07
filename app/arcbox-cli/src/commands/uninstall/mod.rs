@@ -146,12 +146,13 @@ impl std::fmt::Display for Step {
     }
 }
 
-/// Runs every step against `residue`, calling `report` as each finishes.
+/// Runs cleanup against `residue`, calling `report` as each step finishes.
 ///
 /// Order matters: the app quits before the daemon is stopped (its handler
 /// stops the daemon itself); integrations that need binaries from the data
 /// directory (kubectl, the CA certificate) run before the data directory is
-/// removed; the helper is unregistered before its plist goes.
+/// removed. CA trust must be revoked before the helper is unregistered.
+/// Stop after a failed shutdown or CA cleanup to retain the helper and data.
 async fn run(
     host: &dyn Host,
     roots: &Roots,
@@ -160,17 +161,21 @@ async fn run(
 ) -> Vec<Step> {
     let mut steps = Vec::new();
     let mut step = |label: String, outcome: Result<Outcome>| {
+        let failed = outcome.is_err();
         let step = Step { label, outcome };
         report(&step);
         steps.push(step);
+        failed
     };
     let layout = HostLayout::new(roots.data_dir.clone());
 
-    step(
+    if step(
         format!("Quitting {}", roots.profile.app_name()),
         steps::quit_app(host, roots.profile.app_bundle_id()),
-    );
-    step(
+    ) {
+        return steps;
+    }
+    if step(
         "Stopping the daemon".into(),
         steps::stop_daemon(
             host,
@@ -178,7 +183,15 @@ async fn run(
             &[roots.profile.daemon_label(), labels::LEGACY_SCRIPT_DAEMON],
         )
         .await,
-    );
+    ) {
+        return steps;
+    }
+    if step(
+        "Removing trust in the ArcBox local CA".into(),
+        steps::untrust_local_ca(host, roots).await,
+    ) {
+        return steps;
+    }
     if residue.helper_registered {
         step(
             "Unregistering the helper".into(),
@@ -215,10 +228,6 @@ async fn run(
     step(
         "Removing the ssh config Include".into(),
         remove_ssh_include(roots, &layout),
-    );
-    step(
-        "Removing trust in the ArcBox local CA".into(),
-        steps::untrust_local_ca(host, roots),
     );
     if residue.hosts_alias {
         step(
@@ -313,12 +322,14 @@ pub(super) async fn brew_hook() -> Result<()> {
     let host = Mac;
     let layout = HostLayout::new(roots.data_dir.clone());
 
+    steps::quit_app(&host, roots.profile.app_bundle_id())?;
     steps::stop_daemon(
         &host,
         &layout,
         &[roots.profile.daemon_label(), labels::LEGACY_SCRIPT_DAEMON],
     )
     .await?;
+    steps::untrust_local_ca(&host, &roots).await?;
     for label in [roots.profile.daemon_label(), labels::LEGACY_SCRIPT_DAEMON] {
         steps::remove_path(&host, &roots.launch_agent(label))?;
     }

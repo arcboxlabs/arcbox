@@ -7,9 +7,11 @@
 
 use std::ffi::OsStr;
 use std::fs;
+use std::future::Future;
 use std::os::unix::fs::symlink;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::{ExitStatus, Output};
 use std::sync::Mutex;
 
@@ -17,7 +19,7 @@ use anyhow::Result;
 use arcbox_constants::paths::{ArcboxProfile, DOCKER_CLI_TOOLS, HostMountLayout, privileged};
 use arcbox_docker::DockerContextManager;
 
-use super::host::Host;
+use super::host::{Host, run_checked};
 use super::inventory::{Roots, scan};
 use super::steps::Outcome;
 use super::{Step, run};
@@ -52,12 +54,18 @@ impl Recorder {
 }
 
 impl Host for Recorder {
+    fn revoke_local_ca<'a>(
+        &'a self,
+        tls_dir: &'a Path,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            tokio::task::yield_now().await;
+            run_checked(self, "revoke-local-ca", &[tls_dir.as_os_str()]).map(drop)
+        })
+    }
+
     fn delete_local_ca(&self, tls_dir: &Path) -> Result<()> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(format!("delete-local-ca {}", tls_dir.display()));
-        Ok(())
+        run_checked(self, "delete-local-ca", &[tls_dir.as_os_str()]).map(drop)
     }
 
     fn run(&self, program: &str, args: &[&OsStr]) -> Result<Output> {
@@ -355,6 +363,17 @@ async fn everything_arcbox_wrote_is_removed_and_nothing_else_is_touched() {
         calls.contains(&"sudo launchctl bootout system/com.arcboxlabs.desktop.helper".to_owned())
     );
     assert!(calls.contains(&"defaults delete com.arcboxlabs.desktop".to_owned()));
+    let position = |prefix: &str| {
+        calls
+            .iter()
+            .position(|call| call.starts_with(prefix))
+            .unwrap_or_else(|| panic!("missing {prefix}: {calls:?}"))
+    };
+    assert!(position("revoke-local-ca") < position("delete-local-ca"));
+    assert!(
+        position("delete-local-ca")
+            < position("sudo launchctl bootout system/com.arcboxlabs.desktop.helper")
+    );
     assert!(
         !calls.iter().any(|call| call.contains("pkill")),
         "{calls:?}"
@@ -503,6 +522,83 @@ async fn a_failed_step_is_reported_and_does_not_stop_the_others() {
     );
     assert!(failed[0].contains("Input/output error"), "{failed:?}");
     assert!(!install.roots().data_dir.exists());
+}
+
+#[tokio::test]
+async fn failed_shutdown_preserves_ca_trust_and_the_installation() {
+    for fail_quit in [true, false] {
+        let install = Install::new();
+        let host = Recorder::answering(move |program, args| {
+            if fail_quit && program == "osascript" {
+                let script = args[1].to_string_lossy();
+                Some(if script.ends_with("is running") {
+                    output(0, "true", "")
+                } else {
+                    output(1, "", "shutdown refused")
+                })
+            } else if !fail_quit && program == "launchctl" {
+                Some(output(1, "", "shutdown refused"))
+            } else {
+                None
+            }
+        });
+
+        let steps = uninstall(&install, &host, false).await;
+        let failed = failures(&steps);
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].contains("shutdown refused"), "{failed:?}");
+        assert!(install.roots().data_dir.join("tls/ca.pem").exists());
+        assert!(
+            install
+                .roots()
+                .system_path(privileged::HELPER_PLIST)
+                .exists()
+        );
+        assert!(!host.calls().iter().any(|call| call.contains("local-ca")));
+        assert!(
+            !host
+                .calls()
+                .iter()
+                .any(|call| call.contains("bootout system/"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn failed_ca_cleanup_retains_the_helper_and_data_for_retry() {
+    for failing_operation in ["revoke-local-ca", "delete-local-ca"] {
+        let install = Install::new();
+        let host = Recorder::answering(move |program, _| {
+            (program == failing_operation).then(|| output(1, "", "CA cleanup refused"))
+        });
+
+        let steps = uninstall(&install, &host, false).await;
+        let failed = failures(&steps);
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].contains("CA cleanup refused"), "{failed:?}");
+        assert!(
+            install
+                .roots()
+                .system_path(privileged::HELPER_BINARY)
+                .exists()
+        );
+        assert!(
+            install
+                .roots()
+                .system_path(privileged::HELPER_PLIST)
+                .exists()
+        );
+        assert!(install.roots().data_dir.join("tls/ca.pem").exists());
+        assert!(install.roots().data_dir.join("data/docker.img").exists());
+        let calls = host.calls();
+        assert!(
+            !calls.iter().any(|call| call.contains("bootout system/")),
+            "{calls:?}"
+        );
+        if failing_operation == "revoke-local-ca" {
+            assert!(!calls.iter().any(|call| call.starts_with("delete-local-ca")));
+        }
+    }
 }
 
 /// A daemon started by `abctl daemon start` has no launchd job: it is found
