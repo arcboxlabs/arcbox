@@ -225,6 +225,7 @@ libproc = "0.14"
 
 arcbox-asset = { version = "0.8.2", path = "common/arcbox-asset", features = ["download"] } # x-release-please-version
 arcbox-atomic-file = { version = "0.8.2", path = "common/arcbox-atomic-file" } # x-release-please-version
+arcbox-storage = { version = "0.8.2", path = "common/arcbox-storage" } # x-release-please-version
 arcbox-local-ca = { version = "0.8.2", path = "common/arcbox-local-ca" } # x-release-please-version
 arcbox-snapshot = { version = "0.8.2", path = "engine/arcbox-snapshot" } # x-release-please-version
 arcbox-docker-tools = { version = "0.8.2", path = "app/arcbox-docker-tools" } # x-release-please-version

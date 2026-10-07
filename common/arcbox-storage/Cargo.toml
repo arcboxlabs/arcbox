@@ -9,7 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-arcbox-atomic-file = { version = "0.8.2", path = "../arcbox-atomic-file" }
+arcbox-atomic-file.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
