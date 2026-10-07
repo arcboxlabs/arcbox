@@ -427,10 +427,6 @@ mod tests {
         assert!(side.exists());
 
         // Recreated inside the machine: another inode under the same name.
-        // The two birth timestamps the identity tells apart are coarse on
-        // some kernels — one clock tick can cover both files — so let a
-        // tick pass between them.
-        std::thread::sleep(std::time::Duration::from_millis(20));
         fs::remove_file(&target).unwrap();
         fs::write(&target, b"other").unwrap();
         assert_eq!(STORE.load(&target).unwrap(), None);
