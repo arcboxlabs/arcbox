@@ -2,31 +2,21 @@
 //!
 //! Core orchestration layer for `ArcBox`.
 //!
-//! This crate provides high-level management of:
-//!
-//! - [`VmManager`]: Virtual machine lifecycle
-//! - [`MachineManager`]: Linux machine management
+//! [`Runtime`] composes host services around the engine's [`MachineManager`],
+//! [`VmLifecycleManager`], and [`AgentClient`]. These engine types remain
+//! available here as compatibility re-exports.
 //!
 //! ## Architecture
 //!
 //! ```text
-//! ┌─────────────────────────────────────────────────┐
-//! │                  arcbox-core                    │
-//! │  ┌─────────────┐ ┌─────────────┐              │
-//! │  │  VmManager  │ │MachineManager│              │
-//! │  │             │ │             │              │
-//! │  └──────┬──────┘ └──────┬──────┘              │
-//! │         │               │                      │
-//! │         └───────────────┘                      │
-//! │                         ▼                      │
-//! │              ┌─────────────────┐              │
-//! │              │    EventBus     │              │
-//! │              └─────────────────┘              │
-//! └─────────────────────────────────────────────────┘
-//!                        │
-//!           ┌────────────┼────────────┐
-//!           ▼            ▼
-//!      arcbox-vmm   arcbox-fs
+//! arcbox-daemon / arcbox-api / arcbox-docker
+//!                     |
+//!                     v
+//!            arcbox-core::Runtime
+//!                     |
+//!                     +-- arcbox-engine: machine/VM lifecycle and agent clients
+//!                     +-- arcbox-image: boot assets and distribution images
+//!                     +-- arcbox-net: host networking and port forwarding
 //! ```
 #[cfg(target_os = "macos")]
 pub mod bridge_discovery;
