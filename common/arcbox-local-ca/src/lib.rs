@@ -1,22 +1,17 @@
 //! The local certificate authority behind `https://<name>.arcbox.local`.
 //!
-//! The daemon generates the CA once into the data directory ([`ensure`]):
-//! `tls/ca.pem` and `tls/ca-key.pem`, the key mode 0600. The data directory
-//! is the System VM's `/arcbox` share, so the guest agent loads the same
-//! pair ([`LeafMinter::load`]) and mints a short-lived certificate per
-//! server name as TLS clients ask for it. Users trust `ca.pem` once
-//! (`abctl tls trust`).
+//! On macOS, the daemon creates a per-profile CA in the user's Keychain.
+//! Only the public certificate is published as `tls/ca.pem` on the guest
+//! share. The guest keeps leaf keys in memory and sends signed CSRs to
+//! the host. Users trust the root with `abctl tls trust`.
 //!
 //! # Trust model
 //!
-//! - **Who can read the key.** On the Mac, the user and root, who can
-//!   already read everything in the data directory, the VM's disks
-//!   included. Inside the VM, anything that reads `/arcbox` as root: the
-//!   agent, dockerd, and any container given the share (a bind mount of
-//!   `/arcbox`, or a privileged container that enters the VM's namespaces).
-//!   Starting such a container takes the Docker socket, which is already
-//!   root in the VM, so the key's audience is the user plus whoever holds
-//!   that socket.
+//! - **Key access.** The macOS file Keychain controls access through the
+//!   creating application's ACL. ArcBox never exports the private key.
+//!   This does not promise Secure Enclave storage or protection from a
+//!   compromised host account. A guest can request ArcBox certificates
+//!   while connected, but cannot copy the root key from the share.
 //! - **What the key can sign for.** The CA carries critical name
 //!   constraints: DNS names under [`LOCAL_DOMAIN`] only, and no IP address
 //!   at all; it can sign no other CA (path length 0). macOS applies a
@@ -27,26 +22,27 @@
 //! - **What trusting it means.** `abctl tls trust` adds the certificate to
 //!   the user's login keychain with trust limited to TLS servers, behind
 //!   the macOS authorization prompt. Leaf keys never leave guest memory.
-//! - **Rotation.** Delete `tls/` in the data directory: the daemon writes a
-//!   new CA on its next start, and it must be trusted again.
+//! - **Migration.** A new Keychain CA replaces the old shared CA. The
+//!   daemon removes the shared key and revokes the old root's user trust
+//!   before publishing the new root. Users must trust the new root.
+//! - **Persistence.** Removing `tls/ca.pem` does not rotate the Keychain
+//!   CA. The daemon republishes the same public certificate on startup.
 
+#[cfg(any(target_os = "macos", test))]
 mod authority;
 #[cfg(target_os = "macos")]
 mod keychain;
 #[cfg(target_os = "macos")]
 mod migration;
-mod minter;
 mod request;
 
 use arcbox_atomic_file::AtomicWriteError;
 pub use arcbox_constants::dns::LOCAL_DOMAIN;
 
-pub use self::authority::ensure;
 #[cfg(target_os = "macos")]
 pub use self::keychain::KeychainAuthority;
 #[cfg(target_os = "macos")]
 pub use self::migration::remove_trust;
-pub use self::minter::LeafMinter;
 pub use self::request::{CertificateRequest, MAX_CERTIFICATE_SIZE};
 
 /// Why the CA could not be created, loaded, or used.
@@ -88,6 +84,7 @@ pub enum Error {
 }
 
 impl Error {
+    #[cfg(target_os = "macos")]
     fn io(path: &std::path::Path, source: std::io::Error) -> Self {
         Self::Io {
             path: path.to_path_buf(),
