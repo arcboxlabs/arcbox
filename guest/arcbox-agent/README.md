@@ -100,7 +100,7 @@ gives the machine the identity and network the distro cannot know on its own
 The agent in a machine then serves RPC and nothing else: none of the System
 VM services below run there.
 
-The machine root export stores oversized Mac attributes in `.arcbox-xattrs` beside each target. Side-entry version 2 uses Linux file handles to distinguish a recreated file from the original inode. Unsupported side-entry versions return an error and preserve the side entry and inline attributes. See the [identity investigation](../../docs/logs/2026-10-07-sidecar-inode-generation.md) for compatibility and validation.
+The machine root export stores oversized Mac attributes in `.arcbox-xattrs` beside each target. Side-entry version 3 combines Linux file handles with filesystem IDs to distinguish recreated files and replaced mounts. Unsupported side-entry versions return an error and preserve the side entry and inline attributes. See the [identity investigation](../../docs/logs/2026-10-07-sidecar-inode-generation.md) for compatibility and validation.
 
 ## Container Domains
 

@@ -23,6 +23,7 @@ if [ "$(findmnt -n -o FSTYPE --target "$fixture")" != ext4 ]; then
 fi
 mkdir "$fixture/plain" "$fixture/lower" "$fixture/upper" "$fixture/work" "$fixture/merged"
 TMPDIR="$fixture/plain" "$1" machine_export::vfs::sidecar --nocapture
+TMPDIR="$fixture/plain" "$1" machine_export::vfs::sidecar::side_entry::mount_tests --ignored --nocapture
 mount -t overlay overlay -o "lowerdir=$fixture/lower,upperdir=$fixture/upper,workdir=$fixture/work" "$fixture/merged"
 mounted=true
 TMPDIR="$fixture/merged" "$1" machine_export::vfs::sidecar --nocapture

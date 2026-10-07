@@ -22,11 +22,14 @@ use std::path::{Path, PathBuf};
 mod identity;
 pub use identity::Identity;
 
+#[cfg(all(test, target_os = "linux"))]
+mod mount_tests;
+
 /// The hidden directory holding side entries, reserved in every directory.
 pub const SIDE_STORE_DIR: &str = ".arcbox-xattrs";
 
 const SIDE_MAGIC: &[u8; 4] = b"ABXA";
-const SIDE_VERSION: u16 = 2;
+const SIDE_VERSION: u16 = 3;
 
 /// The attributes a side entry holds: Mac names and values.
 pub type SideAttrs = Vec<(Vec<u8>, Vec<u8>)>;
@@ -88,6 +91,9 @@ pub fn write(entry: &Path, identity: &Identity, attrs: &[(&[u8], &[u8])]) -> io:
     let mut out = Vec::new();
     out.extend_from_slice(SIDE_MAGIC);
     out.extend_from_slice(&SIDE_VERSION.to_le_bytes());
+    for word in identity.filesystem {
+        out.extend_from_slice(&word.to_le_bytes());
+    }
     out.extend_from_slice(&identity.kind.to_le_bytes());
     out.extend_from_slice(&(identity.bytes.len() as u16).to_le_bytes());
     out.extend_from_slice(&identity.bytes);
@@ -155,9 +161,14 @@ fn parse_body(bytes: &[u8]) -> Option<(Identity, SideAttrs)> {
         at += n;
         Some(field)
     };
+    let filesystem = [
+        i32::from_le_bytes(take(4)?.try_into().ok()?),
+        i32::from_le_bytes(take(4)?.try_into().ok()?),
+    ];
     let kind = i32::from_le_bytes(take(4)?.try_into().ok()?);
     let handle_len = usize::from(u16::from_le_bytes(take(2)?.try_into().ok()?));
     let identity = Identity {
+        filesystem,
         kind,
         bytes: take(handle_len)?.to_vec(),
     };
@@ -210,6 +221,7 @@ mod tests {
             Some(PathBuf::from("/root/.arcbox-xattrs/x"))
         );
         let identity = Identity {
+            filesystem: [5, -7],
             kind: 1,
             bytes: vec![7, 0, 0, 0, 3, 0, 0, 0],
         };
@@ -300,7 +312,7 @@ mod tests {
 
         let error = STORE.load(&target).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
-        assert!(error.to_string().contains("uses version 1; expected 2"));
+        assert!(error.to_string().contains("uses version 1; expected 3"));
         assert_eq!(fs::read(&entry).unwrap(), legacy);
 
         let replacement = AppleDouble {
