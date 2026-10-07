@@ -15,6 +15,7 @@ const DISKSTATS_SECTOR_BYTES: u64 = 512;
 ///
 /// Busy is everything except idle and iowait. Fields beyond `idle` may be
 /// absent on old kernels; missing fields count as zero.
+/// Guest and guest_nice are already included in user and nice.
 #[must_use]
 pub fn parse_cpu_ticks(stat: &str) -> Option<(u64, u64)> {
     let line = stat.lines().find(|l| l.starts_with("cpu "))?;
@@ -26,7 +27,7 @@ pub fn parse_cpu_ticks(stat: &str) -> Option<(u64, u64)> {
     if fields.len() < 4 {
         return None;
     }
-    let total: u64 = fields.iter().sum();
+    let total: u64 = fields.iter().take(8).sum();
     let idle = fields[3] + fields.get(4).copied().unwrap_or(0);
     Some((total.saturating_sub(idle), total))
 }
@@ -251,6 +252,12 @@ mod tests {
         assert_eq!((busy, total), (30, 100));
         assert!(parse_cpu_ticks("cpu  1 2 3\n").is_none());
         assert!(parse_cpu_ticks("intr 12345\n").is_none());
+    }
+
+    #[test]
+    fn cpu_ticks_exclude_nested_guest_time_but_include_steal() {
+        let stat = "cpu  100 20 50 800 30 5 5 10 80 10\n";
+        assert_eq!(parse_cpu_ticks(stat), Some((190, 1020)));
     }
 
     #[test]

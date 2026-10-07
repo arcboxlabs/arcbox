@@ -14,6 +14,9 @@ Current request surface includes:
 - System information
 - Ensure guest runtime stack (`containerd`/`dockerd`/`runc`) is ready
 - Runtime status
+- Machine and container resource statistics (`WatchStats`)
+
+Machine CPU statistics exclude idle and iowait from busy time. The total counts the first eight `/proc/stat` fields; `guest` and `guest_nice` are already included in `user` and `nice`.
 
 When running as PID 1, the agent also performs basic system initialisation
 (mount filesystems, set hostname, spawn a child reaper).

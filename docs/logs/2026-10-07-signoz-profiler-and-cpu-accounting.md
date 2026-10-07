@@ -258,3 +258,15 @@ The complete agent built for `aarch64-unknown-linux-musl` in release mode, and t
 The manifest check was not bypassed. The workspace requires user setup when prerequisites are missing, so daemon-level validation is paused pending official 0.8.8 assets. The parser change remains uncommitted until that required check passes. Neither a daemon-level pass nor deployment of the parser fix is claimed.
 
 The checked-in suspension probe was separately run against the disposable helper at 14:38:50 UTC. The ten-second watchdog completed, and a subsequent ClickHouse `SELECT 1` succeeded. Python syntax checks, workspace formatting, and `git diff --check` passed. The baseline daemon then stopped cleanly; its helper PID 76989 exited. The new daemon's failed startup also exited, leaving no running VM from this task. The data directory and logs remain available for the next comparison.
+
+## Approved environment preparation and parser validation — 15:11 UTC
+
+The user approved preparing the missing assets and build dependencies. The daemon downloaded boot bundle 0.8.8 into the disposable data directory. Its manifest matched the pinned SHA256 `e40c7c6a09ddbaedd9862b114db0a44efcdea40889eccc08aeef2cf156cd4e74`; the guest Docker version is now 29.8.2.
+
+The first boot reached `VM_READY` but failed while installing its isolated container route. The local daemon signature used identifier `arcbox-daemon`, which the helper does not accept. Re-signing with the existing Makefile's identifier, `com.arcboxlabs.desktop.daemon`, and the ArcBox Developer ID resolved the connection failure. No helper implementation or authentication rule changed.
+
+The matching built daemon and fixed agent then passed a manual daemon-level stats check: `WatchSetupStatus` reported `READY`; `StatsService.Watch` returned six samples with advancing clocks and CPU counters, sane memory counters, and the ClickHouse container present. ClickHouse `SELECT 1` succeeded. The guest agent file SHA256 matched the built binary. The stream probes use a bounded grpcurl deadline because both RPCs stay open after delivering samples; the earlier generic command recorder's 45-second timeout was a probe limitation.
+
+This completes the previously blocked parser validation. The nested-guest regression, Linux Clippy, formatting, full builds, and real daemon stats path have passed. The parser fix is ready to commit; the original CPU accounting amplification and long stall remain separate work.
+
+The dedicated ARM64 image `arcbox-kernel-builder:cpu-accounting-20261007` now contains `bc`, `bison`, `flex`, `cpio`, and `libelf-dev`. It derives from the existing pinned Rust Bookworm image. A container limited to six CPUs and 8 GiB is building Linux 6.18.38 with the deployed kernel repository tag `v0.0.25`. The existing `kernel` checkout remains on its unrelated debug branch.
