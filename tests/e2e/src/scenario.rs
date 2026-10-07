@@ -12,7 +12,7 @@ use anyhow::Result;
 
 use crate::boot_assets::{resolve_boot_version, stage_dev_boot_assets};
 use crate::daemon::{DaemonConfig, DaemonHandle};
-use crate::metrics::RunMetrics;
+use crate::metrics::{BootAssets, RunMetrics};
 
 static TRACING: Once = Once::new();
 
@@ -64,6 +64,14 @@ pub fn run_vz_scenario_with_log(
         .tempdir()?;
     stage_dev_boot_assets(&root, data_dir.path(), &version)?;
 
+    let mut metrics = RunMetrics::new(
+        name,
+        Some("vz"),
+        BootAssets::Bundle {
+            version: version.clone(),
+        },
+    )?;
+
     let mut daemon = DaemonHandle::spawn(DaemonConfig {
         binary: root.join("target/release/arcbox-daemon"),
         data_dir: data_dir.path().to_owned(),
@@ -75,7 +83,6 @@ pub fn run_vz_scenario_with_log(
         ],
     })?;
 
-    let mut metrics = RunMetrics::new(name, Some("vz"));
     let result = scenario(&mut daemon, data_dir.path(), &mut metrics);
     metrics.passed = result.is_ok();
     if let Err(error) = metrics.write(Some(data_dir.path())) {

@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use arcbox_e2e::boot_assets::{resolve_boot_version, stage_dev_boot_assets};
 use arcbox_e2e::daemon::{DaemonConfig, DaemonHandle, connect_unix};
-use arcbox_e2e::metrics::RunMetrics;
+use arcbox_e2e::metrics::{BootAssets, RunMetrics};
 use arcbox_e2e::{env_flag, repo_root};
 use arcbox_grpc::sandbox_v1::sandbox_process_service_client::SandboxProcessServiceClient;
 use arcbox_grpc::sandbox_v1::sandbox_service_client::SandboxServiceClient;
@@ -76,7 +76,13 @@ fn sandbox_coldstart() -> Result<()> {
     let data_dir = temp_dir.path().to_owned();
     stage_dev_boot_assets(&root, &data_dir, &version)?;
 
-    let mut metrics = RunMetrics::new("sandbox_coldstart", Some("vz"));
+    let mut metrics = RunMetrics::new(
+        "sandbox_coldstart",
+        Some("vz"),
+        BootAssets::Bundle {
+            version: version.clone(),
+        },
+    )?;
     let result = run_bench(
         &root,
         &data_dir,

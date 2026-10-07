@@ -32,7 +32,7 @@ use anyhow::{Context, Result, bail};
 use arcbox_e2e::boot_assets::{resolve_boot_version, stage_dev_boot_assets};
 use arcbox_e2e::daemon::{DaemonConfig, DaemonHandle};
 use arcbox_e2e::docker::{docker_output, docker_stream, ensure_image};
-use arcbox_e2e::metrics::RunMetrics;
+use arcbox_e2e::metrics::{BootAssets, RunMetrics};
 
 static TRACING: Once = Once::new();
 
@@ -78,6 +78,14 @@ fn idle_entry_never_shrinks_on_macos() -> Result<()> {
         .tempdir()?;
     stage_dev_boot_assets(&root, data_dir.path(), &version)?;
 
+    let mut metrics = RunMetrics::new(
+        "idle_balloon",
+        Some("vz"),
+        BootAssets::Bundle {
+            version: version.clone(),
+        },
+    )?;
+
     let mut daemon = DaemonHandle::spawn(DaemonConfig {
         binary: root.join("target/release/arcbox-daemon"),
         data_dir: data_dir.path().to_owned(),
@@ -92,7 +100,6 @@ fn idle_entry_never_shrinks_on_macos() -> Result<()> {
         ],
     })?;
 
-    let mut metrics = RunMetrics::new("idle_balloon", Some("vz"));
     let result = scenario(&mut daemon, data_dir.path(), &mut metrics);
     metrics.passed = result.is_ok();
     if let Err(error) = metrics.write(Some(data_dir.path())) {

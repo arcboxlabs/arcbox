@@ -42,7 +42,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use arcbox_e2e::boot_assets::{resolve_boot_version, stage_dev_boot_assets};
 use arcbox_e2e::daemon::{DaemonConfig, DaemonHandle, connect_unix};
-use arcbox_e2e::metrics::RunMetrics;
+use arcbox_e2e::metrics::{BootAssets, RunMetrics};
 use arcbox_e2e::net_fixtures::{spawn_blob_server, spawn_pattern_server};
 use arcbox_grpc::v1::machine_service_client::MachineServiceClient;
 use arcbox_protocol::v1::{
@@ -109,6 +109,14 @@ fn machine_network_end_to_end() -> Result<()> {
         .tempdir()?;
     stage_dev_boot_assets(&root, data_dir.path(), &version)?;
 
+    let mut metrics = RunMetrics::new(
+        "machine_network",
+        Some("vz"),
+        BootAssets::Bundle {
+            version: version.clone(),
+        },
+    )?;
+
     let mut daemon = DaemonHandle::spawn(DaemonConfig {
         binary: root.join("target/release/arcbox-daemon"),
         data_dir: data_dir.path().to_owned(),
@@ -120,7 +128,6 @@ fn machine_network_end_to_end() -> Result<()> {
         ],
     })?;
 
-    let mut metrics = RunMetrics::new("machine_network", Some("vz"));
     let result = scenario(&mut daemon, &mut metrics);
     metrics.passed = result.is_ok();
     if let Err(error) = metrics.write(Some(data_dir.path())) {

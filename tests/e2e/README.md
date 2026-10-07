@@ -151,6 +151,8 @@ Environment variables read by the tests:
 - `ARCBOX_E2E_METRICS_DIR` / `ARCBOX_E2E_RUN_LABEL` — archive per-run phase
   timings as `<label>.metrics.json` in the given directory (set automatically
   by `cargo xtask e2e`). Runs also write `metrics.json` into their data dir.
+  Each record includes the same label, separate argv entries, host OS/kernel/architecture, and Git commit/dirty state. Failed provenance probes return an error before the measured phases.
+  The harness records the resolved boot version passed to the daemon; the direct HV probe records its selected kernel/rootfs paths. Checkout state describes the repository at run time, not the build revision of existing binaries. A boot version identifies the selected bundle generation; locally staged binary overrides can differ.
 - `ARCBOX_E2E_IPERF_IMAGE=<ref>` — guest iperf3 image for the
   `network_iperf` throughput matrix (default `networkstatic/iperf3:latest`).
 - `ARCBOX_E2E_IPERF_MIN_GBPS=<f64>` — `network_iperf` gate floor. Unset (or

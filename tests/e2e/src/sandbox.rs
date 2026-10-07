@@ -41,7 +41,7 @@ use tonic::transport::Channel;
 use tracing::{info, warn};
 
 use crate::daemon::{DaemonConfig, DaemonHandle, connect_unix};
-use crate::metrics::RunMetrics;
+use crate::metrics::{BootAssets, RunMetrics};
 use crate::{env_flag, repo_root};
 
 /// Generous ceiling for daemon startup: asset staging + the cold
@@ -148,7 +148,13 @@ pub fn run(config: SandboxSmokeConfig) -> Result<()> {
 
     crate::boot_assets::stage_dev_boot_assets(&root, &data_dir, &version)?;
 
-    let mut metrics = RunMetrics::new("sandbox_smoke", Some("vz"));
+    let mut metrics = RunMetrics::new(
+        "sandbox_smoke",
+        Some("vz"),
+        BootAssets::Bundle {
+            version: version.clone(),
+        },
+    )?;
     let result = run_scenario(&root, &data_dir, &version, &mut metrics);
     metrics.passed = result.is_ok();
     match metrics.write(Some(&data_dir)) {

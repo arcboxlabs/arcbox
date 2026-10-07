@@ -13,7 +13,7 @@ use toml_edit::DocumentMut;
 use tracing::{info, warn};
 
 use crate::daemon::{DaemonConfig, DaemonHandle, host_mounts};
-use crate::metrics::RunMetrics;
+use crate::metrics::{BootAssets, RunMetrics};
 use crate::{env_flag, repo_root};
 
 const DOCKER_TIMEOUT: Duration = Duration::from_secs(30);
@@ -174,8 +174,14 @@ pub fn run(config: BootAssetsConfig) -> Result<()> {
     }
 
     let backend_label = config.backend.map(arcbox_vmm::VmBackend::as_str);
-    let mut metrics = RunMetrics::new("boot_assets", backend_label);
     let mut ctx = TestContext::new(config)?;
+    let mut metrics = RunMetrics::new(
+        "boot_assets",
+        backend_label,
+        BootAssets::Bundle {
+            version: ctx.version.clone(),
+        },
+    )?;
     let result = run_scenario(&mut ctx, &mut metrics);
     metrics.passed = result.is_ok();
     match metrics.write(Some(&ctx.test_dir)) {

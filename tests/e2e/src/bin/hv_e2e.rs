@@ -216,7 +216,15 @@ fn run() -> Result<(), String> {
         debug_console_socket: None,
     };
 
-    let mut metrics = arcbox_e2e::metrics::RunMetrics::new("hv_vmm", Some("hv"));
+    let mut metrics = arcbox_e2e::metrics::RunMetrics::new(
+        "hv_vmm",
+        Some("hv"),
+        arcbox_e2e::metrics::BootAssets::Files {
+            kernel: config.kernel_path.clone(),
+            rootfs: config.block_devices[0].path.clone(),
+        },
+    )
+    .map_err(|error| format!("metrics provenance: {error:#}"))?;
 
     // The NAT datapath spawns tokio tasks at start; give it a reactor
     // context like the daemon's, but only when the knob asks for it so

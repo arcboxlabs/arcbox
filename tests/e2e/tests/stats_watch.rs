@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail};
 use arcbox_e2e::boot_assets::{resolve_boot_version, stage_dev_boot_assets};
 use arcbox_e2e::daemon::{DaemonConfig, DaemonHandle, connect_unix};
 use arcbox_e2e::docker::{docker_output, ensure_image};
-use arcbox_e2e::metrics::RunMetrics;
+use arcbox_e2e::metrics::{BootAssets, RunMetrics};
 use arcbox_grpc::v1::stats_service_client::StatsServiceClient;
 use arcbox_protocol::v1::{MachineStats, StatsWatchRequest};
 use tonic::Streaming;
@@ -73,6 +73,14 @@ fn stats_watch_streams_sane_shared_samples() -> Result<()> {
         .tempdir()?;
     stage_dev_boot_assets(&root, data_dir.path(), &version)?;
 
+    let mut metrics = RunMetrics::new(
+        "stats_watch",
+        Some("vz"),
+        BootAssets::Bundle {
+            version: version.clone(),
+        },
+    )?;
+
     let mut daemon = DaemonHandle::spawn(DaemonConfig {
         binary: root.join("target/release/arcbox-daemon"),
         data_dir: data_dir.path().to_owned(),
@@ -86,7 +94,6 @@ fn stats_watch_streams_sane_shared_samples() -> Result<()> {
         ],
     })?;
 
-    let mut metrics = RunMetrics::new("stats_watch", Some("vz"));
     let result = scenario(&mut daemon, data_dir.path(), &mut metrics);
     metrics.passed = result.is_ok();
     if let Err(error) = metrics.write(Some(data_dir.path())) {
