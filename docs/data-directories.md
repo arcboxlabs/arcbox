@@ -74,6 +74,8 @@ An upgrade from an older Btrfs-only installation requires readable original meta
 
 `storage-recovery/hold` prevents automatic and direct System VM starts while an offline check or an unverified recovery needs attention. Do not delete this file to bypass recovery. `storage-recovery/status.json` records the latest operation and outcome. A client disconnect does not cancel the daemon-owned operation; clients recover its outcome through `WatchSetupStatus.storage_recovery`. If the daemon restarts with a nonterminal record, the daemon restores the boot hold and reports an interrupted, unverified result. The control plane remains available for another explicit recovery attempt.
 
+Storage health is independent of Docker readiness. A read-only or unavailable volume blocks known write operations while resource listing, stop, and diagnostic requests remain available. Unknown observations from older or disconnected agents do not imply writable storage. Recovery additionally excludes migration execution, backend changes, and resource changes. The recovery rootfs must contain `/sbin/arcbox-storage-recovery`; that entry point verifies the guest binary's recovery capability before executing the dedicated mode.
+
 ### 1.4 `boot/` — Boot Asset Cache
 
 See also [boot-assets.md](boot-assets.md).

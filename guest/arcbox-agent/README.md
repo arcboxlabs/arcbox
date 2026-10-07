@@ -39,6 +39,8 @@ The `storage-recovery` command requires the recovery kernel flag. A recovery ker
 
 The storage manifest grants one-time formatting authority only to host-created volumes with matching identities. Missing, replaced, unreadable, or corrupted existing volumes require recovery. See [data directories](../../docs/data-directories.md) for the paired backup and initialization contract.
 
+The privileged [`storage-recovery-linux.sh`](tests/storage-recovery-linux.sh) harness runs the ignored Linux checks on disposable loop devices. It requires the compiled Linux agent test binary and a recovery rootfs image. The [I/O fault experiment](../../docs/experiments/2026-10-05-storage-recovery-io-fault.md) records the exact scope, prerequisites, commands, and kernel evidence.
+
 ## Runtime Bootstrap Role
 
 At startup, the agent detects and launches the bundled runtime stack

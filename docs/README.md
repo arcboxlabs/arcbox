@@ -47,8 +47,8 @@ from memory. Every new file is added to the index below.
 
 ### Reference
 
-- [Daemon lifecycle](daemon-lifecycle.md) — startup pipeline, lock/handoff, residual state
 - [ArcBox Engine](../engine/arcbox-engine/README.md) — machine lifecycle, force-stop completion, and storage maintenance
+- [Daemon lifecycle](daemon-lifecycle.md) — startup pipeline, lock/handoff, residual state
 - [Data directories](data-directories.md) — every path the daemon writes
 - [Boot assets](boot-assets.md) — the kernel/rootfs bundle and its pin
 - [Disk reclaim](disk-reclaim.md) — how freed guest space returns to the host
@@ -78,6 +78,7 @@ from memory. Every new file is added to the index below.
 ### Experiments
 
 - [2026-10-05 — Does HV observe guest poweroff before host teardown?](experiments/2026-10-05-hv-poweroff-completion.md)
+- [2026-10-05 — Does a real storage I/O failure reach the protection and recovery checks?](experiments/2026-10-05-storage-recovery-io-fault.md)
 - [2026-10-03 — Can a machine's root be served to the Mac by its agent, read-write, fast enough to work in?](experiments/2026-10-03-machine-root-export.md)
 - [2026-10-01 — Why does a miss under `arcbox.local` take 10 s on macOS, and which answer ends it?](experiments/2026-10-01-local-domain-negative-answers.md)
 - [2026-09-30 — How a guest vCPU actually gets woken on HV](experiments/2026-09-30-hv-wake-path.md)
@@ -91,4 +92,5 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-10-05 — Every agent business request requires protocol v7](logs/2026-10-05-agent-v7-admission.md)
 - [2026-09-29 — vsock RX: drain a stream per round, aim the kick](logs/2026-09-29-vsock-rx-round-and-targeted-kick.md)
