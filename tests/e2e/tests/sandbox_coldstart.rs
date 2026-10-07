@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use arcbox_e2e::boot_assets::{resolve_boot_version, stage_dev_boot_assets};
 use arcbox_e2e::daemon::{DaemonConfig, DaemonHandle, connect_unix};
-use arcbox_e2e::metrics::{BootAssets, RunMetrics};
+use arcbox_e2e::metrics::{BootAssets, RunMetrics, percentile};
 use arcbox_e2e::{env_flag, repo_root};
 use arcbox_grpc::sandbox_v1::sandbox_process_service_client::SandboxProcessServiceClient;
 use arcbox_grpc::sandbox_v1::sandbox_service_client::SandboxServiceClient;
@@ -598,14 +598,16 @@ fn report(label: &str, samples: &[Sample], metrics: &mut RunMetrics) {
     let (first_exec, rest_exec) = exec.split_first().expect("at least one iteration");
     info!(
         group = label,
+        steady_samples = rest_ready.len(),
         first_ready_ms = (first_ready * 1000.0).round(),
         ready_min_ms = ms(min(rest_ready)),
         ready_p50_ms = ms(percentile(rest_ready, 0.50)),
-        ready_p90_ms = ms(percentile(rest_ready, 0.90)),
+        ready_p95_ms = ms(percentile(rest_ready, 0.95)),
         ready_max_ms = ms(max(rest_ready)),
         first_exec_ms = (first_exec * 1000.0).round(),
         exec_p50_ms = ms(percentile(rest_exec, 0.50)),
-        exec_p90_ms = ms(percentile(rest_exec, 0.90)),
+        exec_p95_ms = ms(percentile(rest_exec, 0.95)),
+        exec_max_ms = ms(max(rest_exec)),
         warm_exec_p50_ms = ms(percentile(&warm_exec, 0.50)),
         guest_uptime_p50_s = percentile(&uptime, 0.50),
         create_rpc_p50_ms = ms(percentile(&create, 0.50)),
@@ -622,14 +624,16 @@ fn report(label: &str, samples: &[Sample], metrics: &mut RunMetrics) {
         ("exec", first_exec, rest_exec),
     ] {
         metrics.record(&format!("coldstart_{label}_{metric}_first"), *first);
-        metrics.record(
-            &format!("coldstart_{label}_{metric}_p50"),
-            percentile(rest, 0.50).unwrap_or(*first),
-        );
-        metrics.record(
-            &format!("coldstart_{label}_{metric}_p90"),
-            percentile(rest, 0.90).unwrap_or(*first),
-        );
+        metrics.record_distribution(&format!("coldstart_{label}_{metric}"), "seconds", rest);
+        for (suffix, value) in [
+            ("p50", percentile(rest, 0.50)),
+            ("p95", percentile(rest, 0.95)),
+            ("max", max(rest)),
+        ] {
+            if let Some(value) = value {
+                metrics.record(&format!("coldstart_{label}_{metric}_{suffix}"), value);
+            }
+        }
     }
 }
 
@@ -643,17 +647,6 @@ fn min(values: &[f64]) -> Option<f64> {
 
 fn max(values: &[f64]) -> Option<f64> {
     values.iter().copied().reduce(f64::max)
-}
-
-/// Nearest-rank percentile over an unsorted slice.
-fn percentile(values: &[f64], q: f64) -> Option<f64> {
-    if values.is_empty() {
-        return None;
-    }
-    let mut sorted = values.to_vec();
-    sorted.sort_by(f64::total_cmp);
-    let rank = (q * sorted.len() as f64).ceil().max(1.0) as usize;
-    sorted.get(rank - 1).copied()
 }
 
 fn with_machine<T>(msg: T) -> tonic::Request<T> {

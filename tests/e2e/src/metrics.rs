@@ -95,6 +95,25 @@ pub struct Phase {
     pub seconds: f64,
 }
 
+/// Statistics over one set of measurements, excluding separately reported warm-up samples.
+#[derive(Debug, Serialize)]
+pub struct Distribution {
+    pub name: String,
+    pub unit: String,
+    pub count: usize,
+    pub p50: Option<f64>,
+    pub p95: Option<f64>,
+    pub max: Option<f64>,
+}
+
+/// Nearest-rank percentile over an unsorted sample set.
+pub fn percentile(values: &[f64], quantile: f64) -> Option<f64> {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let rank = (quantile * sorted.len() as f64).ceil().max(1.0) as usize;
+    sorted.get(rank - 1).copied()
+}
+
 /// Machine-readable record of one e2e run.
 #[derive(Debug, Serialize)]
 pub struct RunMetrics {
@@ -112,6 +131,8 @@ pub struct RunMetrics {
     pub provenance: Provenance,
     /// Timed phases, in execution order.
     pub phases: Vec<Phase>,
+    /// Sample summaries retain their units and sample counts.
+    pub distributions: Vec<Distribution>,
 }
 
 impl RunMetrics {
@@ -137,6 +158,7 @@ impl RunMetrics {
                 .unwrap_or_else(|| format!("{test}-{}", std::process::id())),
             provenance: Provenance::capture(&crate::repo_root(), boot_assets, argv)?,
             phases: Vec::new(),
+            distributions: Vec::new(),
         })
     }
 
@@ -154,6 +176,18 @@ impl RunMetrics {
         self.phases.push(Phase {
             name: name.to_owned(),
             seconds,
+        });
+    }
+
+    /// Records sample statistics. Empty sets have zero samples and no percentile estimates.
+    pub fn record_distribution(&mut self, name: &str, unit: &str, samples: &[f64]) {
+        self.distributions.push(Distribution {
+            name: name.to_owned(),
+            unit: unit.to_owned(),
+            count: samples.len(),
+            p50: percentile(samples, 0.50),
+            p95: percentile(samples, 0.95),
+            max: samples.iter().copied().reduce(f64::max),
         });
     }
 
@@ -208,6 +242,24 @@ mod tests {
         assert_eq!(metrics.phases.len(), 2);
         assert_eq!(metrics.phases[0].name, "good");
         assert_eq!(metrics.phases[1].name, "bad");
+    }
+
+    #[test]
+    fn distributions_keep_units_counts_and_empty_sample_sets() {
+        let mut metrics = RunMetrics::new("t", None, boot_assets()).expect("provenance");
+        let samples: Vec<f64> = (1..=20).rev().map(f64::from).collect();
+        metrics.record_distribution("latency", "seconds", &samples);
+        metrics.record_distribution("no-steady-samples", "seconds", &[]);
+        metrics.record_distribution("throughput", "per_second", &[2.0, 4.0]);
+        let record = serde_json::to_value(&metrics).expect("JSON");
+        assert_eq!(record["distributions"][0]["count"], 20);
+        assert_eq!(record["distributions"][0]["p50"], 10.0);
+        assert_eq!(record["distributions"][0]["p95"], 19.0);
+        assert_eq!(record["distributions"][0]["max"], 20.0);
+        assert_eq!(record["distributions"][1]["count"], 0);
+        assert!(record["distributions"][1]["p95"].is_null());
+        assert_eq!(record["distributions"][2]["unit"], "per_second");
+        assert!(metrics.phases.is_empty());
     }
 
     #[test]
