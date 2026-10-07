@@ -316,6 +316,7 @@ dependencies = [
  "arcbox-docker",
  "arcbox-docker-tools",
  "arcbox-helper",
+ "arcbox-local-ca",
  "buffa",
  "buffa-types",
  "chrono",

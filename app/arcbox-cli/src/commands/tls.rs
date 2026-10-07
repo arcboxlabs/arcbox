@@ -1,8 +1,8 @@
 //! Trusting the local CA behind `https://<name>.arcbox.local`.
 //!
 //! The daemon creates the CA as `tls/ca.pem` in its data directory on first
-//! start, and the guest agent signs a certificate per container domain with
-//! it. Browsers and `curl` accept those once the user trusts the CA:
+//! start. The CA private key stays in the macOS Keychain, and the host signs
+//! guest-generated CSRs. Browsers and `curl` accept those once the user trusts the CA:
 //!
 //! - `abctl tls trust`   — add it to the login keychain, trusted for TLS
 //!   servers only (`security add-trusted-cert -p ssl`); macOS asks for the

@@ -10,7 +10,6 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use arcbox_constants::dns::LOCAL_CA_COMMON_NAME;
 use arcbox_constants::paths::{DOCKER_CLI_TOOLS, HostLayout, is_arcbox_owned, labels};
 
 use super::host::{Host, run_checked, sudo};
@@ -216,41 +215,10 @@ pub(super) fn remove_hosts_alias(host: &dyn Host, hosts: &Path) -> Result<Outcom
     }
 }
 
-/// Removes trust in, and then the copy of, the ArcBox local CA that
-/// `abctl tls trust` added to the login keychain. `security` asks for the
-/// user's password, as it did when trust was granted.
+/// Removes the selected profile's CA trust, certificate, and Keychain key.
 pub(super) fn untrust_local_ca(host: &dyn Host, roots: &Roots) -> Result<Outcome> {
-    let keychain = roots.login_keychain();
-    let found = host.run(
-        "security",
-        &[
-            OsStr::new("find-certificate"),
-            OsStr::new("-c"),
-            OsStr::new(LOCAL_CA_COMMON_NAME),
-            keychain.as_os_str(),
-        ],
-    )?;
-    if !found.status.success() {
-        return Ok(skipped("not trusted"));
-    }
-    let ca = roots.local_ca();
-    if ca.is_file() {
-        run_checked(
-            host,
-            "security",
-            &[OsStr::new("remove-trusted-cert"), ca.as_os_str()],
-        )?;
-    }
-    run_checked(
-        host,
-        "security",
-        &[
-            OsStr::new("delete-certificate"),
-            OsStr::new("-c"),
-            OsStr::new(LOCAL_CA_COMMON_NAME),
-            keychain.as_os_str(),
-        ],
-    )?;
+    let dir = roots.data_dir.join(arcbox_constants::paths::guest::TLS);
+    host.delete_local_ca(&dir)?;
     Ok(Outcome::Done)
 }
 

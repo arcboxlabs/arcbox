@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use arcbox_constants::paths::{
-    ArcboxProfile, DOCKER_CLI_TOOLS, HostLayout, HostMountLayout, guest, is_arcbox_owned, labels,
+    ArcboxProfile, DOCKER_CLI_TOOLS, HostLayout, HostMountLayout, is_arcbox_owned, labels,
     privileged, privileged_log,
 };
 use arcbox_helper::validate::SocketTarget;
@@ -84,14 +84,6 @@ impl Roots {
     /// single root mounted machines under its `legacy_machines_root`.
     pub(super) fn host_mounts(&self) -> HostMountLayout {
         HostMountLayout::under_home(&self.home)
-    }
-
-    pub(super) fn login_keychain(&self) -> PathBuf {
-        self.home.join("Library/Keychains/login.keychain-db")
-    }
-
-    pub(super) fn local_ca(&self) -> PathBuf {
-        self.data_dir.join(guest::TLS).join(guest::TLS_CA_CERT)
     }
 
     /// The Desktop app's preferences, which `cfprefsd` caches: removed with

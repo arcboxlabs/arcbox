@@ -169,6 +169,15 @@ mod tests {
         let path = dir.path().to_owned();
         fs::remove_dir_all(&path).unwrap();
         KeychainAuthority::delete(&path).unwrap();
+        let remaining = ItemSearchOptions::new()
+            .class(ItemClass::key())
+            .label(&KeychainAuthority::label(&path).unwrap())
+            .load_refs(true)
+            .search();
+        assert_eq!(
+            remaining.unwrap_err().code(),
+            security_framework_sys::base::errSecItemNotFound
+        );
         fs::create_dir(&path).unwrap();
         let replacement = KeychainAuthority::open(&path).unwrap();
         assert_ne!(replacement.certificate_pem().as_bytes(), new);

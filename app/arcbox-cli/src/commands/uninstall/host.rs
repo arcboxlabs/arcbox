@@ -5,6 +5,7 @@
 //! `osascript`, `security`, `defaults` and `umount`.
 
 use std::ffi::OsStr;
+use std::path::Path;
 use std::process::{Command, Output};
 
 use anyhow::{Context, Result, bail};
@@ -12,12 +13,19 @@ use anyhow::{Context, Result, bail};
 pub(super) trait Host: Sync {
     /// Runs `program args…` to completion. `Err` means it could not start.
     fn run(&self, program: &str, args: &[&OsStr]) -> Result<Output>;
+    /// Revokes and deletes only the selected profile's Keychain CA.
+    fn delete_local_ca(&self, tls_dir: &Path) -> Result<()>;
 }
 
 /// The Mac this process runs on.
 pub(super) struct Mac;
 
 impl Host for Mac {
+    fn delete_local_ca(&self, tls_dir: &Path) -> Result<()> {
+        arcbox_local_ca::KeychainAuthority::delete(tls_dir)
+            .context("removing the profile's Keychain CA")
+    }
+
     fn run(&self, program: &str, args: &[&OsStr]) -> Result<Output> {
         Command::new(program)
             .args(args)

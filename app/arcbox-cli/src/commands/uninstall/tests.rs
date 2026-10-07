@@ -52,6 +52,14 @@ impl Recorder {
 }
 
 impl Host for Recorder {
+    fn delete_local_ca(&self, tls_dir: &Path) -> Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("delete-local-ca {}", tls_dir.display()));
+        Ok(())
+    }
+
     fn run(&self, program: &str, args: &[&OsStr]) -> Result<Output> {
         let line = std::iter::once(program.to_owned())
             .chain(args.iter().map(|arg| arg.to_string_lossy().into_owned()))

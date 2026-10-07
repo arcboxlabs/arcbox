@@ -6,7 +6,7 @@ use core_foundation::{base::TCFType, data::CFData};
 use rcgen::{Issuer, PKCS_ECDSA_P256_SHA256, PublicKeyData, SignatureAlgorithm, SigningKey};
 use security_framework::certificate::SecCertificate;
 use security_framework::item::{
-    AddRef, ItemAddOptions, ItemAddValue, ItemClass, ItemSearchOptions, KeyClass, Location,
+    AddRef, ItemAddOptions, ItemAddValue, ItemClass, ItemSearchOptions, KeyClass, Limit, Location,
     Reference, SearchResult,
 };
 use security_framework::key::{Algorithm, GenerateKeyOptions, KeyType, SecKey};
@@ -96,7 +96,7 @@ impl KeychainAuthority {
     }
 
     // Resolve surviving ancestors so uninstall can find keys after the TLS directory is removed.
-    fn label(tls_dir: &Path) -> Result<String, Error> {
+    pub(crate) fn label(tls_dir: &Path) -> Result<String, Error> {
         let path = std::path::absolute(tls_dir).map_err(|e| Error::io(tls_dir, e))?;
         for ancestor in path.ancestors() {
             match ancestor.canonicalize() {
@@ -147,6 +147,7 @@ impl KeychainAuthority {
         match ItemSearchOptions::new()
             .class(ItemClass::key())
             .label(&label)
+            .limit(Limit::All)
             .delete()
         {
             Ok(()) => {}
