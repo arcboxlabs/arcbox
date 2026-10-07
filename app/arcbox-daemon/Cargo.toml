@@ -48,6 +48,8 @@ arcbox-computer.workspace = true
 arcbox-engine.workspace = true
 nix.workspace = true
 libproc.workspace = true
+arcbox-local-ca.workspace = true
+futures.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 arcbox-route.workspace = true

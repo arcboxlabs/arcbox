@@ -147,17 +147,17 @@ init through the `arcbox` VirtioFS share (`/arcbox/config/`).
 
 ### 1.10 `tls/` — Local CA for Container Domains
 
-Generated once by the daemon before the System VM boots, kept across
-restarts; the guest agent reads it through the share (`/arcbox/tls/`) to sign
-a certificate per `https://<name>.arcbox.local` name. Trust model:
+The macOS daemon keeps the CA key and certificate in the user's Keychain.
+The guest sends CSRs to the host and retains only leaf keys in memory.
+The shared directory contains the public certificate for client trust. Trust model:
 `common/arcbox-local-ca/src/lib.rs`.
 
 | Path | Purpose | Creator |
 |------|---------|---------|
 | `tls/ca.pem` | CA certificate, name-constrained to `arcbox.local`; what `abctl tls trust` adds to the login keychain | daemon |
-| `tls/ca-key.pem` | CA private key (mode 0600) | daemon |
+| `tls/ca-key.pem` | Legacy private key; removed before VM boot | legacy daemon |
 
-Deleting `tls/` rotates the CA on the next daemon start; trust the new one again.
+Deleting `tls/` does not rotate the Keychain CA: the daemon exports the same public certificate again. The Keychain key uses `dev.arcbox.local-ca.v2:<canonical tls directory>` as its label. Migration generates a new key, removes the old shared key, revokes the old certificate's user trust, and then replaces `ca.pem`. The old public certificate stays in place if trust removal fails, so the next start can retry. Run `abctl tls trust` to trust the new CA.
 
 ### 1.11 `ssh/` — SSH Server
 
@@ -239,7 +239,7 @@ Not files under a fixed directory, but state ArcBox leaves on the Mac.
 | `~/ArcBox/`: the host mount root, a plain directory holding every guest filesystem the daemon shows the user (ADR 0003). `ARCBOX_HOST_MOUNT_DIR` moves it (test daemons keep it in their data dir). At startup the daemon force-unmounts whatever a previous daemon left under it — their servers died with it — and the pre-ADR-0003 layout (section 10) | daemon (`startup::host_mounts`) | `abctl uninstall`, when nothing but the daemon's directories is left in it |
 | `~/ArcBox/docker`: read-only NFSv4 mount of the guest's Docker data; the containerd data root is the child export at `docker/containerd`, mounted by the NFS client on its own | daemon (`nfs_mount`) | daemon on shutdown; `abctl uninstall` when a daemon left it |
 | `~/ArcBox/machines/<name>`: read-write NFSv3 mount of a running machine's root filesystem, served by the machine's agent on its bridge NIC; the mount point exists only while the machine runs | daemon (`machine_mount`) | daemon when the machine stops or is removed and on shutdown; `abctl uninstall` when a daemon left one |
-| Login keychain: the `ArcBox Local CA` certificate and its TLS trust | user (`abctl tls trust`) | `abctl tls untrust`, `abctl uninstall` |
+| Default file Keychain: per-profile CA key and public certificate; login Keychain: TLS trust | daemon; user (`abctl tls trust`) | `abctl tls untrust` removes trust; `abctl uninstall` removes the profile's key and certificate |
 | `~/.kube/config`: the `arcbox` context, cluster and user; `~/.arcbox/kube/` | user (`abctl k8s enable`) | `abctl k8s disable`, `abctl uninstall` |
 | Login Items entry for the daemon (BTM database) | desktop (SMAppService) | the Desktop app when it quits |
 

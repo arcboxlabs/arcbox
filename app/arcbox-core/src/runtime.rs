@@ -1143,14 +1143,20 @@ impl Runtime {
             return Ok(());
         }
 
-        // So does the CA behind HTTPS on container domains: generated once,
-        // signed with in the guest, trusted by the user (`abctl tls trust`).
-        let tls_dir = self
-            .config
-            .data_dir
-            .join(arcbox_constants::paths::guest::TLS);
-        if arcbox_local_ca::ensure(&tls_dir)? {
-            tracing::info!(path = %tls_dir.display(), "generated the local CA for container domains");
+        #[cfg(target_os = "macos")]
+        {
+            let tls_dir = self
+                .config
+                .data_dir
+                .join(arcbox_constants::paths::guest::TLS);
+            // Retire shared private keys before exposing the data directory to the guest.
+            tokio::task::spawn_blocking(move || {
+                std::fs::create_dir_all(&tls_dir)?;
+                arcbox_local_ca::KeychainAuthority::open(&tls_dir)?.publish(&tls_dir)?;
+                Ok::<_, CoreError>(())
+            })
+            .await
+            .map_err(|error| CoreError::Vm(format!("local CA setup task failed: {error}")))??;
         }
 
         // Boot the VM through the lifecycle manager first so the agent

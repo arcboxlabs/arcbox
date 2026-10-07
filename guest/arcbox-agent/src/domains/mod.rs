@@ -25,11 +25,12 @@
 //! binds) changes nothing, and the rule stays as chosen once the window
 //! closes.
 //!
-//! When the daemon has put the local CA on the share, `https://` works the
+//! With the host's Keychain CA signing leaf CSRs, `https://` works the
 //! same way: port 443 of each container with an HTTP port (unless it
 //! listens on 443 itself) is redirected to a proxy in the agent that
 //! terminates TLS and relays to that HTTP port ([`https`]).
 
+mod certificates;
 mod facts;
 mod http_port;
 mod https;
@@ -86,7 +87,7 @@ enum Command {
 
 impl DomainRoutes {
     /// Starts the task. It sweeps a previous agent's rules, starts the HTTPS
-    /// proxy if the local CA is on the share, then follows the containers
+    /// proxy with the host signing channel, then follows the containers
     /// it is told about until `cancel`.
     #[must_use]
     pub fn spawn(cancel: CancellationToken) -> (Self, JoinHandle<()>) {

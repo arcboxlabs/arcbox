@@ -156,6 +156,8 @@ impl RuntimeBooted {
                 services::start_services(&self.ctx, &self.runtime, self.control_plane).await?;
             recovery::run(&self.ctx, &self.runtime, handles.dns_port).await?;
             if linux_vm {
+                #[cfg(target_os = "macos")]
+                crate::tls_signer::spawn(&self.ctx, &self.runtime).await?;
                 services::enable_docker_integration(&self.ctx);
                 crate::kubernetes_lb::spawn(&self.ctx, &self.runtime);
                 crate::sandbox_cleanup::spawn(&self.ctx, &self.runtime);

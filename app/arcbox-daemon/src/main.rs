@@ -22,6 +22,8 @@ mod ssh_agent;
 mod ssh_service;
 mod startup;
 mod storage_health;
+#[cfg(target_os = "macos")]
+mod tls_signer;
 
 use std::sync::Arc;
 

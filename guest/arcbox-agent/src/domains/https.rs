@@ -14,18 +14,16 @@
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
-use arcbox_constants::paths::guest;
-use arcbox_local_ca::LeafMinter;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_rustls::TlsAcceptor;
+use tokio_rustls::{LazyConfigAcceptor, rustls};
 use tokio_util::sync::CancellationToken;
 
 use super::HttpPorts;
+use super::certificates::Certificates;
 use super::http_port::HTTPS_PORT;
 
 /// Where the 443 rules redirect to, in the VM's own namespace.
@@ -40,24 +38,19 @@ const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 /// The listening proxy.
 pub(super) struct Https {
     listener: TcpListener,
-    acceptor: TlsAcceptor,
+    certificates: Arc<Certificates>,
 }
 
 impl Https {
-    /// Loads the CA the daemon put on the share and binds [`PROXY_PORT`].
+    /// Binds the host signing channel and [`PROXY_PORT`].
     pub(super) async fn bind() -> Result<Self> {
-        let dir = Path::new(guest::MOUNT).join(guest::TLS);
-        let minter = LeafMinter::load(&dir)
-            .with_context(|| format!("loading the local CA from {}", dir.display()))?;
-        let mut config = minter.into_server_config()?;
-        // The plaintext reaches the container as HTTP/1.1; h2 would not.
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let certificates = Arc::new(Certificates::bind()?);
         let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, PROXY_PORT))
             .await
             .with_context(|| format!("binding port {PROXY_PORT}"))?;
         Ok(Self {
             listener,
-            acceptor: TlsAcceptor::from(Arc::new(config)),
+            certificates,
         })
     }
 
@@ -77,10 +70,10 @@ impl Https {
                     }
                 },
             };
-            let acceptor = self.acceptor.clone();
+            let certificates = Arc::clone(&self.certificates);
             let ports = ports.clone();
             tokio::spawn(async move {
-                if let Err(e) = relay(client, &acceptor, &ports).await {
+                if let Err(e) = relay(client, &certificates, &ports).await {
                     tracing::debug!(%peer, error = %format!("{e:#}"), "container domain HTTPS connection ended");
                 }
             });
@@ -89,7 +82,7 @@ impl Https {
 }
 
 /// Terminates one client's TLS and relays it to the container it dialled.
-async fn relay(client: TcpStream, acceptor: &TlsAcceptor, ports: &HttpPorts) -> Result<()> {
+async fn relay(client: TcpStream, certificates: &Certificates, ports: &HttpPorts) -> Result<()> {
     let dialled = original_destination(&client).context("reading the dialled address")?;
     // Anything but a redirected container 443 reached the port directly.
     ensure!(
@@ -100,10 +93,19 @@ async fn relay(client: TcpStream, acceptor: &TlsAcceptor, ports: &HttpPorts) -> 
     let http_port = ports
         .get(container)
         .with_context(|| format!("{container} serves no HTTP port"))?;
-    let mut tls = tokio::time::timeout(TIMEOUT, acceptor.accept(client))
-        .await
-        .context("TLS handshake timed out")?
-        .context("TLS handshake")?;
+    let mut tls = tokio::time::timeout(TIMEOUT, async {
+        let hello = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), client).await?;
+        let name = hello
+            .client_hello()
+            .server_name()
+            .context("TLS client omitted SNI")?
+            .to_owned();
+        let config = certificates.configuration(&name).await?;
+        Ok::<_, anyhow::Error>(hello.into_stream(config).await?)
+    })
+    .await
+    .context("TLS handshake timed out")?
+    .context("TLS handshake")?;
     let mut upstream = tokio::time::timeout(TIMEOUT, TcpStream::connect((container, http_port)))
         .await
         .context("connecting to the container timed out")?

@@ -195,7 +195,8 @@ non-obvious invariants and failure signatures.
 - **Container domains ride nat PREROUTING, and bridged siblings reach them
   only through the kernel's built-in `br_netfilter`.** `domains/` DNATs
   `<ip>:80` to the container's HTTP port and REDIRECTs `<ip>:443` to the
-  agent's TLS proxy on 61443 (`domains/https.rs`, CA from `/arcbox/tls/`),
+  agent's TLS proxy on 61443 (`domains/https.rs`, leaf CSRs signed by the
+  host through vsock port 2202; the CA key stays in the macOS Keychain),
   tagged `arcbox-domain:<id>`, removed on `die`/`destroy`, swept at agent
   start. The rules match the destination only; switched sibling traffic meets
   them because the System VM kernel builds `br_netfilter` in and
