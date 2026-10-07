@@ -178,3 +178,83 @@ New local evidence includes `cpu_ticks_repro.rs`, `cpu-ticks-repro.json`, `host-
 Use an isolated reproduction to capture timer interrupt deltas, both CPU accounting sources, kernel stacks, and host vCPU scheduling together. If the divergence reproduces, compare kernel accounting configurations while holding the VZ backend and workload constant. Enabling another accounting mode or reducing vCPUs without that comparison would be an unverified mitigation.
 
 Correction to the earlier snapshot instructions: sum the first eight `/proc/stat` CPU fields for total CPU time, including `steal` and excluding `guest` and `guest_nice`. The earlier first-seven calculation produced the same result for the captured samples because `steal` was zero.
+
+## Repair and controlled reproduction
+
+### Parser correction
+
+The parser now sums the first eight fields. A regression covers nonzero `guest`, `guest_nice`, and `steal`, so excluding nested guest time cannot accidentally exclude steal time. The original failing reproducer and the imported parser tests pass: 16 tests on macOS and 16 tests in the isolated Linux guest. The Linux run used a musl executable that imports the actual parser; that run alone does not validate a rebuilt agent or its RPC path.
+
+`cargo fmt --check` and `cargo clippy -p arcbox-agent --target aarch64-unknown-linux-musl --all-targets` passed. Clippy reported only an existing future-incompatibility notice for `proc-macro-error2 v2.0.1`. The parser correction changes ArcBox machine statistics when nested guest time is nonzero. It does not change Docker's forwarded statistics or resolve the original incident.
+
+### Isolated baseline and profiler comparison
+
+The reproduction used a separate data directory and Docker socket, an 18-vCPU VZ VM, the deployed daemon, boot bundle 0.8.7, and kernel `6.18.38-arcbox`. The existing user VMs and original SigNoz deployment were not restarted or reconfigured. The disposable data directory is `/private/tmp/arcbox-cpu-repro-w0v7qz49`.
+
+Both ClickHouse cases used `25.12.5.44` and a background pool of 512 threads. Global CPU and real profiler settings were `10000000000` for the enabled case and zero for the disabled case. Runtime queries verified the settings. Both ran the same [bounded workload](../../tests/bench/signoz/cpu_workload.sql).
+
+The table aggregates sample intervals where ClickHouse cgroup usage exceeded ten CPU seconds per elapsed second:
+
+| Profiler | Elapsed | Guest total CPU | Container CPU | Host VM CPU |
+|---|---:|---:|---:|---:|
+| Enabled | 89.19 s | 1212.56 CPU s | 1578.094927 CPU s | not captured |
+| Disabled | 89.88 s | 1251.28 CPU s | 1598.671693 CPU s | 1015.29 CPU s |
+
+With profilers disabled, those counters represent 13.922 guest total cores, 17.787 container cores, and 11.296 host VM cores. The profiler defect is therefore not necessary for the accounting divergence. Host process CPU time and guest counters are sampled sequentially, so short-interval comparisons have read skew; the longer aggregate also shows the discrepancy.
+
+Idle guest total accounting remained close to 18 cores: 17.715 with profilers enabled and 17.761 with profilers disabled. These runs reproduced counter divergence, but did not reproduce the original prolonged ClickHouse lock stalls.
+
+### Controlled host suspension
+
+While the same workload was active, a probe verified the disposable VZ helper's PID and start identity, sent SIGSTOP, and resumed the helper after ten seconds. A detached watchdog and a `finally` block both provided SIGCONT. The original run used PID 76989, started at `Wed Oct 7 21:51:29 2026` local time. The helper stopped at 14:23:37.596848 UTC and resumed at 14:23:47.654469 UTC. Other VZ helpers were not signaled.
+
+The interval spanning the suspension, 14:23:35.506177–14:23:47.671382 UTC, recorded:
+
+| Counter | Delta |
+|---|---:|
+| Guest elapsed | 12.15 s |
+| Guest total CPU | 29.71 CPU s |
+| Container CPU | 218.456426 CPU s |
+| Host VM CPU | 29.14 CPU s |
+| Blocking sample read | 10.157694 s |
+
+Applying Docker's formula to those captured counters gives `218.456426 / 29.71 * 18 * 100 = 13235.33%`. This is a derived percentage, not a raw Docker API or UI percentage sample. The guest remained responsive after resumption and `SELECT 1` succeeded.
+
+Host descheduling is sufficient to produce this class of amplification. The experiment does not establish that the original incident had the same host trigger. It also corrects the earlier emphasis on guest accounting loss: cgroup task runtime can include elapsed host descheduling, so the entire difference cannot be assigned to `/proc/stat` undercounting.
+
+In Linux v6.18.38, [update_rq_clock_task](https://github.com/gregkh/linux/blob/v6.18.38/kernel/sched/core.c#L776) subtracts stolen time only when `paravirt_steal_rq_enabled` is active. Otherwise, elapsed scheduler-clock time advances task runtime. The deployed guest has no observed stolen-time activation message and reports zero steal. Tick accounting and scheduler runtime can therefore diverge during host suspension without either counter providing an independent measurement of physical host CPU use.
+
+### Fresh SigNoz initialization and remaining work
+
+A fresh isolated SigNoz stack used the original image versions and read-only configuration sources. Migrations and ClickHouse initialization completed without the original long stalls. During 179.4 seconds, guest total CPU advanced 3170.25 seconds and ClickHouse cgroup CPU advanced 40.16827 seconds. The Collector reported OpAMP server errors against the fresh metastore, so this run does not validate the original ingestion scenario or an end-to-end SigNoz recovery.
+
+No kernel configuration change has been applied. `CONFIG_VIRT_CPU_ACCOUNTING_GEN` is an untested candidate for aligning accounting sources. Generic virtual accounting can still charge elapsed virtual time and has context-tracking overhead; a lower Docker percentage would not prove correct physical-host accounting or fixed ClickHouse stalls. An A/B comparison and overhead measurement remain necessary.
+
+The available `rust:1-bookworm` image lacks `bc`, `bison`, `flex`, `cpio`, and `libelf-dev`. Kernel build work is paused pending a user-provided ARM64 Linux builder image, as required by the workspace instructions. The original prolonged stall remains unresolved.
+
+### Reproduction probes and evidence
+
+Run the [CPU sampler](../../tests/bench/signoz/sample_cpu.py) against an explicit disposable Docker socket. The container must provide `cat`, `/proc`, and cgroup v2. On the observed ARM64 Linux guest, `/proc/stat` uses 100 USER_HZ ticks per second.
+
+```sh
+python3 tests/bench/signoz/sample_cpu.py --socket "$LAB/run/docker.sock" --container "$CONTAINER" --host-vm-pid "$VM_PID" --seconds 120 --output "$CAPTURE"
+docker --host "unix://$LAB/run/docker.sock" exec -i "$CONTAINER" clickhouse-client < tests/bench/signoz/cpu_workload.sql
+```
+
+Start the sampler before the workload in separate terminals. For the suspension experiment, first identify the helper belonging to the disposable VM and record its start time with `ps -p "$VM_PID" -o lstart= -o comm=`. After the workload becomes active, run the [bounded suspension probe](../../tests/bench/signoz/pause_vm.py) in another terminal:
+
+```sh
+python3 tests/bench/signoz/pause_vm.py --pid "$VM_PID" --expected-start "$VM_START" --output "$PAUSE_EVENTS"
+```
+
+Never select a helper from an existing user VM. The start-time check detects a stale PID; the operator must establish which daemon owns that helper. Verify a query succeeds after resumption. Docker masks `/proc/interrupts` inside these containers, so the sampler omits that file; use `abctl debug` for an unmasked IRQ snapshot.
+
+Raw evidence includes `profiler-on-load.jsonl`, `profiler-off-load.jsonl`, `host-pause.jsonl`, `pause-events.jsonl`, their summaries and analyses, `signoz-init.jsonl`, and `cpu-ticks-fixed-linux.json`. The local evidence archive preserves the analysis scripts and configuration records. Image archives, VM disks, and executable artifacts are excluded.
+
+### Final validation and asset blocker
+
+The complete agent built for `aarch64-unknown-linux-musl` in release mode, and the matching host daemon also built successfully. A daemon-level stats check was attempted in the same disposable data directory with the fixed agent. Startup failed before the VM started: the new daemon embeds the boot bundle 0.8.8 manifest hash, while the retained baseline assets are 0.8.7. The expected hash was `e40c7c6a09ddbaedd9862b114db0a44efcdea40889eccc08aeef2cf156cd4e74`; the baseline manifest hash was `a50d07e225ea82b8d63b6bde7825247729e80133a2c3781e2ccd010bb2433f76`. `boot-assets/dev` contains 0.8.6 and cannot supply the required assets.
+
+The manifest check was not bypassed. The workspace requires user setup when prerequisites are missing, so daemon-level validation is paused pending official 0.8.8 assets. The parser change remains uncommitted until that required check passes. Neither a daemon-level pass nor deployment of the parser fix is claimed.
+
+The checked-in suspension probe was separately run against the disposable helper at 14:38:50 UTC. The ten-second watchdog completed, and a subsequent ClickHouse `SELECT 1` succeeded. Python syntax checks, workspace formatting, and `git diff --check` passed. The baseline daemon then stopped cleanly; its helper PID 76989 exited. The new daemon's failed startup also exited, leaving no running VM from this task. The data directory and logs remain available for the next comparison.
