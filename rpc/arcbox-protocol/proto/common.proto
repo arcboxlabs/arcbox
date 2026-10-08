@@ -52,6 +52,24 @@ message PortBinding {
     string host_ip = 4;
 }
 
+// Selection for one machine web protocol.
+message WebPortPolicy {
+    oneof selection {
+        // Discover a backend automatically.
+        Empty auto = 1;
+        // Disable the protocol.
+        Empty off = 2;
+        // Backend port, 1 through 65535. HTTPS expects native TLS on this port.
+        uint32 port = 3;
+    }
+}
+
+// Complete backend policies; these fields do not report installed routes.
+message MachineWebPorts {
+    WebPortPolicy http_port = 1;
+    WebPortPolicy https_port = 2;
+}
+
 // Resource limits for containers.
 message ResourceLimits {
     // Memory limit in bytes.

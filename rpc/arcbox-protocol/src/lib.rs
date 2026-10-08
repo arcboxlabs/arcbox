@@ -50,8 +50,8 @@ pub use pbjson_types;
 /// Re-exports all types for backward compatibility.
 pub mod common {
     pub use super::v1::{
-        Empty, KeyValue, Mount, PortBinding, ResourceLimits, StorageHealth, StorageVolumeHealth,
-        Timestamp, storage_volume_health,
+        Empty, KeyValue, MachineWebPorts, Mount, PortBinding, ResourceLimits, StorageHealth,
+        StorageVolumeHealth, Timestamp, WebPortPolicy, storage_volume_health, web_port_policy,
     };
 }
 
@@ -64,10 +64,10 @@ pub mod machine {
         DirectoryMount, ExportMachineRequest, ExportMachineResponse, ImportMachineRequest,
         ImportMachineResponse, InspectMachineRequest, ListMachinesRequest, ListMachinesResponse,
         MachineEvent, MachineEventsRequest, MachineExecOutput, MachineExecRequest, MachineHardware,
-        MachineInfo, MachineNetwork, MachineOs, MachineStorage, MachineSummary, MachineWebPorts,
+        MachineInfo, MachineNetwork, MachineOs, MachineStorage, MachineSummary,
         RemoveMachineRequest, SetDefaultMachineRequest, SetMachineResourcesRequest,
         SetMachineResourcesResponse, SetMachineWebPortsRequest, SshInfoRequest, SshInfoResponse,
-        StartMachineRequest, StopMachineRequest, WebPortPolicy, web_port_policy,
+        StartMachineRequest, StopMachineRequest,
     };
 }
 

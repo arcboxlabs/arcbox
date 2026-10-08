@@ -330,24 +330,6 @@ message SetMachineResourcesResponse {
     uint64 host_memory = 5;
 }
 
-// Selection for one machine web protocol.
-message WebPortPolicy {
-    oneof selection {
-        // Discover a backend automatically.
-        Empty auto = 1;
-        // Disable the protocol.
-        Empty off = 2;
-        // Backend port, 1 through 65535. HTTPS expects native TLS on this port.
-        uint32 port = 3;
-    }
-}
-
-// Saved settings; these fields do not report installed routes.
-message MachineWebPorts {
-    WebPortPolicy http_port = 1;
-    WebPortPolicy https_port = 2;
-}
-
 // Request to save machine web backend selection.
 message SetMachineWebPortsRequest {
     string id = 1;

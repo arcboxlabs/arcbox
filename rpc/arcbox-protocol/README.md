@@ -15,7 +15,7 @@ re-exported through:
 
 | Module | Source proto | Description |
 |--------|--------------|-------------|
-| `common` | `common.proto` | Shared types (`Empty`, `Mount`, `PortBinding`, ...) |
+| `common` | `common.proto` | Shared types (`Empty`, `Mount`, `PortBinding`, `WebPortPolicy`, `MachineWebPorts`, ...) |
 | `machine` | `machine.proto` | Machine lifecycle + agent passthrough requests |
 | `container` | `container.proto` | Container lifecycle and exec messages |
 | `image` | `image.proto` | Image pull/list/inspect/remove messages |
@@ -46,7 +46,7 @@ The daemon and the in-VM `arcbox-agent` ship together. Update paired callers and
 
 `ListGuestWebServices` uses typed container, index, and machine endpoints. A machine endpoint names one canonical host-assigned DNS name and its bridge IPv4 address. The System VM consumer rejects machine routes; the schema addition does not enable machine routing.
 
-`MachineService.SetWebPorts` saves per-machine HTTP and HTTPS backend policies. Each `WebPortPolicy` selects automatic discovery, disabled routing, or a port from 1 through 65535. An explicit HTTPS port selects native TLS. Omitted update fields preserve their values. `MachineInfo.web_ports` and the setter response report saved configuration; neither reports installed routes.
+`MachineService.SetWebPorts` saves per-machine HTTP and HTTPS backend policies. The shared `common.proto` defines `WebPortPolicy` and `MachineWebPorts` for host and guest consumers. Each policy selects automatic discovery, disabled routing, or a port from 1 through 65535. An explicit HTTPS port selects native TLS. Omitted update fields preserve their values. `MachineInfo.web_ports` and the setter response report saved configuration; neither reports installed routes.
 
 `SetupStatus.storage_health` reports persistent storage independently of startup
 phase and daemon liveness. Each observation names the Btrfs data volume and the
