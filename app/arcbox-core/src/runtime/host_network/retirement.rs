@@ -4,7 +4,7 @@ use super::*;
 use arcbox_error::CommonError;
 
 impl Runtime {
-    pub(super) async fn prepare_container_incarnation(
+    pub(in crate::runtime) async fn prepare_container_incarnation(
         &self,
         state: &mut CommitState,
         expected: &VmIncarnation,
@@ -20,7 +20,7 @@ impl Runtime {
         Ok(())
     }
 
-    /// Retires Docker state whose physical VM is no longer current and ready.
+    /// Retires Docker and index state whose physical VM is no longer current and ready.
     ///
     /// # Errors
     /// Returns an error if the physical VM registry cannot be read.
@@ -79,7 +79,7 @@ impl Runtime {
             .expect("DNS registry lock poisoned");
         let owners: Vec<_> = registry
             .owners()
-            .filter(|owner| Self::is_container_dns_owner(owner))
+            .filter(|owner| Self::is_container_dns_owner(owner) || *owner == "system:index")
             .map(str::to_owned)
             .collect();
         for owner in owners {

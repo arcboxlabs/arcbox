@@ -10,6 +10,8 @@ use arcbox_dns::registry::{Lookup, Registry};
 use arcbox_dns::web_services::{HttpsMode as UrlHttpsMode, WebServiceUrls};
 use tokio_util::sync::CancellationToken;
 
+mod index;
+
 use super::Runtime;
 use crate::error::{CoreError, Result};
 
