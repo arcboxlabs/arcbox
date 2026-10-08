@@ -73,6 +73,190 @@ async fn http1_to_http2_preserves_authority_scheme_redirects_and_cookies() {
 type Body = http_body_util::combinators::UnsyncBoxBody<Bytes, std::convert::Infallible>;
 type Client = hyper::client::conn::http2::SendRequest<Body>;
 
+fn trailer_body() -> (
+    mpsc::Sender<Result<hyper::body::Frame<Bytes>, std::convert::Infallible>>,
+    Body,
+) {
+    let (sender, receiver) = mpsc::channel(1);
+    let body =
+        http_body_util::StreamBody::new(tokio_stream::wrappers::ReceiverStream::new(receiver));
+    (sender, body.boxed_unsync())
+}
+
+fn checksum_trailers() -> hyper::body::Frame<Bytes> {
+    let mut trailers = HeaderMap::new();
+    trailers.append("x-checksum", HeaderValue::from_static("first"));
+    trailers.append("x-checksum", HeaderValue::from_static("second"));
+    hyper::body::Frame::trailers(trailers)
+}
+
+#[tokio::test]
+async fn http2_uploads_preserve_declared_trailers_or_fail_the_http1_message() {
+    use tokio::io::AsyncReadExt as _;
+    for (length, declared) in [
+        (None, false),
+        (Some(6), false),
+        (None, true),
+        (Some(6), true),
+    ] {
+        let fixture = Http1Backend::new(Arc::new(|| Ok(()))).await;
+        let (upload, body) = trailer_body();
+        let mut request = Request::post("https://web.arcbox.local/checksum")
+            .body(body)
+            .unwrap();
+        if let Some(length) = length {
+            request
+                .headers_mut()
+                .insert(header::CONTENT_LENGTH, length.into());
+        }
+        if declared {
+            request
+                .headers_mut()
+                .insert(header::TRAILER, HeaderValue::from_static("X-CHECKSUM"));
+        }
+        let mut sender = fixture.client.clone();
+        let pending = tokio::spawn(async move { sender.send_request(request).await });
+        let (mut upstream, _) = within(fixture.listener.accept()).await.unwrap();
+        upload
+            .send(Ok(hyper::body::Frame::data(Bytes::from_static(b"abc"))))
+            .await
+            .unwrap();
+        let headers = head(&mut upstream).await;
+        assert!(headers.contains("transfer-encoding: chunked\r\n"));
+        assert!(!headers.contains("content-length:"));
+        assert_eq!(super::tests::chunk(&mut upstream).await, b"abc");
+        upload
+            .send(Ok(hyper::body::Frame::data(Bytes::from_static(b"def"))))
+            .await
+            .unwrap();
+        assert_eq!(super::tests::chunk(&mut upstream).await, b"def");
+        upload.send(Ok(checksum_trailers())).await.unwrap();
+        drop(upload);
+        if declared {
+            assert_eq!(
+                head(&mut upstream).await,
+                "0\r\nx-checksum: first\r\nx-checksum: second\r\n\r\n"
+            );
+            send(
+                &mut upstream,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+            )
+            .await;
+            within(pending)
+                .await
+                .unwrap()
+                .unwrap()
+                .into_body()
+                .collect()
+                .await
+                .unwrap();
+        } else {
+            let mut tail = Vec::new();
+            within(upstream.read_to_end(&mut tail)).await.unwrap();
+            assert!(
+                tail.is_empty(),
+                "failed upload received a complete chunk terminator"
+            );
+            assert!(within(pending).await.unwrap().is_err());
+        }
+        fixture.stop.cancel();
+        finish(fixture.relay).await;
+        fixture.client_tasks.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn http2_responses_preserve_declared_trailers_or_fail_the_http1_message() {
+    use tokio::io::AsyncReadExt as _;
+    for (length, declared) in [
+        (None, false),
+        (Some(6), false),
+        (None, true),
+        (Some(6), true),
+    ] {
+        let (mut client, incoming) = sockets().await;
+        let (outgoing, upstream) = sockets().await;
+        let (download, body) = trailer_body();
+        let body = Arc::new(Mutex::new(Some(body)));
+        let backend_tasks = Executor::default();
+        let tasks = backend_tasks.clone();
+        let server = tokio::spawn(async move {
+            let service = hyper::service::service_fn(move |request: Request<Incoming>| {
+                let body = Arc::clone(&body);
+                async move {
+                    assert_eq!(request.headers()[header::TE], "trailers");
+                    let mut response = Response::builder();
+                    if let Some(length) = length {
+                        response = response.header(header::CONTENT_LENGTH, length);
+                    }
+                    if declared {
+                        response = response.header(header::TRAILER, "X-CHECKSUM");
+                    }
+                    Ok::<_, anyhow::Error>(
+                        response.body(body.lock().await.take().unwrap()).unwrap(),
+                    )
+                }
+            });
+            hyper::server::conn::http2::Builder::new(tasks)
+                .serve_connection(TokioIo::new(upstream), service)
+                .await
+        });
+        let stop = CancellationToken::new();
+        let cancelled = stop.clone();
+        let relay = tokio::spawn(async move {
+            http_tasks::run(&cancelled, async |tasks| {
+                serve_managed(
+                    incoming,
+                    outgoing,
+                    Session {
+                        client: HttpProtocol::Http1,
+                        upstream: HttpProtocol::Http2,
+                        tasks,
+                        verify: Arc::new(|| Ok(())),
+                        invalidate: Arc::new(|| panic!("unexpected invalidation")),
+                    },
+                )
+                .await
+            })
+            .await
+        });
+        send(&mut client, b"GET /checksum HTTP/1.1\r\nHost: web.arcbox.local\r\nTE: gzip, TraILers\r\nConnection: TE\r\n\r\n").await;
+        download
+            .send(Ok(hyper::body::Frame::data(Bytes::from_static(b"abc"))))
+            .await
+            .unwrap();
+        let headers = head(&mut client).await;
+        assert!(headers.contains("transfer-encoding: chunked\r\n"));
+        assert!(!headers.contains("content-length:"));
+        assert_eq!(super::tests::chunk(&mut client).await, b"abc");
+        download
+            .send(Ok(hyper::body::Frame::data(Bytes::from_static(b"def"))))
+            .await
+            .unwrap();
+        assert_eq!(super::tests::chunk(&mut client).await, b"def");
+        download.send(Ok(checksum_trailers())).await.unwrap();
+        drop(download);
+        if declared {
+            assert_eq!(
+                head(&mut client).await,
+                "0\r\nx-checksum: first\r\nx-checksum: second\r\n\r\n"
+            );
+            stop.cancel();
+            finish(relay).await;
+        } else {
+            let mut tail = Vec::new();
+            within(client.read_to_end(&mut tail)).await.unwrap();
+            assert!(
+                tail.is_empty(),
+                "failed response received a complete chunk terminator"
+            );
+            assert!(within(relay).await.unwrap().is_err());
+        }
+        let _peer_close = within(server).await.unwrap();
+        backend_tasks.shutdown().await;
+    }
+}
+
 struct Http1Backend {
     client: Client,
     listener: tokio::net::TcpListener,
@@ -240,6 +424,74 @@ async fn an_extra_http1_connection_rechecks_ownership_before_forwarding() {
     );
     within(server).await.unwrap();
     assert_eq!(checks.load(Ordering::SeqCst), 4);
+    fixture.stop.cancel();
+    finish(fixture.relay).await;
+    fixture.client_tasks.shutdown().await;
+}
+
+#[tokio::test]
+async fn http2_early_response_keeps_upload_streaming_and_allows_a_sibling() {
+    let mut fixture = Http1Backend::new(Arc::new(|| Ok(()))).await;
+    let listener = fixture.listener;
+    let (uploaded, upload_received) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.unwrap();
+        assert!(
+            head(&mut first)
+                .await
+                .starts_with("POST /early HTTP/1.1\r\n")
+        );
+        assert_eq!(super::tests::chunk(&mut first).await, b"abc");
+        send(&mut first, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+        let (mut sibling, _) = listener.accept().await.unwrap();
+        assert!(
+            head(&mut sibling)
+                .await
+                .starts_with("GET /quick HTTP/1.1\r\n")
+        );
+        send(
+            &mut sibling,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+        )
+        .await;
+        assert_eq!(super::tests::chunk(&mut first).await, b"def");
+        uploaded.send(()).unwrap();
+        assert_eq!(super::tests::chunk(&mut first).await, b"");
+    });
+    let (upload, receiver) = tokio::sync::mpsc::channel(1);
+    let stream = futures::stream::unfold(receiver, |mut receiver| async {
+        receiver
+            .recv()
+            .await
+            .map(|frame| (Ok::<_, std::convert::Infallible>(frame), receiver))
+    });
+    let mut early =
+        request("/early").map(|_| http_body_util::StreamBody::new(stream).boxed_unsync());
+    *early.method_mut() = hyper::Method::POST;
+    upload
+        .send(hyper::body::Frame::data(Bytes::from_static(b"abc")))
+        .await
+        .unwrap();
+    let response = within(fixture.client.send_request(early)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.into_body().collect().await.unwrap();
+    let sibling = within(fixture.client.send_request(request("/quick")))
+        .await
+        .unwrap();
+    assert_eq!(
+        within(sibling.into_body().collect())
+            .await
+            .unwrap()
+            .to_bytes(),
+        b"ok"[..]
+    );
+    upload
+        .send(hyper::body::Frame::data(Bytes::from_static(b"def")))
+        .await
+        .unwrap();
+    within(upload_received).await.unwrap();
+    drop(upload);
+    within(server).await.unwrap();
     fixture.stop.cancel();
     finish(fixture.relay).await;
     fixture.client_tasks.shutdown().await;
