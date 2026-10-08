@@ -1157,8 +1157,9 @@ fn a_force_fallback_cannot_stop_a_replacement_with_the_same_name() {
         .unwrap()
         .vm_id = replacement.clone();
     let error = manager
-        .force_stop_expected("replaced", &expected)
-        .unwrap_err();
+        .admit_stop("replaced", &expected, false)
+        .err()
+        .unwrap();
     assert!(error.to_string().contains("incarnation changed"));
     assert!(
         events.try_recv().is_err(),
@@ -1268,10 +1269,64 @@ fn failed_teardown_cannot_restore_a_non_live_machine() {
         .get_mut("uncertain")
         .unwrap()
         .state = MachineState::Stopping;
-    manager.rollback_stopping("uncertain", &expected);
+    let run = manager.admit_stop("uncertain", &expected, false).unwrap();
+    assert!(events.try_recv().is_ok());
+    let failure = Err(EngineError::invalid_state("modeled teardown failed"));
+    let result = manager.finish_stop("uncertain", &run, stop_owner::Completion::Forced(failure));
+    assert!(result.is_err());
     assert_eq!(
         manager.get("uncertain").unwrap().state,
         MachineState::Stopping
     );
     assert!(events.try_recv().is_err());
+}
+
+#[test]
+fn failed_force_preserves_graceful_completion_in_either_order() {
+    use crate::event::Event;
+    use stop_owner::Completion::{Forced, Graceful};
+    for force_first in [false, true] {
+        for stopped in [false, true] {
+            let dir = tempdir().unwrap();
+            let bus = crate::event::EventBus::new();
+            let mut events = bus.subscribe();
+            let manager = test_machine_manager_with_bus(dir.path(), bus);
+            let expected = model_running_machine(&manager, "owned");
+            let graceful = manager.admit_stop("owned", &expected, true).unwrap();
+            assert_eq!(manager.get("owned").unwrap().state, MachineState::Stopping);
+            assert!(manager.host_hold_expected("owned", &expected).is_err());
+            let force = manager.admit_stop("owned", &expected, false).unwrap();
+            assert!(manager.admit_stop("owned", &expected, false).is_err());
+            while events.try_recv().is_ok() {}
+            let fail = || EngineError::invalid_state("modeled stop failed");
+            let grace_result = if stopped { Ok(true) } else { Err(fail()) };
+            let mut completions = [
+                (Forced(Err(fail())), &force),
+                (Graceful(grace_result), &graceful),
+            ];
+            if !force_first {
+                completions.swap(0, 1);
+            }
+            for (step, (completion, run)) in completions.into_iter().enumerate() {
+                let result = manager.finish_stop("owned", run, completion);
+                assert_eq!(result.is_ok(), stopped && (!force_first || step == 1));
+                if step == 0 {
+                    assert_eq!(manager.get("owned").unwrap().state, MachineState::Stopping);
+                    assert!(events.try_recv().is_err());
+                }
+            }
+            let expected_state = if stopped {
+                MachineState::Stopped
+            } else {
+                MachineState::Running
+            };
+            assert_eq!(manager.get("owned").unwrap().state, expected_state);
+            assert!(matches!(
+                (stopped, events.try_recv().unwrap()),
+                (true, Event::MachineStopped { .. }) | (false, Event::MachineStopCancelled { .. })
+            ));
+            assert!(events.try_recv().is_err());
+            assert!(manager.stop_operations.lock().unwrap().is_empty());
+        }
+    }
 }

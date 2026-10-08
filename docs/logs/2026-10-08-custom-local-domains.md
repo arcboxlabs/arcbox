@@ -444,3 +444,5 @@ Expected machine host holds now validate the canonical running state and physica
 The Engine test target compiled, but macOS held the executable at `_dyld_start` before any test harness output. The process was terminated; this attempt does not establish passing tests. Strict Engine, API, Core, and daemon all-target Clippy, formatting, and diff checks passed. Machine, VM, and API event execution remains pending for this prefix.
 
 The unchanged test commands resumed without environment changes. All 35 machine tests, ten VM tests, and the API internal-event regression passed. Workspace formatting and diff checks also passed. These fixtures do not start a native VM or change Keychain trust.
+
+Machine stop admission now retains one owner for each captured physical run, including a graceful predecessor during forced takeover. The test target compiled, but two executions remained at `_dyld_start` before the harness started; both task-owned processes were terminated. Strict Engine, API, Core, and daemon all-target Clippy, workspace formatting, and diff checks passed. Runtime execution of this prefix remains pending.

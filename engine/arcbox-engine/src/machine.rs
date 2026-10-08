@@ -16,9 +16,9 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
 #[cfg(target_os = "macos")]
-use std::sync::{Mutex, PoisonError};
+use std::sync::PoisonError;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 /// Default machine name used for container operations.
@@ -45,6 +45,7 @@ mod host_hold;
 mod maintenance;
 #[cfg(target_os = "macos")]
 mod serial;
+mod stop_owner;
 #[cfg(test)]
 mod tests;
 mod transfer;
@@ -430,6 +431,7 @@ fn validate_mount(mount: &MachineMount) -> Result<()> {
 pub struct MachineManager {
     storage_maintenance: RwLock<bool>,
     machines: RwLock<HashMap<String, MachineInfo>>,
+    stop_operations: Mutex<HashMap<String, stop_owner::StopOperation>>,
     vm_manager: Arc<VmManager>,
     persistence: MachinePersistence,
     /// Data directory for `VirtioFS` sharing.
@@ -536,6 +538,7 @@ impl MachineManager {
         Self {
             storage_maintenance: RwLock::new(false),
             machines: RwLock::new(machines),
+            stop_operations: Mutex::new(HashMap::new()),
             vm_manager,
             persistence,
             data_dir,
@@ -1479,8 +1482,13 @@ impl MachineManager {
                 .ok_or_else(|| EngineError::not_found(name))?;
             self.vm_manager.run_incarnation(&machine.vm_id)?
         };
+        let operation = self.admit_stop(name, &expected, graceful_timeout.is_some())?;
+        self.await_host_release(name);
         if let Some(timeout) = graceful_timeout {
-            if self.graceful_stop_expected(name, &expected, timeout)? {
+            let result =
+                self.vm_manager
+                    .graceful_stop(&operation.vm_id, &operation.expected, timeout);
+            if self.finish_stop(name, &operation, stop_owner::Completion::Graceful(result))? {
                 return Ok(());
             }
             tracing::warn!(
@@ -1488,56 +1496,23 @@ impl MachineManager {
                 "Graceful shutdown unavailable or timed out; force stopping the same run"
             );
         }
-        self.force_stop_expected(name, &expected)
+        self.force_stop_expected(name, &operation)
     }
 
-    fn force_stop_expected(&self, name: &str, expected: &VmIncarnation) -> Result<()> {
-        let stoppable =
-            |state: MachineState| matches!(state, MachineState::Running | MachineState::Stopping);
-        {
+    fn force_stop_expected(&self, name: &str, operation: &Arc<stop_owner::StopRun>) -> Result<()> {
+        let result = {
             let machines = self
                 .machines
                 .read()
                 .map_err(|_| EngineError::LockPoisoned)?;
             let machine = machines
                 .get(name)
-                .ok_or_else(|| EngineError::not_found(name.to_string()))?;
-            if !stoppable(machine.state) {
-                return Err(EngineError::invalid_state(format!(
-                    "machine '{name}' is not running"
-                )));
-            }
-            self.vm_manager
-                .with_run_incarnation(&machine.vm_id, expected, || {
-                    self.publish_event(
-                        name,
-                        crate::event::Event::MachineStopping {
-                            name: name.to_string(),
-                        },
-                    );
-                })?;
-        }
-
-        // Not under the registry lock: the holders read the registry too.
-        self.await_host_release(name);
-
-        let mut machines = self
-            .machines
-            .write()
-            .map_err(|_| EngineError::LockPoisoned)?;
-        let machine = machines
-            .get_mut(name)
-            .ok_or_else(|| EngineError::not_found(name.to_string()))?;
-        // A concurrent stop may have finished during the wait.
-        if !stoppable(machine.state) {
-            return Err(EngineError::invalid_state(format!(
-                "machine '{name}' is not running"
-            )));
-        }
-
-        self.force_stop_vm(&machine.vm_id, expected)?;
-        self.publish_stopped(name, machine, expected)?;
-        Ok(())
+                .ok_or_else(|| EngineError::not_found(name))?;
+            self.require_force_owner(name, operation)?;
+            self.force_stop_vm(&machine.vm_id, &operation.expected)
+        };
+        self.finish_stop(name, operation, stop_owner::Completion::Forced(result))
+            .map(|_| ())
     }
 
     /// Reports whether a machine's VM stopped on its own (guest-driven), and if
@@ -1702,73 +1677,6 @@ impl MachineManager {
         Ok(())
     }
 
-    /// Attempts graceful machine shutdown via guest ACPI stop request.
-    ///
-    /// Returns `Ok(true)` if the machine stopped, `Ok(false)` if graceful
-    /// shutdown timed out or is unavailable.
-    fn graceful_stop_expected(
-        &self,
-        name: &str,
-        expected: &VmIncarnation,
-        timeout: Duration,
-    ) -> Result<bool> {
-        let vm_id = {
-            let mut machines = self
-                .machines
-                .write()
-                .map_err(|_| EngineError::LockPoisoned)?;
-
-            let machine = machines
-                .get_mut(name)
-                .ok_or_else(|| EngineError::not_found(name.to_string()))?;
-
-            if machine.state != MachineState::Running {
-                return Err(EngineError::invalid_state(format!(
-                    "machine '{name}' is not running"
-                )));
-            }
-
-            let vm_id = machine.vm_id.clone();
-            self.vm_manager.with_run_incarnation(&vm_id, expected, || {
-                machine.state = MachineState::Stopping;
-                self.publish_event(
-                    name,
-                    crate::event::Event::MachineStopping {
-                        name: name.to_string(),
-                    },
-                );
-            })?;
-            vm_id
-        };
-        // The guest's shutdown kills the machine's export within moments
-        // of the RPC below — before the unmount it races has finished
-        // (alpine, 2026-10-04) — so the host's release goes first here too.
-        self.await_host_release(name);
-
-        match self.vm_manager.graceful_stop(&vm_id, expected, timeout) {
-            Ok(true) => {
-                let mut machines = self
-                    .machines
-                    .write()
-                    .map_err(|_| EngineError::LockPoisoned)?;
-
-                let machine = machines
-                    .get_mut(name)
-                    .ok_or_else(|| EngineError::not_found(name.to_string()))?;
-                self.publish_stopped(name, machine, expected)?;
-                Ok(true)
-            }
-            Ok(false) => {
-                self.rollback_stopping(name, expected);
-                Ok(false)
-            }
-            Err(e) => {
-                self.rollback_stopping(name, expected);
-                Err(e)
-            }
-        }
-    }
-
     fn force_stop_vm(&self, id: &VmId, expected: &VmIncarnation) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
@@ -1818,22 +1726,6 @@ impl MachineManager {
             m.state = MachineState::Stopped.into();
             m.bridge_ip_address = None;
         })
-    }
-
-    /// Rolls a failed graceful stop back to `Running` — but only if the
-    /// machine is still `Stopping`: a concurrent force [`Self::stop`] may
-    /// have already stopped it, and its `Stopped` must not be overwritten.
-    fn rollback_stopping(&self, name: &str, expected: &VmIncarnation) {
-        if let Ok(mut machines) = self.machines.write() {
-            if let Some(machine) = machines.get_mut(name) {
-                if machine.state == MachineState::Stopping {
-                    let id = machine.vm_id.clone();
-                    let _ = self.vm_manager.with_network_incarnation(&id, expected, || {
-                        machine.state = MachineState::Running;
-                    });
-                }
-            }
-        }
     }
 
     /// Gets machine information.
