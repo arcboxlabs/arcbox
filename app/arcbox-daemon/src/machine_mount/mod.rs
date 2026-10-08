@@ -43,10 +43,11 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use self::export::{host_addresses_on_link, release};
+use self::export::release;
 use self::registry::Mounts;
 use crate::context::DaemonContext;
 use crate::host_mount;
+use crate::host_network::host_addresses_on_link;
 
 /// The guest account the host user stands in for. Machines have no default
 /// user yet — `abctl machine exec` and `ssh <machine>@arcbox` run as root —
@@ -179,7 +180,7 @@ pub async fn mount_machine(
         .context("machine has no bridge address")?
         .parse()
         .context("machine bridge address")?;
-    let clients = host_addresses_on_link(bridge);
+    let clients = host_addresses_on_link(bridge)?;
     if clients.is_empty() {
         bail!(
             "the host has no address on the machine's bridge network ({bridge}), so it could not reach the export"

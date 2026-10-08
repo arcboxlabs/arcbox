@@ -5,6 +5,7 @@ mod control_plane;
 mod disk_reclaim;
 mod dns_service;
 mod host_mount;
+mod host_network;
 mod kubernetes_lb;
 mod kubernetes_proxy;
 mod machine_dns;
