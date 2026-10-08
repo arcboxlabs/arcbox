@@ -145,12 +145,15 @@ distribution".
   Trusted reservations restrict both authority and pattern scope, even without a live route.
   Delegated trees block every local claim, including more specific exact names.
   Keep machine-wide lease acquisition outside this pure matcher.
+- `container::ContainerMetadata` reads Docker identity, aliases, and addresses from one inspect snapshot.
+  Choose the primary IPv4 address by network name, independent of JSON map order.
+  Use `NetworkSettings.Networks`; the deprecated top-level address is not authoritative.
 - Response builders write flag bytes at `[2]`/`[3]` and counts at `[6..12]`
   literally. `build_nxdomain`/SERVFAIL/NODATA MUST zero ANCOUNT/NSCOUNT/ARCOUNT,
   or EDNS(0) queries (ARCOUNT=1 in the request) get malformed responses.
 - Only the first question is parsed (QDCOUNT ≥ 1); trailing OPT/EDNS ignored.
 - This crate compiles for the guest musl target (`aarch64-unknown-linux-musl`).
-  Keep it std-only (`std::net`); do not pull in host-only deps.
+  Keep dependencies platform-independent; do not pull in host-only dependencies.
 
 ## arcbox-xnu-net — macOS batch DGRAM kernel landmines
 
