@@ -42,6 +42,12 @@ impl Installed {
     }
 }
 
+struct SelectedContainer {
+    owner: String,
+    installed: Arc<Installed>,
+    domains: Vec<Domain>,
+}
+
 /// Pins one handshake to the current owner, registration, and installed upstream.
 #[derive(Debug, Eq)]
 pub(super) struct TlsRoute {
@@ -249,6 +255,25 @@ impl WebServices {
     fn container_snapshot(&self, hostname: Option<&Domain>) -> Vec<ContainerWebService> {
         let dns = self.dns.read().expect("DNS registry lock poisoned");
         let installed = self.installed.read().expect("web services lock poisoned");
+        Self::selected_containers(&dns, &installed, hostname)
+            .into_iter()
+            .map(|row| {
+                row.installed.service(
+                    &row.owner,
+                    row.domains
+                        .into_iter()
+                        .map(|name| name.to_string())
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    fn selected_containers(
+        dns: &Registry,
+        installed: &HashMap<String, Arc<Installed>>,
+        hostname: Option<&Domain>,
+    ) -> Vec<SelectedContainer> {
         if let Some(name) = hostname {
             let Lookup::Matched { claim, address, .. } = dns.resolve(name) else {
                 return Vec::new();
@@ -256,28 +281,32 @@ impl WebServices {
             return installed
                 .get(claim.owner())
                 .filter(|route| address == IpAddr::V4(route.ip))
-                .map(|route| route.service(claim.owner(), vec![name.to_string()]))
+                .map(|route| SelectedContainer {
+                    owner: claim.owner().into(),
+                    installed: Arc::clone(route),
+                    domains: vec![name.clone()],
+                })
                 .into_iter()
                 .collect();
         }
         let mut services: Vec<_> = installed
             .iter()
             .filter_map(|(id, route)| {
-                let hostnames: Vec<_> = dns.get(id)?
+                let domains: Vec<_> = dns.get(id)?
                     .claims
                     .iter()
                     .filter_map(|claim| match claim.pattern() {
-                        NamePattern::Exact(name) if matches!(dns.resolve(name), Lookup::Matched { claim, address, .. } if claim.owner() == id && address == IpAddr::V4(route.ip)) => Some(name.to_string()),
+                        NamePattern::Exact(name) if matches!(dns.resolve(name), Lookup::Matched { claim, address, .. } if claim.owner() == id && address == IpAddr::V4(route.ip)) => Some(name.clone()),
                         _ => None,
                     })
                     .collect();
-                if hostnames.is_empty() {
+                if domains.is_empty() {
                     return None;
                 }
-                Some(route.service(id, hostnames))
+                Some(SelectedContainer { owner: id.clone(), installed: Arc::clone(route), domains })
             })
             .collect();
-        services.sort_by(|a, b| a.container_id.cmp(&b.container_id));
+        services.sort_by(|a, b| a.owner.cmp(&b.owner));
         services
     }
 }
