@@ -25,6 +25,8 @@ abctl machine list
 abctl machine ssh -u alice myvm         # login shell as alice; `exec -u` runs a command as a user
 abctl machine default myvm              # `exec`/`ssh` without a name use it
 abctl machine resize myvm --cpus 4      # takes effect at the next start
+abctl machine web myvm                 # show saved web configuration
+abctl machine web myvm --http-port 8080 --https-port off
 abctl machine stop myvm
 abctl machine clone myvm myvm-2         # stopped machines only; copy-on-write
 abctl machine export myvm myvm.tar.zst  # self-contained archive
@@ -69,6 +71,10 @@ docker run hello-world
 ```
 
 Run TLS commands as the logged-in user. `tls rotate` requires a running daemon and resumes any pending rotation. The command authorizes the replacement before revoking the old CA, then asks the daemon to publish the replacement. Cancelling authorization before old-CA revocation preserves the original public certificate. `tls trust`, `tls repair`, and `tls rotate` accept `--expected-fingerprint` to pin the current certificate shown by `tls status`.
+
+## Machine web configuration
+
+`abctl machine web NAME` shows the saved HTTP and HTTPS backend selection. Set `--http-port` or `--https-port` to `auto`, `off`, or a port from 1 through 65535. Omitted options preserve their values. Both protocols default to `auto`; an explicit HTTPS port selects native TLS. These settings persist across daemon restarts, clones, and archives. `machine inspect` includes the saved `web_ports` object. This command saves configuration only; machine web routing is not yet available.
 
 ## Output formats
 

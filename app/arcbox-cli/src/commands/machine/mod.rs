@@ -2,6 +2,7 @@
 
 mod lifecycle;
 mod target;
+mod web;
 
 use anyhow::{Context, Result, bail};
 use arcbox_cli::terminal::{RawModeGuard, TerminalSize};
@@ -98,6 +99,8 @@ pub enum MachineCommands {
     Import(lifecycle::ImportArgs),
     /// Change a machine's CPU and memory limits (applied at its next start)
     Resize(lifecycle::ResizeArgs),
+    /// Show or save HTTP and HTTPS backend selection (configuration only)
+    Web(web::WebArgs),
     /// Show or set the machine `exec` and `ssh` use when given no name
     Default(lifecycle::DefaultArgs),
 }
@@ -232,6 +235,7 @@ pub async fn execute(cmd: MachineCommands) -> Result<()> {
         MachineCommands::Export(args) => lifecycle::execute_export(args).await,
         MachineCommands::Import(args) => lifecycle::execute_import(args).await,
         MachineCommands::Resize(args) => lifecycle::execute_resize(args).await,
+        MachineCommands::Web(args) => web::execute(args).await,
         MachineCommands::Default(args) => lifecycle::execute_default(args).await,
     }
 }
@@ -477,9 +481,7 @@ async fn execute_inspect(args: InspectArgs) -> Result<()> {
         .map_err(|error| crate::error::machine_operation(error, &args.name, "inspect"))?
         .into_owned();
 
-    // Sub-message derefs fall back to default instances (zero/empty), which
-    // matches the old Option-based fallbacks — the JSON shape is unchanged,
-    // including `ip_address: null` when the machine has no address.
+    let web_ports = arcbox_core::machine::MachineWebPorts::try_from(&*machine.web_ports)?;
     let payload = serde_json::json!({
         "id": machine.id,
         "name": machine.name,
@@ -493,6 +495,7 @@ async fn execute_inspect(args: InspectArgs) -> Result<()> {
         "kernel": machine.os.kernel.clone(),
         "distro": machine.os.distro.clone(),
         "distro_version": machine.os.version.clone(),
+        "web_ports": web_ports,
     });
 
     println!(
