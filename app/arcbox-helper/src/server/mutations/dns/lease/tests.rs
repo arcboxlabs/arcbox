@@ -66,6 +66,8 @@ fn exact_roots_are_exclusive_and_late_release_preserves_the_replacement() {
     let first = store.connection();
     let second = store.connection();
     store.update(first, 501, update(1, &["a.local"])).unwrap();
+    let metadata = fs::metadata(dir.path().join("a.local")).unwrap();
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o644);
     let accepted = fs::read(dir.path().join("a.local")).unwrap();
     assert!(store.update(second, 501, update(1, &["a.local"])).is_err());
     assert_eq!(fs::read(dir.path().join("a.local")).unwrap(), accepted);
@@ -271,4 +273,134 @@ fn restart_recovery_removes_only_exact_private_unlinked_lease_files() {
     );
     assert_eq!(fs::read_to_string(target).unwrap(), owned);
     restarted.recover().unwrap();
+}
+
+#[test]
+fn owned_looking_changes_block_updates_and_survive_cleanup() {
+    for kind in 0..4 {
+        let (dir, store) = fixture();
+        let id = store.connection();
+        store.update(id, 501, update(1, &["a.local"])).unwrap();
+        let path = dir.path().join("a.local");
+        let accepted = fs::read_to_string(&path).unwrap();
+        let changed = match kind {
+            0 => format!("# copied {accepted}"),
+            1 => format!("{accepted}nameserver 1.1.1.1\n"),
+            2 => accepted.replace("port 5554", "port 53"),
+            _ => accepted.replace("port 5554", "port 05554"),
+        };
+        fs::write(&path, &changed).unwrap();
+        assert!(store.update(id, 501, update(2, &["a.local"])).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), changed);
+        store.release(id).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), changed);
+        ResolverStore::new(dir.path().to_path_buf())
+            .recover()
+            .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), changed);
+    }
+}
+
+#[test]
+fn unsafe_resolver_slots_block_updates_and_survive_cleanup() {
+    for kind in 0..5 {
+        let (dir, store) = fixture();
+        let id = store.connection();
+        store.update(id, 501, update(1, &["a.local"])).unwrap();
+        let path = dir.path().join("a.local");
+        let accepted = fs::read(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("target");
+        if kind != 2 {
+            fs::write(&target, &accepted).unwrap();
+        }
+        match kind {
+            0 => {
+                fs::write(&path, &accepted).unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+            }
+            1 | 2 => symlink(&target, &path).unwrap(),
+            3 => fs::hard_link(&target, &path).unwrap(),
+            _ => fs::create_dir(&path).unwrap(),
+        }
+        assert!(store.update(id, 501, update(2, &["a.local"])).is_err());
+        store.release(id).unwrap();
+        ResolverStore::new(dir.path().to_path_buf())
+            .recover()
+            .unwrap();
+        if matches!(kind, 1 | 2) {
+            assert_eq!(fs::read_link(&path).unwrap(), target);
+        }
+        if kind == 4 {
+            assert!(path.is_dir());
+        } else if kind != 2 {
+            assert_eq!(fs::read(&path).unwrap(), accepted);
+        }
+        if kind != 2 {
+            assert_eq!(fs::read(&target).unwrap(), accepted);
+        }
+    }
+}
+
+#[test]
+fn unsafe_resolver_directories_block_publication_and_recovery() {
+    for linked in [true, false] {
+        let parent = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let path = parent.path().join("resolver");
+        if linked {
+            symlink(outside.path(), &path).unwrap();
+        } else {
+            fs::create_dir(&path).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o777)).unwrap();
+        }
+        let store = ResolverStore::new(path.clone());
+        assert!(
+            store
+                .update(store.connection(), 501, update(1, &["a.local"]))
+                .is_err()
+        );
+        assert!(store.recover().is_err());
+        assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+        if linked {
+            assert_eq!(fs::read_link(&path).unwrap(), outside.path());
+        }
+    }
+}
+
+#[test]
+fn acl_changes_block_updates_and_preserve_files_and_directories() {
+    for directory_acl in [true, false] {
+        let (dir, store) = fixture();
+        let id = store.connection();
+        store.update(id, 501, update(1, &["a.local"])).unwrap();
+        let path = dir.path().join("a.local");
+        let accepted = fs::read(&path).unwrap();
+        let (target, grant) = if directory_acl {
+            (dir.path(), "everyone allow add_file")
+        } else {
+            (path.as_path(), "everyone allow write")
+        };
+        assert!(
+            std::process::Command::new("/bin/chmod")
+                .args(["+a", grant])
+                .arg(target)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(store.update(id, 501, update(2, &["a.local"])).is_err());
+        assert_eq!(fs::read(&path).unwrap(), accepted);
+        let restarted = ResolverStore::new(dir.path().to_path_buf());
+        if directory_acl {
+            assert!(store.release(id).is_err());
+            assert!(restarted.recover().is_err());
+        } else {
+            store.release(id).unwrap();
+            restarted.recover().unwrap();
+        }
+        assert_eq!(fs::read(&path).unwrap(), accepted);
+    }
 }
