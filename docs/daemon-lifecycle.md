@@ -218,6 +218,8 @@ The guest trust service also retains its `BackgroundTask` through all three shut
 
 The TLS signer also uses a shared `BackgroundTask`. All three shutdown paths join that task before stopping Runtime. Cancellation closes socket waits and waits for an active native connection or signature operation to finish. Each signing connection targets one captured physical VM; replacement rejects signing and certificate delivery.
 
+The HTTPS access observer uses the same shared task ownership. All three shutdown paths join the observer before stopping Runtime. Cancellation drains each started connection and RPC before disabling the observation lease. Enable, response publication, and disable target the captured physical VM. A stopped or replaced VM rejects the request; its guest lease expires without contacting a replacement.
+
 The web index service retains the same task ownership. Failed, interrupted, and stopped-VM lookups withdraw the index. Cancellation drains the active request while withdrawing, so a request holding the host commit lock cannot deadlock cleanup. Runtime stops only after the task finishes.
 
 ## Crash / SIGKILL

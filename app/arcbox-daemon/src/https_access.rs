@@ -18,13 +18,19 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const RPC_TIMEOUT: Duration = Duration::from_millis(750);
 
 /// Starts observation without gating VM or Docker readiness on certificate trust.
-pub fn spawn(ctx: &DaemonContext, runtime: &Arc<Runtime>) {
-    drop(tokio::spawn(observe(
+pub async fn start(ctx: &DaemonContext, runtime: &Arc<Runtime>) {
+    let observation = observe(
         RuntimeSource(Arc::clone(runtime)),
         ctx.setup_state.https_access.clone(),
         runtime.subscribe_system_vm_state(),
         ctx.shutdown.clone(),
-    )));
+    );
+    ctx.https_access_service
+        .start(async move {
+            observation.await;
+            Ok(())
+        })
+        .await;
 }
 
 trait AccessSource {
@@ -124,7 +130,7 @@ async fn observe(
             None => None,
         };
         if active != target {
-            disable(&mut source, active.take()).await;
+            disable(&mut source, active.take(), &mut vm).await;
         }
         let Some((observation_id, expected)) = target else {
             continue;
@@ -133,7 +139,7 @@ async fn observe(
             Ok(addresses) => addresses,
             Err(error) => {
                 debug!(%error, "cannot observe Mac HTTPS access");
-                disable(&mut source, active.take()).await;
+                disable(&mut source, active.take(), &mut vm).await;
                 continue;
             }
         };
@@ -148,6 +154,7 @@ async fn observe(
                 ..Default::default()
             },
             &shutdown,
+            &mut vm,
         )
         .await;
         match response {
@@ -174,7 +181,7 @@ async fn observe(
             }
         }
     }
-    disable(&mut source, active).await;
+    disable(&mut source, active, &mut vm).await;
 }
 
 async fn reconcile<S: AccessSource>(
@@ -182,22 +189,35 @@ async fn reconcile<S: AccessSource>(
     expected: &S::Vm,
     request: ReconcileHttpsAccessRequest,
     shutdown: &CancellationToken,
+    vm: &mut watch::Receiver<VmLifecycleState>,
 ) -> Result<ReconcileHttpsAccessResponse> {
     let cancelled = shutdown.child_token();
-    let operation = source.reconcile(expected, request, &cancelled);
+    let operation = async {
+        ensure!(
+            !cancelled.is_cancelled(),
+            "HTTPS access observation cancelled before connection"
+        );
+        source.reconcile(expected, request, &cancelled).await
+    };
     tokio::pin!(operation);
     tokio::select! {
         biased;
-        result = &mut operation => return result,
         () = cancelled.cancelled() => {},
-        () = tokio::time::sleep(RPC_TIMEOUT) => cancelled.cancel(),
+        _ = vm.changed() => {},
+        () = tokio::time::sleep(RPC_TIMEOUT) => {},
+        result = &mut operation => return result,
     }
+    cancelled.cancel();
     // Joining after socket shutdown prevents a late enable after the next disable.
     operation.await?;
     bail!("HTTPS access observation cancelled")
 }
 
-async fn disable<S: AccessSource>(source: &mut S, active: Option<(String, S::Vm)>) {
+async fn disable<S: AccessSource>(
+    source: &mut S,
+    active: Option<(String, S::Vm)>,
+    vm: &mut watch::Receiver<VmLifecycleState>,
+) {
     let Some((observation_id, expected)) = active else {
         return;
     };
@@ -210,6 +230,7 @@ async fn disable<S: AccessSource>(source: &mut S, active: Option<(String, S::Vm)
             ..Default::default()
         },
         &CancellationToken::new(),
+        vm,
     )
     .await
     {

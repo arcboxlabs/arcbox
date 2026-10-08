@@ -297,3 +297,5 @@ async fn replacement_rejects_a_late_response_and_the_previous_disable_target() {
     assert_eq!(*expected, 1);
     assert!(!disable.enabled);
 }
+
+mod lifecycle;

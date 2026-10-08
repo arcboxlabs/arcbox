@@ -157,7 +157,7 @@ impl RuntimeBooted {
                 #[cfg(target_os = "macos")]
                 crate::tls_signer::spawn(&self.ctx, &self.runtime).await;
                 #[cfg(target_os = "macos")]
-                crate::https_access::spawn(&self.ctx, &self.runtime);
+                crate::https_access::start(&self.ctx, &self.runtime).await;
                 crate::web_index::start(&self.ctx, &self.runtime).await;
                 services::enable_docker_integration(&self.ctx);
                 crate::kubernetes_lb::spawn(&self.ctx, &self.runtime);
