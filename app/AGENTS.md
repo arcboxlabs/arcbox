@@ -119,6 +119,7 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   (`guest/arcbox-agent/src/dns_server.rs`) keeps NXDOMAIN: its clients are
   Linux resolvers, which have no mDNS leg.
 - Keep resolver publication in `ResolverService`, shared through `StartupHandles` and `DaemonContext`. Shutdown and startup cancellation must join the retained task before stopping Runtime. A cancelled join must leave the task in the shared slot. Recovery separates container snapshot replay (`recovery/container_network.rs`) from Docker CLI installation (`recovery/docker_tools.rs`).
+- `arcbox-daemon/src/resolver_service/publication.rs` owns the helper connection, complete resolver lease, authority watch, and mDNS mirror. Before closing the connection, mark DNS authority unavailable, clear setup readiness, then cancel and join the mirror. Reconnect with a fresh transport and the same service nonce.
 - **The resolver-domain owner also registers its names with mDNSResponder**
   (`arcbox-daemon/src/mdns/`, started from `recovery::run` under the same
   `owns_dns_resolver` predicate that installs `/etc/resolver/<domain>`, and

@@ -209,3 +209,7 @@ The daemon now retains the resolver publication task in a shared slot across sta
 ## Serialize shared port writers
 
 Container, sandbox, and shared listener cleanup now enter the host commit boundary. Listener work rechecks physical VM identity after asynchronous operations and cleans only the expected slot on failure. A held listener-stop regression replaces the VM before binding and proves shared cleanup waits for the commit boundary. Serial Runtime passed 78 tests, the focused inbound suite passed four, and strict Core/Docker Clippy and formatting passed. Linux fallback source was updated but not compiled in this slice. Complete snapshots, retirement identity, and shutdown admission remain pending.
+
+## Retain the daemon resolver lease and watch
+
+ResolverService now owns the helper connection, complete resolver lease, authority watch, and mDNS future. Authority withdrawal and mirror cleanup precede transport closure. Required initial setup propagates failure; background reconnection uses a fresh transport and the same service nonce. Four resolver tests, seven mDNS tests, strict daemon all-target Clippy, and formatting passed. Native resolver cutover and installed validation remain pending.

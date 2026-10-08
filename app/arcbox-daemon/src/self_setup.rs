@@ -2,26 +2,22 @@
 //!
 //! Each task follows the check → apply pattern: if the precondition is
 //! already met, skip; otherwise ask `arcbox-helper` to configure it.
-//! [`run`] preserves best-effort production setup, while [`run_required`]
-//! makes an explicitly requested task part of the startup contract.
+//! [`run`] preserves best-effort production setup. The resolver service owns DNS leases.
 //! For CLI-only users, `abctl _install` performs the initial helper setup.
 //!
 //! Adding a new task: implement [`SetupTask`] in a new file under
 //! `self_setup/`, then add it to the `run()` call in `main.rs`.
 
 mod cli_tools;
-mod dns_resolver;
 mod docker_socket;
 mod hosts_alias;
 #[cfg(target_os = "macos")]
 pub mod tls;
 
 pub use cli_tools::CliTools;
-pub use dns_resolver::DnsResolver;
 pub use docker_socket::DockerSocket;
 pub use hosts_alias::HostsAlias;
 
-use anyhow::Context as _;
 use arcbox_helper::client::{Client, ClientError};
 
 /// A self-setup task that can be checked and applied via the helper daemon.
@@ -35,27 +31,6 @@ pub trait SetupTask: Send + Sync {
 
     /// Applies the task via the helper client.
     async fn apply(&self, client: &Client) -> Result<(), ClientError>;
-}
-
-/// Runs one startup-critical setup task and verifies its postcondition.
-pub async fn run_required(task: &dyn SetupTask) -> anyhow::Result<()> {
-    if task.is_satisfied() {
-        return Ok(());
-    }
-
-    let client = Client::connect()
-        .await
-        .with_context(|| format!("{} requires a compatible arcbox-helper", task.name()))?;
-    task.apply(&client)
-        .await
-        .with_context(|| format!("failed to configure {}", task.name()))?;
-    anyhow::ensure!(
-        task.is_satisfied(),
-        "{} was not satisfied after helper configuration",
-        task.name()
-    );
-    tracing::info!(task = task.name(), "configured");
-    Ok(())
 }
 
 /// Runs all setup tasks on a shared helper connection.

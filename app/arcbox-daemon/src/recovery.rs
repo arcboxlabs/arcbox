@@ -29,6 +29,8 @@ use crate::self_setup::SetupTask as _;
 /// An explicitly requested DNS resolver is startup-critical. Canonical
 /// production setup and all other host integrations remain best-effort.
 pub async fn run(ctx: &DaemonContext, runtime: &Arc<Runtime>, dns_port: u16) -> Result<()> {
+    #[cfg(not(target_os = "macos"))]
+    let _ = dns_port;
     let linux_vm = runtime.config().vm.autostart;
     if linux_vm {
         if let Err(error) = recover_container_networking(runtime).await {
@@ -82,20 +84,6 @@ pub async fn run(ctx: &DaemonContext, runtime: &Arc<Runtime>, dns_port: u16) -> 
         &ctx.layout.data_dir,
         &default_data_dir,
     );
-    if ctx.install_dns_resolver {
-        let dns = self_setup::DnsResolver {
-            domain: ctx.dns_domain.to_string(),
-            port: dns_port,
-        };
-        self_setup::run_required(&dns)
-            .await
-            .context("explicit DNS resolver setup failed")?;
-        ctx.setup_state.set_dns_installed(true);
-    }
-    let dns_task = (owns_dns && !ctx.install_dns_resolver).then(|| self_setup::DnsResolver {
-        domain: ctx.dns_domain.to_string(),
-        port: dns_port,
-    });
     if !owns_dns {
         tracing::debug!(
             domain = %ctx.dns_domain,
@@ -103,23 +91,11 @@ pub async fn run(ctx: &DaemonContext, runtime: &Arc<Runtime>, dns_port: u16) -> 
             "non-canonical DNS owner; skipping /etc/resolver self-setup"
         );
     }
-    // The owner of the resolver domain is also the one daemon that announces
-    // its names to mDNSResponder; two daemons claiming `host.arcbox.local`
-    // would conflict.
     #[cfg(target_os = "macos")]
     if owns_dns {
-        let network_manager = Arc::clone(runtime.network_manager());
-        let domain = ctx.dns_domain.to_string();
-        let shutdown = ctx.shutdown.clone();
-        ctx.resolver_service
-            .start(async move {
-                let result = crate::mdns::run(network_manager, &domain, shutdown).await;
-                if let Err(error) = &result {
-                    tracing::warn!(%error, domain, "mDNS mirror stopped");
-                }
-                result.map_err(Into::into)
-            })
-            .await;
+        crate::resolver_service::start(ctx, Arc::clone(runtime.network_manager()), dns_port)
+            .await
+            .context("explicit DNS resolver setup failed")?;
     }
     // The `/var/run/docker.sock` symlink belongs to the production daemon
     // running its canonical data dir: the link target embeds the
@@ -170,9 +146,6 @@ pub async fn run(ctx: &DaemonContext, runtime: &Arc<Runtime>, dns_port: u16) -> 
     let setup_state_self = Arc::clone(&ctx.setup_state);
     tokio::spawn(async move {
         let mut tasks: Vec<&dyn self_setup::SetupTask> = Vec::new();
-        if let Some(dns) = &dns_task {
-            tasks.push(dns);
-        }
         if let Some(socket) = &socket_task {
             tasks.push(socket);
         }
@@ -188,9 +161,6 @@ pub async fn run(ctx: &DaemonContext, runtime: &Arc<Runtime>, dns_port: u16) -> 
             return;
         }
         self_setup::run(&tasks).await;
-        if let Some(dns) = &dns_task {
-            setup_state_self.set_dns_installed(dns.is_satisfied());
-        }
         if let Some(socket) = &socket_task {
             setup_state_self.set_docker_socket_linked(socket.is_satisfied());
         }
