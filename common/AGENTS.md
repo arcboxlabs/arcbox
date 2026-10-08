@@ -140,6 +140,8 @@ distribution".
 - `NamePattern` parses exact custom `.local` names and explicit descendant wildcards.
   Keep exact names separate from wildcard bases; a wildcard never includes its apex.
   Reuse `Domain` validation and preserve label boundaries in suffix matching.
+- `web_services::WebServiceUrls::project` generates public URLs from selected concrete aliases and installed protocol availability.
+  Validate DNS ownership and routes before projection. Managed HTTPS applies only to `.local` descendants; preserve alias order within each group.
 - `claims::resolve` selects an owner from one consistent registry snapshot.
   Conflicting owners must not fall back to a broader wildcard.
   Only generated Compose service claims may share a name; custom claims remain exclusive.

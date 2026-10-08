@@ -1,12 +1,13 @@
-//! Host-owned signing names and public URLs derived from installed guest web routes.
+//! Host-owned signing names and guest routes projected through shared URL policy.
 
 use arcbox_connect::v1::{
     ContainerWebService, ListContainerWebServicesRequest, ReconcileHttpsAccessRequest,
     ReconcileHttpsAccessResponse, WebService, container_web_service::HttpsBackend,
     web_service::HttpsMode,
 };
-use arcbox_constants::dns::{Domain, LOCAL_CA_DNS_SUBTREE};
+use arcbox_constants::dns::Domain;
 use arcbox_dns::registry::{Lookup, Registry};
+use arcbox_dns::web_services::{HttpsMode as UrlHttpsMode, WebServiceUrls};
 use tokio_util::sync::CancellationToken;
 
 use super::Runtime;
@@ -132,13 +133,13 @@ fn container_services(route: ContainerWebService, registry: &Registry) -> Result
         return Err(CoreError::Vm("guest web route has no DNS names".into()));
     }
     let (https_mode, https_port) = match route.https_backend {
-        Some(HttpsBackend::NativeHttpsPort(port)) => (HttpsMode::Passthrough, port),
-        Some(HttpsBackend::TerminatedHttpPort(port)) => (HttpsMode::Managed, port),
-        None => (HttpsMode::None, 0),
+        Some(HttpsBackend::NativeHttpsPort(port)) => (UrlHttpsMode::Passthrough, port),
+        Some(HttpsBackend::TerminatedHttpPort(port)) => (UrlHttpsMode::Managed, port),
+        None => (UrlHttpsMode::None, 0),
     };
     if route.http_port > u32::from(u16::MAX)
         || https_port > u32::from(u16::MAX)
-        || (https_mode != HttpsMode::None && https_port == 0)
+        || (https_mode != UrlHttpsMode::None && https_port == 0)
         || (route.http_port == 0 && https_port == 0)
     {
         return Err(CoreError::Vm(
@@ -153,48 +154,32 @@ fn container_services(route: ContainerWebService, registry: &Registry) -> Result
         if matches!(registry.resolve(&name), Lookup::Matched { claim, address, .. }
             if claim.owner() == route.container_id && address == std::net::IpAddr::V4(ip))
         {
-            domains.push(hostname);
+            domains.push(name);
         }
     }
-    let groups: Vec<(Vec<String>, HttpsMode, u32)> = if https_mode == HttpsMode::Managed {
-        let (local, foreign) = domains
+    Ok(
+        WebServiceUrls::project(domains, route.http_port != 0, https_mode)
             .into_iter()
-            .partition(|name: &String| name.ends_with(LOCAL_CA_DNS_SUBTREE));
-        vec![
-            (local, https_mode, https_port),
-            (foreign, HttpsMode::None, 0),
-        ]
-    } else {
-        vec![(domains, https_mode, https_port)]
-    };
-    Ok(groups
-        .into_iter()
-        .filter_map(|(domains, mode, port)| {
-            let hostname = domains.first()?.clone();
-            if route.http_port == 0 && port == 0 {
-                return None;
-            }
-            Some(WebService {
-                owner: format!("container:{}", route.container_id),
-                http_url: if route.http_port == 0 {
-                    String::new()
-                } else {
-                    format!("http://{hostname}")
-                },
-                https_url: if port == 0 {
-                    String::new()
-                } else {
-                    format!("https://{hostname}")
-                },
-                hostname,
-                domains,
-                https_mode: mode.into(),
-                http_port: route.http_port,
-                https_port: port,
-                ..Default::default()
+            .map(|urls| {
+                let (mode, port) = match urls.https_mode {
+                    UrlHttpsMode::None => (HttpsMode::None, 0),
+                    UrlHttpsMode::Managed => (HttpsMode::Managed, https_port),
+                    UrlHttpsMode::Passthrough => (HttpsMode::Passthrough, https_port),
+                };
+                WebService {
+                    owner: format!("container:{}", route.container_id),
+                    http_url: urls.http_url,
+                    https_url: urls.https_url,
+                    hostname: urls.hostname,
+                    domains: urls.domains,
+                    https_mode: mode.into(),
+                    http_port: route.http_port,
+                    https_port: port,
+                    ..Default::default()
+                }
             })
-        })
-        .collect())
+            .collect(),
+    )
 }
 
 #[cfg(test)]

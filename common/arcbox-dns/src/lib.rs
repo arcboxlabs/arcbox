@@ -1,4 +1,4 @@
-//! Shared DNS ownership, container metadata, packet parsing, and response building.
+//! Shared DNS ownership, web URLs, container metadata, and packet handling.
 //!
 //! Platform-independent policy and packet handling with standard-library types.
 //! Compiles under `aarch64-unknown-linux-musl` for use in both host and guest.
@@ -13,6 +13,7 @@ pub use names::NamePattern;
 pub mod claims;
 pub mod container;
 pub mod registry;
+pub mod web_services;
 
 /// Shared local-hosts table used by both host-side and VMM-side DNS forwarders.
 pub type LocalHostsTable = RwLock<HashMap<String, IpAddr>>;
