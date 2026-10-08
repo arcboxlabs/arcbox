@@ -87,6 +87,7 @@ async fn init_early(args: DaemonArgs, handles: StartupHandles) -> Result<EarlyCo
         guest_trust_service: handles.guest_trust_service,
         web_index_service: handles.web_index_service,
         tls_signer: handles.tls_signer,
+        machine_web_service: handles.machine_web_service,
         https_access_service: handles.https_access_service,
         kubernetes_lb_service: handles.kubernetes_lb_service,
         dns_domain,
@@ -155,6 +156,7 @@ async fn acquire_lock(early: EarlyContext) -> Result<DaemonContext> {
         guest_trust_service: early.guest_trust_service,
         web_index_service: early.web_index_service,
         tls_signer: early.tls_signer,
+        machine_web_service: early.machine_web_service,
         https_access_service: early.https_access_service,
         kubernetes_lb_service: early.kubernetes_lb_service,
         dns_domain: early.dns_domain,
@@ -279,6 +281,8 @@ async fn init_runtime(ctx: &DaemonContext) -> Result<Arc<Runtime>> {
         .map_err(|_| anyhow::anyhow!("init_runtime called twice"))?;
     #[cfg(target_os = "macos")]
     crate::guest_trust::start(ctx, &runtime).await;
+    #[cfg(target_os = "macos")]
+    crate::machine_web::start(ctx, &runtime).await;
     // Armed before `init` for the same reason `early_runtime` is published
     // here: the VM reaches its ready state partway through the call below, so
     // a mirror started after it returns would report the VM down across the

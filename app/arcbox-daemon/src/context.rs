@@ -61,6 +61,7 @@ pub struct StartupHandles {
     pub guest_trust_service: BackgroundTask,
     pub web_index_service: BackgroundTask,
     pub tls_signer: BackgroundTask,
+    pub machine_web_service: BackgroundTask,
     pub https_access_service: BackgroundTask,
     pub kubernetes_lb_service: BackgroundTask,
 }
@@ -78,6 +79,7 @@ impl StartupHandles {
             guest_trust_service: BackgroundTask::default(),
             web_index_service: BackgroundTask::default(),
             tls_signer: BackgroundTask::default(),
+            machine_web_service: BackgroundTask::default(),
             https_access_service: BackgroundTask::default(),
             kubernetes_lb_service: BackgroundTask::default(),
         }
@@ -108,6 +110,7 @@ pub struct EarlyContext {
     pub guest_trust_service: BackgroundTask,
     pub web_index_service: BackgroundTask,
     pub tls_signer: BackgroundTask,
+    pub machine_web_service: BackgroundTask,
     pub https_access_service: BackgroundTask,
     pub kubernetes_lb_service: BackgroundTask,
     pub dns_domain: Domain,
@@ -159,6 +162,7 @@ pub struct DaemonContext {
     pub guest_trust_service: BackgroundTask,
     pub web_index_service: BackgroundTask,
     pub tls_signer: BackgroundTask,
+    pub machine_web_service: BackgroundTask,
     pub https_access_service: BackgroundTask,
     pub kubernetes_lb_service: BackgroundTask,
     pub dns_domain: Domain,

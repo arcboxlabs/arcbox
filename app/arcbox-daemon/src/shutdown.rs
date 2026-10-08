@@ -62,6 +62,9 @@ pub async fn run(ctx: DaemonContext, mut handles: ServiceHandles) -> Result<()> 
     if let Err(error) = ctx.tls_signer.join().await {
         warn!(%error, "TLS signer cleanup failed");
     }
+    if let Err(error) = ctx.machine_web_service.join().await {
+        warn!(%error, "machine web service cleanup failed");
+    }
     if let Err(error) = ctx.https_access_service.join().await {
         warn!(%error, "HTTPS access service cleanup failed");
     }
@@ -248,6 +251,9 @@ pub async fn interrupt_startup(handles: &StartupHandles) -> Result<()> {
     if let Err(error) = handles.tls_signer.join().await {
         warn!(%error, "TLS signer cleanup failed during startup cancellation");
     }
+    if let Err(error) = handles.machine_web_service.join().await {
+        warn!(%error, "machine web service cleanup failed during startup cancellation");
+    }
     if let Err(error) = handles.https_access_service.join().await {
         warn!(%error, "HTTPS access service cleanup failed during startup cancellation");
     }
@@ -288,6 +294,9 @@ pub async fn abort_failed_startup(handles: &StartupHandles) {
     }
     if let Err(error) = handles.tls_signer.join().await {
         warn!(%error, "TLS signer cleanup failed after startup error");
+    }
+    if let Err(error) = handles.machine_web_service.join().await {
+        warn!(%error, "machine web service cleanup failed after startup error");
     }
     if let Err(error) = handles.https_access_service.join().await {
         warn!(%error, "HTTPS access service cleanup failed after startup error");

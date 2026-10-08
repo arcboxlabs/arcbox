@@ -18,6 +18,8 @@ mod kubernetes_proxy;
 mod machine_dns;
 mod machine_mount;
 #[cfg(target_os = "macos")]
+mod machine_web;
+#[cfg(target_os = "macos")]
 mod mdns;
 mod nfs_mount;
 mod power;
