@@ -15,7 +15,7 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
 - Hold `tls/operation.lock` for each login-session TLS mutation until native authorization and publication finish. Concurrent commands must not reorder trust changes.
 - `abctl tls rotate` authorizes the pending candidate before revoking the exact previous root. Release the CLI profile lock before either daemon mutation RPC. The TLS worker serializes commands with refreshes, holds the lock through signer and status updates, and completes accepted work after a client disconnects.
 - `SystemService.ListWebServices` and `WatchWebServices` return URLs from the guest's installed routes and current DNS ownership. Clients must use those URLs rather than derive URLs from exposed or published ports. Only managed HTTPS requires ArcBox CA trust. A failed snapshot ends the stream; clients must clear stale entries. The feature acceptance matrix lives in `docs/local-https.md`.
-- Pass the validated `Domain` into `Runtime` before initialization. Host DNS, VM boot parameters, and service URL validation must use the same suffix.
+- Pass the validated `Domain` into `Runtime` before initialization. Set `NetConfig::dns` at construction. Host DNS, VM boot parameters, and service URL validation must use the same immutable suffix.
 - HTTPS authorization must not block VM or Docker startup. The daemon owns the Keychain identity and reports `SetupStatus.local_https` independently. The daemon disables Keychain UI for its lifetime. Desktop runs `abctl tls trust` only for a deliberate HTTPS action in the login session. The helper stores public certificates and verifies TLS-only Admin trust. Remove legacy User trust during explicit authorization. Revoke the previous root before replacing `tls/ca.pem`; background publication preserves a trusted previous root. CA preparation errors affect HTTPS status, but failure to remove an exposed private key still blocks sharing the data directory. Development profiles and isolated data directories must not change host trust automatically.
 - Register the CA worker independently of Linux VM startup, including in `--no-linux-vm` mode. CA preparation runs in the background and retries after failure. The signing service selects the current published identity when a CSR arrives. Preserve the same authority handle while the root DER is unchanged; reject signatures if that handle changes before delivery.
 - Observe browser HTTPS only while the VM is ready and a Desktop client watches an untrusted root. Match exact host source addresses and current DNS ownership. Cancel and join each guest observation RPC before disabling its lease or starting another request.
@@ -122,7 +122,7 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   `owns_dns_resolver` predicate that installs `/etc/resolver/<domain>`, and
   only for a domain ending in `.local`). Unicast and Bonjour answer from
   one table: `NetworkManager::subscribe_dns_changes` streams every
-  `register_dns`/`deregister_dns`/`set_dns_domain` as a `DnsChange`, and
+  `register_dns`/`deregister_dns`/`replace_dns_projection` as a `DnsChange`, and
   `local_dns_entries` is the snapshot a lagging subscriber resyncs from. The
   records are `kDNSServiceFlagsUnique` on the **loopback interface**
   (`if_nametoindex("lo0")`): nothing leaves the host, and mDNSResponder

@@ -121,3 +121,7 @@ A real TCP/TLS regression pauses certificate configuration, the TLS handshake, a
 ## Validate complete guest reconnect snapshots
 
 The event task validates the entire running-container list and every full-ID inspect before changing ownership. Reconciliation refreshes known IDs, retains unaddressed identities, and disables every absent owner before attempting external cleanup. Empty snapshots remove all absent owners; failed cleanup keeps unavailable identities for retry. All 11 Docker event tests passed, including real Unix-socket cases for incomplete snapshots, identity mismatch, known-owner refresh, empty lists, and cleanup retry. Strict Linux musl all-target Clippy and formatting passed. Acknowledged batch synchronization with the route actor remains the next required boundary; VM recovery is unverified.
+
+## Fix DNS configuration at construction
+
+Runtime now supplies its validated suffix through NetConfig when constructing NetworkManager. The live domain setter and outer forwarder lock are removed, eliminating the forwarder write-lock path before Registry integration. Network tests passed 77 cases with four existing ignored tests; seven web-service tests and the configured machine-DNS test passed. Strict net/core/daemon all-target Clippy and formatting passed. Host Registry integration remains incomplete.

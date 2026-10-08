@@ -159,10 +159,8 @@ pub struct DnsForwarder {
     config: DnsConfig,
     /// Shared local hostname mappings (hostname -> IP).
     local_hosts: Arc<LocalHostsTable>,
-    /// Response cache. Behind a `Mutex` (interior mutability) so `handle_query`
-    /// takes only `&self`; callers then hold a *read* lock on the surrounding
-    /// `RwLock<DnsForwarder>`, so a slow upstream forward never blocks the fast
-    /// local-resolution / cache-hit path.
+    /// Response cache. Interior mutability keeps resolver I/O independent of
+    /// the local-hosts lock, so upstream forwarding cannot block local queries.
     cache: std::sync::Mutex<HashMap<cache::DnsCacheKey, cache::CacheEntry>>,
     /// Live upstream list; re-loaded from the system resolver file when it
     /// changes.

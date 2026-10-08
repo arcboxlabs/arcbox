@@ -145,7 +145,6 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        runtime.network_manager().set_dns_domain("arcbox.local");
         let name = "web.arcbox.local";
         assert_eq!(runtime.https_signing_revision(name).await, None);
         let ip = "10.0.2.3".parse().unwrap();

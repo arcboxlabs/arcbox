@@ -131,7 +131,6 @@ mod tests {
             })
             .unwrap(),
         );
-        runtime.network_manager().set_dns_domain("arcbox.local");
         runtime
             .register_dns("container", &["web".into()], "10.0.2.3".parse().unwrap())
             .await;

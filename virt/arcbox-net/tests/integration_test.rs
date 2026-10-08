@@ -668,6 +668,7 @@ mod network_manager {
             bridge: Some("br0".to_string()),
             multiqueue: true,
             num_queues: 4,
+            dns: Default::default(),
         };
 
         let manager = NetworkManager::new(config);

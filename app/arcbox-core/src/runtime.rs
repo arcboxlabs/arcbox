@@ -288,8 +288,11 @@ impl Runtime {
         let event_bus = EventBus::new();
         let snapshot_dir = config.data_dir.join("snapshots");
         let vm_manager = Arc::new(VmManager::new(snapshot_dir));
-        let network_manager = Arc::new(NetworkManager::new(arcbox_net::NetConfig::default()));
-        network_manager.set_dns_domain(config.network.dns_domain.as_str());
+        let network_manager = Arc::new(NetworkManager::new(arcbox_net::NetConfig {
+            dns: arcbox_net::dns::DnsConfig::default()
+                .with_local_domain(config.network.dns_domain.as_str()),
+            ..Default::default()
+        }));
 
         // Every VM's datapath is wired to the host the same way: the DNS
         // hosts table it shares with the host DnsService, and the operator's

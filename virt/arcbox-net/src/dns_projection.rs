@@ -31,10 +31,7 @@ impl NetworkManager {
             }
         }
 
-        let forwarder = self
-            .dns_forwarder
-            .read()
-            .expect("DNS forwarder lock poisoned");
+        let forwarder = &self.dns_forwarder;
         let suffix = forwarder
             .config()
             .local_domain

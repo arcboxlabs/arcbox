@@ -788,7 +788,16 @@ async fn machine_dns_name_follows_the_configured_domain_and_the_hostname() {
         runtime.machine_dns_name("my_box.v2").as_deref(),
         Some("my-box-v2.arcbox.local")
     );
-    runtime.network_manager().set_dns_domain("test.local");
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = Runtime::new(Config {
+        data_dir: directory.path().to_owned(),
+        network: crate::config::NetworkConfig {
+            dns_domain: "test.local".parse().unwrap(),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .unwrap();
     assert_eq!(
         runtime.machine_dns_name("dev").as_deref(),
         Some("dev.test.local")
