@@ -2,7 +2,7 @@
 //!
 //! Listens on `0.0.0.0:53` (UDP) inside the guest VM. Lookup priority:
 //!
-//! 1. Container registry (name → Docker bridge IP)
+//! 1. DNS registry (container claims, host and index reservations)
 //! 2. Sandbox registry (id → TAP IP)
 //! 3. Names under the configured domain not found → NXDOMAIN
 //! 4. Everything else → forward to gateway (`10.0.2.1:53`)
@@ -12,6 +12,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use arcbox_constants::dns::Domain;
+use arcbox_dns::claims::Boundary;
 use arcbox_dns::registry::{Lookup, Registry};
 use arcbox_dns::{DEFAULT_TTL, DnsQuery, DnsRecordType, NamePattern};
 use tokio::net::UdpSocket;
@@ -56,13 +57,17 @@ impl GuestDnsServer {
     ///
     /// The sandbox registry is shared via a global so that `sandbox.rs`
     /// can register entries synchronously without an async handle.
-    pub fn new(domain: Domain, cancel: CancellationToken) -> Self {
-        Self {
+    ///
+    /// # Errors
+    /// Returns an error if the configured suffix cannot reserve the built-in names.
+    pub fn new(domain: Domain, cancel: CancellationToken) -> anyhow::Result<Self> {
+        let registry = Registry::with_builtin_names(&domain).map_err(anyhow::Error::msg)?;
+        Ok(Self {
             domain,
-            containers: Arc::default(),
+            containers: Arc::new(RwLock::new(registry)),
             sandboxes: Arc::clone(sandbox_registry()),
             cancel,
-        }
+        })
     }
 
     /// Returns the suffix shared by DNS registration and HTTP discovery.
@@ -196,6 +201,12 @@ impl GuestDnsServer {
                 }
                 Lookup::Matched { .. } => return Ok(Some(arcbox_dns::build_nodata(data)?)),
                 Lookup::Conflict => return Ok(Some(arcbox_dns::build_servfail(data)?)),
+                // The host publishes these exact names from its current Registry.
+                Lookup::Reserved(Boundary::ReservedName { authority, .. })
+                    if matches!(authority.as_str(), "system" | "index") =>
+                {
+                    return Ok(None);
+                }
                 Lookup::Reserved(_) => return Ok(Some(arcbox_dns::build_nxdomain(data)?)),
                 Lookup::Delegated(_) => return Ok(None),
                 Lookup::Unmatched => {}
@@ -297,7 +308,8 @@ mod tests {
     #[tokio::test]
     async fn resolves_relative_and_configured_names_for_containers_and_sandboxes() {
         let mut server =
-            GuestDnsServer::new("containers.test".parse().unwrap(), CancellationToken::new());
+            GuestDnsServer::new("containers.test".parse().unwrap(), CancellationToken::new())
+                .unwrap();
         server.sandboxes = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let container_ip = Ipv4Addr::new(172, 17, 0, 2);
         let sandbox_ip = Ipv4Addr::new(10, 0, 3, 2);
@@ -329,15 +341,17 @@ mod tests {
     #[tokio::test]
     async fn only_the_configured_domain_receives_authoritative_negative_answers() {
         let server =
-            GuestDnsServer::new("containers.test".parse().unwrap(), CancellationToken::new());
+            GuestDnsServer::new("containers.test".parse().unwrap(), CancellationToken::new())
+                .unwrap();
         register(&server, "com", "container", Ipv4Addr::new(172, 17, 0, 2)).await;
         for qtype in [1, 28, 64, 65, 65_280].map(DnsRecordType::from) {
-            for name in ["missing.containers.test", "containers.test"] {
-                let response = local_query(&server, name, qtype).await.unwrap();
-                assert_eq!(&response[2..4], &[0x85, 0x83], "{name}");
-                assert_eq!(&response[6..12], &[0; 6], "{name}");
-            }
+            let response = local_query(&server, "missing.containers.test", qtype)
+                .await
+                .unwrap();
+            assert_eq!(&response[2..4], &[0x85, 0x83]);
+            assert_eq!(&response[6..12], &[0; 6]);
             for name in [
+                "containers.test",
                 "web.arcbox.local",
                 "web.example.test",
                 "web.containers.test.evil",
@@ -350,15 +364,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_ownership_results_do_not_reach_sandboxes_or_short_names() {
-        use arcbox_dns::claims::Boundary;
+    async fn builtin_names_forward_without_local_addresses_despite_hostile_claims() {
+        let mut server = GuestDnsServer::new(
+            "dev.arcbox.local".parse().unwrap(),
+            CancellationToken::new(),
+        )
+        .unwrap();
+        server.sandboxes = Arc::default();
+        let ip = Ipv4Addr::new(172, 17, 0, 2);
+        let names = [
+            "host",
+            "host.dev.arcbox.local",
+            "host.docker.internal",
+            "gateway.docker.internal",
+            "dev.arcbox.local",
+        ];
+        for name in names {
+            server.register_sandbox(name, ip);
+        }
+        for patterns in [
+            Vec::new(),
+            names
+                .map(|name| NamePattern::Exact(name.parse().unwrap()))
+                .to_vec(),
+            ["local", "docker.internal"]
+                .map(|name| NamePattern::Descendants(name.parse().unwrap()))
+                .to_vec(),
+        ] {
+            let claims = patterns
+                .into_iter()
+                .map(|pattern| Claim::exclusive(pattern, "hostile".into(), "container".into()))
+                .collect();
+            server
+                .containers
+                .write()
+                .await
+                .replace("hostile".into(), claims, Some(ip.into()))
+                .unwrap();
+            for name in names {
+                for qtype in [1, 28, 64, 65, 65_280].map(DnsRecordType::from) {
+                    assert!(local_query(&server, name, qtype).await.is_none(), "{name}");
+                }
+            }
+        }
+        for name in [
+            "child.host.dev.arcbox.local",
+            "child.dev.arcbox.local",
+            "child.host.docker.internal",
+            "child.gateway.docker.internal",
+        ] {
+            let response = local_query(&server, name, DnsRecordType::A).await.unwrap();
+            assert_eq!(&response[6..8], &[0, 1], "{name}");
+            assert!(response.ends_with(&ip.octets()), "{name}");
+        }
+    }
 
-        let mut server = GuestDnsServer::new(Domain::default(), CancellationToken::new());
+    #[test]
+    fn server_rejects_a_suffix_that_replaces_a_host_alias() {
+        for name in ["host", "host.docker.internal", "gateway.docker.internal"] {
+            assert!(GuestDnsServer::new(name.parse().unwrap(), CancellationToken::new()).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_ownership_results_do_not_reach_sandboxes_or_short_names() {
+        let mut server = GuestDnsServer::new(Domain::default(), CancellationToken::new()).unwrap();
         server.sandboxes = Arc::default();
         *server.containers.write().await = Registry::new(vec![
             Boundary::ReservedName {
                 name: "reserved.local".parse().unwrap(),
                 authority: "host".into(),
+            },
+            Boundary::ReservedTree {
+                root: "system-tree.local".parse().unwrap(),
+                authority: "system".into(),
             },
             Boundary::DelegatedTree {
                 root: "remote.local".parse().unwrap(),
@@ -376,6 +455,7 @@ mod tests {
         for qtype in [1, 28, 64, 65, 65_280].map(DnsRecordType::from) {
             for (name, code) in [
                 ("reserved.local", 3),
+                ("system-tree.local", 3),
                 ("conflict.arcbox.local", 2),
                 ("conflict", 2),
             ] {

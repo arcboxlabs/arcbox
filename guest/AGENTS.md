@@ -229,6 +229,7 @@ non-obvious invariants and failure signatures.
   A failed listing or rejected subscription must enter the existing reconnect path.
   Validate every inspect response before applying a reconnect snapshot. Await route-task acknowledgement before publishing snapshot or event DNS changes; an active scan may finish before consuming the update. Retain unavailable owners until rule and mirror cleanup succeeds.
   Preserve unknown DNS query types through local lookup. Missing names under the configured suffix remain local for every query type.
+  Construct guest DNS with the shared builtin reservations. Forward unresolved exact system/index names to the existing gateway; keep other reservations local. Descendants remain independent.
   Resolve conflicts as SERVFAIL. Short-name lookup requires an exact candidate; never append the suffix to match a wildcard.
   `ListContainerWebServices` reports installed routes, not raw listeners. The
   snapshot joins exact claims with the current DNS registry using both owner and address. A nonempty `hostname` resolves one concrete name through the Registry, including wildcard claims, and returns at most one installed route.

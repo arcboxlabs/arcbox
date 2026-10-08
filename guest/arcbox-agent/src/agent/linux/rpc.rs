@@ -823,7 +823,8 @@ mod tests {
         let dns = crate::dns_server::GuestDnsServer::new(
             Default::default(),
             tokio_util::sync::CancellationToken::new(),
-        );
+        )
+        .unwrap();
         let mut claims = arcbox_dns::claims::Claim::generated(
             "api.arcbox.local".parse().unwrap(),
             "a".into(),

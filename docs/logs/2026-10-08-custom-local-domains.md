@@ -161,3 +161,9 @@ Engine now advances an opaque `VmIncarnation` on each start or reboot. Capture a
 Six Engine VM tests and 73 serial Runtime tests passed, including stale transfer, failed reboot, and canceled manager retirement. Strict all-target Engine/Core Clippy and formatting passed for both intermediate commits. This change establishes manager provenance; final checks after listener awaits, snapshot publication, retirement ordering, and installed VM acceptance remain unfinished.
 
 Forwarding cleanup now checks the expected slot identity before withdrawing old rules, including empty refreshes and bind failures. A real TCP regression proves that a stale operation cannot remove or bind through its replacement slot. All 74 serial Runtime tests, strict all-target Engine/Core Clippy, scoped formatting, and diff checks passed. This slot check does not establish global ordering for owner movement between machines or physical VM changes during an await.
+
+## Share builtin reservations with the guest
+
+Host and guest now construct the same exact host/index reservations. The guest forwards unresolved builtin names to its existing gateway; hostile container or sandbox entries cannot capture them. Descendants and ordinary unavailable claims retain their existing behavior. Invalid suffix construction fails before DNS serving.
+
+All 50 shared DNS tests, three host reservation tests, five guest DNS tests, 12 guest event tests, and the framed guest RPC regression passed. Guest tests ran in networkless Colima containers. Host and guest strict all-target Clippy, workspace formatting, and diff checks passed. Gateway socket failure and installed VM/browser behavior remain unverified.

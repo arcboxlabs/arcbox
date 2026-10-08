@@ -303,7 +303,7 @@ async fn main() -> Result<()> {
     let cancel = tokio_util::sync::CancellationToken::new();
 
     // Start the guest DNS server (0.0.0.0:53).
-    let dns = std::sync::Arc::new(dns_server::GuestDnsServer::new(domain, cancel.clone()));
+    let dns = std::sync::Arc::new(dns_server::GuestDnsServer::new(domain, cancel.clone())?);
     let dns_handle = {
         let dns = Arc::clone(&dns);
         tokio::spawn(async move {

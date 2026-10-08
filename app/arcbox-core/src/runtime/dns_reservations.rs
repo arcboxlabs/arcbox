@@ -1,38 +1,12 @@
 //! Built-in DNS names remain reserved independently of resource addresses.
 
 use arcbox_constants::dns::Domain;
-use arcbox_dns::{claims::Boundary, registry::Registry};
+use arcbox_dns::registry::Registry;
 
 use crate::error::{CoreError, Result};
 
 pub(super) fn registry(domain: &Domain) -> Result<Registry> {
-    let names = [
-        "host".to_owned(),
-        format!("host.{domain}"),
-        "host.docker.internal".to_owned(),
-        "gateway.docker.internal".to_owned(),
-    ];
-    if names.iter().any(|name| name == domain.as_str()) {
-        return Err(CoreError::config(format!(
-            "DNS domain '{domain}' conflicts with a built-in host name"
-        )));
-    }
-    let mut boundaries = names
-        .into_iter()
-        .map(|name| {
-            name.parse()
-                .map(|name| Boundary::ReservedName {
-                    name,
-                    authority: "system".into(),
-                })
-                .map_err(CoreError::config)
-        })
-        .collect::<Result<Vec<_>>>()?;
-    boundaries.push(Boundary::ReservedName {
-        name: domain.clone(),
-        authority: "index".into(),
-    });
-    Ok(Registry::new(boundaries))
+    Registry::with_builtin_names(domain).map_err(CoreError::config)
 }
 
 #[cfg(test)]

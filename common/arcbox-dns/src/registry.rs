@@ -63,6 +63,38 @@ impl Registry {
         }
     }
 
+    /// Reserves exact host aliases and the index apex before resources register.
+    ///
+    /// # Errors
+    /// Returns an error if the suffix replaces a host alias or exceeds its name budget.
+    pub fn with_builtin_names(domain: &Domain) -> Result<Self, String> {
+        let names = [
+            "host".to_owned(),
+            format!("host.{domain}"),
+            "host.docker.internal".to_owned(),
+            "gateway.docker.internal".to_owned(),
+        ];
+        if names.iter().any(|name| name == domain.as_str()) {
+            return Err(format!(
+                "DNS domain '{domain}' conflicts with a built-in host name"
+            ));
+        }
+        let mut boundaries = names
+            .into_iter()
+            .map(|name| {
+                name.parse().map(|name| Boundary::ReservedName {
+                    name,
+                    authority: "system".into(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        boundaries.push(Boundary::ReservedName {
+            name: domain.clone(),
+            authority: "index".into(),
+        });
+        Ok(Self::new(boundaries))
+    }
+
     /// Every effective mutation advances the epoch, including removal.
     #[must_use]
     pub fn epoch(&self) -> u64 {

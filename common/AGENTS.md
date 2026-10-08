@@ -148,6 +148,7 @@ distribution".
   Delegated trees block every local claim, including more specific exact names.
   Keep machine-wide lease acquisition outside this pure matcher.
 - `registry::Registry` stores claims, address, and revision together under the caller's lock.
+  Use `Registry::with_builtin_names` for the shared exact host aliases and index apex. Reservations do not include descendants.
   Replace the complete owner registration; identical replacements preserve the revision and epoch.
   Retain owners without addresses, but exclude their claims from selection.
   Effective replacement or removal advances the epoch; removal and reinsertion must not reuse a revision.

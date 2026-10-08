@@ -47,7 +47,7 @@ fn network_changes_reinspect_the_container_instead_of_the_network() {
 #[tokio::test]
 async fn failed_rule_cleanup_retains_the_full_owner_until_retry_succeeds() {
     let id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    let dns = GuestDnsServer::new(Default::default(), CancellationToken::new());
+    let dns = GuestDnsServer::new(Default::default(), CancellationToken::new()).unwrap();
     sync_dns(
         &dns,
         &serde_json::json!({
@@ -110,7 +110,7 @@ async fn failed_rule_cleanup_retains_the_full_owner_until_retry_succeeds() {
 
 #[tokio::test]
 async fn stopped_domain_task_cannot_accept_updates_or_discard_cleanup_ownership() {
-    let dns = GuestDnsServer::new(Default::default(), CancellationToken::new());
+    let dns = GuestDnsServer::new(Default::default(), CancellationToken::new()).unwrap();
     let (domains, commands) = DomainRoutes::test_channel();
     drop(commands);
     let facts = ContainerFacts::from_inspect(
@@ -137,7 +137,7 @@ async fn stopped_domain_task_cannot_accept_updates_or_discard_cleanup_ownership(
 
 #[tokio::test]
 async fn disconnecting_the_last_network_removes_only_that_containers_dns_ownership() {
-    let dns = GuestDnsServer::new(Default::default(), CancellationToken::new());
+    let dns = GuestDnsServer::new(Default::default(), CancellationToken::new()).unwrap();
     let mut inspect = serde_json::json!({
         "Id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "Name": "/web-1",
@@ -172,7 +172,7 @@ async fn disconnecting_the_last_network_removes_only_that_containers_dns_ownersh
 
 #[tokio::test]
 async fn dns_uses_network_name_order_and_rejects_invalid_names_individually() {
-    let dns = GuestDnsServer::new(Default::default(), CancellationToken::new());
+    let dns = GuestDnsServer::new(Default::default(), CancellationToken::new()).unwrap();
     let mut inspect = serde_json::json!({
         "Id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "Name": "/MyProject_Web_1",
@@ -404,7 +404,7 @@ async fn incomplete_snapshots_never_publish_a_valid_prefix_or_discard_old_owners
         let tmp = tempfile::TempDir::new().unwrap();
         let socket = tmp.path().join("docker.sock");
         let listener = UnixListener::bind(&socket).unwrap();
-        let dns = GuestDnsServer::new(Default::default(), CancellationToken::new());
+        let dns = GuestDnsServer::new(Default::default(), CancellationToken::new()).unwrap();
         for (id, name) in [(OLD_ID, "/absent"), (WEB_ID, "/old-web")] {
             sync_dns(&dns, &inspect(id, name, "172.17.0.2"))
                 .await
@@ -452,7 +452,7 @@ async fn complete_snapshot_refreshes_known_owners_and_keeps_unaddressed_identity
     let tmp = tempfile::TempDir::new().unwrap();
     let socket = tmp.path().join("docker.sock");
     let listener = UnixListener::bind(&socket).unwrap();
-    let dns = GuestDnsServer::new(Default::default(), CancellationToken::new());
+    let dns = GuestDnsServer::new(Default::default(), CancellationToken::new()).unwrap();
     for (id, name) in [(OLD_ID, "/absent"), (WEB_ID, "/old-web")] {
         sync_dns(&dns, &inspect(id, name, "172.17.0.2"))
             .await
@@ -535,7 +535,7 @@ async fn empty_snapshot_disables_all_absent_names_and_retries_failed_cleanup() {
     let tmp = tempfile::TempDir::new().unwrap();
     let socket = tmp.path().join("docker.sock");
     let listener = UnixListener::bind(&socket).unwrap();
-    let dns = GuestDnsServer::new(Default::default(), CancellationToken::new());
+    let dns = GuestDnsServer::new(Default::default(), CancellationToken::new()).unwrap();
     for (id, name) in [(OLD_ID, "/absent"), (WEB_ID, "/web")] {
         sync_dns(&dns, &inspect(id, name, "172.17.0.2"))
             .await
@@ -617,7 +617,7 @@ async fn inspected_events_wait_for_actor_ack_before_dns_and_keep_unavailable_own
         let tmp = tempfile::TempDir::new().unwrap();
         let socket = tmp.path().join("docker.sock");
         let listener = UnixListener::bind(&socket).unwrap();
-        let dns = GuestDnsServer::new(Default::default(), CancellationToken::new());
+        let dns = GuestDnsServer::new(Default::default(), CancellationToken::new()).unwrap();
         sync_dns(&dns, &inspect(WEB_ID, "/old-web", "172.17.0.2"))
             .await
             .unwrap();
