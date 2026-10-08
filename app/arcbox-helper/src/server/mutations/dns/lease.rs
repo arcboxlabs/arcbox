@@ -1,6 +1,8 @@
 //! Connection-bound resolver ownership and revision-safe file publication.
 
 #[cfg(test)]
+mod authority_tests;
+#[cfg(test)]
 mod tests;
 
 use std::collections::BTreeMap;
