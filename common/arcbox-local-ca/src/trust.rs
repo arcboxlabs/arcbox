@@ -81,21 +81,24 @@ impl PublicAuthority {
     /// An absent entry requires no authorization.
     pub fn remove_admin_trust(&self) -> Result<(), Error> {
         let certificate = SecCertificate::from_der(self.der())?;
-        if trust_settings(&certificate, Domain::Admin)?.is_none() {
-            return Ok(());
-        }
-        // SAFETY: the certificate owns a valid native reference throughout the call.
-        let result = unsafe {
-            SecTrustSettingsRemoveTrustSettings(
-                certificate.as_concrete_TypeRef(),
-                Domain::Admin as u32,
-            )
-        };
-        if result == errSecItemNotFound || result == errSecNoTrustSettings {
-            return Ok(());
-        }
-        check(result)
+        remove(&certificate, Domain::Admin)
     }
+}
+
+/// Revokes one certificate's trust without requiring a persistent Keychain item.
+pub fn remove(certificate: &SecCertificate, domain: Domain) -> Result<(), Error> {
+    // Certificate enumeration omits trust records whose Keychain certificate is absent.
+    if trust_settings(certificate, domain)?.is_none() {
+        return Ok(());
+    }
+    // SAFETY: the certificate owns a valid native reference throughout the call.
+    let result = unsafe {
+        SecTrustSettingsRemoveTrustSettings(certificate.as_concrete_TypeRef(), domain as u32)
+    };
+    if result == errSecItemNotFound || result == errSecNoTrustSettings {
+        return Ok(());
+    }
+    check(result)
 }
 
 fn tls_settings() -> Settings {

@@ -3,19 +3,13 @@
 use std::{fs, path::Path};
 
 use arcbox_constants::paths::guest::{TLS_CA_CERT, TLS_CA_KEY};
-use core_foundation::base::TCFType;
 use rustls::pki_types::{CertificateDer, pem::PemObject};
 use security_framework::certificate::SecCertificate;
 use security_framework::item::{ItemClass, ItemSearchOptions, Limit, Reference, SearchResult};
 use security_framework::os::macos::keychain::SecKeychain;
-use security_framework::trust_settings::{Domain, TrustSettings};
-use security_framework_sys::base::SecCertificateRef;
+use security_framework::trust_settings::Domain;
 
-use crate::{Error, KeychainAuthority};
-
-unsafe extern "C" {
-    fn SecTrustSettingsRemoveTrustSettings(certificate: SecCertificateRef, domain: u32) -> i32;
-}
+use crate::{Error, KeychainAuthority, trust};
 
 impl KeychainAuthority {
     /// Retires any shared CA key before the VM boots and publishes this root.
@@ -48,13 +42,15 @@ impl KeychainAuthority {
 }
 
 /// Removes only this certificate's user trust, preserving every other profile.
+/// The certificate does not need to remain stored in the Keychain.
 pub fn remove_trust(pem: &[u8]) -> Result<(), Error> {
-    untrust(&certificate(pem)?)
+    trust::remove(&certificate(pem)?, Domain::User)
 }
 
 /// Removes only this DER certificate's user trust, preserving every other profile.
+/// The certificate does not need to remain stored in the Keychain.
 pub fn remove_user_trust_der(der: &[u8]) -> Result<(), Error> {
-    untrust(&SecCertificate::from_der(der)?)
+    trust::remove(&SecCertificate::from_der(der)?, Domain::User)
 }
 
 fn certificate(pem: &[u8]) -> Result<SecCertificate, Error> {
@@ -65,7 +61,7 @@ fn certificate(pem: &[u8]) -> Result<SecCertificate, Error> {
 
 pub fn delete_certificate(pem: &[u8]) -> Result<(), Error> {
     let certificate = certificate(pem)?;
-    untrust(&certificate)?;
+    trust::remove(&certificate, Domain::User)?;
     // A certificate parsed from DER has no persistent reference. Delete the
     // matching Keychain reference, never another certificate with the same serial.
     let found = ItemSearchOptions::new()
@@ -88,26 +84,6 @@ pub fn delete_certificate(pem: &[u8]) -> Result<(), Error> {
         };
         if stored.to_der() == certificate.to_der() {
             stored.delete()?;
-        }
-    }
-    Ok(())
-}
-
-fn untrust(certificate: &SecCertificate) -> Result<(), Error> {
-    let der = certificate.to_der();
-    let trusted = TrustSettings::new(Domain::User)
-        .iter()?
-        .any(|known| known.to_der() == der);
-    if trusted {
-        // SAFETY: certificate owns a valid SecCertificateRef throughout the call.
-        let status = unsafe {
-            SecTrustSettingsRemoveTrustSettings(
-                certificate.as_concrete_TypeRef(),
-                Domain::User as u32,
-            )
-        };
-        if status != 0 {
-            return Err(security_framework::base::Error::from_code(status).into());
         }
     }
     Ok(())
