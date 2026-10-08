@@ -1,6 +1,6 @@
 //! Validate the public root before certificate storage or native trust changes.
 
-use arcbox_constants::dns::LOCAL_CA_COMMON_NAME;
+use arcbox_constants::dns::{LOCAL_CA_COMMON_NAME, LOCAL_CA_DNS_SUBTREE};
 use sha2::{Digest, Sha256};
 use x509_parser::{
     extensions::{GeneralName, ParsedExtension},
@@ -9,11 +9,12 @@ use x509_parser::{
 
 use crate::{CertificateValidity, Error, LOCAL_DOMAIN, MAX_CERTIFICATE_SIZE};
 
-/// A self-signed public CA with the fixed ArcBox identity and signing scope.
+/// A self-signed public CA with the fixed ArcBox identity and a validated local DNS scope.
 /// Expired certificates remain valid inputs so uninstall can revoke their trust.
 pub struct PublicAuthority {
     der: Vec<u8>,
     validity: CertificateValidity,
+    dns_subtree: &'static str,
 }
 
 impl PublicAuthority {
@@ -43,6 +44,25 @@ impl PublicAuthority {
     #[must_use]
     pub fn validity(&self) -> CertificateValidity {
         self.validity
+    }
+
+    /// Returns the root's permitted DNS subtree; a leading dot requires a descendant.
+    #[must_use]
+    pub fn dns_subtree(&self) -> &'static str {
+        self.dns_subtree
+    }
+
+    /// Checks a normalized, concrete DNS name against this root's parsed constraint.
+    #[cfg(any(target_os = "macos", test))]
+    pub(crate) fn permits_dns_name(&self, name: &str) -> bool {
+        let Some(prefix) = name.strip_suffix(self.dns_subtree) else {
+            return false;
+        };
+        if self.dns_subtree.starts_with('.') {
+            !prefix.is_empty()
+        } else {
+            prefix.is_empty() || prefix.ends_with('.')
+        }
     }
 
     /// Returns the DER certificate's SHA-256 fingerprint as uppercase, colon-separated hex.
@@ -133,8 +153,14 @@ impl TryFrom<Vec<u8>> for PublicAuthority {
             .as_deref()
             .unwrap_or_default();
         let excluded = names.value.excluded_subtrees.as_deref().unwrap_or_default();
+        let dns_subtree = match permitted {
+            [name] if name.base == GeneralName::DNSName(LOCAL_CA_DNS_SUBTREE) => {
+                LOCAL_CA_DNS_SUBTREE
+            }
+            [name] if name.base == GeneralName::DNSName(LOCAL_DOMAIN) => LOCAL_DOMAIN,
+            _ => return Err(Error::InvalidAuthority("CA has an unsupported DNS scope")),
+        };
         if !names.critical
-            || !matches!(permitted, [name] if name.base == GeneralName::DNSName(LOCAL_DOMAIN))
             || excluded.len() != 2
             || !excluded
                 .iter()
@@ -144,11 +170,15 @@ impl TryFrom<Vec<u8>> for PublicAuthority {
                 .any(|name| name.base == GeneralName::IPAddress(&[0; 32]))
         {
             return Err(Error::InvalidAuthority(
-                "CA must permit only ArcBox DNS names and exclude every IP address",
+                "CA must constrain local DNS names and exclude every IP address",
             ));
         }
         let validity = CertificateValidity::from(certificate.validity());
-        Ok(Self { der, validity })
+        Ok(Self {
+            der,
+            validity,
+            dns_subtree,
+        })
     }
 }
 
@@ -192,6 +222,31 @@ mod tests {
     }
 
     #[test]
+    fn retains_the_scope_of_expired_roots_for_revocation() {
+        for subtree in [LOCAL_CA_DNS_SUBTREE, LOCAL_DOMAIN] {
+            let mut parameters = crate::authority::parameters();
+            parameters
+                .name_constraints
+                .as_mut()
+                .unwrap()
+                .permitted_subtrees = vec![GeneralSubtree::DnsName(subtree.into())];
+            parameters.not_after = parameters.not_before;
+            parameters.not_before -= time::Duration::days(1);
+            let public = PublicAuthority::try_from(certificate(parameters)).unwrap();
+            assert_eq!(public.dns_subtree(), subtree);
+            assert!(
+                !public
+                    .validity()
+                    .is_valid_at(time::OffsetDateTime::now_utc())
+            );
+            assert!(public.permits_dns_name("arcbox.local"));
+            assert!(public.permits_dns_name("web.arcbox.local"));
+            assert!(!public.permits_dns_name("local"));
+            assert!(!public.permits_dns_name("web.arcbox.local.example.com"));
+        }
+    }
+
+    #[test]
     fn metadata_identifies_the_certificate_and_keeps_expired_roots_inspectable() {
         let now = time::OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
         let mut params = crate::authority::parameters();
@@ -232,6 +287,10 @@ mod tests {
             |p| p.is_ca = IsCa::Ca(BasicConstraints::Constrained(1)),
             |p| p.key_usages.push(KeyUsagePurpose::DigitalSignature),
             |p| p.name_constraints = None,
+            |p| {
+                p.name_constraints.as_mut().unwrap().permitted_subtrees =
+                    vec![GeneralSubtree::DnsName("local".into())];
+            },
             |p| {
                 p.name_constraints
                     .as_mut()

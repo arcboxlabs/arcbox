@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use arcbox_constants::dns::LOCAL_CA_DNS_SUBTREE;
 use rcgen::{CertificateParams, KeyPair};
 #[cfg(any(target_os = "macos", test))]
 use rcgen::{
@@ -13,9 +14,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, Serve
 #[cfg(any(target_os = "macos", test))]
 use time::{Duration, OffsetDateTime};
 
-#[cfg(any(target_os = "macos", test))]
-use crate::CertificateValidity;
-use crate::{Error, LOCAL_DOMAIN, PublicAuthority};
+use crate::{Error, PublicAuthority};
 
 /// Maximum DER request or response size accepted across the signing boundary.
 pub const MAX_CERTIFICATE_SIZE: usize = 8192;
@@ -28,7 +27,7 @@ pub struct CertificateRequest {
 }
 
 impl CertificateRequest {
-    /// Creates a request for one ArcBox DNS name.
+    /// Creates a request for one concrete `.local` DNS name.
     pub fn new(name: &str) -> Result<Self, Error> {
         let server_name = validate_name(name)?.to_owned();
         let key = KeyPair::generate()?;
@@ -85,9 +84,7 @@ impl CertificateRequest {
 /// Validates a DNS name at the signing boundary, including its label syntax.
 fn validate_name(name: &str) -> Result<ServerName<'_>, Error> {
     let normalized = name.to_ascii_lowercase();
-    let host = normalized
-        .strip_suffix(LOCAL_DOMAIN)
-        .and_then(|prefix| prefix.strip_suffix('.'));
+    let host = normalized.strip_suffix(LOCAL_CA_DNS_SUBTREE);
     if host.is_none_or(str::is_empty) {
         return Err(Error::ForeignName(name.to_owned()));
     }
@@ -138,9 +135,13 @@ impl VerifiedCertificateRequest {
 pub fn sign_request(
     request: &VerifiedCertificateRequest,
     issuer: &Issuer<'_, impl SigningKey>,
-    validity: CertificateValidity,
+    authority: &PublicAuthority,
     now: OffsetDateTime,
 ) -> Result<Vec<u8>, Error> {
+    if !authority.permits_dns_name(request.dns_name()) {
+        return Err(Error::ForeignName(request.name.clone()));
+    }
+    let validity = authority.validity();
     if !validity.is_valid_at(now) {
         return Err(Error::InvalidAuthority(
             "root certificate is outside its validity period",
@@ -163,6 +164,7 @@ pub fn sign_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CertificateValidity;
     use rcgen::{BasicConstraints, IsCa};
 
     fn verified(der: &[u8]) -> VerifiedCertificateRequest {
@@ -174,7 +176,7 @@ mod tests {
         let key = KeyPair::generate().unwrap();
         let params = crate::authority::parameters();
         let ca = params.self_signed(&key).unwrap();
-        let validity = CertificateValidity::from_der(ca.der()).unwrap();
+        let public = PublicAuthority::try_from(ca.der().to_vec()).unwrap();
         let now = OffsetDateTime::now_utc();
         let issuer = Issuer::new(params, key);
         let pending = CertificateRequest::new("dash.signoz.arcbox.local").unwrap();
@@ -183,13 +185,8 @@ mod tests {
         assert!(VerifiedCertificateRequest::try_from(tampered.as_slice()).is_err());
         let request = verified(pending.der());
         assert_eq!(request.dns_name(), "dash.signoz.arcbox.local");
-        let certificate = sign_request(&request, &issuer, validity, now).unwrap();
-        pending
-            .complete(
-                certificate.clone(),
-                &PublicAuthority::try_from(ca.der().to_vec()).unwrap(),
-            )
-            .unwrap();
+        let certificate = sign_request(&request, &issuer, &public, now).unwrap();
+        pending.complete(certificate.clone(), &public).unwrap();
         let mut roots = rustls::RootCertStore::empty();
         roots.add(ca.der().clone()).unwrap();
         let verifier = WebPkiServerVerifier::builder_with_provider(
@@ -210,11 +207,15 @@ mod tests {
 
         for name in [
             "example.com",
-            "arcbox.local",
-            "evilarcbox.local",
+            "local",
+            "notlocal",
+            ".local",
+            "foo.localhost",
+            "foo.local.example.com",
             "*.arcbox.local",
             "web.arcbox.local.example.com",
             "127.0.0.1",
+            "::1",
         ] {
             assert!(CertificateRequest::new(name).is_err(), "{name}");
             let key = KeyPair::generate().unwrap();
@@ -234,6 +235,34 @@ mod tests {
             .unwrap();
         assert!(VerifiedCertificateRequest::try_from(request.der().as_ref()).is_err());
         assert!(VerifiedCertificateRequest::try_from(&[0; MAX_CERTIFICATE_SIZE + 1][..]).is_err());
+    }
+
+    #[test]
+    fn signing_respects_the_loaded_roots_scope() {
+        for (subtree, custom_allowed) in [(".local", true), ("arcbox.local", false)] {
+            let mut params = crate::authority::parameters();
+            params.name_constraints.as_mut().unwrap().permitted_subtrees =
+                vec![rcgen::GeneralSubtree::DnsName(subtree.into())];
+            let root =
+                rcgen::CertifiedIssuer::self_signed(params, KeyPair::generate().unwrap()).unwrap();
+            let public = PublicAuthority::try_from(root.der().to_vec()).unwrap();
+            for (name, allowed) in [
+                ("foo.local", custom_allowed),
+                ("x.foo.local", custom_allowed),
+                ("evilarcbox.local", custom_allowed),
+                ("arcbox.local", true),
+                ("WEB.arcbox.LOCAL", true),
+            ] {
+                let pending = CertificateRequest::new(name).unwrap();
+                let request = verified(pending.der());
+                let certificate = sign_request(&request, &root, &public, OffsetDateTime::now_utc());
+                if allowed {
+                    pending.complete(certificate.unwrap(), &public).unwrap();
+                } else {
+                    assert!(matches!(certificate, Err(Error::ForeignName(_))), "{name}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -308,9 +337,9 @@ mod tests {
         let request = params.serialize_request(&key).unwrap();
         let request = verified(request.der());
         assert_eq!(request.dns_name(), "web.arcbox.local");
-        let validity = CertificateValidity::from_der(ca.der()).unwrap();
+        let public = PublicAuthority::try_from(ca.der().to_vec()).unwrap();
         let certificate = CertificateDer::from(
-            sign_request(&request, &ca, validity, OffsetDateTime::now_utc()).unwrap(),
+            sign_request(&request, &ca, &public, OffsetDateTime::now_utc()).unwrap(),
         );
         let leaf = Issuer::from_ca_cert_der(&certificate, key).unwrap();
         assert_eq!(leaf.key_usages(), [KeyUsagePurpose::DigitalSignature]);
@@ -351,7 +380,14 @@ mod tests {
         )
         .build()
         .unwrap();
-        for name in ["example.com", "127.0.0.1", "::1"] {
+        for name in [
+            "example.com",
+            "local",
+            "notlocal",
+            "foo.localhost",
+            "127.0.0.1",
+            "::1",
+        ] {
             let leaf = CertificateParams::new(vec![name.into()])
                 .unwrap()
                 .signed_by(&KeyPair::generate().unwrap(), &issuer)
@@ -379,21 +415,22 @@ mod tests {
         params.not_before = now - Duration::minutes(10);
         params.not_after = now + Duration::days(2);
         let ca = rcgen::CertifiedIssuer::self_signed(params, KeyPair::generate().unwrap()).unwrap();
-        let validity = CertificateValidity::from_der(ca.der()).unwrap();
+        let public = PublicAuthority::try_from(ca.der().to_vec()).unwrap();
+        let validity = public.validity();
         let request = CertificateRequest::new("web.arcbox.local").unwrap();
         let request = verified(request.der());
-        let leaf = sign_request(&request, &ca, validity, now).unwrap();
+        let leaf = sign_request(&request, &ca, &public, now).unwrap();
         assert_eq!(CertificateValidity::from_der(&leaf).unwrap(), validity);
         for outside in [
             validity.not_before - Duration::seconds(1),
             validity.not_after + Duration::seconds(1),
         ] {
             assert!(matches!(
-                sign_request(&request, &ca, validity, outside),
+                sign_request(&request, &ca, &public, outside),
                 Err(Error::InvalidAuthority(_))
             ));
         }
-        let renewed = sign_request(&request, &ca, validity, now + Duration::days(1)).unwrap();
+        let renewed = sign_request(&request, &ca, &public, now + Duration::days(1)).unwrap();
         let renewed_validity = CertificateValidity::from_der(&renewed).unwrap();
         assert_eq!(renewed_validity.not_after, validity.not_after);
         assert_eq!(

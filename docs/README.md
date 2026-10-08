@@ -68,6 +68,7 @@ from memory. Every new file is added to the index below.
 
 ### Decisions
 
+- [0008 — The local CA covers concrete names under `.local`](adr/0008-local-ca-covers-local-domains.md) (2026-10-08)
 - [0007 — Local HTTPS authorization is independent of startup](adr/0007-local-https-independent-of-startup.md) (2026-10-08)
 - [0006 — Authorize local CA trust in the login user's session](adr/0006-authorize-local-ca-in-user-session.md) (2026-10-08)
 - [0005 — The privileged helper manages local CA trust](adr/0005-helper-manages-local-ca-trust.md) (2026-10-08; trust mutation and authorization superseded by ADR 0006)
@@ -98,6 +99,7 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-10-08 — Custom local domains and deterministic ownership](logs/2026-10-08-custom-local-domains.md)
 - [2026-10-08 — Local CA rotation and recovery](logs/2026-10-08-local-ca-rotation.md)
 - [2026-10-08 — One DNS suffix reaches the host and System VM](logs/2026-10-08-instance-dns-domain.md)
 - [2026-10-08 — Storage dependencies follow the workspace release version](logs/2026-10-08-storage-workspace-release.md)

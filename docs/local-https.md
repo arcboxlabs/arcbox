@@ -28,7 +28,9 @@ The guest reports installed routes through `ListContainerWebServices`. The snaps
 
 Clients use the supplied URLs. Upstream port fields describe the application listener, not the public URL port. A managed HTTPS endpoint requires ArcBox CA trust. A passthrough endpoint uses the application's own TLS and must not request ArcBox CA authorization. A directory error ends the stream; clients must clear stale entries.
 
-Managed HTTPS requires `arcbox.local` or a subdomain such as `one.dev.arcbox.local` as the configured suffix. Other suffixes support HTTP and native TLS, but do not receive managed HTTPS routes or trigger ArcBox CA authorization. The CA name constraints remain unchanged.
+The current guest routing gate requires `arcbox.local` or a subdomain such as `one.dev.arcbox.local` as the configured suffix. Other suffixes support HTTP and native TLS. New roots permit concrete names under `.local`; existing roots retain their actual scope until explicit rotation. Connecting independent custom aliases to routing and system resolution remains unfinished.
+
+The [CA scope decision](adr/0008-local-ca-covers-local-domains.md) preserves the public-DNS and IP restrictions. The broader scope includes other LAN `.local` services, so a compromised root key has authority beyond ArcBox's own namespace. Ordinary signing still requires current host ownership. The broader certificate constraint does not grant resolver ownership over all `.local`.
 
 The host verifies each CSR's signature and single DNS name before signing. The name must belong to a current host container DNS registration and resolve to that registration's address. The host rechecks the registration after signing, so deletion, ownership transfer, or registration replacement discards an in-flight result. The guest separately checks the connection's original destination against its current DNS ownership.
 

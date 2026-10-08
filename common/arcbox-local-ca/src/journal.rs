@@ -86,6 +86,7 @@ impl Journal {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn remove(dir: &Path) -> Result<(), Error> {
         let path = dir.join(FILE_NAME);
         match fs::remove_file(&path) {

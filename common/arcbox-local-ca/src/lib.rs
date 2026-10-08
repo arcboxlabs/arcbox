@@ -1,4 +1,4 @@
-//! The local certificate authority behind `https://<name>.arcbox.local`.
+//! The local certificate authority for ArcBox-managed `.local` services.
 //!
 //! On macOS, the daemon creates a per-profile CA in the user's Keychain.
 //! Only the public certificate is published as `tls/ca.pem` on the guest
@@ -14,12 +14,13 @@
 //!   compromised host account. A guest can request ArcBox certificates
 //!   while connected, but cannot copy the root key from the share.
 //! - **What the key can sign for.** The CA carries critical name
-//!   constraints: DNS names under [`LOCAL_DOMAIN`] only, and no IP address
+//!   constraints: DNS names strictly below `.local` only, and no IP address
 //!   at all; it can sign no other CA (path length 0). macOS applies a
 //!   trusted root's constraints to the chain (trustd seeds its permitted
 //!   subtrees from the anchor), as do OpenSSL, NSS and Chrome, so a leaked
-//!   key impersonates only `*.arcbox.local` names, whose traffic reaches
-//!   containers the key holder could already replace.
+//!   key can impersonate any `.local` name, including LAN services, but cannot
+//!   issue for public DNS names or IP addresses. Existing narrower roots retain
+//!   their parsed signing scope until explicit rotation.
 //! - **What trusting it means.** [`PublicAuthority`] validates the root before
 //!   storage or authorization. TLS-server-only Admin trust requires macOS
 //!   authorization in the login session. The private key stays in the user's
@@ -109,7 +110,7 @@ pub enum Error {
     #[error("certificate verifier: {0}")]
     Verifier(#[from] rustls::client::VerifierBuilderError),
     /// A server name the CA does not sign for.
-    #[error("{0:?} is not a name under {LOCAL_DOMAIN}")]
+    #[error("{0:?} is outside the local CA signing scope")]
     ForeignName(String),
     /// A request violates the host's certificate policy.
     #[error("invalid certificate request: {0}")]

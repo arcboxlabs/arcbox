@@ -14,9 +14,7 @@ use security_framework::os::macos::keychain::SecKeychain;
 use security_framework_sys::base::errSecItemNotFound;
 
 use crate::journal::{Journal, Root, Slot};
-use crate::{
-    CertificateValidity, Error, PublicAuthority, VerifiedCertificateRequest, authority, request,
-};
+use crate::{Error, PublicAuthority, VerifiedCertificateRequest, authority, request};
 
 mod cleanup;
 
@@ -24,7 +22,7 @@ mod cleanup;
 pub struct KeychainAuthority {
     issuer: Issuer<'static, KeychainKey>,
     certificate: SecCertificate,
-    validity: CertificateValidity,
+    public: PublicAuthority,
 }
 
 impl KeychainAuthority {
@@ -86,12 +84,12 @@ impl KeychainAuthority {
             }
         };
         let der = certificate.to_der();
-        let validity = CertificateValidity::from_der(&der)?;
+        let public = PublicAuthority::try_from(der.clone())?;
         let issuer = Issuer::from_ca_cert_der(&der.into(), key)?;
         Ok(Self {
             issuer,
             certificate,
-            validity,
+            public,
         })
     }
 
@@ -100,7 +98,7 @@ impl KeychainAuthority {
         request::sign_request(
             csr,
             &self.issuer,
-            self.validity,
+            &self.public,
             time::OffsetDateTime::now_utc(),
         )
     }

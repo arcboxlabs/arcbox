@@ -118,6 +118,9 @@ distribution".
   Remove the exposed private key before sharing the profile with a guest.
   Verify returned leaves against the requested DNS name and current public root
   before pairing them with guest keys.
+  New roots permit only `.local` descendants and exclude every IP address.
+  Signing must respect the loaded root's actual DNS scope, including retained narrower roots.
+  CA scope does not authorize DNS ownership or a resolver for the whole `.local` namespace.
   Hold the profile operation lock during identity mutation or native trust changes.
   Release the CLI lock before requesting a daemon operation; the daemon acquires the same lock.
   Preserve `tls/identity.json` until every retained identity is untrusted and deleted.
