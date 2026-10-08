@@ -91,6 +91,15 @@ pub struct Services {
 }
 
 impl Services {
+    /// Creates machine RPC services without System VM DNS or Docker watchers.
+    pub fn machine() -> Self {
+        Self {
+            #[cfg(target_os = "linux")]
+            trust: Some(guest_trust::Store::machine("/".into())),
+            ..Self::default()
+        }
+    }
+
     /// Connects System VM services to the DNS registry used by container routing.
     pub fn system(
         web: crate::domains::WebServices,

@@ -100,6 +100,8 @@ gives the machine the identity and network the distro cannot know on its own
 The agent in a machine then serves RPC and nothing else: none of the System
 VM services below run there.
 
+The trust RPC supports Debian, Ubuntu, and Alpine machines with an installed `update-ca-certificates` and a regular system PEM bundle. ArcBox owns only `/usr/local/share/ca-certificates/arcbox-local-ca.crt`. Unsupported distributions and missing prerequisites return an error. Updater failure leaves reconciliation pending until replay. Automatic host delivery remains pending.
+
 The machine root export stores oversized Mac attributes in `.arcbox-xattrs` beside each target. Side-entry version 3 combines Linux file handles with filesystem IDs to distinguish recreated files and replaced mounts. Unsupported side-entry versions return an error and preserve the side entry and inline attributes. See the [identity investigation](../../docs/logs/2026-10-07-sidecar-inode-generation.md) for compatibility and validation.
 
 ## Container Domains

@@ -1,5 +1,7 @@
 //! Serialize guest-owned trust bundle writes through durable installation.
 
+mod machine;
+
 use std::{
     path::PathBuf,
     sync::{
@@ -26,8 +28,22 @@ pub(super) struct Store {
 }
 
 struct State {
-    path: PathBuf,
+    destination: Destination,
     accepted: u64,
+}
+
+enum Destination {
+    Bundle(PathBuf),
+    Machine(PathBuf),
+}
+
+impl Destination {
+    fn install(&self, authority: Option<&PublicAuthority>) -> anyhow::Result<()> {
+        match self {
+            Self::Bundle(path) => Ok(install_trust_bundle(path, authority)?),
+            Self::Machine(root) => machine::install(root, authority),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -38,8 +54,19 @@ struct WriteGate {
 
 impl Store {
     pub(super) fn new(path: PathBuf) -> Self {
+        Self::with_destination(Destination::Bundle(path))
+    }
+
+    pub(super) fn machine(root: PathBuf) -> Self {
+        Self::with_destination(Destination::Machine(root))
+    }
+
+    fn with_destination(destination: Destination) -> Self {
         Self {
-            state: Arc::new(Mutex::new(State { path, accepted: 0 })),
+            state: Arc::new(Mutex::new(State {
+                destination,
+                accepted: 0,
+            })),
             next_connection: Arc::default(),
             #[cfg(test)]
             gate: Arc::default(),
@@ -86,14 +113,20 @@ impl Store {
                 ),
                 Desired::Remove(_) => None,
             };
-            install_trust_bundle(&state.path, authority.as_ref()).map_err(|error| {
-                let code = if matches!(error, arcbox_local_ca::Error::InvalidAuthority(_)) {
-                    400
-                } else {
-                    500
-                };
-                ErrorResponse::new(code, error.to_string())
-            })?;
+            state
+                .destination
+                .install(authority.as_ref())
+                .map_err(|error| {
+                    let code = if matches!(
+                        error.downcast_ref::<arcbox_local_ca::Error>(),
+                        Some(arcbox_local_ca::Error::InvalidAuthority(_))
+                    ) {
+                        400
+                    } else {
+                        500
+                    };
+                    ErrorResponse::new(code, format!("{error:#}"))
+                })?;
             Ok(match authority {
                 Some(authority) => Applied::InstalledSha256(authority.fingerprint_sha256()),
                 None => Applied::Removed(Default::default()),

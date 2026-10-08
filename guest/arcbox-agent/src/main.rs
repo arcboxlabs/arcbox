@@ -292,7 +292,12 @@ async fn main() -> Result<()> {
 
     tracing::info!(?guest, "ArcBox agent starting...");
     if guest != agent::Guest::SystemVm {
-        return agent::run(guest, agent::Services::default()).await;
+        let services = if guest == agent::Guest::DistroMachine {
+            agent::Services::machine()
+        } else {
+            agent::Services::default()
+        };
+        return agent::run(guest, services).await;
     }
 
     let cmdline = std::fs::read_to_string("/proc/cmdline")
