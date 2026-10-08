@@ -10,11 +10,9 @@
 //! both gaps. Every [`RECONCILE_INTERVAL`] it inspects every running
 //! container, then commits the complete host state if no concurrent mutation
 //! invalidated the query. This also refreshes known containers. It follows the
-//! System VM's lifecycle: when the VM goes down it retires every piece of
-//! container state at once (a listener kept alive would hold its port while
-//! injecting into a dead datapath), and when the VM is back it reconciles
-//! promptly — retrying every [`RETURN_RETRY`] until a snapshot commits — rather
-//! than waiting out a whole interval.
+//! System VM's physical identity on each notification and timer tick, so a
+//! coalesced restart cannot retain the previous VM's container state. When
+//! the VM returns, it retries every [`RETURN_RETRY`] until a snapshot commits.
 
 use crate::api::AppState;
 use crate::error::Result;
@@ -22,13 +20,14 @@ use crate::guest_query::running_container_snapshot;
 use crate::proxy::ProxyState;
 use arcbox_core::runtime::ContainerNetwork;
 use arcbox_core::{Runtime, VmLifecycleState};
+use arcbox_error::CommonError;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-/// How often the guest's container set is compared with the host's state.
+/// Steady-state check interval and deadline for one complete guest snapshot.
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Cadence after the VM comes back, until the first snapshot commits:
@@ -85,13 +84,15 @@ async fn reconcile_loop(
     // The guest has containers the host has never seen whenever the VM has
     // just come up — at daemon start as much as after a restart.
     let mut returning = true;
+    let mut retirement_pending = true;
     loop {
-        let delay = if returning {
+        let delay = if retirement_pending || (ready && returning) {
             RETURN_RETRY
         } else {
             RECONCILE_INTERVAL
         };
-        tokio::select! {
+        let query_due = tokio::select! {
+            biased;
             () = shutdown.cancelled() => break,
             // The sender lives as long as the runtime; an error means it is
             // gone and there is nothing left to reconcile.
@@ -99,30 +100,42 @@ async fn reconcile_loop(
                 if changed.is_err() {
                     break;
                 }
-                let now_ready = vm.borrow_and_update().is_ready();
-                if ready && !now_ready {
-                    runtime.retire_system_vm_container_networking().await;
-                }
-                if now_ready && !ready {
-                    returning = true;
-                }
-                ready = now_ready;
+                false
             }
-            () = tokio::time::sleep(delay), if ready => {
-                // Keep the loop's receiver unread so the next iteration handles the notification.
-                let mut query_vm = vm.clone();
-                let interrupted = async {
-                    tokio::select! {
-                        () = shutdown.cancelled() => {},
-                        _ = query_vm.changed() => {},
-                    }
-                };
-                match reconcile(runtime, guest, interrupted).await {
-                    Ok(true) => returning = false,
-                    Ok(false) => {},
-                    // A failed guest query leaves the existing host state intact.
-                    Err(e) => tracing::debug!(error = %e, "host networking reconcile skipped"),
+            () = tokio::time::sleep(delay) => true,
+        };
+        let now_ready = vm.borrow_and_update().is_ready();
+        if now_ready && !ready {
+            returning = true;
+        }
+        ready = now_ready;
+        match runtime.retire_system_vm_container_networking().await {
+            Ok(retired) => {
+                retirement_pending = false;
+                returning |= retired;
+            }
+            Err(error) => {
+                // Retry failed cleanup even when the lifecycle watch reports a stopped VM.
+                retirement_pending = true;
+                returning = true;
+                tracing::debug!(%error, "container host networking retirement deferred");
+                continue;
+            }
+        }
+        if query_due && ready {
+            // Keep the loop's receiver unread so the next iteration handles the notification.
+            let mut query_vm = vm.clone();
+            let interrupted = async {
+                tokio::select! {
+                    () = shutdown.cancelled() => {},
+                    _ = query_vm.changed() => {},
                 }
+            };
+            match reconcile(runtime, guest, interrupted).await {
+                Ok(true) => returning = false,
+                Ok(false) => {}
+                // A failed guest query leaves the existing host state intact.
+                Err(e) => tracing::debug!(error = %e, "host networking reconcile skipped"),
             }
         }
     }
@@ -141,7 +154,9 @@ async fn reconcile(
     let containers = tokio::select! {
         biased;
         () = interrupted => return Ok(false),
-        containers = guest.snapshot() => containers?,
+        containers = tokio::time::timeout(RECONCILE_INTERVAL, guest.snapshot()) => {
+            containers.map_err(|_| CommonError::timeout("container networking snapshot timed out"))??
+        },
     };
     snapshot.commit(&containers).await.map_err(Into::into)
 }
@@ -159,7 +174,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::Notify;
 
-    fn test_runtime() -> (Arc<Runtime>, TempDir) {
+    fn test_runtime() -> (Arc<Runtime>, NetworkFixture, TempDir) {
         let tmp = TempDir::new().unwrap();
         let config = Config {
             data_dir: tmp.path().to_path_buf(),
@@ -169,12 +184,13 @@ mod tests {
             skip_vm_check: true,
             ..Default::default()
         };
+        let fixture = NetworkFixture::default();
         let runtime = Arc::new(
             Runtime::with_vm_lifecycle_config(config, vlc)
                 .expect("runtime")
-                .with_network_fixture(NetworkFixture::default()),
+                .with_network_fixture(fixture.clone()),
         );
-        (runtime, tmp)
+        (runtime, fixture, tmp)
     }
 
     fn network(id: &str, name: &str, ip: &str) -> ContainerNetwork {
@@ -244,7 +260,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconcile_tears_down_only_orphans() {
-        let (runtime, _tmp) = test_runtime();
+        let (runtime, _fixture, _tmp) = test_runtime();
         let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
         runtime
             .register_dns("alive", &["alive.local".into()], ip)
@@ -268,7 +284,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconcile_reclaims_alias_only_containers() {
-        let (runtime, _tmp) = test_runtime();
+        let (runtime, _fixture, _tmp) = test_runtime();
         // A container with a name alias but no DNS/port state (e.g. started
         // with --network none): without reclamation every ephemeral --rm run
         // would leak one alias for the life of the daemon.
@@ -299,7 +315,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconcile_is_fail_safe_on_query_error() {
-        let (runtime, _tmp) = test_runtime();
+        let (runtime, _fixture, _tmp) = test_runtime();
         runtime
             .register_dns("c", &["c.local".into()], IpAddr::V4(Ipv4Addr::LOCALHOST))
             .await
@@ -320,7 +336,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconcile_refreshes_known_containers_and_registers_unknown_containers() {
-        let (runtime, _tmp) = test_runtime();
+        let (runtime, _fixture, _tmp) = test_runtime();
         runtime
             .register_container_dns(&network("known", "old", "172.17.0.2").metadata)
             .await
@@ -353,7 +369,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_mutation_during_a_query_prevents_stale_publication_or_removal() {
-        let (runtime, _tmp) = test_runtime();
+        let (runtime, _fixture, _tmp) = test_runtime();
         let guest = Arc::new(FakeGuest {
             snapshot: Ok(vec![network("canonical", "stale", "172.17.0.2")]),
             query_gate: Some((Notify::new(), Notify::new())),
@@ -406,7 +422,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn shutdown_and_server_drop_cancel_a_pending_query_without_publication() {
         for cancel_shutdown in [true, false] {
-            let (runtime, _tmp) = test_runtime();
+            let (runtime, _fixture, _tmp) = test_runtime();
             let current = network("current", "current", "172.17.0.2");
             let mutation = runtime
                 .begin_container_mutation(runtime.container_network_incarnation().unwrap())
@@ -479,7 +495,7 @@ mod tests {
     /// the short retry rather than a whole interval.
     #[tokio::test(start_paused = true)]
     async fn a_vm_departure_retires_container_state_and_its_return_is_reconciled_promptly() {
-        let (runtime, _tmp) = test_runtime();
+        let (runtime, fixture, _tmp) = test_runtime();
         let guest = Arc::new(FakeGuest::running(&["web"]));
         runtime
             .register_dns(
@@ -516,6 +532,7 @@ mod tests {
 
         // The VM goes down: its containers' host state goes at once, and
         // nothing is reconciled while it is down.
+        fixture.stop();
         vm_tx.send_replace(VmLifecycleState::Stopping);
         settle(Duration::ZERO).await;
         assert!(runtime.registered_container_ids().await.is_empty());
@@ -524,6 +541,7 @@ mod tests {
 
         // The VM returns: the container dockerd brought back is set up within
         // the short retry, not after a whole interval.
+        fixture.restart();
         vm_tx.send_replace(VmLifecycleState::Running);
         settle(RETURN_RETRY).await;
         assert_eq!(guest.queries(), queries + 1);

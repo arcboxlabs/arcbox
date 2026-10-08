@@ -2161,40 +2161,6 @@ impl Runtime {
         None
     }
 
-    /// Drops every piece of host state the System VM's containers left
-    /// behind — their listeners and ownership records, DNS entries and name
-    /// aliases — once the VM has gone down. Nothing it hosted is reachable
-    /// any more, and a listener bound for it would hold its port while
-    /// injecting into a datapath that no longer exists. The Docker layer's
-    /// reconciler rebuilds the state from the guest once it is back.
-    pub async fn retire_system_vm_container_networking(&self) {
-        let _commit = self.host_network.commit.lock().await;
-        self.invalidate_host_network_snapshot();
-        let containers = self.registered_container_ids().await;
-        for id in &containers {
-            self.stop_port_forwarding_raw(id).await;
-            self.deregister_dns_by_id_raw(id).await;
-        }
-        if !containers.is_empty() {
-            tracing::info!(
-                containers = containers.len(),
-                "retired the stopped System VM's container networking"
-            );
-        }
-        #[cfg(target_os = "macos")]
-        {
-            // Ownership map before the listener map, the order every other
-            // path takes.
-            let mut rules = self.inbound_rules.write().await;
-            let mut listeners = self.inbound_listeners.write().await;
-            if let Some(slot) = listeners.get_mut(DEFAULT_MACHINE_NAME) {
-                slot.stop_all().await;
-                listeners.remove(DEFAULT_MACHINE_NAME);
-            }
-            rules.retain(|_, (machine, _)| machine != DEFAULT_MACHINE_NAME);
-        }
-    }
-
     /// Stops all active port forwarders across every machine.
     pub async fn stop_port_forwarding_all(&self) {
         let _commit = self.host_network.commit.lock().await;

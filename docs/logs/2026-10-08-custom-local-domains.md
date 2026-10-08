@@ -251,3 +251,7 @@ Real temporary Unix sockets now cover cancellation before the first lease acknow
 Guest decoding now uses the existing transport reader's 16 MiB allocation bound and validates the complete V2 header, trace length, and UTF-8 within one frame. Malformed lengths cannot consume the next frame; short-frame compatibility and silent trace replacement are removed. Host transport passed 26 tests and the final Linux musl guest passed 13 RPC tests in networkless Colima. Both strict all-target Clippy gates and formatting passed. Authority-channel dispatch and installed transport validation remain pending.
 
 Readiness streaming now resides in `agent/linux/rpc/readiness.rs`, preserving the storage-recovery restriction and error responses. Five Linux guest dispatcher tests, the musl build, strict all-target musl Clippy, formatting, and diff checks passed. This extraction makes room for the exclusive authority receiver without changing the readiness protocol.
+
+## Retire the previous physical VM before publication
+
+The host commit state now retains the VM that owns published container networking. A replacement VM retires that state before its first publication; canceled cleanup retains ownership for retry. The Docker reconciler checks physical identity on each lifecycle notification and timer tick, even while stopped. Complete guest queries use the existing 30-second interval as their deadline, and failed retirement keeps the short retry cadence. These changes do not start a VM or change installed resolver state.

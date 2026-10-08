@@ -6,6 +6,7 @@ use arcbox_engine::vm::VmIncarnation;
 use std::sync::Mutex;
 use tokio::sync::Mutex as AsyncMutex;
 
+mod retirement;
 mod snapshot;
 #[cfg(test)]
 mod tests;
@@ -13,10 +14,15 @@ pub use snapshot::{ContainerNetwork, HostNetworkSnapshot};
 
 #[derive(Default)]
 pub(super) struct HostNetwork {
-    pub(super) commit: AsyncMutex<()>,
+    pub(super) commit: AsyncMutex<CommitState>,
     activity: Mutex<Activity>,
     #[cfg(any(test, feature = "test-support"))]
     fixture: Option<NetworkFixture>,
+}
+
+#[derive(Default)]
+pub(super) struct CommitState {
+    incarnation: Option<VmIncarnation>,
 }
 
 #[derive(Default)]
@@ -66,8 +72,11 @@ impl HostMutationLease<'_> {
     /// Returns an error if admission closes, the VM changes, or port binding fails.
     pub async fn commit(&self, change: ContainerChange<'_>) -> Result<()> {
         let runtime = self.runtime;
-        let _commit = runtime.host_network.commit.lock().await;
+        let mut commit = runtime.host_network.commit.lock().await;
         self.with_live_vm(|| ())?;
+        runtime
+            .prepare_container_incarnation(&mut commit, &self.vm)
+            .await?;
         let id = match change {
             ContainerChange::Publish(container, _) => container.id.as_str(),
             ContainerChange::Remove(id) => id,

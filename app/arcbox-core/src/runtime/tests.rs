@@ -809,6 +809,8 @@ async fn retiring_system_vm_container_networking_drops_every_trace_of_its_contai
     use arcbox_net::darwin::inbound_relay::{InboundListenerManager, InboundProtocol};
 
     let (runtime, _tmp) = networking_test_runtime();
+    let fixture = super::NetworkFixture::default();
+    let runtime = runtime.with_network_fixture(fixture.clone());
     let localhost = std::net::Ipv4Addr::LOCALHOST;
     let (commands_tx, _commands_rx) = tokio::sync::mpsc::channel(4);
     let mut manager = InboundListenerManager::new(commands_tx);
@@ -836,7 +838,13 @@ async fn retiring_system_vm_container_networking_drops_every_trace_of_its_contai
         .unwrap();
     assert!(accepting(host_port).await);
 
-    runtime.retire_system_vm_container_networking().await;
+    fixture.stop();
+    assert!(
+        runtime
+            .retire_system_vm_container_networking()
+            .await
+            .unwrap()
+    );
 
     assert!(
         !accepting(host_port).await,

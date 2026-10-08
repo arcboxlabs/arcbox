@@ -49,7 +49,7 @@ impl HostNetworkSnapshot<'_> {
     /// Returns an error if admission closes, the physical VM changes, or a port operation fails.
     pub async fn commit(self, containers: &[ContainerNetwork]) -> Result<bool> {
         let runtime = self.runtime;
-        let _commit = runtime.host_network.commit.lock().await;
+        let mut commit = runtime.host_network.commit.lock().await;
         {
             let mut activity = runtime
                 .host_network
@@ -64,6 +64,9 @@ impl HostNetworkSnapshot<'_> {
             activity.check_open()?;
         }
         self.with_live_vm(|| ())?;
+        runtime
+            .prepare_container_incarnation(&mut commit, &self.vm)
+            .await?;
         let desired: HashSet<_> = containers.iter().map(|c| c.metadata.id.as_str()).collect();
         let registered = runtime.registered_container_ids().await;
         let result = async {

@@ -185,7 +185,10 @@ async fn canceled_retirement_and_shutdown_keep_cleanup_owners() {
         );
         let cleanup = || async {
             if retire_system_vm {
-                runtime.retire_system_vm_container_networking().await;
+                runtime
+                    .retire_system_vm_container_networking()
+                    .await
+                    .unwrap();
             } else {
                 runtime.stop_port_forwarding_all().await;
             }
