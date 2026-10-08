@@ -249,3 +249,5 @@ Real temporary Unix sockets now cover cancellation before the first lease acknow
 ## Share the bounded guest RPC frame reader
 
 Guest decoding now uses the existing transport reader's 16 MiB allocation bound and validates the complete V2 header, trace length, and UTF-8 within one frame. Malformed lengths cannot consume the next frame; short-frame compatibility and silent trace replacement are removed. Host transport passed 26 tests and the final Linux musl guest passed 13 RPC tests in networkless Colima. Both strict all-target Clippy gates and formatting passed. Authority-channel dispatch and installed transport validation remain pending.
+
+Readiness streaming now resides in `agent/linux/rpc/readiness.rs`, preserving the storage-recovery restriction and error responses. Five Linux guest dispatcher tests, the musl build, strict all-target musl Clippy, formatting, and diff checks passed. This extraction makes room for the exclusive authority receiver without changing the readiness protocol.

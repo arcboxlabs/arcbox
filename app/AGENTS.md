@@ -469,8 +469,8 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   `DEFAULT_STARTUP_TIMEOUT_SECS = 90` (`mod.rs`) budgets VM boot → agent
   ready; `ContainerRuntimeConfig::startup_timeout_ms = 150_000`
   (`config.rs`) budgets agent ready → dockerd `/_ping`. Residual skew: the
-  guest watch loop (`guest/arcbox-agent/src/agent/linux/rpc.rs`
-  `handle_watch_readiness`) emits `RuntimeFailed` at exactly its own
+  guest watch loop (`guest/arcbox-agent/src/agent/linux/rpc/readiness.rs`
+  `watch`) emits `RuntimeFailed` at exactly its own
   deadline, which equals the host's recv deadline, so the host can drop the
   stream before the failure detail lands (ABX-414).
 - **Clone, export and import act on a stopped machine's `data.img` and
