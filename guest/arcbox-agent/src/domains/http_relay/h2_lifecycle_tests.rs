@@ -217,3 +217,140 @@ async fn cancellation_after_response_eos_resets_an_upload_at_zero_capacity() {
     fixture.complete_bodyless_request("sibling").await;
     fixture.shutdown().await;
 }
+
+#[tokio::test]
+async fn an_http2_early_response_preserves_data_before_the_no_error_reset() {
+    let mut fixture = RawFixture::new().await;
+    fixture.complete_bodyless_request("ready").await;
+    let (pending, mut upload) = fixture.send("early", false).await;
+    upload.send_data(Bytes::from_static(b"x"), false).unwrap();
+    let (request, mut reply) = fixture.call().await;
+    let mut request = request.into_body();
+    assert_eq!(within(request.data()).await.unwrap().unwrap(), &b"x"[..]);
+    let mut stream = reply
+        .send_response(Response::builder().status(413).body(()).unwrap(), false)
+        .unwrap();
+    stream
+        .send_data(Bytes::from_static(b"too big"), true)
+        .unwrap();
+    drop(request);
+    drop(stream);
+    drop(reply);
+    let response = within(pending).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let mut body = response.into_body();
+    let mut received = Vec::new();
+    while let Some(data) = within(body.data()).await {
+        let data = data.unwrap();
+        received.extend_from_slice(&data);
+        body.flow_control().release_capacity(data.len()).unwrap();
+    }
+    assert_eq!(received, b"too big");
+    assert!(within(body.trailers()).await.unwrap().is_none());
+    assert_eq!(
+        within(poll_fn(|cx| upload.poll_reset(cx))).await.unwrap(),
+        h2::Reason::NO_ERROR
+    );
+    fixture.complete_bodyless_request("sibling").await;
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_http1_early_close_preserves_the_complete_response_and_stops_upload() {
+    use super::tests::{chunk, head, send};
+    use tokio::io::AsyncWriteExt as _;
+
+    let (client, incoming) = sockets().await;
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let outgoing = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let stop = CancellationToken::new();
+    let stopping = stop.clone();
+    let relay = tokio::spawn(async move {
+        http_tasks::run(&stopping, async move |tasks| {
+            serve_managed(
+                incoming,
+                outgoing,
+                Session {
+                    client: HttpProtocol::Http2,
+                    upstream: HttpProtocol::Http1,
+                    tasks,
+                    verify: Arc::new(|| Ok(())),
+                    invalidate: Arc::new(|| panic!("healthy fixture route was invalidated")),
+                },
+            )
+            .await
+        })
+        .await
+    });
+    let backend = tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.unwrap();
+        assert!(
+            head(&mut first)
+                .await
+                .starts_with("POST /large HTTP/1.1\r\n")
+        );
+        assert_eq!(chunk(&mut first).await, b"abc");
+        send(&mut first, b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 7\r\nConnection: close\r\n\r\ntoo big").await;
+        first.shutdown().await.unwrap();
+        drop(first);
+        let (mut sibling, _) = listener.accept().await.unwrap();
+        assert!(
+            head(&mut sibling)
+                .await
+                .starts_with("GET /quick HTTP/1.1\r\n")
+        );
+        send(
+            &mut sibling,
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+        )
+        .await;
+        sibling.shutdown().await.unwrap();
+    });
+    let (mut sender, driver) = h2::client::handshake(client).await.unwrap();
+    let client = tokio::spawn(driver);
+    let (pending, mut upload) = sender
+        .send_request(
+            Request::post("https://web.arcbox.local/large")
+                .body(())
+                .unwrap(),
+            false,
+        )
+        .unwrap();
+    upload.send_data(Bytes::from_static(b"abc"), false).unwrap();
+    let response = within(pending).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let mut body = response.into_body();
+    let mut received = Vec::new();
+    while let Some(data) = within(body.data()).await {
+        let data = data.unwrap();
+        received.extend_from_slice(&data);
+        body.flow_control().release_capacity(data.len()).unwrap();
+    }
+    assert_eq!(received, b"too big");
+    assert!(within(body.trailers()).await.unwrap().is_none());
+    assert_eq!(
+        within(poll_fn(|cx| upload.poll_reset(cx))).await.unwrap(),
+        h2::Reason::NO_ERROR
+    );
+    let mut sender = within(sender.ready()).await.unwrap();
+    let (pending, _) = sender
+        .send_request(
+            Request::get("https://web.arcbox.local/quick")
+                .body(())
+                .unwrap(),
+            true,
+        )
+        .unwrap();
+    let mut body = within(pending).await.unwrap().into_body();
+    assert_eq!(within(body.data()).await.unwrap().unwrap(), &b"ok"[..]);
+    assert!(within(body.data()).await.is_none());
+    within(backend).await.unwrap();
+    stop.cancel();
+    within(relay).await.unwrap().unwrap();
+    drop(sender);
+    let _client_close = within(client).await.unwrap();
+}
