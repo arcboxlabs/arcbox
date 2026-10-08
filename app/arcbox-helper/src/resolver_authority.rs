@@ -5,6 +5,8 @@
 pub struct ResolverAuthoritySnapshot {
     /// Global epoch. A new helper connection must request an initial snapshot.
     pub epoch: u64,
+    /// Root ownership, availability, or endpoint lifetime; excludes lease revision metadata.
+    pub authority_revision: u64,
     /// Sorted, unique exact roots, including retained unavailable roots.
     pub roots: Vec<ResolverAuthorityRoot>,
 }

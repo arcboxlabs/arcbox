@@ -131,6 +131,36 @@ async fn snapshots_project_each_connection_and_notify_acquire_replace_and_releas
 }
 
 #[tokio::test]
+async fn coalesced_owner_replacement_keeps_a_lifetime_revision_without_metadata_churn() {
+    let (_directory, store) = fixture();
+    let owner = store.connection();
+    let observer = store.connection();
+    store
+        .update(owner, 501, update(1, 5553, &["a.local"]))
+        .unwrap();
+    let initial = store.snapshot(observer).unwrap();
+    let metadata = changed(&store, observer, initial.epoch, || {
+        store
+            .update(owner, 501, update(2, 5553, &["a.local"]))
+            .unwrap();
+    })
+    .await;
+    assert_eq!(metadata.authority_revision, initial.authority_revision);
+    assert_ne!(metadata.roots, initial.roots);
+
+    let replaced = changed(&store, observer, metadata.epoch, || {
+        store.release(owner).unwrap();
+        let next = store.connection();
+        store
+            .update(next, 501, update(2, 5553, &["a.local"]))
+            .unwrap();
+    })
+    .await;
+    assert_eq!(replaced.roots, metadata.roots);
+    assert!(replaced.authority_revision > metadata.authority_revision);
+}
+
+#[tokio::test]
 async fn rejected_updates_retain_only_previous_roots_without_an_active_revision() {
     for preflight_failure in [false, true] {
         let (directory, store) = fixture();

@@ -43,12 +43,14 @@ fn publisher() -> Publisher {
             roots: vec!["arcbox.local".into()],
         },
         authorities: Vec::new(),
+        helper_revision: None,
     }
 }
 
 fn accepted(request: &ResolverLease) -> ResolverAuthoritySnapshot {
     ResolverAuthoritySnapshot {
         epoch: 1,
+        authority_revision: 1,
         roots: request
             .roots
             .iter()
@@ -138,11 +140,39 @@ fn wire_revisions_preserve_effective_authority_and_external_changes_update_it() 
     assert_eq!(instance(&publisher, "web.team.arcbox.local"), original);
 
     snapshot.epoch += 1;
+    snapshot.authority_revision += 1;
     snapshot.roots[1].state = ResolverAuthorityState::RetainedUnavailable;
     assert!(publisher.apply(snapshot).unwrap());
     let changed = instance(&publisher, "web.team.arcbox.local");
     assert_eq!(changed.0, InstanceTarget::Unavailable);
     assert!(changed.1 > original.1);
+}
+
+#[test]
+fn coalesced_authority_changes_invalidate_identical_and_empty_host_snapshots() {
+    for empty in [false, true] {
+        let mut publisher = publisher();
+        if empty {
+            publisher.request.roots.clear();
+        }
+        let mut snapshot = accepted(&publisher.request);
+        publisher.apply(snapshot.clone()).unwrap();
+        let registry = publisher.manager.dns_registry();
+        let before = registry.read().unwrap().epoch();
+        snapshot.epoch += 2;
+        snapshot.authority_revision += 2;
+        publisher.apply(snapshot.clone()).unwrap();
+        assert!(registry.read().unwrap().epoch() > before);
+        if !empty {
+            assert_eq!(
+                instance(&publisher, "arcbox.local").0,
+                InstanceTarget::Current
+            );
+        }
+        let renewed = registry.read().unwrap().epoch();
+        publisher.apply(snapshot).unwrap();
+        assert_eq!(registry.read().unwrap().epoch(), renewed);
+    }
 }
 
 #[test]

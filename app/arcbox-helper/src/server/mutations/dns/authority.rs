@@ -15,8 +15,16 @@ impl ResolverStore {
             .expect("DNS resolver mutation lock poisoned");
         // Connection identities start at one, so this projection compares global authority.
         let previous = state.roots(0);
+        let ownership = state.ownership();
         let result = mutation(&mut state);
-        if previous != state.roots(0) {
+        let authority_changed = ownership != state.ownership();
+        if authority_changed {
+            state.authority_revision = state
+                .authority_revision
+                .checked_add(1)
+                .expect("authority revision exhausted");
+        }
+        if authority_changed || previous != state.roots(0) {
             state.epoch = state
                 .epoch
                 .checked_add(1)
@@ -36,6 +44,7 @@ impl ResolverStore {
         }
         Ok(ResolverAuthoritySnapshot {
             epoch: state.epoch,
+            authority_revision: state.authority_revision,
             roots: state.roots(connection),
         })
     }

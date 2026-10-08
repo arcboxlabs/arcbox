@@ -36,6 +36,7 @@ pub async fn start(ctx: &DaemonContext, manager: Arc<NetworkManager>, port: u16)
             roots: Vec::new(),
         },
         authorities: Vec::new(),
+        helper_revision: None,
     };
     let required = ctx.install_dns_resolver;
     ctx.resolver_service
@@ -59,6 +60,7 @@ struct Publisher {
     socket: String,
     request: ResolverLease,
     authorities: Vec<InstanceAuthority>,
+    helper_revision: Option<u64>,
 }
 
 impl Publisher {
@@ -71,6 +73,7 @@ impl Publisher {
         let mut ready = Some(ready);
         loop {
             self.unavailable();
+            self.helper_revision = None;
             self.request.revision = 0;
             match self.connection(&mut ready, &mut run_mirror).await {
                 Ok(()) => return Ok(()),
@@ -240,7 +243,11 @@ impl Publisher {
                 })
             })
             .collect::<Result<_>>()?;
-        Ok(self.project(authorities) == self.request.roots)
+        let barrier = self
+            .helper_revision
+            .replace(snapshot.authority_revision)
+            .is_some_and(|previous| previous != snapshot.authority_revision);
+        Ok(self.project(authorities, barrier) == self.request.roots)
     }
 
     fn unavailable(&mut self) {
@@ -263,12 +270,16 @@ impl Publisher {
                     target: InstanceTarget::Unavailable,
                 })
                 .collect(),
+            false,
         );
     }
 
-    fn project(&mut self, authorities: Vec<InstanceAuthority>) -> Vec<String> {
+    fn project(&mut self, authorities: Vec<InstanceAuthority>, barrier: bool) -> Vec<String> {
         let registry = self.manager.dns_registry();
         let mut registry = registry.write().expect("DNS registry lock poisoned");
+        if barrier {
+            registry.invalidate_instance_authorities();
+        }
         registry.replace_instance_authorities(authorities.clone());
         self.manager.replace_dns_projection(&registry);
         self.authorities = authorities;

@@ -58,6 +58,7 @@ impl TryFrom<ResolverLease> for Update {
 #[derive(Default)]
 pub(super) struct State {
     pub(super) epoch: u64,
+    pub(super) authority_revision: u64,
     next_connection: u64,
     connections: BTreeMap<u64, Lease>,
 }
@@ -82,6 +83,19 @@ struct Record {
 }
 
 impl State {
+    pub(super) fn ownership(&self) -> BTreeMap<String, (u64, Option<u16>)> {
+        let mut roots = BTreeMap::new();
+        for (&owner, lease) in &self.connections {
+            let port = lease.accepted.as_ref().and_then(|accepted| {
+                (!lease.failed && !lease.retiring).then_some(accepted.port.value())
+            });
+            for root in lease.records.iter().flat_map(|record| &record.roots) {
+                roots.entry(root.to_string()).or_insert((owner, port));
+            }
+        }
+        roots
+    }
+
     pub(super) fn contains(&self, connection: u64) -> bool {
         self.connections.contains_key(&connection)
     }
