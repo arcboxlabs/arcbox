@@ -1,5 +1,6 @@
 //! Publishes the built-in index only from a validated snapshot of the current physical VM.
 
+use arcbox_connect::v1::ListGuestWebServicesRequest;
 use arcbox_dns::{NamePattern, claims::Claim};
 use arcbox_engine::vm::VmIncarnation;
 

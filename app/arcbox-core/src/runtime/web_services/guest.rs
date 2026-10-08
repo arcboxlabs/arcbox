@@ -21,8 +21,8 @@ use crate::error::CoreError;
 /// A host-captured machine name and physical VM run, without cached DNS authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapturedWebGuest {
-    machine: String,
-    incarnation: VmIncarnation,
+    pub(super) machine: String,
+    pub(super) incarnation: VmIncarnation,
 }
 
 /// One guarded machine identity, exact DNS claim, and complete saved web policies.
@@ -81,6 +81,38 @@ impl Runtime {
         Ok(self
             .machine_manager
             .connect_agent_expected(&guest.machine, &guest.incarnation)?)
+    }
+
+    /// Connects a dedicated query while retaining the expected VM through native connection.
+    /// The caller must retain the returned hold until cancelled RPC work has completed.
+    ///
+    /// # Errors
+    /// Returns an error if cancellation occurs, the captured VM changes, or connection fails.
+    pub async fn connect_web_guest_query(
+        self: &std::sync::Arc<Self>,
+        guest: &CapturedWebGuest,
+        cancelled: &tokio_util::sync::CancellationToken,
+    ) -> Result<(
+        arcbox_engine::agent_client::AgentClient,
+        arcbox_engine::machine::HostHold,
+    )> {
+        if cancelled.is_cancelled() {
+            return Err(CoreError::invalid_state("web query cancelled"));
+        }
+        let hold = self.hold_web_guest(guest)?;
+        let runtime = std::sync::Arc::clone(self);
+        let guest = guest.clone();
+        let cancelled = cancelled.clone();
+        tokio::task::spawn_blocking(move || {
+            // The queued native operation owns the hold even if its awaiting caller is dropped.
+            if cancelled.is_cancelled() {
+                return Err(CoreError::invalid_state("web query cancelled"));
+            }
+            let agent = runtime.connect_web_guest_agent(&guest)?;
+            Ok((agent, hold))
+        })
+        .await
+        .map_err(|error| CoreError::Vm(format!("web query connection worker: {error}")))?
     }
 
     /// Captures a guest before opening its signing or observation connection.
@@ -237,6 +269,30 @@ mod tests {
         claims::Claim,
         registry::{InstanceAuthority, InstanceTarget},
     };
+
+    #[tokio::test]
+    async fn cancelled_query_rejects_before_host_hold_or_native_connection() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = std::sync::Arc::new(
+            Runtime::new(crate::Config {
+                data_dir: directory.path().into(),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        let guest = CapturedWebGuest {
+            machine: "absent".into(),
+            incarnation: VmIncarnation::for_test(),
+        };
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        cancelled.cancel();
+        let error = runtime
+            .connect_web_guest_query(&guest, &cancelled)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("web query cancelled"));
+    }
 
     #[tokio::test]
     async fn system_authority_rejects_a_machine_claim_and_a_retired_run() {

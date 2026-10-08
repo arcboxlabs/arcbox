@@ -38,6 +38,8 @@ Capture `Runtime::container_network_incarnation` before querying Kubernetes Serv
 
 `Runtime::set_machine_web_ports` saves typed HTTP and HTTPS backend policies for a user machine. Omitted fields retain their values. The System VM is excluded. This method does not apply routes.
 
+`Arc<Runtime>::list_web_services` owns query cancellation and retains the captured VM through native connection and RPC cleanup. Each guest query has a five-second budget. A disconnected List or Watch caller cancels its query.
+
 ## Architecture
 
 ```text

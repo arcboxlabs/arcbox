@@ -1,9 +1,9 @@
 //! Host-owned signing names and guest routes projected through shared URL policy.
 
 use arcbox_connect::v1::{
-    ContainerWebService, GuestWebService, IndexWebService, ListGuestWebServicesRequest,
-    ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse, WebService,
-    container_web_service::HttpsBackend, guest_web_service::Route, web_service::HttpsMode,
+    ContainerWebService, GuestWebService, IndexWebService, ReconcileHttpsAccessRequest,
+    ReconcileHttpsAccessResponse, WebService, container_web_service::HttpsBackend,
+    guest_web_service::Route, web_service::HttpsMode,
 };
 use arcbox_constants::dns::Domain;
 use arcbox_dns::registry::{Lookup, Registry};
@@ -16,6 +16,7 @@ pub use guest::{CapturedMachineWeb, CapturedWebGuest};
 #[cfg(test)]
 mod https_access_tests;
 mod index;
+mod list;
 
 use super::Runtime;
 use crate::error::{CoreError, Result};
@@ -82,40 +83,6 @@ impl Runtime {
             .reconcile_https_access(request, cancelled)
             .await?;
         self.with_host_network_incarnation(self.default_machine_name(), expected, || response)
-    }
-
-    /// Lists guest web services with their current DNS names and installed routes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the guest cannot be reached or reports an invalid route.
-    pub async fn list_web_services(&self, hostname: Option<Domain>) -> Result<Vec<WebService>> {
-        let request = ListGuestWebServicesRequest {
-            hostname: hostname
-                .as_ref()
-                .map_or_else(String::new, ToString::to_string),
-            ..Default::default()
-        };
-        let expected = self.container_network_incarnation()?;
-        let agent = self.connect_system_agent_expected(expected.clone()).await?;
-        let response = agent
-            .list_guest_web_services(request, &CancellationToken::new())
-            .await?;
-        self.with_host_network_incarnation(self.default_machine_name(), &expected, || {
-            let registry = self
-                .dns_registry
-                .read()
-                .expect("DNS registry lock poisoned");
-            selected_services(
-                response.services,
-                hostname.as_ref(),
-                &registry,
-                &IndexEndpoint {
-                    apex: &self.config.network.dns_domain,
-                    gateway: self.config.container.cidr.docker_bridge_gateway(),
-                },
-            )
-        })?
     }
 }
 
@@ -244,15 +211,6 @@ fn container_services(route: ContainerWebService, registry: &Registry) -> Result
         Some(HttpsBackend::TerminatedHttpPort(port)) => (UrlHttpsMode::Managed, port),
         None => (UrlHttpsMode::None, 0),
     };
-    if route.http_port > u32::from(u16::MAX)
-        || https_port > u32::from(u16::MAX)
-        || (https_mode != UrlHttpsMode::None && https_port == 0)
-        || (route.http_port == 0 && https_port == 0)
-    {
-        return Err(CoreError::Vm(
-            "guest web route has invalid upstream ports".into(),
-        ));
-    }
     let mut domains = Vec::new();
     for hostname in route.hostnames {
         let name = hostname.parse::<Domain>().map_err(|error| {
@@ -264,29 +222,52 @@ fn container_services(route: ContainerWebService, registry: &Registry) -> Result
             domains.push(name);
         }
     }
-    Ok(
-        WebServiceUrls::project(domains, route.http_port != 0, https_mode)
-            .into_iter()
-            .map(|urls| {
-                let (mode, port) = match urls.https_mode {
-                    UrlHttpsMode::None => (HttpsMode::None, 0),
-                    UrlHttpsMode::Managed => (HttpsMode::Managed, https_port),
-                    UrlHttpsMode::Passthrough => (HttpsMode::Passthrough, https_port),
-                };
-                WebService {
-                    owner: format!("container:{}", route.container_id),
-                    http_url: urls.http_url,
-                    https_url: urls.https_url,
-                    hostname: urls.hostname,
-                    domains: urls.domains,
-                    https_mode: mode.into(),
-                    http_port: route.http_port,
-                    https_port: port,
-                    ..Default::default()
-                }
-            })
-            .collect(),
+    project_service(
+        format!("container:{}", route.container_id),
+        domains,
+        route.http_port,
+        https_mode,
+        https_port,
     )
+}
+
+fn project_service(
+    owner: String,
+    domains: Vec<Domain>,
+    http_port: u32,
+    https_mode: UrlHttpsMode,
+    https_port: u32,
+) -> Result<Vec<WebService>> {
+    if http_port > u32::from(u16::MAX)
+        || https_port > u32::from(u16::MAX)
+        || (https_mode != UrlHttpsMode::None && https_port == 0)
+        || (http_port == 0 && https_port == 0)
+    {
+        return Err(CoreError::Vm(
+            "guest web route has invalid upstream ports".into(),
+        ));
+    }
+    Ok(WebServiceUrls::project(domains, http_port != 0, https_mode)
+        .into_iter()
+        .map(|urls| {
+            let (mode, port) = match urls.https_mode {
+                UrlHttpsMode::None => (HttpsMode::None, 0),
+                UrlHttpsMode::Managed => (HttpsMode::Managed, https_port),
+                UrlHttpsMode::Passthrough => (HttpsMode::Passthrough, https_port),
+            };
+            WebService {
+                owner: owner.clone(),
+                http_url: urls.http_url,
+                https_url: urls.https_url,
+                hostname: urls.hostname,
+                domains: urls.domains,
+                https_mode: mode.into(),
+                http_port,
+                https_port: port,
+                ..Default::default()
+            }
+        })
+        .collect())
 }
 
 #[cfg(test)]
