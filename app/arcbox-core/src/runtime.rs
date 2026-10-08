@@ -3,6 +3,8 @@
 mod assets;
 mod dns_reservations;
 mod engine_config;
+#[cfg(target_os = "macos")]
+mod inbound_listeners;
 mod kubeconfig;
 mod kubernetes_lb;
 mod machine_dns;
@@ -39,10 +41,12 @@ use arcbox_connect::v1::{
 use arcbox_dns::{NamePattern, claims::Claim, container::ContainerMetadata, registry::Registry};
 use arcbox_net::NetworkManager;
 #[cfg(target_os = "macos")]
-use arcbox_net::darwin::inbound_relay::{InboundListenerManager, InboundProtocol};
+use arcbox_net::darwin::inbound_relay::InboundProtocol;
 #[cfg(not(target_os = "macos"))]
 use arcbox_net::port_forward::{PortForwardRule, PortForwarder};
 use assets::ensure_guest_binaries;
+#[cfg(target_os = "macos")]
+use inbound_listeners::Slot as InboundListenerSlot;
 use kubeconfig::{host_endpoint, rewrite_kubeconfig};
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
@@ -141,7 +145,7 @@ type InboundRulesMap =
     Arc<TokioRwLock<HashMap<String, (String, Vec<(Ipv4Addr, u16, u16, InboundProtocol)>)>>>;
 /// Per-machine inbound listener managers, keyed by machine name.
 #[cfg(target_os = "macos")]
-type InboundListenerMap = Arc<TokioRwLock<HashMap<String, InboundListenerManager>>>;
+type InboundListenerMap = Arc<TokioRwLock<HashMap<String, InboundListenerSlot>>>;
 
 struct KubernetesHostEndpoint {
     port: u16,
@@ -1412,34 +1416,6 @@ impl Runtime {
         }
     }
 
-    /// Installs the manager the machine's VMM created for the running VM.
-    ///
-    /// A manager already cached under the name belongs to the previous
-    /// incarnation of the VM: its listeners inject into a datapath that no
-    /// longer exists, and they hold the host ports the same publishes need
-    /// on the new VM. It is stopped, and the ownership records that pointed
-    /// at its listeners dropped, before the new manager takes its place.
-    #[cfg(target_os = "macos")]
-    async fn adopt_inbound_listener_manager(
-        &self,
-        machine_name: &str,
-        manager: InboundListenerManager,
-    ) {
-        // Ownership map before the listener map, the order every other
-        // path takes.
-        let mut rules = self.inbound_rules.write().await;
-        let mut listeners = self.inbound_listeners.write().await;
-        if let Some(mut stale) = listeners.insert(machine_name.to_owned(), manager) {
-            tracing::info!(
-                machine = machine_name,
-                listeners = stale.len(),
-                "retiring the previous VM incarnation's inbound listeners"
-            );
-            stale.stop_all().await;
-            rules.retain(|_, (machine, _)| machine != machine_name);
-        }
-    }
-
     /// macOS: add inbound rules via the machine's `InboundListenerManager`.
     #[cfg(target_os = "macos")]
     async fn start_port_forwarding_macos(
@@ -1450,13 +1426,11 @@ impl Runtime {
     ) -> Result<()> {
         // A manager the VMM still holds belongs to a VM booted since the
         // last publish: adopt it, retiring the previous incarnation's.
-        if let Some(manager) = self
-            .machine_manager
-            .take_inbound_listener_manager(machine_name)
-        {
-            self.adopt_inbound_listener_manager(machine_name, manager)
-                .await;
-        }
+        self.adopt_inbound_listener_manager(machine_name, || {
+            self.machine_manager
+                .take_inbound_listener_manager(machine_name)
+        })
+        .await;
         if !self
             .inbound_listeners
             .read()
@@ -1496,10 +1470,10 @@ impl Runtime {
                 machine == machine_name
                     && installed.len() == planned_rules.len()
                     && planned_rules.iter().all(|rule| installed.contains(rule))
-                    && listeners.get(machine_name).is_some_and(|manager| {
-                        installed
-                            .iter()
-                            .all(|(ip, port, _, protocol)| manager.has_rule(*ip, *port, *protocol))
+                    && listeners.get(machine_name).is_some_and(|slot| {
+                        installed.iter().all(|(ip, port, _, protocol)| {
+                            slot.current.has_rule(*ip, *port, *protocol)
+                        })
                     })
             }) {
                 return Ok(());
@@ -1515,10 +1489,14 @@ impl Runtime {
             // cancellation cannot leave a live listener undiscoverable.
             let mut rules_guard = self.inbound_rules.write().await;
             let mut listeners_guard = self.inbound_listeners.write().await;
-            let manager = listeners_guard
-                .get_mut(machine_name)
-                .expect("checked machine_name presence above");
-            if let Err(e) = manager
+            let slot = listeners_guard.get_mut(machine_name).ok_or_else(|| {
+                CoreError::Machine(format!(
+                    "inbound listener manager not available for machine '{machine_name}'",
+                ))
+            })?;
+            slot.finish_retiring().await;
+            if let Err(e) = slot
+                .current
                 .add_rule(host_ip, host_port, container_port, protocol)
                 .await
             {
@@ -1631,26 +1609,20 @@ impl Runtime {
     pub async fn stop_port_forwarding_by_id(&self, container_id: &str) {
         #[cfg(target_os = "macos")]
         {
-            let authority = self.inbound_rules.read().await.get(container_id).cloned();
-            if let Some((machine_name, rules)) = authority.as_ref() {
+            let mut authority = self.inbound_rules.write().await;
+            if let Some((machine_name, rules)) = authority.get(container_id) {
                 let mut guard = self.inbound_listeners.write().await;
-                if let Some(manager) = guard.get_mut(machine_name) {
+                if let Some(slot) = guard.get_mut(machine_name) {
                     for (host_ip, host_port, _, proto) in rules.iter().copied() {
-                        manager.remove_rule(host_ip, host_port, proto).await;
+                        slot.current.remove_rule(host_ip, host_port, proto).await;
                     }
-                }
-                drop(guard);
-                let mut rules_guard = self.inbound_rules.write().await;
-                if rules_guard.get(container_id) == authority.as_ref() {
-                    // The authoritative owner remains visible through every
-                    // await and a concurrent replacement is never removed.
-                    rules_guard.remove(container_id);
                 }
                 tracing::debug!(
                     machine = %machine_name,
                     container_id,
                     "Stopped port forwarding for container",
                 );
+                authority.remove(container_id);
             }
         }
 
@@ -2083,8 +2055,9 @@ impl Runtime {
             // path takes.
             let mut rules = self.inbound_rules.write().await;
             let mut listeners = self.inbound_listeners.write().await;
-            if let Some(mut stale) = listeners.remove(DEFAULT_MACHINE_NAME) {
-                stale.stop_all().await;
+            if let Some(slot) = listeners.get_mut(DEFAULT_MACHINE_NAME) {
+                slot.stop_all().await;
+                listeners.remove(DEFAULT_MACHINE_NAME);
             }
             rules.retain(|_, (machine, _)| machine != DEFAULT_MACHINE_NAME);
         }
@@ -2094,14 +2067,14 @@ impl Runtime {
     pub async fn stop_port_forwarding_all(&self) {
         #[cfg(target_os = "macos")]
         {
+            let mut rules = self.inbound_rules.write().await;
             let mut guard = self.inbound_listeners.write().await;
-            for manager in guard.values_mut() {
-                manager.stop_all().await;
+            for slot in guard.values_mut() {
+                slot.stop_all().await;
             }
             // Clear only after every listener task has terminated.
             guard.clear();
-            drop(guard);
-            self.inbound_rules.write().await.clear();
+            rules.clear();
         }
 
         #[cfg(not(target_os = "macos"))]

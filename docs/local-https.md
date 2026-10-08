@@ -38,7 +38,9 @@ Host rename and network refresh replace Registry ownership without first deregis
 
 Host port refresh preserves equivalent healthy listeners and removes listeners when bindings become empty. Equality includes the effective host address, host port, guest port, protocol, and machine. Canceled or exited listeners complete cleanup before recovery. Host socket tests cover refresh, conflicting destinations, TCP/UDP sharing, and cancellation; installed forwarding validation remains pending.
 
-The 70 Runtime tests pass with `--test-threads=1`. Two parallel runs exposed bind and post-teardown connection failures; the isolated teardown regression passes. Parallel port reuse remains under investigation, so the serial result does not establish concurrent socket-test stability.
+Each macOS machine retains its current listener manager and any manager awaiting retirement in Runtime. Adoption takes the VMM's next manager only after acquiring the rules and listener locks and completing prior retirement. Cancellation preserves cleanup ownership during replacement, System VM retirement, and shutdown. Global host commit ordering and VM incarnation fencing remain pending.
+
+The 72 Runtime tests pass with `--test-threads=1`, including two deterministic manager-cancellation regressions. Strict all-target core Clippy and workspace formatting pass. Two earlier parallel runs exposed bind and post-teardown connection failures; the isolated teardown regression passes. Parallel socket behavior remains under investigation, so the serial result does not establish concurrent socket-test stability.
 
 For a container attached to multiple networks, host DNS, guest DNS, service discovery, and published-port mirrors select the first valid IPv4 address in network-name order. They ignore the deprecated top-level `NetworkSettings.IPAddress`. Domain NAT retains all distinct container IPv4 addresses.
 

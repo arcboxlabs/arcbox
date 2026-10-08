@@ -536,6 +536,7 @@ above). When editing either side, keep in lockstep:
 ## Host port forwarding & image pull (`arcbox-docker`)
 
 - Preserve equivalent healthy listeners during refresh. Compare the machine, effective host address, both ports, and protocol. Empty bindings withdraw previous listeners. Retain cancellation and join ownership until cleanup completes; configure `PortForwarder` rules before starting the complete set.
+- Acquire rules before listener slots. Finish retained retirement before taking the next manager from the VMM. Store both managers before awaiting cleanup; remove a slot only after cleanup completes.
 - Published container ports are forwarded in userspace: container inspect →
   `parse_port_bindings` → `PortForwarder` binds a host `TcpListener`/`UdpSocket`
   per rule (`virt/arcbox-net/src/port_forward.rs`), reachable via loopback. No

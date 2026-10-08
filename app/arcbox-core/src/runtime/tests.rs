@@ -585,7 +585,7 @@ async fn conflicting_sandbox_cleanup_does_not_remove_the_existing_listener() {
     let (command_tx, mut command_rx) = tokio::sync::mpsc::channel(4);
     runtime.inbound_listeners.write().await.insert(
         "test-machine".into(),
-        InboundListenerManager::new(command_tx),
+        InboundListenerManager::new(command_tx).into(),
     );
     let first = [("127.0.0.1".to_owned(), host_port, 80, "tcp".to_owned())];
     runtime
@@ -647,7 +647,7 @@ async fn forwarding_refresh_preserves_equivalent_listeners_and_clears_empty_bind
         .await
         .unwrap();
     runtime
-        .adopt_inbound_listener_manager("test-machine", manager)
+        .adopt_inbound_listener_manager("test-machine", || Some(manager))
         .await;
     runtime.inbound_rules.write().await.insert(
         "web".into(),
@@ -680,7 +680,11 @@ async fn forwarding_refresh_preserves_equivalent_listeners_and_clears_empty_bind
         .unwrap();
     assert!(!accepting(host_port).await);
     assert!(!runtime.inbound_rules.read().await.contains_key("web"));
-    assert!(runtime.inbound_listeners.read().await["test-machine"].is_empty());
+    assert!(
+        runtime.inbound_listeners.read().await["test-machine"]
+            .current
+            .is_empty()
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -694,7 +698,9 @@ async fn forwarding_refresh_does_not_trust_ownership_without_a_listener() {
     let host_port = blocker.local_addr().unwrap().port();
     let (command_tx, _command_rx) = tokio::sync::mpsc::channel(4);
     runtime
-        .adopt_inbound_listener_manager("test-machine", InboundListenerManager::new(command_tx))
+        .adopt_inbound_listener_manager("test-machine", || {
+            Some(InboundListenerManager::new(command_tx))
+        })
         .await;
     runtime.inbound_rules.write().await.insert(
         "web".into(),
@@ -731,7 +737,7 @@ async fn a_fresh_listener_manager_retires_the_previous_incarnations_listeners() 
         .await
         .unwrap();
     runtime
-        .adopt_inbound_listener_manager("test-machine", previous)
+        .adopt_inbound_listener_manager("test-machine", || Some(previous))
         .await;
     runtime.inbound_rules.write().await.insert(
         "web".to_owned(),
@@ -745,7 +751,9 @@ async fn a_fresh_listener_manager_retires_the_previous_incarnations_listeners() 
     // The VM comes back: its new VMM hands over a manager of its own.
     let (fresh_tx, _fresh_rx) = tokio::sync::mpsc::channel(4);
     runtime
-        .adopt_inbound_listener_manager("test-machine", InboundListenerManager::new(fresh_tx))
+        .adopt_inbound_listener_manager("test-machine", || {
+            Some(InboundListenerManager::new(fresh_tx))
+        })
         .await;
 
     assert!(
@@ -783,7 +791,7 @@ async fn retiring_system_vm_container_networking_drops_every_trace_of_its_contai
         .await
         .unwrap();
     runtime
-        .adopt_inbound_listener_manager(super::DEFAULT_MACHINE_NAME, manager)
+        .adopt_inbound_listener_manager(super::DEFAULT_MACHINE_NAME, || Some(manager))
         .await;
     runtime.inbound_rules.write().await.insert(
         "web".to_owned(),

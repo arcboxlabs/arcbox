@@ -83,7 +83,7 @@ mod listeners {
         let (commands_tx, commands) = mpsc::channel(16);
         runtime.inbound_listeners.write().await.insert(
             DEFAULT_MACHINE_NAME.into(),
-            InboundListenerManager::new(commands_tx),
+            InboundListenerManager::new(commands_tx).into(),
         );
         runtime.vm_lifecycle().set_kubernetes_hold(true).await;
         (runtime, commands, dir)
