@@ -138,6 +138,10 @@ distribution".
 - `NamePattern` parses exact custom `.local` names and explicit descendant wildcards.
   Keep exact names separate from wildcard bases; a wildcard never includes its apex.
   Reuse `Domain` validation and preserve label boundaries in suffix matching.
+- `claims::resolve` selects an owner from one consistent registry snapshot.
+  Conflicting owners must not fall back to a broader wildcard.
+  Only generated Compose service claims may share a name; custom claims remain exclusive.
+  Resolve the selected owner's address and revision from the same snapshot.
 - Response builders write flag bytes at `[2]`/`[3]` and counts at `[6..12]`
   literally. `build_nxdomain`/SERVFAIL/NODATA MUST zero ANCOUNT/NSCOUNT/ARCOUNT,
   or EDNS(0) queries (ARCOUNT=1 in the request) get malformed responses.

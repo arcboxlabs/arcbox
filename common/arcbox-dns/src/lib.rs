@@ -10,6 +10,8 @@ use std::sync::RwLock;
 mod names;
 pub use names::NamePattern;
 
+pub mod claims;
+
 /// Shared local-hosts table used by both host-side and VMM-side DNS forwarders.
 pub type LocalHostsTable = RwLock<HashMap<String, IpAddr>>;
 
