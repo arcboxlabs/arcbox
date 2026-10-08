@@ -12,10 +12,17 @@ pub struct BackgroundTask {
 }
 
 impl BackgroundTask {
-    pub async fn start(&self, run: impl Future<Output = Result<()>> + Send + 'static) {
-        let mut task = self.task.lock().await;
-        assert!(task.is_none(), "background service must start once");
-        *task = Some(AbortOnDropHandle::new(tokio::spawn(run)));
+    pub fn start(
+        &self,
+        run: impl Future<Output = Result<()>> + Send + 'static,
+    ) -> impl Future<Output = ()> + Send + '_ {
+        // Box before awaiting the slot so callers do not retain the service's full future.
+        let run = Box::pin(run);
+        async move {
+            let mut task = self.task.lock().await;
+            assert!(task.is_none(), "background service must start once");
+            *task = Some(AbortOnDropHandle::new(tokio::spawn(run)));
+        }
     }
 
     pub async fn join(&self) -> Result<()> {

@@ -216,6 +216,8 @@ The resolver service uses `BackgroundTask`, shared through the pre-pipeline hand
 
 The guest trust service also retains its `BackgroundTask` through all three shutdown paths and joins any active connection or certificate delivery before Runtime stops.
 
+The TLS signer also uses a shared `BackgroundTask`. All three shutdown paths join that task before stopping Runtime. Cancellation closes socket waits and waits for an active native connection or signature operation to finish. Each signing connection targets one captured physical VM; replacement rejects signing and certificate delivery.
+
 The web index service retains the same task ownership. Failed, interrupted, and stopped-VM lookups withdraw the index. Cancellation drains the active request while withdrawing, so a request holding the host commit lock cannot deadlock cleanup. Runtime stops only after the task finishes.
 
 ## Crash / SIGKILL

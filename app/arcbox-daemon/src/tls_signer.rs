@@ -18,33 +18,35 @@ use tokio_util::{codec::LengthDelimitedCodec, sync::CancellationToken};
 
 use crate::context::DaemonContext;
 
-pub fn spawn(ctx: &DaemonContext, runtime: &Arc<Runtime>) {
+pub async fn spawn(ctx: &DaemonContext, runtime: &Arc<Runtime>) {
     let authority = ctx.local_ca.subscribe();
     let runtime = Arc::clone(runtime);
     let shutdown = ctx.shutdown.clone();
-    tokio::spawn(run(runtime, authority, shutdown));
+    ctx.tls_signer
+        .start(run(runtime, authority, shutdown))
+        .await;
 }
 
 async fn run(
     runtime: Arc<Runtime>,
     authority: watch::Receiver<Option<Arc<KeychainAuthority>>>,
     shutdown: CancellationToken,
-) {
+) -> Result<()> {
     let mut state = runtime.subscribe_system_vm_state();
     loop {
         let ready = state.wait_for(|state| state.is_ready());
         tokio::select! {
-            () = shutdown.cancelled() => return,
-            ready = ready => if ready.is_err() { return; },
+            () = shutdown.cancelled() => return Ok(()),
+            ready = ready => if ready.is_err() { return Ok(()); },
         }
-        let result = tokio::select! {
-            () = shutdown.cancelled() => return,
-            result = serve_once(&runtime, &authority) => result,
-        };
+        let result = serve_once(&runtime, &authority, &shutdown).await;
+        if shutdown.is_cancelled() {
+            return Ok(());
+        }
         if let Err(error) = result {
             tracing::warn!(%error, "local CA signing connection failed");
             tokio::select! {
-                () = shutdown.cancelled() => return,
+                () = shutdown.cancelled() => return Ok(()),
                 () = tokio::time::sleep(Duration::from_secs(1)) => {}
             }
         }
@@ -54,73 +56,155 @@ async fn run(
 async fn serve_once(
     runtime: &Arc<Runtime>,
     authority: &watch::Receiver<Option<Arc<KeychainAuthority>>>,
+    shutdown: &CancellationToken,
 ) -> Result<()> {
+    let expected = runtime.container_network_incarnation()?;
+    let connecting_vm = expected.clone();
     let connecting_runtime = Arc::clone(runtime);
-    let socket = tokio::task::spawn_blocking(move || {
-        let fd = connecting_runtime.connect_vsock_port(DEFAULT_MACHINE_NAME, TLS_SIGNING_PORT)?;
+    let stream = connect_native(shutdown, move || {
+        let fd = connecting_runtime.connect_vsock_port_expected(
+            DEFAULT_MACHINE_NAME,
+            &connecting_vm,
+            TLS_SIGNING_PORT,
+        )?;
         // SAFETY: the hypervisor returns a newly opened descriptor and transfers ownership.
-        Ok::<_, arcbox_core::CoreError>(unsafe { OwnedFd::from_raw_fd(fd) })
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     })
-    .await??;
-    let stream = VsockStream::from_fd_with_shutdown(socket, VsockShutdown::CloseOnDropOnly)?;
-    serve_request(stream, authority, runtime, |authority, request| {
-        Ok(authority.sign(request)?)
-    })
+    .await?;
+    let signing_runtime = Arc::clone(runtime);
+    SigningSession {
+        current: authority,
+        runtime,
+        shutdown,
+        ensure_vm: move || {
+            ensure!(
+                signing_runtime.container_network_incarnation()? == expected,
+                "VM changed during signing"
+            );
+            Ok(())
+        },
+    }
+    .serve(stream, |authority, request| Ok(authority.sign(request)?))
     .await
 }
 
-async fn serve_request<A, S>(
-    stream: S,
-    current: &watch::Receiver<Option<Arc<A>>>,
-    runtime: &Runtime,
-    sign: impl FnOnce(&A, &VerifiedCertificateRequest) -> Result<Vec<u8>> + Send + 'static,
-) -> Result<()>
+async fn connect_native(
+    shutdown: &CancellationToken,
+    connect: impl FnOnce() -> Result<OwnedFd> + Send + 'static,
+) -> Result<VsockStream> {
+    // Native connection work must finish before the retained service can stop.
+    let cancelled = shutdown.clone();
+    let socket = tokio::task::spawn_blocking(move || {
+        ensure!(!cancelled.is_cancelled(), "TLS signer cancelled");
+        connect()
+    })
+    .await??;
+    ensure!(!shutdown.is_cancelled(), "TLS signer cancelled");
+    Ok(VsockStream::from_fd_with_shutdown(
+        socket,
+        VsockShutdown::CloseOnDropOnly,
+    )?)
+}
+
+struct SigningSession<'a, A, F> {
+    current: &'a watch::Receiver<Option<Arc<A>>>,
+    runtime: &'a Runtime,
+    shutdown: &'a CancellationToken,
+    ensure_vm: F,
+}
+
+impl<A, F> SigningSession<'_, A, F>
 where
     A: Send + Sync + 'static,
-    S: AsyncRead + AsyncWrite + Unpin,
+    F: Fn() -> Result<()> + Clone + Send + Sync + 'static,
 {
-    let mut frames = LengthDelimitedCodec::builder()
-        .max_frame_length(MAX_CERTIFICATE_SIZE)
-        .new_framed(stream);
-    // VZ requires the host to keep reading while the connection is parked.
-    let request = frames
-        .next()
-        .await
-        .context("guest closed the signing connection")??;
-    let request = VerifiedCertificateRequest::try_from(request.as_ref())?;
-    let name = request.dns_name().to_owned();
-    let revision = runtime
-        .https_signing_revision(&name)
-        .await
-        .context("CSR DNS name is not owned by a current host container")?;
-    let authority = current
-        .borrow()
-        .clone()
-        .context("local CA is not prepared")?;
-    let signing_authority = Arc::clone(&authority);
-    let certificate =
-        tokio::task::spawn_blocking(move || sign(&signing_authority, &request)).await??;
-    ensure!(
-        runtime.https_signing_revision(&name).await == Some(revision),
-        "DNS ownership changed during signing"
-    );
-    ensure!(
-        current
+    async fn serve<S>(
+        self,
+        stream: S,
+        sign: impl FnOnce(&A, &VerifiedCertificateRequest) -> Result<Vec<u8>> + Send + 'static,
+    ) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let mut frames = LengthDelimitedCodec::builder()
+            .max_frame_length(MAX_CERTIFICATE_SIZE)
+            .new_framed(stream);
+        // VZ requires the host to keep reading while the connection is parked.
+        let request = self
+            .shutdown
+            .run_until_cancelled(frames.next())
+            .await
+            .context("TLS signer cancelled")?
+            .context("guest closed the signing connection")??;
+        let request = VerifiedCertificateRequest::try_from(request.as_ref())?;
+        let name = request.dns_name().to_owned();
+        let revision = self
+            .runtime
+            .https_signing_revision(&name)
+            .await
+            .context("CSR DNS name is not owned by a current web service")?;
+        let authority = self
+            .current
             .borrow()
-            .as_ref()
-            .is_some_and(|active| Arc::ptr_eq(active, &authority)),
-        "local CA changed during signing"
-    );
-    tokio::time::timeout(Duration::from_secs(10), frames.send(certificate.into()))
-        .await
-        .context("guest did not read its certificate")??;
-    Ok(())
+            .clone()
+            .context("local CA is not prepared")?;
+        let signing_authority = Arc::clone(&authority);
+        let ensure_vm = self.ensure_vm.clone();
+        let shutdown = self.shutdown.clone();
+        let certificate = tokio::task::spawn_blocking(move || {
+            ensure!(!shutdown.is_cancelled(), "TLS signer cancelled");
+            ensure_vm()?;
+            sign(&signing_authority, &request)
+        })
+        .await??;
+        ensure!(
+            self.runtime.https_signing_revision(&name).await == Some(revision),
+            "DNS ownership changed during signing"
+        );
+        ensure!(
+            self.current
+                .borrow()
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(active, &authority)),
+            "local CA changed during signing"
+        );
+        (self.ensure_vm)()?;
+        self.shutdown
+            .run_until_cancelled(tokio::time::timeout(
+                Duration::from_secs(10),
+                frames.send(certificate.into()),
+            ))
+            .await
+            .context("TLS signer cancelled")?
+            .context("guest did not read its certificate")??;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use arcbox_local_ca::CertificateRequest;
+
+    async fn serve_request<A, S>(
+        stream: S,
+        current: &watch::Receiver<Option<Arc<A>>>,
+        runtime: &Runtime,
+        sign: impl FnOnce(&A, &VerifiedCertificateRequest) -> Result<Vec<u8>> + Send + 'static,
+    ) -> Result<()>
+    where
+        A: Send + Sync + 'static,
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        SigningSession {
+            current,
+            runtime,
+            shutdown: &CancellationToken::new(),
+            ensure_vm: || Ok(()),
+        }
+        .serve(stream, sign)
+        .await
+    }
 
     async fn runtime() -> (Arc<Runtime>, tempfile::TempDir) {
         let directory = tempfile::tempdir().unwrap();
@@ -279,5 +363,158 @@ mod tests {
                 assert!(guest.next().await.is_none());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn cancellation_waits_for_native_connect_and_closes_its_socket() {
+        use std::{io::Read, os::unix::net::UnixStream, pin::pin, task::Poll};
+
+        let shutdown = CancellationToken::new();
+        let cancelled = shutdown.clone();
+        let task = crate::background_task::BackgroundTask::default();
+        let (host, mut guest) = UnixStream::pair().unwrap();
+        guest
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (started, connecting) = tokio::sync::oneshot::channel();
+        let (finish, finished) = std::sync::mpsc::channel();
+        task.start(async move {
+            connect_native(&cancelled, move || {
+                started.send(()).unwrap();
+                finished.recv().unwrap();
+                Ok(host.into())
+            })
+            .await?;
+            Ok(())
+        })
+        .await;
+        connecting.await.unwrap();
+        shutdown.cancel();
+        let mut joining = pin!(task.join());
+        assert!(matches!(futures::poll!(&mut joining), Poll::Pending));
+        finish.send(()).unwrap();
+        assert_eq!(
+            joining.await.unwrap_err().to_string(),
+            "TLS signer cancelled"
+        );
+        assert_eq!(guest.read(&mut [0]).unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancellation_waits_for_signing_and_discards_the_certificate() {
+        use std::{pin::pin, task::Poll};
+
+        let (runtime, _directory) = runtime().await;
+        let (_sender, current) = watch::channel(Some(Arc::new(1_u8)));
+        let shutdown = CancellationToken::new();
+        let cancelled = shutdown.clone();
+        let task = crate::background_task::BackgroundTask::default();
+        let (host, guest) = tokio::io::duplex(1024);
+        let (started, signing) = tokio::sync::oneshot::channel();
+        let (finish, finished) = std::sync::mpsc::channel();
+        task.start(async move {
+            SigningSession {
+                current: &current,
+                runtime: &runtime,
+                shutdown: &cancelled,
+                ensure_vm: || Ok(()),
+            }
+            .serve(host, move |_, _| {
+                started.send(()).unwrap();
+                finished.recv().unwrap();
+                Ok(vec![1])
+            })
+            .await
+        })
+        .await;
+        let mut guest = LengthDelimitedCodec::builder().new_framed(guest);
+        let request = CertificateRequest::new("web.arcbox.local").unwrap();
+        guest.send(request.der().to_vec().into()).await.unwrap();
+        signing.await.unwrap();
+        shutdown.cancel();
+        let mut joining = pin!(task.join());
+        assert!(matches!(futures::poll!(&mut joining), Poll::Pending));
+        finish.send(()).unwrap();
+        assert_eq!(
+            joining.await.unwrap_err().to_string(),
+            "TLS signer cancelled"
+        );
+        assert!(guest.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn vm_replacement_fences_signing_and_delivery() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        for replaced_before_request in [true, false] {
+            let (runtime, _directory) = runtime().await;
+            let (_sender, current) = watch::channel(Some(Arc::new(1_u8)));
+            let same_vm = Arc::new(AtomicBool::new(!replaced_before_request));
+            let expected = Arc::clone(&same_vm);
+            let (host, guest) = tokio::io::duplex(1024);
+            let (started, signing) = tokio::sync::oneshot::channel();
+            let (finish, finished) = std::sync::mpsc::channel();
+            let task = tokio::spawn(async move {
+                SigningSession {
+                    current: &current,
+                    runtime: &runtime,
+                    shutdown: &CancellationToken::new(),
+                    ensure_vm: move || {
+                        ensure!(expected.load(Ordering::SeqCst), "VM changed during signing");
+                        Ok(())
+                    },
+                }
+                .serve(host, move |_, _| {
+                    started.send(()).unwrap();
+                    finished.recv().unwrap();
+                    Ok(vec![1])
+                })
+                .await
+            });
+            let mut guest = LengthDelimitedCodec::builder().new_framed(guest);
+            let request = CertificateRequest::new("web.arcbox.local").unwrap();
+            guest.send(request.der().to_vec().into()).await.unwrap();
+            if replaced_before_request {
+                assert!(signing.await.is_err());
+            } else {
+                signing.await.unwrap();
+                same_vm.store(false, Ordering::SeqCst);
+                finish.send(()).unwrap();
+            }
+            assert_eq!(
+                task.await.unwrap().unwrap_err().to_string(),
+                "VM changed during signing"
+            );
+            assert!(guest.next().await.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_a_parked_request() {
+        use std::{pin::pin, task::Poll};
+
+        let (runtime, _directory) = runtime().await;
+        let (_sender, current) = watch::channel(Some(Arc::new(1_u8)));
+        let shutdown = CancellationToken::new();
+        let (host, mut guest) = tokio::io::duplex(1024);
+        let session = SigningSession {
+            current: &current,
+            runtime: &runtime,
+            shutdown: &shutdown,
+            ensure_vm: || Ok(()),
+        };
+        let mut serving = pin!(session.serve(host, |_, _| panic!("no request was sent")));
+        assert!(matches!(futures::poll!(&mut serving), Poll::Pending));
+        shutdown.cancel();
+        assert_eq!(
+            serving.await.unwrap_err().to_string(),
+            "TLS signer cancelled"
+        );
+        assert_eq!(
+            tokio::io::AsyncReadExt::read(&mut guest, &mut [0])
+                .await
+                .unwrap(),
+            0
+        );
     }
 }

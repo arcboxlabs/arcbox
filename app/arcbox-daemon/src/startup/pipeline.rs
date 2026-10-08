@@ -155,7 +155,7 @@ impl RuntimeBooted {
             recovery::run(&self.ctx, &self.runtime, handles.dns_port).await?;
             if linux_vm {
                 #[cfg(target_os = "macos")]
-                crate::tls_signer::spawn(&self.ctx, &self.runtime);
+                crate::tls_signer::spawn(&self.ctx, &self.runtime).await;
                 #[cfg(target_os = "macos")]
                 crate::https_access::spawn(&self.ctx, &self.runtime);
                 crate::web_index::start(&self.ctx, &self.runtime).await;

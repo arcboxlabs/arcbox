@@ -60,6 +60,7 @@ pub struct StartupHandles {
     pub resolver_service: BackgroundTask,
     pub guest_trust_service: BackgroundTask,
     pub web_index_service: BackgroundTask,
+    pub tls_signer: BackgroundTask,
 }
 
 impl StartupHandles {
@@ -74,6 +75,7 @@ impl StartupHandles {
             resolver_service: BackgroundTask::default(),
             guest_trust_service: BackgroundTask::default(),
             web_index_service: BackgroundTask::default(),
+            tls_signer: BackgroundTask::default(),
         }
     }
 }
@@ -101,6 +103,7 @@ pub struct EarlyContext {
     pub resolver_service: BackgroundTask,
     pub guest_trust_service: BackgroundTask,
     pub web_index_service: BackgroundTask,
+    pub tls_signer: BackgroundTask,
     pub dns_domain: Domain,
     /// Explicit DNS port; 0 lets the bound service choose one. `None` binds
     /// the profile's port, falling back to an OS-allocated one when taken.
@@ -149,6 +152,7 @@ pub struct DaemonContext {
     pub resolver_service: BackgroundTask,
     pub guest_trust_service: BackgroundTask,
     pub web_index_service: BackgroundTask,
+    pub tls_signer: BackgroundTask,
     pub dns_domain: Domain,
     /// Explicit DNS port; `None` binds the profile's port best-effort. The
     /// actual bound port lives in [`ServiceHandles`].

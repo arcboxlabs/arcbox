@@ -59,6 +59,9 @@ pub async fn run(ctx: DaemonContext, mut handles: ServiceHandles) -> Result<()> 
     if let Err(error) = ctx.web_index_service.join().await {
         warn!(%error, "web index service cleanup failed");
     }
+    if let Err(error) = ctx.tls_signer.join().await {
+        warn!(%error, "TLS signer cleanup failed");
+    }
 
     drain(&mut handles).await;
 
@@ -236,6 +239,9 @@ pub async fn interrupt_startup(handles: &StartupHandles) -> Result<()> {
     if let Err(error) = handles.web_index_service.join().await {
         warn!(%error, "web index service cleanup failed during startup cancellation");
     }
+    if let Err(error) = handles.tls_signer.join().await {
+        warn!(%error, "TLS signer cleanup failed during startup cancellation");
+    }
 
     // `early_runtime` is filled before the VM boots, so it covers every
     // window in which a VM can exist; empty means nothing to tear down.
@@ -267,6 +273,9 @@ pub async fn abort_failed_startup(handles: &StartupHandles) {
     }
     if let Err(error) = handles.web_index_service.join().await {
         warn!(%error, "web index service cleanup failed after startup error");
+    }
+    if let Err(error) = handles.tls_signer.join().await {
+        warn!(%error, "TLS signer cleanup failed after startup error");
     }
     if let Some(runtime) = handles.early_runtime.get() {
         if let Err(error) = runtime.shutdown_force().await {
