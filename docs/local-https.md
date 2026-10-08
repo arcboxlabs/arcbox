@@ -90,6 +90,8 @@ Run `abctl machine web NAME` to read the saved HTTP and HTTPS backend policies. 
 
 Host service snapshots query running distro machines independently of System VM readiness. Exact machine hostnames select only their captured guest. Responses must match the raw machine name, canonical hostname, bridge IPv4 address, and current DNS claim revision. Queries run concurrently; any failure cancels and drains the remaining work before failing the complete snapshot.
 
+Machine List, Inspect, and Events are available when Runtime is constructed, before System VM initialization finishes. Loaded machine metadata can include saved addresses; only validated web-service snapshots establish installed endpoints. Machine operations retain their existing readiness and storage-recovery gates.
+
 ## Machine client trust
 
 The machine agent accepts authenticated public-root snapshots on Debian, Ubuntu, and Alpine. It updates only `/usr/local/share/ca-certificates/arcbox-local-ca.crt`, invokes the installed `update-ca-certificates`, and verifies and syncs the rebuilt system PEM bundle before acknowledging installation or explicit removal. Updater failure leaves reconciliation pending until replay. Missing tools or stores and other distributions return an error.

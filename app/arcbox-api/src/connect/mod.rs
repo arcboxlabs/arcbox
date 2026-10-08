@@ -70,9 +70,8 @@ pub use template::TemplateServiceImpl;
 
 /// Shared handle to a runtime that may not be initialized yet.
 ///
-/// Services are registered before the runtime exists, so each RPC calls
-/// `runtime.ready()`, which answers `Unavailable` while the daemon is still
-/// downloading assets or starting the VM.
+/// Services are registered before Runtime exists. Each RPC calls `ready()` on
+/// its early or operational handle and returns `Unavailable` until that handle is filled.
 pub type SharedRuntime = Arc<OnceLock<Arc<Runtime>>>;
 
 /// Idle interval after which a server stream emits a keepalive frame, so
@@ -225,7 +224,7 @@ fn exposed_port(
 /// registration is what decides whether a path is served at all: the router
 /// answers exactly what it was given, and an omission 404s at runtime.
 #[must_use]
-pub fn router(runtime: SharedRuntime) -> connectrpc::Router {
+pub fn router(runtime: SharedRuntime, early_runtime: SharedRuntime) -> connectrpc::Router {
     let clone = || Arc::clone(&runtime);
     let sandbox_operations = Arc::new(arcbox_computer::locks::SandboxOperationLocks::default());
     let router = connectrpc::Router::new()
@@ -251,21 +250,20 @@ pub fn router(runtime: SharedRuntime) -> connectrpc::Router {
         .add_service(Arc::new(StatsServiceImpl::new(clone())))
         .add_service(Arc::new(KubernetesServiceImpl::new(clone())))
         .add_service(Arc::new(MigrationServiceImpl::new(clone())))
-        .add_service(Arc::new(MachineServiceImpl::new(clone())));
+        .add_service(Arc::new(MachineServiceImpl::new(clone(), early_runtime)));
     #[cfg(target_os = "macos")]
     let router = router.add_service(Arc::new(MacosServiceImpl::new(clone())));
     router
 }
 
-/// Registers the services plus the ones needing extra state the router
-/// helper above cannot reach.
-///
-/// `SystemService` is separate because it also observes the setup state and
-/// the early runtime handle — it must answer while `shared_runtime` is still
-/// empty, which is the whole point of a diagnostics RPC.
+/// Registers every service, including SystemService with its setup state.
 #[must_use]
-pub fn router_with_system(runtime: SharedRuntime, system: SystemServiceImpl) -> connectrpc::Router {
-    router(runtime).add_service(Arc::new(system))
+pub fn router_with_system(
+    runtime: SharedRuntime,
+    early_runtime: SharedRuntime,
+    system: SystemServiceImpl,
+) -> connectrpc::Router {
+    router(runtime, early_runtime).add_service(Arc::new(system))
 }
 
 #[cfg(test)]

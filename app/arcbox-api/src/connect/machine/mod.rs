@@ -1,5 +1,7 @@
 //! Machine service gRPC implementation.
 
+#[cfg(test)]
+mod directory_tests;
 mod rootfs;
 mod transfer;
 #[cfg(test)]
@@ -46,13 +48,17 @@ fn refusal<E: std::fmt::Display + Into<ApiError>>(error: E) -> ConnectError {
 /// Machine service implementation.
 pub struct MachineServiceImpl {
     runtime: SharedRuntime,
+    early_runtime: SharedRuntime,
 }
 
 impl MachineServiceImpl {
-    /// Creates a new machine service with a deferred runtime.
+    /// Uses the early handle for directory reads and the operational handle for all other requests.
     #[must_use]
-    pub fn new(runtime: SharedRuntime) -> Self {
-        Self { runtime }
+    pub fn new(runtime: SharedRuntime, early_runtime: SharedRuntime) -> Self {
+        Self {
+            runtime,
+            early_runtime,
+        }
     }
 }
 
@@ -317,7 +323,7 @@ impl pb::MachineService for MachineServiceImpl {
         _ctx: RequestContext,
         _request: ServiceRequest<'_, pb::ListMachinesRequest>,
     ) -> ServiceResult<pb::ListMachinesResponse> {
-        let runtime = self.runtime.ready()?;
+        let runtime = self.early_runtime.ready()?;
 
         let summaries: Vec<pb::MachineSummary> = runtime
             .machine_manager()
@@ -351,7 +357,7 @@ impl pb::MachineService for MachineServiceImpl {
         request: ServiceRequest<'_, pb::InspectMachineRequest>,
     ) -> ServiceResult<pb::MachineInfo> {
         let id = request.to_owned_message().id;
-        let runtime = self.runtime.ready()?;
+        let runtime = self.early_runtime.ready()?;
 
         let machine = runtime
             .machine_manager()
@@ -633,7 +639,7 @@ impl pb::MachineService for MachineServiceImpl {
         use tokio::sync::broadcast::error::RecvError;
 
         let req = request.to_owned_message();
-        let mut rx = self.runtime.ready()?.event_bus().subscribe();
+        let mut rx = self.early_runtime.ready()?.event_bus().subscribe();
 
         let stream = async_stream::stream! {
             loop {

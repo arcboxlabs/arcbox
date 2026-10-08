@@ -54,7 +54,7 @@ async fn web_settings_preserve_omission_and_reject_invalid_updates_atomically() 
         })
         .await
         .unwrap();
-    let service = MachineServiceImpl::new(shared.clone());
+    let service = MachineServiceImpl::new(shared.clone(), shared.clone());
     let response = set(
         &service,
         pb::SetMachineWebPortsRequest {

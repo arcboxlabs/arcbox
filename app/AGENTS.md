@@ -44,8 +44,10 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
 - Two runtime handles, do not conflate them (`context.rs`): `shared_runtime`
   is filled only after full init and gates normal RPCs with `UNAVAILABLE`
   via `runtime.ready()`; `early_runtime` is filled the moment `Runtime` is
-  constructed, before the VM boots. Only diagnostics and the read-only
-  `ListWebServices` / `WatchWebServices` use `early_runtime`. Core checks each
+  constructed, before the VM boots. Diagnostics, `ListWebServices` /
+  `WatchWebServices`, and `MachineService.List` / `Inspect` / `Events` use
+  `early_runtime`. Machine directory reads expose loaded metadata; operations
+  retain their existing readiness and storage-recovery gates. Core checks each
   web guest's readiness; machine discovery must not wait for System VM startup.
   A stuck boot never fills `shared_runtime`, so `GetVirtioDebug` also reads
   `early_runtime`. Keep normal RPCs on `shared_runtime`. Never gate a

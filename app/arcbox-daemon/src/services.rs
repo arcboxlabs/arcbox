@@ -1,8 +1,8 @@
 //! Service startup: DNS, Docker API, gRPC servers.
 //!
-//! gRPC is started once with all services. Machine/Sandbox/Snapshot services
-//! use `SharedRuntime` (backed by `OnceLock`) and return `UNAVAILABLE` until
-//! `init_runtime()` fills it. This avoids restarting the gRPC server mid-boot.
+//! gRPC starts once with all services. Machine directory reads use the early
+//! Runtime; operations wait for the operational Runtime. Empty handles return
+//! `UNAVAILABLE` without restarting the gRPC server mid-boot.
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -42,9 +42,8 @@ pub async fn start_control_plane(ctx: &DaemonContext) -> Result<ControlPlane> {
 
 /// Starts the gRPC server with all services.
 ///
-/// Machine/Sandbox/Snapshot services return `UNAVAILABLE` until
-/// `init_runtime()` sets the runtime. SystemService works immediately so
-/// clients can observe setup progress.
+/// Setup status works immediately. Machine directory reads and web snapshots
+/// become available at Runtime construction; operations wait for initialization.
 async fn start_grpc(ctx: &DaemonContext) -> Result<tokio::task::JoinHandle<()>> {
     let socket_path = &ctx.layout.grpc_socket;
     let listener = crate::control_plane::bind(socket_path)?;
@@ -62,6 +61,7 @@ async fn start_grpc(ctx: &DaemonContext) -> Result<tokio::task::JoinHandle<()>> 
     // Reflection rides along and answers over all three wire formats.
     let app = crate::control_plane::into_app(crate::control_plane::connect_router(
         Arc::clone(&ctx.shared_runtime),
+        Arc::clone(&ctx.early_runtime),
         system_service,
     )?);
 

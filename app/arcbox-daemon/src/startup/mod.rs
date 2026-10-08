@@ -273,9 +273,8 @@ async fn init_runtime(ctx: &DaemonContext) -> Result<Arc<Runtime>> {
     }
     let selected_guest_docker_port = config.container.guest_docker_vsock_port;
     let runtime = Arc::new(Runtime::new(config).context("Failed to create runtime")?);
-    // Publish the diagnostics handle before the VM boots: a stuck boot
-    // must stay observable via GetVirtioDebug while `shared_runtime`
-    // (the general RPC gate) is still empty.
+    // A stuck boot must preserve diagnostics and read-only directory access
+    // while `shared_runtime` still gates operations.
     ctx.early_runtime
         .set(Arc::clone(&runtime))
         .map_err(|_| anyhow::anyhow!("init_runtime called twice"))?;

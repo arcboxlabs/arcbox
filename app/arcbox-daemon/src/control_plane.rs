@@ -111,6 +111,7 @@ pub fn bind(socket_path: &std::path::Path) -> Result<UnixListener> {
 /// would mean the build emitted a corrupt one.
 pub fn connect_router(
     runtime: arcbox_api::SharedRuntime,
+    early_runtime: arcbox_api::SharedRuntime,
     system: arcbox_api::SystemServiceImpl,
 ) -> Result<connectrpc::Router> {
     let reflector = connectrpc_reflection::Reflector::from_descriptor_set_bytes(
@@ -118,7 +119,7 @@ pub fn connect_router(
     )
     .context("parsing the embedded file descriptor set for reflection")?;
     Ok(connectrpc_reflection::install(
-        arcbox_api::connect::router_with_system(runtime, system),
+        arcbox_api::connect::router_with_system(runtime, early_runtime, system),
         reflector,
     ))
 }
@@ -161,7 +162,8 @@ mod tests {
             Arc::clone(&runtime),
             Arc::clone(&runtime),
         );
-        let app = into_app(connect_router(runtime, system).expect("connect router"));
+        let app =
+            into_app(connect_router(runtime.clone(), runtime, system).expect("connect router"));
 
         let listener = bind(&socket).expect("bind temp socket");
         let shutdown = CancellationToken::new();
@@ -337,7 +339,7 @@ mod tests {
             Arc::clone(&runtime),
             Arc::clone(&runtime),
         );
-        let router = connect_router(runtime, system).expect("connect router");
+        let router = connect_router(runtime.clone(), runtime, system).expect("connect router");
 
         for path in [
             "arcbox.v1.IconService/GetImageIcon",

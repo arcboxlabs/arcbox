@@ -97,8 +97,7 @@ pub struct EarlyContext {
     pub layout: HostLayout,
     pub shared_runtime: SharedRuntime,
     /// Filled as soon as the runtime is constructed, before the VM boots.
-    /// Diagnostics only (`GetVirtioDebug`) — a stuck boot must stay
-    /// observable while `shared_runtime` is still empty.
+    /// Serves diagnostics and read-only directories while startup is incomplete.
     pub early_runtime: SharedRuntime,
     pub setup_state: Arc<SetupState>,
     pub shutdown: CancellationToken,
@@ -149,7 +148,7 @@ pub struct DaemonContext {
     /// Shared with gRPC services. Filled after runtime service endpoints bind.
     pub shared_runtime: SharedRuntime,
     /// Filled by `init_runtime` right after runtime construction, before
-    /// the VM boots. Diagnostics only (`GetVirtioDebug`).
+    /// the VM boots, for diagnostics and read-only directories.
     pub early_runtime: SharedRuntime,
     pub setup_state: Arc<SetupState>,
     /// The daemon's private signer for the published root, replaced after recovery or rotation.
