@@ -154,9 +154,10 @@ pub mod api {
 
     // System service types
     pub use super::v1::{
-        AcknowledgeHttpsAccessRequest, Event, EventActor, EventsRequest, GetInfoRequest,
-        GetInfoResponse, GetVersionRequest, GetVersionResponse, ListWebServicesResponse,
-        LocalHttpsAccess, LocalHttpsStatus, PruneRequest, PruneResponse, ResolveContainerFsRequest,
+        AcknowledgeHttpsAccessRequest, CommitLocalCaRotationRequest, Event, EventActor,
+        EventsRequest, GetInfoRequest, GetInfoResponse, GetVersionRequest, GetVersionResponse,
+        ListWebServicesResponse, LocalCaRotation, LocalHttpsAccess, LocalHttpsStatus,
+        PrepareLocalCaRotationRequest, PruneRequest, PruneResponse, ResolveContainerFsRequest,
         ResolveContainerFsResponse, ResolveImageFsRequest, ResolveImageFsResponse,
         SystemPingRequest, SystemPingResponse, WebService,
     };
@@ -240,9 +241,10 @@ pub use v1::{
 
 // API types - System
 pub use v1::{
-    AcknowledgeHttpsAccessRequest, Event, EventActor, EventsRequest, GetInfoRequest,
-    GetInfoResponse, GetVersionRequest, GetVersionResponse, ListWebServicesResponse,
-    LocalHttpsAccess, LocalHttpsStatus, PruneRequest, PruneResponse, ResolveContainerFsRequest,
+    AcknowledgeHttpsAccessRequest, CommitLocalCaRotationRequest, Event, EventActor, EventsRequest,
+    GetInfoRequest, GetInfoResponse, GetVersionRequest, GetVersionResponse,
+    ListWebServicesResponse, LocalCaRotation, LocalHttpsAccess, LocalHttpsStatus,
+    PrepareLocalCaRotationRequest, PruneRequest, PruneResponse, ResolveContainerFsRequest,
     ResolveContainerFsResponse, ResolveImageFsRequest, ResolveImageFsResponse, SystemPingRequest,
     SystemPingResponse, WebService,
 };

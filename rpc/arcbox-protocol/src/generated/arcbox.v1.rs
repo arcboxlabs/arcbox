@@ -1647,6 +1647,29 @@ pub mod web_service {
         }
     }
 }
+/// The daemon selects the profile; clients cannot supply a filesystem path.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PrepareLocalCaRotationRequest {
+    /// SHA-256 fingerprint of the current root observed by the client.
+    #[prost(string, tag = "1")]
+    pub expected_current_sha256: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalCaRotation {
+    /// Exact public certificates for login-session trust migration. No private keys.
+    #[prost(bytes = "vec", tag = "1")]
+    pub previous_certificate_der: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub candidate_certificate_der: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CommitLocalCaRotationRequest {
+    /// Fingerprints pin both sides of the prepared rotation.
+    #[prost(string, tag = "1")]
+    pub expected_old_sha256: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub expected_new_sha256: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LocalHttpsStatus {
     #[prost(enumeration = "local_https_status::TrustState", tag = "1")]

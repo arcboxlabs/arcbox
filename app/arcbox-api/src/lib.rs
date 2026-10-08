@@ -11,7 +11,7 @@ pub use arcbox_connect::v1::setup_status::Phase as SetupPhase;
 #[cfg(target_os = "macos")]
 pub use connect::MacosServiceImpl;
 pub use connect::SharedRuntime;
-pub use connect::{HttpsAccess, SetupState, SystemServiceImpl};
+pub use connect::{HttpsAccess, LocalCaCommand, LocalCaControl, SetupState, SystemServiceImpl};
 pub use connect::{
     IconServiceImpl, KubernetesServiceImpl, MachineServiceImpl, MigrationServiceImpl,
     SandboxFilesystemServiceImpl, SandboxProcessServiceImpl, SandboxServiceImpl,

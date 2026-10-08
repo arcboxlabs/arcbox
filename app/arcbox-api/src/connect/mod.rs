@@ -27,6 +27,7 @@ mod filesystem;
 mod https_access;
 mod icon;
 mod kubernetes;
+mod local_ca;
 mod machine;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -56,6 +57,7 @@ pub use filesystem::SandboxFilesystemServiceImpl;
 pub use https_access::HttpsAccess;
 pub use icon::IconServiceImpl;
 pub use kubernetes::KubernetesServiceImpl;
+pub use local_ca::{LocalCaCommand, LocalCaControl};
 pub use machine::MachineServiceImpl;
 #[cfg(target_os = "macos")]
 pub use macos::MacosServiceImpl;

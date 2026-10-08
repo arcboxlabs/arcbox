@@ -32,6 +32,8 @@ const UPDATE_BUFFER: usize = 64;
 pub struct SetupState {
     /// Browser requests are independent of startup readiness and native trust mutation.
     pub https_access: super::HttpsAccess,
+    /// The daemon's TLS worker owns CA mutations independently of VM readiness.
+    pub local_ca: super::LocalCaControl,
     /// Latest snapshot, for `GetSetupStatus` and for seeding a new stream.
     tx: Arc<watch::Sender<SetupStatus>>,
     /// Every update, in order.
@@ -56,6 +58,7 @@ impl SetupState {
         let (tx, _) = watch::channel(initial);
         Self {
             https_access: super::HttpsAccess::default(),
+            local_ca: super::LocalCaControl::default(),
             tx: Arc::new(tx),
             updates: broadcast::channel(UPDATE_BUFFER).0,
         }
@@ -250,6 +253,32 @@ fn device_debug_to_proto(device: arcbox_core::DeviceDebug) -> pb::VirtioDeviceDe
               Router rather than named by callers"
 )]
 impl pb::SystemService for SystemServiceImpl {
+    async fn prepare_local_ca_rotation(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, pb::PrepareLocalCaRotationRequest>,
+    ) -> ServiceResult<pb::LocalCaRotation> {
+        let rotation = self
+            .setup_state
+            .local_ca
+            .prepare(request.to_owned_message())
+            .await?;
+        Response::ok(rotation)
+    }
+
+    async fn commit_local_ca_rotation(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, pb::CommitLocalCaRotationRequest>,
+    ) -> ServiceResult<pb::Empty> {
+        let response = self
+            .setup_state
+            .local_ca
+            .commit(request.to_owned_message())
+            .await?;
+        Response::ok(response)
+    }
+
     async fn recover_storage(
         &self,
         _ctx: RequestContext,

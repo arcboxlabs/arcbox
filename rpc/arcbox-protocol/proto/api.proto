@@ -209,6 +209,13 @@ service SystemService {
     // Ends one prompt without changing native certificate trust.
     rpc AcknowledgeHttpsAccess(AcknowledgeHttpsAccessRequest) returns (Empty);
 
+    // Prepares a replacement root without changing native trust or the published root.
+    rpc PrepareLocalCaRotation(PrepareLocalCaRotationRequest) returns (LocalCaRotation);
+
+    // Publishes the prepared root after native trust migration has completed.
+    // Accepted mutations continue if the client disconnects.
+    rpc CommitLocalCaRotation(CommitLocalCaRotationRequest) returns (Empty);
+
     // Gets the System VM's current hypervisor backend.
     rpc GetSystemVmBackend(Empty) returns (SystemVmBackendInfo);
 
@@ -1215,6 +1222,24 @@ message WebService {
     // Upstream ports; these are not the ports in the public URLs.
     uint32 http_port = 7;
     uint32 https_port = 8;
+}
+
+// The daemon selects the profile; clients cannot supply a filesystem path.
+message PrepareLocalCaRotationRequest {
+    // SHA-256 fingerprint of the current root observed by the client.
+    string expected_current_sha256 = 1;
+}
+
+message LocalCaRotation {
+    // Exact public certificates for login-session trust migration. No private keys.
+    bytes previous_certificate_der = 1;
+    bytes candidate_certificate_der = 2;
+}
+
+message CommitLocalCaRotationRequest {
+    // Fingerprints pin both sides of the prepared rotation.
+    string expected_old_sha256 = 1;
+    string expected_new_sha256 = 2;
 }
 
 message LocalHttpsStatus {
