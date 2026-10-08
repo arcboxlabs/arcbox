@@ -178,3 +178,39 @@ async fn non_fatal_kill_keeps_host_networking() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert!(runtime.registered_container_ids().await.is_empty());
 }
+
+#[tokio::test]
+async fn start_and_restart_pin_identity_and_preserve_query() {
+    let routes = vec![
+        MockRoute {
+            method: "GET",
+            path: "/containers/reused-name/json",
+            status: 200,
+            body: INSPECT_WEB,
+        },
+        MockRoute {
+            method: "POST",
+            path: "/containers/abc123/start",
+            status: 409,
+            body: "canonical start reached",
+        },
+        MockRoute {
+            method: "POST",
+            path: "/containers/abc123/restart",
+            status: 409,
+            body: "canonical restart reached",
+        },
+    ];
+    let (router, _runtime, guest, _tmp) = router_with_mock_guest(routes).await;
+    for action in ["start", "restart"] {
+        let uri = format!("/v1.47/containers/reused-name/{action}?t=7&signal=SIGTERM");
+        let (status, _) = send(&router, "POST", &uri).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            guest.last_request_uri().await,
+            Some(format!(
+                "/v1.47/containers/abc123/{action}?t=7&signal=SIGTERM"
+            ))
+        );
+    }
+}

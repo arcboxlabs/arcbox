@@ -1,3 +1,6 @@
+mod guest;
+mod start;
+
 use super::{extract_container_id, proxy_to_system_vm, require_amd64_runtime};
 use crate::api::AppState;
 use crate::error::{DockerError, Result};
@@ -91,9 +94,14 @@ pub async fn start_container(
     OriginalUri(uri): OriginalUri,
     req: Request<Body>,
 ) -> Result<Response> {
-    let container_id = extract_container_id(&uri);
-    if let Some(id) = container_id.as_deref() {
-        tracing::Span::current().record("container_id", id);
+    let mut uri = uri;
+    let start = match extract_container_id(&uri) {
+        Some(id) => Some(start::Start::acquire(&state, &id).await?),
+        None => None,
+    };
+    if let Some(start) = &start {
+        tracing::Span::current().record("container_id", start.id.as_str());
+        uri = start.uri(&uri)?;
     }
 
     // Proxy start request to guest.
@@ -101,8 +109,8 @@ pub async fn start_container(
 
     // On success, inspect the container and set up port forwarding + DNS.
     if response.status().is_success() {
-        if let Some(ref id) = container_id {
-            setup_container_networking(&state, id).await;
+        if let Some(start) = &start {
+            setup_container_networking(&state, &start.id).await;
         }
     }
 
@@ -221,8 +229,14 @@ pub async fn restart_container(
     OriginalUri(uri): OriginalUri,
     req: Request<Body>,
 ) -> Result<Response> {
-    if let Some(id) = extract_container_id(&uri) {
-        tracing::Span::current().record("container_id", id.as_str());
+    let mut uri = uri;
+    let start = match extract_container_id(&uri) {
+        Some(id) => Some(start::Start::acquire(&state, &id).await?),
+        None => None,
+    };
+    if let Some(start) = &start {
+        tracing::Span::current().record("container_id", start.id.as_str());
+        uri = start.uri(&uri)?;
     }
     let response = proxy_to_system_vm(&state, &uri, req).await?;
 

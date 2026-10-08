@@ -31,6 +31,8 @@ docker run alpine echo hello
 docker images
 ```
 
+Start and restart requests resolve a canonical container ID before waiting for the per-container lock. ArcBox uses that ID through the guest operation, so a concurrent rename or name reuse cannot redirect the request.
+
 ## Architecture
 
 ```mermaid
