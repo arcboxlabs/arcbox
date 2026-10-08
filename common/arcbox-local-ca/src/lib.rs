@@ -3,7 +3,8 @@
 //! On macOS, the daemon creates a per-profile CA in the user's Keychain.
 //! Only the public certificate is published as `tls/ca.pem` on the guest
 //! share. The guest keeps leaf keys in memory and sends signed CSRs to
-//! the host. The privileged helper manages the public root's system trust.
+//! the host. The privileged helper stores the public root in the System Keychain.
+//! A login-session process requests Admin trust through native authorization.
 //!
 //! # Trust model
 //!
@@ -19,13 +20,14 @@
 //!   subtrees from the anchor), as do OpenSSL, NSS and Chrome, so a leaked
 //!   key impersonates only `*.arcbox.local` names, whose traffic reaches
 //!   containers the key holder could already replace.
-//! - **What trusting it means.** The helper validates [`PublicAuthority`]
-//!   before installing TLS-server-only Admin trust in the System Keychain.
-//!   The private key stays in the user's Keychain. Leaf keys stay in guest memory.
-//! - **Migration.** A new Keychain CA replaces the old shared CA. The
-//!   daemon removes the shared key and revokes the old root's user trust
-//!   before publishing the new root. The production daemon asks the helper
-//!   to revoke old Admin trust before publication and trust the new root.
+//! - **What trusting it means.** [`PublicAuthority`] validates the root before
+//!   storage or authorization. TLS-server-only Admin trust requires macOS
+//!   authorization in the login session. The private key stays in the user's
+//!   Keychain. Leaf keys stay in guest memory.
+//! - **Migration.** A new Keychain CA replaces the old shared CA. Before
+//!   publication, the caller must revoke the old root's User and Admin trust.
+//!   Publication retires the shared key. The production daemon waits for the
+//!   new root's TLS-server-only Admin trust before booting the VM.
 //! - **Persistence.** Removing `tls/ca.pem` does not rotate the Keychain
 //!   CA. The daemon republishes the same public certificate on startup.
 
@@ -37,6 +39,8 @@ mod keychain;
 mod migration;
 mod public;
 mod request;
+#[cfg(target_os = "macos")]
+mod trust;
 
 use arcbox_atomic_file::AtomicWriteError;
 pub use arcbox_constants::dns::LOCAL_DOMAIN;

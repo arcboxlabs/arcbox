@@ -1,4 +1,4 @@
-//! Validate the public root before a privileged helper changes system trust.
+//! Validate the public root before certificate storage or native trust changes.
 
 use arcbox_constants::dns::LOCAL_CA_COMMON_NAME;
 use x509_parser::{
