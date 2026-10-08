@@ -95,6 +95,7 @@ This file is only the non-obvious operational knowledge.
   `.../transport.rs` (async VZ/Linux) — the only thing keeping them equal is a
   comment; diverge and cross-backend frames silently mismatch.
 - Guest RPC decoding uses `vsock::read_framed` for the same allocation bound. Validate the complete V2 header and trace bytes inside that frame; reject short headers, out-of-frame trace lengths, and invalid UTF-8.
+- Use `BlockingVsockTransport::into_split` for independent blocking reader and writer workers. The receiver has no idle deadline. Retain a shutdown handle before splitting; cancel the socket and join both workers when the connection ends.
 - **`AgentClient::connect()` is a no-op on the blocking path** — the HV
   transport is connected at creation (`from_fd`); only the async path dials.
 - **Every proto in the dir is additive-only under the CI `buf breaking`

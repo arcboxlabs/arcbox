@@ -81,6 +81,8 @@ it from agent protocol v5 (v4 had the half-close without the window).
 
 `BlockingVsockTransport::shutdown_handle()` returns an owned `BlockingVsockShutdown` handle. Dropping the handle shuts down the connected socket and interrupts pending blocking I/O. Retain the handle for the full lifetime of a cancellable operation; aborting a `spawn_blocking` task alone does not interrupt the task's I/O.
 
+Use `BlockingVsockTransport::into_split()` for full-duplex blocking RPCs. Move the returned sender and receiver to separate workers. The sender uses a deadline per write; the receiver waits without an idle deadline and continues reading while the sender is idle. Obtain the shutdown handle before splitting, then drop the handle and join both workers when the connection ends. Both halves share the existing framing and 16 MiB receive bound.
+
 ## Port Notes
 
 - `1024` is the guest agent RPC port used by `arcbox-agent`.

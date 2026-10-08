@@ -28,6 +28,28 @@ pub struct BlockingVsockTransport {
     stream: Option<UnixStream>,
 }
 
+/// Sole writer of a split blocking transport, with a deadline for each send.
+pub struct BlockingVsockSender(UnixStream);
+
+impl BlockingVsockSender {
+    /// Sends bytes that already include the frame's length prefix.
+    pub fn send(&mut self, data: &[u8], deadline: Instant) -> Result<()> {
+        BlockingVsockTransport::send_to(&mut self.0, data, deadline)
+    }
+}
+
+/// Sole reader of a split blocking transport, with no idle deadline.
+pub struct BlockingVsockReceiver(UnixStream);
+
+impl BlockingVsockReceiver {
+    /// Receives one full frame, including its length prefix.
+    ///
+    /// Retain a shutdown handle to cancel an idle or incomplete read.
+    pub fn recv(&mut self) -> Result<Bytes> {
+        BlockingVsockTransport::recv_from(&mut self.0, None)
+    }
+}
+
 /// Cancels pending I/O on a blocking transport when the owner drops this handle.
 /// The duplicate socket keeps the file descriptor valid until cancellation.
 pub struct BlockingVsockShutdown(UnixStream);
@@ -53,6 +75,19 @@ impl BlockingVsockTransport {
     pub fn close(&mut self) {
         self.stream.take();
     }
+
+    /// Consumes the transport into independent blocking send and receive halves.
+    ///
+    /// Obtain a shutdown handle before splitting; cancellation must interrupt and join both workers.
+    ///
+    /// # Errors
+    /// Returns an error if the transport is closed or the socket cannot be duplicated.
+    pub fn into_split(self) -> Result<(BlockingVsockSender, BlockingVsockReceiver)> {
+        let reader = self.stream.ok_or(TransportError::NotConnected)?;
+        let writer = reader.try_clone()?;
+        Ok((BlockingVsockSender(writer), BlockingVsockReceiver(reader)))
+    }
+
     /// Creates a transport from a raw fd (takes ownership).
     ///
     /// # Safety
@@ -72,9 +107,22 @@ impl BlockingVsockTransport {
     /// `AgentClient::build_message`).
     pub fn send(&mut self, data: &[u8], deadline: Instant) -> Result<()> {
         let stream = self.stream.as_mut().ok_or(TransportError::NotConnected)?;
+        Self::send_to(stream, data, deadline)
+    }
+
+    /// Receives a framed message with a deadline.
+    ///
+    /// Returns the full frame (4-byte length prefix + payload), matching
+    /// the async transport's `read_framed` semantics.
+    pub fn recv(&mut self, deadline: Instant) -> Result<Bytes> {
+        let stream = self.stream.as_mut().ok_or(TransportError::NotConnected)?;
+        Self::recv_from(stream, Some(deadline))
+    }
+
+    fn send_to(stream: &mut UnixStream, data: &[u8], deadline: Instant) -> Result<()> {
         let mut offset = 0;
         while offset < data.len() {
-            Self::poll_ready(stream, libc::POLLOUT, deadline)?;
+            Self::poll_ready(stream, libc::POLLOUT, Some(deadline))?;
             match stream.write(&data[offset..]) {
                 Ok(0) => {
                     return Err(TransportError::io(io::Error::new(
@@ -91,14 +139,10 @@ impl BlockingVsockTransport {
         Ok(())
     }
 
-    /// Receives a framed message with a deadline.
-    ///
-    /// Returns the full frame (4-byte length prefix + payload), matching
-    /// the async transport's `read_framed` semantics.
-    pub fn recv(&mut self, deadline: Instant) -> Result<Bytes> {
+    fn recv_from(stream: &mut UnixStream, deadline: Option<Instant>) -> Result<Bytes> {
         // Read 4-byte length prefix.
         let mut len_buf = [0u8; 4];
-        self.read_exact(&mut len_buf, deadline)?;
+        Self::read_exact(stream, &mut len_buf, deadline)?;
         let len = u32::from_be_bytes(len_buf) as usize;
         if len > MAX_FRAME_SIZE {
             return Err(TransportError::Protocol(format!(
@@ -109,13 +153,15 @@ impl BlockingVsockTransport {
         // Read payload.
         let mut buf = vec![0u8; 4 + len];
         buf[..4].copy_from_slice(&len_buf);
-        self.read_exact(&mut buf[4..], deadline)?;
+        Self::read_exact(stream, &mut buf[4..], deadline)?;
         Ok(Bytes::from(buf))
     }
 
-    /// Reads exactly `buf.len()` bytes with a deadline.
-    fn read_exact(&mut self, buf: &mut [u8], deadline: Instant) -> Result<()> {
-        let stream = self.stream.as_mut().ok_or(TransportError::NotConnected)?;
+    fn read_exact(
+        stream: &mut UnixStream,
+        buf: &mut [u8],
+        deadline: Option<Instant>,
+    ) -> Result<()> {
         let mut offset = 0;
         while offset < buf.len() {
             Self::poll_ready(stream, libc::POLLIN, deadline)?;
@@ -135,16 +181,20 @@ impl BlockingVsockTransport {
         Ok(())
     }
 
-    /// Polls the fd for readiness with a deadline.
-    fn poll_ready(stream: &UnixStream, events: i16, deadline: Instant) -> Result<()> {
-        let now = Instant::now();
-        if now >= deadline {
-            return Err(TransportError::io(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "transport deadline exceeded",
-            )));
-        }
-        let timeout_ms = (deadline - now).as_millis().min(i32::MAX as u128) as i32;
+    fn poll_ready(stream: &UnixStream, events: i16, deadline: Option<Instant>) -> Result<()> {
+        let timeout_ms = if let Some(deadline) = deadline {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| {
+                    TransportError::io(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "transport deadline exceeded",
+                    ))
+                })?;
+            remaining.as_millis().min(i32::MAX as u128) as i32
+        } else {
+            -1
+        };
 
         let mut pfd = libc::pollfd {
             fd: stream.as_raw_fd(),
@@ -208,7 +258,123 @@ mod tests {
             client.shutdown_handle().err().unwrap().kind(),
             io::ErrorKind::NotConnected
         );
+        assert!(matches!(
+            client.into_split(),
+            Err(TransportError::NotConnected)
+        ));
         assert_eq!(guest.read(&mut [0]).unwrap(), 0);
+    }
+
+    #[test]
+    fn split_keeps_receiving_while_the_writer_is_idle() {
+        let (host, mut guest) = UnixStream::pair().unwrap();
+        guest
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        // SAFETY: host transfers ownership of its connected socket.
+        let transport = unsafe { BlockingVsockTransport::from_raw_fd(host.into_raw_fd()).unwrap() };
+        let _shutdown = transport.shutdown_handle().unwrap();
+        let (mut writer, mut reader) = transport.into_split().unwrap();
+        let (started, ready) = std::sync::mpsc::channel();
+        let (received, events) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            received.send(reader.recv()).unwrap();
+            received.send(reader.recv()).unwrap();
+        });
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        let frame = [0, 0, 0, 2, b'o', b'k'];
+        writer
+            .send(&frame, Instant::now() + Duration::from_secs(2))
+            .unwrap();
+        let mut request = [0; 6];
+        guest.read_exact(&mut request).unwrap();
+        assert_eq!(request, frame);
+        guest.write_all(&frame).unwrap();
+        assert_eq!(
+            events
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            frame
+        );
+        drop(guest);
+        assert!(
+            events
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .is_err()
+        );
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn shutdown_releases_an_idle_reader_and_a_saturated_writer() {
+        let (mut host, _guest) = UnixStream::pair().unwrap();
+        host.set_nonblocking(true).unwrap();
+        loop {
+            match host.write(&[0; 8192]) {
+                Ok(written) => assert!(written > 0),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("cannot fill socket: {error}"),
+            }
+        }
+        // SAFETY: host transfers ownership of its connected socket.
+        let transport = unsafe { BlockingVsockTransport::from_raw_fd(host.into_raw_fd()).unwrap() };
+        let shutdown = transport.shutdown_handle().unwrap();
+        let (mut writer, mut reader) = transport.into_split().unwrap();
+        let (started, ready) = std::sync::mpsc::channel();
+        let (finished, results) = std::sync::mpsc::channel();
+        let read_worker = std::thread::spawn({
+            let started = started.clone();
+            let finished = finished.clone();
+            move || {
+                started.send(()).unwrap();
+                finished.send(reader.recv().map(|_| ())).unwrap();
+            }
+        });
+        let write_worker = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            finished
+                .send(writer.send(&[1], Instant::now() + Duration::from_secs(5)))
+                .unwrap();
+        });
+        for _ in 0..2 {
+            ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+        drop(shutdown);
+        for _ in 0..2 {
+            let error = results
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap_err();
+            assert!(!error.to_string().contains("deadline"), "{error}");
+        }
+        read_worker.join().unwrap();
+        write_worker.join().unwrap();
+    }
+
+    #[test]
+    fn split_receiver_rejects_oversized_and_incomplete_frames() {
+        for (frame, oversized) in [
+            (u32::MAX.to_be_bytes().to_vec(), true),
+            (vec![0, 0, 0, 2, b'x'], false),
+        ] {
+            let (host, mut guest) = UnixStream::pair().unwrap();
+            // SAFETY: host transfers ownership of its connected socket.
+            let transport =
+                unsafe { BlockingVsockTransport::from_raw_fd(host.into_raw_fd()).unwrap() };
+            let (_writer, mut reader) = transport.into_split().unwrap();
+            guest.write_all(&frame).unwrap();
+            drop(guest);
+            let error = reader.recv().unwrap_err();
+            assert_eq!(
+                matches!(error, TransportError::Protocol(_)),
+                oversized,
+                "{error}"
+            );
+        }
     }
 
     #[test]
