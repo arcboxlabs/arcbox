@@ -89,7 +89,6 @@ impl Publisher {
         let (start, started) = oneshot::channel();
         let stop = CancellationToken::new();
         let manager = Arc::clone(&self.manager);
-        let domain = self.domain.to_string();
         let shutdown = self.shutdown.clone();
         let mut mirror = Box::pin(async {
             tokio::select! {
@@ -97,7 +96,7 @@ impl Publisher {
                 () = stop.cancelled() => Ok(()),
                 result = started => {
                     result.context("resolver lease was not acquired")?;
-                    crate::mdns::run(manager, &domain, stop.clone()).await.context("mDNS mirror failed")
+                    crate::mdns::run(manager, stop.clone()).await.context("mDNS mirror failed")
                 }
             }
         });

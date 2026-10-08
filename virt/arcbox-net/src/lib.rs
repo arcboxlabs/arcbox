@@ -149,7 +149,7 @@ pub struct NetworkManager {
     ip_allocator: RwLock<Option<nat::IpAllocator>>,
     /// DNS forwarder with local hostname resolution.
     dns_forwarder: dns::DnsForwarder,
-    /// Local-domain name changes, for mirrors of the DNS table.
+    /// Granted concrete `.local` changes for mDNS publication.
     dns_changes: broadcast::Sender<DnsChange>,
     /// Complete ownership changes, including claims without concrete records.
     dns_registry_epoch: watch::Sender<u64>,
@@ -376,7 +376,7 @@ impl NetworkManager {
         }
     }
 
-    /// Streams every later change to the names under the local domain.
+    /// Streams every later change to granted concrete `.local` names.
     ///
     /// Subscribe first, then read [`Self::local_dns_entries`], so no change
     /// falls between the two; on `Lagged` read the entries again.
@@ -393,7 +393,7 @@ impl NetworkManager {
         self.dns_registry_epoch.subscribe()
     }
 
-    /// Every `(fqdn, ip)` currently served under the local domain.
+    /// Every granted concrete `.local` record, including custom names and apexes.
     #[must_use]
     pub fn local_dns_entries(&self) -> Vec<(String, IpAddr)> {
         self.dns_forwarder.local_domain_entries()
@@ -419,13 +419,18 @@ mod tests {
     use super::*;
 
     fn register(manager: &NetworkManager, ip: IpAddr) {
+        let domain = manager.config().dns.local_domain.as_ref().unwrap();
         let claims = arcbox_dns::claims::Claim::generated(
-            "web.custom.test".parse().unwrap(),
+            format!("web.{domain}").parse().unwrap(),
             "web".into(),
             "test".into(),
         );
         let registry = manager.dns_registry();
         let mut registry = registry.write().unwrap();
+        registry.replace_instance_authorities(vec![arcbox_dns::registry::InstanceAuthority {
+            root: domain.parse().unwrap(),
+            target: arcbox_dns::registry::InstanceTarget::Current,
+        }]);
         registry
             .replace("web".into(), claims.into(), Some(ip))
             .unwrap();
@@ -435,7 +440,7 @@ mod tests {
     #[test]
     fn dns_changes_name_the_fqdn_from_construction_config() {
         let manager = NetworkManager::new(NetConfig {
-            dns: dns::DnsConfig::default().with_local_domain("custom.test"),
+            dns: dns::DnsConfig::default().with_local_domain("custom.local"),
             ..Default::default()
         });
         let mut changes = manager.subscribe_dns_changes();
@@ -445,13 +450,13 @@ mod tests {
         assert_eq!(
             changes.try_recv().unwrap(),
             DnsChange::Registered {
-                fqdn: "web.custom.test".into(),
+                fqdn: "web.custom.local".into(),
                 ip
             }
         );
         assert_eq!(
             manager.local_dns_entries(),
-            vec![("web.custom.test".to_owned(), ip)],
+            vec![("web.custom.local".to_owned(), ip)],
             "only the FQDN entry is listed, not the bare hostname"
         );
 
@@ -464,7 +469,7 @@ mod tests {
         assert_eq!(
             changes.try_recv().unwrap(),
             DnsChange::Removed {
-                fqdn: "web.custom.test".into()
+                fqdn: "web.custom.local".into()
             }
         );
 

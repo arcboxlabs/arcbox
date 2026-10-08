@@ -214,6 +214,14 @@ mod tests {
             "Config": {"Labels": {"dev.arcbox.domains": "custom.local,*.api.local"}},
             "NetworkSettings": {"Networks": {"bridge": {"IPAddress": "10.0.2.3"}}}
         });
+        runtime
+            .dns_registry
+            .write()
+            .unwrap()
+            .replace_instance_authorities(vec![arcbox_dns::registry::InstanceAuthority {
+                root: "custom.local".parse().unwrap(),
+                target: arcbox_dns::registry::InstanceTarget::Current,
+            }]);
         let metadata = arcbox_dns::container::ContainerMetadata::from_inspect(&inspect).unwrap();
         runtime.register_container_dns(&metadata).await;
         let revision = runtime

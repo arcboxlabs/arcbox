@@ -1,11 +1,11 @@
-//! Registers the daemon's `*.<domain>` names with mDNSResponder.
+//! Registers the daemon's granted concrete `.local` names with mDNSResponder.
 //!
-//! The domain ends in `.local`, which RFC 6762 gives to mDNS, so macOS
-//! resolves it through mDNSResponder. The unicast server on 127.0.0.1 still
+//! RFC 6762 assigns `.local` to mDNS, so macOS resolves these names
+//! through mDNSResponder. The unicast server on 127.0.0.1 still
 //! answers through `/etc/resolver/<domain>`, and stays the one that makes a
 //! miss fail fast; this mirror adds the same names as host-local Bonjour
 //! records so they resolve on a Mac that has no resolver file, as
-//! OrbStack's `orb.local` names do. Both answer from the same table.
+//! OrbStack's `orb.local` names do. Both derive ownership from the Registry.
 //!
 //! Every Bonjour operation needs Local Network access (TN3179). A `launchd`
 //! agent inherits its app's privilege and the user is asked once; a daemon
@@ -27,7 +27,6 @@ use std::time::Duration;
 use arcbox_net::NetworkManager;
 use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
-use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -38,14 +37,6 @@ use mirror::{Event, Mirror, Registrar};
 /// Local Network access in System Settings at any time, and mDNSResponder
 /// does not revisit a refused registration on its own.
 const RETRY_DENIED: Duration = Duration::from_secs(60);
-
-/// RFC 6762: `.local` is the mDNS domain. DNS names compare case-insensitively.
-fn is_mdns_domain(domain: &str) -> bool {
-    domain
-        .rsplit('.')
-        .next()
-        .is_some_and(|tld| tld.eq_ignore_ascii_case("local"))
-}
 
 struct Fd(RawFd);
 
@@ -70,14 +61,10 @@ impl Registrar for Connection {
 /// Runs the resolver owner's mirror until shutdown; the caller retains this future.
 pub async fn run(
     network_manager: Arc<NetworkManager>,
-    domain: &str,
     shutdown: CancellationToken,
 ) -> io::Result<()> {
-    if !is_mdns_domain(domain) {
-        return Ok(());
-    }
     // Subscribe before the snapshot so no change falls between the two.
-    let mut changes = network_manager.subscribe_dns_changes();
+    let mut changes = network_manager.subscribe_dns_registry();
     let connection = Connection::open()?;
     let fd = connection.fd();
     let mut mirror = Mirror::new(connection);
@@ -99,11 +86,11 @@ pub async fn run(
             }
         };
         tokio::select! {
+            biased;
             () = shutdown.cancelled() => break,
-            change = changes.recv() => match change {
-                Ok(change) => mirror.apply(change),
-                Err(RecvError::Lagged(_)) => mirror.resync(network_manager.local_dns_entries()),
-                Err(RecvError::Closed) => break,
+            change = changes.changed() => match change {
+                Ok(()) => mirror.resync(network_manager.local_dns_entries()),
+                Err(_) => break,
             },
             guard = socket.readable() => {
                 let mut guard = guard?;
@@ -119,18 +106,18 @@ pub async fn run(
                         Some(Event::Confirmed { fqdn }) => {
                             if !announced {
                                 announced = true;
-                                info!("mDNSResponder serves this host's *.{domain} names");
+                                info!("mDNSResponder serves this instance's granted .local names");
                             }
                             debug!(fqdn, "mDNS record live");
                         }
                         Some(Event::Denied) => warn!(
                             retry_secs = RETRY_DENIED.as_secs(),
-                            "mDNSResponder refused the *.{domain} records: this process has no \
+                            "mDNSResponder refused the granted .local records: this process has no \
                              Local Network access (System Settings › Privacy & Security › Local \
-                             Network); names resolve through /etc/resolver/{domain} meanwhile"
+                             Network); names resolve through the leased resolver files meanwhile"
                         ),
                         Some(Event::Recovered) => {
-                            info!("mDNSResponder accepts the *.{domain} records again");
+                            info!("mDNSResponder accepts the granted .local records again");
                         }
                         Some(Event::Refused { fqdn, error }) => {
                             warn!(fqdn, error, "mDNSResponder refused a record");
@@ -143,20 +130,4 @@ pub async fn run(
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_mdns_domain;
-
-    #[test]
-    fn only_local_domains_are_announced() {
-        assert!(is_mdns_domain("arcbox.local"));
-        assert!(is_mdns_domain("worktree.dev.arcbox.local"));
-        assert!(is_mdns_domain("ARCBOX.LOCAL"));
-        assert!(is_mdns_domain("local"));
-        assert!(!is_mdns_domain("arcbox.test"));
-        assert!(!is_mdns_domain("notlocal"));
-        assert!(!is_mdns_domain("local.example"));
-    }
 }

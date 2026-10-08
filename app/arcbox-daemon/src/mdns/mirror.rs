@@ -10,8 +10,6 @@ use std::hash::Hash;
 use std::io;
 use std::net::IpAddr;
 
-use arcbox_net::DnsChange;
-
 use super::dns_sd::ERR_POLICY_DENIED;
 
 /// Where records are registered. Registration is asynchronous: the
@@ -82,19 +80,6 @@ impl<R: Registrar> Mirror<R> {
     /// Replaces the desired state with a full snapshot of the table.
     pub fn resync(&mut self, entries: Vec<(String, IpAddr)>) {
         self.desired = entries.into_iter().collect();
-        self.reconcile();
-    }
-
-    /// Applies one change from the table.
-    pub fn apply(&mut self, change: DnsChange) {
-        match change {
-            DnsChange::Registered { fqdn, ip } => {
-                self.desired.insert(fqdn, ip);
-            }
-            DnsChange::Removed { fqdn } => {
-                self.desired.remove(&fqdn);
-            }
-        }
         self.reconcile();
     }
 
@@ -239,9 +224,7 @@ mod tests {
             ]
         );
 
-        mirror.apply(DnsChange::Removed {
-            fqdn: "a.arcbox.local".into(),
-        });
+        mirror.resync(vec![("b.arcbox.local".into(), ip(3))]);
         assert_eq!(mirror.registrar.removed, vec![1]);
         assert_eq!(
             registered(&mirror).len(),
@@ -254,17 +237,11 @@ mod tests {
     fn a_changed_address_replaces_the_record() {
         let mut mirror = Mirror::new(FakeRegistrar::default());
         mirror.resync(vec![("web.arcbox.local".into(), ip(2))]);
-        mirror.apply(DnsChange::Registered {
-            fqdn: "web.arcbox.local".into(),
-            ip: ip(9),
-        });
+        mirror.resync(vec![("web.arcbox.local".into(), ip(9))]);
         assert_eq!(mirror.registrar.removed, vec![1]);
         assert_eq!(registered(&mirror)[1], ("web.arcbox.local".into(), ip(9)));
 
-        mirror.apply(DnsChange::Registered {
-            fqdn: "web.arcbox.local".into(),
-            ip: ip(9),
-        });
+        mirror.resync(vec![("web.arcbox.local".into(), ip(9))]);
         assert_eq!(
             registered(&mirror).len(),
             2,
@@ -286,10 +263,10 @@ mod tests {
         );
         assert!(mirror.is_denied());
 
-        mirror.apply(DnsChange::Registered {
-            fqdn: "b.arcbox.local".into(),
-            ip: ip(3),
-        });
+        mirror.resync(vec![
+            ("a.arcbox.local".into(), ip(2)),
+            ("b.arcbox.local".into(), ip(3)),
+        ]);
         assert_eq!(
             registered(&mirror).len(),
             1,
@@ -333,20 +310,14 @@ mod tests {
             })
         );
 
-        mirror.apply(DnsChange::Registered {
-            fqdn: "dup.arcbox.local".into(),
-            ip: ip(2),
-        });
+        mirror.resync(vec![("dup.arcbox.local".into(), ip(2))]);
         assert_eq!(
             registered(&mirror).len(),
             1,
             "the refused address is not retried"
         );
 
-        mirror.apply(DnsChange::Registered {
-            fqdn: "dup.arcbox.local".into(),
-            ip: ip(5),
-        });
+        mirror.resync(vec![("dup.arcbox.local".into(), ip(5))]);
         assert_eq!(registered(&mirror)[1], ("dup.arcbox.local".into(), ip(5)));
     }
 

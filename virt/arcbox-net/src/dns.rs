@@ -216,23 +216,15 @@ impl DnsForwarder {
         &self.config
     }
 
-    /// Every `(fqdn, ip)` the table holds under the local domain.
+    /// Every granted concrete `.local` record in the mDNS projection.
     #[must_use]
     pub fn local_domain_entries(&self) -> Vec<(String, IpAddr)> {
-        let Some(domain) = self.config.local_domain.as_ref() else {
-            return Vec::new();
-        };
-        let suffix = format!(".{domain}");
-        self.local_hosts.read().map_or_else(
-            |_| Vec::new(),
-            |hosts| {
-                hosts
-                    .iter()
-                    .filter(|(name, _)| name.ends_with(&suffix))
-                    .map(|(name, ip)| (name.clone(), *ip))
-                    .collect()
-            },
-        )
+        self.local_hosts
+            .read()
+            .expect("local DNS hosts lock poisoned")
+            .iter()
+            .map(|(name, ip)| (name.clone(), *ip))
+            .collect()
     }
 
     /// Resolves a local hostname.

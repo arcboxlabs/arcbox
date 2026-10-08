@@ -10,11 +10,11 @@ use arcbox_dns::{
 use crate::{DnsChange, NetworkManager};
 
 impl NetworkManager {
-    /// Replaces concrete DNS records with the registry's selected exact claims.
+    /// Replaces mDNS records with the registry's granted exact `.local` claims.
     ///
     /// Hold the registry mutation lock through this call. Wildcards remain in the registry;
     /// conflicts and unavailable owners produce no concrete record. Names are already canonical
-    /// and never receive another suffix. mDNS changes cover only the configured local domain.
+    /// and never receive another suffix. The configured suffix does not limit custom names.
     /// The latest Registry epoch is published even when no concrete records change.
     pub fn replace_dns_projection(&self, registry: &Registry) {
         let mut projected = HashMap::new();
@@ -24,7 +24,19 @@ impl NetworkManager {
                 let NamePattern::Exact(name) = candidate.pattern() else {
                     continue;
                 };
-                if let Lookup::Matched { claim, address, .. } = registry.resolve(name)
+                if name
+                    .as_str()
+                    .rsplit_once('.')
+                    .is_none_or(|(_, tld)| tld != "local")
+                {
+                    continue;
+                }
+                if let Lookup::Matched {
+                    claim,
+                    address,
+                    publishable: true,
+                    ..
+                } = registry.resolve(name)
                     && matches!(claim.pattern(), NamePattern::Exact(_))
                 {
                     projected.insert(name.as_str().to_owned(), address);
@@ -33,24 +45,18 @@ impl NetworkManager {
         }
 
         let forwarder = &self.dns_forwarder;
-        let suffix = forwarder
-            .config()
-            .local_domain
-            .as_ref()
-            .map(|domain| format!(".{domain}"));
-        let announced = |name: &str| suffix.as_ref().is_some_and(|suffix| name.ends_with(suffix));
         let table = forwarder.local_hosts_table();
         let mut current = table.write().expect("local DNS hosts lock poisoned");
         let previous = std::mem::replace(&mut *current, projected);
         for name in previous.keys() {
-            if announced(name) && !current.contains_key(name) {
+            if !current.contains_key(name) {
                 let _ = self
                     .dns_changes
                     .send(DnsChange::Removed { fqdn: name.clone() });
             }
         }
         for (name, ip) in current.iter() {
-            if announced(name) && previous.get(name) != Some(ip) {
+            if previous.get(name) != Some(ip) {
                 let _ = self.dns_changes.send(DnsChange::Registered {
                     fqdn: name.clone(),
                     ip: *ip,
@@ -71,21 +77,36 @@ impl NetworkManager {
 mod tests {
     use std::net::IpAddr;
 
-    use arcbox_dns::claims::{Boundary, Claim};
+    use arcbox_dns::{
+        claims::{Boundary, Claim},
+        registry::{InstanceAuthority, InstanceTarget},
+    };
 
     use super::*;
     use crate::NetConfig;
 
     fn claim(owner: &str, name: &str) -> Claim {
-        Claim::exclusive(
-            NamePattern::parse_custom(name).unwrap(),
-            owner.into(),
-            "containers".into(),
-        )
+        let pattern = match name.strip_prefix("*.") {
+            Some(root) => NamePattern::Descendants(root.parse().unwrap()),
+            None => NamePattern::Exact(name.parse().unwrap()),
+        };
+        Claim::exclusive(pattern, owner.into(), "containers".into())
     }
 
     fn ip(last: u8) -> IpAddr {
         std::net::Ipv4Addr::new(10, 0, 2, last).into()
+    }
+
+    fn grant(registry: &mut Registry, roots: &[&str]) {
+        registry.replace_instance_authorities(
+            roots
+                .iter()
+                .map(|root| InstanceAuthority {
+                    root: root.parse().unwrap(),
+                    target: InstanceTarget::Current,
+                })
+                .collect(),
+        );
     }
 
     #[test]
@@ -139,6 +160,7 @@ mod tests {
                 instance: "remote".into(),
             },
         ]);
+        grant(&mut registry, &["arcbox.local", "example.local"]);
         registry
             .replace(
                 "first".into(),
@@ -181,8 +203,14 @@ mod tests {
             ])
         );
         assert_eq!(
-            manager.local_dns_entries(),
-            vec![("web.arcbox.local".into(), ip(2))]
+            manager
+                .local_dns_entries()
+                .into_iter()
+                .collect::<HashMap<_, _>>(),
+            HashMap::from([
+                ("web.arcbox.local".into(), ip(2)),
+                ("site.example.local".into(), ip(2))
+            ])
         );
     }
 
@@ -191,9 +219,10 @@ mod tests {
         let manager = NetworkManager::new(NetConfig::default());
         let mut changes = manager.subscribe_dns_changes();
         let mut registry = Registry::default();
+        grant(&mut registry, &["arcbox.local"]);
         let claims = vec![
             claim("web", "web.arcbox.local"),
-            claim("web", "web.example.local"),
+            claim("web", "web.example.test"),
         ];
         registry
             .replace("web".into(), claims.clone(), Some(ip(2)))
@@ -244,6 +273,7 @@ mod tests {
         let manager = NetworkManager::new(NetConfig::default());
         let mut changes = manager.subscribe_dns_changes();
         let mut registry = Registry::default();
+        grant(&mut registry, &["arcbox.local"]);
         let name = "web.project.arcbox.local";
         for (owner, address) in [("z", ip(3)), ("a", ip(2))] {
             let claims = Claim::compose_service(
@@ -299,6 +329,93 @@ mod tests {
                 ip: ip(3)
             }
         );
+        assert!(changes.try_recv().is_err());
+    }
+
+    #[test]
+    fn grants_control_custom_local_names_and_apex_independently_of_configured_suffix() {
+        let manager = NetworkManager::new(NetConfig {
+            dns: crate::dns::DnsConfig::default().with_local_domain("containers.test"),
+            ..Default::default()
+        });
+        let mut registry = Registry::default();
+        let claims = [
+            "custom.local",
+            "deep.custom.local",
+            "*.wild.local",
+            "web.containers.test",
+        ]
+        .into_iter()
+        .map(|name| claim("web", name))
+        .collect();
+        registry.replace("web".into(), claims, Some(ip(2))).unwrap();
+        let mut changes = manager.subscribe_dns_changes();
+        manager.replace_dns_projection(&registry);
+        assert_eq!(manager.local_dns_entries(), [] as [(String, IpAddr); 0]);
+        assert!(changes.try_recv().is_err());
+
+        for target in [
+            InstanceTarget::Current,
+            InstanceTarget::Other { port: 5554 },
+            InstanceTarget::Unavailable,
+            InstanceTarget::Current,
+        ] {
+            registry.replace_instance_authorities(vec![
+                InstanceAuthority {
+                    root: "containers.test".parse().unwrap(),
+                    target: InstanceTarget::Current,
+                },
+                InstanceAuthority {
+                    root: "custom.local".parse().unwrap(),
+                    target,
+                },
+                InstanceAuthority {
+                    root: "wild.local".parse().unwrap(),
+                    target: InstanceTarget::Current,
+                },
+            ]);
+            manager.replace_dns_projection(&registry);
+            let mut events = Vec::new();
+            while let Ok(event) = changes.try_recv() {
+                events.push(event);
+            }
+            let expected = if target == InstanceTarget::Current {
+                vec![
+                    ("custom.local".into(), ip(2)),
+                    ("deep.custom.local".into(), ip(2)),
+                ]
+            } else {
+                vec![]
+            };
+            let mut actual = manager.local_dns_entries();
+            actual.sort();
+            assert_eq!(actual, expected);
+            assert_eq!(
+                events.len(),
+                if target == InstanceTarget::Unavailable {
+                    0
+                } else {
+                    2
+                }
+            );
+            for event in events {
+                assert_eq!(
+                    matches!(event, DnsChange::Registered { .. }),
+                    target == InstanceTarget::Current
+                );
+            }
+        }
+        grant(&mut registry, &[]);
+        manager.replace_dns_projection(&registry);
+        assert_eq!(manager.local_dns_entries(), [] as [(String, IpAddr); 0]);
+        assert!(matches!(
+            changes.try_recv().unwrap(),
+            DnsChange::Removed { .. }
+        ));
+        assert!(matches!(
+            changes.try_recv().unwrap(),
+            DnsChange::Removed { .. }
+        ));
         assert!(changes.try_recv().is_err());
     }
 }

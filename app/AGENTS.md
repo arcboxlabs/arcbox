@@ -120,13 +120,7 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   Linux resolvers, which have no mDNS leg.
 - Keep resolver publication in `ResolverService`, shared through `StartupHandles` and `DaemonContext`. Shutdown and startup cancellation must join the retained task before stopping Runtime. A cancelled join must leave the task in the shared slot. Recovery separates container snapshot replay (`recovery/container_network.rs`) from Docker CLI installation (`recovery/docker_tools.rs`).
 - `arcbox-daemon/src/resolver_service/publication.rs` owns the helper connection, complete resolver lease, authority watch, and mDNS mirror. Before closing the connection, mark DNS authority unavailable, clear setup readiness, then cancel and join the mirror. Reconnect with a fresh transport and the same service nonce.
-- **The resolver-domain owner also registers its names with mDNSResponder**
-  (`arcbox-daemon/src/mdns/`, started from `recovery::run` under the same
-  `owns_dns_resolver` predicate that installs `/etc/resolver/<domain>`, and
-  only for a domain ending in `.local`). Unicast and Bonjour answer from
-  one Registry: `NetworkManager::subscribe_dns_changes` streams concrete
-  changes from `replace_dns_projection` as a `DnsChange`, and
-  `local_dns_entries` is the snapshot a lagging subscriber resyncs from. The
+- **The resolver lease owner registers granted concrete `.local` names with mDNSResponder** (`arcbox-daemon/src/mdns/`). Unicast and Bonjour derive ownership from one Registry. Subscribe to `NetworkManager::subscribe_dns_registry` before reading `local_dns_entries`; resync the latest complete projection on each notification. Do not replay record deltas after reading a newer snapshot. Custom `.local` claims participate independently of the configured suffix. The
   records are `kDNSServiceFlagsUnique` on the **loopback interface**
   (`if_nametoindex("lo0")`): nothing leaves the host, and mDNSResponder
   answers a query for a type the name lacks (AAAA for an IPv4 name) at once,
