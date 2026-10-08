@@ -232,7 +232,6 @@ arcbox-docker-tools = { version = "0.8.2", path = "app/arcbox-docker-tools" } # 
 
 # External crates
 arcbox-boot = { version = "0.8.0", features = ["download"] }
-macos-resolver = "0.2.0"
 
 fc-sdk = "0.2.3"
 

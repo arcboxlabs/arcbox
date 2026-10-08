@@ -386,7 +386,7 @@ async fn add_macos_checks(checks: &mut Vec<HealthCheck>) {
             "DNS resolver",
             dns.resolver_error
                 .unwrap_or_else(|| format!("missing {}", dns.resolver_path)),
-            "Run `sudo abctl dns install`.",
+            "Start ArcBox and complete helper setup. Inspect DNS with `abctl dns status`.",
         )
     });
     checks.push(match &dns.health {

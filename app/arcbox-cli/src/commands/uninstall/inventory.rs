@@ -20,8 +20,7 @@ use arcbox_constants::paths::{
 };
 use arcbox_helper::validate::SocketTarget;
 
-/// Marker prefix shared by the resolver files `abctl dns install`
-/// (`# managed by arcbox`) and the helper (`# managed by arcbox-helper`) write.
+/// Marker prefix for historical CLI files and current helper lease files.
 const RESOLVER_MARKER: &str = "# managed by arcbox";
 
 /// Marker on the one `/etc/hosts` line the helper manages.

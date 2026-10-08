@@ -53,7 +53,6 @@ arcbox-local-ca.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 hickory-proto = { version = "0.26.1", default-features = false, features = ["std"] }
-macos-resolver = { workspace = true }
 
 [features]
 default = []

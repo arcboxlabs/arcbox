@@ -10,8 +10,6 @@ use std::time::Instant;
 use anyhow::Result;
 use arcbox_api::SetupPhase;
 use arcbox_core::Runtime;
-#[cfg(target_os = "macos")]
-use macos_resolver::FileResolver;
 use tracing::{info, warn};
 
 use crate::context::{ControlPlane, DaemonContext, EarlyContext, ServiceHandles, StartupHandles};
@@ -199,8 +197,6 @@ impl RuntimeServicesStarted {
     /// Marks startup complete and returns handles for the shutdown loop.
     pub async fn mark_ready(self) -> Result<ReadyDaemon> {
         record_startup_phase("mark_ready", async {
-            #[cfg(target_os = "macos")]
-            check_resolver_installed(self.ctx.dns_domain.as_str());
             self.ctx
                 .setup_state
                 .set_phase(SetupPhase::Ready, "Daemon ready");
@@ -230,14 +226,6 @@ impl RuntimeServicesStarted {
             ctx: self.ctx,
             handles: self.handles,
         })
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn check_resolver_installed(domain: &str) {
-    let resolver = FileResolver::new("arcbox");
-    if !resolver.is_registered(domain) {
-        println!("Hint: Run 'sudo abctl dns install' to enable *.{domain} DNS resolution.");
     }
 }
 

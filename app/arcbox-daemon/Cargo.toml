@@ -55,7 +55,6 @@ uuid.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 arcbox-route.workspace = true
-macos-resolver = { workspace = true }
 security-framework = "3.7.0"
 
 [features]

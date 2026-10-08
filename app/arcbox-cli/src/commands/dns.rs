@@ -1,36 +1,24 @@
-//! DNS resolver management commands.
+//! Read-only DNS resolver and reachability diagnostics.
 //!
-//! Manages `/etc/resolver/arcbox.local` for `*.arcbox.local` DNS resolution.
-//! The resolver file points at `127.0.0.1:<port>`, where the ArcBox daemon
-//! serves DNS: 5553 unless that port was taken at startup, in which case the
-//! daemon publishes the OS-allocated port it fell back to through this file.
-//!
-//! - `abctl dns install`   — create resolver file (requires sudo)
-//! - `abctl dns uninstall` — remove resolver file (requires sudo)
-//! - `abctl dns status`    — check resolver file and DNS reachability
+//! The daemon publishes connection-bound resolver files through the helper.
+//! `abctl dns status` reads the published port and probes DNS reachability.
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use arcbox_constants::paths::{ArcboxProfile, HostLayout};
 use clap::Subcommand;
 use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{Name, RecordType};
-use macos_resolver::{FileResolver, ResolverConfig, to_env_prefix};
 use serde::Serialize;
 use tokio::net::UdpSocket;
 use tokio::process::Command;
 use tokio::time::timeout;
 
 use super::OutputFormat;
-
-/// Prefix for marker comment and environment variable namespace.
-///
-/// - Marker: `# managed by arcbox`
-/// - Env vars: `ARCBOX_RESOLVER_DIR`, `ARCBOX_DNS_PORT`, `ARCBOX_DNS_DOMAIN`
-const PREFIX: &str = "arcbox";
 
 /// Default domain suffix (overridable via `ARCBOX_DNS_DOMAIN`).
 const DEFAULT_DNS_DOMAIN: &str = "arcbox.local";
@@ -97,31 +85,22 @@ impl SystemResolverHealth {
     }
 }
 
-/// Reads the DNS port from `{PREFIX}_DNS_PORT` or falls back to the
-/// profile's default.
+/// Reads `ARCBOX_DNS_PORT` or uses the profile default.
 fn dns_port() -> u16 {
-    let key = format!("{}_DNS_PORT", to_env_prefix(PREFIX));
-    std::env::var(key)
+    std::env::var("ARCBOX_DNS_PORT")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or_else(|| ArcboxProfile::from_env_or_default().dns_host_port())
 }
 
-/// Reads the DNS domain from `{PREFIX}_DNS_DOMAIN` or falls back to the default.
+/// Reads `ARCBOX_DNS_DOMAIN` or uses the default domain.
 fn dns_domain() -> String {
-    let key = format!("{}_DNS_DOMAIN", to_env_prefix(PREFIX));
-    std::env::var(key).unwrap_or_else(|_| DEFAULT_DNS_DOMAIN.to_string())
+    std::env::var("ARCBOX_DNS_DOMAIN").unwrap_or_else(|_| DEFAULT_DNS_DOMAIN.to_string())
 }
 
-/// DNS resolver management commands.
+/// Read-only DNS diagnostics.
 #[derive(Debug, Subcommand)]
 pub enum DnsCommands {
-    /// Install the macOS DNS resolver for *.arcbox.local
-    Install,
-
-    /// Remove the macOS DNS resolver for *.arcbox.local
-    Uninstall,
-
     /// Check DNS resolver status
     Status,
 }
@@ -131,8 +110,6 @@ pub async fn execute(cmd: DnsCommands, format: OutputFormat) -> Result<()> {
     validate_dns_scope(ArcboxProfile::from_env_or_default())?;
 
     match cmd {
-        DnsCommands::Install => execute_install().await,
-        DnsCommands::Uninstall => execute_uninstall().await,
         DnsCommands::Status => execute_status(format).await,
     }
 }
@@ -144,54 +121,6 @@ fn validate_dns_scope(profile: ArcboxProfile) -> Result<()> {
         );
     }
     Ok(())
-}
-
-/// Creates `/etc/resolver/<domain>` as a permanent entry.
-async fn execute_install() -> Result<()> {
-    let resolver = FileResolver::new(PREFIX);
-    let domain = dns_domain();
-    let port = dns_port();
-    let config = ResolverConfig::new(&domain, "127.0.0.1", port);
-
-    match resolver.register_permanent(&config) {
-        Ok(()) => {
-            println!("Installed DNS resolver: /etc/resolver/{domain}");
-            println!("  nameserver 127.0.0.1");
-            println!("  port       {port}");
-            println!();
-            println!("All *.{domain} queries will be routed to the ArcBox DNS server.");
-            Ok(())
-        }
-        Err(ref e) if e.is_permission_denied() => {
-            eprintln!("Error: permission denied writing to /etc/resolver/");
-            eprintln!();
-            eprintln!("Run with sudo:");
-            eprintln!("  sudo abctl dns install");
-            std::process::exit(1);
-        }
-        Err(e) => Err(e).context("Failed to install DNS resolver"),
-    }
-}
-
-/// Removes `/etc/resolver/<domain>`.
-async fn execute_uninstall() -> Result<()> {
-    let resolver = FileResolver::new(PREFIX);
-    let domain = dns_domain();
-
-    match resolver.unregister(&domain) {
-        Ok(()) => {
-            println!("Removed DNS resolver: /etc/resolver/{domain}");
-            Ok(())
-        }
-        Err(ref e) if e.is_permission_denied() => {
-            eprintln!("Error: permission denied removing /etc/resolver/{domain}");
-            eprintln!();
-            eprintln!("Run with sudo:");
-            eprintln!("  sudo abctl dns uninstall");
-            std::process::exit(1);
-        }
-        Err(e) => Err(e).context("Failed to uninstall DNS resolver"),
-    }
 }
 
 async fn execute_status(format: OutputFormat) -> Result<()> {
@@ -211,33 +140,28 @@ async fn execute_status(format: OutputFormat) -> Result<()> {
 }
 
 pub(super) async fn inspect_status() -> DnsStatus {
-    let resolver = FileResolver::new(PREFIX);
     let domain = dns_domain();
-    let resolver_path = resolver.resolver_dir().join(&domain);
-    // The daemon may have fallen back from its default port, so the resolver
-    // file, which is where macOS sends the queries, names the port to probe.
-    let (resolver_installed, resolver_error, port) = if !resolver.is_registered(&domain) {
-        (
-            false,
-            Some("resolver file is missing or not managed by ArcBox".to_owned()),
-            dns_port(),
-        )
-    } else {
-        match std::fs::read_to_string(&resolver_path) {
-            Ok(content) => match resolver_port(&content) {
-                Some(port) => (true, None, port),
-                None => (
-                    false,
-                    Some("expected nameserver 127.0.0.1 and one port directive".to_owned()),
-                    dns_port(),
-                ),
-            },
-            Err(error) => (
+    let resolver_path = std::env::var("ARCBOX_RESOLVER_DIR")
+        .map_or_else(|_| PathBuf::from("/etc/resolver"), PathBuf::from)
+        .join(&domain);
+    // Probe the published port, which may differ from the startup default.
+    let (resolver_installed, resolver_error, port) = match std::fs::read_to_string(&resolver_path) {
+        Ok(content) => match resolver_port(&content) {
+            Some(port) => (true, None, port),
+            None => (
                 false,
-                Some(format!("failed to read resolver file: {error}")),
+                Some(
+                    "expected an ArcBox marker, nameserver 127.0.0.1, and one port directive"
+                        .to_owned(),
+                ),
                 dns_port(),
             ),
-        }
+        },
+        Err(error) => (
+            false,
+            Some(format!("failed to read resolver file: {error}")),
+            dns_port(),
+        ),
     };
     let server: SocketAddr = (Ipv4Addr::LOCALHOST, port).into();
     let query_name = format!("host.{domain}");
@@ -309,10 +233,7 @@ fn print_status(status: &DnsStatus) {
 
     if !status.resolver_installed {
         println!();
-        println!(
-            "Run 'sudo abctl dns install' to enable *.{} DNS resolution.",
-            status.domain
-        );
+        println!("Start ArcBox and complete helper setup to enable DNS resolution.");
     }
 
     if matches!(&status.health, DnsHealth::DaemonDown) {
@@ -322,7 +243,9 @@ fn print_status(status: &DnsStatus) {
 
 /// The port a managed resolver file sends `127.0.0.1` queries to.
 fn resolver_port(content: &str) -> Option<u16> {
-    if !has_directive(content, "nameserver", "127.0.0.1") {
+    if !content.contains("# managed by arcbox")
+        || !has_directive(content, "nameserver", "127.0.0.1")
+    {
         return None;
     }
     directive_value(content, "port")?.parse().ok()
@@ -547,6 +470,13 @@ mod tests {
 
     #[test]
     fn resolver_file_names_the_port_to_probe() {
+        assert_eq!(resolver_port("nameserver 127.0.0.1\nport 5553\n"), None);
+        assert_eq!(
+            resolver_port(
+                "# managed by arcbox-helper\nnameserver 127.0.0.1\nport 5553\n# lease 501 production 01 1 1\n"
+            ),
+            Some(5553)
+        );
         assert_eq!(
             resolver_port("# managed by arcbox\nnameserver 127.0.0.1\nport 5553\n"),
             Some(5553)
