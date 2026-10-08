@@ -12,6 +12,7 @@ mod cancellation;
 mod guest_trust;
 mod instance_authority;
 mod machine_exec;
+mod retained_session;
 mod sandbox_stream;
 mod shutdown;
 mod storage_check;

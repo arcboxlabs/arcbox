@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent_client::transport::AgentTransport;
 use arcbox_transport::vsock::BlockingVsockTransport;
 use std::{os::fd::IntoRawFd, os::unix::net::UnixStream, time::Duration};
 
