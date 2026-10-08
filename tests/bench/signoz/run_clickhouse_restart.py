@@ -186,6 +186,14 @@ def wait_for_clickhouse(output, name, started):
 def run(args):
     output = args.output.resolve()
     output.mkdir(exist_ok=False)
+    observer_source = args.native_observer or Path(__file__).resolve().with_name("observe-clickhouse.sh")
+    observer_bytes = observer_source.read_bytes()
+    observer = output / "observer"
+    observer.write_bytes(observer_bytes)
+    observer.chmod(observer_source.stat().st_mode & 0o777)
+    observer_command = ["/tmp/stall-observe"] if args.native_observer else ["bash", "/tmp/stall-observe"]
+    observer_arguments = [args.observer_policy] if args.native_observer else []
+    (output / "observer.json").write_text(json.dumps({"path": str(observer_source.resolve()), "sha256": hashlib.sha256(observer_bytes).hexdigest(), "command": observer_command, "policy": args.observer_policy if args.native_observer else "other"}, indent=2) + "\n")
     (output / "fixture.json").write_text(json.dumps(FIXTURE, indent=2) + "\n")
     prefix = "stall-warm-" + args.case + "-" + uuid.uuid4().hex[:8]
     names = {kind: prefix + "-" + kind for kind in SEEDS}
@@ -234,12 +242,14 @@ def run(args):
             api("POST", "/networks/create", {"Name": prefix, "Labels": {"arcbox.stall.experiment": prefix}})
             for kind, seed in seeds.items():
                 payload = container_payload(seed, kind, prefix, prefix, volumes[kind])
+                if kind == "ch" and args.native_observer and args.observer_policy == "fifo":
+                    payload["HostConfig"]["CapAdd"].append("SYS_NICE")
                 (output / (kind + "-create.json")).write_text(json.dumps(payload, indent=2) + "\n")
                 api("POST", "/containers/create?name=" + quote(names[kind]), payload)
                 created.append(names[kind])
             for kind, path, destination in frozen_configs:
                 cli(output, kind + "-copy-" + path.name, ["cp", str(path), names[kind] + ":" + destination])
-            cli(output, "copy-observer", ["cp", str(Path(__file__).resolve().with_name("observe-clickhouse.sh")), names["ch"] + ":/tmp/stall-observe.sh"])
+            cli(output, "copy-observer", ["cp", str(observer), names["ch"] + ":/tmp/stall-observe"])
             api("POST", f"/containers/{names['keeper']}/start")
             wait_for_keeper(output, names["keeper"])
             start_target = None
@@ -273,10 +283,10 @@ def run(args):
                 raise RuntimeError("The running libc hash does not match the retained disassembly.")
             cli(output, "identity", ["exec", "--user", "0", names["ch"], "cat", "/proc/1/maps", "/proc/1/status", "/proc/self/status", "/sys/fs/cgroup/cpu.max"])
             cli(output, "query-prerequisites", ["exec", names["ch"], "bash", "-e", "-c", "command -v timeout; command -v clickhouse-client"])
-            cli(output, "proc-preflight", ["exec", "--user", "0", names["ch"], "bash", "/tmp/stall-observe.sh", "1"], timeout=10)
+            cli(output, "proc-preflight", ["exec", "--user", "0", names["ch"], *observer_command, "1", *observer_arguments], timeout=10)
             if time.monotonic() - started >= 30:
                 raise RuntimeError("Observation setup missed the 30-second contention boundary.")
-            sampler = subprocess.Popen(DOCKER + ["exec", "--user", "0", names["ch"], "bash", "/tmp/stall-observe.sh", "360"], stdout=streams.enter_context((output / "proc-samples.txt").open("w")), stderr=streams.enter_context((output / "proc-samples.stderr").open("w")))
+            sampler = subprocess.Popen(DOCKER + ["exec", "--user", "0", names["ch"], *observer_command, "360", *observer_arguments], stdout=streams.enter_context((output / "proc-samples.txt").open("w")), stderr=streams.enter_context((output / "proc-samples.stderr").open("w")))
             if args.case == "contention":
                 contention = start_contention(output, streams, started + 30)
                 event(output, "contention_scheduled", pid=contention.pid, start_seconds=30, end_seconds=90, workers=36)
@@ -332,6 +342,8 @@ if __name__ == "__main__":
         parser.add_argument("--fixture", type=Path, required=True, help="Verified stopped-seed identities, config hashes, and Docker socket")
         parser.add_argument("--case", choices=("control", "contention", "startup-contention"), required=True)
         parser.add_argument("--output", type=Path, required=True)
+        parser.add_argument("--native-observer", type=Path, help="Static Linux observe_clickhouse binary; adds SYS_NICE for FIFO sampling")
+        parser.add_argument("--observer-policy", choices=("fifo", "other"), default="fifo", help="Scheduling policy for the native observer")
         args = parser.parse_args()
         FIXTURE = json.loads(args.fixture.read_text())
         SOCKET = FIXTURE["socket"]
