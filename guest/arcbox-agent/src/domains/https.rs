@@ -1,4 +1,7 @@
-//! TLS termination for currently owned, concrete `.local` names.
+//! HTTP directory and TLS termination for currently owned, concrete names.
+//!
+//! The exact built-in index gateway also redirects port 80 to this listener.
+//! Its current Registry registration selects the HTTP directory before TLS.
 //!
 //! Port 443 of each container with an HTTP port is REDIRECTed (nat
 //! PREROUTING) to [`PROXY_PORT`] in the VM's own namespace. The proxy reads
@@ -24,7 +27,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::WebServices;
 use super::certificates::Certificates;
-use super::http_port::HTTPS_PORT;
+use super::http_port::{HTTP_PORT, HTTPS_PORT};
 
 #[cfg(test)]
 #[path = "https_tests.rs"]
@@ -98,14 +101,20 @@ impl Https {
     }
 }
 
-/// Terminates one client's TLS and relays it to the container it dialled.
+/// Dispatches one redirected HTTP request or managed TLS connection.
 async fn relay(
     client: TcpStream,
     certificates: &Certificates,
     services: &WebServices,
 ) -> Result<()> {
     let dialled = original_destination(&client).context("reading the dialled address")?;
-    // Anything but a redirected container 443 reached the port directly.
+    if dialled.port() == HTTP_PORT {
+        let route = services
+            .index_route(*dialled.ip())
+            .context("index is unavailable at the dialled address")?;
+        return super::index::serve(client, services.clone(), route, HTTP_PORT).await;
+    }
+    // Anything but a redirected port 80 or 443 reached the proxy directly.
     ensure!(
         dialled.port() == HTTPS_PORT,
         "{dialled} is no container's HTTPS port"

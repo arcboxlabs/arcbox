@@ -13,6 +13,7 @@ use arcbox_constants::dns::{Domain, LOCAL_CA_DNS_SUBTREE};
 use arcbox_dns::{
     NamePattern,
     registry::{Lookup, Registry},
+    web_services::{HttpsMode, WebServiceUrls},
 };
 
 use super::{ContainerFacts, SelectedRoutes};
@@ -227,6 +228,39 @@ impl WebServices {
             "managed TLS route for {name:?} at {destination} changed during the handshake"
         );
         Ok(())
+    }
+
+    pub(super) fn index_route(&self, destination: Ipv4Addr) -> Option<super::index::Route> {
+        super::index::Route::resolve(
+            &self.dns.read().expect("DNS registry lock poisoned"),
+            destination,
+        )
+    }
+
+    pub(super) fn directory_urls(
+        &self,
+        expected: &super::index::Route,
+    ) -> anyhow::Result<Option<Vec<WebServiceUrls>>> {
+        let dns = self.dns.read().expect("DNS registry lock poisoned");
+        anyhow::ensure!(
+            super::index::Route::resolve(&dns, expected.destination).as_ref() == Some(expected),
+            "index registration changed"
+        );
+        Ok(self.directory_available.load(Ordering::Acquire).then(|| {
+            let installed = self.installed.read().expect("web services lock poisoned");
+            Self::selected_containers(&dns, &installed, None)
+                .into_iter()
+                .flat_map(|row| {
+                    let selected = row.installed.selected;
+                    let https = match selected.https {
+                        None => HttpsMode::None,
+                        Some(super::HttpsBackend::Native(_)) => HttpsMode::Passthrough,
+                        Some(super::HttpsBackend::Terminate(_)) => HttpsMode::Managed,
+                    };
+                    WebServiceUrls::project(row.domains, selected.http.is_some(), https)
+                })
+                .collect()
+        }))
     }
 
     /// Returns typed installed endpoints selected by current DNS ownership.
