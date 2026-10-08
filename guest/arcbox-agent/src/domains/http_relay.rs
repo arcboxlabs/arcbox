@@ -174,3 +174,6 @@ fn strip_hop_headers(headers: &mut HeaderMap) -> Result<bool> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod translation_tests;

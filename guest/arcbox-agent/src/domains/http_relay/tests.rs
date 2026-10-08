@@ -4,13 +4,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
-async fn within<T>(future: impl Future<Output = T>) -> T {
+pub(super) async fn within<T>(future: impl Future<Output = T>) -> T {
     tokio::time::timeout(Duration::from_secs(2), future)
         .await
         .unwrap()
 }
 
-async fn sockets() -> (TcpStream, TcpStream) {
+pub(super) async fn sockets() -> (TcpStream, TcpStream) {
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .await
         .unwrap();
@@ -38,21 +38,21 @@ async fn until(stream: &mut TcpStream, end: &[u8]) -> Vec<u8> {
     .await
 }
 
-async fn head(stream: &mut TcpStream) -> String {
+pub(super) async fn head(stream: &mut TcpStream) -> String {
     String::from_utf8(until(stream, b"\r\n\r\n").await).unwrap()
 }
 
-async fn send(stream: &mut TcpStream, bytes: &[u8]) {
+pub(super) async fn send(stream: &mut TcpStream, bytes: &[u8]) {
     within(stream.write_all(bytes)).await.unwrap();
 }
 
-async fn bytes(stream: &mut TcpStream, count: usize) -> Vec<u8> {
+pub(super) async fn bytes(stream: &mut TcpStream, count: usize) -> Vec<u8> {
     let mut bytes = vec![0; count];
     within(stream.read_exact(&mut bytes)).await.unwrap();
     bytes
 }
 
-async fn chunk(stream: &mut TcpStream) -> Vec<u8> {
+pub(super) async fn chunk(stream: &mut TcpStream) -> Vec<u8> {
     let line = String::from_utf8(until(stream, b"\r\n").await).unwrap();
     let count = usize::from_str_radix(line.trim(), 16).unwrap();
     let data = bytes(stream, count).await;
@@ -60,7 +60,7 @@ async fn chunk(stream: &mut TcpStream) -> Vec<u8> {
     data
 }
 
-async fn finish(task: JoinHandle<Result<()>>) {
+pub(super) async fn finish(task: JoinHandle<Result<()>>) {
     within(task).await.unwrap().unwrap();
 }
 
