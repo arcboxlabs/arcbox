@@ -24,6 +24,7 @@
 
 mod control;
 mod filesystem;
+mod https_access;
 mod icon;
 mod kubernetes;
 mod machine;
@@ -52,6 +53,7 @@ use tokio_stream::{Stream, StreamExt as _};
 
 pub use control::SandboxServiceImpl;
 pub use filesystem::SandboxFilesystemServiceImpl;
+pub use https_access::HttpsAccess;
 pub use icon::IconServiceImpl;
 pub use kubernetes::KubernetesServiceImpl;
 pub use machine::MachineServiceImpl;

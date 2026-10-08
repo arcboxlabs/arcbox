@@ -1706,6 +1706,59 @@ pub mod local_https_status {
         }
     }
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LocalHttpsAccess {
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub hostname: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub certificate_sha256: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AcknowledgeHttpsAccessRequest {
+    #[prost(string, tag = "1")]
+    pub request_id: ::prost::alloc::string::String,
+    /// Clients persist CANCELLED and FAILED per profile and CA fingerprint before acknowledgement.
+    /// An explicit Enable or Repair action may bypass that suppression.
+    #[prost(enumeration = "acknowledge_https_access_request::Outcome", tag = "2")]
+    pub outcome: i32,
+}
+/// Nested message and enum types in `AcknowledgeHttpsAccessRequest`.
+pub mod acknowledge_https_access_request {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum Outcome {
+        Unspecified = 0,
+        Completed = 1,
+        Cancelled = 2,
+        Failed = 3,
+    }
+    impl Outcome {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unspecified => "OUTCOME_UNSPECIFIED",
+                Self::Completed => "COMPLETED",
+                Self::Cancelled => "CANCELLED",
+                Self::Failed => "FAILED",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "OUTCOME_UNSPECIFIED" => Some(Self::Unspecified),
+                "COMPLETED" => Some(Self::Completed),
+                "CANCELLED" => Some(Self::Cancelled),
+                "FAILED" => Some(Self::Failed),
+                _ => None,
+            }
+        }
+    }
+}
 /// Hypervisor backend for the single System VM.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -3478,6 +3531,30 @@ pub struct ListContainerWebServicesRequest {}
 pub struct ListContainerWebServicesResponse {
     #[prost(message, repeated, tag = "1")]
     pub services: ::prost::alloc::vec::Vec<ContainerWebService>,
+}
+/// The guest releases waiting handshakes after three seconds without renewal.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReconcileHttpsAccessRequest {
+    /// A new identifier clears the previous access. Reuse it for polls and cancellation.
+    #[prost(string, tag = "1")]
+    pub observation_id: ::prost::alloc::string::String,
+    /// Exact Mac source addresses. Other clients never wait or produce an access.
+    #[prost(string, repeated, tag = "2")]
+    pub host_addresses: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// False releases every waiting handshake without changing certificate validation.
+    #[prost(bool, tag = "3")]
+    pub enabled: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReconcileHttpsAccessResponse {
+    /// Empty until a managed ClientHello passes the guest's DNS ownership check.
+    #[prost(string, tag = "1")]
+    pub hostname: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub destination_ip: ::prost::alloc::string::String,
+    /// Zero means no access. Concurrent accesses retain the first event's sequence.
+    #[prost(uint64, tag = "3")]
+    pub sequence: u64,
 }
 /// An installed route selected through protocol discovery or an explicit port label.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

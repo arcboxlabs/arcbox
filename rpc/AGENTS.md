@@ -68,6 +68,7 @@ This file is only the non-obvious operational knowledge.
 
 ## Invariants (each with a one-clause why)
 
+- `SystemService.WatchHttpsAccess` registers a Desktop observer independently of VM readiness. An empty `request_id` clears the pending request. `AcknowledgeHttpsAccess` ends the prompt, but native CA inspection alone establishes trust. Desktop must persist canceled or failed outcomes before acknowledging them. `ReconcileHttpsAccess` renews a three-second guest lease over either agent transport; only exact host source addresses may trigger authorization.
 - **Generated prost code is committed** (`arcbox-protocol/src/generated/*.rs`)
   and rustfmt'd by `build.rs` (writes into `src/`, not `OUT_DIR`) — a `.proto`
   edit without a rebuild+commit ships a stale/unformatted file that fails

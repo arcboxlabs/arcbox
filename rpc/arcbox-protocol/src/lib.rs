@@ -115,7 +115,8 @@ pub mod agent {
         KubernetesStatusResponse, KubernetesStopRequest, KubernetesStopResponse,
         ListContainerWebServicesRequest, ListContainerWebServicesResponse, MachineStats,
         MemoryPressureEvent, MmapReadFileRequest, MmapReadFileResponse, PortBindingsChanged,
-        PortBindingsRemoved, ReadinessEvent, RuntimeEnsureRequest, RuntimeEnsureResponse,
+        PortBindingsRemoved, ReadinessEvent, ReconcileHttpsAccessRequest,
+        ReconcileHttpsAccessResponse, RuntimeEnsureRequest, RuntimeEnsureResponse,
         RuntimeStatusRequest, RuntimeStatusResponse, ServiceStatus, ShutdownRequest,
         ShutdownResponse, StorageCheckRequest, StorageCheckResponse, StorageCheckResult,
         SystemInfo, WatchMemoryPressureRequest, WatchReadinessRequest, WatchStatsRequest,
@@ -153,10 +154,11 @@ pub mod api {
 
     // System service types
     pub use super::v1::{
-        Event, EventActor, EventsRequest, GetInfoRequest, GetInfoResponse, GetVersionRequest,
-        GetVersionResponse, ListWebServicesResponse, LocalHttpsStatus, PruneRequest, PruneResponse,
-        ResolveContainerFsRequest, ResolveContainerFsResponse, ResolveImageFsRequest,
-        ResolveImageFsResponse, SystemPingRequest, SystemPingResponse, WebService,
+        AcknowledgeHttpsAccessRequest, Event, EventActor, EventsRequest, GetInfoRequest,
+        GetInfoResponse, GetVersionRequest, GetVersionResponse, ListWebServicesResponse,
+        LocalHttpsAccess, LocalHttpsStatus, PruneRequest, PruneResponse, ResolveContainerFsRequest,
+        ResolveContainerFsResponse, ResolveImageFsRequest, ResolveImageFsResponse,
+        SystemPingRequest, SystemPingResponse, WebService,
     };
 
     // Volume service types
@@ -223,8 +225,9 @@ pub use v1::{
     KubernetesStartResponse, KubernetesStatusRequest, KubernetesStatusResponse,
     KubernetesStopRequest, KubernetesStopResponse, ListContainerWebServicesRequest,
     ListContainerWebServicesResponse, PortBindingsChanged, PortBindingsRemoved,
-    RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse,
-    ServiceStatus, ShutdownRequest, ShutdownResponse, StorageCheckRequest, StorageCheckResponse,
+    ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse, RuntimeEnsureRequest,
+    RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse, ServiceStatus,
+    ShutdownRequest, ShutdownResponse, StorageCheckRequest, StorageCheckResponse,
     StorageCheckResult, SystemInfo, container_web_service, storage_check_request,
 };
 
@@ -237,10 +240,11 @@ pub use v1::{
 
 // API types - System
 pub use v1::{
-    Event, EventActor, EventsRequest, GetInfoRequest, GetInfoResponse, GetVersionRequest,
-    GetVersionResponse, ListWebServicesResponse, LocalHttpsStatus, PruneRequest, PruneResponse,
-    ResolveContainerFsRequest, ResolveContainerFsResponse, ResolveImageFsRequest,
-    ResolveImageFsResponse, SystemPingRequest, SystemPingResponse, WebService,
+    AcknowledgeHttpsAccessRequest, Event, EventActor, EventsRequest, GetInfoRequest,
+    GetInfoResponse, GetVersionRequest, GetVersionResponse, ListWebServicesResponse,
+    LocalHttpsAccess, LocalHttpsStatus, PruneRequest, PruneResponse, ResolveContainerFsRequest,
+    ResolveContainerFsResponse, ResolveImageFsRequest, ResolveImageFsResponse, SystemPingRequest,
+    SystemPingResponse, WebService,
 };
 
 // API types - Volume

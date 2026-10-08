@@ -30,6 +30,8 @@ const UPDATE_BUFFER: usize = 64;
 /// Observed by `SystemServiceImpl` to serve gRPC queries.
 #[derive(Debug, Clone)]
 pub struct SetupState {
+    /// Browser requests are independent of startup readiness and native trust mutation.
+    pub https_access: super::HttpsAccess,
     /// Latest snapshot, for `GetSetupStatus` and for seeding a new stream.
     tx: Arc<watch::Sender<SetupStatus>>,
     /// Every update, in order.
@@ -53,6 +55,7 @@ impl SetupState {
         };
         let (tx, _) = watch::channel(initial);
         Self {
+            https_access: super::HttpsAccess::default(),
             tx: Arc::new(tx),
             updates: broadcast::channel(UPDATE_BUFFER).0,
         }
@@ -125,6 +128,7 @@ impl SetupState {
 
     /// Publishes CA status without changing daemon or VM readiness.
     pub fn set_local_https(&self, status: pb::LocalHttpsStatus) {
+        self.https_access.update_status(&status);
         self.publish(|s| s.local_https = status.into());
     }
 
@@ -292,6 +296,25 @@ impl pb::SystemService for SystemServiceImpl {
             }
         };
         Response::ok(Box::pin(stream))
+    }
+
+    async fn watch_https_access(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, pb::Empty>,
+    ) -> ServiceResult<ServiceStream<pb::LocalHttpsAccess>> {
+        Response::ok(self.setup_state.https_access.watch())
+    }
+
+    async fn acknowledge_https_access(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, pb::AcknowledgeHttpsAccessRequest>,
+    ) -> ServiceResult<pb::Empty> {
+        self.setup_state
+            .https_access
+            .acknowledge(&request.to_owned_message())?;
+        Response::ok(pb::Empty::default())
     }
 
     async fn get_info(

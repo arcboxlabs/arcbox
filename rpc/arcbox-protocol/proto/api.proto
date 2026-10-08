@@ -202,6 +202,13 @@ service SystemService {
     // Streams complete route snapshots and fails when the guest is unavailable.
     rpc WatchWebServices(Empty) returns (stream ListWebServicesResponse);
 
+    // Observes real managed HTTPS accesses that need login-session authorization.
+    // An empty request_id clears the pending request. Only an active observer enables prompts.
+    rpc WatchHttpsAccess(Empty) returns (stream LocalHttpsAccess);
+
+    // Ends one prompt without changing native certificate trust.
+    rpc AcknowledgeHttpsAccess(AcknowledgeHttpsAccessRequest) returns (Empty);
+
     // Gets the System VM's current hypervisor backend.
     rpc GetSystemVmBackend(Empty) returns (SystemVmBackendInfo);
 
@@ -1230,4 +1237,23 @@ message LocalHttpsStatus {
     int64 certificate_not_before_unix_seconds = 4;
     int64 certificate_not_after_unix_seconds = 5;
     bool legacy_user_trust = 6;
+}
+
+message LocalHttpsAccess {
+    string request_id = 1;
+    string hostname = 2;
+    string certificate_sha256 = 3;
+}
+
+message AcknowledgeHttpsAccessRequest {
+    enum Outcome {
+        OUTCOME_UNSPECIFIED = 0;
+        COMPLETED = 1;
+        CANCELLED = 2;
+        FAILED = 3;
+    }
+    string request_id = 1;
+    // Clients persist CANCELLED and FAILED per profile and CA fingerprint before acknowledgement.
+    // An explicit Enable or Repair action may bypass that suppression.
+    Outcome outcome = 2;
 }

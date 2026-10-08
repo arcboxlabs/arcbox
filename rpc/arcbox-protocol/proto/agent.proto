@@ -43,6 +43,9 @@ service AgentService {
     // Lists installed container web routes selected by the guest.
     rpc ListContainerWebServices(ListContainerWebServicesRequest) returns (ListContainerWebServicesResponse);
 
+    // Renews host HTTPS observation and returns the first managed access in that observation.
+    rpc ReconcileHttpsAccess(ReconcileHttpsAccessRequest) returns (ReconcileHttpsAccessResponse);
+
     // Requests graceful guest shutdown. The agent responds immediately,
     // then performs orderly process teardown and powers off the VM.
     rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
@@ -89,6 +92,24 @@ message ListContainerWebServicesRequest {}
 
 message ListContainerWebServicesResponse {
     repeated ContainerWebService services = 1;
+}
+
+// The guest releases waiting handshakes after three seconds without renewal.
+message ReconcileHttpsAccessRequest {
+    // A new identifier clears the previous access. Reuse it for polls and cancellation.
+    string observation_id = 1;
+    // Exact Mac source addresses. Other clients never wait or produce an access.
+    repeated string host_addresses = 2;
+    // False releases every waiting handshake without changing certificate validation.
+    bool enabled = 3;
+}
+
+message ReconcileHttpsAccessResponse {
+    // Empty until a managed ClientHello passes the guest's DNS ownership check.
+    string hostname = 1;
+    string destination_ip = 2;
+    // Zero means no access. Concurrent accesses retain the first event's sequence.
+    uint64 sequence = 3;
 }
 
 // An installed route selected through protocol discovery or an explicit port label.
