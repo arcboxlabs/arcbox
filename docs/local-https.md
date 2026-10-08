@@ -16,6 +16,8 @@ The guest reports installed routes through `ListContainerWebServices`. The snaps
 
 Clients use the supplied URLs. Upstream port fields describe the application listener, not the public URL port. A managed HTTPS endpoint requires ArcBox CA trust. A passthrough endpoint uses the application's own TLS and must not request ArcBox CA authorization. A directory error ends the stream; clients must clear stale entries.
 
+The host verifies each CSR's signature and single DNS name before signing. The name must belong to a current host container DNS registration and resolve to that registration's address. The host rechecks the registration after signing, so deletion, ownership transfer, or registration replacement discards an in-flight result. The guest separately checks the connection's original destination against its current DNS ownership.
+
 ## Completion requirements
 
 The feature objective includes the complete local-domain experience across Docker, Compose, machines, and Kubernetes. A unit test or a published protocol field does not establish product completion. Each row needs evidence at its stated scope.
@@ -34,7 +36,7 @@ The feature objective includes the complete local-domain experience across Docke
 | Unsupported trust stores | State behavior for read-only roots, mounted stores, Java, Node, image builds, and containers created inside the VM. | Partial boundaries documented; full coverage missing. |
 | Machine integration | Verify machine names, HTTP/HTTPS port configuration, managed/native TLS, and client trust from inside a machine. | Machine DNS exists; web-service and trust integration missing. |
 | Kubernetes integration | Verify `cluster.local`, Service reachability, LoadBalancer/Ingress wildcard names, and intended HTTPS behavior from macOS. | LoadBalancer port forwarding exists; domain and HTTPS integration missing. |
-| Domain ownership | Reject a TLS SNI name that does not belong to the actual destination; validate the same ownership at signing and routing boundaries. | Guest routing checks SNI ownership before and after authorization. Independent host signing-boundary validation and real wrong-SNI rejection remain pending. |
+| Domain ownership | Reject a TLS SNI name that does not belong to the actual destination; validate the same ownership at signing and routing boundaries. | Guest routing checks SNI ownership before and after authorization. The host signer independently verifies current container DNS ownership before and after signing. Real wrong-SNI rejection remains pending. |
 | Private-key boundary | Verify signed creator access and rejection of unrelated identities; confirm no private root bytes reach disk exports, helper, or guest. | Native baseline exists; complete identity-negative matrix missing. |
 | Root and leaf lifecycle | Verify actual leaf expiry, concurrent issuance, root renewal, rotation, repair, revocation, migration, and uninstall without removing unrelated roots. | Leaves are verified against the published root and cached with its DER. CA preparation retries after failure; the signer follows the current published identity. Explicit root renewal, rotation, corrupt-publication repair, and native lifecycle evidence remain pending. |
 | Application protocols | Verify forwarded scheme, redirects, secure cookies, WebSocket, SSE, HTTP/2, and gRPC on supported modes. | Managed TLS currently advertises HTTP/1.1 only; protocol matrix missing. |

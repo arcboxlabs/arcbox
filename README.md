@@ -303,6 +303,7 @@ Most of ArcBox's performance-critical code is custom rather than vendored:
   the System Keychain. The private key stays in the user's Keychain;
   the host signs guest-generated certificate requests. Helper installation
   and certificate trust require separate administrator authorization.
+  The host verifies container DNS ownership before and after each signature.
   Run `abctl tls status --json` to inspect trust, certificate validity, and the public CA fingerprint without changing trust.
   Pass that fingerprint to `abctl tls trust --expected-fingerprint <SHA-256>` to reject a CA change between inspection and authorization.
   Guest DNS follows the Mac's resolvers as

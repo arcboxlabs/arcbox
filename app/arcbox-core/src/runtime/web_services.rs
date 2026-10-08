@@ -1,4 +1,4 @@
-//! Public URLs derived from the guest's installed web routes.
+//! Host-owned signing names and public URLs derived from installed guest web routes.
 
 use arcbox_connect::v1::{
     ContainerWebService, ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse, WebService,
@@ -10,6 +10,34 @@ use super::Runtime;
 use crate::error::{CoreError, Result};
 
 impl Runtime {
+    /// Authorizes a local FQDN for signing and returns its container DNS registration revision.
+    /// A new registration changes the revision even when the owner and address are unchanged.
+    pub async fn https_signing_revision(&self, fqdn: &str) -> Option<u64> {
+        let domain = self.network_manager.dns_domain()?;
+        let hostname = fqdn.strip_suffix(&format!(".{domain}"))?;
+        let entries = self.dns_entries.read().await;
+        let (owner, entry) = entries
+            .iter()
+            .filter(|(_, entry)| {
+                entry
+                    .hostnames
+                    .iter()
+                    .any(|name| name == hostname || name == fqdn)
+            })
+            .max_by_key(|(_, entry)| entry.revision)?;
+        if !Self::is_container_dns_owner(owner) {
+            return None;
+        }
+        (self
+            .network_manager
+            .local_hosts_table()
+            .read()
+            .expect("local DNS hosts lock poisoned")
+            .get(fqdn)
+            == Some(&entry.ip))
+        .then_some(entry.revision)
+    }
+
     /// Renews the guest's leased observation of managed HTTPS access from the Mac.
     /// The caller must cancel through the token and await completion, including connection setup.
     ///
@@ -107,6 +135,55 @@ fn container_service(route: ContainerWebService) -> Result<WebService> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn signing_authorization_follows_current_container_dns_ownership() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = Runtime::new(crate::Config {
+            data_dir: directory.path().to_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        runtime.network_manager().set_dns_domain("arcbox.local");
+        let name = "web.arcbox.local";
+        assert_eq!(runtime.https_signing_revision(name).await, None);
+        let ip = "10.0.2.3".parse().unwrap();
+        let aliases = [
+            "web".into(),
+            "web.demo".into(),
+            "absolute.arcbox.local".into(),
+        ];
+        runtime.register_dns("first", &aliases, ip).await;
+        let first = runtime.https_signing_revision(name).await.unwrap();
+        for alias in [name, "web.demo.arcbox.local", "absolute.arcbox.local"] {
+            assert_eq!(runtime.https_signing_revision(alias).await, Some(first));
+        }
+        assert_eq!(
+            runtime.https_signing_revision("web.example.com").await,
+            None
+        );
+
+        runtime.register_dns("first", &aliases, ip).await;
+        let renewed = runtime.https_signing_revision(name).await.unwrap();
+        assert_ne!(renewed, first);
+        runtime.register_dns("second", &["web".into()], ip).await;
+        let second = runtime.https_signing_revision(name).await.unwrap();
+        assert_ne!(second, renewed);
+        for owner in ["sandbox:other", "machine:other", "system:host"] {
+            runtime.register_dns(owner, &["web".into()], ip).await;
+            assert_eq!(runtime.https_signing_revision(name).await, None, "{owner}");
+            runtime.deregister_dns_by_id(owner).await;
+            assert_eq!(runtime.https_signing_revision(name).await, Some(second));
+        }
+        runtime.deregister_dns_by_id("second").await;
+        assert_eq!(runtime.https_signing_revision(name).await, Some(renewed));
+        runtime
+            .network_manager()
+            .register_dns("web", "10.0.2.4".parse().unwrap());
+        assert_eq!(runtime.https_signing_revision(name).await, None);
+        runtime.deregister_dns_by_id("first").await;
+        assert_eq!(runtime.https_signing_revision(name).await, None);
+    }
 
     fn route() -> ContainerWebService {
         ContainerWebService {

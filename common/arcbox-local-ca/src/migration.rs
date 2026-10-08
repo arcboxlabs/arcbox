@@ -225,7 +225,8 @@ mod tests {
         reopened.publish(dir.path()).unwrap();
         assert_eq!(fs::read(dir.path().join(TLS_CA_CERT)).unwrap(), new);
         let pending = CertificateRequest::new("test.arcbox.local").unwrap();
-        let certificate = reopened.sign(pending.der()).unwrap();
+        let request = crate::VerifiedCertificateRequest::try_from(pending.der()).unwrap();
+        let certificate = reopened.sign(&request).unwrap();
         use rustls::client::danger::ServerCertVerifier as _;
         let mut roots = rustls::RootCertStore::empty();
         roots

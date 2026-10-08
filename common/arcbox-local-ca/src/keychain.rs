@@ -13,7 +13,7 @@ use security_framework::key::{Algorithm, GenerateKeyOptions, KeyType, SecKey};
 use security_framework::os::macos::keychain::SecKeychain;
 use security_framework_sys::base::errSecItemNotFound;
 
-use crate::{CertificateValidity, Error, authority, request};
+use crate::{CertificateValidity, Error, VerifiedCertificateRequest, authority, request};
 
 /// A per-profile CA whose root private key stays in the macOS Keychain.
 pub struct KeychainAuthority {
@@ -83,8 +83,8 @@ impl KeychainAuthority {
         })
     }
 
-    /// Signs one verified CSR while the root is valid and caps the leaf at the root's expiry.
-    pub fn sign(&self, csr: &[u8]) -> Result<Vec<u8>, Error> {
+    /// Signs a verified CSR after the caller authorizes its DNS name against current host ownership.
+    pub fn sign(&self, csr: &VerifiedCertificateRequest) -> Result<Vec<u8>, Error> {
         request::sign_request(
             csr,
             &self.issuer,

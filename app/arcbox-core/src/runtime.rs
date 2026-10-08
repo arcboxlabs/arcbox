@@ -1860,6 +1860,12 @@ impl Runtime {
         Self::sandbox_port_key_owner(key).is_none() && !kubernetes_lb::is_owner_key(key)
     }
 
+    fn is_container_dns_owner(owner: &str) -> bool {
+        !owner.starts_with("sandbox:")
+            && !owner.starts_with("system:")
+            && !owner.starts_with(machine_dns::MACHINE_DNS_OWNER_PREFIX)
+    }
+
     /// Registers DNS entries for a container.
     ///
     /// Maps each hostname in `hostnames` to `ip` so the host can reach the
@@ -1987,11 +1993,7 @@ impl Runtime {
             .read()
             .await
             .keys()
-            .filter(|owner| {
-                !owner.starts_with("sandbox:")
-                    && !owner.starts_with("system:")
-                    && !owner.starts_with(machine_dns::MACHINE_DNS_OWNER_PREFIX)
-            })
+            .filter(|owner| Self::is_container_dns_owner(owner))
             .cloned()
             .collect();
         ids.extend(self.container_aliases.read().await.values().cloned());

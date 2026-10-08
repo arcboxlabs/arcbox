@@ -97,10 +97,46 @@ fn validate_name(name: &str) -> Result<ServerName<'_>, Error> {
     }
 }
 
-/// Verifies the CSR signature and applies host-owned certificate policy.
+/// A signature-verified CSR with exactly one permitted DNS name.
+#[cfg(any(target_os = "macos", test))]
+pub struct VerifiedCertificateRequest {
+    request: CertificateSigningRequestParams,
+    name: String,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl TryFrom<&[u8]> for VerifiedCertificateRequest {
+    type Error = Error;
+
+    fn try_from(der: &[u8]) -> Result<Self, Error> {
+        if der.len() > MAX_CERTIFICATE_SIZE {
+            return Err(Error::InvalidRequest(
+                "certificate request exceeds 8192 bytes",
+            ));
+        }
+        let request = CertificateSigningRequestParams::from_der(&der.into())?;
+        let [SanType::DnsName(name)] = request.params.subject_alt_names.as_slice() else {
+            return Err(Error::InvalidRequest("exactly one DNS name is required"));
+        };
+        validate_name(name.as_str())?;
+        let name = name.as_str().to_ascii_lowercase();
+        Ok(Self { request, name })
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl VerifiedCertificateRequest {
+    /// Returns the verified, lowercase DNS name for host ownership authorization.
+    #[must_use]
+    pub fn dns_name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Applies host-owned certificate policy to an already verified CSR.
 #[cfg(any(target_os = "macos", test))]
 pub fn sign_request(
-    der: &[u8],
+    request: &VerifiedCertificateRequest,
     issuer: &Issuer<'_, impl SigningKey>,
     validity: CertificateValidity,
     now: OffsetDateTime,
@@ -110,26 +146,16 @@ pub fn sign_request(
             "root certificate is outside its validity period",
         ));
     }
-    if der.len() > MAX_CERTIFICATE_SIZE {
-        return Err(Error::InvalidRequest(
-            "certificate request exceeds 8192 bytes",
-        ));
-    }
-    let request = CertificateSigningRequestParams::from_der(&der.into())?;
-    let [SanType::DnsName(name)] = request.params.subject_alt_names.as_slice() else {
-        return Err(Error::InvalidRequest("exactly one DNS name is required"));
-    };
-    validate_name(name.as_str())?;
     // Copy only the verified public key and DNS name. A guest cannot choose
     // CA privileges, certificate lifetime, or additional certificate usages.
-    let mut params = CertificateParams::new(vec![name.as_str().to_ascii_lowercase()])?;
+    let mut params = CertificateParams::new(vec![request.name.clone()])?;
     params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     params.use_authority_key_identifier_extension = true;
     params.not_before = (now - Duration::hours(1)).max(validity.not_before);
     params.not_after = (now + Duration::days(30)).min(validity.not_after);
     Ok(params
-        .signed_by(&request.public_key, issuer)?
+        .signed_by(&request.request.public_key, issuer)?
         .der()
         .to_vec())
 }
@@ -138,6 +164,10 @@ pub fn sign_request(
 mod tests {
     use super::*;
     use rcgen::{BasicConstraints, IsCa};
+
+    fn verified(der: &[u8]) -> VerifiedCertificateRequest {
+        VerifiedCertificateRequest::try_from(der).unwrap()
+    }
 
     #[test]
     fn csr_policy_keeps_the_guest_key_and_rejects_foreign_names() {
@@ -150,8 +180,10 @@ mod tests {
         let pending = CertificateRequest::new("dash.signoz.arcbox.local").unwrap();
         let mut tampered = pending.der().to_vec();
         *tampered.last_mut().unwrap() ^= 1;
-        assert!(sign_request(&tampered, &issuer, validity, now).is_err());
-        let certificate = sign_request(pending.der(), &issuer, validity, now).unwrap();
+        assert!(VerifiedCertificateRequest::try_from(tampered.as_slice()).is_err());
+        let request = verified(pending.der());
+        assert_eq!(request.dns_name(), "dash.signoz.arcbox.local");
+        let certificate = sign_request(&request, &issuer, validity, now).unwrap();
         pending
             .complete(
                 certificate.clone(),
@@ -191,7 +223,7 @@ mod tests {
                 .serialize_request(&key)
                 .unwrap();
             assert!(
-                sign_request(request.der(), &issuer, validity, now).is_err(),
+                VerifiedCertificateRequest::try_from(request.der().as_ref()).is_err(),
                 "{name}"
             );
         }
@@ -200,8 +232,8 @@ mod tests {
             .unwrap()
             .serialize_request(&key)
             .unwrap();
-        assert!(sign_request(request.der(), &issuer, validity, now).is_err());
-        assert!(sign_request(&[0; MAX_CERTIFICATE_SIZE + 1], &issuer, validity, now).is_err());
+        assert!(VerifiedCertificateRequest::try_from(request.der().as_ref()).is_err());
+        assert!(VerifiedCertificateRequest::try_from(&[0; MAX_CERTIFICATE_SIZE + 1][..]).is_err());
     }
 
     #[test]
@@ -269,14 +301,16 @@ mod tests {
         )
         .unwrap();
         let key = KeyPair::generate().unwrap();
-        let mut params = CertificateParams::new(vec!["web.arcbox.local".into()]).unwrap();
+        let mut params = CertificateParams::new(vec!["WEB.arcbox.local".into()]).unwrap();
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
         let request = params.serialize_request(&key).unwrap();
+        let request = verified(request.der());
+        assert_eq!(request.dns_name(), "web.arcbox.local");
         let validity = CertificateValidity::from_der(ca.der()).unwrap();
         let certificate = CertificateDer::from(
-            sign_request(request.der(), &ca, validity, OffsetDateTime::now_utc()).unwrap(),
+            sign_request(&request, &ca, validity, OffsetDateTime::now_utc()).unwrap(),
         );
         let leaf = Issuer::from_ca_cert_der(&certificate, key).unwrap();
         assert_eq!(leaf.key_usages(), [KeyUsagePurpose::DigitalSignature]);
@@ -347,18 +381,19 @@ mod tests {
         let ca = rcgen::CertifiedIssuer::self_signed(params, KeyPair::generate().unwrap()).unwrap();
         let validity = CertificateValidity::from_der(ca.der()).unwrap();
         let request = CertificateRequest::new("web.arcbox.local").unwrap();
-        let leaf = sign_request(request.der(), &ca, validity, now).unwrap();
+        let request = verified(request.der());
+        let leaf = sign_request(&request, &ca, validity, now).unwrap();
         assert_eq!(CertificateValidity::from_der(&leaf).unwrap(), validity);
         for outside in [
             validity.not_before - Duration::seconds(1),
             validity.not_after + Duration::seconds(1),
         ] {
             assert!(matches!(
-                sign_request(request.der(), &ca, validity, outside),
+                sign_request(&request, &ca, validity, outside),
                 Err(Error::InvalidAuthority(_))
             ));
         }
-        let renewed = sign_request(request.der(), &ca, validity, now + Duration::days(1)).unwrap();
+        let renewed = sign_request(&request, &ca, validity, now + Duration::days(1)).unwrap();
         let renewed_validity = CertificateValidity::from_der(&renewed).unwrap();
         assert_eq!(renewed_validity.not_after, validity.not_after);
         assert_eq!(

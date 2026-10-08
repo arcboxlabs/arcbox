@@ -34,6 +34,8 @@
 //!   revocation. Signing requires a valid root and caps the leaf's validity at
 //!   the root's bounds. The guest verifies each leaf against its requested name
 //!   and the published root before serving it. Root replacement invalidates cached leaves.
+//! - **Name authorization.** The signer verifies each CSR before checking its DNS name
+//!   against current host container ownership. Ownership must still match after signing.
 
 #[cfg(any(target_os = "macos", test))]
 mod authority;
@@ -57,6 +59,8 @@ pub use self::migration::{
     Publication, remove_shared_private_key, remove_trust, remove_user_trust_der,
 };
 pub use self::public::PublicAuthority;
+#[cfg(any(target_os = "macos", test))]
+pub use self::request::VerifiedCertificateRequest;
 pub use self::request::{CertificateRequest, MAX_CERTIFICATE_SIZE};
 pub use self::validity::CertificateValidity;
 
