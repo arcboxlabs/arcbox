@@ -107,6 +107,7 @@ The restructure plan and its locked decisions live in
 ## Durable writes
 
 - Use `agent_client/retained_session.rs` to own dedicated session transport workers. Drop protocol channels before cancellation and worker joins. Keep protocol admission and acknowledgements in each session module.
+- Machine web sessions consume an expected machine connection and fix raw name, canonical hostname, and bridge IPv4 at Open. Replace the full policy with source revisions starting at one and strictly increasing. Validate the exact acknowledgement. Cancel and join before releasing the host hold; configuration acknowledgement does not imply installed routes.
 - Instance authority sessions consume one connected agent client. Retain their coordinator, observe idle failure, then drop the session and join before reconnecting. The coordinator owns admission, sequential acknowledgements, continuous reads, and shutdown of both transport workers.
 - VM listener transfer requires the expected `VmIncarnation`. Capture and validate the physical run under `VmManager.vms`; stopped or replaced runs must fail. The non-default `arcbox-engine/test-support` feature provides identity-only listener fixtures and never creates a live VM.
 - Expected agent and arbitrary-port connections share the VM-entry guard. Hold that guard through the native connection call. Do not acquire a second VM registry lock inside the guarded operation.

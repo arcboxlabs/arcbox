@@ -1,5 +1,6 @@
 use super::*;
 use crate::agent_client::transport::AgentTransport;
+use crate::agent_client::{BLOCKING_RPC_TIMEOUT, wire};
 use arcbox_transport::vsock::BlockingVsockTransport;
 use std::{os::fd::IntoRawFd, os::unix::net::UnixStream, time::Duration};
 

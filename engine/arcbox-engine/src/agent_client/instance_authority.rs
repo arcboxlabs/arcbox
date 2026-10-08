@@ -13,8 +13,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::transport::BLOCKING_RPC_TIMEOUT;
-use super::{AgentClient, retained_session, wire};
+use super::AgentClient;
+use super::retained_session::{self, exchange};
 use crate::error::{EngineError, Result};
 
 struct Replacement {
@@ -93,6 +93,7 @@ async fn run(
         MessageType::PingRequest,
         &[],
         MessageType::PingResponse,
+        failure,
     )
     .await?;
     AgentClient::check_agent_protocol(&ping)?;
@@ -102,6 +103,7 @@ async fn run(
         MessageType::OpenInstanceAuthorityRequest,
         &[],
         MessageType::OpenInstanceAuthorityResponse,
+        failure,
     )
     .await?;
     ready.send(true).map_err(failure)?;
@@ -123,6 +125,7 @@ async fn run(
             MessageType::ReplaceInstanceAuthorityRequest,
             &update.snapshot.encode_to_vec(),
             MessageType::InstanceAuthorityAck,
+            failure,
         )
         .await?;
         if ack.authority_revision != update.snapshot.authority_revision {
@@ -135,37 +138,6 @@ async fn run(
             .send(())
             .map_err(|()| failure("snapshot receiver closed"))?;
     }
-}
-
-async fn exchange<T: Message>(
-    commands: &mpsc::Sender<(Bytes, Instant)>,
-    frames: &mut mpsc::Receiver<Bytes>,
-    request: MessageType,
-    payload: &[u8],
-    expected: MessageType,
-) -> Result<T> {
-    tokio::time::timeout(BLOCKING_RPC_TIMEOUT, async {
-        commands
-            .send((
-                wire::build_message(request, "", payload),
-                Instant::now() + BLOCKING_RPC_TIMEOUT,
-            ))
-            .await
-            .map_err(failure)?;
-        let raw = frames
-            .recv()
-            .await
-            .ok_or_else(|| failure("connection closed"))?;
-        let (kind, _, payload) = wire::parse_response(&raw)?;
-        if kind == MessageType::Error as u32 {
-            let (code, message) = wire::parse_error_response(&payload)?;
-            return Err(EngineError::Agent { code, message });
-        }
-        AgentClient::expect_response_type(kind, expected)?;
-        AgentClient::decode_response(&payload)
-    })
-    .await
-    .map_err(|_| failure(format!("{request:?} timed out")))?
 }
 
 fn failure(error: impl std::fmt::Display) -> EngineError {

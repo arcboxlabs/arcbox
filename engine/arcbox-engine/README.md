@@ -54,3 +54,5 @@ Use `AgentClient::list_kubernetes_load_balancers(cancelled)` to poll LoadBalance
 Use `MachineManager::set_web_ports` to save a machine's HTTP and HTTPS backend selection. Each policy is `Auto`, `Off`, or `Port(NonZeroU16)`; an explicit HTTPS port selects native TLS. Omitted arguments preserve the saved selection. The settings survive daemon restarts, clones, and archives. Saving these settings does not apply routes.
 
 `MachinePersistence` serializes saves, removals, and updates through the same manager. Concurrent field updates preserve the latest saved configuration. Update callbacks must not call a write method on the same manager. Separate manager instances do not coordinate writes.
+
+Use `AgentClient::machine_web` on an expected machine connection to retain one fixed raw name, canonical hostname, and bridge IPv4 address. Send complete `ReplaceMachineWebRequest` policies with increasing source revisions starting at one. The matching acknowledgement confirms configuration receipt, not installed routes. Drop the session and await its coordinator before releasing the machine host hold.

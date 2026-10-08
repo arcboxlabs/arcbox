@@ -12,6 +12,7 @@ mod cancellation;
 mod guest_trust;
 mod instance_authority;
 mod machine_exec;
+mod machine_web;
 mod retained_session;
 mod sandbox_stream;
 mod shutdown;
@@ -28,6 +29,7 @@ mod kubernetes_tests;
 
 pub use self::instance_authority::InstanceAuthoritySession;
 pub use self::machine_exec::{ExecSessionInput, ExecSessionOutput};
+pub use self::machine_web::MachineWebSession;
 pub use self::sandbox_stream::SandboxStream;
 use self::sandbox_stream::StreamKind;
 pub use self::storage_health::StorageHealthStream;

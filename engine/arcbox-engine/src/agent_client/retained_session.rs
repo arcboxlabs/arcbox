@@ -2,6 +2,8 @@
 
 use std::{future::Future, time::Instant};
 
+use arcbox_constants::wire::MessageType;
+use buffa::Message;
 use bytes::Bytes;
 use tokio::{
     sync::mpsc,
@@ -9,7 +11,8 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::transport::AgentTransport;
+use super::transport::{AgentTransport, BLOCKING_RPC_TIMEOUT};
+use super::{AgentClient, wire};
 use crate::error::{EngineError, Result};
 
 /// Starts dedicated transport workers and joins both after the protocol or cancellation ends.
@@ -111,4 +114,36 @@ where
         result
     });
     Ok(coordinator)
+}
+
+pub(super) async fn exchange<T: Message>(
+    commands: &mpsc::Sender<(Bytes, Instant)>,
+    frames: &mut mpsc::Receiver<Bytes>,
+    request: MessageType,
+    payload: &[u8],
+    expected: MessageType,
+    failure: fn(String) -> EngineError,
+) -> Result<T> {
+    tokio::time::timeout(BLOCKING_RPC_TIMEOUT, async {
+        commands
+            .send((
+                wire::build_message(request, "", payload),
+                Instant::now() + BLOCKING_RPC_TIMEOUT,
+            ))
+            .await
+            .map_err(|error| failure(error.to_string()))?;
+        let raw = frames
+            .recv()
+            .await
+            .ok_or_else(|| failure("connection closed".into()))?;
+        let (kind, _, payload) = wire::parse_response(&raw)?;
+        if kind == MessageType::Error as u32 {
+            let (code, message) = wire::parse_error_response(&payload)?;
+            return Err(EngineError::Agent { code, message });
+        }
+        AgentClient::expect_response_type(kind, expected)?;
+        AgentClient::decode_response(&payload)
+    })
+    .await
+    .map_err(|_| failure(format!("{request:?} timed out")))?
 }
