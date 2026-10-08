@@ -30,40 +30,28 @@ pub(super) fn build_message(msg_type: MessageType, trace_id: &str, payload: &[u8
     buf.freeze()
 }
 
-/// Parses a V2 wire response. Returns (`resp_type`, `trace_id`, payload).
+/// Parses a complete V2 frame from the bounded transport reader.
+/// Returns (`resp_type`, `trace_id`, payload); malformed trace fields fail.
 pub(super) fn parse_response(response: &[u8]) -> Result<(u32, String, Vec<u8>)> {
-    if response.len() < FRAME_HEADER_SIZE {
+    if response.len() < FRAME_HEADER_SIZE + TRACE_LEN_FIELD_SIZE {
         return Err(EngineError::Machine("response too short".to_string()));
     }
     let mut cursor = std::io::Cursor::new(response);
-    let length = cursor.get_u32() as usize;
+    cursor.advance(std::mem::size_of::<u32>());
     let resp_type = cursor.get_u32();
-
-    let remaining = length.saturating_sub(TYPE_FIELD_SIZE);
-    let offset = FRAME_HEADER_SIZE;
-
-    if remaining < TRACE_LEN_FIELD_SIZE || response.len() < offset + TRACE_LEN_FIELD_SIZE {
-        // No trace_len field; treat the rest as payload.
-        return Ok((resp_type, String::new(), response[offset..].to_vec()));
-    }
-
-    let trace_len = u16::from_be_bytes([response[offset], response[offset + 1]]) as usize;
-    let trace_start = offset + TRACE_LEN_FIELD_SIZE;
+    let trace_len = cursor.get_u16() as usize;
+    let trace_start = FRAME_HEADER_SIZE + TRACE_LEN_FIELD_SIZE;
     let trace_end = trace_start + trace_len;
-    let payload_start = trace_end;
-
-    if response.len() < trace_end {
-        return Ok((resp_type, String::new(), response[trace_start..].to_vec()));
-    }
-
-    let trace_id = String::from_utf8(response[trace_start..trace_end].to_vec()).unwrap_or_default();
-    let payload = if response.len() > payload_start {
-        response[payload_start..].to_vec()
-    } else {
-        Vec::new()
-    };
-
-    Ok((resp_type, trace_id, payload))
+    let trace = response.get(trace_start..trace_end).ok_or_else(|| {
+        EngineError::Machine("response trace length exceeds the frame".to_string())
+    })?;
+    let trace_id = std::str::from_utf8(trace)
+        .map_err(|_| EngineError::Machine("invalid response trace encoding".to_string()))?;
+    Ok((
+        resp_type,
+        trace_id.to_owned(),
+        response[trace_end..].to_vec(),
+    ))
 }
 
 /// Parses an error response from the agent into `(status code, message)`.
@@ -92,6 +80,42 @@ pub(super) fn parse_error_response(payload: &[u8]) -> Result<(i32, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_requires_complete_v2_trace_fields() {
+        for (frame, expected) in [
+            (&[][..], "response too short"),
+            (&[0, 0, 0, 3, 0, 0, 0][..], "response too short"),
+            (&[0, 0, 0, 4, 0, 0, 0, 1][..], "response too short"),
+            (&[0, 0, 0, 5, 0, 0, 0, 1, 0][..], "response too short"),
+            (
+                &[0, 0, 0, 6, 0, 0, 0, 1, 0, 1][..],
+                "trace length exceeds the frame",
+            ),
+            (
+                &[0, 0, 0, 7, 0, 0, 0, 1, 0, 1, 0xff][..],
+                "invalid response trace encoding",
+            ),
+        ] {
+            assert!(
+                parse_response(frame)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn response_separates_utf8_trace_from_binary_payload() {
+        for trace in ["", "trace-λ"] {
+            let frame = build_message(MessageType::InstanceAuthorityAck, trace, &[0, 0xff]);
+            let (kind, decoded_trace, payload) = parse_response(&frame).unwrap();
+            assert_eq!(kind, MessageType::InstanceAuthorityAck as u32);
+            assert_eq!(decoded_trace, trace);
+            assert_eq!(payload, [0, 0xff]);
+        }
+    }
 
     /// Mirror of the agent's `ErrorResponse::encode` framing.
     fn encode_error(code: i32, message: &str) -> Vec<u8> {
