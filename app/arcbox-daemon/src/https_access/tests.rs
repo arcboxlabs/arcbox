@@ -15,6 +15,7 @@ struct Recording {
     calls: Arc<Mutex<Vec<(u64, ReconcileHttpsAccessRequest)>>>,
     incarnation: Arc<Mutex<u64>>,
     replace_on_addresses: Arc<Mutex<bool>>,
+    cancel_on_claim: Arc<Mutex<Option<CancellationToken>>>,
     response: Arc<Mutex<ReconcileHttpsAccessResponse>>,
     delay: Arc<Mutex<Duration>>,
 }
@@ -37,21 +38,30 @@ impl AccessSource for Recording {
         Ok(*self.incarnation.lock().unwrap())
     }
 
-    fn with_vm<T>(&self, expected: &Self::Vm, publish: impl FnOnce() -> T) -> Result<T> {
+    fn with_claim<T>(
+        &self,
+        expected: &Self::Vm,
+        hostname: &str,
+        publish: impl FnOnce(IpAddr) -> T,
+    ) -> Result<Option<T>> {
         let current = self.incarnation.lock().unwrap();
         ensure!(*current == *expected, "physical VM changed");
-        Ok(publish())
+        let cancelled = self.cancel_on_claim.lock().unwrap().take();
+        if let Some(cancelled) = cancelled {
+            cancelled.cancel();
+        }
+        Ok((hostname == "web.arcbox.local").then(|| publish("10.0.2.3".parse().unwrap())))
     }
 
-    fn host_addresses(&self) -> Result<Vec<String>> {
+    fn host_addresses(&self, expected: &Self::Vm) -> Result<Vec<String>> {
+        ensure!(
+            *self.incarnation.lock().unwrap() == *expected,
+            "physical VM changed"
+        );
         if std::mem::take(&mut *self.replace_on_addresses.lock().unwrap()) {
             *self.incarnation.lock().unwrap() += 1;
         }
         Ok(vec!["192.168.64.1".into()])
-    }
-
-    fn resolve(&self, hostname: &str) -> Option<IpAddr> {
-        (hostname == "web.arcbox.local").then(|| "10.0.2.3".parse().unwrap())
     }
 
     async fn reconcile(
@@ -60,7 +70,10 @@ impl AccessSource for Recording {
         request: ReconcileHttpsAccessRequest,
         cancelled: &CancellationToken,
     ) -> Result<ReconcileHttpsAccessResponse> {
-        self.with_vm(expected, || ())?;
+        ensure!(
+            *self.incarnation.lock().unwrap() == *expected,
+            "physical VM changed"
+        );
         let enabled = request.enabled;
         self.calls.lock().unwrap().push((*expected, request));
         let response = self.response.lock().unwrap().clone();
@@ -187,6 +200,10 @@ async fn validates_dns_and_rejects_an_inflight_response_from_an_earlier_cycle() 
     settle(POLL_INTERVAL).await;
     assert_no_event(&mut client).await;
     source.response.lock().unwrap().destination_ip = "10.0.2.3".into();
+    source.response.lock().unwrap().hostname = "other.arcbox.local".into();
+    settle(POLL_INTERVAL).await;
+    assert_no_event(&mut client).await;
+    source.response.lock().unwrap().hostname = "web.arcbox.local".into();
     *source.delay.lock().unwrap() = Duration::from_millis(500);
     settle(POLL_INTERVAL).await;
     let previous = setup.https_access.observing_cycle().unwrap();
@@ -296,6 +313,74 @@ async fn replacement_rejects_a_late_response_and_the_previous_disable_target() {
     let (expected, disable) = calls.last().unwrap();
     assert_eq!(*expected, 1);
     assert!(!disable.enabled);
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_during_claim_validation_does_not_publish() {
+    let setup = Arc::new(SetupState::new());
+    status(&setup, TrustState::Untrusted);
+    let mut client = watch(setup.clone()).await;
+    assert_eq!(client.next().await.unwrap().unwrap().request_id, "");
+    let source = Recording::default();
+    *source.response.lock().unwrap() = ReconcileHttpsAccessResponse {
+        hostname: "web.arcbox.local".into(),
+        destination_ip: "10.0.2.3".into(),
+        sequence: 1,
+        ..Default::default()
+    };
+    let (_vm_tx, vm) = watch::channel(VmLifecycleState::Running);
+    let shutdown = CancellationToken::new();
+    *source.cancel_on_claim.lock().unwrap() = Some(shutdown.clone());
+    observe(source.clone(), setup.https_access.clone(), vm, shutdown).await;
+    assert_no_event(&mut client).await;
+    assert!(!source.calls().last().unwrap().enabled);
+}
+
+#[tokio::test]
+async fn runtime_source_publishes_only_current_system_claims() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = arcbox_core::runtime::NetworkFixture::default();
+    let runtime = Arc::new(
+        Runtime::new(arcbox_core::Config {
+            data_dir: directory.path().into(),
+            ..Default::default()
+        })
+        .unwrap()
+        .with_network_fixture(fixture.clone()),
+    );
+    let address = "10.0.2.3".parse::<IpAddr>().unwrap();
+    runtime
+        .register_dns("container", &["web".into()], address)
+        .await
+        .unwrap();
+    runtime
+        .register_machine_dns("other", address)
+        .await
+        .unwrap();
+    let source = RuntimeSource(runtime);
+    let guest = source.incarnation().unwrap();
+    assert_eq!(
+        source
+            .with_claim(&guest, "web.arcbox.local", |ip| ip)
+            .unwrap(),
+        Some(address)
+    );
+    assert_eq!(
+        source
+            .with_claim(&guest, "other.machine.arcbox.local", |_| panic!(
+                "System guest must not authorize a machine claim"
+            ))
+            .unwrap(),
+        None
+    );
+    fixture.restart();
+    assert!(
+        source
+            .with_claim(&guest, "web.arcbox.local", |_| panic!(
+                "retired guest must not publish"
+            ))
+            .is_err()
+    );
 }
 
 mod lifecycle;

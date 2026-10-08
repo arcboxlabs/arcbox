@@ -2,11 +2,10 @@
 
 use std::{net::IpAddr, sync::Arc, time::Duration};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Result, bail, ensure};
 use arcbox_api::HttpsAccess;
 use arcbox_connect::v1::{ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse};
-use arcbox_core::{DEFAULT_MACHINE_NAME, Runtime, VmLifecycleState};
-use arcbox_engine::vm::VmIncarnation;
+use arcbox_core::{DEFAULT_MACHINE_NAME, Runtime, VmLifecycleState, runtime::CapturedWebGuest};
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -36,9 +35,13 @@ pub async fn start(ctx: &DaemonContext, runtime: &Arc<Runtime>) {
 trait AccessSource {
     type Vm: Clone + Eq + Send + Sync;
     fn incarnation(&self) -> Result<Self::Vm>;
-    fn with_vm<T>(&self, expected: &Self::Vm, publish: impl FnOnce() -> T) -> Result<T>;
-    fn host_addresses(&self) -> Result<Vec<String>>;
-    fn resolve(&self, hostname: &str) -> Option<IpAddr>;
+    fn with_claim<T>(
+        &self,
+        expected: &Self::Vm,
+        hostname: &str,
+        publish: impl FnOnce(IpAddr) -> T,
+    ) -> Result<Option<T>>;
+    fn host_addresses(&self, expected: &Self::Vm) -> Result<Vec<String>>;
     async fn reconcile(
         &mut self,
         expected: &Self::Vm,
@@ -50,29 +53,25 @@ trait AccessSource {
 struct RuntimeSource(Arc<Runtime>);
 
 impl AccessSource for RuntimeSource {
-    type Vm = VmIncarnation;
+    type Vm = CapturedWebGuest;
 
     fn incarnation(&self) -> Result<Self::Vm> {
-        Ok(self.0.container_network_incarnation()?)
+        Ok(self.0.capture_web_guest(DEFAULT_MACHINE_NAME)?)
     }
 
-    fn with_vm<T>(&self, expected: &Self::Vm, publish: impl FnOnce() -> T) -> Result<T> {
-        Ok(self.0.machine_manager().with_network_incarnation(
-            DEFAULT_MACHINE_NAME,
-            expected,
-            |_| publish(),
-        )?)
-    }
-
-    fn host_addresses(&self) -> Result<Vec<String>> {
-        let bridge = self
+    fn with_claim<T>(
+        &self,
+        expected: &Self::Vm,
+        hostname: &str,
+        publish: impl FnOnce(IpAddr) -> T,
+    ) -> Result<Option<T>> {
+        Ok(self
             .0
-            .machine_manager()
-            .get(DEFAULT_MACHINE_NAME)
-            .and_then(|machine| machine.bridge_ip_address)
-            .context("System VM has no bridge address")?
-            .parse()
-            .context("invalid System VM bridge address")?;
+            .with_web_guest_claim(expected, hostname, |address, _| publish(address))?)
+    }
+
+    fn host_addresses(&self, expected: &Self::Vm) -> Result<Vec<String>> {
+        let bridge = self.0.web_guest_bridge_address(expected)?;
         let addresses = crate::host_network::host_addresses_on_link(bridge)?;
         ensure!(
             !addresses.is_empty(),
@@ -82,10 +81,6 @@ impl AccessSource for RuntimeSource {
             .into_iter()
             .map(|address| address.to_string())
             .collect())
-    }
-
-    fn resolve(&self, hostname: &str) -> Option<IpAddr> {
-        self.0.web_service_dns_address(hostname)
     }
 
     async fn reconcile(
@@ -135,7 +130,7 @@ async fn observe(
         let Some((observation_id, expected)) = target else {
             continue;
         };
-        let host_addresses = match source.host_addresses() {
+        let host_addresses = match source.host_addresses(&expected) {
             Ok(addresses) => addresses,
             Err(error) => {
                 debug!(%error, "cannot observe Mac HTTPS access");
@@ -159,15 +154,13 @@ async fn observe(
         .await;
         match response {
             Ok(response) if response.sequence > 0 => {
-                let state = vm.borrow();
-                if state.is_ready() && !shutdown.is_cancelled() {
-                    let recorded = source.with_vm(&expected, || {
-                        if response.destination_ip.parse::<IpAddr>()
-                            .is_ok_and(|ip| source.resolve(&response.hostname) == Some(ip))
+                let ready = vm.borrow().is_ready();
+                if ready && !shutdown.is_cancelled() {
+                    let recorded = source.with_claim(&expected, &response.hostname, |address| {
+                        if !shutdown.is_cancelled()
+                            && response.destination_ip.parse::<IpAddr>() == Ok(address)
                         {
                             access.record(&response.hostname, &observation_id);
-                        } else {
-                            debug!(hostname = %response.hostname, "ignored HTTPS access without current DNS ownership");
                         }
                     });
                     if let Err(error) = recorded {

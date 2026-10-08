@@ -1,6 +1,6 @@
 //! Captured guest identity and current authority for host web services.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use arcbox_connect::v1::OpenMachineWebRequest;
 use arcbox_constants::{dns::Domain, ports::TLS_SIGNING_PORT};
@@ -130,6 +130,33 @@ impl Runtime {
             machine: machine.into(),
             incarnation,
         })
+    }
+
+    /// Reads the bridge IPv4 address under the captured machine and physical VM guards.
+    ///
+    /// # Errors
+    /// Returns an error if host admission closes, the machine stops, or its bridge IPv4 address is unavailable.
+    pub fn web_guest_bridge_address(&self, guest: &CapturedWebGuest) -> Result<Ipv4Addr> {
+        self.ensure_host_network_open()?;
+        self.machine_manager.with_network_incarnation(
+            &guest.machine,
+            &guest.incarnation,
+            |machine| {
+                if machine.state != MachineState::Running {
+                    return Err(CoreError::invalid_state("web guest is not running"));
+                }
+                machine
+                    .bridge_ip_address
+                    .as_deref()
+                    .ok_or_else(|| {
+                        CoreError::invalid_state("web guest has no bridge IPv4 address")
+                    })?
+                    .parse()
+                    .map_err(|error| {
+                        CoreError::Vm(format!("invalid web guest bridge IPv4 address: {error}"))
+                    })
+            },
+        )?
     }
 
     /// Holds the captured machine until host connection and signing work finish.

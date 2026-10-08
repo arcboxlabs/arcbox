@@ -47,16 +47,17 @@ impl AccessSource for Connecting {
         self.source.incarnation()
     }
 
-    fn with_vm<T>(&self, expected: &Self::Vm, publish: impl FnOnce() -> T) -> Result<T> {
-        self.source.with_vm(expected, publish)
+    fn with_claim<T>(
+        &self,
+        expected: &Self::Vm,
+        hostname: &str,
+        publish: impl FnOnce(IpAddr) -> T,
+    ) -> Result<Option<T>> {
+        self.source.with_claim(expected, hostname, publish)
     }
 
-    fn host_addresses(&self) -> Result<Vec<String>> {
-        self.source.host_addresses()
-    }
-
-    fn resolve(&self, hostname: &str) -> Option<IpAddr> {
-        self.source.resolve(hostname)
+    fn host_addresses(&self, expected: &Self::Vm) -> Result<Vec<String>> {
+        self.source.host_addresses(expected)
     }
 
     async fn reconcile(

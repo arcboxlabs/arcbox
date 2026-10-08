@@ -66,8 +66,8 @@ impl Runtime {
     ///
     /// Returns an error if the captured VM changes, cancellation occurs, or the guest rejects the observation.
     pub async fn reconcile_https_access(
-        &self,
-        expected: &arcbox_engine::vm::VmIncarnation,
+        self: &std::sync::Arc<Self>,
+        guest: &CapturedWebGuest,
         request: ReconcileHttpsAccessRequest,
         cancelled: &CancellationToken,
     ) -> Result<ReconcileHttpsAccessResponse> {
@@ -76,13 +76,10 @@ impl Runtime {
                 "HTTPS access observation cancelled",
             ));
         }
-        self.with_host_network_incarnation(self.default_machine_name(), expected, || ())?;
-        let response = self
-            .connect_system_agent_expected(expected.clone())
-            .await?
-            .reconcile_https_access(request, cancelled)
-            .await?;
-        self.with_host_network_incarnation(self.default_machine_name(), expected, || response)
+        self.with_host_network_incarnation(&guest.machine, &guest.incarnation, || ())?;
+        let (agent, _hold) = self.connect_web_guest_query(guest, cancelled).await?;
+        let response = agent.reconcile_https_access(request, cancelled).await?;
+        self.with_host_network_incarnation(&guest.machine, &guest.incarnation, || response)
     }
 }
 

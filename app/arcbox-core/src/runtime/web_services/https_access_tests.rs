@@ -6,13 +6,17 @@ use super::*;
 async fn rejected_observation_does_not_connect_to_a_replacement_vm() {
     let directory = tempfile::tempdir().unwrap();
     let fixture = crate::runtime::NetworkFixture::default();
-    let runtime = Runtime::new(crate::Config {
-        data_dir: directory.path().to_owned(),
-        ..Default::default()
-    })
-    .unwrap()
-    .with_network_fixture(fixture.clone());
-    let previous = runtime.container_network_incarnation().unwrap();
+    let runtime = std::sync::Arc::new(
+        Runtime::new(crate::Config {
+            data_dir: directory.path().to_owned(),
+            ..Default::default()
+        })
+        .unwrap()
+        .with_network_fixture(fixture.clone()),
+    );
+    let previous = runtime
+        .capture_web_guest(runtime.default_machine_name())
+        .unwrap();
     fixture.restart();
     for enabled in [false, true] {
         let error = runtime
@@ -32,7 +36,9 @@ async fn rejected_observation_does_not_connect_to_a_replacement_vm() {
     cancelled.cancel();
     let error = runtime
         .reconcile_https_access(
-            &runtime.container_network_incarnation().unwrap(),
+            &runtime
+                .capture_web_guest(runtime.default_machine_name())
+                .unwrap(),
             ReconcileHttpsAccessRequest::default(),
             &cancelled,
         )
