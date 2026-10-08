@@ -15,7 +15,7 @@ use anyhow::{Context, Result, bail};
 pub(super) trait Host: Sync {
     /// Runs `program args…` to completion. `Err` means it could not start.
     fn run(&self, program: &str, args: &[&OsStr]) -> Result<Output>;
-    /// Revokes trust through native authorization before removing the helper's public copy.
+    /// Revokes trust through native authorization while the caller holds the profile lock.
     fn revoke_local_ca<'a>(
         &'a self,
         tls_dir: &'a Path,
@@ -32,7 +32,7 @@ impl Host for Mac {
         &'a self,
         tls_dir: &'a Path,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
-        Box::pin(super::super::tls::remove_trust(tls_dir))
+        Box::pin(super::super::tls::remove_trust_locked(tls_dir))
     }
 
     fn delete_local_ca(&self, tls_dir: &Path) -> Result<()> {

@@ -12,6 +12,8 @@ The `certificate_state` field distinguishes `missing`, `valid`, `renewal_due`, `
 
 Run `abctl tls repair` to restore a missing or damaged `tls/ca.pem` from the profile's existing Keychain CA. Repair does not create a key or change trust. The optional `--expected-fingerprint` pins the current root. Repair rejects an inactive root, multiple matching Keychain items, and a publication containing a recoverable different certificate or multiple PEM objects. A repaired file does not establish that trust in an unknown previous root was removed.
 
+Trust, repair, and revocation are exclusive per profile through native authorization. A concurrent command fails until the active command completes or the user cancels authorization. Status remains read-only and does not take that lock.
+
 The [authorization decision](adr/0007-local-https-independent-of-startup.md) separates HTTPS from Docker readiness. The [installed validation log](logs/2026-10-08-helper-ca-trust.md#installed-desktop-authorization-and-restart) covers the earlier startup-authorization flow. That evidence does not validate the new on-demand flow.
 
 ## Service discovery contract

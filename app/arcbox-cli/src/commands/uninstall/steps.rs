@@ -218,6 +218,8 @@ pub(super) fn remove_hosts_alias(host: &dyn Host, hosts: &Path) -> Result<Outcom
 /// Removes the selected profile's CA trust, certificate, and Keychain key.
 pub(super) async fn untrust_local_ca(host: &dyn Host, roots: &Roots) -> Result<Outcome> {
     let dir = roots.data_dir.join(arcbox_constants::paths::guest::TLS);
+    // Exclude new authorization until the revoked identity is also removed.
+    let _operation = arcbox_local_ca::lock_profile(&dir)?;
     host.revoke_local_ca(&dir).await?;
     host.delete_local_ca(&dir)?;
     Ok(Outcome::Done)

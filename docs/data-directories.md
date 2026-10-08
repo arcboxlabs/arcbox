@@ -156,10 +156,11 @@ The shared directory contains the public certificate for client trust. Trust mod
 |------|---------|---------|
 | `tls/ca.pem` | Public CA certificate, name-constrained to `arcbox.local`; native user-session authorization sets Admin TLS trust, and the helper stores the System Keychain copy | daemon |
 | `tls/ca-key.pem` | Legacy private key; removed before VM boot | legacy daemon |
+| `tls/operation.lock` | Serializes identity changes, trust, repair, and revocation for this profile | daemon; CLI |
 
 Deleting `tls/` does not rotate the Keychain CA: the daemon exports the same public certificate again. The Keychain key uses `dev.arcbox.local-ca.v2:<canonical tls directory>` as its label. Migration generates a new key, removes the old shared key, revokes the old certificate's trust, and then replaces `ca.pem`. The old public certificate stays in place if trust removal fails, so the next start can retry.
 
-The canonical production instance verifies Admin-domain TLS trust before booting the VM. Missing trust keeps startup at `AWAITING_HTTPS_TRUST` while Desktop invokes `abctl tls trust` in the login user's session. macOS authorizes trust changes separately from helper installation; correct existing trust needs no new prompt. Migration also removes legacy User trust for an unchanged certificate, because User settings override Admin policy. Development and isolated instances do not install trust automatically. `abctl tls status` checks Admin trust, the System Keychain copy, and absence of legacy User trust. `abctl tls untrust` revokes Admin and legacy User trust before removing that copy. The next production startup requests authorization again.
+CA trust is independent of VM and Docker startup. Desktop invokes `abctl tls trust` in the login user's session after a deliberate managed HTTPS action. macOS authorizes trust changes separately from helper installation; correct existing trust needs no new prompt. Migration also removes legacy User trust for an unchanged certificate, because User settings override Admin policy. Development and isolated instances do not install trust automatically. `abctl tls status` checks Admin trust, the System Keychain copy, and absence of legacy User trust. `abctl tls untrust` revokes Admin and legacy User trust before removing that copy. Trust, repair, and revocation hold `operation.lock` through authorization, so concurrent commands for the same profile fail without opening another prompt.
 
 ### 1.11 `ssh/` — SSH Server
 
@@ -431,6 +432,8 @@ for the privileged paths. It prints what it found before asking to continue,
 then reports each step as `done`, `skipped (why)` or `FAILED: why`, and exits
 non-zero when any step failed. `--keep-data` keeps `~/.arcbox/data`
 (containers, images, volumes, machines); `--yes` skips the prompt.
+
+CA cleanup holds the profile operation lock until both trust revocation and Keychain identity deletion finish. The removal plan includes the lock directory created during cleanup, including when the profile directory was absent.
 
 ```bash
 abctl uninstall                 # everything

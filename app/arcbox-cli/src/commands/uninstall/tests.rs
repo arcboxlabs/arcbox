@@ -499,6 +499,28 @@ async fn keep_data_leaves_the_data_directory_and_homebrew_keeps_its_app() {
     assert!(roots.app_bundle().exists());
 }
 
+#[tokio::test]
+async fn an_absent_profile_leaves_no_ca_cleanup_lock() {
+    for keep_data in [false, true] {
+        let install = Install::new();
+        let data_dir = &install.roots().data_dir;
+        fs::remove_dir_all(data_dir).unwrap();
+        let host = Recorder::answering(|program, args| {
+            if program == "revoke-local-ca" {
+                assert!(Path::new(args[0]).join("operation.lock").exists());
+            }
+            None
+        });
+
+        let steps = uninstall(&install, &host, keep_data).await;
+        assert_eq!(failures(&steps), Vec::<String>::new());
+        assert!(!data_dir.join("tls").exists());
+        if !keep_data {
+            assert!(!data_dir.exists());
+        }
+    }
+}
+
 /// A step that fails is reported as failed, and the rest still run (#716).
 #[tokio::test]
 async fn a_failed_step_is_reported_and_does_not_stop_the_others() {
@@ -565,6 +587,41 @@ async fn failed_shutdown_preserves_ca_trust_and_the_installation() {
 }
 
 #[tokio::test]
+async fn ca_cleanup_excludes_authorization_until_identity_deletion_finishes() {
+    let install = Install::new();
+    let dir = install.roots().data_dir.join("tls");
+    let host = Recorder::answering(|program, args| {
+        if matches!(program, "revoke-local-ca" | "delete-local-ca") {
+            assert!(matches!(
+                arcbox_local_ca::lock_profile(Path::new(args[0])),
+                Err(arcbox_local_ca::Error::OperationInProgress)
+            ));
+        }
+        None
+    });
+    let existing = arcbox_local_ca::lock_profile(&dir).unwrap();
+    assert!(
+        super::steps::untrust_local_ca(&host, install.roots())
+            .await
+            .is_err()
+    );
+    assert_eq!(host.calls(), Vec::<String>::new());
+    drop(existing);
+
+    super::steps::untrust_local_ca(&host, install.roots())
+        .await
+        .unwrap();
+    assert_eq!(
+        host.calls(),
+        vec![
+            format!("revoke-local-ca {}", dir.display()),
+            format!("delete-local-ca {}", dir.display()),
+        ]
+    );
+    arcbox_local_ca::lock_profile(&dir).unwrap();
+}
+
+#[tokio::test]
 async fn failed_ca_cleanup_retains_the_helper_and_data_for_retry() {
     for failing_operation in ["revoke-local-ca", "delete-local-ca"] {
         let install = Install::new();
@@ -598,6 +655,7 @@ async fn failed_ca_cleanup_retains_the_helper_and_data_for_retry() {
         if failing_operation == "revoke-local-ca" {
             assert!(!calls.iter().any(|call| call.starts_with("delete-local-ca")));
         }
+        arcbox_local_ca::lock_profile(&install.roots().data_dir.join("tls")).unwrap();
     }
 }
 

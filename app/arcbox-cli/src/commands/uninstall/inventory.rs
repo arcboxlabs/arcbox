@@ -1,4 +1,4 @@
-//! Everything ArcBox writes to a Mac, and which of it is present.
+//! ArcBox-owned paths to remove, including the lock directory created during CA cleanup.
 //!
 //! This list is the contract behind `abctl uninstall`; the "Uninstall"
 //! section of `docs/data-directories.md` restates it for users. Change the
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use arcbox_constants::paths::{
-    ArcboxProfile, DOCKER_CLI_TOOLS, HostLayout, HostMountLayout, is_arcbox_owned, labels,
+    ArcboxProfile, DOCKER_CLI_TOOLS, HostLayout, HostMountLayout, guest, is_arcbox_owned, labels,
     privileged, privileged_log,
 };
 use arcbox_helper::validate::SocketTarget;
@@ -110,7 +110,7 @@ impl Roots {
     }
 }
 
-/// A file or directory ArcBox left behind.
+/// An ArcBox-owned file or directory scheduled for removal.
 pub(super) struct Found {
     pub(super) what: &'static str,
     pub(super) path: PathBuf,
@@ -118,7 +118,7 @@ pub(super) struct Found {
     pub(super) needs_root: bool,
 }
 
-/// What is present on this Mac out of everything ArcBox writes.
+/// Existing ArcBox state and paths created during uninstall.
 pub(super) struct Residue {
     pub(super) files: Vec<Found>,
     /// `/etc/hosts` carries the managed `ArcBox` alias line.
@@ -137,8 +137,8 @@ impl Residue {
     }
 }
 
-/// Lists what is present. Read-only; ownership checks read links and files
-/// as the current user.
+/// Plans removal of existing state and the directory created by CA cleanup.
+/// Ownership checks read links and files as the current user.
 pub(super) fn scan(roots: &Roots, keep_data: bool) -> Residue {
     let mut files = Vec::new();
     let mut found = |what, path: PathBuf, needs_root| {
@@ -230,13 +230,12 @@ pub(super) fn scan(roots: &Roots, keep_data: bool) -> Residue {
     if keep_data {
         if let Ok(entries) = std::fs::read_dir(&roots.data_dir) {
             for entry in entries.flatten() {
-                if entry.file_name() != "data" {
+                let name = entry.file_name();
+                if name != "data" && name != guest::TLS {
                     found("data directory entry", entry.path(), false);
                 }
             }
         }
-    } else {
-        found("data directory", roots.data_dir.clone(), false);
     }
 
     let app = roots.app_bundle();
@@ -244,6 +243,20 @@ pub(super) fn scan(roots: &Roots, keep_data: bool) -> Residue {
     if !app_left_to_homebrew {
         found("app bundle", app, false);
     }
+    // CA cleanup creates operation.lock even when the profile directory is absent.
+    files.push(Found {
+        what: if keep_data {
+            "CA directory"
+        } else {
+            "data directory"
+        },
+        path: if keep_data {
+            roots.data_dir.join(guest::TLS)
+        } else {
+            roots.data_dir.clone()
+        },
+        needs_root: false,
+    });
 
     Residue {
         files,

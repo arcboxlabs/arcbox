@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail, ensure};
 use arcbox_constants::dns::LOCAL_DOMAIN;
 use arcbox_constants::paths::{HostLayout, guest};
 use arcbox_helper::client::Client;
-use arcbox_local_ca::{KeychainAuthority, PublicAuthority};
+use arcbox_local_ca::{KeychainAuthority, PublicAuthority, lock_profile};
 use clap::Subcommand;
 
 /// Local CA commands.
@@ -73,6 +73,7 @@ pub async fn execute(cmd: TlsCommands) -> Result<()> {
         );
         return Ok(());
     }
+    let _operation = lock_profile(&tls_dir)?;
 
     let der = KeychainAuthority::existing_certificate(&tls_dir)?
         .context("no Keychain CA for this profile: start the ArcBox daemon once to create it")?;
@@ -138,6 +139,12 @@ fn check_fingerprint(cmd: &TlsCommands, actual: &str) -> Result<()> {
 /// Revoke both identities if migration has not yet replaced the public file.
 /// Keep the public file and private identity available until every removal succeeds.
 pub(super) async fn remove_trust(tls_dir: &Path) -> Result<()> {
+    let _operation = lock_profile(tls_dir)?;
+    remove_trust_locked(tls_dir).await
+}
+
+/// The caller must hold the profile lock through this call and any subsequent identity deletion.
+pub(super) async fn remove_trust_locked(tls_dir: &Path) -> Result<()> {
     let mut authorities: Vec<_> = KeychainAuthority::existing_certificate(tls_dir)?
         .map(PublicAuthority::try_from)
         .transpose()?

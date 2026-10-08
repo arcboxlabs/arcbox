@@ -45,6 +45,8 @@ mod journal;
 mod keychain;
 #[cfg(target_os = "macos")]
 mod migration;
+#[cfg(target_os = "macos")]
+mod operation;
 mod public;
 mod request;
 #[cfg(target_os = "macos")]
@@ -60,6 +62,8 @@ pub use self::keychain::KeychainAuthority;
 pub use self::migration::{
     Publication, remove_shared_private_key, remove_trust, remove_user_trust_der,
 };
+#[cfg(target_os = "macos")]
+pub use self::operation::lock_profile;
 pub use self::public::PublicAuthority;
 #[cfg(any(target_os = "macos", test))]
 pub use self::request::VerifiedCertificateRequest;
@@ -69,6 +73,11 @@ pub use self::validity::CertificateValidity;
 /// Why the CA could not be created, loaded, or used.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// Another process holds this profile's native authorization or identity mutation lock.
+    #[error(
+        "another local HTTPS operation is in progress for this profile; finish or cancel its authorization first"
+    )]
+    OperationInProgress,
     /// Reading or writing a CA file failed.
     #[error("{}: {source}", .path.display())]
     Io {

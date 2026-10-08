@@ -38,6 +38,10 @@ async fn refresh(
     let prepared = tokio::task::spawn_blocking({
         let dir = dir.to_owned();
         move || {
+            let operation = match arcbox_local_ca::lock_profile(&dir) {
+                Ok(operation) => operation,
+                Err(error) => return (active, Err(error.into()), None),
+            };
             let prepared = (|| -> Result<_> {
                 std::fs::create_dir_all(&dir)?;
                 arcbox_local_ca::remove_shared_private_key(&dir)?;
@@ -53,22 +57,28 @@ async fn refresh(
                     Err(error) => Err(error.into()),
                 }
             });
-            (active, result)
+            (active, result, Some(operation))
         }
     })
     .await
     .context("CA preparation task failed");
-    let result = match prepared {
-        Ok((active, result)) => {
+    let (result, _operation) = match prepared {
+        Ok((active, result, operation)) => {
             authority.send_replace(active);
-            result
+            (result, operation)
         }
         Err(error) => {
             authority.send_replace(None);
-            Err(error)
+            (Err(error), None)
         }
     };
     if let Err(error) = result {
+        if matches!(
+            error.downcast_ref::<arcbox_local_ca::Error>(),
+            Some(arcbox_local_ca::Error::OperationInProgress)
+        ) {
+            return inspect(dir).await;
+        }
         return failed(format!("{error:#}"));
     }
     inspect(dir).await
