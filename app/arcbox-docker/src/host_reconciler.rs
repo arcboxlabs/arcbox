@@ -490,6 +490,209 @@ mod tests {
         tokio::task::yield_now().await;
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_coalesced_restart_cancels_the_query_and_retires_the_old_generation() {
+        let (runtime, fixture, _tmp) = test_runtime();
+        assert!(
+            reconcile(&runtime, &FakeGuest::running(&["old"]), pending())
+                .await
+                .unwrap()
+        );
+        let guest = Arc::new(FakeGuest {
+            query_gate: Some((Notify::new(), Notify::new())),
+            ..FakeGuest::running(&["replacement"])
+        });
+        let (vm_tx, vm) = watch::channel(VmLifecycleState::Running);
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn({
+            let (runtime, guest, shutdown) =
+                (Arc::clone(&runtime), Arc::clone(&guest), shutdown.clone());
+            async move { reconcile_loop(&runtime, guest.as_ref(), vm, shutdown).await }
+        });
+        let (entered, release) = guest.query_gate.as_ref().unwrap();
+        tokio::time::timeout(RETURN_RETRY * 2, entered.notified())
+            .await
+            .expect("the old generation query starts");
+
+        fixture.restart();
+        vm_tx.send_replace(VmLifecycleState::Stopping);
+        vm_tx.send_replace(VmLifecycleState::Running);
+        tokio::time::timeout(Duration::from_secs(1), guest.query_finished.notified())
+            .await
+            .expect("the coalesced notification cancels the old query");
+        settle(Duration::ZERO).await;
+        assert_eq!(guest.active_queries.load(Ordering::Relaxed), 0);
+        assert_eq!(runtime.resolve_registered_container("old").await, None);
+        assert_eq!(runtime.container_dns_address("old.arcbox.local"), None);
+        assert_eq!(
+            runtime.resolve_registered_container("replacement").await,
+            None
+        );
+
+        release.notify_one();
+        settle(RETURN_RETRY).await;
+        assert_eq!(guest.queries(), 2);
+        assert_eq!(
+            runtime
+                .resolve_registered_container("replacement")
+                .await
+                .as_deref(),
+            Some("replacement")
+        );
+        assert_eq!(
+            runtime.container_dns_address("replacement.arcbox.local"),
+            Some("172.17.0.2".parse().unwrap())
+        );
+        assert_eq!(runtime.resolve_registered_container("old").await, None);
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("shutdown joins the reconciler")
+            .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn periodic_checks_retire_a_physical_vm_without_a_lifecycle_notification() {
+        let (runtime, fixture, _tmp) = test_runtime();
+        let guest = Arc::new(FakeGuest::running(&["web"]));
+        let (_vm_tx, vm) = watch::channel(VmLifecycleState::Running);
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn({
+            let (runtime, guest, shutdown) =
+                (Arc::clone(&runtime), Arc::clone(&guest), shutdown.clone());
+            async move { reconcile_loop(&runtime, guest.as_ref(), vm, shutdown).await }
+        });
+        settle(RETURN_RETRY).await;
+        assert_eq!(guest.queries(), 1);
+        assert_eq!(
+            runtime.resolve_registered_container("web").await.as_deref(),
+            Some("web")
+        );
+
+        fixture.stop();
+        settle(RECONCILE_INTERVAL).await;
+        assert_eq!(guest.queries(), 1);
+        assert_eq!(runtime.resolve_registered_container("web").await, None);
+        assert_eq!(runtime.container_dns_address("web.arcbox.local"), None);
+
+        fixture.restart();
+        settle(RETURN_RETRY).await;
+        assert_eq!(guest.queries(), 2);
+        assert_eq!(
+            runtime.resolve_registered_container("web").await.as_deref(),
+            Some("web")
+        );
+        assert_eq!(
+            runtime.container_dns_address("web.arcbox.local"),
+            Some("172.17.0.2".parse().unwrap())
+        );
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("shutdown joins the reconciler")
+            .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_query_deadline_allows_retirement_after_an_unannounced_physical_restart() {
+        let (runtime, fixture, _tmp) = test_runtime();
+        assert!(
+            reconcile(&runtime, &FakeGuest::running(&["old"]), pending())
+                .await
+                .unwrap()
+        );
+        let guest = Arc::new(FakeGuest {
+            query_gate: Some((Notify::new(), Notify::new())),
+            ..FakeGuest::running(&["replacement"])
+        });
+        let (_vm_tx, vm) = watch::channel(VmLifecycleState::Running);
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn({
+            let (runtime, guest, shutdown) =
+                (Arc::clone(&runtime), Arc::clone(&guest), shutdown.clone());
+            async move { reconcile_loop(&runtime, guest.as_ref(), vm, shutdown).await }
+        });
+        let (entered, release) = guest.query_gate.as_ref().unwrap();
+        tokio::time::timeout(RETURN_RETRY * 2, entered.notified())
+            .await
+            .expect("the old generation query starts");
+        fixture.restart();
+        tokio::time::timeout(
+            RECONCILE_INTERVAL + RETURN_RETRY,
+            guest.query_finished.notified(),
+        )
+        .await
+        .expect("the deadline drops the unanswered guest query");
+        assert_eq!(guest.active_queries.load(Ordering::Relaxed), 0);
+        assert_eq!(guest.queries(), 1);
+        assert_eq!(
+            runtime.resolve_registered_container("old").await.as_deref(),
+            Some("old")
+        );
+
+        tokio::time::timeout(RETURN_RETRY * 2, entered.notified())
+            .await
+            .expect("the next tick queries the replacement VM");
+        assert_eq!(runtime.resolve_registered_container("old").await, None);
+        assert_eq!(runtime.container_dns_address("old.arcbox.local"), None);
+        assert_eq!(guest.queries(), 2);
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), guest.query_finished.notified())
+            .await
+            .expect("the replacement query finishes");
+        settle(Duration::ZERO).await;
+        assert_eq!(
+            runtime
+                .resolve_registered_container("replacement")
+                .await
+                .as_deref(),
+            Some("replacement")
+        );
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("shutdown joins the reconciler")
+            .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stopped_vm_is_rechecked_at_the_regular_interval() {
+        let (runtime, fixture, _tmp) = test_runtime();
+        fixture.stop();
+        let guest = Arc::new(FakeGuest::running(&[]));
+        let (_vm_tx, vm) = watch::channel(VmLifecycleState::Stopping);
+        let shutdown = CancellationToken::new();
+        let task = tokio::spawn({
+            let (runtime, guest, shutdown) =
+                (Arc::clone(&runtime), Arc::clone(&guest), shutdown.clone());
+            async move { reconcile_loop(&runtime, guest.as_ref(), vm, shutdown).await }
+        });
+        settle(RETURN_RETRY).await;
+        runtime
+            .register_container_alias("stale", "stale")
+            .await
+            .unwrap();
+        settle(RETURN_RETRY).await;
+        assert_eq!(
+            runtime
+                .resolve_registered_container("stale")
+                .await
+                .as_deref(),
+            Some("stale")
+        );
+        settle(RECONCILE_INTERVAL.checked_sub(RETURN_RETRY).unwrap()).await;
+        assert_eq!(runtime.resolve_registered_container("stale").await, None);
+        assert_eq!(guest.queries(), 0);
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("shutdown joins the reconciler")
+            .unwrap();
+    }
+
     /// The lifecycle contract end to end: a VM departure retires the
     /// containers' host state at once, and its return is reconciled within
     /// the short retry rather than a whole interval.
