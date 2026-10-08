@@ -1,7 +1,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use arcbox_helper::{HelperService, ResolverLease, client::Client};
+use arcbox_helper::{
+    HelperService, ResolverAuthorityRoot, ResolverAuthorityState, ResolverLease, ResolverOwner,
+    client::Client,
+};
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 
@@ -99,6 +102,8 @@ async fn resolver_eof_drains_in_flight_mutations_before_releasing_the_lease() {
     let (proceed, pending) = oneshot::channel();
     let (completed_tx, completed_rx) = oneshot::channel();
     let mutation_server = server.clone();
+    let observer = store.connection();
+    let mutation_store = Arc::clone(&store);
     let next_path = directory.path().join("next.local");
     let mut in_flight = JoinSet::new();
     in_flight.spawn(async move {
@@ -108,6 +113,14 @@ async fn resolver_eof_drains_in_flight_mutations_before_releasing_the_lease() {
             .await
             .unwrap();
         assert!(next_path.exists());
+        assert_eq!(
+            mutation_store.snapshot(observer).unwrap().roots,
+            [ResolverAuthorityRoot {
+                root: "next.local".into(),
+                owner: ResolverOwner::OtherConnection,
+                state: ResolverAuthorityState::RetainedUnavailable,
+            }]
+        );
         completed_tx.send(()).unwrap();
     });
     let finishing = finish_connection(server, in_flight);

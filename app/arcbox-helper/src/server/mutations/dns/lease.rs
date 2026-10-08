@@ -9,7 +9,9 @@ use std::path::Path;
 
 use arcbox_constants::{dns::Domain, paths::ArcboxProfile};
 use arcbox_helper::validate::DnsPort;
-use arcbox_helper::{HelperError, ResolverLease};
+use arcbox_helper::{
+    HelperError, ResolverAuthorityRoot, ResolverAuthorityState, ResolverLease, ResolverOwner,
+};
 
 use super::{
     ResolverStore, contents,
@@ -53,6 +55,7 @@ impl TryFrom<ResolverLease> for Update {
 
 #[derive(Default)]
 pub(super) struct State {
+    pub(super) epoch: u64,
     next_connection: u64,
     connections: BTreeMap<u64, Lease>,
 }
@@ -60,9 +63,15 @@ pub(super) struct State {
 #[derive(Default)]
 struct Lease {
     nonce: Option<[u8; 16]>,
-    revision: u64,
+    accepted: Option<Accepted>,
     failed: bool,
+    retiring: bool,
     records: Vec<Record>,
+}
+
+struct Accepted {
+    revision: u64,
+    port: DnsPort,
 }
 
 struct Record {
@@ -71,6 +80,39 @@ struct Record {
 }
 
 impl State {
+    pub(super) fn contains(&self, connection: u64) -> bool {
+        self.connections.contains_key(&connection)
+    }
+
+    pub(super) fn roots(&self, connection: u64) -> Vec<ResolverAuthorityRoot> {
+        let mut roots = BTreeMap::new();
+        for (&owner, lease) in &self.connections {
+            let state = match &lease.accepted {
+                Some(accepted) if !lease.failed && !lease.retiring => {
+                    ResolverAuthorityState::Active {
+                        port: accepted.port.value(),
+                        accepted_revision: accepted.revision,
+                    }
+                }
+                _ => ResolverAuthorityState::RetainedUnavailable,
+            };
+            for root in lease.records.iter().flat_map(|record| &record.roots) {
+                roots
+                    .entry(root.as_str().to_owned())
+                    .or_insert_with(|| ResolverAuthorityRoot {
+                        root: root.as_str().to_owned(),
+                        owner: if owner == connection {
+                            ResolverOwner::CurrentConnection
+                        } else {
+                            ResolverOwner::OtherConnection
+                        },
+                        state: state.clone(),
+                    });
+            }
+        }
+        roots.into_values().collect()
+    }
+
     pub(super) fn unleased(&self, root: &Domain) -> Result<(), HelperError> {
         if self
             .connections
@@ -108,13 +150,19 @@ impl ResolverStore {
     }
 
     pub fn invalidate(&self, connection: u64) {
-        let mut state = self
-            .mutation
-            .lock()
-            .expect("DNS resolver mutation lock poisoned");
-        if let Some(lease) = state.connections.get_mut(&connection) {
-            lease.failed = true;
-        }
+        self.mutate(|state| {
+            if let Some(lease) = state.connections.get_mut(&connection) {
+                lease.failed = true;
+            }
+        });
+    }
+
+    pub fn retire(&self, connection: u64) {
+        self.mutate(|state| {
+            if let Some(lease) = state.connections.get_mut(&connection) {
+                lease.retiring = true;
+            }
+        });
     }
 
     fn update_with(
@@ -124,10 +172,17 @@ impl ResolverStore {
         update: Update,
         write: impl Fn(&Path, &[u8]) -> Result<(), HelperError>,
     ) -> Result<(), HelperError> {
-        let mut state = self
-            .mutation
-            .lock()
-            .expect("DNS resolver mutation lock poisoned");
+        self.mutate(|state| self.publish(state, connection, uid, update, write))
+    }
+
+    fn publish(
+        &self,
+        state: &mut State,
+        connection: u64,
+        uid: u32,
+        update: Update,
+        write: impl Fn(&Path, &[u8]) -> Result<(), HelperError>,
+    ) -> Result<(), HelperError> {
         let current = state
             .connections
             .get_mut(&connection)
@@ -136,7 +191,7 @@ impl ResolverStore {
             return Err(HelperError::validation("resolver lease connection failed"));
         }
         current.failed = true;
-        if update.revision <= current.revision
+        if update.revision <= current.accepted.as_ref().map_or(0, |lease| lease.revision)
             || current.nonce.is_some_and(|nonce| nonce != update.nonce)
         {
             return Err(HelperError::validation(
@@ -190,8 +245,6 @@ impl ResolverStore {
             .connections
             .get_mut(&connection)
             .expect("connection was checked under lock");
-        lease.nonce = Some(update.nonce);
-        lease.revision = update.revision;
         lease.records.push(record);
         let result = (|| {
             let next = lease.records.last().expect("attempted record was inserted");
@@ -219,22 +272,25 @@ impl ResolverStore {
         let next = lease.records.pop().expect("attempted record was inserted");
         lease.records.clear();
         lease.records.push(next);
+        lease.nonce = Some(update.nonce);
+        lease.accepted = Some(Accepted {
+            revision: update.revision,
+            port: update.port,
+        });
         lease.failed = false;
         Ok(())
     }
 
     pub fn release(&self, connection: u64) -> Result<(), HelperError> {
-        let mut state = self
-            .mutation
-            .lock()
-            .expect("DNS resolver mutation lock poisoned");
-        let Some(lease) = state.connections.get_mut(&connection) else {
-            return Ok(());
-        };
-        lease.failed = true;
-        remove(&lease.records, &self.directory, &[])?;
-        state.connections.remove(&connection);
-        Ok(())
+        self.mutate(|state| {
+            let Some(lease) = state.connections.get_mut(&connection) else {
+                return Ok(());
+            };
+            lease.failed = true;
+            remove(&lease.records, &self.directory, &[])?;
+            state.connections.remove(&connection);
+            Ok(())
+        })
     }
 
     pub fn recover(&self) -> Result<(), HelperError> {

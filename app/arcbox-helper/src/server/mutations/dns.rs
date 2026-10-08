@@ -1,5 +1,6 @@
 //! DNS resolver file management for `/etc/resolver/`.
 
+mod authority;
 pub mod lease;
 mod storage;
 
@@ -19,6 +20,7 @@ const MARKER: &str = "# managed by arcbox-helper";
 pub struct ResolverStore {
     directory: PathBuf,
     mutation: Mutex<lease::State>,
+    authority_epoch: tokio::sync::watch::Sender<u64>,
 }
 
 impl ResolverStore {
@@ -26,6 +28,7 @@ impl ResolverStore {
         Self {
             directory,
             mutation: Mutex::new(lease::State::default()),
+            authority_epoch: tokio::sync::watch::channel(0).0,
         }
     }
 

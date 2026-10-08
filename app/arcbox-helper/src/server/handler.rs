@@ -6,6 +6,8 @@
 
 use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
+
 use arcbox_constants::dns::Domain;
 use arcbox_helper::HelperError;
 use arcbox_helper::HelperService;
@@ -20,6 +22,7 @@ pub(super) struct HelperServer {
     peer: VerifiedPeer,
     resolvers: Arc<mutations::dns::ResolverStore>,
     connection: u64,
+    closed: CancellationToken,
 }
 
 impl HelperServer {
@@ -29,7 +32,13 @@ impl HelperServer {
             peer,
             resolvers,
             connection,
+            closed: CancellationToken::new(),
         }
+    }
+
+    pub(super) fn retire(&self) {
+        self.resolvers.retire(self.connection);
+        self.closed.cancel();
     }
 
     pub(super) fn release(&self) -> Result<(), HelperError> {
@@ -38,6 +47,21 @@ impl HelperServer {
 }
 
 impl HelperService for HelperServer {
+    async fn resolver_watch(
+        self,
+        _: tarpc::context::Context,
+        after_epoch: Option<u64>,
+    ) -> Result<arcbox_helper::ResolverAuthoritySnapshot, HelperError> {
+        if self.peer.resolver_profile().is_none() {
+            return Err(HelperError::validation(
+                "resolver watch requires an audit-verified daemon",
+            ));
+        }
+        self.resolvers
+            .watch(self.connection, after_epoch, &self.closed)
+            .await
+    }
+
     async fn resolver_lease(
         self,
         _: tarpc::context::Context,

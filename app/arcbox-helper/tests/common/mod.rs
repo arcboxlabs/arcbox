@@ -18,6 +18,16 @@ pub struct MockHelperServer {
 }
 
 impl HelperService for MockHelperServer {
+    async fn resolver_watch(
+        self,
+        _: tarpc::context::Context,
+        _: Option<u64>,
+    ) -> Result<arcbox_helper::ResolverAuthoritySnapshot, HelperError> {
+        Err(HelperError::validation(
+            "mock has no verified daemon identity",
+        ))
+    }
+
     async fn resolver_lease(
         self,
         _: tarpc::context::Context,

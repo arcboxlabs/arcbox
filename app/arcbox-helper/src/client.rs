@@ -224,6 +224,16 @@ impl Client {
             .await??)
     }
 
+    /// Watches authority with five seconds of margin beyond the helper's bounded wait.
+    pub async fn resolver_watch(
+        &self,
+        after_epoch: Option<u64>,
+    ) -> Result<crate::ResolverAuthoritySnapshot, ClientError> {
+        let mut context = tarpc::context::current();
+        context.deadline = std::time::Instant::now() + std::time::Duration::from_secs(35);
+        Ok(self.inner.resolver_watch(context, after_epoch).await??)
+    }
+
     async fn ensure_compatible(&self) -> Result<(), ClientError> {
         let version = self.version().await?;
         let installed = arcbox_constants::helper::parse_helper_version(&version)

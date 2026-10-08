@@ -11,6 +11,7 @@ mod lease_tests;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::task::Poll;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
@@ -127,13 +128,32 @@ async fn serve_connection(
     let codec = tarpc::tokio_util::codec::length_delimited::LengthDelimitedCodec::builder();
     let transport = tarpc::serde_transport::new(codec.new_framed(conn), Bincode::default());
     let mut in_flight = JoinSet::new();
-    BaseChannel::with_defaults(transport)
-        .execute(server.clone().serve())
-        .for_each(|response| {
-            in_flight.spawn(response);
-            futures::future::ready(())
-        })
-        .await;
+    {
+        let mut requests = Box::pin(BaseChannel::with_defaults(transport.fuse()).requests());
+        loop {
+            let request = futures::future::poll_fn(|cx| {
+                let next = requests.as_mut().poll_next(cx);
+                // tarpc can remain pending after EOF while an unchanged watch is in flight.
+                if requests.channel().get_ref().is_done()
+                    || matches!(&next, Poll::Ready(Some(Err(_))))
+                {
+                    server.retire();
+                }
+                next
+            })
+            .await;
+            match request {
+                Some(Ok(request)) => {
+                    in_flight.spawn(request.execute(server.clone().serve()));
+                }
+                Some(Err(error)) => {
+                    tracing::warn!(%error, "helper request stream failed");
+                    break;
+                }
+                None => break,
+            }
+        }
+    }
     finish_connection(server, in_flight).await
 }
 
@@ -141,6 +161,7 @@ async fn finish_connection(
     server: HelperServer,
     mut in_flight: JoinSet<()>,
 ) -> Result<(), arcbox_helper::HelperError> {
+    server.retire();
     // Drain accepted mutations before lease release and the idle-watchdog decrement.
     let mut errors = Vec::new();
     while let Some(result) = in_flight.join_next().await {

@@ -6,9 +6,13 @@
 
 pub mod client;
 pub mod error;
+mod resolver_authority;
 pub mod validate;
 
 pub use error::HelperError;
+pub use resolver_authority::{
+    ResolverAuthorityRoot, ResolverAuthoritySnapshot, ResolverAuthorityState, ResolverOwner,
+};
 
 /// Complete resolver roots for one daemon instance on one helper connection.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -133,6 +137,11 @@ pub trait HelperService {
 
     /// Publishes all roots atomically per file and releases the lease at connection EOF.
     async fn resolver_lease(update: ResolverLease) -> Result<(), HelperError>;
+
+    /// Returns complete authority immediately, after an epoch change, or after 30 seconds.
+    async fn resolver_watch(
+        after_epoch: Option<u64>,
+    ) -> Result<ResolverAuthoritySnapshot, HelperError>;
 }
 
 /// Low-level connect — use [`client::Client::connect()`] instead.

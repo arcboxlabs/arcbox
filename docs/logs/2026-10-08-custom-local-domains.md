@@ -191,3 +191,7 @@ Common DNS passed 52 tests, net 115, Core web services 10, Linux guest DNS 6, an
 ## Guard request-driven host publication
 
 Container and network mutations now publish ports, aliases, and DNS under the host commit lock. The final synchronous Engine guard prevents physical VM replacement while publishing aliases/DNS; stale cleanup only targets the expected listener slot. Failed cleanup retains the original operation error as well. Engine passed 6 tests, serial Runtime 77, Docker CA/lifecycle 9, and mock API handlers 13. Strict Engine/Core/Docker Clippy and formatting passed. Snapshot, shared-wrapper, retirement, and shutdown fencing remain pending.
+
+## Watch helper resolver authority
+
+The helper now returns complete sorted root snapshots with a global epoch and connection-relative ownership. Only fully accepted live leases expose a port and revision. Failed or retiring connections retain unavailable roots. Watches wait at most 30 seconds; the client allows 35 seconds. The transport poll observes EOF before draining pending watches, preserving tarpc cancellation and synchronous mutation completion. The core slice passed 39 binary tests with one native CA test ignored, strict all-target Clippy, and formatting. Daemon consumption remains pending.
