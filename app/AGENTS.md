@@ -523,6 +523,8 @@ above). When editing either side, keep in lockstep:
 - Both the request path (`ensure_endpoint_verified`) and the host-networking
   reconciler go through the same `reset_if_restarted` so they react to a
   restart through one pool.
+- A malformed `/containers/json` response must fail the query, including a missing or empty container ID.
+  Only a valid empty array permits reconciliation to remove every registered container.
 
 ## Host port forwarding & image pull (`arcbox-docker`)
 

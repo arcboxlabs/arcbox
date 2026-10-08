@@ -15,7 +15,10 @@ const INSPECT_WEB: &str = r#"{
     "Id": "abc123",
     "Name": "/web",
     "Config": {"Labels": {}},
-    "NetworkSettings": {"IPAddress": "172.17.0.2", "Networks": {}}
+    "HostConfig": {"ReadonlyRootfs": false},
+    "State": {"Running": false},
+    "Mounts": [],
+    "NetworkSettings": {"Networks": {"bridge": {"IPAddress": "172.17.0.2"}}}
 }"#;
 
 fn lifecycle_routes() -> Vec<MockRoute> {
@@ -110,6 +113,29 @@ async fn guest_error_status_passes_through() {
 }
 
 #[tokio::test]
+async fn malformed_successful_listing_is_a_query_error() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let guest = mock_guest::start_with_routes(
+        tmp.path(),
+        vec![MockRoute {
+            method: "GET",
+            path: "/containers/json",
+            status: 200,
+            body: "not json",
+        }],
+    )
+    .await;
+    let client = arcbox_docker::proxy::GuestHttpClient::new(Arc::new(
+        mock_guest::UnixSocketConnector::new(guest.socket_path.clone()),
+    ));
+
+    let result = arcbox_docker::guest_query::list_running_container_ids(&client).await;
+
+    assert!(matches!(result, Err(arcbox_docker::DockerError::Server(_))));
+    guest.cancel.cancel();
+}
+
+#[tokio::test]
 async fn start_stop_cycle_manages_host_networking() {
     let (router, runtime, _guest, _tmp) = router_with_mock_guest(lifecycle_routes()).await;
 
@@ -185,6 +211,12 @@ async fn start_and_restart_pin_identity_and_preserve_query() {
         MockRoute {
             method: "GET",
             path: "/containers/reused-name/json",
+            status: 200,
+            body: INSPECT_WEB,
+        },
+        MockRoute {
+            method: "GET",
+            path: "/containers/abc123/json",
             status: 200,
             body: INSPECT_WEB,
         },

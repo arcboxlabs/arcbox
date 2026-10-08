@@ -70,21 +70,29 @@ pub async fn list_running_container_ids(client: &GuestHttpClient) -> Result<Hash
         .await
         .map_err(|e| DockerError::Server(format!("read /containers/json body: {e}")))?
         .to_bytes();
-    Ok(parse_container_ids(&body))
+    parse_container_ids(&body)
 }
 
 /// Extracts full container IDs from a `GET /containers/json` response body.
-/// Malformed JSON yields an empty set (treated as a failed read upstream).
-fn parse_container_ids(body: &[u8]) -> HashSet<String> {
-    serde_json::from_slice::<Vec<serde_json::Value>>(body)
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|c| {
-            c.get("Id")
-                .and_then(serde_json::Value::as_str)
-                .map(String::from)
-        })
-        .collect()
+/// Rejects an invalid listing so reconciliation cannot remove live containers.
+fn parse_container_ids(body: &[u8]) -> Result<HashSet<String>> {
+    #[derive(serde::Deserialize)]
+    struct Container {
+        #[serde(rename = "Id")]
+        id: String,
+    }
+
+    let containers: Vec<Container> = serde_json::from_slice(body)
+        .map_err(|e| DockerError::Server(format!("parse /containers/json body: {e}")))?;
+    if containers.iter().any(|container| container.id.is_empty()) {
+        return Err(DockerError::Server(
+            "parse /containers/json body: empty container Id".into(),
+        ));
+    }
+    Ok(containers
+        .into_iter()
+        .map(|container| container.id)
+        .collect())
 }
 
 #[cfg(test)]
@@ -95,10 +103,25 @@ mod tests {
     fn parse_ids_from_docker_list() {
         let body = br#"[{"Id":"aaa","Names":["/x"]},{"Id":"bbb"}]"#;
         assert_eq!(
-            parse_container_ids(body),
+            parse_container_ids(body).unwrap(),
             HashSet::from(["aaa".to_string(), "bbb".to_string()])
         );
-        assert!(parse_container_ids(b"[]").is_empty());
-        assert!(parse_container_ids(b"not json").is_empty());
+        assert!(parse_container_ids(b"[]").unwrap().is_empty());
+    }
+
+    #[test]
+    fn invalid_listings_cannot_become_empty_or_partial_snapshots() {
+        for body in [
+            "not json",
+            "null",
+            r#"{"message":"not a listing"}"#,
+            "[{}]",
+            r#"[{"Id":null}]"#,
+            r#"[{"Id":123}]"#,
+            r#"[{"Id":""}]"#,
+            r#"[{"Id":"alive"},{}]"#,
+        ] {
+            assert!(parse_container_ids(body.as_bytes()).is_err(), "{body}");
+        }
     }
 }

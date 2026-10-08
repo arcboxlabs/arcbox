@@ -29,3 +29,9 @@ The DNS crate passed 17 unit and integration tests, including five name-pattern 
 `claims::resolve` selects exact names before the most specific wildcard. Independent owners at the winning specificity produce a conflict without falling back to another wildcard. Duplicate claims from the same owner and authority are idempotent. Generated Compose service aliases may share a name within one project, service, and authority; selection uses the smallest complete container ID. Custom aliases remain exclusive, including on Compose containers. The caller must obtain the selected owner's address and revision from the same registry snapshot.
 
 The DNS crate passed 24 tests, including seven ownership regressions. Strict all-target Clippy passed for the host and `aarch64-unknown-linux-musl`. Namespace reservations, cross-instance delegation, and runtime registration remain separate unfinished slices. These checks did not change native trust or system DNS.
+
+## Invalid container listings preserve host state
+
+The shared host query previously converted malformed JSON into an empty container set. The networking reconciler could then remove every live container's DNS and port state. Listing parsing now rejects malformed JSON, non-array responses, and missing, non-string, or empty IDs. A mixed valid/invalid list also fails instead of publishing a partial snapshot. Only a valid empty array means no running containers.
+
+All 131 Docker library tests and seven handler mock tests passed. The mock suite includes an HTTP 200 response with malformed JSON through the actual pooled guest client. Existing lifecycle fixtures now provide the full inspect fields required by CA injection and canonical-ID requests; response and network-state assertions remain intact. Strict all-target Clippy passed for the Docker crate. This repair does not yet refresh known IDs or add revision-conditional removal.
