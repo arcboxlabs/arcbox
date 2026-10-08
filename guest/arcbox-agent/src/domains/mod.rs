@@ -39,6 +39,7 @@ mod probe;
 mod routes;
 mod scans;
 mod selection;
+mod services;
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
@@ -51,6 +52,7 @@ use tokio_util::sync::CancellationToken;
 pub use self::facts::{ContainerFacts, primary_ipv4};
 use self::routes::Routes;
 pub use self::selection::{HttpsBackend, SelectedRoutes};
+pub use self::services::WebServices;
 
 /// iptables `--comment` tag prefix; the suffix is the container's full ID.
 const RULE_OWNER: &str = "arcbox-domain:";
@@ -81,6 +83,7 @@ impl HttpPorts {
 /// Handle to the task that owns the container-domain rules.
 pub struct DomainRoutes {
     commands: mpsc::UnboundedSender<Command>,
+    services: WebServices,
 }
 
 enum Command {
@@ -93,20 +96,31 @@ impl DomainRoutes {
     /// proxy with the host signing channel, then follows the containers
     /// it is told about until `cancel`.
     #[must_use]
-    pub fn spawn(cancel: CancellationToken) -> (Self, JoinHandle<()>) {
+    pub fn spawn(
+        dns: crate::dns_server::ContainerRegistry,
+        cancel: CancellationToken,
+    ) -> (Self, JoinHandle<()>) {
         let (commands, inbox) = mpsc::unbounded_channel();
-        let task = tokio::spawn(Routes::new().run(inbox, cancel));
-        (Self { commands }, task)
+        let services = WebServices::new(dns);
+        let task = tokio::spawn(Routes::new(services.clone()).run(inbox, cancel));
+        (Self { commands, services }, task)
+    }
+
+    /// Returns the installed web routes filtered by the current DNS resolution.
+    pub fn services(&self) -> WebServices {
+        self.services.clone()
     }
 
     /// Starts following a running container, or invalidates its discovered protocols.
     pub fn track(&self, facts: ContainerFacts) {
+        self.services.remove(&facts.id);
         // The inbox closes only once the task has stopped for shutdown.
         let _ = self.commands.send(Command::Track(facts));
     }
 
     /// Stops following a container and removes its rules.
     pub fn forget(&self, container_id: &str) {
+        self.services.remove(container_id);
         let _ = self.commands.send(Command::Forget(container_id.to_owned()));
     }
 }

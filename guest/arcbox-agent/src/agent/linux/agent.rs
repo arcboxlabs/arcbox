@@ -24,7 +24,7 @@ impl Agent {
     }
 
     /// Runs the agent for `guest`, listening on vsock.
-    pub async fn run(&self, guest: Guest) -> Result<()> {
+    pub async fn run(&self, guest: Guest, web_services: crate::domains::WebServices) -> Result<()> {
         if guest == Guest::SystemVm {
             start_system_vm_services().await;
         }
@@ -39,8 +39,9 @@ impl Agent {
                     // Debug, not info: the host opens a connection per RPC, including
                     // its periodic polls, and each request is logged on its own.
                     tracing::debug!("Accepted connection from {:?}", peer_addr);
+                    let web_services = web_services.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, guest).await {
+                        if let Err(e) = handle_connection(stream, guest, &web_services).await {
                             // A routine daemon-side teardown (host closes the
                             // socketpair while the agent is writing a response)
                             // surfaces as BrokenPipe / ConnectionReset /

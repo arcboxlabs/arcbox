@@ -296,10 +296,14 @@ mod tests {
     #[tokio::test]
     async fn watch_sends_snapshot_and_stops_when_peer_closes() {
         let (server, mut client) = tokio::io::duplex(4096);
-        let task = tokio::spawn(super::super::rpc::handle_connection(
-            server,
-            crate::agent::Guest::SystemVm,
-        ));
+        let task = tokio::spawn(async move {
+            super::super::rpc::handle_connection(
+                server,
+                crate::agent::Guest::SystemVm,
+                &crate::domains::WebServices::default(),
+            )
+            .await
+        });
         crate::rpc::write_message(
             &mut client,
             MessageType::WatchStorageHealthRequest,

@@ -76,9 +76,9 @@ impl Guest {
 }
 
 /// Runs the agent for `guest`.
-pub async fn run(guest: Guest) -> Result<()> {
+pub async fn run(guest: Guest, web_services: crate::domains::WebServices) -> Result<()> {
     let agent = Agent::new();
-    agent.run(guest).await
+    agent.run(guest, web_services).await
 }
 
 #[cfg(test)]

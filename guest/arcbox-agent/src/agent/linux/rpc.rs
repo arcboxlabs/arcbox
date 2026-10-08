@@ -38,7 +38,11 @@ enum RequestResult {
 /// Handles a single vsock connection.
 ///
 /// Reads RPC requests, processes them, and writes responses.
-pub(super) async fn handle_connection<S>(mut stream: S, guest: Guest) -> Result<()>
+pub(super) async fn handle_connection<S>(
+    mut stream: S,
+    guest: Guest,
+    web_services: &crate::domains::WebServices,
+) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -164,7 +168,7 @@ where
                 }
                 return Ok(());
             }
-            Ok(request) => handle_request(request, guest).await,
+            Ok(request) => handle_request(request, guest, web_services).await,
             Err(e) => {
                 tracing::warn!(trace_id = %trace_id, "Failed to parse request: {}", e);
                 RequestResult::Single(RpcResponse::Error(ErrorResponse::new(
@@ -197,10 +201,22 @@ fn allowed_in_recovery(kind: crate::rpc::MessageType) -> bool {
 }
 
 /// Handles a single RPC request.
-async fn handle_request(request: RpcRequest, guest: Guest) -> RequestResult {
+async fn handle_request(
+    request: RpcRequest,
+    guest: Guest,
+    web_services: &crate::domains::WebServices,
+) -> RequestResult {
     match request {
         RpcRequest::Ping(req) => RequestResult::Single(handle_ping(req, guest)),
         RpcRequest::GetSystemInfo => RequestResult::Single(handle_get_system_info().await),
+        RpcRequest::ListContainerWebServices => {
+            RequestResult::Single(RpcResponse::ListContainerWebServices(
+                arcbox_connect::v1::ListContainerWebServicesResponse {
+                    services: web_services.snapshot().await,
+                    ..Default::default()
+                },
+            ))
+        }
         RpcRequest::EnsureRuntime(req) => RequestResult::Single(handle_ensure_runtime(req).await),
         RpcRequest::RuntimeStatus(req) => RequestResult::Single(handle_runtime_status(req).await),
         RpcRequest::StartKubernetes(req) => {
@@ -581,7 +597,14 @@ mod recovery_tests {
     #[tokio::test]
     async fn recovery_blocks_mutation_requests_before_parsing_or_dispatch() {
         let (mut client, server) = tokio::io::duplex(4096);
-        let dispatcher = tokio::spawn(handle_connection(server, Guest::StorageRecovery));
+        let dispatcher = tokio::spawn(async move {
+            handle_connection(
+                server,
+                Guest::StorageRecovery,
+                &crate::domains::WebServices::default(),
+            )
+            .await
+        });
         for kind in [
             MessageType::EnsureRuntimeRequest,
             MessageType::MachineExecRequest,
@@ -606,7 +629,14 @@ mod recovery_tests {
     #[tokio::test]
     async fn recovery_readiness_does_not_require_docker_and_refuses_runtime_start() {
         let (mut client, server) = tokio::io::duplex(4096);
-        let dispatcher = tokio::spawn(handle_connection(server, Guest::StorageRecovery));
+        let dispatcher = tokio::spawn(async move {
+            handle_connection(
+                server,
+                Guest::StorageRecovery,
+                &crate::domains::WebServices::default(),
+            )
+            .await
+        });
         for start_runtime_if_needed in [false, true] {
             let request = arcbox_connect::v1::WatchReadinessRequest {
                 start_runtime_if_needed,
@@ -666,7 +696,9 @@ mod storage_check_tests {
             (Guest::DistroMachine, Action::VerifyWrites.into(), 403),
         ] {
             let (mut client, server) = tokio::io::duplex(4096);
-            let dispatcher = tokio::spawn(handle_connection(server, guest));
+            let dispatcher = tokio::spawn(async move {
+                handle_connection(server, guest, &crate::domains::WebServices::default()).await
+            });
             tokio::time::timeout(Duration::from_secs(5), async {
                 let request = StorageCheckRequest {
                     action,
@@ -690,5 +722,68 @@ mod storage_check_tests {
             .await
             .expect("storage check response and connection close exceeded five seconds");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domains::{ContainerFacts, HttpsBackend, SelectedRoutes, WebServices};
+
+    #[tokio::test]
+    async fn list_web_services_dispatches_a_framed_request_with_native_tls() {
+        let dns =
+            crate::dns_server::GuestDnsServer::new(tokio_util::sync::CancellationToken::new());
+        dns.register_container("api", "api", "172.17.0.2".parse().unwrap())
+            .await;
+        let services = WebServices::new(dns.containers());
+        let facts = ContainerFacts::from_inspect(&serde_json::json!({
+            "Id": "a", "Name": "/api", "State": { "Pid": 1 },
+            "NetworkSettings": {
+                "SandboxKey": "/var/run/docker/netns/api",
+                "Networks": { "bridge": { "IPAddress": "172.17.0.2" } }
+            }
+        }))
+        .unwrap();
+        services.publish(
+            &facts,
+            SelectedRoutes {
+                http: None,
+                https: Some(HttpsBackend::Native(8443)),
+            },
+        );
+        let (mut client, server) = tokio::io::duplex(4096);
+        let task = tokio::spawn(async move {
+            handle_connection(server, Guest::SystemVm, &services).await
+        });
+        write_message(
+            &mut client,
+            crate::rpc::MessageType::ListContainerWebServicesRequest,
+            "web-services-test",
+            &arcbox_connect::v1::ListContainerWebServicesRequest::default().encode_to_vec(),
+        )
+        .await
+        .unwrap();
+        let (kind, trace, payload) = read_message(&mut client).await.unwrap();
+        assert_eq!(
+            kind,
+            crate::rpc::MessageType::ListContainerWebServicesResponse
+        );
+        assert_eq!(trace, "web-services-test");
+        let response =
+            arcbox_connect::v1::ListContainerWebServicesResponse::decode_from_slice(&payload)
+                .unwrap();
+        assert_eq!(response.services.len(), 1);
+        let service = &response.services[0];
+        assert_eq!(service.container_id, "a");
+        assert_eq!(service.hostnames, ["api.arcbox.local"]);
+        assert_eq!(service.ipv4_address, "172.17.0.2");
+        assert_eq!(service.http_port, 0);
+        assert_eq!(
+            service.https_backend,
+            Some(arcbox_connect::v1::container_web_service::HttpsBackend::NativeHttpsPort(8443))
+        );
+        drop(client);
+        task.await.unwrap().unwrap();
     }
 }

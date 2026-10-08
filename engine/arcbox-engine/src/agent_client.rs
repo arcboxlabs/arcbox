@@ -15,6 +15,7 @@ mod shutdown;
 mod storage_check;
 mod storage_health;
 mod transport;
+mod web_services;
 mod wire;
 
 #[cfg(test)]

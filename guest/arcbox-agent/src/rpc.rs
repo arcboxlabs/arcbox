@@ -19,12 +19,12 @@ use arcbox_connect::v1::{
     KubernetesKubeconfigRequest, KubernetesKubeconfigResponse, KubernetesLoadBalancersRequest,
     KubernetesLoadBalancersResponse, KubernetesStartRequest, KubernetesStartResponse,
     KubernetesStatusRequest, KubernetesStatusResponse, KubernetesStopRequest,
-    KubernetesStopResponse, MemoryPressureEvent, MmapReadFileRequest, MmapReadFileResponse,
-    PortBindingsChanged, PortBindingsRemoved, ReadinessEvent, RuntimeEnsureRequest,
-    RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse, ShutdownRequest,
-    ShutdownResponse, StorageCheckRequest, StorageCheckResponse, SystemInfo,
-    WatchMemoryPressureRequest, WatchReadinessRequest, WatchStatsRequest,
-    WatchStorageHealthRequest,
+    KubernetesStopResponse, ListContainerWebServicesRequest, ListContainerWebServicesResponse,
+    MemoryPressureEvent, MmapReadFileRequest, MmapReadFileResponse, PortBindingsChanged,
+    PortBindingsRemoved, ReadinessEvent, RuntimeEnsureRequest, RuntimeEnsureResponse,
+    RuntimeStatusRequest, RuntimeStatusResponse, ShutdownRequest, ShutdownResponse,
+    StorageCheckRequest, StorageCheckResponse, SystemInfo, WatchMemoryPressureRequest,
+    WatchReadinessRequest, WatchStatsRequest, WatchStorageHealthRequest,
 };
 pub use arcbox_constants::wire::MessageType;
 
@@ -75,6 +75,7 @@ impl ErrorResponse {
 pub enum RpcRequest {
     Ping(PingRequest),
     GetSystemInfo,
+    ListContainerWebServices,
     EnsureRuntime(RuntimeEnsureRequest),
     RuntimeStatus(RuntimeStatusRequest),
     StartKubernetes(KubernetesStartRequest),
@@ -104,6 +105,7 @@ pub enum RpcRequest {
 pub enum RpcResponse {
     Ping(PingResponse),
     SystemInfo(SystemInfo),
+    ListContainerWebServices(ListContainerWebServicesResponse),
     RuntimeEnsure(RuntimeEnsureResponse),
     RuntimeStatus(RuntimeStatusResponse),
     KubernetesStart(KubernetesStartResponse),
@@ -136,6 +138,7 @@ impl RpcResponse {
         match self {
             Self::Ping(_) => MessageType::PingResponse,
             Self::SystemInfo(_) => MessageType::GetSystemInfoResponse,
+            Self::ListContainerWebServices(_) => MessageType::ListContainerWebServicesResponse,
             Self::RuntimeEnsure(_) => MessageType::EnsureRuntimeResponse,
             Self::RuntimeStatus(_) => MessageType::RuntimeStatusResponse,
             Self::KubernetesStart(_) => MessageType::KubernetesStartResponse,
@@ -167,6 +170,7 @@ impl RpcResponse {
         match self {
             Self::Ping(msg) => msg.encode_to_vec(),
             Self::SystemInfo(msg) => msg.encode_to_vec(),
+            Self::ListContainerWebServices(msg) => msg.encode_to_vec(),
             Self::RuntimeEnsure(msg) => msg.encode_to_vec(),
             Self::RuntimeStatus(msg) => msg.encode_to_vec(),
             Self::KubernetesStart(msg) => msg.encode_to_vec(),
@@ -327,6 +331,10 @@ pub fn parse_request(msg_type: MessageType, payload: &[u8]) -> Result<RpcRequest
             Ok(RpcRequest::Ping(req))
         }
         MessageType::GetSystemInfoRequest => Ok(RpcRequest::GetSystemInfo),
+        MessageType::ListContainerWebServicesRequest => {
+            ListContainerWebServicesRequest::decode_from_slice(payload)?;
+            Ok(RpcRequest::ListContainerWebServices)
+        }
         MessageType::EnsureRuntimeRequest => {
             let req = RuntimeEnsureRequest::decode_from_slice(payload)?;
             Ok(RpcRequest::EnsureRuntime(req))

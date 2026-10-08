@@ -15,6 +15,7 @@ use crate::iptables::NatRule;
 pub struct ContainerFacts {
     pub(super) id: String,
     pub(super) hostname: String,
+    pub(super) aliases: Vec<String>,
     /// Its init process, whose `/proc` entry shows the container's sockets.
     pub(super) pid: u32,
     /// Its network namespace (`SandboxKey`).
@@ -32,11 +33,16 @@ impl ContainerFacts {
     #[must_use]
     pub fn from_inspect(inspect: &serde_json::Value) -> Option<Self> {
         let id = inspect.get("Id")?.as_str()?.to_owned();
-        let hostname = format!(
-            "{}.{}",
-            inspect.get("Name")?.as_str()?.trim_start_matches('/'),
-            arcbox_constants::dns::LOCAL_DOMAIN
-        );
+        let name = inspect.get("Name")?.as_str()?.trim_start_matches('/');
+        let hostname = format!("{name}.{}", arcbox_constants::dns::LOCAL_DOMAIN);
+        let compose = inspect
+            .pointer("/Config/Labels")
+            .and_then(serde_json::Value::as_object)
+            .and_then(crate::dns::extract_compose_info);
+        let aliases = crate::dns::collect_aliases(name, compose.as_ref())
+            .into_iter()
+            .map(|alias| alias.to_lowercase())
+            .collect();
         let pid = inspect
             .pointer("/State/Pid")?
             .as_u64()
@@ -66,6 +72,7 @@ impl ContainerFacts {
         Some(Self {
             id,
             hostname,
+            aliases,
             pid,
             netns,
             ips,

@@ -11,7 +11,8 @@ use super::https::Https;
 use super::scans::Scans;
 use super::selection::ALT_HTTPS_PORT;
 use super::{
-    Command, ContainerFacts, HttpPorts, RULE_OWNER, SelectedRoutes, http_port, listeners, probe,
+    Command, ContainerFacts, HttpPorts, RULE_OWNER, SelectedRoutes, WebServices, http_port,
+    listeners, probe,
 };
 use crate::iptables::{self, NatRule, TaggedRules};
 
@@ -26,6 +27,7 @@ pub(super) struct Routes {
     ports: HttpPorts,
     /// Whether the HTTPS proxy is up, so port 443 has somewhere to go.
     https: bool,
+    services: WebServices,
 }
 
 struct Tracked {
@@ -38,12 +40,13 @@ struct Tracked {
 }
 
 impl Routes {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(services: WebServices) -> Self {
         Self {
             rules: TaggedRules::new(RULE_OWNER),
             containers: HashMap::new(),
             ports: HttpPorts::default(),
             https: false,
+            services,
         }
     }
 
@@ -142,6 +145,7 @@ impl Routes {
                     // An exiting container (its die event follows) or an
                     // init process gone to another network namespace.
                     tracing::debug!(container_id = id, error = %e, "cannot read container listeners");
+                    self.services.remove(id);
                     continue;
                 }
             };
@@ -212,6 +216,7 @@ impl Routes {
                         tracked.installed = wanted;
                     }
                     Err(e) => {
+                        self.services.remove(id);
                         tracing::warn!(container_id = id, error = %format!("{e:#}"), "failed to route container domain");
                         continue;
                     }
@@ -220,6 +225,7 @@ impl Routes {
             self.ports
                 .route(tracked.facts.ips(), selected.terminated_port());
             tracked.selected = selected;
+            self.services.publish(&tracked.facts, selected);
         }
     }
 }

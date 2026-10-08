@@ -108,6 +108,11 @@ The machine root export stores oversized Mac attributes in `.arcbox-xattrs` besi
 resolve to a container IPv4 address. The agent discovers HTTP with a bounded
 `HEAD /` request that includes the container domain in `Host`. A valid HTTP
 response is required; listening TCP ports alone do not identify web services.
+
+`ListContainerWebServices` returns the installed HTTP and HTTPS routes and their
+current DNS names. Each shared Compose alias appears only on the container
+selected by guest DNS. The host uses this snapshot for service URLs; explicit
+port labels describe configured routes and do not guarantee application health.
 The agent tries port 80, then exposed listeners, then other listeners in
 ascending order. Port 443 is reserved for HTTPS. Set `dev.arcbox.http-port`
 to a port number to override discovery, or `off` to disable managed HTTP.

@@ -220,6 +220,10 @@ non-obvious invariants and failure signatures.
   Network connect/disconnect events trigger a fresh container inspect. DNS and
   discovery use the same first valid network IPv4 address. Disconnecting the
   last addressed network removes that container's DNS ownership and routes.
+  `ListContainerWebServices` reports installed routes, not raw listeners. The
+  snapshot joins candidate aliases with the current DNS registry: a shared
+  Compose alias belongs only to the container whose selected IP DNS returns.
+  The host must use this snapshot to build URLs instead of guessing from ports.
   Regression signature: siblings get RST on `<name>.arcbox.local:80` while the Mac works — check
   `iptables -t nat -S PREROUTING | grep arcbox-domain` and
   `/proc/sys/net/bridge/bridge-nf-call-iptables`.

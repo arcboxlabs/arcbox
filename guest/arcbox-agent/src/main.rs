@@ -253,7 +253,7 @@ async fn main() -> Result<()> {
         init::verify_critical_mounts().map_err(anyhow::Error::msg)?;
         // Tokio owns every recovery child. A waitpid(-1) reaper can consume
         // a checker's exit status before its Child::wait observes the result.
-        return agent::run(guest).await;
+        return agent::run(guest, domains::WebServices::default()).await;
     }
 
     // `arcbox-agent init` is the one-shot system-init entry that busybox init's
@@ -295,7 +295,7 @@ async fn main() -> Result<()> {
 
     tracing::info!(?guest, "ArcBox agent starting...");
     if guest != agent::Guest::SystemVm {
-        return agent::run(guest).await;
+        return agent::run(guest, domains::WebServices::default()).await;
     }
 
     let cancel = tokio_util::sync::CancellationToken::new();
@@ -313,7 +313,8 @@ async fn main() -> Result<()> {
 
     // Container domains: routes each container's ports 80 and 443 to what
     // it serves, sweeping a previous agent's rules before it follows anyone.
-    let (domains, domains_handle) = domains::DomainRoutes::spawn(cancel.clone());
+    let (domains, domains_handle) = domains::DomainRoutes::spawn(dns.containers(), cancel.clone());
+    let web_services = domains.services();
 
     // Start Docker event listener for auto-registering container DNS,
     // mirroring host-address-pinned publishes, and following containers for
@@ -354,7 +355,7 @@ async fn main() -> Result<()> {
     let ssh_auth_handle = tokio::spawn(ssh_auth::run_ssh_auth_relay(cancel.clone()));
 
     // Run the agent (vsock listener + RPC handler).
-    let result = agent::run(guest).await;
+    let result = agent::run(guest, web_services).await;
 
     // Shut down background tasks.
     cancel.cancel();
