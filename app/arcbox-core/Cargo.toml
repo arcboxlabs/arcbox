@@ -65,6 +65,7 @@ tracing-subscriber.workspace = true
 
 [features]
 default = []
+test-support = ["arcbox-engine/test-support"]
 backend-native = []
 backend-guest-docker = []
 provision-bundled = []

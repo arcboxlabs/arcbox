@@ -64,6 +64,10 @@ pub enum DockerError {
     #[error("{0}")]
     StorageProtected(String),
 
+    /// Host publication cannot use the requested physical VM.
+    #[error("host networking unavailable: {0}")]
+    HostNetwork(#[from] arcbox_core::CoreError),
+
     /// Not implemented.
     #[error("Not implemented: {0}")]
     NotImplemented(String),
@@ -88,7 +92,7 @@ impl DockerError {
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Server(_) | Self::Context(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::GuestUnavailable(_) => StatusCode::BAD_GATEWAY,
-            Self::StorageProtected(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::StorageProtected(_) | Self::HostNetwork(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
         }
     }

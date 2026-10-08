@@ -3,6 +3,7 @@
 mod assets;
 mod dns_reservations;
 mod engine_config;
+mod host_network;
 #[cfg(target_os = "macos")]
 mod inbound_listeners;
 mod kubeconfig;
@@ -18,6 +19,9 @@ mod web_services;
 #[cfg(test)]
 mod tests;
 
+pub use host_network::HostMutationLease;
+#[cfg(any(test, feature = "test-support"))]
+pub use host_network::NetworkFixture;
 pub use machine_settings::MachineResources;
 pub use progress::InitProgress;
 
@@ -217,6 +221,7 @@ pub struct Runtime {
     dns_registry: Arc<RwLock<Registry>>,
     /// Lifecycle operations for one canonical container ID share the same lock.
     container_lifecycle: Mutex<HashMap<String, Weak<TokioMutex<()>>>>,
+    host_network: host_network::HostNetwork,
     /// Maps a container's unique name to its canonical ID, so teardown can
     /// resolve the name/short-ID a client used without a guest inspect
     /// round-trip. Populated at registration, updated on rename, cleared with
@@ -386,6 +391,7 @@ impl Runtime {
             sandbox_host_state: TokioMutex::new(0),
             dns_registry,
             container_lifecycle: Mutex::default(),
+            host_network: host_network::HostNetwork::default(),
             container_aliases: Arc::new(TokioRwLock::new(HashMap::new())),
             stats_hub,
             machine_stats_hubs: Arc::new(TokioRwLock::new(HashMap::new())),

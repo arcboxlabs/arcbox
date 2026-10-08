@@ -5,6 +5,43 @@ use tokio::{sync::Notify, time::timeout};
 
 use super::*;
 
+#[tokio::test]
+async fn a_slow_stop_does_not_block_another_canonical_containers_guest_or_host_work() {
+    let guest = guest::Guest::new(metadata()).await;
+    let release = Arc::new(Notify::new());
+    guest.data.lock().unwrap().block_operation = Some(Arc::clone(&release));
+    let state = guest.state.clone();
+    let stop = tokio::spawn(async move { operation(state, "test", "stop").await });
+    wait_for_request(&guest, "/containers/canonical-test/stop").await;
+
+    let response = timeout(
+        Duration::from_secs(2),
+        operation(guest.state.clone(), "other", "start"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        guest
+            .state
+            .runtime
+            .resolve_registered_container("other")
+            .await
+            .as_deref(),
+        Some("canonical-other")
+    );
+    assert!(
+        !stop.is_finished(),
+        "the first guest response is still held"
+    );
+    release.notify_one();
+    assert_eq!(
+        stop.await.unwrap().unwrap().status(),
+        StatusCode::NO_CONTENT
+    );
+}
+
 async fn wait_for_request(guest: &guest::Guest, path: &str) {
     let changed = Arc::clone(&guest.data.lock().unwrap().changed);
     timeout(Duration::from_secs(2), async {

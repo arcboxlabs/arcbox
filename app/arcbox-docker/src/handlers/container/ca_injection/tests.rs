@@ -149,10 +149,11 @@ async fn operation(state: AppState, id: &str, action: &str) -> Result<Response> 
         .body(Body::empty())
         .unwrap();
     let uri = OriginalUri(request.uri().clone());
-    if action == "start" {
-        super::super::start_container(State(state), uri, request).await
-    } else {
-        super::super::restart_container(State(state), uri, request).await
+    match action {
+        "start" => super::super::start_container(State(state), uri, request).await,
+        "restart" => super::super::restart_container(State(state), uri, request).await,
+        "stop" => super::super::stop_container(State(state), uri, request).await,
+        _ => panic!("unsupported fixture operation"),
     }
 }
 

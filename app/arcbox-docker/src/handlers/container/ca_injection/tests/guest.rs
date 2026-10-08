@@ -86,7 +86,8 @@ impl Guest {
                 ..VmLifecycleConfig::default()
             },
         )
-        .unwrap();
+        .unwrap()
+        .with_network_fixture(arcbox_core::runtime::NetworkFixture::default());
         Self {
             state: AppState {
                 runtime: Arc::new(runtime),
@@ -142,12 +143,21 @@ fn respond(request: Request<bytes::Bytes>, data: &Mutex<Data>) -> (Response, Opt
         } else {
             Body::from(data.metadata.to_string())
         }
-    } else if path.ends_with("/start") || path.ends_with("/restart") {
+    } else if path == "/containers/other/json" || path == "/containers/canonical-other/json" {
+        let mut metadata = data.metadata.clone();
+        metadata["Id"] = json!("canonical-other");
+        metadata["Name"] = json!("/other");
+        Body::from(metadata.to_string())
+    } else if path.ends_with("/start") || path.ends_with("/restart") || path.ends_with("/stop") {
         assert_eq!(method, Method::POST);
-        assert!(path.starts_with("/containers/canonical-test/"));
+        assert!(matches!(
+            path.split('/').nth(2),
+            Some("canonical-test" | "canonical-other")
+        ));
+        let running = !path.ends_with("/stop");
         data.operations.push(path);
         gate = data.block_operation.take();
-        data.metadata["State"]["Running"] = json!(true);
+        data.metadata["State"]["Running"] = json!(running);
         response = response.status(204);
         Body::empty()
     } else {

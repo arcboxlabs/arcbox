@@ -49,6 +49,7 @@ tower = { workspace = true, features = ["util"] }
 http-body-util = "0.1"
 hyper = { workspace = true }
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
+arcbox-core = { workspace = true, features = ["test-support"] }
 
 [features]
 default = []

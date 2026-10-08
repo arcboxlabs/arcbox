@@ -9,22 +9,24 @@ use crate::{
     proxy::{ActivityClass, ActivityLease},
 };
 
-pub(in crate::handlers) struct Lifecycle {
+pub(in crate::handlers) struct Lifecycle<'a> {
     pub id: String,
     _guard: tokio::sync::OwnedMutexGuard<()>,
     _lease: Option<ActivityLease>,
+    _network: arcbox_core::runtime::HostMutationLease<'a>,
 }
 
-impl Lifecycle {
-    pub async fn from_uri(state: &AppState, uri: &Uri) -> Result<Self> {
+impl<'a> Lifecycle<'a> {
+    pub async fn from_uri(state: &'a AppState, uri: &Uri) -> Result<Self> {
         let token = super::super::extract_container_id(uri)
             .ok_or_else(|| DockerError::InvalidParameter("missing container path".into()))?;
         Self::acquire(state, &token).await
     }
 
-    pub async fn acquire(state: &AppState, id: &str) -> Result<Self> {
+    pub async fn acquire(state: &'a AppState, id: &str) -> Result<Self> {
         super::super::ensure_system_vm_ready(state, ActivityClass::Active).await?;
         let lease = state.proxy.activity_lease();
+        let vm = state.runtime.container_network_incarnation()?;
         #[derive(Deserialize)]
         struct Identity {
             #[serde(rename = "Id")]
@@ -42,10 +44,12 @@ impl Lifecycle {
             ));
         }
         let guard = state.runtime.lock_container_lifecycle(&id).await;
+        let network = state.runtime.begin_container_mutation(vm).await?;
         Ok(Self {
             id,
             _guard: guard,
             _lease: lease,
+            _network: network,
         })
     }
 
