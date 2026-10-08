@@ -9,6 +9,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
+use arcbox_constants::dns::Domain;
 use arcbox_e2e::daemon::connect_unix;
 use arcbox_e2e::docker::{
     docker_host, docker_output, docker_output_with_input, ensure_image, run_with_timeout,
@@ -16,13 +17,22 @@ use arcbox_e2e::docker::{
 use arcbox_e2e::scenario::run_vz_scenario;
 use arcbox_grpc::SystemServiceClient;
 use arcbox_local_ca::KeychainAuthority;
-use arcbox_protocol::v1::{Empty, local_https_status::TrustState};
+use arcbox_protocol::v1::{Empty, local_https_status::TrustState, web_service::HttpsMode};
 
 const MARKER: &str = "keychain-https-ok";
 
 #[test]
 #[ignore = "boots a VZ System VM and creates an isolated Keychain CA"]
 fn keychain_ca_serves_container_https() -> Result<()> {
+    let domain: Domain = std::env::var("ARCBOX_DNS_DOMAIN")
+        .unwrap_or_else(|_| Domain::default().to_string())
+        .parse()
+        .map_err(anyhow::Error::msg)?;
+    let container_name = format!("keychain-web.{domain}");
+    let compose_name = format!("web.keychain.{domain}");
+    let compose_url = format!("https://{compose_name}/");
+    let wrong_name = format!("wrong-owner.{domain}");
+    let wrong_url = format!("https://{wrong_name}/");
     let mut ca_dir = None;
     let result = run_vz_scenario("local_https", |daemon, data_dir, _metrics| {
         ca_dir = Some(data_dir.join("tls"));
@@ -76,11 +86,7 @@ fn keychain_ca_serves_container_https() -> Result<()> {
         .trim()
         .parse::<std::net::Ipv4Addr>()?;
         // A second name requires another signing connection; repeating the first exercises the cache.
-        for name in [
-            "keychain-web.arcbox.local",
-            "web.keychain.arcbox.local",
-            "keychain-web.arcbox.local",
-        ] {
+        for name in [&container_name, &compose_name, &container_name] {
             let script = format!(
                 "cat >/tmp/ca.pem; curl --fail --silent --show-error --noproxy '*' --retry 10 --retry-all-errors --retry-delay 1 --retry-max-time 20 --max-time 10 --cacert /tmp/ca.pem --resolve {name}:443:{} https://{name}/",
                 ip,
@@ -115,7 +121,7 @@ fn keychain_ca_serves_container_https() -> Result<()> {
                 "*",
                 "--max-time",
                 "10",
-                "https://web.keychain.arcbox.local/",
+                &compose_url,
             ],
             Duration::from_secs(30),
         )?;
@@ -123,14 +129,25 @@ fn keychain_ca_serves_container_https() -> Result<()> {
             response.trim() == MARKER,
             "default container DNS and trust returned {response:?}"
         );
-        for (options, url, expected_exit) in [
+        verify_service_directory(&daemon.grpc_socket(), &container_name, &compose_name)?;
+        let mut rejections = vec![
             (
                 vec!["--label", "dev.arcbox.add-ca-certificates=false"],
-                "https://web.keychain.arcbox.local/",
+                compose_url.as_str(),
+                compose_name.as_str(),
                 60,
             ),
-            (Vec::new(), "https://wrong-owner.arcbox.local/", 35),
-        ] {
+            (Vec::new(), wrong_url.as_str(), wrong_name.as_str(), 35),
+        ];
+        if domain != Domain::default() {
+            rejections.push((
+                Vec::new(),
+                "https://web.keychain.arcbox.local/",
+                "web.keychain.arcbox.local",
+                35,
+            ));
+        }
+        for (options, url, name, expected_exit) in rejections {
             let output = run_with_timeout(
                 Command::new("docker")
                     .env("DOCKER_HOST", docker_host(data_dir))
@@ -146,7 +163,7 @@ fn keychain_ca_serves_container_https() -> Result<()> {
                         "--max-time",
                         "10",
                         "--resolve",
-                        &format!("wrong-owner.arcbox.local:443:{ip}"),
+                        &format!("{name}:443:{ip}"),
                         url,
                     ]),
                 Duration::from_secs(30),
@@ -166,6 +183,38 @@ fn keychain_ca_serves_container_https() -> Result<()> {
         KeychainAuthority::delete(&dir).context("delete isolated test CA")?;
     }
     result
+}
+
+fn verify_service_directory(socket: &Path, container_name: &str, compose_name: &str) -> Result<()> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            let mut client = SystemServiceClient::new(connect_unix(socket).await?);
+            let listing = client.list_web_services(Empty {}).await?.into_inner();
+            let service = listing
+                .services
+                .iter()
+                .find(|service| service.domains.iter().any(|name| name == container_name))
+                .context("HTTPS container is absent from the web service directory")?;
+            ensure!(
+                service.hostname == compose_name,
+                "incorrect primary service name"
+            );
+            ensure!(
+                service.http_url == format!("http://{compose_name}"),
+                "incorrect HTTP URL"
+            );
+            ensure!(
+                service.https_url == format!("https://{compose_name}"),
+                "incorrect HTTPS URL"
+            );
+            ensure!(
+                service.https_mode() == HttpsMode::Managed,
+                "incorrect HTTPS mode"
+            );
+            Ok(())
+        })
 }
 
 fn wait_https_preparation(socket: &Path) -> Result<String> {

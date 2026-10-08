@@ -66,6 +66,8 @@ cargo test -p arcbox-e2e --test local_https -- --ignored --nocapture
 
 The test serves HTTP on container port 8080 and verifies HTTPS on port 443 with the exported root. Container and Compose names exercise signing-channel reconnection. A separate request uses the container's default DNS and CA bundle, without `--resolve` or `--cacert`. Opt-out must fail certificate verification, and an unowned SNI name must fail the TLS handshake. The test deletes its isolated CA without changing user trust.
 
+Run the same test with `ARCBOX_DNS_DOMAIN=run.dev.arcbox.local` to verify a configured instance suffix. The test also checks the public service URLs and rejects the old `web.keychain.arcbox.local` SNI when a custom suffix is active. These checks do not validate macOS system DNS or browser authorization.
+
 VMM-level HV probe — drives the HV backend directly (no daemon): boot, vsock
 agent RPC, DAX, agent supervision, pause/resume, guest PSCI poweroff, worker
 teardown. The `guest_poweroff` phase requires completion after the shutdown
