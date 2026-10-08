@@ -200,7 +200,7 @@ impl RuntimeServicesStarted {
     pub async fn mark_ready(self) -> Result<ReadyDaemon> {
         record_startup_phase("mark_ready", async {
             #[cfg(target_os = "macos")]
-            check_resolver_installed(&self.ctx.dns_domain);
+            check_resolver_installed(self.ctx.dns_domain.as_str());
             self.ctx
                 .setup_state
                 .set_phase(SetupPhase::Ready, "Daemon ready");

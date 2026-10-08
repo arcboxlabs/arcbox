@@ -4,6 +4,7 @@ use arcbox_connect::v1::{
     ContainerWebService, ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse, WebService,
     container_web_service::HttpsBackend, web_service::HttpsMode,
 };
+use arcbox_constants::dns::Domain;
 use tokio_util::sync::CancellationToken;
 
 use super::Runtime;
@@ -73,19 +74,19 @@ impl Runtime {
         response
             .services
             .into_iter()
-            .map(container_service)
+            .map(|route| container_service(route, &self.config.network.dns_domain))
             .collect()
     }
 }
 
-fn container_service(route: ContainerWebService) -> Result<WebService> {
+fn container_service(route: ContainerWebService, suffix: &Domain) -> Result<WebService> {
     let hostname = route
         .hostnames
         .first()
         .ok_or_else(|| CoreError::Vm("guest web route has no DNS names".into()))?;
     for domain in &route.hostnames {
         if domain
-            .strip_suffix(arcbox_constants::dns::LOCAL_DOMAIN)
+            .strip_suffix(suffix.as_str())
             .and_then(|prefix| prefix.strip_suffix('.'))
             .is_none_or(str::is_empty)
             || !domain
@@ -200,7 +201,7 @@ mod tests {
 
     #[test]
     fn urls_use_the_owned_compose_alias_and_default_ingress_ports() {
-        let service = container_service(route()).unwrap();
+        let service = container_service(route(), &Domain::default()).unwrap();
         assert_eq!(service.owner, "container:abc123");
         assert_eq!(service.hostname, "web.demo.arcbox.local");
         assert_eq!(service.domains.len(), 2);
@@ -216,7 +217,7 @@ mod tests {
         let mut route = route();
         route.http_port = 0;
         route.https_backend = Some(HttpsBackend::NativeHttpsPort(8443));
-        let service = container_service(route).unwrap();
+        let service = container_service(route, &Domain::default()).unwrap();
         assert_eq!(service.http_url, "");
         assert_eq!(service.https_url, "https://web.demo.arcbox.local");
         assert_eq!(service.https_mode, HttpsMode::Passthrough);
@@ -227,7 +228,7 @@ mod tests {
     fn absent_https_does_not_produce_an_https_url() {
         let mut route = route();
         route.https_backend = None;
-        let service = container_service(route).unwrap();
+        let service = container_service(route, &Domain::default()).unwrap();
         assert_eq!(service.https_url, "");
         assert_eq!(service.https_mode, HttpsMode::None);
     }
@@ -237,13 +238,73 @@ mod tests {
         for hostname in ["", "example.com", "evil.com/#.arcbox.local", "arcbox.local"] {
             let mut route = route();
             route.hostnames = vec![hostname.into()];
-            assert!(container_service(route).is_err());
+            assert!(container_service(route, &Domain::default()).is_err());
         }
         let mut overflow = route();
         overflow.http_port = u32::MAX;
-        assert!(container_service(overflow).is_err());
+        assert!(container_service(overflow, &Domain::default()).is_err());
         let mut zero_tls = route();
         zero_tls.https_backend = Some(HttpsBackend::NativeHttpsPort(0));
-        assert!(container_service(zero_tls).is_err());
+        assert!(container_service(zero_tls, &Domain::default()).is_err());
+    }
+
+    #[tokio::test]
+    async fn configured_suffix_reaches_host_dns_guest_boot_and_signing_authorization() {
+        let directory = tempfile::tempdir().unwrap();
+        let suffix: Domain = "one.dev.arcbox.local".parse().unwrap();
+        let runtime = Runtime::new(crate::Config {
+            data_dir: directory.path().to_owned(),
+            network: crate::config::NetworkConfig {
+                dns_domain: suffix.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(runtime.vm_lifecycle().config().dns_domain, suffix);
+        assert_eq!(
+            runtime.network_manager().dns_domain().as_deref(),
+            Some(suffix.as_str())
+        );
+        runtime
+            .register_dns("container", &["web".into()], "10.0.2.3".parse().unwrap())
+            .await;
+        let name = "web.one.dev.arcbox.local";
+        let first = runtime.https_signing_revision(name).await.unwrap();
+        for name in [
+            "web.arcbox.local",
+            "web.two.dev.arcbox.local",
+            "web.one.dev.arcbox.local.evil",
+        ] {
+            assert_eq!(runtime.https_signing_revision(name).await, None, "{name}");
+        }
+        runtime
+            .register_dns("container", &["web".into()], "10.0.2.3".parse().unwrap())
+            .await;
+        let renewed = runtime.https_signing_revision(name).await.unwrap();
+        assert_ne!(renewed, first);
+        runtime.deregister_dns_by_id("container").await;
+        assert_eq!(runtime.https_signing_revision(name).await, None);
+    }
+
+    #[test]
+    fn urls_require_the_configured_instance_suffix() {
+        let suffix = "one.dev.arcbox.local".parse().unwrap();
+        let mut custom = route();
+        custom.hostnames = vec!["web.demo.one.dev.arcbox.local".into()];
+        let service = container_service(custom, &suffix).unwrap();
+        assert_eq!(service.http_url, "http://web.demo.one.dev.arcbox.local");
+        assert_eq!(service.https_url, "https://web.demo.one.dev.arcbox.local");
+        for name in [
+            "web.arcbox.local",
+            "web.two.dev.arcbox.local",
+            "one.dev.arcbox.local",
+            "web.evilone.dev.arcbox.local",
+            "web.one.dev.arcbox.local.evil",
+        ] {
+            let mut invalid = route();
+            invalid.hostnames = vec!["web.demo.one.dev.arcbox.local".into(), name.into()];
+            assert!(container_service(invalid, &suffix).is_err(), "{name}");
+        }
     }
 }

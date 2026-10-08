@@ -280,6 +280,7 @@ impl Runtime {
         vm_lifecycle_config.guest_docker_vsock_port =
             Some(config.container.guest_docker_vsock_port);
         vm_lifecycle_config.container_network = config.container.cidr;
+        vm_lifecycle_config.dns_domain = config.network.dns_domain.clone();
         vm_lifecycle_config.allow_unpinned_boot_manifest =
             config.profile == arcbox_constants::paths::ArcboxProfile::Development;
 
@@ -287,6 +288,7 @@ impl Runtime {
         let snapshot_dir = config.data_dir.join("snapshots");
         let vm_manager = Arc::new(VmManager::new(snapshot_dir));
         let network_manager = Arc::new(NetworkManager::new(arcbox_net::NetConfig::default()));
+        network_manager.set_dns_domain(config.network.dns_domain.as_str());
 
         // Every VM's datapath is wired to the host the same way: the DNS
         // hosts table it shares with the host DnsService, and the operator's

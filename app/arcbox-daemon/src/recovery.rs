@@ -71,13 +71,13 @@ pub async fn run(ctx: &DaemonContext, runtime: &Arc<Runtime>, dns_port: u16) -> 
     let owns_dns = owns_dns_resolver(
         ctx.profile,
         ctx.install_dns_resolver,
-        &ctx.dns_domain,
+        ctx.dns_domain.as_str(),
         &ctx.layout.data_dir,
         &default_data_dir,
     );
     if ctx.install_dns_resolver {
         let dns = self_setup::DnsResolver {
-            domain: ctx.dns_domain.clone(),
+            domain: ctx.dns_domain.to_string(),
             port: dns_port,
         };
         self_setup::run_required(&dns)
@@ -86,12 +86,12 @@ pub async fn run(ctx: &DaemonContext, runtime: &Arc<Runtime>, dns_port: u16) -> 
         ctx.setup_state.set_dns_installed(true);
     }
     let dns_task = (owns_dns && !ctx.install_dns_resolver).then(|| self_setup::DnsResolver {
-        domain: ctx.dns_domain.clone(),
+        domain: ctx.dns_domain.to_string(),
         port: dns_port,
     });
     if !owns_dns {
         tracing::debug!(
-            domain = ctx.dns_domain,
+            domain = %ctx.dns_domain,
             data_dir = %ctx.layout.data_dir.display(),
             "non-canonical DNS owner; skipping /etc/resolver self-setup"
         );
@@ -101,7 +101,7 @@ pub async fn run(ctx: &DaemonContext, runtime: &Arc<Runtime>, dns_port: u16) -> 
     // would conflict.
     #[cfg(target_os = "macos")]
     if owns_dns {
-        crate::mdns::spawn(runtime, &ctx.dns_domain, &ctx.shutdown);
+        crate::mdns::spawn(runtime, ctx.dns_domain.as_str(), &ctx.shutdown);
     }
     // The `/var/run/docker.sock` symlink belongs to the production daemon
     // running its canonical data dir: the link target embeds the

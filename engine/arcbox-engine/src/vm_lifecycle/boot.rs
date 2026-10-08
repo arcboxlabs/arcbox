@@ -14,11 +14,12 @@ use crate::error::{EngineError, Result};
 use crate::event::Event;
 use crate::machine::MachineConfig;
 use arcbox_constants::cmdline::{
-    CONTAINER_NETWORK_KEY, DEBUG_CONSOLE_KEY, DOCKER_METADATA_DEVICE_KEY,
+    CONTAINER_NETWORK_KEY, DEBUG_CONSOLE_KEY, DNS_DOMAIN_KEY, DOCKER_METADATA_DEVICE_KEY,
     GUEST_DOCKER_VSOCK_PORT_KEY, HV_EARLYCON_DIRECTIVE, RUNTIME_GENERATION_KEY,
 };
 use arcbox_constants::container_network::ContainerNetwork;
 use arcbox_constants::devices::DOCKER_METADATA_BLOCK_DEVICE;
+use arcbox_constants::dns::Domain;
 use arcbox_error::CommonError;
 
 use super::actor::{Completion, InternalEvent, LifecycleShared};
@@ -558,7 +559,11 @@ impl LifecycleShared {
             }
         }
 
-        cmdline = with_container_network(cmdline, self.config.container_network);
+        cmdline = with_network_config(
+            cmdline,
+            self.config.container_network,
+            &self.config.dns_domain,
+        );
 
         let guest_manifest = arcbox_storage::manifest_path(
             &std::path::Path::new("/arcbox/data").join(&self.data_image_filename),
@@ -806,11 +811,17 @@ impl LifecycleShared {
     }
 }
 
-/// Replaces any container-network token with the validated lifecycle value.
-pub(super) fn with_container_network(cmdline: String, network: ContainerNetwork) -> String {
+/// Replaces network tokens with the validated lifecycle values.
+pub(super) fn with_network_config(
+    cmdline: String,
+    network: ContainerNetwork,
+    domain: &Domain,
+) -> String {
     let mut cmdline = cmdline
         .split_whitespace()
-        .filter(|token| !token.starts_with(CONTAINER_NETWORK_KEY))
+        .filter(|token| {
+            !token.starts_with(CONTAINER_NETWORK_KEY) && !token.starts_with(DNS_DOMAIN_KEY)
+        })
         .collect::<Vec<_>>()
         .join(" ");
     if !cmdline.is_empty() {
@@ -818,6 +829,9 @@ pub(super) fn with_container_network(cmdline: String, network: ContainerNetwork)
     }
     cmdline.push_str(CONTAINER_NETWORK_KEY);
     cmdline.push_str(&network.to_string());
+    cmdline.push(' ');
+    cmdline.push_str(DNS_DOMAIN_KEY);
+    cmdline.push_str(domain.as_str());
     cmdline
 }
 

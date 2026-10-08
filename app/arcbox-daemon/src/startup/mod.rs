@@ -48,7 +48,7 @@ async fn init_early(args: DaemonArgs, handles: StartupHandles) -> Result<EarlyCo
     }
 
     let dns_domain = dns_domain(args.dns_domain)?;
-    validate_explicit_dns_resolver(profile, args.install_dns_resolver, &dns_domain)?;
+    validate_explicit_dns_resolver(profile, args.install_dns_resolver, dns_domain.as_str())?;
 
     std::fs::create_dir_all(&layout.data_dir).context("Failed to create data directory")?;
     std::fs::create_dir_all(&layout.run_dir).context("Failed to create run directory")?;
@@ -299,10 +299,6 @@ async fn init_runtime(ctx: &DaemonContext) -> Result<Arc<Runtime>> {
         "Runtime initialized"
     );
 
-    if ctx.dns_domain != DEFAULT_DNS_DOMAIN {
-        runtime.network_manager().set_dns_domain(&ctx.dns_domain);
-    }
-
     // Replay the startup cleanup before the runtime is published, so no
     // sandbox state from a previous daemon outlives it. The stream is a
     // streaming RPC, which the HV backend's blocking agent transport cannot
@@ -333,6 +329,7 @@ fn effective_config(ctx: &DaemonContext) -> Result<Config> {
     // The daemon's layout (sockets, lock file) was already resolved from
     // --profile/--data-dir/--socket, so it must win over config files.
     config.data_dir.clone_from(&ctx.layout.data_dir);
+    config.network.dns_domain.clone_from(&ctx.dns_domain);
     config
         .docker
         .socket_path
@@ -379,15 +376,12 @@ fn dns_port(cli_port: Option<u16>) -> Option<u16> {
     })
 }
 
-fn dns_domain(cli_domain: Option<Domain>) -> Result<String> {
+fn dns_domain(cli_domain: Option<Domain>) -> Result<Domain> {
     if let Some(domain) = cli_domain {
-        return Ok(domain.to_string());
+        return Ok(domain);
     }
     std::env::var("ARCBOX_DNS_DOMAIN")
-        .map_or_else(
-            |_| Ok(DEFAULT_DNS_DOMAIN.to_string()),
-            |domain| domain.parse::<Domain>().map(|domain| domain.to_string()),
-        )
+        .map_or_else(|_| Ok(Domain::default()), |domain| domain.parse::<Domain>())
         .map_err(anyhow::Error::msg)
         .context("Invalid DNS domain")
 }

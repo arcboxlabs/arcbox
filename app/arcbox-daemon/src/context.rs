@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use arcbox_api::{SetupState, SharedRuntime};
 use arcbox_constants::container_network::ContainerNetwork;
+use arcbox_constants::dns::Domain;
 use arcbox_constants::paths::{ArcboxProfile, HostLayout, HostMountLayout};
 use tokio_util::sync::CancellationToken;
 
@@ -90,7 +91,7 @@ pub struct EarlyContext {
     pub daemon_lock_slot: SharedDaemonLock,
     /// Slot filled once the selected non-default container CIDR is known.
     pub container_network_lease_slot: SharedContainerNetworkLease,
-    pub dns_domain: String,
+    pub dns_domain: Domain,
     /// Explicit DNS port; 0 lets the bound service choose one. `None` binds
     /// the profile's port, falling back to an OS-allocated one when taken.
     pub dns_port: Option<u16>,
@@ -135,7 +136,7 @@ pub struct DaemonContext {
     pub shutdown: CancellationToken,
     /// Holds the same-user CIDR lease until shutdown cleanup completes.
     pub container_network_lease_slot: SharedContainerNetworkLease,
-    pub dns_domain: String,
+    pub dns_domain: Domain,
     /// Explicit DNS port; `None` binds the profile's port best-effort. The
     /// actual bound port lives in [`ServiceHandles`].
     pub dns_port: Option<u16>,

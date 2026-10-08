@@ -1,10 +1,11 @@
-use super::boot::{agent_timeout_error, ensure_earlycon, with_container_network};
+use super::boot::{agent_timeout_error, ensure_earlycon, with_network_config};
 use super::types::{DesiredBoot, machine_drift_reason, metadata_image_filename};
 use super::*;
 use crate::machine::MachineState;
 use crate::vm::ensure_sparse_block_image;
 use arcbox_constants::cmdline::HV_EARLYCON_DIRECTIVE;
 use arcbox_constants::container_network::ContainerNetwork;
+use arcbox_constants::dns::Domain;
 
 #[test]
 fn test_lifecycle_state_is_ready() {
@@ -62,9 +63,10 @@ fn ensure_earlycon_respects_explicit_directive() {
 #[test]
 fn container_network_cmdline_is_authoritative_and_unique() {
     let network: ContainerNetwork = "10.64.0.0/16".parse().unwrap();
-    let cmdline = with_container_network(
+    let cmdline = with_network_config(
         "root=/dev/vda arcbox.container_network=172.16.0.0/12 console=hvc0".to_string(),
         network,
+        &Domain::default(),
     );
 
     assert!(cmdline.contains("arcbox.container_network=10.64.0.0/16"));
@@ -75,6 +77,38 @@ fn container_network_cmdline_is_authoritative_and_unique() {
             .filter(|token| token.starts_with("arcbox.container_network="))
             .count(),
         1
+    );
+}
+
+#[test]
+fn dns_domain_replaces_duplicate_boot_tokens_and_triggers_machine_drift() {
+    let network = ContainerNetwork::default();
+    let domain: Domain = "one.dev.arcbox.local".parse().unwrap();
+    let cmdline = with_network_config(
+        "root=/dev/vda arcbox.dns_domain=old.local console=hvc0 arcbox.dns_domain=arcbox.local"
+            .into(),
+        network,
+        &domain,
+    );
+    assert_eq!(Domain::from_kernel_cmdline(&cmdline).unwrap(), domain);
+    assert!(cmdline.starts_with("root=/dev/vda console=hvc0 "));
+    assert_eq!(
+        with_network_config(cmdline.clone(), network, &domain),
+        cmdline
+    );
+
+    let want = DefaultVmConfig::default();
+    let mut boot = DesiredBoot {
+        kernel: "/k".into(),
+        cmdline,
+        rootfs_image: "/rootfs.erofs".into(),
+    };
+    let current = sample_machine(want.cpus, want.memory_mb, &boot.kernel, &boot.cmdline);
+    assert_eq!(machine_drift_reason(&current, &want, Some(&boot)), None);
+    boot.cmdline = with_network_config(boot.cmdline, network, &Domain::default());
+    assert_eq!(
+        machine_drift_reason(&current, &want, Some(&boot)),
+        Some("cmdline")
     );
 }
 
