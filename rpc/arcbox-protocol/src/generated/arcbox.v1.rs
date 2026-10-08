@@ -3629,6 +3629,71 @@ pub struct ReconcileHttpsAccessResponse {
     #[prost(uint64, tag = "3")]
     pub sequence: u64,
 }
+/// Owns this connection until EOF; only the host may open one on the System VM.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OpenInstanceAuthorityRequest {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OpenInstanceAuthorityResponse {}
+/// Replaces every instance root after the exclusive connection has opened.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ReplaceInstanceAuthorityRequest {
+    /// Source authority lifetime; strictly increases within one connection.
+    #[prost(uint64, tag = "1")]
+    pub authority_revision: u64,
+    #[prost(message, repeated, tag = "2")]
+    pub roots: ::prost::alloc::vec::Vec<InstanceAuthorityRoot>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct InstanceAuthorityRoot {
+    #[prost(string, tag = "1")]
+    pub root: ::prost::alloc::string::String,
+    #[prost(enumeration = "instance_authority_root::Target", tag = "2")]
+    pub target: i32,
+    /// OTHER requires a nonzero host loopback u16 port; every other target uses zero.
+    #[prost(uint32, tag = "3")]
+    pub dns_port: u32,
+}
+/// Nested message and enum types in `InstanceAuthorityRoot`.
+pub mod instance_authority_root {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum Target {
+        Unspecified = 0,
+        Current = 1,
+        Other = 2,
+        Unavailable = 3,
+    }
+    impl Target {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unspecified => "UNSPECIFIED",
+                Self::Current => "CURRENT",
+                Self::Other => "OTHER",
+                Self::Unavailable => "UNAVAILABLE",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "UNSPECIFIED" => Some(Self::Unspecified),
+                "CURRENT" => Some(Self::Current),
+                "OTHER" => Some(Self::Other),
+                "UNAVAILABLE" => Some(Self::Unavailable),
+                _ => None,
+            }
+        }
+    }
+}
+/// Confirms the complete snapshot was installed before the response was sent.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct InstanceAuthorityAck {
+    #[prost(uint64, tag = "1")]
+    pub authority_revision: u64,
+}
 /// An installed route selected through protocol discovery or an explicit port label.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ContainerWebService {

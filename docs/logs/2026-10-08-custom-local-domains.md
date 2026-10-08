@@ -233,3 +233,7 @@ The mDNS projection contains only selected exact `.local` names with Current ins
 Shared DNS and port writers now advance the host generation under the same commit lock. DNS publication returns admission failures through SandboxHost, API, and daemon callers. Cleanup remains available after admission closes. Serial Runtime passed 81 tests and daemon machine-DNS passed two; strict Core/computer/API/Docker/daemon all-target Clippy passed. The regression holds the commit lock and verifies stale-snapshot rejection and explicit closed-admission errors. Shutdown closure and physical-generation retirement remain pending.
 
 Resolver snapshot regressions reject mismatched ports, revisions, and roots before publication. They also cover metadata-only updates, external authority withdrawal, late acknowledgment, and retention of known, attempted, and current roots after failure. Eight resolver tests and strict daemon Clippy passed. The disconnected legacy DNS installer module is removed; no runtime fallback remains. Real-socket lifetime tests and installed cutover remain pending.
+
+## Define the exclusive guest authority channel
+
+The paired wire schema adds an empty Open, a complete root snapshot with its source authority revision, and an acknowledgment of that revision. Protocol and minimum remain 7/7. Generated prost and Connect descriptors were refreshed. Eleven constants/protocol tests, strict constants/protocol/Connect Clippy, and formatting passed. Guest dispatch and host delivery are not implemented by this schema slice.

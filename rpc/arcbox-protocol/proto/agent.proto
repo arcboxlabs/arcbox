@@ -115,6 +115,35 @@ message ReconcileHttpsAccessResponse {
     uint64 sequence = 3;
 }
 
+// Owns this connection until EOF; only the host may open one on the System VM.
+message OpenInstanceAuthorityRequest {}
+message OpenInstanceAuthorityResponse {}
+
+// Replaces every instance root after the exclusive connection has opened.
+message ReplaceInstanceAuthorityRequest {
+    // Source authority lifetime; strictly increases within one connection.
+    uint64 authority_revision = 1;
+    repeated InstanceAuthorityRoot roots = 2;
+}
+
+message InstanceAuthorityRoot {
+    string root = 1;
+    enum Target {
+        UNSPECIFIED = 0;
+        CURRENT = 1;
+        OTHER = 2;
+        UNAVAILABLE = 3;
+    }
+    Target target = 2;
+    // OTHER requires a nonzero host loopback u16 port; every other target uses zero.
+    uint32 dns_port = 3;
+}
+
+// Confirms the complete snapshot was installed before the response was sent.
+message InstanceAuthorityAck {
+    uint64 authority_revision = 1;
+}
+
 // An installed route selected through protocol discovery or an explicit port label.
 message ContainerWebService {
     string container_id = 1;

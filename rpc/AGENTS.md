@@ -68,6 +68,7 @@ This file is only the non-obvious operational knowledge.
 
 ## Invariants (each with a one-clause why)
 
+- Instance authority uses a dedicated exclusive port-1024 connection. Open has no identity fields; Replace and Ack carry the source authority revision. Updates contain complete roots and use strictly increasing revisions within one connection. Keep this channel separate from HTTPS access observation.
 - `SystemService.WatchHttpsAccess` registers a Desktop observer independently of VM readiness. An empty `request_id` clears the pending request. `AcknowledgeHttpsAccess` ends the prompt, but native CA inspection alone establishes trust. Desktop must persist canceled or failed outcomes before acknowledging them. `ReconcileHttpsAccess` renews a three-second guest lease over either agent transport; only exact host source addresses may trigger authorization.
 - **Generated prost code is committed** (`arcbox-protocol/src/generated/*.rs`)
   and rustfmt'd by `build.rs` (writes into `src/`, not `OUT_DIR`) — a `.proto`

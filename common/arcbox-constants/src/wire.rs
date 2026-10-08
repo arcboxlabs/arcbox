@@ -124,6 +124,10 @@ pub enum MessageType {
     ListContainerWebServicesRequest = 0x0016,
     /// Renews managed HTTPS access observation (`arcbox.v1.ReconcileHttpsAccessRequest`).
     ReconcileHttpsAccessRequest = 0x0017,
+    /// Opens an exclusive host connection for System VM instance authority.
+    OpenInstanceAuthorityRequest = 0x0018,
+    /// Replaces the complete instance authority snapshot on its owning connection.
+    ReplaceInstanceAuthorityRequest = 0x0019,
     /// Ask a distro machine's agent to serve the machine's root over NFSv3
     /// on its bridge NIC (payload: `arcbox.v1.EnsureMachineExportRequest`).
     /// Answered with [`Self::EnsureMachineExportResponse`]. The host daemon
@@ -370,6 +374,10 @@ pub enum MessageType {
     ListContainerWebServicesResponse = 0x1016,
     /// Answers [`Self::ReconcileHttpsAccessRequest`] with the first observed access.
     ReconcileHttpsAccessResponse = 0x1017,
+    /// Confirms acquisition of the exclusive instance authority connection.
+    OpenInstanceAuthorityResponse = 0x1018,
+    /// Confirms the source authority revision installed by the guest.
+    InstanceAuthorityAck = 0x1019,
     /// Answers [`Self::EnsureMachineExportRequest`] (payload:
     /// `arcbox.v1.EnsureMachineExportResponse`).
     EnsureMachineExportResponse = 0x10A8,
@@ -533,6 +541,8 @@ impl MessageType {
             0x0015 => Some(Self::StorageCheckRequest),
             0x0016 => Some(Self::ListContainerWebServicesRequest),
             0x0017 => Some(Self::ReconcileHttpsAccessRequest),
+            0x0018 => Some(Self::OpenInstanceAuthorityRequest),
+            0x0019 => Some(Self::ReplaceInstanceAuthorityRequest),
             0x00A8 => Some(Self::EnsureMachineExportRequest),
             0x0090 => Some(Self::KubernetesLoadBalancersRequest),
             // Sandbox CRUD requests.
@@ -613,6 +623,8 @@ impl MessageType {
             0x1015 => Some(Self::StorageCheckResponse),
             0x1016 => Some(Self::ListContainerWebServicesResponse),
             0x1017 => Some(Self::ReconcileHttpsAccessResponse),
+            0x1018 => Some(Self::OpenInstanceAuthorityResponse),
+            0x1019 => Some(Self::InstanceAuthorityAck),
             0x10A8 => Some(Self::EnsureMachineExportResponse),
             0x1090 => Some(Self::KubernetesLoadBalancersResponse),
             0x1030 => Some(Self::PortBindingsChanged),
@@ -795,6 +807,8 @@ mod tests {
             (0x0013, MessageType::EnsureNfsExportRequest),
             (0x0016, MessageType::ListContainerWebServicesRequest),
             (0x0017, MessageType::ReconcileHttpsAccessRequest),
+            (0x0018, MessageType::OpenInstanceAuthorityRequest),
+            (0x0019, MessageType::ReplaceInstanceAuthorityRequest),
             (0x00A8, MessageType::EnsureMachineExportRequest),
             (0x0090, MessageType::KubernetesLoadBalancersRequest),
             (0x100F, MessageType::MemoryPressureEvent),
@@ -804,6 +818,8 @@ mod tests {
             (0x1013, MessageType::EnsureNfsExportResponse),
             (0x1016, MessageType::ListContainerWebServicesResponse),
             (0x1017, MessageType::ReconcileHttpsAccessResponse),
+            (0x1018, MessageType::OpenInstanceAuthorityResponse),
+            (0x1019, MessageType::InstanceAuthorityAck),
             (0x10A8, MessageType::EnsureMachineExportResponse),
             (0x1090, MessageType::KubernetesLoadBalancersResponse),
             (0x1001, MessageType::PingResponse),
