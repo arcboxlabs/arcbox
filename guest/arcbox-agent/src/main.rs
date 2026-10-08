@@ -300,6 +300,9 @@ async fn main() -> Result<()> {
     let domain = arcbox_constants::dns::Domain::from_kernel_cmdline(&cmdline)
         .map_err(anyhow::Error::msg)
         .context("parsing the System VM DNS domain")?;
+    let network =
+        arcbox_constants::container_network::ContainerNetwork::from_kernel_cmdline(&cmdline)
+            .context("parsing the System VM container network")?;
     let cancel = tokio_util::sync::CancellationToken::new();
 
     // Start the guest DNS server (0.0.0.0:53).
@@ -315,7 +318,7 @@ async fn main() -> Result<()> {
 
     // Container domains: routes each container's ports 80 and 443 to what
     // it serves, sweeping a previous agent's rules before it follows anyone.
-    let (domains, domains_handle) = domains::DomainRoutes::spawn(dns.registry(), cancel.clone());
+    let (domains, domains_handle) = domains::DomainRoutes::spawn(&dns, network, cancel.clone());
     let services = agent::Services::system(domains.services(), dns.clone());
 
     // Start Docker event listener for auto-registering container DNS,

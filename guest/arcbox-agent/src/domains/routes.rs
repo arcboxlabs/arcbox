@@ -1,6 +1,7 @@
 //! The task that owns the container-domain rules.
 
 use std::collections::{BTreeSet, HashMap};
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -8,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::http_port::HTTPS_PORT;
 use super::https::Https;
+use super::index::Publisher;
 use super::scans::Scans;
 use super::selection::ALT_HTTPS_PORT;
 use super::{
@@ -17,6 +19,7 @@ use crate::iptables::{self, NatRule, TaggedRules};
 
 /// Whether bridged frames traverse iptables (see the module docs).
 const BRIDGE_NF_CALL_IPTABLES: &str = "/proc/sys/net/bridge/bridge-nf-call-iptables";
+const INDEX_RETRY: Duration = Duration::from_secs(1);
 
 /// The rules in the kernel and the containers they follow.
 pub(super) struct Routes {
@@ -25,6 +28,19 @@ pub(super) struct Routes {
     /// Whether managed HTTPS proxy binding has not failed.
     https: bool,
     services: WebServices,
+    index: Option<Publisher>,
+    index_retry: Option<Instant>,
+    frontend: tokio::task::JoinSet<()>,
+    frontend_cancel: CancellationToken,
+}
+
+impl Drop for Routes {
+    fn drop(&mut self) {
+        if let Some(index) = &self.index {
+            index.withdraw();
+        }
+        self.frontend_cancel.cancel();
+    }
 }
 
 struct Tracked {
@@ -43,14 +59,21 @@ impl Routes {
             containers: HashMap::new(),
             https: true,
             services,
+            index: None,
+            index_retry: None,
+            frontend: tokio::task::JoinSet::new(),
+            frontend_cancel: CancellationToken::new(),
         }
     }
 
     pub(super) async fn run(
         mut self,
-        mut inbox: mpsc::UnboundedReceiver<Command>,
+        inbox: mpsc::UnboundedReceiver<Command>,
+        index: Publisher,
         cancel: CancellationToken,
     ) {
+        self.index = Some(index);
+        self.cleanup_index().await;
         match iptables::sweep(RULE_OWNER).await {
             Ok(0) => {}
             Ok(removed) => {
@@ -64,20 +87,43 @@ impl Routes {
             }
         }
         warn_unless_bridged_traffic_is_filtered();
-        let proxy = match Https::bind().await {
-            Ok(https) => Some(tokio::spawn(
-                https.serve(self.services.clone(), cancel.clone()),
-            )),
+        match Https::bind().await {
+            Ok(https) => {
+                self.frontend
+                    .spawn(https.serve(self.services.clone(), self.frontend_cancel.clone()));
+                self.reconcile_index().await;
+            }
             Err(e) => {
                 self.https = false;
                 tracing::warn!(error = %format!("{e:#}"), "container domains serve no HTTPS");
-                None
             }
-        };
+        }
+        self.follow(inbox, cancel).await;
+        self.stop_frontend().await;
+        self.cleanup_index().await;
+    }
+
+    async fn cleanup_index(&self) {
+        if let Some(index) = &self.index
+            && let Err(error) = index.cleanup().await
+        {
+            tracing::warn!(%error, "index redirect cleanup failed");
+        }
+    }
+
+    async fn follow(
+        &mut self,
+        mut inbox: mpsc::UnboundedReceiver<Command>,
+        cancel: CancellationToken,
+    ) {
         loop {
-            let due = self.containers.values().map(|c| c.scans.next).min();
+            let due = self.next_scan();
             tokio::select! {
                 () = cancel.cancelled() => break,
+                Some(result) = self.frontend.join_next() => {
+                    if let Err(error) = result { tracing::warn!(%error, "domain frontend exited"); }
+                    break;
+                },
                 command = inbox.recv() => match command {
                     Some(command) => self.handle_command(command).await,
                     None => break,
@@ -85,8 +131,42 @@ impl Routes {
                 () = sleep_until(due) => self.scan_due().await,
             }
         }
-        if let Some(proxy) = proxy {
-            let _ = proxy.await;
+    }
+
+    async fn stop_frontend(&mut self) {
+        if let Some(index) = &self.index {
+            index.withdraw();
+        }
+        self.frontend_cancel.cancel();
+        while let Some(result) = self.frontend.join_next().await {
+            if let Err(error) = result {
+                tracing::warn!(%error, "domain frontend join failed");
+            }
+        }
+    }
+
+    fn next_scan(&self) -> Option<Instant> {
+        self.containers
+            .values()
+            .map(|container| container.scans.next)
+            .chain(self.index_retry)
+            .min()
+    }
+
+    async fn reconcile_index(&mut self) {
+        if self.https
+            && let Some(index) = &mut self.index
+        {
+            let result = index.reconcile().await;
+            self.index_reconciled(result);
+        }
+    }
+
+    fn index_reconciled(&mut self, result: anyhow::Result<()>) {
+        self.index_retry = None;
+        if let Err(error) = result {
+            self.index_retry = Some(Instant::now() + INDEX_RETRY);
+            tracing::warn!(%error, "index is unavailable");
         }
     }
 
@@ -101,6 +181,7 @@ impl Routes {
                 let _ = reply.send(());
             }
             Command::Reconcile(facts, reply) => {
+                self.reconcile_index().await;
                 let present: BTreeSet<_> = facts.iter().map(|facts| facts.id.clone()).collect();
                 self.containers.retain(|id, _| {
                     self.services.remove(id);
@@ -146,6 +227,7 @@ impl Routes {
 
     /// Rescans every container whose scan is due and follows its choice.
     async fn scan_due(&mut self) {
+        self.reconcile_index().await;
         let now = Instant::now();
         for tracked in self.containers.values_mut() {
             if tracked.scans.next > now {
@@ -269,6 +351,71 @@ mod tests {
     use super::super::HttpsBackend;
     use super::super::http_port::Pin;
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_index_retries_without_containers_and_success_clears_the_deadline() {
+        use std::{pin::pin, task::Poll};
+
+        let mut routes = Routes::new(WebServices::new(crate::dns_server::DnsRegistry::default()));
+        assert!(routes.next_scan().is_none());
+        routes.index_reconciled(Err(anyhow::anyhow!("transient rule failure")));
+        let mut retry = pin!(sleep_until(routes.next_scan()));
+        assert!(matches!(futures::poll!(&mut retry), Poll::Pending));
+        tokio::time::advance(INDEX_RETRY.checked_sub(Duration::from_millis(1)).unwrap()).await;
+        assert!(matches!(futures::poll!(&mut retry), Poll::Pending));
+        tokio::time::advance(Duration::from_millis(1)).await;
+        retry.await;
+        routes.index_reconciled(Ok(()));
+        assert!(routes.next_scan().is_none());
+    }
+
+    #[tokio::test]
+    async fn actor_exit_withdraws_index_before_cancelling_and_joining_frontend() {
+        use arcbox_dns::{NamePattern, claims::Claim};
+        for stop in ["inbox", "cancel"] {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                let dns = crate::dns_server::DnsRegistry::default();
+                let apex: arcbox_constants::dns::Domain = "arcbox.local".parse().unwrap();
+                let gateway = "172.17.0.1".parse().unwrap();
+                dns.write()
+                    .unwrap()
+                    .replace(
+                        "system:index".into(),
+                        vec![Claim::exclusive(
+                            NamePattern::Exact(apex.clone()),
+                            "system:index".into(),
+                            "index".into(),
+                        )],
+                        Some(std::net::IpAddr::V4(gateway)),
+                    )
+                    .unwrap();
+                let mut routes = Routes::new(WebServices::new(dns.clone()));
+                routes.index = Some(Publisher::new(dns.clone(), apex, gateway));
+                let child = routes.frontend_cancel.clone();
+                let (observed, observation) = tokio::sync::oneshot::channel();
+                routes.frontend.spawn(async move {
+                    child.cancelled().await;
+                    observed
+                        .send(dns.read().unwrap().get("system:index").is_none())
+                        .unwrap();
+                });
+                let (sender, inbox) = mpsc::unbounded_channel();
+                let cancel = CancellationToken::new();
+                let mut sender = Some(sender);
+                if stop == "inbox" {
+                    drop(sender.take());
+                } else {
+                    cancel.cancel();
+                }
+                routes.follow(inbox, cancel).await;
+                routes.stop_frontend().await;
+                assert!(observation.await.unwrap(), "{stop}");
+                assert!(routes.frontend.is_empty());
+            })
+            .await
+            .unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn acknowledged_updates_discard_late_scan_publications_and_refresh_tracking() {

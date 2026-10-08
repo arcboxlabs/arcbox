@@ -235,6 +235,7 @@ non-obvious invariants and failure signatures.
   Keep the Docker directory unavailable until subscription and complete reconciliation succeed. The watcher owns directory availability for one subscription lifetime. Hide container directory entries after disconnect or cancellation. Retain installed forwarding routes independently of directory availability.
   Serve the browser index from `domains/index/` only for the current exact `system:index` registration and original gateway destination. Require one matching HTTP Host. Select directory URLs under the same Registry read lock. Keep endpoint readiness independent from Docker directory availability.
   Serve managed TLS for the same exact index registration without an upstream. Pin its revision across host authorization, certificate configuration, and handshake. Report the typed index route even when the Docker directory is unavailable.
+  Publish `system:index` only after the shared frontend binds and both gateway redirects precede Docker's PREROUTING jump. `domains/index/publisher.rs` owns only `arcbox-index:` rules. Withdraw the registration before repair or frontend shutdown. Join the frontend before sweeping redirects. Retry failed publication without requiring a container.
   Shared Compose claims select the smallest complete container ID; custom claims remain exclusive.
   The host must use this snapshot to build URLs instead of guessing from ports.
   The HTTPS proxy checks SNI against the same DNS registry before requesting a

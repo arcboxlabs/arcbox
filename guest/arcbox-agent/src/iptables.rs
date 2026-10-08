@@ -24,7 +24,7 @@ const IPTABLES: &str = "/sbin/iptables";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NatRule {
     /// Everything after the chain name: matches, the comment tag, the target.
-    spec: Vec<String>,
+    pub(crate) spec: Vec<String>,
 }
 
 impl NatRule {
@@ -124,18 +124,7 @@ impl TaggedRules {
 /// Deletes every nat PREROUTING rule tagged by `owner`, whoever installed
 /// it, and returns how many went.
 pub async fn sweep(owner: &str) -> Result<usize> {
-    let listing = Command::new(IPTABLES)
-        .args(["-t", "nat", "-w", "2", "-S", "PREROUTING"])
-        .output()
-        .await
-        .context("listing nat PREROUTING")?;
-    if !listing.status.success() {
-        bail!(
-            "iptables -t nat -S PREROUTING failed: {}",
-            String::from_utf8_lossy(&listing.stderr).trim()
-        );
-    }
-    let listing = String::from_utf8_lossy(&listing.stdout);
+    let listing = list_prerouting().await?;
     let mut failures = Vec::new();
     let mut removed = 0usize;
     for args in listing.lines().filter_map(|line| sweep_args(owner, line)) {
@@ -154,6 +143,21 @@ pub async fn sweep(owner: &str) -> Result<usize> {
     Ok(removed)
 }
 
+pub async fn list_prerouting() -> Result<String> {
+    let listing = Command::new(IPTABLES)
+        .args(["-t", "nat", "-w", "2", "-S", "PREROUTING"])
+        .output()
+        .await
+        .context("listing nat PREROUTING")?;
+    if !listing.status.success() {
+        bail!(
+            "iptables -t nat -S PREROUTING failed: {}",
+            String::from_utf8_lossy(&listing.stderr).trim()
+        );
+    }
+    String::from_utf8(listing.stdout).context("reading nat PREROUTING output")
+}
+
 /// If `line` (from `iptables -S PREROUTING`) is tagged by `owner`, the argv
 /// that deletes it.
 fn sweep_args(owner: &str, line: &str) -> Option<Vec<String>> {
@@ -166,7 +170,7 @@ fn sweep_args(owner: &str, line: &str) -> Option<Vec<String>> {
 }
 
 /// `iptables -S` quotes comments; `-D` wants them bare.
-fn unquote(field: &str) -> String {
+pub fn unquote(field: &str) -> String {
     field
         .strip_prefix('"')
         .and_then(|f| f.strip_suffix('"'))

@@ -1,6 +1,9 @@
 //! HTTP responses pinned to the current built-in directory registration.
 
 mod page;
+mod publisher;
+
+pub(super) use publisher::Publisher;
 
 use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr};

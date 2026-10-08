@@ -314,6 +314,7 @@ Most of ArcBox's performance-critical code is custom rather than vendored:
   Run `abctl tls rotate` to replace the root through native authorization. New roots cover `.local` DNS names; existing roots retain their narrower scope until rotation. See [local HTTPS](docs/local-https.md) for domain support and security boundaries.
   Run `abctl tls untrust` to revoke every root retained for this profile, including an interrupted rotation.
   The System VM receives the current public root automatically after startup and root replacement. CA preparation failures preserve its installed root.
+  Open `http://arcbox.local` for the browser index of current service URLs. The index also supports managed HTTPS after CA authorization. See the [acceptance matrix](docs/local-https.md#completion-requirements) for validation status.
   Guest DNS follows the Mac's resolvers as
   they change (Wi-Fi switch, VPN up or down), and guest egress follows the
   Mac's proxy settings by default; `proxy = "none"` or a proxy URL under
