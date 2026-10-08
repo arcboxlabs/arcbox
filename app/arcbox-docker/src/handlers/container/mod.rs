@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod ca_injection;
 mod guest;
 mod start;
 
