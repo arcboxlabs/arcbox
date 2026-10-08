@@ -1,0 +1,217 @@
+--- a/daemon/internal/unshare/unshare_linux.go
++++ b/daemon/internal/unshare/unshare_linux.go
+@@ -1,6 +1,7 @@
+ package unshare
+ 
+ import (
++	"errors"
+ 	"fmt"
+ 	"os"
+ 	"runtime"
+@@ -96,6 +97,49 @@
+ //
+ // [unshare(2)]: https://man7.org/linux/man-pages/man2/unshare.2.html
+ func Go(flags int, setupfn func() error, fn func()) error {
++	return goInNamespace(flags, setupfn, fn, nil)
++}
++
++// GoInMountNS runs setupfn and fn in a new mount namespace on a locked thread.
++// The startup and callback semantics are the same as Go.
++// If wait is non-nil, the caller must call wait exactly once, even when err is non-nil.
++// A successful wait confirms that the worker has finished its exit task work.
++// The wait function owns and closes the thread pidfd. Linux 6.9 or later is required.
++func GoInMountNS(setupfn func() error, fn func()) (wait func() error, err error) {
++	pidfd := -1
++	err = goInNamespace(unix.CLONE_NEWNS, setupfn, fn, func() error {
++		var openErr error
++		pidfd, openErr = unix.PidfdOpen(unix.Gettid(), unix.PIDFD_THREAD)
++		return os.NewSyscallError("pidfd_open", openErr)
++	})
++	if pidfd < 0 {
++		return nil, err
++	}
++	return func() error { return waitThreadExit(pidfd) }, err
++}
++
++func waitThreadExit(pidfd int) (retErr error) {
++	// A Go callback can return before exit_task_work releases the thread's mount references.
++	defer func() {
++		retErr = errors.Join(retErr, os.NewSyscallError("close pidfd", unix.Close(pidfd)))
++	}()
++	poll := []unix.PollFd{{Fd: int32(pidfd), Events: unix.POLLIN}}
++	for {
++		if _, err := unix.Poll(poll, -1); err != nil {
++			if errors.Is(err, unix.EINTR) {
++				continue
++			}
++			return os.NewSyscallError("poll pidfd", err)
++		}
++		events := poll[0].Revents
++		if events&(unix.POLLERR|unix.POLLNVAL) == 0 && events&(unix.POLLIN|unix.POLLHUP) != 0 {
++			return nil
++		}
++		return fmt.Errorf("poll pidfd: unexpected events %#x", events)
++	}
++}
++
++func goInNamespace(flags int, setupfn func() error, fn func(), beforeUnshare func() error) error {
+ 	started := make(chan error)
+ 
+ 	maskedFlags := flags
+@@ -107,6 +151,12 @@
+ 	go func() {
+ 		// Prepare to manipulate per-thread kernel state.
+ 		runtime.LockOSThread()
++		if beforeUnshare != nil {
++			if err := beforeUnshare(); err != nil {
++				started <- err
++				return
++			}
++		}
+ 
+ 		// Not all changes to the execution state can be reverted.
+ 		// If an irreversible change to the execution state is made, our
+--- /dev/null
++++ b/daemon/internal/unshare/unshare_linux_test.go
+@@ -0,0 +1,141 @@
++package unshare
++
++import (
++	"errors"
++	"fmt"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"testing"
++
++	"golang.org/x/sys/unix"
++)
++
++// Set TMPDIR to an owned directory on a filesystem that supports OverlayFS NFS exports.
++func TestGoInMountNSOverlayRelease(t *testing.T) {
++	for _, setupFails := range []bool{false, true} {
++		t.Run(fmt.Sprintf("setup_failure_%t", setupFails), func(t *testing.T) {
++			root := t.TempDir()
++			for _, dir := range []string{"lower", "upper", "work", "merged"} {
++				if err := os.Mkdir(filepath.Join(root, dir), 0o700); err != nil {
++					t.Fatal(err)
++				}
++			}
++			options := fmt.Sprintf("lowerdir=%s/lower,upperdir=%s/upper,workdir=%s/work,index=on,nfs_export=on", root, root, root)
++			setupErr := errors.New("setup failed after mounting overlay")
++			start := func(failSetup bool, fn func()) (func() error, error) {
++				return GoInMountNS(func() error {
++					if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
++						return fmt.Errorf("make test namespace private: %w", err)
++					}
++					if err := unix.Mount("overlay", filepath.Join(root, "merged"), "overlay", 0, options); err != nil {
++						return fmt.Errorf("mount test overlay under TMPDIR: %w", err)
++					}
++					if err := unix.Chdir(filepath.Join(root, "merged")); err != nil {
++						return fmt.Errorf("pin test overlay as working directory: %w", err)
++					}
++					if failSetup {
++						return setupErr
++					}
++					return nil
++				}, fn)
++			}
++
++			finish, ran := make(chan struct{}), make(chan struct{})
++			wait, startErr := start(setupFails, func() {
++				close(ran)
++				<-finish
++			})
++			var busyErr, busyWaitErr error
++			if startErr == nil {
++				busyWait, err := start(false, nil)
++				busyErr = err
++				if busyWait != nil {
++					busyWaitErr = busyWait()
++				}
++			}
++			close(finish)
++			var waitErr error
++			if wait != nil {
++				waitErr = wait()
++			}
++			if wait == nil || waitErr != nil {
++				t.Fatalf("join initial view: wait=%t, setup=%v, wait error=%v", wait != nil, startErr, waitErr)
++			}
++
++			// Reusing upper/work immediately after wait is the lifecycle regression check.
++			retryWait, retryErr := start(false, nil)
++			var retryWaitErr error
++			if retryWait != nil {
++				retryWaitErr = retryWait()
++			}
++			if setupFails {
++				if !errors.Is(startErr, setupErr) {
++					t.Fatalf("setup error = %v, want %v", startErr, setupErr)
++				}
++				select {
++				case <-ran:
++					t.Fatal("callback ran after setup failed")
++				default:
++				}
++			} else {
++				if startErr != nil {
++					t.Fatalf("initial overlay mount: %v", startErr)
++				}
++				if !errors.Is(busyErr, unix.EBUSY) || busyWaitErr != nil {
++					t.Fatalf("active view must retain upper: mount=%v, wait=%v", busyErr, busyWaitErr)
++				}
++				select {
++				case <-ran:
++				default:
++					t.Fatal("callback did not run")
++				}
++			}
++			if retryErr != nil || retryWait == nil || retryWaitErr != nil {
++				t.Fatalf("remount after join: mount=%v, wait=%t, wait error=%v", retryErr, retryWait != nil, retryWaitErr)
++			}
++		})
++	}
++}
++
++func TestGoInMountNSPidfdOpenFailure(t *testing.T) {
++	const childEnv = "MOBY_UNSHARE_PIDFD_FAILURE_CHILD"
++	if os.Getenv(childEnv) != "1" {
++		cmd := exec.Command(os.Args[0], "-test.run=^TestGoInMountNSPidfdOpenFailure$", "-test.timeout=10s")
++		cmd.Env = append(os.Environ(), childEnv+"=1")
++		if output, err := cmd.CombinedOutput(); err != nil {
++			t.Fatalf("pidfd failure subprocess: %v\n%s", err, output)
++		}
++		return
++	}
++
++	// Change the descriptor limit only in this subprocess; the test suite keeps its limit.
++	var limit unix.Rlimit
++	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &limit); err != nil {
++		t.Fatal(err)
++	}
++	if err := unix.Setrlimit(unix.RLIMIT_NOFILE, &unix.Rlimit{Cur: 0, Max: limit.Max}); err != nil {
++		t.Fatal(err)
++	}
++	called := make(chan struct{}, 2)
++	wait, startErr := GoInMountNS(func() error {
++		called <- struct{}{}
++		return nil
++	}, func() { called <- struct{}{} })
++	restoreErr := unix.Setrlimit(unix.RLIMIT_NOFILE, &limit)
++	var waitErr error
++	if wait != nil {
++		waitErr = wait()
++	}
++	if restoreErr != nil {
++		t.Fatalf("restore descriptor limit: %v", restoreErr)
++	}
++	if wait != nil || !errors.Is(startErr, unix.EMFILE) {
++		t.Fatalf("pidfd_open failure: wait=%t, setup=%v, wait error=%v", wait != nil, startErr, waitErr)
++	}
++	select {
++	case <-called:
++		t.Fatal("namespace callback ran after pidfd_open failed")
++	default:
++	}
++}

@@ -1,0 +1,2 @@
+# Unified-diff context requires leading spaces before empty lines and Go tabs.
+*.patch -whitespace
