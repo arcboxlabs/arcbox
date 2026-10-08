@@ -8,7 +8,7 @@ fn sync_dns(dns: &GuestDnsServer, info: &serde_json::Value) -> anyhow::Result<()
     let metadata =
         ContainerMetadata::from_inspect(info).context("test inspect omitted identity")?;
     super::sync_dns(
-        &mut dns.containers().write().unwrap(),
+        &mut dns.registry().write().unwrap(),
         dns.domain(),
         &metadata,
     )
@@ -56,7 +56,7 @@ async fn failed_rule_cleanup_retains_the_full_owner_until_retry_succeeds() {
         }),
     )
     .unwrap();
-    let registry = dns.containers();
+    let registry = dns.registry();
     let (domains, mut commands) = DomainRoutes::test_channel();
     let mut sync = ContainerSync {
         dns: &dns,
@@ -131,7 +131,7 @@ async fn stopped_domain_task_cannot_accept_updates_or_discard_cleanup_ownership(
     };
     let error = forget_container(&mut sync, "owner").await.unwrap_err();
     assert!(error.to_string().contains("rules task stopped"));
-    assert!(dns.containers().read().unwrap().get("owner").is_some());
+    assert!(dns.registry().read().unwrap().get("owner").is_some());
 }
 
 #[test]
@@ -151,7 +151,7 @@ fn disconnecting_the_last_network_removes_only_that_containers_dns_ownership() {
     sync_dns(&dns, &replica).unwrap();
     inspect["NetworkSettings"]["Networks"] = serde_json::json!({});
     sync_dns(&dns, &inspect).unwrap();
-    let entries = dns.containers();
+    let entries = dns.registry();
     let entries = entries.read().unwrap();
     assert_eq!(
         entries
@@ -200,7 +200,7 @@ fn dns_uses_network_name_order_and_rejects_invalid_names_individually() {
         );
         assert_eq!(metadata.claims(dns.domain(), "container").warnings.len(), 2);
         sync_dns(&dns, &inspect).unwrap();
-        let entries = dns.containers();
+        let entries = dns.registry();
         let entries = entries.read().unwrap();
         let registration = entries.get(metadata.id.as_str()).unwrap();
         assert_eq!(registration.address, Some("172.18.0.3".parse().unwrap()));
@@ -407,7 +407,7 @@ async fn incomplete_snapshots_never_publish_a_valid_prefix_or_discard_old_owners
         for (id, name) in [(OLD_ID, "/absent"), (WEB_ID, "/old-web")] {
             sync_dns(&dns, &inspect(id, name, "172.17.0.2")).unwrap();
         }
-        let registry = dns.containers();
+        let registry = dns.registry();
         let epoch = registry.read().unwrap().epoch();
         let (domains, mut commands) = DomainRoutes::test_channel();
         let mut sync = ContainerSync {
@@ -455,7 +455,7 @@ async fn complete_snapshot_refreshes_known_owners_and_keeps_unaddressed_identity
     for (id, name) in [(OLD_ID, "/absent"), (WEB_ID, "/old-web")] {
         sync_dns(&dns, &inspect(id, name, "172.17.0.2")).unwrap();
     }
-    let registry = dns.containers();
+    let registry = dns.registry();
     let epoch = registry.read().unwrap().epoch();
     let web = inspect(WEB_ID, "/new-web", "172.17.0.4");
     let (domains, mut commands) = DomainRoutes::test_channel();
@@ -542,7 +542,7 @@ async fn empty_snapshot_disables_all_absent_names_and_retries_failed_cleanup() {
     for (id, name) in [(OLD_ID, "/absent"), (WEB_ID, "/web")] {
         sync_dns(&dns, &inspect(id, name, "172.17.0.2")).unwrap();
     }
-    let registry = dns.containers();
+    let registry = dns.registry();
     let (domains, mut commands) = DomainRoutes::test_channel();
     let mut sync = ContainerSync {
         dns: &dns,
@@ -620,7 +620,7 @@ async fn inspected_events_wait_for_actor_ack_before_dns_and_keep_unavailable_own
         let listener = UnixListener::bind(&socket).unwrap();
         let dns = GuestDnsServer::new(Default::default(), CancellationToken::new()).unwrap();
         sync_dns(&dns, &inspect(WEB_ID, "/old-web", "172.17.0.2")).unwrap();
-        let registry = dns.containers();
+        let registry = dns.registry();
         let epoch = registry.read().unwrap().epoch();
         let info = inspect(WEB_ID, "/new-web", ip);
         let (domains, mut commands) = DomainRoutes::test_channel();

@@ -94,7 +94,7 @@ impl Services {
     ) -> Self {
         Self {
             web,
-            authority: Some(instance_authority::Receiver::new(dns.containers())),
+            authority: Some(instance_authority::Receiver::new(dns.registry())),
             dns: Some(dns),
         }
     }

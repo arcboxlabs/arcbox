@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::agent::Services;
-use crate::dns_server::ContainerRegistry;
+use crate::dns_server::DnsRegistry;
 use crate::rpc::MessageType;
 use arcbox_connect::v1::instance_authority_root::Target;
 use arcbox_connect::v1::{
@@ -88,7 +88,7 @@ impl AuthorityPeer {
     }
 }
 
-fn services() -> (Services, ContainerRegistry) {
+fn services() -> (Services, DnsRegistry) {
     let dns = std::sync::Arc::new(
         crate::dns_server::GuestDnsServer::new(
             Default::default(),
@@ -96,7 +96,7 @@ fn services() -> (Services, ContainerRegistry) {
         )
         .unwrap(),
     );
-    let registry = dns.containers();
+    let registry = dns.registry();
     (
         Services::system(crate::domains::WebServices::new(registry.clone()), dns),
         registry,
@@ -115,7 +115,7 @@ fn replacement(revision: u64) -> ReplaceInstanceAuthorityRequest {
     }
 }
 
-fn instance(registry: &ContainerRegistry) -> (InstanceTarget, u64) {
+fn instance(registry: &DnsRegistry) -> (InstanceTarget, u64) {
     match registry
         .read()
         .unwrap()

@@ -8,7 +8,7 @@ use arcbox_connect::v1::{InstanceAuthorityAck, ReplaceInstanceAuthorityRequest};
 use arcbox_dns::registry::{InstanceAuthority, InstanceTarget};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::dns_server::ContainerRegistry;
+use crate::dns_server::DnsRegistry;
 use crate::rpc::{
     ErrorResponse, RpcRequest, RpcResponse, parse_request, read_message, write_response,
 };
@@ -16,13 +16,13 @@ use crate::rpc::{
 /// Connection admission and the shared registry for one System VM.
 #[derive(Clone)]
 pub(super) struct Receiver {
-    registry: ContainerRegistry,
+    registry: DnsRegistry,
     active: Arc<Mutex<bool>>,
 }
 
 impl Receiver {
     /// Binds connection ownership to the System VM's existing registry.
-    pub(super) fn new(registry: ContainerRegistry) -> Self {
+    pub(super) fn new(registry: DnsRegistry) -> Self {
         Self {
             registry,
             active: Arc::new(Mutex::new(false)),

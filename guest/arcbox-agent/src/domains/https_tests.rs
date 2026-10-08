@@ -1,7 +1,7 @@
 use super::*;
 #[cfg(target_os = "linux")]
 use crate::agent::{AuthorityPeer, Services};
-use crate::dns_server::ContainerRegistry;
+use crate::dns_server::DnsRegistry;
 #[cfg(target_os = "linux")]
 use arcbox_connect::v1::{InstanceAuthorityRoot, ReplaceInstanceAuthorityRequest};
 use arcbox_dns::container::ContainerMetadata;
@@ -41,7 +41,7 @@ fn configuration() -> Arc<rustls::ServerConfig> {
     )
 }
 
-fn publish(services: &WebServices, dns: &ContainerRegistry, owner: &str, port: u16, domain: &str) {
+fn publish(services: &WebServices, dns: &DnsRegistry, owner: &str, port: u16, domain: &str) {
     let domain = domain.parse().unwrap();
     let inspect = serde_json::json!({
         "Id": owner, "Name": "/web", "State": { "Pid": 1 },
@@ -69,7 +69,7 @@ fn publish(services: &WebServices, dns: &ContainerRegistry, owner: &str, port: u
 }
 
 #[cfg(target_os = "linux")]
-fn replace_owner(services: &WebServices, dns: &ContainerRegistry, port: u16) {
+fn replace_owner(services: &WebServices, dns: &DnsRegistry, port: u16) {
     dns.write().unwrap().remove("a");
     publish(services, dns, "b", port, "arcbox.local");
 }
@@ -101,7 +101,7 @@ async fn owned_foreign_sni_cannot_request_authorization_or_a_certificate() {
     within(async {
         let incoming = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let address = incoming.local_addr().unwrap();
-        let dns = ContainerRegistry::default();
+        let dns = DnsRegistry::default();
         let services = WebServices::new(dns.clone());
         publish(&services, &dns, "a", 3000, "containers.test");
         let observation = arcbox_connect::v1::ReconcileHttpsAccessRequest {
@@ -172,7 +172,7 @@ async fn ownership_changes_at_each_tls_stage_stop_application_forwarding() {
                 )
                 .unwrap(),
             );
-            let dns = server.containers();
+            let dns = server.registry();
             let services = WebServices::new(dns.clone());
             publish(&services, &dns, "a", port, "arcbox.local");
             let mut authority = if mutation == "resource" {

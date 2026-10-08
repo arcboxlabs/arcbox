@@ -28,12 +28,12 @@ const FORWARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Current resource claims and addresses, keyed by owner identity.
 /// Keep guards within synchronous memory operations so teardown can revoke authority.
-pub type ContainerRegistry = Arc<RwLock<Registry>>;
+pub type DnsRegistry = Arc<RwLock<Registry>>;
 
 /// Guest DNS server.
 pub struct GuestDnsServer {
     domain: Domain,
-    containers: ContainerRegistry,
+    registry: DnsRegistry,
     cancel: CancellationToken,
 }
 
@@ -46,7 +46,7 @@ impl GuestDnsServer {
         let registry = Registry::with_builtin_names(&domain).map_err(anyhow::Error::msg)?;
         Ok(Self {
             domain,
-            containers: Arc::new(RwLock::new(registry)),
+            registry: Arc::new(RwLock::new(registry)),
             cancel,
         })
     }
@@ -58,9 +58,8 @@ impl GuestDnsServer {
     }
 
     /// Returns the shared resource registry for registration and authority delivery.
-    #[allow(dead_code)]
-    pub fn containers(&self) -> ContainerRegistry {
-        Arc::clone(&self.containers)
+    pub fn registry(&self) -> DnsRegistry {
+        Arc::clone(&self.registry)
     }
 
     /// Registers an exact sandbox name in its reserved tree.
@@ -81,7 +80,7 @@ impl GuestDnsServer {
             .context("parse sandbox DNS IPv4 address")?;
         let owner = format!("sandbox:{id}");
         let claim = Claim::exclusive(NamePattern::Exact(name), owner.clone(), "sandbox".into());
-        self.containers
+        self.registry
             .write()
             .expect("DNS registry lock poisoned")
             .replace(owner, vec![claim], Some(address.into()))?;
@@ -90,7 +89,7 @@ impl GuestDnsServer {
 
     /// Deregisters a sandbox by ID.
     pub fn deregister_sandbox(&self, id: &str) {
-        self.containers
+        self.registry
             .write()
             .expect("DNS registry lock poisoned")
             .remove(&format!("sandbox:{id}"));
@@ -154,7 +153,7 @@ impl GuestDnsServer {
         // Known names have IPv4 data only; other record types receive NODATA.
         let is_a_query = query.qtype == DnsRecordType::A;
         let mut owned_instance = false;
-        let registry = self.containers.read().expect("DNS registry lock poisoned");
+        let registry = self.registry.read().expect("DNS registry lock poisoned");
 
         if let Ok(name) = name_lower.parse::<Domain>() {
             let relative = format!("{name}.{}", self.domain).parse::<Domain>().ok();
@@ -247,7 +246,7 @@ mod tests {
             id.into(),
             "container".into(),
         );
-        let mut registry = server.containers.write().unwrap();
+        let mut registry = server.registry.write().unwrap();
         registry
             .replace(id.into(), claims.into(), Some(ip.into()))
             .unwrap();
@@ -317,9 +316,9 @@ mod tests {
             3
         );
         for (id, ip) in [("Box", "invalid"), ("two.labels", "10.0.3.3")] {
-            let epoch = server.containers.read().unwrap().epoch();
+            let epoch = server.registry.read().unwrap().epoch();
             assert!(server.register_sandbox(id, ip).is_err());
-            assert_eq!(server.containers.read().unwrap().epoch(), epoch);
+            assert_eq!(server.registry.read().unwrap().epoch(), epoch);
             assert!(
                 local_query(&server, name, DnsRecordType::A)
                     .unwrap()
@@ -331,14 +330,7 @@ mod tests {
             local_query(&server, name, DnsRecordType::A).unwrap()[3] & 15,
             3
         );
-        assert!(
-            server
-                .containers
-                .read()
-                .unwrap()
-                .get("sandbox:Box")
-                .is_none()
-        );
+        assert!(server.registry.read().unwrap().get("sandbox:Box").is_none());
     }
 
     #[test]
@@ -394,7 +386,7 @@ mod tests {
                 .map(|pattern| Claim::exclusive(pattern, "hostile".into(), "container".into()))
                 .collect();
             server
-                .containers
+                .registry
                 .write()
                 .unwrap()
                 .replace("hostile".into(), claims, Some(ip.into()))
@@ -429,7 +421,7 @@ mod tests {
         let server = GuestDnsServer::new(Domain::default(), CancellationToken::new()).unwrap();
         let sandbox_ip = Ipv4Addr::new(10, 0, 3, 2);
         server
-            .containers
+            .registry
             .write()
             .unwrap()
             .replace(
@@ -470,7 +462,7 @@ mod tests {
             InstanceTarget::Unavailable,
         ] {
             server
-                .containers
+                .registry
                 .write()
                 .unwrap()
                 .replace_instance_authorities(vec![InstanceAuthority {
@@ -503,7 +495,7 @@ mod tests {
     #[test]
     fn terminal_ownership_results_do_not_reach_short_names() {
         let server = GuestDnsServer::new(Domain::default(), CancellationToken::new()).unwrap();
-        *server.containers.write().unwrap() = Registry::new(vec![
+        *server.registry.write().unwrap() = Registry::new(vec![
             Boundary::ReservedName {
                 name: "reserved.local".parse().unwrap(),
                 authority: "host".into(),

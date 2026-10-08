@@ -75,7 +75,7 @@ impl DomainRoutes {
     /// it is told about until `cancel`.
     #[must_use]
     pub fn spawn(
-        dns: crate::dns_server::ContainerRegistry,
+        dns: crate::dns_server::DnsRegistry,
         cancel: CancellationToken,
     ) -> (Self, JoinHandle<()>) {
         let (commands, inbox) = mpsc::unbounded_channel();

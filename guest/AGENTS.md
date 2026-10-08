@@ -232,7 +232,7 @@ non-obvious invariants and failure signatures.
   Construct guest DNS with the shared builtin reservations. Forward exact system/index names and the machine tree to the existing gateway. Inject the same DNS server through `agent::Services` into `SandboxService`; register exact sandbox names as `sandbox:<id>` owners in the shared Registry. Docker snapshots must reconcile Docker owners only. Validate DNS IDs before provisioning and propagate invalid nonempty addresses; an empty address withdraws the sandbox name. Do not restore global, flat, or bare sandbox fallback.
   Apply instance authority through the same Registry. Foreign instances use the gateway; unavailable instances return SERVFAIL before local resource lookup. Preserve internal resource lookup when no instance root matches.
   System VM `agent::Services` shares that Registry with the exclusive host authority connection. Its unique session guard revokes known roots synchronously before releasing the connection slot. Every later source revision creates a lifetime barrier, including identical root snapshots.
-  Keep ContainerRegistry guards within synchronous memory operations. Release every guard before authorization waits, route reconciliation, or socket I/O.
+  Keep DnsRegistry guards within synchronous memory operations. Release every guard before authorization waits, route reconciliation, or socket I/O.
   Keep readiness streaming in `agent/linux/rpc/readiness.rs`; the dispatcher owns connection routing and preserves the recovery guest restrictions.
   Resolve conflicts as SERVFAIL. Short-name lookup requires an exact candidate; never append the suffix to match a wildcard.
   `ListContainerWebServices` reports installed routes, not raw listeners. The

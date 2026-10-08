@@ -15,7 +15,7 @@ use arcbox_dns::{
 };
 
 use super::{ContainerFacts, SelectedRoutes};
-use crate::dns_server::ContainerRegistry;
+use crate::dns_server::DnsRegistry;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Installed {
@@ -95,7 +95,7 @@ impl TlsRoute {
 #[derive(Clone, Default)]
 pub struct WebServices {
     installed: Arc<RwLock<HashMap<String, Arc<Installed>>>>,
-    dns: ContainerRegistry,
+    dns: DnsRegistry,
     access: super::access::Access,
 }
 
@@ -122,7 +122,7 @@ impl WebServices {
         self.access.reconcile(request)
     }
 
-    pub(crate) fn new(dns: ContainerRegistry) -> Self {
+    pub(crate) fn new(dns: DnsRegistry) -> Self {
         Self {
             dns,
             ..Self::default()

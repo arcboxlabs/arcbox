@@ -827,12 +827,12 @@ mod tests {
             "a".into(),
             "container".into(),
         ));
-        dns.containers()
+        dns.registry()
             .write()
             .unwrap()
             .replace("a".into(), claims, Some("172.17.0.2".parse().unwrap()))
             .unwrap();
-        let services = WebServices::new(dns.containers());
+        let services = WebServices::new(dns.registry());
         for id in ["a", "b"] {
             let facts = ContainerFacts::from_inspect(
                 &serde_json::json!({
@@ -912,7 +912,7 @@ mod tests {
             ("stale", "api.svc.local", None),
         ] {
             {
-                let registry = dns.containers();
+                let registry = dns.registry();
                 let mut registry = registry.write().unwrap();
                 match change {
                     "exact" | "conflict" => {

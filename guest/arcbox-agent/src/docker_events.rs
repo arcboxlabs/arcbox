@@ -184,7 +184,7 @@ async fn reconcile_existing(sync: &mut ContainerSync<'_>, socket: &Path) -> anyh
     }
     sync.domains.reconcile(facts).await?;
 
-    let registry = sync.dns.containers();
+    let registry = sync.dns.registry();
     let absent = {
         let mut registry = registry.write().expect("DNS registry lock poisoned");
         // Resource owners are namespaced; Docker's complete container IDs contain no colon.
@@ -262,7 +262,7 @@ fn network_container_id(event: &serde_json::Value) -> anyhow::Result<Option<&str
 }
 
 async fn forget_container(sync: &mut ContainerSync<'_>, id: &str) -> anyhow::Result<()> {
-    let registry = sync.dns.containers();
+    let registry = sync.dns.registry();
     // An unavailable owner remains enumerable until every external cleanup succeeds.
     registry
         .write()
@@ -291,7 +291,7 @@ async fn register_container_by_id(
     sync_dns(
         &mut sync
             .dns
-            .containers()
+            .registry()
             .write()
             .expect("DNS registry lock poisoned"),
         sync.dns.domain(),
