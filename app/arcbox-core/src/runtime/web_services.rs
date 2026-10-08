@@ -21,13 +21,6 @@ use super::Runtime;
 use crate::error::{CoreError, Result};
 
 impl Runtime {
-    /// Authorizes a local FQDN for signing and returns its DNS resolution revision.
-    /// Effective resource or instance changes invalidate the revision across asynchronous work.
-    pub async fn https_signing_revision(&self, fqdn: &str) -> Option<u64> {
-        self.web_service_dns_entry(fqdn)
-            .map(|(_, revision)| revision)
-    }
-
     /// Returns the current container or built-in index address for a conflict-free DNS name.
     pub fn web_service_dns_address(&self, fqdn: &str) -> Option<std::net::IpAddr> {
         self.web_service_dns_entry(fqdn).map(|(address, _)| address)
@@ -300,6 +293,12 @@ fn container_services(route: ContainerWebService, registry: &Registry) -> Result
 mod tests {
     use super::*;
 
+    fn dns_revision(runtime: &Runtime, name: &str) -> Option<u64> {
+        runtime
+            .web_service_dns_entry(name)
+            .map(|(_, revision)| revision)
+    }
+
     #[tokio::test]
     async fn container_claims_keep_canonical_names_and_withdraw_addressless_owners() {
         let directory = tempfile::tempdir().unwrap();
@@ -323,20 +322,17 @@ mod tests {
             }]);
         let metadata = arcbox_dns::container::ContainerMetadata::from_inspect(&inspect).unwrap();
         runtime.register_container_dns(&metadata).await.unwrap();
-        let revision = runtime
-            .https_signing_revision("custom.local")
-            .await
-            .unwrap();
+        let revision = dns_revision(&runtime, "custom.local").unwrap();
         for name in ["web.arcbox.local", "custom.local", "v1.api.local"] {
             assert_eq!(
                 runtime.web_service_dns_address(name),
                 Some("10.0.2.3".parse().unwrap())
             );
-            assert_eq!(runtime.https_signing_revision(name).await, Some(revision));
+            assert_eq!(dns_revision(&runtime, name), Some(revision));
         }
         for name in ["custom.local.arcbox.local", "api.local"] {
             assert_eq!(runtime.web_service_dns_address(name), None);
-            assert_eq!(runtime.https_signing_revision(name).await, None);
+            assert_eq!(dns_revision(&runtime, name), None);
         }
         let hosts = runtime.network_manager().local_hosts_table();
         assert!(hosts.read().unwrap().contains_key("custom.local"));
@@ -347,10 +343,7 @@ mod tests {
                 .contains_key("custom.local.arcbox.local")
         );
         runtime.register_container_dns(&metadata).await.unwrap();
-        assert_eq!(
-            runtime.https_signing_revision("custom.local").await,
-            Some(revision)
-        );
+        assert_eq!(dns_revision(&runtime, "custom.local"), Some(revision));
 
         inspect["NetworkSettings"]["Networks"] = serde_json::json!({});
         let metadata = arcbox_dns::container::ContainerMetadata::from_inspect(&inspect).unwrap();
@@ -363,7 +356,7 @@ mod tests {
                 .contains("container")
         );
         assert_eq!(runtime.web_service_dns_address("custom.local"), None);
-        assert_eq!(runtime.https_signing_revision("custom.local").await, None);
+        assert_eq!(dns_revision(&runtime, "custom.local"), None);
         assert!(!hosts.read().unwrap().contains_key("custom.local"));
         runtime.deregister_dns_by_id("container").await;
         assert!(runtime.registered_container_ids().await.is_empty());
@@ -378,7 +371,7 @@ mod tests {
         })
         .unwrap();
         let name = "web.arcbox.local";
-        assert_eq!(runtime.https_signing_revision(name).await, None);
+        assert_eq!(dns_revision(&runtime, name), None);
         let ip = "10.0.2.3".parse().unwrap();
         let aliases = [
             "web".into(),
@@ -386,43 +379,40 @@ mod tests {
             "absolute.arcbox.local".into(),
         ];
         runtime.register_dns("first", &aliases, ip).await.unwrap();
-        let first = runtime.https_signing_revision(name).await.unwrap();
+        let first = dns_revision(&runtime, name).unwrap();
         for alias in [name, "web.demo.arcbox.local", "absolute.arcbox.local"] {
-            assert_eq!(runtime.https_signing_revision(alias).await, Some(first));
+            assert_eq!(dns_revision(&runtime, alias), Some(first));
         }
-        assert_eq!(
-            runtime.https_signing_revision("web.example.com").await,
-            None
-        );
+        assert_eq!(dns_revision(&runtime, "web.example.com"), None);
 
         runtime.register_dns("first", &aliases, ip).await.unwrap();
-        let renewed = runtime.https_signing_revision(name).await.unwrap();
+        let renewed = dns_revision(&runtime, name).unwrap();
         assert_eq!(renewed, first);
         runtime
             .register_dns("second", &["web".into()], ip)
             .await
             .unwrap();
-        assert_eq!(runtime.https_signing_revision(name).await, None);
+        assert_eq!(dns_revision(&runtime, name), None);
         runtime.deregister_dns_by_id("second").await;
         for owner in ["sandbox:other", "machine:other", "system:host"] {
             runtime
                 .register_dns(owner, &["web".into()], ip)
                 .await
                 .unwrap();
-            assert_eq!(runtime.https_signing_revision(name).await, None, "{owner}");
+            assert_eq!(dns_revision(&runtime, name), None, "{owner}");
             runtime.deregister_dns_by_id(owner).await;
-            assert_eq!(runtime.https_signing_revision(name).await, Some(first));
+            assert_eq!(dns_revision(&runtime, name), Some(first));
         }
-        assert_eq!(runtime.https_signing_revision(name).await, Some(renewed));
+        assert_eq!(dns_revision(&runtime, name), Some(renewed));
         runtime
             .network_manager()
             .local_hosts_table()
             .write()
             .unwrap()
             .insert(name.into(), "10.0.2.4".parse().unwrap());
-        assert_eq!(runtime.https_signing_revision(name).await, Some(first));
+        assert_eq!(dns_revision(&runtime, name), Some(first));
         runtime.deregister_dns_by_id("first").await;
-        assert_eq!(runtime.https_signing_revision(name).await, None);
+        assert_eq!(dns_revision(&runtime, name), None);
     }
 
     fn selected_container_services(
@@ -641,22 +631,22 @@ mod tests {
             .await
             .unwrap();
         let name = "web.one.dev.arcbox.local";
-        let first = runtime.https_signing_revision(name).await.unwrap();
+        let first = dns_revision(&runtime, name).unwrap();
         for name in [
             "web.arcbox.local",
             "web.two.dev.arcbox.local",
             "web.one.dev.arcbox.local.evil",
         ] {
-            assert_eq!(runtime.https_signing_revision(name).await, None, "{name}");
+            assert_eq!(dns_revision(&runtime, name), None, "{name}");
         }
         runtime
             .register_dns("container", &["web".into()], "10.0.2.3".parse().unwrap())
             .await
             .unwrap();
-        let renewed = runtime.https_signing_revision(name).await.unwrap();
+        let renewed = dns_revision(&runtime, name).unwrap();
         assert_eq!(renewed, first);
         runtime.deregister_dns_by_id("container").await;
-        assert_eq!(runtime.https_signing_revision(name).await, None);
+        assert_eq!(dns_revision(&runtime, name), None);
     }
 
     #[test]
@@ -798,7 +788,7 @@ mod tests {
             "index".into(),
         );
         runtime.replace_dns_registration("system:index", vec![claim.clone()], Some(gateway.into()));
-        assert_eq!(runtime.https_signing_revision(apex.as_str()).await, None);
+        assert_eq!(dns_revision(&runtime, apex.as_str()), None);
         assert_eq!(runtime.web_service_dns_address(apex.as_str()), None);
         runtime
             .dns_registry
@@ -808,22 +798,19 @@ mod tests {
                 root: apex.clone(),
                 target: InstanceTarget::Current,
             }]);
-        let revision = runtime.https_signing_revision(apex.as_str()).await.unwrap();
+        let revision = dns_revision(&runtime, apex.as_str()).unwrap();
         assert_eq!(
             runtime.web_service_dns_address(apex.as_str()),
             Some(gateway.into())
         );
         runtime.replace_dns_registration("system:index", vec![claim.clone()], Some(gateway.into()));
-        assert_eq!(
-            runtime.https_signing_revision(apex.as_str()).await,
-            Some(revision)
-        );
+        assert_eq!(dns_revision(&runtime, apex.as_str()), Some(revision));
         for name in [
             "host.arcbox.local",
             "other.arcbox.local",
             "child.arcbox.local",
         ] {
-            assert_eq!(runtime.https_signing_revision(name).await, None);
+            assert_eq!(dns_revision(&runtime, name), None);
             assert_eq!(runtime.web_service_dns_address(name), None);
         }
         let extra = Claim::exclusive(
@@ -837,20 +824,17 @@ mod tests {
             (vec![claim.clone()], None),
         ] {
             runtime.replace_dns_registration("system:index", claims, address);
-            assert_eq!(runtime.https_signing_revision(apex.as_str()).await, None);
+            assert_eq!(dns_revision(&runtime, apex.as_str()), None);
             assert_eq!(runtime.web_service_dns_address(apex.as_str()), None);
         }
         runtime.replace_dns_registration("system:index", vec![claim], Some(gateway.into()));
-        assert_ne!(
-            runtime.https_signing_revision(apex.as_str()).await.unwrap(),
-            revision
-        );
+        assert_ne!(dns_revision(&runtime, apex.as_str()).unwrap(), revision);
         runtime
             .dns_registry
             .write()
             .unwrap()
             .invalidate_instance_authorities();
-        assert_eq!(runtime.https_signing_revision(apex.as_str()).await, None);
+        assert_eq!(dns_revision(&runtime, apex.as_str()), None);
         assert_eq!(runtime.web_service_dns_address(apex.as_str()), None);
     }
 

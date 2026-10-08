@@ -137,6 +137,47 @@ mod tests {
     };
 
     #[tokio::test]
+    async fn system_authority_rejects_a_machine_claim_and_a_retired_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = crate::runtime::NetworkFixture::default();
+        let runtime = Runtime::new(crate::Config {
+            data_dir: directory.path().into(),
+            ..Default::default()
+        })
+        .unwrap()
+        .with_network_fixture(fixture.clone());
+        runtime
+            .register_dns("container", &["web".into()], "10.0.2.3".parse().unwrap())
+            .await
+            .unwrap();
+        runtime
+            .register_machine_dns("machine", "192.168.64.8".parse().unwrap())
+            .await
+            .unwrap();
+        let guest = runtime
+            .capture_web_guest(runtime.default_machine_name())
+            .unwrap();
+        let revision = runtime
+            .with_web_guest_claim(&guest, "web.arcbox.local", |_, revision| revision)
+            .unwrap();
+        assert!(revision.is_some());
+        assert_eq!(
+            runtime
+                .with_web_guest_claim(&guest, "machine.machine.arcbox.local", |_, _| ())
+                .unwrap(),
+            None
+        );
+        fixture.restart();
+        assert!(
+            runtime
+                .with_web_guest_claim(&guest, "web.arcbox.local", |_, _| panic!(
+                    "retired run must not authorize"
+                ))
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn machine_authority_is_exact_current_and_bound_to_one_canonical_record() {
         let directory = tempfile::tempdir().unwrap();
         let runtime = Runtime::new(crate::Config {

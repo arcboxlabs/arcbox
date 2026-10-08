@@ -5,8 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
-use arcbox_constants::ports::TLS_SIGNING_PORT;
-use arcbox_core::{DEFAULT_MACHINE_NAME, Runtime};
+use arcbox_core::{DEFAULT_MACHINE_NAME, Runtime, runtime::CapturedWebGuest};
 use arcbox_local_ca::{KeychainAuthority, MAX_CERTIFICATE_SIZE, VerifiedCertificateRequest};
 use arcbox_transport::vsock::{VsockShutdown, VsockStream};
 use futures::{SinkExt, StreamExt};
@@ -58,34 +57,29 @@ async fn serve_once(
     authority: &watch::Receiver<Option<Arc<KeychainAuthority>>>,
     shutdown: &CancellationToken,
 ) -> Result<()> {
-    let expected = runtime.container_network_incarnation()?;
-    let connecting_vm = expected.clone();
+    let guest = runtime.capture_web_guest(DEFAULT_MACHINE_NAME)?;
+    let connecting_guest = guest.clone();
     let connecting_runtime = Arc::clone(runtime);
     let stream = connect_native(shutdown, move || {
-        let fd = connecting_runtime.connect_vsock_port_expected(
-            DEFAULT_MACHINE_NAME,
-            &connecting_vm,
-            TLS_SIGNING_PORT,
-        )?;
+        let fd = connecting_runtime.connect_web_guest_signer(&connecting_guest)?;
         // SAFETY: the hypervisor returns a newly opened descriptor and transfers ownership.
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     })
     .await?;
-    let signing_runtime = Arc::clone(runtime);
     SigningSession {
         current: authority,
-        runtime,
         shutdown,
-        ensure_vm: move || {
-            ensure!(
-                signing_runtime.container_network_incarnation()? == expected,
-                "VM changed during signing"
-            );
-            Ok(())
-        },
+        authorize: authorization(Arc::clone(runtime), guest),
     }
     .serve(stream, |authority, request| Ok(authority.sign(request)?))
     .await
+}
+
+fn authorization(
+    runtime: Arc<Runtime>,
+    guest: CapturedWebGuest,
+) -> impl Fn(&str) -> Result<Option<u64>> + Clone {
+    move |name| Ok(runtime.with_web_guest_claim(&guest, name, |_, revision| revision)?)
 }
 
 async fn connect_native(
@@ -108,15 +102,14 @@ async fn connect_native(
 
 struct SigningSession<'a, A, F> {
     current: &'a watch::Receiver<Option<Arc<A>>>,
-    runtime: &'a Runtime,
     shutdown: &'a CancellationToken,
-    ensure_vm: F,
+    authorize: F,
 }
 
 impl<A, F> SigningSession<'_, A, F>
 where
     A: Send + Sync + 'static,
-    F: Fn() -> Result<()> + Clone + Send + Sync + 'static,
+    F: Fn(&str) -> Result<Option<u64>> + Clone + Send + Sync + 'static,
 {
     async fn serve<S>(
         self,
@@ -138,27 +131,27 @@ where
             .context("guest closed the signing connection")??;
         let request = VerifiedCertificateRequest::try_from(request.as_ref())?;
         let name = request.dns_name().to_owned();
-        let revision = self
-            .runtime
-            .https_signing_revision(&name)
-            .await
-            .context("CSR DNS name is not owned by a current web service")?;
+        let revision = (self.authorize)(&name)?
+            .context("CSR DNS name is not owned by this guest's current web service")?;
         let authority = self
             .current
             .borrow()
             .clone()
             .context("local CA is not prepared")?;
         let signing_authority = Arc::clone(&authority);
-        let ensure_vm = self.ensure_vm.clone();
+        let authorize = self.authorize.clone();
         let shutdown = self.shutdown.clone();
         let certificate = tokio::task::spawn_blocking(move || {
             ensure!(!shutdown.is_cancelled(), "TLS signer cancelled");
-            ensure_vm()?;
+            ensure!(
+                authorize(request.dns_name())? == Some(revision),
+                "DNS ownership changed during signing"
+            );
             sign(&signing_authority, &request)
         })
         .await??;
         ensure!(
-            self.runtime.https_signing_revision(&name).await == Some(revision),
+            (self.authorize)(&name)? == Some(revision),
             "DNS ownership changed during signing"
         );
         ensure!(
@@ -168,7 +161,6 @@ where
                 .is_some_and(|active| Arc::ptr_eq(active, &authority)),
             "local CA changed during signing"
         );
-        (self.ensure_vm)()?;
         self.shutdown
             .run_until_cancelled(tokio::time::timeout(
                 Duration::from_secs(10),
@@ -189,7 +181,7 @@ mod tests {
     async fn serve_request<A, S>(
         stream: S,
         current: &watch::Receiver<Option<Arc<A>>>,
-        runtime: &Runtime,
+        runtime: &Arc<Runtime>,
         sign: impl FnOnce(&A, &VerifiedCertificateRequest) -> Result<Vec<u8>> + Send + 'static,
     ) -> Result<()>
     where
@@ -198,9 +190,11 @@ mod tests {
     {
         SigningSession {
             current,
-            runtime,
             shutdown: &CancellationToken::new(),
-            ensure_vm: || Ok(()),
+            authorize: authorization(
+                Arc::clone(runtime),
+                runtime.capture_web_guest(DEFAULT_MACHINE_NAME)?,
+            ),
         }
         .serve(stream, sign)
         .await
@@ -213,7 +207,8 @@ mod tests {
                 data_dir: directory.path().to_owned(),
                 ..Default::default()
             })
-            .unwrap(),
+            .unwrap()
+            .with_network_fixture(arcbox_core::runtime::NetworkFixture::default()),
         );
         runtime
             .register_dns("container", &["web".into()], "10.0.2.3".parse().unwrap())
@@ -415,9 +410,11 @@ mod tests {
         task.start(async move {
             SigningSession {
                 current: &current,
-                runtime: &runtime,
                 shutdown: &cancelled,
-                ensure_vm: || Ok(()),
+                authorize: authorization(
+                    Arc::clone(&runtime),
+                    runtime.capture_web_guest(DEFAULT_MACHINE_NAME)?,
+                ),
             }
             .serve(host, move |_, _| {
                 started.send(()).unwrap();
@@ -455,13 +452,16 @@ mod tests {
             let (started, signing) = tokio::sync::oneshot::channel();
             let (finish, finished) = std::sync::mpsc::channel();
             let task = tokio::spawn(async move {
+                let authorize = authorization(
+                    Arc::clone(&runtime),
+                    runtime.capture_web_guest(DEFAULT_MACHINE_NAME)?,
+                );
                 SigningSession {
                     current: &current,
-                    runtime: &runtime,
                     shutdown: &CancellationToken::new(),
-                    ensure_vm: move || {
+                    authorize: move |name: &str| {
                         ensure!(expected.load(Ordering::SeqCst), "VM changed during signing");
-                        Ok(())
+                        authorize(name)
                     },
                 }
                 .serve(host, move |_, _| {
@@ -499,9 +499,11 @@ mod tests {
         let (host, mut guest) = tokio::io::duplex(1024);
         let session = SigningSession {
             current: &current,
-            runtime: &runtime,
             shutdown: &shutdown,
-            ensure_vm: || Ok(()),
+            authorize: authorization(
+                Arc::clone(&runtime),
+                runtime.capture_web_guest(DEFAULT_MACHINE_NAME).unwrap(),
+            ),
         };
         let mut serving = pin!(session.serve(host, |_, _| panic!("no request was sent")));
         assert!(matches!(futures::poll!(&mut serving), Poll::Pending));

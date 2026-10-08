@@ -319,11 +319,28 @@ async fn network_refresh_is_idempotent_and_rename_replaces_the_old_alias() {
         &serde_json::from_str(INSPECT_WEB).unwrap(),
     )
     .unwrap();
-    runtime.register_container_dns(&metadata).await.unwrap();
-    let revision = runtime
-        .https_signing_revision("web.arcbox.local")
-        .await
+    assert!(
+        runtime
+            .capture_container_snapshot()
+            .await
+            .unwrap()
+            .unwrap()
+            .commit(&[arcbox_core::runtime::ContainerNetwork {
+                metadata,
+                bindings: Vec::new(),
+            }])
+            .await
+            .unwrap()
+    );
+    let captured = runtime
+        .capture_web_guest(runtime.default_machine_name())
         .unwrap();
+    let dns_revision = |name| {
+        runtime
+            .with_web_guest_claim(&captured, name, |_, revision| revision)
+            .unwrap()
+    };
+    let revision = dns_revision("web.arcbox.local").unwrap();
     let response = router
         .clone()
         .oneshot(
@@ -336,10 +353,7 @@ async fn network_refresh_is_idempotent_and_rename_replaces_the_old_alias() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        runtime.https_signing_revision("web.arcbox.local").await,
-        Some(revision)
-    );
+    assert_eq!(dns_revision("web.arcbox.local"), Some(revision));
 
     let (status, _) = send(&router, "POST", "/containers/web/rename?name=renamed").await;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -351,17 +365,8 @@ async fn network_refresh_is_idempotent_and_rename_replaces_the_old_alias() {
             .as_deref(),
         Some("abc123")
     );
-    assert_eq!(
-        runtime.https_signing_revision("web.arcbox.local").await,
-        None
-    );
-    assert_ne!(
-        runtime
-            .https_signing_revision("renamed.arcbox.local")
-            .await
-            .unwrap(),
-        revision
-    );
+    assert_eq!(dns_revision("web.arcbox.local"), None);
+    assert_ne!(dns_revision("renamed.arcbox.local").unwrap(), revision);
 }
 
 #[tokio::test]
