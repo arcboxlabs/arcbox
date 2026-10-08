@@ -1,20 +1,29 @@
 //! Resource facts shared by domain discovery, NAT rules, and HTTPS routing.
 
 mod container;
+mod machine;
 
 use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
+use arcbox_constants::dns::Domain;
+
 use super::http_port::{HTTP_PORT, HTTPS_PORT, Pin};
 use super::{HttpsBackend, RULE_OWNER, SelectedRoutes};
 use crate::iptables::NatRule;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Resource {
+    Container { hostname: String },
+    Machine { name: String, hostname: Domain },
+}
 
 /// A running resource and the inputs required to discover and route its web services.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EndpointFacts {
     pub(super) id: String,
-    pub(super) hostname: String,
+    pub(super) resource: Resource,
     /// A process whose `/proc` entry shows the endpoint's sockets.
     pub(super) pid: u32,
     /// The network namespace that the process must still occupy.
@@ -27,6 +36,19 @@ pub struct EndpointFacts {
 }
 
 impl EndpointFacts {
+    /// Returns the Registry owner shared by configuration and installed routes.
+    pub(crate) fn owner(&self) -> &str {
+        &self.id
+    }
+
+    /// Returns the probe Host/SNI while preserving container naming behavior.
+    pub(super) fn hostname(&self) -> &str {
+        match &self.resource {
+            Resource::Container { hostname } => hostname,
+            Resource::Machine { hostname, .. } => hostname.as_str(),
+        }
+    }
+
     /// Native HTTPS keeps the application's TLS; terminated HTTPS reaches the proxy.
     pub(super) fn rules(
         &self,
@@ -100,7 +122,7 @@ mod tests {
         let facts =
             EndpointFacts::from_inspect(&inspect(), &"containers.test".parse().unwrap()).unwrap();
         assert_eq!(facts.id, "abc123");
-        assert_eq!(facts.hostname, "web.containers.test");
+        assert_eq!(facts.hostname(), "web.containers.test");
         assert_eq!(facts.pid, 4242);
         assert_eq!(
             facts.netns,
@@ -149,7 +171,7 @@ mod tests {
             "com.docker.compose.service": "Web_API",
         });
         let facts = EndpointFacts::from_inspect(&inspect, &Domain::default()).unwrap();
-        assert_eq!(facts.hostname, "MyProject_Web_1.arcbox.local");
+        assert_eq!(facts.hostname(), "MyProject_Web_1.arcbox.local");
     }
 
     #[test]

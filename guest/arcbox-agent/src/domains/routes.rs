@@ -268,7 +268,11 @@ impl Routes {
                     if listening.contains(&port)
                         && tracked
                             .probes
-                            .responds_https(tracked.facts.primary_ip, port, &tracked.facts.hostname)
+                            .responds_https(
+                                tracked.facts.primary_ip,
+                                port,
+                                tracked.facts.hostname(),
+                            )
                             .await
                     {
                         native.insert(port);
@@ -340,7 +344,7 @@ impl Tracked {
             let port = http_port::choose(self.facts.pin, &candidates, &self.facts.exposed)?;
             let protocol = self
                 .probes
-                .http(self.facts.primary_ip, port, &self.facts.hostname)
+                .http(self.facts.primary_ip, port, self.facts.hostname())
                 .await;
             if self.facts.pin.is_some() || protocol.is_some() {
                 return Some(HttpBackend { port, protocol });

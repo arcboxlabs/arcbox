@@ -100,7 +100,7 @@ gives the machine the identity and network the distro cannot know on its own
 The agent in a machine then serves RPC and nothing else: none of the System
 VM services below run there.
 
-Machine web configuration uses `OpenMachineWebRequest` to fix the raw machine name, exact canonical hostname, and bridge IPv4 for one host connection. `ReplaceMachineWebRequest` replaces both policies with a positive, increasing source revision. The guest stores configuration and an exact private DNS claim until disconnect; acknowledgement does not advertise an installed route or activate listeners and NAT.
+Machine web configuration uses `OpenMachineWebRequest` to fix the raw machine name, exact canonical hostname, and bridge IPv4 for one host connection. `ReplaceMachineWebRequest` validates both policies before replacing typed endpoint facts with a positive, increasing source revision. The guest stores these facts and an exact private DNS claim until disconnect. Typed installed machine snapshots check the current owner and address independently of Docker availability; acknowledgement does not advertise an installed route or activate listeners and NAT.
 
 The trust RPC supports Debian, Ubuntu, and Alpine machines with an installed `update-ca-certificates` and a regular system PEM bundle. ArcBox owns only `/usr/local/share/ca-certificates/arcbox-local-ca.crt`. Unsupported distributions and missing prerequisites return an error. Updater failure leaves reconciliation pending until replay. The daemon delivers its current public root to each running machine independently of System VM startup.
 

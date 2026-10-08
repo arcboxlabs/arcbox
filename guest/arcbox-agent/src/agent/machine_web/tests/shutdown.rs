@@ -162,9 +162,8 @@ fn a_new_revision_with_identical_policies_invalidates_installed_routes() {
             .configuration
             .as_ref()
             .unwrap()
-            .policy
-            .as_ref(),
-        Some(&request)
+            .source_revision,
+        request.source_revision
     );
 }
 
@@ -245,7 +244,7 @@ fn invalid_or_stale_replacements_preserve_the_last_complete_policy() {
     let mut invalid = vec![
         replacement(0, Selection::Port(80), Selection::Port(443)),
         replacement(1, Selection::Port(80), Selection::Port(443)),
-        accepted.clone(),
+        accepted,
         replacement(3, Selection::Port(0), Selection::Port(443)),
         replacement(3, Selection::Port(80), Selection::Port(65536)),
         ReplaceMachineWebRequest {
@@ -263,19 +262,12 @@ fn invalid_or_stale_replacements_preserve_the_last_complete_policy() {
         }
         invalid.push(missing);
     }
+    let accepted_configuration = receiver.state.lock().unwrap().configuration.clone();
     for request in invalid {
         assert!(session.replace(request).is_err());
         assert_eq!(
-            receiver
-                .state
-                .lock()
-                .unwrap()
-                .configuration
-                .as_ref()
-                .unwrap()
-                .policy
-                .as_ref(),
-            Some(&accepted)
+            receiver.state.lock().unwrap().configuration,
+            accepted_configuration
         );
     }
 }

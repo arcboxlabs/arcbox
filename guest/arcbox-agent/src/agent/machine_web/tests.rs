@@ -1,7 +1,7 @@
 //! Exact machine ownership and complete configuration validation.
 
 use super::*;
-use arcbox_connect::v1::{MachineWebPorts, WebPortPolicy};
+use arcbox_connect::v1::{MachineWebPorts, WebPortPolicy, web_port_policy::Selection};
 use arcbox_dns::registry::Lookup;
 
 fn receiver() -> Receiver {
@@ -70,8 +70,8 @@ fn exact_raw_identity_and_complete_policy_belong_to_one_session() {
     {
         let state = receiver.state.lock().unwrap();
         let configuration = state.configuration.as_ref().unwrap();
-        assert_eq!(configuration.open, open());
-        assert_eq!(configuration.policy.as_ref(), Some(&request));
+        assert_eq!(configuration.facts.owner(), "machine:my_vm");
+        assert_eq!(configuration.source_revision, request.source_revision);
     }
     assert_eq!(
         receiver.web.snapshot(None),

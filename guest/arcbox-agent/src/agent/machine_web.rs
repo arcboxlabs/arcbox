@@ -4,14 +4,12 @@ use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, ensure};
-use arcbox_connect::v1::{
-    MachineWebAck, OpenMachineWebRequest, ReplaceMachineWebRequest, web_port_policy::Selection,
-};
+use arcbox_connect::v1::{MachineWebAck, OpenMachineWebRequest, ReplaceMachineWebRequest};
 use arcbox_dns::{NamePattern, claims::Claim};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 
 use crate::dns_server::DnsRegistry;
-use crate::domains::WebServices;
+use crate::domains::{EndpointFacts, WebServices};
 use crate::rpc::{
     ErrorResponse, RpcRequest, RpcResponse, parse_request, read_message, write_response,
 };
@@ -29,9 +27,10 @@ struct State {
     configuration: Option<Configuration>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Configuration {
-    open: OpenMachineWebRequest,
-    policy: Option<ReplaceMachineWebRequest>,
+    facts: EndpointFacts,
+    source_revision: u64,
 }
 
 impl Receiver {
@@ -49,7 +48,8 @@ impl Receiver {
         bridge: Option<Ipv4Addr>,
     ) -> Result<Option<Session>> {
         ensure!(!open.machine_name.is_empty(), "machine name is required");
-        let hostname = open.hostname.parse().map_err(anyhow::Error::msg)?;
+        let hostname: arcbox_constants::dns::Domain =
+            open.hostname.parse().map_err(anyhow::Error::msg)?;
         let address = open.ipv4_address.parse::<Ipv4Addr>()?;
         ensure!(
             Some(address) == bridge,
@@ -59,7 +59,8 @@ impl Receiver {
         if state.active {
             return Ok(None);
         }
-        let owner = format!("machine:{}", open.machine_name);
+        let facts = EndpointFacts::machine(open.machine_name, hostname.clone(), address);
+        let owner = facts.owner().to_owned();
         self.registry
             .write()
             .expect("DNS registry lock poisoned")
@@ -72,7 +73,10 @@ impl Receiver {
                 )],
                 Some(address.into()),
             )?;
-        state.configuration = Some(Configuration { open, policy: None });
+        state.configuration = Some(Configuration {
+            facts,
+            source_revision: 0,
+        });
         state.active = true;
         Ok(Some(Session {
             receiver: self.clone(),
@@ -141,15 +145,6 @@ struct Session {
 
 impl Session {
     fn replace(&self, request: ReplaceMachineWebRequest) -> Result<u64> {
-        for policy in [&request.ports.http_port, &request.ports.https_port] {
-            ensure!(
-                matches!(
-                    &policy.selection,
-                    Some(Selection::Auto(_) | Selection::Off(_) | Selection::Port(1..=65535))
-                ),
-                "complete valid machine web policies are required"
-            );
-        }
         let mut state = self
             .receiver
             .state
@@ -161,15 +156,12 @@ impl Session {
             .expect("session owns configuration");
         let revision = request.source_revision;
         ensure!(
-            revision
-                > configuration
-                    .policy
-                    .as_ref()
-                    .map_or(0, |policy| policy.source_revision),
+            revision > configuration.source_revision,
             "source revision must increase"
         );
+        configuration.facts.replace_machine_ports(&request.ports)?;
         self.receiver.web.clear();
-        configuration.policy = Some(request);
+        configuration.source_revision = revision;
         Ok(revision)
     }
 
@@ -184,7 +176,7 @@ impl Session {
                 .registry
                 .write()
                 .expect("DNS registry lock poisoned")
-                .remove(&format!("machine:{}", configuration.open.machine_name));
+                .remove(configuration.facts.owner());
         }
         self.receiver.web.clear();
     }

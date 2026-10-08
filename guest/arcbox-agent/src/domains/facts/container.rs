@@ -5,7 +5,7 @@ use arcbox_dns::container::ContainerMetadata;
 
 use super::super::http_port::{self, Pin};
 use super::super::selection::HTTPS_LABEL;
-use super::EndpointFacts;
+use super::{EndpointFacts, Resource};
 
 impl EndpointFacts {
     /// Reads facts from a container's inspect JSON.
@@ -41,7 +41,7 @@ impl EndpointFacts {
             .unwrap_or_default();
         Some(Self {
             id: metadata.id,
-            hostname,
+            resource: Resource::Container { hostname },
             pid,
             netns,
             ips,

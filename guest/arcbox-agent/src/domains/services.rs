@@ -1,4 +1,4 @@
-//! Installed web routes and Docker directory visibility joined with current DNS ownership.
+//! Typed installed web routes selected by current DNS ownership and resource availability.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use arcbox_connect::v1::{
-    ContainerWebService, GuestWebService, IndexWebService, ReconcileHttpsAccessRequest,
-    ReconcileHttpsAccessResponse, container_web_service::HttpsBackend,
+    ContainerWebService, GuestWebService, IndexWebService, MachineWebService,
+    ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse, container_web_service::HttpsBackend,
 };
 use arcbox_constants::dns::{Domain, LOCAL_CA_DNS_SUBTREE};
 use arcbox_dns::{
@@ -16,11 +16,13 @@ use arcbox_dns::{
     web_services::{HttpsMode, WebServiceUrls},
 };
 
+use super::facts::Resource;
 use super::{EndpointFacts, HttpBackend, SelectedRoutes};
 use crate::dns_server::DnsRegistry;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Installed {
+    resource: Resource,
     ip: Ipv4Addr,
     selected: SelectedRoutes,
 }
@@ -181,6 +183,7 @@ impl WebServices {
             installed.remove(&facts.id);
         } else {
             let route = Installed {
+                resource: facts.resource.clone(),
                 ip: facts.primary_ip,
                 selected,
             };
@@ -313,7 +316,52 @@ impl WebServices {
                 route: container.into(),
                 ..Default::default()
             })
+            .chain(self.machine_snapshot(hostname))
             .chain(self.index_snapshot(hostname))
+            .collect()
+    }
+
+    fn machine_snapshot(&self, hostname: Option<&Domain>) -> Vec<GuestWebService> {
+        use arcbox_connect::v1::machine_web_service::HttpsBackend;
+
+        let dns = self.dns.read().expect("DNS registry lock poisoned");
+        let installed = self.installed.read().expect("web services lock poisoned");
+        installed
+            .iter()
+            .filter_map(|(owner, route)| {
+                let Resource::Machine {
+                    name,
+                    hostname: expected,
+                } = &route.resource
+                else {
+                    return None;
+                };
+                if hostname.is_some_and(|name| name != expected)
+                    || !matches!(dns.resolve(expected), Lookup::Matched { claim, address, .. }
+                    if claim.owner() == owner && address == IpAddr::V4(route.ip))
+                {
+                    return None;
+                }
+                Some(GuestWebService {
+                    route: MachineWebService {
+                        machine_name: name.clone(),
+                        hostname: expected.to_string(),
+                        ipv4_address: route.ip.to_string(),
+                        http_port: route.selected.http.map_or(0, u32::from),
+                        https_backend: route.selected.https.map(|backend| match backend {
+                            super::HttpsBackend::Native(port) => {
+                                HttpsBackend::NativeHttpsPort(u32::from(port))
+                            }
+                            super::HttpsBackend::Terminate(backend) => {
+                                HttpsBackend::TerminatedHttpPort(u32::from(backend.port))
+                            }
+                        }),
+                        ..Default::default()
+                    }
+                    .into(),
+                    ..Default::default()
+                })
+            })
             .collect()
     }
 
@@ -356,7 +404,10 @@ impl WebServices {
             };
             return installed
                 .get(claim.owner())
-                .filter(|route| address == IpAddr::V4(route.ip))
+                .filter(|route| {
+                    matches!(route.resource, Resource::Container { .. })
+                        && address == IpAddr::V4(route.ip)
+                })
                 .map(|route| SelectedContainer {
                     owner: claim.owner().into(),
                     installed: Arc::clone(route),
@@ -368,6 +419,9 @@ impl WebServices {
         let mut services: Vec<_> = installed
             .iter()
             .filter_map(|(id, route)| {
+                if !matches!(route.resource, Resource::Container { .. }) {
+                    return None;
+                }
                 let domains: Vec<_> = dns.get(id)?
                     .claims
                     .iter()
@@ -429,6 +483,110 @@ mod tests {
                 })),
             },
         );
+    }
+
+    #[test]
+    fn machine_snapshot_requires_its_exact_owner_and_address_without_a_docker_source() {
+        use arcbox_connect::v1::guest_web_service::Route;
+        use arcbox_dns::claims::Claim;
+
+        let services = WebServices::default();
+        let hostname: Domain = "my-vm.machine.arcbox.local".parse().unwrap();
+        let ip = "192.168.64.8".parse().unwrap();
+        let facts = EndpointFacts::machine("my_vm".into(), hostname.clone(), ip);
+        let claim = Claim::exclusive(
+            NamePattern::Exact(hostname.clone()),
+            facts.owner().into(),
+            "machine".into(),
+        );
+        services
+            .dns
+            .write()
+            .unwrap()
+            .replace(facts.owner().into(), vec![claim.clone()], Some(ip.into()))
+            .unwrap();
+        services.publish(
+            &facts,
+            SelectedRoutes::choose(
+                Some(HttpBackend {
+                    port: 3000,
+                    protocol: Some(super::super::HttpProtocol::Http2),
+                }),
+                None,
+                &Default::default(),
+            ),
+        );
+        assert_eq!(services.directory_snapshot(None), None);
+        for filter in [None, Some(&hostname)] {
+            let rows = services.snapshot(filter);
+            assert_eq!(rows.len(), 1);
+            let Some(Route::Machine(row)) = &rows[0].route else {
+                panic!("machine row is missing")
+            };
+            assert_eq!(row.machine_name, "my_vm");
+            assert_eq!(row.hostname, hostname.as_str());
+            assert_eq!(row.ipv4_address, ip.to_string());
+            assert_eq!(row.http_port, 3000);
+            assert!(matches!(
+                row.https_backend,
+                Some(
+                    arcbox_connect::v1::machine_web_service::HttpsBackend::TerminatedHttpPort(3000)
+                )
+            ));
+        }
+        assert_eq!(
+            services.snapshot(Some(&"other.machine.arcbox.local".parse().unwrap())),
+            Vec::<GuestWebService>::new()
+        );
+        let source = services.directory_source();
+        source.ready();
+        assert_eq!(services.directory_snapshot(None), Some(Vec::new()));
+        drop(source);
+        assert_eq!(services.snapshot(None).len(), 1);
+        for https in [Some(super::super::HttpsBackend::Native(9443)), None] {
+            services.publish(
+                &facts,
+                SelectedRoutes {
+                    http: Some(3000),
+                    https,
+                },
+            );
+            let rows = services.snapshot(None);
+            let Some(Route::Machine(row)) = &rows[0].route else {
+                panic!("machine row is missing")
+            };
+            assert_eq!(
+                row.https_backend,
+                https.map(|_| {
+                    arcbox_connect::v1::machine_web_service::HttpsBackend::NativeHttpsPort(9443)
+                })
+            );
+        }
+        services
+            .dns
+            .write()
+            .unwrap()
+            .replace(
+                facts.owner().into(),
+                vec![claim],
+                Some("192.168.64.9".parse().unwrap()),
+            )
+            .unwrap();
+        assert_eq!(services.snapshot(None), Vec::<GuestWebService>::new());
+        let mut dns = services.dns.write().unwrap();
+        dns.remove(facts.owner());
+        dns.replace(
+            "machine:other".into(),
+            vec![Claim::exclusive(
+                NamePattern::Exact(hostname),
+                "machine:other".into(),
+                "machine".into(),
+            )],
+            Some(ip.into()),
+        )
+        .unwrap();
+        drop(dns);
+        assert_eq!(services.snapshot(None), Vec::<GuestWebService>::new());
     }
 
     #[test]
