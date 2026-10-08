@@ -125,6 +125,8 @@ The proxy reads `/arcbox/tls/ca.pem` before cache reuse and verifies new leaves
 against the requested name and published root. Replacing the root renews cached
 leaves. Missing or invalid roots and signing results from a replaced root fail
 the handshake; the next connection can retry after publication recovers.
+
+The host can observe managed HTTPS access through the unary `ReconcileHttpsAccess` RPC on either backend. The observer supplies exact Mac source addresses and renews a three-second lease. The guest reports the first valid ClientHello in that observation, including when the leaf is cached. A matching Mac connection waits at most 30 seconds for authorization before continuing TLS. Disabling observation or losing the lease releases waiting connections. Container clients and clients without an active observer proceed immediately. Native HTTPS bypasses observation. The proxy checks DNS ownership again after waiting.
 The agent tries port 80, then exposed listeners, then other listeners in
 ascending order. Port 443 is reserved for HTTPS. Set `dev.arcbox.http-port`
 to a port number to override discovery, or `off` to disable managed HTTP.

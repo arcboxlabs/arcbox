@@ -75,6 +75,7 @@ arcbox-transport.workspace = true
 [dev-dependencies]
 arcbox-computer-runtime.workspace = true
 tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }
 toml.workspace = true
 
 [features]

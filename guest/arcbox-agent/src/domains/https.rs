@@ -95,32 +95,44 @@ async fn relay(
     services: &WebServices,
 ) -> Result<()> {
     let dialled = original_destination(&client).context("reading the dialled address")?;
+    let source = client
+        .peer_addr()
+        .context("reading the TLS client address")?
+        .ip();
     // Anything but a redirected container 443 reached the port directly.
     ensure!(
         dialled.port() == HTTPS_PORT,
         "{dialled} is no container's HTTPS port"
     );
     let container = *dialled.ip();
-    let http_port = ports
+    ports
         .get(container)
         .with_context(|| format!("{container} serves no HTTP port"))?;
+    let hello = tokio::time::timeout(
+        TIMEOUT,
+        LazyConfigAcceptor::new(rustls::server::Acceptor::default(), client),
+    )
+    .await
+    .context("TLS ClientHello timed out")??;
+    let name = hello
+        .client_hello()
+        .server_name()
+        .context("TLS client omitted SNI")?
+        .to_owned();
+    services
+        .observe_managed_tls(&name, container, source)
+        .await?;
     let mut tls = tokio::time::timeout(TIMEOUT, async {
-        let hello = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), client).await?;
-        let name = hello
-            .client_hello()
-            .server_name()
-            .context("TLS client omitted SNI")?
-            .to_owned();
-        ensure!(
-            services.resolves_to(&name, container).await,
-            "TLS name {name:?} does not resolve to {container}"
-        );
         let config = certificates.configuration(&name).await?;
         Ok::<_, anyhow::Error>(hello.into_stream(config).await?)
     })
     .await
     .context("TLS handshake timed out")?
     .context("TLS handshake")?;
+    // The service can move its listener while the host authorizes certificate trust.
+    let http_port = ports
+        .get(container)
+        .with_context(|| format!("{container} serves no HTTP port"))?;
     let upstream = tokio::time::timeout(TIMEOUT, TcpStream::connect((container, http_port)))
         .await
         .context("connecting to the container timed out")

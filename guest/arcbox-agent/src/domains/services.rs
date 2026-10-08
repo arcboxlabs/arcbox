@@ -1,10 +1,13 @@
 //! Installed web routes joined with the current DNS resolution.
 
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, RwLock};
 
-use arcbox_connect::v1::{ContainerWebService, container_web_service::HttpsBackend};
+use arcbox_connect::v1::{
+    ContainerWebService, ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse,
+    container_web_service::HttpsBackend,
+};
 
 use super::{ContainerFacts, SelectedRoutes};
 use crate::dns_server::ContainerRegistry;
@@ -15,14 +18,42 @@ struct Installed {
     selected: SelectedRoutes,
 }
 
-/// A read-only snapshot handle shared by the routing task and RPC connections.
+/// Installed routes and HTTPS access observation shared with the RPC connections.
 #[derive(Clone, Default)]
 pub struct WebServices {
     installed: Arc<RwLock<HashMap<String, Installed>>>,
     dns: ContainerRegistry,
+    access: super::access::Access,
 }
 
 impl WebServices {
+    pub(super) async fn observe_managed_tls(
+        &self,
+        name: &str,
+        destination: Ipv4Addr,
+        source: IpAddr,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.resolves_to(name, destination).await,
+            "TLS name {name:?} does not resolve to {destination}"
+        );
+        self.access.observe(name, destination, source).await;
+        // DNS ownership can change while the Mac authorizes certificate trust.
+        anyhow::ensure!(
+            self.resolves_to(name, destination).await,
+            "TLS name {name:?} no longer resolves to {destination}"
+        );
+        Ok(())
+    }
+
+    /// Renews host observation and returns the first managed access in that observation.
+    pub fn reconcile_https_access(
+        &self,
+        request: ReconcileHttpsAccessRequest,
+    ) -> anyhow::Result<ReconcileHttpsAccessResponse> {
+        self.access.reconcile(request)
+    }
+
     pub(crate) fn new(dns: ContainerRegistry) -> Self {
         Self {
             dns,
@@ -107,6 +138,55 @@ impl WebServices {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn managed_access_checks_ownership_before_reporting_and_after_waiting() {
+        let destination = Ipv4Addr::new(172, 17, 0, 2);
+        let source: IpAddr = "192.168.64.1".parse().unwrap();
+        let dns = Arc::new(tokio::sync::RwLock::new(HashMap::from([(
+            "web".into(),
+            destination,
+        )])));
+        let services = WebServices::new(dns.clone());
+        let mut request = ReconcileHttpsAccessRequest {
+            observation_id: "one".into(),
+            host_addresses: vec![source.to_string()],
+            enabled: true,
+            ..Default::default()
+        };
+        services.reconcile_https_access(request.clone()).unwrap();
+        assert!(
+            services
+                .observe_managed_tls("wrong.arcbox.local", destination, source)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            services
+                .reconcile_https_access(request.clone())
+                .unwrap()
+                .sequence,
+            0
+        );
+        let handshake = tokio::spawn({
+            let services = services.clone();
+            async move {
+                services
+                    .observe_managed_tls("WEB.arcbox.local", destination, source)
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        let access = services.reconcile_https_access(request.clone()).unwrap();
+        assert_eq!(access.hostname, "web.arcbox.local");
+        assert_eq!(access.sequence, 1);
+        dns.write()
+            .await
+            .insert("web".into(), Ipv4Addr::new(172, 17, 0, 3));
+        request.enabled = false;
+        services.reconcile_https_access(request).unwrap();
+        assert!(handshake.await.unwrap().is_err());
+    }
 
     #[tokio::test]
     async fn tls_names_follow_live_dns_ownership() {
