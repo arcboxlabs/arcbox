@@ -1,4 +1,4 @@
-//! Concrete DNS records projected from current resource claims for host and mDNS consumers.
+//! Concrete DNS projection and complete Registry change notification for host consumers.
 
 use std::collections::HashMap;
 
@@ -15,6 +15,7 @@ impl NetworkManager {
     /// Hold the registry mutation lock through this call. Wildcards remain in the registry;
     /// conflicts and unavailable owners produce no concrete record. Names are already canonical
     /// and never receive another suffix. mDNS changes cover only the configured local domain.
+    /// The latest Registry epoch is published even when no concrete records change.
     pub fn replace_dns_projection(&self, registry: &Registry) {
         let mut projected = HashMap::new();
         for owner in registry.owners() {
@@ -56,6 +57,13 @@ impl NetworkManager {
                 });
             }
         }
+        self.dns_registry_epoch.send_if_modified(|epoch| {
+            if *epoch == registry.epoch() {
+                return false;
+            }
+            *epoch = registry.epoch();
+            true
+        });
     }
 }
 
@@ -78,6 +86,44 @@ mod tests {
 
     fn ip(last: u8) -> IpAddr {
         std::net::Ipv4Addr::new(10, 0, 2, last).into()
+    }
+
+    #[test]
+    fn registry_watch_includes_changes_without_concrete_records() {
+        let manager = NetworkManager::new(NetConfig::default());
+        let registry = manager.dns_registry();
+        let mut registry = registry.write().unwrap();
+        let mut epochs = manager.subscribe_dns_registry();
+        let mut records = manager.subscribe_dns_changes();
+        for (name, address) in [
+            ("*.custom.local", None),
+            ("*.custom.local", Some(ip(2))),
+            ("*.custom.local", None),
+            ("exact.custom.local", None),
+            ("exact.custom.local", Some(ip(2))),
+        ] {
+            let claims = vec![claim("resource", name)];
+            let revision = registry
+                .replace("resource".into(), claims.clone(), address)
+                .unwrap();
+            manager.replace_dns_projection(&registry);
+            assert!(epochs.has_changed().unwrap());
+            assert_eq!(*epochs.borrow_and_update(), revision);
+            assert!(records.try_recv().is_err());
+
+            registry
+                .replace("resource".into(), claims, address)
+                .unwrap();
+            manager.replace_dns_projection(&registry);
+            assert!(!epochs.has_changed().unwrap());
+        }
+
+        drop(epochs);
+        registry.remove("resource");
+        manager.replace_dns_projection(&registry);
+        let epochs = manager.subscribe_dns_registry();
+        assert_eq!(*epochs.borrow(), registry.epoch());
+        assert!(manager.local_hosts_table().read().unwrap().is_empty());
     }
 
     #[test]

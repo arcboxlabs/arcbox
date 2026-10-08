@@ -103,7 +103,7 @@ impl Default for NetConfig {
 use std::net::IpAddr;
 use std::sync::RwLock;
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 /// Network manager state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +151,8 @@ pub struct NetworkManager {
     dns_forwarder: dns::DnsForwarder,
     /// Local-domain name changes, for mirrors of the DNS table.
     dns_changes: broadcast::Sender<DnsChange>,
+    /// Complete ownership changes, including claims without concrete records.
+    dns_registry_epoch: watch::Sender<u64>,
 }
 
 impl NetworkManager {
@@ -164,6 +166,7 @@ impl NetworkManager {
             ip_allocator: RwLock::new(None),
             dns_forwarder,
             dns_changes: broadcast::channel(DNS_CHANGE_CAPACITY).0,
+            dns_registry_epoch: watch::channel(0).0,
         }
     }
 
@@ -380,6 +383,14 @@ impl NetworkManager {
     #[must_use]
     pub fn subscribe_dns_changes(&self) -> broadcast::Receiver<DnsChange> {
         self.dns_changes.subscribe()
+    }
+
+    /// Watches the latest ownership epoch, including changes without concrete records.
+    /// Subscribe before reading the Registry snapshot. Drop watch borrows before
+    /// acquiring the Registry lock; the publisher holds that lock during notification.
+    #[must_use]
+    pub fn subscribe_dns_registry(&self) -> watch::Receiver<u64> {
+        self.dns_registry_epoch.subscribe()
     }
 
     /// Every `(fqdn, ip)` currently served under the local domain.

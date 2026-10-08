@@ -131,3 +131,9 @@ Runtime now supplies its validated suffix through NetConfig when constructing Ne
 Network connect and disconnect resolve the container before taking Runtime's full-ID lifecycle lock. The lock covers the guest mutation and host DNS refresh. Canonicalization replaces only the request's `Container` field. A forced disconnect after an explicit container 404 forwards the original payload to remove an orphan endpoint and skips host publication; other errors propagate.
 
 All 146 focused Docker tests passed: 124 library tests, 13 mock handler tests, five request-forwarding tests, and four routing tests. Strict all-target Docker Clippy, formatting, and diff checks passed. These results cover canonical lock ordering, request options and framing, orphan endpoint handling, and unchanged host ownership after failure. Global host commit ordering and installed VM validation remain pending.
+
+## Publish complete DNS ownership changes
+
+NetworkManager now exposes the latest Registry epoch through a watch channel. Wildcards, unavailable owners, and names outside the configured suffix advance this feed even when the concrete mDNS projection does not change. Identical replacements do not notify subscribers. Subscribers read the full Registry snapshot after subscribing and must release watch borrows before taking the Registry lock.
+
+Four projection tests and strict all-target net Clippy passed. The new regression covers wildcard address loss, custom exact names, unchanged replacements, and subscription after a change with no active receiver. Resolver lease integration remains pending.
