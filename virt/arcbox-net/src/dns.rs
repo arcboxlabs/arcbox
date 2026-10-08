@@ -14,11 +14,15 @@ mod upstream;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 pub use arcbox_dns::DnsRecordType;
 use arcbox_dns::LocalHostsTable;
+use arcbox_dns::{
+    NamePattern,
+    registry::{Lookup, Registry},
+};
 
 use crate::error::{NetError, Result};
 
@@ -148,19 +152,27 @@ pub enum DnsResponseCode {
     Refused = 5,
 }
 
+/// DNS ownership and relative-name policy shared by the host and VM datapaths.
+#[derive(Debug, Clone)]
+pub struct SharedDns {
+    /// Current resource claims and addresses.
+    pub registry: Arc<RwLock<Registry>>,
+    /// Domain appended when looking up exact relative aliases.
+    pub local_domain: Option<String>,
+}
+
 /// DNS forwarder.
 ///
 /// Forwards DNS queries to upstream servers and provides local hostname
-/// resolution for VMs. The local hosts table is behind an `Arc<RwLock<...>>`
-/// so it can be shared between the host-side DnsService and the VMM-side
-/// datapath forwarder.
+/// resolution from the same Registry on the host and in VM datapaths.
 pub struct DnsForwarder {
     /// Configuration.
     config: DnsConfig,
-    /// Shared local hostname mappings (hostname -> IP).
+    /// Concrete projection for mDNS publication, never a lookup authority.
     local_hosts: Arc<LocalHostsTable>,
+    registry: Arc<RwLock<Registry>>,
     /// Response cache. Interior mutability keeps resolver I/O independent of
-    /// the local-hosts lock, so upstream forwarding cannot block local queries.
+    /// the registry lock, so upstream forwarding cannot block local queries.
     cache: std::sync::Mutex<HashMap<cache::DnsCacheKey, cache::CacheEntry>>,
     /// Live upstream list; re-loaded from the system resolver file when it
     /// changes.
@@ -168,69 +180,39 @@ pub struct DnsForwarder {
 }
 
 impl DnsForwarder {
-    /// Creates a new DNS forwarder with a fresh (empty) hosts table.
+    /// Creates a new DNS forwarder with an empty registry.
     #[must_use]
     pub fn new(config: DnsConfig) -> Self {
-        Self::with_shared_hosts(config, Arc::new(LocalHostsTable::new(HashMap::new())))
+        Self::with_shared_registry(config, Arc::default())
     }
 
-    /// Creates a DNS forwarder sharing an existing hosts table.
-    ///
-    /// Used to connect the VMM-side forwarder to the same table as the
-    /// host-side `NetworkManager` forwarder, so `runtime.register_dns()`
-    /// updates both simultaneously.
+    /// Shares ownership and address changes with the host or another VM datapath.
     #[must_use]
-    pub fn with_shared_hosts(config: DnsConfig, local_hosts: Arc<LocalHostsTable>) -> Self {
+    pub fn with_shared_registry(config: DnsConfig, registry: Arc<RwLock<Registry>>) -> Self {
         let upstream = upstream::Upstreams::new(&config);
         Self {
             config,
-            local_hosts,
+            local_hosts: Arc::default(),
+            registry,
             cache: std::sync::Mutex::new(HashMap::new()),
             upstream,
         }
     }
 
-    /// Returns a clone of the shared hosts table handle.
+    /// Returns the concrete projection for mDNS publication and snapshots.
     pub fn local_hosts_table(&self) -> Arc<LocalHostsTable> {
         Arc::clone(&self.local_hosts)
+    }
+
+    /// Returns the shared source of DNS ownership and addresses.
+    pub(crate) fn registry(&self) -> Arc<RwLock<Registry>> {
+        Arc::clone(&self.registry)
     }
 
     /// Returns the configuration.
     #[must_use]
     pub fn config(&self) -> &DnsConfig {
         &self.config
-    }
-
-    /// Adds a local hostname mapping.
-    pub fn add_local_host(&self, hostname: &str, ip: IpAddr) {
-        let hostname = hostname.to_lowercase();
-        if let Ok(mut hosts) = self.local_hosts.write() {
-            hosts.insert(hostname.clone(), ip);
-            if let Some(fqdn) = self.local_fqdn(&hostname) {
-                hosts.insert(fqdn, ip);
-            }
-        }
-        tracing::debug!("Added local host: {} -> {}", hostname, ip);
-    }
-
-    /// Removes a local hostname mapping.
-    pub fn remove_local_host(&self, hostname: &str) {
-        let hostname = hostname.to_lowercase();
-        if let Ok(mut hosts) = self.local_hosts.write() {
-            hosts.remove(&hostname);
-            if let Some(fqdn) = self.local_fqdn(&hostname) {
-                hosts.remove(&fqdn);
-            }
-        }
-    }
-
-    /// The name `hostname` is served under in the local domain
-    /// (`<hostname>.<local_domain>`, lowercased), or `None` without a
-    /// local domain.
-    #[must_use]
-    pub fn local_fqdn(&self, hostname: &str) -> Option<String> {
-        let domain = self.config.local_domain.as_ref()?;
-        Some(format!("{}.{domain}", hostname.to_lowercase()))
     }
 
     /// Every `(fqdn, ip)` the table holds under the local domain.
@@ -255,24 +237,49 @@ impl DnsForwarder {
     /// Resolves a local hostname.
     #[must_use]
     pub fn resolve_local(&self, hostname: &str) -> Option<IpAddr> {
-        let hostname = hostname.to_lowercase();
-        self.local_hosts.read().ok()?.get(&hostname).copied()
+        let registry = self.registry.read().expect("DNS registry lock poisoned");
+        match self.lookup(&registry, hostname) {
+            Lookup::Matched { address, .. } => Some(address),
+            _ => None,
+        }
+    }
+
+    fn lookup<'a>(&self, registry: &'a Registry, hostname: &str) -> Lookup<'a> {
+        let Ok(name) = hostname.to_ascii_lowercase().parse() else {
+            return Lookup::Unmatched;
+        };
+        let lookup = registry.resolve(&name);
+        // Only exact aliases support short names; wildcards must not capture external DNS.
+        if matches!(lookup, Lookup::Unmatched)
+            && let Some(domain) = &self.config.local_domain
+            && let Ok(relative) = format!("{name}.{domain}").parse()
+            && registry.owners().filter_map(|id| registry.get(id))
+                .filter(|entry| entry.address.is_some()).flat_map(|entry| &entry.claims)
+                .any(|claim| matches!(claim.pattern(), NamePattern::Exact(exact) if exact == &relative))
+        {
+            let relative = registry.resolve(&relative);
+            if !matches!(&relative, Lookup::Matched { claim, .. } if !matches!(claim.pattern(), NamePattern::Exact(_))) {
+                return relative;
+            }
+        }
+        lookup
     }
 
     /// Attempts to resolve a DNS query locally without any network I/O.
     ///
-    /// Returns `Some(response)` if the query was resolved from local host
-    /// mappings, or `None` if upstream forwarding is needed. Known names
-    /// receive NODATA for record types without local data, including unknown types.
+    /// Claims, conflicts, and reserved names produce terminal responses.
+    /// Delegated and unmatched names return `None` for upstream forwarding.
+    /// Known names receive NODATA for record types without local data.
     pub fn try_resolve_locally(&self, data: &[u8]) -> Option<Vec<u8>> {
         let query = DnsQuery::parse(data).ok()?;
-        let ip = self.resolve_local(&query.name)?;
-        self.build_local_response(&query, ip).ok()
+        self.local_response(data, &query, false)
     }
 
     /// Attempts local resolution, answering authoritatively for the local domain.
     ///
     /// - Registered local host → matching address response or NODATA
+    /// - Conflicted name → SERVFAIL; reserved name → NODATA
+    /// - Delegated name → `None` (caller should forward to upstream)
     /// - Unregistered `*.<local_domain>` (and the bare domain) → `Some(NODATA)`
     /// - Other domains → `None` (caller should forward to upstream)
     ///
@@ -286,15 +293,31 @@ impl DnsForwarder {
     /// Either form keeps the name from leaking upstream.
     pub fn try_resolve_locally_or_nodata(&self, data: &[u8]) -> Option<Vec<u8>> {
         let query = DnsQuery::parse(data).ok()?;
+        self.local_response(data, &query, true)
+    }
 
-        if let Some(ip) = self.resolve_local(&query.name) {
-            return self.build_local_response(&query, ip).ok();
+    fn local_response(&self, data: &[u8], query: &DnsQuery, local_nodata: bool) -> Option<Vec<u8>> {
+        let registry = self.registry.read().expect("DNS registry lock poisoned");
+        match self.lookup(&registry, &query.name) {
+            Lookup::Matched { address, .. } => {
+                return self.build_local_response(query, address).ok();
+            }
+            Lookup::Conflict => return arcbox_dns::build_servfail(data).ok(),
+            Lookup::Reserved(_) => {
+                return if local_nodata {
+                    Some(Self::build_nodata_response(query))
+                } else {
+                    arcbox_dns::build_nxdomain(data).ok()
+                };
+            }
+            Lookup::Delegated(_) => return None,
+            Lookup::Unmatched => {}
         }
 
-        if let Some(ref domain) = self.config.local_domain {
+        if local_nodata && let Some(ref domain) = self.config.local_domain {
             let name_lower = query.name.to_lowercase();
             if name_lower == *domain || name_lower.ends_with(&format!(".{domain}")) {
-                return Some(Self::build_nodata_response(&query));
+                return Some(Self::build_nodata_response(query));
             }
         }
 
@@ -350,8 +373,8 @@ impl DnsForwarder {
         let query = DnsQuery::parse(data)?;
 
         // Check for local resolution
-        if let Some(ip) = self.resolve_local(&query.name) {
-            return self.build_local_response(&query, ip);
+        if let Some(response) = self.local_response(data, &query, false) {
+            return Ok(response);
         }
 
         // Check cache
@@ -595,11 +618,6 @@ impl DnsServer {
         self.listen_addr
     }
 
-    /// Adds a local hostname mapping.
-    pub fn add_host(&mut self, hostname: &str, ip: IpAddr) {
-        self.forwarder.add_local_host(hostname, ip);
-    }
-
     /// Resolves a hostname.
     ///
     /// Returns the IP address if found locally.
@@ -621,6 +639,24 @@ impl DnsServer {
 mod tests {
     use super::*;
 
+    fn register(forwarder: &DnsForwarder, hostname: &str, ip: IpAddr) {
+        let name = format!(
+            "{hostname}.{}",
+            forwarder.config.local_domain.as_ref().unwrap()
+        );
+        let claims = arcbox_dns::claims::Claim::generated(
+            name.parse().unwrap(),
+            hostname.into(),
+            "test".into(),
+        );
+        forwarder
+            .registry
+            .write()
+            .unwrap()
+            .replace(hostname.into(), claims.into(), Some(ip))
+            .unwrap();
+    }
+
     #[test]
     fn test_dns_config_default() {
         let config = DnsConfig::default();
@@ -641,13 +677,13 @@ mod tests {
         let mut forwarder = DnsForwarder::new(config);
 
         let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 64, 10));
-        forwarder.add_local_host("myvm", ip);
+        register(&forwarder, "myvm", ip);
 
         assert_eq!(forwarder.resolve_local("myvm"), Some(ip));
         assert_eq!(forwarder.resolve_local("MYVM"), Some(ip)); // Case insensitive
         assert_eq!(forwarder.resolve_local("myvm.arcbox.local"), Some(ip));
 
-        forwarder.remove_local_host("myvm");
+        forwarder.registry.write().unwrap().remove("myvm");
         assert_eq!(forwarder.resolve_local("myvm"), None);
     }
 
@@ -742,7 +778,7 @@ mod tests {
     fn unknown_qtypes_respect_local_scope_and_preserve_questions() {
         let forwarder =
             DnsForwarder::new(DnsConfig::default().with_local_domain("containers.test"));
-        forwarder.add_local_host("web", IpAddr::V4(Ipv4Addr::new(172, 17, 0, 2)));
+        register(&forwarder, "web", IpAddr::V4(Ipv4Addr::new(172, 17, 0, 2)));
         for qtype in [64, 65, 65_280] {
             for (name, registered) in [
                 ("web", true),
@@ -1033,7 +1069,7 @@ mod tests {
         let config = DnsConfig::default();
         let mut forwarder = DnsForwarder::new(config);
         let ip = IpAddr::V4(Ipv4Addr::new(172, 17, 0, 2));
-        forwarder.add_local_host("my-nginx", ip);
+        register(&forwarder, "my-nginx", ip);
 
         let query = build_test_query("my-nginx.arcbox.local");
         let response = forwarder
@@ -1097,7 +1133,7 @@ mod tests {
         let mut forwarder = DnsForwarder::new(config);
 
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
-        forwarder.add_local_host("web", ip);
+        register(&forwarder, "web", ip);
 
         // Registered host under custom domain resolves.
         let query = build_test_query("web.myorg.test");

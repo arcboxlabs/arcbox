@@ -287,13 +287,14 @@ impl Runtime {
                 .with_local_domain(config.network.dns_domain.as_str()),
             ..Default::default()
         }));
+        let dns_registry = network_manager.dns_registry();
 
         // Every VM's datapath is wired to the host the same way: the DNS
-        // hosts table it shares with the host DnsService, and the operator's
+        // registry it shares with the host DnsService, and the operator's
         // egress proxy policy. `system` probes the Mac's proxy settings here,
         // once per daemon start.
         let host_network = HostNetwork {
-            dns_hosts: Some(network_manager.local_hosts_table()),
+            dns: Some(network_manager.shared_dns()),
             proxy: config.network.proxy_settings().resolve(),
         };
 
@@ -374,7 +375,7 @@ impl Runtime {
             kubernetes_lb_ports: TokioMutex::default(),
             sandbox_dns_ids: Arc::new(TokioRwLock::new(HashSet::new())),
             sandbox_host_state: TokioMutex::new(0),
-            dns_registry: Arc::default(),
+            dns_registry,
             container_lifecycle: Mutex::default(),
             container_aliases: Arc::new(TokioRwLock::new(HashMap::new())),
             stats_hub,

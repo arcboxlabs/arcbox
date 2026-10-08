@@ -71,6 +71,7 @@ gic = ["arcbox-core/gic"]
 workspace = true
 
 [dev-dependencies]
+arcbox-dns.workspace = true
 arcbox-grpc.workspace = true
 arcbox-protocol.workspace = true
 connectrpc = { package = "arcbox-connectrpc", version = "0.9.0-arcbox.1", features = ["client"] }

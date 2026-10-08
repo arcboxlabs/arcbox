@@ -278,7 +278,10 @@ mod tests {
         assert_eq!(runtime.https_signing_revision(name).await, Some(renewed));
         runtime
             .network_manager()
-            .register_dns("web", "10.0.2.4".parse().unwrap());
+            .local_hosts_table()
+            .write()
+            .unwrap()
+            .insert(name.into(), "10.0.2.4".parse().unwrap());
         assert_eq!(runtime.https_signing_revision(name).await, Some(first));
         runtime.deregister_dns_by_id("first").await;
         assert_eq!(runtime.https_signing_revision(name).await, None);

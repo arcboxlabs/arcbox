@@ -569,6 +569,7 @@ dependencies = [
  "arcbox-connectrpc-reflection",
  "arcbox-constants",
  "arcbox-core",
+ "arcbox-dns",
  "arcbox-docker",
  "arcbox-docker-tools",
  "arcbox-engine",
@@ -727,7 +728,6 @@ dependencies = [
  "arcbox-atomic-file",
  "arcbox-connect",
  "arcbox-constants",
- "arcbox-dns",
  "arcbox-error",
  "arcbox-fakeip",
  "arcbox-hypervisor",
@@ -1298,7 +1298,6 @@ name = "arcbox-vmm"
 version = "0.8.2"
 dependencies = [
  "arcbox-constants",
- "arcbox-dns",
  "arcbox-error",
  "arcbox-fakeip",
  "arcbox-fs",

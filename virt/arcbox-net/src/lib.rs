@@ -120,10 +120,8 @@ pub enum NetworkState {
 
 /// A change to the names served under the local DNS domain.
 ///
-/// Emitted by [`NetworkManager::register_dns`], [`NetworkManager::deregister_dns`]
-/// and [`NetworkManager::replace_dns_projection`] for a mirror that announces the same
-/// names elsewhere (the daemon's mDNS mirror). `fqdn` is the lowercased
-/// `<hostname>.<local_domain>` the table serves.
+/// Emitted by [`NetworkManager::replace_dns_projection`] for the daemon's mDNS mirror.
+/// `fqdn` is the canonical full name published by the projection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DnsChange {
     /// `fqdn` now resolves to `ip` (also sent when the address changes).
@@ -355,28 +353,23 @@ impl NetworkManager {
             .unwrap_or(0)
     }
 
-    /// Returns the shared local-hosts table for this network manager.
-    ///
-    /// Pass this to the VMM when constructing the datapath's `DnsForwarder`
-    /// so that both the host-side `DnsService` and the VMM-side forwarder
-    /// resolve from the same table.
+    /// Returns the concrete DNS projection used for mDNS publication and snapshots.
     pub fn local_hosts_table(&self) -> std::sync::Arc<arcbox_dns::LocalHostsTable> {
         self.dns_forwarder.local_hosts_table()
     }
 
-    /// Registers a local DNS hostname → IP mapping.
-    pub fn register_dns(&self, hostname: &str, ip: IpAddr) {
-        self.dns_forwarder.add_local_host(hostname, ip);
-        if let Some(fqdn) = self.dns_forwarder.local_fqdn(hostname) {
-            let _ = self.dns_changes.send(DnsChange::Registered { fqdn, ip });
-        }
+    /// Shares DNS ownership with Runtime and every VM datapath.
+    pub fn dns_registry(
+        &self,
+    ) -> std::sync::Arc<std::sync::RwLock<arcbox_dns::registry::Registry>> {
+        self.dns_forwarder.registry()
     }
 
-    /// Removes a local DNS hostname mapping.
-    pub fn deregister_dns(&self, hostname: &str) {
-        self.dns_forwarder.remove_local_host(hostname);
-        if let Some(fqdn) = self.dns_forwarder.local_fqdn(hostname) {
-            let _ = self.dns_changes.send(DnsChange::Removed { fqdn });
+    /// Shares DNS ownership and the configured relative-name suffix with VM datapaths.
+    pub fn shared_dns(&self) -> dns::SharedDns {
+        dns::SharedDns {
+            registry: self.dns_registry(),
+            local_domain: self.dns_forwarder.config().local_domain.clone(),
         }
     }
 
@@ -414,6 +407,20 @@ impl NetworkManager {
 mod tests {
     use super::*;
 
+    fn register(manager: &NetworkManager, ip: IpAddr) {
+        let claims = arcbox_dns::claims::Claim::generated(
+            "web.custom.test".parse().unwrap(),
+            "web".into(),
+            "test".into(),
+        );
+        let registry = manager.dns_registry();
+        let mut registry = registry.write().unwrap();
+        registry
+            .replace("web".into(), claims.into(), Some(ip))
+            .unwrap();
+        manager.replace_dns_projection(&registry);
+    }
+
     #[test]
     fn dns_changes_name_the_fqdn_from_construction_config() {
         let manager = NetworkManager::new(NetConfig {
@@ -423,7 +430,7 @@ mod tests {
         let mut changes = manager.subscribe_dns_changes();
         let ip = IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 2, 5));
 
-        manager.register_dns("Web", ip);
+        register(&manager, ip);
         assert_eq!(
             changes.try_recv().unwrap(),
             DnsChange::Registered {
@@ -437,7 +444,12 @@ mod tests {
             "only the FQDN entry is listed, not the bare hostname"
         );
 
-        manager.deregister_dns("web");
+        {
+            let registry = manager.dns_registry();
+            let mut registry = registry.write().unwrap();
+            registry.remove("web");
+            manager.replace_dns_projection(&registry);
+        }
         assert_eq!(
             changes.try_recv().unwrap(),
             DnsChange::Removed {
@@ -491,7 +503,7 @@ mod tests {
             ..Default::default()
         });
         let ip = IpAddr::V4(std::net::Ipv4Addr::new(172, 17, 0, 2));
-        manager.register_dns("web", ip);
+        register(&manager, ip);
 
         // Helper to build a minimal A-record query.
         let build_query = |name: &str| -> Vec<u8> {

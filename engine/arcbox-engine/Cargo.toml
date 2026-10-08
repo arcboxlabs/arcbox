@@ -12,7 +12,6 @@ authors.workspace = true
 arcbox-atomic-file.workspace = true
 arcbox-connect = { workspace = true }
 arcbox-constants = { workspace = true }
-arcbox-dns = { workspace = true }
 arcbox-error = { workspace = true }
 arcbox-fakeip.workspace = true
 arcbox-hypervisor = { workspace = true }

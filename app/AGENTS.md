@@ -121,8 +121,8 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   (`arcbox-daemon/src/mdns/`, started from `recovery::run` under the same
   `owns_dns_resolver` predicate that installs `/etc/resolver/<domain>`, and
   only for a domain ending in `.local`). Unicast and Bonjour answer from
-  one table: `NetworkManager::subscribe_dns_changes` streams every
-  `register_dns`/`deregister_dns`/`replace_dns_projection` as a `DnsChange`, and
+  one Registry: `NetworkManager::subscribe_dns_changes` streams concrete
+  changes from `replace_dns_projection` as a `DnsChange`, and
   `local_dns_entries` is the snapshot a lagging subscriber resyncs from. The
   records are `kDNSServiceFlagsUnique` on the **loopback interface**
   (`if_nametoindex("lo0")`): nothing leaves the host, and mDNSResponder

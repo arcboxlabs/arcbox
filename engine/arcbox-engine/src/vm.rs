@@ -257,12 +257,12 @@ impl VmManager {
             }
         };
 
-        // Wire the datapath to the host: the shared DNS hosts table and the
+        // Wire the datapath to the host: shared DNS ownership and the
         // operator's egress proxy policy.
         #[cfg(target_os = "macos")]
         {
-            if let Some(table) = host_network.dns_hosts {
-                vmm.set_shared_dns_hosts(table);
+            if let Some(dns) = host_network.dns {
+                vmm.set_shared_dns(dns);
             }
             if let Some(proxy) = host_network.proxy {
                 vmm.set_proxy_env(proxy);

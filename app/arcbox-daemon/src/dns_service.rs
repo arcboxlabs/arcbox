@@ -231,7 +231,22 @@ mod tests {
     async fn test_dns_local_resolution_roundtrip() {
         let nm = Arc::new(NetworkManager::new(arcbox_net::NetConfig::default()));
         let ip = std::net::IpAddr::V4(Ipv4Addr::new(172, 17, 0, 2));
-        nm.register_dns("my-nginx", ip);
+        {
+            let registry = nm.dns_registry();
+            let mut registry = registry.write().unwrap();
+            registry
+                .replace(
+                    "nginx".into(),
+                    vec![arcbox_dns::claims::Claim::exclusive(
+                        arcbox_dns::NamePattern::Exact("my-nginx.arcbox.local".parse().unwrap()),
+                        "nginx".into(),
+                        "container".into(),
+                    )],
+                    Some(ip),
+                )
+                .unwrap();
+            nm.replace_dns_projection(&registry);
+        }
 
         let service = DnsService::bind_requested(Some(0), 0).await.unwrap();
         let server_addr = ("127.0.0.1", service.host_port().unwrap());
