@@ -192,7 +192,7 @@ impl Client {
         Ok(self.inner.version(tarpc::context::current()).await?)
     }
 
-    /// Installs TLS-only Admin trust for a public ArcBox CA certificate.
+    /// Stores a public ArcBox CA in the System Keychain without granting trust.
     pub async fn ca_install(&self, der: &[u8]) -> Result<(), ClientError> {
         Ok(self
             .inner
@@ -208,7 +208,7 @@ impl Client {
             .await??)
     }
 
-    /// Removes only this public CA's Admin trust and System Keychain certificate.
+    /// Removes only this public CA from the System Keychain after Admin trust is revoked.
     pub async fn ca_remove(&self, der: &[u8]) -> Result<(), ClientError> {
         Ok(self
             .inner

@@ -107,13 +107,13 @@ pub trait HelperService {
     /// Idempotent when the route is absent; refuses to delete a foreign route.
     async fn route_remove_if_owned(subnet: String, iface: String) -> Result<bool, HelperError>;
 
-    /// Trusts a validated public ArcBox CA for TLS servers in the Admin domain.
+    /// Stores a validated public ArcBox CA in the System Keychain without granting trust.
     async fn ca_install(der: Vec<u8>) -> Result<(), HelperError>;
 
     /// Checks exact TLS-only Admin trust and System Keychain certificate presence.
     async fn ca_status(der: Vec<u8>) -> Result<bool, HelperError>;
 
-    /// Removes this public ArcBox CA's Admin trust and System Keychain certificate.
+    /// Removes this public ArcBox CA from the System Keychain after Admin trust is revoked.
     async fn ca_remove(der: Vec<u8>) -> Result<(), HelperError>;
 }
 

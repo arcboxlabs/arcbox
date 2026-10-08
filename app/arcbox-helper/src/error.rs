@@ -133,6 +133,12 @@ impl From<core_foundation::error::CFError> for HelperError {
     }
 }
 
+impl From<arcbox_local_ca::Error> for HelperError {
+    fn from(error: arcbox_local_ca::Error) -> Self {
+        Self::Other(error.to_string())
+    }
+}
+
 /// Stable machine-readable code for metrics / Desktop branching.
 impl HelperError {
     #[must_use]

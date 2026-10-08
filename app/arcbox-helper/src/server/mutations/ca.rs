@@ -1,16 +1,9 @@
-//! TLS-only system trust for validated public ArcBox roots. No private keys enter the helper.
+//! System Keychain storage for validated public roots. Trust authorization stays in the login session.
 
 use std::sync::{Mutex, MutexGuard};
 
 use arcbox_helper::HelperError;
 use arcbox_local_ca::PublicAuthority;
-use core_foundation::{
-    array::CFArray,
-    base::{CFType, TCFType},
-    dictionary::CFDictionary,
-    number::CFNumber,
-    string::CFString,
-};
 use security_framework::{
     certificate::SecCertificate,
     item::{
@@ -18,27 +11,12 @@ use security_framework::{
         Reference, SearchResult,
     },
     os::macos::keychain::SecKeychain,
-    policy::SecPolicy,
-    secure_transport::SslProtocolSide,
 };
-use security_framework_sys::{
-    base::{SecCertificateRef, errSecDuplicateItem, errSecItemNotFound, errSecNoTrustSettings},
-    trust_settings::{
-        SecTrustSettingsCopyTrustSettings, SecTrustSettingsSetTrustSettings,
-        kSecTrustSettingsDomainAdmin, kSecTrustSettingsResultTrustRoot,
-    },
-};
+use security_framework_sys::base::{errSecDuplicateItem, errSecItemNotFound};
 
 const SYSTEM_KEYCHAIN: &str = "/Library/Keychains/System.keychain";
-const POLICY: &str = "kSecTrustSettingsPolicy";
-const POLICY_NAME: &str = "kSecTrustSettingsPolicyName";
-const RESULT: &str = "kSecTrustSettingsResult";
-// The certificate and its trust settings are separate native mutations.
+// Serialize duplicate detection and certificate removal across helper requests.
 static MUTATION: Mutex<()> = Mutex::new(());
-
-unsafe extern "C" {
-    fn SecTrustSettingsRemoveTrustSettings(certificate: SecCertificateRef, domain: u32) -> i32;
-}
 
 pub fn install(ca: &PublicAuthority) -> Result<(), HelperError> {
     let _guard = lock()?;
@@ -48,40 +26,27 @@ pub fn install(ca: &PublicAuthority) -> Result<(), HelperError> {
         .set_location(Location::FileKeychain(keychain))
         .add()
     {
-        Ok(()) => {}
-        Err(error) if error.code() == errSecDuplicateItem && stored(&certificate)?.is_some() => {}
-        Err(error) => return Err(error.into()),
+        Ok(()) => Ok(()),
+        Err(error) if error.code() == errSecDuplicateItem && stored(&certificate)?.is_some() => {
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
     }
-    let settings = tls_settings();
-    // SAFETY: the owned certificate and dictionary remain valid for the native call.
-    check(unsafe {
-        SecTrustSettingsSetTrustSettings(
-            certificate.as_concrete_TypeRef(),
-            kSecTrustSettingsDomainAdmin,
-            settings.as_CFTypeRef(),
-        )
-    })
 }
 
 pub fn status(ca: &PublicAuthority) -> Result<bool, HelperError> {
     let _guard = lock()?;
     let certificate = SecCertificate::from_der(ca.der()).map_err(HelperError::from)?;
-    Ok(stored(&certificate)?.is_some()
-        && trust_settings(&certificate)?.is_some_and(|settings| is_tls_only(&settings)))
+    Ok(stored(&certificate)?.is_some() && ca.admin_trusted().map_err(HelperError::from)?)
 }
 
 pub fn remove(ca: &PublicAuthority) -> Result<(), HelperError> {
     let _guard = lock()?;
     let certificate = SecCertificate::from_der(ca.der()).map_err(HelperError::from)?;
-    // SAFETY: the certificate owns a valid native reference throughout the call.
-    let result = unsafe {
-        SecTrustSettingsRemoveTrustSettings(
-            certificate.as_concrete_TypeRef(),
-            kSecTrustSettingsDomainAdmin,
-        )
-    };
-    if result != errSecItemNotFound && result != errSecNoTrustSettings {
-        check(result)?;
+    if ca.has_admin_trust().map_err(HelperError::from)? {
+        return Err(HelperError::other(
+            "revoke this CA's Admin trust from the login session before removing the certificate",
+        ));
     }
     if let Some(stored) = stored(&certificate)? {
         stored.delete().map_err(HelperError::from)?;
@@ -131,68 +96,6 @@ fn stored(certificate: &SecCertificate) -> Result<Option<SecCertificate>, Helper
     Ok(None)
 }
 
-type Settings = CFDictionary<CFString, CFType>;
-
-fn tls_settings() -> Settings {
-    CFDictionary::from_CFType_pairs(&[
-        (
-            CFString::from_static_string(POLICY),
-            SecPolicy::create_ssl(SslProtocolSide::SERVER, None).as_CFType(),
-        ),
-        (
-            CFString::from_static_string(RESULT),
-            CFNumber::from(i64::from(kSecTrustSettingsResultTrustRoot)).as_CFType(),
-        ),
-    ])
-}
-
-fn trust_settings(certificate: &SecCertificate) -> Result<Option<CFArray<Settings>>, HelperError> {
-    let mut settings = std::ptr::null();
-    // SAFETY: the certificate is valid; success returns an owned CFArray of dictionaries.
-    let result = unsafe {
-        SecTrustSettingsCopyTrustSettings(
-            certificate.as_concrete_TypeRef(),
-            kSecTrustSettingsDomainAdmin,
-            &raw mut settings,
-        )
-    };
-    if result == errSecItemNotFound || result == errSecNoTrustSettings {
-        return Ok(None);
-    }
-    check(result)?;
-    // SAFETY: Security.framework returned an owned array after a successful call.
-    Ok(Some(unsafe { CFArray::wrap_under_create_rule(settings) }))
-}
-
-fn is_tls_only(settings: &CFArray<Settings>) -> bool {
-    if settings.len() != 1 {
-        return false;
-    }
-    let entry = settings.get(0).expect("one trust settings dictionary");
-    let policy = entry.find(CFString::from_static_string(POLICY));
-    let name = entry.find(CFString::from_static_string(POLICY_NAME));
-    let result = entry.find(CFString::from_static_string(RESULT));
-    entry.len() == 1 + usize::from(name.is_some()) + usize::from(result.is_some())
-        && policy.is_some_and(|policy| {
-            *policy == SecPolicy::create_ssl(SslProtocolSide::SERVER, None).as_CFType()
-        })
-        && name.is_none_or(|name| *name == CFString::from_static_string("sslServer").as_CFType())
-        && result.is_none_or(|result| {
-            result
-                .downcast::<CFNumber>()
-                .and_then(|number| number.to_i64())
-                == Some(i64::from(kSecTrustSettingsResultTrustRoot))
-        })
-}
-
-fn check(status: i32) -> Result<(), HelperError> {
-    if status == 0 {
-        Ok(())
-    } else {
-        Err(security_framework::base::Error::from_code(status).into())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,25 +103,6 @@ mod tests {
         BasicConstraints, CertificateParams, CidrSubnet, DistinguishedName, DnType, GeneralSubtree,
         IsCa, KeyPair, KeyUsagePurpose, NameConstraints,
     };
-
-    #[test]
-    fn status_rejects_broad_or_client_trust() {
-        let server = tls_settings();
-        assert!(is_tls_only(&CFArray::from_CFTypes(std::slice::from_ref(
-            &server
-        ))));
-        assert!(!is_tls_only(&CFArray::from_CFTypes(&[])));
-        let broad = Settings::from_CFType_pairs(&[]);
-        assert!(!is_tls_only(&CFArray::from_CFTypes(std::slice::from_ref(
-            &broad
-        ))));
-        assert!(!is_tls_only(&CFArray::from_CFTypes(&[server, broad])));
-        let client = Settings::from_CFType_pairs(&[(
-            CFString::from_static_string(POLICY),
-            SecPolicy::create_ssl(SslProtocolSide::CLIENT, None).as_CFType(),
-        )]);
-        assert!(!is_tls_only(&CFArray::from_CFTypes(&[client])));
-    }
 
     fn authority() -> PublicAuthority {
         let mut parameters = CertificateParams::default();
@@ -251,8 +135,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires root; installs and removes two isolated public CAs in system trust"]
-    fn native_trust_lifecycle_preserves_other_roots() {
+    #[ignore = "requires root; stores and removes two isolated public CAs in the System Keychain"]
+    fn native_storage_lifecycle_preserves_other_roots() {
         // SAFETY: geteuid has no preconditions or side effects.
         assert_eq!(unsafe { libc::geteuid() }, 0, "run this test as root");
         struct Cleanup(PublicAuthority);
@@ -263,15 +147,26 @@ mod tests {
         }
         let first = Cleanup(authority());
         let second = Cleanup(authority());
+        let is_stored = |ca: &PublicAuthority| {
+            stored(&SecCertificate::from_der(ca.der()).unwrap())
+                .unwrap()
+                .is_some()
+        };
+        assert!(!is_stored(&first.0));
         assert!(!status(&first.0).unwrap());
         install(&first.0).unwrap();
         install(&first.0).unwrap();
         install(&second.0).unwrap();
-        assert!(status(&first.0).unwrap());
-        assert!(status(&second.0).unwrap());
+        assert!(is_stored(&first.0));
+        assert!(is_stored(&second.0));
+        assert!(!status(&first.0).unwrap());
+        assert!(!status(&second.0).unwrap());
+        assert!(!first.0.has_admin_trust().unwrap());
+        assert!(!second.0.has_admin_trust().unwrap());
         remove(&first.0).unwrap();
         remove(&first.0).unwrap();
         assert!(!status(&first.0).unwrap());
-        assert!(status(&second.0).unwrap());
+        assert!(!is_stored(&first.0));
+        assert!(is_stored(&second.0));
     }
 }
