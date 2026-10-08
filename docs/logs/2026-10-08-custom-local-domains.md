@@ -213,3 +213,7 @@ Container, sandbox, and shared listener cleanup now enter the host commit bounda
 ## Retain the daemon resolver lease and watch
 
 ResolverService now owns the helper connection, complete resolver lease, authority watch, and mDNS future. Authority withdrawal and mirror cleanup precede transport closure. Required initial setup propagates failure; background reconnection uses a fresh transport and the same service nonce. Four resolver tests, seven mDNS tests, strict daemon all-target Clippy, and formatting passed. Native resolver cutover and installed validation remain pending.
+
+## Keep guest Registry operations synchronous
+
+ContainerRegistry now uses the standard RwLock. DNS lookup, route validation, and service snapshots release guards before asynchronous authorization or I/O. The final Linux musl binary passed 29 DNS, service, TLS, event, and RPC regressions in networkless Colima containers. Strict all-target musl Clippy and formatting passed. Protocol and minimum remain 7/7; guest authority transport and installed VM acceptance remain pending.

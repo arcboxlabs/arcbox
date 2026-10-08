@@ -147,13 +147,13 @@ async fn relay_to(
         .await?;
     let tls = tokio::time::timeout(TIMEOUT, async {
         let config = configuration(&name).await?;
-        services.verify_tls_route(&name, container, &route).await?;
+        services.verify_tls_route(&name, container, &route)?;
         Ok::<_, anyhow::Error>(hello.into_stream(config).await?)
     })
     .await
     .context("TLS handshake timed out")?
     .context("TLS handshake")?;
-    services.verify_tls_route(&name, container, &route).await?;
+    services.verify_tls_route(&name, container, &route)?;
     let http_port = route.http_port;
     let upstream = tokio::time::timeout(TIMEOUT, connect((container, http_port)))
         .await
@@ -161,13 +161,11 @@ async fn relay_to(
         .and_then(|result| {
             result.with_context(|| format!("connecting to {container}:{http_port}"))
         });
-    services.verify_tls_route(&name, container, &route).await?;
+    services.verify_tls_route(&name, container, &route)?;
     let upstream = match upstream {
         Ok(upstream) => upstream,
         Err(error) => {
-            services
-                .invalidate_tls_route(&name, container, &route)
-                .await;
+            services.invalidate_tls_route(&name, container, &route);
             return Err(error);
         }
     };

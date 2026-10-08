@@ -33,13 +33,7 @@ fn configuration() -> Arc<rustls::ServerConfig> {
     )
 }
 
-async fn publish(
-    services: &WebServices,
-    dns: &ContainerRegistry,
-    owner: &str,
-    port: u16,
-    domain: &str,
-) {
+fn publish(services: &WebServices, dns: &ContainerRegistry, owner: &str, port: u16, domain: &str) {
     let domain = domain.parse().unwrap();
     let inspect = serde_json::json!({
         "Id": owner, "Name": "/web", "State": { "Pid": 1 },
@@ -50,7 +44,7 @@ async fn publish(
     });
     let metadata = ContainerMetadata::from_inspect(&inspect).unwrap();
     dns.write()
-        .await
+        .unwrap()
         .replace(
             owner.into(),
             metadata.claims(&domain, "container").claims,
@@ -66,9 +60,9 @@ async fn publish(
     );
 }
 
-async fn replace_owner(services: &WebServices, dns: &ContainerRegistry, port: u16) {
-    dns.write().await.remove("a");
-    publish(services, dns, "b", port, "arcbox.local").await;
+fn replace_owner(services: &WebServices, dns: &ContainerRegistry, port: u16) {
+    dns.write().unwrap().remove("a");
+    publish(services, dns, "b", port, "arcbox.local");
 }
 
 async fn head(stream: &mut (impl AsyncRead + Unpin)) -> String {
@@ -86,7 +80,7 @@ async fn owned_foreign_sni_cannot_request_authorization_or_a_certificate() {
         let address = incoming.local_addr().unwrap();
         let dns = ContainerRegistry::default();
         let services = WebServices::new(dns.clone());
-        publish(&services, &dns, "a", 3000, "containers.test").await;
+        publish(&services, &dns, "a", 3000, "containers.test");
         let observation = arcbox_connect::v1::ReconcileHttpsAccessRequest {
             observation_id: "foreign".into(),
             host_addresses: vec![Ipv4Addr::LOCALHOST.to_string()],
@@ -143,7 +137,7 @@ async fn owner_replacement_at_each_tls_stage_stops_application_forwarding() {
             let port = backend.local_addr().unwrap().port();
             let dns = ContainerRegistry::default();
             let services = WebServices::new(dns.clone());
-            publish(&services, &dns, "a", port, "arcbox.local").await;
+            publish(&services, &dns, "a", port, "arcbox.local");
             let (configured, configuration_started) = oneshot::channel();
             let (configure, configuration_released) = oneshot::channel();
             let (connected, mut connection_started) = oneshot::channel();
@@ -181,7 +175,7 @@ async fn owner_replacement_at_each_tls_stage_stops_application_forwarding() {
                 result = configuration_started => result.unwrap(),
             }
             if stage == "configuration" {
-                replace_owner(&services, &dns, port).await;
+                replace_owner(&services, &dns, port);
             }
             configure.send(()).unwrap();
             if stage == "handshake" {
@@ -190,7 +184,7 @@ async fn owner_replacement_at_each_tls_stage_stops_application_forwarding() {
                     handshake.get_ref().unwrap().peek(&mut [0]).await.unwrap(),
                     0
                 );
-                replace_owner(&services, &dns, port).await;
+                replace_owner(&services, &dns, port);
             }
             if stage == "configuration" {
                 let error = relay.await.unwrap().unwrap_err();
@@ -219,12 +213,12 @@ async fn owner_replacement_at_each_tls_stage_stops_application_forwarding() {
                 .await
                 .unwrap();
             if stage == "connect" {
-                replace_owner(&services, &dns, port).await;
+                replace_owner(&services, &dns, port);
             } else if stage == "reinstalled" {
-                let revision = dns.read().await.get("a").unwrap().revision;
+                let revision = dns.read().unwrap().get("a").unwrap().revision;
                 services.remove("a");
-                publish(&services, &dns, "a", port, "arcbox.local").await;
-                assert_eq!(dns.read().await.get("a").unwrap().revision, revision);
+                publish(&services, &dns, "a", port, "arcbox.local");
+                assert_eq!(dns.read().unwrap().get("a").unwrap().revision, revision);
             }
             connect.send(()).unwrap();
             if matches!(stage, "connect" | "reinstalled") {

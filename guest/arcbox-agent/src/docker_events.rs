@@ -186,7 +186,7 @@ async fn reconcile_existing(sync: &mut ContainerSync<'_>, socket: &Path) -> anyh
 
     let registry = sync.dns.containers();
     let absent = {
-        let mut registry = registry.write().await;
+        let mut registry = registry.write().expect("DNS registry lock poisoned");
         let absent: Vec<_> = registry
             .owners()
             .filter(|owner| !ids.contains(owner))
@@ -265,11 +265,14 @@ async fn forget_container(sync: &mut ContainerSync<'_>, id: &str) -> anyhow::Res
     // An unavailable owner remains enumerable until every external cleanup succeeds.
     registry
         .write()
-        .await
+        .expect("DNS registry lock poisoned")
         .replace(id.to_owned(), Vec::new(), None)?;
     sync.domains.forget(id).await?;
     sync.mirror.remove(id).await?;
-    registry.write().await.remove(id);
+    registry
+        .write()
+        .expect("DNS registry lock poisoned")
+        .remove(id);
     Ok(())
 }
 
@@ -285,7 +288,11 @@ async fn register_container_by_id(
     let tracked = container.facts.is_some();
     sync.domains.update(id, container.facts).await?;
     sync_dns(
-        &mut *sync.dns.containers().write().await,
+        &mut sync
+            .dns
+            .containers()
+            .write()
+            .expect("DNS registry lock poisoned"),
         sync.dns.domain(),
         &container.metadata,
     )?;

@@ -231,6 +231,7 @@ non-obvious invariants and failure signatures.
   Preserve unknown DNS query types through local lookup. Missing names under the configured suffix remain local for every query type.
   Construct guest DNS with the shared builtin reservations. Forward unresolved exact system/index names to the existing gateway; keep other reservations local. Descendants remain independent.
   Apply instance authority through the same Registry. Foreign instances use the gateway; unavailable instances return SERVFAIL before sandbox fallback. Preserve internal resource lookup when no instance root matches.
+  Keep ContainerRegistry guards within synchronous memory operations. Release every guard before authorization waits, route reconciliation, or socket I/O.
   Resolve conflicts as SERVFAIL. Short-name lookup requires an exact candidate; never append the suffix to match a wildcard.
   `ListContainerWebServices` reports installed routes, not raw listeners. The
   snapshot joins exact claims with the current DNS registry using both owner and address. A nonempty `hostname` resolves one concrete name through the Registry, including wildcard claims, and returns at most one installed route.

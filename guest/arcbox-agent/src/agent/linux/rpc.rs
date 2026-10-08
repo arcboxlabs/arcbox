@@ -246,7 +246,7 @@ async fn handle_request(
             };
             RequestResult::Single(RpcResponse::ListContainerWebServices(
                 arcbox_connect::v1::ListContainerWebServicesResponse {
-                    services: web_services.snapshot(hostname.as_ref()).await,
+                    services: web_services.snapshot(hostname.as_ref()),
                     ..Default::default()
                 },
             ))
@@ -838,7 +838,7 @@ mod tests {
         ));
         dns.containers()
             .write()
-            .await
+            .unwrap()
             .replace("a".into(), claims, Some("172.17.0.2".parse().unwrap()))
             .unwrap();
         let services = WebServices::new(dns.containers());
@@ -920,7 +920,7 @@ mod tests {
         ] {
             {
                 let registry = dns.containers();
-                let mut registry = registry.write().await;
+                let mut registry = registry.write().unwrap();
                 match change {
                     "exact" | "conflict" => {
                         let id = if change == "exact" { "b" } else { "c" };

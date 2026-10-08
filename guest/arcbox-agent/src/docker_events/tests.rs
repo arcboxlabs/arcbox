@@ -4,11 +4,11 @@ use std::time::Duration;
 use tokio::net::UnixListener;
 use tokio::time::timeout;
 
-async fn sync_dns(dns: &GuestDnsServer, info: &serde_json::Value) -> anyhow::Result<()> {
+fn sync_dns(dns: &GuestDnsServer, info: &serde_json::Value) -> anyhow::Result<()> {
     let metadata =
         ContainerMetadata::from_inspect(info).context("test inspect omitted identity")?;
     super::sync_dns(
-        &mut *dns.containers().write().await,
+        &mut dns.containers().write().unwrap(),
         dns.domain(),
         &metadata,
     )
@@ -55,7 +55,6 @@ async fn failed_rule_cleanup_retains_the_full_owner_until_retry_succeeds() {
             "NetworkSettings": { "Networks": { "bridge": { "IPAddress": "172.17.0.2" } } }
         }),
     )
-    .await
     .unwrap();
     let registry = dns.containers();
     let (domains, mut commands) = DomainRoutes::test_channel();
@@ -75,7 +74,7 @@ async fn failed_rule_cleanup_retains_the_full_owner_until_retry_succeeds() {
                     panic!("cleanup must send Forget");
                 };
                 assert_eq!(owner, id);
-                let entries = registry.read().await;
+                let entries = registry.read().unwrap();
                 let unavailable = entries
                     .get(id)
                     .expect("owner survives until cleanup completes");
@@ -100,10 +99,10 @@ async fn failed_rule_cleanup_retains_the_full_owner_until_retry_succeeds() {
                     .to_string()
                     .contains("rule deletion failed")
             );
-            assert!(registry.read().await.get(id).is_some());
+            assert!(registry.read().unwrap().get(id).is_some());
         } else {
             result.unwrap();
-            assert!(registry.read().await.get(id).is_none());
+            assert!(registry.read().unwrap().get(id).is_none());
         }
     }
 }
@@ -132,11 +131,11 @@ async fn stopped_domain_task_cannot_accept_updates_or_discard_cleanup_ownership(
     };
     let error = forget_container(&mut sync, "owner").await.unwrap_err();
     assert!(error.to_string().contains("rules task stopped"));
-    assert!(dns.containers().read().await.get("owner").is_some());
+    assert!(dns.containers().read().unwrap().get("owner").is_some());
 }
 
-#[tokio::test]
-async fn disconnecting_the_last_network_removes_only_that_containers_dns_ownership() {
+#[test]
+fn disconnecting_the_last_network_removes_only_that_containers_dns_ownership() {
     let dns = GuestDnsServer::new(Default::default(), CancellationToken::new()).unwrap();
     let mut inspect = serde_json::json!({
         "Id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -144,16 +143,16 @@ async fn disconnecting_the_last_network_removes_only_that_containers_dns_ownersh
         "Config": { "Labels": { "com.docker.compose.project": "demo", "com.docker.compose.service": "web" } },
         "NetworkSettings": { "Networks": { "app": { "IPAddress": "172.18.0.2" } } }
     });
-    sync_dns(&dns, &inspect).await.unwrap();
+    sync_dns(&dns, &inspect).unwrap();
     let mut replica = inspect.clone();
     replica["Id"] = "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into();
     replica["Name"] = "/web-2".into();
     replica["NetworkSettings"]["Networks"]["app"]["IPAddress"] = "172.18.0.3".into();
-    sync_dns(&dns, &replica).await.unwrap();
+    sync_dns(&dns, &replica).unwrap();
     inspect["NetworkSettings"]["Networks"] = serde_json::json!({});
-    sync_dns(&dns, &inspect).await.unwrap();
+    sync_dns(&dns, &inspect).unwrap();
     let entries = dns.containers();
-    let entries = entries.read().await;
+    let entries = entries.read().unwrap();
     assert_eq!(
         entries
             .get(inspect["Id"].as_str().unwrap())
@@ -170,8 +169,8 @@ async fn disconnecting_the_last_network_removes_only_that_containers_dns_ownersh
     );
 }
 
-#[tokio::test]
-async fn dns_uses_network_name_order_and_rejects_invalid_names_individually() {
+#[test]
+fn dns_uses_network_name_order_and_rejects_invalid_names_individually() {
     let dns = GuestDnsServer::new(Default::default(), CancellationToken::new()).unwrap();
     let mut inspect = serde_json::json!({
         "Id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -200,9 +199,9 @@ async fn dns_uses_network_name_order_and_rejects_invalid_names_individually() {
             ["Web.MyProject", "MyProject_Web_1"]
         );
         assert_eq!(metadata.claims(dns.domain(), "container").warnings.len(), 2);
-        sync_dns(&dns, &inspect).await.unwrap();
+        sync_dns(&dns, &inspect).unwrap();
         let entries = dns.containers();
-        let entries = entries.read().await;
+        let entries = entries.read().unwrap();
         let registration = entries.get(metadata.id.as_str()).unwrap();
         assert_eq!(registration.address, Some("172.18.0.3".parse().unwrap()));
         let names: Vec<_> = registration
@@ -406,12 +405,10 @@ async fn incomplete_snapshots_never_publish_a_valid_prefix_or_discard_old_owners
         let listener = UnixListener::bind(&socket).unwrap();
         let dns = GuestDnsServer::new(Default::default(), CancellationToken::new()).unwrap();
         for (id, name) in [(OLD_ID, "/absent"), (WEB_ID, "/old-web")] {
-            sync_dns(&dns, &inspect(id, name, "172.17.0.2"))
-                .await
-                .unwrap();
+            sync_dns(&dns, &inspect(id, name, "172.17.0.2")).unwrap();
         }
         let registry = dns.containers();
-        let epoch = registry.read().await.epoch();
+        let epoch = registry.read().unwrap().epoch();
         let (domains, mut commands) = DomainRoutes::test_channel();
         let mut sync = ContainerSync {
             dns: &dns,
@@ -425,7 +422,7 @@ async fn incomplete_snapshots_never_publish_a_valid_prefix_or_discard_old_owners
             for (id, (status, body)) in [WEB_ID, OFFLINE_ID].into_iter().zip(inspections) {
                 let (mut stream, path) = request(&listener).await;
                 assert_eq!(path, format!("GET /containers/{id}/json HTTP/1.0\r\n"));
-                assert_eq!(registry.read().await.epoch(), epoch);
+                assert_eq!(registry.read().unwrap().epoch(), epoch);
                 assert!(matches!(
                     commands.try_recv(),
                     Err(tokio::sync::mpsc::error::TryRecvError::Empty)
@@ -439,7 +436,7 @@ async fn incomplete_snapshots_never_publish_a_valid_prefix_or_discard_old_owners
         .await
         .unwrap();
         assert!(result.is_err());
-        assert_eq!(registry.read().await.epoch(), epoch);
+        assert_eq!(registry.read().unwrap().epoch(), epoch);
         assert!(matches!(
             commands.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
@@ -454,12 +451,10 @@ async fn complete_snapshot_refreshes_known_owners_and_keeps_unaddressed_identity
     let listener = UnixListener::bind(&socket).unwrap();
     let dns = GuestDnsServer::new(Default::default(), CancellationToken::new()).unwrap();
     for (id, name) in [(OLD_ID, "/absent"), (WEB_ID, "/old-web")] {
-        sync_dns(&dns, &inspect(id, name, "172.17.0.2"))
-            .await
-            .unwrap();
+        sync_dns(&dns, &inspect(id, name, "172.17.0.2")).unwrap();
     }
     let registry = dns.containers();
-    let epoch = registry.read().await.epoch();
+    let epoch = registry.read().unwrap().epoch();
     let web = inspect(WEB_ID, "/new-web", "172.17.0.4");
     let (domains, mut commands) = DomainRoutes::test_channel();
     let mut sync = ContainerSync {
@@ -494,25 +489,26 @@ async fn complete_snapshot_refreshes_known_owners_and_keeps_unaddressed_identity
             facts,
             [ContainerFacts::from_inspect(&web, dns.domain()).unwrap()]
         );
-        assert_eq!(registry.read().await.epoch(), epoch);
+        assert_eq!(registry.read().unwrap().epoch(), epoch);
         reply.send(()).unwrap();
         let crate::domains::Command::Forget(id, reply) = commands.recv().await.unwrap() else {
             panic!("absent owner must be cleaned up");
         };
         assert_eq!(id, OLD_ID);
-        let entries = registry.read().await;
-        assert_eq!(entries.get(OLD_ID).unwrap().address, None);
-        assert_eq!(entries.get(OFFLINE_ID).unwrap().address, None);
-        assert_ne!(entries.get(OFFLINE_ID).unwrap().claims, []);
-        assert!(
-            matches!(entries.resolve(&"new-web.arcbox.local".parse().unwrap()), Lookup::Matched { claim, address, .. }
-            if claim.owner() == WEB_ID && address == "172.17.0.4".parse::<std::net::IpAddr>().unwrap())
-        );
-        assert!(matches!(
-            entries.resolve(&"old-web.arcbox.local".parse().unwrap()),
-            Lookup::Unmatched
-        ));
-        drop(entries);
+        {
+            let entries = registry.read().unwrap();
+            assert_eq!(entries.get(OLD_ID).unwrap().address, None);
+            assert_eq!(entries.get(OFFLINE_ID).unwrap().address, None);
+            assert_ne!(entries.get(OFFLINE_ID).unwrap().claims, []);
+            assert!(
+                matches!(entries.resolve(&"new-web.arcbox.local".parse().unwrap()), Lookup::Matched { claim, address, .. }
+                if claim.owner() == WEB_ID && address == "172.17.0.4".parse::<std::net::IpAddr>().unwrap())
+            );
+            assert!(matches!(
+                entries.resolve(&"old-web.arcbox.local".parse().unwrap()),
+                Lookup::Unmatched
+            ));
+        }
         reply.send(Ok(())).unwrap();
         let crate::domains::Command::Forget(id, reply) = commands.recv().await.unwrap() else {
             panic!("unaddressed owner must remove routes");
@@ -526,8 +522,8 @@ async fn complete_snapshot_refreshes_known_owners_and_keeps_unaddressed_identity
     .await
     .unwrap();
     result.unwrap();
-    assert!(registry.read().await.get(OLD_ID).is_none());
-    assert!(registry.read().await.get(OFFLINE_ID).is_some());
+    assert!(registry.read().unwrap().get(OLD_ID).is_none());
+    assert!(registry.read().unwrap().get(OFFLINE_ID).is_some());
 }
 
 #[tokio::test]
@@ -537,9 +533,7 @@ async fn empty_snapshot_disables_all_absent_names_and_retries_failed_cleanup() {
     let listener = UnixListener::bind(&socket).unwrap();
     let dns = GuestDnsServer::new(Default::default(), CancellationToken::new()).unwrap();
     for (id, name) in [(OLD_ID, "/absent"), (WEB_ID, "/web")] {
-        sync_dns(&dns, &inspect(id, name, "172.17.0.2"))
-            .await
-            .unwrap();
+        sync_dns(&dns, &inspect(id, name, "172.17.0.2")).unwrap();
     }
     let registry = dns.containers();
     let (domains, mut commands) = DomainRoutes::test_channel();
@@ -567,7 +561,7 @@ async fn empty_snapshot_disables_all_absent_names_and_retries_failed_cleanup() {
                 };
                 assert!([OLD_ID, WEB_ID].contains(&id.as_str()));
                 cleaned.insert(id);
-                let entries = registry.read().await;
+                let entries = registry.read().unwrap();
                 for owner in entries.owners() {
                     let entry = entries.get(owner).unwrap();
                     assert_eq!(entry.address, None);
@@ -602,10 +596,10 @@ async fn empty_snapshot_disables_all_absent_names_and_retries_failed_cleanup() {
         .unwrap();
         if fail {
             assert!(result.unwrap_err().to_string().contains("cleanup failed"));
-            assert_eq!(registry.read().await.owners().count(), 2);
+            assert_eq!(registry.read().unwrap().owners().count(), 2);
         } else {
             result.unwrap();
-            assert_eq!(registry.read().await.owners().count(), 0);
+            assert_eq!(registry.read().unwrap().owners().count(), 0);
         }
     }
 }
@@ -618,11 +612,9 @@ async fn inspected_events_wait_for_actor_ack_before_dns_and_keep_unavailable_own
         let socket = tmp.path().join("docker.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let dns = GuestDnsServer::new(Default::default(), CancellationToken::new()).unwrap();
-        sync_dns(&dns, &inspect(WEB_ID, "/old-web", "172.17.0.2"))
-            .await
-            .unwrap();
+        sync_dns(&dns, &inspect(WEB_ID, "/old-web", "172.17.0.2")).unwrap();
         let registry = dns.containers();
-        let epoch = registry.read().await.epoch();
+        let epoch = registry.read().unwrap().epoch();
         let info = inspect(WEB_ID, "/new-web", ip);
         let (domains, mut commands) = DomainRoutes::test_channel();
         let mut sync = ContainerSync {
@@ -640,7 +632,7 @@ async fn inspected_events_wait_for_actor_ack_before_dns_and_keep_unavailable_own
             };
             assert_eq!(id, WEB_ID);
             assert_eq!(facts, ContainerFacts::from_inspect(&info, dns.domain()));
-            assert_eq!(registry.read().await.epoch(), epoch);
+            assert_eq!(registry.read().unwrap().epoch(), epoch);
             reply.send(()).unwrap();
             if ip.is_empty() {
                 let crate::domains::Command::Forget(id, reply) = commands.recv().await.unwrap()
@@ -648,7 +640,7 @@ async fn inspected_events_wait_for_actor_ack_before_dns_and_keep_unavailable_own
                     panic!("unaddressed container must remove rules");
                 };
                 assert_eq!(id, WEB_ID);
-                assert_eq!(registry.read().await.get(WEB_ID).unwrap().address, None);
+                assert_eq!(registry.read().unwrap().get(WEB_ID).unwrap().address, None);
                 reply.send(Err(anyhow::anyhow!("cleanup failed"))).unwrap();
             }
         };
@@ -662,7 +654,7 @@ async fn inspected_events_wait_for_actor_ack_before_dns_and_keep_unavailable_own
         } else {
             result.unwrap();
         }
-        let entries = registry.read().await;
+        let entries = registry.read().unwrap();
         let expected = ip.parse::<std::net::IpAddr>().ok();
         assert_eq!(entries.get(WEB_ID).unwrap().address, expected);
         assert!(matches!(
