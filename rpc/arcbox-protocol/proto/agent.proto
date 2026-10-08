@@ -102,6 +102,24 @@ message GuestWebService {
     oneof route {
         ContainerWebService container = 1;
         IndexWebService index = 2;
+        MachineWebService machine = 3;
+    }
+}
+
+// An installed endpoint owned by the responding distro machine.
+message MachineWebService {
+    // The host's machine name, before hostname normalization.
+    string machine_name = 1;
+    // The one exact canonical machine DNS name assigned by the host.
+    string hostname = 2;
+    string ipv4_address = 3;
+    // Zero means no managed HTTP route.
+    uint32 http_port = 4;
+    oneof https_backend {
+        // Preserve the application's TLS handshake and certificate.
+        uint32 native_https_port = 5;
+        // Terminate TLS in the guest, then relay HTTP to this port.
+        uint32 terminated_http_port = 6;
     }
 }
 

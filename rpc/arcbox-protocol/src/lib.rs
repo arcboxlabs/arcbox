@@ -113,15 +113,15 @@ pub mod agent {
         KubernetesLoadBalancersRequest, KubernetesLoadBalancersResponse, KubernetesServicePort,
         KubernetesStartRequest, KubernetesStartResponse, KubernetesStatusRequest,
         KubernetesStatusResponse, KubernetesStopRequest, KubernetesStopResponse,
-        ListGuestWebServicesRequest, ListGuestWebServicesResponse, MachineStats,
+        ListGuestWebServicesRequest, ListGuestWebServicesResponse, MachineStats, MachineWebService,
         MemoryPressureEvent, MmapReadFileRequest, MmapReadFileResponse, PortBindingsChanged,
         PortBindingsRemoved, ReadinessEvent, ReconcileHttpsAccessRequest,
         ReconcileHttpsAccessResponse, RuntimeEnsureRequest, RuntimeEnsureResponse,
         RuntimeStatusRequest, RuntimeStatusResponse, ServiceStatus, ShutdownRequest,
         ShutdownResponse, StorageCheckRequest, StorageCheckResponse, StorageCheckResult,
         SystemInfo, WatchMemoryPressureRequest, WatchReadinessRequest, WatchStatsRequest,
-        container_web_service, guest_web_service, kubernetes_host_port, memory_pressure_event,
-        readiness_event, storage_check_request,
+        container_web_service, guest_web_service, kubernetes_host_port, machine_web_service,
+        memory_pressure_event, readiness_event, storage_check_request,
     };
 
     // Backward compatibility type aliases (short names without Agent prefix).
@@ -226,12 +226,12 @@ pub use v1::{
     KubernetesLoadBalancersRequest, KubernetesLoadBalancersResponse, KubernetesServicePort,
     KubernetesStartRequest, KubernetesStartResponse, KubernetesStatusRequest,
     KubernetesStatusResponse, KubernetesStopRequest, KubernetesStopResponse,
-    ListGuestWebServicesRequest, ListGuestWebServicesResponse, PortBindingsChanged,
-    PortBindingsRemoved, ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse,
-    RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse,
-    ServiceStatus, ShutdownRequest, ShutdownResponse, StorageCheckRequest, StorageCheckResponse,
-    StorageCheckResult, SystemInfo, container_web_service, guest_web_service,
-    storage_check_request,
+    ListGuestWebServicesRequest, ListGuestWebServicesResponse, MachineWebService,
+    PortBindingsChanged, PortBindingsRemoved, ReconcileHttpsAccessRequest,
+    ReconcileHttpsAccessResponse, RuntimeEnsureRequest, RuntimeEnsureResponse,
+    RuntimeStatusRequest, RuntimeStatusResponse, ServiceStatus, ShutdownRequest, ShutdownResponse,
+    StorageCheckRequest, StorageCheckResponse, StorageCheckResult, SystemInfo,
+    container_web_service, guest_web_service, machine_web_service, storage_check_request,
 };
 
 // API types - Network

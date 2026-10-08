@@ -222,6 +222,22 @@ mod tests {
             wrong_gateway,
             [endpoint(&runtime), endpoint(&runtime)].concat(),
             vec![GuestWebService::default()],
+            vec![GuestWebService {
+                route: arcbox_connect::v1::MachineWebService {
+                    machine_name: "default".into(),
+                    hostname: runtime.config.network.dns_domain.to_string(),
+                    ipv4_address: runtime
+                        .config
+                        .container
+                        .cidr
+                        .docker_bridge_gateway()
+                        .to_string(),
+                    http_port: 80,
+                    ..Default::default()
+                }
+                .into(),
+                ..Default::default()
+            }],
         ] {
             assert!(
                 runtime

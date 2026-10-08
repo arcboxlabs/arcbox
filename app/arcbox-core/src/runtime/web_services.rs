@@ -146,6 +146,11 @@ fn selected_services(
                     }
                     index.project(*route, registry)?
                 }
+                Some(Route::Machine(_)) => {
+                    return Err(CoreError::Vm(
+                        "System VM reported a machine web route".into(),
+                    ));
+                }
                 None => return Err(CoreError::Vm("guest web route has no resource kind".into())),
             };
             services.extend(projected);
@@ -443,6 +448,62 @@ mod tests {
                 ..Default::default()
             };
             assert!(selected_services(vec![service], None, &registry(), &index).is_err());
+        }
+    }
+
+    #[test]
+    fn system_guest_cannot_report_a_registered_machine_or_publish_partial_rows() {
+        use arcbox_connect::v1::{MachineWebService, machine_web_service};
+        use arcbox_dns::{NamePattern, claims::Claim};
+
+        let hostname: Domain = "dev.machine.arcbox.local".parse().unwrap();
+        let owner = "machine:dev";
+        let address = "192.168.64.5";
+        let mut registry = registry();
+        registry
+            .replace(
+                owner.into(),
+                vec![Claim::exclusive(
+                    NamePattern::Exact(hostname.clone()),
+                    owner.into(),
+                    "machine".into(),
+                )],
+                Some(address.parse().unwrap()),
+            )
+            .unwrap();
+        let machine = GuestWebService {
+            route: MachineWebService {
+                machine_name: "dev".into(),
+                hostname: hostname.to_string(),
+                ipv4_address: address.into(),
+                http_port: 3000,
+                https_backend: Some(machine_web_service::HttpsBackend::TerminatedHttpPort(3000)),
+                ..Default::default()
+            }
+            .into(),
+            ..Default::default()
+        };
+        let index = IndexEndpoint {
+            apex: &"arcbox.local".parse().unwrap(),
+            gateway: "172.17.0.1".parse().unwrap(),
+        };
+        let container = GuestWebService {
+            route: route().into(),
+            ..Default::default()
+        };
+        assert_ne!(
+            selected_services(vec![container.clone()], None, &registry, &index).unwrap(),
+            Vec::<WebService>::new()
+        );
+        for (routes, requested) in [
+            (vec![machine.clone()], None),
+            (vec![machine.clone()], Some(&hostname)),
+            (vec![container, machine], None),
+        ] {
+            let error = selected_services(routes, requested, &registry, &index).unwrap_err();
+            assert!(
+                matches!(error, CoreError::Vm(message) if message == "System VM reported a machine web route")
+            );
         }
     }
 

@@ -3652,7 +3652,7 @@ pub struct ListGuestWebServicesResponse {
 /// A ready guest endpoint, selected by its resource kind.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GuestWebService {
-    #[prost(oneof = "guest_web_service::Route", tags = "1, 2")]
+    #[prost(oneof = "guest_web_service::Route", tags = "1, 2, 3")]
     pub route: ::core::option::Option<guest_web_service::Route>,
 }
 /// Nested message and enum types in `GuestWebService`.
@@ -3663,6 +3663,37 @@ pub mod guest_web_service {
         Container(super::ContainerWebService),
         #[prost(message, tag = "2")]
         Index(super::IndexWebService),
+        #[prost(message, tag = "3")]
+        Machine(super::MachineWebService),
+    }
+}
+/// An installed endpoint owned by the responding distro machine.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MachineWebService {
+    /// The host's machine name, before hostname normalization.
+    #[prost(string, tag = "1")]
+    pub machine_name: ::prost::alloc::string::String,
+    /// The one exact canonical machine DNS name assigned by the host.
+    #[prost(string, tag = "2")]
+    pub hostname: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub ipv4_address: ::prost::alloc::string::String,
+    /// Zero means no managed HTTP route.
+    #[prost(uint32, tag = "4")]
+    pub http_port: u32,
+    #[prost(oneof = "machine_web_service::HttpsBackend", tags = "5, 6")]
+    pub https_backend: ::core::option::Option<machine_web_service::HttpsBackend>,
+}
+/// Nested message and enum types in `MachineWebService`.
+pub mod machine_web_service {
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum HttpsBackend {
+        /// Preserve the application's TLS handshake and certificate.
+        #[prost(uint32, tag = "5")]
+        NativeHttpsPort(u32),
+        /// Terminate TLS in the guest, then relay HTTP to this port.
+        #[prost(uint32, tag = "6")]
+        TerminatedHttpPort(u32),
     }
 }
 /// The builtin index owns the configured apex at the guest bridge gateway.
