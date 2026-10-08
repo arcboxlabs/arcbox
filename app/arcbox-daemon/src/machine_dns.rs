@@ -1,8 +1,8 @@
-//! Keeps `<machine>.arcbox.local` in step with the machines that run.
+//! Keeps `<machine>.machine.arcbox.local` in step with the machines that run.
 //!
 //! A machine's name is published at its bridge NIC address when it reaches
 //! readiness and withdrawn when it stops or is removed; the System VM is
-//! `default.arcbox.local`, its address recorded by the lifecycle's own
+//! `default.machine.arcbox.local`, its address recorded by the lifecycle's own
 //! readiness. The loop follows the runtime's event bus and, on every machine
 //! event, re-derives the answer from the machine's current record rather
 //! than from the event's kind — so a missed event (a lagging receiver) is

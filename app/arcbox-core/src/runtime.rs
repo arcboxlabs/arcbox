@@ -1852,17 +1852,28 @@ impl Runtime {
         self.sandbox_port_keys.write().await.remove(sandbox_id);
     }
 
+    /// Returns the canonical sandbox name, validated before provisioning.
+    ///
+    /// # Errors
+    /// Returns an error if the sandbox ID cannot form a DNS name.
+    pub fn sandbox_dns_name(&self, sandbox_id: &str) -> Result<arcbox_constants::dns::Domain> {
+        arcbox_dns::claims::ResourceScope::Sandbox
+            .name(sandbox_id, &self.config.network.dns_domain)
+            .map_err(CoreError::config)
+    }
+
     /// Register a sandbox hostname and remember its ownership independently
     /// from Docker container DNS state.
     ///
     /// # Errors
-    /// Returns an error when host networking admission is closed.
+    /// Returns an error if the DNS name is invalid or host networking admission is closed.
     pub async fn register_sandbox_dns(&self, sandbox_id: &str, ip: IpAddr) -> Result<()> {
+        let name = self.sandbox_dns_name(sandbox_id)?;
         let _commit = self.host_network.commit.lock().await;
         self.begin_host_network_write()?;
         self.register_dns_raw(
             &Self::sandbox_dns_owner(sandbox_id),
-            &[sandbox_id.to_owned()],
+            &[name.to_string()],
             ip,
         );
         self.sandbox_dns_ids

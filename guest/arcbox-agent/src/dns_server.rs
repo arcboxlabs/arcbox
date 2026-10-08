@@ -2,8 +2,8 @@
 //!
 //! Listens on `0.0.0.0:53` (UDP) inside the guest VM. Lookup priority:
 //!
-//! 1. DNS registry (container claims, host and index reservations)
-//! 2. Sandbox registry (id → TAP IP)
+//! 1. DNS registry (container claims and trusted namespace reservations)
+//! 2. Exact sandbox IDs within the reserved sandbox tree
 //! 3. Names under the configured domain not found → NXDOMAIN
 //! 4. Everything else → forward to gateway (`10.0.2.1:53`)
 
@@ -211,36 +211,30 @@ impl GuestDnsServer {
                 {
                     return Ok(None);
                 }
+                Lookup::Reserved(Boundary::ReservedTree { authority, .. })
+                    if authority == "machine" =>
+                {
+                    return Ok(None);
+                }
+                Lookup::Reserved(Boundary::ReservedTree { root, authority })
+                    if authority == "sandbox" =>
+                {
+                    let sandboxes = self.sandboxes.read().expect("sandbox DNS lock poisoned");
+                    let ip = name
+                        .as_str()
+                        .strip_suffix(&format!(".{root}"))
+                        .and_then(|id| sandboxes.get(id));
+                    return Ok(Some(match ip {
+                        Some(ip) if is_a_query => {
+                            arcbox_dns::build_response_a(data, *ip, DEFAULT_TTL)?
+                        }
+                        Some(_) => arcbox_dns::build_nodata(data)?,
+                        None => arcbox_dns::build_nxdomain(data)?,
+                    }));
+                }
                 Lookup::Reserved(_) => return Ok(Some(arcbox_dns::build_nxdomain(data)?)),
                 Lookup::Delegated(_) => return Ok(None),
                 Lookup::Unmatched => {}
-            }
-        }
-
-        // 3. Sandbox registry lookup (std::sync::RwLock, not async).
-        let bare_name = name_lower.strip_suffix(&suffix).unwrap_or(&name_lower);
-        if let Some(ip) = self
-            .sandboxes
-            .read()
-            .ok()
-            .and_then(|g| g.get(&name_lower).copied())
-        {
-            if is_a_query {
-                return Ok(Some(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?));
-            }
-            return Ok(Some(arcbox_dns::build_nodata(data)?));
-        }
-        if bare_name != name_lower {
-            if let Some(ip) = self
-                .sandboxes
-                .read()
-                .ok()
-                .and_then(|g| g.get(bare_name).copied())
-            {
-                if is_a_query {
-                    return Ok(Some(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?));
-                }
-                return Ok(Some(arcbox_dns::build_nodata(data)?));
             }
         }
 
@@ -320,8 +314,7 @@ mod tests {
             ("web.demo", container_ip),
             ("WEB.demo.Containers.Test", container_ip),
             ("deep.web.demo.containers.test", container_ip),
-            ("sandbox", sandbox_ip),
-            ("SANDBOX.containers.test", sandbox_ip),
+            ("SANDBOX.sandbox.containers.test", sandbox_ip),
         ] {
             let response = local_query(&server, name, DnsRecordType::A).unwrap();
             assert_eq!(&response[..4], &[0x12, 0x34, 0x81, 0x80], "{name}");
@@ -334,6 +327,11 @@ mod tests {
                 assert_eq!(&response[6..12], &[0; 6], "{name} type {qtype}");
             }
         }
+        assert!(local_query(&server, "sandbox", DnsRecordType::A).is_none());
+        assert_eq!(
+            local_query(&server, "sandbox.containers.test", DnsRecordType::A).unwrap()[3] & 15,
+            3
+        );
     }
 
     #[test]
@@ -423,11 +421,45 @@ mod tests {
     }
 
     #[test]
-    fn instance_roots_gate_sandbox_fallback_and_every_query_type() {
-        use arcbox_dns::registry::InstanceAuthority;
+    fn resource_trees_reject_container_wildcards_and_keep_machine_queries_on_the_host() {
         let mut server = GuestDnsServer::new(Domain::default(), CancellationToken::new()).unwrap();
         server.sandboxes = Arc::default();
-        server.register_sandbox("sandbox.custom.local", Ipv4Addr::new(10, 0, 3, 2));
+        let sandbox_ip = Ipv4Addr::new(10, 0, 3, 2);
+        server
+            .containers
+            .write()
+            .unwrap()
+            .replace(
+                "hostile".into(),
+                Claim::generated(Domain::default(), "hostile".into(), "container".into()).into(),
+                Some(Ipv4Addr::new(172, 17, 0, 2).into()),
+            )
+            .unwrap();
+        server.register_sandbox("box", sandbox_ip);
+        let live = local_query(&server, "box.sandbox.arcbox.local", DnsRecordType::A).unwrap();
+        assert!(live.ends_with(&sandbox_ip.octets()));
+        server.deregister_sandbox("box");
+        for qtype in [1, 28, 64, 65, 65_280].map(DnsRecordType::from) {
+            for name in [
+                "sandbox.arcbox.local",
+                "box.sandbox.arcbox.local",
+                "deep.box.sandbox.arcbox.local",
+            ] {
+                let response = local_query(&server, name, qtype).unwrap();
+                assert_eq!(response[3] & 15, 3, "{name}");
+                assert_eq!(&response[6..12], &[0; 6], "{name}");
+            }
+            assert!(local_query(&server, "default.machine.arcbox.local", qtype).is_none());
+        }
+    }
+
+    #[test]
+    fn instance_roots_gate_sandbox_fallback_and_every_query_type() {
+        use arcbox_dns::registry::InstanceAuthority;
+        let mut server =
+            GuestDnsServer::new("custom.local".parse().unwrap(), CancellationToken::new()).unwrap();
+        server.sandboxes = Arc::default();
+        server.register_sandbox("sandbox", Ipv4Addr::new(10, 0, 3, 2));
         for target in [
             InstanceTarget::Current,
             InstanceTarget::Other { port: 5354 },
@@ -441,7 +473,10 @@ mod tests {
                     root: "custom.local".parse().unwrap(),
                     target,
                 }]);
-            for name in ["sandbox.custom.local", "missing.custom.local"] {
+            for name in [
+                "sandbox.sandbox.custom.local",
+                "missing.sandbox.custom.local",
+            ] {
                 for qtype in [1, 28, 64, 65, 65_280].map(DnsRecordType::from) {
                     let response = local_query(&server, name, qtype);
                     if matches!(target, InstanceTarget::Other { .. }) {

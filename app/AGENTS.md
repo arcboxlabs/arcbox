@@ -16,7 +16,8 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
 - `abctl tls rotate` authorizes the pending candidate before revoking the exact previous root. Release the CLI profile lock before either daemon mutation RPC. The TLS worker serializes commands with refreshes, holds the lock through signer and status updates, and completes accepted work after a client disconnects.
 - `SystemService.ListWebServices` and `WatchWebServices` return URLs from the guest's installed routes and current DNS ownership. A nonempty List `hostname` resolves a concrete name, including wildcard claims, and returns at most one owner/address-validated service. Watch always returns the complete directory. Clients must use those URLs rather than derive URLs from exposed or published ports. Only managed HTTPS requires ArcBox CA trust. A failed snapshot ends the stream; clients must clear stale entries. The feature acceptance matrix lives in `docs/local-https.md`.
 - Pass the validated `Domain` into `Runtime` before initialization. Set `NetConfig::dns` at construction. Host DNS and VM boot parameters must use the same immutable default suffix. Validate service URLs against current Registry ownership; custom claims can use other suffixes. Separate managed `.local` aliases from aliases without managed HTTPS in directory entries.
-- Initialize Runtime's DNS Registry with exact reservations for built-in host names and the configured index apex before registering resources. Address loss must not release these reservations. Reject a suffix that conflicts with a built-in host name or cannot fit the host alias.
+- Initialize Runtime's DNS Registry with exact host/index reservations and permanent machine/sandbox trees before registering resources. Address loss must not release these reservations. Reject a suffix that conflicts with a built-in host name or cannot fit the reserved names.
+- Validate the sandbox DNS name before Create or Restore dials the guest. Reject invalid IDs before provisioning; preserve the supplied identity without lossy replacement.
 - HTTPS authorization must not block VM or Docker startup. The daemon owns the Keychain identity and reports `SetupStatus.local_https` independently. The daemon disables Keychain UI for its lifetime. Desktop runs `abctl tls trust` only for a deliberate HTTPS action in the login session. The helper stores public certificates and verifies TLS-only Admin trust. Remove legacy User trust during explicit authorization. Revoke the previous root before replacing `tls/ca.pem`; background publication preserves a trusted previous root. CA preparation errors affect HTTPS status, but failure to remove an exposed private key still blocks sharing the data directory. Development profiles and isolated data directories must not change host trust automatically.
 - Register the CA worker independently of Linux VM startup, including in `--no-linux-vm` mode. CA preparation runs in the background and retries after failure. The signing service selects the current published identity when a CSR arrives. Preserve the same authority handle while the root DER is unchanged; reject signatures if that handle changes before delivery.
 - Observe browser HTTPS only while the VM is ready and a Desktop client watches an untrusted root. Match exact host source addresses and current DNS ownership. Cancel and join each guest observation RPC before disabling its lease or starting another request.
@@ -426,10 +427,10 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   loop that found all of this: `ARCBOX_MACHINE_IMAGE_BASE=<dir>` pointing at
   a local `machine-images sync` output (the directory, not its `index.json`),
   and `abctl machine exec` into the machine while `start` is still waiting.
-- **A running machine is published as `<hostname>.arcbox.local` at its
+- **A running machine is published as `<hostname>.machine.arcbox.local` at its
   bridge NIC address** (`arcbox-daemon/src/machine_dns.rs`,
   `arcbox-core/src/runtime/machine_dns.rs`), the System VM as
-  `default.arcbox.local`. The hostname is `machine_hostname(name)` (`_` and
+  `default.machine.arcbox.local`. The hostname is `machine_hostname(name)` (`_` and
   `.` become `-`; `create` refuses a name that cannot become a DNS label),
   the same string the shim gets on the cmdline, so the guest and the Mac
   agree. The loop follows machine events and re-derives the answer from
@@ -443,11 +444,12 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   the Docker host reconciler tears every machine down as a vanished
   container within one interval. The entry goes through
   `Runtime::register_dns`, so the resolver owner's mDNS mirror (above)
-  announces `<hostname>.arcbox.local` on `lo0` like a container's name and
-  withdraws it when the machine stops: `dns-sd -G v4 <hostname>.arcbox.local`
-  shows the record on interface 1 while the machine runs (verified
-  2026-10-04 with a development daemon on an isolated `.local` domain).
-  Regression signature: `dig <name>.arcbox.local` at the daemon's DNS port
+  announces `<hostname>.machine.arcbox.local` on `lo0` like a container's name and
+  withdraws it when the machine stops: `dns-sd -G v4 <hostname>.machine.arcbox.local`
+  must show the record on interface 1 while the machine runs. Publication
+  with the former flat name was verified on 2026-10-04 with an isolated
+  development daemon. The scoped machine name still needs installed validation.
+  Regression signature: `dig <name>.machine.arcbox.local` at the daemon's DNS port
   answers NODATA (NOERROR, no answer) for a running machine whose `inspect`
   shows a bridge address.
 - **`restart_generation` reports departures, not arrivals.** It is bumped on

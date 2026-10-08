@@ -253,11 +253,12 @@ when it is missing. Clone and export refuse a running machine: its data disk
 is a btrfs volume mounted read-write in the guest, so stop it first.
 
 A machine is its name: the guest's hostname is the machine name, and while it
-runs the Mac reaches it as `<name>.arcbox.local` (`ssh user@dev.arcbox.local`,
-`curl http://dev.arcbox.local:3000`). `_` and `.` in a name become `-` in the
+runs the Mac reaches it as `<name>.machine.arcbox.local` (`ssh user@dev.machine.arcbox.local`,
+`curl http://dev.machine.arcbox.local:3000`). `_` and `.` in a name become `-` in the
 hostname (`my_box.v2` answers as `my-box-v2`); what is left must be a DNS label
 of up to 63 letters, digits and hyphens. The System VM behind `docker` is
-`default.arcbox.local`.
+`default.machine.arcbox.local`. Sandboxes use `<id>.sandbox.arcbox.local`.
+The `machine` and `sandbox` trees stay reserved when a resource stops; container aliases cannot claim these names.
 
 ## macOS guests
 
@@ -292,8 +293,8 @@ Most of ArcBox's performance-critical code is custom rather than vendored:
 - **A userspace network datapath on macOS**: DHCP, DNS forwarding, NAT and
   connection tracking, batched socket I/O, and userspace TCP termination that
   splices guest flows onto real host sockets — no `pf` NAT and no `utun` device.
-  Containers are reachable by IP, and `abctl dns install` adds
-  `*.arcbox.local` name resolution: `http://<container>.arcbox.local` reaches
+  Containers are reachable by IP, and the daemon leases
+  `*.arcbox.local` name resolution through the helper: `http://<container>.arcbox.local` reaches
   whatever port the container serves (or its `dev.arcbox.http-port` label),
   and `https://` works on port 443 after macOS authorizes the local CA.
   Native HTTPS on 443 or 8443 keeps the application's certificate; discovery supports HTTP/1.1 and HTTP/2.

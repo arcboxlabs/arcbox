@@ -289,6 +289,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sandbox_creation_and_restore_reject_invalid_dns_ids_before_guest_access() {
+        use arcbox_connect::sandbox_v1::{
+            CreateSandboxRequest, RestoreRequest, SandboxService as _, SandboxSnapshotService as _,
+        };
+        use buffa::Message as _;
+        use connectrpc::HasMessageView as _;
+
+        let (directory, shared) = storage_runtime();
+        let create = control::SandboxServiceImpl::new(shared.clone(), Arc::default());
+        let restore = snapshot::SandboxSnapshotServiceImpl::new(shared, Arc::default());
+        for id in ["under_score", "-leading", "trailing-", &"x".repeat(64)] {
+            let bytes = bytes::Bytes::from(
+                CreateSandboxRequest {
+                    id: id.into(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            );
+            let view = CreateSandboxRequest::decode_view(&bytes).unwrap();
+            let error = create
+                .create(
+                    RequestContext::new(Default::default()),
+                    connectrpc::ServiceRequest::from_parts(&view, &bytes),
+                )
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(error.code, connectrpc::ErrorCode::InvalidArgument, "{id}");
+            let bytes = bytes::Bytes::from(
+                RestoreRequest {
+                    id: id.into(),
+                    ..Default::default()
+                }
+                .encode_to_vec(),
+            );
+            let view = RestoreRequest::decode_view(&bytes).unwrap();
+            let error = restore
+                .restore(
+                    RequestContext::new(Default::default()),
+                    connectrpc::ServiceRequest::from_parts(&view, &bytes),
+                )
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(error.code, connectrpc::ErrorCode::InvalidArgument, "{id}");
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
     async fn storage_admission_rejects_reserved_and_held_writes_but_preserves_reads() {
         let (directory, shared) = storage_runtime();
         let runtime = shared.ready().unwrap();

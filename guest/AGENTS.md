@@ -229,7 +229,7 @@ non-obvious invariants and failure signatures.
   A failed listing or rejected subscription must enter the existing reconnect path.
   Validate every inspect response before applying a reconnect snapshot. Await route-task acknowledgement before publishing snapshot or event DNS changes; an active scan may finish before consuming the update. Retain unavailable owners until rule and mirror cleanup succeeds.
   Preserve unknown DNS query types through local lookup. Missing names under the configured suffix remain local for every query type.
-  Construct guest DNS with the shared builtin reservations. Forward unresolved exact system/index names to the existing gateway; keep other reservations local. Descendants remain independent.
+  Construct guest DNS with the shared builtin reservations. Forward exact system/index names and the machine tree to the existing gateway. Resolve exact sandbox IDs only within the selected sandbox reservation; missing IDs stay local. Do not restore flat or bare sandbox fallback.
   Apply instance authority through the same Registry. Foreign instances use the gateway; unavailable instances return SERVFAIL before sandbox fallback. Preserve internal resource lookup when no instance root matches.
   System VM `agent::Services` shares that Registry with the exclusive host authority connection. Its unique session guard revokes known roots synchronously before releasing the connection slot. Every later source revision creates a lifetime barrier, including identical root snapshots.
   Keep ContainerRegistry guards within synchronous memory operations. Release every guard before authorization waits, route reconciliation, or socket I/O.

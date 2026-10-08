@@ -94,7 +94,7 @@ pub struct MachineInfo {
     /// Guest IP address (reported by agent via vsock).
     pub ip_address: Option<String>,
     /// Address of the guest's bridge NIC, the one the Mac reaches directly
-    /// and `<name>.arcbox.local` resolves to. Reported by the agent at
+    /// and `<name>.machine.arcbox.local` resolves to. Reported by the agent at
     /// readiness; `None` while stopped or when the guest has no bridge NIC.
     pub bridge_ip_address: Option<String>,
     /// macOS hypervisor backend this machine boots on.
@@ -347,7 +347,7 @@ fn vm_shared_dirs(data_dir: &std::path::Path, mounts: &[MachineMount]) -> Vec<Sh
 /// get.
 ///
 /// The hostname is a key too: `my_box` and `my-box` would answer to one
-/// `my-box.arcbox.local`, and the DNS table keeps whichever started last,
+/// `my-box.machine.arcbox.local`, and the DNS table keeps whichever started last,
 /// so a user's `ssh` lands on the wrong machine with nothing to say why.
 /// The second name is refused instead.
 fn reserve_hostname(machines: &HashMap<String, MachineInfo>, name: &str) -> Result<String> {
@@ -368,7 +368,7 @@ fn reserve_hostname(machines: &HashMap<String, MachineInfo>, name: &str) -> Resu
 }
 
 /// The hostname a machine named `name` gets, which is also the label of
-/// its `<hostname>.arcbox.local` record and what the shim is handed on the
+/// its `<hostname>.machine.arcbox.local` record and what the shim is handed on the
 /// kernel command line.
 ///
 /// A machine name may carry `_` and `.`, which a DNS label may not; both
@@ -1188,7 +1188,7 @@ impl MachineManager {
     ///
     /// Distro machines record it in their own readiness probe; the System
     /// VM's readiness lives in the lifecycle actor, which calls this once
-    /// the agent answers so `default.arcbox.local` can be published from
+    /// the agent answers so `default.machine.arcbox.local` can be published from
     /// the same record as every other machine. Same transport dispatch as
     /// [`Self::ping_agent`].
     ///

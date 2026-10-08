@@ -1,6 +1,6 @@
 //! The host DNS name of a machine.
 //!
-//! A running machine resolves as `<hostname>.<local domain>` at its bridge
+//! A running machine resolves as `<hostname>.machine.<local domain>` at its bridge
 //! NIC address — the address the Mac reaches directly, unlike the uplink's
 //! `10.0.2.x` that every machine shares behind its own NAT. The label is
 //! the machine's hostname ([`machine_hostname`]: the name with `_` and `.`
@@ -17,6 +17,7 @@
 
 use std::net::IpAddr;
 
+use arcbox_dns::claims::ResourceScope;
 use arcbox_engine::machine::machine_hostname;
 
 use super::Runtime;
@@ -39,7 +40,10 @@ impl Runtime {
                 "two machines share one hostname; rename one to resolve the DNS conflict"
             );
         }
-        self.register_dns(&Self::machine_dns_owner(machine), &[hostname], ip)
+        let name = ResourceScope::Machine
+            .name(&hostname, &self.config.network.dns_domain)
+            .map_err(super::CoreError::config)?;
+        self.register_dns(&Self::machine_dns_owner(machine), &[name.to_string()], ip)
             .await
     }
 
@@ -50,6 +54,9 @@ impl Runtime {
         machine: &str,
         hostname: &str,
     ) -> Option<String> {
+        let hostname = ResourceScope::Machine
+            .name(hostname, &self.config.network.dns_domain)
+            .ok()?;
         let own = Self::machine_dns_owner(machine);
         let registry = self
             .dns_registry
@@ -60,7 +67,7 @@ impl Runtime {
             .find(|owner| {
                 owner.starts_with(MACHINE_DNS_OWNER_PREFIX)
                     && registry.get(owner).expect("registry owners are registered").claims.iter().any(|claim| {
-                        matches!(claim.pattern(), arcbox_dns::NamePattern::Exact(name) if name.as_str() == hostname)
+                        matches!(claim.pattern(), arcbox_dns::NamePattern::Exact(name) if name == &hostname)
                     })
             })
             .and_then(|owner| owner.strip_prefix(MACHINE_DNS_OWNER_PREFIX))
@@ -84,14 +91,14 @@ impl Runtime {
             .collect()
     }
 
-    /// The name `machine` is published under, or `None` when the daemon
-    /// serves no local domain or the name cannot be a hostname.
+    /// The canonical machine name, or `None` when the complete DNS name is invalid.
     #[must_use]
     pub fn machine_dns_name(&self, machine: &str) -> Option<String> {
         let hostname = machine_hostname(machine).ok()?;
-        self.network_manager
-            .dns_domain()
-            .map(|domain| format!("{hostname}.{domain}"))
+        ResourceScope::Machine
+            .name(&hostname, &self.config.network.dns_domain)
+            .ok()
+            .map(|name| name.to_string())
     }
 
     fn machine_dns_owner(machine: &str) -> String {

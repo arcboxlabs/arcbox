@@ -318,7 +318,7 @@ impl LifecycleShared {
     }
 
     /// Records the guest's bridge NIC address on the machine record, which
-    /// is what publishes the System VM as `default.arcbox.local`. Runs
+    /// is what publishes the System VM as `default.machine.arcbox.local`. Runs
     /// before the actor hears `AgentReady`, so the `MachineStarted` it then
     /// publishes finds the address already on the record. Best effort: a
     /// VM without a bridge NIC simply has no name on the Mac.

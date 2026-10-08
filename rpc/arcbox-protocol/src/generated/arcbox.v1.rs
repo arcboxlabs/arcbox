@@ -2316,12 +2316,12 @@ pub struct MachineNetwork {
     #[prost(string, tag = "5")]
     pub bridge_mac_address: ::prost::alloc::string::String,
     /// IPv4 address of the bridge NIC: the address the Mac reaches directly
-    /// and the one `<machine>.arcbox.local` resolves to. Empty until the
+    /// and the one `<machine>.machine.<local domain>` resolves to. Empty until the
     /// machine has reported it.
     #[prost(string, tag = "6")]
     pub bridge_ip_address: ::prost::alloc::string::String,
     /// The name the host's DNS answers for this machine while it runs
-    /// (`<machine>.<local domain>`). Empty when the machine has no bridge
+    /// (`<machine>.machine.<local domain>`). Empty when the machine has no bridge
     /// address to register.
     #[prost(string, tag = "7")]
     pub dns_name: ::prost::alloc::string::String,
@@ -3774,9 +3774,8 @@ pub struct SystemInfo {
     pub distro_init_pending: bool,
     /// IPv4 address of the guest's bridge NIC (the vmnet interface the Mac
     /// reaches directly), or empty when the guest has none or it has no
-    /// address yet. The host registers `<machine>.arcbox.local` at this
-    /// address; `ip_addresses` keeps listing every interface, so an older
-    /// host that ignores this field sees exactly what it saw before.
+    /// address yet. The host registers `<machine>.machine.<local domain>`
+    /// at this address; `ip_addresses` lists every interface.
     #[prost(string, tag = "13")]
     pub bridge_ip_address: ::prost::alloc::string::String,
 }

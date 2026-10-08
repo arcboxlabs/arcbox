@@ -305,7 +305,7 @@ async fn deregister_dns_clears_aliases_even_without_dns_entry() {
 }
 
 #[tokio::test]
-async fn sandbox_dns_cleanup_restores_same_named_container() {
+async fn sandbox_dns_has_a_separate_namespace_from_the_same_named_container() {
     let (runtime, _tmp) = networking_test_runtime();
     let container_ip = "172.17.0.2".parse().unwrap();
     let sandbox_ip = "172.31.0.2".parse().unwrap();
@@ -327,8 +327,15 @@ async fn sandbox_dns_cleanup_restores_same_named_container() {
         runtime.registered_container_ids().await,
         std::collections::HashSet::from(["container".to_string()])
     );
-    assert_eq!(dns_address(&runtime, "same"), None);
-    assert_eq!(dns_address(&runtime, "same.arcbox.local"), None);
+    assert_eq!(dns_address(&runtime, "same"), Some(container_ip));
+    assert_eq!(
+        dns_address(&runtime, "same.arcbox.local"),
+        Some(container_ip)
+    );
+    assert_eq!(
+        dns_address(&runtime, "same.sandbox.arcbox.local"),
+        Some(sandbox_ip)
+    );
 
     runtime.deregister_sandbox_dns("SAME").await;
     {
@@ -341,6 +348,7 @@ async fn sandbox_dns_cleanup_restores_same_named_container() {
         dns_address(&runtime, "same.arcbox.local"),
         Some(container_ip)
     );
+    assert_eq!(dns_address(&runtime, "same.sandbox.arcbox.local"), None);
 }
 
 #[tokio::test]
@@ -939,13 +947,14 @@ async fn machine_dns_is_published_under_the_local_domain_and_owned_apart_from_co
     let ip: std::net::IpAddr = "192.168.64.5".parse().unwrap();
     runtime.register_machine_dns("dev", ip).await.unwrap();
 
-    assert_eq!(dns_address(&runtime, "dev"), Some(ip));
-    assert_eq!(dns_address(&runtime, "dev.arcbox.local"), Some(ip));
+    assert_eq!(dns_address(&runtime, "dev"), None);
+    assert_eq!(dns_address(&runtime, "dev.arcbox.local"), None);
+    assert_eq!(dns_address(&runtime, "dev.machine.arcbox.local"), Some(ip));
     assert!(runtime.registered_container_ids().await.is_empty());
     assert_eq!(runtime.registered_machine_dns_names().await, vec!["dev"]);
 
     runtime.deregister_machine_dns("dev").await;
-    assert_eq!(dns_address(&runtime, "dev.arcbox.local"), None);
+    assert_eq!(dns_address(&runtime, "dev.machine.arcbox.local"), None);
     assert_eq!(
         runtime.registered_machine_dns_names().await,
         Vec::<String>::new()
@@ -959,11 +968,11 @@ async fn machine_dns_name_follows_the_configured_domain_and_the_hostname() {
     let (runtime, _tmp) = networking_test_runtime();
     assert_eq!(
         runtime.machine_dns_name("dev").as_deref(),
-        Some("dev.arcbox.local")
+        Some("dev.machine.arcbox.local")
     );
     assert_eq!(
         runtime.machine_dns_name("my_box.v2").as_deref(),
-        Some("my-box-v2.arcbox.local")
+        Some("my-box-v2.machine.arcbox.local")
     );
     let directory = tempfile::tempdir().unwrap();
     let runtime = Runtime::new(Config {
@@ -977,12 +986,15 @@ async fn machine_dns_name_follows_the_configured_domain_and_the_hostname() {
     .unwrap();
     assert_eq!(
         runtime.machine_dns_name("dev").as_deref(),
-        Some("dev.test.local")
+        Some("dev.machine.test.local")
     );
 
     let ip: std::net::IpAddr = "192.168.64.5".parse().unwrap();
     runtime.register_machine_dns("my_box.v2", ip).await.unwrap();
-    assert_eq!(dns_address(&runtime, "my-box-v2.test.local"), Some(ip));
+    assert_eq!(
+        dns_address(&runtime, "my-box-v2.machine.test.local"),
+        Some(ip)
+    );
     assert_eq!(
         runtime.registered_machine_dns_names().await,
         vec!["my_box.v2"]
