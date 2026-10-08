@@ -1,4 +1,5 @@
 use super::*;
+use arcbox_dns::{NamePattern, registry::Lookup};
 use std::time::Duration;
 use tokio::net::UnixListener;
 use tokio::time::timeout;
@@ -28,29 +29,42 @@ async fn disconnecting_the_last_network_removes_only_that_containers_dns_ownersh
         "Config": { "Labels": { "com.docker.compose.project": "demo", "com.docker.compose.service": "web" } },
         "NetworkSettings": { "Networks": { "app": { "IPAddress": "172.18.0.2" } } }
     });
-    sync_dns(&dns, &inspect).await;
-    dns.register_container("web.demo", "web-2", "172.18.0.3".parse().unwrap())
-        .await;
+    sync_dns(&dns, &inspect).await.unwrap();
+    let mut replica = inspect.clone();
+    replica["Id"] = "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into();
+    replica["Name"] = "/web-2".into();
+    replica["NetworkSettings"]["Networks"]["app"]["IPAddress"] = "172.18.0.3".into();
+    sync_dns(&dns, &replica).await.unwrap();
     inspect["NetworkSettings"]["Networks"] = serde_json::json!({});
-    sync_dns(&dns, &inspect).await;
+    sync_dns(&dns, &inspect).await.unwrap();
     let entries = dns.containers();
     let entries = entries.read().await;
-    assert!(!entries.contains_key("web-1"));
     assert_eq!(
-        entries.get("web.demo"),
-        Some(&"172.18.0.3".parse().unwrap())
+        entries
+            .get(inspect["Id"].as_str().unwrap())
+            .unwrap()
+            .address,
+        None
+    );
+    assert!(matches!(
+        entries.resolve(&"web-1.arcbox.local".parse().unwrap()),
+        Lookup::Unmatched
+    ));
+    assert!(
+        matches!(entries.resolve(&"web.demo.arcbox.local".parse().unwrap()), Lookup::Matched { claim, address, .. } if claim.owner() == replica["Id"].as_str().unwrap() && address == "172.18.0.3".parse::<std::net::IpAddr>().unwrap())
     );
 }
 
 #[tokio::test]
-async fn dns_uses_network_name_order_and_preserves_alias_underscores() {
+async fn dns_uses_network_name_order_and_rejects_invalid_names_individually() {
     let dns = GuestDnsServer::new(Default::default(), CancellationToken::new());
     let mut inspect = serde_json::json!({
         "Id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "Name": "/MyProject_Web_1",
         "Config": { "Labels": {
             "com.docker.compose.project": "MyProject",
-            "com.docker.compose.service": "Web_API",
+            "com.docker.compose.service": "Web",
+            "dev.arcbox.domains": "API.LOCAL, bad_name.local",
         } },
         "NetworkSettings": {}
     });
@@ -65,12 +79,26 @@ async fn dns_uses_network_name_order_and_preserves_alias_underscores() {
         }),
     ] {
         inspect["NetworkSettings"]["Networks"] = networks;
-        sync_dns(&dns, &inspect).await;
+        let metadata = ContainerMetadata::from_inspect(&inspect).unwrap();
+        assert_eq!(
+            metadata.default_aliases(),
+            ["Web.MyProject", "MyProject_Web_1"]
+        );
+        assert_eq!(metadata.claims(dns.domain(), "container").warnings.len(), 2);
+        sync_dns(&dns, &inspect).await.unwrap();
         let entries = dns.containers();
         let entries = entries.read().await;
-        let primary = "172.18.0.3".parse().unwrap();
-        assert_eq!(entries.get("myproject_web_1"), Some(&primary));
-        assert_eq!(entries.get("web_api.myproject"), Some(&primary));
+        let registration = entries.get(metadata.id.as_str()).unwrap();
+        assert_eq!(registration.address, Some("172.18.0.3".parse().unwrap()));
+        let names: Vec<_> = registration
+            .claims
+            .iter()
+            .filter_map(|claim| match claim.pattern() {
+                NamePattern::Exact(name) => Some(name.as_str()),
+                NamePattern::Descendants(_) => None,
+            })
+            .collect();
+        assert_eq!(names, ["web.myproject.arcbox.local", "api.local"]);
     }
 }
 

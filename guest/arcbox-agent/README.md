@@ -111,6 +111,8 @@ response is required; listening TCP ports alone do not identify web services.
 
 DNS checks local names for every query type, including HTTPS and SVCB. Known IPv4-only names return NODATA for other types. Missing names under the configured suffix return NXDOMAIN; external names are forwarded to the gateway.
 
+Guest registration uses complete container IDs and canonical name claims. Generated names include descendant wildcards; `dev.arcbox.domains` accepts exact and explicit wildcard `.local` names. Independent owners of an exclusive name produce SERVFAIL. Compose service replicas select the smallest complete ID. Short names require an exact claim, so a container named `com` cannot capture `example.com` through a wildcard. Host registration and macOS resolver integration remain unfinished.
+
 `ListContainerWebServices` returns the installed HTTP and HTTPS routes and their
 current DNS names. Each shared Compose alias appears only on the container
 selected by guest DNS. The host uses this snapshot for service URLs; explicit

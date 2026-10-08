@@ -8,11 +8,12 @@
 //! 4. Everything else → forward to gateway (`10.0.2.1:53`)
 
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use arcbox_constants::dns::Domain;
-use arcbox_dns::{DEFAULT_TTL, DnsQuery, DnsRecordType};
+use arcbox_dns::registry::{Lookup, Registry};
+use arcbox_dns::{DEFAULT_TTL, DnsQuery, DnsRecordType, NamePattern};
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
@@ -39,22 +40,13 @@ pub fn sandbox_registry() -> &'static SandboxRegistry {
 /// Upstream forwarding timeout.
 const FORWARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Shared container registry: alias → IPv4 address (resolved view).
-pub type ContainerRegistry = Arc<RwLock<HashMap<String, Ipv4Addr>>>;
-
-/// Tracks which containers own each alias: alias → (owner → IP).
-///
-/// When multiple replicas register the same service alias, each owns a
-/// separate entry. The resolved `ContainerRegistry` always points to the
-/// most recently registered IP for that alias.
-type AliasOwners = Arc<RwLock<HashMap<String, HashMap<String, Ipv4Addr>>>>;
+/// Current container claims and addresses, keyed by complete container ID.
+pub type ContainerRegistry = Arc<RwLock<Registry>>;
 
 /// Guest DNS server.
 pub struct GuestDnsServer {
     domain: Domain,
     containers: ContainerRegistry,
-    /// Owner tracking for shared aliases (e.g. compose service names).
-    alias_owners: AliasOwners,
     sandboxes: SandboxRegistry,
     cancel: CancellationToken,
 }
@@ -67,8 +59,7 @@ impl GuestDnsServer {
     pub fn new(domain: Domain, cancel: CancellationToken) -> Self {
         Self {
             domain,
-            containers: Arc::new(RwLock::new(HashMap::new())),
-            alias_owners: Arc::new(RwLock::new(HashMap::new())),
+            containers: Arc::default(),
             sandboxes: Arc::clone(sandbox_registry()),
             cancel,
         }
@@ -90,48 +81,6 @@ impl GuestDnsServer {
     #[allow(dead_code)]
     pub fn sandboxes(&self) -> SandboxRegistry {
         Arc::clone(&self.sandboxes)
-    }
-
-    /// Registers a container alias → IP mapping.
-    ///
-    /// `owner` identifies the container that owns this alias (typically the
-    /// container name). Multiple owners can share the same alias — the
-    /// resolved IP always reflects the most recently registered owner.
-    pub async fn register_container(&self, alias: &str, owner: &str, ip: Ipv4Addr) {
-        let key = alias.to_lowercase();
-        let owner_key = owner.to_lowercase();
-        tracing::debug!(alias = %key, owner = %owner_key, %ip, "dns: register container");
-
-        self.alias_owners
-            .write()
-            .await
-            .entry(key.clone())
-            .or_default()
-            .insert(owner_key, ip);
-        self.containers.write().await.insert(key, ip);
-    }
-
-    /// Deregisters a single owner from an alias.
-    ///
-    /// The alias is only removed from the resolved registry when no owners
-    /// remain. If other owners exist, the resolved IP is updated to an
-    /// arbitrary remaining owner's IP.
-    pub async fn deregister_container(&self, alias: &str, owner: &str) {
-        let key = alias.to_lowercase();
-        let owner_key = owner.to_lowercase();
-        tracing::debug!(alias = %key, owner = %owner_key, "dns: deregister container");
-
-        let mut owners = self.alias_owners.write().await;
-        if let Some(map) = owners.get_mut(&key) {
-            map.remove(&owner_key);
-            if map.is_empty() {
-                owners.remove(&key);
-                self.containers.write().await.remove(&key);
-            } else if let Some(&remaining_ip) = map.values().next() {
-                // Re-point to an arbitrary remaining replica.
-                self.containers.write().await.insert(key, remaining_ip);
-            }
-        }
     }
 
     /// Registers a sandbox ID → IP mapping.
@@ -216,26 +165,45 @@ impl GuestDnsServer {
         // Known names have IPv4 data only; other record types receive NODATA.
         let is_a_query = query.qtype == DnsRecordType::A;
 
-        // 1. Container registry lookup.
-        if let Some(&ip) = self.containers.read().await.get(&name_lower) {
-            if is_a_query {
-                return Ok(Some(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?));
+        if let Ok(name) = name_lower.parse::<Domain>() {
+            let registry = self.containers.read().await;
+            let relative = format!("{name}.{}", self.domain).parse::<Domain>().ok();
+            let mut lookup = registry.resolve(&name);
+            // Only exact aliases support short names; wildcards must not capture external DNS.
+            if matches!(lookup, Lookup::Unmatched)
+                && let Some(relative) = &relative
+                && registry
+                    .owners()
+                    .filter_map(|id| registry.get(id))
+                    .filter(|entry| entry.address.is_some())
+                    .flat_map(|entry| &entry.claims)
+                    .any(|claim| {
+                        matches!(claim.pattern(), NamePattern::Exact(exact) if exact == relative)
+                    })
+            {
+                lookup = registry.resolve(relative);
+                if matches!(&lookup, Lookup::Matched { claim, .. } if !matches!(claim.pattern(), NamePattern::Exact(_)))
+                {
+                    lookup = Lookup::Unmatched;
+                }
             }
-            return Ok(Some(arcbox_dns::build_nodata(data)?));
-        }
-
-        // 2. Try with the configured suffix stripped.
-        let bare_name = name_lower.strip_suffix(&suffix).unwrap_or(&name_lower);
-        if bare_name != name_lower {
-            if let Some(&ip) = self.containers.read().await.get(bare_name) {
-                if is_a_query {
+            match lookup {
+                Lookup::Matched {
+                    address: IpAddr::V4(ip),
+                    ..
+                } if is_a_query => {
                     return Ok(Some(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?));
                 }
-                return Ok(Some(arcbox_dns::build_nodata(data)?));
+                Lookup::Matched { .. } => return Ok(Some(arcbox_dns::build_nodata(data)?)),
+                Lookup::Conflict => return Ok(Some(arcbox_dns::build_servfail(data)?)),
+                Lookup::Reserved(_) => return Ok(Some(arcbox_dns::build_nxdomain(data)?)),
+                Lookup::Delegated(_) => return Ok(None),
+                Lookup::Unmatched => {}
             }
         }
 
         // 3. Sandbox registry lookup (std::sync::RwLock, not async).
+        let bare_name = name_lower.strip_suffix(&suffix).unwrap_or(&name_lower);
         if let Some(ip) = self
             .sandboxes
             .read()
@@ -291,6 +259,19 @@ impl GuestDnsServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arcbox_dns::claims::Claim;
+
+    async fn register(server: &GuestDnsServer, name: &str, id: &str, ip: Ipv4Addr) {
+        let claims = Claim::generated(
+            format!("{name}.{}", server.domain).parse().unwrap(),
+            id.into(),
+            "container".into(),
+        );
+        let mut registry = server.containers.write().await;
+        registry
+            .replace(id.into(), claims.into(), Some(ip.into()))
+            .unwrap();
+    }
 
     async fn local_query(
         server: &GuestDnsServer,
@@ -320,14 +301,13 @@ mod tests {
         server.sandboxes = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let container_ip = Ipv4Addr::new(172, 17, 0, 2);
         let sandbox_ip = Ipv4Addr::new(10, 0, 3, 2);
-        server
-            .register_container("web.demo", "container", container_ip)
-            .await;
+        register(&server, "web.demo", "container", container_ip).await;
         server.register_sandbox("sandbox", sandbox_ip);
 
         for (name, ip) in [
             ("web.demo", container_ip),
             ("WEB.demo.Containers.Test", container_ip),
+            ("deep.web.demo.containers.test", container_ip),
             ("sandbox", sandbox_ip),
             ("SANDBOX.containers.test", sandbox_ip),
         ] {
@@ -350,9 +330,7 @@ mod tests {
     async fn only_the_configured_domain_receives_authoritative_negative_answers() {
         let server =
             GuestDnsServer::new("containers.test".parse().unwrap(), CancellationToken::new());
-        server
-            .register_container("web", "container", Ipv4Addr::new(172, 17, 0, 2))
-            .await;
+        register(&server, "com", "container", Ipv4Addr::new(172, 17, 0, 2)).await;
         for qtype in [1, 28, 64, 65, 65_280].map(DnsRecordType::from) {
             for name in ["missing.containers.test", "containers.test"] {
                 let response = local_query(&server, name, qtype).await.unwrap();
@@ -363,9 +341,12 @@ mod tests {
                 "web.arcbox.local",
                 "web.example.test",
                 "web.containers.test.evil",
+                "example.com",
+                "deep.com",
             ] {
                 assert!(local_query(&server, name, qtype).await.is_none(), "{name}");
             }
         }
     }
+
 }

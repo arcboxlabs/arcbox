@@ -812,8 +812,20 @@ mod tests {
             Default::default(),
             tokio_util::sync::CancellationToken::new(),
         );
-        dns.register_container("api", "api", "172.17.0.2".parse().unwrap())
-            .await;
+        let claims = arcbox_dns::claims::Claim::generated(
+            "api.arcbox.local".parse().unwrap(),
+            "a".into(),
+            "container".into(),
+        );
+        dns.containers()
+            .write()
+            .await
+            .replace(
+                "a".into(),
+                claims.into(),
+                Some("172.17.0.2".parse().unwrap()),
+            )
+            .unwrap();
         let services = WebServices::new(dns.domain().clone(), dns.containers());
         let facts = ContainerFacts::from_inspect(
             &serde_json::json!({

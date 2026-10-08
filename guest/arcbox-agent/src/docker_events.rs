@@ -171,40 +171,13 @@ async fn handle_event(sync: &mut ContainerSync<'_>, json_str: &str) -> anyhow::R
     let id = &id_full[..12.min(id_full.len())];
 
     match action {
-        "start" => {
+        "start" | "rename" => {
             register_container_by_id(sync, id).await?;
         }
-        "die" | "destroy" => {
-            // Deregister this container's ownership of all its aliases.
-            // Shared aliases (compose service names) are only removed from
-            // DNS when no other replica still references them.
-            let attrs = &event["Actor"]["Attributes"];
-            let name = attrs["name"].as_str().unwrap_or_default();
-            if !name.is_empty() {
-                let compose = attrs.as_object().and_then(crate::dns::extract_compose_info);
-                for alias in crate::dns::collect_aliases(name, compose.as_ref()) {
-                    sync.dns.deregister_container(&alias, name).await;
-                }
-            }
-            if !id_full.is_empty() {
-                sync.domains.forget(id_full);
-                sync.mirror.remove(id_full).await?;
-            }
-        }
-        "rename" => {
-            // Deregister old name's ownership, register under new name.
-            let attrs = &event["Actor"]["Attributes"];
-            let old_name = attrs["oldName"]
-                .as_str()
-                .unwrap_or_default()
-                .trim_start_matches('/');
-            if !old_name.is_empty() {
-                let compose = attrs.as_object().and_then(crate::dns::extract_compose_info);
-                for alias in crate::dns::collect_aliases(old_name, compose.as_ref()) {
-                    sync.dns.deregister_container(&alias, old_name).await;
-                }
-            }
-            register_container_by_id(sync, id).await?;
+        "die" | "destroy" if !id_full.is_empty() => {
+            sync.dns.containers().write().await.remove(id_full);
+            sync.domains.forget(id_full);
+            sync.mirror.remove(id_full).await?;
         }
         _ => {}
     }
@@ -239,29 +212,23 @@ async fn register_container_by_id(sync: &mut ContainerSync<'_>, id: &str) -> any
         sync.mirror.apply(full_id, &pinned_publishes(&info)).await?;
     }
 
-    sync_dns(sync.dns, &info).await;
-    Ok(())
+    sync_dns(sync.dns, &info).await
 }
 
-async fn sync_dns(dns: &GuestDnsServer, info: &serde_json::Value) {
+async fn sync_dns(dns: &GuestDnsServer, info: &serde_json::Value) -> anyhow::Result<()> {
     let Some(metadata) = ContainerMetadata::from_inspect(info) else {
-        return;
+        return Ok(());
     };
-    let name = metadata.name.as_str();
-
-    // The DNS server tracks shared aliases by container name.
-    let aliases = metadata.default_aliases();
-    let Some(ip) = metadata.primary_ipv4() else {
-        for alias in &aliases {
-            dns.deregister_container(alias, name).await;
-        }
-        return;
-    };
-    for alias in &aliases {
-        dns.register_container(alias, name, ip).await;
+    let claims = metadata.claims(dns.domain(), "container");
+    for warning in claims.warnings {
+        tracing::warn!(container_id = %metadata.id, %warning, "rejected container DNS name");
     }
-
-    tracing::debug!(name, %ip, aliases = ?aliases, "registered container DNS");
+    let address = metadata.primary_ipv4().map(std::net::IpAddr::V4);
+    dns.containers()
+        .write()
+        .await
+        .replace(metadata.id, claims.claims, address)?;
+    Ok(())
 }
 
 /// Performs a GET request to the Docker Engine API via Unix socket.

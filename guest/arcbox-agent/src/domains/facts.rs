@@ -18,7 +18,6 @@ use crate::iptables::NatRule;
 pub struct ContainerFacts {
     pub(super) id: String,
     pub(super) hostname: String,
-    pub(super) aliases: Vec<String>,
     /// Its init process, whose `/proc` entry shows the container's sockets.
     pub(super) pid: u32,
     /// Its network namespace (`SandboxKey`).
@@ -37,11 +36,6 @@ impl ContainerFacts {
     pub fn from_inspect(inspect: &serde_json::Value, domain: &Domain) -> Option<Self> {
         let metadata = ContainerMetadata::from_inspect(inspect)?;
         let hostname = format!("{}.{domain}", metadata.name);
-        let aliases = metadata
-            .default_aliases()
-            .into_iter()
-            .map(|alias| alias.to_lowercase())
-            .collect();
         let pid = inspect
             .pointer("/State/Pid")?
             .as_u64()
@@ -70,7 +64,6 @@ impl ContainerFacts {
         Some(Self {
             id: metadata.id,
             hostname,
-            aliases,
             pid,
             netns,
             ips,
@@ -161,7 +154,6 @@ mod tests {
             ContainerFacts::from_inspect(&inspect(), &"containers.test".parse().unwrap()).unwrap();
         assert_eq!(facts.id, "abc123");
         assert_eq!(facts.hostname, "web.containers.test");
-        assert_eq!(facts.aliases, ["web"]);
         assert_eq!(facts.pid, 4242);
         assert_eq!(
             facts.netns,
@@ -202,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn aliases_keep_underscores_and_match_dns_case() {
+    fn probe_hostname_preserves_the_container_name() {
         let mut inspect = inspect();
         inspect["Name"] = "/MyProject_Web_1".into();
         inspect["Config"]["Labels"] = serde_json::json!({
@@ -210,7 +202,6 @@ mod tests {
             "com.docker.compose.service": "Web_API",
         });
         let facts = ContainerFacts::from_inspect(&inspect, &Domain::default()).unwrap();
-        assert_eq!(facts.aliases, ["web_api.myproject", "myproject_web_1"]);
         assert_eq!(facts.hostname, "MyProject_Web_1.arcbox.local");
     }
 

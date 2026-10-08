@@ -85,3 +85,9 @@ All 50 targeted tests passed: 17 shared parser/response tests, 31 host DNS tests
 `registry::Registry` stores each owner's complete claims, optional address, and revision in one caller-locked snapshot. Identical replacements preserve the revision and epoch. Effective replacement and removal advance the epoch, including removal followed by reinsertion. A disconnected owner retains its identity but contributes no claims. A foreign-owner claim rejects the entire replacement before mutation. Lookup preserves conflicts, reservations, and delegations and returns the selected claim, address, and revision together.
 
 All 50 DNS tests passed, including five registry regressions covering rename, idempotence, address loss, revision reuse, atomic rejection, and namespace boundaries. Strict all-target Clippy passed on the host and Linux musl target; formatting passed. Production callers still need to adopt the registry. These checks did not change system DNS, native trust, or installed guest behavior.
+
+## Guest registry integration
+
+Guest DNS and web-service discovery now share the ownership registry. Inspect replaces all claims under the complete container ID; rename uses a fresh inspect, and die/destroy removes that ID. Registration reports invalid names individually. DNS resolves custom exact names and descendant wildcards, returns SERVFAIL for conflicts, and limits short names to exact claims. Web-service snapshots compare the selected owner and address, including when two owners have the same IP.
+
+The full host-executed guest suites passed 99 library and 184 binary tests with the accompanying DNS boundary regression. Strict Linux musl all-target Clippy and formatting passed. This integration does not complete host registration, macOS resolver ownership, reconnect snapshot removal, or revision checks across guest certificate signing. The new behavior has not run inside a VM or browser.

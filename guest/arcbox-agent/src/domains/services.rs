@@ -9,12 +9,12 @@ use arcbox_connect::v1::{
     container_web_service::HttpsBackend,
 };
 use arcbox_constants::dns::Domain;
+use arcbox_dns::{NamePattern, registry::Lookup};
 
 use super::{ContainerFacts, SelectedRoutes};
 use crate::dns_server::ContainerRegistry;
 
 struct Installed {
-    aliases: Vec<String>,
     ip: Ipv4Addr,
     selected: SelectedRoutes,
 }
@@ -73,7 +73,6 @@ impl WebServices {
             installed.insert(
                 facts.id.clone(),
                 Installed {
-                    aliases: facts.aliases.clone(),
                     ip: facts.primary_ip,
                     selected,
                 },
@@ -90,14 +89,10 @@ impl WebServices {
 
     /// A TLS name must resolve to the address the client actually dialled.
     pub(super) async fn resolves_to(&self, name: &str, address: Ipv4Addr) -> bool {
-        let name = name.to_ascii_lowercase();
-        let Some(alias) = name
-            .strip_suffix(self.domain.as_str())
-            .and_then(|prefix| prefix.strip_suffix('.'))
-        else {
+        let Ok(name) = name.to_ascii_lowercase().parse::<Domain>() else {
             return false;
         };
-        self.dns.read().await.get(alias) == Some(&address)
+        matches!(self.dns.read().await.resolve(&name), Lookup::Matched { address: current, .. } if current == IpAddr::V4(address))
     }
 
     /// Shared Compose aliases belong only to the container DNS currently selects.
@@ -107,11 +102,13 @@ impl WebServices {
         let mut services: Vec<_> = installed
             .iter()
             .filter_map(|(id, route)| {
-                let hostnames: Vec<_> = route
-                    .aliases
+                let hostnames: Vec<_> = dns.get(id)?
+                    .claims
                     .iter()
-                    .filter(|alias| dns.get(*alias) == Some(&route.ip))
-                    .map(|alias| format!("{alias}.{}", self.domain))
+                    .filter_map(|claim| match claim.pattern() {
+                        NamePattern::Exact(name) if matches!(dns.resolve(name), Lookup::Matched { claim, address, .. } if claim.owner() == id && address == IpAddr::V4(route.ip)) => Some(name.to_string()),
+                        _ => None,
+                    })
                     .collect();
                 if hostnames.is_empty() {
                     return None;
@@ -142,15 +139,30 @@ impl WebServices {
 mod tests {
     use super::*;
 
+    async fn register(services: &WebServices, id: &str, names: &[&str], ip: Ipv4Addr) {
+        let claims = names
+            .iter()
+            .flat_map(|name| {
+                arcbox_dns::claims::Claim::compose_service(
+                    format!("{name}.{}", services.domain).parse().unwrap(),
+                    id.into(),
+                    "container".into(),
+                    ("demo".into(), (*name).into()),
+                )
+            })
+            .collect();
+        let mut registry = services.dns.write().await;
+        registry
+            .replace(id.into(), claims, Some(ip.into()))
+            .unwrap();
+    }
+
     #[tokio::test(start_paused = true)]
     async fn managed_access_checks_ownership_before_reporting_and_after_waiting() {
         let destination = Ipv4Addr::new(172, 17, 0, 2);
         let source: IpAddr = "192.168.64.1".parse().unwrap();
-        let dns = Arc::new(tokio::sync::RwLock::new(HashMap::from([(
-            "web".into(),
-            destination,
-        )])));
-        let services = WebServices::new(Domain::default(), dns.clone());
+        let services = WebServices::new(Domain::default(), Arc::default());
+        register(&services, "a", &["web"], destination).await;
         let mut request = ReconcileHttpsAccessRequest {
             observation_id: "one".into(),
             host_addresses: vec![source.to_string()],
@@ -183,9 +195,7 @@ mod tests {
         let access = services.reconcile_https_access(request.clone()).unwrap();
         assert_eq!(access.hostname, "web.arcbox.local");
         assert_eq!(access.sequence, 1);
-        dns.write()
-            .await
-            .insert("web".into(), Ipv4Addr::new(172, 17, 0, 3));
+        register(&services, "a", &["web"], Ipv4Addr::new(172, 17, 0, 3)).await;
         request.enabled = false;
         services.reconcile_https_access(request).unwrap();
         assert!(handshake.await.unwrap().is_err());
@@ -195,11 +205,9 @@ mod tests {
     async fn tls_names_follow_live_dns_ownership() {
         let first = Ipv4Addr::new(172, 17, 0, 2);
         let second = Ipv4Addr::new(172, 17, 0, 3);
-        let dns = Arc::new(tokio::sync::RwLock::new(HashMap::from([
-            ("web.demo".into(), first),
-            ("db.demo".into(), second),
-        ])));
-        let services = WebServices::new("one.dev.arcbox.local".parse().unwrap(), dns.clone());
+        let services = WebServices::new("one.dev.arcbox.local".parse().unwrap(), Arc::default());
+        register(&services, "a", &["web.demo"], first).await;
+        register(&services, "b", &["db.demo"], second).await;
         assert!(
             services
                 .resolves_to("WEB.demo.one.dev.arcbox.local", first)
@@ -216,7 +224,7 @@ mod tests {
         ] {
             assert!(!services.resolves_to(name, first).await, "{name}");
         }
-        dns.write().await.insert("web.demo".into(), second);
+        register(&services, "a", &["web.demo"], second).await;
         assert!(
             !services
                 .resolves_to("web.demo.one.dev.arcbox.local", first)
@@ -231,12 +239,7 @@ mod tests {
 
     #[tokio::test]
     async fn shared_alias_follows_dns_ownership_and_removed_routes_disappear() {
-        let dns = Arc::new(tokio::sync::RwLock::new(HashMap::from([
-            ("web.demo".into(), Ipv4Addr::new(172, 17, 0, 3)),
-            ("demo-web-1".into(), Ipv4Addr::new(172, 17, 0, 2)),
-            ("demo-web-2".into(), Ipv4Addr::new(172, 17, 0, 3)),
-        ])));
-        let services = WebServices::new("one.dev.arcbox.local".parse().unwrap(), dns.clone());
+        let services = WebServices::new("one.dev.arcbox.local".parse().unwrap(), Arc::default());
         for (id, ip, aliases) in [
             (
                 "a",
@@ -245,14 +248,14 @@ mod tests {
             ),
             (
                 "b",
-                Ipv4Addr::new(172, 17, 0, 3),
+                Ipv4Addr::new(172, 17, 0, 2),
                 ["web.demo", "demo-web-2"],
             ),
         ] {
+            register(&services, id, &aliases, ip).await;
             services.installed.write().unwrap().insert(
                 id.into(),
                 Installed {
-                    aliases: aliases.map(str::to_owned).to_vec(),
                     ip,
                     selected: SelectedRoutes {
                         http: Some(3000),
@@ -262,23 +265,7 @@ mod tests {
             );
         }
         let snapshot = services.snapshot().await;
-        assert_eq!(snapshot[0].hostnames, ["demo-web-1.one.dev.arcbox.local"]);
-        assert_eq!(
-            snapshot[1].hostnames,
-            [
-                "web.demo.one.dev.arcbox.local",
-                "demo-web-2.one.dev.arcbox.local"
-            ]
-        );
-        assert_eq!(
-            snapshot[1].https_backend,
-            Some(HttpsBackend::TerminatedHttpPort(3000))
-        );
-
-        dns.write()
-            .await
-            .insert("web.demo".into(), Ipv4Addr::new(172, 17, 0, 2));
-        let snapshot = services.snapshot().await;
+        assert_eq!(snapshot[1].hostnames, ["demo-web-2.one.dev.arcbox.local"]);
         assert_eq!(
             snapshot[0].hostnames,
             [
@@ -286,11 +273,23 @@ mod tests {
                 "demo-web-1.one.dev.arcbox.local"
             ]
         );
-        assert_eq!(snapshot[1].hostnames, ["demo-web-2.one.dev.arcbox.local"]);
+        assert_eq!(
+            snapshot[1].https_backend,
+            Some(HttpsBackend::TerminatedHttpPort(3000))
+        );
 
-        services.remove("a");
-        assert_eq!(services.snapshot().await.len(), 1);
-        dns.write().await.clear();
+        services.dns.write().await.remove("a");
+        let snapshot = services.snapshot().await;
+        assert_eq!(
+            snapshot[0].hostnames,
+            [
+                "web.demo.one.dev.arcbox.local",
+                "demo-web-2.one.dev.arcbox.local"
+            ]
+        );
+        assert_eq!(snapshot.len(), 1);
+
+        services.remove("b");
         assert_eq!(services.snapshot().await, Vec::<ContainerWebService>::new());
     }
 }

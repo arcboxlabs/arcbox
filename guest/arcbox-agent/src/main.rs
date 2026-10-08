@@ -99,9 +99,6 @@ mod sandbox;
 #[cfg(target_os = "linux")]
 mod sandbox_cleanup_watch;
 
-// DNS: legacy /etc/hosts management (being replaced by dns_server).
-mod dns;
-
 // Guest-side DNS server and Docker event-driven container registration.
 mod dns_server;
 mod docker_config;

@@ -211,7 +211,7 @@ non-obvious invariants and failure signatures.
   Automatic HTTP discovery requires a real HTTP response to a bounded `HEAD /`
   probe with the container domain in `Host`. An exposed or listening TCP port
   alone does not identify HTTP. The `dev.arcbox.http-port` label overrides discovery.
-  Read the System VM suffix from `arcbox.dns_domain=` once at startup. Use the shared `Domain` for DNS, probe Host/SNI, service URLs, and TLS ownership. Keep registry aliases relative. Outside the local CA namespace, serve HTTP and native TLS without managed HTTPS routes.
+  Read the System VM suffix from `arcbox.dns_domain=` once at startup. Use the shared `Domain` for DNS, probe Host/SNI, service URLs, and TLS ownership. Store canonical claims in `arcbox_dns::registry::Registry`, keyed by complete container ID. Outside the local CA namespace, serve HTTP and native TLS without managed HTTPS routes.
   Native HTTPS discovery checks 443 then 8443 and takes precedence over the
   TLS proxy. `dev.arcbox.https-port` selects a native port; `off` disables
   managed HTTPS routing. Native TLS preserves the application's certificate.
@@ -228,9 +228,10 @@ non-obvious invariants and failure signatures.
   Confirm the Docker event subscription before listing running containers so snapshot-time changes remain buffered.
   A failed listing or rejected subscription must enter the existing reconnect path.
   Preserve unknown DNS query types through local lookup. Missing names under the configured suffix remain local for every query type.
+  Resolve conflicts as SERVFAIL. Short-name lookup requires an exact candidate; never append the suffix to match a wildcard.
   `ListContainerWebServices` reports installed routes, not raw listeners. The
-  snapshot joins candidate aliases with the current DNS registry: a shared
-  Compose alias belongs only to the container whose selected IP DNS returns.
+  snapshot joins exact claims with the current DNS registry using both owner and address.
+  Shared Compose claims select the smallest complete container ID; custom claims remain exclusive.
   The host must use this snapshot to build URLs instead of guessing from ports.
   The HTTPS proxy checks SNI against the same DNS registry before requesting a
   certificate. A name must resolve to the connection's original destination IP.
