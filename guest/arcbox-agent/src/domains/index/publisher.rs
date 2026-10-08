@@ -6,7 +6,6 @@ use anyhow::{Result, ensure};
 use arcbox_constants::dns::Domain;
 use arcbox_dns::{NamePattern, claims::Claim};
 
-use super::super::https::PROXY_PORT;
 use crate::dns_server::DnsRegistry;
 use crate::iptables::{self, NatRule, TaggedRules};
 
@@ -30,10 +29,10 @@ impl Publisher {
         }
     }
 
-    pub(in crate::domains) async fn reconcile(&mut self) -> Result<()> {
+    fn redirect_rules(&self, frontend_port: u16) -> Vec<NatRule> {
         let address = format!("{}/32", self.gateway);
-        let proxy = PROXY_PORT.to_string();
-        let wanted: Vec<_> = ["80", "443"]
+        let proxy = frontend_port.to_string();
+        ["80", "443"]
             .map(|port| {
                 NatRule::new(
                     RULE_OWNER,
@@ -42,7 +41,11 @@ impl Publisher {
                     &["-j", "REDIRECT", "--to-ports", &proxy],
                 )
             })
-            .into();
+            .into()
+    }
+
+    pub(in crate::domains) async fn reconcile(&mut self, frontend_port: u16) -> Result<()> {
+        let wanted = self.redirect_rules(frontend_port);
         match iptables::list_prerouting().await {
             Ok(listing) if precede_docker(&listing, &wanted) => {}
             result => {
@@ -107,25 +110,19 @@ mod tests {
 
     #[test]
     fn builtin_redirects_must_precede_docker_and_match_the_exact_gateway() {
-        let rules: Vec<_> = ["80", "443"]
-            .map(|port| {
-                NatRule::new(
-                    "arcbox-index:",
-                    "gateway",
-                    &[
-                        "-d",
-                        "172.17.0.1/32",
-                        "-p",
-                        "tcp",
-                        "-m",
-                        "tcp",
-                        "--dport",
-                        port,
-                    ],
-                    &["-j", "REDIRECT", "--to-ports", "61443"],
-                )
-            })
-            .into();
+        let publisher = Publisher::new(
+            DnsRegistry::default(),
+            "arcbox.local".parse().unwrap(),
+            "172.17.0.1".parse().unwrap(),
+        );
+        let rules = publisher.redirect_rules(51347);
+        assert_eq!(
+            rules.iter().map(NatRule::spec).collect::<Vec<_>>(),
+            [
+                "-d 172.17.0.1/32 -p tcp -m tcp --dport 80 -m comment --comment arcbox-index:gateway -j REDIRECT --to-ports 51347",
+                "-d 172.17.0.1/32 -p tcp -m tcp --dport 443 -m comment --comment arcbox-index:gateway -j REDIRECT --to-ports 51347",
+            ]
+        );
         let entries: Vec<_> = rules
             .iter()
             .map(|rule| format!("-A PREROUTING {}", rule.spec()))
@@ -141,7 +138,7 @@ mod tests {
             format!("{docker}\n{ours}"),
             format!("{}\n{docker}\n{}", entries[0], entries[1]),
             ours.replace("172.17.0.1/32", "10.0.2.2/32"),
-            ours.replace("61443", "61444"),
+            ours.replace("51347", "52468"),
         ] {
             assert!(!precede_docker(&listing, &rules), "{listing}");
         }

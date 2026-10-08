@@ -16,6 +16,20 @@ use tokio_rustls::TlsConnector;
 #[path = "https_http2_tests.rs"]
 mod http2;
 
+#[tokio::test]
+async fn frontend_bindings_return_distinct_available_ports() {
+    within(async {
+        let (first, first_port) = Https::bind_listener().await.unwrap();
+        let (second, second_port) = Https::bind_listener().await.unwrap();
+        assert_ne!(first_port, 0);
+        assert_ne!(second_port, 0);
+        assert_ne!(first_port, second_port);
+        assert_eq!(first.local_addr().unwrap().port(), first_port);
+        assert_eq!(second.local_addr().unwrap().port(), second_port);
+    })
+    .await;
+}
+
 fn publish_index(dns: &DnsRegistry) {
     use arcbox_dns::{
         NamePattern,

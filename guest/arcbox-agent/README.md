@@ -147,12 +147,11 @@ to a port number to override discovery, or `off` to disable managed HTTP. Cleart
 Native HTTPS on 443 or 8443 takes precedence over automatic TLS termination.
 Set `dev.arcbox.https-port` to another native TLS port, or `off` to disable
 managed HTTPS. Native HTTPS preserves the application's certificate. Otherwise,
-a selected HTTP service receives HTTPS through the guest proxy on port 61443.
+a selected HTTP service receives HTTPS through the guest proxy. The kernel selects an available frontend port, and the guest redirects public port 443 to that bound port.
 Native discovery negotiates HTTP/2 or HTTP/1.1 with ALPN and requires an HTTP response. Use an explicit native port for a service that requires a client certificate.
 The proxy obtains a certificate for the client's SNI through the host signing
 channel, then negotiates HTTP/2 or HTTP/1.1 with ALPN. The CA private key stays in the macOS Keychain;
-only the public root is shared in `/arcbox/tls/`. Port 61443 is reserved for
-the proxy and cannot be published by a container.
+only the public root is shared in `/arcbox/tls/`. The proxy does not reserve a fixed frontend port.
 
 Managed forwarding supports HTTP/1.1 and HTTP/2 in either direction and replaces `X-Forwarded-Proto` with `https`. The relay preserves authority, redirects, repeated cookies, and streaming bodies. With HTTP/2 on both sides, native gRPC supports unary, client streaming, server streaming, and bidirectional streaming calls without decoding message data or compression. HTTP/2 streams share the HTTP/2 upstream connection and use separate connections to an HTTP/1 backend. Cancellation remains observable after response completion while a request upload is active. An HTTP/1 WebSocket upgrade uses an HTTP/1 connection even when discovery selected HTTP/2. Listener shutdown cancels and joins every internal connection and stream task. Native TLS remains passthrough.
 

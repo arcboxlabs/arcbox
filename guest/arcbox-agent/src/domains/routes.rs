@@ -25,8 +25,8 @@ const INDEX_RETRY: Duration = Duration::from_secs(1);
 pub(super) struct Routes {
     rules: TaggedRules,
     containers: HashMap<String, Tracked>,
-    /// Whether managed HTTPS proxy binding has not failed.
-    https: bool,
+    /// The frontend's bound port; absent when managed HTTPS is unavailable.
+    frontend_port: Option<u16>,
     services: WebServices,
     index: Option<Publisher>,
     index_retry: Option<Instant>,
@@ -57,7 +57,7 @@ impl Routes {
         Self {
             rules: TaggedRules::new(RULE_OWNER),
             containers: HashMap::new(),
-            https: true,
+            frontend_port: None,
             services,
             index: None,
             index_retry: None,
@@ -88,13 +88,13 @@ impl Routes {
         }
         warn_unless_bridged_traffic_is_filtered();
         match Https::bind().await {
-            Ok(https) => {
+            Ok((https, port)) => {
+                self.frontend_port = Some(port);
                 self.frontend
                     .spawn(https.serve(self.services.clone(), self.frontend_cancel.clone()));
                 self.reconcile_index().await;
             }
             Err(e) => {
-                self.https = false;
                 tracing::warn!(error = %format!("{e:#}"), "container domains serve no HTTPS");
             }
         }
@@ -154,10 +154,10 @@ impl Routes {
     }
 
     async fn reconcile_index(&mut self) {
-        if self.https
+        if let Some(port) = self.frontend_port
             && let Some(index) = &mut self.index
         {
-            let result = index.reconcile().await;
+            let result = index.reconcile(port).await;
             self.index_reconciled(result);
         }
     }
@@ -268,8 +268,8 @@ impl Routes {
             let http = tracked.http_backend(candidates).await;
             let id = tracked.facts.id.as_str();
             let selected = SelectedRoutes::choose(http, tracked.facts.https_pin, &native)
-                .with_managed_https(self.https);
-            let wanted = tracked.facts.rules(selected);
+                .with_managed_https(self.frontend_port.is_some());
+            let wanted = tracked.facts.rules(selected, self.frontend_port);
             if wanted != tracked.installed {
                 match self.rules.replace(id, wanted.clone()).await {
                     Ok(()) => {
@@ -497,7 +497,7 @@ mod tests {
             for facts in &old {
                 routes.track(facts.clone());
             }
-            let installed = old[0].rules(selected);
+            let installed = old[0].rules(selected, Some(51347));
             routes.containers.get_mut("live").unwrap().installed = installed.clone();
             routes.containers.get_mut("live").unwrap().selected = selected;
             let mut changed = old[0].clone();
@@ -549,7 +549,9 @@ mod tests {
 
     #[test]
     fn proxy_availability_controls_managed_routes() {
-        let routes = Routes::new(WebServices::default());
+        let mut routes = Routes::new(WebServices::default());
+        assert!(routes.frontend_port.is_none());
+        routes.frontend_port = Some(51347);
         for (pin, native, expected) in [
             (
                 None,
@@ -579,7 +581,7 @@ mod tests {
                 pin,
                 &native,
             )
-            .with_managed_https(routes.https);
+            .with_managed_https(routes.frontend_port.is_some());
             assert_eq!(selected.http, Some(8080));
             assert_eq!(selected.https, expected);
         }

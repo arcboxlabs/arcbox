@@ -4,16 +4,14 @@
 //! Its current Registry registration selects the HTTP directory before TLS.
 //!
 //! Port 443 of each container with an HTTP port is REDIRECTed (nat
-//! PREROUTING) to [`PROXY_PORT`] in the VM's own namespace. The proxy reads
+//! PREROUTING) to the bound frontend in the VM's own namespace. The proxy reads
 //! the address the client dialled from conntrack (`SO_ORIGINAL_DST`),
 //! presents a certificate the local CA signs for the SNI name, and forwards
 //! HTTP with `X-Forwarded-Proto: https` to the container. Traffic from the Mac never
 //! passes through the daemon, so the guest is the only place to terminate.
 //!
-//! [`PROXY_PORT`] is taken in the VM's namespace, so a container cannot
-//! publish that host port. It sits above the kernel's ephemeral range,
-//! which dockerd picks unnamed publishes from, so only an explicit
-//! `-p 61443:…` collides.
+//! The kernel selects an available frontend port. Every redirect uses the
+//! actual bound port, so the proxy does not require a fixed host port.
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -33,9 +31,6 @@ use super::http_port::{HTTP_PORT, HTTPS_PORT};
 #[path = "https_tests.rs"]
 mod tests;
 
-/// Where the 443 rules redirect to, in the VM's own namespace.
-pub(super) const PROXY_PORT: u16 = 61443;
-
 /// A handshake or upstream connect that takes longer is given up.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -49,16 +44,28 @@ pub(super) struct Https {
 }
 
 impl Https {
-    /// Binds the host signing channel and [`PROXY_PORT`].
-    pub(super) async fn bind() -> Result<Self> {
+    /// Binds the host signing channel and returns the selected frontend port.
+    pub(super) async fn bind() -> Result<(Self, u16)> {
         let certificates = Arc::new(Certificates::bind()?);
-        let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, PROXY_PORT))
+        let (listener, port) = Self::bind_listener().await?;
+        Ok((
+            Self {
+                listener,
+                certificates,
+            },
+            port,
+        ))
+    }
+
+    async fn bind_listener() -> Result<(TcpListener, u16)> {
+        let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))
             .await
-            .with_context(|| format!("binding port {PROXY_PORT}"))?;
-        Ok(Self {
-            listener,
-            certificates,
-        })
+            .context("binding domain frontend")?;
+        let port = listener
+            .local_addr()
+            .context("reading domain frontend address")?
+            .port();
+        Ok((listener, port))
     }
 
     /// Serves connections until `cancel`, one task each.

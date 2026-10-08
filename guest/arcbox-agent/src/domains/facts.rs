@@ -7,7 +7,6 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
 use super::http_port::{HTTP_PORT, HTTPS_PORT, Pin};
-use super::https::PROXY_PORT;
 use super::{HttpsBackend, RULE_OWNER, SelectedRoutes};
 use crate::iptables::NatRule;
 
@@ -29,7 +28,11 @@ pub struct EndpointFacts {
 
 impl EndpointFacts {
     /// Native HTTPS keeps the application's TLS; terminated HTTPS reaches the proxy.
-    pub(super) fn rules(&self, selected: SelectedRoutes) -> Vec<NatRule> {
+    pub(super) fn rules(
+        &self,
+        selected: SelectedRoutes,
+        frontend_port: Option<u16>,
+    ) -> Vec<NatRule> {
         let native = match selected.https {
             Some(HttpsBackend::Native(port)) => Some(port),
             _ => None,
@@ -49,12 +52,14 @@ impl EndpointFacts {
                     &["-j", "DNAT", "--to-destination", &destination],
                 ));
             }
-            if selected.terminated_port().is_some() {
+            if let Some(port) = frontend_port
+                && selected.terminated_port().is_some()
+            {
                 rules.push(NatRule::new(
                     RULE_OWNER,
                     &self.id,
                     &["-d", &ip, "-p", "tcp", "--dport", &HTTPS_PORT.to_string()],
-                    &["-j", "REDIRECT", "--to-ports", &PROXY_PORT.to_string()],
+                    &["-j", "REDIRECT", "--to-ports", &port.to_string()],
                 ));
             }
         }
@@ -188,10 +193,13 @@ mod tests {
     fn port_80_of_every_address_routes_to_the_http_port() {
         let facts = EndpointFacts::from_inspect(&inspect(), &Domain::default()).unwrap();
         assert_eq!(
-            specs(&facts.rules(SelectedRoutes {
-                http: Some(3000),
-                https: None
-            })),
+            specs(&facts.rules(
+                SelectedRoutes {
+                    http: Some(3000),
+                    https: None
+                },
+                None
+            )),
             [
                 "-d 172.17.0.2 -p tcp --dport 80 -m comment --comment arcbox-domain:abc123 \
                  -j DNAT --to-destination 172.17.0.2:3000",
@@ -200,44 +208,54 @@ mod tests {
             ]
         );
         assert_eq!(
-            facts.rules(SelectedRoutes {
-                http: Some(80),
-                https: None
-            }),
+            facts.rules(
+                SelectedRoutes {
+                    http: Some(80),
+                    https: None
+                },
+                None
+            ),
             [],
             "80 needs no rule"
         );
-        assert_eq!(facts.rules(SelectedRoutes::default()), []);
+        assert_eq!(facts.rules(SelectedRoutes::default(), None), []);
     }
 
     #[test]
-    fn port_443_goes_to_the_proxy_whatever_the_http_port() {
+    fn port_443_goes_to_the_bound_proxy_whatever_the_http_port() {
         let facts = EndpointFacts::from_inspect(&inspect(), &Domain::default()).unwrap();
         let redirect = "-d 172.17.0.2 -p tcp --dport 443 -m comment --comment \
-                        arcbox-domain:abc123 -j REDIRECT --to-ports 61443";
-        let served_on_80 = specs(&facts.rules(SelectedRoutes::choose(
-            Some(super::super::HttpBackend {
-                port: 80,
-                protocol: Some(super::super::HttpProtocol::Http1),
-            }),
-            None,
-            &BTreeSet::new(),
-        )));
+                        arcbox-domain:abc123 -j REDIRECT --to-ports 51347";
+        let served_on_80 = specs(&facts.rules(
+            SelectedRoutes::choose(
+                Some(super::super::HttpBackend {
+                    port: 80,
+                    protocol: Some(super::super::HttpProtocol::Http1),
+                }),
+                None,
+                &BTreeSet::new(),
+            ),
+            Some(51347),
+        ));
         assert_eq!(served_on_80.len(), 2, "one redirect per address");
         assert_eq!(served_on_80[0], redirect);
-        let served_on_3000 = specs(&facts.rules(SelectedRoutes::choose(
+        let selected = SelectedRoutes::choose(
             Some(super::super::HttpBackend {
                 port: 3000,
                 protocol: Some(super::super::HttpProtocol::Http1),
             }),
             None,
             &BTreeSet::new(),
-        )));
+        );
+        let served_on_3000 = specs(&facts.rules(selected, Some(51347)));
         assert_eq!(served_on_3000.len(), 4);
         assert!(served_on_3000.contains(&redirect.to_owned()));
+        let redirected = specs(&facts.rules(selected, Some(52468)));
+        assert!(redirected.contains(&redirect.replace("51347", "52468")));
+        assert!(!redirected.contains(&redirect.to_owned()));
         assert!(
             facts
-                .rules(SelectedRoutes::choose(None, None, &BTreeSet::new()))
+                .rules(SelectedRoutes::choose(None, None, &BTreeSet::new()), None)
                 .is_empty(),
             "no HTTP port, nothing to relay to"
         );
@@ -250,18 +268,17 @@ mod tests {
         let facts = EndpointFacts::from_inspect(&inspect, &Domain::default()).unwrap();
         let selected = SelectedRoutes::choose(None, facts.https_pin, &BTreeSet::new());
         assert_eq!(
-            specs(&facts.rules(selected)),
+            specs(&facts.rules(selected, None)),
             [
                 "-d 172.17.0.2 -p tcp --dport 443 -m comment --comment arcbox-domain:abc123 -j DNAT --to-destination 172.17.0.2:8443",
                 "-d 172.18.0.3 -p tcp --dport 443 -m comment --comment arcbox-domain:abc123 -j DNAT --to-destination 172.18.0.3:8443",
             ]
         );
         assert_eq!(
-            facts.rules(SelectedRoutes::choose(
-                None,
-                Some(Pin::Port(443)),
-                &BTreeSet::new()
-            )),
+            facts.rules(
+                SelectedRoutes::choose(None, Some(Pin::Port(443)), &BTreeSet::new()),
+                None
+            ),
             []
         );
     }
