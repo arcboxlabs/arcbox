@@ -98,7 +98,9 @@ async fn run(
         tokio::select! {
             () = shutdown.cancelled() => break,
             event = events.recv() => match event {
-                Ok(Event::MachineStarted { name }) => sync(runtime, root, &name).await,
+                Ok(Event::MachineStarted { name } | Event::MachineStopCancelled { name }) => {
+                    sync(runtime, root, &name).await;
+                }
                 Ok(
                     Event::MachineStopping { name }
                     | Event::MachineStopped { name }

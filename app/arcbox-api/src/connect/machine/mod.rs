@@ -695,6 +695,12 @@ mod tests {
     }
 
     #[test]
+    fn stop_admission_and_cancellation_remain_internal() {
+        assert!(to_machine_event(&Event::MachineStopping { name: "m".into() }).is_none());
+        assert!(to_machine_event(&Event::MachineStopCancelled { name: "m".into() }).is_none());
+    }
+
+    #[test]
     fn ignores_non_machine_events() {
         assert!(to_machine_event(&Event::VmStarted { id: "vm".into() }).is_none());
         assert!(to_machine_event(&Event::ContainerRouteInstalled { name: "m".into() }).is_none());

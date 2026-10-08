@@ -297,28 +297,30 @@ async fn expected_agent_connection_fences_replacement_and_selects_the_locked_bac
     }
 }
 
-fn modeled_stop_vm(manager: &VmManager) -> (VmId, VmIncarnation) {
-    use std::sync::atomic::Ordering;
-    let id = manager
-        .create(VmConfig {
-            vsock: false,
-            ..Default::default()
-        })
-        .unwrap();
-    let mut vms = manager.vms.write().unwrap();
-    let entry = vms.get_mut(&id).unwrap();
-    entry.begin_run().unwrap();
-    let vmm = Vmm::new(VmManager::build_vmm_config(entry)).unwrap();
-    vmm.running_flag().store(true, Ordering::SeqCst);
-    entry.vmm = Some(vmm);
-    entry.info.state = MachineState::Running;
-    (id, entry.run_incarnation())
+impl VmManager {
+    pub(crate) fn modeled_running_vm(&self) -> (VmId, VmIncarnation) {
+        use std::sync::atomic::Ordering;
+        let id = self
+            .create(VmConfig {
+                vsock: false,
+                ..Default::default()
+            })
+            .unwrap();
+        let mut vms = self.vms.write().unwrap();
+        let entry = vms.get_mut(&id).unwrap();
+        entry.begin_run().unwrap();
+        let vmm = Vmm::new(Self::build_vmm_config(entry)).unwrap();
+        vmm.running_flag().store(true, Ordering::SeqCst);
+        entry.vmm = Some(vmm);
+        entry.info.state = MachineState::Running;
+        (id, entry.run_incarnation())
+    }
 }
 
 #[test]
 fn stale_stop_and_remove_reject_before_touching_the_replacement() {
     let (manager, _dir) = test_vm_manager();
-    let (id, old) = modeled_stop_vm(&manager);
+    let (id, old) = manager.modeled_running_vm();
     manager
         .vms
         .write()
@@ -353,7 +355,7 @@ fn stale_stop_and_remove_reject_before_touching_the_replacement() {
 fn graceful_completion_never_restores_or_stops_a_replacement_run() {
     for stopped in [false, true] {
         let (manager, _dir) = test_vm_manager();
-        let (id, expected) = modeled_stop_vm(&manager);
+        let (id, expected) = manager.modeled_running_vm();
         manager
             .vms
             .write()
@@ -382,7 +384,7 @@ fn graceful_completion_never_restores_or_stops_a_replacement_run() {
 #[test]
 fn borrowed_vmm_prevents_force_and_removal_until_graceful_restores_it() {
     let (manager, _dir) = test_vm_manager();
-    let (id, expected) = modeled_stop_vm(&manager);
+    let (id, expected) = manager.modeled_running_vm();
     manager
         .vms
         .write()
@@ -405,4 +407,18 @@ fn borrowed_vmm_prevents_force_and_removal_until_graceful_restores_it() {
     });
     assert!(!result.unwrap());
     assert_eq!(manager.network_incarnation(&id).unwrap(), expected);
+}
+
+impl VmManager {
+    pub(crate) fn model_teardown_failure(&self, id: &VmId) {
+        let mut vms = self.vms.write().unwrap();
+        let entry = vms.get_mut(id).unwrap();
+        entry.info.state = MachineState::Stopping;
+        entry
+            .vmm
+            .as_ref()
+            .unwrap()
+            .running_flag()
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }

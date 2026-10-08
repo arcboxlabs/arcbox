@@ -1168,3 +1168,110 @@ fn a_force_fallback_cannot_stop_a_replacement_with_the_same_name() {
     assert_eq!(machine.vm_id, replacement);
     assert_eq!(machine.state, MachineState::Running);
 }
+
+#[test]
+fn expected_host_holds_reject_stopping_replaced_and_unstarted_runs() {
+    let dir = tempdir().unwrap();
+    let manager = test_machine_manager(dir.path());
+    let expected = model_running_machine(&manager, "trust");
+
+    let hold = manager.host_hold_expected("trust", &expected).unwrap();
+    assert!(!manager.host_holds.wait_released("trust", Duration::ZERO));
+    drop(hold);
+    assert!(manager.host_holds.wait_released("trust", Duration::ZERO));
+
+    manager
+        .machines
+        .write()
+        .unwrap()
+        .get_mut("trust")
+        .unwrap()
+        .state = MachineState::Stopping;
+    assert!(manager.host_hold_expected("trust", &expected).is_err());
+    assert!(manager.host_holds.wait_released("trust", Duration::ZERO));
+
+    let (replacement, current) = manager.vm_manager.modeled_running_vm();
+    {
+        let mut machines = manager.machines.write().unwrap();
+        let machine = machines.get_mut("trust").unwrap();
+        machine.state = MachineState::Running;
+        machine.vm_id = replacement;
+    }
+    assert!(manager.host_hold_expected("trust", &expected).is_err());
+    assert!(manager.host_holds.wait_released("trust", Duration::ZERO));
+    drop(manager.host_hold_expected("trust", &current).unwrap());
+
+    let unstarted = manager.vm_manager.create(VmConfig::default()).unwrap();
+    let unstarted_run = manager.vm_manager.run_incarnation(&unstarted).unwrap();
+    manager
+        .machines
+        .write()
+        .unwrap()
+        .get_mut("trust")
+        .unwrap()
+        .vm_id = unstarted;
+    assert!(manager.host_hold_expected("trust", &unstarted_run).is_err());
+    assert!(manager.host_holds.wait_released("trust", Duration::ZERO));
+}
+
+#[test]
+fn removal_does_not_claim_a_machine_with_an_active_stop() {
+    let dir = tempdir().unwrap();
+    let bus = crate::event::EventBus::new();
+    let mut events = bus.subscribe();
+    let manager = test_machine_manager_with_bus(dir.path(), bus);
+    manager.register_mock_machine("stopping", 7).unwrap();
+    manager
+        .machines
+        .write()
+        .unwrap()
+        .get_mut("stopping")
+        .unwrap()
+        .state = MachineState::Stopping;
+    for force in [false, true] {
+        let error = manager.remove("stopping", force).unwrap_err();
+        assert!(error.to_string().contains("another stop owns"));
+        assert_eq!(
+            manager.get("stopping").unwrap().state,
+            MachineState::Stopping
+        );
+        assert!(events.try_recv().is_err());
+    }
+}
+
+fn model_running_machine(manager: &MachineManager, name: &str) -> VmIncarnation {
+    manager.register_mock_machine(name, 7).unwrap();
+    let (id, expected) = manager.vm_manager.modeled_running_vm();
+    manager
+        .machines
+        .write()
+        .unwrap()
+        .get_mut(name)
+        .unwrap()
+        .vm_id = id;
+    expected
+}
+
+#[test]
+fn failed_teardown_cannot_restore_a_non_live_machine() {
+    let dir = tempdir().unwrap();
+    let bus = crate::event::EventBus::new();
+    let mut events = bus.subscribe();
+    let manager = test_machine_manager_with_bus(dir.path(), bus);
+    let expected = model_running_machine(&manager, "uncertain");
+    let id = manager.get("uncertain").unwrap().vm_id;
+    manager.vm_manager.model_teardown_failure(&id);
+    manager
+        .machines
+        .write()
+        .unwrap()
+        .get_mut("uncertain")
+        .unwrap()
+        .state = MachineState::Stopping;
+    manager.rollback_stopping("uncertain", &expected);
+    assert_eq!(
+        manager.get("uncertain").unwrap().state,
+        MachineState::Stopping
+    );
+    assert!(events.try_recv().is_err());
+}

@@ -48,6 +48,7 @@ async fn run(
             event = events.recv() => match event {
                 Ok(
                     Event::MachineStarted { name }
+                    | Event::MachineStopCancelled { name }
                     | Event::MachineStopped { name }
                     | Event::MachineRemoved { name },
                 ) => sync(runtime, &name).await?,

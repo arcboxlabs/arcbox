@@ -556,6 +556,27 @@ impl MachineManager {
         self.host_holds.hold(name)
     }
 
+    /// Holds a running machine while host work drains before shutdown.
+    ///
+    /// # Errors
+    /// Returns an error if the machine is stopping, unavailable, or no longer names the expected run.
+    pub fn host_hold_expected(&self, name: &str, expected: &VmIncarnation) -> Result<HostHold> {
+        let machines = self
+            .machines
+            .read()
+            .map_err(|_| EngineError::LockPoisoned)?;
+        let machine = machines
+            .get(name)
+            .ok_or_else(|| EngineError::not_found(name))?;
+        if machine.state != MachineState::Running {
+            return Err(EngineError::invalid_state(format!(
+                "machine '{name}' is not running"
+            )));
+        }
+        self.vm_manager
+            .with_network_incarnation(&machine.vm_id, expected, || self.host_holds.hold(name))
+    }
+
     /// Waits for the host to release what it holds of `name`, within
     /// [`HOST_RELEASE_TIMEOUT`]; a hold that outlives the wait is logged
     /// and the stop goes ahead.
@@ -1514,32 +1535,8 @@ impl MachineManager {
             )));
         }
 
-        // Stop underlying VM
-        #[cfg(target_os = "macos")]
-        self.vm_manager
-            .force_stop_without_hypervisor(&machine.vm_id, expected)?;
-        #[cfg(not(target_os = "macos"))]
-        self.vm_manager.stop(&machine.vm_id, expected)?;
-
-        machine.state = MachineState::Stopped;
-        machine.cid = None;
-        machine.bridge_ip_address = None;
-        self.stop_serial_drain(name);
-
-        if let Err(e) = self.persist_stopped(name) {
-            tracing::warn!(
-                "Failed to persist stopped state for machine '{}': {}",
-                name,
-                e
-            );
-        }
-
-        self.publish_event(
-            name,
-            crate::event::Event::MachineStopped {
-                name: name.to_string(),
-            },
-        );
+        self.force_stop_vm(&machine.vm_id, expected)?;
+        self.publish_stopped(name, machine, expected)?;
         Ok(())
     }
 
@@ -1758,28 +1755,7 @@ impl MachineManager {
                 let machine = machines
                     .get_mut(name)
                     .ok_or_else(|| EngineError::not_found(name.to_string()))?;
-                let current_id = machine.vm_id.clone();
-                self.vm_manager
-                    .with_run_incarnation(&current_id, expected, || {
-                        machine.state = MachineState::Stopped;
-                        machine.cid = None;
-                        machine.bridge_ip_address = None;
-                        self.stop_serial_drain(name);
-
-                        if let Err(e) = self.persist_stopped(name) {
-                            tracing::warn!(
-                                "Failed to persist stopped state for machine '{}': {}",
-                                name,
-                                e
-                            );
-                        }
-                        self.publish_event(
-                            name,
-                            crate::event::Event::MachineStopped {
-                                name: name.to_string(),
-                            },
-                        );
-                    })?;
+                self.publish_stopped(name, machine, expected)?;
                 Ok(true)
             }
             Ok(false) => {
@@ -1791,6 +1767,47 @@ impl MachineManager {
                 Err(e)
             }
         }
+    }
+
+    fn force_stop_vm(&self, id: &VmId, expected: &VmIncarnation) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            self.vm_manager.force_stop_without_hypervisor(id, expected)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.vm_manager.stop(id, expected)
+        }
+    }
+
+    fn publish_stopped(
+        &self,
+        name: &str,
+        machine: &mut MachineInfo,
+        expected: &VmIncarnation,
+    ) -> Result<()> {
+        let id = machine.vm_id.clone();
+        self.vm_manager.with_run_incarnation(&id, expected, || {
+            machine.state = MachineState::Stopped;
+            machine.cid = None;
+            machine.bridge_ip_address = None;
+            self.stop_serial_drain(name);
+
+            if let Err(e) = self.persist_stopped(name) {
+                tracing::warn!(
+                    "Failed to persist stopped state for machine '{}': {}",
+                    name,
+                    e
+                );
+            }
+
+            self.publish_event(
+                name,
+                crate::event::Event::MachineStopped {
+                    name: name.to_string(),
+                },
+            );
+        })
     }
 
     /// Records a stop: the state, and the bridge address, which is only
@@ -1868,6 +1885,11 @@ impl MachineManager {
             return Ok(false);
         };
 
+        if machine.state == MachineState::Stopping {
+            return Err(EngineError::invalid_state(
+                "another stop owns this machine run",
+            ));
+        }
         let expected = self.vm_manager.run_incarnation(&machine.vm_id)?;
         // Check if machine is running
         if machine.state == MachineState::Running && !force {
@@ -1879,22 +1901,32 @@ impl MachineManager {
         // Stop if running and force is set
         if machine.state == MachineState::Running {
             let vm_id = machine.vm_id.clone();
-            drop(machines); // Release lock before stopping
-            self.publish_event(
-                name,
-                crate::event::Event::MachineStopping {
-                    name: name.to_string(),
-                },
-            );
+            self.vm_manager
+                .with_run_incarnation(&vm_id, &expected, || {
+                    self.publish_event(
+                        name,
+                        crate::event::Event::MachineStopping {
+                            name: name.to_string(),
+                        },
+                    );
+                })?;
+            drop(machines);
             // The VM dies below; what the host holds of the machine (its
             // root mount) must be released while the machine still answers.
             self.await_host_release(name);
-            self.vm_manager.stop(&vm_id, &expected)?;
-            self.stop_serial_drain(name);
             machines = self
                 .machines
                 .write()
                 .map_err(|_| EngineError::LockPoisoned)?;
+            if machines
+                .get(name)
+                .is_some_and(|machine| machine.state == MachineState::Stopping)
+            {
+                return Err(EngineError::invalid_state(
+                    "another stop owns this machine run",
+                ));
+            }
+            self.vm_manager.stop(&vm_id, &expected)?;
         }
 
         // Get VM ID before removing from map.
@@ -1907,6 +1939,7 @@ impl MachineManager {
 
         // Remove from VM manager
         self.vm_manager.remove(&vm_id, &expected)?;
+        self.stop_serial_drain(name);
 
         // Remove from machines map
         machines.remove(name);

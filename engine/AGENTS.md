@@ -96,6 +96,7 @@ The restructure plan and its locked decisions live in
 ## Guest trust
 
 - `agent_client/guest_trust.rs` sends an explicit current public certificate or removal over a dedicated cancellable connection. Await cancellation before retiring the VM. Match the acknowledged fingerprint and expected VM incarnation before reporting client trust as ready.
+- Machine trust requests must acquire `host_hold_expected` before connecting. Retain the hold until native connection and request workers finish cancellation.
 
 ## Durable writes
 
