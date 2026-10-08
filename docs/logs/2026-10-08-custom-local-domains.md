@@ -255,3 +255,5 @@ Readiness streaming now resides in `agent/linux/rpc/readiness.rs`, preserving th
 ## Retire the previous physical VM before publication
 
 The host commit state now retains the VM that owns published container networking. A replacement VM retires that state before its first publication; canceled cleanup retains ownership for retry. The Docker reconciler checks physical identity on each lifecycle notification and timer tick, even while stopped. Complete guest queries use the existing 30-second interval as their deadline, and failed retirement keeps the short retry cadence. These changes do not start a VM or change installed resolver state.
+
+Graceful and forced shutdown now close host-network admission before slow cleanup, then clear shared host state under the existing lock order. New regressions cover partial publication from a replacement VM, late writers during shutdown, and canceled retirement that preserves a newer shared TCP listener. Serial Runtime passed 83 tests before the final socket regression; that regression passed separately. Strict all-target Core/Docker Clippy and formatting passed. Installed restart and teardown acceptance remain pending.

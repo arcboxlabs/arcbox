@@ -1,4 +1,4 @@
-//! Retires obsolete physical datapaths before container publication.
+//! Retires obsolete physical datapaths and closes publication before shutdown.
 
 use super::*;
 use arcbox_error::CommonError;
@@ -82,6 +82,39 @@ impl Runtime {
             .filter(|owner| Self::is_container_dns_owner(owner))
             .map(str::to_owned)
             .collect();
+        for owner in owners {
+            registry.remove(&owner);
+        }
+        self.network_manager.replace_dns_projection(&registry);
+        state.incarnation = None;
+    }
+
+    pub(in crate::runtime) fn close_host_network_admission(&self) {
+        let mut activity = self
+            .host_network
+            .activity
+            .lock()
+            .expect("host activity lock poisoned");
+        activity.closed = true;
+        activity.advance();
+    }
+
+    pub(in crate::runtime) async fn clear_host_network_for_shutdown(&self) {
+        let mut sandbox = self.sandbox_host_state.lock().await;
+        let mut kubernetes = self.kubernetes_lb_ports.lock().await;
+        let mut state = self.host_network.commit.lock().await;
+        self.invalidate_host_network_snapshot();
+        *sandbox = sandbox.wrapping_add(1);
+        self.stop_port_forwarding_all_raw().await;
+        self.sandbox_port_keys.write().await.clear();
+        self.sandbox_dns_ids.write().await.clear();
+        *kubernetes = Default::default();
+        self.container_aliases.write().await.clear();
+        let mut registry = self
+            .dns_registry
+            .write()
+            .expect("DNS registry lock poisoned");
+        let owners: Vec<_> = registry.owners().map(str::to_owned).collect();
         for owner in owners {
             registry.remove(&owner);
         }

@@ -1261,11 +1261,12 @@ impl Runtime {
     ///
     /// Returns an error if shutdown fails.
     pub async fn shutdown(&self) -> Result<()> {
+        self.close_host_network_admission();
         tracing::info!("ArcBox runtime shutting down");
         let recovery_closed = self.close_storage_recovery().await;
 
         // 1. Stop all active host port forwarders.
-        self.stop_port_forwarding_all().await;
+        self.clear_host_network_for_shutdown().await;
 
         // 2. Shutdown VM lifecycle manager (gracefully stops default VM).
         if matches!(recovery_closed, Ok(false))
@@ -1337,10 +1338,11 @@ impl Runtime {
     ///
     /// Returns an error if shutdown fails.
     pub async fn shutdown_force(&self) -> Result<()> {
+        self.close_host_network_admission();
         tracing::warn!("ArcBox runtime force shutdown");
         let recovery_closed = self.close_storage_recovery().await;
 
-        self.stop_port_forwarding_all().await;
+        self.clear_host_network_for_shutdown().await;
 
         // Force stop VM lifecycle manager (immediate VM termination).
         if matches!(recovery_closed, Ok(false))

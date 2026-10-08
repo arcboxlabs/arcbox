@@ -309,3 +309,271 @@ async fn stale_and_failed_snapshots_preserve_a_healthy_listener() {
     ));
     runtime.stop_port_forwarding_all().await;
 }
+
+#[tokio::test]
+async fn a_new_vm_mutation_retires_all_previous_containers_before_publication() {
+    let (runtime, _dir) = runtime().await;
+    let fixture = NetworkFixture::default();
+    let runtime = runtime.with_network_fixture(fixture.clone());
+    for owner in ["system:host", "machine:other", "sandbox:other"] {
+        runtime
+            .register_dns(
+                owner,
+                &[format!("{}.local", owner.replace(':', "-"))],
+                "127.0.0.1".parse().unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    let metadata = |id: &str| {
+        ContainerMetadata::from_inspect(&serde_json::json!({
+            "Id": id, "Name": format!("/{id}"),
+            "NetworkSettings": {"Networks": {"bridge": {"IPAddress": "172.17.0.2"}}}
+        }))
+        .unwrap()
+    };
+    let containers = ["old-one", "old-two"].map(|id| ContainerNetwork {
+        metadata: metadata(id),
+        bindings: vec![],
+    });
+    runtime
+        .capture_container_snapshot()
+        .await
+        .unwrap()
+        .unwrap()
+        .commit(&containers)
+        .await
+        .unwrap();
+    fixture.restart();
+    let mutation = runtime
+        .begin_container_mutation(runtime.container_network_incarnation().unwrap())
+        .await
+        .unwrap();
+    mutation
+        .commit(ContainerChange::Publish(&metadata("new"), &[]))
+        .await
+        .unwrap();
+    drop(mutation);
+    assert_eq!(
+        runtime.registered_container_ids().await,
+        std::collections::HashSet::from(["new".into()])
+    );
+    assert_eq!(runtime.resolve_registered_container("old-one").await, None);
+    assert_eq!(runtime.resolve_registered_container("old-two").await, None);
+    assert!(
+        !runtime
+            .retire_system_vm_container_networking()
+            .await
+            .unwrap()
+    );
+    fixture.stop();
+    assert!(
+        runtime
+            .retire_system_vm_container_networking()
+            .await
+            .unwrap()
+    );
+    assert!(runtime.registered_container_ids().await.is_empty());
+    assert_eq!(runtime.resolve_registered_container("new").await, None);
+    let registry = runtime.dns_registry.read().unwrap();
+    assert!(registry.get("old-one").is_none());
+    assert!(registry.get("old-two").is_none());
+    assert!(registry.get("new").is_none());
+    for owner in ["system:host", "machine:other", "sandbox:other"] {
+        assert!(registry.get(owner).is_some());
+    }
+}
+
+#[tokio::test]
+async fn shutdown_closes_admission_before_cleanup_and_rejects_delayed_publication() {
+    use std::{
+        future::Future,
+        task::{Context, Waker},
+    };
+    for force in [false, true] {
+        let (runtime, _dir) = runtime().await;
+        let runtime = runtime.with_network_fixture(NetworkFixture::default());
+        runtime
+            .register_sandbox_dns("existing", "172.17.0.2".parse().unwrap())
+            .await
+            .unwrap();
+        runtime
+            .register_container_alias("existing", "existing")
+            .await
+            .unwrap();
+        let snapshot = runtime.capture_container_snapshot().await.unwrap().unwrap();
+        let mutation = runtime
+            .begin_container_mutation(runtime.container_network_incarnation().unwrap())
+            .await
+            .unwrap();
+        let aliases = runtime.container_aliases.write().await;
+        let mut writer = std::pin::pin!(runtime.register_container_alias("late", "late"));
+        assert!(
+            writer
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        let mut shutdown = std::pin::pin!(async {
+            if force {
+                runtime.shutdown_force().await
+            } else {
+                runtime.shutdown().await
+            }
+        });
+        assert!(
+            shutdown
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        assert!(runtime.host_network.activity.lock().unwrap().closed);
+        drop(aliases);
+        assert!(
+            writer
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("admission is closed")
+        );
+        shutdown.await.unwrap();
+        assert!(
+            snapshot
+                .commit(&[])
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("admission is closed")
+        );
+        assert!(
+            mutation
+                .commit(ContainerChange::Remove("existing"))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("admission is closed")
+        );
+        assert!(
+            runtime
+                .register_sandbox_dns("late", "172.17.0.3".parse().unwrap())
+                .await
+                .is_err()
+        );
+        assert!(
+            runtime
+                .start_port_forwarding_for(runtime.default_machine_name(), "late", &[])
+                .await
+                .is_err()
+        );
+        assert!(runtime.container_aliases.read().await.is_empty());
+        assert!(
+            runtime
+                .dns_registry
+                .read()
+                .unwrap()
+                .owners()
+                .next()
+                .is_none()
+        );
+        assert!(runtime.sandbox_dns_ids.read().await.is_empty());
+        assert!(runtime.sandbox_port_keys.read().await.is_empty());
+        runtime.deregister_sandbox_dns("existing").await;
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn canceled_retirement_retains_ownership_and_preserves_a_new_shared_listener() {
+    use arcbox_net::darwin::inbound_relay::{
+        InboundCommand, InboundListenerManager, InboundProtocol,
+    };
+    use std::{
+        future::Future,
+        task::{Context, Waker},
+    };
+    let (runtime, _dir) = runtime().await;
+    let fixture = NetworkFixture::default();
+    let runtime = runtime.with_network_fixture(fixture.clone());
+    let metadata =
+        ContainerMetadata::from_inspect(&serde_json::json!({"Id":"old", "Name":"/old"})).unwrap();
+    let mutation = runtime
+        .begin_container_mutation(runtime.container_network_incarnation().unwrap())
+        .await
+        .unwrap();
+    mutation
+        .commit(ContainerChange::Publish(&metadata, &[]))
+        .await
+        .unwrap();
+    drop(mutation);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let mut manager = InboundListenerManager::new(tx);
+    let port = manager
+        .add_rule(std::net::Ipv4Addr::LOCALHOST, 0, 8080, InboundProtocol::Tcp)
+        .await
+        .unwrap();
+    runtime
+        .adopt_test_manager(runtime.default_machine_name(), manager)
+        .await;
+    let aliases = runtime.container_aliases.write().await;
+    {
+        let mut retire = std::pin::pin!(runtime.retire_system_vm_container_networking());
+        assert!(
+            retire
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+    }
+    assert!(
+        runtime
+            .host_network
+            .commit
+            .lock()
+            .await
+            .incarnation
+            .is_some()
+    );
+    assert!(runtime.dns_registry.read().unwrap().get("old").is_some());
+    drop(aliases);
+    assert!(
+        runtime
+            .retire_system_vm_container_networking()
+            .await
+            .unwrap()
+    );
+    assert!(runtime.dns_registry.read().unwrap().get("old").is_none());
+    let _stream = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+        .await
+        .unwrap();
+    assert!(matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap(),
+        Some(InboundCommand::TcpAccepted {
+            container_port: 8080,
+            ..
+        })
+    ));
+    fixture.stop();
+    assert!(
+        runtime
+            .retire_system_vm_container_networking()
+            .await
+            .unwrap()
+    );
+    assert!(
+        tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+            .await
+            .is_err()
+    );
+    assert!(
+        runtime
+            .host_network
+            .commit
+            .lock()
+            .await
+            .incarnation
+            .is_none()
+    );
+    assert!(runtime.inbound_listeners.read().await.is_empty());
+}
