@@ -833,80 +833,85 @@ impl MachineManager {
     /// guest's console pipes empty for as long as it runs; see [`serial`] for
     /// why a VM cannot go without one.
     pub async fn start(self: &Arc<Self>, name: &str) -> Result<()> {
-        let is_machine_vm = self.start_process(name)?;
+        let (is_machine_vm, expected) = self.start_process(name)?;
 
         if is_machine_vm {
-            self.wait_for_machine_ready(name).await.map_err(|e| {
-                EngineError::Machine(format!(
-                    "Machine '{name}' started but readiness check failed: {e}"
-                ))
-            })?;
+            self.wait_for_machine_ready(name, &expected)
+                .await
+                .map_err(|e| {
+                    EngineError::Machine(format!(
+                        "Machine '{name}' started but readiness check failed: {e}"
+                    ))
+                })?;
         }
 
-        self.publish_event(
-            name,
-            crate::event::Event::MachineStarted {
-                name: name.to_string(),
-            },
-        );
-        Ok(())
+        self.with_network_incarnation(name, &expected, |machine| {
+            if machine.state != MachineState::Running {
+                return Err(EngineError::invalid_state(format!(
+                    "machine '{name}' is not running"
+                )));
+            }
+            self.publish_event(
+                name,
+                crate::event::Event::MachineStarted {
+                    name: name.to_string(),
+                },
+            );
+            Ok(())
+        })?
     }
 
-    fn start_process(self: &Arc<Self>, name: &str) -> Result<bool> {
+    fn start_process(self: &Arc<Self>, name: &str) -> Result<(bool, VmIncarnation)> {
         // The reservation cannot overtake a start before its running state is published.
         let _storage = self.storage_permit(name)?;
         self.start_reserved_process(name)
     }
 
-    fn start_reserved_process(self: &Arc<Self>, name: &str) -> Result<bool> {
+    fn start_reserved_process(self: &Arc<Self>, name: &str) -> Result<(bool, VmIncarnation)> {
         self.verify_storage_pair(name)?;
         let (vm_id, cid) = self.assign_cid_for_start(name)?;
+        let expected = self.vm_manager.start(&vm_id, self.host_network.clone())?;
+        let is_machine_vm = self.publish_running(name, &expected, cid)?;
+        Ok((is_machine_vm, expected))
+    }
 
-        // Check if this is a distro-based machine VM.
-        let is_machine_vm = self
-            .machines
-            .read()
-            .map_err(|_| EngineError::LockPoisoned)?
-            .get(name)
-            .and_then(|m| m.distro.as_ref())
-            .is_some();
-
-        // Start underlying VM
-        self.vm_manager.start(&vm_id, self.host_network.clone())?;
-
-        // Update machine state
+    fn publish_running(&self, name: &str, expected: &VmIncarnation, cid: u32) -> Result<bool> {
         let started_at = Utc::now();
-        {
-            let mut machines = self
-                .machines
-                .write()
-                .map_err(|_| EngineError::LockPoisoned)?;
-
-            if let Some(machine) = machines.get_mut(name) {
+        let mut machines = self
+            .machines
+            .write()
+            .map_err(|_| EngineError::LockPoisoned)?;
+        let machine = machines
+            .get_mut(name)
+            .ok_or_else(|| EngineError::not_found(name))?;
+        if !matches!(machine.state, MachineState::Created | MachineState::Stopped) {
+            return Err(EngineError::invalid_state(format!(
+                "machine '{name}' cannot publish a start"
+            )));
+        }
+        // Capture readers before the publication guard to avoid a nested VM registry read.
+        #[cfg(target_os = "macos")]
+        let readers = self.vm_manager.dup_serial_readers(&machine.vm_id, expected);
+        self.vm_manager
+            .with_network_incarnation(&machine.vm_id, expected, || {
                 machine.state = MachineState::Running;
                 machine.cid = Some(cid);
                 machine.ip_address = None;
                 machine.bridge_ip_address = None;
                 machine.started_at = Some(started_at);
-
+                #[cfg(target_os = "macos")]
+                self.start_serial_drain(name, readers);
+                if let Err(error) = self.persistence.update(name, |saved| {
+                    saved.state = MachineState::Running.into();
+                    saved.ip_address = None;
+                    saved.bridge_ip_address = None;
+                    saved.started_at = Some(started_at);
+                }) {
+                    tracing::warn!(machine = name, %error, "Failed to persist running state");
+                }
                 tracing::info!("Machine '{}' started with CID {}", name, cid);
-            }
-        }
-
-        #[cfg(target_os = "macos")]
-        self.start_serial_drain(name, &vm_id);
-
-        // Update persisted state (single read-modify-write)
-        if let Err(e) = self.persistence.update(name, |m| {
-            m.state = MachineState::Running.into();
-            m.ip_address = None;
-            m.bridge_ip_address = None;
-            m.started_at = Some(started_at);
-        }) {
-            tracing::warn!("Failed to persist state for machine '{}': {}", name, e);
-        }
-
-        Ok(is_machine_vm)
+                machine.distro.is_some()
+            })
     }
 
     /// Waits for the guest agent to become ready and discovers the IP address.
@@ -922,7 +927,7 @@ impl MachineManager {
     /// Probe before the first sleep: failed probes are ~1ms (vsock RST via
     /// the event-driven RX path), while sleeping first puts a full backoff
     /// interval on every start even when the agent is already up.
-    async fn wait_for_machine_ready(&self, name: &str) -> Result<()> {
+    async fn wait_for_machine_ready(&self, name: &str, expected: &VmIncarnation) -> Result<()> {
         const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
         const INITIAL_DELAY_MS: u64 = 50;
         const MAX_DELAY_MS: u64 = 500;
@@ -933,22 +938,34 @@ impl MachineManager {
         let mut delay_ms = INITIAL_DELAY_MS;
         let mut attempt: u32 = 0;
 
-        let addresses = loop {
+        let (_hold, addresses) = loop {
             attempt += 1;
-
-            let probed = match self.connect_agent(name) {
+            let hold = self.host_hold_expected(name, expected)?;
+            let probed = match self.connect_agent_expected(name, expected) {
                 Ok(agent) if agent.is_blocking() => {
                     tokio::task::block_in_place(|| probe_ip_blocking(agent, name, attempt))?
                 }
-                Ok(agent) => probe_ip_async(agent, name, attempt).await?,
+                Ok(agent) => {
+                    let budget = deadline
+                        .saturating_duration_since(std::time::Instant::now())
+                        .min(std::time::Duration::from_secs(5));
+                    match tokio::time::timeout(budget, probe_ip_async(agent, name, attempt)).await {
+                        Ok(result) => result?,
+                        Err(_) => {
+                            tracing::trace!(machine = name, attempt, "readiness probe timed out");
+                            None
+                        }
+                    }
+                }
                 Err(e) => {
                     tracing::trace!("Machine '{}' connect failed (attempt {attempt}): {e}", name);
                     None
                 }
             };
             if let Some(addresses) = probed {
-                break addresses;
+                break (hold, addresses);
             }
+            drop(hold);
 
             if std::time::Instant::now() >= deadline {
                 self.log_console_tail(name);
@@ -960,23 +977,13 @@ impl MachineManager {
             delay_ms = (delay_ms * 3 / 2).min(MAX_DELAY_MS);
         };
 
-        // Back on async context — update state.
-        {
-            let mut machines = self
-                .machines
-                .write()
-                .map_err(|_| EngineError::LockPoisoned)?;
-            if let Some(machine) = machines.get_mut(name) {
-                machine.ip_address = Some(addresses.ip.clone());
-                machine.bridge_ip_address.clone_from(&addresses.bridge_ip);
-            }
-        }
-        if let Err(e) = self.persistence.update(name, |m| {
-            m.ip_address = Some(addresses.ip.clone());
-            m.bridge_ip_address.clone_from(&addresses.bridge_ip);
-        }) {
-            tracing::warn!("Failed to persist IP for machine '{}': {}", name, e);
-        }
+        self.publish_addresses(
+            name,
+            expected,
+            Some(&addresses.ip),
+            addresses.bridge_ip.as_deref(),
+            &tokio_util::sync::CancellationToken::new(),
+        )?;
         tracing::info!(
             machine = name,
             ip = %addresses.ip,
@@ -1294,14 +1301,21 @@ impl MachineManager {
         })
         .await?;
         let bridge_ip = Some(info.bridge_ip_address).filter(|ip| !ip.is_empty());
-        self.publish_bridge_address(&machine_name, &expected, bridge_ip.as_deref(), cancelled)?;
+        self.publish_addresses(
+            &machine_name,
+            &expected,
+            None,
+            bridge_ip.as_deref(),
+            cancelled,
+        )?;
         Ok(bridge_ip)
     }
 
-    fn publish_bridge_address(
+    fn publish_addresses(
         &self,
         machine_name: &str,
         expected: &VmIncarnation,
+        ip: Option<&str>,
         bridge_ip: Option<&str>,
         cancelled: &tokio_util::sync::CancellationToken,
     ) -> Result<()> {
@@ -1320,12 +1334,14 @@ impl MachineManager {
         self.vm_manager
             .with_network_incarnation(&machine.vm_id, expected, || {
                 if cancelled.is_cancelled() {
-                    return Err(EngineError::Machine(
-                        "bridge address query cancelled".into(),
-                    ));
+                    return Err(EngineError::Machine("address query cancelled".into()));
+                }
+                if let Some(ip) = ip {
+                    machine.ip_address = Some(ip.to_owned());
                 }
                 machine.bridge_ip_address = bridge_ip.map(str::to_owned);
                 if let Err(error) = self.persistence.update(machine_name, |saved| {
+                    saved.ip_address.clone_from(&machine.ip_address);
                     saved
                         .bridge_ip_address
                         .clone_from(&machine.bridge_ip_address);
@@ -1333,7 +1349,7 @@ impl MachineManager {
                     tracing::warn!(
                         machine = machine_name,
                         %error,
-                        "failed to persist bridge address"
+                        "failed to persist machine addresses"
                     );
                 }
                 Ok(())
@@ -1411,8 +1427,8 @@ impl MachineManager {
     /// Starts the serial drain for a machine that just entered `Running`,
     /// replacing (and thereby stopping) any earlier one under the same name.
     #[cfg(target_os = "macos")]
-    fn start_serial_drain(&self, name: &str, vm_id: &VmId) {
-        let handle = match self.vm_manager.dup_serial_readers(vm_id) {
+    fn start_serial_drain(&self, name: &str, readers: Result<Option<arcbox_vmm::SerialReaders>>) {
+        let handle = match readers {
             Ok(Some(readers)) => serial::spawn(name, readers),
             Ok(None) => {
                 tracing::debug!(machine = name, "no host console pipes to drain");

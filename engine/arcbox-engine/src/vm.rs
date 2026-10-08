@@ -229,12 +229,12 @@ impl VmManager {
         }
     }
 
-    /// Starts a VM, wiring its datapath to `host_network`.
+    /// Starts a VM and returns the physical run identity under the VM write guard.
     ///
     /// # Errors
     ///
     /// Returns an error if the VM cannot be started.
-    pub fn start(&self, id: &VmId, host_network: HostNetwork) -> Result<()> {
+    pub fn start(&self, id: &VmId, host_network: HostNetwork) -> Result<VmIncarnation> {
         let mut vms = self.vms.write().map_err(|_| EngineError::LockPoisoned)?;
 
         let entry = vms
@@ -284,7 +284,7 @@ impl VmManager {
         entry.info.state = MachineState::Running;
 
         tracing::info!("Started VM {}", id);
-        Ok(())
+        Ok(entry.run_incarnation())
     }
 
     /// Stops a VM.
@@ -878,17 +878,21 @@ impl VmManager {
     ///
     /// # Errors
     ///
-    /// Returns an error if the VM is unknown or the pipes cannot be duplicated.
+    /// Returns an error if the expected run is unavailable or the pipes cannot be duplicated.
     #[cfg(target_os = "macos")]
-    pub fn dup_serial_readers(&self, id: &VmId) -> Result<Option<arcbox_vmm::SerialReaders>> {
-        let vms = self.vms.read().map_err(|_| EngineError::LockPoisoned)?;
-        let entry = vms
-            .get(id)
-            .ok_or_else(|| EngineError::not_found(id.to_string()))?;
-        let Some(vmm) = entry.vmm.as_ref() else {
-            return Ok(None);
-        };
-        vmm.dup_serial_readers().map_err(EngineError::from)
+    pub fn dup_serial_readers(
+        &self,
+        id: &VmId,
+        expected: &VmIncarnation,
+    ) -> Result<Option<arcbox_vmm::SerialReaders>> {
+        self.with_expected_entry(id, expected, |entry| {
+            entry
+                .vmm
+                .as_ref()
+                .expect("live VM has a VMM")
+                .dup_serial_readers()
+                .map_err(EngineError::from)
+        })?
     }
 
     /// Reads serial console output from a running VM (macOS only).

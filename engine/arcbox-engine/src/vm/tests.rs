@@ -422,3 +422,13 @@ impl VmManager {
             .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
+
+impl VmManager {
+    pub(crate) fn model_restarted_vm(&self, id: &VmId) -> VmIncarnation {
+        let mut vms = self.vms.write().unwrap();
+        let entry = vms.get_mut(id).unwrap();
+        entry.begin_run().unwrap();
+        entry.info.state = MachineState::Running;
+        entry.run_incarnation()
+    }
+}

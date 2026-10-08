@@ -1712,7 +1712,7 @@ fn bridge_publication_rejects_stopping_and_replaced_runs_in_memory_and_storage()
     let changed = Some("192.168.64.3".to_owned());
     let cancelled = tokio_util::sync::CancellationToken::new();
     manager
-        .publish_bridge_address("bridge", &expected, original.as_deref(), &cancelled)
+        .publish_addresses("bridge", &expected, None, original.as_deref(), &cancelled)
         .unwrap();
     let addresses = || {
         (
@@ -1734,7 +1734,7 @@ fn bridge_publication_rejects_stopping_and_replaced_runs_in_memory_and_storage()
             .state = state;
         assert!(
             manager
-                .publish_bridge_address("bridge", &expected, changed.as_deref(), &cancelled)
+                .publish_addresses("bridge", &expected, None, changed.as_deref(), &cancelled)
                 .is_err()
         );
         assert_eq!(addresses(), (original.clone(), original.clone()));
@@ -1748,18 +1748,18 @@ fn bridge_publication_rejects_stopping_and_replaced_runs_in_memory_and_storage()
     }
     assert!(
         manager
-            .publish_bridge_address("bridge", &expected, changed.as_deref(), &cancelled)
+            .publish_addresses("bridge", &expected, None, changed.as_deref(), &cancelled)
             .is_err()
     );
     assert_eq!(addresses(), (original.clone(), original));
     manager
-        .publish_bridge_address("bridge", &current, changed.as_deref(), &cancelled)
+        .publish_addresses("bridge", &current, None, changed.as_deref(), &cancelled)
         .unwrap();
     assert_eq!(addresses(), (changed.clone(), changed.clone()));
     cancelled.cancel();
     assert!(
         manager
-            .publish_bridge_address("bridge", &current, None, &cancelled)
+            .publish_addresses("bridge", &current, None, None, &cancelled)
             .is_err()
     );
     assert_eq!(addresses(), (changed.clone(), changed));
@@ -1820,4 +1820,113 @@ async fn aborted_bridge_query_retains_hold_until_native_connect_drains() {
             .bridge_ip_address
             .is_none()
     );
+}
+
+#[test]
+fn late_start_cannot_overwrite_restarted_or_stopping_machine() {
+    let directory = tempdir().unwrap();
+    let manager = test_machine_manager(directory.path());
+    let expected = model_running_machine(&manager, "start");
+    {
+        let mut machines = manager.machines.write().unwrap();
+        let machine = machines.get_mut("start").unwrap();
+        machine.state = MachineState::Stopped;
+        machine.ip_address = Some("10.0.0.2".into());
+        machine.bridge_ip_address = Some("192.168.64.2".into());
+    }
+    let original = manager.get("start").unwrap();
+    manager.persistence.save(&original).unwrap();
+    let saved = serde_json::to_value(manager.persistence.load("start").unwrap()).unwrap();
+    let current = manager.vm_manager.model_restarted_vm(&original.vm_id);
+    assert!(manager.publish_running("start", &expected, 99).is_err());
+    let unchanged = manager.get("start").unwrap();
+    assert_eq!(unchanged.state, MachineState::Stopped);
+    assert_eq!(unchanged.cid, original.cid);
+    assert_eq!(unchanged.ip_address, original.ip_address);
+    assert_eq!(unchanged.bridge_ip_address, original.bridge_ip_address);
+    assert_eq!(unchanged.started_at, original.started_at);
+    manager
+        .machines
+        .write()
+        .unwrap()
+        .get_mut("start")
+        .unwrap()
+        .state = MachineState::Stopping;
+    assert!(manager.publish_running("start", &current, 99).is_err());
+    assert_eq!(manager.get("start").unwrap().state, MachineState::Stopping);
+    assert_eq!(
+        serde_json::to_value(manager.persistence.load("start").unwrap()).unwrap(),
+        saved
+    );
+    manager
+        .machines
+        .write()
+        .unwrap()
+        .get_mut("start")
+        .unwrap()
+        .state = MachineState::Stopped;
+    manager.publish_running("start", &current, 99).unwrap();
+    let running = manager.get("start").unwrap();
+    assert_eq!(running.state, MachineState::Running);
+    assert_eq!(running.cid, Some(99));
+    assert!(running.ip_address.is_none());
+    assert!(running.bridge_ip_address.is_none());
+    let saved = manager.persistence.load("start").unwrap();
+    assert!(saved.state.needs_recovery());
+    assert_eq!(saved.started_at, running.started_at);
+    assert!(saved.ip_address.is_none());
+    assert!(saved.bridge_ip_address.is_none());
+}
+
+#[tokio::test]
+async fn readiness_cannot_probe_or_publish_a_restarted_run() {
+    let directory = tempdir().unwrap();
+    let manager = test_machine_manager(directory.path());
+    let expected = model_running_machine(&manager, "ready");
+    manager
+        .persistence
+        .save(&manager.get("ready").unwrap())
+        .unwrap();
+    let cancelled = tokio_util::sync::CancellationToken::new();
+    manager
+        .publish_addresses(
+            "ready",
+            &expected,
+            Some("10.0.0.2"),
+            Some("192.168.64.2"),
+            &cancelled,
+        )
+        .unwrap();
+    let current = manager
+        .vm_manager
+        .model_restarted_vm(&manager.get("ready").unwrap().vm_id);
+    let error = manager
+        .wait_for_machine_ready("ready", &expected)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("incarnation changed"));
+    assert!(manager.host_holds.wait_released("ready", Duration::ZERO));
+    assert!(
+        manager
+            .publish_addresses("ready", &expected, Some("10.0.0.3"), None, &cancelled)
+            .is_err()
+    );
+    let unchanged = manager.get("ready").unwrap();
+    let saved = manager.persistence.load("ready").unwrap();
+    assert_eq!(unchanged.ip_address.as_deref(), Some("10.0.0.2"));
+    assert_eq!(unchanged.bridge_ip_address.as_deref(), Some("192.168.64.2"));
+    assert_eq!(saved.ip_address, unchanged.ip_address);
+    assert_eq!(saved.bridge_ip_address, unchanged.bridge_ip_address);
+    manager
+        .publish_addresses("ready", &current, Some("10.0.0.3"), None, &cancelled)
+        .unwrap();
+    manager
+        .publish_addresses("ready", &current, None, Some("192.168.64.3"), &cancelled)
+        .unwrap();
+    let ready = manager.get("ready").unwrap();
+    let saved = manager.persistence.load("ready").unwrap();
+    assert_eq!(ready.ip_address.as_deref(), Some("10.0.0.3"));
+    assert_eq!(ready.bridge_ip_address.as_deref(), Some("192.168.64.3"));
+    assert_eq!(saved.ip_address, ready.ip_address);
+    assert_eq!(saved.bridge_ip_address, ready.bridge_ip_address);
 }
