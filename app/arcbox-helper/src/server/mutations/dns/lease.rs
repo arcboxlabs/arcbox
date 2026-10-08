@@ -225,7 +225,7 @@ impl ResolverStore {
             .expect("connection was checked under lock");
         for root in &update.roots {
             let path = self.directory.join(root.as_str());
-            if storage::inspect(&path, self.expected_owner, |bytes| {
+            if storage::inspect(&path, self.expected_owner, |bytes, _| {
                 current.records.iter().any(|record| {
                     record.roots.contains(root) && bytes == record.contents.as_bytes()
                 })
@@ -314,8 +314,9 @@ impl ResolverStore {
                 .file_name()
                 .to_str()
                 .is_some_and(|name| name.parse::<Domain>().is_ok())
-                && storage::inspect(&entry.path(), self.expected_owner, is_record)?
-                    == ManagedFile::Owned
+                && storage::inspect(&entry.path(), self.expected_owner, |bytes, _| {
+                    is_record(bytes)
+                })? == ManagedFile::Owned
             {
                 fs::remove_file(entry.path())
                     .map_err(|e| HelperError::io("remove", entry.path(), e))?;
@@ -341,7 +342,7 @@ fn remove(
     for record in records {
         for root in record.roots.iter().filter(|root| !keep.contains(root)) {
             let path = directory.join(root.as_str());
-            let result = storage::inspect(&path, expected_owner, |bytes| {
+            let result = storage::inspect(&path, expected_owner, |bytes, _| {
                 bytes == record.contents.as_bytes()
             })
             .and_then(|file| {

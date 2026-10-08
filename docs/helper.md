@@ -53,7 +53,7 @@ bump the runtime (`0.4.x`) must **not** re-prompt.
 
 `arcbox-helper --check-resolvers [ROOT...]` reads only the selected resolver roots and prints each exact legacy root on its own line. The check requires root-owned files and directory metadata even when the caller is a login user. It does not start the service or change files. An empty root set does not inspect `/etc/resolver`.
 
-Before replacing the executable, the privileged installer runs the bundled helper's `--prepare-install` command. The command checks `launchctl bootout`, confirms the exact helper label is absent from `launchctl list`, and waits up to 50 seconds for root helper processes at the installed executable path to exit. The command excludes its own maintenance process and propagates inspection errors. Replacement never copies the installed executable onto itself.
+Before replacing the executable, the privileged installer runs the bundled helper's `--prepare-install [ROOT...]` command. The command checks `launchctl bootout`, confirms the exact helper label is absent from `launchctl list`, and waits up to 50 seconds for root helper processes at the installed executable path to exit. The command excludes its own maintenance process and propagates inspection errors. Replacement never copies the installed executable onto itself.
 
 ## Threat model
 
@@ -186,3 +186,5 @@ See also [data-directories.md](data-directories.md) and
 `abctl _install --user-uid UID --data-dir ABSOLUTE_PATH` selects the login user and daemon data directory explicitly. Without `--user-uid`, the installer uses `SUDO_UID` or the current UID. UID 0 is not a login-user target. The installer reads the user's home from the account database. Privileged installation skips shell integration; run `abctl setup install` as the login user.
 
 Keep the selected daemon stopped until installation finishes. Desktop unregisters the selected daemon and checks its lock before requesting authorization. The privileged installer checks the same lock and retains an exclusive lock when the file exists. A missing lock only indicates current absence; the installer does not create the daemon's lock. The installer never reads or signals a PID from this user-owned file.
+
+`--resolver-root ROOT` may be repeated to select exact legacy roots. Explicit roots replace the profile default: production selects only `arcbox.local`; development selects none. Maintenance reserves every distinct legacy UDP port before stopping the helper, reinspects the entire selected batch, and removes files only when the batch remains identical. A busy port, stop failure, or changed batch preserves every selected file. No namespace scan or ancestor inference occurs.

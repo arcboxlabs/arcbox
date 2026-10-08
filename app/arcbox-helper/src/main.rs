@@ -16,10 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     if args.first().is_some_and(|arg| arg == "--prepare-install") {
-        if args.len() != 1 {
-            return Err("--prepare-install does not accept arguments".into());
-        }
-        install::stop_helper()?;
+        server::prepare_install(&args[1..])?;
         return Ok(());
     }
     let mut idle_exit = false;
@@ -28,7 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match arg.as_str() {
             "--help" | "-h" => {
                 eprintln!(
-                    "arcbox-helper {}\nPrivileged helper daemon for host mutations (routes, DNS, sockets)\n\nOptions:\n  --idle-exit  Exit after {}s with no active connections\n  --check-resolvers [ROOT...]  List selected legacy resolver roots without changes\n  --prepare-install  Stop the installed helper before replacement (root only)",
+                    "arcbox-helper {}\nPrivileged helper daemon for host mutations (routes, DNS, sockets)\n\nOptions:\n  --idle-exit  Exit after {}s with no active connections\n  --check-resolvers [ROOT...]  List selected legacy resolver roots without changes\n  --prepare-install [ROOT...]  Stop the helper and migrate selected legacy resolvers (root only)",
                     env!("CARGO_PKG_VERSION"),
                     server::IDLE_TIMEOUT.as_secs(),
                 );

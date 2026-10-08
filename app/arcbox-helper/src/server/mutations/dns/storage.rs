@@ -79,7 +79,7 @@ fn has_acl(file: &File, path: &Path) -> Result<bool, HelperError> {
 pub(super) fn inspect(
     path: &Path,
     expected_owner: u32,
-    owns: impl FnOnce(&[u8]) -> bool,
+    owns: impl FnOnce(&[u8], &fs::Metadata) -> bool,
 ) -> Result<ManagedFile, HelperError> {
     let file = match OpenOptions::new()
         .read(true)
@@ -108,7 +108,7 @@ pub(super) fn inspect(
     file.take(257)
         .read_to_end(&mut content)
         .map_err(|e| HelperError::io("read", path, e))?;
-    Ok(if owns(&content) {
+    Ok(if owns(&content, &metadata) {
         ManagedFile::Owned
     } else {
         ManagedFile::Foreign

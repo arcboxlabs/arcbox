@@ -5,7 +5,7 @@
 //! boot assets, runtime binaries, Docker CLI tools — is handled by the
 //! daemon during startup via self-setup.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -37,12 +37,19 @@ pub struct InstallArgs {
     /// Absolute data directory for the selected daemon.
     #[arg(long)]
     pub data_dir: Option<PathBuf>,
+
+    /// Exact legacy resolver roots to migrate; replaces the profile default.
+    #[arg(long)]
+    pub resolver_root: Vec<String>,
 }
 
 /// Executes the install command.
 pub async fn execute(args: InstallArgs) -> Result<()> {
-    validate_install_scope(ArcboxProfile::from_env_or_default(), &args)?;
+    let profile = ArcboxProfile::from_env_or_default();
+    validate_install_scope(profile, &args)?;
     let target = target::Target::resolve(args.user_uid, args.data_dir)?;
+    let roots = resolver_roots(profile, args.resolver_root);
+    let helper = resolve_helper_source(args.helper_path.as_deref())?;
     // SAFETY: geteuid has no arguments or failure case.
     let is_privileged = unsafe { libc::geteuid() } == 0;
 
@@ -53,7 +60,7 @@ pub async fn execute(args: InstallArgs) -> Result<()> {
     // 1. Install helper binary (requires sudo).
     print_step(1, 3, "Installing arcbox-helper...");
     let stopped_daemon = target.hold_stopped_daemon()?;
-    install_helper(args.helper_path.as_deref())?;
+    install_helper(&helper, &roots)?;
     drop(stopped_daemon);
     print_done();
 
@@ -99,6 +106,14 @@ fn validate_install_scope(profile: ArcboxProfile, args: &InstallArgs) -> Result<
     Ok(())
 }
 
+fn resolver_roots(profile: ArcboxProfile, roots: Vec<String>) -> Vec<String> {
+    if roots.is_empty() && profile == ArcboxProfile::Production {
+        vec![arcbox_constants::dns::LOCAL_DOMAIN.to_owned()]
+    } else {
+        roots
+    }
+}
+
 fn print_step(n: u32, total: u32, msg: &str) {
     print!("[{n}/{total}] {msg:<40}");
 }
@@ -111,37 +126,35 @@ fn print_skipped() {
     println!("skipped");
 }
 
+fn resolve_helper_source(custom_path: Option<&Path>) -> Result<PathBuf> {
+    let path = if let Some(path) = custom_path {
+        path.to_owned()
+    } else {
+        let exe = super::bundle::current_executable()?;
+        exe.parent()
+            .context("executable has no parent directory")?
+            .join("arcbox-helper")
+    };
+    path.canonicalize()
+        .with_context(|| format!("resolve helper source {}", path.display()))
+}
+
 /// Installs the arcbox-helper binary and registers it as a launchd system
 /// daemon with socket activation.
 ///
 /// launchd creates the socket at `/var/run/arcbox-helper.sock` and starts
 /// the helper on-demand when the main daemon connects.
-fn install_helper(custom_path: Option<&std::path::Path>) -> Result<()> {
+fn install_helper(helper_src: &Path, roots: &[String]) -> Result<()> {
     let dest = PathBuf::from(privileged::HELPER_BINARY);
 
-    // Use custom path if provided, otherwise look next to our own executable.
-    let helper_src = if let Some(path) = custom_path {
-        path.to_path_buf()
-    } else {
-        let exe = super::bundle::current_executable()?;
-        let exe_dir = exe.parent().context("executable has no parent directory")?;
-        exe_dir.join("arcbox-helper")
-    };
-
-    if !helper_src.exists() {
-        bail!(
-            "arcbox-helper not found at {}. Build it first with: cargo build -p arcbox-helper",
-            helper_src.display()
-        );
-    }
-    let helper_src = helper_src.canonicalize().context("resolve helper source")?;
     let destination_is_source = match dest.canonicalize() {
         Ok(path) => path == helper_src,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
         Err(error) => return Err(error).context("resolve installed helper"),
     };
-    let output = Command::new(&helper_src)
+    let output = Command::new(helper_src)
         .arg("--prepare-install")
+        .args(roots)
         .output()
         .context("failed to prepare helper installation")?;
     if !output.status.success() {
@@ -157,7 +170,7 @@ fn install_helper(custom_path: Option<&std::path::Path>) -> Result<()> {
 
     // Copy binary.
     if !destination_is_source {
-        std::fs::copy(&helper_src, &dest).with_context(|| {
+        std::fs::copy(helper_src, &dest).with_context(|| {
             format!(
                 "failed to copy {} -> {}",
                 helper_src.display(),
@@ -197,7 +210,7 @@ fn install_helper(custom_path: Option<&std::path::Path>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{InstallArgs, validate_install_scope};
+    use super::{InstallArgs, resolver_roots, validate_install_scope};
     use arcbox_constants::paths::ArcboxProfile;
 
     #[test]
@@ -208,6 +221,7 @@ mod tests {
             helper_path: None,
             user_uid: None,
             data_dir: None,
+            resolver_root: Vec::new(),
         };
         assert!(validate_install_scope(ArcboxProfile::Development, &args).is_ok());
 
@@ -218,9 +232,26 @@ mod tests {
                 helper_path: None,
                 user_uid: None,
                 data_dir: None,
+                resolver_root: Vec::new(),
             };
             assert!(validate_install_scope(ArcboxProfile::Development, &args).is_err());
             assert!(validate_install_scope(ArcboxProfile::Production, &args).is_ok());
+        }
+    }
+
+    #[test]
+    fn explicit_roots_replace_the_profile_migration_defaults() {
+        assert_eq!(
+            resolver_roots(ArcboxProfile::Production, Vec::new()),
+            ["arcbox.local"]
+        );
+        assert_eq!(
+            resolver_roots(ArcboxProfile::Development, Vec::new()),
+            Vec::<String>::new()
+        );
+        for profile in [ArcboxProfile::Production, ArcboxProfile::Development] {
+            let roots = vec!["custom.local".to_owned(), "other.local".to_owned()];
+            assert_eq!(resolver_roots(profile, roots.clone()), roots);
         }
     }
 }

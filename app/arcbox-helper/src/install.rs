@@ -13,12 +13,6 @@ use arcbox_helper::HelperError;
 
 /// Stops the loaded helper and waits for every installed helper process to exit.
 pub fn stop_helper() -> Result<(), HelperError> {
-    // SAFETY: geteuid has no arguments or failure case.
-    if unsafe { libc::geteuid() } != 0 {
-        return Err(HelperError::validation(
-            "helper installation preparation requires root",
-        ));
-    }
     let executable = installed_executable()?;
     let target = format!("system/{}", labels::HELPER);
     let output = Command::new("/bin/launchctl")
