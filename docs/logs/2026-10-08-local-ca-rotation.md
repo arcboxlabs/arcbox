@@ -33,3 +33,10 @@ The CLI and daemon use the same per-profile file lock for mutations. The CLI hol
 `tls/identity.json` now selects the current Keychain identity. Missing recorded keys or certificates stop preparation without generating replacements. Untrust enumerates current, pending, retired, and separately published roots. Cleanup retains public DER until exact certificate and key removal succeeds.
 
 macOS persists both members of the generated key pair. Cleanup verifies and removes the public key before the certificate and private key. A missing private key does not prevent finding the certificate through the persistent public key's hash and bytes. Apple ignores the supplied certificate label when `SecItemAdd` receives `kSecValueRef`; identity lookup therefore does not rely on certificate labels. The [Apple implementation](https://github.com/apple-oss-distributions/Security/blob/main/OSX/libsecurity_keychain/lib/SecItem.cpp#L4932) and the isolated native regression agree on this behavior.
+
+## Verification on 2026-10-08
+
+- The affected host library and binary suites passed 464 tests. The final local CA suite passed 22 tests, with six native tests excluded from the default run. Workspace formatting and strict all-target Clippy passed for core, CLI, local CA, daemon, and API.
+- All four isolated Keychain regressions passed: journal selection and missing journal, missing private key, missing recorded identity, and interrupted cleanup retaining only a public key or an unfinished key pair. The existing native migration regression also passed. These tests do not install trust.
+- Swift generation, formatting, lint, and all three local HTTPS test suites passed. The full Desktop suite failed two existing saved-window-frame tests. AppKit mapped frames from the external display to the current built-in display; the tests expect unchanged coordinates. The tests remain unchanged pending approval.
+- Native Admin trust authorization, the browser flow, and a signed build containing these changes remain unverified. Rotation orchestration and the Desktop renewal action are still pending.
