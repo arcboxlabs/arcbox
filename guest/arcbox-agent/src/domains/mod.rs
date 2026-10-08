@@ -99,11 +99,12 @@ impl DomainRoutes {
     /// it is told about until `cancel`.
     #[must_use]
     pub fn spawn(
+        domain: arcbox_constants::dns::Domain,
         dns: crate::dns_server::ContainerRegistry,
         cancel: CancellationToken,
     ) -> (Self, JoinHandle<()>) {
         let (commands, inbox) = mpsc::unbounded_channel();
-        let services = WebServices::new(dns);
+        let services = WebServices::new(domain, dns);
         let task = tokio::spawn(Routes::new(services.clone()).run(inbox, cancel));
         (Self { commands, services }, task)
     }

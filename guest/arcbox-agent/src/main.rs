@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod agent;
@@ -298,10 +298,18 @@ async fn main() -> Result<()> {
         return agent::run(guest, domains::WebServices::default()).await;
     }
 
+    let cmdline = std::fs::read_to_string("/proc/cmdline")
+        .context("reading the System VM kernel command line")?;
+    let domain = arcbox_constants::dns::Domain::from_kernel_cmdline(&cmdline)
+        .map_err(anyhow::Error::msg)
+        .context("parsing the System VM DNS domain")?;
     let cancel = tokio_util::sync::CancellationToken::new();
 
     // Start the guest DNS server (0.0.0.0:53).
-    let dns = std::sync::Arc::new(dns_server::GuestDnsServer::new(cancel.clone()));
+    let dns = std::sync::Arc::new(dns_server::GuestDnsServer::new(
+        domain.clone(),
+        cancel.clone(),
+    ));
     let dns_handle = {
         let dns = Arc::clone(&dns);
         tokio::spawn(async move {
@@ -313,7 +321,8 @@ async fn main() -> Result<()> {
 
     // Container domains: routes each container's ports 80 and 443 to what
     // it serves, sweeping a previous agent's rules before it follows anyone.
-    let (domains, domains_handle) = domains::DomainRoutes::spawn(dns.containers(), cancel.clone());
+    let (domains, domains_handle) =
+        domains::DomainRoutes::spawn(domain, dns.containers(), cancel.clone());
     let web_services = domains.services();
 
     // Start Docker event listener for auto-registering container DNS,

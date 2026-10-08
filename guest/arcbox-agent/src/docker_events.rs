@@ -214,7 +214,7 @@ async fn register_container_by_id(sync: &mut ContainerSync<'_>, id: &str) -> any
 
     // Keyed by the full ID: the die/destroy events carry that, not the name.
     if let Some(full_id) = info["Id"].as_str() {
-        match ContainerFacts::from_inspect(&info) {
+        match ContainerFacts::from_inspect(&info, sync.dns.domain()) {
             Some(facts) => sync.domains.track(facts),
             None => sync.domains.forget(full_id),
         }
@@ -300,7 +300,7 @@ mod tests {
 
     #[tokio::test]
     async fn disconnecting_the_last_network_removes_only_that_containers_dns_ownership() {
-        let dns = GuestDnsServer::new(CancellationToken::new());
+        let dns = GuestDnsServer::new(Default::default(), CancellationToken::new());
         let mut inspect = serde_json::json!({
             "Name": "/web-1",
             "Config": { "Labels": { "com.docker.compose.project": "demo", "com.docker.compose.service": "web" } },

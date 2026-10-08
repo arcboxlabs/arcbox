@@ -4,14 +4,14 @@
 //!
 //! 1. Container registry (name → Docker bridge IP)
 //! 2. Sandbox registry (id → TAP IP)
-//! 3. `*.arcbox.local` not found → NXDOMAIN
+//! 3. Names under the configured domain not found → NXDOMAIN
 //! 4. Everything else → forward to gateway (`10.0.2.1:53`)
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
-use arcbox_constants::dns::LOCAL_DOMAIN;
+use arcbox_constants::dns::Domain;
 use arcbox_dns::{DEFAULT_TTL, DnsQuery, DnsRecordType};
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
@@ -51,6 +51,7 @@ type AliasOwners = Arc<RwLock<HashMap<String, HashMap<String, Ipv4Addr>>>>;
 
 /// Guest DNS server.
 pub struct GuestDnsServer {
+    domain: Domain,
     containers: ContainerRegistry,
     /// Owner tracking for shared aliases (e.g. compose service names).
     alias_owners: AliasOwners,
@@ -63,13 +64,20 @@ impl GuestDnsServer {
     ///
     /// The sandbox registry is shared via a global so that `sandbox.rs`
     /// can register entries synchronously without an async handle.
-    pub fn new(cancel: CancellationToken) -> Self {
+    pub fn new(domain: Domain, cancel: CancellationToken) -> Self {
         Self {
+            domain,
             containers: Arc::new(RwLock::new(HashMap::new())),
             alias_owners: Arc::new(RwLock::new(HashMap::new())),
             sandboxes: Arc::clone(sandbox_registry()),
             cancel,
         }
+    }
+
+    /// Returns the suffix shared by DNS registration and HTTP discovery.
+    #[must_use]
+    pub fn domain(&self) -> &Domain {
+        &self.domain
     }
 
     /// Returns a handle to the container registry for external registration.
@@ -192,32 +200,40 @@ impl GuestDnsServer {
     /// Handles a single DNS query: local lookup, then forward.
     async fn handle_query(&self, data: &[u8]) -> anyhow::Result<Vec<u8>> {
         let query = DnsQuery::parse(data)?;
-        let name_lower = query.name.to_lowercase();
+        match self.local_response(data, &query).await? {
+            Some(response) => Ok(response),
+            None => self.forward_to_gateway(data).await,
+        }
+    }
 
-        // Only answer A queries from local registries. AAAA queries for
-        // known names get NXDOMAIN (we only have IPv4 container IPs).
-        // Other types are forwarded to the gateway.
+    async fn local_response(
+        &self,
+        data: &[u8],
+        query: &DnsQuery,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        let name_lower = query.name.to_lowercase();
+        let suffix = format!(".{}", self.domain);
+
+        // Known names have IPv4 data only; other record types receive NODATA.
         let is_a_query = query.qtype == DnsRecordType::A;
 
         // 1. Container registry lookup.
         if let Some(&ip) = self.containers.read().await.get(&name_lower) {
             if is_a_query {
-                return Ok(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?);
+                return Ok(Some(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?));
             }
             // AAAA for known container → empty answer (no IPv6).
-            return Ok(arcbox_dns::build_nodata(data)?);
+            return Ok(Some(arcbox_dns::build_nodata(data)?));
         }
 
-        // 2. Try with `.arcbox.local` suffix stripped.
-        let bare_name = name_lower
-            .strip_suffix(&format!(".{LOCAL_DOMAIN}"))
-            .unwrap_or(&name_lower);
+        // 2. Try with the configured suffix stripped.
+        let bare_name = name_lower.strip_suffix(&suffix).unwrap_or(&name_lower);
         if bare_name != name_lower {
             if let Some(&ip) = self.containers.read().await.get(bare_name) {
                 if is_a_query {
-                    return Ok(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?);
+                    return Ok(Some(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?));
                 }
-                return Ok(arcbox_dns::build_nodata(data)?);
+                return Ok(Some(arcbox_dns::build_nodata(data)?));
             }
         }
 
@@ -229,9 +245,9 @@ impl GuestDnsServer {
             .and_then(|g| g.get(&name_lower).copied())
         {
             if is_a_query {
-                return Ok(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?);
+                return Ok(Some(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?));
             }
-            return Ok(arcbox_dns::build_nodata(data)?);
+            return Ok(Some(arcbox_dns::build_nodata(data)?));
         }
         if bare_name != name_lower {
             if let Some(ip) = self
@@ -241,22 +257,21 @@ impl GuestDnsServer {
                 .and_then(|g| g.get(bare_name).copied())
             {
                 if is_a_query {
-                    return Ok(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?);
+                    return Ok(Some(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?));
                 }
-                return Ok(arcbox_dns::build_nodata(data)?);
+                return Ok(Some(arcbox_dns::build_nodata(data)?));
             }
         }
 
         // 4. Authoritative NXDOMAIN for unresolved local-domain queries.
         // NXDOMAIN (not NODATA) because the name genuinely doesn't exist.
-        if (name_lower == LOCAL_DOMAIN || name_lower.ends_with(&format!(".{LOCAL_DOMAIN}")))
+        if (name_lower == self.domain.as_str() || name_lower.ends_with(&suffix))
             && matches!(query.qtype, DnsRecordType::A | DnsRecordType::Aaaa)
         {
-            return Ok(arcbox_dns::build_nxdomain(data)?);
+            return Ok(Some(arcbox_dns::build_nxdomain(data)?));
         }
 
-        // 5. Forward to gateway.
-        self.forward_to_gateway(data).await
+        Ok(None)
     }
 
     /// Forwards a query to the gateway DNS forwarder over UDP.
@@ -274,5 +289,81 @@ impl GuestDnsServer {
             anyhow::bail!("gateway DNS reply failed validation");
         }
         Ok(buf[..len].to_vec())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn local_query(
+        server: &GuestDnsServer,
+        name: &str,
+        qtype: DnsRecordType,
+    ) -> Option<Vec<u8>> {
+        let mut packet = vec![0x12, 0x34, 0x01, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+        for label in name.split('.') {
+            packet.push(u8::try_from(label.len()).unwrap());
+            packet.extend_from_slice(label.as_bytes());
+        }
+        packet.push(0);
+        packet.extend_from_slice(&(qtype as u16).to_be_bytes());
+        packet.extend_from_slice(&1_u16.to_be_bytes());
+        let query = DnsQuery::parse(&packet).unwrap();
+        server.local_response(&packet, &query).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn resolves_relative_and_configured_names_for_containers_and_sandboxes() {
+        let mut server =
+            GuestDnsServer::new("containers.test".parse().unwrap(), CancellationToken::new());
+        server.sandboxes = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let container_ip = Ipv4Addr::new(172, 17, 0, 2);
+        let sandbox_ip = Ipv4Addr::new(10, 0, 3, 2);
+        server
+            .register_container("web.demo", "container", container_ip)
+            .await;
+        server.register_sandbox("sandbox", sandbox_ip);
+
+        for (name, ip) in [
+            ("web.demo", container_ip),
+            ("WEB.demo.Containers.Test", container_ip),
+            ("sandbox", sandbox_ip),
+            ("SANDBOX.containers.test", sandbox_ip),
+        ] {
+            let response = local_query(&server, name, DnsRecordType::A).await.unwrap();
+            assert_eq!(&response[..4], &[0x12, 0x34, 0x81, 0x80], "{name}");
+            assert_eq!(&response[6..8], &[0, 1], "{name}");
+            assert!(response.ends_with(&ip.octets()), "{name}");
+
+            let response = local_query(&server, name, DnsRecordType::Aaaa)
+                .await
+                .unwrap();
+            assert_eq!(&response[2..4], &[0x85, 0x80], "{name}");
+            assert_eq!(&response[6..8], &[0, 0], "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn only_the_configured_domain_receives_authoritative_negative_answers() {
+        let server =
+            GuestDnsServer::new("containers.test".parse().unwrap(), CancellationToken::new());
+        server
+            .register_container("web", "container", Ipv4Addr::new(172, 17, 0, 2))
+            .await;
+        for qtype in [DnsRecordType::A, DnsRecordType::Aaaa] {
+            for name in ["missing.containers.test", "containers.test"] {
+                let response = local_query(&server, name, qtype).await.unwrap();
+                assert_eq!(&response[2..4], &[0x85, 0x83], "{name}");
+                assert_eq!(&response[6..8], &[0, 0], "{name}");
+            }
+            for name in [
+                "web.arcbox.local",
+                "web.example.test",
+                "web.containers.test.evil",
+            ] {
+                assert!(local_query(&server, name, qtype).await.is_none(), "{name}");
+            }
+        }
     }
 }

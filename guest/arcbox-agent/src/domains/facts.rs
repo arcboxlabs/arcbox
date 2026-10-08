@@ -4,6 +4,8 @@ use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
+use arcbox_constants::dns::Domain;
+
 use super::http_port::{self, HTTP_PORT, HTTPS_PORT, Pin};
 use super::https::PROXY_PORT;
 use super::selection::HTTPS_LABEL;
@@ -31,10 +33,10 @@ impl ContainerFacts {
     /// Reads them from a container's inspect JSON: `None` when it is not
     /// running or has no IPv4 address (host or no networking).
     #[must_use]
-    pub fn from_inspect(inspect: &serde_json::Value) -> Option<Self> {
+    pub fn from_inspect(inspect: &serde_json::Value, domain: &Domain) -> Option<Self> {
         let id = inspect.get("Id")?.as_str()?.to_owned();
         let name = inspect.get("Name")?.as_str()?.trim_start_matches('/');
-        let hostname = format!("{name}.{}", arcbox_constants::dns::LOCAL_DOMAIN);
+        let hostname = format!("{name}.{domain}");
         let compose = inspect
             .pointer("/Config/Labels")
             .and_then(serde_json::Value::as_object)
@@ -173,8 +175,11 @@ mod tests {
 
     #[test]
     fn facts_come_from_inspect() {
-        let facts = ContainerFacts::from_inspect(&inspect()).unwrap();
+        let facts =
+            ContainerFacts::from_inspect(&inspect(), &"containers.test".parse().unwrap()).unwrap();
         assert_eq!(facts.id, "abc123");
+        assert_eq!(facts.hostname, "web.containers.test");
+        assert_eq!(facts.aliases, ["web"]);
         assert_eq!(facts.pid, 4242);
         assert_eq!(
             facts.netns,
@@ -198,7 +203,7 @@ mod tests {
             "a": { "IPAddress": "172.18.0.3" },
             "z": { "IPAddress": "172.17.0.2" },
         });
-        let facts = ContainerFacts::from_inspect(&inspect).unwrap();
+        let facts = ContainerFacts::from_inspect(&inspect, &Domain::default()).unwrap();
         assert_eq!(primary_ipv4(&inspect), Some(facts.primary_ip));
         assert_eq!(facts.primary_ip, "172.18.0.3".parse::<Ipv4Addr>().unwrap());
         assert_ne!(facts.primary_ip, facts.ips[0]);
@@ -206,30 +211,35 @@ mod tests {
 
     #[test]
     fn stopped_or_unaddressed_containers_have_no_facts() {
+        let domain = Domain::default();
         let mut stopped = inspect();
         stopped["State"]["Pid"] = 0.into();
-        assert_eq!(ContainerFacts::from_inspect(&stopped), None);
+        assert_eq!(ContainerFacts::from_inspect(&stopped, &domain), None);
 
         let mut no_sandbox = inspect();
         no_sandbox["NetworkSettings"]["SandboxKey"] = "".into();
-        assert_eq!(ContainerFacts::from_inspect(&no_sandbox), None);
+        assert_eq!(ContainerFacts::from_inspect(&no_sandbox, &domain), None);
 
         let mut host = inspect();
         host["NetworkSettings"]["Networks"] = serde_json::json!({ "host": { "IPAddress": "" } });
-        assert_eq!(ContainerFacts::from_inspect(&host), None);
+        assert_eq!(ContainerFacts::from_inspect(&host, &domain), None);
     }
 
     #[test]
     fn the_label_is_read_and_a_bad_one_ignored() {
+        let domain = Domain::default();
         let mut pinned = inspect();
         pinned["Config"]["Labels"][http_port::LABEL] = "off".into();
         assert_eq!(
-            ContainerFacts::from_inspect(&pinned).unwrap().pin,
+            ContainerFacts::from_inspect(&pinned, &domain).unwrap().pin,
             Some(Pin::Off)
         );
 
         pinned["Config"]["Labels"][http_port::LABEL] = "web".into();
-        assert_eq!(ContainerFacts::from_inspect(&pinned).unwrap().pin, None);
+        assert_eq!(
+            ContainerFacts::from_inspect(&pinned, &domain).unwrap().pin,
+            None
+        );
     }
 
     fn specs(rules: &[NatRule]) -> Vec<String> {
@@ -238,7 +248,7 @@ mod tests {
 
     #[test]
     fn port_80_of_every_address_routes_to_the_http_port() {
-        let facts = ContainerFacts::from_inspect(&inspect()).unwrap();
+        let facts = ContainerFacts::from_inspect(&inspect(), &Domain::default()).unwrap();
         assert_eq!(
             specs(&facts.rules(SelectedRoutes {
                 http: Some(3000),
@@ -264,7 +274,7 @@ mod tests {
 
     #[test]
     fn port_443_goes_to_the_proxy_whatever_the_http_port() {
-        let facts = ContainerFacts::from_inspect(&inspect()).unwrap();
+        let facts = ContainerFacts::from_inspect(&inspect(), &Domain::default()).unwrap();
         let redirect = "-d 172.17.0.2 -p tcp --dport 443 -m comment --comment \
                         arcbox-domain:abc123 -j REDIRECT --to-ports 61443";
         let served_on_80 =
@@ -287,7 +297,7 @@ mod tests {
     fn https_only_8443_maps_without_a_proxy_or_http_route() {
         let mut inspect = inspect();
         inspect["Config"]["Labels"][HTTPS_LABEL] = "8443".into();
-        let facts = ContainerFacts::from_inspect(&inspect).unwrap();
+        let facts = ContainerFacts::from_inspect(&inspect, &Domain::default()).unwrap();
         let selected = SelectedRoutes::choose(None, facts.https_pin, &BTreeSet::new());
         assert_eq!(
             specs(&facts.rules(selected)),

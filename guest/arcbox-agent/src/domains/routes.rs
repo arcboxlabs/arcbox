@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use arcbox_local_ca::LOCAL_DOMAIN;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -25,7 +26,7 @@ pub(super) struct Routes {
     containers: HashMap<String, Tracked>,
     /// The HTTP port behind each address, for the HTTPS proxy.
     ports: HttpPorts,
-    /// Whether the HTTPS proxy is up, so port 443 has somewhere to go.
+    /// Whether the domain permits managed HTTPS and proxy binding has not failed.
     https: bool,
     services: WebServices,
 }
@@ -41,11 +42,13 @@ struct Tracked {
 
 impl Routes {
     pub(super) fn new(services: WebServices) -> Self {
+        let domain = services.domain.as_str();
+        let https = domain == LOCAL_DOMAIN || domain.ends_with(&format!(".{LOCAL_DOMAIN}"));
         Self {
             rules: TaggedRules::new(RULE_OWNER),
             containers: HashMap::new(),
             ports: HttpPorts::default(),
-            https: false,
+            https,
             services,
         }
     }
@@ -69,15 +72,13 @@ impl Routes {
         }
         warn_unless_bridged_traffic_is_filtered();
         let proxy = match Https::bind().await {
-            Ok(https) => {
-                self.https = true;
-                Some(tokio::spawn(https.serve(
-                    self.ports.clone(),
-                    self.services.clone(),
-                    cancel.clone(),
-                )))
-            }
+            Ok(https) => Some(tokio::spawn(https.serve(
+                self.ports.clone(),
+                self.services.clone(),
+                cancel.clone(),
+            ))),
             Err(e) => {
+                self.https = false;
                 tracing::warn!(error = %format!("{e:#}"), "container domains serve no HTTPS");
                 None
             }
@@ -201,10 +202,8 @@ impl Routes {
                 }
                 candidates.remove(&port);
             };
-            let mut selected = SelectedRoutes::choose(http_port, tracked.facts.https_pin, &native);
-            if !self.https && selected.terminated_port().is_some() {
-                selected.https = None;
-            }
+            let selected = SelectedRoutes::choose(http_port, tracked.facts.https_pin, &native)
+                .with_managed_https(self.https);
             let wanted = tracked.facts.rules(selected);
             if wanted != tracked.installed {
                 match self.rules.replace(id, wanted.clone()).await {
@@ -232,6 +231,15 @@ impl Routes {
     }
 }
 
+impl SelectedRoutes {
+    fn with_managed_https(mut self, enabled: bool) -> Self {
+        if !enabled && self.terminated_port().is_some() {
+            self.https = None;
+        }
+        self
+    }
+}
+
 async fn sleep_until(due: Option<Instant>) {
     match due {
         Some(due) => tokio::time::sleep_until(due).await,
@@ -250,5 +258,58 @@ fn warn_unless_bridged_traffic_is_filtered() {
             error = %e,
             "br_netfilter is unavailable: containers reaching a sibling's domain on port 80 bypass its rule"
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::HttpsBackend;
+    use super::super::http_port::Pin;
+    use super::*;
+
+    #[test]
+    fn foreign_domains_keep_http_and_native_tls_without_managed_routes() {
+        for (domain, managed) in [
+            ("arcbox.local", true),
+            ("one.dev.arcbox.local", true),
+            ("containers.test", false),
+            ("evilarcbox.local", false),
+            ("arcbox.local.evil", false),
+        ] {
+            let services = WebServices::new(domain.parse().unwrap(), Default::default());
+            let routes = Routes::new(services);
+            for (pin, native, expected) in [
+                (
+                    None,
+                    BTreeSet::new(),
+                    managed.then_some(HttpsBackend::Terminate(8080)),
+                ),
+                (
+                    None,
+                    BTreeSet::from([8443]),
+                    Some(HttpsBackend::Native(8443)),
+                ),
+                (
+                    Some(Pin::Port(9443)),
+                    BTreeSet::new(),
+                    Some(HttpsBackend::Native(9443)),
+                ),
+                (Some(Pin::Off), BTreeSet::from([443]), None),
+            ] {
+                let selected = SelectedRoutes::choose(Some(8080), pin, &native)
+                    .with_managed_https(routes.https);
+                assert_eq!(selected.http, Some(8080), "{domain}");
+                assert_eq!(selected.https, expected, "{domain}");
+            }
+        }
+        let unavailable =
+            SelectedRoutes::choose(Some(8080), None, &BTreeSet::new()).with_managed_https(false);
+        assert_eq!(
+            unavailable,
+            SelectedRoutes {
+                http: Some(8080),
+                https: None
+            }
+        );
     }
 }

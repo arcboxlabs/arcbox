@@ -14,9 +14,13 @@ The [authorization decision](adr/0007-local-https-independent-of-startup.md) sep
 
 ## Service discovery contract
 
+The daemon's `--dns-domain` option takes precedence over `ARCBOX_DNS_DOMAIN`; the default is `arcbox.local`. Host DNS receives the validated suffix before VM startup. The System VM receives the same suffix through `arcbox.dns_domain=` on the kernel command line. DNS replies, HTTP Host and TLS SNI probes, service URLs, and HTTPS ownership checks use that suffix. A changed suffix participates in the existing VM boot-configuration drift check.
+
 The guest reports installed routes through `ListContainerWebServices`. The snapshot includes only names that resolve to the selected container address. The host exposes those routes through `SystemService.ListWebServices` and `WatchWebServices`.
 
 Clients use the supplied URLs. Upstream port fields describe the application listener, not the public URL port. A managed HTTPS endpoint requires ArcBox CA trust. A passthrough endpoint uses the application's own TLS and must not request ArcBox CA authorization. A directory error ends the stream; clients must clear stale entries.
+
+Managed HTTPS requires `arcbox.local` or a subdomain such as `one.dev.arcbox.local` as the configured suffix. Other suffixes support HTTP and native TLS, but do not receive managed HTTPS routes or trigger ArcBox CA authorization. The CA name constraints remain unchanged.
 
 The host verifies each CSR's signature and single DNS name before signing. The name must belong to a current host container DNS registration and resolve to that registration's address. The host rechecks the registration after signing, so deletion, ownership transfer, or registration replacement discards an in-flight result. The guest separately checks the connection's original destination against its current DNS ownership.
 
@@ -29,6 +33,7 @@ The feature objective includes the complete local-domain experience across Docke
 | Requirement | Required evidence | Audit state on 2026-10-08 |
 |---|---|---|
 | Container and Compose names | Access fresh container and service/project names from macOS without resolver overrides or published ports. | Basic macOS HTTPS path verified; current dynamic changes need another VM run. |
+| Instance DNS suffix | Start with a custom suffix; verify host and guest DNS, probe Host/SNI, service URLs, TLS ownership, and restart after changing it. | Shared validation and host/guest propagation are implemented. VM and browser acceptance remain pending. |
 | Custom `.local` names and implicit/default/custom wildcards | Resolve and serve exact and nested names; reject collisions or ambiguous ownership; verify certificate names. | Missing. |
 | HTTP and HTTPS discovery | Use actual protocol responses; exercise multiple listeners, explicit overrides, late listeners, same-port replacement, and network changes. | Selection tests exist; current installed NAT path needs validation. |
 | Native HTTPS | Preserve the application's certificate on 443, 8443, and explicit ports; cover HTTP/2-only and mTLS listeners. | HTTP/1.1 and HTTP/2 discovery pass real TLS socket tests. Explicit native ports bypass discovery for mTLS; installed NAT and mTLS validation remain pending. |

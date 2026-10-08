@@ -179,18 +179,19 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    async fn reply(mut stream: impl AsyncRead + AsyncWrite + Unpin, response: &[u8]) {
+    async fn reply(mut stream: impl AsyncRead + AsyncWrite + Unpin, name: &str, response: &[u8]) {
         let mut request = vec![0; 1024];
         let len = stream.read(&mut request).await.unwrap();
         let request = String::from_utf8_lossy(&request[..len]).to_lowercase();
         assert!(request.starts_with("head / http/1.1\r\n"));
-        assert!(request.contains("host: web.arcbox.local\r\n"));
+        assert!(request.contains(&format!("host: {name}\r\n")));
         assert!(request.contains("user-agent: arcbox/probe\r\n"));
         stream.write_all(response).await.unwrap();
     }
 
     #[tokio::test]
     async fn accepts_http_errors_but_rejects_other_protocols() {
+        let name = "web.containers.test";
         for (response, expected) in [
             (
                 &b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"[..],
@@ -201,10 +202,10 @@ mod tests {
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
             let port = listener.local_addr().unwrap().port();
             let server = tokio::spawn(async move {
-                reply(listener.accept().await.unwrap().0, response).await;
+                reply(listener.accept().await.unwrap().0, name, response).await;
             });
             assert_eq!(
-                responds(Ipv4Addr::LOCALHOST, port, "web.arcbox.local", false).await,
+                responds(Ipv4Addr::LOCALHOST, port, name, false).await,
                 expected
             );
             server.await.unwrap();
@@ -228,6 +229,7 @@ mod tests {
 
     #[tokio::test]
     async fn discovers_self_signed_https_with_the_domain_sni() {
+        let name = "web.containers.test";
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move {
@@ -235,10 +237,10 @@ mod tests {
                 .accept(listener.accept().await.unwrap().0)
                 .await
                 .unwrap();
-            assert_eq!(tls.get_ref().1.server_name(), Some("web.arcbox.local"));
-            reply(tls, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+            assert_eq!(tls.get_ref().1.server_name(), Some(name));
+            reply(tls, name, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
         });
-        assert!(responds(Ipv4Addr::LOCALHOST, port, "web.arcbox.local", true).await);
+        assert!(responds(Ipv4Addr::LOCALHOST, port, name, true).await);
         server.await.unwrap();
     }
 
@@ -289,7 +291,12 @@ mod tests {
                 &b"-ERR starting\r\n"[..],
                 &b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"[..],
             ] {
-                reply(listener.accept().await.unwrap().0, response).await;
+                reply(
+                    listener.accept().await.unwrap().0,
+                    "web.arcbox.local",
+                    response,
+                )
+                .await;
             }
         });
         let mut cache = Cache::default();

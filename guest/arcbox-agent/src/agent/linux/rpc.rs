@@ -808,18 +808,23 @@ mod tests {
 
     #[tokio::test]
     async fn list_web_services_dispatches_a_framed_request_with_native_tls() {
-        let dns =
-            crate::dns_server::GuestDnsServer::new(tokio_util::sync::CancellationToken::new());
+        let dns = crate::dns_server::GuestDnsServer::new(
+            Default::default(),
+            tokio_util::sync::CancellationToken::new(),
+        );
         dns.register_container("api", "api", "172.17.0.2".parse().unwrap())
             .await;
-        let services = WebServices::new(dns.containers());
-        let facts = ContainerFacts::from_inspect(&serde_json::json!({
-            "Id": "a", "Name": "/api", "State": { "Pid": 1 },
-            "NetworkSettings": {
-                "SandboxKey": "/var/run/docker/netns/api",
-                "Networks": { "bridge": { "IPAddress": "172.17.0.2" } }
-            }
-        }))
+        let services = WebServices::new(dns.domain().clone(), dns.containers());
+        let facts = ContainerFacts::from_inspect(
+            &serde_json::json!({
+                "Id": "a", "Name": "/api", "State": { "Pid": 1 },
+                "NetworkSettings": {
+                    "SandboxKey": "/var/run/docker/netns/api",
+                    "Networks": { "bridge": { "IPAddress": "172.17.0.2" } }
+                }
+            }),
+            dns.domain(),
+        )
         .unwrap();
         services.publish(
             &facts,
