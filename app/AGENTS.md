@@ -576,6 +576,8 @@ above). When editing either side, keep in lockstep:
 
 ## Kubernetes LoadBalancer forwarding
 
+- The poller cancels on VM state, Kubernetes hold, or shutdown changes. Await the current connection, listing, and publication before starting another poll. Drain cancellation and listener cleanup together because publication holds the port lock. A listing failure disconnects the client and withdraws stale listeners. Retain the poller in `BackgroundTask`; normal shutdown, interrupted startup, and failed startup must join the poller before Runtime stops.
+
 - Capture the physical `VmIncarnation` before listing Services. Keep the cached client with that incarnation. Apply every listing and its port outcomes only to the captured VM. Cancel through the operation token and await pinned cleanup before retiring the VM.
 
 - k3s runs servicelb (traefik stays disabled), so a LoadBalancer Service gets

@@ -8,6 +8,7 @@
 //! every LoadBalancer listener closes, so a VM restart or a crashed k3s
 //! leaves nothing bound. Polling a unary agent RPC rather than watching is
 //! deliberate: the HV backend's blocking agent transport carries no streams.
+//! The retained service drains cancelled polls and closes its listeners before Runtime stops.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,8 +31,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// warning; a few are routine while k3s starts its API server.
 const FAILURES_BEFORE_WARNING: u32 = 15;
 
-/// Spawns the reconcile loop for the System VM's cluster.
-pub fn spawn(ctx: &DaemonContext, runtime: &Arc<Runtime>) {
+/// Retains the reconcile loop for the System VM's cluster through daemon shutdown.
+pub async fn start(ctx: &DaemonContext, runtime: &Arc<Runtime>) {
     let vm = runtime.subscribe_system_vm_state();
     let hold = runtime.subscribe_kubernetes_hold();
     let shutdown = ctx.shutdown.clone();
@@ -40,9 +41,12 @@ pub fn spawn(ctx: &DaemonContext, runtime: &Arc<Runtime>) {
         agent: None,
     };
     let runtime = Arc::clone(runtime);
-    drop(tokio::spawn(async move {
-        reconcile_loop(&runtime, vm, hold, shutdown, source).await;
-    }));
+    ctx.kubernetes_lb_service
+        .start(async move {
+            reconcile_loop(&runtime, vm, hold, shutdown, source).await;
+            Ok(())
+        })
+        .await;
 }
 
 /// Where the loop gets its listings; a seam so the gating is testable
@@ -89,11 +93,7 @@ impl ServiceSource for AgentSource {
     }
 }
 
-/// Polls `source` and applies each listing while the VM is ready and the
-/// hold is taken; closes the listeners whenever either is not.
-///
-/// A failed listing leaves the listeners as they were: a transient API
-/// server hiccup must not unpublish every Service.
+/// Cancels and drains each poll before the next VM or Kubernetes hold can publish.
 async fn reconcile_loop(
     runtime: &Runtime,
     mut vm: watch::Receiver<VmLifecycleState>,
@@ -102,26 +102,49 @@ async fn reconcile_loop(
     mut source: impl ServiceSource,
 ) {
     let mut failures = 0u32;
-    loop {
-        let active = vm.borrow_and_update().is_ready() && *hold.borrow_and_update();
+    while !shutdown.is_cancelled() {
+        let ready = vm.borrow_and_update().is_ready();
+        let held = *hold.borrow_and_update();
+        let active = ready && held;
         if active {
-            match source.list(&shutdown).await {
-                Ok((expected, listing)) => {
-                    failures = 0;
-                    if let Err(error) = runtime
-                        .apply_kubernetes_load_balancers(&expected, &listing, &shutdown)
-                        .await
-                    {
-                        source.disconnect();
-                        debug!(%error, "Kubernetes Service listing lost its VM or lifecycle hold");
+            let cancelled = shutdown.child_token();
+            let outcome = {
+                let operation = poll(runtime, &mut source, &cancelled);
+                tokio::pin!(operation);
+                let outcome = tokio::select! {
+                    biased;
+                    () = shutdown.cancelled() => PollOutcome::Stop,
+                    changed = vm.changed() => if changed.is_ok() { PollOutcome::Changed } else { PollOutcome::Stop },
+                    changed = hold.changed() => if changed.is_ok() { PollOutcome::Changed } else { PollOutcome::Stop },
+                    result = &mut operation => PollOutcome::Applied(result),
+                };
+                if !matches!(outcome, PollOutcome::Applied(_)) {
+                    cancelled.cancel();
+                    // Apply can hold the port lock. Poll cleanup and the cancelled operation together.
+                    let (result, ()) =
+                        tokio::join!(operation, runtime.close_kubernetes_load_balancers());
+                    if let Err(error) = result {
+                        debug!(%error, "Kubernetes Service poll cancelled and drained");
                     }
                 }
-                Err(e) => {
+                outcome
+            };
+            match outcome {
+                PollOutcome::Changed => {
+                    failures = 0;
+                    source.disconnect();
+                    continue;
+                }
+                PollOutcome::Stop => break,
+                PollOutcome::Applied(Ok(())) => failures = 0,
+                PollOutcome::Applied(Err(error)) => {
+                    source.disconnect();
+                    runtime.close_kubernetes_load_balancers().await;
                     failures += 1;
                     if failures == FAILURES_BEFORE_WARNING {
-                        warn!(error = %e, failures, "cannot list Kubernetes Services; LoadBalancer ports are left as they were");
+                        warn!(%error, failures, "cannot list Kubernetes Services; LoadBalancer ports were withdrawn");
                     } else {
-                        debug!(error = %e, "Kubernetes Service listing failed");
+                        debug!(%error, "Kubernetes Service poll failed; LoadBalancer ports were withdrawn");
                     }
                 }
             }
@@ -131,15 +154,41 @@ async fn reconcile_loop(
             runtime.close_kubernetes_load_balancers().await;
         }
         tokio::select! {
+            biased;
             () = shutdown.cancelled() => break,
-            // The senders live as long as the runtime; an error means it is
-            // gone and there is nothing left to reconcile.
             changed = vm.changed() => if changed.is_err() { break },
             changed = hold.changed() => if changed.is_err() { break },
             () = tokio::time::sleep(POLL_INTERVAL), if active => {}
         }
     }
+    source.disconnect();
+    runtime.close_kubernetes_load_balancers().await;
 }
+
+async fn poll(
+    runtime: &Runtime,
+    source: &mut impl ServiceSource,
+    cancelled: &CancellationToken,
+) -> arcbox_core::Result<()> {
+    if cancelled.is_cancelled() {
+        return Err(arcbox_core::CoreError::invalid_state(
+            "Kubernetes Service poll cancelled before connection",
+        ));
+    }
+    let (expected, listing) = source.list(cancelled).await?;
+    runtime
+        .apply_kubernetes_load_balancers(&expected, &listing, cancelled)
+        .await
+}
+
+enum PollOutcome {
+    Applied(arcbox_core::Result<()>),
+    Changed,
+    Stop,
+}
+
+#[cfg(test)]
+mod cancellation_tests;
 
 #[cfg(test)]
 mod tests {

@@ -222,6 +222,8 @@ The HTTPS access observer uses the same shared task ownership. All three shutdow
 
 The web index service retains the same task ownership. Failed, interrupted, and stopped-VM lookups withdraw the index. Cancellation drains the active request while withdrawing, so a request holding the host commit lock cannot deadlock cleanup. Runtime stops only after the task finishes.
 
+The Kubernetes LoadBalancer poller also uses a shared `BackgroundTask`. All three shutdown paths join the poller before stopping Runtime. A VM change, Kubernetes hold change, or shutdown cancels the current poll. The poller drains the connection, listing, and publication while closing listeners. A listing failure discards the connection and withdraws stale listeners before retrying.
+
 ## Crash / SIGKILL
 
 When the daemon is killed without graceful shutdown:

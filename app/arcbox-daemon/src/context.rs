@@ -62,6 +62,7 @@ pub struct StartupHandles {
     pub web_index_service: BackgroundTask,
     pub tls_signer: BackgroundTask,
     pub https_access_service: BackgroundTask,
+    pub kubernetes_lb_service: BackgroundTask,
 }
 
 impl StartupHandles {
@@ -78,6 +79,7 @@ impl StartupHandles {
             web_index_service: BackgroundTask::default(),
             tls_signer: BackgroundTask::default(),
             https_access_service: BackgroundTask::default(),
+            kubernetes_lb_service: BackgroundTask::default(),
         }
     }
 }
@@ -107,6 +109,7 @@ pub struct EarlyContext {
     pub web_index_service: BackgroundTask,
     pub tls_signer: BackgroundTask,
     pub https_access_service: BackgroundTask,
+    pub kubernetes_lb_service: BackgroundTask,
     pub dns_domain: Domain,
     /// Explicit DNS port; 0 lets the bound service choose one. `None` binds
     /// the profile's port, falling back to an OS-allocated one when taken.
@@ -157,6 +160,7 @@ pub struct DaemonContext {
     pub web_index_service: BackgroundTask,
     pub tls_signer: BackgroundTask,
     pub https_access_service: BackgroundTask,
+    pub kubernetes_lb_service: BackgroundTask,
     pub dns_domain: Domain,
     /// Explicit DNS port; `None` binds the profile's port best-effort. The
     /// actual bound port lives in [`ServiceHandles`].

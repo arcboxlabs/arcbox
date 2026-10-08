@@ -160,7 +160,7 @@ impl RuntimeBooted {
                 crate::https_access::start(&self.ctx, &self.runtime).await;
                 crate::web_index::start(&self.ctx, &self.runtime).await;
                 services::enable_docker_integration(&self.ctx);
-                crate::kubernetes_lb::spawn(&self.ctx, &self.runtime);
+                crate::kubernetes_lb::start(&self.ctx, &self.runtime).await;
                 crate::sandbox_cleanup::spawn(&self.ctx, &self.runtime);
             }
             crate::disk_reclaim::spawn(&self.ctx, &self.runtime);
