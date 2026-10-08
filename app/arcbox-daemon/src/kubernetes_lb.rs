@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use arcbox_connect::v1::KubernetesLoadBalancersResponse;
 use arcbox_core::{AgentClient, Runtime, VmLifecycleState};
+use arcbox_engine::vm::VmIncarnation;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -51,7 +52,7 @@ trait ServiceSource {
     async fn list(
         &mut self,
         cancelled: &CancellationToken,
-    ) -> arcbox_core::Result<KubernetesLoadBalancersResponse>;
+    ) -> arcbox_core::Result<(VmIncarnation, KubernetesLoadBalancersResponse)>;
 
     /// Forgets any connection to a VM that is going away.
     fn disconnect(&mut self);
@@ -61,21 +62,26 @@ trait ServiceSource {
 /// poll does not pay for (and log) a new vsock connection every interval.
 struct AgentSource {
     runtime: Arc<Runtime>,
-    agent: Option<AgentClient>,
+    agent: Option<(VmIncarnation, AgentClient)>,
 }
 
 impl ServiceSource for AgentSource {
     async fn list(
         &mut self,
         cancelled: &CancellationToken,
-    ) -> arcbox_core::Result<KubernetesLoadBalancersResponse> {
+    ) -> arcbox_core::Result<(VmIncarnation, KubernetesLoadBalancersResponse)> {
+        let expected = self.runtime.container_network_incarnation()?;
         let agent = match self.agent.take() {
-            Some(agent) => agent,
-            None => self.runtime.connect_system_agent().await?,
+            Some((incarnation, agent)) if incarnation == expected => agent,
+            _ => {
+                self.runtime
+                    .connect_system_agent_expected(expected.clone())
+                    .await?
+            }
         };
         let (agent, listing) = agent.list_kubernetes_load_balancers(cancelled).await?;
-        self.agent = Some(agent);
-        Ok(listing)
+        self.agent = Some((expected.clone(), agent));
+        Ok((expected, listing))
     }
 
     fn disconnect(&mut self) {
@@ -100,9 +106,15 @@ async fn reconcile_loop(
         let active = vm.borrow_and_update().is_ready() && *hold.borrow_and_update();
         if active {
             match source.list(&shutdown).await {
-                Ok(listing) => {
+                Ok((expected, listing)) => {
                     failures = 0;
-                    runtime.apply_kubernetes_load_balancers(&listing).await;
+                    if let Err(error) = runtime
+                        .apply_kubernetes_load_balancers(&expected, &listing, &shutdown)
+                        .await
+                    {
+                        source.disconnect();
+                        debug!(%error, "Kubernetes Service listing lost its VM or lifecycle hold");
+                    }
                 }
                 Err(e) => {
                     failures += 1;
@@ -138,15 +150,18 @@ mod tests {
     use super::*;
 
     /// Counts listings and answers each with an empty cluster.
-    struct CountingSource(Arc<AtomicUsize>);
+    struct CountingSource(Arc<AtomicUsize>, Arc<Runtime>);
 
     impl ServiceSource for CountingSource {
         async fn list(
             &mut self,
             _cancelled: &CancellationToken,
-        ) -> arcbox_core::Result<KubernetesLoadBalancersResponse> {
+        ) -> arcbox_core::Result<(VmIncarnation, KubernetesLoadBalancersResponse)> {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(KubernetesLoadBalancersResponse::default())
+            Ok((
+                self.1.container_network_incarnation()?,
+                KubernetesLoadBalancersResponse::default(),
+            ))
         }
 
         fn disconnect(&mut self) {}
@@ -167,23 +182,24 @@ mod tests {
                 data_dir: dir.path().to_path_buf(),
                 ..Default::default()
             })
-            .unwrap(),
+            .unwrap()
+            .with_network_fixture(arcbox_core::runtime::NetworkFixture::default()),
         );
         let (vm_tx, vm) = watch::channel(VmLifecycleState::Running);
-        let (hold_tx, hold) = watch::channel(false);
+        let hold = runtime.subscribe_kubernetes_hold();
         let shutdown = CancellationToken::new();
         let polls = Arc::new(AtomicUsize::new(0));
 
         let task = tokio::spawn({
             let (runtime, shutdown) = (Arc::clone(&runtime), shutdown.clone());
-            let source = CountingSource(Arc::clone(&polls));
+            let source = CountingSource(Arc::clone(&polls), Arc::clone(&runtime));
             async move { reconcile_loop(&runtime, vm, hold, shutdown, source).await }
         });
 
         settle(POLL_INTERVAL * 3).await;
         assert_eq!(polls.load(Ordering::SeqCst), 0, "no poll without the hold");
 
-        hold_tx.send_replace(true);
+        runtime.vm_lifecycle().set_kubernetes_hold(true).await;
         settle(POLL_INTERVAL * 3).await;
         let while_held = polls.load(Ordering::SeqCst);
         assert!(

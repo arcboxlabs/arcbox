@@ -1126,7 +1126,7 @@ impl Runtime {
         } else {
             self.release_kubernetes().await;
         }
-        response.host_ports = self.kubernetes_host_ports().await;
+        response.host_ports = self.kubernetes_host_ports().await?;
         Ok(response)
     }
 

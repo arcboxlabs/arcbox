@@ -152,7 +152,7 @@ impl Runtime {
             .check_open()
     }
 
-    async fn update_container_ports(
+    pub(super) async fn update_container_ports(
         &self,
         vm: &VmIncarnation,
         id: &str,
@@ -168,7 +168,7 @@ impl Runtime {
             .await
     }
 
-    async fn clear_container_ports(&self, vm: &VmIncarnation, id: &str) -> Result<()> {
+    pub(super) async fn clear_container_ports(&self, vm: &VmIncarnation, id: &str) -> Result<()> {
         #[cfg(target_os = "macos")]
         return self
             .stop_inbound_rules(id, Some((self.default_machine_name(), vm)))

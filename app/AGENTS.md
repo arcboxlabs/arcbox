@@ -576,6 +576,8 @@ above). When editing either side, keep in lockstep:
 
 ## Kubernetes LoadBalancer forwarding
 
+- Capture the physical `VmIncarnation` before listing Services. Keep the cached client with that incarnation. Apply every listing and its port outcomes only to the captured VM. Cancel through the operation token and await pinned cleanup before retiring the VM.
+
 - k3s runs servicelb (traefik stays disabled), so a LoadBalancer Service gets
   a svclb pod and the node IP, 10.0.2.2, as its ingress. The daemon
   (`arcbox-daemon/src/kubernetes_lb.rs`) polls the agent's
@@ -591,7 +593,7 @@ above). When editing either side, keep in lockstep:
   `Runtime::is_container_owner` rejects; otherwise the Docker host-networking
   reconcile treats it as a vanished container's and closes it.
 - Stop and delete release the hold *before* closing the listeners, and
-  `apply` does nothing without the hold, so a listing that raced a stop cannot
+  `apply` rejects listings without the hold, so a listing that raced a stop cannot
   reopen them. `abctl kubernetes status` prints each port's outcome
   (forwarded, pending, skipped, failed).
 

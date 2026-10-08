@@ -72,6 +72,7 @@ gic = ["arcbox-core/gic"]
 workspace = true
 
 [dev-dependencies]
+arcbox-core = { path = "../arcbox-core", features = ["test-support"] }
 arcbox-grpc.workspace = true
 arcbox-protocol.workspace = true
 buffa = "0.9.1"

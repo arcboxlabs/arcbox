@@ -71,11 +71,13 @@ mod listeners {
 
     impl Runtime {
         async fn apply_test_load_balancers(&self, listing: &KubernetesLoadBalancersResponse) {
-            self.apply_load_balancers_with(listing, |owner, binding| async move {
-                self.start_test_port_forwarding(DEFAULT_MACHINE_NAME, &owner, &[binding])
-                    .await
-            })
-            .await;
+            self.apply_kubernetes_load_balancers(
+                &self.container_network_incarnation().unwrap(),
+                listing,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
         }
     }
 
@@ -119,6 +121,7 @@ mod listeners {
         runtime
             .kubernetes_host_ports()
             .await
+            .unwrap()
             .into_iter()
             .map(|port| (port.name, port.port, port.state.as_known().unwrap()))
             .collect()
@@ -183,14 +186,118 @@ mod listeners {
     async fn a_listing_that_raced_a_stop_opens_nothing() {
         let (runtime, _commands, _dir) = runtime().await;
         let port = u32::from(free_port());
+        let expected = runtime.container_network_incarnation().unwrap();
         runtime.release_kubernetes().await;
-
-        runtime
-            .apply_test_load_balancers(&listing(vec![load_balancer("web", &[("TCP", port)], true)]))
-            .await;
+        assert!(
+            runtime
+                .apply_kubernetes_load_balancers(
+                    &expected,
+                    &listing(vec![load_balancer("web", &[("TCP", port)], true)]),
+                    &CancellationToken::new(),
+                )
+                .await
+                .is_err()
+        );
 
         assert!(!accepts(port).await);
         assert_eq!(report(&runtime).await, []);
+    }
+
+    #[tokio::test]
+    async fn pending_publication_rejects_cancellation_and_vm_replacement() {
+        for replace_vm in [false, true] {
+            let (runtime, _commands, _dir) = runtime().await;
+            let expected = runtime.container_network_incarnation().unwrap();
+            let cancelled = CancellationToken::new();
+            let port = u32::from(free_port());
+            let services = listing(vec![load_balancer("web", &[("TCP", port)], true)]);
+            let entered = tokio::sync::Notify::new();
+            let release = tokio::sync::Notify::new();
+            let forward = |owner: String, binding| {
+                let (runtime, expected, entered, release) =
+                    (&runtime, &expected, &entered, &release);
+                async move {
+                    runtime
+                        .update_container_ports(expected, &owner, &[binding])
+                        .await?;
+                    entered.notify_one();
+                    release.notified().await;
+                    Ok(())
+                }
+            };
+            let operation =
+                runtime.apply_load_balancers_with(&expected, &services, &cancelled, forward);
+            let invalidate = async {
+                entered.notified().await;
+                assert!(accepts(port).await);
+                if replace_vm {
+                    runtime.restart_network_fixture();
+                } else {
+                    cancelled.cancel();
+                }
+                release.notify_one();
+            };
+            let (result, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+                tokio::join!(operation, invalidate)
+            })
+            .await
+            .unwrap();
+            assert!(result.is_err());
+            assert!(!accepts(port).await);
+            assert_eq!(report(&runtime).await, []);
+        }
+    }
+
+    #[tokio::test]
+    async fn replacement_vm_retries_old_failures_and_rejects_old_snapshots() {
+        let (runtime, _commands, _dir) = runtime().await;
+        let old = runtime.container_network_incarnation().unwrap();
+        let busy = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let retry = u32::from(busy.local_addr().unwrap().port());
+        let stable = u32::from(free_port());
+        let services = listing(vec![load_balancer(
+            "web",
+            &[("TCP", retry), ("TCP", stable)],
+            true,
+        )]);
+        runtime.apply_test_load_balancers(&services).await;
+        assert!(
+            report(&runtime)
+                .await
+                .iter()
+                .any(|(_, port, state)| *port == retry && *state == State::Failed)
+        );
+        drop(busy);
+        runtime.restart_network_fixture();
+        assert!(runtime.kubernetes_host_ports().await.is_err());
+        let (commands, _replacement_commands) = mpsc::channel(16);
+        runtime
+            .adopt_test_manager(DEFAULT_MACHINE_NAME, InboundListenerManager::new(commands))
+            .await;
+        let current = runtime.container_network_incarnation().unwrap();
+        let cancelled = CancellationToken::new();
+        runtime
+            .apply_kubernetes_load_balancers(&current, &services, &cancelled)
+            .await
+            .unwrap();
+        assert!(accepts(retry).await);
+        assert!(accepts(stable).await);
+        let before = report(&runtime).await;
+        assert!(
+            before
+                .iter()
+                .all(|(_, _, state)| *state == State::Forwarded)
+        );
+        assert!(
+            runtime
+                .apply_kubernetes_load_balancers(&old, &listing(Vec::new()), &cancelled)
+                .await
+                .is_err()
+        );
+        assert!(accepts(retry).await);
+        assert!(accepts(stable).await);
+        assert_eq!(report(&runtime).await, before);
+        runtime.close_kubernetes_load_balancers().await;
     }
 
     #[tokio::test]
@@ -206,7 +313,7 @@ mod listeners {
         )]);
 
         runtime.apply_test_load_balancers(&web).await;
-        let ports = runtime.kubernetes_host_ports().await;
+        let ports = runtime.kubernetes_host_ports().await.unwrap();
         let state = |port: u32, protocol: &str| {
             let found = ports
                 .iter()
@@ -232,7 +339,7 @@ mod listeners {
 
         {
             let mut ports = runtime.kubernetes_lb_ports.lock().await;
-            for outcome in ports.0.values_mut() {
+            for outcome in ports.outcomes.values_mut() {
                 if let Outcome::Failed { at, .. } = outcome {
                     *at = Instant::now().checked_sub(BIND_RETRY_INTERVAL).unwrap();
                 }
