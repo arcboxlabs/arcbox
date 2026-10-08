@@ -214,6 +214,8 @@ Startup interruption follows the same shutdown error contract: route cleanup com
 
 The resolver service uses `BackgroundTask`, shared through the pre-pipeline handles and daemon context. The shared slot retains the publication task until its join completes, including when the first waiter is cancelled. Normal shutdown, interrupted startup, and failed startup all join the same task before stopping Runtime. The resolver task owns the helper resolver lease, Bonjour publication, and guest authority delivery.
 
+The guest trust service also retains its `BackgroundTask` through all three shutdown paths and joins any active connection or certificate delivery before Runtime stops.
+
 ## Crash / SIGKILL
 
 When the daemon is killed without graceful shutdown:

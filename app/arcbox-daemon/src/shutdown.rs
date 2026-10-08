@@ -53,6 +53,9 @@ pub async fn run(ctx: DaemonContext, mut handles: ServiceHandles) -> Result<()> 
     if let Err(error) = ctx.resolver_service.join().await {
         warn!(%error, "resolver service cleanup failed");
     }
+    if let Err(error) = ctx.guest_trust_service.join().await {
+        warn!(%error, "guest trust service cleanup failed");
+    }
 
     drain(&mut handles).await;
 
@@ -224,6 +227,9 @@ pub async fn interrupt_startup(handles: &StartupHandles) -> Result<()> {
     if let Err(error) = handles.resolver_service.join().await {
         warn!(%error, "resolver service cleanup failed during startup cancellation");
     }
+    if let Err(error) = handles.guest_trust_service.join().await {
+        warn!(%error, "guest trust service cleanup failed during startup cancellation");
+    }
 
     // `early_runtime` is filled before the VM boots, so it covers every
     // window in which a VM can exist; empty means nothing to tear down.
@@ -249,6 +255,9 @@ pub async fn abort_failed_startup(handles: &StartupHandles) {
     handles.shutdown.cancel();
     if let Err(error) = handles.resolver_service.join().await {
         warn!(%error, "resolver service cleanup failed after startup error");
+    }
+    if let Err(error) = handles.guest_trust_service.join().await {
+        warn!(%error, "guest trust service cleanup failed after startup error");
     }
     if let Some(runtime) = handles.early_runtime.get() {
         if let Err(error) = runtime.shutdown_force().await {

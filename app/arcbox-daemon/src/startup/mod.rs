@@ -84,6 +84,7 @@ async fn init_early(args: DaemonArgs, handles: StartupHandles) -> Result<EarlyCo
         daemon_lock_slot: handles.daemon_lock,
         container_network_lease_slot: handles.container_network_lease,
         resolver_service: handles.resolver_service,
+        guest_trust_service: handles.guest_trust_service,
         dns_domain,
         dns_port,
         install_dns_resolver: args.install_dns_resolver,
@@ -147,6 +148,7 @@ async fn acquire_lock(early: EarlyContext) -> Result<DaemonContext> {
         shutdown: early.shutdown,
         container_network_lease_slot: early.container_network_lease_slot,
         resolver_service: early.resolver_service,
+        guest_trust_service: early.guest_trust_service,
         dns_domain: early.dns_domain,
         dns_port: early.dns_port,
         install_dns_resolver: early.install_dns_resolver,
@@ -267,6 +269,10 @@ async fn init_runtime(ctx: &DaemonContext) -> Result<Arc<Runtime>> {
     ctx.early_runtime
         .set(Arc::clone(&runtime))
         .map_err(|_| anyhow::anyhow!("init_runtime called twice"))?;
+    #[cfg(target_os = "macos")]
+    if runtime.config().vm.autostart {
+        crate::guest_trust::start(ctx, &runtime).await;
+    }
     // Armed before `init` for the same reason `early_runtime` is published
     // here: the VM reaches its ready state partway through the call below, so
     // a mirror started after it returns would report the VM down across the
