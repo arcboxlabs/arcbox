@@ -4,7 +4,8 @@
 //! trust changes run in this process so macOS can request authorization.
 //! The daemon owns the private key. This process publishes public bytes after
 //! revoking a previous root. Explicit commands also work for development profiles.
-//! A supplied fingerprint pins the public certificate before any trust change.
+//! Repair restores the current public root without creating a key or changing trust.
+//! A supplied fingerprint pins the public certificate before any write or trust change.
 //! Native authorization cancellation exits with status 130; other failures exit with status 1.
 
 use std::path::Path;
@@ -22,6 +23,12 @@ pub enum TlsCommands {
     /// Authorize the profile's CA for system HTTPS through the macOS prompt
     Trust {
         /// Authorize only the certificate with this SHA-256 fingerprint
+        #[arg(long)]
+        expected_fingerprint: Option<String>,
+    },
+    /// Restore the current Keychain CA's public file without changing trust
+    Repair {
+        /// Restore only the certificate with this SHA-256 fingerprint
         #[arg(long)]
         expected_fingerprint: Option<String>,
     },
@@ -70,11 +77,15 @@ pub async fn execute(cmd: TlsCommands) -> Result<()> {
     let der = KeychainAuthority::existing_certificate(&tls_dir)?
         .context("no Keychain CA for this profile: start the ArcBox daemon once to create it")?;
     let authority = PublicAuthority::try_from(der)?;
-    if let TlsCommands::Trust {
-        expected_fingerprint: Some(expected),
-    } = cmd
-    {
-        check_fingerprint(&authority.fingerprint_sha256(), &expected)?;
+    check_fingerprint(&cmd, &authority.fingerprint_sha256())?;
+    if matches!(cmd, TlsCommands::Repair { .. }) {
+        authority.repair_publication(&tls_dir)?;
+        println!(
+            "Restored the current profile's public CA file: {}",
+            tls_dir.join(guest::TLS_CA_CERT).display()
+        );
+        println!("CA SHA-256: {}", authority.fingerprint_sha256());
+        return Ok(());
     }
     ensure!(
         authority
@@ -108,11 +119,19 @@ pub async fn execute(cmd: TlsCommands) -> Result<()> {
     Ok(())
 }
 
-fn check_fingerprint(actual: &str, expected: &str) -> Result<()> {
-    ensure!(
-        actual.eq_ignore_ascii_case(expected),
-        "the local CA changed since HTTPS was requested; refresh its status and try again"
-    );
+fn check_fingerprint(cmd: &TlsCommands, actual: &str) -> Result<()> {
+    if let TlsCommands::Trust {
+        expected_fingerprint: Some(expected),
+    }
+    | TlsCommands::Repair {
+        expected_fingerprint: Some(expected),
+    } = cmd
+    {
+        ensure!(
+            actual.eq_ignore_ascii_case(expected),
+            "the local CA changed since HTTPS was requested; refresh its status and try again"
+        );
+    }
     Ok(())
 }
 
@@ -142,7 +161,9 @@ pub(super) async fn remove_trust(tls_dir: &Path) -> Result<()> {
 fn published_authority(tls_dir: &Path) -> Result<Option<PublicAuthority>> {
     let path = tls_dir.join(guest::TLS_CA_CERT);
     match std::fs::read(&path) {
-        Ok(pem) => Ok(Some(PublicAuthority::from_pem(&pem)?)),
+        Ok(pem) => Ok(Some(PublicAuthority::from_pem(&pem).context(
+            "invalid public CA file; run `abctl tls repair` to check whether the public file can be restored",
+        )?)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
     }
@@ -163,12 +184,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_stale_or_partial_fingerprint_cannot_authorize_the_current_root() {
+    fn trust_and_repair_reject_stale_or_partial_fingerprints() {
         let current = "AB:CD:".repeat(10) + "EF:01";
-        check_fingerprint(&current, &current.to_ascii_lowercase()).unwrap();
-        for expected in ["", "AB:CD", &("AB:CD:".repeat(10) + "EF:02")] {
-            let error = check_fingerprint(&current, expected).unwrap_err();
-            assert!(error.to_string().contains("refresh its status"));
+        for expected in [
+            "",
+            "AB:CD",
+            &("AB:CD:".repeat(10) + "EF:02"),
+            &current.to_ascii_lowercase(),
+        ] {
+            for cmd in [
+                TlsCommands::Trust {
+                    expected_fingerprint: Some(expected.into()),
+                },
+                TlsCommands::Repair {
+                    expected_fingerprint: Some(expected.into()),
+                },
+            ] {
+                let result = check_fingerprint(&cmd, &current);
+                if expected.eq_ignore_ascii_case(&current) {
+                    result.unwrap();
+                } else {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("refresh its status")
+                    );
+                }
+            }
         }
     }
 }

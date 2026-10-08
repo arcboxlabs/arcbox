@@ -53,7 +53,16 @@ impl Status {
         let validity = authority.validity();
         let valid = validity.is_valid_at(SystemTime::now().into());
         let published = match std::fs::read(tls_dir.join(TLS_CA_CERT)) {
-            Ok(pem) => PublicAuthority::from_pem(&pem)?.der() == authority.der(),
+            Ok(pem) => {
+                PublicAuthority::from_pem(&pem)
+                    .map_err(|error| {
+                        crate::CoreError::invalid_state(format!(
+                            "invalid public CA file: {error}; run `abctl tls repair` to check whether the public file can be restored"
+                        ))
+                    })?
+                    .der()
+                    == authority.der()
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => return Err(error.into()),
         };

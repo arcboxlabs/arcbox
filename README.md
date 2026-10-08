@@ -306,6 +306,7 @@ Most of ArcBox's performance-critical code is custom rather than vendored:
   The host verifies container DNS ownership before and after each signature.
   Run `abctl tls status --json` to inspect trust, certificate validity, and the public CA fingerprint without changing trust.
   Pass that fingerprint to `abctl tls trust --expected-fingerprint <SHA-256>` to reject a CA change between inspection and authorization.
+  Run `abctl tls repair` to restore a missing or damaged public CA file from the current Keychain identity without changing trust. Repair preserves different certificates and rejects ambiguous identities.
   Guest DNS follows the Mac's resolvers as
   they change (Wi-Fi switch, VPN up or down), and guest egress follows the
   Mac's proxy settings by default; `proxy = "none"` or a proxy URL under

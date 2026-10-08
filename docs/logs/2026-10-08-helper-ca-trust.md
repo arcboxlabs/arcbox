@@ -93,3 +93,9 @@ The four probe tests passed on macOS, including real self-signed TLS sockets for
 The host now parses a signature-verified CSR before authorizing its single DNS name against host-maintained container DNS records. The signer checks the current registration and resolved address before signing, then checks the registration revision again before returning the certificate. Unknown names, non-container registrations, deleted registrations, and registrations replaced during signing are rejected. The guest still checks the actual connection destination independently.
 
 Validation passed: 14 CA tests, five core web-service tests, and four daemon signer tests. Two native CA tests were not run. The daemon tests send real CSRs through the framed request path and verify that invalid or unowned requests never reach the signer. They also cover deletion, owner transfer, and re-registration while signing is in progress. Real VM validation remains pending.
+
+## Explicit public CA repair
+
+`abctl tls repair` restores a missing or damaged publication from the existing profile identity. The command does not create a key, call the helper, or change trust. It rejects an inactive root, ambiguous Keychain identities, recoverable different certificates, and multiple PEM objects. The optional expected fingerprint applies before repair. Status and trust parse failures now direct the user to this command without claiming that every damaged file is repairable.
+
+Validation passed: 18 default CA tests, the CLI fingerprint test, targeted strict host Clippy, and formatting. The native Keychain migration test also passed, including same-profile public repair, wrong-profile rejection, signature verification, identity reopening, and deletion of isolated test identities. That test does not grant trust. The native Admin-trust lifecycle test remains unrun at this checkpoint.

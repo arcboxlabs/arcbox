@@ -1,4 +1,4 @@
-//! Publish the Keychain certificate only after retiring the shared CA.
+//! Publish the Keychain certificate and explicitly repair its public file without changing trust.
 
 use std::{fs, path::Path};
 
@@ -8,6 +8,7 @@ use security_framework::certificate::SecCertificate;
 use security_framework::item::{ItemClass, ItemSearchOptions, Limit, Reference, SearchResult};
 use security_framework::os::macos::keychain::SecKeychain;
 use security_framework::trust_settings::Domain;
+use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::{Error, KeychainAuthority, PublicAuthority, trust};
 
@@ -38,6 +39,76 @@ impl KeychainAuthority {
 }
 
 impl PublicAuthority {
+    /// Restores only this profile's current public root without creating a key or changing trust.
+    /// Preserves every recoverable different certificate for explicit trust revocation.
+    pub fn repair_publication(&self, dir: &Path) -> Result<(), Error> {
+        if KeychainAuthority::existing_certificate(dir)?.as_deref() != Some(self.der()) {
+            return Err(Error::InvalidAuthority(
+                "publication repair requires the current profile's Keychain CA",
+            ));
+        }
+        self.repair_checked(dir)
+    }
+
+    fn repair_checked(&self, dir: &Path) -> Result<(), Error> {
+        if !self.validity().is_valid_at(time::OffsetDateTime::now_utc()) {
+            return Err(Error::InvalidAuthority(
+                "the current CA is outside its validity period; rotate it before repairing publication",
+            ));
+        }
+        let path = dir.join(TLS_CA_CERT);
+        match fs::read(&path) {
+            Ok(bytes) => {
+                self.check_repairable(&bytes)?;
+                if Self::from_pem(&bytes).is_ok() {
+                    return Ok(());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Error::io(&path, error)),
+        }
+        fs::create_dir_all(dir).map_err(|error| Error::io(dir, error))?;
+        let exported = pem::encode(&pem::Pem::new("CERTIFICATE", self.der()));
+        arcbox_atomic_file::write(&path, exported.as_bytes())?;
+        Ok(())
+    }
+
+    fn check_repairable(&self, bytes: &[u8]) -> Result<(), Error> {
+        // Inspect raw DER before PEM so an appended PEM cannot hide a complete certificate.
+        if X509Certificate::from_der(bytes).is_ok() {
+            return self.check_repair_certificate(bytes);
+        }
+        let certificates = pem::parse_many(bytes).map_err(|_| {
+            Error::InvalidAuthority(
+                "ambiguous PEM publication; preserve it for certificate recovery",
+            )
+        })?;
+        if certificates.len() > 1 {
+            return Err(Error::InvalidAuthority(
+                "publication contains multiple PEM objects; repair cannot replace them",
+            ));
+        }
+        if let Some(certificate) = certificates.first() {
+            if certificate.tag() != "CERTIFICATE" {
+                return Err(Error::InvalidAuthority(
+                    "publication contains a non-certificate PEM object",
+                ));
+            }
+            self.check_repair_certificate(certificate.contents())?;
+        }
+        Ok(())
+    }
+
+    fn check_repair_certificate(&self, der: &[u8]) -> Result<(), Error> {
+        // Structural parsing protects foreign and policy-invalid certificates without trusting them.
+        if X509Certificate::from_der(der).is_ok() && der != self.der() {
+            return Err(Error::InvalidAuthority(
+                "publication contains a different certificate; revoke its trust before replacing it",
+            ));
+        }
+        Ok(())
+    }
+
     /// Publishes this root after the previous root loses User and Admin trust.
     /// Preserves a trusted previous root so an explicit action can revoke the exact certificate.
     pub fn publish(&self, dir: &Path) -> Result<Publication, Error> {
@@ -122,6 +193,89 @@ pub fn delete_certificate(pem: &[u8]) -> Result<(), Error> {
 mod tests {
     use super::*;
     use crate::CertificateRequest;
+
+    fn public_root(parameters: rcgen::CertificateParams) -> (PublicAuthority, String) {
+        let certificate = parameters
+            .self_signed(&rcgen::KeyPair::generate().unwrap())
+            .unwrap();
+        (
+            PublicAuthority::try_from(certificate.der().to_vec()).unwrap(),
+            certificate.pem(),
+        )
+    }
+
+    #[test]
+    fn repair_restores_missing_or_damaged_publication_with_the_same_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let (current, pem) = public_root(crate::authority::parameters());
+        let tls = dir.path().join("missing-tls");
+        let path = tls.join(TLS_CA_CERT);
+        current.repair_checked(&tls).unwrap();
+        for damaged in [
+            Vec::new(),
+            b"corrupt certificate".to_vec(),
+            pem.as_bytes()[..40].to_vec(),
+            pem::encode(&pem::Pem::new("CERTIFICATE", [0_u8])).into_bytes(),
+            current.der().to_vec(),
+            format!("damaged prefix\n{pem}").into_bytes(),
+        ] {
+            fs::write(&path, damaged).unwrap();
+            current.repair_checked(&tls).unwrap();
+            assert_eq!(
+                PublicAuthority::from_pem(&fs::read(&path).unwrap())
+                    .unwrap()
+                    .der(),
+                current.der()
+            );
+        }
+        let published = fs::read(&path).unwrap();
+        current.repair_checked(&tls).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), published);
+    }
+
+    #[test]
+    fn repair_preserves_different_certificates_and_ambiguous_pem() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(TLS_CA_CERT);
+        let (current, current_pem) = public_root(crate::authority::parameters());
+        let (different, different_pem) = public_root(crate::authority::parameters());
+        let mut broad = crate::authority::parameters();
+        broad.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let policy_invalid = broad
+            .self_signed(&rcgen::KeyPair::generate().unwrap())
+            .unwrap();
+        let foreign = rcgen::CertificateParams::default()
+            .self_signed(&rcgen::KeyPair::generate().unwrap())
+            .unwrap();
+        for preserved in [
+            different.der().to_vec(),
+            different_pem.into_bytes(),
+            foreign.pem().into_bytes(),
+            policy_invalid.pem().into_bytes(),
+            format!("{current_pem}{current_pem}").into_bytes(),
+            format!("{current_pem}{}", foreign.pem()).into_bytes(),
+            format!("-----BEGIN CERTIFICATE-----\n!\n-----END CERTIFICATE-----\n{current_pem}")
+                .into_bytes(),
+            [different.der(), current_pem.as_bytes()].concat(),
+        ] {
+            fs::write(&path, &preserved).unwrap();
+            assert!(current.repair_checked(dir.path()).is_err());
+            assert_eq!(fs::read(&path).unwrap(), preserved);
+        }
+    }
+
+    #[test]
+    fn repair_rejects_an_expired_root_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(TLS_CA_CERT);
+        fs::write(&path, b"damaged").unwrap();
+        let mut parameters = crate::authority::parameters();
+        parameters.not_after = time::OffsetDateTime::now_utc() - time::Duration::days(1);
+        parameters.not_before = parameters.not_after - time::Duration::days(1);
+        let (expired, _) = public_root(parameters);
+        assert!(expired.repair_checked(dir.path()).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"damaged");
+    }
 
     #[test]
     fn publication_preserves_a_trusted_previous_root_until_explicit_revocation() {
@@ -254,6 +408,12 @@ mod tests {
         let other_ca = KeychainAuthority::open(other.path()).unwrap();
         let other_pem = other_ca.certificate_pem();
         assert_ne!(reopened.certificate_pem(), other_pem);
+        let public = PublicAuthority::from_pem(&new).unwrap();
+        fs::write(dir.path().join(TLS_CA_CERT), b"damaged").unwrap();
+        public.repair_publication(dir.path()).unwrap();
+        assert_eq!(fs::read(dir.path().join(TLS_CA_CERT)).unwrap(), new);
+        assert!(public.repair_publication(other.path()).is_err());
+        assert_eq!(other_ca.certificate_pem(), other_pem);
         let path = dir.path().to_owned();
         fs::remove_dir_all(&path).unwrap();
         assert!(

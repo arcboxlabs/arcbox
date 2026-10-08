@@ -45,11 +45,7 @@ impl KeychainAuthority {
                 SecKey::new(&options)?
             }
         };
-        let public = key
-            .public_key()
-            .and_then(|key| key.external_representation())
-            .ok_or(Error::InvalidAuthority("missing EC public key"))?
-            .to_vec();
+        let public = public_key_bytes(&key)?;
         let existing = certificate_for_key(&key)?;
         let key = KeychainKey { key, public };
         let certificate = match existing {
@@ -64,15 +60,6 @@ impl KeychainAuthority {
                 certificate
             }
         };
-        let certificate_public = certificate
-            .public_key()?
-            .external_representation()
-            .ok_or(Error::InvalidAuthority("missing certificate public key"))?;
-        if certificate_public.bytes() != key.public {
-            return Err(Error::InvalidAuthority(
-                "certificate and private key differ",
-            ));
-        }
         let der = certificate.to_der();
         let validity = CertificateValidity::from_der(&der)?;
         let issuer = Issuer::from_ca_cert_der(&der.into(), key)?;
@@ -177,10 +164,28 @@ fn certificate_for_key(key: &SecKey) -> Result<Option<SecCertificate>, Error> {
             .pub_key_hash(hash.bytes())
             .load_refs(true),
     )? {
-        Some(Reference::Certificate(certificate)) => Ok(Some(certificate)),
+        Some(Reference::Certificate(certificate)) => {
+            let certificate_public = certificate
+                .public_key()?
+                .external_representation()
+                .ok_or(Error::InvalidAuthority("missing certificate public key"))?;
+            if certificate_public.bytes() != public_key_bytes(key)? {
+                return Err(Error::InvalidAuthority(
+                    "certificate and private key differ",
+                ));
+            }
+            Ok(Some(certificate))
+        }
         Some(_) => Err(Error::InvalidAuthority("expected a certificate")),
         None => Ok(None),
     }
+}
+
+fn public_key_bytes(key: &SecKey) -> Result<Vec<u8>, Error> {
+    key.public_key()
+        .and_then(|key| key.external_representation())
+        .map(|bytes| bytes.to_vec())
+        .ok_or(Error::InvalidAuthority("missing EC public key"))
 }
 
 fn public_key_hash(key: &SecKey) -> Result<CFData, Error> {
@@ -197,13 +202,25 @@ fn public_key_hash(key: &SecKey) -> Result<CFData, Error> {
 fn find(query: &mut ItemSearchOptions) -> Result<Option<Reference>, Error> {
     // The helper stores a public copy in System.keychain. Identity operations
     // must only find and delete the user's original Keychain items.
-    match query.keychains(&[SecKeychain::default()?]).search() {
-        Ok(items) => match items.into_iter().next() {
-            Some(SearchResult::Ref(reference)) => Ok(Some(reference)),
-            _ => Err(Error::InvalidAuthority("expected a keychain reference")),
-        },
+    match query
+        .keychains(&[SecKeychain::default()?])
+        .limit(Limit::All)
+        .search()
+    {
+        Ok(items) => unique_reference(items),
         Err(error) if error.code() == errSecItemNotFound => Ok(None),
         Err(error) => Err(error.into()),
+    }
+}
+
+fn unique_reference(mut items: Vec<SearchResult>) -> Result<Option<Reference>, Error> {
+    if items.len() > 1 {
+        return Err(Error::InvalidAuthority("ambiguous Keychain CA identity"));
+    }
+    match items.pop() {
+        Some(SearchResult::Ref(reference)) => Ok(Some(reference)),
+        Some(_) => Err(Error::InvalidAuthority("expected a keychain reference")),
+        None => Ok(None),
     }
 }
 
@@ -231,5 +248,25 @@ impl SigningKey for KeychainKey {
                 tracing::error!(%error, "Keychain CA signing failed");
                 rcgen::Error::RemoteKeyError
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_lookup_rejects_multiple_matches() {
+        let certificate = authority::parameters()
+            .self_signed(&rcgen::KeyPair::generate().unwrap())
+            .unwrap();
+        let reference = || {
+            SearchResult::Ref(Reference::Certificate(
+                SecCertificate::from_der(certificate.der()).unwrap(),
+            ))
+        };
+        assert!(unique_reference(Vec::new()).unwrap().is_none());
+        assert!(unique_reference(vec![reference()]).unwrap().is_some());
+        assert!(unique_reference(vec![reference(), reference()]).is_err());
     }
 }
