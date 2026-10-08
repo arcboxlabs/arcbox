@@ -76,6 +76,7 @@ from memory. Every new file is added to the index below.
 
 ### Experiments
 
+- [2026-10-08 — Can host CPU contention stall real ClickHouse threads?](experiments/2026-10-08-clickhouse-restart-contention.md) — [procfs reader probe](../tests/bench/signoz/probe_status_read.sh), [reader checks](../tests/bench/signoz/analyze_status_read.py)
 - [2026-10-08 — Can a delayed waiter block a condition-variable notifier?](experiments/2026-10-08-condvar-notification-latency.md) — [combined probe](../tests/bench/signoz/cond_scheduler_latency.c), [host driver](../tests/bench/signoz/run_cond_scheduler.py), [evidence checks](../tests/bench/signoz/analyze_cond_scheduler.py)
 - [2026-10-08 — Which task clock charges host suspension?](experiments/2026-10-08-thread-cpu-accounting.md)
 - [2026-10-08 — Can HV expose correct execution time, and does Colima avoid CPU accounting divergence?](experiments/2026-10-08-hv-cpu-accounting-and-colima.md)

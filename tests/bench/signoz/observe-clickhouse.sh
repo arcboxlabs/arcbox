@@ -18,13 +18,15 @@ for ((sample = 0; sample < samples; sample++)); do
             *) continue ;;
         esac
         printf 'thread\t%s\t%s\n' "${task##*/}" "$comm"
+        # Bash read seeks on regular files; a procfs seek can regenerate changing text.
+        status=$(<"$task/status")
         while IFS= read -r line; do
             case "$line" in
                 State:*|Uid:*|Cpus_allowed_list:*|SigPnd:*|SigBlk:*|voluntary_ctxt_switches:*|nonvoluntary_ctxt_switches:*)
                     printf '%s\n' "$line"
                     ;;
             esac
-        done < "$task/status"
+        done <<< "$status"
         schedstat=$(<"$task/schedstat")
         syscall=$(<"$task/syscall")
         wchan=$(<"$task/wchan")
