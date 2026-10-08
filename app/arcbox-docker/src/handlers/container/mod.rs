@@ -1,8 +1,8 @@
 mod ca_injection;
 mod guest;
-mod start;
+pub(super) mod lifecycle;
 
-use super::{extract_container_id, proxy_to_system_vm, require_amd64_runtime};
+use super::{proxy_to_system_vm, require_amd64_runtime};
 use crate::api::AppState;
 use crate::error::{DockerError, Result};
 use crate::port_bindings::parse_port_bindings;
@@ -12,6 +12,7 @@ use axum::body::Body;
 use axum::extract::{OriginalUri, State};
 use axum::http::{Request, Uri};
 use axum::response::Response;
+use lifecycle::Lifecycle;
 use std::net::IpAddr;
 
 /// Create a container, resolving macOS symlinks in bind-mount source paths.
@@ -99,26 +100,16 @@ pub async fn start_container(
     OriginalUri(uri): OriginalUri,
     req: Request<Body>,
 ) -> Result<Response> {
-    let mut uri = uri;
-    let start = match extract_container_id(&uri) {
-        Some(id) => Some(start::Start::acquire(&state, &id).await?),
-        None => None,
-    };
-    let warnings = if let Some(start) = &start {
-        tracing::Span::current().record("container_id", start.id.as_str());
-        uri = start.uri(&uri)?;
-        ca_injection::reconcile(&state, &start.id).await?
-    } else {
-        Vec::new()
-    };
+    let lifecycle = Lifecycle::from_uri(&state, &uri).await?;
+    tracing::Span::current().record("container_id", lifecycle.id.as_str());
+    let uri = lifecycle.uri(&uri)?;
+    let warnings = ca_injection::reconcile(&state, &lifecycle.id).await?;
     let mut response = proxy_to_system_vm(&state, &uri, req).await?;
     ca_injection::report_warnings(&mut response, warnings);
 
     // On success, inspect the container and set up port forwarding + DNS.
     if response.status().is_success() {
-        if let Some(start) = &start {
-            setup_container_networking(&state, &start.id).await?;
-        }
+        setup_container_networking(&state, &lifecycle.id).await?;
     }
 
     Ok(response)
@@ -140,11 +131,9 @@ pub async fn stop_container(
     OriginalUri(uri): OriginalUri,
     req: Request<Body>,
 ) -> Result<Response> {
-    if let Some(id) = extract_container_id(&uri) {
-        tracing::Span::current().record("container_id", id.as_str());
-    }
-    // Resolve the canonical ID from the host registry (no guest round-trip).
-    let canonical = resolve_or_raw_for_teardown(&state, &uri).await;
+    let lifecycle = Lifecycle::from_uri(&state, &uri).await?;
+    tracing::Span::current().record("container_id", lifecycle.id.as_str());
+    let uri = lifecycle.uri(&uri)?;
 
     let response = proxy_to_system_vm(&state, &uri, req).await?;
 
@@ -152,10 +141,11 @@ pub async fn stop_container(
     // Docker returns 204 on success and 304 when already stopped.
     let status = response.status().as_u16();
     if status == 204 || status == 304 {
-        if let Some(canonical) = canonical {
-            state.runtime.stop_port_forwarding_by_id(&canonical).await;
-            state.runtime.deregister_dns_by_id(&canonical).await;
-        }
+        state
+            .runtime
+            .stop_port_forwarding_by_id(&lifecycle.id)
+            .await;
+        state.runtime.deregister_dns_by_id(&lifecycle.id).await;
     }
 
     Ok(response)
@@ -199,11 +189,9 @@ pub async fn kill_container(
     OriginalUri(uri): OriginalUri,
     req: Request<Body>,
 ) -> Result<Response> {
-    if let Some(id) = extract_container_id(&uri) {
-        tracing::Span::current().record("container_id", id.as_str());
-    }
-    // Resolve the canonical ID from the host registry (no guest round-trip).
-    let canonical = resolve_or_raw_for_teardown(&state, &uri).await;
+    let lifecycle = Lifecycle::from_uri(&state, &uri).await?;
+    tracing::Span::current().record("container_id", lifecycle.id.as_str());
+    let uri = lifecycle.uri(&uri)?;
 
     let terminates = kill_terminates_container(&uri);
     let response = proxy_to_system_vm(&state, &uri, req).await?;
@@ -211,10 +199,11 @@ pub async fn kill_container(
     // Docker kill returns 204 for any delivered signal; only tear down when the
     // signal actually terminates the container (see `kill_terminates_container`).
     if response.status().as_u16() == 204 && terminates {
-        if let Some(canonical) = canonical {
-            state.runtime.stop_port_forwarding_by_id(&canonical).await;
-            state.runtime.deregister_dns_by_id(&canonical).await;
-        }
+        state
+            .runtime
+            .stop_port_forwarding_by_id(&lifecycle.id)
+            .await;
+        state.runtime.deregister_dns_by_id(&lifecycle.id).await;
     }
 
     Ok(response)
@@ -236,18 +225,10 @@ pub async fn restart_container(
     OriginalUri(uri): OriginalUri,
     req: Request<Body>,
 ) -> Result<Response> {
-    let mut uri = uri;
-    let start = match extract_container_id(&uri) {
-        Some(id) => Some(start::Start::acquire(&state, &id).await?),
-        None => None,
-    };
-    let warnings = if let Some(start) = &start {
-        tracing::Span::current().record("container_id", start.id.as_str());
-        uri = start.uri(&uri)?;
-        ca_injection::reconcile(&state, &start.id).await?
-    } else {
-        Vec::new()
-    };
+    let lifecycle = Lifecycle::from_uri(&state, &uri).await?;
+    tracing::Span::current().record("container_id", lifecycle.id.as_str());
+    let uri = lifecycle.uri(&uri)?;
+    let warnings = ca_injection::reconcile(&state, &lifecycle.id).await?;
     let mut response = proxy_to_system_vm(&state, &uri, req).await?;
     ca_injection::report_warnings(&mut response, warnings);
 
@@ -255,14 +236,12 @@ pub async fn restart_container(
     // a new IP) with a single inspect call for both canonical ID and DNS info.
     // Port forwarding targets the guest VM and survives container restarts.
     if response.status().as_u16() == 204 {
-        if let Some(id) = extract_container_id(&uri) {
-            let _ = state.runtime.ensure_vm_ready().await;
-            let inspect = crate::guest_query::inspect_container(state.proxy.client(), &id).await?;
-            state
-                .runtime
-                .register_container_dns(&inspect.metadata)
-                .await;
-        }
+        let inspect =
+            crate::guest_query::inspect_container(state.proxy.client(), &lifecycle.id).await?;
+        state
+            .runtime
+            .register_container_dns(&inspect.metadata)
+            .await;
     }
 
     Ok(response)
@@ -284,20 +263,19 @@ pub async fn remove_container(
     OriginalUri(uri): OriginalUri,
     req: Request<Body>,
 ) -> Result<Response> {
-    if let Some(id) = extract_container_id(&uri) {
-        tracing::Span::current().record("container_id", id.as_str());
-    }
-    // Resolve the canonical ID from the host registry (no guest round-trip).
-    let canonical = resolve_or_raw_for_teardown(&state, &uri).await;
+    let lifecycle = Lifecycle::from_uri(&state, &uri).await?;
+    tracing::Span::current().record("container_id", lifecycle.id.as_str());
+    let uri = lifecycle.uri(&uri)?;
 
     let response = proxy_to_system_vm(&state, &uri, req).await?;
 
     // Only tear down networking after a successful remove.
     if response.status().is_success() {
-        if let Some(canonical) = canonical {
-            state.runtime.stop_port_forwarding_by_id(&canonical).await;
-            state.runtime.deregister_dns_by_id(&canonical).await;
-        }
+        state
+            .runtime
+            .stop_port_forwarding_by_id(&lifecycle.id)
+            .await;
+        state.runtime.deregister_dns_by_id(&lifecycle.id).await;
     }
 
     Ok(response)
@@ -410,12 +388,9 @@ pub async fn rename_container(
     OriginalUri(uri): OriginalUri,
     req: Request<Body>,
 ) -> Result<Response> {
-    if let Some(id) = extract_container_id(&uri) {
-        tracing::Span::current().record("container_id", id.as_str());
-    }
-    // Resolve the canonical ID from the host registry BEFORE proxying — the
-    // old name alias is dropped as part of the post-rename refresh.
-    let canonical = resolve_canonical_from_uri(&state, &uri).await;
+    let lifecycle = Lifecycle::from_uri(&state, &uri).await?;
+    tracing::Span::current().record("container_id", lifecycle.id.as_str());
+    let uri = lifecycle.uri(&uri)?;
     let new_name = query_param(&uri, "name").map(str::to_string);
     if let Some(name) = new_name.as_deref() {
         tracing::Span::current().record("new_name", name);
@@ -425,16 +400,13 @@ pub async fn rename_container(
     let response = proxy_to_system_vm(&state, &uri, req).await?;
 
     if response.status().is_success() {
-        if let Some(ref canonical) = canonical {
-            // Docker may already have renamed the container when inspect fails.
-            // Preserve the previous host state until an authoritative snapshot arrives.
-            let inspect =
-                crate::guest_query::inspect_container(state.proxy.client(), canonical).await?;
-            state
-                .runtime
-                .register_container_dns(&inspect.metadata)
-                .await;
-        }
+        // Preserve previous host state if inspect fails after the guest rename.
+        let inspect =
+            crate::guest_query::inspect_container(state.proxy.client(), &lifecycle.id).await?;
+        state
+            .runtime
+            .register_container_dns(&inspect.metadata)
+            .await;
     }
 
     Ok(response)
@@ -445,35 +417,6 @@ pub fn extract_container_name(inspect_json: &[u8]) -> Option<String> {
     let value: serde_json::Value = serde_json::from_slice(inspect_json).ok()?;
     let name = value.get("Name")?.as_str()?.trim_start_matches('/');
     (!name.is_empty()).then(|| name.to_string())
-}
-
-/// Extracts a container identifier from the URI and resolves it to the
-/// canonical full ID of a container with registered host networking state.
-///
-/// Resolution is purely against the host registry (exact ID, name alias, or
-/// unique short-ID prefix) — no guest round-trip. Every container that got
-/// host networking was registered with its name at setup, so `None` means
-/// the container has no host state to refresh or tear down.
-async fn resolve_canonical_from_uri(state: &AppState, uri: &Uri) -> Option<String> {
-    let token = extract_container_id(uri)?;
-    state.runtime.resolve_registered_container(&token).await
-}
-
-/// Variant of [`resolve_canonical_from_uri`] for teardown handlers
-/// (stop/kill/remove): when the token resolves to nothing registered, the
-/// raw token is returned as-is. Teardown only matters for containers *with*
-/// host state, so an unresolved token makes the teardown calls harmless
-/// no-ops against the canonical-keyed maps; the reconciler backstops
-/// anything the registry missed.
-async fn resolve_or_raw_for_teardown(state: &AppState, uri: &Uri) -> Option<String> {
-    let token = extract_container_id(uri)?;
-    Some(
-        state
-            .runtime
-            .resolve_registered_container(&token)
-            .await
-            .unwrap_or(token),
-    )
 }
 
 #[cfg(test)]

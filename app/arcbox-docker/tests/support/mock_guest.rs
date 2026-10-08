@@ -105,6 +105,18 @@ impl MockGuest {
     pub async fn last_request_uri(&self) -> Option<String> {
         self.last_request_uri.lock().await.clone()
     }
+
+    /// Waits for a request target observed on the mock connection.
+    #[allow(dead_code)] // used by the handler integration suite only
+    pub async fn wait_for_request_uri(&self, uri: &str) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while self.last_request_uri().await.as_deref() != Some(uri) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("mock guest received the expected request");
+    }
 }
 
 /// Start a mock guest dockerd listening on a Unix socket (echo behavior).

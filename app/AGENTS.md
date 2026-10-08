@@ -529,6 +529,7 @@ above). When editing either side, keep in lockstep:
 - Register container DNS through `Runtime::register_container_dns`. Reject invalid inspect snapshots before changing host state. Preserve previous ownership if post-mutation inspect fails.
   The primary address is the first valid IPv4 address in network-name order; ignore the deprecated top-level `NetworkSettings.IPAddress`.
 - Cold-start recovery must obtain `guest_query::running_container_snapshot` before publishing DNS or listeners. A failed inspect or mismatched full ID rejects the complete snapshot.
+- Start, restart, stop, kill, remove, and rename must inspect the requested token before acquiring Runtime's full-ID lifecycle lock. Hold the lock and activity lease through the guest mutation and host publication. Preserve the query when rewriting the URI.
 
 ## Host port forwarding & image pull (`arcbox-docker`)
 

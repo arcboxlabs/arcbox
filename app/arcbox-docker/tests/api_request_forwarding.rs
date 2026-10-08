@@ -43,12 +43,20 @@ async fn send(router: &axum::Router, method: &str, uri: &str) -> (StatusCode, by
 /// removal into a polite one, or leaks the volumes — with a 204 either way.
 #[tokio::test]
 async fn query_string_reaches_the_guest_verbatim() {
-    let (router, _runtime, guest, _tmp) = router_with_mock_guest(vec![MockRoute {
-        method: "DELETE",
-        path: "/containers/web",
-        status: 204,
-        body: "",
-    }])
+    let (router, _runtime, guest, _tmp) = router_with_mock_guest(vec![
+        MockRoute {
+            method: "GET",
+            path: "/containers/web/json",
+            status: 200,
+            body: r#"{"Id":"abc123"}"#,
+        },
+        MockRoute {
+            method: "DELETE",
+            path: "/containers/abc123",
+            status: 204,
+            body: "",
+        },
+    ])
     .await;
 
     let (status, _) = send(&router, "DELETE", "/containers/web?force=true&v=true").await;
@@ -56,8 +64,8 @@ async fn query_string_reaches_the_guest_verbatim() {
 
     let seen = guest.last_request_uri().await.expect("guest saw a request");
     assert_eq!(
-        seen, "/containers/web?force=true&v=true",
-        "the request target must reach dockerd byte-for-byte"
+        seen, "/containers/abc123?force=true&v=true",
+        "canonicalization must preserve the query byte-for-byte"
     );
 }
 

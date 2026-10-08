@@ -72,10 +72,13 @@ async fn alias_start_blocks_canonical_restart_until_the_guest_responds() {
 async fn inspection_body_failure_invalidates_cached_readiness() {
     let guest = guest::Guest::new(metadata()).await;
     guest.data.lock().unwrap().oversized_inspect = true;
-    let error = Start::acquire(&guest.state, "test").await.err().unwrap();
+    let error = Lifecycle::acquire(&guest.state, "test")
+        .await
+        .err()
+        .unwrap();
     assert!(error.is_guest_transport());
     guest.data.lock().unwrap().oversized_inspect = false;
-    let _start = Start::acquire(&guest.state, "test").await.unwrap();
+    let _start = Lifecycle::acquire(&guest.state, "test").await.unwrap();
     assert_eq!(
         guest
             .data

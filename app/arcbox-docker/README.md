@@ -31,7 +31,7 @@ docker run alpine echo hello
 docker images
 ```
 
-Start and restart requests resolve a canonical container ID before waiting for the per-container lock. ArcBox uses that ID through the guest operation, so a concurrent rename or name reuse cannot redirect the request.
+Start, restart, stop, kill, remove, and rename resolve a canonical container ID before acquiring Runtime's per-container lock. ArcBox keeps that lock and an activity lease through the guest operation and host networking update. Names and short IDs use the same lock; the forwarded URI retains the original query.
 
 ### Container trust for local HTTPS
 

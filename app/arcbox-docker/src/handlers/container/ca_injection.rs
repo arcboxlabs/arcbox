@@ -7,7 +7,7 @@ mod test_support;
 #[cfg(test)]
 mod tests;
 
-use super::{guest::Container, start::Start};
+use super::{guest::Container, lifecycle::Lifecycle};
 
 use std::{
     collections::HashMap,
@@ -54,7 +54,7 @@ pub(super) async fn after_create(state: &AppState, response: Response) -> Result
         .as_str()
         .ok_or_else(|| DockerError::Server("container creation response has no ID".into()))?;
     let result = async {
-        let start = Start::acquire(state, id).await?;
+        let start = Lifecycle::acquire(state, id).await?;
         reconcile(state, &start.id).await
     }
     .await;

@@ -1,4 +1,5 @@
 use super::*;
+use crate::handlers::extract_container_id;
 
 fn uri(s: &str) -> Uri {
     s.parse().unwrap()
@@ -23,10 +24,13 @@ fn extract_id_from_delete_path() {
 }
 
 #[test]
-fn extract_id_skips_collection_endpoints() {
-    assert_eq!(extract_container_id(&uri("/containers/json")), None);
-    assert_eq!(extract_container_id(&uri("/containers/create")), None);
-    assert_eq!(extract_container_id(&uri("/containers/prune")), None);
+fn extract_id_accepts_collection_named_containers() {
+    for token in ["json", "create", "prune"] {
+        assert_eq!(
+            extract_container_id(&uri(&format!("/containers/{token}"))).as_deref(),
+            Some(token)
+        );
+    }
 }
 
 #[test]

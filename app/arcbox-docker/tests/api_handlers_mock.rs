@@ -25,6 +25,12 @@ fn lifecycle_routes() -> Vec<MockRoute> {
     vec![
         MockRoute {
             method: "GET",
+            path: "/containers/web/json",
+            status: 200,
+            body: INSPECT_WEB,
+        },
+        MockRoute {
+            method: "GET",
             path: "/containers/json",
             status: 200,
             body: "[]",
@@ -55,7 +61,7 @@ fn lifecycle_routes() -> Vec<MockRoute> {
         },
         MockRoute {
             method: "DELETE",
-            path: "/containers/web",
+            path: "/containers/abc123",
             status: 204,
             body: "",
         },
@@ -216,9 +222,8 @@ async fn start_stop_cycle_manages_host_networking() {
         "name alias must resolve after start"
     );
 
-    // Stop BY NAME: the registry resolves the alias without a guest inspect
-    // and tears down the canonical entry.
-    let (status, _) = send(&router, "POST", "/containers/abc123/stop").await;
+    // The guest resolves the name before the canonical entry is torn down.
+    let (status, _) = send(&router, "POST", "/containers/web/stop").await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert!(
         runtime.registered_container_ids().await.is_empty(),
@@ -232,8 +237,14 @@ async fn successful_rename_with_invalid_inspect_preserves_previous_host_ownershi
     for body in ["not json", r#"{"Name":"/renamed"}"#, r#"{"Id":"abc123"}"#] {
         let routes = vec![
             MockRoute {
+                method: "GET",
+                path: "/containers/web/json",
+                status: 200,
+                body: INSPECT_WEB,
+            },
+            MockRoute {
                 method: "POST",
-                path: "/containers/web/rename",
+                path: "/containers/abc123/rename",
                 status: 204,
                 body: "",
             },
@@ -286,7 +297,7 @@ async fn network_refresh_is_idempotent_and_rename_replaces_the_old_alias() {
         },
         MockRoute {
             method: "POST",
-            path: "/containers/web/rename",
+            path: "/containers/abc123/rename",
             status: 204,
             body: "",
         },
@@ -392,43 +403,77 @@ async fn non_fatal_kill_keeps_host_networking() {
 }
 
 #[tokio::test]
-async fn start_and_restart_pin_identity_and_preserve_query() {
-    let routes = vec![
-        MockRoute {
-            method: "GET",
-            path: "/containers/reused-name/json",
-            status: 200,
-            body: INSPECT_WEB,
-        },
-        MockRoute {
-            method: "GET",
-            path: "/containers/abc123/json",
-            status: 200,
-            body: INSPECT_WEB,
-        },
-        MockRoute {
-            method: "POST",
-            path: "/containers/abc123/start",
-            status: 409,
-            body: "canonical start reached",
-        },
-        MockRoute {
-            method: "POST",
-            path: "/containers/abc123/restart",
-            status: 409,
-            body: "canonical restart reached",
-        },
+async fn lifecycle_mutations_share_canonical_lock_and_preserve_query() {
+    let actions = [
+        ("POST", "/containers/abc123/start"),
+        ("POST", "/containers/abc123/restart"),
+        ("POST", "/containers/abc123/stop"),
+        ("POST", "/containers/abc123/kill"),
+        ("POST", "/containers/abc123/rename"),
+        ("DELETE", "/containers/abc123"),
     ];
-    let (router, _runtime, guest, _tmp) = router_with_mock_guest(routes).await;
-    for action in ["start", "restart"] {
-        let uri = format!("/v1.47/containers/reused-name/{action}?t=7&signal=SIGTERM");
-        let (status, _) = send(&router, "POST", &uri).await;
-        assert_eq!(status, StatusCode::CONFLICT);
+    let mut routes: Vec<_> = [
+        "/containers/reused-name/json",
+        "/containers/json/json",
+        "/containers/abc/json",
+        "/containers/abc123/json",
+    ]
+    .into_iter()
+    .map(|path| MockRoute {
+        method: "GET",
+        path,
+        status: 200,
+        body: INSPECT_WEB,
+    })
+    .collect();
+    routes.extend(actions.into_iter().map(|(method, path)| MockRoute {
+        method,
+        path,
+        status: 409,
+        body: "canonical mutation",
+    }));
+    let (router, runtime, guest, _tmp) = router_with_mock_guest(routes).await;
+    for token in ["reused-name", "json", "abc"] {
+        for (method, path) in actions {
+            let guard = runtime.lock_container_lifecycle("abc123").await;
+            let expected = format!("/v1.47{path}?t=7&name=new%2Dname&signal=SIGTERM");
+            let uri = expected.replace("/abc123", &format!("/{token}"));
+            let router = router.clone();
+            let mut request = tokio::spawn(async move { send(&router, method, &uri).await });
+            guest
+                .wait_for_request_uri(&format!("/containers/{token}/json"))
+                .await;
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(25), &mut request)
+                    .await
+                    .is_err()
+            );
+            drop(guard);
+            let (status, _) = request.await.unwrap();
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert_eq!(guest.last_request_uri().await, Some(expected));
+        }
+    }
+}
+
+#[tokio::test]
+async fn invalid_identity_cannot_reach_a_guest_mutation() {
+    for (guest_status, body, expected) in [
+        (404, r#"{"message":"missing"}"#, StatusCode::NOT_FOUND),
+        (200, r#"{"Id":""}"#, StatusCode::INTERNAL_SERVER_ERROR),
+    ] {
+        let (router, _runtime, guest, _tmp) = router_with_mock_guest(vec![MockRoute {
+            method: "GET",
+            path: "/containers/missing/json",
+            status: guest_status,
+            body,
+        }])
+        .await;
+        let (status, _) = send(&router, "DELETE", "/containers/missing?force=true").await;
+        assert_eq!(status, expected);
         assert_eq!(
-            guest.last_request_uri().await,
-            Some(format!(
-                "/v1.47/containers/abc123/{action}?t=7&signal=SIGTERM"
-            ))
+            guest.last_request_uri().await.as_deref(),
+            Some("/containers/missing/json")
         );
     }
 }
