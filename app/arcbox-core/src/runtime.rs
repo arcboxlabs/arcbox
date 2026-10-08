@@ -10,6 +10,7 @@ mod progress;
 mod sandbox_host;
 mod storage_health;
 mod storage_recovery;
+mod web_services;
 
 #[cfg(test)]
 mod tests;
