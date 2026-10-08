@@ -224,6 +224,8 @@ non-obvious invariants and failure signatures.
   snapshot joins candidate aliases with the current DNS registry: a shared
   Compose alias belongs only to the container whose selected IP DNS returns.
   The host must use this snapshot to build URLs instead of guessing from ports.
+  The HTTPS proxy checks SNI against the same DNS registry before requesting a
+  certificate. A name must resolve to the connection's original destination IP.
   Regression signature: siblings get RST on `<name>.arcbox.local:80` while the Mac works — check
   `iptables -t nat -S PREROUTING | grep arcbox-domain` and
   `/proc/sys/net/bridge/bridge-nf-call-iptables`.

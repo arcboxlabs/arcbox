@@ -71,9 +71,11 @@ impl Routes {
         let proxy = match Https::bind().await {
             Ok(https) => {
                 self.https = true;
-                Some(tokio::spawn(
-                    https.serve(self.ports.clone(), cancel.clone()),
-                ))
+                Some(tokio::spawn(https.serve(
+                    self.ports.clone(),
+                    self.services.clone(),
+                    cancel.clone(),
+                )))
             }
             Err(e) => {
                 tracing::warn!(error = %format!("{e:#}"), "container domains serve no HTTPS");

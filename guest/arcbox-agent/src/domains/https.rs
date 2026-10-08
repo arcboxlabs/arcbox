@@ -22,9 +22,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{LazyConfigAcceptor, rustls};
 use tokio_util::sync::CancellationToken;
 
-use super::HttpPorts;
 use super::certificates::Certificates;
 use super::http_port::HTTPS_PORT;
+use super::{HttpPorts, WebServices};
 
 /// Where the 443 rules redirect to, in the VM's own namespace.
 pub(super) const PROXY_PORT: u16 = 61443;
@@ -55,7 +55,12 @@ impl Https {
     }
 
     /// Serves connections until `cancel`, one task each.
-    pub(super) async fn serve(self, ports: HttpPorts, cancel: CancellationToken) {
+    pub(super) async fn serve(
+        self,
+        ports: HttpPorts,
+        services: WebServices,
+        cancel: CancellationToken,
+    ) {
         loop {
             let (client, peer) = tokio::select! {
                 () = cancel.cancelled() => return,
@@ -72,8 +77,9 @@ impl Https {
             };
             let certificates = Arc::clone(&self.certificates);
             let ports = ports.clone();
+            let services = services.clone();
             tokio::spawn(async move {
-                if let Err(e) = relay(client, &certificates, &ports).await {
+                if let Err(e) = relay(client, &certificates, &ports, &services).await {
                     tracing::debug!(%peer, error = %format!("{e:#}"), "container domain HTTPS connection ended");
                 }
             });
@@ -82,7 +88,12 @@ impl Https {
 }
 
 /// Terminates one client's TLS and relays it to the container it dialled.
-async fn relay(client: TcpStream, certificates: &Certificates, ports: &HttpPorts) -> Result<()> {
+async fn relay(
+    client: TcpStream,
+    certificates: &Certificates,
+    ports: &HttpPorts,
+    services: &WebServices,
+) -> Result<()> {
     let dialled = original_destination(&client).context("reading the dialled address")?;
     // Anything but a redirected container 443 reached the port directly.
     ensure!(
@@ -100,6 +111,10 @@ async fn relay(client: TcpStream, certificates: &Certificates, ports: &HttpPorts
             .server_name()
             .context("TLS client omitted SNI")?
             .to_owned();
+        ensure!(
+            services.resolves_to(&name, container).await,
+            "TLS name {name:?} does not resolve to {container}"
+        );
         let config = certificates.configuration(&name).await?;
         Ok::<_, anyhow::Error>(hello.into_stream(config).await?)
     })

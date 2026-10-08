@@ -54,6 +54,18 @@ impl WebServices {
             .remove(id);
     }
 
+    /// A TLS name must resolve to the address the client actually dialled.
+    pub(super) async fn resolves_to(&self, name: &str, address: Ipv4Addr) -> bool {
+        let name = name.to_ascii_lowercase();
+        let Some(alias) = name
+            .strip_suffix(arcbox_constants::dns::LOCAL_DOMAIN)
+            .and_then(|prefix| prefix.strip_suffix('.'))
+        else {
+            return false;
+        };
+        self.dns.read().await.get(alias) == Some(&address)
+    }
+
     /// Shared Compose aliases belong only to the container DNS currently selects.
     pub async fn snapshot(&self) -> Vec<ContainerWebService> {
         let dns = self.dns.read().await;
@@ -95,6 +107,29 @@ impl WebServices {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn tls_names_follow_live_dns_ownership() {
+        let first = Ipv4Addr::new(172, 17, 0, 2);
+        let second = Ipv4Addr::new(172, 17, 0, 3);
+        let dns = Arc::new(tokio::sync::RwLock::new(HashMap::from([
+            ("web.demo".into(), first),
+            ("db.demo".into(), second),
+        ])));
+        let services = WebServices::new(dns.clone());
+        assert!(services.resolves_to("WEB.demo.arcbox.local", first).await);
+        for name in [
+            "db.demo.arcbox.local",
+            "missing.arcbox.local",
+            "web.demo",
+            "web.demo.arcbox.local.evil",
+        ] {
+            assert!(!services.resolves_to(name, first).await, "{name}");
+        }
+        dns.write().await.insert("web.demo".into(), second);
+        assert!(!services.resolves_to("web.demo.arcbox.local", first).await);
+        assert!(services.resolves_to("web.demo.arcbox.local", second).await);
+    }
 
     #[tokio::test]
     async fn shared_alias_follows_dns_ownership_and_removed_routes_disappear() {
