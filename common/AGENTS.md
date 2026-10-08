@@ -153,6 +153,8 @@ distribution".
 - Response builders write flag bytes at `[2]`/`[3]` and counts at `[6..12]`
   literally. `build_nxdomain`/SERVFAIL/NODATA MUST zero ANCOUNT/NSCOUNT/ARCOUNT,
   or EDNS(0) queries (ARCOUNT=1 in the request) get malformed responses.
+- Preserve unknown QTYPE values in `DnsRecordType::Unknown` so local ownership checks run before upstream forwarding.
+  Empty local responses and forwarded queries must preserve the original question bytes.
 - Only the first question is parsed (QDCOUNT ≥ 1); trailing OPT/EDNS ignored.
 - This crate compiles for the guest musl target (`aarch64-unknown-linux-musl`).
   Keep dependencies platform-independent; do not pull in host-only dependencies.

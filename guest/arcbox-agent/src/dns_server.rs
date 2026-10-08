@@ -178,8 +178,7 @@ impl GuestDnsServer {
                         }
                         Err(e) => {
                             tracing::debug!(error = %e, "dns: query parse failed, forwarding to gateway");
-                            // Forward unparseable queries (e.g. HTTPS/SVCB type)
-                            // to gateway instead of returning SERVFAIL.
+                            // The gateway may handle query formats rejected by this parser.
                             match self.forward_to_gateway(data).await {
                                 Ok(response) => {
                                     let _ = sock.send_to(&response, peer).await;
@@ -222,7 +221,6 @@ impl GuestDnsServer {
             if is_a_query {
                 return Ok(Some(arcbox_dns::build_response_a(data, ip, DEFAULT_TTL)?));
             }
-            // AAAA for known container → empty answer (no IPv6).
             return Ok(Some(arcbox_dns::build_nodata(data)?));
         }
 
@@ -265,9 +263,7 @@ impl GuestDnsServer {
 
         // 4. Authoritative NXDOMAIN for unresolved local-domain queries.
         // NXDOMAIN (not NODATA) because the name genuinely doesn't exist.
-        if (name_lower == self.domain.as_str() || name_lower.ends_with(&suffix))
-            && matches!(query.qtype, DnsRecordType::A | DnsRecordType::Aaaa)
-        {
+        if name_lower == self.domain.as_str() || name_lower.ends_with(&suffix) {
             return Ok(Some(arcbox_dns::build_nxdomain(data)?));
         }
 
@@ -307,10 +303,14 @@ mod tests {
             packet.extend_from_slice(label.as_bytes());
         }
         packet.push(0);
-        packet.extend_from_slice(&(qtype as u16).to_be_bytes());
+        packet.extend_from_slice(&u16::from(qtype).to_be_bytes());
         packet.extend_from_slice(&1_u16.to_be_bytes());
         let query = DnsQuery::parse(&packet).unwrap();
-        server.local_response(&packet, &query).await.unwrap()
+        let response = server.local_response(&packet, &query).await.unwrap();
+        if let Some(response) = &response {
+            assert_eq!(&response[12..packet.len()], &packet[12..]);
+        }
+        response
     }
 
     #[tokio::test]
@@ -336,11 +336,13 @@ mod tests {
             assert_eq!(&response[6..8], &[0, 1], "{name}");
             assert!(response.ends_with(&ip.octets()), "{name}");
 
-            let response = local_query(&server, name, DnsRecordType::Aaaa)
-                .await
-                .unwrap();
-            assert_eq!(&response[2..4], &[0x85, 0x80], "{name}");
-            assert_eq!(&response[6..8], &[0, 0], "{name}");
+            for qtype in [28, 64, 65, 65_280] {
+                let response = local_query(&server, name, DnsRecordType::from(qtype))
+                    .await
+                    .unwrap();
+                assert_eq!(&response[2..4], &[0x85, 0x80], "{name} type {qtype}");
+                assert_eq!(&response[6..12], &[0; 6], "{name} type {qtype}");
+            }
         }
     }
 
@@ -351,11 +353,11 @@ mod tests {
         server
             .register_container("web", "container", Ipv4Addr::new(172, 17, 0, 2))
             .await;
-        for qtype in [DnsRecordType::A, DnsRecordType::Aaaa] {
+        for qtype in [1, 28, 64, 65, 65_280].map(DnsRecordType::from) {
             for name in ["missing.containers.test", "containers.test"] {
                 let response = local_query(&server, name, qtype).await.unwrap();
                 assert_eq!(&response[2..4], &[0x85, 0x83], "{name}");
-                assert_eq!(&response[6..8], &[0, 0], "{name}");
+                assert_eq!(&response[6..12], &[0; 6], "{name}");
             }
             for name in [
                 "web.arcbox.local",

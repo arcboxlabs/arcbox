@@ -73,3 +73,9 @@ The shared metadata parser reads `dev.arcbox.domains` as comma-separated exact o
 Each rejected name produces a diagnostic without discarding other valid names. Invalid underscores are not rewritten as hyphens, and invalid generated names do not acquire an ID fallback. Valid 252-byte and 253-byte generated names retain exact claims without an impossible descendant wildcard. Production registration still needs to consume these claims and report their diagnostics.
 
 All 45 DNS tests passed, including six claim-generation regressions. Strict all-target Clippy passed on the host and Linux musl target, and formatting passed. These tests verify generated and custom ownership rules but do not establish macOS resolver or browser coverage.
+
+## Preserve unknown DNS query types
+
+The shared DNS parser and host forwarder now preserve unknown QTYPE values, including SVCB and HTTPS. Known local names return NODATA when the requested record type has no local data. Missing names under the configured suffix keep the existing host NODATA and guest NXDOMAIN behavior for every query type. External queries reach the existing upstream path with their original question bytes. The host reuses the shared record type instead of maintaining a second enum.
+
+All 50 targeted tests passed: 17 shared parser/response tests, 31 host DNS tests, and two guest DNS tests covering multiple names and query types. A real UDP upstream test verifies forwarding of types 64, 65, and 65280. Strict Clippy passed for the shared parser targets, all host network targets, and all Linux musl guest targets. Formatting passed. These checks do not verify conflict responses, which require the pending ownership-registry integration, or installed VM/browser behavior.

@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use arcbox_dns::DnsRecordType;
 use arcbox_dns::LocalHostsTable;
 
 use crate::error::{NetError, Result};
@@ -119,43 +120,6 @@ fn default_upstream() -> Vec<SocketAddr> {
         .iter()
         .map(|ip| SocketAddr::new(IpAddr::V4(*ip), DNS_PORT))
         .collect()
-}
-
-/// DNS record type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u16)]
-pub enum DnsRecordType {
-    /// A record (IPv4 address).
-    A = 1,
-    /// AAAA record (IPv6 address).
-    Aaaa = 28,
-    /// CNAME record.
-    Cname = 5,
-    /// PTR record (reverse lookup).
-    Ptr = 12,
-    /// MX record (mail exchange).
-    Mx = 15,
-    /// TXT record.
-    Txt = 16,
-    /// SRV record (service).
-    Srv = 33,
-}
-
-impl TryFrom<u16> for DnsRecordType {
-    type Error = ();
-
-    fn try_from(value: u16) -> std::result::Result<Self, Self::Error> {
-        match value {
-            1 => Ok(Self::A),
-            28 => Ok(Self::Aaaa),
-            5 => Ok(Self::Cname),
-            12 => Ok(Self::Ptr),
-            15 => Ok(Self::Mx),
-            16 => Ok(Self::Txt),
-            33 => Ok(Self::Srv),
-            _ => Err(()),
-        }
-    }
 }
 
 /// DNS query class.
@@ -300,9 +264,8 @@ impl DnsForwarder {
     /// Attempts to resolve a DNS query locally without any network I/O.
     ///
     /// Returns `Some(response)` if the query was resolved from local host
-    /// mappings, or `None` if upstream forwarding is needed. Unsupported
-    /// query types (e.g. HTTPS/SVCB) gracefully return `None` instead of
-    /// failing, so the caller can forward the raw query.
+    /// mappings, or `None` if upstream forwarding is needed. Known names
+    /// receive NODATA for record types without local data, including unknown types.
     pub fn try_resolve_locally(&self, data: &[u8]) -> Option<Vec<u8>> {
         let query = DnsQuery::parse(data).ok()?;
         let ip = self.resolve_local(&query.name)?;
@@ -311,7 +274,7 @@ impl DnsForwarder {
 
     /// Attempts local resolution, answering authoritatively for the local domain.
     ///
-    /// - Registered local host → `Some(A/AAAA response)`
+    /// - Registered local host → matching address response or NODATA
     /// - Unregistered `*.<local_domain>` (and the bare domain) → `Some(NODATA)`
     /// - Other domains → `None` (caller should forward to upstream)
     ///
@@ -579,8 +542,7 @@ impl DnsQuery {
         let qtype_raw = u16::from_be_bytes([data[offset], data[offset + 1]]);
         let qclass_raw = u16::from_be_bytes([data[offset + 2], data[offset + 3]]);
 
-        let qtype = DnsRecordType::try_from(qtype_raw)
-            .map_err(|()| NetError::Dns(format!("unsupported query type: {}", qtype_raw)))?;
+        let qtype = DnsRecordType::from(qtype_raw);
 
         let qclass = if qclass_raw == 1 {
             DnsClass::In
@@ -670,9 +632,9 @@ mod tests {
 
     #[test]
     fn test_dns_record_type_conversion() {
-        assert_eq!(DnsRecordType::try_from(1), Ok(DnsRecordType::A));
-        assert_eq!(DnsRecordType::try_from(28), Ok(DnsRecordType::Aaaa));
-        assert!(DnsRecordType::try_from(999).is_err());
+        assert_eq!(DnsRecordType::from(1), DnsRecordType::A);
+        assert_eq!(DnsRecordType::from(28), DnsRecordType::Aaaa);
+        assert_eq!(DnsRecordType::from(999), DnsRecordType::Unknown(999));
     }
 
     #[test]
@@ -703,6 +665,10 @@ mod tests {
 
     /// Builds a minimal DNS query packet for testing.
     fn build_test_query(name: &str) -> Vec<u8> {
+        build_test_query_type(name, 1)
+    }
+
+    fn build_test_query_type(name: &str, qtype: u16) -> Vec<u8> {
         let mut packet = Vec::with_capacity(64);
         // Header: ID=0xABCD, flags=0x0100 (RD=1), QDCOUNT=1
         packet.extend_from_slice(&[0xAB, 0xCD, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00]);
@@ -713,7 +679,7 @@ mod tests {
             packet.extend_from_slice(label.as_bytes());
         }
         packet.push(0x00); // root label
-        packet.extend_from_slice(&[0x00, 0x01]); // QTYPE = A
+        packet.extend_from_slice(&qtype.to_be_bytes());
         packet.extend_from_slice(&[0x00, 0x01]); // QCLASS = IN
         packet
     }
@@ -758,6 +724,58 @@ mod tests {
             .expect("a reply echoing the txid must be accepted");
         handle.join().unwrap();
         assert_eq!(&reply[0..2], &query[0..2], "reply carries the query's txid");
+    }
+
+    #[test]
+    fn unknown_qtypes_are_forwarded_with_the_original_question() {
+        for qtype in [64, 65, 65_280] {
+            let (upstream, handle) = spawn_fake_upstream(true);
+            let forwarder = DnsForwarder::new(DnsConfig::default().with_upstream(vec![upstream]));
+            let query = build_test_query_type("Web.example.com", qtype);
+            let reply = forwarder.handle_query(&query).unwrap();
+            handle.join().unwrap();
+            assert_eq!(&reply[..2], &query[..2]);
+            assert_eq!(reply[3] & 0x0f, 0);
+            assert_eq!(&reply[12..], &query[12..]);
+        }
+    }
+
+    #[test]
+    fn unknown_qtypes_respect_local_scope_and_preserve_questions() {
+        let forwarder =
+            DnsForwarder::new(DnsConfig::default().with_local_domain("containers.test"));
+        forwarder.add_local_host("web", IpAddr::V4(Ipv4Addr::new(172, 17, 0, 2)));
+        for qtype in [64, 65, 65_280] {
+            for (name, registered) in [
+                ("web", true),
+                ("WEB.containers.test", true),
+                ("missing.containers.test", false),
+                ("containers.test", false),
+            ] {
+                let query = build_test_query_type(name, qtype);
+                let response = forwarder.try_resolve_locally_or_nodata(&query).unwrap();
+                assert_eq!(&response[..4], &[0xab, 0xcd, 0x85, 0x80]);
+                assert_eq!(&response[4..6], &[0, 1]);
+                assert_eq!(&response[6..12], &[0; 6]);
+                assert_eq!(&response[12..], &query[12..]);
+                if registered {
+                    assert_eq!(
+                        forwarder.try_resolve_locally(&query),
+                        Some(response.clone())
+                    );
+                    assert_eq!(forwarder.handle_query(&query).unwrap(), response);
+                }
+            }
+            for name in [
+                "web.example.test",
+                "web.containers.test.evil",
+                "printer.local",
+            ] {
+                let query = build_test_query_type(name, qtype);
+                assert!(forwarder.try_resolve_locally(&query).is_none());
+                assert!(forwarder.try_resolve_locally_or_nodata(&query).is_none());
+            }
+        }
     }
 
     /// Regression (cache-poisoning): a reply whose transaction id does not

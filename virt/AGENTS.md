@@ -96,6 +96,8 @@ files above.
   any `unsafe` guest-memory access. Debug builds panic on overflow while
   release wraps past bounds checks — both are bugs; tests must cover
   near-`u64::MAX` inputs.
+- DNS uses the shared `arcbox_dns::DnsRecordType`, including unknown wire values.
+  Local name checks must run for every query type before forwarding or cache lookup.
 
 ## vmnet relay (bridge NIC, `arcbox-vmnet`)
 

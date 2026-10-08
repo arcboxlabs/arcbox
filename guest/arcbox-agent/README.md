@@ -109,6 +109,8 @@ resolve to a container IPv4 address. The agent discovers HTTP with a bounded
 `HEAD /` request that includes the container domain in `Host`. A valid HTTP
 response is required; listening TCP ports alone do not identify web services.
 
+DNS checks local names for every query type, including HTTPS and SVCB. Known IPv4-only names return NODATA for other types. Missing names under the configured suffix return NXDOMAIN; external names are forwarded to the gateway.
+
 `ListContainerWebServices` returns the installed HTTP and HTTPS routes and their
 current DNS names. Each shared Compose alias appears only on the container
 selected by guest DNS. The host uses this snapshot for service URLs; explicit

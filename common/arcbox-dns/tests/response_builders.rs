@@ -52,14 +52,27 @@ fn servfail_response() {
 }
 
 #[test]
-fn unsupported_qtype_returns_error() {
-    // HTTPS record (type 65) is not in our enum.
-    let q = query("example.com", 65);
-    let result = arcbox_dns::DnsQuery::parse(&q);
-    assert!(
-        result.is_err(),
-        "unsupported type should error so caller can forward"
-    );
+fn unknown_qtypes_preserve_names_and_questions_in_empty_responses() {
+    for qtype in [64, 65, 65_280] {
+        let q = query("Web.arcbox.local", qtype);
+        let parsed = arcbox_dns::DnsQuery::parse(&q).unwrap();
+        assert_eq!(parsed.name, "Web.arcbox.local");
+        assert_eq!(parsed.qtype, arcbox_dns::DnsRecordType::Unknown(qtype));
+        assert_eq!(u16::from(parsed.qtype), qtype);
+        assert_eq!(parsed.raw_question, q[12..]);
+        for (response, rcode) in [
+            (arcbox_dns::build_nodata(&q).unwrap(), 0),
+            (arcbox_dns::build_servfail(&q).unwrap(), 2),
+            (arcbox_dns::build_nxdomain(&q).unwrap(), 3),
+        ] {
+            assert_eq!(&response[..2], &q[..2]);
+            assert_ne!(response[2] & 0x80, 0);
+            assert_eq!(response[3] & 0x0f, rcode);
+            assert_eq!(&response[4..6], &[0, 1]);
+            assert_eq!(&response[6..12], &[0; 6]);
+            assert_eq!(&response[12..], &q[12..]);
+        }
+    }
 }
 
 #[test]
