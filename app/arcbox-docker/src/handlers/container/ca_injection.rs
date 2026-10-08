@@ -4,6 +4,8 @@ mod archive;
 mod bundle;
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+mod tests;
 
 use super::{guest::Container, start::Start};
 
