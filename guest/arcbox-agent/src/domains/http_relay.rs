@@ -1,4 +1,9 @@
-//! HTTP/1.1 forwarding after managed TLS termination.
+//! HTTP forwarding after managed TLS termination.
+
+mod h1_body;
+mod multiplex;
+
+pub(super) use multiplex::{Session, serve as serve_managed};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -74,10 +79,7 @@ pub(super) async fn serve(
 }
 
 fn prepare_request<B>(request: &mut Request<B>, protocol: HttpProtocol) -> Result<bool> {
-    let trailers = request
-        .headers()
-        .get(header::TE)
-        .is_some_and(|value| value == "trailers");
+    let trailers = accepts_trailers(request.headers());
     let upgrade = request.headers().get(header::UPGRADE).cloned();
     let websocket =
         strip_hop_headers(request.headers_mut())? && upgrade.as_ref().is_some_and(is_websocket);
@@ -99,6 +101,15 @@ fn prepare_request<B>(request: &mut Request<B>, protocol: HttpProtocol) -> Resul
         .headers_mut()
         .insert("x-forwarded-proto", HeaderValue::from_static("https"));
     Ok(websocket)
+}
+
+fn accepts_trailers(headers: &HeaderMap) -> bool {
+    headers.get_all(header::TE).iter().any(|value| {
+        value
+            .as_bytes()
+            .split(|byte| *byte == b',')
+            .any(|token| token.trim_ascii().eq_ignore_ascii_case(b"trailers"))
+    })
 }
 
 fn prepare_response<B>(response: &mut Response<B>, websocket: bool) -> Result<bool> {

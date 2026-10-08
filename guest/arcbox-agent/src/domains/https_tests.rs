@@ -114,6 +114,7 @@ async fn index_tls_serves_html_without_upstream_and_rejects_stale_handshakes() {
                         Ok(configuration())
                     },
                     async |_| panic!("index must not connect to an upstream"),
+                    super::super::http_tasks::Executor::default(),
                 )
                 .await
             });
@@ -269,7 +270,7 @@ async fn head(stream: &mut (impl AsyncRead + Unpin)) -> String {
 
 #[tokio::test]
 async fn owned_foreign_sni_cannot_request_authorization_or_a_certificate() {
-    within(async {
+    within(Box::pin(async {
         let incoming = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let address = incoming.local_addr().unwrap();
         let dns = DnsRegistry::default();
@@ -292,6 +293,7 @@ async fn owned_foreign_sni_cannot_request_authorization_or_a_certificate() {
                 &services,
                 async |_| panic!("foreign SNI must not request a certificate"),
                 async |_| panic!("foreign SNI must not connect upstream"),
+                super::super::http_tasks::Executor::default(),
             )
             .await
         };
@@ -311,7 +313,7 @@ async fn owned_foreign_sni_cannot_request_authorization_or_a_certificate() {
                 .sequence,
             0
         );
-    })
+    }))
     .await;
 }
 
@@ -395,6 +397,7 @@ async fn ownership_changes_at_each_tls_stage_stop_application_forwarding() {
                             connection_released.await.unwrap();
                             Ok(stream)
                         },
+                        super::super::http_tasks::Executor::default(),
                     )
                     .await
                 }

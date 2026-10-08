@@ -88,8 +88,8 @@ impl Https {
             let services = services.clone();
             let cancel = cancel.clone();
             connections.spawn(async move {
-                let result = super::http_tasks::run(&cancel, async |_executor| {
-                    relay(client, &certificates, &services).await
+                let result = super::http_tasks::run(&cancel, async |executor| {
+                    relay(client, &certificates, &services, executor).await
                 })
                 .await;
                 if let Err(e) = result {
@@ -110,6 +110,7 @@ async fn relay(
     client: TcpStream,
     certificates: &Certificates,
     services: &WebServices,
+    executor: super::http_tasks::Executor,
 ) -> Result<()> {
     let dialled = original_destination(&client).context("reading the dialled address")?;
     if dialled.port() == HTTP_PORT {
@@ -129,6 +130,7 @@ async fn relay(
         services,
         async |name| certificates.configuration(name).await,
         async |address| TcpStream::connect(address).await,
+        executor,
     )
     .await
 }
@@ -139,6 +141,7 @@ async fn relay_to(
     services: &WebServices,
     configuration: impl AsyncFnOnce(&str) -> Result<Arc<rustls::ServerConfig>>,
     connect: impl AsyncFnOnce((Ipv4Addr, u16)) -> io::Result<TcpStream>,
+    executor: super::http_tasks::Executor,
 ) -> Result<()> {
     let source = client
         .peer_addr()
@@ -167,12 +170,20 @@ async fn relay_to(
     .context("TLS handshake timed out")?
     .context("TLS handshake")?;
     services.verify_tls_route(&name, container, &route)?;
-    let http_port = match &route {
-        super::services::TlsRoute::Container(route) => route.backend.port,
+    let backend = match &route {
+        super::services::TlsRoute::Container(route) => route.backend,
         super::services::TlsRoute::Index(route) => {
             return super::index::serve(tls, services.clone(), route.clone(), HTTPS_PORT).await;
         }
     };
+    let protocol = match backend.protocol {
+        Some(protocol) => protocol,
+        None => super::probe::http(container, backend.port, &name, executor.clone())
+            .await
+            .context("the configured HTTP port did not establish an HTTP protocol")?,
+    };
+    services.verify_tls_route(&name, container, &route)?;
+    let http_port = backend.port;
     let upstream = tokio::time::timeout(TIMEOUT, connect((container, http_port)))
         .await
         .context("connecting to the container timed out")
@@ -187,7 +198,32 @@ async fn relay_to(
             return Err(error);
         }
     };
-    super::http_relay::serve(tls, upstream).await
+    let client = if tls.get_ref().1.alpn_protocol() == Some(b"h2") {
+        super::selection::HttpProtocol::Http2
+    } else {
+        super::selection::HttpProtocol::Http1
+    };
+    let route = Arc::new(route);
+    let verify = {
+        let (services, name, route) = (services.clone(), name.clone(), Arc::clone(&route));
+        Arc::new(move || services.verify_tls_route(&name, container, &route))
+    };
+    let invalidate = {
+        let services = services.clone();
+        Arc::new(move || services.invalidate_tls_route(&name, container, &route))
+    };
+    super::http_relay::serve_managed(
+        tls,
+        upstream,
+        super::http_relay::Session {
+            client,
+            upstream: protocol,
+            tasks: executor,
+            verify,
+            invalidate,
+        },
+    )
+    .await
 }
 
 /// The destination the client dialled before a nat rule redirected it.
