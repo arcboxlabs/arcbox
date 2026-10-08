@@ -10,6 +10,8 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
 
 ## Startup & readiness contract
 
+- `local_https::Status` in `arcbox-core` is the read-only CA inspection shared by CLI and daemon diagnostics. `abctl tls status --json` returns public metadata without changing trust.
+- `SystemService.ListWebServices` and `WatchWebServices` return URLs from installed guest routes and current DNS ownership. Clients must clear stale entries when a snapshot fails.
 - Canonical production HTTPS trust is required before VM boot (`self_setup/tls.rs`, called from `startup::init_runtime`). Publish `AWAITING_HTTPS_TRUST` when authorization is needed and keep the daemon alive. Desktop runs `abctl tls trust` as the login user so macOS can show native authorization. The helper stores public certificates and verifies TLS-only Admin trust; root cannot bypass trust authorization. Remove legacy User trust even when the current certificate is unchanged. Revoke the previous root's Admin and User trust before replacing `tls/ca.pem`. Skip native trust mutations when the existing trust is correct. Development profiles and isolated data directories must not change host trust automatically. Keep the root private key in the user's Keychain; pass only public certificates to the helper.
 - Startup is a phased, typed pipeline and the order is load-bearing — see
   root AGENTS.md "Architecture Principles" and `docs/daemon-lifecycle.md`

@@ -38,6 +38,7 @@ mod stats;
 mod stream_input;
 mod system;
 mod template;
+mod web_services;
 
 use std::sync::Arc;
 use std::time::Duration;

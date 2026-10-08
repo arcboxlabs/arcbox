@@ -2,8 +2,8 @@
 //!
 //! The helper stores only the public certificate in System Keychain. Native
 //! trust changes run in this process so macOS can request authorization.
-//! The daemon owns the private key and publishes the certificate after trust
-//! is ready. Explicit commands also work for development profiles.
+//! The daemon owns the private key. This process publishes public bytes after
+//! revoking a previous root. Explicit commands also work for development profiles.
 //! Native authorization cancellation exits with status 130; other failures exit with status 1.
 
 use std::path::Path;
@@ -20,10 +20,14 @@ use clap::Subcommand;
 pub enum TlsCommands {
     /// Authorize the profile's CA for system HTTPS through the macOS prompt
     Trust,
-    /// Revoke CA trust; the next production start requires authorization
+    /// Revoke CA trust without stopping containers
     Untrust,
     /// Check whether this profile's CA is ready for system HTTPS
-    Status,
+    Status {
+        /// Print public CA metadata and trust status as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Executes the tls subcommand.
@@ -33,10 +37,26 @@ pub async fn execute(cmd: TlsCommands) -> Result<()> {
         bail!("run `abctl tls` as yourself, not root: the CA belongs to your profile's Keychain");
     }
     let tls_dir = HostLayout::from_env_or_default().data_dir.join(guest::TLS);
+    if let TlsCommands::Status { json } = cmd {
+        let status = arcbox_core::local_https::Status::inspect(&tls_dir).await?;
+        if json {
+            println!("{}", serde_json::to_string(&status)?);
+        } else {
+            println!("{}", status.message);
+            if !status.certificate_sha256.is_empty() {
+                println!("CA SHA-256: {}", status.certificate_sha256);
+                println!(
+                    "Valid until (UTC Unix seconds): {}",
+                    status.certificate_not_after_unix_seconds
+                );
+            }
+        }
+        return Ok(());
+    }
     if matches!(cmd, TlsCommands::Untrust) {
         remove_trust(&tls_dir).await?;
         println!(
-            "Removed ArcBox CA trust for {}. The next production start requires authorization.",
+            "Removed ArcBox CA trust for {}. Containers can run without HTTPS trust.",
             tls_dir.display()
         );
         return Ok(());
@@ -45,37 +65,35 @@ pub async fn execute(cmd: TlsCommands) -> Result<()> {
     let der = KeychainAuthority::existing_certificate(&tls_dir)?
         .context("no Keychain CA for this profile: start the ArcBox daemon once to create it")?;
     let authority = PublicAuthority::try_from(der)?;
-    let client = Client::connect().await?;
-    if matches!(cmd, TlsCommands::Trust) {
-        if let Some(previous) = published_authority(&tls_dir)?
-            && previous.der() != authority.der()
-        {
-            revoke(&client, &previous).await?;
-        }
-        client.ca_install(authority.der()).await?;
-        arcbox_local_ca::remove_user_trust_der(authority.der())
-            .context("revoking legacy user HTTPS trust; approve the macOS prompt to continue")?;
+    ensure!(
         authority
-            .trust_admin()
-            .context("authorizing system HTTPS trust; approve the macOS prompt to continue")?;
+            .validity()
+            .is_valid_at(std::time::SystemTime::now().into()),
+        "the local CA is outside its validity period; rotate the CA before authorizing HTTPS"
+    );
+    let client = Client::connect().await?;
+    if let Some(previous) = published_authority(&tls_dir)?
+        && previous.der() != authority.der()
+    {
+        revoke(&client, &previous).await?;
     }
+    client.ca_install(authority.der()).await?;
+    arcbox_local_ca::remove_user_trust_der(authority.der())
+        .context("revoking legacy user HTTPS trust; approve the macOS prompt to continue")?;
+    authority
+        .trust_admin()
+        .context("authorizing system HTTPS trust; approve the macOS prompt to continue")?;
     let legacy_user_trust = authority.has_user_trust()?;
     let trusted = client.ca_status(authority.der()).await? && !legacy_user_trust;
-    if matches!(cmd, TlsCommands::Trust) {
-        ensure!(trusted, "system HTTPS trust was not installed");
-    }
-    println!(
-        "System HTTPS trust for *.{LOCAL_DOMAIN} ({}): {}.",
-        tls_dir.display(),
-        if trusted {
-            "installed"
-        } else {
-            "not installed"
-        }
+    ensure!(trusted, "system HTTPS trust was not installed");
+    ensure!(
+        authority.publish(&tls_dir)? == arcbox_local_ca::Publication::Published,
+        "the previous local CA still has trust; revoke it before publishing this CA"
     );
-    if legacy_user_trust {
-        println!("Legacy user HTTPS trust remains. Run `abctl tls trust` to finish migration.");
-    }
+    println!(
+        "System HTTPS trust for *.{LOCAL_DOMAIN} ({}): installed.",
+        tls_dir.display(),
+    );
     Ok(())
 }
 

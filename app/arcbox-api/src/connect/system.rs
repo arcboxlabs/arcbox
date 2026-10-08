@@ -123,6 +123,11 @@ impl SetupState {
         self.publish(|s| s.docker_tools_installed = installed);
     }
 
+    /// Publishes CA status without changing daemon or VM readiness.
+    pub fn set_local_https(&self, status: pb::LocalHttpsStatus) {
+        self.publish(|s| s.local_https = status.into());
+    }
+
     /// Returns the current snapshot plus a receiver for every update after it.
     ///
     /// Both are taken while holding the snapshot's read lock, which excludes
@@ -389,6 +394,44 @@ impl pb::SystemService for SystemServiceImpl {
         Response::ok(info)
     }
 
+    async fn list_web_services(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, pb::Empty>,
+    ) -> ServiceResult<pb::ListWebServicesResponse> {
+        let services = self
+            .runtime
+            .ready()?
+            .list_web_services()
+            .await
+            .map_err(crate::ApiError::from)?;
+        Response::ok(pb::ListWebServicesResponse {
+            services,
+            ..Default::default()
+        })
+    }
+
+    async fn watch_web_services(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, pb::Empty>,
+    ) -> ServiceResult<ServiceStream<pb::ListWebServicesResponse>> {
+        let runtime = Arc::clone(self.runtime.ready()?);
+        Response::ok(super::web_services::watch(move || {
+            let runtime = Arc::clone(&runtime);
+            async move {
+                let services = runtime
+                    .list_web_services()
+                    .await
+                    .map_err(crate::ApiError::from)?;
+                Ok(pb::ListWebServicesResponse {
+                    services,
+                    ..Default::default()
+                })
+            }
+        }))
+    }
+
     async fn get_virtio_debug(
         &self,
         _ctx: RequestContext,
@@ -611,5 +654,27 @@ mod tests {
         state.set_storage_health(None);
         assert!(!updates.try_recv().unwrap().storage_health.is_set());
         assert_eq!(state.current().phase, setup_status::Phase::Ready);
+    }
+
+    #[test]
+    fn https_authorization_does_not_change_docker_readiness() {
+        let state = SetupState::new();
+        state.set_phase(setup_status::Phase::Ready, "ready");
+        state.set_vm_running(true);
+        let (_, mut updates) = state.subscribe();
+        for trust in [
+            pb::local_https_status::TrustState::Untrusted,
+            pb::local_https_status::TrustState::Trusted,
+            pb::local_https_status::TrustState::Error,
+        ] {
+            state.set_local_https(pb::LocalHttpsStatus {
+                trust_state: trust.into(),
+                ..Default::default()
+            });
+            let update = updates.try_recv().unwrap();
+            assert_eq!(update.phase, setup_status::Phase::Ready);
+            assert!(update.vm_running);
+            assert_eq!(update.local_https.trust_state, trust);
+        }
     }
 }

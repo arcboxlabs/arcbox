@@ -81,6 +81,10 @@ pub enum CoreError {
     #[error("local CA error: {0}")]
     LocalCa(#[from] arcbox_local_ca::Error),
 
+    /// A required privileged helper inspection or operation failed.
+    #[error(transparent)]
+    Helper(#[from] arcbox_helper::client::ClientError),
+
     /// Published-image registry error (index/manifest fetch, reference
     /// parsing, name validation) shared by the macOS base-image and Linux
     /// machine-image flows.
