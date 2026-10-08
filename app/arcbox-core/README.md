@@ -38,6 +38,8 @@ Capture `Runtime::container_network_incarnation` before querying Kubernetes Serv
 
 `Runtime::set_machine_web_ports` saves typed HTTP and HTTPS backend policies for a user machine. Omitted fields retain their values. The System VM is excluded. This method does not apply routes.
 
+`Arc<Runtime>::list_web_services` concurrently lists containers and the index from the ready System VM, plus services from each running distro machine. A machine hostname selects its exact guest independently of System VM readiness. Each machine response must match the captured raw machine name, canonical hostname, IPv4 address, and current claim revision. Any guest error cancels and drains sibling queries, fails the snapshot, and terminates Watch. Results have stable owner and hostname ordering.
+
 `Arc<Runtime>::list_web_services` owns query cancellation and retains the captured VM through native connection and RPC cleanup. Each guest query has a five-second budget. A disconnected List or Watch caller cancels its query.
 
 ## Architecture

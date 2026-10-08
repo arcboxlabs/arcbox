@@ -86,6 +86,8 @@ The daemon delivers its current public root to the System VM's system CA bundle 
 
 Run `abctl machine web NAME` to read the saved HTTP and HTTPS backend policies. Set `--http-port` or `--https-port` to `auto`, `off`, or a port from 1 through 65535. Omitted options preserve the current value. Both protocols default to `auto`; an explicit HTTPS port selects native TLS. Inspect, clone, and archive transfer retain these settings. The daemon observes saved policies every second and sends complete replacements over a retained connection to the captured machine, independently of System VM startup. Identity changes close and drain the connection before reopening. Guest configuration acknowledgement confirms stored policy; guest routing and installed machine HTTPS remain pending.
 
+Host service snapshots query running distro machines independently of System VM readiness. Exact machine hostnames select only their captured guest. Responses must match the raw machine name, canonical hostname, bridge IPv4 address, and current DNS claim revision. Queries run concurrently; any failure cancels and drains the remaining work before failing the complete snapshot.
+
 ## Machine client trust
 
 The machine agent accepts authenticated public-root snapshots on Debian, Ubuntu, and Alpine. It updates only `/usr/local/share/ca-certificates/arcbox-local-ca.crt`, invokes the installed `update-ca-certificates`, and verifies and syncs the rebuilt system PEM bundle before acknowledging installation or explicit removal. Updater failure leaves reconciliation pending until replay. Missing tools or stores and other distributions return an error.
