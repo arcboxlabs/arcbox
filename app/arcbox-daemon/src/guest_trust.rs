@@ -4,7 +4,7 @@ mod machines;
 
 use std::{future::Future, sync::Arc, time::Duration};
 
-use anyhow::{Context as _, Result, ensure};
+use anyhow::{Result, ensure};
 use arcbox_connect::v1::{
     reconcile_guest_trust_request::Desired, reconcile_guest_trust_response::Applied,
 };
@@ -14,7 +14,7 @@ use arcbox_local_ca::{KeychainAuthority, PublicAuthority};
 use tokio::{sync::watch, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use crate::context::DaemonContext;
+use crate::{context::DaemonContext, guest_workers::join_services};
 
 const RETRY_INTERVAL: Duration = Duration::from_secs(2);
 const IDENTITY_INTERVAL: Duration = Duration::from_secs(30);
@@ -51,31 +51,7 @@ async fn run(
         shutdown.clone(),
     ));
     tasks.spawn(machines::run(runtime, authority, shutdown.clone()));
-    supervise(tasks, shutdown).await
-}
-
-async fn supervise(mut tasks: JoinSet<Result<()>>, shutdown: CancellationToken) -> Result<()> {
-    let first = tasks
-        .join_next()
-        .await
-        .expect("guest trust has two services");
-    shutdown.cancel();
-    let mut result = first
-        .context("guest trust service panicked")
-        .and_then(std::convert::identity);
-    while let Some(joined) = tasks.join_next().await {
-        if let Err(error) = joined
-            .context("guest trust service panicked")
-            .and_then(std::convert::identity)
-        {
-            if result.is_ok() {
-                result = Err(error);
-            } else {
-                tracing::warn!(%error, "guest trust service failed during cleanup");
-            }
-        }
-    }
-    result
+    join_services(tasks, shutdown).await
 }
 
 async fn run_system(

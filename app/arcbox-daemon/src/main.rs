@@ -7,6 +7,8 @@ mod disk_reclaim;
 mod dns_service;
 #[cfg(target_os = "macos")]
 mod guest_trust;
+#[cfg(target_os = "macos")]
+mod guest_workers;
 mod host_mount;
 mod host_network;
 #[cfg(target_os = "macos")]

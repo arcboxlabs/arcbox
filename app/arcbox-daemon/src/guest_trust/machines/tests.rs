@@ -1,8 +1,8 @@
 //! Exercises machine task ownership without a native VM or Keychain.
 
-use std::sync::Mutex;
+use std::{collections::HashSet, sync::Mutex};
 
-use arcbox_core::event::EventBus;
+use arcbox_core::event::{Event, EventBus};
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
@@ -38,9 +38,10 @@ impl Harness {
         let events = EventBus::new();
         let shutdown = CancellationToken::new();
         let (started, deliveries) = mpsc::unbounded_channel();
-        let task = tokio::spawn(supervise(
+        let task = tokio::spawn(supervise_machines(
             events.subscribe(),
             shutdown.clone(),
+            IDENTITY_INTERVAL,
             move || source.lock().unwrap().clone(),
             move |name, changed, shutdown| {
                 let started = started.clone();
@@ -210,9 +211,10 @@ async fn cancellation_before_supervision_never_starts_machine_work() {
     let bus = EventBus::new();
     let shutdown = CancellationToken::new();
     shutdown.cancel();
-    supervise(
+    supervise_machines(
         bus.subscribe(),
         shutdown,
+        IDENTITY_INTERVAL,
         || HashSet::from(["a".into()]),
         |_, _, _| async { panic!("cancelled service started a machine worker") },
     )

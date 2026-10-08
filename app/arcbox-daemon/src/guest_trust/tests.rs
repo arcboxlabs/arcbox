@@ -258,7 +258,7 @@ async fn service_failure_and_panic_join_the_other_service_before_returning() {
                 assert!(!panics, "injected service panic");
                 anyhow::bail!("injected service failure")
             });
-            let service = tokio::spawn(supervise(tasks, shutdown));
+            let service = tokio::spawn(join_services(tasks, shutdown));
             closing.await.unwrap();
             assert!(!service.is_finished(), "service cleanup was abandoned");
             finish.send(()).unwrap();
