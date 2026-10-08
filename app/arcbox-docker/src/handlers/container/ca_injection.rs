@@ -94,10 +94,12 @@ pub(super) fn report_warnings(response: &mut Response, warnings: Vec<String>) {
 pub(super) async fn reconcile(state: &AppState, id: &str) -> Result<Vec<String>> {
     let tls_dir = state.runtime.config().data_dir.join("tls");
     let published = tokio::fs::read(tls_dir.join("ca.pem")).await;
-    if matches!(&published, Err(error) if error.kind() == std::io::ErrorKind::NotFound) {
-        return Ok(vec![UNAVAILABLE.into()]);
-    }
-    let result = reconcile_with_root(state, id, move || published_root(&tls_dir, published?)).await;
+    let result = reconcile_with_root(state, id, move || match published {
+        Ok(pem) => published_root(&tls_dir, pem),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    })
+    .await;
     crate::proxy::invalidate_on_guest_error(state, result)
 }
 

@@ -121,6 +121,23 @@ async fn opt_out_precedes_root_loader_failures() {
     assert_eq!(guest.data.lock().unwrap().writes, 0);
 }
 
+#[tokio::test]
+async fn missing_publication_is_quiet_when_injection_is_disabled() {
+    let mut config = metadata();
+    config["Config"]["Labels"] = json!({OPT_OUT: "false"});
+    let guest = guest::Guest::new(config).await;
+    assert!(
+        !tokio::fs::try_exists(guest.state.runtime.config().data_dir.join("tls/ca.pem"))
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        reconcile(&guest.state, "test").await.unwrap(),
+        Vec::<String>::new()
+    );
+    assert_eq!(guest.data.lock().unwrap().writes, 0);
+}
+
 async fn operation(state: AppState, id: &str, action: &str) -> Result<Response> {
     use axum::{
         extract::{OriginalUri, State},
