@@ -54,6 +54,17 @@ pub(super) async fn handle_connection<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    // Assign before Ping: reconnecting must not let buffered older updates win.
+    let trust_order = if peer_cid == tokio_vsock::VMADDR_CID_HOST && guest != Guest::StorageRecovery
+    {
+        services
+            .trust
+            .as_ref()
+            .map(super::super::guest_trust::Store::connection_order)
+            .transpose()?
+    } else {
+        None
+    };
     loop {
         // Read the next request (V2 wire format with trace_id).
         let (msg_type, trace_id, payload) = match read_message(&mut stream).await {
@@ -94,15 +105,15 @@ where
             continue;
         }
 
-        if msg_type == crate::rpc::MessageType::ReconcileHttpsAccessRequest
-            && peer_cid != tokio_vsock::VMADDR_CID_HOST
+        if matches!(
+            msg_type,
+            crate::rpc::MessageType::ReconcileHttpsAccessRequest
+                | crate::rpc::MessageType::ReconcileGuestTrustRequest
+        ) && peer_cid != tokio_vsock::VMADDR_CID_HOST
         {
             write_response(
                 &mut stream,
-                &RpcResponse::Error(ErrorResponse::new(
-                    403,
-                    "HTTPS observation requires the host",
-                )),
+                &RpcResponse::Error(ErrorResponse::new(403, "HTTPS control requires the host")),
                 &trace_id,
             )
             .await?;
@@ -159,6 +170,15 @@ where
 
         // Parse and handle the request.
         let result = match parse_request(msg_type, &payload) {
+            Ok(RpcRequest::ReconcileGuestTrust(request)) => {
+                RequestResult::Single(match services.trust.as_ref().zip(trust_order) {
+                    Some((store, order)) => store.reconcile(order, request).await,
+                    None => RpcResponse::Error(ErrorResponse::new(
+                        503,
+                        "guest trust installation is unavailable for this guest",
+                    )),
+                })
+            }
             Ok(RpcRequest::OpenInstanceAuthority(_)) => {
                 if guest == Guest::SystemVm
                     && peer_cid == tokio_vsock::VMADDR_CID_HOST
@@ -249,6 +269,7 @@ async fn handle_request(
         RpcRequest::OpenInstanceAuthority(_) | RpcRequest::ReplaceInstanceAuthority(_) => {
             unreachable!("instance authority owns the connection")
         }
+        RpcRequest::ReconcileGuestTrust(_) => unreachable!("guest trust uses the injected store"),
         RpcRequest::Ping(req) => RequestResult::Single(handle_ping(req, guest)),
         RpcRequest::GetSystemInfo => RequestResult::Single(handle_get_system_info().await),
         RpcRequest::ReconcileHttpsAccess(request) => {

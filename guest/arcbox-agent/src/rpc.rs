@@ -22,11 +22,12 @@ use arcbox_connect::v1::{
     KubernetesStopRequest, KubernetesStopResponse, ListGuestWebServicesRequest,
     ListGuestWebServicesResponse, MemoryPressureEvent, MmapReadFileRequest, MmapReadFileResponse,
     OpenInstanceAuthorityRequest, OpenInstanceAuthorityResponse, PortBindingsChanged,
-    PortBindingsRemoved, ReadinessEvent, ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse,
-    ReplaceInstanceAuthorityRequest, RuntimeEnsureRequest, RuntimeEnsureResponse,
-    RuntimeStatusRequest, RuntimeStatusResponse, ShutdownRequest, ShutdownResponse,
-    StorageCheckRequest, StorageCheckResponse, SystemInfo, WatchMemoryPressureRequest,
-    WatchReadinessRequest, WatchStatsRequest, WatchStorageHealthRequest,
+    PortBindingsRemoved, ReadinessEvent, ReconcileGuestTrustRequest, ReconcileGuestTrustResponse,
+    ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse, ReplaceInstanceAuthorityRequest,
+    RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse,
+    ShutdownRequest, ShutdownResponse, StorageCheckRequest, StorageCheckResponse, SystemInfo,
+    WatchMemoryPressureRequest, WatchReadinessRequest, WatchStatsRequest,
+    WatchStorageHealthRequest,
 };
 pub use arcbox_constants::wire::MessageType;
 
@@ -79,6 +80,7 @@ pub enum RpcRequest {
     GetSystemInfo,
     ListGuestWebServices(ListGuestWebServicesRequest),
     ReconcileHttpsAccess(ReconcileHttpsAccessRequest),
+    ReconcileGuestTrust(ReconcileGuestTrustRequest),
     OpenInstanceAuthority(OpenInstanceAuthorityRequest),
     ReplaceInstanceAuthority(ReplaceInstanceAuthorityRequest),
     EnsureRuntime(RuntimeEnsureRequest),
@@ -112,6 +114,7 @@ pub enum RpcResponse {
     SystemInfo(SystemInfo),
     ListGuestWebServices(ListGuestWebServicesResponse),
     ReconcileHttpsAccess(ReconcileHttpsAccessResponse),
+    ReconcileGuestTrust(ReconcileGuestTrustResponse),
     OpenInstanceAuthority(OpenInstanceAuthorityResponse),
     InstanceAuthorityAck(InstanceAuthorityAck),
     RuntimeEnsure(RuntimeEnsureResponse),
@@ -148,6 +151,7 @@ impl RpcResponse {
             Self::SystemInfo(_) => MessageType::GetSystemInfoResponse,
             Self::ListGuestWebServices(_) => MessageType::ListGuestWebServicesResponse,
             Self::ReconcileHttpsAccess(_) => MessageType::ReconcileHttpsAccessResponse,
+            Self::ReconcileGuestTrust(_) => MessageType::ReconcileGuestTrustResponse,
             Self::OpenInstanceAuthority(_) => MessageType::OpenInstanceAuthorityResponse,
             Self::InstanceAuthorityAck(_) => MessageType::InstanceAuthorityAck,
             Self::RuntimeEnsure(_) => MessageType::EnsureRuntimeResponse,
@@ -183,6 +187,7 @@ impl RpcResponse {
             Self::SystemInfo(msg) => msg.encode_to_vec(),
             Self::ListGuestWebServices(msg) => msg.encode_to_vec(),
             Self::ReconcileHttpsAccess(msg) => msg.encode_to_vec(),
+            Self::ReconcileGuestTrust(msg) => msg.encode_to_vec(),
             Self::OpenInstanceAuthority(msg) => msg.encode_to_vec(),
             Self::InstanceAuthorityAck(msg) => msg.encode_to_vec(),
             Self::RuntimeEnsure(msg) => msg.encode_to_vec(),
@@ -313,6 +318,9 @@ pub fn parse_request(msg_type: MessageType, payload: &[u8]) -> Result<RpcRequest
             let request = ListGuestWebServicesRequest::decode_from_slice(payload)?;
             Ok(RpcRequest::ListGuestWebServices(request))
         }
+        MessageType::ReconcileGuestTrustRequest => Ok(RpcRequest::ReconcileGuestTrust(
+            ReconcileGuestTrustRequest::decode_from_slice(payload)?,
+        )),
         MessageType::ReconcileHttpsAccessRequest => Ok(RpcRequest::ReconcileHttpsAccess(
             ReconcileHttpsAccessRequest::decode_from_slice(payload)?,
         )),

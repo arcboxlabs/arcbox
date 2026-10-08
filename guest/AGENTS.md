@@ -90,6 +90,7 @@ non-obvious invariants and failure signatures.
   `include_str!`-embedded into the daemon at COMPILE time
   (`engine/arcbox-image/src/boot_assets/lockfile.rs`) — editing `assets.lock`
   without rebuilding the daemon changes nothing.
+- `ReconcileGuestTrust` requires the host CID before request decoding. Recovery guests reject the request. System VM services serialize installation into `/etc/ssl/certs/ca-certificates.crt`; other guests report unsupported until a trust store is injected. Assign trust connection order before Ping and only for the actual host CID. Reject an older connection after a newer update is accepted. Acquire an owned async guard before scheduling each blocking writer. Carry that guard through cancellation until installation finishes. Acknowledge only completed durable installation or explicit removal. Do not import roots from the writable guest share.
 - **Guest wall clock comes from the Ping handler.** HV exposes no RTC (ABX-416),
   so `handle_ping` calls `sync_clock_from_host(req.timestamp_secs)` →
   `clock_settime(CLOCK_REALTIME)` (`agent/linux/rpc.rs`). Before that

@@ -12,6 +12,8 @@ use arcbox_constants::cmdline::MACHINE_ROOTFS_KEY;
 pub mod ensure_runtime;
 #[cfg(any(target_os = "linux", test))]
 mod exec_error;
+#[cfg(target_os = "linux")]
+mod guest_trust;
 mod instance_authority;
 #[cfg(all(test, target_os = "linux"))]
 pub use linux::rpc::instance_authority_tests::AuthorityPeer;
@@ -83,6 +85,8 @@ impl Guest {
 pub struct Services {
     web: crate::domains::WebServices,
     authority: Option<instance_authority::Receiver>,
+    #[cfg(target_os = "linux")]
+    trust: Option<guest_trust::Store>,
     dns: Option<std::sync::Arc<crate::dns_server::GuestDnsServer>>,
 }
 
@@ -96,6 +100,10 @@ impl Services {
             web,
             authority: Some(instance_authority::Receiver::new(dns.registry())),
             dns: Some(dns),
+            #[cfg(target_os = "linux")]
+            trust: Some(guest_trust::Store::new(
+                "/etc/ssl/certs/ca-certificates.crt".into(),
+            )),
         }
     }
 }
