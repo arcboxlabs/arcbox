@@ -60,7 +60,7 @@ mod validity;
 use arcbox_atomic_file::AtomicWriteError;
 pub use arcbox_constants::dns::LOCAL_DOMAIN;
 
-pub use self::bundle::{install_trust_bundle, reconcile_trust_bundle};
+pub use self::bundle::{install_trust_anchor, install_trust_bundle, reconcile_trust_bundle};
 #[cfg(target_os = "macos")]
 pub use self::keychain::KeychainAuthority;
 #[cfg(target_os = "macos")]

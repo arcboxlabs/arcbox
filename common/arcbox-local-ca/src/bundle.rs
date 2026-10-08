@@ -1,6 +1,9 @@
 //! Replace or remove only the validated ArcBox section of a PEM trust bundle.
 
+mod anchor;
 mod file;
+
+pub use anchor::install_trust_anchor;
 
 pub use file::install_trust_bundle;
 

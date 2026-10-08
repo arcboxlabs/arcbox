@@ -129,6 +129,7 @@ distribution".
   Resolve certificates through recorded DER or exact public-key identity, never a shared subject name.
 
 - Use `arcbox-local-ca::reconcile_trust_bundle` to replace or remove the owned ArcBox PEM section. Pass `None` only for explicit removal. Validate the owned certificate before removal, including expired roots. Preserve every byte outside the section. Callers must check the incoming root's validity before installation.
+- `arcbox-local-ca::install_trust_anchor` atomically writes a validated ArcBox-only source file or durably removes that file. Reject symlinks and unowned content. The caller must serialize writes and complete its distro updater before acknowledging installation.
 - `arcbox-local-ca::install_trust_bundle` validates incoming validity and durably replaces an existing bundle at the caller-selected path. Serialize calls for that path. Reading may follow a symlink; atomic publication replaces the link and preserves its target. Do not canonicalize the destination. Every replay must confirm durability before acknowledging success. This helper does not select distro trust stores or run distro update tools.
 
 - `translate()` (arcbox-conntrack) and `DnsQuery::parse` (arcbox-dns) consume
