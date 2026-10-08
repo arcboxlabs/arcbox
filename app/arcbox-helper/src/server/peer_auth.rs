@@ -33,6 +33,15 @@ pub(super) struct VerifiedPeer {
 }
 
 impl VerifiedPeer {
+    #[cfg(test)]
+    pub(super) fn test_daemon(uid: u32, signed: bool) -> Self {
+        Self {
+            uid,
+            identifier: signed.then_some("com.arcboxlabs.desktop.daemon"),
+            audit_token: signed,
+        }
+    }
+
     pub(super) fn uid(self) -> u32 {
         self.uid
     }
