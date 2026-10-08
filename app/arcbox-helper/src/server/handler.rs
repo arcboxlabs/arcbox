@@ -19,15 +19,43 @@ use super::peer_auth::VerifiedPeer;
 pub(super) struct HelperServer {
     peer: VerifiedPeer,
     resolvers: Arc<mutations::dns::ResolverStore>,
+    connection: u64,
 }
 
 impl HelperServer {
     pub(super) fn new(peer: VerifiedPeer, resolvers: Arc<mutations::dns::ResolverStore>) -> Self {
-        Self { peer, resolvers }
+        let connection = resolvers.connection();
+        Self {
+            peer,
+            resolvers,
+            connection,
+        }
+    }
+
+    pub(super) fn release(&self) -> Result<(), HelperError> {
+        self.resolvers.release(self.connection)
     }
 }
 
 impl HelperService for HelperServer {
+    async fn resolver_lease(
+        self,
+        _: tarpc::context::Context,
+        update: arcbox_helper::ResolverLease,
+    ) -> Result<(), HelperError> {
+        let result = (|| {
+            let update = mutations::dns::lease::Update::try_from(update)?;
+            if self.peer.resolver_profile() != Some(update.profile) {
+                return Err(HelperError::validation(
+                    "resolver lease requires the matching audit-verified daemon",
+                ));
+            }
+            self.resolvers
+                .update(self.connection, self.peer.uid(), update)
+        })();
+        result.inspect_err(|_| self.resolvers.invalidate(self.connection))
+    }
+
     async fn route_add(
         self,
         _: tarpc::context::Context,

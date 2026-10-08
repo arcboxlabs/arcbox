@@ -1,5 +1,6 @@
 //! DNS resolver file management for `/etc/resolver/`.
 
+pub mod lease;
 mod storage;
 
 use std::fs;
@@ -17,23 +18,24 @@ const MARKER: &str = "# managed by arcbox-helper";
 
 pub struct ResolverStore {
     directory: PathBuf,
-    mutation: Mutex<()>,
+    mutation: Mutex<lease::State>,
 }
 
 impl ResolverStore {
     pub fn new(directory: PathBuf) -> Self {
         Self {
             directory,
-            mutation: Mutex::new(()),
+            mutation: Mutex::new(lease::State::default()),
         }
     }
 
     pub fn install(&self, domain: &Domain, port: DnsPort) -> Result<(), HelperError> {
         let resolver_dir = &self.directory;
-        let _guard = self
+        let guard = self
             .mutation
             .lock()
             .expect("DNS resolver mutation lock poisoned");
+        guard.unleased(domain)?;
         if domain.as_str() == "local" {
             return Err(HelperError::validation(
                 "the .local namespace cannot be claimed",
@@ -54,10 +56,11 @@ impl ResolverStore {
 
     pub fn uninstall(&self, domain: &Domain) -> Result<(), HelperError> {
         let resolver_dir = &self.directory;
-        let _guard = self
+        let guard = self
             .mutation
             .lock()
             .expect("DNS resolver mutation lock poisoned");
+        guard.unleased(domain)?;
         let Some(_directory) = open_directory(resolver_dir)? else {
             return Ok(());
         };

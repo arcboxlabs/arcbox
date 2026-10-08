@@ -167,3 +167,7 @@ Forwarding cleanup now checks the expected slot identity before withdrawing old 
 Host and guest now construct the same exact host/index reservations. The guest forwards unresolved builtin names to its existing gateway; hostile container or sandbox entries cannot capture them. Descendants and ordinary unavailable claims retain their existing behavior. Invalid suffix construction fails before DNS serving.
 
 All 50 shared DNS tests, three host reservation tests, five guest DNS tests, 12 guest event tests, and the framed guest RPC regression passed. Guest tests ran in networkless Colima containers. Host and guest strict all-target Clippy, workspace formatting, and diff checks passed. Gateway socket failure and installed VM/browser behavior remain unverified.
+
+## Lease resolver roots to a verified daemon connection
+
+The helper now accepts complete resolver-root leases bound to the verified daemon profile, kernel UID, startup nonce, and increasing revision. Exact roots remain exclusive; failed updates invalidate the connection, and cleanup requires the recorded file contents. Nine helper DNS tests, four mock RPC tests, two temporary-root filesystem tests, strict all-target Clippy, and formatting passed. The daemon does not consume leases yet; system resolver files were not changed.

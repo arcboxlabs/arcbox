@@ -114,7 +114,7 @@ async fn accept_loop(
             let mut in_flight = JoinSet::new();
 
             BaseChannel::with_defaults(transport)
-                .execute(server.serve())
+                .execute(server.clone().serve())
                 .for_each(|resp| {
                     in_flight.spawn(resp);
                     futures::future::ready(())
@@ -125,6 +125,9 @@ async fn accept_loop(
             // the connection as idle, so idle_watchdog never kills the
             // process while work is still running.
             while in_flight.join_next().await.is_some() {}
+            if let Err(error) = server.release() {
+                tracing::error!(%error, "resolver lease cleanup failed");
+            }
 
             tracker_clone.disconnect();
         });

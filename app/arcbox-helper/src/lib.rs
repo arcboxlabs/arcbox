@@ -10,6 +10,21 @@ pub mod validate;
 
 pub use error::HelperError;
 
+/// Complete resolver roots for one daemon instance on one helper connection.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ResolverLease {
+    /// Must match the audit-token-verified daemon signing profile.
+    pub profile: String,
+    /// Immutable random identifier generated once per daemon startup.
+    pub nonce: [u8; 16],
+    /// Strictly increasing revision, starting at one.
+    pub revision: u64,
+    /// Bound unprivileged DNS listener port.
+    pub port: u16,
+    /// Complete exact resolver roots; the helper never broadens them.
+    pub roots: Vec<String>,
+}
+
 /// Unix socket path where the helper daemon listens.
 pub const HELPER_SOCKET: &str = arcbox_constants::paths::privileged::HELPER_SOCKET;
 
@@ -115,6 +130,9 @@ pub trait HelperService {
 
     /// Removes this public ArcBox CA from the System Keychain after Admin trust is revoked.
     async fn ca_remove(der: Vec<u8>) -> Result<(), HelperError>;
+
+    /// Publishes all roots atomically per file and releases the lease at connection EOF.
+    async fn resolver_lease(update: ResolverLease) -> Result<(), HelperError>;
 }
 
 /// Low-level connect — use [`client::Client::connect()`] instead.

@@ -216,6 +216,14 @@ impl Client {
             .await??)
     }
 
+    /// Replaces this connection's resolver roots after daemon-identity verification.
+    pub async fn resolver_lease(&self, update: crate::ResolverLease) -> Result<(), ClientError> {
+        Ok(self
+            .inner
+            .resolver_lease(tarpc::context::current(), update)
+            .await??)
+    }
+
     async fn ensure_compatible(&self) -> Result<(), ClientError> {
         let version = self.version().await?;
         let installed = arcbox_constants::helper::parse_helper_version(&version)

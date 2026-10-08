@@ -18,6 +18,16 @@ pub struct MockHelperServer {
 }
 
 impl HelperService for MockHelperServer {
+    async fn resolver_lease(
+        self,
+        _: tarpc::context::Context,
+        _: arcbox_helper::ResolverLease,
+    ) -> Result<(), HelperError> {
+        Err(HelperError::validation(
+            "mock has no verified daemon identity",
+        ))
+    }
+
     async fn route_add(
         self,
         _: tarpc::context::Context,
