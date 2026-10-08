@@ -103,7 +103,7 @@ impl Default for NetConfig {
 use std::net::IpAddr;
 use std::sync::RwLock;
 
-use tokio::sync::{broadcast, watch};
+use tokio::sync::watch;
 
 /// Network manager state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,22 +117,6 @@ pub enum NetworkState {
     /// Network manager is stopping.
     Stopping,
 }
-
-/// A change to the names served under the local DNS domain.
-///
-/// Emitted by [`NetworkManager::replace_dns_projection`] for the daemon's mDNS mirror.
-/// `fqdn` is the canonical full name published by the projection.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DnsChange {
-    /// `fqdn` now resolves to `ip` (also sent when the address changes).
-    Registered { fqdn: String, ip: IpAddr },
-    /// `fqdn` no longer resolves.
-    Removed { fqdn: String },
-}
-
-/// Changes a slow subscriber may fall behind by before it must resync from
-/// [`NetworkManager::local_dns_entries`].
-const DNS_CHANGE_CAPACITY: usize = 256;
 
 /// Network manager.
 ///
@@ -149,8 +133,6 @@ pub struct NetworkManager {
     ip_allocator: RwLock<Option<nat::IpAllocator>>,
     /// DNS forwarder with local hostname resolution.
     dns_forwarder: dns::DnsForwarder,
-    /// Granted concrete `.local` changes for mDNS publication.
-    dns_changes: broadcast::Sender<DnsChange>,
     /// Complete ownership changes, including claims without concrete records.
     dns_registry_epoch: watch::Sender<u64>,
 }
@@ -165,7 +147,6 @@ impl NetworkManager {
             state: RwLock::new(NetworkState::Stopped),
             ip_allocator: RwLock::new(None),
             dns_forwarder,
-            dns_changes: broadcast::channel(DNS_CHANGE_CAPACITY).0,
             dns_registry_epoch: watch::channel(0).0,
         }
     }
@@ -376,15 +357,6 @@ impl NetworkManager {
         }
     }
 
-    /// Streams every later change to granted concrete `.local` names.
-    ///
-    /// Subscribe first, then read [`Self::local_dns_entries`], so no change
-    /// falls between the two; on `Lagged` read the entries again.
-    #[must_use]
-    pub fn subscribe_dns_changes(&self) -> broadcast::Receiver<DnsChange> {
-        self.dns_changes.subscribe()
-    }
-
     /// Watches the latest ownership epoch, including changes without concrete records.
     /// Subscribe before reading the Registry snapshot. Drop watch borrows before
     /// acquiring the Registry lock; the publisher holds that lock during notification.
@@ -438,22 +410,17 @@ mod tests {
     }
 
     #[test]
-    fn dns_changes_name_the_fqdn_from_construction_config() {
+    fn dns_projection_names_the_fqdn_from_construction_config() {
         let manager = NetworkManager::new(NetConfig {
             dns: dns::DnsConfig::default().with_local_domain("custom.local"),
             ..Default::default()
         });
-        let mut changes = manager.subscribe_dns_changes();
+        let mut changes = manager.subscribe_dns_registry();
         let ip = IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 2, 5));
 
         register(&manager, ip);
-        assert_eq!(
-            changes.try_recv().unwrap(),
-            DnsChange::Registered {
-                fqdn: "web.custom.local".into(),
-                ip
-            }
-        );
+        assert!(changes.has_changed().unwrap());
+        changes.borrow_and_update();
         assert_eq!(
             manager.local_dns_entries(),
             vec![("web.custom.local".to_owned(), ip)],
@@ -466,15 +433,8 @@ mod tests {
             registry.remove("web");
             manager.replace_dns_projection(&registry);
         }
-        assert_eq!(
-            changes.try_recv().unwrap(),
-            DnsChange::Removed {
-                fqdn: "web.custom.local".into()
-            }
-        );
-
+        assert!(changes.has_changed().unwrap());
         assert_eq!(manager.local_dns_entries(), [] as [(String, IpAddr); 0]);
-        assert!(changes.try_recv().is_err());
     }
 
     #[test]

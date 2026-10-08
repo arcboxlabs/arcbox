@@ -237,3 +237,5 @@ Resolver snapshot regressions reject mismatched ports, revisions, and roots befo
 ## Define the exclusive guest authority channel
 
 The paired wire schema adds an empty Open, a complete root snapshot with its source authority revision, and an acknowledgment of that revision. Protocol and minimum remain 7/7. Generated prost and Connect descriptors were refreshed. Eleven constants/protocol tests, strict constants/protocol/Connect Clippy, and formatting passed. Guest dispatch and host delivery are not implemented by this schema slice.
+
+The obsolete DNS record-delta channel is removed after its final production consumer moved to the Registry watch. Projection tests now assert the complete accepted snapshot and ownership notifications, preserving exact address, conflict, withdrawal, and unchanged-update checks. The complete net suite again passed 118 tests with five ignored cases; strict all-target net Clippy and formatting passed.
