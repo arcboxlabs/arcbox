@@ -177,3 +177,6 @@ mod tests;
 
 #[cfg(test)]
 mod translation_tests;
+
+#[cfg(test)]
+mod grpc_tests;

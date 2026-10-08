@@ -424,3 +424,5 @@ Managed HTTP/2 now uses direct h2 stream ownership at both endpoints while shari
 Socket regressions now cover both HTTP protocol directions, authority and forwarded scheme, redirects, repeated cookies, SSE alongside independent requests, WebSocket read-ahead, and pinned-route rejection before an additional HTTP/1 connection. The test prefix passed strict musl all-target Clippy and formatting. Runtime execution is recorded with the complete relay suite below.
 
 Streaming boundary regressions cover repeated declared trailers and rejection of undeclared trailers with and without Content-Length. An early HTTP/2 response still permits upload progress and a sibling request. The test prefix passed strict musl all-target Clippy and formatting. Arbitrary HTTP/2 trailers remain unsupported across HTTP/1 boundaries.
+
+Native gRPC socket tests cover compressed unary message bytes, binary metadata, repeated trailers, client streaming, server streaming, bidirectional streaming, and trailers-only status. The test prefix passed strict musl all-target Clippy and formatting. The relay does not decode or buffer complete gRPC messages.
