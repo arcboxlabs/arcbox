@@ -1122,6 +1122,34 @@ impl MachineManager {
         self.vm_manager.connect_vsock(&machine.vm_id, port)
     }
 
+    /// Opens an agent connection only for the expected physical VM run.
+    ///
+    /// # Errors
+    /// Returns an error if the machine is unavailable, replaced, or cannot connect.
+    pub fn connect_agent_expected(
+        &self,
+        name: &str,
+        expected: &VmIncarnation,
+    ) -> Result<crate::agent_client::AgentClient> {
+        let machines = self
+            .machines
+            .read()
+            .map_err(|_| EngineError::LockPoisoned)?;
+        let machine = machines
+            .get(name)
+            .ok_or_else(|| EngineError::not_found(name))?;
+        if machine.state != MachineState::Running {
+            return Err(EngineError::invalid_state(format!(
+                "machine '{name}' is not running"
+            )));
+        }
+        let cid = machine
+            .cid
+            .ok_or_else(|| EngineError::invalid_state("CID not assigned"))?;
+        self.vm_manager
+            .connect_agent_expected(&machine.vm_id, expected, cid)
+    }
+
     /// Connects to the machine's agent and pings it once.
     ///
     /// A ping is also a wall-clock sync: the request carries the host's

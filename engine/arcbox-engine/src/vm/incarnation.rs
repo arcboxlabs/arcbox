@@ -72,6 +72,15 @@ impl VmManager {
         expected: &VmIncarnation,
         publish: impl FnOnce() -> T,
     ) -> Result<T> {
+        self.with_expected_entry(id, expected, |_| publish())
+    }
+
+    fn with_expected_entry<T>(
+        &self,
+        id: &VmId,
+        expected: &VmIncarnation,
+        operation: impl FnOnce(&VmEntry) -> T,
+    ) -> Result<T> {
         let vms = self.vms.read().map_err(|_| EngineError::LockPoisoned)?;
         let entry = vms
             .get(id)
@@ -79,7 +88,39 @@ impl VmManager {
         if entry.network_incarnation()? != *expected {
             return Err(EngineError::invalid_state("VM network incarnation changed"));
         }
-        Ok(publish())
+        Ok(operation(entry))
+    }
+
+    pub(crate) fn connect_agent_expected(
+        &self,
+        id: &VmId,
+        expected: &VmIncarnation,
+        cid: u32,
+    ) -> Result<crate::agent_client::AgentClient> {
+        self.connect_agent_using(id, expected, cid, |vmm| {
+            vmm.connect_vsock(arcbox_constants::ports::AGENT_PORT)
+                .map_err(EngineError::from)
+        })
+    }
+
+    pub(super) fn connect_agent_using(
+        &self,
+        id: &VmId,
+        expected: &VmIncarnation,
+        cid: u32,
+        connect: impl FnOnce(&Vmm) -> Result<std::os::fd::RawFd>,
+    ) -> Result<crate::agent_client::AgentClient> {
+        use crate::agent_client::AgentClient;
+
+        let (backend, fd) = self.with_expected_entry(id, expected, |entry| {
+            let vmm = entry.vmm.as_ref().expect("live incarnation has a VMM");
+            connect(vmm).map(|fd| (entry.config.backend, fd))
+        })??;
+        if cfg!(target_os = "macos") && backend == arcbox_vmm::VmBackend::Hv {
+            AgentClient::from_fd_blocking(cid, fd)
+        } else {
+            AgentClient::from_fd_async(cid, fd)
+        }
     }
 
     /// Captures the current live datapath identity.

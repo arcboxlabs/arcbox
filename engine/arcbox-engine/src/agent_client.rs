@@ -159,11 +159,22 @@ impl AgentClient {
     /// The choice between this and [`Self::from_fd_blocking`] must come from
     /// the VM backend — both backends hand over unnamed AF_UNIX fds, so the
     /// socket domain cannot distinguish them.
-    #[cfg(target_os = "macos")]
     pub fn from_fd_async(cid: u32, fd: std::os::unix::io::RawFd) -> Result<Self> {
         let addr = VsockAddr::new(cid, AGENT_PORT);
+        #[cfg(target_os = "macos")]
         let transport = VsockTransport::from_raw_fd(fd, addr)
             .map_err(|e| EngineError::Machine(format!("invalid vsock fd: {e}")))?;
+        #[cfg(target_os = "linux")]
+        let transport = {
+            use arcbox_transport::vsock::VsockStream;
+            use std::os::fd::{FromRawFd, OwnedFd};
+
+            // SAFETY: the caller transfers the connected fd into this client.
+            let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+            let stream = VsockStream::from_fd(fd)
+                .map_err(|e| EngineError::Machine(format!("invalid vsock fd: {e}")))?;
+            VsockTransport::from_stream(stream, addr)
+        };
         Ok(Self {
             cid,
             transport: AgentTransport::Async(transport),

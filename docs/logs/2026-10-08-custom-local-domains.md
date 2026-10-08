@@ -273,3 +273,7 @@ The blocking transport now provides independent typed sender and receiver halves
 ## Name helper methods on the wire
 
 The helper and its clients now use length-delimited JSON with named RPC and error variants. The Bincode dependency and decoder are removed; the helper package remains 1.2.0. A real framed socket test rejects a recorded Bincode mutation and malformed JSON before dispatch, with no resolver file created. The helper passed 73 tests with one native Keychain test ignored, and the daemon passed nine resolver-service tests. Strict debug all-target and release-binary helper Clippy, scoped formatting, and diff checks passed. The installed helper remains unchanged; the paired installer cutover is not yet connected.
+
+## Open agent connections for the captured physical VM
+
+Runtime now exposes an expected-incarnation connection through MachineManager. VmManager checks the live incarnation, selects the backend, and obtains its connected socket under the same VM read lock. The socket fixture passed for both HV and VZ; replacement cannot acquire the write lock during connection, stale or dead incarnations never call the connector, and dropping the client closes the socket. Strict all-target Core/Engine Clippy, scoped formatting, and diff checks passed. The Linux connected-fd constructor was updated but not compiled by this macOS gate. Daemon authority delivery and installed VM validation remain pending.

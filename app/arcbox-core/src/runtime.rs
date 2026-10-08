@@ -938,6 +938,23 @@ impl Runtime {
             .map_err(CoreError::from)
     }
 
+    /// Opens the System VM's agent connection for one captured physical run.
+    ///
+    /// # Errors
+    /// Returns an error if the expected VM is unavailable, replaced, or cannot connect.
+    pub async fn connect_system_agent_expected(
+        &self,
+        expected: VmIncarnation,
+    ) -> Result<crate::agent_client::AgentClient> {
+        let machine_manager = Arc::clone(&self.machine_manager);
+        tokio::task::spawn_blocking(move || {
+            machine_manager.connect_agent_expected(DEFAULT_MACHINE_NAME, &expected)
+        })
+        .await
+        .map_err(|e| CoreError::Vm(format!("agent connect task panicked: {e}")))?
+        .map_err(CoreError::from)
+    }
+
     /// Connects to a machine's guest service via vsock port.
     ///
     /// # Errors

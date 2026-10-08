@@ -209,3 +209,90 @@ fn replaced_or_dead_incarnations_cannot_take_the_next_manager() {
     manager.remove(&id).unwrap();
     assert!(manager.network_incarnation(&id).is_err());
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn expected_agent_connection_fences_replacement_and_selects_the_locked_backend() {
+    use std::io::Read;
+    use std::os::fd::IntoRawFd;
+    use std::os::unix::net::UnixStream;
+    use std::sync::atomic::Ordering;
+
+    for backend in [arcbox_vmm::VmBackend::Hv, arcbox_vmm::VmBackend::Vz] {
+        let (manager, _dir) = test_vm_manager();
+        let id = manager
+            .create(VmConfig {
+                backend,
+                vsock: false,
+                ..Default::default()
+            })
+            .unwrap();
+        {
+            let mut vms = manager.vms.write().unwrap();
+            let entry = vms.get_mut(&id).unwrap();
+            entry.begin_run().unwrap();
+            let vmm = Vmm::new(VmManager::build_vmm_config(entry)).unwrap();
+            vmm.running_flag().store(true, Ordering::SeqCst);
+            entry.vmm = Some(vmm);
+            entry.info.state = MachineState::Running;
+        }
+        let expected = manager.network_incarnation(&id).unwrap();
+        let (host, mut guest) = UnixStream::pair().unwrap();
+        let agent = std::thread::scope(|scope| {
+            let (begin, begun) = std::sync::mpsc::channel();
+            let (checked, check) = std::sync::mpsc::channel();
+            let manager = &manager;
+            let id = &id;
+            let transition = scope.spawn(move || {
+                begun.recv().unwrap();
+                assert!(manager.vms.try_write().is_err());
+                checked.send(()).unwrap();
+                let mut vms = manager.vms.write().unwrap();
+                let entry = vms.get_mut(id).unwrap();
+                entry.reboot_with(|_| Ok(())).unwrap();
+                entry.config.backend = if backend == arcbox_vmm::VmBackend::Hv {
+                    arcbox_vmm::VmBackend::Vz
+                } else {
+                    arcbox_vmm::VmBackend::Hv
+                };
+            });
+            let agent = manager
+                .connect_agent_using(id, &expected, 7, |_| {
+                    begin.send(()).unwrap();
+                    check.recv().unwrap();
+                    Ok(host.into_raw_fd())
+                })
+                .unwrap();
+            transition.join().unwrap();
+            agent
+        });
+        assert_eq!(agent.cid(), 7);
+        assert_eq!(agent.is_blocking(), backend == arcbox_vmm::VmBackend::Hv);
+        drop(agent);
+        assert_eq!(guest.read(&mut [0]).unwrap(), 0);
+
+        let stale = manager.connect_agent_using(&id, &expected, 7, |_| {
+            panic!("a stale incarnation must not open a socket")
+        });
+        assert!(matches!(
+            stale,
+            Err(EngineError::Common(
+                arcbox_error::CommonError::InvalidState(_)
+            ))
+        ));
+        let current = manager.network_incarnation(&id).unwrap();
+        let flag = manager.vms.read().unwrap()[&id]
+            .vmm
+            .as_ref()
+            .unwrap()
+            .running_flag();
+        flag.store(false, Ordering::SeqCst);
+        assert!(
+            manager
+                .connect_agent_using(&id, &current, 7, |_| {
+                    panic!("a dead VM must not open a socket")
+                })
+                .is_err()
+        );
+    }
+}
