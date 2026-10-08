@@ -98,7 +98,9 @@ impl AgentClient {
                     Err(cancelled_error())
                 }
                 result = &mut worker => {
-                    result.map_err(|error| EngineError::Machine(error.to_string()))?
+                    let result = result.map_err(|error| EngineError::Machine(error.to_string()))?;
+                    shutdown.disarm();
+                    result
                 }
             };
         }

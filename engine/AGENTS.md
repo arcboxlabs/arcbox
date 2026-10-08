@@ -89,6 +89,10 @@ The restructure plan and its locked decisions live in
 
 - Directory requests consume a dedicated client and accept a cancellation token on both transports. Cancel and await each request before retiring its owner.
 
+## Kubernetes listing
+
+- `AgentClient::list_kubernetes_load_balancers` consumes the connection and returns the client only after success. Cancel through the supplied token and await completion before retiring the VM. Reuse the returned client for the next poll.
+
 ## Guest trust
 
 - `agent_client/guest_trust.rs` sends an explicit current public certificate or removal over a dedicated cancellable connection. Await cancellation before retiring the VM. Match the acknowledged fingerprint and expected VM incarnation before reporting client trust as ready.

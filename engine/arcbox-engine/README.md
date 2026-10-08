@@ -36,3 +36,5 @@ Dropping the async future closes the connection. The guest contract cancels offl
 Recovery owners can pass a cancellation token to `storage_check_with_cancel` and `watch_readiness_with_cancel`. After cancelling the token, await the operation to join any blocking RPC worker before stopping the VM.
 
 A successful RPC returns the guest's check results. Callers must require `StorageCheckResponse.passed` before treating verification as successful. The client does not remove storage protection or start runtime services.
+
+Use `AgentClient::list_kubernetes_load_balancers(cancelled)` to poll LoadBalancer Services. Reuse the returned client after success. Cancel the token and await the operation before retiring the VM; blocking transport cancellation closes the socket and joins its worker.

@@ -48,7 +48,10 @@ pub fn spawn(ctx: &DaemonContext, runtime: &Arc<Runtime>) {
 /// without a guest.
 trait ServiceSource {
     /// Lists the cluster's LoadBalancer Services.
-    async fn list(&mut self) -> arcbox_core::Result<KubernetesLoadBalancersResponse>;
+    async fn list(
+        &mut self,
+        cancelled: &CancellationToken,
+    ) -> arcbox_core::Result<KubernetesLoadBalancersResponse>;
 
     /// Forgets any connection to a VM that is going away.
     fn disconnect(&mut self);
@@ -62,19 +65,17 @@ struct AgentSource {
 }
 
 impl ServiceSource for AgentSource {
-    async fn list(&mut self) -> arcbox_core::Result<KubernetesLoadBalancersResponse> {
-        let agent = match &mut self.agent {
+    async fn list(
+        &mut self,
+        cancelled: &CancellationToken,
+    ) -> arcbox_core::Result<KubernetesLoadBalancersResponse> {
+        let agent = match self.agent.take() {
             Some(agent) => agent,
-            None => self
-                .agent
-                .insert(self.runtime.connect_system_agent().await?),
+            None => self.runtime.connect_system_agent().await?,
         };
-        let listing = agent.list_kubernetes_load_balancers().await;
-        if listing.is_err() {
-            // The connection may be what failed; the next poll dials afresh.
-            self.agent = None;
-        }
-        Ok(listing?)
+        let (agent, listing) = agent.list_kubernetes_load_balancers(cancelled).await?;
+        self.agent = Some(agent);
+        Ok(listing)
     }
 
     fn disconnect(&mut self) {
@@ -98,7 +99,7 @@ async fn reconcile_loop(
     loop {
         let active = vm.borrow_and_update().is_ready() && *hold.borrow_and_update();
         if active {
-            match source.list().await {
+            match source.list(&shutdown).await {
                 Ok(listing) => {
                     failures = 0;
                     runtime.apply_kubernetes_load_balancers(&listing).await;
@@ -140,7 +141,10 @@ mod tests {
     struct CountingSource(Arc<AtomicUsize>);
 
     impl ServiceSource for CountingSource {
-        async fn list(&mut self) -> arcbox_core::Result<KubernetesLoadBalancersResponse> {
+        async fn list(
+            &mut self,
+            _cancelled: &CancellationToken,
+        ) -> arcbox_core::Result<KubernetesLoadBalancersResponse> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(KubernetesLoadBalancersResponse::default())
         }

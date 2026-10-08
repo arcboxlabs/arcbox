@@ -52,12 +52,21 @@ impl BlockingVsockReceiver {
 
 /// Cancels pending I/O on a blocking transport when the owner drops this handle.
 /// The duplicate socket keeps the file descriptor valid until cancellation.
-pub struct BlockingVsockShutdown(UnixStream);
+pub struct BlockingVsockShutdown(Option<UnixStream>);
+
+impl BlockingVsockShutdown {
+    /// Releases the duplicate descriptor without interrupting the original connection.
+    pub fn disarm(mut self) {
+        self.0.take();
+    }
+}
 
 impl Drop for BlockingVsockShutdown {
     fn drop(&mut self) {
         // An already-disconnected socket needs no further cleanup.
-        let _ = self.0.shutdown(std::net::Shutdown::Both);
+        if let Some(stream) = &self.0 {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
     }
 }
 
@@ -68,7 +77,7 @@ impl BlockingVsockTransport {
             .as_ref()
             .ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected))?
             .try_clone()
-            .map(BlockingVsockShutdown)
+            .map(|stream| BlockingVsockShutdown(Some(stream)))
     }
 
     /// Closes the owned stream. A closed transport cannot reconnect.

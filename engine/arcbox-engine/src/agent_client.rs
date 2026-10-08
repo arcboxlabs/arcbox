@@ -22,6 +22,8 @@ mod wire;
 
 #[cfg(test)]
 mod admission_tests;
+#[cfg(test)]
+mod kubernetes_tests;
 
 pub use self::instance_authority::InstanceAuthoritySession;
 pub use self::machine_exec::{ExecSessionInput, ExecSessionOutput};
@@ -68,6 +70,7 @@ use buffa::Message;
 use bytes::Bytes;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 /// A chunk in a sandbox file-write stream.
 #[derive(Debug)]
@@ -1008,20 +1011,39 @@ impl AgentClient {
 
     /// Lists the guest cluster's Services of type LoadBalancer.
     ///
-    /// Unary, so it works over the blocking HV transport too.
+    /// Returns the connected client after success so the poller can reuse the connection.
+    /// The caller must cancel through the token and await the blocking worker's completion.
     ///
     /// # Errors
     ///
     /// Returns an error if the request fails or the guest cannot list
     /// Services (code 503 while the API server is not answering).
     pub async fn list_kubernetes_load_balancers(
-        &mut self,
-    ) -> Result<KubernetesLoadBalancersResponse> {
+        self,
+        cancelled: &CancellationToken,
+    ) -> Result<(Self, KubernetesLoadBalancersResponse)> {
         let payload = KubernetesLoadBalancersRequest::default().encode_to_vec();
-        self.unary_rpc(
-            MessageType::KubernetesLoadBalancersRequest,
-            &payload,
-            MessageType::KubernetesLoadBalancersResponse,
+        let blocking_payload = payload.clone();
+        self.cancellable(
+            cancelled,
+            move |mut client| {
+                let response = client.unary_rpc_blocking(
+                    MessageType::KubernetesLoadBalancersRequest,
+                    &blocking_payload,
+                    MessageType::KubernetesLoadBalancersResponse,
+                )?;
+                Ok((client, response))
+            },
+            move |mut client| async move {
+                let response = client
+                    .unary_rpc(
+                        MessageType::KubernetesLoadBalancersRequest,
+                        &payload,
+                        MessageType::KubernetesLoadBalancersResponse,
+                    )
+                    .await?;
+                Ok((client, response))
+            },
         )
         .await
     }
