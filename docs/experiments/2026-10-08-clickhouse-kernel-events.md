@@ -195,3 +195,34 @@ The [stack checker](../../tests/bench/signoz/analyze_clickhouse_stacks.py) valid
 python3 tests/bench/signoz/analyze_clickhouse_stacks.py --self-test
 python3 tests/bench/signoz/analyze_clickhouse_stacks.py /absolute/startup-stacks-on-02
 ```
+
+## The delayed task's assigned CPUs remain in spin contention
+
+The same zero-loss capture narrows the 13843 wait without adding a workload. During 7492.253309–7512.239204, ten migration events move the runnable task along CPU path `1 → 6 → 16 → 2 → 8 → 4 → 17 → 9 → 11 → 0 → 9`. A single-runqueue debt calculation cannot describe this interval.
+
+The retained `analyze-assigned-cpu-overlay-v2.py` pairs exact-SPIN events on each CPU, clips each pair to the target's assignment interval, and takes the interval union. Begin flags for the selected hot-hash pairs report disabled IRQs. All selected pairs close, migration sources match the previous destination, and the assignment intervals partition the complete wait. Union and clipping self-checks cover overlaps, duplicates, empty intersections, and disjoint intervals.
+
+| Guest elapsed coverage | Measured duration |
+|---|---:|
+| Target runnable wait | 19.985895 s |
+| Hot-hash SPIN coverage along assigned CPUs | 19.527241 s; 97.7051% |
+| Task-context portion of that coverage | 12.261626 s |
+| Hardirq-context portion of that coverage | 7.265615 s |
+| Idle-current coverage along assigned CPUs | 0 s |
+| All 18 CPUs: union of 2,463 hot-hash SPIN pairs | 348.606252 guest-CPU-s; 96.9034% of 359.746110 guest-CPU-s |
+
+The hot hash is the one associated with the identified `do_sigaction` signal-lock contender in this capture. IRQ common_pid identifies the interrupted current task, not the timer target or lock holder. These are guest mono spans, including possible host descheduling. They do not measure physical CPU execution. The interval union avoids counting overlapping records twice.
+
+The event-derived lower bound on queued ClickHouse after-snapshot identities peaks at 662 and averages 567.55 over the window. At least 400 such tasks remain queued for a total of 16.958680 seconds. These values are not kernel `nr_running` or eligibility measurements. The target's preceding runtime charges total 50.845835 ms, but no event records its virtual lag, deadline, runqueue average, or hierarchical eligibility. The capture also lacks effective ancestor cgroup quota/throttle snapshots. The container configuration itself has no CPU quota.
+
+The exact non-RT `spin_lock_irq()` path disables local IRQs and preemption before entering qspinlock. Long contention can therefore defer local timer ticks and scheduling even when the vCPU executes throughout. The baseline kernel uses tick accounting and disables IRQ_TIME_ACCOUNTING; scheduler runtime records cannot separate task and interrupt execution. A scheduler/tick discrepancy in this path is not by itself stolen-time evidence. The controlled VM-suspension result remains separate.
+
+The direct observation is extensive IRQ-disabled guest lock contention while the task waits across multiple CPUs. EEVDF debt remains unproven in this application capture. Independent host residency is needed to distinguish physical spinning from host scheduling amplification. The detailed results are retained as `runnable-fairness-window-v3.json` and `runnable-assigned-cpu-overlay-v2.json`, with their versioned analysis sources.
+
+## Minimal host tracing still needs a complete source capture
+
+A supported Blank template plus the Thread State Trace instrument reports reaching its 30-second limit. The driver's 300-second total process wait expires before an exit status is collected. The logs do not separately time postprocessing. The recorder subsequently disappears, leaving an approximately 39 GiB package. Export rejects that package with `Document Missing Template Error`. This is an incomplete preflight with unknown recorder exit status, not usable host scheduling evidence or proof of a fixed Instruments defect. The exact command, logs, and incomplete package are retained.
+
+The earlier `ktrace info` message is misleading. A read-only direct library call returns EPERM at effective UID 501. The installed tool's error path passes the fixed value EX_OSERR (71) as the error-code argument to `errc`, producing the displayed EREMOTE text. Running `ktrace info` with administrator authorization in the user's terminal succeeds and reports disabled tracing with no allocated kernel buffer; tailspind is the recorded background owner. The tool process does not share that terminal's sudo authorization. No global tracing reset, daemon termination, or permission change is used to obtain access.
+
+The prepared one-shot `capture-host-root30.sh` verifies the owned daemon/helper identities, records 30 seconds through `ktrace dump`, retains scheduling and trace-metadata classes, and returns ownership of its output files to the user. The raw TRACE_LOST_EVENTS ID is `0x07020008`; the previous Instruments tables do not expose its `7,2` subclass, so those exports cannot establish zero source loss. A new root capture must validate coverage and loss markers before application correlation.
