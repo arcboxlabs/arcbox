@@ -203,6 +203,7 @@ See also [helper.md](helper.md) for versioning, threat model, and ownership rule
 | `/usr/local/libexec/arcbox-helper` | Privileged helper binary | cli (`abctl _install`) |
 | `/Library/LaunchDaemons/com.arcboxlabs.desktop.helper.plist` | Helper LaunchDaemon (socket-activation) | cli (`abctl _install`) |
 | `/var/run/arcbox-helper.sock` | Helper socket (created by launchd) | launchd |
+| `/var/run/arcbox-helper-install.lock` | Shared installation lock, held through the final readiness check and retained through uninstall until reboot | cli (`abctl _install`) |
 | `/var/run/docker.sock` | Symlink → `~/.arcbox/run/docker.sock` | helper |
 | `/etc/resolver/arcbox.local` | macOS DNS resolver file | helper |
 | `/var/log/arcbox/` | Privileged helper log directory | helper |
@@ -428,7 +429,7 @@ older installations. They can be safely deleted.
 
 ## 11. Uninstall
 
-`abctl uninstall` removes everything above that is ArcBox's. Run it as
+`abctl uninstall` removes ArcBox state except the retained paths listed below. Run it as
 yourself, not under `sudo`: the Docker context, shell profile, kubeconfig and
 keychain trust are the user's, and the command asks for `sudo` itself, once,
 for the privileged paths. It prints what it found before asking to continue,
@@ -439,7 +440,7 @@ non-zero when any step failed. `--keep-data` keeps `~/.arcbox/data`
 CA cleanup holds the profile operation lock until both trust revocation and Keychain identity deletion finish. The removal plan includes the lock directory created during cleanup, including when the profile directory was absent.
 
 ```bash
-abctl uninstall                 # everything
+abctl uninstall                 # remove ArcBox state
 abctl uninstall --keep-data     # keep ~/.arcbox/data for a reinstall
 brew uninstall --cask arcbox    # when the app came from Homebrew
 ```
@@ -467,9 +468,7 @@ What the command does, in order:
    shell integration (section 1.6, 1.7, 1.8, 7, and the Docker CLI plugin
    registration in section 5), the kubectl integration, the `~/.ssh/config`
    Include.
-4. Removes every path in sections 3, 4, 4.1, 6 and 6.1 that is ArcBox's, then
-   `~/.arcbox` (or all of it but `data/`), then `/Applications/ArcBox.app`
-   unless Homebrew installed it.
+4. Removes ArcBox-owned paths in sections 3, 4, 4.1, 6 and 6.1 except the shared helper installation lock. Then removes `~/.arcbox` (or all of it but `data/`) and `/Applications/ArcBox.app` unless Homebrew installed the app.
 
 Ownership is checked before anything privileged is removed, with the rules
 the helper applies when it creates them: a `/usr/local/bin` link must point
@@ -479,6 +478,8 @@ files are left alone and never listed.
 
 Not removed: `~/.config/arcbox/config.toml` and `/etc/arcbox/config.toml`
 (section 2), which the user wrote.
+
+The root-owned `/var/run/arcbox-helper-install.lock` also remains until reboot. Uninstall must not unlink the lock: an active installer and subsequent installers must use the same inode. The installer stores no PID or user data in the lock. The per-profile `tls/operation.lock` is removed after CA cleanup; the shared installation lock is retained.
 
 The list in this document is the contract behind the command
 (`app/arcbox-cli/src/commands/uninstall/inventory.rs`). A new path ArcBox

@@ -150,6 +150,7 @@ pub(super) fn scan(roots: &Roots, keep_data: bool) -> Residue {
         }
     };
 
+    // Preserve HELPER_INSTALL_LOCK so concurrent installers keep locking the same inode.
     // Privileged, by path.
     found(
         "helper binary",

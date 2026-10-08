@@ -12,6 +12,7 @@ use anyhow::{Context, Result, bail, ensure};
 use arcbox_constants::paths::{ArcboxProfile, privileged};
 
 mod daemon;
+mod lock;
 mod preflight;
 mod target;
 
@@ -55,14 +56,13 @@ pub async fn execute(args: InstallArgs) -> Result<()> {
     let target = target::Target::resolve(args.user_uid, args.data_dir)?;
     let roots = resolver_roots(profile, args.resolver_root);
     let helper = resolve_helper_source(args.helper_path.as_deref())?;
-    let status = preflight::inspect(&helper, &roots).await?;
     if args.check {
+        let status = preflight::inspect(&helper, &roots).await?;
         println!("{}", serde_json::to_string(&status)?);
         return Ok(());
     }
-    // SAFETY: geteuid has no arguments or failure case.
-    let is_privileged = unsafe { libc::geteuid() } == 0;
-
+    let installation_lock = lock::acquire()?;
+    let status = preflight::inspect(&helper, &roots).await?;
     println!("ArcBox Install");
     println!("==============");
     println!();
@@ -83,6 +83,8 @@ pub async fn execute(args: InstallArgs) -> Result<()> {
         print_done();
     }
 
+    drop(installation_lock);
+
     // 2. Register daemon service.
     print_step(2, 3, "Registering daemon service...");
     if args.no_daemon {
@@ -96,17 +98,10 @@ pub async fn execute(args: InstallArgs) -> Result<()> {
     print_step(3, 3, "Setting up shell integration...");
     if args.no_shell {
         print_skipped();
-    } else if is_privileged {
+    } else {
         println!("skipped (privileged installation)");
         println!();
         println!("  Run as your normal user: abctl setup install");
-    } else {
-        super::setup::execute(
-            super::setup::SetupCommands::Install,
-            super::OutputFormat::Quiet,
-        )
-        .await?;
-        print_done();
     }
 
     println!();

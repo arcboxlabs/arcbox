@@ -8,7 +8,7 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::future::Future;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{MetadataExt, symlink};
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -135,6 +135,10 @@ impl Install {
         write(&roots.system_path(privileged::HELPER_BINARY), "helper");
         write(&roots.system_path(privileged::HELPER_PLIST), "<plist/>");
         write(&roots.system_path(privileged::HELPER_SOCKET), "");
+        write(
+            &roots.system_path(privileged::HELPER_INSTALL_LOCK),
+            "preserve lock contents\n",
+        );
         write(&roots.system_path("/var/log/arcbox/helper.log"), "{}");
         write(
             &roots.system_path("/etc/resolver/arcbox.local"),
@@ -259,9 +263,13 @@ fn failures(steps: &[Step]) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn everything_arcbox_wrote_is_removed_and_nothing_else_is_touched() {
+async fn removable_state_is_deleted_and_exempt_paths_are_preserved() {
     let install = Install::new();
     let roots = install.roots();
+    let install_lock_path = roots.system_path(privileged::HELPER_INSTALL_LOCK);
+    let install_lock = fs::File::open(&install_lock_path).unwrap();
+    install_lock.lock().unwrap();
+    let install_lock_inode = install_lock.metadata().unwrap().ino();
     // OrbStack's link shares our xbin layout (#715); a stray real file in
     // /usr/local/bin is nobody's to delete.
     let bin = roots.system_path("/usr/local/bin");
@@ -322,6 +330,14 @@ async fn everything_arcbox_wrote_is_removed_and_nothing_else_is_touched() {
             absent.display()
         );
     }
+    assert_eq!(
+        fs::metadata(&install_lock_path).unwrap().ino(),
+        install_lock_inode
+    );
+    assert_eq!(
+        fs::read_to_string(&install_lock_path).unwrap(),
+        "preserve lock contents\n"
+    );
     assert_eq!(
         fs::read_link(bin.join("docker-compose")).unwrap(),
         PathBuf::from("/Applications/OrbStack.app/Contents/MacOS/xbin/docker-compose")

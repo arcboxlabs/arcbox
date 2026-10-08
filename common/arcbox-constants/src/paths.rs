@@ -77,6 +77,8 @@ pub mod privileged {
     pub const HELPER_PLIST: &str = "/Library/LaunchDaemons/com.arcboxlabs.desktop.helper.plist";
     /// Helper socket-activation socket path.
     pub const HELPER_SOCKET: &str = "/var/run/arcbox-helper.sock";
+    /// Shared installation lock, retained across installs and uninstall until reboot.
+    pub const HELPER_INSTALL_LOCK: &str = "/var/run/arcbox-helper-install.lock";
     /// Docker socket symlink path.
     pub const DOCKER_SOCKET: &str = "/var/run/docker.sock";
 }
