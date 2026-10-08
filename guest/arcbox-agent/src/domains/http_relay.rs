@@ -1,5 +1,6 @@
 //! HTTP forwarding after managed TLS termination.
 
+mod exchange;
 mod h1_body;
 mod multiplex;
 

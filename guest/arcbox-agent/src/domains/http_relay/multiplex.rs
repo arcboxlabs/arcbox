@@ -6,6 +6,7 @@ use hyper::Version;
 use hyper::client::conn::{http1, http2};
 use hyper::rt::Executor as _;
 use tokio::net::TcpStream;
+use tokio_util::sync::CancellationToken;
 
 use super::h1_body::Body;
 use super::*;
@@ -66,12 +67,14 @@ pub(in crate::domains) async fn serve(
             let request =
                 if client_protocol == HttpProtocol::Http2 && protocol == HttpProtocol::Http1 {
                     let (mut parts, body) = request.into_parts();
-                    let body = h1_body::stream(body, &mut parts.headers, true)?;
+                    let body = h1_body::stream(h1_body::direct(body), &mut parts.headers, true)?;
                     Request::from_parts(parts, body)
                 } else {
                     request.map(h1_body::direct)
                 };
-            let mut response = backend.send(request, protocol).await?;
+            let cancel = CancellationToken::new();
+            let cancellation = cancel.clone().drop_guard();
+            let (mut response, _uploaded) = backend.send(request, protocol, cancel).await?;
             if prepare_response(&mut response, websocket)? {
                 upgrades.send((
                     client_upgrade.context("WebSocket client upgrade missing")?,
@@ -90,9 +93,9 @@ pub(in crate::domains) async fn serve(
                 let body = h1_body::stream(body, &mut parts.headers, accepts_trailers)?;
                 Response::from_parts(parts, body)
             } else {
-                response.map(h1_body::direct)
+                response
             };
-            Ok::<_, anyhow::Error>(response)
+            Ok::<_, anyhow::Error>(response.map(|body| exchange::guard(body, cancellation)))
         }
     });
     match client_protocol {
@@ -132,8 +135,12 @@ impl Backend {
         &self,
         request: Request<Body>,
         protocol: HttpProtocol,
-    ) -> Result<Response<Incoming>> {
+        cancel: CancellationToken,
+    ) -> Result<(Response<Body>, exchange::Uploaded)> {
         (self.session.verify)()?;
+        let (parts, body) = request.into_parts();
+        let (body, uploaded) = exchange::track(body);
+        let request = Request::from_parts(parts, body);
         if protocol == HttpProtocol::Http2 {
             let mut sender = self
                 .sender
@@ -142,7 +149,10 @@ impl Backend {
                 .clone();
             sender.ready().await?;
             (self.session.verify)()?;
-            return Ok(sender.send_request(request).await?);
+            return Ok((
+                sender.send_request(request).await?.map(h1_body::direct),
+                uploaded,
+            ));
         }
         // One HTTP/1 socket per stream lets an SSE response coexist with sibling HTTP/2 requests.
         let first = self.first.lock().await.take();
@@ -164,9 +174,17 @@ impl Backend {
             }
         };
         let (mut sender, driver) = http1::handshake(TokioIo::new(upstream)).await?;
-        retain(&self.session.tasks, driver.with_upgrades());
+        retain(&self.session.tasks, async move {
+            tokio::select! {
+                () = cancel.cancelled() => Ok(()),
+                result = driver.with_upgrades() => result,
+            }
+        });
         (self.session.verify)()?;
-        Ok(sender.send_request(request).await?)
+        Ok((
+            sender.send_request(request).await?.map(h1_body::direct),
+            uploaded,
+        ))
     }
 }
 

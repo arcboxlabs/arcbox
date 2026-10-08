@@ -11,11 +11,7 @@ pub(super) fn direct(body: Incoming) -> Body {
     body.map_err(anyhow::Error::from).boxed_unsync()
 }
 
-pub(super) fn stream(
-    body: Incoming,
-    headers: &mut HeaderMap,
-    accepts_trailers: bool,
-) -> Result<Body> {
+pub(super) fn stream(body: Body, headers: &mut HeaderMap, accepts_trailers: bool) -> Result<Body> {
     let declared = headers
         .get_all(header::TRAILER)
         .iter()
