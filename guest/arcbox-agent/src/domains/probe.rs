@@ -297,6 +297,28 @@ mod tests {
         server.await.unwrap();
     }
 
+    async fn reply_http2(
+        stream: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        scheme: &'static str,
+    ) -> Result<(), hyper::Error> {
+        let service =
+            hyper::service::service_fn(move |request: Request<hyper::body::Incoming>| async move {
+                assert_eq!(request.method(), hyper::Method::HEAD);
+                assert_eq!(request.uri().authority().unwrap(), "web.arcbox.local");
+                assert_eq!(request.uri().scheme_str(), Some(scheme));
+                assert_eq!(request.headers()["user-agent"], "ArcBox/probe");
+                Ok::<_, std::convert::Infallible>(
+                    hyper::Response::builder()
+                        .status(401)
+                        .body(Empty::<Bytes>::new())
+                        .unwrap(),
+                )
+            });
+        hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+            .serve_connection(TokioIo::new(stream), service)
+            .await
+    }
+
     #[tokio::test]
     async fn discovers_http2_only_https_with_the_domain_authority() {
         let mut config = tls_configuration();
@@ -310,22 +332,7 @@ mod tests {
                 .unwrap();
             assert_eq!(tls.get_ref().1.server_name(), Some("web.arcbox.local"));
             assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"h2"[..]));
-            let service =
-                hyper::service::service_fn(|request: Request<hyper::body::Incoming>| async move {
-                    assert_eq!(request.method(), hyper::Method::HEAD);
-                    assert_eq!(request.uri().authority().unwrap(), "web.arcbox.local");
-                    assert_eq!(request.uri().scheme_str(), Some("https"));
-                    assert_eq!(request.headers()["user-agent"], "ArcBox/probe");
-                    Ok::<_, std::convert::Infallible>(
-                        hyper::Response::builder()
-                            .status(401)
-                            .body(Empty::<Bytes>::new())
-                            .unwrap(),
-                    )
-                });
-            hyper::server::conn::http2::Builder::new(TokioExecutor::new())
-                .serve_connection(TokioIo::new(tls), service)
-                .await
+            reply_http2(tls, "https").await
         });
         let discovered = responds_https(Ipv4Addr::LOCALHOST, port, "web.arcbox.local").await;
         server.abort();
@@ -350,20 +357,7 @@ mod tests {
                     .await;
                 }
                 let (stream, _) = listener.accept().await.unwrap();
-                let service = hyper::service::service_fn(
-                    |request: Request<hyper::body::Incoming>| async move {
-                        assert_eq!(request.method(), hyper::Method::HEAD);
-                        assert_eq!(request.uri().authority().unwrap(), "web.arcbox.local");
-                        assert_eq!(request.uri().scheme_str(), Some("http"));
-                        assert_eq!(request.headers()["user-agent"], "ArcBox/probe");
-                        Ok::<_, std::convert::Infallible>(hyper::Response::new(
-                            Empty::<Bytes>::new(),
-                        ))
-                    },
-                );
-                hyper::server::conn::http2::Builder::new(TokioExecutor::new())
-                    .serve_connection(TokioIo::new(stream), service)
-                    .await
+                reply_http2(stream, "http").await
             });
             if dual {
                 request(
@@ -385,6 +379,120 @@ mod tests {
             if let Err(error) = server.await {
                 assert!(error.is_cancelled(), "HTTP/2 fixture failed: {error}");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_probes_close_both_unresponsive_sockets() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = async {
+            for h2 in [true, false] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                stream.read_to_end(&mut request).await.unwrap();
+                assert!(request.starts_with(if h2 {
+                    b"PRI * HTTP/2.0\r\n"
+                } else {
+                    b"HEAD / HTTP/1.1\r\n"
+                }));
+            }
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(3), async {
+            let mut cache = Cache::default();
+            tokio::join!(
+                cache.http(Ipv4Addr::LOCALHOST, port, "web.arcbox.local"),
+                server
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn outer_cancellation_joins_the_probe_socket_before_returning() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        let stop = cancelled.clone();
+        let probe = tokio::spawn(async move {
+            super::super::http_tasks::run(&cancelled, async move |executor| {
+                let _ = http(Ipv4Addr::LOCALHOST, port, "web.arcbox.local", executor).await;
+                anyhow::bail!("protocol discovery completed before cancellation")
+            })
+            .await
+        });
+        let (mut peer, _) = listener.accept().await.unwrap();
+        let mut preface = [0; 24];
+        peer.read_exact(&mut preface).await.unwrap();
+        assert_eq!(&preface, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+        stop.cancel();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            probe.await.unwrap().unwrap();
+            peer.read_to_end(&mut Vec::new()).await.unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn replacing_a_listener_invalidates_its_cached_protocol() {
+        let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let netns = std::path::Path::new("/proc/self/ns/net");
+        let original = super::super::listeners::read(std::process::id(), netns)
+            .await
+            .unwrap();
+        let server = tokio::spawn(async move {
+            reject_http2(&listener).await;
+            reply(
+                listener.accept().await.unwrap().0,
+                "web.arcbox.local",
+                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+            )
+            .await;
+        });
+        let mut cache = Cache::default();
+        cache.observe(&original);
+        assert_eq!(
+            cache
+                .http(Ipv4Addr::LOCALHOST, port, "web.arcbox.local")
+                .await,
+            Some(HttpProtocol::Http1)
+        );
+        server.await.unwrap();
+        let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))
+            .await
+            .unwrap();
+        let replacement = super::super::listeners::read(std::process::id(), netns)
+            .await
+            .unwrap();
+        assert!(original.ports().contains(&port));
+        assert!(replacement.ports().contains(&port));
+        assert_ne!(original, replacement);
+        cache.observe(&original);
+        assert_eq!(
+            cache
+                .http(Ipv4Addr::LOCALHOST, port, "web.arcbox.local")
+                .await,
+            Some(HttpProtocol::Http1)
+        );
+        cache.observe(&replacement);
+        let server =
+            tokio::spawn(
+                async move { reply_http2(listener.accept().await.unwrap().0, "http").await },
+            );
+        assert_eq!(
+            cache
+                .http(Ipv4Addr::LOCALHOST, port, "web.arcbox.local")
+                .await,
+            Some(HttpProtocol::Http2)
+        );
+        server.abort();
+        if let Err(error) = server.await {
+            assert!(error.is_cancelled(), "HTTP/2 fixture failed: {error}");
         }
     }
 
