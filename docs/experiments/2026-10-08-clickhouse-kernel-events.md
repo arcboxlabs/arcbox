@@ -157,3 +157,34 @@ The median observed signal-10 generation interval is 1.410079 seconds. This agre
 ## Host scheduling preflight
 
 A ten-second macOS System Trace attached to the owned VZ helper succeeds and exposes named threads `com.apple.virtualization.thread.cpu-0` through `cpu-17`. Context-switch records contain host thread IDs, physical cores, states, and nanosecond timestamps. This provides an independent route to measure host execution. The initial template reports a five-second window, but the actual context-switch coverage is only about 334.6 ms at the recording tail. Long inferred initial thread-state intervals contain sentinel core and CPU-time fields and cannot establish earlier on-core execution. Validate retained coverage and clock alignment before using a host trace to interpret a guest stall.
+
+A second preflight explicitly requests a 30-second window. Its recorded duration is 32.120922 seconds, but context-switch events cover only 29.988445791–32.120742458, or 2.132296667 seconds. CPU samples have the same late start. Extending the requested window therefore does not establish usable coverage. The thread-state and cpu-state tables share a modeler and input stream; agreement is internal consistency, not independent confirmation. Later idle `ps` readings are not contemporaneous counter evidence and cannot establish a discrepancy during either recording. Neither preflight is used to attribute the guest failure. No host recording runs during the next application case.
+
+## Bounded stacks identify the process signal lock
+
+The same diagnostic kernel already enables STACKTRACE, FRAME_POINTER, and KALLSYMS. The next helper retains the primary 18-event instance and adds a separate `INSTANCE-stacks` instance. The additional instance uses nop, mono, all 18 CPUs, and a requested 1024 KiB per CPU, which rounds to 1027 KiB. It records exact-SPIN contention begins and installs `stacktrace:128 if flags == 1` after recording starts. Freezing stops both instances and explicitly removes the conditional trigger. Recording-off and event-off alone do not unregister that trigger. The first freeze preserves its trigger readback; repeated freeze calls do not overwrite that evidence. Both buffers export before either instance is removed.
+
+The kernel decrements the trigger count without atomic synchronization. The requested count is not a strict global limit; count consumption also does not guarantee successful stack storage. Stack collection runs synchronously in the contender's path and can perturb the measured wait. IRQ stacks may contain the interrupted task's frames. A stack record has no lock address, so the analyzer associates only adjacent same-CPU, same-TID, same-context SPIN begins and leaves ambiguous sequences unresolved.
+
+`startup-stacks-on-01` fails only the preparation readback check: the kernel prints `stacktrace:count=128`, whereas the prototype expected `stacktrace:128`. No application or host-pressure workload starts. Export and cleanup succeed. The next helper corrects that exact display format and preserves the failed attempt. The successful capture helper SHA256 is `885af992df01f316aae6cf717854128e626d80629eb7e573640d0f2c59147d96`.
+
+`startup-stacks-on-02`, prefix `stall-warm-startup-contention-2f7f1a34`, fails ClickHouse's 25-second readiness deadline. The final log places readiness 54.778684 seconds after its startup message on the guest realtime clock. This is a partial startup failure: no SQL observation, effective-settings query, before snapshot, or WINDOW_BEGIN exists. Early inspect records guest leader 13098; frozen identity-after contains 712 tasks in that thread group. The after-only snapshot does not establish all earlier identities by itself. All 36 host workers terminate, all three containers stop, and cleanup reports no errors.
+
+Independent capture-integrity checks pass. The primary ring retains 121,001 records. The stack ring retains 7,370 records: 7,241 exact-SPIN begins and 129 stacks. Frame continuation lines do not count as ring records. Every CPU has zero overrun, commit-overrun, dropped-event, and read-event counters, and frozen counters remain stable during export. The armed trigger reads 128 and the frozen trigger reads zero. All 129 stacks have an adjacent begin without a context ambiguity. Stack sampling spans 7485.693604–7492.208201 and exhausts its budget during early startup.
+
+Printed hash `00000000e230f497` accounts for 7,164 stack-instance begins and 88 captured stacks. Seventy stacks have ordinary task context and a TID present in the ClickHouse after snapshot. The group includes `do_sigaction`, `__set_current_blocked`/`sigprocmask`, and POSIX timer paths. Ten stacks have hardirq context, including `posix_timer_fn`/`posixtimer_send_sigqueue`/`__lock_task_sighand`. Eight early runc stacks and one idle IRQ lack an after TID. Those records must not be relabeled as ClickHouse user-thread calls, and equal hashes across object lifetimes do not exclude address reuse or collision.
+
+A concrete ordinary-task chain identifies the lock without relying only on its hash:
+
+| Evidence | Recorded value |
+|---|---|
+| TID 13843, CPU 1 stack | `queued_spin_lock_slowpath → do_sigaction → __arm64_sys_rt_sigaction` |
+| Primary begin → acquisition | 7492.207339 → 7492.253257; 45.918 ms |
+| Following scheduler charge | 45.996750 ms |
+| Runnable switch-out → next switch-in | 7492.253309 → 7512.239204; 19.985895 s |
+
+The stack-instance begin is at 7492.207343 and its stack at 7492.207344, inside the unique matching primary interval. Raw locations are `stacks/export/cpu1.trace:122–133`, `export/cpu1.trace:2977–2981`, and `export/cpu9.trace:2779`. The event comm is ThreadPool; the after snapshot names the same TID SystemLogFlush, with Tgid 13098 and NSpid `13843 725`.
+
+Version-exact [Linux `do_sigaction`](https://github.com/gregkh/linux/blob/v6.18.38/kernel/signal.c#L4314) takes `current->sighand->siglock` at this call site. This establishes a ClickHouse contender in the guest kernel's process-shared signal lock. [ClickHouse QueryProfiler](https://github.com/ClickHouse/ClickHouse/blob/6b09ccf262fd16345434572fb4d45dfd608f86c2/src/Common/QueryProfiler.cpp#L245) installs a signal action before creating and setting its timer, consistent with the captured startup paths. The kernel stack alone does not identify the user-space caller or signal number. A timer-create stack alone also cannot distinguish its timer lock from the sighand lock.
+
+The result directly connects an identified signal-lock wait, a scheduler charge, and a long runnable interval in a real application startup. It does not identify the lock holder, measure physical execution, establish EEVDF debt, or prove the original glibc notifier chain. The earlier capture's unresolved hash is not retroactively assigned an identity. Production behavior remains unchanged.

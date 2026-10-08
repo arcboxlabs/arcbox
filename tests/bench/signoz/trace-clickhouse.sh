@@ -11,6 +11,8 @@ for tool in awk cat date getconf mkdir mount readlink rmdir uname; do
     command -v "$tool" >/dev/null || fail "Required tool is missing: $tool. Install the tool before capture."
 done
 trace=/trace/instances/$instance
+stack_trace=/trace/instances/$instance-stacks
+stack_event=$stack_trace/events/lock/contention_begin
 events=(sched/sched_switch sched/sched_waking sched/sched_wakeup sched/sched_wakeup_new
     sched/sched_migrate_task sched/sched_process_fork sched/sched_process_exec sched/sched_process_exit
     signal/signal_generate signal/signal_deliver syscalls/sys_enter_futex syscalls/sys_exit_futex
@@ -42,6 +44,126 @@ configuration() {
     done
 }
 
+
+stack_configuration() {
+    local destination=$1 file
+    mkdir "$destination"
+    for file in tracing_on current_tracer trace_clock tracing_cpumask buffer_size_kb buffer_total_size_kb buffer_subbuf_size_kb \
+        trace_options set_event_pid set_event_notrace_pid; do
+        cat "$stack_trace/$file" > "$destination/$file"
+    done
+    cat "$stack_trace/events/enable" > "$destination/events-enable"
+    mkdir "$destination/lock-contention_begin"
+    for file in enable filter trigger format; do
+        cat "$stack_event/$file" > "$destination/lock-contention_begin/$file"
+    done
+}
+
+stack_remove_trigger() {
+    local current
+    current=$(cat "$stack_event/trigger") || return 1
+    if [[ $current == *stacktrace:* ]]; then printf '!stacktrace\n' > "$stack_event/trigger" || return 1; fi
+    if ! awk '!/^#/ && NF {bad=1} END {exit bad}' "$stack_event/trigger"; then
+        printf 'A stack trigger remains installed.\n' >&2
+        return 1
+    fi
+}
+
+stack_prepare() {
+    local option cpu actual_kb total_kb=0 requested_kb=1024 blocks expected_kb
+    mkdir /capture/stacks
+    printf '%s-stacks\n' "$instance" > /capture/stacks/instance
+    mkdir "$stack_trace"
+    printf '0\n' > "$stack_trace/tracing_on"
+    printf 'nop\n' > "$stack_trace/current_tracer"
+    printf 'mono\n' > "$stack_trace/trace_clock"
+    printf '3ffff\n' > "$stack_trace/tracing_cpumask"
+    printf '%s\n' "$requested_kb" > "$stack_trace/buffer_size_kb"
+    for option in overwrite markers context-info; do printf '1\n' > "$stack_trace/options/$option"; done
+    for option in stacktrace userstacktrace event-fork verbose raw hex bin latency-format; do
+        if [[ -e $stack_trace/options/$option ]]; then printf '0\n' > "$stack_trace/options/$option"; fi
+    done
+    printf '0\n' > "$stack_trace/events/enable"
+    printf '\n' > "$stack_trace/set_event_pid"
+    printf '\n' > "$stack_trace/set_event_notrace_pid"
+    [[ -d $stack_event ]] || fail 'The stack instance requires lock/contention_begin.'
+    awk '!/^#/ && NF {bad=1} END {exit bad}' "$stack_event/trigger" || fail 'The stack event has a trigger.'
+    printf 'flags == 1\n' > "$stack_event/filter"
+    [[ $(<"$stack_event/filter") == 'flags == 1' ]] || fail 'The stack event filter was not applied.'
+    [[ $(<"$stack_trace/current_tracer") == nop && $(<"$stack_trace/trace_clock") == *'[mono]'* ]] || fail 'The stack tracer or clock was not selected.'
+    [[ $(<"$stack_trace/tracing_cpumask") =~ ^0*3ffff$ ]] || fail 'The stack CPU mask was not applied.'
+    blocks=$(((requested_kb * 1024 + data_bytes - 1) / data_bytes))
+    if ((blocks < 2)); then blocks=2; fi
+    expected_kb=$((blocks * data_bytes / 1024))
+    printf 'requested_kb\t%s\npayload_bytes\t%s\nblocks\t%s\nexpected_per_cpu_kb\t%s\n' \
+        "$requested_kb" "$data_bytes" "$blocks" "$expected_kb" > /capture/stacks/buffer-sizing.tsv
+    for cpu in {0..17}; do
+        actual_kb=$(<"$stack_trace/per_cpu/cpu$cpu/buffer_size_kb")
+        [[ $actual_kb == "$expected_kb" ]] || fail "Stack CPU $cpu buffer is $actual_kb KiB; expected $expected_kb."
+        total_kb=$((total_kb + actual_kb))
+        printf 'cpu%s_kb\t%s\n' "$cpu" "$actual_kb" >> /capture/stacks/buffer-sizing.tsv
+    done
+    [[ $(<"$stack_trace/buffer_size_kb") == "$expected_kb" && $(<"$stack_trace/buffer_total_size_kb") == "$total_kb" ]] || fail 'The stack buffer sizes disagree.'
+    : > "$stack_trace/trace"
+    stack_configuration /capture/stacks/initial
+    for cpu in {0..17}; do cat "$stack_trace/per_cpu/cpu$cpu/stats" > "/capture/stacks/initial/cpu$cpu.stats"; done
+}
+
+stack_arm() {
+    if [[ $1 == on ]]; then
+        printf '1\n' > "$stack_trace/tracing_on"
+        [[ $(<"$stack_trace/tracing_on") == 1 ]] || fail 'The stack instance did not start.'
+        printf '1\n' > "$stack_event/enable"
+        printf '%s\t%s\n' "$(date -u +%s.%N)" "$(</proc/uptime)" > /capture/stacks/arm-before.tsv
+        # Conditional triggers can spend their count while tracing is off.
+        printf 'stacktrace:128 if flags == 1\n' > "$stack_event/trigger"
+        printf '%s\t%s\n' "$(date -u +%s.%N)" "$(</proc/uptime)" > /capture/stacks/arm-after.tsv
+    fi
+    cat "$stack_event/trigger" > /capture/stacks/armed-trigger
+    if [[ $1 == on ]]; then
+        awk '$1 ~ /^stacktrace:count=[0-9]+$/ && $2=="if" && $3=="flags" && $4=="==" && $5=="1" {found++} END {exit found!=1}' \
+            /capture/stacks/armed-trigger || fail 'The counted SPIN stack trigger was not installed.'
+    fi
+}
+
+stack_freeze() {
+    if [[ -f /capture/stacks/freeze-complete ]]; then
+        [[ $(<"$stack_trace/tracing_on") == 0 ]] || fail 'A frozen stack instance is recording again.'
+        awk '!/^#/ && NF {bad=1} END {exit bad}' "$stack_event/trigger" || fail 'A frozen stack trigger is installed again.'
+        return
+    fi
+    printf '0\n' > "$stack_trace/tracing_on"
+    printf '0\n' > "$stack_trace/events/enable"
+    if [[ ! -f /capture/stacks/frozen-trigger-before-remove ]]; then
+        cat "$stack_event/trigger" > /capture/stacks/frozen-trigger-before-remove
+    fi
+    # Disabling recording or the event does not unregister a conditional trigger.
+    stack_remove_trigger
+    cat "$stack_event/trigger" > /capture/stacks/frozen-trigger-after-remove
+    [[ $(<"$stack_trace/tracing_on") == 0 ]] || fail 'The stack instance did not stop.'
+    if [[ ! -d /capture/stacks/frozen ]]; then stack_configuration /capture/stacks/frozen; fi
+    date -u +%s.%N > /capture/stacks/freeze-complete
+}
+
+failure_cleanup() {
+    local code=$? active
+    trap - EXIT
+    if ((code)); then
+        printf '%s\t%d\n' "$action" "$code" >> /capture/failures.tsv
+        for active in "$trace" "$stack_trace"; do
+            if [[ -e $active/tracing_on ]]; then
+                printf '0\n' > "$active/tracing_on" || printf 'Failed to stop %s\n' "$active" >&2
+                printf '0\n' > "$active/events/enable" || printf 'Failed to disable events for %s\n' "$active" >&2
+            fi
+        done
+        if [[ -e $stack_event/trigger ]]; then
+            cat "$stack_event/trigger" >> /capture/stacks/failure-trigger-before-remove || printf 'Failed to save the stack trigger.\n' >&2
+            stack_remove_trigger || printf 'Failed to remove the stack trigger.\n' >&2
+        fi
+    fi
+    exit "$code"
+}
+
 if [[ $action == prepare ]]; then
     [[ $# == 3 && ($3 == on || $3 == off) ]] || fail 'prepare requires INSTANCE on|off.'
     [[ $(</sys/devices/system/cpu/online) == 0-17 ]] || fail 'The capture requires online CPUs 0-17.'
@@ -64,14 +186,8 @@ else
     if [[ $action == freeze && $# == 3 && -f /capture/export-complete ]]; then exit 0; fi
     [[ -d $trace ]] || fail 'The trace instance is missing.'
 fi
-# A failed operation must not leave this owned instance recording indefinitely.
-trap 'code=$?; if ((code)); then
-    printf "%s\t%d\n" "$action" "$code" >> /capture/failures.tsv
-    if [[ -e $trace/tracing_on ]]; then
-        printf "0\n" > "$trace/tracing_on"
-        printf "0\n" > "$trace/events/enable"
-    fi
-fi; exit "$code"' EXIT
+# A failed operation must preserve both buffers and stop both instances.
+trap failure_cleanup EXIT
 
 case $action in
     prepare)
@@ -119,6 +235,7 @@ case $action in
         mask=$(<"$trace/tracing_cpumask")
         [[ $mask =~ ^0*3ffff$ ]] || fail "Unexpected trace CPU mask: $mask."
         [[ -z $(<"$trace/set_event_pid") && -z $(<"$trace/set_event_notrace_pid") ]] || fail 'An event PID filter remains.'
+        stack_prepare
         cat /proc/meminfo > /capture/meminfo
         awk '/^MemAvailable:/ {ok=($2>2097152)} END {exit !ok}' /capture/meminfo || fail 'More than 2 GiB must remain after trace allocation.'
         cat /proc/config.gz > /capture/kernel.config.gz
@@ -139,6 +256,7 @@ case $action in
         for cpu in {0..17}; do cat "$trace/per_cpu/cpu$cpu/stats" > "/capture/initial/cpu$cpu.stats"; done
         printf '1\n' > "$trace/tracing_on"
         [[ $(<"$trace/tracing_on") == 1 ]] || fail 'The trace instance did not start.'
+        stack_arm "$3"
         mark "ARM $instance $3"
         ;;
     identity)
@@ -165,18 +283,21 @@ case $action in
         [[ $# == 3 && -n $3 && $3 != *$'\n'* && $3 != *$'\r'* ]] || fail 'freeze requires a single-line reason.'
         if [[ -f /capture/freeze-reason ]]; then
             [[ $(<"$trace/tracing_on") == 0 ]] || fail 'A frozen instance is recording again.'
+            stack_freeze
             exit 0
         fi
         mark "END $3"
         printf '0\n' > "$trace/tracing_on"
         printf '0\n' > "$trace/events/enable"
         [[ $(<"$trace/tracing_on") == 0 ]] || fail 'The trace instance did not stop.'
+        stack_freeze
         printf '%s\n' "$3" > /capture/freeze-reason
         mark "FROZEN $3"
         ;;
     export)
         [[ $# == 2 ]] || fail 'export requires INSTANCE.'
         [[ $(<"$trace/tracing_on") == 0 ]] || fail 'Freeze the trace instance before export.'
+        if [[ -d $stack_trace ]]; then stack_freeze; fi
         configuration /capture/export
         for cpu in {0..17}; do cat "$trace/per_cpu/cpu$cpu/stats" > "/capture/export/cpu$cpu.stats-before"; done
         for cpu in {0..17}; do cat "$trace/per_cpu/cpu$cpu/trace" > "/capture/export/cpu$cpu.trace"; done
@@ -186,7 +307,15 @@ case $action in
         cat /trace/saved_tgids > /capture/export/saved_tgids
         cat /sys/devices/system/cpu/online > /capture/export/online
         [[ $(<"$trace/tracing_on") == 0 ]] || fail 'The trace instance restarted during export.'
+        if [[ -d $stack_trace ]]; then
+            stack_configuration /capture/stacks/export
+            for cpu in {0..17}; do cat "$stack_trace/per_cpu/cpu$cpu/stats" > "/capture/stacks/export/cpu$cpu.stats-before"; done
+            for cpu in {0..17}; do cat "$stack_trace/per_cpu/cpu$cpu/trace" > "/capture/stacks/export/cpu$cpu.trace"; done
+            for cpu in {0..17}; do cat "$stack_trace/per_cpu/cpu$cpu/stats" > "/capture/stacks/export/cpu$cpu.stats-after"; done
+            [[ $(<"$stack_trace/tracing_on") == 0 ]] || fail 'The stack instance restarted during export.'
+        fi
         mark EXPORTED
+        if [[ -d $stack_trace ]]; then rmdir "$stack_trace"; fi
         rmdir "$trace"
         date -u +%s.%N > /capture/export-complete
         ;;
