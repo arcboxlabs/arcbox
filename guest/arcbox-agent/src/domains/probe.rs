@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use http_body_util::Empty;
 use hyper::Request;
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -63,7 +63,11 @@ pub(super) async fn responds(ip: Ipv4Addr, port: u16, name: &str, tls: bool) -> 
             let stream = TlsConnector::from(configuration())
                 .connect(ServerName::try_from(name.to_owned())?, stream)
                 .await?;
-            request(stream, name).await
+            if stream.get_ref().1.alpn_protocol() == Some(b"h2") {
+                request_http2(stream, name).await
+            } else {
+                request(stream, name).await
+            }
         } else {
             request(stream, name).await
         }
@@ -97,6 +101,23 @@ async fn request(stream: impl AsyncRead + AsyncWrite + Unpin, name: &str) -> Res
     }
 }
 
+async fn request_http2(
+    stream: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    name: &str,
+) -> Result<()> {
+    let (mut sender, connection) =
+        hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(stream)).await?;
+    let request = Request::head(format!("https://{name}/"))
+        .header("User-Agent", "ArcBox/probe")
+        .body(Empty::<Bytes>::new())?;
+    let response = sender.send_request(request);
+    tokio::pin!(response);
+    tokio::select! {
+        response = &mut response => response.map(|_| ()).context("HTTP/2 probe response"),
+        _ = connection => response.await.map(|_| ()).context("HTTP/2 probe response"),
+    }
+}
+
 fn configuration() -> Arc<rustls::ClientConfig> {
     static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
     Arc::clone(CONFIG.get_or_init(|| {
@@ -108,7 +129,7 @@ fn configuration() -> Arc<rustls::ClientConfig> {
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(verifier))
             .with_no_client_auth();
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         Arc::new(config)
     }))
 }
@@ -190,26 +211,27 @@ mod tests {
         }
     }
 
+    fn tls_configuration() -> rustls::ServerConfig {
+        use rustls::pki_types::PrivatePkcs8KeyDer;
+        rustls::ServerConfig::builder_with_provider(rustls::crypto::ring::default_provider().into())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from(
+                    include_bytes!("testdata/probe-cert.der").to_vec(),
+                )],
+                PrivatePkcs8KeyDer::from(include_bytes!("testdata/probe-key.der").to_vec()).into(),
+            )
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn discovers_self_signed_https_with_the_domain_sni() {
-        use rustls::pki_types::PrivatePkcs8KeyDer;
-        let config = rustls::ServerConfig::builder_with_provider(
-            rustls::crypto::ring::default_provider().into(),
-        )
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![CertificateDer::from(
-                include_bytes!("testdata/probe-cert.der").to_vec(),
-            )],
-            PrivatePkcs8KeyDer::from(include_bytes!("testdata/probe-key.der").to_vec()).into(),
-        )
-        .unwrap();
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move {
-            let tls = tokio_rustls::TlsAcceptor::from(Arc::new(config))
+            let tls = tokio_rustls::TlsAcceptor::from(Arc::new(tls_configuration()))
                 .accept(listener.accept().await.unwrap().0)
                 .await
                 .unwrap();
@@ -218,6 +240,44 @@ mod tests {
         });
         assert!(responds(Ipv4Addr::LOCALHOST, port, "web.arcbox.local", true).await);
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovers_http2_only_https_with_the_domain_authority() {
+        let mut config = tls_configuration();
+        config.alpn_protocols = vec![b"h2".to_vec()];
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let tls = tokio_rustls::TlsAcceptor::from(Arc::new(config))
+                .accept(listener.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            assert_eq!(tls.get_ref().1.server_name(), Some("web.arcbox.local"));
+            assert_eq!(tls.get_ref().1.alpn_protocol(), Some(&b"h2"[..]));
+            let service =
+                hyper::service::service_fn(|request: Request<hyper::body::Incoming>| async move {
+                    assert_eq!(request.method(), hyper::Method::HEAD);
+                    assert_eq!(request.uri().authority().unwrap(), "web.arcbox.local");
+                    assert_eq!(request.uri().scheme_str(), Some("https"));
+                    assert_eq!(request.headers()["user-agent"], "ArcBox/probe");
+                    Ok::<_, std::convert::Infallible>(
+                        hyper::Response::builder()
+                            .status(401)
+                            .body(Empty::<Bytes>::new())
+                            .unwrap(),
+                    )
+                });
+            hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(tls), service)
+                .await
+        });
+        let discovered = responds(Ipv4Addr::LOCALHOST, port, "web.arcbox.local", true).await;
+        server.abort();
+        if let Err(error) = server.await {
+            assert!(error.is_cancelled(), "HTTP/2 fixture failed: {error}");
+        }
+        assert!(discovered);
     }
 
     #[tokio::test]

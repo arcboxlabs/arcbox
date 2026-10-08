@@ -214,6 +214,7 @@ non-obvious invariants and failure signatures.
   Native HTTPS discovery checks 443 then 8443 and takes precedence over the
   TLS proxy. `dev.arcbox.https-port` selects a native port; `off` disables
   managed HTTPS routing. Native TLS preserves the application's certificate.
+  Native discovery follows ALPN for HTTP/2 or HTTP/1.1 and requires a response. An explicit native port bypasses discovery for mTLS services.
   Listener scans continue every five seconds after startup backoff. Socket inode
   changes and failed proxy upstream connections invalidate successful probes.
   Failed discovery probes retry; unchanged successful probes do not repeat.

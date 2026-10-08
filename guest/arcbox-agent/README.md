@@ -135,6 +135,7 @@ Native HTTPS on 443 or 8443 takes precedence over automatic TLS termination.
 Set `dev.arcbox.https-port` to another native TLS port, or `off` to disable
 managed HTTPS. Native HTTPS preserves the application's certificate. Otherwise,
 a selected HTTP service receives HTTPS through the guest proxy on port 61443.
+Native discovery negotiates HTTP/2 or HTTP/1.1 with ALPN and requires an HTTP response. Use an explicit native port for a service that requires a client certificate.
 The proxy obtains a certificate for the client's SNI through the host signing
 channel, then relays HTTP/1.1. The CA private key stays in the macOS Keychain;
 only the public root is shared in `/arcbox/tls/`. Port 61443 is reserved for

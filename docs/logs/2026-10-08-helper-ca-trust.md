@@ -73,3 +73,9 @@ CA preparation now runs independently of startup and retries after failure. The 
 Validation on 2026-10-08: 91 daemon tests, four API authorization tests, the engine's real-socket cancellation test, and 12 container CA-injection tests passed. The common CA tests passed with 14 tests and two native tests ignored. The guest's 38 domain tests passed on the host; musl Clippy and Linux test-binary compilation passed, but the Linux test binaries have not run in a guest. Targeted host Clippy and workspace formatting passed. Desktop's 37 focused tests and Swift application build passed earlier in this series.
 
 The container E2E now requires default DNS and CA trust without request overrides, curl exit 60 after injection opt-out, and TLS rejection of an unowned SNI name. Compilation does not establish those runtime results. The new paired application, browser authorization, cancellation, and retry still require live validation. The installed checks above cover the earlier startup flow only.
+
+## Native HTTP/2 discovery
+
+Native HTTPS discovery now advertises `h2` and `http/1.1`, then sends its `HEAD /` request using the negotiated protocol. HTTP/2 requests carry the service domain in `:authority`. The probe still requires an HTTP response and does not supply a client certificate. Services that require mTLS use an explicit `dev.arcbox.https-port`; their connections remain native TLS passthrough.
+
+The four probe tests passed on macOS, including real self-signed TLS sockets for HTTP/1.1 and an HTTP/2-only server. The HTTP/2 test verifies SNI, ALPN, `:authority`, the request method, and acceptance of an HTTP 401 response. Guest Clippy passed for all targets on `aarch64-unknown-linux-musl`. These checks do not validate the installed NAT route or mTLS behavior.
