@@ -9,35 +9,64 @@ use security_framework::item::{ItemClass, ItemSearchOptions, Limit, Reference, S
 use security_framework::os::macos::keychain::SecKeychain;
 use security_framework::trust_settings::Domain;
 
-use crate::{Error, KeychainAuthority, trust};
+use crate::{Error, KeychainAuthority, PublicAuthority, trust};
+
+/// Whether the current public root replaced the previous publication.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Publication {
+    /// The current public root is available to clients.
+    Published,
+    /// The previous root remains trusted and must be revoked in the login session.
+    AwaitingRevocation,
+}
+
+/// Removes an exposed root key before the data directory is shared with a guest.
+pub fn remove_shared_private_key(dir: &Path) -> Result<(), Error> {
+    let key = dir.join(TLS_CA_KEY);
+    match fs::remove_file(&key) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::io(&key, error)),
+    }
+}
 
 impl KeychainAuthority {
-    /// Retires any shared CA key before the VM boots and publishes this root.
-    /// A failed trust removal leaves the old public certificate for the next attempt.
-    pub fn publish(&self, dir: &Path) -> Result<(), Error> {
-        let key = dir.join(TLS_CA_KEY);
-        match fs::remove_file(&key) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(Error::io(&key, error)),
-        }
+    /// Publishes public bytes without requesting native authorization.
+    pub fn publish(&self, dir: &Path) -> Result<Publication, Error> {
+        PublicAuthority::from_pem(self.certificate_pem().as_bytes())?.publish(dir)
+    }
+}
+
+impl PublicAuthority {
+    /// Publishes this root after the previous root loses User and Admin trust.
+    /// Preserves a trusted previous root so an explicit action can revoke the exact certificate.
+    pub fn publish(&self, dir: &Path) -> Result<Publication, Error> {
+        self.publish_checked(dir, Self::has_trust)
+    }
+
+    fn publish_checked(
+        &self,
+        dir: &Path,
+        has_trust: impl FnOnce(&Self) -> Result<bool, Error>,
+    ) -> Result<Publication, Error> {
+        remove_shared_private_key(dir)?;
         let path = dir.join(TLS_CA_CERT);
-        let current = match fs::read(&path) {
-            Ok(bytes) => Some(bytes),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(Error::io(&path, error)),
-        };
-        let exported = self.certificate_pem();
-        if current.as_deref() == Some(exported.as_bytes()) {
-            return Ok(());
-        }
-        if let Some(old) = current {
-            if certificate(&old)?.to_der() != certificate(exported.as_bytes())?.to_der() {
-                remove_trust(&old)?;
+        match fs::read(&path) {
+            Ok(bytes) => {
+                let previous = Self::from_pem(&bytes)?;
+                if previous.der() == self.der() {
+                    return Ok(Publication::Published);
+                }
+                if has_trust(&previous)? {
+                    return Ok(Publication::AwaitingRevocation);
+                }
             }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Error::io(&path, error)),
         }
+        let exported = pem::encode(&pem::Pem::new("CERTIFICATE", self.der()));
         arcbox_atomic_file::write(&path, exported.as_bytes())?;
-        Ok(())
+        Ok(Publication::Published)
     }
 }
 
@@ -93,6 +122,68 @@ pub fn delete_certificate(pem: &[u8]) -> Result<(), Error> {
 mod tests {
     use super::*;
     use crate::CertificateRequest;
+
+    #[test]
+    fn publication_preserves_a_trusted_previous_root_until_explicit_revocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = || {
+            let key = rcgen::KeyPair::generate().unwrap();
+            crate::authority::parameters().self_signed(&key).unwrap()
+        };
+        let previous = root();
+        let current = PublicAuthority::try_from(root().der().to_vec()).unwrap();
+        let path = dir.path().join(TLS_CA_CERT);
+        fs::write(&path, previous.pem()).unwrap();
+        fs::write(dir.path().join(TLS_CA_KEY), b"retired private key").unwrap();
+        assert_eq!(
+            current.publish_checked(dir.path(), |_| Ok(true)).unwrap(),
+            Publication::AwaitingRevocation
+        );
+        assert_eq!(fs::read(&path).unwrap(), previous.pem().as_bytes());
+        assert!(!dir.path().join(TLS_CA_KEY).exists());
+
+        assert_eq!(
+            current.publish_checked(dir.path(), |_| Ok(false)).unwrap(),
+            Publication::Published
+        );
+        assert_eq!(
+            PublicAuthority::from_pem(&fs::read(&path).unwrap())
+                .unwrap()
+                .der(),
+            current.der()
+        );
+        current
+            .publish_checked(dir.path(), |_| {
+                panic!("same root needs no trust inspection")
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn failed_trust_inspection_preserves_the_previous_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let previous = crate::authority::parameters().self_signed(&key).unwrap();
+        let other_key = rcgen::KeyPair::generate().unwrap();
+        let current = PublicAuthority::try_from(
+            crate::authority::parameters()
+                .self_signed(&other_key)
+                .unwrap()
+                .der()
+                .to_vec(),
+        )
+        .unwrap();
+        let path = dir.path().join(TLS_CA_CERT);
+        fs::write(&path, previous.pem()).unwrap();
+        assert!(
+            current
+                .publish_checked(dir.path(), |_| Err(Error::InvalidAuthority(
+                    "inspection failed"
+                )))
+                .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), previous.pem().as_bytes());
+    }
 
     #[test]
     #[ignore = "creates and deletes an isolated CA in the user's macOS Keychain"]

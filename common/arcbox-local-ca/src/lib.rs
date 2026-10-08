@@ -26,8 +26,8 @@
 //!   Keychain. Leaf keys stay in guest memory.
 //! - **Migration.** A new Keychain CA replaces the old shared CA. Before
 //!   publication, the caller must revoke the old root's User and Admin trust.
-//!   Publication retires the shared key. The production daemon waits for the
-//!   new root's TLS-server-only Admin trust before booting the VM.
+//!   Publication retires the shared key without requesting authorization.
+//!   A trusted previous root remains published until explicit revocation.
 //! - **Persistence.** Removing `tls/ca.pem` does not rotate the Keychain
 //!   CA. The daemon republishes the same public certificate on startup.
 //! - **Validity.** Root metadata remains readable after expiry for status and
@@ -52,7 +52,9 @@ pub use arcbox_constants::dns::LOCAL_DOMAIN;
 #[cfg(target_os = "macos")]
 pub use self::keychain::KeychainAuthority;
 #[cfg(target_os = "macos")]
-pub use self::migration::{remove_trust, remove_user_trust_der};
+pub use self::migration::{
+    Publication, remove_shared_private_key, remove_trust, remove_user_trust_der,
+};
 pub use self::public::PublicAuthority;
 pub use self::request::{CertificateRequest, MAX_CERTIFICATE_SIZE};
 pub use self::validity::CertificateValidity;

@@ -113,6 +113,9 @@ distribution".
   host status and guest renewal. Keep expired roots parseable for exact trust
   revocation. Signing must reject inactive roots and cap leaf validity at the
   root's bounds. Root private keys must remain in the macOS Keychain.
+  Certificate publication must not mutate trust. Preserve a trusted previous
+  root until an explicit login-session action revokes that exact certificate.
+  Remove the exposed private key before sharing the profile with a guest.
 
 - `translate()` (arcbox-conntrack) and `DnsQuery::parse` (arcbox-dns) consume
   arbitrary guest bytes on the VM datapath. The virt/AGENTS.md "Guest-controlled
