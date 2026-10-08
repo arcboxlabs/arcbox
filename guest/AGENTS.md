@@ -220,8 +220,10 @@ non-obvious invariants and failure signatures.
   Listener scans continue every five seconds after startup backoff. Socket inode
   changes and failed proxy upstream connections invalidate successful probes.
   Failed discovery probes retry; unchanged successful probes do not repeat.
-  Network connect/disconnect events trigger a fresh container inspect. DNS and
-  discovery use the same first valid network IPv4 address. Disconnecting the
+  Network connect/disconnect events trigger a fresh container inspect. Use shared
+  `ContainerMetadata` for identity, aliases, and addresses. DNS, discovery, and
+  published-port mirrors select the first valid IPv4 address in network-name order.
+  Domain NAT retains every distinct container IPv4 address. Disconnecting the
   last addressed network removes that container's DNS ownership and routes.
   Confirm the Docker event subscription before listing running containers so snapshot-time changes remain buffered.
   A failed listing or rejected subscription must enter the existing reconnect path.

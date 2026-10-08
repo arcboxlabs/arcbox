@@ -5,6 +5,7 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
 use arcbox_constants::dns::Domain;
+use arcbox_dns::container::ContainerMetadata;
 
 use super::http_port::{self, HTTP_PORT, HTTPS_PORT, Pin};
 use super::https::PROXY_PORT;
@@ -30,18 +31,14 @@ pub struct ContainerFacts {
 }
 
 impl ContainerFacts {
-    /// Reads them from a container's inspect JSON: `None` when it is not
-    /// running or has no IPv4 address (host or no networking).
+    /// Reads facts from a container's inspect JSON.
+    /// Returns `None` when identity, a running process, a network namespace, or an IPv4 address is missing.
     #[must_use]
     pub fn from_inspect(inspect: &serde_json::Value, domain: &Domain) -> Option<Self> {
-        let id = inspect.get("Id")?.as_str()?.to_owned();
-        let name = inspect.get("Name")?.as_str()?.trim_start_matches('/');
-        let hostname = format!("{name}.{domain}");
-        let compose = inspect
-            .pointer("/Config/Labels")
-            .and_then(serde_json::Value::as_object)
-            .and_then(crate::dns::extract_compose_info);
-        let aliases = crate::dns::collect_aliases(name, compose.as_ref())
+        let metadata = ContainerMetadata::from_inspect(inspect)?;
+        let hostname = format!("{}.{domain}", metadata.name);
+        let aliases = metadata
+            .default_aliases()
             .into_iter()
             .map(|alias| alias.to_lowercase())
             .collect();
@@ -55,12 +52,11 @@ impl ContainerFacts {
             .as_str()
             .filter(|key| !key.is_empty())?
             .into();
-        let mut ips: Vec<Ipv4Addr> = ipv4_addresses(inspect).collect();
-        let primary_ip = *ips.first()?;
+        let primary_ip = metadata.primary_ipv4()?;
+        let mut ips = metadata.ipv4_addresses().to_vec();
         ips.sort_unstable();
-        ips.dedup();
-        let pin = read_pin(inspect, &id, http_port::LABEL);
-        let https_pin = read_pin(inspect, &id, HTTPS_LABEL);
+        let pin = read_pin(inspect, &metadata.id, http_port::LABEL);
+        let https_pin = read_pin(inspect, &metadata.id, HTTPS_LABEL);
         let exposed = inspect
             .pointer("/Config/ExposedPorts")
             .and_then(|ports| ports.as_object())
@@ -72,7 +68,7 @@ impl ContainerFacts {
             })
             .unwrap_or_default();
         Some(Self {
-            id,
+            id: metadata.id,
             hostname,
             aliases,
             pid,
@@ -122,20 +118,6 @@ impl ContainerFacts {
         }
         rules
     }
-}
-
-/// The address used by both guest DNS and protocol discovery.
-pub fn primary_ipv4(inspect: &serde_json::Value) -> Option<Ipv4Addr> {
-    ipv4_addresses(inspect).next()
-}
-
-fn ipv4_addresses(inspect: &serde_json::Value) -> impl Iterator<Item = Ipv4Addr> + '_ {
-    inspect
-        .pointer("/NetworkSettings/Networks")
-        .and_then(serde_json::Value::as_object)
-        .into_iter()
-        .flat_map(|networks| networks.values())
-        .filter_map(|network| network.get("IPAddress")?.as_str()?.parse().ok())
 }
 
 fn read_pin(inspect: &serde_json::Value, id: &str, label: &str) -> Option<Pin> {
@@ -199,14 +181,37 @@ mod tests {
     #[test]
     fn dns_and_discovery_use_the_same_address_despite_sorted_rule_ips() {
         let mut inspect = inspect();
-        inspect["NetworkSettings"]["Networks"] = serde_json::json!({
-            "a": { "IPAddress": "172.18.0.3" },
-            "z": { "IPAddress": "172.17.0.2" },
+        for networks in [
+            serde_json::json!({
+                "z": { "IPAddress": "172.17.0.2" },
+                "a": { "IPAddress": "172.18.0.3" },
+            }),
+            serde_json::json!({
+                "a": { "IPAddress": "172.18.0.3" },
+                "z": { "IPAddress": "172.17.0.2" },
+            }),
+        ] {
+            inspect["NetworkSettings"]["Networks"] = networks;
+            let facts = ContainerFacts::from_inspect(&inspect, &Domain::default()).unwrap();
+            let metadata = ContainerMetadata::from_inspect(&inspect).unwrap();
+            assert_eq!(metadata.primary_ipv4(), Some(facts.primary_ip));
+            assert_eq!(facts.primary_ip, "172.18.0.3".parse::<Ipv4Addr>().unwrap());
+            assert_ne!(facts.primary_ip, facts.ips[0]);
+            assert_eq!(facts.ips.len(), 2);
+        }
+    }
+
+    #[test]
+    fn aliases_keep_underscores_and_match_dns_case() {
+        let mut inspect = inspect();
+        inspect["Name"] = "/MyProject_Web_1".into();
+        inspect["Config"]["Labels"] = serde_json::json!({
+            "com.docker.compose.project": "MyProject",
+            "com.docker.compose.service": "Web_API",
         });
         let facts = ContainerFacts::from_inspect(&inspect, &Domain::default()).unwrap();
-        assert_eq!(primary_ipv4(&inspect), Some(facts.primary_ip));
-        assert_eq!(facts.primary_ip, "172.18.0.3".parse::<Ipv4Addr>().unwrap());
-        assert_ne!(facts.primary_ip, facts.ips[0]);
+        assert_eq!(facts.aliases, ["web_api.myproject", "myproject_web_1"]);
+        assert_eq!(facts.hostname, "MyProject_Web_1.arcbox.local");
     }
 
     #[test]

@@ -59,3 +59,9 @@ Five host-executed socket and event tests passed. Strict all-target Clippy passe
 All host Docker registration paths now use `ContainerMetadata` through the existing inspect adapter. Start, restart, rename, network changes, recovery, and reconciliation share the same alias and primary-address rules. The adapter no longer reads the deprecated top-level address, including when that field disagrees with the current network addresses.
 
 All 133 Docker library tests and seven API mock tests passed. Strict all-target Clippy, workspace formatting, and the layer check passed; the layer check covers 65 members and 190 edges with two existing exceptions. Regression coverage rejects a top-level-only address and verifies stable selection with multiple networks and invalid or IPv6-only entries. The dependency change adds only the existing workspace DNS crate. Full-ID replacement and production claim selection remain unfinished.
+
+## Guest metadata adoption
+
+Guest DNS, web-service facts, and published-port mirrors now consume the same metadata parser as the host. DNS and discovery select one primary address; domain NAT retains all distinct addresses. Each pinned published binding produces one mirror target at the shared primary address. Duplicate guest address parsers are removed. Existing lowercase alias keys and underscore spelling remain unchanged pending canonical claim registration.
+
+All 18 targeted host-executed tests passed: eight facts tests, six event tests, and four publish-mirror tests. Strict Linux musl all-target Clippy and workspace formatting passed. These tests cover shared primary-address selection, all-address retention, alias spelling, and one target per published binding. The new guest behavior has not run inside a VM.

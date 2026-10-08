@@ -26,6 +26,8 @@ The daemon's `--dns-domain` option takes precedence over `ARCBOX_DNS_DOMAIN`; th
 
 The guest reports installed routes through `ListContainerWebServices`. The snapshot includes only names that resolve to the selected container address. The host exposes those routes through `SystemService.ListWebServices` and `WatchWebServices`.
 
+For a container attached to multiple networks, host DNS, guest DNS, service discovery, and published-port mirrors select the first valid IPv4 address in network-name order. They ignore the deprecated top-level `NetworkSettings.IPAddress`. Domain NAT retains all distinct container IPv4 addresses.
+
 Clients use the supplied URLs. Upstream port fields describe the application listener, not the public URL port. A managed HTTPS endpoint requires ArcBox CA trust. A passthrough endpoint uses the application's own TLS and must not request ArcBox CA authorization. A directory error ends the stream; clients must clear stale entries.
 
 The current guest routing gate requires `arcbox.local` or a subdomain such as `one.dev.arcbox.local` as the configured suffix. Other suffixes support HTTP and native TLS. New roots permit concrete names under `.local`; existing roots retain their actual scope until explicit rotation. Connecting independent custom aliases to routing and system resolution remains unfinished.

@@ -11,12 +11,13 @@ use std::future::Future;
 use std::path::Path;
 
 use anyhow::Context;
+use arcbox_dns::container::ContainerMetadata;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::dns_server::GuestDnsServer;
-use crate::domains::{ContainerFacts, DomainRoutes, primary_ipv4};
+use crate::domains::{ContainerFacts, DomainRoutes};
 use crate::publish_mirror::{PublishMirror, pinned_publishes};
 
 const DOCKER_SOCK: &str = "/var/run/docker.sock";
@@ -243,24 +244,14 @@ async fn register_container_by_id(sync: &mut ContainerSync<'_>, id: &str) -> any
 }
 
 async fn sync_dns(dns: &GuestDnsServer, info: &serde_json::Value) {
-    let name = info["Name"]
-        .as_str()
-        .unwrap_or_default()
-        .trim_start_matches('/');
-    if name.is_empty() {
+    let Some(metadata) = ContainerMetadata::from_inspect(info) else {
         return;
-    }
+    };
+    let name = metadata.name.as_str();
 
-    // Extract compose metadata from labels for hierarchical DNS names.
-    let compose = info["Config"]["Labels"]
-        .as_object()
-        .and_then(crate::dns::extract_compose_info);
-
-    // Register the container name and any compose aliases.
-    // The container name is the owner — shared aliases (like compose
-    // service names) are ref-counted per owner in the DNS server.
-    let aliases = crate::dns::collect_aliases(name, compose.as_ref());
-    let Some(ip) = primary_ipv4(info) else {
+    // The DNS server tracks shared aliases by container name.
+    let aliases = metadata.default_aliases();
+    let Some(ip) = metadata.primary_ipv4() else {
         for alias in &aliases {
             dns.deregister_container(alias, name).await;
         }

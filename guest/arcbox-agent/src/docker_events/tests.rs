@@ -23,6 +23,7 @@ fn network_changes_reinspect_the_container_instead_of_the_network() {
 async fn disconnecting_the_last_network_removes_only_that_containers_dns_ownership() {
     let dns = GuestDnsServer::new(Default::default(), CancellationToken::new());
     let mut inspect = serde_json::json!({
+        "Id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "Name": "/web-1",
         "Config": { "Labels": { "com.docker.compose.project": "demo", "com.docker.compose.service": "web" } },
         "NetworkSettings": { "Networks": { "app": { "IPAddress": "172.18.0.2" } } }
@@ -39,6 +40,38 @@ async fn disconnecting_the_last_network_removes_only_that_containers_dns_ownersh
         entries.get("web.demo"),
         Some(&"172.18.0.3".parse().unwrap())
     );
+}
+
+#[tokio::test]
+async fn dns_uses_network_name_order_and_preserves_alias_underscores() {
+    let dns = GuestDnsServer::new(Default::default(), CancellationToken::new());
+    let mut inspect = serde_json::json!({
+        "Id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "Name": "/MyProject_Web_1",
+        "Config": { "Labels": {
+            "com.docker.compose.project": "MyProject",
+            "com.docker.compose.service": "Web_API",
+        } },
+        "NetworkSettings": {}
+    });
+    for networks in [
+        serde_json::json!({
+            "z": { "IPAddress": "172.17.0.2" },
+            "a": { "IPAddress": "172.18.0.3" },
+        }),
+        serde_json::json!({
+            "a": { "IPAddress": "172.18.0.3" },
+            "z": { "IPAddress": "172.17.0.2" },
+        }),
+    ] {
+        inspect["NetworkSettings"]["Networks"] = networks;
+        sync_dns(&dns, &inspect).await;
+        let entries = dns.containers();
+        let entries = entries.read().await;
+        let primary = "172.18.0.3".parse().unwrap();
+        assert_eq!(entries.get("myproject_web_1"), Some(&primary));
+        assert_eq!(entries.get("web_api.myproject"), Some(&primary));
+    }
 }
 
 async fn request(listener: &UnixListener) -> (BufReader<UnixStream>, String) {
