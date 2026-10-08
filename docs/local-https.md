@@ -30,6 +30,8 @@ Guest reconnects validate the complete container list and every inspect response
 
 Host rename and network refresh replace Registry ownership without first deregistering the container. An unchanged refresh preserves the signing revision, and a rename removes the old display alias. Start and restart share Runtime's lock for the full container ID. Two focused Runtime tests and ten Docker handler tests pass. Other host lifecycle operations and the periodic reconciler still need the shared commit ordering.
 
+Host port refresh preserves equivalent healthy listeners and removes listeners when bindings become empty. Equality includes the effective host address, host port, guest port, protocol, and machine. Canceled or exited listeners complete cleanup before recovery. Host socket tests cover refresh, conflicting destinations, TCP/UDP sharing, and cancellation; installed forwarding validation remains pending.
+
 For a container attached to multiple networks, host DNS, guest DNS, service discovery, and published-port mirrors select the first valid IPv4 address in network-name order. They ignore the deprecated top-level `NetworkSettings.IPAddress`. Domain NAT retains all distinct container IPv4 addresses.
 
 Clients use the supplied URLs. Upstream port fields describe the application listener, not the public URL port. A managed HTTPS endpoint requires ArcBox CA trust. A passthrough endpoint uses the application's own TLS and must not request ArcBox CA authorization. A directory error ends the stream; clients must clear stale entries.

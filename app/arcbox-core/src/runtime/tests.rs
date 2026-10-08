@@ -374,6 +374,7 @@ async fn sandbox_cleanup_discovers_authority_without_secondary_indexes() {
             vec![(
                 std::net::Ipv4Addr::LOCALHOST,
                 45_678,
+                80,
                 super::InboundProtocol::Tcp,
             )],
         ),
@@ -448,21 +449,36 @@ async fn sandbox_port_mappings_filter_sort_and_fence_cleanup() {
             Runtime::sandbox_port_key("target", 8080, "tcp"),
             (
                 "default".into(),
-                vec![(Ipv4Addr::LOCALHOST, 45_001, super::InboundProtocol::Tcp)],
+                vec![(
+                    Ipv4Addr::LOCALHOST,
+                    45_001,
+                    8080,
+                    super::InboundProtocol::Tcp,
+                )],
             ),
         );
         rules.insert(
             Runtime::sandbox_port_key("target", 5353, "udp"),
             (
                 "default".into(),
-                vec![(Ipv4Addr::LOCALHOST, 45_002, super::InboundProtocol::Udp)],
+                vec![(
+                    Ipv4Addr::LOCALHOST,
+                    45_002,
+                    5353,
+                    super::InboundProtocol::Udp,
+                )],
             ),
         );
         rules.insert(
             Runtime::sandbox_port_key("target", 8080, "udp"),
             (
                 "default".into(),
-                vec![(Ipv4Addr::LOCALHOST, 45_000, super::InboundProtocol::Udp)],
+                vec![(
+                    Ipv4Addr::LOCALHOST,
+                    45_000,
+                    8080,
+                    super::InboundProtocol::Udp,
+                )],
             ),
         );
         rules.insert(
@@ -612,6 +628,90 @@ async fn accepting(port: u16) -> bool {
     .is_ok_and(|connected| connected.is_ok())
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn forwarding_refresh_preserves_equivalent_listeners_and_clears_empty_bindings() {
+    use arcbox_net::darwin::inbound_relay::{InboundListenerManager, InboundProtocol};
+
+    let (mut runtime, _tmp) = networking_test_runtime();
+    runtime.config.docker.expose_ports_to_lan = false;
+    let localhost = std::net::Ipv4Addr::LOCALHOST;
+    let (command_tx, _command_rx) = tokio::sync::mpsc::channel(4);
+    let mut manager = InboundListenerManager::new(command_tx);
+    let host_port = manager
+        .add_rule(localhost, 0, 80, InboundProtocol::Tcp)
+        .await
+        .unwrap();
+    manager
+        .add_rule(localhost, 0, 53, InboundProtocol::Udp)
+        .await
+        .unwrap();
+    runtime
+        .adopt_inbound_listener_manager("test-machine", manager)
+        .await;
+    runtime.inbound_rules.write().await.insert(
+        "web".into(),
+        (
+            "test-machine".into(),
+            vec![
+                (localhost, 0, 80, InboundProtocol::Tcp),
+                (localhost, 0, 53, InboundProtocol::Udp),
+            ],
+        ),
+    );
+
+    let equivalent = [
+        ("0.0.0.0".into(), 0, 53, "UDP".into()),
+        (String::new(), 0, 80, "TCP".into()),
+        ("127.0.0.1".into(), 0, 80, "tcp".into()),
+    ];
+    runtime
+        .start_port_forwarding_for("test-machine", "web", &equivalent)
+        .await
+        .unwrap();
+    assert!(
+        accepting(host_port).await,
+        "equivalent bindings must keep the original ephemeral listener"
+    );
+
+    runtime
+        .start_port_forwarding_for("test-machine", "web", &[])
+        .await
+        .unwrap();
+    assert!(!accepting(host_port).await);
+    assert!(!runtime.inbound_rules.read().await.contains_key("web"));
+    assert!(runtime.inbound_listeners.read().await["test-machine"].is_empty());
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn forwarding_refresh_does_not_trust_ownership_without_a_listener() {
+    use arcbox_net::darwin::inbound_relay::{InboundListenerManager, InboundProtocol};
+
+    let (runtime, _tmp) = networking_test_runtime();
+    let localhost = std::net::Ipv4Addr::LOCALHOST;
+    let blocker = std::net::TcpListener::bind((localhost, 0)).unwrap();
+    let host_port = blocker.local_addr().unwrap().port();
+    let (command_tx, _command_rx) = tokio::sync::mpsc::channel(4);
+    runtime
+        .adopt_inbound_listener_manager("test-machine", InboundListenerManager::new(command_tx))
+        .await;
+    runtime.inbound_rules.write().await.insert(
+        "web".into(),
+        (
+            "test-machine".into(),
+            vec![(localhost, host_port, 80, InboundProtocol::Tcp)],
+        ),
+    );
+
+    let bindings = [(localhost.to_string(), host_port, 80, "tcp".into())];
+    runtime
+        .start_port_forwarding_for("test-machine", "web", &bindings)
+        .await
+        .expect_err("a stale ownership record must not hide the occupied port");
+    assert!(!runtime.inbound_rules.read().await.contains_key("web"));
+}
+
 /// A VM restart (resize, backend switch) hands the runtime a fresh listener
 /// manager. The previous incarnation's listeners must go with it: they
 /// inject into a datapath that is gone, and they hold the very host ports
@@ -637,7 +737,7 @@ async fn a_fresh_listener_manager_retires_the_previous_incarnations_listeners() 
         "web".to_owned(),
         (
             "test-machine".to_owned(),
-            vec![(localhost, 0, InboundProtocol::Tcp)],
+            vec![(localhost, 0, 80, InboundProtocol::Tcp)],
         ),
     );
     assert!(accepting(host_port).await);
@@ -689,7 +789,7 @@ async fn retiring_system_vm_container_networking_drops_every_trace_of_its_contai
         "web".to_owned(),
         (
             super::DEFAULT_MACHINE_NAME.to_owned(),
-            vec![(localhost, 0, InboundProtocol::Tcp)],
+            vec![(localhost, 0, 80, InboundProtocol::Tcp)],
         ),
     );
     runtime

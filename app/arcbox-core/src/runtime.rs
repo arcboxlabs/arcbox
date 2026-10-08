@@ -131,13 +131,13 @@ fn resolve_bind_ip(host_ip_str: &str, unspecified: Ipv4Addr) -> Option<Ipv4Addr>
 
 /// Inbound port-forwarding rules per container.
 ///
-/// Maps the canonical container ID to the machine that holds the rules and
-/// the list of `(host_ip, host_port, protocol)` tuples registered on that
-/// machine. The machine name is needed so teardown reaches the right
+/// Maps each canonical container ID to its machine and complete host-to-guest
+/// bindings. The destination port participates in refresh equality.
+/// The machine name is needed so teardown reaches the right
 /// inbound listener when both utility VMs are active concurrently.
 #[cfg(target_os = "macos")]
 type InboundRulesMap =
-    Arc<TokioRwLock<HashMap<String, (String, Vec<(Ipv4Addr, u16, InboundProtocol)>)>>>;
+    Arc<TokioRwLock<HashMap<String, (String, Vec<(Ipv4Addr, u16, u16, InboundProtocol)>)>>>;
 /// Per-machine inbound listener managers, keyed by machine name.
 #[cfg(target_os = "macos")]
 type InboundListenerMap = Arc<TokioRwLock<HashMap<String, InboundListenerManager>>>;
@@ -1391,6 +1391,7 @@ impl Runtime {
         bindings: &[(String, u16, u16, String)], // (host_ip, host_port, container_port, protocol)
     ) -> Result<()> {
         if bindings.is_empty() {
+            self.stop_port_forwarding_by_id(container_id).await;
             return Ok(());
         }
 
@@ -1463,13 +1464,6 @@ impl Runtime {
             )));
         }
 
-        // Remove previously tracked listeners for this container before
-        // applying new bindings, so stale ports do not leak. Cleanup
-        // routes to the machine the rules were originally bound to —
-        // which may differ from the requested machine if the container
-        // was previously on a different role.
-        self.stop_port_forwarding_by_id(container_id).await;
-
         let unspecified = self.config.docker.default_publish_address();
         let mut planned_rules = Vec::new();
         for (host_ip_str, host_port, container_port, protocol) in bindings {
@@ -1486,8 +1480,29 @@ impl Runtime {
                 );
                 continue;
             };
-            planned_rules.push((host_ip, *host_port, *container_port, proto));
+            let rule = (host_ip, *host_port, *container_port, proto);
+            if !planned_rules.contains(&rule) {
+                planned_rules.push(rule);
+            }
         }
+        {
+            let rules = self.inbound_rules.read().await;
+            let listeners = self.inbound_listeners.read().await;
+            if rules.get(container_id).is_some_and(|(machine, installed)| {
+                machine == machine_name
+                    && installed.len() == planned_rules.len()
+                    && planned_rules.iter().all(|rule| installed.contains(rule))
+                    && listeners.get(machine_name).is_some_and(|manager| {
+                        installed
+                            .iter()
+                            .all(|(ip, port, _, protocol)| manager.has_rule(*ip, *port, *protocol))
+                    })
+            }) {
+                return Ok(());
+            }
+        }
+        self.stop_port_forwarding_by_id(container_id).await;
+
         let mut added_count = 0usize;
         let mut bind_errors: Vec<String> = Vec::new();
         for (host_ip, host_port, container_port, protocol) in planned_rules {
@@ -1517,7 +1532,9 @@ impl Runtime {
                 .entry(container_id.to_owned())
                 .or_insert_with(|| (machine_name.to_owned(), Vec::new()));
             debug_assert_eq!(authority.0, machine_name);
-            authority.1.push((host_ip, host_port, protocol));
+            authority
+                .1
+                .push((host_ip, host_port, container_port, protocol));
             added_count += 1;
         }
 
@@ -1544,7 +1561,6 @@ impl Runtime {
         container_id: &str,
         bindings: &[(String, u16, u16, String)],
     ) -> Result<()> {
-        self.stop_port_forwarding_by_id(container_id).await;
         let guest_ip = self.guest_ip_for_machine(machine_name);
         let unspecified = self.config.docker.default_publish_address();
         let mut forwarder = PortForwarder::new();
@@ -1578,10 +1594,22 @@ impl Runtime {
         }
 
         let mut forwarders = self.port_forwarders.write().await;
-        forwarders.insert(container_id.to_string(), forwarder);
+        let unchanged = forwarders.get(container_id).is_some_and(|installed| {
+            installed.rules().len() == forwarder.rules().len()
+                && forwarder
+                    .rules()
+                    .iter()
+                    .all(|rule| installed.rules().contains(rule))
+        });
+        if !unchanged {
+            if let Some(installed) = forwarders.get_mut(container_id) {
+                installed.stop().await;
+            }
+            forwarders.insert(container_id.to_string(), forwarder);
+        }
         let result = forwarders
             .get_mut(container_id)
-            .expect("forwarder was just inserted")
+            .expect("forwarder retained or inserted")
             .start()
             .await;
         if let Err(error) = result {
@@ -1603,7 +1631,7 @@ impl Runtime {
             if let Some((machine_name, rules)) = authority.as_ref() {
                 let mut guard = self.inbound_listeners.write().await;
                 if let Some(manager) = guard.get_mut(machine_name) {
-                    for (host_ip, host_port, proto) in rules.iter().copied() {
+                    for (host_ip, host_port, _, proto) in rules.iter().copied() {
                         manager.remove_rule(host_ip, host_port, proto).await;
                     }
                 }
@@ -1707,7 +1735,7 @@ impl Runtime {
             mappings.extend(
                 rules
                     .iter()
-                    .map(|(_, host_port, protocol)| SandboxPortMapping {
+                    .map(|(_, host_port, _, protocol)| SandboxPortMapping {
                         sandbox_port,
                         host_port: *host_port,
                         protocol: match protocol {

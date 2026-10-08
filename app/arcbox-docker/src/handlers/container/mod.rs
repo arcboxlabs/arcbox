@@ -329,11 +329,6 @@ async fn setup_port_forwarding_from_inspect(
     body_bytes: &[u8],
 ) {
     let bindings = parse_port_bindings(body_bytes);
-    if bindings.is_empty() {
-        tracing::debug!("No port bindings found for container {}", canonical_id);
-        return;
-    }
-
     tracing::info!(
         "Port forwarding: {} bindings for container {}",
         bindings.len(),
