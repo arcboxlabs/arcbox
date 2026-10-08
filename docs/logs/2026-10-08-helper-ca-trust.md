@@ -103,3 +103,11 @@ Validation passed: 18 default CA tests, the CLI fingerprint test, targeted stric
 ## Managed HTTP/1.1 forwarding
 
 The managed relay now replaces the forwarded scheme on each request, preserves application headers and streaming bodies, negotiates trailers per hop, and supports WebSocket read-ahead. A session owns both HTTP drivers; upstream completion drains the response, and cancellation releases sockets. Validation passed: all 44 guest domain tests, including five real TCP relay tests; Linux all-target Clippy; Linux test-binary compilation; workspace formatting. The tests cover spoofed scheme headers, pipelined requests, early responses during upload, redirects, repeated cookies, SSE, trailers, WebSocket, natural disconnect, and cancellation. The Linux binary has not run in a VM; installed browser/protocol and performance checks remain pending.
+
+## Paired build after repair and HTTP forwarding
+
+The development application built successfully from runtime `b5a88779bc2de88b78a465a40be3a23ebdd46269` and Desktop `7f9601431fd4a76354532e9a1b1d1bd8c8fc0fe9`. Deep strict code-signature verification passed. CLI and daemon report `0.8.2`; the unchanged release-pin metadata remains `v0.8.0`. The embedded `arcbox-agent` and `vm-agent` hashes match their Linux release artifacts. The host CLI, helper, and daemon have no `/nix/store/` dynamic dependencies.
+
+Desktop now emits `--docker-integration` only for production. The previous development LaunchAgent included the flag, which the current daemon rejects before startup. The actual rebuilt development plist contains only the daemon name and `--profile development`. All 16 packaging tests, strict xtask Clippy, and formatting passed.
+
+The current local HTTPS E2E executable compiled successfully but has not run. An unrelated CPU reproduction VM still occupies the test window; the application and a competing VM were not launched. A read-only development-profile status query reported no existing Keychain CA. First-browser authorization, cancellation, retry, and system DNS acceptance remain unverified. The existing host `--dns-domain` option does not yet configure the guest's fixed `arcbox.local` suffix, so a custom host suffix alone is insufficient for isolated end-to-end HTTPS. Agent protocol and minimum remain `7/7`.
