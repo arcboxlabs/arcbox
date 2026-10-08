@@ -212,7 +212,7 @@ process exit, as in every other path.
 
 Startup interruption follows the same shutdown error contract: route cleanup completes before the daemon reports a stop error or task panic. A forced stop retains direct process exit and uses status 1 when shutdown failed.
 
-`ResolverService` is shared through the pre-pipeline handles and daemon context. The shared slot retains the publication task until its join completes, including when the first waiter is cancelled. Normal shutdown, interrupted startup, and failed startup all join the same task before stopping Runtime. The current task owns Bonjour publication; helper resolver lease ownership is a separate integration step.
+The resolver service uses `BackgroundTask`, shared through the pre-pipeline handles and daemon context. The shared slot retains the publication task until its join completes, including when the first waiter is cancelled. Normal shutdown, interrupted startup, and failed startup all join the same task before stopping Runtime. The resolver task owns the helper resolver lease, Bonjour publication, and guest authority delivery.
 
 ## Crash / SIGKILL
 

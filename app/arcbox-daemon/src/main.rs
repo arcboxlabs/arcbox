@@ -1,5 +1,6 @@
 //! ArcBox daemon — orchestrates VM, networking, and API services.
 
+mod background_task;
 mod context;
 mod control_plane;
 mod disk_reclaim;

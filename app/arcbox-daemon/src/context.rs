@@ -21,8 +21,8 @@ use arcbox_constants::dns::Domain;
 use arcbox_constants::paths::{ArcboxProfile, HostLayout, HostMountLayout};
 use tokio_util::sync::CancellationToken;
 
+use crate::background_task::BackgroundTask;
 use crate::dns_service::DnsService;
-use crate::resolver_service::ResolverService;
 use crate::startup::{ContainerNetworkLease, DaemonLock};
 
 /// Daemon lock shared between the startup pipeline and `main`.
@@ -57,7 +57,7 @@ pub struct StartupHandles {
     pub daemon_lock: SharedDaemonLock,
     /// Filled before an isolated VM boots and held through shutdown cleanup.
     pub container_network_lease: SharedContainerNetworkLease,
-    pub resolver_service: ResolverService,
+    pub resolver_service: BackgroundTask,
 }
 
 impl StartupHandles {
@@ -69,7 +69,7 @@ impl StartupHandles {
             shutdown: CancellationToken::new(),
             daemon_lock: Arc::new(std::sync::OnceLock::new()),
             container_network_lease: Arc::new(std::sync::OnceLock::new()),
-            resolver_service: ResolverService::default(),
+            resolver_service: BackgroundTask::default(),
         }
     }
 }
@@ -94,7 +94,7 @@ pub struct EarlyContext {
     pub daemon_lock_slot: SharedDaemonLock,
     /// Slot filled once the selected non-default container CIDR is known.
     pub container_network_lease_slot: SharedContainerNetworkLease,
-    pub resolver_service: ResolverService,
+    pub resolver_service: BackgroundTask,
     pub dns_domain: Domain,
     /// Explicit DNS port; 0 lets the bound service choose one. `None` binds
     /// the profile's port, falling back to an OS-allocated one when taken.
@@ -140,7 +140,7 @@ pub struct DaemonContext {
     pub shutdown: CancellationToken,
     /// Holds the same-user CIDR lease until shutdown cleanup completes.
     pub container_network_lease_slot: SharedContainerNetworkLease,
-    pub resolver_service: ResolverService,
+    pub resolver_service: BackgroundTask,
     pub dns_domain: Domain,
     /// Explicit DNS port; `None` binds the profile's port best-effort. The
     /// actual bound port lives in [`ServiceHandles`].
