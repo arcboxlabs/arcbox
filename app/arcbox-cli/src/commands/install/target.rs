@@ -149,6 +149,15 @@ mod tests {
 
     #[test]
     fn stopped_probe_holds_a_free_lock_and_never_reads_or_changes_its_pid() {
+        // Concurrent subprocess tests can inherit flock descriptors until exec completes.
+        super::super::tests::isolated_lock_test(
+            "commands::install::target::tests::stopped_probe_lock_worker",
+        );
+    }
+
+    #[test]
+    #[ignore = "Executed by the parent test in an isolated process."]
+    fn stopped_probe_lock_worker() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("daemon.lock");
         // SAFETY: getuid has no arguments or failure case.

@@ -8,15 +8,20 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use arcbox_constants::paths::{ArcboxProfile, privileged};
 
 mod daemon;
+mod preflight;
 mod target;
 
 /// Arguments for the install command.
 #[derive(clap::Args)]
 pub struct InstallArgs {
+    /// Inspect helper readiness and selected legacy resolvers without changing state.
+    #[arg(long)]
+    pub check: bool,
+
     /// Skip the daemon launchd service registration.
     #[arg(long)]
     pub no_daemon: bool,
@@ -50,6 +55,11 @@ pub async fn execute(args: InstallArgs) -> Result<()> {
     let target = target::Target::resolve(args.user_uid, args.data_dir)?;
     let roots = resolver_roots(profile, args.resolver_root);
     let helper = resolve_helper_source(args.helper_path.as_deref())?;
+    let status = preflight::inspect(&helper, &roots).await?;
+    if args.check {
+        println!("{}", serde_json::to_string(&status)?);
+        return Ok(());
+    }
     // SAFETY: geteuid has no arguments or failure case.
     let is_privileged = unsafe { libc::geteuid() } == 0;
 
@@ -59,10 +69,19 @@ pub async fn execute(args: InstallArgs) -> Result<()> {
 
     // 1. Install helper binary (requires sudo).
     print_step(1, 3, "Installing arcbox-helper...");
-    let stopped_daemon = target.hold_stopped_daemon()?;
-    install_helper(&helper, &roots)?;
-    drop(stopped_daemon);
-    print_done();
+    if status.helper_ready && status.legacy_roots.is_empty() {
+        print_skipped();
+    } else {
+        let stopped_daemon = target.hold_stopped_daemon()?;
+        install_helper(&helper, &roots)?;
+        let installed = preflight::inspect(&helper, &roots).await?;
+        ensure!(
+            installed.helper_ready && installed.legacy_roots.is_empty(),
+            "helper installation did not reach a ready state: {installed:?}"
+        );
+        drop(stopped_daemon);
+        print_done();
+    }
 
     // 2. Register daemon service.
     print_step(2, 3, "Registering daemon service...");
@@ -213,9 +232,24 @@ mod tests {
     use super::{InstallArgs, resolver_roots, validate_install_scope};
     use arcbox_constants::paths::ArcboxProfile;
 
+    pub(super) fn isolated_lock_test(test: &str) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--ignored"])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed;"),
+            "isolated lock test {test} failed ({}):\n{stdout}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn development_install_only_allows_the_helper_path() {
         let args = InstallArgs {
+            check: false,
             no_daemon: true,
             no_shell: true,
             helper_path: None,
@@ -227,6 +261,7 @@ mod tests {
 
         for (no_daemon, no_shell) in [(false, true), (true, false), (false, false)] {
             let args = InstallArgs {
+                check: false,
                 no_daemon,
                 no_shell,
                 helper_path: None,

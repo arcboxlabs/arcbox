@@ -2,7 +2,7 @@
 
 Privileged root helper for host mutations that the user-space daemon cannot
 perform: `/usr/local/bin` CLI symlinks, `/var/run/docker.sock`, `/etc/resolver`,
-`/etc/hosts` alias, local HTTPS CA trust, and utun/route setup.
+`/etc/hosts` alias, local HTTPS CA storage, and utun/route setup.
 
 ## Independent version
 
@@ -26,30 +26,20 @@ Desktop and daemon parse that line with
 `arcbox_constants::helper::parse_helper_version` and compare by semver triple
 **within the same major**. A different major may change required helper behavior.
 
-### When to bump
+### Coordinated helper updates
 
-Bump the helper version (and the three pins above **together**) only when the
-**on-disk root binary** must be replaced:
+Keep the helper package and minimum version at `1.2.0` for this paired deployment. Ship the helper and its daemon/CLI consumers together when RPC or required behavior changes. Do not add compatibility decoders or automatically bump versions for protocol changes.
 
-- tarpc wire break / required new RPC method
-- security fix in the privileged helper
-- behavior the current daemon hard-requires
-
-Ordinary daemon / CLI / guest / networking work must **not** bump the helper.
-Otherwise every Desktop user gets an admin-password reinstall prompt.
-
-release-please does **not** bump `app/arcbox-helper/Cargo.toml` (no
-`x-release-please-version` on that pin). Helper bumps are manual.
+A matching semver alone does not establish readiness. The installer requires the current JSON RPC transport, the same-major version floor and bundled-version policy, and an explicit selected-resolver check. release-please does not manage the helper version pins.
 
 A regression test (`helper_version_pins_are_aligned` in
 `app/arcbox-helper/tests/connection_test.rs`) fails if the three pins drift.
 
 ### Admin password impact
 
-Installing or upgrading the helper requires admin authorization (AppleScript /
-`osascript` admin prompt, or `sudo abctl _install`). Once the on-disk helper
-semver is **≥** the bundled helper, subsequent ArcBox app updates that only
-bump the runtime (`0.4.x`) must **not** re-prompt.
+Installing or upgrading the helper requires admin authorization (the Desktop system prompt or `sudo abctl _install`). Desktop skips authorization only when the installed helper answers compatible JSON RPCs, meets the bundled same-major version requirement, and has no selected legacy resolver files to migrate. Runtime-only updates that satisfy these checks do not re-prompt.
+
+`abctl _install --check --no-daemon --no-shell --helper-path PATH --user-uid UID --data-dir ABSOLUTE_PATH` prints exactly one JSON result, such as `{"helper_ready":true,"legacy_roots":[]}`. Missing or incompatible helper services report `helper_ready: false`; inspection errors return a nonzero exit status. Logs use stderr. The installer repeats the check after bootstrap and keeps the selected daemon stopped when the result is not ready.
 
 `arcbox-helper --check-resolvers [ROOT...]` reads only the selected resolver roots and prints each exact legacy root on its own line. The check requires root-owned files and directory metadata even when the caller is a login user. It does not start the service or change files. An empty root set does not inspect `/etc/resolver`.
 
