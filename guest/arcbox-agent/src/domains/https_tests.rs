@@ -231,7 +231,7 @@ fn publish(services: &WebServices, dns: &DnsRegistry, owner: &str, port: u16, do
         )
         .unwrap();
     services.publish(
-        &super::super::ContainerFacts::from_inspect(&inspect, &domain).unwrap(),
+        &super::super::EndpointFacts::from_inspect(&inspect, &domain).unwrap(),
         super::super::SelectedRoutes {
             http: Some(port),
             https: Some(super::super::HttpsBackend::Terminate(

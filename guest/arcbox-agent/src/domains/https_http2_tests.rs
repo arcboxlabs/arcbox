@@ -1,6 +1,6 @@
 use super::*;
 use crate::domains::{
-    ContainerFacts, HttpBackend, HttpProtocol, HttpsBackend, SelectedRoutes, http_tasks,
+    EndpointFacts, HttpBackend, HttpProtocol, HttpsBackend, SelectedRoutes, http_tasks,
 };
 use bytes::Bytes;
 use http_body_util::{BodyExt as _, Empty};
@@ -26,7 +26,7 @@ async fn managed_h2_rejects_replaced_pinned_routes_without_closing_an_existing_s
                 }
             });
             services.publish(
-                &ContainerFacts::from_inspect(&inspect, &"arcbox.local".parse().unwrap()).unwrap(),
+                &EndpointFacts::from_inspect(&inspect, &"arcbox.local".parse().unwrap()).unwrap(),
                 SelectedRoutes {
                     http: Some(port),
                     https: Some(HttpsBackend::Terminate(HttpBackend { port, protocol })),

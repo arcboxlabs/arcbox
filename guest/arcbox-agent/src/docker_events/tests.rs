@@ -112,7 +112,7 @@ async fn stopped_domain_task_cannot_accept_updates_or_discard_cleanup_ownership(
     let dns = GuestDnsServer::new(Default::default(), CancellationToken::new()).unwrap();
     let (domains, commands) = DomainRoutes::test_channel();
     drop(commands);
-    let facts = ContainerFacts::from_inspect(
+    let facts = EndpointFacts::from_inspect(
         &serde_json::json!({
             "Id": "owner", "Name": "/web", "State": { "Pid": 1 },
             "NetworkSettings": {
@@ -586,7 +586,7 @@ async fn complete_snapshot_refreshes_known_owners_and_keeps_unaddressed_identity
         };
         assert_eq!(
             facts,
-            [ContainerFacts::from_inspect(&web, dns.domain()).unwrap()]
+            [EndpointFacts::from_inspect(&web, dns.domain()).unwrap()]
         );
         assert_eq!(registry.read().unwrap().epoch(), epoch);
         reply.send(()).unwrap();
@@ -735,7 +735,7 @@ async fn inspected_events_wait_for_actor_ack_before_dns_and_keep_unavailable_own
                 panic!("inspect event must await actor replacement");
             };
             assert_eq!(id, WEB_ID);
-            assert_eq!(facts, ContainerFacts::from_inspect(&info, dns.domain()));
+            assert_eq!(facts, EndpointFacts::from_inspect(&info, dns.domain()));
             assert_eq!(registry.read().unwrap().epoch(), epoch);
             reply.send(()).unwrap();
             if ip.is_empty() {

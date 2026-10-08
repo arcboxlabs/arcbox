@@ -1,26 +1,24 @@
-//! What the domain rules need to know about a container.
+//! Resource facts shared by domain discovery, NAT rules, and HTTPS routing.
+
+mod container;
 
 use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
-use arcbox_constants::dns::Domain;
-use arcbox_dns::container::ContainerMetadata;
-
-use super::http_port::{self, HTTP_PORT, HTTPS_PORT, Pin};
+use super::http_port::{HTTP_PORT, HTTPS_PORT, Pin};
 use super::https::PROXY_PORT;
-use super::selection::HTTPS_LABEL;
 use super::{HttpsBackend, RULE_OWNER, SelectedRoutes};
 use crate::iptables::NatRule;
 
-/// A running container, as far as its domain is concerned.
+/// A running resource and the inputs required to discover and route its web services.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContainerFacts {
+pub struct EndpointFacts {
     pub(super) id: String,
     pub(super) hostname: String,
-    /// Its init process, whose `/proc` entry shows the container's sockets.
+    /// A process whose `/proc` entry shows the endpoint's sockets.
     pub(super) pid: u32,
-    /// Its network namespace (`SandboxKey`).
+    /// The network namespace that the process must still occupy.
     pub(super) netns: PathBuf,
     ips: Vec<Ipv4Addr>,
     pub(super) primary_ip: Ipv4Addr,
@@ -29,51 +27,7 @@ pub struct ContainerFacts {
     pub(super) exposed: BTreeSet<u16>,
 }
 
-impl ContainerFacts {
-    /// Reads facts from a container's inspect JSON.
-    /// Returns `None` when identity, a running process, a network namespace, or an IPv4 address is missing.
-    #[must_use]
-    pub fn from_inspect(inspect: &serde_json::Value, domain: &Domain) -> Option<Self> {
-        let metadata = ContainerMetadata::from_inspect(inspect)?;
-        let hostname = format!("{}.{domain}", metadata.name);
-        let pid = inspect
-            .pointer("/State/Pid")?
-            .as_u64()
-            .and_then(|pid| u32::try_from(pid).ok())
-            .filter(|&pid| pid != 0)?;
-        let netns = inspect
-            .pointer("/NetworkSettings/SandboxKey")?
-            .as_str()
-            .filter(|key| !key.is_empty())?
-            .into();
-        let primary_ip = metadata.primary_ipv4()?;
-        let mut ips = metadata.ipv4_addresses().to_vec();
-        ips.sort_unstable();
-        let pin = read_pin(inspect, &metadata.id, http_port::LABEL);
-        let https_pin = read_pin(inspect, &metadata.id, HTTPS_LABEL);
-        let exposed = inspect
-            .pointer("/Config/ExposedPorts")
-            .and_then(|ports| ports.as_object())
-            .map(|ports| {
-                ports
-                    .keys()
-                    .filter_map(|spec| spec.strip_suffix("/tcp")?.parse().ok())
-                    .collect()
-            })
-            .unwrap_or_default();
-        Some(Self {
-            id: metadata.id,
-            hostname,
-            pid,
-            netns,
-            ips,
-            primary_ip,
-            pin,
-            https_pin,
-            exposed,
-        })
-    }
-
+impl EndpointFacts {
     /// Native HTTPS keeps the application's TLS; terminated HTTPS reaches the proxy.
     pub(super) fn rules(&self, selected: SelectedRoutes) -> Vec<NatRule> {
         let native = match selected.https {
@@ -108,19 +62,12 @@ impl ContainerFacts {
     }
 }
 
-fn read_pin(inspect: &serde_json::Value, id: &str, label: &str) -> Option<Pin> {
-    let value = inspect.pointer("/Config/Labels")?.get(label)?.as_str()?;
-    match value.parse() {
-        Ok(pin) => Some(pin),
-        Err(error) => {
-            tracing::warn!(container_id = id, label, %error, "invalid port override; using protocol discovery");
-            None
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use arcbox_constants::dns::Domain;
+    use arcbox_dns::container::ContainerMetadata;
+
+    use super::super::{http_port, selection::HTTPS_LABEL};
     use super::*;
 
     fn inspect() -> serde_json::Value {
@@ -146,7 +93,7 @@ mod tests {
     #[test]
     fn facts_come_from_inspect() {
         let facts =
-            ContainerFacts::from_inspect(&inspect(), &"containers.test".parse().unwrap()).unwrap();
+            EndpointFacts::from_inspect(&inspect(), &"containers.test".parse().unwrap()).unwrap();
         assert_eq!(facts.id, "abc123");
         assert_eq!(facts.hostname, "web.containers.test");
         assert_eq!(facts.pid, 4242);
@@ -179,7 +126,7 @@ mod tests {
             }),
         ] {
             inspect["NetworkSettings"]["Networks"] = networks;
-            let facts = ContainerFacts::from_inspect(&inspect, &Domain::default()).unwrap();
+            let facts = EndpointFacts::from_inspect(&inspect, &Domain::default()).unwrap();
             let metadata = ContainerMetadata::from_inspect(&inspect).unwrap();
             assert_eq!(metadata.primary_ipv4(), Some(facts.primary_ip));
             assert_eq!(facts.primary_ip, "172.18.0.3".parse::<Ipv4Addr>().unwrap());
@@ -196,7 +143,7 @@ mod tests {
             "com.docker.compose.project": "MyProject",
             "com.docker.compose.service": "Web_API",
         });
-        let facts = ContainerFacts::from_inspect(&inspect, &Domain::default()).unwrap();
+        let facts = EndpointFacts::from_inspect(&inspect, &Domain::default()).unwrap();
         assert_eq!(facts.hostname, "MyProject_Web_1.arcbox.local");
     }
 
@@ -205,15 +152,15 @@ mod tests {
         let domain = Domain::default();
         let mut stopped = inspect();
         stopped["State"]["Pid"] = 0.into();
-        assert_eq!(ContainerFacts::from_inspect(&stopped, &domain), None);
+        assert_eq!(EndpointFacts::from_inspect(&stopped, &domain), None);
 
         let mut no_sandbox = inspect();
         no_sandbox["NetworkSettings"]["SandboxKey"] = "".into();
-        assert_eq!(ContainerFacts::from_inspect(&no_sandbox, &domain), None);
+        assert_eq!(EndpointFacts::from_inspect(&no_sandbox, &domain), None);
 
         let mut host = inspect();
         host["NetworkSettings"]["Networks"] = serde_json::json!({ "host": { "IPAddress": "" } });
-        assert_eq!(ContainerFacts::from_inspect(&host, &domain), None);
+        assert_eq!(EndpointFacts::from_inspect(&host, &domain), None);
     }
 
     #[test]
@@ -222,13 +169,13 @@ mod tests {
         let mut pinned = inspect();
         pinned["Config"]["Labels"][http_port::LABEL] = "off".into();
         assert_eq!(
-            ContainerFacts::from_inspect(&pinned, &domain).unwrap().pin,
+            EndpointFacts::from_inspect(&pinned, &domain).unwrap().pin,
             Some(Pin::Off)
         );
 
         pinned["Config"]["Labels"][http_port::LABEL] = "web".into();
         assert_eq!(
-            ContainerFacts::from_inspect(&pinned, &domain).unwrap().pin,
+            EndpointFacts::from_inspect(&pinned, &domain).unwrap().pin,
             None
         );
     }
@@ -239,7 +186,7 @@ mod tests {
 
     #[test]
     fn port_80_of_every_address_routes_to_the_http_port() {
-        let facts = ContainerFacts::from_inspect(&inspect(), &Domain::default()).unwrap();
+        let facts = EndpointFacts::from_inspect(&inspect(), &Domain::default()).unwrap();
         assert_eq!(
             specs(&facts.rules(SelectedRoutes {
                 http: Some(3000),
@@ -265,7 +212,7 @@ mod tests {
 
     #[test]
     fn port_443_goes_to_the_proxy_whatever_the_http_port() {
-        let facts = ContainerFacts::from_inspect(&inspect(), &Domain::default()).unwrap();
+        let facts = EndpointFacts::from_inspect(&inspect(), &Domain::default()).unwrap();
         let redirect = "-d 172.17.0.2 -p tcp --dport 443 -m comment --comment \
                         arcbox-domain:abc123 -j REDIRECT --to-ports 61443";
         let served_on_80 = specs(&facts.rules(SelectedRoutes::choose(
@@ -300,7 +247,7 @@ mod tests {
     fn https_only_8443_maps_without_a_proxy_or_http_route() {
         let mut inspect = inspect();
         inspect["Config"]["Labels"][HTTPS_LABEL] = "8443".into();
-        let facts = ContainerFacts::from_inspect(&inspect, &Domain::default()).unwrap();
+        let facts = EndpointFacts::from_inspect(&inspect, &Domain::default()).unwrap();
         let selected = SelectedRoutes::choose(None, facts.https_pin, &BTreeSet::new());
         assert_eq!(
             specs(&facts.rules(selected)),

@@ -13,7 +13,7 @@ use super::index::Publisher;
 use super::scans::Scans;
 use super::selection::{ALT_HTTPS_PORT, HttpBackend};
 use super::{
-    Command, ContainerFacts, RULE_OWNER, SelectedRoutes, WebServices, http_port, listeners, probe,
+    Command, EndpointFacts, RULE_OWNER, SelectedRoutes, WebServices, http_port, listeners, probe,
 };
 use crate::iptables::{self, NatRule, TaggedRules};
 
@@ -44,7 +44,7 @@ impl Drop for Routes {
 }
 
 struct Tracked {
-    facts: ContainerFacts,
+    facts: EndpointFacts,
     scans: Scans,
     probes: probe::Cache,
     selected: SelectedRoutes,
@@ -198,7 +198,7 @@ impl Routes {
         }
     }
 
-    fn track(&mut self, facts: ContainerFacts) {
+    fn track(&mut self, facts: EndpointFacts) {
         self.services.remove(&facts.id);
         let installed = if let Some(known) = self.containers.remove(&facts.id) {
             known.installed
@@ -366,7 +366,7 @@ mod tests {
                     .unwrap();
             }
         });
-        let facts = ContainerFacts::from_inspect(
+        let facts = EndpointFacts::from_inspect(
             &serde_json::json!({
                 "Id": "pinned", "Name": "/web", "State": { "Pid": 1 },
                 "Config": { "Labels": { "dev.arcbox.http-port": port.to_string() } },
@@ -473,7 +473,7 @@ mod tests {
             let mut routes = Routes::new(services.clone());
             let old: Vec<_> = ["live", "absent", "nofacts"]
                 .map(|id| {
-                    ContainerFacts::from_inspect(
+                    EndpointFacts::from_inspect(
                         &serde_json::json!({
                             "Id": id, "Name": format!("/{id}"), "State": { "Pid": 1 },
                             "NetworkSettings": {

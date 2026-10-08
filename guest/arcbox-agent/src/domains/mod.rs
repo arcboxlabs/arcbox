@@ -50,7 +50,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-pub use self::facts::ContainerFacts;
+pub use self::facts::EndpointFacts;
 use self::routes::Routes;
 pub use self::selection::{HttpBackend, HttpProtocol, HttpsBackend, SelectedRoutes};
 pub use self::services::WebServices;
@@ -66,8 +66,8 @@ pub struct DomainRoutes {
 
 /// Commands processed by the container domain rules task.
 pub enum Command {
-    Update(String, Option<ContainerFacts>, oneshot::Sender<()>),
-    Reconcile(Vec<ContainerFacts>, oneshot::Sender<()>),
+    Update(String, Option<EndpointFacts>, oneshot::Sender<()>),
+    Reconcile(Vec<EndpointFacts>, oneshot::Sender<()>),
     Forget(String, oneshot::Sender<anyhow::Result<()>>),
 }
 
@@ -98,7 +98,7 @@ impl DomainRoutes {
     }
 
     /// Acknowledges replacement of one container's tracking after any active scan finishes.
-    pub async fn update(&self, id: &str, facts: Option<ContainerFacts>) -> anyhow::Result<()> {
+    pub async fn update(&self, id: &str, facts: Option<EndpointFacts>) -> anyhow::Result<()> {
         let (reply, response) = oneshot::channel();
         self.commands
             .send(Command::Update(id.to_owned(), facts, reply))
@@ -109,7 +109,7 @@ impl DomainRoutes {
     }
 
     /// Acknowledges replacement of the complete tracked set after any active scan finishes.
-    pub async fn reconcile(&self, facts: Vec<ContainerFacts>) -> anyhow::Result<()> {
+    pub async fn reconcile(&self, facts: Vec<EndpointFacts>) -> anyhow::Result<()> {
         let (reply, response) = oneshot::channel();
         self.commands
             .send(Command::Reconcile(facts, reply))

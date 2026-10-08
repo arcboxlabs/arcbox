@@ -20,7 +20,7 @@ use tokio::net::UnixStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::dns_server::GuestDnsServer;
-use crate::domains::{ContainerFacts, DomainRoutes};
+use crate::domains::{DomainRoutes, EndpointFacts};
 use crate::publish_mirror::{PinnedPublish, PublishMirror, pinned_publishes};
 
 const DOCKER_SOCK: &str = "/var/run/docker.sock";
@@ -28,7 +28,7 @@ const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
 struct InspectedContainer {
     metadata: ContainerMetadata,
-    facts: Option<ContainerFacts>,
+    facts: Option<EndpointFacts>,
     publishes: Vec<PinnedPublish>,
 }
 
@@ -40,7 +40,7 @@ impl InspectedContainer {
         anyhow::ensure!(metadata.id == id, "Docker inspect ID does not match {id}");
         Ok(Self {
             metadata,
-            facts: ContainerFacts::from_inspect(&info, domain),
+            facts: EndpointFacts::from_inspect(&info, domain),
             publishes: pinned_publishes(&info),
         })
     }

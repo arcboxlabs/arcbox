@@ -780,7 +780,7 @@ mod storage_check_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domains::{ContainerFacts, HttpsBackend, SelectedRoutes, WebServices};
+    use crate::domains::{EndpointFacts, HttpsBackend, SelectedRoutes, WebServices};
 
     #[tokio::test]
     async fn https_observation_requires_host_cid_and_valid_addresses_over_the_wire() {
@@ -861,7 +861,7 @@ mod tests {
         let directory = services.directory_source();
         directory.ready();
         for id in ["a", "b"] {
-            let facts = ContainerFacts::from_inspect(
+            let facts = EndpointFacts::from_inspect(
                 &serde_json::json!({
                     "Id": id, "Name": "/api", "State": { "Pid": 1 },
                     "NetworkSettings": {

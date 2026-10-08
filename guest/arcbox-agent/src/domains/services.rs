@@ -16,7 +16,7 @@ use arcbox_dns::{
     web_services::{HttpsMode, WebServiceUrls},
 };
 
-use super::{ContainerFacts, HttpBackend, SelectedRoutes};
+use super::{EndpointFacts, HttpBackend, SelectedRoutes};
 use crate::dns_server::DnsRegistry;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,7 +175,7 @@ impl WebServices {
     }
 
     /// Publish only after the selected NAT rules have been installed.
-    pub(crate) fn publish(&self, facts: &ContainerFacts, selected: SelectedRoutes) {
+    pub(crate) fn publish(&self, facts: &EndpointFacts, selected: SelectedRoutes) {
         let mut installed = self.installed.write().expect("web services lock poisoned");
         if selected == SelectedRoutes::default() {
             installed.remove(&facts.id);
@@ -401,7 +401,7 @@ mod tests {
         registry
             .replace(id.into(), claims, Some(ip.into()))
             .unwrap();
-        let facts = ContainerFacts::from_inspect(
+        let facts = EndpointFacts::from_inspect(
             &serde_json::json!({
                 "Id": id, "Name": "/web", "State": { "Pid": 1 },
                 "NetworkSettings": {
