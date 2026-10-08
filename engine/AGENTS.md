@@ -109,6 +109,6 @@ deliberate rather than missed:
   the **grandparent** so the directory creation itself is durable — and,
   less obviously, `cleanup_stale_template_markers` reaps leftover temps
   by matching the `TEMPLATE_MARKER_TEMP_PREFIX` (`.tmp-`) *prefix*, which
-  the crate's `.{stem}.{uuid}.tmp` names do not have. Migrate the writer
+  the crate's `.arcbox-{uuid}.tmp` names do not have. Migrate the writer
   and that sweep together or crash recovery silently stops collecting
   its own orphans.

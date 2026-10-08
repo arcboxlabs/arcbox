@@ -39,6 +39,7 @@ security-framework = { version = "3.7", default-features = false }
 core-foundation = "0.10"
 arcbox-local-ca = { version = "0.8.2", path = "../../common/arcbox-local-ca" }
 security-framework-sys = "2.17.0"
+arcbox-atomic-file.workspace = true
 
 [dev-dependencies]
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }

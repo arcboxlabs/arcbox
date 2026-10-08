@@ -25,7 +25,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -79,6 +79,22 @@ impl AtomicWriteError {
 /// See [`AtomicWriteError`]: the two variants mean materially different
 /// things and are worth matching on rather than collapsing.
 pub fn write(destination: &Path, bytes: &[u8]) -> Result<(), AtomicWriteError> {
+    write_with_mode(destination, bytes, 0o600)
+}
+
+/// Atomically replaces a public file with mode 0644, durably.
+///
+/// The temporary file remains private until its complete contents are written.
+/// Permissions are set before publication, independent of the process umask.
+///
+/// # Errors
+///
+/// See [`AtomicWriteError`] for publication and durability failures.
+pub fn write_public(destination: &Path, bytes: &[u8]) -> Result<(), AtomicWriteError> {
+    write_with_mode(destination, bytes, 0o644)
+}
+
+fn write_with_mode(destination: &Path, bytes: &[u8], mode: u32) -> Result<(), AtomicWriteError> {
     let not_committed = |source| AtomicWriteError::NotCommitted {
         path: destination.to_path_buf(),
         source,
@@ -90,14 +106,7 @@ pub fn write(destination: &Path, bytes: &[u8]) -> Result<(), AtomicWriteError> {
             format!("path has no parent: {}", destination.display()),
         )));
     };
-    let temp_path = parent.join(format!(
-        ".{}.{}.tmp",
-        destination
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .unwrap_or("atomic"),
-        Uuid::new_v4()
-    ));
+    let temp_path = parent.join(format!(".arcbox-{}.tmp", Uuid::new_v4()));
 
     (|| {
         let mut temp = OpenOptions::new()
@@ -106,6 +115,7 @@ pub fn write(destination: &Path, bytes: &[u8]) -> Result<(), AtomicWriteError> {
             .mode(0o600)
             .open(&temp_path)?;
         temp.write_all(bytes)?;
+        temp.set_permissions(fs::Permissions::from_mode(mode))?;
         temp.sync_all()?;
         drop(temp);
         fs::rename(&temp_path, destination)?;
@@ -139,6 +149,34 @@ pub fn write(destination: &Path, bytes: &[u8]) -> Result<(), AtomicWriteError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maximum_length_destination_does_not_lengthen_the_temporary_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a".repeat(255));
+        write_public(&path, b"public").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"public");
+    }
+
+    #[test]
+    fn publication_sets_the_requested_visibility_without_changing_hardlinked_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let private = dir.path().join("private");
+        write(&private, b"old").unwrap();
+        let public = dir.path().join("public");
+        fs::hard_link(&private, &public).unwrap();
+        write_public(&public, b"new").unwrap();
+        assert_eq!(fs::read(&private).unwrap(), b"old");
+        assert_eq!(fs::read(&public).unwrap(), b"new");
+        assert_eq!(
+            fs::metadata(&private).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&public).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
 
     #[test]
     fn a_replaced_file_holds_the_new_bytes_and_leaves_no_temp() {

@@ -109,6 +109,8 @@ distribution".
 
 ## Guest-facing parsers (VM path)
 
+- `arcbox-atomic-file::write` publishes private files with mode 0600. Use `write_public` only for content that every local user may read. Set final permissions through the temporary file descriptor before publication; propagate both write and durability errors.
+
 - `arcbox-local-ca` exposes public root metadata and certificate validity for
   host status and guest renewal. Keep expired roots parseable for exact trust
   revocation. Signing must reject inactive roots and cap leaf validity at the
