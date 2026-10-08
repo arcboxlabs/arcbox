@@ -300,6 +300,44 @@ mod tests {
         assert!(handshake.await.unwrap().is_err());
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn authorization_wait_rejects_replaced_owners_at_the_same_address() {
+        let destination = Ipv4Addr::new(172, 17, 0, 2);
+        let source: IpAddr = "192.168.64.1".parse().unwrap();
+        for replacement in ["a", "b"] {
+            let services = WebServices::new(Domain::default(), Arc::default());
+            register(&services, "a", &["web"], destination).await;
+            let mut request = ReconcileHttpsAccessRequest {
+                observation_id: replacement.into(),
+                host_addresses: vec![source.to_string()],
+                enabled: true,
+                ..Default::default()
+            };
+            services.reconcile_https_access(request.clone()).unwrap();
+            let handshake = tokio::spawn({
+                let services = services.clone();
+                async move {
+                    services
+                        .observe_managed_tls("web.arcbox.local", destination, source)
+                        .await
+                }
+            });
+            tokio::task::yield_now().await;
+            assert_eq!(
+                services
+                    .reconcile_https_access(request.clone())
+                    .unwrap()
+                    .sequence,
+                1
+            );
+            services.dns.write().await.remove("a");
+            register(&services, replacement, &["web"], destination).await;
+            request.enabled = false;
+            services.reconcile_https_access(request).unwrap();
+            assert!(handshake.await.unwrap().is_err(), "{replacement}");
+        }
+    }
+
     #[tokio::test]
     async fn handshake_route_checks_registration_and_installed_backend() {
         let ip = Ipv4Addr::new(172, 17, 0, 2);

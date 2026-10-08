@@ -118,7 +118,7 @@ async fn request_http2(
     }
 }
 
-fn configuration() -> Arc<rustls::ClientConfig> {
+pub(super) fn configuration() -> Arc<rustls::ClientConfig> {
     static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
     Arc::clone(CONFIG.get_or_init(|| {
         let provider = rustls::crypto::ring::default_provider();

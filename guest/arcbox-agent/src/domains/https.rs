@@ -26,6 +26,10 @@ use super::WebServices;
 use super::certificates::Certificates;
 use super::http_port::HTTPS_PORT;
 
+#[cfg(test)]
+#[path = "https_tests.rs"]
+mod tests;
+
 /// Where the 443 rules redirect to, in the VM's own namespace.
 pub(super) const PROXY_PORT: u16 = 61443;
 

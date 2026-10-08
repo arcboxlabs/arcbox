@@ -113,3 +113,7 @@ NetworkManager now provides a Registry projection that preserves canonical exact
 The guest captures the selected owner, registration revision, and installed route identity before observing HTTPS access. The proxy rechecks that route after authorization, certificate configuration, TLS handshake, and upstream connection. A different owner at the same IP, removal and reinsertion of the same owner or route, a changed upstream port, or replacement by native TLS rejects the request. Identical registration and publication keep an active handshake valid. Failed upstream connections invalidate only the pinned route under the DNS and installed-route locks. The redundant IP-to-port map is removed.
 
 Service regressions passed on the host for authorization waits, ownership changes, route replacement, and stale failure invalidation. Strict Linux musl all-target Clippy and formatting passed. VM and browser acceptance remain unverified.
+
+## Exercise the asynchronous TLS relay
+
+A real TCP/TLS regression pauses certificate configuration, the TLS handshake, and the upstream connection. Ownership replacement at the same address stops forwarding at every stage. Reinstalling the same owner at the same address and port also stops forwarding without changing its DNS revision. The valid control forwards HTTP and verifies the response and forwarded scheme. All five relay scenarios, five service tests, and strict Linux musl all-target Clippy passed. These socket tests do not validate the guest NAT path, browser trust, or macOS authorization.
