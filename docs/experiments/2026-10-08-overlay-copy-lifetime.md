@@ -3,7 +3,7 @@
 - Type: experiment
 - Area: guest Docker archive views, OverlayFS mount lifetime
 - Outcome: overlapping overlay lifetimes identified; production repair remains open
-- Probe: [guest lifecycle recorder](../../tests/bench/signoz/probe-overlay-lifecycle.sh)
+- Probes: [guest lifecycle recorder](../../tests/bench/signoz/probe-overlay-lifecycle.sh), [lifecycle analyzer](../../tests/bench/signoz/analyze_overlay_lifecycle.py)
 - Host / guest: macOS VZ; Linux 6.18.38 arm64, 18 vCPUs, 16 GiB; Docker 29.8.2 with the containerd overlay snapshotter
 
 ## Question
@@ -60,3 +60,5 @@ The original ClickHouse stall remains a separate investigation. Its guest signal
 ## Preserved evidence
 
 Task artifact `overlay-copy-lifetime-2026-10-08` contains 162 source/copy SHA256-verified files totaling 79,393,054 bytes. It retains the exact driver, probe, kernel/configuration, raw trace, analyses, matching Moby source, and a snapshot of the live daemon log. All 75 pre-existing container identities, image identities, names, and states match the before-reboot baseline; the additional stopped probe container brings the total to 76. All four recorder actions succeeded and the owned probes were removed. The isolated diagnostic VM remains available; the previous frozen archives are unchanged.
+
+Run `python3 tests/bench/signoz/analyze_overlay_lifecycle.py TRACE --output NEW_JSON`; use `--self-test` for recursion, CPU migration, pointer mismatch, truncation, and mount-address reuse checks. On this capture, all 3,214 probe calls pair completely, all ten unlock stacks associate, and exactly one lock-overlap chain appears. Independent analysis matches the checked-in parser's JSON. Inspect header counts, parse/pairing/lifetime errors, CPU loss counters, and probe misses together; `capture.loss_free` alone only describes ring-buffer loss. Profile hit counts span registration and need not equal recorded events. Displayed timestamps have microsecond precision. Check the parser with `ruff check` and `ruff format --check --line-length 120`; those checks and its self-tests pass. Shell syntax and repository formatting also pass.
