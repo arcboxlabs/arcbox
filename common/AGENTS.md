@@ -148,6 +148,8 @@ distribution".
 - `container::ContainerMetadata` reads Docker identity, aliases, and addresses from one inspect snapshot.
   Choose the primary IPv4 address by network name, independent of JSON map order.
   Use `NetworkSettings.Networks`; the deprecated top-level address is not authoritative.
+  Generate canonical claims with a caller-supplied suffix and authority; report each rejected name without rewriting the name.
+  One-off Compose containers claim only their unique name; custom CSV names remain exclusive even on service replicas.
 - Response builders write flag bytes at `[2]`/`[3]` and counts at `[6..12]`
   literally. `build_nxdomain`/SERVFAIL/NODATA MUST zero ANCOUNT/NSCOUNT/ARCOUNT,
   or EDNS(0) queries (ARCOUNT=1 in the request) get malformed responses.

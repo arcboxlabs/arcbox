@@ -65,3 +65,11 @@ All 133 Docker library tests and seven API mock tests passed. Strict all-target 
 Guest DNS, web-service facts, and published-port mirrors now consume the same metadata parser as the host. DNS and discovery select one primary address; domain NAT retains all distinct addresses. Each pinned published binding produces one mirror target at the shared primary address. Duplicate guest address parsers are removed. Existing lowercase alias keys and underscore spelling remain unchanged pending canonical claim registration.
 
 All 18 targeted host-executed tests passed: eight facts tests, six event tests, and four publish-mirror tests. Strict Linux musl all-target Clippy and workspace formatting passed. These tests cover shared primary-address selection, all-address retention, alias spelling, and one target per published binding. The new guest behavior has not run inside a VM.
+
+## Canonical container claims
+
+The shared metadata parser reads `dev.arcbox.domains` as comma-separated exact or explicit wildcard `.local` names. Claim generation canonicalizes generated names under the caller's suffix and uses the complete container ID. Generated names include descendant wildcards when the DNS length limit permits a descendant. Custom exact names do not gain implicit wildcards, and custom names remain exclusive across Compose replicas. One-off Compose containers claim only their unique container name.
+
+Each rejected name produces a diagnostic without discarding other valid names. Invalid underscores are not rewritten as hyphens, and invalid generated names do not acquire an ID fallback. Valid 252-byte and 253-byte generated names retain exact claims without an impossible descendant wildcard. Production registration still needs to consume these claims and report their diagnostics.
+
+All 45 DNS tests passed, including six claim-generation regressions. Strict all-target Clippy passed on the host and Linux musl target, and formatting passed. These tests verify generated and custom ownership rules but do not establish macOS resolver or browser coverage.
