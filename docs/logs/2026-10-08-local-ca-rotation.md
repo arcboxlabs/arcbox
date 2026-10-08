@@ -83,3 +83,11 @@ The unused `AWAITING_HTTPS_TRUST` phase and Swift mapping were removed. The pair
 After this correction, the host tests passed 340 tests across local CA, protocol, gRPC, transport, API, daemon, and CLI. Strict all-target Clippy and workspace formatting passed. The three focused Swift HTTPS suites passed 34 tests, and Swift formatting and lint passed. The native trust and full Desktop limitations above still apply.
 
 `buf breaking` against `origin/master` reports only the previously recorded `MachineService.Import` to `ImportMachine` rename. The rename is an intentional paired-component change. The compatibility gate remains failing for that rename; the check was not disabled or filtered. Removing the unused HTTPS phase adds no finding against that base.
+
+## Signed development bundle
+
+`make build-runnable` completed with runtime `4f54ca73feed471e61183d1debb959c9366d28dc` and Desktop `c0487aefb176167f13c6e8f63471bbd147e87c1a`. The build used the configured Developer ID identity for both host binaries and Xcode. `codesign --verify --deep --strict` and the bundled `abctl tls rotate --help` passed outside the sandbox. Sandbox signature verification returned `CSSMERR_TP_NOT_TRUSTED`; the unchanged escalated command passed.
+
+All 17 embedded host Mach-O files have no `/nix/store` dependency or search path across their architectures. The embedded static AArch64 guest binaries match the runtime's release artifacts exactly: `arcbox-agent` SHA-256 `6c0386098c0f7687fa3fd3f2f35a7d4770649cc545b8deeb7da54ebc6a6b08e0`, and `vm-agent` SHA-256 `8307bb403cd7bcc17b783c75c98499e9f46840e8217eda32f92c6f9fdfbe3fbd`. The Debug App retains local `PackageFrameworks` search paths; these checks do not establish a distributable release.
+
+The App was not launched or installed. Native authorization, browser acceptance, and the complete Desktop suite retain the limitations above. The three isolated trusted roots still await cleanup authorization.
