@@ -9,6 +9,7 @@
 //! `MessageType` frames, same `AGENT_PROTOCOL_VERSION`, no wire change.
 
 mod cancellation;
+mod instance_authority;
 mod machine_exec;
 mod sandbox_stream;
 mod shutdown;
@@ -21,6 +22,7 @@ mod wire;
 #[cfg(test)]
 mod admission_tests;
 
+pub use self::instance_authority::InstanceAuthoritySession;
 pub use self::machine_exec::{ExecSessionInput, ExecSessionOutput};
 pub use self::sandbox_stream::SandboxStream;
 use self::sandbox_stream::StreamKind;
