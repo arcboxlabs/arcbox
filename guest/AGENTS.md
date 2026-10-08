@@ -217,6 +217,9 @@ non-obvious invariants and failure signatures.
   Listener scans continue every five seconds after startup backoff. Socket inode
   changes and failed proxy upstream connections invalidate successful probes.
   Failed discovery probes retry; unchanged successful probes do not repeat.
+  Network connect/disconnect events trigger a fresh container inspect. DNS and
+  discovery use the same first valid network IPv4 address. Disconnecting the
+  last addressed network removes that container's DNS ownership and routes.
   Regression signature: siblings get RST on `<name>.arcbox.local:80` while the Mac works — check
   `iptables -t nat -S PREROUTING | grep arcbox-domain` and
   `/proc/sys/net/bridge/bridge-nf-call-iptables`.

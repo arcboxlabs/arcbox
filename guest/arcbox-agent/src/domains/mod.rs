@@ -48,7 +48,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-pub use self::facts::ContainerFacts;
+pub use self::facts::{ContainerFacts, primary_ipv4};
 use self::routes::Routes;
 pub use self::selection::{HttpsBackend, SelectedRoutes};
 

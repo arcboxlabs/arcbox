@@ -163,7 +163,12 @@ impl Routes {
                     if listening.contains(&port)
                         && tracked
                             .probes
-                            .responds(tracked.facts.ips()[0], port, &tracked.facts.hostname, true)
+                            .responds(
+                                tracked.facts.primary_ip,
+                                port,
+                                &tracked.facts.hostname,
+                                true,
+                            )
                             .await
                     {
                         native.insert(port);
@@ -178,7 +183,12 @@ impl Routes {
                 if tracked.facts.pin.is_some()
                     || tracked
                         .probes
-                        .responds(tracked.facts.ips()[0], port, &tracked.facts.hostname, false)
+                        .responds(
+                            tracked.facts.primary_ip,
+                            port,
+                            &tracked.facts.hostname,
+                            false,
+                        )
                         .await
                 {
                     break Some(port);

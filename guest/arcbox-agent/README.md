@@ -126,6 +126,9 @@ on a five-second schedule while the container runs. Socket identity changes
 invalidate successful protocol probes, including replacement listeners on
 the same port. Failed discovery probes retry. Failed proxy upstream connects
 also invalidate discovery. Closed listeners lose their managed routes.
+Network connect/disconnect events refresh container addresses and discovery.
+DNS and protocol probes use the same default address; disconnecting the last
+addressed network removes the container's DNS ownership and routes.
 
 The agent installs destination-only rules in nat PREROUTING for every
 container IPv4 address, tagged `arcbox-domain:<container id>`. HTTP and native

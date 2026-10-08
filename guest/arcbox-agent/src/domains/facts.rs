@@ -20,6 +20,7 @@ pub struct ContainerFacts {
     /// Its network namespace (`SandboxKey`).
     pub(super) netns: PathBuf,
     ips: Vec<Ipv4Addr>,
+    pub(super) primary_ip: Ipv4Addr,
     pub(super) pin: Option<Pin>,
     pub(super) https_pin: Option<Pin>,
     pub(super) exposed: BTreeSet<u16>,
@@ -46,17 +47,10 @@ impl ContainerFacts {
             .as_str()
             .filter(|key| !key.is_empty())?
             .into();
-        let mut ips: Vec<Ipv4Addr> = inspect
-            .pointer("/NetworkSettings/Networks")?
-            .as_object()?
-            .values()
-            .filter_map(|net| net.get("IPAddress")?.as_str()?.parse().ok())
-            .collect();
+        let mut ips: Vec<Ipv4Addr> = ipv4_addresses(inspect).collect();
+        let primary_ip = *ips.first()?;
         ips.sort_unstable();
         ips.dedup();
-        if ips.is_empty() {
-            return None;
-        }
         let pin = read_pin(inspect, &id, http_port::LABEL);
         let https_pin = read_pin(inspect, &id, HTTPS_LABEL);
         let exposed = inspect
@@ -75,6 +69,7 @@ impl ContainerFacts {
             pid,
             netns,
             ips,
+            primary_ip,
             pin,
             https_pin,
             exposed,
@@ -118,6 +113,20 @@ impl ContainerFacts {
         }
         rules
     }
+}
+
+/// The address used by both guest DNS and protocol discovery.
+pub fn primary_ipv4(inspect: &serde_json::Value) -> Option<Ipv4Addr> {
+    ipv4_addresses(inspect).next()
+}
+
+fn ipv4_addresses(inspect: &serde_json::Value) -> impl Iterator<Item = Ipv4Addr> + '_ {
+    inspect
+        .pointer("/NetworkSettings/Networks")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flat_map(|networks| networks.values())
+        .filter_map(|network| network.get("IPAddress")?.as_str()?.parse().ok())
 }
 
 fn read_pin(inspect: &serde_json::Value, id: &str, label: &str) -> Option<Pin> {
@@ -173,6 +182,19 @@ mod tests {
         );
         assert_eq!(facts.pin, None);
         assert_eq!(facts.exposed, BTreeSet::from([8080]));
+    }
+
+    #[test]
+    fn dns_and_discovery_use_the_same_address_despite_sorted_rule_ips() {
+        let mut inspect = inspect();
+        inspect["NetworkSettings"]["Networks"] = serde_json::json!({
+            "a": { "IPAddress": "172.18.0.3" },
+            "z": { "IPAddress": "172.17.0.2" },
+        });
+        let facts = ContainerFacts::from_inspect(&inspect).unwrap();
+        assert_eq!(primary_ipv4(&inspect), Some(facts.primary_ip));
+        assert_eq!(facts.primary_ip, "172.18.0.3".parse::<Ipv4Addr>().unwrap());
+        assert_ne!(facts.primary_ip, facts.ips[0]);
     }
 
     #[test]
