@@ -78,3 +78,36 @@ python3 tests/bench/signoz/run_profiler_attribution.py --socket "$SOCKET_PATH" -
 ```
 
 Both cases satisfied the driver's predictions. GCC strict compilation and static analysis, the same explicit clang-format style, and Python syntax validation passed. Raw records and the probes are preserved under the task artifact directory `profiler-attribution-2026-10-08` with a verified SHA256 manifest. The diagnostic container and daemon were stopped after collection; the previously stopped task builder was returned to its stopped state.
+
+## Follow-up: incorrect runtime causes prolonged scheduling exclusion
+
+The [competition driver](../../tests/bench/signoz/run_scheduler_debt.py) starts eight existing busy probes in the same container, all pinned to guest CPU 1 for 120 seconds. The container has unlimited `cpu.max`; recorded throttling counters stay zero. A control runs without suspension. A second run suspends the verified disposable helper for ten seconds after every worker has produced two seconds of samples. The final driver also reads task state and `/proc/PID/schedstat` every three seconds; this state sampling was added for the pause run.
+
+This experiment tests a scheduling consequence, not merely a displayed counter. Linux [update_curr](https://github.com/gregkh/linux/blob/v6.18.38/kernel/sched/fair.c#L1297) advances the current entity's `vruntime` by its accounted runtime. The [EEVDF eligibility check](https://github.com/gregkh/linux/blob/v6.18.38/kernel/sched/fair.c#L797) compares that value with the runqueue's weighted average. For eight equal-weight, continuously runnable tasks, a ten-second overcharge to one task predicts approximately `(8 - 1) × 10 = 70` seconds of subsequent exclusion while its peers catch up. The `vlag` clamp does not repair this overcharge during ordinary preemption.
+
+| Observation | Unpaused control | Pause run |
+|---|---:|---:|
+| Largest sample gap across eight workers | 1.133074 s | 80.338194 s |
+| Largest gap among the seven unaffected peers | — | 10.218061 s |
+| Affected worker's raw PROF advance across its largest gap | — | 0.021 s |
+| Affected worker's scheduler advance across that gap | — | 10.042077 s |
+| Unchanged runnable snapshots after resume | — | 24 |
+
+The affected worker, index 6 and guest PID 40, remained in state `R` at all 24 snapshots from 0.026 to 69.795 seconds after the pause helper returned. Its kernel runtime stayed exactly 10.301243054 s and its dispatch count stayed exactly 120. The worker was therefore runnable without further execution across snapshots spanning about 69.8 seconds. These host timestamps follow each Docker read, so the interval is not a strict lower bound. The other seven workers continued producing samples. At the next snapshot, 72.839 seconds after resume, the affected worker had resumed: dispatch count was 235 and recorded runqueue delay had advanced from 1.903 s to 74.469 s. Runqueue delay is accounted on dispatch, so its earlier unchanged value does not mean the task was not waiting.
+
+The maximum clock-read span was 45,167 ns. No recorded CPU-clock snapshot straddled the pause. The affected worker's largest gap starts at elapsed 2.013045 s and ends at 82.351238 s. Its final scheduler runtime is 15.552710 s, but raw PROF is only 5.504 s; the scheduler treated the unexecuted ten seconds as that task's share of CPU time.
+
+This proves an application-visible scheduling defect under controlled host suspension. The chain is host descheduling without effective steal subtraction → excessive guest task runtime → excessive `vruntime` → prolonged exclusion of a runnable task. The result matches the roughly seventy-second prediction and cannot be explained solely by Docker display arithmetic or a blocked logging pipe.
+
+The experiment pins tasks to one CPU to keep the runqueue and equal-weight comparison controlled. It does not prove that the original ClickHouse threads had the same affinity, host pause, or scheduling sequence. The original incident's hundreds of runnable threads and long waits are consistent with this mechanism, but fault-time host/vCPU evidence is still missing. Generic virtual accounting alone does not remove the scheduler-runtime overcharge and therefore does not address this cause.
+
+Reproduce with the same static `thread_accounting` executable copied into a dedicated container:
+
+```sh
+python3 tests/bench/signoz/run_scheduler_debt.py --socket "$SOCKET_PATH" --container scheduler-debt --output /tmp/scheduler-control
+python3 tests/bench/signoz/run_scheduler_debt.py --socket "$SOCKET_PATH" --container scheduler-debt --pause --host-vm-pid "$VM_PID" --expected-start "$VM_START" --output /tmp/scheduler-pause
+```
+
+Verify helper ownership with its open kernel and disk files before suspension. The successful helper was PID 19743, started at `Thu Oct  8 12:20:07 2026`; SIGSTOP/SIGCONT occurred at 04:25:01.084988 and 04:25:11.141336 UTC. An earlier attempt omitted a space in that start-time string and was rejected before sending a signal. The driver stopped its dedicated container on failure; no user VM was suspended. That failed record is retained separately from the successful run.
+
+The runtime analysis checks the control and peer gaps, the affected task's continued runnable state and unchanged dispatch count, unlimited quota, and zero throttling. Python syntax, workspace formatting, and the existing `arcbox-hv` CPU accounting example's Clippy check passed. Raw records, exact source, kernel identity, and the analysis are preserved with a SHA256 manifest under `scheduler-debt-2026-10-08`. No production scheduler or kernel change was made.
