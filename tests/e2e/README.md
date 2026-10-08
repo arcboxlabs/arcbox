@@ -64,7 +64,7 @@ cargo build --release -p arcbox-agent --target aarch64-unknown-linux-musl
 cargo test -p arcbox-e2e --test local_https -- --ignored --nocapture
 ```
 
-The test serves HTTP on container port 8080 and verifies HTTPS on port 443 with the exported root. Separate names exercise signing-channel reconnection. The test deletes its isolated CA without changing user trust.
+The test serves HTTP on container port 8080 and verifies HTTPS on port 443 with the exported root. Container and Compose names exercise signing-channel reconnection. A separate request uses the container's default DNS and CA bundle, without `--resolve` or `--cacert`. Opt-out must fail certificate verification, and an unowned SNI name must fail the TLS handshake. The test deletes its isolated CA without changing user trust.
 
 VMM-level HV probe — drives the HV backend directly (no daemon): boot, vsock
 agent RPC, DAX, agent supervision, pause/resume, guest PSCI poweroff, worker

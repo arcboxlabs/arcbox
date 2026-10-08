@@ -1,15 +1,22 @@
 //! Exercise automatic container HTTPS with a Keychain CA and guest-owned leaf keys.
 //! Requests cross the guest bridge to port 443. No host routes or trust settings change.
+//! Default container trust, opt-out, and SNI ownership are checked separately.
 
 #![cfg(target_os = "macos")]
 
 use std::path::Path;
+use std::process::Command;
 use std::time::Duration;
 
-use anyhow::{Result, ensure};
-use arcbox_e2e::docker::{docker_output, docker_output_with_input, ensure_image};
+use anyhow::{Context, Result, ensure};
+use arcbox_e2e::daemon::connect_unix;
+use arcbox_e2e::docker::{
+    docker_host, docker_output, docker_output_with_input, ensure_image, run_with_timeout,
+};
 use arcbox_e2e::scenario::run_vz_scenario;
+use arcbox_grpc::SystemServiceClient;
 use arcbox_local_ca::KeychainAuthority;
+use arcbox_protocol::v1::{Empty, local_https_status::TrustState};
 
 const MARKER: &str = "keychain-https-ok";
 
@@ -25,7 +32,9 @@ fn keychain_ca_serves_container_https() -> Result<()> {
             }
         }
         let _cleanup = Cleanup(data_dir);
-        let ca = std::fs::read(data_dir.join("tls/ca.pem"))?;
+        let preparation = wait_https_preparation(&daemon.grpc_socket())?;
+        let ca = std::fs::read(data_dir.join("tls/ca.pem"))
+            .with_context(|| format!("read prepared CA; HTTPS status: {preparation}"))?;
         ensure!(
             !data_dir.join("tls/ca-key.pem").exists(),
             "shared CA key exists"
@@ -48,6 +57,10 @@ fn keychain_ca_serves_container_https() -> Result<()> {
                 "keychain-web",
                 "--label",
                 "dev.arcbox.http-port=8080",
+                "--label",
+                "com.docker.compose.project=keychain",
+                "--label",
+                "com.docker.compose.service=web",
                 &image,
                 "sh",
                 "-c",
@@ -70,7 +83,7 @@ fn keychain_ca_serves_container_https() -> Result<()> {
         // A second name requires another signing connection; repeating the first exercises the cache.
         for name in [
             "keychain-web.arcbox.local",
-            "alias.arcbox.local",
+            "web.keychain.arcbox.local",
             "keychain-web.arcbox.local",
         ] {
             let script = format!(
@@ -94,6 +107,85 @@ fn keychain_ca_serves_container_https() -> Result<()> {
             )?;
             ensure!(response.trim() == MARKER, "HTTPS returned {response:?}");
         }
+        let response = docker_output(
+            data_dir,
+            &[
+                "run",
+                "--rm",
+                curl_image,
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--noproxy",
+                "*",
+                "--max-time",
+                "10",
+                "https://web.keychain.arcbox.local/",
+            ],
+            Duration::from_secs(30),
+        )?;
+        ensure!(
+            response.trim() == MARKER,
+            "default container DNS and trust returned {response:?}"
+        );
+        for (options, url, expected_exit) in [
+            (
+                vec!["--label", "dev.arcbox.add-ca-certificates=false"],
+                "https://web.keychain.arcbox.local/",
+                60,
+            ),
+            (Vec::new(), "https://wrong-owner.arcbox.local/", 35),
+        ] {
+            let output = run_with_timeout(
+                Command::new("docker")
+                    .env("DOCKER_HOST", docker_host(data_dir))
+                    .args(["run", "--rm"])
+                    .args(options)
+                    .arg(curl_image)
+                    .args([
+                        "--fail",
+                        "--silent",
+                        "--show-error",
+                        "--noproxy",
+                        "*",
+                        "--max-time",
+                        "10",
+                        "--resolve",
+                        &format!("wrong-owner.arcbox.local:443:{ip}"),
+                        url,
+                    ]),
+                Duration::from_secs(30),
+            )?;
+            ensure!(
+                output.status.code() == Some(expected_exit),
+                "{url} must fail with curl exit {expected_exit}, got {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            ensure!(output.stdout.is_empty(), "rejected HTTPS returned a body");
+        }
         Ok(())
     })
+}
+
+fn wait_https_preparation(socket: &Path) -> Result<String> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            tokio::time::timeout(Duration::from_secs(30), async {
+                let mut client = SystemServiceClient::new(connect_unix(socket).await?);
+                let mut status = client.watch_setup_status(Empty {}).await?.into_inner();
+                while let Some(status) = status.message().await? {
+                    if let Some(https) = status.local_https
+                        && https.trust_state() != TrustState::Unspecified
+                    {
+                        return Ok(https.message);
+                    }
+                }
+                anyhow::bail!("HTTPS status stream ended before CA preparation")
+            })
+            .await
+            .context("HTTPS preparation timed out")?
+        })
 }
