@@ -76,6 +76,7 @@ from memory. Every new file is added to the index below.
 
 ### Experiments
 
+- [2026-10-08 — Can a delayed waiter block a condition-variable notifier?](experiments/2026-10-08-condvar-notification-latency.md)
 - [2026-10-08 — Which task clock charges host suspension?](experiments/2026-10-08-thread-cpu-accounting.md)
 - [2026-10-08 — Can HV expose correct execution time, and does Colima avoid CPU accounting divergence?](experiments/2026-10-08-hv-cpu-accounting-and-colima.md)
 - [2026-10-03 — Can a machine's root be served to the Mac by its agent, read-write, fast enough to work in?](experiments/2026-10-03-machine-root-export.md)
