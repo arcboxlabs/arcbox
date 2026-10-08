@@ -1,6 +1,8 @@
 //! Retains resolver publication ownership across startup cancellation and shutdown.
 
 #[cfg(target_os = "macos")]
+mod guest;
+#[cfg(target_os = "macos")]
 mod publication;
 #[cfg(target_os = "macos")]
 pub use publication::start;

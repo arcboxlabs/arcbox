@@ -584,6 +584,7 @@ dependencies = [
  "arcbox-transport",
  "async-trait",
  "axum",
+ "buffa",
  "bytes",
  "clap",
  "dirs",

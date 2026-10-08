@@ -92,8 +92,8 @@ pub async fn run(ctx: &DaemonContext, runtime: &Arc<Runtime>, dns_port: u16) -> 
         );
     }
     #[cfg(target_os = "macos")]
-    if owns_dns {
-        crate::resolver_service::start(ctx, Arc::clone(runtime.network_manager()), dns_port)
+    {
+        crate::resolver_service::start(ctx, Arc::clone(runtime), dns_port, owns_dns)
             .await
             .context("explicit DNS resolver setup failed")?;
     }

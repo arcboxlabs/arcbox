@@ -20,7 +20,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::context::DaemonContext;
 
-pub async fn start(ctx: &DaemonContext, manager: Arc<NetworkManager>, port: u16) -> Result<()> {
+pub async fn start(
+    ctx: &DaemonContext,
+    runtime: Arc<arcbox_core::Runtime>,
+    port: u16,
+    owns_dns: bool,
+) -> Result<()> {
+    let manager = Arc::clone(runtime.network_manager());
     let (ready, started) = oneshot::channel();
     let publisher = Publisher {
         manager: Arc::clone(&manager),
@@ -39,9 +45,22 @@ pub async fn start(ctx: &DaemonContext, manager: Arc<NetworkManager>, port: u16)
         helper_revision: None,
     };
     let required = ctx.install_dns_resolver;
+    let shutdown = ctx.shutdown.clone();
     ctx.resolver_service
-        .start(publisher.run(ready, required, move |stop| {
-            crate::mdns::run(Arc::clone(&manager), stop)
+        .start(Box::pin(async move {
+            let publication = async move {
+                if owns_dns {
+                    publisher
+                        .run(ready, required, move |stop| {
+                            crate::mdns::run(Arc::clone(&manager), stop)
+                        })
+                        .await
+                } else {
+                    Ok(())
+                }
+            };
+            let (result, ()) = tokio::join!(publication, super::guest::run(runtime, shutdown));
+            result
         }))
         .await;
     if required {

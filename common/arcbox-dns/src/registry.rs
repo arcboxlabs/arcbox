@@ -138,6 +138,12 @@ impl Registry {
         self.epoch
     }
 
+    /// Returns the complete authority snapshot and its lifetime revision under the caller's lock.
+    #[must_use]
+    pub fn instance_authorities(&self) -> (u64, &[InstanceAuthority]) {
+        (self.authority_revision, &self.instances)
+    }
+
     /// Replaces validated, canonically sorted instance roots without changing resource claims.
     /// Equivalent effective snapshots preserve every revision.
     pub fn replace_instance_authorities(&mut self, instances: Vec<InstanceAuthority>) -> bool {

@@ -74,6 +74,7 @@ workspace = true
 [dev-dependencies]
 arcbox-grpc.workspace = true
 arcbox-protocol.workspace = true
+buffa = "0.9.1"
 connectrpc = { package = "arcbox-connectrpc", version = "0.9.0-arcbox.1", features = ["client"] }
 serde_json.workspace = true
 tarpc.workspace = true
