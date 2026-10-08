@@ -6,6 +6,7 @@ use std::sync::PoisonError;
 
 use super::{DEFAULT_MACHINE_NAME, HostCapacity, Runtime};
 use crate::error::{CoreError, Result};
+use crate::machine::{MachineWebPorts, WebPortPolicy};
 
 /// A machine's CPU and memory limits after [`Runtime::set_machine_resources`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +23,26 @@ pub struct MachineResources {
 }
 
 impl Runtime {
+    /// Saves a user machine's web policies without applying routes. Omitted fields retain their values.
+    ///
+    /// # Errors
+    /// Returns an error for the System VM, an unknown or transitioning machine, or a failed save.
+    pub fn set_machine_web_ports(
+        &self,
+        name: &str,
+        http_port: Option<WebPortPolicy>,
+        https_port: Option<WebPortPolicy>,
+    ) -> Result<MachineWebPorts> {
+        if name == DEFAULT_MACHINE_NAME {
+            return Err(CoreError::config(
+                "machine web settings are unavailable for the System VM",
+            ));
+        }
+        self.machine_manager
+            .set_web_ports(name, http_port, https_port)
+            .map_err(Into::into)
+    }
+
     /// Changes a user machine's CPU and memory limits; a zero keeps the
     /// current value. The limits are checked against the host, then
     /// recorded for the machine's next start — see

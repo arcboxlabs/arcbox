@@ -36,6 +36,8 @@ Capture `Runtime::container_network_incarnation` before collecting HTTPS observa
 
 Capture `Runtime::container_network_incarnation` before querying Kubernetes Services. Pass that identity and a cancellation token to `apply_kubernetes_load_balancers`; the runtime rejects old VM snapshots and withdraws interrupted publications before returning.
 
+`Runtime::set_machine_web_ports` saves typed HTTP and HTTPS backend policies for a user machine. Omitted fields retain their values. The System VM is excluded. This method does not apply routes.
+
 ## Architecture
 
 ```text

@@ -11,6 +11,7 @@ use crate::error::{EngineError, Result};
 
 #[cfg(test)]
 mod tests;
+mod wire;
 
 /// Selection for one machine web protocol.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

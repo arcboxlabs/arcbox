@@ -2,6 +2,8 @@
 
 mod rootfs;
 mod transfer;
+#[cfg(test)]
+mod web_ports_tests;
 
 use arcbox_connect::v1 as pb;
 use arcbox_connect::v1::machine_exec_input;
@@ -269,6 +271,34 @@ impl pb::MachineService for MachineServiceImpl {
         })
     }
 
+    async fn set_web_ports(
+        &self,
+        _ctx: RequestContext,
+        request: ServiceRequest<'_, pb::SetMachineWebPortsRequest>,
+    ) -> ServiceResult<pb::MachineWebPorts> {
+        use arcbox_core::machine::WebPortPolicy;
+
+        let req = request.to_owned_message();
+        let http_port = req
+            .http_port
+            .as_option()
+            .map(WebPortPolicy::try_from)
+            .transpose()
+            .map_err(refusal)?;
+        let https_port = req
+            .https_port
+            .as_option()
+            .map(WebPortPolicy::try_from)
+            .transpose()
+            .map_err(refusal)?;
+        let saved = self
+            .runtime
+            .ready_for_write(&req.id)?
+            .set_machine_web_ports(&req.id, http_port, https_port)
+            .map_err(refusal)?;
+        Response::ok(saved.into())
+    }
+
     async fn set_default(
         &self,
         _ctx: RequestContext,
@@ -389,6 +419,7 @@ impl pb::MachineService for MachineServiceImpl {
                 ..Default::default()
             }
             .into(),
+            web_ports: pb::MachineWebPorts::from(machine.web_ports).into(),
             created: timestamp(machine.created_at).into(),
             started_at: machine.started_at.map(timestamp).into(),
             mounts: machine

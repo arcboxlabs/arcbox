@@ -64,10 +64,10 @@ pub mod machine {
         DirectoryMount, ExportMachineRequest, ExportMachineResponse, ImportMachineRequest,
         ImportMachineResponse, InspectMachineRequest, ListMachinesRequest, ListMachinesResponse,
         MachineEvent, MachineEventsRequest, MachineExecOutput, MachineExecRequest, MachineHardware,
-        MachineInfo, MachineNetwork, MachineOs, MachineStorage, MachineSummary,
+        MachineInfo, MachineNetwork, MachineOs, MachineStorage, MachineSummary, MachineWebPorts,
         RemoveMachineRequest, SetDefaultMachineRequest, SetMachineResourcesRequest,
-        SetMachineResourcesResponse, SshInfoRequest, SshInfoResponse, StartMachineRequest,
-        StopMachineRequest,
+        SetMachineResourcesResponse, SetMachineWebPortsRequest, SshInfoRequest, SshInfoResponse,
+        StartMachineRequest, StopMachineRequest, WebPortPolicy, web_port_policy,
     };
 }
 
@@ -193,8 +193,9 @@ pub use v1::{
     CreateMachineRequest, CreateMachineResponse, DirectoryMount, InspectMachineRequest,
     ListMachinesRequest, ListMachinesResponse, MachineEvent, MachineEventsRequest,
     MachineExecOutput, MachineExecRequest, MachineHardware, MachineInfo, MachineNetwork, MachineOs,
-    MachineStorage, MachineSummary, RemoveMachineRequest, SshInfoRequest, SshInfoResponse,
-    StartMachineRequest, StopMachineRequest,
+    MachineStorage, MachineSummary, MachineWebPorts, RemoveMachineRequest,
+    SetMachineWebPortsRequest, SshInfoRequest, SshInfoResponse, StartMachineRequest,
+    StopMachineRequest, WebPortPolicy, web_port_policy,
 };
 
 // Container types

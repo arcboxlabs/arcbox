@@ -81,6 +81,9 @@ service MachineService {
     // SystemService.SetSystemVmResources instead, which restarts it.
     rpc SetResources(SetMachineResourcesRequest) returns (SetMachineResourcesResponse);
 
+    // Saves web backend selection without applying routes. Omitted fields retain their values.
+    rpc SetWebPorts(SetMachineWebPortsRequest) returns (MachineWebPorts);
+
     // Sets the default machine — the one `abctl machine exec` and
     // `abctl machine ssh` act on when given no name — or clears it with an
     // empty id. The machine must exist. List reports the current one.
@@ -327,6 +330,33 @@ message SetMachineResourcesResponse {
     uint64 host_memory = 5;
 }
 
+// Selection for one machine web protocol.
+message WebPortPolicy {
+    oneof selection {
+        // Discover a backend automatically.
+        Empty auto = 1;
+        // Disable the protocol.
+        Empty off = 2;
+        // Backend port, 1 through 65535. HTTPS expects native TLS on this port.
+        uint32 port = 3;
+    }
+}
+
+// Saved settings; these fields do not report installed routes.
+message MachineWebPorts {
+    WebPortPolicy http_port = 1;
+    WebPortPolicy https_port = 2;
+}
+
+// Request to save machine web backend selection.
+message SetMachineWebPortsRequest {
+    string id = 1;
+    // Omission preserves the saved HTTP selection.
+    WebPortPolicy http_port = 2;
+    // Omission preserves the saved HTTPS selection.
+    WebPortPolicy https_port = 3;
+}
+
 // Request to set or clear the default machine.
 message SetDefaultMachineRequest {
     // Machine ID or name; empty clears the default.
@@ -385,6 +415,8 @@ message MachineInfo {
     Timestamp started_at = 9;
     // Directory mounts.
     repeated DirectoryMount mounts = 10;
+    // Saved backend selection, independent of installed routes.
+    MachineWebPorts web_ports = 11;
 }
 
 // Machine hardware configuration.

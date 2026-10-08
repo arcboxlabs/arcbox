@@ -2202,6 +2202,47 @@ pub struct SetMachineResourcesResponse {
     #[prost(uint64, tag = "5")]
     pub host_memory: u64,
 }
+/// Selection for one machine web protocol.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WebPortPolicy {
+    #[prost(oneof = "web_port_policy::Selection", tags = "1, 2, 3")]
+    pub selection: ::core::option::Option<web_port_policy::Selection>,
+}
+/// Nested message and enum types in `WebPortPolicy`.
+pub mod web_port_policy {
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Selection {
+        /// Discover a backend automatically.
+        #[prost(message, tag = "1")]
+        Auto(super::Empty),
+        /// Disable the protocol.
+        #[prost(message, tag = "2")]
+        Off(super::Empty),
+        /// Backend port, 1 through 65535. HTTPS expects native TLS on this port.
+        #[prost(uint32, tag = "3")]
+        Port(u32),
+    }
+}
+/// Saved settings; these fields do not report installed routes.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct MachineWebPorts {
+    #[prost(message, optional, tag = "1")]
+    pub http_port: ::core::option::Option<WebPortPolicy>,
+    #[prost(message, optional, tag = "2")]
+    pub https_port: ::core::option::Option<WebPortPolicy>,
+}
+/// Request to save machine web backend selection.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetMachineWebPortsRequest {
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
+    /// Omission preserves the saved HTTP selection.
+    #[prost(message, optional, tag = "2")]
+    pub http_port: ::core::option::Option<WebPortPolicy>,
+    /// Omission preserves the saved HTTPS selection.
+    #[prost(message, optional, tag = "3")]
+    pub https_port: ::core::option::Option<WebPortPolicy>,
+}
 /// Request to set or clear the default machine.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SetDefaultMachineRequest {
@@ -2283,6 +2324,9 @@ pub struct MachineInfo {
     /// Directory mounts.
     #[prost(message, repeated, tag = "10")]
     pub mounts: ::prost::alloc::vec::Vec<DirectoryMount>,
+    /// Saved backend selection, independent of installed routes.
+    #[prost(message, optional, tag = "11")]
+    pub web_ports: ::core::option::Option<MachineWebPorts>,
 }
 /// Machine hardware configuration.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

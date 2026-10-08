@@ -500,6 +500,7 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   pulls. A clone or an import gets its own `arcbox.machine_name=` on the
   cmdline, which the guest applies on every boot (`machine_identity`), so
   the source's name never leaks through the overlay's `/etc/hostname`.
+- `MachineService.SetWebPorts` and `Runtime::set_machine_web_ports` save typed machine web policies. Preserve absent request fields through the manager update. Inspect reports saved settings, not installed routes.
 - `MachineManager::set_resources` writes the new CPU/memory to the VM config
   and the persisted record at once; a stopped machine boots with it next, a
   running one keeps its size and the result says `restart_required`. It
