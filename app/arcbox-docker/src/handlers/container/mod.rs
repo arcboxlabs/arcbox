@@ -1,4 +1,3 @@
-#[cfg(test)]
 mod ca_injection;
 mod guest;
 mod start;
@@ -77,7 +76,11 @@ pub async fn create_container(
     // recomputes framing from the actual body.
     req.headers_mut().remove(axum::http::header::CONTENT_LENGTH);
 
-    proxy_to_system_vm(&state, &uri, req).await
+    let response = proxy_to_system_vm(&state, &uri, req).await?;
+    crate::proxy::invalidate_on_guest_error(
+        &state,
+        ca_injection::after_create(&state, response).await,
+    )
 }
 
 /// Start a container, then set up host-side port forwarding and DNS.
@@ -101,13 +104,15 @@ pub async fn start_container(
         Some(id) => Some(start::Start::acquire(&state, &id).await?),
         None => None,
     };
-    if let Some(start) = &start {
+    let warnings = if let Some(start) = &start {
         tracing::Span::current().record("container_id", start.id.as_str());
         uri = start.uri(&uri)?;
-    }
-
-    // Proxy start request to guest.
-    let response = proxy_to_system_vm(&state, &uri, req).await?;
+        ca_injection::reconcile(&state, &start.id).await?
+    } else {
+        Vec::new()
+    };
+    let mut response = proxy_to_system_vm(&state, &uri, req).await?;
+    ca_injection::report_warnings(&mut response, warnings);
 
     // On success, inspect the container and set up port forwarding + DNS.
     if response.status().is_success() {
@@ -236,11 +241,15 @@ pub async fn restart_container(
         Some(id) => Some(start::Start::acquire(&state, &id).await?),
         None => None,
     };
-    if let Some(start) = &start {
+    let warnings = if let Some(start) = &start {
         tracing::Span::current().record("container_id", start.id.as_str());
         uri = start.uri(&uri)?;
-    }
-    let response = proxy_to_system_vm(&state, &uri, req).await?;
+        ca_injection::reconcile(&state, &start.id).await?
+    } else {
+        Vec::new()
+    };
+    let mut response = proxy_to_system_vm(&state, &uri, req).await?;
+    ca_injection::report_warnings(&mut response, warnings);
 
     // Docker restart returns 204 on success. Refresh DNS (container may get
     // a new IP) with a single inspect call for both canonical ID and DNS info.

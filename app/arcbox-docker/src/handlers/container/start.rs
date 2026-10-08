@@ -6,18 +6,19 @@ use serde::Deserialize;
 use crate::{
     api::AppState,
     error::{DockerError, Result},
-    proxy::ActivityClass,
+    proxy::{ActivityClass, ActivityLease},
 };
 
 pub(super) struct Start {
     pub id: String,
     _guard: tokio::sync::OwnedMutexGuard<()>,
+    _lease: Option<ActivityLease>,
 }
 
 impl Start {
     pub async fn acquire(state: &AppState, id: &str) -> Result<Self> {
         super::super::ensure_system_vm_ready(state, ActivityClass::Active).await?;
-        let _lease = state.proxy.activity_lease();
+        let lease = state.proxy.activity_lease();
         #[derive(Deserialize)]
         struct Identity {
             #[serde(rename = "Id")]
@@ -27,7 +28,11 @@ impl Start {
         let Identity { id } = serde_json::from_slice(&body)
             .map_err(|e| DockerError::Server(format!("invalid container identity: {e}")))?;
         let guard = state.proxy.lock_container_start(&id).await;
-        Ok(Self { id, _guard: guard })
+        Ok(Self {
+            id,
+            _guard: guard,
+            _lease: lease,
+        })
     }
 
     pub fn uri(&self, uri: &Uri) -> Result<Uri> {
