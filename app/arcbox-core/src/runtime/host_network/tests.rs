@@ -189,6 +189,61 @@ async fn snapshots_skip_active_mutations_and_reject_changed_generations_or_vms()
     ));
 }
 
+#[tokio::test]
+async fn shared_writers_invalidate_snapshots_and_reject_closed_admission() {
+    use std::{
+        future::Future,
+        task::{Context, Waker},
+    };
+    let (runtime, _dir) = runtime().await;
+    let runtime = runtime.with_network_fixture(NetworkFixture::default());
+    let snapshot = runtime.capture_container_snapshot().await.unwrap().unwrap();
+    let commit = runtime.host_network.commit.lock().await;
+    let names = ["web".into()];
+    let mut register =
+        std::pin::pin!(runtime.register_dns("web", &names, "172.17.0.2".parse().unwrap()));
+    assert!(
+        register
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    assert!(runtime.dns_registry.read().unwrap().get("web").is_none());
+    drop(commit);
+    register.await.unwrap();
+    assert!(!snapshot.commit(&[]).await.unwrap());
+    assert!(runtime.dns_registry.read().unwrap().get("web").is_some());
+    let snapshot = runtime.capture_container_snapshot().await.unwrap().unwrap();
+    runtime.stop_port_forwarding_all().await;
+    assert!(!snapshot.commit(&[]).await.unwrap());
+    runtime.host_network.activity.lock().unwrap().closed = true;
+    assert!(
+        runtime
+            .register_container_alias("late", "late")
+            .await
+            .is_err()
+    );
+    assert!(
+        runtime
+            .register_sandbox_dns("late", "172.17.0.3".parse().unwrap())
+            .await
+            .is_err()
+    );
+    assert!(
+        runtime
+            .register_host_dns(&names, "172.17.0.4".parse().unwrap())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        runtime.registered_container_ids().await,
+        std::collections::HashSet::from(["web".into()])
+    );
+    assert!(runtime.sandbox_dns_ids.read().await.is_empty());
+    runtime.deregister_dns_by_id("web").await;
+    assert!(runtime.registered_container_ids().await.is_empty());
+}
+
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn stale_and_failed_snapshots_preserve_a_healthy_listener() {
