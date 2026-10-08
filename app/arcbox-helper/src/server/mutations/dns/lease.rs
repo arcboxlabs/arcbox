@@ -128,19 +128,6 @@ impl State {
         }
         roots.into_values().collect()
     }
-
-    pub(super) fn unleased(&self, root: &Domain) -> Result<(), HelperError> {
-        if self
-            .connections
-            .values()
-            .any(|lease| lease.records.iter().any(|r| r.roots.contains(root)))
-        {
-            return Err(HelperError::other(format!(
-                "resolver root {root} has a connection lease"
-            )));
-        }
-        Ok(())
-    }
 }
 
 impl ResolverStore {

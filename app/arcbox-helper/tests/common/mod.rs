@@ -69,35 +69,6 @@ impl HelperService for MockHelperServer {
         Ok(true)
     }
 
-    async fn dns_install(
-        self,
-        _: tarpc::context::Context,
-        domain: String,
-        port: u16,
-    ) -> Result<(), HelperError> {
-        validate::validate_domain(&domain).map_err(HelperError::validation)?;
-        validate::validate_port(port).map_err(HelperError::validation)?;
-        Ok(())
-    }
-
-    async fn dns_uninstall(
-        self,
-        _: tarpc::context::Context,
-        domain: String,
-    ) -> Result<(), HelperError> {
-        validate::validate_domain(&domain).map_err(HelperError::validation)?;
-        Ok(())
-    }
-
-    async fn dns_status(
-        self,
-        _: tarpc::context::Context,
-        domain: String,
-    ) -> Result<bool, HelperError> {
-        validate::validate_domain(&domain).map_err(HelperError::validation)?;
-        Ok(false)
-    }
-
     async fn hosts_alias_install(self, _: tarpc::context::Context) -> Result<(), HelperError> {
         Ok(())
     }

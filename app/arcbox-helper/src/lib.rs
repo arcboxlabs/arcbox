@@ -77,15 +77,6 @@ pub trait HelperService {
     /// Idempotent: returns Ok if the route is already absent.
     async fn route_remove(subnet: String) -> Result<(), HelperError>;
 
-    /// Installs a DNS resolver file for `domain` pointing to `127.0.0.1:port`.
-    async fn dns_install(domain: String, port: u16) -> Result<(), HelperError>;
-
-    /// Removes the DNS resolver file for `domain`.
-    async fn dns_uninstall(domain: String) -> Result<(), HelperError>;
-
-    /// Checks if a DNS resolver file is installed for `domain`.
-    async fn dns_status(domain: String) -> Result<bool, HelperError>;
-
     /// Creates `/var/run/docker.sock` symlink pointing to `target`.
     async fn socket_link(target: String) -> Result<(), HelperError>;
 

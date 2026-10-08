@@ -137,26 +137,6 @@ fn complete_preflight_preserves_foreign_files_and_links() {
 }
 
 #[test]
-fn legacy_mutations_cannot_take_an_active_root_even_when_missing() {
-    let (dir, store) = fixture();
-    let id = store.connection();
-    let domain = "a.local".parse().unwrap();
-    let port = DnsPort::try_from(5554).unwrap();
-    store.update(id, 501, update(1, &["a.local"])).unwrap();
-    let path = dir.path().join("a.local");
-    let accepted = fs::read(&path).unwrap();
-    assert!(store.install(&domain, port).is_err());
-    assert!(store.uninstall(&domain).is_err());
-    assert_eq!(fs::read(&path).unwrap(), accepted);
-    fs::remove_file(&path).unwrap();
-    assert!(store.install(&domain, port).is_err());
-    assert!(store.uninstall(&domain).is_err());
-    assert!(!path.exists());
-    store.release(id).unwrap();
-    store.install(&domain, port).unwrap();
-}
-
-#[test]
 fn partial_publication_cleans_both_revisions_and_invalidates_the_connection() {
     let (dir, store) = fixture();
     let id = store.connection();

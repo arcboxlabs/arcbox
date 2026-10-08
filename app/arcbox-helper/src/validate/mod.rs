@@ -30,14 +30,6 @@ pub fn validate_iface(s: &str) -> Result<(), String> {
     s.parse::<BridgeIface>().map(|_| ())
 }
 
-pub fn validate_domain(s: &str) -> Result<(), String> {
-    s.parse::<arcbox_constants::dns::Domain>().map(|_| ())
-}
-
-pub fn validate_port(port: u16) -> Result<(), String> {
-    DnsPort::try_from(port).map(|_| ())
-}
-
 pub fn validate_socket_target(s: &str) -> Result<(), String> {
     s.parse::<SocketTarget>().map(|_| ())
 }

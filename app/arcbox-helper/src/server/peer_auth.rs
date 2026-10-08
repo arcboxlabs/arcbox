@@ -46,10 +46,6 @@ impl VerifiedPeer {
         self.uid
     }
 
-    pub(super) fn identifier(self) -> Option<&'static str> {
-        self.identifier
-    }
-
     /// PID lookup and debug bypass cannot establish a resolver lease owner.
     pub(super) fn resolver_profile(self) -> Option<ArcboxProfile> {
         if !self.audit_token {

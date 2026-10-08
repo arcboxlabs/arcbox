@@ -8,10 +8,9 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use arcbox_constants::dns::Domain;
 use arcbox_helper::HelperError;
 use arcbox_helper::HelperService;
-use arcbox_helper::validate::{BridgeIface, CliName, CliTarget, DnsPort, SocketTarget, Subnet};
+use arcbox_helper::validate::{BridgeIface, CliName, CliTarget, SocketTarget, Subnet};
 use arcbox_local_ca::PublicAuthority;
 
 use super::mutations;
@@ -109,49 +108,6 @@ impl HelperService for HelperServer {
         let subnet: Subnet = subnet.parse().map_err(HelperError::validation)?;
         let iface: BridgeIface = iface.parse().map_err(HelperError::validation)?;
         mutations::route::remove_if_owned(&subnet, &iface)
-    }
-
-    async fn dns_install(
-        self,
-        _: tarpc::context::Context,
-        domain: String,
-        port: u16,
-    ) -> Result<(), HelperError> {
-        let domain: Domain = domain.parse().map_err(HelperError::validation)?;
-        let port = DnsPort::try_from(port).map_err(HelperError::validation)?;
-        tracing::debug!(
-            peer_uid = self.peer.uid(),
-            peer_identifier = self.peer.identifier(),
-            resolver_profile = ?self.peer.resolver_profile(),
-            domain = %domain,
-            "resolver install requested"
-        );
-        self.resolvers.install(&domain, port)
-    }
-
-    async fn dns_uninstall(
-        self,
-        _: tarpc::context::Context,
-        domain: String,
-    ) -> Result<(), HelperError> {
-        let domain: Domain = domain.parse().map_err(HelperError::validation)?;
-        tracing::debug!(
-            peer_uid = self.peer.uid(),
-            peer_identifier = self.peer.identifier(),
-            resolver_profile = ?self.peer.resolver_profile(),
-            domain = %domain,
-            "resolver uninstall requested"
-        );
-        self.resolvers.uninstall(&domain)
-    }
-
-    async fn dns_status(
-        self,
-        _: tarpc::context::Context,
-        domain: String,
-    ) -> Result<bool, HelperError> {
-        let domain: Domain = domain.parse().map_err(HelperError::validation)?;
-        self.resolvers.status(&domain)
     }
 
     async fn hosts_alias_install(self, _: tarpc::context::Context) -> Result<(), HelperError> {

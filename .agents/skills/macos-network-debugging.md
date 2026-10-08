@@ -149,8 +149,7 @@ codesign --force --options runtime \
 
 ### Protocol
 
-tarpc (bincode serialization over Unix STREAM socket). Not JSON — cannot be
-tested with raw socket tools.
+tarpc uses length-delimited JSON frames over a Unix STREAM socket.
 
 ### RPC methods (tarpc service)
 
@@ -158,9 +157,8 @@ tested with raw socket tools.
 |--------|-------------|
 | `route_add(subnet, iface)` | `/sbin/route -n add -net <subnet> -interface <iface>` |
 | `route_remove(subnet)` | `/sbin/route -n delete -net <subnet>` |
-| `dns_install(domain, port)` | Write `/etc/resolver/<domain>` |
-| `dns_uninstall(domain)` | Remove `/etc/resolver/<domain>` |
-| `dns_status(domain)` | Check if resolver file exists |
+| `resolver_lease(update)` | Publish complete connection-bound resolver roots for an audit-token-verified daemon |
+| `resolver_watch(after_epoch)` | Return current resolver authority for an audit-token-verified daemon |
 | `socket_link(target)` | Create `/var/run/docker.sock` → target symlink |
 | `socket_unlink()` | Remove `/var/run/docker.sock` symlink |
 | `cli_link(name, target)` | Create `/usr/local/bin/<name>` → target symlink |

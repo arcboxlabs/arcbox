@@ -119,30 +119,6 @@ impl Client {
             .await??)
     }
 
-    /// Installs a DNS resolver file for `domain` on port `port`.
-    pub async fn dns_install(&self, domain: &str, port: u16) -> Result<(), ClientError> {
-        Ok(self
-            .inner
-            .dns_install(tarpc::context::current(), domain.into(), port)
-            .await??)
-    }
-
-    /// Removes the DNS resolver file for `domain`.
-    pub async fn dns_uninstall(&self, domain: &str) -> Result<(), ClientError> {
-        Ok(self
-            .inner
-            .dns_uninstall(tarpc::context::current(), domain.into())
-            .await??)
-    }
-
-    /// Checks if a DNS resolver file is installed for `domain`.
-    pub async fn dns_status(&self, domain: &str) -> Result<bool, ClientError> {
-        Ok(self
-            .inner
-            .dns_status(tarpc::context::current(), domain.into())
-            .await??)
-    }
-
     /// Appends the fixed `127.0.0.1 ArcBox` alias to `/etc/hosts`.
     pub async fn hosts_alias_install(&self) -> Result<(), ClientError> {
         Ok(self

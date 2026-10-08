@@ -193,7 +193,7 @@ socket at `/var/run/arcbox-helper.sock`.
 
 ```
 arcbox-daemon / abctl
-        │  tarpc (bincode over Unix socket)
+        │  tarpc (length-delimited JSON over Unix socket)
         ▼
   arcbox-helper  (runs as root)
         │
