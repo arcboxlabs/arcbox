@@ -236,6 +236,31 @@ impl ResolverStore {
         state.connections.remove(&connection);
         Ok(())
     }
+
+    pub fn recover(&self) -> Result<(), HelperError> {
+        let _guard = self
+            .mutation
+            .lock()
+            .expect("DNS resolver mutation lock poisoned");
+        let Some(_directory) = open_directory(&self.directory)? else {
+            return Ok(());
+        };
+        for entry in fs::read_dir(&self.directory)
+            .map_err(|e| HelperError::io("list", &self.directory, e))?
+        {
+            let entry = entry.map_err(|e| HelperError::io("list", &self.directory, e))?;
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.parse::<Domain>().is_ok())
+                && storage::inspect(&entry.path(), is_record)? == ManagedFile::Owned
+            {
+                fs::remove_file(entry.path())
+                    .map_err(|e| HelperError::io("remove", entry.path(), e))?;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn remove(records: &[Record], directory: &Path, keep: &[Domain]) -> Result<(), HelperError> {
@@ -281,4 +306,31 @@ fn record_contents(
         contents(port),
         u128::from_be_bytes(nonce)
     )
+}
+
+fn is_record(bytes: &[u8]) -> bool {
+    let parse = || {
+        let text = std::str::from_utf8(bytes).ok()?;
+        let mut fields = text.lines().last()?.strip_prefix("# lease ")?.split(' ');
+        let uid = fields.next()?.parse::<u32>().ok()?;
+        let profile = fields.next()?.parse::<ArcboxProfile>().ok()?;
+        let nonce = u128::from_str_radix(fields.next()?, 16).ok()?.to_be_bytes();
+        let revision = fields.next()?.parse::<u64>().ok()?;
+        let connection = fields.next()?.parse::<u64>().ok()?;
+        let port = DnsPort::try_from(
+            text.lines()
+                .nth(2)?
+                .strip_prefix("port ")?
+                .parse::<u16>()
+                .ok()?,
+        )
+        .ok()?;
+        Some(
+            revision > 0
+                && connection > 0
+                && bytes
+                    == record_contents(port, uid, profile, nonce, revision, connection).as_bytes(),
+        )
+    };
+    parse().unwrap_or(false)
 }

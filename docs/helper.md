@@ -95,6 +95,8 @@ The resolver storage module (`server/mutations/dns/storage.rs`) validates direct
 
 A successful lease response confirms publication of every requested root and withdrawal of omitted roots. Every failed lease request permanently invalidates that connection. Validation and preflight failures preserve existing files until EOF. Partial publication failure immediately attempts cleanup of both the previous and attempted revision, including a write that renamed the file before returning `DurabilityUncertain`. Cleanup continues across paths and reports all errors. EOF drains in-flight requests before exact-stamp cleanup. Failed EOF cleanup retains ownership and blocks new claims until helper restart; there is no automatic cleanup retry. Authority snapshots, cross-instance change notifications, and daemon/mDNS integration remain pending.
 
+At helper startup, recovery removes only resolver files with the complete canonical lease stamp and the existing private-file safety properties. Recovery preserves unleased resolver files, malformed stamps, writable files, and links. Live updates accept only absent files or the current connection's exact file contents; another connection's stamp is never an ownership grant.
+
 `is_arcbox_owned` (shared with `CliTarget`) rejects relative paths, `..`, and
 anything outside `/Applications/` or `/Users/` without an
 `<ArcBox bundle>.app/Contents/MacOS/xbin/` segment. The bundle name is part of

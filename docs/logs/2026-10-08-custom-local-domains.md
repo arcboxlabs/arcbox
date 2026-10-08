@@ -171,3 +171,5 @@ All 50 shared DNS tests, three host reservation tests, five guest DNS tests, 12 
 ## Lease resolver roots to a verified daemon connection
 
 The helper now accepts complete resolver-root leases bound to the verified daemon profile, kernel UID, startup nonce, and increasing revision. Exact roots remain exclusive; failed updates invalidate the connection, and cleanup requires the recorded file contents. Nine helper DNS tests, four mock RPC tests, two temporary-root filesystem tests, strict all-target Clippy, and formatting passed. The daemon does not consume leases yet; system resolver files were not changed.
+
+Startup recovery removes only canonical orphan lease files after file-safety checks. Unleased files, foreign contents, writable files, and links remain untouched. Eight lease regressions cover stale nonce/revision, exact and nested roots, foreign preflight, partial rename failure, retained cleanup evidence, and startup recovery. The helper binary suite passed 35 tests with one native root-only test ignored; strict all-target Clippy and formatting passed.

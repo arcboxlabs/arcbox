@@ -78,11 +78,12 @@ async fn accept_loop(
     listener: tokio::net::UnixListener,
     tracker: Arc<ConnectionTracker>,
     shutdown: CancellationToken,
-) {
+) -> Result<(), arcbox_helper::HelperError> {
     let codec = tarpc::tokio_util::codec::length_delimited::LengthDelimitedCodec::builder();
     let resolvers = Arc::new(mutations::dns::ResolverStore::new(fs_root::resolve(
         mutations::dns::RESOLVER_DIR,
     )));
+    resolvers.recover()?;
 
     loop {
         let conn = tokio::select! {
@@ -96,7 +97,7 @@ async fn accept_loop(
                 }
             }
             () = shutdown.cancelled() => {
-                return;
+                return Ok(());
             }
         };
 
@@ -170,7 +171,7 @@ pub async fn run(idle_exit: bool) -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("idle-exit enabled ({}s timeout)", IDLE_TIMEOUT.as_secs());
         tokio::spawn(idle_watchdog(Arc::clone(&tracker), shutdown.clone()));
     }
-    accept_loop(listener, tracker, shutdown).await;
+    accept_loop(listener, tracker, shutdown).await?;
 
     Ok(())
 }
