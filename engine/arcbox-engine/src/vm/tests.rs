@@ -206,7 +206,7 @@ fn replaced_or_dead_incarnations_cannot_take_the_next_manager() {
         .unwrap()
         .info
         .state = MachineState::Stopped;
-    manager.remove(&id).unwrap();
+    manager.remove(&id, &current).unwrap();
     assert!(manager.network_incarnation(&id).is_err());
 }
 
@@ -295,4 +295,114 @@ async fn expected_agent_connection_fences_replacement_and_selects_the_locked_bac
                 .is_err()
         );
     }
+}
+
+fn modeled_stop_vm(manager: &VmManager) -> (VmId, VmIncarnation) {
+    use std::sync::atomic::Ordering;
+    let id = manager
+        .create(VmConfig {
+            vsock: false,
+            ..Default::default()
+        })
+        .unwrap();
+    let mut vms = manager.vms.write().unwrap();
+    let entry = vms.get_mut(&id).unwrap();
+    entry.begin_run().unwrap();
+    let vmm = Vmm::new(VmManager::build_vmm_config(entry)).unwrap();
+    vmm.running_flag().store(true, Ordering::SeqCst);
+    entry.vmm = Some(vmm);
+    entry.info.state = MachineState::Running;
+    (id, entry.run_incarnation())
+}
+
+#[test]
+fn stale_stop_and_remove_reject_before_touching_the_replacement() {
+    let (manager, _dir) = test_vm_manager();
+    let (id, old) = modeled_stop_vm(&manager);
+    manager
+        .vms
+        .write()
+        .unwrap()
+        .get_mut(&id)
+        .unwrap()
+        .reboot_with(|_| Ok(()))
+        .unwrap();
+    let current = manager.network_incarnation(&id).unwrap();
+    for result in [
+        manager.stop(&id, &old),
+        manager
+            .graceful_stop_using(&id, &old, |_| panic!("stale stop reached wait"))
+            .map(|_| ()),
+        manager.send_shutdown_rpc(&id, &old, 0),
+        manager.remove(&id, &old),
+    ] {
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("incarnation changed")
+        );
+    }
+    #[cfg(target_os = "macos")]
+    assert!(manager.force_stop_without_hypervisor(&id, &old).is_err());
+    assert_eq!(manager.network_incarnation(&id).unwrap(), current);
+    assert!(manager.remove(&id, &current).is_err());
+}
+
+#[test]
+fn graceful_completion_never_restores_or_stops_a_replacement_run() {
+    for stopped in [false, true] {
+        let (manager, _dir) = test_vm_manager();
+        let (id, expected) = modeled_stop_vm(&manager);
+        manager
+            .vms
+            .write()
+            .unwrap()
+            .get_mut(&id)
+            .unwrap()
+            .info
+            .state = MachineState::Stopping;
+        let result = manager.graceful_stop_using(&id, &expected, |_| {
+            let mut vms = manager.vms.write().unwrap();
+            let entry = vms.get_mut(&id).unwrap();
+            assert!(entry.vmm.is_none());
+            entry.begin_run().unwrap();
+            let vmm = Vmm::new(VmManager::build_vmm_config(entry)).unwrap();
+            vmm.running_flag()
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            entry.vmm = Some(vmm);
+            entry.info.state = MachineState::Running;
+            Ok(stopped)
+        });
+        assert!(result.unwrap_err().to_string().contains("run changed"));
+        assert_ne!(manager.network_incarnation(&id).unwrap(), expected);
+    }
+}
+
+#[test]
+fn borrowed_vmm_prevents_force_and_removal_until_graceful_restores_it() {
+    let (manager, _dir) = test_vm_manager();
+    let (id, expected) = modeled_stop_vm(&manager);
+    manager
+        .vms
+        .write()
+        .unwrap()
+        .get_mut(&id)
+        .unwrap()
+        .info
+        .state = MachineState::Stopping;
+    let result = manager.graceful_stop_using(&id, &expected, |_| {
+        assert!(manager.stop(&id, &expected).is_err());
+        assert!(manager.remove(&id, &expected).is_err());
+        #[cfg(target_os = "macos")]
+        assert!(
+            manager
+                .force_stop_without_hypervisor(&id, &expected)
+                .is_err()
+        );
+        assert_eq!(manager.get(&id).unwrap().state, MachineState::Stopping);
+        Ok(false)
+    });
+    assert!(!result.unwrap());
+    assert_eq!(manager.network_incarnation(&id).unwrap(), expected);
 }

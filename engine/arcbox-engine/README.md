@@ -2,6 +2,8 @@
 
 ArcBox Engine owns machine and VM lifecycles without a daemon dependency.
 
+Before stopping or removing a VM through `VmManager`, capture `run_incarnation` and pass that identity to the lifecycle operation. A stopped or created VM also has an identity; the identity does not imply readiness. Operations reject replacement runs before touching their VMM or publishing completion.
+
 Use `VmLifecycleManager::force_stop` to interrupt a boot or graceful shutdown and wait for machine removal:
 
 ```rust,ignore

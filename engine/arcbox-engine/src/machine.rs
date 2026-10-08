@@ -1449,7 +1449,7 @@ impl MachineManager {
     pub fn stop(&self, name: &str) -> Result<()> {
         let stoppable =
             |state: MachineState| matches!(state, MachineState::Running | MachineState::Stopping);
-        {
+        let expected = {
             let machines = self
                 .machines
                 .read()
@@ -1462,7 +1462,8 @@ impl MachineManager {
                     "machine '{name}' is not running"
                 )));
             }
-        }
+            self.vm_manager.run_incarnation(&machine.vm_id)?
+        };
 
         self.publish_event(
             name,
@@ -1490,9 +1491,9 @@ impl MachineManager {
         // Stop underlying VM
         #[cfg(target_os = "macos")]
         self.vm_manager
-            .force_stop_without_hypervisor(&machine.vm_id)?;
+            .force_stop_without_hypervisor(&machine.vm_id, &expected)?;
         #[cfg(not(target_os = "macos"))]
-        self.vm_manager.stop(&machine.vm_id)?;
+        self.vm_manager.stop(&machine.vm_id, &expected)?;
 
         machine.state = MachineState::Stopped;
         machine.cid = None;
@@ -1683,7 +1684,7 @@ impl MachineManager {
     /// Returns `Ok(true)` if the machine stopped, `Ok(false)` if graceful
     /// shutdown timed out or is unavailable.
     pub fn graceful_stop(&self, name: &str, timeout: Duration) -> Result<bool> {
-        let vm_id = {
+        let (vm_id, expected) = {
             let mut machines = self
                 .machines
                 .write()
@@ -1699,8 +1700,9 @@ impl MachineManager {
                 )));
             }
 
+            let expected = self.vm_manager.run_incarnation(&machine.vm_id)?;
             machine.state = MachineState::Stopping;
-            machine.vm_id.clone()
+            (machine.vm_id.clone(), expected)
         };
         self.publish_event(
             name,
@@ -1713,7 +1715,7 @@ impl MachineManager {
         // (alpine, 2026-10-04) — so the host's release goes first here too.
         self.await_host_release(name);
 
-        match self.vm_manager.graceful_stop(&vm_id, timeout) {
+        match self.vm_manager.graceful_stop(&vm_id, &expected, timeout) {
             Ok(true) => {
                 let mut machines = self
                     .machines
@@ -1723,33 +1725,36 @@ impl MachineManager {
                 let machine = machines
                     .get_mut(name)
                     .ok_or_else(|| EngineError::not_found(name.to_string()))?;
-                machine.state = MachineState::Stopped;
-                machine.cid = None;
-                machine.bridge_ip_address = None;
-                self.stop_serial_drain(name);
+                let current_id = machine.vm_id.clone();
+                self.vm_manager
+                    .with_run_incarnation(&current_id, &expected, || {
+                        machine.state = MachineState::Stopped;
+                        machine.cid = None;
+                        machine.bridge_ip_address = None;
+                        self.stop_serial_drain(name);
 
-                if let Err(e) = self.persist_stopped(name) {
-                    tracing::warn!(
-                        "Failed to persist stopped state for machine '{}': {}",
-                        name,
-                        e
-                    );
-                }
-                drop(machines);
-                self.publish_event(
-                    name,
-                    crate::event::Event::MachineStopped {
-                        name: name.to_string(),
-                    },
-                );
+                        if let Err(e) = self.persist_stopped(name) {
+                            tracing::warn!(
+                                "Failed to persist stopped state for machine '{}': {}",
+                                name,
+                                e
+                            );
+                        }
+                        self.publish_event(
+                            name,
+                            crate::event::Event::MachineStopped {
+                                name: name.to_string(),
+                            },
+                        );
+                    })?;
                 Ok(true)
             }
             Ok(false) => {
-                self.rollback_stopping(name);
+                self.rollback_stopping(name, &expected);
                 Ok(false)
             }
             Err(e) => {
-                self.rollback_stopping(name);
+                self.rollback_stopping(name, &expected);
                 Err(e)
             }
         }
@@ -1768,11 +1773,14 @@ impl MachineManager {
     /// Rolls a failed graceful stop back to `Running` — but only if the
     /// machine is still `Stopping`: a concurrent force [`Self::stop`] may
     /// have already stopped it, and its `Stopped` must not be overwritten.
-    fn rollback_stopping(&self, name: &str) {
+    fn rollback_stopping(&self, name: &str, expected: &VmIncarnation) {
         if let Ok(mut machines) = self.machines.write() {
             if let Some(machine) = machines.get_mut(name) {
                 if machine.state == MachineState::Stopping {
-                    machine.state = MachineState::Running;
+                    let id = machine.vm_id.clone();
+                    let _ = self.vm_manager.with_network_incarnation(&id, expected, || {
+                        machine.state = MachineState::Running;
+                    });
                 }
             }
         }
@@ -1827,6 +1835,7 @@ impl MachineManager {
             return Ok(false);
         };
 
+        let expected = self.vm_manager.run_incarnation(&machine.vm_id)?;
         // Check if machine is running
         if machine.state == MachineState::Running && !force {
             return Err(EngineError::invalid_state(
@@ -1847,7 +1856,7 @@ impl MachineManager {
             // The VM dies below; what the host holds of the machine (its
             // root mount) must be released while the machine still answers.
             self.await_host_release(name);
-            self.vm_manager.stop(&vm_id)?;
+            self.vm_manager.stop(&vm_id, &expected)?;
             self.stop_serial_drain(name);
             machines = self
                 .machines
@@ -1864,7 +1873,7 @@ impl MachineManager {
         };
 
         // Remove from VM manager
-        self.vm_manager.remove(&vm_id)?;
+        self.vm_manager.remove(&vm_id, &expected)?;
 
         // Remove from machines map
         machines.remove(name);

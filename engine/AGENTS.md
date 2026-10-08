@@ -102,6 +102,7 @@ The restructure plan and its locked decisions live in
 - Instance authority sessions consume one connected agent client. Retain their coordinator, observe idle failure, then drop the session and join before reconnecting. The coordinator owns admission, sequential acknowledgements, continuous reads, and shutdown of both transport workers.
 - VM listener transfer requires the expected `VmIncarnation`. Capture and validate the physical run under `VmManager.vms`; stopped or replaced runs must fail. The non-default `arcbox-engine/test-support` feature provides identity-only listener fixtures and never creates a live VM.
 - Expected agent and arbitrary-port connections share the VM-entry guard. Hold that guard through the native connection call. Do not acquire a second VM registry lock inside the guarded operation.
+- VM stop and removal require the captured `VmIncarnation`. Validate the expected run before shutdown connection, VMM transfer, and completion publication. An absent VMM during graceful shutdown does not mean the VM has stopped.
 
 New code that atomically replaces a **file** uses
 `common/arcbox-atomic-file` rather than hand-rolling temp-then-rename. It

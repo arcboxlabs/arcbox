@@ -291,13 +291,14 @@ impl VmManager {
     ///
     /// # Errors
     ///
-    /// Returns an error if the VM cannot be stopped.
-    pub fn stop(&self, id: &VmId) -> Result<()> {
+    /// Returns an error if the VM was replaced, cannot stop, or lent its VMM to graceful shutdown.
+    pub fn stop(&self, id: &VmId, expected: &VmIncarnation) -> Result<()> {
         let mut vms = self.vms.write().map_err(|_| EngineError::LockPoisoned)?;
 
         let entry = vms
             .get_mut(id)
             .ok_or_else(|| EngineError::not_found(id.to_string()))?;
+        entry.require_run(expected)?;
 
         if !matches!(
             entry.info.state,
@@ -309,12 +310,11 @@ impl VmManager {
             )));
         }
 
+        let vmm = entry.vmm.as_mut().ok_or_else(|| {
+            EngineError::invalid_state("VMM is owned by an in-flight graceful stop")
+        })?;
         entry.info.state = MachineState::Stopping;
-
-        // Stop the VMM
-        if let Some(ref mut vmm) = entry.vmm {
-            vmm.stop()?;
-        }
+        vmm.stop()?;
 
         entry.vmm = None;
         entry.info.state = MachineState::Stopped;
@@ -366,7 +366,23 @@ impl VmManager {
     ///
     /// Returns `Ok(true)` if the VM stopped, `Ok(false)` if graceful shutdown
     /// timed out or the agent was unreachable.
-    pub fn graceful_stop(&self, id: &VmId, timeout: Duration) -> Result<bool> {
+    pub fn graceful_stop(
+        &self,
+        id: &VmId,
+        expected: &VmIncarnation,
+        timeout: Duration,
+    ) -> Result<bool> {
+        self.graceful_stop_using(id, expected, |vmm| {
+            vmm.wait_for_stopped(timeout).map_err(EngineError::from)
+        })
+    }
+
+    fn graceful_stop_using(
+        &self,
+        id: &VmId,
+        expected: &VmIncarnation,
+        wait: impl FnOnce(&mut Vmm) -> Result<bool>,
+    ) -> Result<bool> {
         // Pre-check: determine whether to send the shutdown RPC based on
         // current state. Only Running VMs accept vsock connections.
         let should_send_rpc = {
@@ -374,6 +390,7 @@ impl VmManager {
             let entry = vms
                 .get(id)
                 .ok_or_else(|| EngineError::not_found(id.to_string()))?;
+            entry.require_run(expected)?;
             match entry.info.state {
                 MachineState::Running => true,
                 MachineState::Stopping => false,
@@ -390,9 +407,12 @@ impl VmManager {
         // Phase 1: Send shutdown RPC while VM is still Running and VMM is in
         // the entry. connect_vsock requires Running state.
         if should_send_rpc {
-            if let Err(e) =
-                self.send_shutdown_rpc(id, arcbox_constants::timeouts::GUEST_SHUTDOWN_GRACE_SECS)
-            {
+            if let Err(e) = self.send_shutdown_rpc(
+                id,
+                expected,
+                arcbox_constants::timeouts::GUEST_SHUTDOWN_GRACE_SECS,
+            ) {
+                self.with_run_incarnation(id, expected, || ())?;
                 tracing::warn!("Shutdown RPC failed for VM {id}: {e}, cannot gracefully stop");
                 return Ok(false);
             }
@@ -406,6 +426,7 @@ impl VmManager {
             let entry = vms
                 .get_mut(id)
                 .ok_or_else(|| EngineError::not_found(id.to_string()))?;
+            entry.require_run(expected)?;
 
             if !matches!(
                 entry.info.state,
@@ -428,23 +449,28 @@ impl VmManager {
         };
 
         // Phase 3: Wait for VM to reach Stopped state (PSCI will trigger this).
-        let stop_result = vmm.wait_for_stopped(timeout).map_err(EngineError::from);
+        let stop_result = wait(&mut vmm);
 
-        // Re-acquire to update final state. The entry may have been removed
-        // by a concurrent force_stop while the lock was released — if so,
-        // safely drop the Vmm (skipping the macOS VF stop path) and return
-        // Ok since the force path already handled teardown.
+        // A replacement may reuse the VM ID while the wait runs without the lock.
+        // Release the old VMM without publishing into the replacement entry.
         let mut vms = self.vms.write().map_err(|_| EngineError::LockPoisoned)?;
-        let Some(entry) = vms.get_mut(id) else {
-            tracing::warn!("VM {id} removed during graceful stop (concurrent force stop)");
-            // Force path already handled teardown. Skip the macOS VF stop
-            // path (could crash) but still drop to release FDs/resources.
-            #[allow(unused_mut)]
+        let Some(entry) = vms
+            .get_mut(id)
+            .filter(|entry| entry.require_run(expected).is_ok())
+        else {
+            tracing::warn!("VM {id} replaced or removed during graceful stop");
+            // The macOS VF stop path can crash after guest shutdown.
+            #[allow(
+                unused_mut,
+                reason = "macOS marks the VMM before releasing its resources"
+            )]
             let mut vmm = vmm;
             #[cfg(target_os = "macos")]
             vmm.set_skip_hypervisor_stop();
             drop(vmm);
-            return Ok(stop_result.unwrap_or(false));
+            return Err(EngineError::invalid_state(
+                "VM run changed during graceful stop",
+            ));
         };
 
         match stop_result {
@@ -453,7 +479,10 @@ impl VmManager {
                 // already halted via ACPI. Skip it but still drop normally
                 // to close FDs and free resources. On Linux/KVM the normal
                 // stop path is safe, so let Drop handle it.
-                #[allow(unused_mut)]
+                #[allow(
+                    unused_mut,
+                    reason = "macOS marks the VMM before releasing its resources"
+                )]
                 let mut vmm = vmm;
                 #[cfg(target_os = "macos")]
                 vmm.set_skip_hypervisor_stop();
@@ -475,7 +504,10 @@ impl VmManager {
                         "VM {id} state changed to {:?} during graceful stop, not restoring",
                         entry.info.state
                     );
-                    #[allow(unused_mut)]
+                    #[allow(
+                        unused_mut,
+                        reason = "macOS marks the VMM before releasing its resources"
+                    )]
                     let mut vmm = vmm;
                     #[cfg(target_os = "macos")]
                     vmm.set_skip_hypervisor_stop();
@@ -490,23 +522,26 @@ impl VmManager {
     ///
     /// Protocol admission and shutdown each use the blocking client's deadline.
     /// The caller's VM-stop timeout starts after the guest accepts shutdown.
-    fn send_shutdown_rpc(&self, id: &VmId, timeout_seconds: u32) -> Result<()> {
-        use arcbox_constants::ports::AGENT_PORT;
-
-        let cid = {
-            let vms = self.vms.read().map_err(|_| EngineError::LockPoisoned)?;
-            let entry = vms
-                .get(id)
-                .ok_or_else(|| EngineError::not_found(id.to_string()))?;
-            entry
+    fn send_shutdown_rpc(
+        &self,
+        id: &VmId,
+        expected: &VmIncarnation,
+        timeout_seconds: u32,
+    ) -> Result<()> {
+        let (cid, fd) = self.with_expected_entry(id, expected, |entry| -> Result<_> {
+            let cid = entry
                 .config
                 .guest_cid
-                .ok_or_else(|| EngineError::invalid_state("VM guest CID is not configured"))?
-        };
-        let fd = self.connect_vsock(id, AGENT_PORT)?;
+                .ok_or_else(|| EngineError::invalid_state("VM guest CID is not configured"))?;
+            let fd = entry
+                .vmm
+                .as_ref()
+                .expect("live incarnation has a VMM")
+                .connect_vsock(arcbox_constants::ports::AGENT_PORT)?;
+            Ok((cid, fd))
+        })??;
         crate::agent_client::AgentClient::from_fd_blocking(cid, fd)?
             .shutdown_blocking(timeout_seconds)?;
-
         tracing::info!("Guest accepted shutdown for VM {id}");
         Ok(())
     }
@@ -516,12 +551,13 @@ impl VmManager {
     /// This is a macOS fallback for environments where explicit VF stop can
     /// terminate the daemon process unexpectedly.
     #[cfg(target_os = "macos")]
-    pub fn force_stop_without_hypervisor(&self, id: &VmId) -> Result<()> {
+    pub fn force_stop_without_hypervisor(&self, id: &VmId, expected: &VmIncarnation) -> Result<()> {
         let mut vms = self.vms.write().map_err(|_| EngineError::LockPoisoned)?;
 
         let entry = vms
             .get_mut(id)
             .ok_or_else(|| EngineError::not_found(id.to_string()))?;
+        entry.require_run(expected)?;
 
         if entry.info.state != MachineState::Running {
             return Err(EngineError::invalid_state(format!(
@@ -778,17 +814,21 @@ impl VmManager {
     ///
     /// # Errors
     ///
-    /// Returns an error if the VM cannot be removed.
-    pub fn remove(&self, id: &VmId) -> Result<()> {
+    /// Returns an error if the VM was replaced or remains active.
+    pub fn remove(&self, id: &VmId, expected: &VmIncarnation) -> Result<()> {
         let mut vms = self.vms.write().map_err(|_| EngineError::LockPoisoned)?;
 
         let entry = vms
             .get(id)
             .ok_or_else(|| EngineError::not_found(id.to_string()))?;
+        entry.require_run(expected)?;
 
-        if entry.info.state == MachineState::Running {
+        if matches!(
+            entry.info.state,
+            MachineState::Running | MachineState::Starting | MachineState::Stopping
+        ) {
             return Err(EngineError::invalid_state(
-                "cannot remove running VM".to_string(),
+                "cannot remove active VM".to_string(),
             ));
         }
 

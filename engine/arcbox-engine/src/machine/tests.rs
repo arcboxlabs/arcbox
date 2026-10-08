@@ -222,8 +222,8 @@ fn test_register_mock_machine_idempotent() {
 /// A force stop publishes `MachineStopping`, then waits for the host to
 /// release what it holds of the machine before it touches the VM: the hold
 /// here is dropped by another thread after a delay, and `stop` returns no
-/// earlier. The mock machine has no VM, so the stop itself then fails —
-/// that failure is the VM's, after the wait, and not what is under test.
+/// earlier. An unstarted VM record rejects teardown after the wait.
+/// This test checks host release ordering without starting or stopping a VM.
 #[test]
 fn a_force_stop_waits_for_the_host_to_release_the_machine() {
     use crate::event::{Event, EventBus};
@@ -233,6 +233,14 @@ fn a_force_stop_waits_for_the_host_to_release_the_machine() {
     let mut events = bus.subscribe();
     let manager = Arc::new(test_machine_manager_with_bus(temp_dir.path(), bus));
     manager.register_mock_machine("held", 7).unwrap();
+    let vm_id = manager.vm_manager.create(VmConfig::default()).unwrap();
+    manager
+        .machines
+        .write()
+        .unwrap()
+        .get_mut("held")
+        .unwrap()
+        .vm_id = vm_id;
 
     let hold = manager.host_hold("held");
     let release_after = Duration::from_millis(300);

@@ -22,6 +22,20 @@ impl VmIncarnation {
 }
 
 impl VmEntry {
+    pub(super) fn run_incarnation(&self) -> VmIncarnation {
+        VmIncarnation {
+            id: self.info.id.clone(),
+            run_sequence: self.run_sequence,
+        }
+    }
+
+    pub(super) fn require_run(&self, expected: &VmIncarnation) -> Result<()> {
+        if self.run_incarnation() != *expected {
+            return Err(EngineError::invalid_state("VM run incarnation changed"));
+        }
+        Ok(())
+    }
+
     pub(super) fn begin_run(&mut self) -> Result<()> {
         self.info.state = MachineState::Starting;
         self.run_sequence = self
@@ -54,14 +68,38 @@ impl VmEntry {
         {
             return Err(EngineError::invalid_state("VM network is not running"));
         }
-        Ok(VmIncarnation {
-            id: self.info.id.clone(),
-            run_sequence: self.run_sequence,
-        })
+        Ok(self.run_incarnation())
     }
 }
 
 impl VmManager {
+    /// Captures the registered run identity, including created and stopped VMs.
+    ///
+    /// This identity fences lifecycle actions; it does not prove that the VM is running.
+    ///
+    /// # Errors
+    /// Returns an error if the VM is absent or the registry lock is poisoned.
+    pub fn run_incarnation(&self, id: &VmId) -> Result<VmIncarnation> {
+        let vms = self.vms.read().map_err(|_| EngineError::LockPoisoned)?;
+        vms.get(id)
+            .map(VmEntry::run_incarnation)
+            .ok_or_else(|| EngineError::not_found(id.to_string()))
+    }
+
+    pub(crate) fn with_run_incarnation<T>(
+        &self,
+        id: &VmId,
+        expected: &VmIncarnation,
+        publish: impl FnOnce() -> T,
+    ) -> Result<T> {
+        let vms = self.vms.read().map_err(|_| EngineError::LockPoisoned)?;
+        let entry = vms
+            .get(id)
+            .ok_or_else(|| EngineError::not_found(id.to_string()))?;
+        entry.require_run(expected)?;
+        Ok(publish())
+    }
+
     /// Publishes synchronously while the expected physical VM cannot be replaced.
     ///
     /// # Errors
@@ -75,7 +113,7 @@ impl VmManager {
         self.with_expected_entry(id, expected, |_| publish())
     }
 
-    fn with_expected_entry<T>(
+    pub(super) fn with_expected_entry<T>(
         &self,
         id: &VmId,
         expected: &VmIncarnation,
