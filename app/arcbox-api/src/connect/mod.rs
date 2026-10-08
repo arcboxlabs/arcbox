@@ -299,7 +299,13 @@ mod tests {
         let (directory, shared) = storage_runtime();
         let create = control::SandboxServiceImpl::new(shared.clone(), Arc::default());
         let restore = snapshot::SandboxSnapshotServiceImpl::new(shared, Arc::default());
-        for id in ["under_score", "-leading", "trailing-", &"x".repeat(64)] {
+        for id in [
+            "under_score",
+            "-leading",
+            "trailing-",
+            "two.labels",
+            &"x".repeat(64),
+        ] {
             let bytes = bytes::Bytes::from(
                 CreateSandboxRequest {
                     id: id.into(),

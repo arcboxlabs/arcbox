@@ -33,6 +33,9 @@ impl ResourceScope {
     /// # Errors
     /// Returns an error if the resulting name violates DNS label or length limits.
     pub fn name(self, hostname: &str, domain: &Domain) -> Result<Domain, String> {
+        if hostname.contains('.') {
+            return Err("resource hostname must be one DNS label".into());
+        }
         format!(
             "{}.{}.{domain}",
             hostname.to_ascii_lowercase(),

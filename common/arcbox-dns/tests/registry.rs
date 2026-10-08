@@ -68,7 +68,7 @@ fn resource_trees_block_container_claims_before_creation_and_after_address_loss(
                 .name(&"x".repeat(64), &suffix)
                 .is_err()
         );
-        for invalid in ["under_score", "-leading", "trailing-"] {
+        for invalid in ["under_score", "-leading", "trailing-", "two.labels"] {
             assert!(ResourceScope::Sandbox.name(invalid, &suffix).is_err());
         }
     }
