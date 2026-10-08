@@ -425,3 +425,13 @@ The [kernel-event experiment](../experiments/2026-10-08-clickhouse-kernel-events
 The first valid marker-only control completes 60 queries without failure. Independent validation confirms runtime settings, contention, identities, trace completeness, and cleanup. Event-enabled capture remains to be validated; the original stall and its complete causal chain remain unresolved.
 
 The first events-on capture also completes 60 queries and passes independent validation. Its 18 buffers retain 6,732,869 events without overrun, dropped events, commit-overrun, or consumption. The strict checker normalizes the kernel's syscall display format; the first parser rejection is preserved separately. Both negative cases retain their original runtime settings. Neither reproduces the earlier long lock or Keeper-expiry warning, so this pair does not identify the original stall's cause.
+
+## Startup contention exposes runnable delays without proc polling — 2026-10-08
+
+The [startup kernel capture](../experiments/2026-10-08-clickhouse-kernel-events.md#startup-contention-retains-a-partial-stall) fails its host Docker logs readiness command despite ClickHouse having logged readiness. It retains 130,997 kernel events without loss, then logs Keeper timeout and session expiry before cleanup stops the application. This is a valid partial trace, not a completed application observation; runtime settings, identity snapshots, and SQL results are absent. The full validator continues to reject the case.
+
+Trace-derived ClickHouse descendants include a 31.079283-second wakeup-to-dispatch delay and a 29.084645-second runnable interval inside a candidate signal handler. Other CPUs continue producing events, so these intervals are not a continuous whole-VM pause. The evidence establishes severe guest scheduling delay but does not identify wrong runtime charging, EEVDF exclusion, or an old-glibc notifier dependency in this capture. The driver now obtains the container PID before readiness to retain a frozen identity snapshot when readiness fails.
+
+Production Activity and Docker statistics do not perform the earlier observer's per-thread syscall/wchan reads. Their cgroup accounting flushes have separate locking paths. These source findings do not attribute the measured stall to either collector, and no production behavior is changed.
+
+The next startup repetition validates early PID capture against both frozen identity snapshots and passes the full capture checker. All 60 queries succeed, with 6,641,887 retained events and no loss or application warning. This is a completed negative application result, not proof that all scheduling waits were short. The new failure-path identity collection still needs a live failure case.

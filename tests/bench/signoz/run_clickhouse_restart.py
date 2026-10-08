@@ -289,6 +289,10 @@ def run(args):
             api("POST", f"/containers/{names['ch']}/start")
             started = time.monotonic()
             event(output, "clickhouse_started", requested_monotonic=requested, completed_monotonic=started, observation_seconds=SECONDS)
+            if trace is not None:
+                inspection = api("GET", f"/containers/{names['ch']}/json")
+                guest_pid = inspection["State"]["Pid"]
+                (output / "ch-started.json").write_text(json.dumps(inspection, indent=2) + "\n")
             wait_for_clickhouse(output, names["ch"], started)
             libc = cli(output, "libc-hash", ["exec", names["ch"], "sha256sum", "/lib/aarch64-linux-gnu/libc.so.6"])
             if libc["stdout"].split()[0] != LIBC_HASH:
@@ -302,7 +306,6 @@ def run(args):
                 cli(output, "proc-preflight", ["exec", "--user", "0", names["ch"], *observer_command, "1", *observer_arguments], timeout=10)
                 sampler = subprocess.Popen(DOCKER + ["exec", "--user", "0", names["ch"], *observer_command, "360", *observer_arguments], stdout=streams.enter_context((output / "proc-samples.txt").open("w")), stderr=streams.enter_context((output / "proc-samples.stderr").open("w")))
             else:
-                guest_pid = api("GET", f"/containers/{names['ch']}/json")["State"]["Pid"]
                 cli(output, "runtime-settings", ["exec", names["ch"], "timeout", "--kill-after=1", "3", "clickhouse-client", "--query", "SELECT name,value FROM system.server_settings WHERE name IN ('global_profiler_real_time_period_ns','global_profiler_cpu_time_period_ns','background_schedule_pool_size') FORMAT JSONEachRow"], timeout=4)
                 trace.identity("before", guest_pid)
             if time.monotonic() - started >= 30:

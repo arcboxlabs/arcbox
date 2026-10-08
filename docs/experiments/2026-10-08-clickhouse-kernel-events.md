@@ -70,3 +70,49 @@ The [offline validator](../../tests/bench/signoz/validate_clickhouse_trace.py) c
 ```sh
 python3 tests/bench/signoz/validate_clickhouse_trace.py /absolute/completed-case on 2ba51fc323186f9a6c2cd10de093ff46677efba2bd461e8ccfd6e55b8ea3b236
 ```
+
+## Scheduling in the completed negative capture
+
+The retained `events-on-01` analysis separates sleeping intervals from runnable intervals. All 520 Common/BgSchPool identities retain their start ticks across the two snapshots. The merged event stream contains 119,891 complete sleep → wakeup → switch-in chains and 14 runnable switch-out → switch-in chains, with no state-machine anomalies.
+
+| Threads | Longest runnable switch-out → switch-in | Longest wakeup → switch-in | Longest sleep → wakeup |
+|---|---:|---:|---:|
+| 8 Common | 50 µs | 867 µs | 1.410474 s |
+| 512 BgSchPool | 91 µs | 13.526 ms | 25.002971 s |
+
+The 25-second interval is an untimed `FUTEX_WAIT_BITSET_PRIVATE|CLOCK_REALTIME` sleep, followed by wakeup, switch-in, and return zero. It is not runnable starvation. Three uninterruptible intervals are classified separately; the longest is 50 µs. These intervals use guest mono time and do not measure physical CPU execution. The versioned parser, boundary self-checks, and `scheduling-analysis-v2.json` remain with the raw evidence.
+
+## Startup contention retains a partial stall
+
+The startup variant starts ClickHouse five seconds after all 36 host workers start. `startup-events-on-01` fails earlier: copying configuration into the stopped clone returns overlayfs EBUSY. No application, tracing, or contention starts. After the recorded cleanup, the exact same copy command succeeds in 24.835 ms. The failed result and successful recheck are retained. No driver retry or mount workaround is added, and this preparation failure has no established root cause.
+
+`startup-events-on-02` starts under contention without the periodic proc observer. ClickHouse logs readiness about 0.7 seconds after startup, but the host Docker logs command exceeds its five-second timeout. The driver therefore never reaches the SQL loop or identity prelude. It freezes and exports the trace before stopping the containers. Application logs show Keeper operation timeouts and session expiry before that stop request; they contain no executor lock-delay warning.
+
+The partial capture retains 130,997 events across 18 CPUs from ARM at 2338.049519 to END at 2379.204326. Every loss and consumption counter is zero. Frozen counters remain stable through export, and no event follows END. Preparation, freezing, export, copying, and container cleanup succeed. The separate partial checker passes capture integrity; the full validator correctly rejects the missing 300-second observation. Missing runtime settings, maps, process identity snapshots, WINDOW_BEGIN, and SQL results remain explicit limitations.
+
+The trace contains one `/usr/bin/clickhouse-server` exec, at guest PID 23381. Fork lineage and comm names identify candidate descendants, without proving container or thread-group membership. Two raw chains establish substantial guest scheduling delay:
+
+| Candidate | Retained chain | Elapsed guest mono time |
+|---|---|---:|
+| BgSchPool 23841 | wakeup at 2347.788279 → switch-in at 2378.867562 | 31.079283 s |
+| BgSchPool 23490 | R+ switch-out at 2346.013685 → switch-in at 2375.098330 | 29.084645 s |
+
+For 23490, signal 10 is delivered at 2345.795753. The first subsequent `rt_sigreturn` occurs at 2375.098402, only 72 µs after switch-in. Most of this candidate signal-handler interval is therefore an observed runnable wait. The raw boundaries are `cpu11.trace:3249,3252` and `cpu12.trace:8860,8863`. This does not establish continuous handler execution, a particular glibc wait, or EEVDF debt.
+
+Other CPUs continue producing events during the long waits. The largest gap in the merged selected-event stream is 209.663 ms; the largest single-CPU event gap is 1.952271 s. These observations exclude a continuous whole-VM pause across the 29-second interval, but do not exclude individual host vCPU descheduling, guest execution without selected events, or kernel lock delays.
+
+The freeze request takes 34.596592 seconds to return on the host. This includes Docker dispatch, guest scheduling, helper execution, and response transport. It is not a measurement of the kernel tracing-disable operation. The helper's process creation → Bash exec interval alone spans 7.866037 guest seconds. The FROZEN control row follows disabling both recording and events; its timestamp does not identify when recording stopped.
+
+The next driver revision moves its existing container inspect immediately after successful start and saves `ch-started.json`. If readiness then fails, finalization can request identity-after using the captured guest PID. A failed early inspect still leaves that identity unavailable. The change adds no periodic process reads, and the frozen snapshot remains insufficient by itself to exclude PID reuse.
+
+## Production statistics use a different observation path
+
+Desktop Activity, the menubar, and `abctl top` share the guest WatchStats stream. The collector reads global proc statistics, cgroup counters, and per-container network counters. Docker stats uses Moby 29.8.2, containerd 2.3.6, and cgroups 3.1.3 to read cgroup statistics. Neither path enumerates application TIDs to read syscall, wchan, status, stat, or schedstat as the earlier diagnostic observer did.
+
+Linux `cpu.stat` flushes per-CPU rstat state while holding its base lock with interrupts disabled. The diagnostic syscall snapshot can instead wait for a task to become inactive and acquire task/runqueue locks. These are distinct dependencies, not attributed causes. Production statistics were not added to this capture. Startup contention reproducing delay without periodic proc reads shows that those reads are not necessary for this observed scheduling failure.
+
+## Repetition with early container identity
+
+`startup-events-on-03` completes all 60 queries, with a median host command time of 54.529 ms and a maximum of 83.218 ms. The full validator passes. All 6,641,887 retained events have zero loss or consumption, and both snapshots contain 717 threads. `ch-started.json` identifies guest PID 25223; both snapshots match that PID, NSpid 1, and the same container cgroup. The 36 workers all terminate with SIGTERM, and all three containers stop after trace export. No warning or error appears in the saved ClickHouse log.
+
+This repetition exercises early PID capture and normal frozen identity collection. It does not exercise identity collection after a readiness failure, and query success alone does not establish short scheduling waits. The startup failure remains intermittent; no production repair follows from this repetition.
