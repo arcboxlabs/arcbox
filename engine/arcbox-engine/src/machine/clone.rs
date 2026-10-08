@@ -154,6 +154,7 @@ fn cloned_record(
         created_at: Utc::now(),
         started_at: None,
         mounts: src.mounts.clone(),
+        web_ports: src.web_ports,
     }
 }
 

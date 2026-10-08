@@ -99,6 +99,10 @@ The restructure plan and its locked decisions live in
 - Machine trust requests must acquire `host_hold_expected` before connecting. Retain the hold until native connection and request workers finish cancellation.
 - Stop and removal must fail before teardown when host holds remain after ten seconds. Drain holds outside the machine registry lock, including stopped-record removal retries. Revalidate the physical run after reacquiring the lock. See ADR 0009.
 
+## Machine settings
+
+- Keep machine web backend selection in `machine::MachineWebPorts`. Preserve omitted updates and inherited clone/archive settings. Persist updates before changing the canonical record. Saved policy does not imply installed routes.
+
 ## Durable writes
 
 - Instance authority sessions consume one connected agent client. Retain their coordinator, observe idle failure, then drop the session and join before reconnecting. The coordinator owns admission, sequential acknowledgements, continuous reads, and shutdown of both transport workers.

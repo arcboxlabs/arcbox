@@ -468,6 +468,7 @@ impl LifecycleShared {
             block_devices,
             rootfs: None,
             mounts: Vec::new(),
+            web_ports: Default::default(),
             distro: None,
             distro_version: None,
             backend: self.backend(),

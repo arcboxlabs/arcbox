@@ -68,4 +68,7 @@ pub struct ArchivedMachine {
     /// re-validated on import.
     #[serde(default)]
     pub mounts: Vec<MachineMount>,
+    /// Saved HTTP and HTTPS backend selection.
+    #[serde(default)]
+    pub web_ports: super::MachineWebPorts,
 }

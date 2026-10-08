@@ -832,11 +832,19 @@ async fn a_clone_gets_its_own_identity_and_the_sources_data() {
     let temp_dir = tempdir().unwrap();
     let manager = test_machine_manager(temp_dir.path());
     let source = create_shimmed(&manager, temp_dir.path(), "src_box").await;
+    let web_ports = manager
+        .set_web_ports(
+            "src_box",
+            Some("8080".parse().unwrap()),
+            Some(WebPortPolicy::Off),
+        )
+        .unwrap();
 
     assert_eq!(manager.clone_machine("src_box", "copy").unwrap(), "copy");
     let clone = manager.get("copy").unwrap();
 
     assert_eq!(clone.state, MachineState::Created);
+    assert_eq!(clone.web_ports, web_ports);
     assert_ne!(clone.vm_id, source.vm_id, "a clone is its own VM");
     assert_eq!((clone.cpus, clone.memory_mb, clone.disk_gb), (2, 1536, 1));
     assert_eq!(clone.distro.as_deref(), Some("alpine"));
@@ -869,6 +877,7 @@ async fn a_clone_gets_its_own_identity_and_the_sources_data() {
         Some(&*disk.to_string_lossy())
     );
     assert_eq!(persisted.cmdline.as_deref(), Some(cmdline));
+    assert_eq!(persisted.web_ports, web_ports);
 }
 
 #[tokio::test]
@@ -972,6 +981,13 @@ async fn export_then_import_restores_the_machine_and_its_data() {
     let temp_dir = tempdir().unwrap();
     let manager = test_machine_manager(temp_dir.path());
     let source = create_shimmed(&manager, temp_dir.path(), "dev").await;
+    let web_ports = manager
+        .set_web_ports(
+            "dev",
+            Some(WebPortPolicy::Off),
+            Some("8443".parse().unwrap()),
+        )
+        .unwrap();
     let source_disk = std::fs::read(source.disk_path.as_ref().unwrap()).unwrap();
     let archive_path = temp_dir.path().join("dev.tar.zst");
 
@@ -988,6 +1004,7 @@ async fn export_then_import_restores_the_machine_and_its_data() {
 
     let manifest = archive::read_manifest(&archive_path).unwrap();
     assert_eq!(manifest.machine.name, "dev");
+    assert_eq!(manifest.machine.web_ports, web_ports);
     assert_eq!(
         (manifest.machine.cpus, manifest.machine.memory_mb),
         (2, 1536)
@@ -1017,6 +1034,7 @@ async fn export_then_import_restores_the_machine_and_its_data() {
             }),
         }),
         mounts: manifest.machine.mounts,
+        web_ports: manifest.machine.web_ports,
         ..Default::default()
     };
     assert_eq!(
@@ -1026,6 +1044,7 @@ async fn export_then_import_restores_the_machine_and_its_data() {
 
     let imported = manager.get("dev2").unwrap();
     assert_eq!(imported.state, MachineState::Created);
+    assert_eq!(imported.web_ports, web_ports);
     assert_eq!(
         (imported.cpus, imported.memory_mb, imported.disk_gb),
         (2, 1536, 1)

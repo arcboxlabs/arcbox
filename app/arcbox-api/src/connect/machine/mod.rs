@@ -128,6 +128,7 @@ impl pb::MachineService for MachineServiceImpl {
             backend: arcbox_core::VmBackend::default(),
             enable_rosetta: false,
             nested_virt: false,
+            web_ports: Default::default(),
         };
 
         runtime

@@ -50,3 +50,5 @@ Recovery owners can pass a cancellation token to `storage_check_with_cancel` and
 A successful RPC returns the guest's check results. Callers must require `StorageCheckResponse.passed` before treating verification as successful. The client does not remove storage protection or start runtime services.
 
 Use `AgentClient::list_kubernetes_load_balancers(cancelled)` to poll LoadBalancer Services. Reuse the returned client after success. Cancel the token and await the operation before retiring the VM; blocking transport cancellation closes the socket and joins its worker.
+
+Use `MachineManager::set_web_ports` to save a machine's HTTP and HTTPS backend selection. Each policy is `Auto`, `Off`, or `Port(NonZeroU16)`; an explicit HTTPS port selects native TLS. Omitted arguments preserve the saved selection. The settings survive daemon restarts, clones, and archives. Saving these settings does not apply routes.

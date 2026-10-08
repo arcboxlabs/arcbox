@@ -71,6 +71,9 @@ pub struct PersistedMachine {
     /// Host directories shared into the machine.
     #[serde(default)]
     pub mounts: Vec<crate::machine::MachineMount>,
+    /// Saved HTTP and HTTPS backend selection.
+    #[serde(default)]
+    pub web_ports: crate::machine::MachineWebPorts,
 }
 
 /// Default creation time for backward compatibility with old configs.
@@ -159,6 +162,7 @@ impl From<&MachineInfo> for PersistedMachine {
             created_at: info.created_at,
             started_at: info.started_at,
             mounts: info.mounts.clone(),
+            web_ports: info.web_ports,
         }
     }
 }
@@ -326,6 +330,7 @@ mod tests {
             name: "test-vm".to_string(),
             started_at: None,
             mounts: Vec::new(),
+            web_ports: crate::machine::MachineWebPorts::default(),
             state: MachineState::Created,
             vm_id: VmId::new(),
             cpus: 4,
@@ -371,6 +376,7 @@ mod tests {
                 name: name.to_string(),
                 started_at: None,
                 mounts: Vec::new(),
+                web_ports: crate::machine::MachineWebPorts::default(),
                 state: MachineState::Created,
                 vm_id: VmId::new(),
                 cpus: 2,
@@ -409,6 +415,7 @@ mod tests {
             name: "test-vm".to_string(),
             started_at: None,
             mounts: Vec::new(),
+            web_ports: crate::machine::MachineWebPorts::default(),
             state: MachineState::Created,
             vm_id: VmId::new(),
             cpus: 2,
@@ -445,6 +452,7 @@ mod tests {
             name: "test-vm".to_string(),
             started_at: None,
             mounts: Vec::new(),
+            web_ports: crate::machine::MachineWebPorts::default(),
             state: MachineState::Created,
             vm_id: VmId::new(),
             cpus: 2,
@@ -496,6 +504,7 @@ mod tests {
             name: "crash-vm".to_string(),
             started_at: None,
             mounts: Vec::new(),
+            web_ports: crate::machine::MachineWebPorts::default(),
             state: MachineState::Running,
             vm_id: VmId::new(),
             cpus: 2,

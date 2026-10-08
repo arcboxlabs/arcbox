@@ -103,6 +103,7 @@ pub(super) async fn import(
         block_devices: Vec::new(),
         rootfs: Some(rootfs::rootfs_for(runtime, &image).await?),
         mounts: archived.mounts,
+        web_ports: archived.web_ports,
         distro: Some(archived.distro.clone()),
         distro_version: archived.distro_version.clone(),
         backend: arcbox_core::VmBackend::default(),

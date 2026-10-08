@@ -49,11 +49,13 @@ mod stop_owner;
 #[cfg(test)]
 mod tests;
 mod transfer;
+mod web_ports;
 
 pub use clone::clone_file;
 pub use host_hold::HostHold;
 pub use maintenance::StorageMaintenance;
 use transfer::DataDisk;
+pub use web_ports::{MachineWebPorts, WebPortPolicy};
 
 /// How long a stop waits for the host to release what it holds of the
 /// machine before touching the VM. The release takes well under a second
@@ -108,6 +110,8 @@ pub struct MachineInfo {
     pub started_at: Option<DateTime<Utc>>,
     /// Host directories shared into the machine (shim machines).
     pub mounts: Vec<MachineMount>,
+    /// Saved HTTP and HTTPS backend selection.
+    pub web_ports: MachineWebPorts,
 }
 
 /// The outcome of [`MachineManager::set_resources`].
@@ -184,6 +188,8 @@ pub struct MachineConfig {
     /// shares. Honored on shim machines (the shim mounts them into the new
     /// root); ignored elsewhere.
     pub mounts: Vec<MachineMount>,
+    /// Saved HTTP and HTTPS backend selection.
+    pub web_ports: MachineWebPorts,
     /// Distribution name (e.g., "alpine", "ubuntu").
     pub distro: Option<String>,
     /// Distribution version (e.g., "3.21", "24.04").
@@ -220,6 +226,7 @@ impl Default for MachineConfig {
             block_devices: Vec::new(),
             rootfs: None,
             mounts: Vec::new(),
+            web_ports: MachineWebPorts::default(),
             distro: None,
             distro_version: None,
             backend: arcbox_vmm::VmBackend::default(),
@@ -517,6 +524,7 @@ impl MachineManager {
                     created_at: persisted.created_at,
                     started_at: persisted.started_at,
                     mounts: persisted.mounts.clone(),
+                    web_ports: persisted.web_ports,
                 };
                 machines.insert(persisted.name.clone(), info);
             }
@@ -788,6 +796,7 @@ impl MachineManager {
             created_at: Utc::now(),
             started_at: None,
             mounts: config.mounts,
+            web_ports: config.web_ports,
         };
         self.register(&mut machines, info)
     }
@@ -1950,6 +1959,7 @@ impl MachineManager {
             created_at: Utc::now(),
             started_at: None,
             mounts: Vec::new(),
+            web_ports: MachineWebPorts::default(),
         };
 
         machines.insert(name.to_string(), info);
