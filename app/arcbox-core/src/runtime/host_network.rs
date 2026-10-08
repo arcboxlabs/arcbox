@@ -6,8 +6,10 @@ use arcbox_engine::vm::VmIncarnation;
 use std::sync::Mutex;
 use tokio::sync::Mutex as AsyncMutex;
 
+mod snapshot;
 #[cfg(test)]
 mod tests;
+pub use snapshot::{ContainerNetwork, HostNetworkSnapshot};
 
 #[derive(Default)]
 pub(super) struct HostNetwork {
@@ -73,9 +75,11 @@ impl HostMutationLease<'_> {
         let result = async {
             match change {
                 ContainerChange::Publish(_, bindings) if !bindings.is_empty() => {
-                    self.update_ports(id, bindings).await?;
+                    runtime
+                        .update_container_ports(&self.vm, id, bindings)
+                        .await?;
                 }
-                _ => self.clear_ports(id).await?,
+                _ => runtime.clear_container_ports(&self.vm, id).await?,
             }
             let mut aliases = runtime.container_aliases.write().await;
             self.with_live_vm(|| {
@@ -91,9 +95,12 @@ impl HostMutationLease<'_> {
         }
         .await;
         if let Err(error) = result {
-            self.clear_ports(id).await.map_err(|cleanup| {
-                CoreError::invalid_state(format!("{error}; port cleanup failed: {cleanup}"))
-            })?;
+            runtime
+                .clear_container_ports(&self.vm, id)
+                .await
+                .map_err(|cleanup| {
+                    CoreError::invalid_state(format!("{error}; port cleanup failed: {cleanup}"))
+                })?;
             return Err(error);
         }
         Ok(())
@@ -106,35 +113,37 @@ impl HostMutationLease<'_> {
             publish,
         )
     }
-
-    async fn update_ports(&self, id: &str, bindings: &[(String, u16, u16, String)]) -> Result<()> {
-        let runtime = self.runtime;
-        let machine = runtime.default_machine_name();
-        #[cfg(target_os = "macos")]
-        return runtime
-            .start_port_forwarding_with_incarnation(machine, id, bindings, &self.vm)
-            .await;
-        #[cfg(not(target_os = "macos"))]
-        runtime
-            .start_port_forwarding_fallback(machine, id, bindings, &self.vm)
-            .await
-    }
-
-    async fn clear_ports(&self, id: &str) -> Result<()> {
-        #[cfg(target_os = "macos")]
-        return self
-            .runtime
-            .stop_inbound_rules(id, Some((self.runtime.default_machine_name(), &self.vm)))
-            .await;
-        #[cfg(not(target_os = "macos"))]
-        {
-            self.runtime.stop_port_forwarding_raw(id).await;
-            Ok(())
-        }
-    }
 }
 
 impl Runtime {
+    async fn update_container_ports(
+        &self,
+        vm: &VmIncarnation,
+        id: &str,
+        bindings: &[(String, u16, u16, String)],
+    ) -> Result<()> {
+        let machine = self.default_machine_name();
+        #[cfg(target_os = "macos")]
+        return self
+            .start_port_forwarding_with_incarnation(machine, id, bindings, vm)
+            .await;
+        #[cfg(not(target_os = "macos"))]
+        self.start_port_forwarding_fallback(machine, id, bindings, vm)
+            .await
+    }
+
+    async fn clear_container_ports(&self, vm: &VmIncarnation, id: &str) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        return self
+            .stop_inbound_rules(id, Some((self.default_machine_name(), vm)))
+            .await;
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = vm;
+            self.stop_port_forwarding_raw(id).await;
+            Ok(())
+        }
+    }
     pub(super) fn with_host_network_incarnation<T>(
         &self,
         machine: &str,
@@ -164,12 +173,12 @@ impl Runtime {
             .with_network_incarnation(machine, expected, publish)?)
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
     pub(super) fn has_network_fixture(&self) -> bool {
         self.host_network.fixture.is_some()
     }
 
-    #[cfg(test)]
+    #[cfg(all(target_os = "macos", test))]
     pub(super) fn restart_network_fixture(&self) -> VmIncarnation {
         self.host_network
             .fixture

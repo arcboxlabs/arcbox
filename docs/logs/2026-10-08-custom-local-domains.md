@@ -217,3 +217,7 @@ ResolverService now owns the helper connection, complete resolver lease, authori
 ## Keep guest Registry operations synchronous
 
 ContainerRegistry now uses the standard RwLock. DNS lookup, route validation, and service snapshots release guards before asynchronous authorization or I/O. The final Linux musl binary passed 29 DNS, service, TLS, event, and RPC regressions in networkless Colima containers. Strict all-target musl Clippy and formatting passed. Protocol and minimum remain 7/7; guest authority transport and installed VM acceptance remain pending.
+
+## Commit complete host container snapshots
+
+Cold recovery captures an idle host generation and physical VM before querying every running container. Publication rejects intervening mutations or VM replacement. Port work holds the shared commit lock; Registry and aliases publish together under the final Engine guard. An ordinary bind failure preserves healthy untouched listeners, but successful earlier listener work may remain. Serial Runtime passed 80 tests, mock Docker API passed 13, and scoped strict all-target Clippy and formatting passed. Shared writer generation and retirement/shutdown fencing remain pending.

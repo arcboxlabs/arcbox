@@ -21,7 +21,7 @@ mod tests;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use host_network::NetworkFixture;
-pub use host_network::{ContainerChange, HostMutationLease};
+pub use host_network::{ContainerChange, ContainerNetwork, HostMutationLease, HostNetworkSnapshot};
 pub use machine_settings::MachineResources;
 pub use progress::InitProgress;
 
@@ -1961,15 +1961,19 @@ impl Runtime {
     }
 
     fn replace_container_dns(&self, container: &ContainerMetadata) {
+        self.replace_dns_registration(
+            &container.id,
+            self.container_dns_claims(container),
+            container.primary_ipv4().map(IpAddr::V4),
+        );
+    }
+
+    fn container_dns_claims(&self, container: &ContainerMetadata) -> Vec<Claim> {
         let claims = container.claims(&self.config.network.dns_domain, "container");
         for warning in claims.warnings {
             tracing::warn!(container_id = %container.id, %warning, "container DNS claim rejected");
         }
-        self.replace_dns_registration(
-            &container.id,
-            claims.claims,
-            container.primary_ipv4().map(IpAddr::V4),
-        );
+        claims.claims
     }
 
     /// Registers exact resource names; bare labels also receive the configured domain suffix.

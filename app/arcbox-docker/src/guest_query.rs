@@ -5,6 +5,7 @@
 
 use crate::error::{DockerError, Result};
 use crate::proxy::{GuestHttpClient, proxy_to_guest_pooled};
+use arcbox_core::runtime::ContainerNetwork;
 use arcbox_dns::container::ContainerMetadata;
 use axum::http::{HeaderMap, Method};
 use bytes::Bytes;
@@ -44,7 +45,7 @@ pub async fn inspect_container(client: &GuestHttpClient, token: &str) -> Result<
 
 /// Reads every running container before returning a snapshot for host reconciliation.
 /// Failed or mismatched inspect responses reject the entire snapshot.
-pub async fn running_container_snapshot(client: &GuestHttpClient) -> Result<Vec<ContainerInspect>> {
+pub async fn running_container_snapshot(client: &GuestHttpClient) -> Result<Vec<ContainerNetwork>> {
     let mut ids: Vec<_> = list_running_container_ids(client)
         .await?
         .into_iter()
@@ -59,7 +60,13 @@ pub async fn running_container_snapshot(client: &GuestHttpClient) -> Result<Vec<
                 inspect.metadata.id
             )));
         }
-        snapshot.push(inspect);
+        snapshot.push(ContainerNetwork {
+            bindings: crate::port_bindings::parse_port_bindings(&inspect.body)
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            metadata: inspect.metadata,
+        });
     }
     Ok(snapshot)
 }

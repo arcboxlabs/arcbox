@@ -101,11 +101,89 @@ async fn vm_replacement_during_alias_wait_rejects_final_publication() {
         Some("canonical")
     );
     assert_eq!(runtime.resolve_registered_container("new").await, None);
-    let hosts = runtime.network_manager.local_hosts_table();
-    let hosts = hosts.read().unwrap();
-    assert_eq!(
-        hosts.get("old.arcbox.local"),
-        Some(&"172.17.0.2".parse().unwrap())
+    let registry = runtime.dns_registry.read().unwrap();
+    assert!(matches!(
+        registry.resolve(&"old.arcbox.local".parse().unwrap()),
+        arcbox_dns::registry::Lookup::Matched { address, .. }
+            if address == "172.17.0.2".parse::<std::net::IpAddr>().unwrap()
+    ));
+    assert!(matches!(
+        registry.resolve(&"new.arcbox.local".parse().unwrap()),
+        arcbox_dns::registry::Lookup::Unmatched
+    ));
+}
+
+#[tokio::test]
+async fn snapshots_skip_active_mutations_and_reject_changed_generations_or_vms() {
+    let (runtime, _dir) = runtime().await;
+    let fixture = NetworkFixture::default();
+    let runtime = runtime.with_network_fixture(fixture.clone());
+    let before = runtime.capture_container_snapshot().await.unwrap().unwrap();
+    let during = runtime.capture_container_snapshot().await.unwrap().unwrap();
+    let vm = runtime.container_network_incarnation().unwrap();
+    let mutation = runtime.begin_container_mutation(vm).await.unwrap();
+    assert!(
+        runtime
+            .capture_container_snapshot()
+            .await
+            .unwrap()
+            .is_none()
     );
-    assert!(!hosts.contains_key("new.arcbox.local"));
+    let mut metadata = ContainerMetadata::from_inspect(&serde_json::json!({
+        "Id": "canonical", "Name": "/current",
+        "NetworkSettings": {"Networks": {"bridge": {"IPAddress": "172.17.0.2"}}}
+    }))
+    .unwrap();
+    mutation
+        .commit(ContainerChange::Publish(&metadata, &[]))
+        .await
+        .unwrap();
+    assert!(!during.commit(&[]).await.unwrap());
+    drop(mutation);
+    assert!(!before.commit(&[]).await.unwrap());
+    let replaced = runtime.capture_container_snapshot().await.unwrap().unwrap();
+    let epoch = runtime.dns_registry.read().unwrap().epoch();
+    fixture.restart();
+    assert!(replaced.commit(&[]).await.is_err());
+    assert_eq!(runtime.dns_registry.read().unwrap().epoch(), epoch);
+    assert_eq!(
+        runtime
+            .resolve_registered_container("current")
+            .await
+            .as_deref(),
+        Some("canonical")
+    );
+
+    runtime
+        .register_host_dns(&["host".into()], "10.0.2.1".parse().unwrap())
+        .await;
+    metadata.name = "refreshed".into();
+    let snapshot = runtime.capture_container_snapshot().await.unwrap().unwrap();
+    assert!(
+        snapshot
+            .commit(&[ContainerNetwork {
+                metadata,
+                bindings: vec![]
+            }])
+            .await
+            .unwrap()
+    );
+    assert_eq!(runtime.resolve_registered_container("current").await, None);
+    assert_eq!(
+        runtime
+            .resolve_registered_container("refreshed")
+            .await
+            .as_deref(),
+        Some("canonical")
+    );
+    let registry = runtime.dns_registry.read().unwrap();
+    assert!(registry.get(super::super::HOST_DNS_OWNER).is_some());
+    assert!(matches!(
+        registry.resolve(&"current.arcbox.local".parse().unwrap()),
+        arcbox_dns::registry::Lookup::Unmatched
+    ));
+    assert!(matches!(
+        registry.resolve(&"refreshed.arcbox.local".parse().unwrap()),
+        arcbox_dns::registry::Lookup::Matched { .. }
+    ));
 }
