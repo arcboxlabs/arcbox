@@ -12,6 +12,10 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
 use tokio_rustls::TlsConnector;
 
+#[cfg(target_os = "linux")]
+#[path = "https_http2_tests.rs"]
+mod http2;
+
 fn publish_index(dns: &DnsRegistry) {
     use arcbox_dns::{
         NamePattern,
