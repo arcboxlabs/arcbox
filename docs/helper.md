@@ -82,9 +82,9 @@ Rejected peers are dropped before any tarpc dispatch; logs include
 | `socket_link` / `socket_unlink` | Target must parse as `SocketTarget` (`~/.arcbox` / `~/.arcbox-dev`); replace only ArcBox-owned symlink | Only ArcBox-owned symlink; never real sockets |
 | `dns_install` / `dns_uninstall` | Writes marker `# managed by arcbox-helper`; refuses to overwrite foreign resolvers | Only files carrying the marker |
 | `hosts_alias_*` | Fixed `127.0.0.1 ArcBox # managed by arcbox-helper` line only | Lines carrying the marker only |
-| `ca_install` / `ca_status` / `ca_remove` | Public DER certificate must pass the ArcBox root policy, including verified self-signature, critical DNS/IP constraints, and CA path length zero; stores public certificate in System Keychain with TLS-server-only Admin trust | Exact certificate DER only; preserves other users' and profiles' roots |
+| `ca_install` / `ca_status` / `ca_remove` | Public DER certificate must pass the ArcBox root policy, including verified self-signature, critical DNS/IP constraints, and CA path length zero; stores the System Keychain copy and inspects TLS-server-only Admin trust | Exact certificate DER only; removal requires prior Admin trust revocation and preserves other roots |
 
-The helper never receives a CA private key or a certificate file path. The daemon calls `ca_install` and verifies `ca_status` before the canonical production VM boots. `ca_status` checks both the System Keychain certificate and the precise Admin trust policy; existing User trust cannot satisfy that check. The native Security.framework APIs require no additional authentication from the already-authorized root helper. Legacy User trust remains a separate user-session operation. See [ADR 0005](adr/0005-helper-manages-local-ca-trust.md).
+The helper never receives a CA private key or a certificate file path. `ca_install` stores the public certificate without changing trust. `ca_status` checks both the System Keychain certificate and the precise Admin trust policy; existing User trust cannot satisfy that check. `ca_remove` refuses deletion until Admin trust is revoked. Trust mutations run in the login user's GUI session through native Security.framework APIs. Desktop invokes the bundled `abctl tls trust` when the daemon publishes `AWAITING_HTTPS_TRUST`; cancellation returns CLI status 130 and leaves startup retryable. Correct existing trust skips native mutation. Root helper installation authorization cannot replace CA trust authorization. See [ADR 0006](adr/0006-authorize-local-ca-in-user-session.md).
 
 `is_arcbox_owned` (shared with `CliTarget`) rejects relative paths, `..`, and
 anything outside `/Applications/` or `/Users/` without an
@@ -117,7 +117,7 @@ cargo test -p arcbox-helper --test e2e_fs_test
 ```
 
 Release builds **ignore** the env var (production must never be redirected).
-CA trust RPCs reject a filesystem test root because Keychain mutations cannot be redirected into that directory. The ignored native CA lifecycle test requires root and removes its exact temporary certificates after checking installation, policy, idempotency, and sibling isolation.
+CA RPCs reject a filesystem test root because Keychain mutations cannot be redirected into that directory. The helper's ignored native storage test requires root and checks exact-certificate storage, idempotency, and sibling isolation. Native trust lifecycle checks run separately in the login user's GUI session and require macOS authorization.
 
 Also covered by unit tests in the helper binary (`--bins`) and mock tarpc
 integration tests (`--tests` excluding `e2e_fs_test`).

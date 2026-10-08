@@ -67,7 +67,8 @@ from memory. Every new file is added to the index below.
 
 ### Decisions
 
-- [0005 — The privileged helper manages local CA trust](adr/0005-helper-manages-local-ca-trust.md) (2026-10-08)
+- [0006 — Authorize local CA trust in the login user's session](adr/0006-authorize-local-ca-in-user-session.md) (2026-10-08)
+- [0005 — The privileged helper manages local CA trust](adr/0005-helper-manages-local-ca-trust.md) (2026-10-08; trust mutation and authorization superseded by ADR 0006)
 - [0004 — The macOS Keychain owns the local CA key](adr/0004-local-ca-signs-in-macos-keychain.md) (2026-10-07)
 - [0001 — On the HV backend, asserting the SPI is the whole wake](adr/0001-hv-spi-is-the-whole-wake.md) (2026-09-30)
 - [0002 — A distro machine's root is served to the host by a userspace NFSv3 server in its agent, mounted over the bridge NIC](adr/0002-machine-root-export-over-userspace-nfsv3.md) (2026-10-03; decisions 4 and 5 superseded by ADR 0003)
