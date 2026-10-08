@@ -1,9 +1,9 @@
 //! Host-owned signing names and guest routes projected through shared URL policy.
 
 use arcbox_connect::v1::{
-    ContainerWebService, GuestWebService, ListGuestWebServicesRequest, ReconcileHttpsAccessRequest,
-    ReconcileHttpsAccessResponse, WebService, container_web_service::HttpsBackend,
-    guest_web_service::Route, web_service::HttpsMode,
+    ContainerWebService, GuestWebService, IndexWebService, ListGuestWebServicesRequest,
+    ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse, WebService,
+    container_web_service::HttpsBackend, guest_web_service::Route, web_service::HttpsMode,
 };
 use arcbox_constants::dns::Domain;
 use arcbox_dns::registry::{Lookup, Registry};
@@ -77,7 +77,8 @@ impl Runtime {
                 .map_or_else(String::new, ToString::to_string),
             ..Default::default()
         };
-        let mut agent = self.connect_system_agent().await?;
+        let expected = self.container_network_incarnation()?;
+        let mut agent = self.connect_system_agent_expected(expected.clone()).await?;
         let response = if agent.is_blocking() {
             tokio::task::spawn_blocking(move || agent.list_guest_web_services_blocking(request))
                 .await
@@ -85,11 +86,21 @@ impl Runtime {
         } else {
             agent.list_guest_web_services(request).await?
         };
-        let registry = self
-            .dns_registry
-            .read()
-            .expect("DNS registry lock poisoned");
-        selected_services(response.services, hostname.as_ref(), &registry)
+        self.with_host_network_incarnation(self.default_machine_name(), &expected, || {
+            let registry = self
+                .dns_registry
+                .read()
+                .expect("DNS registry lock poisoned");
+            selected_services(
+                response.services,
+                hostname.as_ref(),
+                &registry,
+                &IndexEndpoint {
+                    apex: &self.config.network.dns_domain,
+                    gateway: self.config.container.cidr.docker_bridge_gateway(),
+                },
+            )
+        })?
     }
 }
 
@@ -97,6 +108,7 @@ fn selected_services(
     routes: Vec<GuestWebService>,
     hostname: Option<&Domain>,
     registry: &Registry,
+    index: &IndexEndpoint<'_>,
 ) -> Result<Vec<WebService>> {
     if hostname.is_some() && routes.len() > 1 {
         return Err(CoreError::Vm(
@@ -106,24 +118,73 @@ fn selected_services(
     routes
         .into_iter()
         .try_fold(Vec::new(), |mut services, route| {
-            match route.route {
+            let projected = match route.route {
                 Some(Route::Container(route)) => {
                     if hostname.is_some_and(|name| route.hostnames != [name.as_str()]) {
                         return Err(CoreError::Vm(
                             "guest web route does not match the requested hostname".into(),
                         ));
                     }
-                    services.extend(container_services(*route, registry)?);
+                    container_services(*route, registry)?
                 }
-                Some(Route::Index(_)) => {
-                    return Err(CoreError::Vm(
-                        "guest index route has no host publication".into(),
-                    ));
+                Some(Route::Index(route)) => {
+                    if hostname.is_some_and(|name| route.hostname != name.as_str()) {
+                        return Err(CoreError::Vm(
+                            "guest index does not match the requested hostname".into(),
+                        ));
+                    }
+                    index.project(*route, registry)?
                 }
                 None => return Err(CoreError::Vm("guest web route has no resource kind".into())),
-            }
+            };
+            services.extend(projected);
             Ok(services)
         })
+}
+
+struct IndexEndpoint<'a> {
+    apex: &'a Domain,
+    gateway: std::net::Ipv4Addr,
+}
+
+impl IndexEndpoint<'_> {
+    fn project(&self, route: IndexWebService, registry: &Registry) -> Result<Vec<WebService>> {
+        let Self { apex, gateway } = *self;
+        if route.hostname != apex.as_str() || route.ipv4_address != gateway.to_string() {
+            return Err(CoreError::Vm(
+                "guest index does not match the configured apex and gateway".into(),
+            ));
+        }
+        if !matches!(registry.resolve(apex), Lookup::Matched { claim, address, publishable: true, .. }
+        if claim.owner() == "system:index" && claim.authority() == "index"
+            && claim.pattern() == &arcbox_dns::NamePattern::Exact(apex.clone())
+            && address == std::net::IpAddr::V4(gateway))
+        {
+            return Ok(Vec::new());
+        }
+        let mode = if route.managed_https {
+            UrlHttpsMode::Managed
+        } else {
+            UrlHttpsMode::None
+        };
+        Ok(WebServiceUrls::project(vec![apex.clone()], true, mode)
+            .into_iter()
+            .map(|urls| WebService {
+                owner: "system:index".into(),
+                hostname: urls.hostname,
+                domains: urls.domains,
+                http_url: urls.http_url,
+                https_url: urls.https_url,
+                https_mode: if urls.https_mode == UrlHttpsMode::Managed {
+                    HttpsMode::Managed
+                } else {
+                    HttpsMode::None
+                }
+                .into(),
+                ..Default::default()
+            })
+            .collect())
+    }
 }
 
 fn container_services(route: ContainerWebService, registry: &Registry) -> Result<Vec<WebService>> {
@@ -335,17 +396,25 @@ mod tests {
                 .collect(),
             hostname,
             registry,
+            &IndexEndpoint {
+                apex: &"arcbox.local".parse().unwrap(),
+                gateway: "172.17.0.1".parse().unwrap(),
+            },
         )
     }
 
     #[test]
     fn missing_or_invalid_typed_routes_are_rejected() {
+        let index = IndexEndpoint {
+            apex: &"arcbox.local".parse().unwrap(),
+            gateway: "172.17.0.1".parse().unwrap(),
+        };
         for route in [None, Some(Route::Index(Default::default()))] {
             let service = GuestWebService {
                 route,
                 ..Default::default()
             };
-            assert!(selected_services(vec![service], None, &registry()).is_err());
+            assert!(selected_services(vec![service], None, &registry(), &index).is_err());
         }
     }
 
@@ -605,6 +674,195 @@ mod tests {
                 selected_container_services(vec![stale], Some(&name), &registry).unwrap(),
                 []
             );
+        }
+    }
+
+    #[test]
+    fn index_urls_require_the_current_builtin_owner_and_configured_endpoint() {
+        use arcbox_dns::claims::Claim;
+        use arcbox_dns::registry::{InstanceAuthority, InstanceTarget};
+        let apex: Domain = "one.arcbox.local".parse().unwrap();
+        let gateway = "172.17.0.1".parse().unwrap();
+        let index = IndexEndpoint {
+            apex: &apex,
+            gateway,
+        };
+        let mut registry = Registry::with_builtin_names(&apex).unwrap();
+        let claim = Claim::exclusive(
+            arcbox_dns::NamePattern::Exact(apex.clone()),
+            "system:index".into(),
+            "index".into(),
+        );
+        let route = IndexWebService {
+            hostname: apex.to_string(),
+            ipv4_address: gateway.to_string(),
+            managed_https: true,
+            ..Default::default()
+        };
+        assert_eq!(index.project(route.clone(), &registry).unwrap(), []);
+        registry
+            .replace(
+                "system:index".into(),
+                vec![claim.clone()],
+                Some(gateway.into()),
+            )
+            .unwrap();
+        assert_eq!(index.project(route.clone(), &registry).unwrap(), []);
+        registry.replace_instance_authorities(vec![InstanceAuthority {
+            root: apex.clone(),
+            target: InstanceTarget::Current,
+        }]);
+        let service = index
+            .project(route.clone(), &registry)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(service.owner, "system:index");
+        assert_eq!(service.domains, [apex.as_str()]);
+        assert_eq!(service.http_url, "http://one.arcbox.local");
+        assert_eq!(service.https_url, "https://one.arcbox.local");
+        assert_eq!(service.https_mode, HttpsMode::Managed);
+        assert_eq!((service.http_port, service.https_port), (0, 0));
+        let guest_route = GuestWebService {
+            route: route.clone().into(),
+            ..Default::default()
+        };
+        assert!(
+            selected_services(
+                vec![guest_route],
+                Some(&"else.arcbox.local".parse().unwrap()),
+                &registry,
+                &index,
+            )
+            .is_err()
+        );
+        for target in [
+            InstanceTarget::Unavailable,
+            InstanceTarget::Other { port: 5353 },
+        ] {
+            registry.replace_instance_authorities(vec![InstanceAuthority {
+                root: apex.clone(),
+                target,
+            }]);
+            assert_eq!(index.project(route.clone(), &registry).unwrap(), []);
+        }
+        registry.replace_instance_authorities(vec![InstanceAuthority {
+            root: apex.clone(),
+            target: InstanceTarget::Current,
+        }]);
+        registry
+            .replace(
+                "system:index".into(),
+                vec![claim],
+                Some("172.17.0.2".parse().unwrap()),
+            )
+            .unwrap();
+        assert_eq!(index.project(route.clone(), &registry).unwrap(), []);
+        for (hostname, address) in [
+            ("else.arcbox.local", "172.17.0.1"),
+            ("one.arcbox.local", "172.17.0.2"),
+            ("one.arcbox.local", "invalid"),
+        ] {
+            let invalid = IndexWebService {
+                hostname: hostname.into(),
+                ipv4_address: address.into(),
+                ..route.clone()
+            };
+            assert!(index.project(invalid, &registry).is_err());
+        }
+    }
+
+    #[test]
+    fn index_projection_rejects_container_owners_and_wildcard_claims() {
+        use arcbox_dns::NamePattern;
+        use arcbox_dns::claims::Claim;
+        use arcbox_dns::registry::{InstanceAuthority, InstanceTarget};
+        let apex: Domain = "one.arcbox.local".parse().unwrap();
+        let gateway = "172.17.0.1".parse().unwrap();
+        let index = IndexEndpoint {
+            apex: &apex,
+            gateway,
+        };
+        for (owner, authority, pattern) in [
+            ("container:a", "index", NamePattern::Exact(apex.clone())),
+            (
+                "system:index",
+                "container",
+                NamePattern::Exact(apex.clone()),
+            ),
+            (
+                "system:index",
+                "index",
+                NamePattern::Descendants("arcbox.local".parse().unwrap()),
+            ),
+        ] {
+            let mut registry = Registry::default();
+            registry.replace_instance_authorities(vec![InstanceAuthority {
+                root: apex.clone(),
+                target: InstanceTarget::Current,
+            }]);
+            registry
+                .replace(
+                    owner.into(),
+                    vec![Claim::exclusive(pattern, owner.into(), authority.into())],
+                    Some(gateway.into()),
+                )
+                .unwrap();
+            assert!(matches!(
+                registry.resolve(&apex),
+                Lookup::Matched {
+                    publishable: true,
+                    ..
+                }
+            ));
+            let route = IndexWebService {
+                hostname: apex.to_string(),
+                ipv4_address: gateway.to_string(),
+                managed_https: true,
+                ..Default::default()
+            };
+            assert_eq!(index.project(route, &registry).unwrap(), []);
+        }
+    }
+
+    #[test]
+    fn index_projection_preserves_http_when_managed_https_is_unavailable() {
+        use arcbox_dns::claims::Claim;
+        use arcbox_dns::registry::{InstanceAuthority, InstanceTarget};
+        for (hostname, managed, https) in [("arcbox.local", false, ""), ("arcbox.test", true, "")] {
+            let apex: Domain = hostname.parse().unwrap();
+            let gateway = "172.17.0.1".parse().unwrap();
+            let index = IndexEndpoint {
+                apex: &apex,
+                gateway,
+            };
+            let mut registry = Registry::with_builtin_names(&apex).unwrap();
+            registry.replace_instance_authorities(vec![InstanceAuthority {
+                root: apex.clone(),
+                target: InstanceTarget::Current,
+            }]);
+            registry
+                .replace(
+                    "system:index".into(),
+                    vec![Claim::exclusive(
+                        arcbox_dns::NamePattern::Exact(apex.clone()),
+                        "system:index".into(),
+                        "index".into(),
+                    )],
+                    Some(gateway.into()),
+                )
+                .unwrap();
+            let route = IndexWebService {
+                hostname: hostname.into(),
+                ipv4_address: gateway.to_string(),
+                managed_https: managed,
+                ..Default::default()
+            };
+            let services = index.project(route, &registry).unwrap();
+            assert_eq!(services.len(), 1);
+            assert_eq!(services[0].http_url, format!("http://{hostname}"));
+            assert_eq!(services[0].https_url, https);
+            assert_eq!(services[0].https_mode, HttpsMode::None);
         }
     }
 }
