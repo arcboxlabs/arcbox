@@ -32,6 +32,8 @@ let cid = runtime.ensure_vm_ready().await?;
 println!("default machine CID: {cid}");
 ```
 
+Capture `Runtime::container_network_incarnation` before collecting HTTPS observation addresses. Pass that identity to `reconcile_https_access` for both enable and disable requests. The call rejects a replaced VM and must be awaited after cancellation.
+
 ## Architecture
 
 ```text

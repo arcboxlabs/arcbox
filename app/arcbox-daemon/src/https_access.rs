@@ -6,6 +6,7 @@ use anyhow::{Context, Result, bail, ensure};
 use arcbox_api::HttpsAccess;
 use arcbox_connect::v1::{ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse};
 use arcbox_core::{DEFAULT_MACHINE_NAME, Runtime, VmLifecycleState};
+use arcbox_engine::vm::VmIncarnation;
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -27,10 +28,14 @@ pub fn spawn(ctx: &DaemonContext, runtime: &Arc<Runtime>) {
 }
 
 trait AccessSource {
+    type Vm: Clone + Eq + Send + Sync;
+    fn incarnation(&self) -> Result<Self::Vm>;
+    fn with_vm<T>(&self, expected: &Self::Vm, publish: impl FnOnce() -> T) -> Result<T>;
     fn host_addresses(&self) -> Result<Vec<String>>;
     fn resolve(&self, hostname: &str) -> Option<IpAddr>;
     async fn reconcile(
         &mut self,
+        expected: &Self::Vm,
         request: ReconcileHttpsAccessRequest,
         cancelled: &CancellationToken,
     ) -> Result<ReconcileHttpsAccessResponse>;
@@ -39,6 +44,20 @@ trait AccessSource {
 struct RuntimeSource(Arc<Runtime>);
 
 impl AccessSource for RuntimeSource {
+    type Vm = VmIncarnation;
+
+    fn incarnation(&self) -> Result<Self::Vm> {
+        Ok(self.0.container_network_incarnation()?)
+    }
+
+    fn with_vm<T>(&self, expected: &Self::Vm, publish: impl FnOnce() -> T) -> Result<T> {
+        Ok(self.0.machine_manager().with_network_incarnation(
+            DEFAULT_MACHINE_NAME,
+            expected,
+            publish,
+        )?)
+    }
+
     fn host_addresses(&self) -> Result<Vec<String>> {
         let bridge = self
             .0
@@ -65,10 +84,14 @@ impl AccessSource for RuntimeSource {
 
     async fn reconcile(
         &mut self,
+        expected: &Self::Vm,
         request: ReconcileHttpsAccessRequest,
         cancelled: &CancellationToken,
     ) -> Result<ReconcileHttpsAccessResponse> {
-        Ok(self.0.reconcile_https_access(request, cancelled).await?)
+        Ok(self
+            .0
+            .reconcile_https_access(expected, request, cancelled)
+            .await?)
     }
 }
 
@@ -90,10 +113,20 @@ async fn observe(
         }
         let ready = vm.borrow_and_update().is_ready();
         let cycle = ready.then(|| access.observing_cycle()).flatten();
-        if active != cycle {
+        let target = match cycle {
+            Some(cycle) => match source.incarnation() {
+                Ok(expected) => Some((cycle, expected)),
+                Err(error) => {
+                    debug!(%error, "cannot capture HTTPS observation VM");
+                    None
+                }
+            },
+            None => None,
+        };
+        if active != target {
             disable(&mut source, active.take()).await;
         }
-        let Some(observation_id) = cycle else {
+        let Some((observation_id, expected)) = target else {
             continue;
         };
         let host_addresses = match source.host_addresses() {
@@ -104,9 +137,10 @@ async fn observe(
                 continue;
             }
         };
-        active = Some(observation_id.clone());
+        active = Some((observation_id.clone(), expected.clone()));
         let response = reconcile(
             &mut source,
+            &expected,
             ReconcileHttpsAccessRequest {
                 observation_id: observation_id.clone(),
                 host_addresses,
@@ -117,17 +151,21 @@ async fn observe(
         )
         .await;
         match response {
-            Ok(response)
-                if response.sequence > 0 && vm.borrow().is_ready() && !shutdown.is_cancelled() =>
-            {
-                if response
-                    .destination_ip
-                    .parse::<IpAddr>()
-                    .is_ok_and(|ip| source.resolve(&response.hostname) == Some(ip))
-                {
-                    access.record(&response.hostname, &observation_id);
-                } else {
-                    debug!(hostname = %response.hostname, "ignored HTTPS access without current DNS ownership");
+            Ok(response) if response.sequence > 0 => {
+                let state = vm.borrow();
+                if state.is_ready() && !shutdown.is_cancelled() {
+                    let recorded = source.with_vm(&expected, || {
+                        if response.destination_ip.parse::<IpAddr>()
+                            .is_ok_and(|ip| source.resolve(&response.hostname) == Some(ip))
+                        {
+                            access.record(&response.hostname, &observation_id);
+                        } else {
+                            debug!(hostname = %response.hostname, "ignored HTTPS access without current DNS ownership");
+                        }
+                    });
+                    if let Err(error) = recorded {
+                        debug!(%error, "ignored HTTPS access from a retired VM");
+                    }
                 }
             }
             Ok(_) => {}
@@ -139,13 +177,14 @@ async fn observe(
     disable(&mut source, active).await;
 }
 
-async fn reconcile(
-    source: &mut impl AccessSource,
+async fn reconcile<S: AccessSource>(
+    source: &mut S,
+    expected: &S::Vm,
     request: ReconcileHttpsAccessRequest,
     shutdown: &CancellationToken,
 ) -> Result<ReconcileHttpsAccessResponse> {
     let cancelled = shutdown.child_token();
-    let operation = source.reconcile(request, &cancelled);
+    let operation = source.reconcile(expected, request, &cancelled);
     tokio::pin!(operation);
     tokio::select! {
         biased;
@@ -158,12 +197,13 @@ async fn reconcile(
     bail!("HTTPS access observation cancelled")
 }
 
-async fn disable(source: &mut impl AccessSource, observation_id: Option<String>) {
-    let Some(observation_id) = observation_id else {
+async fn disable<S: AccessSource>(source: &mut S, active: Option<(String, S::Vm)>) {
+    let Some((observation_id, expected)) = active else {
         return;
     };
     if let Err(error) = reconcile(
         source,
+        &expected,
         ReconcileHttpsAccessRequest {
             observation_id,
             enabled: false,

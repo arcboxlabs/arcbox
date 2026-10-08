@@ -388,3 +388,5 @@ The daemon now retains index refresh and withdrawal through startup cancellation
 Expected arbitrary-port and agent connections now share the existing physical VM-entry guard. The shared guard/backend regression passed. Strict Engine, Core, and daemon all-target Clippy and scoped formatting passed. This socket fixture does not exercise a native hypervisor connection.
 
 The daemon retains TLS signing through all three shutdown paths. Eight signing tests passed, including cancellation during native connection and signing, parked-request shutdown, and physical VM replacement before signing or delivery. Strict host all-target Clippy and formatting passed. The tests use socket fixtures and do not establish installed browser or Keychain behavior.
+
+HTTPS observation captures the physical VM before collecting host addresses and pins enable, publication, and disable to that VM. Eighteen Core web-service tests and seven daemon observation tests passed, including rejection of stale VM responses and targets. Strict host all-target Clippy and formatting passed. Native browser authorization remains unverified.

@@ -10,6 +10,8 @@ use arcbox_dns::registry::{Lookup, Registry};
 use arcbox_dns::web_services::{HttpsMode as UrlHttpsMode, WebServiceUrls};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
+mod https_access_tests;
 mod index;
 
 use super::Runtime;
@@ -57,17 +59,25 @@ impl Runtime {
     ///
     /// # Errors
     ///
-    /// Returns an error if the guest cannot be reached or rejects the observation.
+    /// Returns an error if the captured VM changes, cancellation occurs, or the guest rejects the observation.
     pub async fn reconcile_https_access(
         &self,
+        expected: &arcbox_engine::vm::VmIncarnation,
         request: ReconcileHttpsAccessRequest,
         cancelled: &CancellationToken,
     ) -> Result<ReconcileHttpsAccessResponse> {
-        self.connect_system_agent()
+        if cancelled.is_cancelled() {
+            return Err(CoreError::invalid_state(
+                "HTTPS access observation cancelled",
+            ));
+        }
+        self.with_host_network_incarnation(self.default_machine_name(), expected, || ())?;
+        let response = self
+            .connect_system_agent_expected(expected.clone())
             .await?
             .reconcile_https_access(request, cancelled)
-            .await
-            .map_err(Into::into)
+            .await?;
+        self.with_host_network_incarnation(self.default_machine_name(), expected, || response)
     }
 
     /// Lists guest web services with their current DNS names and installed routes.
