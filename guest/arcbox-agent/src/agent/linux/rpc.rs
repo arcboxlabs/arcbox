@@ -1051,4 +1051,40 @@ mod tests {
         drop(client);
         task.await.unwrap().unwrap();
     }
+
+    #[tokio::test]
+    async fn machine_web_rejects_nonhost_and_wrong_guests_before_decoding() {
+        use crate::rpc::MessageType;
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            for (guest, cid) in [
+                (Guest::DistroMachine, 3),
+                (Guest::SystemVm, 2),
+                (Guest::StorageRecovery, 2),
+            ] {
+                let services = crate::agent::Services::machine();
+                let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+                let task =
+                    tokio::spawn(
+                        async move { handle_connection(server, guest, &services, cid).await },
+                    );
+                for kind in [
+                    MessageType::OpenMachineWebRequest,
+                    MessageType::ReplaceMachineWebRequest,
+                ] {
+                    write_message(&mut client, kind, "untrusted", &[0x80])
+                        .await
+                        .unwrap();
+                    let (kind, trace, payload) = read_message(&mut client).await.unwrap();
+                    assert_eq!(kind, MessageType::Error);
+                    assert_eq!(trace, "untrusted");
+                    assert_eq!(ErrorResponse::decode(&payload).unwrap().code, 403);
+                }
+                drop(client);
+                task.await.unwrap().unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    }
 }
