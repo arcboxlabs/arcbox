@@ -1,5 +1,7 @@
 //! The host signs with a persistent Keychain key; no API exports its private bytes.
 
+mod cleanup;
+
 use std::path::Path;
 
 use core_foundation::{base::TCFType, data::CFData};
@@ -120,40 +122,6 @@ impl KeychainAuthority {
         }
         Err(Error::InvalidAuthority("CA path has no existing ancestor"))
     }
-
-    /// Revokes this profile's trust and deletes its keys and public certificate.
-    pub fn delete(tls_dir: &Path) -> Result<(), Error> {
-        let label = Self::label(tls_dir)?;
-        let path = tls_dir.join(arcbox_constants::paths::guest::TLS_CA_CERT);
-        match std::fs::read(&path) {
-            Ok(pem) => crate::migration::delete_certificate(&pem)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(Error::io(&path, error)),
-        }
-        if let Some(Reference::Key(key)) = find(
-            ItemSearchOptions::new()
-                .key_class(KeyClass::private())
-                .label(&label)
-                .load_refs(true),
-        )? {
-            if let Some(certificate) = certificate_for_key(&key)? {
-                crate::remove_user_trust_der(&certificate.to_der())?;
-                certificate.delete()?;
-            }
-        }
-        match ItemSearchOptions::new()
-            .keychains(&[SecKeychain::default()?])
-            .class(ItemClass::key())
-            .label(&label)
-            .limit(Limit::All)
-            .delete()
-        {
-            Ok(()) => {}
-            Err(error) if error.code() == errSecItemNotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        Ok(())
-    }
 }
 
 fn certificate_for_key(key: &SecKey) -> Result<Option<SecCertificate>, Error> {
@@ -252,21 +220,4 @@ impl SigningKey for KeychainKey {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn identity_lookup_rejects_multiple_matches() {
-        let certificate = authority::parameters()
-            .self_signed(&rcgen::KeyPair::generate().unwrap())
-            .unwrap();
-        let reference = || {
-            SearchResult::Ref(Reference::Certificate(
-                SecCertificate::from_der(certificate.der()).unwrap(),
-            ))
-        };
-        assert!(unique_reference(Vec::new()).unwrap().is_none());
-        assert!(unique_reference(vec![reference()]).unwrap().is_some());
-        assert!(unique_reference(vec![reference(), reference()]).is_err());
-    }
-}
+mod tests;
