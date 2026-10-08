@@ -15,7 +15,8 @@ Requiring CA trust before VM boot prevents ordinary Docker use when a user cance
 3. Keep removal of an exposed private root key as a required barrier before sharing the data directory.
 4. Preserve a trusted previous public root until an explicit login-session action revokes that exact certificate. Publication must not request authorization.
 5. Let the login-session CLI publish the current public root after authorization. The CLI must not create or use the private root key.
-6. Refresh read-only trust status every five seconds. Publish only changes and cancel the monitor at daemon shutdown.
+6. Prepare and recover the identity in the background every five seconds, then inspect trust without authorization. Publish status changes and cancel the monitor at daemon shutdown.
+7. Select the current published identity when a CSR arrives. Preserve the same signer handle for an unchanged root and reject signatures completed after that handle changes.
 
 ## Consequences
 

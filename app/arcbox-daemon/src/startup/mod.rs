@@ -142,7 +142,7 @@ async fn acquire_lock(early: EarlyContext) -> Result<DaemonContext> {
         early_runtime: early.early_runtime,
         setup_state: early.setup_state,
         #[cfg(target_os = "macos")]
-        local_ca: std::sync::OnceLock::new(),
+        local_ca: tokio::sync::watch::channel(None).0,
         shutdown: early.shutdown,
         container_network_lease_slot: early.container_network_lease_slot,
         dns_domain: early.dns_domain,
@@ -250,7 +250,7 @@ async fn init_runtime(ctx: &DaemonContext) -> Result<Arc<Runtime>> {
     let config = effective_config(ctx)?;
     #[cfg(target_os = "macos")]
     if config.vm.autostart {
-        crate::self_setup::tls::prepare(ctx).await;
+        crate::self_setup::tls::prepare(ctx);
     }
     if config.vm.autostart
         && let Some(lease) = ContainerNetworkLease::acquire(config.container.cidr)?

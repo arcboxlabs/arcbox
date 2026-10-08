@@ -129,9 +129,9 @@ pub struct DaemonContext {
     /// the VM boots. Diagnostics only (`GetVirtioDebug`).
     pub early_runtime: SharedRuntime,
     pub setup_state: Arc<SetupState>,
-    /// The daemon alone owns the private root used by the guest signing service.
+    /// The daemon's private signer for the published root, replaced after recovery or rotation.
     #[cfg(target_os = "macos")]
-    pub local_ca: std::sync::OnceLock<Arc<arcbox_local_ca::KeychainAuthority>>,
+    pub local_ca: tokio::sync::watch::Sender<Option<Arc<arcbox_local_ca::KeychainAuthority>>>,
     pub shutdown: CancellationToken,
     /// Holds the same-user CIDR lease until shutdown cleanup completes.
     pub container_network_lease_slot: SharedContainerNetworkLease,
