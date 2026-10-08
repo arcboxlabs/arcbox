@@ -163,7 +163,12 @@ async fn relay_to(
     .context("TLS handshake timed out")?
     .context("TLS handshake")?;
     services.verify_tls_route(&name, container, &route)?;
-    let http_port = route.http_port;
+    let http_port = match &route {
+        super::services::TlsRoute::Container(route) => route.http_port,
+        super::services::TlsRoute::Index(route) => {
+            return super::index::serve(tls, services.clone(), route.clone(), HTTPS_PORT).await;
+        }
+    };
     let upstream = tokio::time::timeout(TIMEOUT, connect((container, http_port)))
         .await
         .context("connecting to the container timed out")

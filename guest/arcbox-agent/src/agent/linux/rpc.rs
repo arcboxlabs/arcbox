@@ -25,6 +25,8 @@ use crate::rpc::{
 #[cfg(test)]
 mod guest_trust_tests;
 #[cfg(test)]
+mod index_tests;
+#[cfg(test)]
 pub(in crate::agent) mod instance_authority_tests;
 mod readiness;
 

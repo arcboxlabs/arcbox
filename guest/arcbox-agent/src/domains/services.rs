@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use arcbox_connect::v1::{
-    ContainerWebService, GuestWebService, ReconcileHttpsAccessRequest,
+    ContainerWebService, GuestWebService, IndexWebService, ReconcileHttpsAccessRequest,
     ReconcileHttpsAccessResponse, container_web_service::HttpsBackend,
 };
 use arcbox_constants::dns::{Domain, LOCAL_CA_DNS_SUBTREE};
@@ -49,16 +49,22 @@ struct SelectedContainer {
     domains: Vec<Domain>,
 }
 
-/// Pins one handshake to the current owner, registration, and installed upstream.
+/// Pins a managed TLS handshake to an installed container or the built-in index.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum TlsRoute {
+    Container(ContainerTlsRoute),
+    Index(super::index::Route),
+}
+
 #[derive(Debug, Eq)]
-pub(super) struct TlsRoute {
+pub(super) struct ContainerTlsRoute {
     owner: String,
     revision: u64,
     installed: Arc<Installed>,
     pub(super) http_port: u16,
 }
 
-impl PartialEq for TlsRoute {
+impl PartialEq for ContainerTlsRoute {
     fn eq(&self, other: &Self) -> bool {
         self.owner == other.owner
             && self.revision == other.revision
@@ -77,6 +83,11 @@ impl TlsRoute {
         if !name.as_str().ends_with(LOCAL_CA_DNS_SUBTREE) {
             return None;
         }
+        if let Some(index) = super::index::Route::resolve(dns, destination)
+            && index.name() == &name
+        {
+            return Some(Self::Index(index));
+        }
         let Lookup::Matched {
             claim,
             address,
@@ -90,12 +101,12 @@ impl TlsRoute {
         if address != IpAddr::V4(destination) || route.ip != destination {
             return None;
         }
-        Some(Self {
+        Some(Self::Container(ContainerTlsRoute {
             owner: claim.owner().into(),
             revision,
             installed: Arc::clone(route),
             http_port: route.selected.terminated_port()?,
-        })
+        }))
     }
 }
 
@@ -211,8 +222,10 @@ impl WebServices {
     ) {
         let dns = self.dns.read().expect("DNS registry lock poisoned");
         let mut installed = self.installed.write().expect("web services lock poisoned");
-        if TlsRoute::resolve(name, destination, &dns, &installed).as_ref() == Some(expected) {
-            installed.remove(&expected.owner);
+        if TlsRoute::resolve(name, destination, &dns, &installed).as_ref() == Some(expected)
+            && let TlsRoute::Container(route) = expected
+        {
+            installed.remove(&route.owner);
         }
     }
 
@@ -263,6 +276,27 @@ impl WebServices {
         }))
     }
 
+    fn index_snapshot(&self, hostname: Option<&Domain>) -> Option<GuestWebService> {
+        let dns = self.dns.read().expect("DNS registry lock poisoned");
+        let IpAddr::V4(destination) = dns.get("system:index")?.address? else {
+            return None;
+        };
+        let route = super::index::Route::resolve(&dns, destination)?;
+        if hostname.is_some_and(|name| name != route.name()) {
+            return None;
+        }
+        Some(GuestWebService {
+            route: IndexWebService {
+                hostname: route.name().to_string(),
+                ipv4_address: destination.to_string(),
+                managed_https: route.name().as_str().ends_with(LOCAL_CA_DNS_SUBTREE),
+                ..Default::default()
+            }
+            .into(),
+            ..Default::default()
+        })
+    }
+
     /// Returns typed installed endpoints selected by current DNS ownership.
     pub fn snapshot(&self, hostname: Option<&Domain>) -> Vec<GuestWebService> {
         self.directory_snapshot(hostname)
@@ -272,6 +306,7 @@ impl WebServices {
                 route: container.into(),
                 ..Default::default()
             })
+            .chain(self.index_snapshot(hostname))
             .collect()
     }
 

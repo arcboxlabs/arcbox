@@ -12,6 +12,172 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
 use tokio_rustls::TlsConnector;
 
+fn publish_index(dns: &DnsRegistry) {
+    use arcbox_dns::{
+        NamePattern,
+        claims::Claim,
+        registry::{InstanceAuthority, InstanceTarget},
+    };
+    let apex: arcbox_constants::dns::Domain = "arcbox.local".parse().unwrap();
+    let mut dns = dns.write().unwrap();
+    dns.replace_instance_authorities(vec![InstanceAuthority {
+        root: apex.clone(),
+        target: InstanceTarget::Current,
+    }]);
+    dns.replace(
+        "system:index".into(),
+        vec![Claim::exclusive(
+            NamePattern::Exact(apex),
+            "system:index".into(),
+            "index".into(),
+        )],
+        Some(Ipv4Addr::LOCALHOST.into()),
+    )
+    .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn index_authorization_wait_rechecks_exact_registration() {
+    let dns = DnsRegistry::default();
+    let services = WebServices::new(dns.clone());
+    publish_index(&dns);
+    let mut request = arcbox_connect::v1::ReconcileHttpsAccessRequest {
+        observation_id: "index".into(),
+        host_addresses: vec![Ipv4Addr::LOCALHOST.to_string()],
+        enabled: true,
+        ..Default::default()
+    };
+    services.reconcile_https_access(request.clone()).unwrap();
+    assert!(
+        services
+            .observe_managed_tls(
+                "child.arcbox.local",
+                Ipv4Addr::LOCALHOST,
+                Ipv4Addr::LOCALHOST.into()
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        services
+            .reconcile_https_access(request.clone())
+            .unwrap()
+            .sequence,
+        0
+    );
+    let handshake = tokio::spawn({
+        let services = services.clone();
+        async move {
+            services
+                .observe_managed_tls(
+                    "arcbox.local",
+                    Ipv4Addr::LOCALHOST,
+                    Ipv4Addr::LOCALHOST.into(),
+                )
+                .await
+        }
+    });
+    tokio::task::yield_now().await;
+    let access = services.reconcile_https_access(request.clone()).unwrap();
+    assert_eq!(access.hostname, "arcbox.local");
+    assert_eq!(access.sequence, 1);
+    dns.write().unwrap().remove("system:index");
+    publish_index(&dns);
+    request.enabled = false;
+    services.reconcile_https_access(request).unwrap();
+    assert!(handshake.await.unwrap().is_err());
+}
+
+#[tokio::test]
+#[cfg(target_os = "linux")]
+async fn index_tls_serves_html_without_upstream_and_rejects_stale_handshakes() {
+    use http_body_util::BodyExt as _;
+    use hyper_util::rt::TokioIo;
+    for stage in ["valid", "configuration", "handshake"] {
+        within(async {
+            let incoming = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let address = incoming.local_addr().unwrap();
+            let dns = DnsRegistry::default();
+            let services = WebServices::new(dns.clone());
+            publish_index(&dns);
+            let (configured, configuration_started) = oneshot::channel();
+            let (configure, configuration_released) = oneshot::channel();
+            let relay = tokio::spawn(async move {
+                relay_to(
+                    incoming.accept().await.unwrap().0,
+                    Ipv4Addr::LOCALHOST,
+                    &services,
+                    async |name: &str| {
+                        assert_eq!(name, "arcbox.local");
+                        configured.send(()).unwrap();
+                        configuration_released.await.unwrap();
+                        Ok(configuration())
+                    },
+                    async |_| panic!("index must not connect to an upstream"),
+                )
+                .await
+            });
+            let connector = TlsConnector::from(super::super::probe::configuration());
+            let socket = TcpStream::connect(address).await.unwrap();
+            let mut handshake = connector.connect("arcbox.local".try_into().unwrap(), socket);
+            tokio::select! {
+                result = &mut handshake => panic!("TLS finished before configuration: {result:?}"),
+                result = configuration_started => result.unwrap(),
+            }
+            if stage == "configuration" {
+                dns.write().unwrap().remove("system:index");
+            }
+            configure.send(()).unwrap();
+            if stage == "handshake" {
+                assert_ne!(
+                    handshake.get_ref().unwrap().peek(&mut [0]).await.unwrap(),
+                    0
+                );
+                dns.write().unwrap().remove("system:index");
+            }
+            if stage == "configuration" {
+                assert!(handshake.await.is_err());
+            } else {
+                let client = handshake.await.unwrap();
+                if stage == "valid" {
+                    let (mut requests, driver) =
+                        hyper::client::conn::http1::handshake(TokioIo::new(client))
+                            .await
+                            .unwrap();
+                    let driver = tokio::spawn(driver);
+                    let response = requests
+                        .send_request(
+                            hyper::Request::builder()
+                                .uri("/")
+                                .header(hyper::header::HOST, "arcbox.local:443")
+                                .body(http_body_util::Full::new(bytes::Bytes::new()))
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status(), hyper::StatusCode::OK);
+                    assert_eq!(response.headers()[hyper::header::CACHE_CONTROL], "no-store");
+                    let body = response.into_body().collect().await.unwrap().to_bytes();
+                    let body = String::from_utf8_lossy(&body);
+                    assert!(body.contains("Local web services"));
+                    assert!(body.contains("directory is unavailable"));
+                    drop(requests);
+                    driver.await.unwrap().unwrap();
+                }
+            }
+            let result = relay.await.unwrap();
+            if stage == "valid" {
+                result.unwrap();
+            } else {
+                assert!(
+                    format!("{:#}", result.unwrap_err()).contains("changed during the handshake")
+                );
+            }
+        })
+        .await;
+    }
+}
+
 #[cfg(target_os = "linux")]
 const NAME: &str = "web.arcbox.local";
 

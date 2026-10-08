@@ -28,6 +28,10 @@ pub(super) struct Route {
 }
 
 impl Route {
+    pub(super) fn name(&self) -> &Domain {
+        &self.name
+    }
+
     pub(super) fn resolve(registry: &Registry, destination: Ipv4Addr) -> Option<Self> {
         let registration = registry.get("system:index")?;
         let [claim] = registration.claims.as_slice() else {
