@@ -64,6 +64,14 @@ The host verifies each CSR's signature and single DNS name before signing. The n
 
 Managed HTTPS replaces `X-Forwarded-Proto` with `https` on every HTTP/1.1 request. The relay preserves Host, path/query, Location, and repeated Set-Cookie values. Bodies remain streaming; trailer capability is negotiated per hop. WebSocket upgrades preserve bytes already read with the handshake. Native TLS passes through unchanged. Managed HTTP/2 and gRPC translation are not implemented.
 
+## Container client trust
+
+The Docker API proxy injects the current public CA into supported regular PEM system bundles before container start. Set `dev.arcbox.add-ca-certificates=false` to disable injection. Injection preserves unrelated roots and does not execute image code. The host checks the published certificate against the active Keychain identity.
+
+Injection skips running containers, read-only roots, caller-mounted bundles, symbolic bundle paths, and containers with custom certificate environment variables. A restart of a running container does not refresh trust. Java keystores and Node's bundled roots are not managed; runtimes configured to use the system bundle can use the injected root. Image builds and Docker requests made directly inside the VM bypass this hook. A package manager that rebuilds the bundle can remove the injected root.
+
+The opt-in real Docker regression verifies default curl trust, opt-out, repeat injection, and preservation of unrelated roots. [Rerun instructions and scope](logs/2026-10-08-custom-local-domains.md#verify-container-client-trust-with-real-docker) distinguish this test from installed ArcBox validation.
+
 ## Completion requirements
 
 The feature objective includes the complete local-domain experience across Docker, Compose, machines, and Kubernetes. A unit test or a published protocol field does not establish product completion. Each row needs evidence at its stated scope.
@@ -79,8 +87,8 @@ The feature objective includes the complete local-domain experience across Docke
 | Cancellation and existing trust | Cancel authorization while Docker stays usable; retry explicitly; restart with existing trust without another mutation. | Independent state tests exist; new combined native flow needs validation. |
 | Desktop service entry points | Open the same authoritative URL from the list, details, and menu bar; handle deletion during authorization and directory disconnects. | List, details, and menu bar share the opener. Retry, dismissal, and reload actions are implemented. The Swift app builds and its focused tests pass; the paired runtime and browser flow remain unverified. |
 | Browser index | Serve an index at `arcbox.local` with current service links and useful failure states. | Missing. |
-| Container client trust | Verify container-to-container HTTPS without custom CA flags; verify opt-out and preservation of unrelated roots. | Create/start injection preserves unrelated roots and honors opt-out; a running restart reports a skip. Real container validation is missing. |
-| Unsupported trust stores | State behavior for read-only roots, mounted stores, Java, Node, image builds, and containers created inside the VM. | Partial boundaries documented; full coverage missing. |
+| Container client trust | Verify container-to-container HTTPS without custom CA flags; verify opt-out and preservation of unrelated roots. | Real Docker archive injection passes default curl, opt-out, idempotence, and root-preservation checks in isolated Colima containers. The fixture bypasses the host Keychain and VM lifecycle. Installed ArcBox create/start validation remains pending. |
+| Unsupported trust stores | State behavior for read-only roots, mounted stores, Java, Node, image builds, and containers created inside the VM. | Boundaries are documented above. Guard tests cover running, read-only, mounted, symbolic, and custom-environment cases; installed runtime coverage remains pending. |
 | Machine integration | Verify machine names, HTTP/HTTPS port configuration, managed/native TLS, and client trust from inside a machine. | Machine DNS exists; web-service and trust integration missing. |
 | Kubernetes integration | Verify `cluster.local`, Service reachability, LoadBalancer/Ingress wildcard names, and intended HTTPS behavior from macOS. | LoadBalancer port forwarding exists; domain and HTTPS integration missing. |
 | Domain ownership | Reject a TLS SNI name that does not belong to the actual destination; validate the same ownership at signing and routing boundaries. | Guest routing checks owner, revision, address, and installed backend across each handshake stage. The host signer independently verifies current container DNS ownership before and after signing. Real wrong-SNI rejection remains pending. |

@@ -76,27 +76,31 @@ impl Guest {
                 });
             }
         });
-        let runtime = Runtime::with_vm_lifecycle_config(
-            Config {
-                data_dir: directory.path().into(),
-                ..Config::default()
-            },
-            VmLifecycleConfig {
-                skip_vm_check: true,
-                ..VmLifecycleConfig::default()
-            },
-        )
-        .unwrap()
-        .with_network_fixture(arcbox_core::runtime::NetworkFixture::default());
         Self {
-            state: AppState {
-                runtime: Arc::new(runtime),
-                proxy: Arc::new(ProxyState::new(Arc::new(Connector(socket)))),
-            },
+            state: state(socket, directory.path()),
             data,
             _directory: directory,
             task,
         }
+    }
+}
+
+pub(super) fn state(socket: PathBuf, directory: &Path) -> AppState {
+    let runtime = Runtime::with_vm_lifecycle_config(
+        Config {
+            data_dir: directory.into(),
+            ..Config::default()
+        },
+        VmLifecycleConfig {
+            skip_vm_check: true,
+            ..VmLifecycleConfig::default()
+        },
+    )
+    .unwrap()
+    .with_network_fixture(arcbox_core::runtime::NetworkFixture::default());
+    AppState {
+        runtime: Arc::new(runtime),
+        proxy: Arc::new(ProxyState::new(Arc::new(Connector(socket)))),
     }
 }
 

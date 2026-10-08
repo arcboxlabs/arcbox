@@ -321,3 +321,20 @@ The installer selects the login UID and absolute daemon data directory explicitl
 Public URL projection now lives in the shared DNS crate. The host uses this policy for alias grouping, managed `.local` HTTPS, native TLS, and HTTP-only entries; ownership and installed-route validation remain in the caller. Four projection regressions and ten Core service-directory regressions passed. Strict shared DNS/Core all-target Clippy, formatting, and diff checks passed. The browser index will reuse this policy; its frontend and installed routing remain pending.
 
 The guest's shared handle is now named DnsRegistry and exposed through GuestDnsServer::registry. All authority, routing, Docker, and sandbox callers use the resource-neutral name; the old type and accessor are removed without aliases. The musl guest test build, strict musl all-target Clippy, formatting, and diff checks passed. This mechanical rename adds no behavior or tests.
+
+## Verify container client trust with real Docker
+
+The opt-in Docker regression runs the production CA reconciliation against real Docker archive endpoints. An internal network contains a Caddy TLS server, a default curl client, and an opted-out client. Default curl succeeds without CA overrides; the opted-out client exits with certificate error 60. The original bundle remains an unchanged prefix, repeated injection is byte-identical, and opt-out leaves the complete bundle unchanged. Cleanup removes the containers, anonymous volumes, and network.
+
+Run with an existing Unix Docker socket and offline images. The client image must contain curl and a regular `/etc/ssl/certs/ca-certificates.crt`; the server image must contain Caddy. The validated environment used Colima Docker 29.5.2, `arcbox-validation-gnu:1.96.0`, and `caddy:2-alpine`:
+
+```bash
+ARCBOX_CA_TEST_DOCKER_HOST=unix:///Users/Xuan/.config/colima/default/docker.sock \
+ARCBOX_CA_TEST_CLIENT_IMAGE=arcbox-validation-gnu:1.96.0 \
+ARCBOX_CA_TEST_SERVER_IMAGE=caddy:2-alpine \
+devenv shell -- cargo test -p arcbox-docker --lib \
+  real_docker_injection_enables_default_https_trust_and_preserves_opt_out \
+  -- --ignored --test-threads=1
+```
+
+The real-container test passed in 1.74 seconds. The focused CA suite passed 13 tests with this opt-in test ignored; strict Docker all-target Clippy, scoped formatting, and diff checks passed. A framed Unix adapter supplies the Docker endpoint and an in-memory CA supplies the public root. These results validate archive injection and client trust, not Keychain identity, installed ArcBox create/start, VM routing, browser authorization, or native trust changes.

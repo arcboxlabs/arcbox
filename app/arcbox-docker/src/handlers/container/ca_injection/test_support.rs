@@ -7,6 +7,10 @@ use rcgen::{
 use std::io::Read;
 
 pub(super) fn root() -> Vec<u8> {
+    root_identity().0.pem().into_bytes()
+}
+
+pub(super) fn root_identity() -> (rcgen::Certificate, rcgen::Issuer<'static, KeyPair>) {
     let mut params = CertificateParams::default();
     params.distinguished_name = DistinguishedName::new();
     params
@@ -24,11 +28,9 @@ pub(super) fn root() -> Vec<u8> {
             GeneralSubtree::IpAddress(CidrSubnet::V6([0; 16], [0; 16])),
         ],
     });
-    params
-        .self_signed(&KeyPair::generate().unwrap())
-        .unwrap()
-        .pem()
-        .into_bytes()
+    let key = KeyPair::generate().unwrap();
+    let certificate = params.self_signed(&key).unwrap();
+    (certificate, rcgen::Issuer::new(params, key))
 }
 
 pub(super) fn tar(content: &[u8]) -> Vec<u8> {
