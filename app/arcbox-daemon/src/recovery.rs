@@ -26,7 +26,9 @@ use crate::self_setup::SetupTask as _;
 pub async fn run(ctx: &DaemonContext, runtime: &Arc<Runtime>, dns_port: u16) -> Result<()> {
     let linux_vm = runtime.config().vm.autostart;
     if linux_vm {
-        recover_container_networking(runtime).await;
+        if let Err(error) = recover_container_networking(runtime).await {
+            tracing::warn!(%error, "container networking recovery failed");
+        }
     }
 
     // Cold-start route reconcile (non-blocking). This is load-bearing after
@@ -329,40 +331,23 @@ async fn ensure_docker_tools(data_dir: &Path) -> anyhow::Result<()> {
 /// Reports nothing about VM liveness: `services::vm_running_loop` owns
 /// `SetupStatus.vm_running` and follows the lifecycle across restarts, which
 /// a one-shot observation made here could not.
-async fn recover_container_networking(runtime: &Arc<Runtime>) {
+async fn recover_container_networking(runtime: &Arc<Runtime>) -> Result<()> {
     use arcbox_docker::guest_query;
     use arcbox_docker::proxy::{GuestHttpClient, VsockConnector};
 
     let client = GuestHttpClient::new(Arc::new(VsockConnector::new(Arc::clone(runtime))));
-    let running = match guest_query::list_running_container_ids(&client).await {
-        Ok(ids) => ids,
-        Err(e) => {
-            tracing::debug!("Failed to list containers for networking recovery: {}", e);
-            return;
-        }
-    };
+    let running = guest_query::list_running_container_ids(&client).await?;
 
     let mut recovered_dns = 0u32;
     let mut recovered_ports = 0u32;
     for id in &running {
-        let Some(inspect_body) = guest_query::inspect_container(&client, id).await else {
-            continue;
-        };
-
-        // Re-register the name alias so lifecycle calls by name resolve
-        // without a guest round-trip (mirrors handler-side registration).
-        if let Some(name) = arcbox_docker::handlers::extract_container_name(&inspect_body) {
-            runtime.register_container_alias(&name, id).await;
-        }
-
-        if let Some((aliases, ip)) =
-            arcbox_docker::handlers::extract_container_dns_info(&inspect_body)
-        {
-            runtime.register_dns(id, &aliases, ip).await;
+        let inspect = guest_query::inspect_container(&client, id).await?;
+        runtime.register_container_dns(&inspect.metadata).await;
+        if inspect.metadata.primary_ipv4().is_some() {
             recovered_dns += 1;
         }
 
-        let bindings = arcbox_docker::port_bindings::parse_port_bindings(&inspect_body);
+        let bindings = arcbox_docker::port_bindings::parse_port_bindings(&inspect.body);
         if !bindings.is_empty() {
             let rules: Vec<_> = bindings
                 .iter()
@@ -392,6 +377,7 @@ async fn recover_container_networking(runtime: &Arc<Runtime>) {
             "Recovered networking for running containers"
         );
     }
+    Ok(())
 }
 
 #[cfg(test)]

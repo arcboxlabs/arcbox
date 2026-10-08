@@ -162,6 +162,48 @@ async fn start_stop_cycle_manages_host_networking() {
 }
 
 #[tokio::test]
+async fn successful_rename_with_invalid_inspect_preserves_previous_host_ownership() {
+    for body in ["not json", r#"{"Name":"/renamed"}"#, r#"{"Id":"abc123"}"#] {
+        let routes = vec![
+            MockRoute {
+                method: "POST",
+                path: "/containers/web/rename",
+                status: 204,
+                body: "",
+            },
+            MockRoute {
+                method: "GET",
+                path: "/containers/abc123/json",
+                status: 200,
+                body,
+            },
+        ];
+        let (router, runtime, guest, _tmp) = router_with_mock_guest(routes).await;
+        let metadata = arcbox_dns::container::ContainerMetadata::from_inspect(
+            &serde_json::from_str(INSPECT_WEB).unwrap(),
+        )
+        .unwrap();
+        runtime.register_container_dns(&metadata).await;
+        let previous = runtime.network_manager().local_dns_entries();
+
+        let (status, error) = send(&router, "POST", "/containers/web/rename?name=renamed").await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(String::from_utf8_lossy(&error).contains("parse /containers/abc123/json body"));
+        assert_eq!(
+            guest.last_request_uri().await.as_deref(),
+            Some("/containers/abc123/json")
+        );
+        assert_eq!(runtime.network_manager().local_dns_entries(), previous);
+        assert_eq!(
+            runtime.resolve_registered_container("web").await.as_deref(),
+            Some("abc123")
+        );
+        assert_eq!(runtime.resolve_registered_container("renamed").await, None);
+    }
+}
+
+#[tokio::test]
 async fn versioned_remove_by_name_runs_local_teardown() {
     let (router, runtime, _guest, _tmp) = router_with_mock_guest(lifecycle_routes()).await;
 

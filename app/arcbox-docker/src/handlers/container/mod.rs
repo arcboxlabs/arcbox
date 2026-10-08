@@ -12,7 +12,6 @@ use axum::body::Body;
 use axum::extract::{OriginalUri, State};
 use axum::http::{Request, Uri};
 use axum::response::Response;
-use bytes::Bytes;
 use std::net::IpAddr;
 
 /// Create a container, resolving macOS symlinks in bind-mount source paths.
@@ -118,7 +117,7 @@ pub async fn start_container(
     // On success, inspect the container and set up port forwarding + DNS.
     if response.status().is_success() {
         if let Some(start) = &start {
-            setup_container_networking(&state, &start.id).await;
+            setup_container_networking(&state, &start.id).await?;
         }
     }
 
@@ -258,18 +257,11 @@ pub async fn restart_container(
     if response.status().as_u16() == 204 {
         if let Some(id) = extract_container_id(&uri) {
             let _ = state.runtime.ensure_vm_ready().await;
-            if let Some(body_bytes) = inspect_container_body(&state, &id).await {
-                let canonical = canonical_id_or_fallback(&id, &body_bytes);
-                if let Some(name) = extract_container_name(&body_bytes) {
-                    state
-                        .runtime
-                        .register_container_alias(&name, &canonical)
-                        .await;
-                }
-                if let Some((aliases, ip)) = extract_container_dns_info(&body_bytes) {
-                    state.runtime.register_dns(&canonical, &aliases, ip).await;
-                }
-            }
+            let inspect = crate::guest_query::inspect_container(state.proxy.client(), &id).await?;
+            state
+                .runtime
+                .register_container_dns(&inspect.metadata)
+                .await;
         }
     }
 
@@ -317,44 +309,17 @@ pub async fn remove_container(
 /// name alias, port forwarding, and DNS. The `start` handler's post-start
 /// step, and what the host reconciler runs for a container it finds running
 /// without knowing it.
-pub async fn setup_container_networking(state: &AppState, container_id: &str) {
-    let Some(body_bytes) = inspect_container_body(state, container_id).await else {
-        tracing::warn!(
-            container_id,
-            "Failed to inspect container for networking setup; \
-             port forwarding and DNS will not be configured"
-        );
-        return;
-    };
-
-    // Use the canonical full container ID from inspect (not the URI token which
-    // may be a name or short ID) so that stop/remove can reliably match the key.
-    let canonical_id = canonical_id_or_fallback(container_id, &body_bytes);
-
-    // Record the name → ID alias so later lifecycle calls (stop/kill/remove by
-    // name or short ID) resolve without a guest round-trip.
-    if let Some(name) = extract_container_name(&body_bytes) {
-        state
-            .runtime
-            .register_container_alias(&name, &canonical_id)
-            .await;
-    }
-
-    // Port forwarding.
-    setup_port_forwarding_from_inspect(state, &canonical_id, &body_bytes).await;
-
-    // DNS registration.
-    if let Some((aliases, ip)) = extract_container_dns_info(&body_bytes) {
-        state
-            .runtime
-            .register_dns(&canonical_id, &aliases, ip)
-            .await;
-    }
-}
-
-/// Fetches the inspect JSON body for a container from guest dockerd.
-async fn inspect_container_body(state: &AppState, container_id: &str) -> Option<Bytes> {
-    crate::guest_query::inspect_container(state.proxy.client(), container_id).await
+///
+/// # Errors
+/// Returns an error when inspect fails or lacks a valid container identity.
+pub async fn setup_container_networking(state: &AppState, container_id: &str) -> Result<()> {
+    let inspect = crate::guest_query::inspect_container(state.proxy.client(), container_id).await?;
+    state
+        .runtime
+        .register_container_dns(&inspect.metadata)
+        .await;
+    setup_port_forwarding_from_inspect(state, &inspect.metadata.id, &inspect.body).await;
+    Ok(())
 }
 
 /// Configures port forwarding from pre-fetched inspect JSON.
@@ -466,65 +431,19 @@ pub async fn rename_container(
 
     if response.status().is_success() {
         if let Some(ref canonical) = canonical {
-            // Inspect FIRST (by canonical ID, which survives rename) and only
-            // replace the old registration once usable fresh data is in hand.
-            // Tearing down before a failed/unusable inspect would leave the
-            // container with no DNS entry and no resolvable alias at all —
-            // stale old-name DNS is strictly better than none.
-            let refreshed = match inspect_container_body(&state, canonical).await {
-                Some(body_bytes) => {
-                    let name = extract_container_name(&body_bytes);
-                    let dns = extract_container_dns_info(&body_bytes);
-                    if name.is_none() && dns.is_none() {
-                        false
-                    } else {
-                        state.runtime.deregister_dns_by_id(canonical).await;
-                        if let Some(name) = name.as_deref() {
-                            state
-                                .runtime
-                                .register_container_alias(name, canonical)
-                                .await;
-                        }
-                        if let Some((aliases, ip)) = dns {
-                            state.runtime.register_dns(canonical, &aliases, ip).await;
-                        }
-                        true
-                    }
-                }
-                None => false,
-            };
-            if !refreshed {
-                // Keep the old registration, but make sure the NEW name
-                // (known from the query) resolves for later lifecycle calls —
-                // otherwise stop/rm by the new name would be registry misses
-                // and their teardown a no-op.
-                if let Some(name) = new_name.as_deref() {
-                    state
-                        .runtime
-                        .register_container_alias(name, canonical)
-                        .await;
-                }
-                tracing::warn!(
-                    container_id = %canonical,
-                    "post-rename inspect unusable; keeping previous DNS registration"
-                );
-            }
+            // Docker may already have renamed the container when inspect fails.
+            // Preserve the previous host state until an authoritative snapshot arrives.
+            let inspect =
+                crate::guest_query::inspect_container(state.proxy.client(), canonical).await?;
+            state.runtime.deregister_dns_by_id(canonical).await;
+            state
+                .runtime
+                .register_container_dns(&inspect.metadata)
+                .await;
         }
     }
 
     Ok(response)
-}
-
-/// Extracts the canonical full container ID from a Docker inspect JSON response.
-fn extract_canonical_id_from_inspect(inspect_json: &[u8]) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_slice(inspect_json).ok()?;
-    value.get("Id")?.as_str().map(String::from)
-}
-
-/// Returns the canonical container ID from inspect JSON, falling back to the
-/// original request token when the inspect payload does not contain a usable ID.
-pub(super) fn canonical_id_or_fallback(container_id: &str, inspect_json: &[u8]) -> String {
-    extract_canonical_id_from_inspect(inspect_json).unwrap_or_else(|| container_id.to_string())
 }
 
 /// Extracts a container's unique name from Docker inspect JSON.

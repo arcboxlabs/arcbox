@@ -10,7 +10,7 @@ use super::test_support::{root, tar, untar};
 use super::*;
 
 fn metadata() -> serde_json::Value {
-    json!({"Id":"canonical-test", "Config":{"Env":null,"Labels":null}, "HostConfig":{"ReadonlyRootfs":false}, "State":{"Running":false}, "Mounts":[]})
+    json!({"Id":"canonical-test", "Name":"/test", "Config":{"Env":null,"Labels":null}, "HostConfig":{"ReadonlyRootfs":false}, "State":{"Running":false}, "Mounts":[]})
 }
 
 async fn reconcile_with_pem(state: &AppState, id: &str, pem: &[u8]) -> Result<Vec<String>> {

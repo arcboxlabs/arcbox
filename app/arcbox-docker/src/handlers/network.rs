@@ -7,9 +7,6 @@
 //! All other network operations proxy through the fallback untouched (host
 //! routing uses one static container-subnet route, not per-network state).
 
-use super::container::{
-    canonical_id_or_fallback, extract_container_dns_info, extract_container_name,
-};
 use super::proxying::proxy_to_system_vm;
 use crate::api::AppState;
 use crate::error::{DockerError, Result};
@@ -76,7 +73,7 @@ async fn proxy_then_refresh_dns(
 
     if response.status().is_success() {
         match container {
-            Some(token) => refresh_container_dns(state, &token).await,
+            Some(token) => refresh_container_dns(state, &token).await?,
             None => tracing::debug!(
                 uri = %uri,
                 "network operation body had no Container field; skipping DNS refresh"
@@ -92,28 +89,17 @@ async fn proxy_then_refresh_dns(
 /// The old entry is removed first: after a disconnect the container may have
 /// no IP left at all, in which case nothing is re-registered (a stale address
 /// would otherwise linger).
-async fn refresh_container_dns(state: &AppState, token: &str) {
-    let Some(inspect) = crate::guest_query::inspect_container(state.proxy.client(), token).await
-    else {
-        tracing::debug!(
-            container = token,
-            "could not inspect container after network change; DNS entry left unchanged"
-        );
-        return;
-    };
-    let canonical = canonical_id_or_fallback(token, &inspect);
-    state.runtime.deregister_dns_by_id(&canonical).await;
-    // Deregistration also cleared the name alias — re-register it so later
-    // lifecycle calls by name still resolve.
-    if let Some(name) = extract_container_name(&inspect) {
-        state
-            .runtime
-            .register_container_alias(&name, &canonical)
-            .await;
-    }
-    if let Some((aliases, ip)) = extract_container_dns_info(&inspect) {
-        state.runtime.register_dns(&canonical, &aliases, ip).await;
-    }
+async fn refresh_container_dns(state: &AppState, token: &str) -> Result<()> {
+    let inspect = crate::guest_query::inspect_container(state.proxy.client(), token).await?;
+    state
+        .runtime
+        .deregister_dns_by_id(&inspect.metadata.id)
+        .await;
+    state
+        .runtime
+        .register_container_dns(&inspect.metadata)
+        .await;
+    Ok(())
 }
 
 /// Extracts the `Container` field (name or ID) from a network

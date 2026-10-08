@@ -91,3 +91,9 @@ All 50 DNS tests passed, including five registry regressions covering rename, id
 Guest DNS and web-service discovery now share the ownership registry. Inspect replaces all claims under the complete container ID; rename uses a fresh inspect, and die/destroy removes that ID. Registration reports invalid names individually. DNS resolves custom exact names and descendant wildcards, returns SERVFAIL for conflicts, and limits short names to exact claims. Web-service snapshots compare the selected owner and address, including when two owners have the same IP.
 
 The full host-executed guest suites passed 99 library and 184 binary tests with the accompanying DNS boundary regression. Strict Linux musl all-target Clippy and formatting passed. This integration does not complete host registration, macOS resolver ownership, reconnect snapshot removal, or revision checks across guest certificate signing. The new behavior has not run inside a VM or browser.
+
+## Consolidate host container registration
+
+Host start, restart, rename, network refresh, reconciliation, and startup recovery now register validated inspect metadata through one Runtime entry. Invalid inspect responses propagate errors without synthesizing identity from a request token. A successful Docker rename followed by invalid inspect returns HTTP 500 and preserves previous host ownership.
+
+Docker library tests passed 127 cases, mock API tests passed eight, and daemon recovery tests passed four. Strict all-target Clippy and formatting passed. All 28 Runtime tests passed serially; parallel runs still failed in unchanged listener tests, including an address-rebind race. These results do not establish VM or browser acceptance.

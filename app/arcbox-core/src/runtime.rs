@@ -35,6 +35,7 @@ use arcbox_connect::v1::{
     ImageFsPathsResponse, KubernetesDeleteResponse, KubernetesKubeconfigResponse,
     KubernetesStartResponse, KubernetesStatusResponse, KubernetesStopResponse, ServiceStatus,
 };
+use arcbox_dns::container::ContainerMetadata;
 use arcbox_net::NetworkManager;
 #[cfg(target_os = "macos")]
 use arcbox_net::darwin::inbound_relay::{InboundListenerManager, InboundProtocol};
@@ -1866,6 +1867,16 @@ impl Runtime {
         !owner.starts_with("sandbox:")
             && !owner.starts_with("system:")
             && !owner.starts_with(machine_dns::MACHINE_DNS_OWNER_PREFIX)
+    }
+
+    /// Registers a container's name and DNS aliases from one validated inspect snapshot.
+    pub async fn register_container_dns(&self, container: &ContainerMetadata) {
+        self.register_container_alias(&container.name, &container.id)
+            .await;
+        if let Some(ip) = container.primary_ipv4() {
+            self.register_dns(&container.id, &container.default_aliases(), ip.into())
+                .await;
+        }
     }
 
     /// Registers DNS entries for a container.

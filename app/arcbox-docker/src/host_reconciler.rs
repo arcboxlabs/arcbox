@@ -64,7 +64,7 @@ trait Guest: Send + Sync {
 
     /// Sets up host networking for a running container the host does not
     /// know.
-    fn set_up(&self, container_id: &str) -> impl Future<Output = ()> + Send;
+    fn set_up(&self, container_id: &str) -> impl Future<Output = Result<()>> + Send;
 }
 
 /// Guest dockerd through the Docker proxy's pooled client.
@@ -80,8 +80,8 @@ impl Guest for ProxyGuest {
         list_running_container_ids(self.state.proxy.client()).await
     }
 
-    async fn set_up(&self, container_id: &str) {
-        setup_container_networking(&self.state, container_id).await;
+    async fn set_up(&self, container_id: &str) -> Result<()> {
+        setup_container_networking(&self.state, container_id).await
     }
 }
 
@@ -153,7 +153,7 @@ async fn reconcile(runtime: &Runtime, guest: &impl Guest) -> Result<()> {
             container_id = %id,
             "reconciler setting up host networking for a running container it did not know"
         );
-        guest.set_up(id).await;
+        guest.set_up(id).await?;
     }
     Ok(())
 }
@@ -213,8 +213,9 @@ mod tests {
             self.running.clone().map_err(DockerError::Server)
         }
 
-        async fn set_up(&self, container_id: &str) {
+        async fn set_up(&self, container_id: &str) -> Result<()> {
             self.set_up.lock().unwrap().push(container_id.to_owned());
+            Ok(())
         }
     }
 

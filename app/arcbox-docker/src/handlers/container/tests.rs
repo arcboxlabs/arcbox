@@ -78,49 +78,6 @@ fn extract_name_from_inspect_json() {
 }
 
 #[test]
-fn extract_canonical_id_from_inspect_json() {
-    let json = br#"{"Id":"abc123def456789","Name":"/my-nginx","State":{}}"#;
-    assert_eq!(
-        extract_canonical_id_from_inspect(json).as_deref(),
-        Some("abc123def456789")
-    );
-}
-
-#[test]
-fn extract_canonical_id_missing_field() {
-    let json = br#"{"Name":"/my-nginx"}"#;
-    assert_eq!(extract_canonical_id_from_inspect(json), None);
-}
-
-#[test]
-fn extract_canonical_id_invalid_json() {
-    assert_eq!(extract_canonical_id_from_inspect(b"not json"), None);
-}
-
-#[test]
-fn canonical_id_or_fallback_uses_canonical() {
-    let json = br#"{"Id":"canonical-abcdef","Name":"/my-nginx"}"#;
-    assert_eq!(
-        canonical_id_or_fallback("web", json),
-        "canonical-abcdef".to_string()
-    );
-}
-
-#[test]
-fn canonical_id_or_fallback_falls_back_when_missing() {
-    let json = br#"{"Name":"/my-nginx"}"#;
-    assert_eq!(canonical_id_or_fallback("web", json), "web".to_string());
-}
-
-#[test]
-fn canonical_id_or_fallback_falls_back_on_invalid_json() {
-    assert_eq!(
-        canonical_id_or_fallback("web", b"not json"),
-        "web".to_string()
-    );
-}
-
-#[test]
 fn test_extract_container_dns_info_plain() {
     let json = serde_json::json!({
         "Id": "abc123",
