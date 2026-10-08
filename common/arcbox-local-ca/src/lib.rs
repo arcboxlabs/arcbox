@@ -30,6 +30,9 @@
 //!   new root's TLS-server-only Admin trust before booting the VM.
 //! - **Persistence.** Removing `tls/ca.pem` does not rotate the Keychain
 //!   CA. The daemon republishes the same public certificate on startup.
+//! - **Validity.** Root metadata remains readable after expiry for status and
+//!   revocation. Signing requires a valid root and caps the leaf's validity at
+//!   the root's bounds. The guest can inspect leaf expiry for renewal.
 
 #[cfg(any(target_os = "macos", test))]
 mod authority;
@@ -41,6 +44,7 @@ mod public;
 mod request;
 #[cfg(target_os = "macos")]
 mod trust;
+mod validity;
 
 use arcbox_atomic_file::AtomicWriteError;
 pub use arcbox_constants::dns::LOCAL_DOMAIN;
@@ -51,6 +55,7 @@ pub use self::keychain::KeychainAuthority;
 pub use self::migration::{remove_trust, remove_user_trust_der};
 pub use self::public::PublicAuthority;
 pub use self::request::{CertificateRequest, MAX_CERTIFICATE_SIZE};
+pub use self::validity::CertificateValidity;
 
 /// Why the CA could not be created, loaded, or used.
 #[derive(Debug, thiserror::Error)]

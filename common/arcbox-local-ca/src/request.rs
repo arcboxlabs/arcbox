@@ -10,6 +10,8 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, Serve
 #[cfg(any(target_os = "macos", test))]
 use time::{Duration, OffsetDateTime};
 
+#[cfg(any(target_os = "macos", test))]
+use crate::CertificateValidity;
 use crate::{Error, LOCAL_DOMAIN};
 
 /// Maximum DER request or response size accepted across the signing boundary.
@@ -70,7 +72,17 @@ fn validate_name(name: &str) -> Result<(), Error> {
 
 /// Verifies the CSR signature and applies host-owned certificate policy.
 #[cfg(any(target_os = "macos", test))]
-pub fn sign_request(der: &[u8], issuer: &Issuer<'_, impl SigningKey>) -> Result<Vec<u8>, Error> {
+pub fn sign_request(
+    der: &[u8],
+    issuer: &Issuer<'_, impl SigningKey>,
+    validity: CertificateValidity,
+    now: OffsetDateTime,
+) -> Result<Vec<u8>, Error> {
+    if !validity.is_valid_at(now) {
+        return Err(Error::InvalidAuthority(
+            "root certificate is outside its validity period",
+        ));
+    }
     if der.len() > MAX_CERTIFICATE_SIZE {
         return Err(Error::InvalidRequest(
             "certificate request exceeds 8192 bytes",
@@ -87,9 +99,8 @@ pub fn sign_request(der: &[u8], issuer: &Issuer<'_, impl SigningKey>) -> Result<
     params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     params.use_authority_key_identifier_extension = true;
-    let now = OffsetDateTime::now_utc();
-    params.not_before = now - Duration::hours(1);
-    params.not_after = now + Duration::days(30);
+    params.not_before = (now - Duration::hours(1)).max(validity.not_before);
+    params.not_after = (now + Duration::days(30)).min(validity.not_after);
     Ok(params
         .signed_by(&request.public_key, issuer)?
         .der()
@@ -110,12 +121,14 @@ mod tests {
         let key = KeyPair::generate().unwrap();
         let params = crate::authority::parameters();
         let ca = params.self_signed(&key).unwrap();
+        let validity = CertificateValidity::from_der(ca.der()).unwrap();
+        let now = OffsetDateTime::now_utc();
         let issuer = Issuer::new(params, key);
         let pending = CertificateRequest::new("dash.signoz.arcbox.local").unwrap();
         let mut tampered = pending.der().to_vec();
         *tampered.last_mut().unwrap() ^= 1;
-        assert!(sign_request(&tampered, &issuer).is_err());
-        let certificate = sign_request(pending.der(), &issuer).unwrap();
+        assert!(sign_request(&tampered, &issuer, validity, now).is_err());
+        let certificate = sign_request(pending.der(), &issuer, validity, now).unwrap();
         pending.complete(certificate.clone()).unwrap();
         let mut roots = rustls::RootCertStore::empty();
         roots.add(ca.der().clone()).unwrap();
@@ -149,15 +162,18 @@ mod tests {
                 .unwrap()
                 .serialize_request(&key)
                 .unwrap();
-            assert!(sign_request(request.der(), &issuer).is_err(), "{name}");
+            assert!(
+                sign_request(request.der(), &issuer, validity, now).is_err(),
+                "{name}"
+            );
         }
         let key = KeyPair::generate().unwrap();
         let request = CertificateParams::new(vec!["a.arcbox.local".into(), "example.com".into()])
             .unwrap()
             .serialize_request(&key)
             .unwrap();
-        assert!(sign_request(request.der(), &issuer).is_err());
-        assert!(sign_request(&[0; MAX_CERTIFICATE_SIZE + 1], &issuer).is_err());
+        assert!(sign_request(request.der(), &issuer, validity, now).is_err());
+        assert!(sign_request(&[0; MAX_CERTIFICATE_SIZE + 1], &issuer, validity, now).is_err());
     }
 
     #[test]
@@ -174,7 +190,10 @@ mod tests {
         params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
         let request = params.serialize_request(&key).unwrap();
-        let certificate = CertificateDer::from(sign_request(request.der(), &ca).unwrap());
+        let validity = CertificateValidity::from_der(ca.der()).unwrap();
+        let certificate = CertificateDer::from(
+            sign_request(request.der(), &ca, validity, OffsetDateTime::now_utc()).unwrap(),
+        );
         let leaf = Issuer::from_ca_cert_der(&certificate, key).unwrap();
         assert_eq!(leaf.key_usages(), [KeyUsagePurpose::DigitalSignature]);
         let mut roots = rustls::RootCertStore::empty();
@@ -233,5 +252,34 @@ mod tests {
                 "{error:?}"
             );
         }
+    }
+
+    #[test]
+    fn leaf_validity_cannot_outlive_the_root_or_use_an_inactive_root() {
+        let now = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
+        let mut params = crate::authority::parameters();
+        params.not_before = now - Duration::minutes(10);
+        params.not_after = now + Duration::days(2);
+        let ca = rcgen::CertifiedIssuer::self_signed(params, KeyPair::generate().unwrap()).unwrap();
+        let validity = CertificateValidity::from_der(ca.der()).unwrap();
+        let request = CertificateRequest::new("web.arcbox.local").unwrap();
+        let leaf = sign_request(request.der(), &ca, validity, now).unwrap();
+        assert_eq!(CertificateValidity::from_der(&leaf).unwrap(), validity);
+        for outside in [
+            validity.not_before - Duration::seconds(1),
+            validity.not_after + Duration::seconds(1),
+        ] {
+            assert!(matches!(
+                sign_request(request.der(), &ca, validity, outside),
+                Err(Error::InvalidAuthority(_))
+            ));
+        }
+        let renewed = sign_request(request.der(), &ca, validity, now + Duration::days(1)).unwrap();
+        let renewed_validity = CertificateValidity::from_der(&renewed).unwrap();
+        assert_eq!(renewed_validity.not_after, validity.not_after);
+        assert_eq!(
+            renewed_validity.not_before,
+            now + Duration::days(1) - Duration::hours(1)
+        );
     }
 }

@@ -13,12 +13,13 @@ use security_framework::key::{Algorithm, GenerateKeyOptions, KeyType, SecKey};
 use security_framework::os::macos::keychain::SecKeychain;
 use security_framework_sys::base::errSecItemNotFound;
 
-use crate::{Error, authority, request};
+use crate::{CertificateValidity, Error, authority, request};
 
 /// A per-profile CA whose root private key stays in the macOS Keychain.
 pub struct KeychainAuthority {
     issuer: Issuer<'static, KeychainKey>,
     certificate: SecCertificate,
+    validity: CertificateValidity,
 }
 
 impl KeychainAuthority {
@@ -72,16 +73,24 @@ impl KeychainAuthority {
                 "certificate and private key differ",
             ));
         }
-        let issuer = Issuer::from_ca_cert_der(&certificate.to_der().into(), key)?;
+        let der = certificate.to_der();
+        let validity = CertificateValidity::from_der(&der)?;
+        let issuer = Issuer::from_ca_cert_der(&der.into(), key)?;
         Ok(Self {
             issuer,
             certificate,
+            validity,
         })
     }
 
-    /// Signs one verified CSR under the host's fixed leaf-certificate policy.
+    /// Signs one verified CSR while the root is valid and caps the leaf at the root's expiry.
     pub fn sign(&self, csr: &[u8]) -> Result<Vec<u8>, Error> {
-        request::sign_request(csr, &self.issuer)
+        request::sign_request(
+            csr,
+            &self.issuer,
+            self.validity,
+            time::OffsetDateTime::now_utc(),
+        )
     }
 
     /// Exports only the public root certificate for client trust.

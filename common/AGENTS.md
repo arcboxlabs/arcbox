@@ -109,6 +109,11 @@ distribution".
 
 ## Guest-facing parsers (VM path)
 
+- `arcbox-local-ca` exposes public root metadata and certificate validity for
+  host status and guest renewal. Keep expired roots parseable for exact trust
+  revocation. Signing must reject inactive roots and cap leaf validity at the
+  root's bounds. Root private keys must remain in the macOS Keychain.
+
 - `translate()` (arcbox-conntrack) and `DnsQuery::parse` (arcbox-dns) consume
   arbitrary guest bytes on the VM datapath. The virt/AGENTS.md "Guest-controlled
   input" rule applies here: every guest-programmed value is arbitrary bits, all

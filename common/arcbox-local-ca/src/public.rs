@@ -1,16 +1,20 @@
 //! Validate the public root before certificate storage or native trust changes.
 
 use arcbox_constants::dns::LOCAL_CA_COMMON_NAME;
+use sha2::{Digest, Sha256};
 use x509_parser::{
     extensions::{GeneralName, ParsedExtension},
     prelude::{FromDer, X509Certificate},
 };
 
-use crate::{Error, LOCAL_DOMAIN, MAX_CERTIFICATE_SIZE};
+use crate::{CertificateValidity, Error, LOCAL_DOMAIN, MAX_CERTIFICATE_SIZE};
 
 /// A self-signed public CA with the fixed ArcBox identity and signing scope.
 /// Expired certificates remain valid inputs so uninstall can revoke their trust.
-pub struct PublicAuthority(Vec<u8>);
+pub struct PublicAuthority {
+    der: Vec<u8>,
+    validity: CertificateValidity,
+}
 
 impl PublicAuthority {
     /// Parses exactly one PEM certificate and validates the ArcBox root policy.
@@ -32,7 +36,23 @@ impl PublicAuthority {
     /// Returns the validated public certificate. No private key is present.
     #[must_use]
     pub fn der(&self) -> &[u8] {
-        &self.0
+        &self.der
+    }
+
+    /// Returns the root's validity interval, including expired roots retained for revocation.
+    #[must_use]
+    pub fn validity(&self) -> CertificateValidity {
+        self.validity
+    }
+
+    /// Returns the DER certificate's SHA-256 fingerprint as uppercase, colon-separated hex.
+    #[must_use]
+    pub fn fingerprint_sha256(&self) -> String {
+        Sha256::digest(self.der())
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect::<Vec<_>>()
+            .join(":")
     }
 }
 
@@ -127,7 +147,8 @@ impl TryFrom<Vec<u8>> for PublicAuthority {
                 "CA must permit only ArcBox DNS names and exclude every IP address",
             ));
         }
-        Ok(Self(der))
+        let validity = CertificateValidity::from(certificate.validity());
+        Ok(Self { der, validity })
     }
 }
 
@@ -168,6 +189,35 @@ mod tests {
         assert!(PublicAuthority::try_from(tampered).is_err());
         assert!(PublicAuthority::try_from([der.as_slice(), &[0]].concat()).is_err());
         assert!(PublicAuthority::try_from(vec![0; MAX_CERTIFICATE_SIZE + 1]).is_err());
+    }
+
+    #[test]
+    fn metadata_identifies_the_certificate_and_keeps_expired_roots_inspectable() {
+        let now = time::OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
+        let mut params = crate::authority::parameters();
+        params.not_before = now - time::Duration::days(2);
+        params.not_after = now - time::Duration::days(1);
+        let key = KeyPair::generate().unwrap();
+        let first = params.self_signed(&key).unwrap();
+        let public = PublicAuthority::try_from(first.der().to_vec()).unwrap();
+        assert_eq!(public.validity().not_before, params.not_before);
+        assert_eq!(public.validity().not_after, params.not_after);
+        assert!(!public.validity().is_valid_at(now));
+        let pem = format!("\n{}\n", first.pem().replace('\n', "\r\n"));
+        assert_eq!(
+            public.fingerprint_sha256(),
+            PublicAuthority::from_pem(pem.as_bytes())
+                .unwrap()
+                .fingerprint_sha256()
+        );
+        params.not_after += time::Duration::days(2);
+        let replacement =
+            PublicAuthority::try_from(params.self_signed(&key).unwrap().der().to_vec()).unwrap();
+        assert!(replacement.validity().is_valid_at(now));
+        assert_ne!(
+            public.fingerprint_sha256(),
+            replacement.fingerprint_sha256()
+        );
     }
 
     #[test]
