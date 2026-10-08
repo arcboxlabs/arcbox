@@ -10,6 +10,7 @@ use tokio::sync::watch;
 #[derive(Clone, Debug, Default)]
 struct State {
     fingerprint: String,
+    observation_id: String,
     untrusted: bool,
     suppressed: bool,
     pending: Option<LocalHttpsAccess>,
@@ -30,11 +31,11 @@ impl Default for HttpsAccess {
 }
 
 impl HttpsAccess {
-    /// Returns the root to observe, or `None` when no GUI can authorize it.
-    pub fn observing_fingerprint(&self) -> Option<String> {
+    /// Returns the current trust cycle, or `None` when no GUI can authorize it.
+    pub fn observing_cycle(&self) -> Option<String> {
         let state = self.state.borrow();
         (self.state.receiver_count() > 0 && state.untrusted && !state.suppressed)
-            .then(|| state.fingerprint.clone())
+            .then(|| state.observation_id.clone())
     }
 
     /// Reconciles actual trust. Only native inspection can end the untrusted state.
@@ -58,6 +59,10 @@ impl HttpsAccess {
                     state.acknowledged = Some(pending.request_id.clone());
                 }
             }
+            if untrusted {
+                // A reused certificate must not accept an earlier trust cycle's RPC response.
+                state.observation_id = uuid::Uuid::new_v4().to_string();
+            }
             state.fingerprint.clone_from(&status.certificate_sha256);
             state.untrusted = untrusted;
             state.pending = None;
@@ -66,14 +71,14 @@ impl HttpsAccess {
     }
 
     /// Publishes a validated Mac access and merges concurrent requests for the same root.
-    pub fn record(&self, hostname: &str, fingerprint: &str) {
+    pub fn record(&self, hostname: &str, observation_id: &str) {
         if self.state.receiver_count() == 0 {
             return;
         }
         self.state.send_if_modified(|state| {
             if !state.untrusted
                 || state.suppressed
-                || state.fingerprint != fingerprint
+                || state.observation_id != observation_id
                 || state.pending.is_some()
             {
                 return false;
@@ -81,7 +86,7 @@ impl HttpsAccess {
             state.pending = Some(LocalHttpsAccess {
                 request_id: uuid::Uuid::new_v4().to_string(),
                 hostname: hostname.into(),
-                certificate_sha256: fingerprint.into(),
+                certificate_sha256: state.fingerprint.clone(),
                 ..Default::default()
             });
             true
@@ -162,17 +167,18 @@ mod tests {
         let access = HttpsAccess::default();
         access.update_status(&untrusted("first"));
         access.record("ignored.arcbox.local", "first");
-        assert!(access.observing_fingerprint().is_none());
+        assert!(access.observing_cycle().is_none());
         let mut first = access.watch();
         assert_eq!(first.next().await.unwrap().unwrap().request_id, "");
-        access.record("web.arcbox.local", "first");
+        let cycle = access.observing_cycle().unwrap();
+        access.record("web.arcbox.local", &cycle);
         let pending = first.next().await.unwrap().unwrap();
-        access.record("other.arcbox.local", "first");
+        access.record("other.arcbox.local", &cycle);
         let mut reconnect = access.watch();
         assert_eq!(reconnect.next().await.unwrap().unwrap(), pending);
         drop(first);
         drop(reconnect);
-        assert!(access.observing_fingerprint().is_none());
+        assert!(access.observing_cycle().is_none());
     }
 
     #[tokio::test]
@@ -180,7 +186,8 @@ mod tests {
         let access = HttpsAccess::default();
         access.update_status(&untrusted("first"));
         let mut stream = access.watch();
-        access.record("web.arcbox.local", "first");
+        let first_cycle = access.observing_cycle().unwrap();
+        access.record("web.arcbox.local", &first_cycle);
         let request = AcknowledgeHttpsAccessRequest {
             request_id: stream.next().await.unwrap().unwrap().request_id,
             outcome: Outcome::Cancelled.into(),
@@ -189,14 +196,15 @@ mod tests {
         access.acknowledge(&request).unwrap();
         access.acknowledge(&request).unwrap();
         assert!(access.state.borrow().untrusted);
-        assert!(access.observing_fingerprint().is_none());
-        access.record("web.arcbox.local", "first");
+        assert!(access.observing_cycle().is_none());
+        access.record("web.arcbox.local", &first_cycle);
         assert_eq!(stream.next().await.unwrap().unwrap().request_id, "");
         access.update_status(&untrusted("second"));
-        assert_eq!(access.observing_fingerprint().as_deref(), Some("second"));
-        access.record("web.arcbox.local", "first");
+        let second_cycle = access.observing_cycle().unwrap();
+        assert_ne!(first_cycle, second_cycle);
+        access.record("web.arcbox.local", &first_cycle);
         assert!(access.state.borrow().pending.is_none());
-        access.record("web.arcbox.local", "second");
+        access.record("web.arcbox.local", &second_cycle);
         assert!(access.acknowledge(&request).is_err());
     }
 
@@ -205,7 +213,8 @@ mod tests {
         let access = HttpsAccess::default();
         access.update_status(&untrusted("root"));
         let mut stream = access.watch();
-        access.record("web.arcbox.local", "root");
+        let first_cycle = access.observing_cycle().unwrap();
+        access.record("web.arcbox.local", &first_cycle);
         let mut request = AcknowledgeHttpsAccessRequest {
             request_id: stream.next().await.unwrap().unwrap().request_id,
             ..Default::default()
@@ -220,12 +229,76 @@ mod tests {
         request.outcome = Outcome::Completed.into();
         access.acknowledge(&request).unwrap();
         assert!(access.state.borrow().pending.is_none());
-        assert!(access.observing_fingerprint().is_none());
+        assert!(access.observing_cycle().is_none());
         access.update_status(&untrusted("root"));
-        access.record("web.arcbox.local", "root");
+        let next_cycle = access.observing_cycle().unwrap();
+        assert_ne!(first_cycle, next_cycle);
+        access.record("web.arcbox.local", &next_cycle);
         let next = access.state.borrow().pending.clone().unwrap();
         assert_ne!(next.request_id, request.request_id);
         access.acknowledge(&request).unwrap();
         assert_eq!(access.state.borrow().pending.as_ref(), Some(&next));
+    }
+
+    #[tokio::test]
+    async fn service_watch_counts_clients_and_rejects_a_previous_trust_cycle() {
+        use std::sync::Arc;
+
+        use arcbox_connect::v1::{Empty, SystemService};
+        use buffa::Message as _;
+        use connectrpc::{HasMessageView, RequestContext, ServiceRequest};
+
+        use crate::{SetupState, SystemServiceImpl};
+
+        let setup = Arc::new(SetupState::new());
+        let access = &setup.https_access;
+        setup.set_local_https(untrusted("root"));
+        assert!(access.observing_cycle().is_none());
+        let service = SystemServiceImpl::new(setup.clone(), Arc::default(), Arc::default());
+        let body = bytes::Bytes::new();
+        let view = Empty::decode_view(&body).unwrap();
+        let request = ServiceRequest::from_parts(&view, &body);
+        let mut stream = service
+            .watch_https_access(RequestContext::new(Default::default()), request)
+            .await
+            .unwrap()
+            .body;
+        let previous = access.observing_cycle().unwrap();
+        assert_eq!(access.state.receiver_count(), 1);
+        setup.set_local_https(LocalHttpsStatus {
+            trust_state: TrustState::Trusted.into(),
+            certificate_sha256: "root".into(),
+            ..Default::default()
+        });
+        setup.set_local_https(untrusted("root"));
+        let current = access.observing_cycle().unwrap();
+        assert_ne!(previous, current);
+        access.record("stale.arcbox.local", &previous);
+        assert_eq!(stream.next().await.unwrap().unwrap().request_id, "");
+        access.record("web.arcbox.local", &current);
+        let event = stream.next().await.unwrap().unwrap();
+        assert_eq!(event.hostname, "web.arcbox.local");
+        assert_eq!(event.certificate_sha256, "root");
+        let body = bytes::Bytes::from(
+            AcknowledgeHttpsAccessRequest {
+                request_id: event.request_id,
+                outcome: Outcome::Cancelled.into(),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        );
+        let view = AcknowledgeHttpsAccessRequest::decode_view(&body).unwrap();
+        service
+            .acknowledge_https_access(
+                RequestContext::new(Default::default()),
+                ServiceRequest::from_parts(&view, &body),
+            )
+            .await
+            .unwrap();
+        assert!(access.observing_cycle().is_none());
+        assert_eq!(access.state.receiver_count(), 1);
+        drop(stream);
+        assert_eq!(access.state.receiver_count(), 0);
+        assert!(access.observing_cycle().is_none());
     }
 }
