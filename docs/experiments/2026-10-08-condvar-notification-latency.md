@@ -84,3 +84,19 @@ This controlled experiment connects incorrect guest runtime charging, prolonged 
 The experiment does **not** identify the original ClickHouse trigger. The original capture lacks a matching blocked notifier futex, the associated delayed waiter, and its scheduling history. The synthetic SIGUSR1 busy handler and controlled whole-VM suspension establish a possible causal chain; they do not establish that those conditions occurred in the original incident.
 
 The probe requires the baseline tick-accounting kernel, at least three guest CPUs, and assertions enabled. Compile with the same strict GCC flags as the earlier probe. Invoke `control fast`, `pause wait` for the tested old runtime, or `pause fast` for the tested modern runtime. Supply `go` on stdin after the ready event and, for pause cases, after the verified helper resumes. A 150-second alarm bounds the process. GCC warnings and static analysis, clang-format, workspace formatting, and the existing HV example's Clippy check pass. All four runtime assertions pass. Source, binary, identities, snapshots, and analysis are preserved under `cond-scheduler-2026-10-08` with a SHA256 manifest.
+
+### Host driver and evidence checks
+
+[run_cond_scheduler.py](../../tests/bench/signoz/run_cond_scheduler.py) implements the ready/resume handshake and records every probe line. Copy the compiled probe to `/tmp/cond_scheduler_latency` in a dedicated container. Place the matched modern loader and libc under `/tmp/libc-modern`, as in the earlier comparison. Verify that the target VZ helper opens the disposable VM's kernel and disks before supplying its PID and exact `ps -o lstart=` value. The driver stops its dedicated container after any unsuccessful run, because terminating the Docker client alone can leave the guest process alive.
+
+Replace the uppercase placeholders below with the verified experiment values. Each output directory must be new. Both pause cases use the same ten-second watchdog-backed suspension.
+
+```sh
+python3 tests/bench/signoz/run_cond_scheduler.py --socket SOCKET --container CONTAINER --runtime old --mode control --output RESULTS/old-control
+python3 tests/bench/signoz/run_cond_scheduler.py --socket SOCKET --container CONTAINER --runtime modern --mode control --output RESULTS/modern-control
+python3 tests/bench/signoz/run_cond_scheduler.py --socket SOCKET --container CONTAINER --runtime old --mode pause --host-vm-pid PID --expected-start 'START_TIME' --output RESULTS/old-pause
+python3 tests/bench/signoz/run_cond_scheduler.py --socket SOCKET --container CONTAINER --runtime modern --mode pause --host-vm-pid PID --expected-start 'START_TIME' --output RESULTS/modern-pause
+python3 tests/bench/signoz/analyze_cond_scheduler.py RESULTS
+```
+
+[analyze_cond_scheduler.py](../../tests/bench/signoz/analyze_cond_scheduler.py) requires successful completion and empty stderr for every case. It verifies unique overcharging, more than forty seconds of sampled runnable state with unchanged runtime/dispatch/PROF counters, and advancing peer counters during that interval. Peer deltas in the report use snapshots strictly inside the victim's observation window. The checker also verifies the expected notification order and bounded snapshot duration. These checks distinguish scheduler exclusion from a second suspension of CPU 1 and distinguish notification blocking from CPU work by the notifier. Run Python with assertions enabled.
