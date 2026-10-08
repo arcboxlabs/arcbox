@@ -39,6 +39,8 @@
 
 #[cfg(any(target_os = "macos", test))]
 mod authority;
+#[cfg(test)]
+mod journal;
 #[cfg(target_os = "macos")]
 mod keychain;
 #[cfg(target_os = "macos")]
@@ -77,6 +79,13 @@ pub enum Error {
     /// Replacing a CA file failed.
     #[error(transparent)]
     Write(#[from] AtomicWriteError),
+    /// The persisted CA rotation state could not be encoded or decoded.
+    #[error("invalid local CA journal {}: {source}", .path.display())]
+    Journal {
+        path: std::path::PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
     /// Generating or parsing a certificate or key failed.
     #[error("certificate: {0}")]
     Certificate(#[from] rcgen::Error),

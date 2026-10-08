@@ -98,6 +98,7 @@ from memory. Every new file is added to the index below.
 
 ### Logs
 
+- [2026-10-08 — Local CA rotation and recovery](logs/2026-10-08-local-ca-rotation.md)
 - [2026-10-08 — One DNS suffix reaches the host and System VM](logs/2026-10-08-instance-dns-domain.md)
 - [2026-10-08 — Storage dependencies follow the workspace release version](logs/2026-10-08-storage-workspace-release.md)
 - [2026-10-08 — Sandbox benchmarks distinguish creation paths and preserve measurement units](logs/2026-10-08-sandbox-benchmark-integration.md)
