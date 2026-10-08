@@ -447,6 +447,7 @@ pub struct MachineManager {
     /// What the host holds of each running machine; every stop waits for
     /// these to clear before it touches the VM (see [`HostHold`]).
     host_holds: host_hold::HostHolds,
+    host_release_timeout: Duration,
     /// The serial drain of every running machine, by name (see [`serial`]).
     /// Dropping an entry stops its drain.
     #[cfg(target_os = "macos")]
@@ -546,17 +547,10 @@ impl MachineManager {
             host_network,
             event_bus,
             host_holds: host_hold::HostHolds::default(),
+            host_release_timeout: HOST_RELEASE_TIMEOUT,
             #[cfg(target_os = "macos")]
             serial_drains: Mutex::new(HashMap::new()),
         }
-    }
-
-    /// Registers a host-side dependency on machine `name` — a mount served
-    /// by the machine, say — that every stop waits for before it touches
-    /// the VM. Release it, by dropping the hold, on `MachineStopping`.
-    #[must_use]
-    pub fn host_hold(&self, name: &str) -> HostHold {
-        self.host_holds.hold(name)
     }
 
     /// Holds a running machine while host work drains before shutdown.
@@ -580,16 +574,40 @@ impl MachineManager {
             .with_network_incarnation(&machine.vm_id, expected, || self.host_holds.hold(name))
     }
 
-    /// Waits for the host to release what it holds of `name`, within
-    /// [`HOST_RELEASE_TIMEOUT`]; a hold that outlives the wait is logged
-    /// and the stop goes ahead.
-    fn await_host_release(&self, name: &str) {
-        if !self.host_holds.wait_released(name, HOST_RELEASE_TIMEOUT) {
-            tracing::warn!(
-                machine = name,
-                "the host did not release the machine within {HOST_RELEASE_TIMEOUT:?}; stopping it anyway"
-            );
+    /// Waits for host resources within the stop deadline.
+    /// A timeout fails an active stop before teardown, or leaves an inactive VM registered.
+    fn await_host_release(
+        &self,
+        name: &str,
+        owner: Option<(&Arc<stop_owner::StopRun>, bool)>,
+    ) -> Result<()> {
+        if self
+            .host_holds
+            .wait_released(name, self.host_release_timeout)
+        {
+            return Ok(());
         }
+        let timeout_error = || {
+            EngineError::from(arcbox_error::CommonError::timeout(format!(
+                "host resources for machine '{name}' did not drain within {:?}; no teardown was attempted",
+                self.host_release_timeout
+            )))
+        };
+        if let Some((run, graceful)) = owner {
+            let completion = if graceful {
+                stop_owner::Completion::Graceful(Err(timeout_error()))
+            } else {
+                stop_owner::Completion::Forced(Err(timeout_error()))
+            };
+            // A stopped predecessor does not permit removal while host resources remain held.
+            match self.finish_stop(name, run, completion) {
+                Ok(_) | Err(EngineError::Common(arcbox_error::CommonError::Timeout(_))) => {}
+                Err(error) => {
+                    tracing::warn!(machine = name, %error, "Failed to finish a stop after host drain timed out");
+                }
+            }
+        }
+        Err(timeout_error())
     }
 
     /// Publish a lifecycle event for user machine `name`. The default System VM
@@ -1467,6 +1485,7 @@ impl MachineManager {
     /// that owns the VMM can temporarily prevent forced teardown.
     /// `MachineStopping` is published while the run identity is locked.
     /// The host then gets [`HOST_RELEASE_TIMEOUT`] to release its holds.
+    /// A hold timeout cancels this stop before guest shutdown or teardown.
     ///
     /// # Errors
     ///
@@ -1483,7 +1502,7 @@ impl MachineManager {
             self.vm_manager.run_incarnation(&machine.vm_id)?
         };
         let operation = self.admit_stop(name, &expected, graceful_timeout.is_some())?;
-        self.await_host_release(name);
+        self.await_host_release(name, Some((&operation, graceful_timeout.is_some())))?;
         if let Some(timeout) = graceful_timeout {
             let result =
                 self.vm_manager
@@ -1789,13 +1808,20 @@ impl MachineManager {
             }
             drop(machines);
             let operation = self.admit_stop(name, &expected, false)?;
-            self.await_host_release(name);
+            self.await_host_release(name, Some((&operation, false)))?;
             self.force_stop_expected(name, &operation)?;
             machines = self
                 .machines
                 .write()
                 .map_err(|_| EngineError::LockPoisoned)?;
         }
+
+        drop(machines);
+        self.await_host_release(name, None)?;
+        machines = self
+            .machines
+            .write()
+            .map_err(|_| EngineError::LockPoisoned)?;
 
         // Get VM ID before removing from map.
         let vm_id = {

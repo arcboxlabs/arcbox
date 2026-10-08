@@ -7,7 +7,8 @@
 //! a `remove --force` took ~15 s that way. A holder therefore registers a
 //! [`HostHold`] while it depends on the machine and drops it once the
 //! `MachineStopping` event has made it let go; every stop waits, bounded,
-//! for the holds to clear before it touches the VM. The graceful stop
+//! for the holds to clear before it touches the VM. A timeout aborts the stop.
+//! The graceful stop
 //! waits too: its shutdown RPC kills the machine's export within moments
 //! on alpine, before an unmount started at the event has finished.
 
@@ -63,6 +64,15 @@ impl HostHolds {
 pub struct HostHold {
     inner: Arc<Inner>,
     name: String,
+}
+
+#[cfg(feature = "test-support")]
+impl HostHold {
+    /// Creates a hold for a registry fixture without admitting work to a VM.
+    #[must_use]
+    pub fn for_test() -> Self {
+        HostHolds::default().hold("fixture")
+    }
 }
 
 impl Drop for HostHold {

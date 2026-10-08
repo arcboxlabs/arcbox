@@ -10,6 +10,8 @@ One operation owns stopping each physical run. A failed forced takeover preserve
 
 Use `host_hold_expected` to admit host work only while the named machine is running the captured physical VM. On `MachineStopping`, cancel and join the work before dropping its hold.
 
+Stop and removal wait at most ten seconds for host holds. A timeout returns an error before teardown. Removal of a created or stopped machine also waits for remaining holds; retry after the holder finishes.
+
 Removal of a running or stopping machine requires `force`. Forced removal acquires the same stop ownership and retains the captured physical run through final deletion.
 
 Use `VmLifecycleManager::force_stop` to interrupt a boot or graceful shutdown and wait for machine removal:

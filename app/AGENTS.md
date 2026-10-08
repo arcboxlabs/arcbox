@@ -242,6 +242,7 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
 
 ## Machine root mounts
 
+- Acquire `host_hold_expected` before the first VM-dependent mount operation. Retain the hold through registration and the first unmount attempt. A host-hold timeout must abort machine teardown; see ADR 0009.
 - **A running distro machine's `/` is mounted read-write on the host**, at
   `~/ArcBox/machines/<name>`, under the one host mount root `~/ArcBox` that
   also holds the docker export at `docker/` (`ARCBOX_HOST_MOUNT_DIR` moves

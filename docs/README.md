@@ -68,6 +68,7 @@ from memory. Every new file is added to the index below.
 
 ### Decisions
 
+- [0009 — Host work must drain before machine teardown](adr/0009-host-work-drains-before-machine-teardown.md) (2026-10-09; supersedes ADR 0003 decision 5)
 - [0008 — The local CA covers concrete names under `.local`](adr/0008-local-ca-covers-local-domains.md) (2026-10-08)
 - [0007 — Local HTTPS authorization is independent of startup](adr/0007-local-https-independent-of-startup.md) (2026-10-08)
 - [0006 — Authorize local CA trust in the login user's session](adr/0006-authorize-local-ca-in-user-session.md) (2026-10-08)

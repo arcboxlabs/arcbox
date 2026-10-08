@@ -242,7 +242,7 @@ fn a_force_stop_waits_for_the_host_to_release_the_machine() {
         .unwrap()
         .vm_id = vm_id;
 
-    let hold = manager.host_hold("held");
+    let hold = manager.host_holds.hold("held");
     let release_after = Duration::from_millis(300);
     let releaser = std::thread::spawn(move || {
         std::thread::sleep(release_after);
@@ -1506,4 +1506,143 @@ fn failed_takeover_after_graceful_timeout_reopens_admission() {
         Event::MachineStopCancelled { .. }
     ));
     assert!(events.try_recv().is_err());
+}
+
+#[test]
+fn held_resources_abort_stop_and_removal_before_vm_teardown() {
+    use crate::event::Event;
+    for graceful in [false, true] {
+        let dir = tempdir().unwrap();
+        let bus = crate::event::EventBus::new();
+        let mut events = bus.subscribe();
+        let mut manager = test_machine_manager_with_bus(dir.path(), bus);
+        manager.host_release_timeout = Duration::from_millis(1);
+        let expected = model_running_machine(&manager, "drain");
+        let hold = manager.host_hold_expected("drain", &expected).unwrap();
+        let error = manager
+            .stop("drain", graceful.then_some(Duration::ZERO))
+            .unwrap_err();
+        assert!(error.to_string().contains("did not drain"));
+        assert_eq!(manager.get("drain").unwrap().state, MachineState::Running);
+        assert_eq!(manager.network_incarnation("drain").unwrap(), expected);
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::MachineStopping { .. }
+        ));
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::MachineStopCancelled { .. }
+        ));
+        assert!(events.try_recv().is_err());
+        let error = manager.remove("drain", true).unwrap_err();
+        assert!(error.to_string().contains("did not drain"));
+        assert_eq!(manager.network_incarnation("drain").unwrap(), expected);
+        assert_eq!(manager.get("drain").unwrap().state, MachineState::Running);
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::MachineStopping { .. }
+        ));
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::MachineStopCancelled { .. }
+        ));
+        assert!(events.try_recv().is_err());
+        drop(hold);
+        // The fixture has no initialized hypervisor or vCPU; teardown only updates modeled state.
+        if !graceful {
+            manager.stop("drain", None).unwrap();
+            assert_eq!(manager.get("drain").unwrap().state, MachineState::Stopped);
+        }
+        manager.remove("drain", true).unwrap();
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::MachineStopping { .. }
+        ));
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::MachineStopped { .. }
+        ));
+        assert!(!manager.exists("drain"));
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::MachineRemoved { .. }
+        ));
+        assert!(events.try_recv().is_err());
+    }
+}
+
+#[test]
+fn drain_timeout_retains_the_pending_graceful_owner() {
+    use stop_owner::Completion::Graceful;
+    let dir = tempdir().unwrap();
+    let mut manager = test_machine_manager(dir.path());
+    manager.host_release_timeout = Duration::ZERO;
+    let expected = model_running_machine(&manager, "pending");
+    let hold = manager.host_hold_expected("pending", &expected).unwrap();
+    let graceful = manager.admit_stop("pending", &expected, true).unwrap();
+    let force = manager.admit_stop("pending", &expected, false).unwrap();
+    assert!(
+        manager
+            .await_host_release("pending", Some((&force, false)))
+            .is_err()
+    );
+    assert_eq!(
+        manager.get("pending").unwrap().state,
+        MachineState::Stopping
+    );
+    drop(hold);
+    manager
+        .await_host_release("pending", Some((&graceful, true)))
+        .unwrap();
+    assert!(
+        !manager
+            .finish_stop("pending", &graceful, Graceful(Ok(false)))
+            .unwrap()
+    );
+    manager.require_force_owner("pending", &graceful).unwrap();
+}
+
+#[test]
+fn completed_predecessor_does_not_hide_a_host_drain_timeout() {
+    use stop_owner::Completion::Graceful;
+    let dir = tempdir().unwrap();
+    let mut manager = test_machine_manager(dir.path());
+    manager.host_release_timeout = Duration::ZERO;
+    let expected = model_running_machine(&manager, "completed");
+    let hold = manager.host_hold_expected("completed", &expected).unwrap();
+    let graceful = manager.admit_stop("completed", &expected, true).unwrap();
+    let force = manager.admit_stop("completed", &expected, false).unwrap();
+    let id = manager.get("completed").unwrap().vm_id;
+    manager.force_stop_vm(&id, &expected).unwrap();
+    assert_eq!(
+        manager.vm_manager.get(&id).unwrap().state,
+        MachineState::Stopped
+    );
+    assert!(
+        manager
+            .finish_stop("completed", &graceful, Graceful(Ok(true)))
+            .unwrap()
+    );
+    let error = manager
+        .await_host_release("completed", Some((&force, false)))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        EngineError::Common(arcbox_error::CommonError::Timeout(_))
+    ));
+    assert_eq!(
+        manager.get("completed").unwrap().state,
+        MachineState::Stopped
+    );
+    let error = manager.remove("completed", true).unwrap_err();
+    assert!(matches!(
+        error,
+        EngineError::Common(arcbox_error::CommonError::Timeout(_))
+    ));
+    assert!(manager.vm_manager.get(&id).is_some());
+    assert!(manager.exists("completed"));
+    drop(hold);
+    manager.remove("completed", true).unwrap();
+    assert!(!manager.exists("completed"));
+    assert!(manager.vm_manager.get(&id).is_none());
 }

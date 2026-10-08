@@ -176,6 +176,14 @@ pub async fn mount_machine(
         return Ok(mount_path);
     }
 
+    let expected = runtime
+        .machine_manager()
+        .vm_manager()
+        .network_incarnation(&machine.vm_id)?;
+    let hold = runtime
+        .machine_manager()
+        .host_hold_expected(&machine.name, &expected)?;
+
     let bridge: Ipv4Addr = machine
         .bridge_ip_address
         .as_deref()
@@ -221,9 +229,7 @@ pub async fn mount_machine(
     let port = u16::try_from(endpoint.port).context("export port out of range")?;
     export::mount(&endpoint.address, port, &mount_path).await?;
 
-    // Held from here until the mount is released, so a force stop lets the
-    // release reach a live server instead of leaving a dead mount behind.
-    let hold = runtime.machine_manager().host_hold(&machine.name);
+    // Keep the admission hold until the recorded mount is released.
     mounted().record(&machine.name, mount_path.clone(), hold);
     info!(
         machine = %machine.name,
