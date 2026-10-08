@@ -128,6 +128,8 @@ distribution".
   Preserve `tls/identity.json` until every retained identity is untrusted and deleted.
   Resolve certificates through recorded DER or exact public-key identity, never a shared subject name.
 
+- Use `arcbox-local-ca::reconcile_trust_bundle` to replace or remove the owned ArcBox PEM section. Pass `None` only for explicit removal. Validate the owned certificate before removal, including expired roots. Preserve every byte outside the section. Callers must check the incoming root's validity before installation.
+
 - `translate()` (arcbox-conntrack) and `DnsQuery::parse` (arcbox-dns) consume
   arbitrary guest bytes on the VM datapath. The virt/AGENTS.md "Guest-controlled
   input" rule applies here: every guest-programmed value is arbitrary bits, all

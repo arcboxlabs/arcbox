@@ -40,6 +40,7 @@
 
 #[cfg(any(target_os = "macos", test))]
 mod authority;
+mod bundle;
 #[cfg(any(target_os = "macos", test))]
 mod journal;
 #[cfg(target_os = "macos")]
@@ -59,6 +60,7 @@ mod validity;
 use arcbox_atomic_file::AtomicWriteError;
 pub use arcbox_constants::dns::LOCAL_DOMAIN;
 
+pub use self::bundle::reconcile_trust_bundle;
 #[cfg(target_os = "macos")]
 pub use self::keychain::KeychainAuthority;
 #[cfg(target_os = "macos")]
@@ -123,6 +125,9 @@ pub enum Error {
     #[cfg(target_os = "macos")]
     #[error("security framework: {0}")]
     Security(String),
+    /// A PEM trust bundle has invalid text or ambiguous ownership markers.
+    #[error("invalid CA trust bundle: {0}")]
+    InvalidTrustBundle(&'static str),
     /// A CA violates the expected identity, constraints, or Keychain representation.
     #[error("invalid local CA: {0}")]
     InvalidAuthority(&'static str),

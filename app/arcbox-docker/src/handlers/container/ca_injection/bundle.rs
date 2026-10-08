@@ -2,47 +2,15 @@
 
 use std::{io::Read, path::Path};
 
-use arcbox_local_ca::PublicAuthority;
+use arcbox_local_ca::{PublicAuthority, reconcile_trust_bundle};
 
 use crate::error::{DockerError, Result};
-
-const BEGIN: &str = "\n# BEGIN ARCBOX LOCAL CA\n";
-const END: &str = "# END ARCBOX LOCAL CA\n";
 
 pub(super) fn reconcile(bundle: &[u8], pem: &[u8]) -> Result<Vec<u8>> {
     let current = PublicAuthority::from_pem(pem)
         .map_err(|e| DockerError::Server(format!("invalid published ArcBox CA: {e}")))?;
-    let text = std::str::from_utf8(bundle)
-        .map_err(|e| DockerError::Server(format!("container CA bundle is not PEM text: {e}")))?;
-    let starts: Vec<_> = text.match_indices(BEGIN).map(|(index, _)| index).collect();
-    let ends: Vec<_> = text.match_indices(END).map(|(index, _)| index).collect();
-    let (before, after) = match (starts.as_slice(), ends.as_slice()) {
-        ([], []) => (text, ""),
-        ([start], [end]) if start + BEGIN.len() <= *end => {
-            let previous = PublicAuthority::from_pem(&text.as_bytes()[start + BEGIN.len()..*end])
-                .map_err(|e| {
-                DockerError::Server(format!("invalid ArcBox section in CA bundle: {e}"))
-            })?;
-            if previous.der() == current.der() {
-                return Ok(bundle.to_vec());
-            }
-            (&text[..*start], &text[end + END.len()..])
-        }
-        _ => {
-            return Err(DockerError::Server(
-                "ambiguous ArcBox markers in CA bundle".into(),
-            ));
-        }
-    };
-    Ok([
-        before.as_bytes(),
-        BEGIN.as_bytes(),
-        pem.trim_ascii(),
-        b"\n",
-        END.as_bytes(),
-        after.as_bytes(),
-    ]
-    .concat())
+    reconcile_trust_bundle(bundle, Some(&current))
+        .map_err(|e| DockerError::Server(format!("invalid container CA bundle: {e}")))
 }
 
 pub(super) fn reconcile_archive(bytes: &[u8], path: &Path, pem: &[u8]) -> Result<Option<Vec<u8>>> {
