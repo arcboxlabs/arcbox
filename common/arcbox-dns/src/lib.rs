@@ -1,4 +1,4 @@
-//! DNS packet parsing and response building.
+//! DNS name patterns, packet parsing, and response building.
 //!
 //! Platform-independent, no-std-compatible (except `std::net` types).
 //! Compiles under `aarch64-unknown-linux-musl` for use in both host and guest.
@@ -6,6 +6,9 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::RwLock;
+
+mod names;
+pub use names::NamePattern;
 
 /// Shared local-hosts table used by both host-side and VMM-side DNS forwarders.
 pub type LocalHostsTable = RwLock<HashMap<String, IpAddr>>;

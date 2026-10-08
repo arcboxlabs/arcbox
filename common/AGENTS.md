@@ -135,6 +135,9 @@ distribution".
 
 ## arcbox-dns — hand-rolled byte layout
 
+- `NamePattern` parses exact custom `.local` names and explicit descendant wildcards.
+  Keep exact names separate from wildcard bases; a wildcard never includes its apex.
+  Reuse `Domain` validation and preserve label boundaries in suffix matching.
 - Response builders write flag bytes at `[2]`/`[3]` and counts at `[6..12]`
   literally. `build_nxdomain`/SERVFAIL/NODATA MUST zero ANCOUNT/NSCOUNT/ARCOUNT,
   or EDNS(0) queries (ARCOUNT=1 in the request) get malformed responses.

@@ -17,3 +17,9 @@ No production CA was rotated or trusted during implementation. Custom aliases re
 The default CA and constants suites passed 58 tests; 11 native CA tests remained ignored. The CLI, core, daemon, and helper library/binary suites passed another 452 tests; one native helper test remained ignored. Strict all-target Clippy passed for the CA and constants crates. These tests verify CSR rejection, the loaded root's actual scope, leaf verification, and existing host consumers without native trust changes.
 
 The CA crate also passed strict all-target Clippy for `aarch64-unknown-linux-musl`. That check exposed the journal cleanup method in Linux test builds, although all its callers are macOS-only. The method now has the same platform condition as its callers. Workspace formatting passed. Linux execution and native `.local` trust acceptance remain unverified.
+
+## Shared name patterns
+
+`arcbox-dns::NamePattern` reuses `Domain` validation. Custom input accepts a concrete `.local` name or a leading `*.` and normalizes case and outer whitespace. Exact patterns match only one name. Wildcards match descendants at any depth but exclude the apex. Selection ranks exact names before wildcards, then prefers the most specific wildcard base. The parser rejects wildcard patterns too long to have a valid concrete descendant.
+
+The DNS crate passed 17 unit and integration tests, including five name-pattern regressions. Strict all-target Clippy, workspace formatting, and `cargo xtask check-layers` passed. The dependency change adds only the existing workspace constants crate. This first slice does not change runtime registration or system DNS.
