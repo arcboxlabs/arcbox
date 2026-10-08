@@ -60,6 +60,8 @@ curl http://localhost:8080
 
 Run `abctl doctor` to check the runtime, and `abctl --help` to see every command.
 
+Desktop stops the selected daemon before a helper update. For CLI-only updates, keep that daemon stopped during installation; see the [helper installation requirements](docs/helper.md).
+
 ## Containers
 
 ArcBox is a drop-in Docker engine. It exposes a Docker-compatible socket and

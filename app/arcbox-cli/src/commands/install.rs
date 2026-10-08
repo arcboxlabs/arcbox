@@ -12,6 +12,7 @@ use anyhow::{Context, Result, bail};
 use arcbox_constants::paths::{ArcboxProfile, privileged};
 
 mod daemon;
+mod target;
 
 /// Arguments for the install command.
 #[derive(clap::Args)]
@@ -28,11 +29,22 @@ pub struct InstallArgs {
     /// Defaults to looking next to the current executable.
     #[arg(long)]
     pub helper_path: Option<PathBuf>,
+
+    /// Login-user ID for the selected daemon and data directory.
+    #[arg(long)]
+    pub user_uid: Option<u32>,
+
+    /// Absolute data directory for the selected daemon.
+    #[arg(long)]
+    pub data_dir: Option<PathBuf>,
 }
 
 /// Executes the install command.
 pub async fn execute(args: InstallArgs) -> Result<()> {
     validate_install_scope(ArcboxProfile::from_env_or_default(), &args)?;
+    let target = target::Target::resolve(args.user_uid, args.data_dir)?;
+    // SAFETY: geteuid has no arguments or failure case.
+    let is_privileged = unsafe { libc::geteuid() } == 0;
 
     println!("ArcBox Install");
     println!("==============");
@@ -40,7 +52,9 @@ pub async fn execute(args: InstallArgs) -> Result<()> {
 
     // 1. Install helper binary (requires sudo).
     print_step(1, 3, "Installing arcbox-helper...");
+    let stopped_daemon = target.hold_stopped_daemon()?;
     install_helper(args.helper_path.as_deref())?;
+    drop(stopped_daemon);
     print_done();
 
     // 2. Register daemon service.
@@ -48,18 +62,16 @@ pub async fn execute(args: InstallArgs) -> Result<()> {
     if args.no_daemon {
         print_skipped();
     } else {
-        daemon::register_daemon_service()?;
+        daemon::register_daemon_service(&target)?;
         print_done();
     }
 
     // 3. Shell integration.
-    // Under sudo, dirs::home_dir() returns /var/root, so setup would
-    // install to root's home instead of the real user's. Skip and hint.
     print_step(3, 3, "Setting up shell integration...");
     if args.no_shell {
         print_skipped();
-    } else if std::env::var("SUDO_USER").is_ok() {
-        println!("skipped (sudo)");
+    } else if is_privileged {
+        println!("skipped (privileged installation)");
         println!();
         println!("  Run as your normal user: abctl setup install");
     } else {
@@ -180,6 +192,8 @@ mod tests {
             no_daemon: true,
             no_shell: true,
             helper_path: None,
+            user_uid: None,
+            data_dir: None,
         };
         assert!(validate_install_scope(ArcboxProfile::Development, &args).is_ok());
 
@@ -188,6 +202,8 @@ mod tests {
                 no_daemon,
                 no_shell,
                 helper_path: None,
+                user_uid: None,
+                data_dir: None,
             };
             assert!(validate_install_scope(ArcboxProfile::Development, &args).is_err());
             assert!(validate_install_scope(ArcboxProfile::Production, &args).is_ok());

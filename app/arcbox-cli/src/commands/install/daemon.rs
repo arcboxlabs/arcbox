@@ -1,30 +1,15 @@
 //! User daemon registration and login-user resolution for installation.
 
-use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use arcbox_constants::paths::ArcboxProfile;
 
-/// Registers the daemon as a launchd user agent.
-///
-/// Under `sudo`, `dirs::home_dir()` returns `/var/root` and `getuid()`
-/// returns 0. We detect this via `SUDO_USER` / `SUDO_UID` and resolve
-/// the real user's home and UID instead.
-pub(super) fn register_daemon_service() -> Result<()> {
-    let (home, uid) = resolve_real_user()?;
+/// Registers the selected user's daemon as a launchd user agent.
+pub(super) fn register_daemon_service(target: &super::target::Target) -> Result<()> {
+    let (home, uid, data_dir) = (&target.home, target.uid, &target.data_dir);
     let profile = ArcboxProfile::from_env_or_default();
     let daemon_label = profile.daemon_label();
-    let data_dir = std::env::var(arcbox_constants::env::DATA_DIR)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .map_or_else(
-            || match profile {
-                ArcboxProfile::Production => home.join(".arcbox"),
-                ArcboxProfile::Development => home.join(".arcbox-dev"),
-            },
-            PathBuf::from,
-        );
     let plist_dir = home.join("Library/LaunchAgents");
     std::fs::create_dir_all(&plist_dir).context("failed to create LaunchAgents directory")?;
 
@@ -41,7 +26,7 @@ pub(super) fn register_daemon_service() -> Result<()> {
 
     let plist_path = plist_dir.join(format!("{daemon_label}.plist"));
 
-    let daemon_path = super::super::bundle::locate_daemon(&data_dir)?
+    let daemon_path = super::super::bundle::locate_daemon(data_dir)?
         .to_string_lossy()
         .into_owned();
 
@@ -113,45 +98,4 @@ pub(super) fn register_daemon_service() -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Resolves the real user's home directory and UID.
-///
-/// When running under `sudo`, `dirs::home_dir()` returns `/var/root` and
-/// `libc::getuid()` returns 0. We use `SUDO_USER` to look up the home
-/// directory and `SUDO_UID` for the UID. Falls back to the current process
-/// values when not running under sudo.
-fn resolve_real_user() -> Result<(PathBuf, u32)> {
-    if let Ok(sudo_user) = std::env::var("SUDO_USER") {
-        let uid: u32 = std::env::var("SUDO_UID")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .context("SUDO_USER is set but SUDO_UID is missing or invalid")?;
-
-        // Resolve home directory from the password database.
-        let home = home_for_user(&sudo_user)
-            .unwrap_or_else(|| PathBuf::from(format!("/Users/{sudo_user}")));
-
-        return Ok((home, uid));
-    }
-
-    let home = dirs::home_dir().context("could not determine home directory")?;
-    // SAFETY: getuid() is a trivial POSIX syscall with no preconditions.
-    let uid = unsafe { libc::getuid() };
-    Ok((home, uid))
-}
-
-/// Looks up a user's home directory via the POSIX password database.
-fn home_for_user(username: &str) -> Option<PathBuf> {
-    let c_name = std::ffi::CString::new(username).ok()?;
-    // SAFETY: getpwnam is a standard POSIX function. We pass a valid
-    // null-terminated string and check the return value before
-    // dereferencing. The returned pointer is to static storage.
-    let pw = unsafe { libc::getpwnam(c_name.as_ptr()) };
-    if pw.is_null() {
-        return None;
-    }
-    // SAFETY: pw is non-null and pw_dir is a valid C string.
-    let dir = unsafe { std::ffi::CStr::from_ptr((*pw).pw_dir) };
-    Some(PathBuf::from(dir.to_string_lossy().into_owned()))
 }

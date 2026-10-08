@@ -178,3 +178,9 @@ See also [data-directories.md](data-directories.md) and
 | `/var/log/arcbox/helper.log` | Helper log |
 | `/usr/local/bin/docker*` | CLI convenience symlinks into app xbin |
 | `/var/run/docker.sock` | Optional symlink to `~/.arcbox/run/docker.sock` |
+
+### Installer target
+
+`abctl _install --user-uid UID --data-dir ABSOLUTE_PATH` selects the login user and daemon data directory explicitly. Without `--user-uid`, the installer uses `SUDO_UID` or the current UID. UID 0 is not a login-user target. The installer reads the user's home from the account database. Privileged installation skips shell integration; run `abctl setup install` as the login user.
+
+Keep the selected daemon stopped until installation finishes. Desktop unregisters the selected daemon and checks its lock before requesting authorization. The privileged installer checks the same lock and retains an exclusive lock when the file exists. A missing lock only indicates current absence; the installer does not create the daemon's lock. The installer never reads or signals a PID from this user-owned file.
