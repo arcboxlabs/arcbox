@@ -249,9 +249,7 @@ async fn prepare_assets(ctx: &DaemonContext) -> Result<assets::PreparedAssets> {
 async fn init_runtime(ctx: &DaemonContext) -> Result<Arc<Runtime>> {
     let config = effective_config(ctx)?;
     #[cfg(target_os = "macos")]
-    if config.vm.autostart {
-        crate::self_setup::tls::prepare(ctx);
-    }
+    crate::self_setup::tls::prepare(ctx);
     if config.vm.autostart
         && let Some(lease) = ContainerNetworkLease::acquire(config.container.cidr)?
     {

@@ -257,55 +257,59 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn preparation_and_trust_errors_recover_without_changing_docker_readiness() {
-        let state = Arc::new(SetupState::new());
-        state.set_phase(SetupPhase::Ready, "Docker ready");
-        state.set_vm_running(true);
-        let shutdown = CancellationToken::new();
-        let inspections = Arc::new(AtomicUsize::new(0));
-        let (_sender, commands) = mpsc::channel::<()>(1);
-        let task = tokio::spawn({
-            let state = Arc::clone(&state);
-            let shutdown = shutdown.clone();
-            let inspections = Arc::clone(&inspections);
-            async move {
-                monitor(&shutdown, commands, |_| {
-                    let status = match inspections.fetch_add(1, Ordering::SeqCst) {
-                        0 => failed("Keychain locked".into()),
-                        1 => LocalHttpsStatus {
-                            trust_state: TrustState::Untrusted.into(),
-                            ..Default::default()
-                        },
-                        2 => failed("helper disconnected".into()),
-                        _ => LocalHttpsStatus {
-                            trust_state: TrustState::Trusted.into(),
-                            ..Default::default()
-                        },
-                    };
-                    state.set_local_https(status);
-                    std::future::ready(())
-                })
-                .await;
+        for vm_running in [false, true] {
+            let state = Arc::new(SetupState::new());
+            state.set_phase(SetupPhase::Ready, "Daemon ready");
+            state.set_vm_running(vm_running);
+            let shutdown = CancellationToken::new();
+            let inspections = Arc::new(AtomicUsize::new(0));
+            let (_sender, commands) = mpsc::channel::<()>(1);
+            let task = tokio::spawn({
+                let state = Arc::clone(&state);
+                let shutdown = shutdown.clone();
+                let inspections = Arc::clone(&inspections);
+                async move {
+                    monitor(&shutdown, commands, |_| {
+                        let status = match inspections.fetch_add(1, Ordering::SeqCst) {
+                            0 => failed("Keychain locked".into()),
+                            1 => LocalHttpsStatus {
+                                trust_state: TrustState::Untrusted.into(),
+                                ..Default::default()
+                            },
+                            2 => failed("helper disconnected".into()),
+                            _ => LocalHttpsStatus {
+                                trust_state: TrustState::Trusted.into(),
+                                ..Default::default()
+                            },
+                        };
+                        state.set_local_https(status);
+                        std::future::ready(())
+                    })
+                    .await;
+                }
+            });
+            for expected in [
+                TrustState::Error,
+                TrustState::Untrusted,
+                TrustState::Error,
+                TrustState::Trusted,
+            ] {
+                tokio::task::yield_now().await;
+                let current = state.current();
+                assert_eq!(current.local_https.trust_state, expected);
+                assert_eq!(current.phase, SetupPhase::Ready);
+                assert_eq!(current.vm_running, vm_running);
+                tokio::time::advance(STATUS_INTERVAL).await;
             }
-        });
-        for expected in [
-            TrustState::Error,
-            TrustState::Untrusted,
-            TrustState::Error,
-            TrustState::Trusted,
-        ] {
-            tokio::task::yield_now().await;
-            let current = state.current();
-            assert_eq!(current.local_https.trust_state, expected);
-            assert_eq!(current.phase, SetupPhase::Ready);
-            assert!(current.vm_running);
+            shutdown.cancel();
+            task.await.unwrap();
+            let stopped_at = inspections.load(Ordering::SeqCst);
             tokio::time::advance(STATUS_INTERVAL).await;
+            assert_eq!(inspections.load(Ordering::SeqCst), stopped_at);
+            let current = state.current();
+            assert_eq!(current.phase, SetupPhase::Ready);
+            assert_eq!(current.vm_running, vm_running);
         }
-        shutdown.cancel();
-        task.await.unwrap();
-        let stopped_at = inspections.load(Ordering::SeqCst);
-        tokio::time::advance(STATUS_INTERVAL).await;
-        assert_eq!(inspections.load(Ordering::SeqCst), stopped_at);
-        assert_eq!(state.current().phase, SetupPhase::Ready);
     }
 
     #[tokio::test]

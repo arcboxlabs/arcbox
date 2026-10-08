@@ -73,3 +73,13 @@ Read-only inspection confirmed the following residual certificates. Each has one
 The revised fixture retains its directory immediately and saves each root's public DER before trust mutation. Its destructor only reports recovery paths and fingerprints. Explicit success cleanup verifies that every retained root is untrusted before deleting identities. A filesystem regression confirms that a panic preserves the journal and public DER. The revised native test has not been retried.
 
 An exact-reference cleanup script passed Swift type checking and read-only inspection. Applying cleanup awaits renewed user authorization because revocation was canceled. The script verifies full fingerprints, key labels and public-key hashes, journal bytes, and a file whitelist. Cancellation stops immediately. Identity deletion starts only after all three roots have no User or Admin trust.
+
+## CA management without a Linux VM
+
+Review found that `--no-linux-vm` skipped CA worker registration, so rotation failed even with a running daemon. The worker now registers independently of Linux VM startup. Docker, guest signing, and browser observation retain their existing VM requirements. The recovery test covers both running and stopped VM states and confirms that CA status changes leave the VM state and startup phase unchanged.
+
+The unused `AWAITING_HTTPS_TRUST` phase and Swift mapping were removed. The paired components use `local_https` for CA status. Protocol version and minimum remain 7/7; no old-client branch or RPC alias was added.
+
+After this correction, the host tests passed 340 tests across local CA, protocol, gRPC, transport, API, daemon, and CLI. Strict all-target Clippy and workspace formatting passed. The three focused Swift HTTPS suites passed 34 tests, and Swift formatting and lint passed. The native trust and full Desktop limitations above still apply.
+
+`buf breaking` against `origin/master` reports only the previously recorded `MachineService.Import` to `ImportMachine` rename. The rename is an intentional paired-component change. The compatibility gate remains failing for that rename; the check was not disabled or filtered. Removing the unused HTTPS phase adds no finding against that base.

@@ -1438,8 +1438,6 @@ pub mod setup_status {
         /// Startup failed fatally; the daemon exits shortly after
         /// publishing this phase. See the `error` field for the cause.
         Failed = 10,
-        /// Legacy startup gate. New daemons report local_https independently.
-        AwaitingHttpsTrust = 11,
     }
     impl Phase {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -1459,7 +1457,6 @@ pub mod setup_status {
                 Self::DownloadingAssets => "DOWNLOADING_ASSETS",
                 Self::CleaningUp => "CLEANING_UP",
                 Self::Failed => "FAILED",
-                Self::AwaitingHttpsTrust => "AWAITING_HTTPS_TRUST",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -1476,7 +1473,6 @@ pub mod setup_status {
                 "DOWNLOADING_ASSETS" => Some(Self::DownloadingAssets),
                 "CLEANING_UP" => Some(Self::CleaningUp),
                 "FAILED" => Some(Self::Failed),
-                "AWAITING_HTTPS_TRUST" => Some(Self::AwaitingHttpsTrust),
                 _ => None,
             }
         }

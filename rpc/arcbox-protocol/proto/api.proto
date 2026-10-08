@@ -1128,8 +1128,7 @@ message SetupStatus {
         // Startup failed fatally; the daemon exits shortly after
         // publishing this phase. See the `error` field for the cause.
         FAILED = 10;
-        // Legacy startup gate. New daemons report local_https independently.
-        AWAITING_HTTPS_TRUST = 11;
+        reserved 11;
     }
 
     // Current daemon phase.
