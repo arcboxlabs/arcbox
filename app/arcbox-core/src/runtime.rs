@@ -966,6 +966,21 @@ impl Runtime {
             .map_err(CoreError::from)
     }
 
+    /// Opens a guest service connection for one captured physical VM run.
+    ///
+    /// # Errors
+    /// Returns an error if the expected VM is unavailable, replaced, or cannot connect.
+    pub fn connect_vsock_port_expected(
+        &self,
+        machine_name: &str,
+        expected: &VmIncarnation,
+        port: u32,
+    ) -> Result<std::os::fd::RawFd> {
+        self.machine_manager
+            .connect_vsock_port_expected(machine_name, expected, port)
+            .map_err(CoreError::from)
+    }
+
     /// Resolves a container's filesystem layer directories (guest paths)
     /// from containerd snapshot metadata in the System VM.
     ///

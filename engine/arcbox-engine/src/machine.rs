@@ -1122,6 +1122,27 @@ impl MachineManager {
         self.vm_manager.connect_vsock(&machine.vm_id, port)
     }
 
+    /// Opens a vsock connection only for the expected physical VM run.
+    ///
+    /// # Errors
+    /// Returns an error if the machine is unavailable, replaced, or cannot connect.
+    pub fn connect_vsock_port_expected(
+        &self,
+        name: &str,
+        expected: &VmIncarnation,
+        port: u32,
+    ) -> Result<std::os::fd::RawFd> {
+        let machines = self
+            .machines
+            .read()
+            .map_err(|_| EngineError::LockPoisoned)?;
+        let machine = machines
+            .get(name)
+            .ok_or_else(|| EngineError::not_found(name))?;
+        self.vm_manager
+            .connect_vsock_expected(&machine.vm_id, expected, port)
+    }
+
     /// Opens an agent connection only for the expected physical VM run.
     ///
     /// # Errors

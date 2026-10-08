@@ -91,6 +91,30 @@ impl VmManager {
         Ok(operation(entry))
     }
 
+    pub(crate) fn connect_vsock_expected(
+        &self,
+        id: &VmId,
+        expected: &VmIncarnation,
+        port: u32,
+    ) -> Result<std::os::fd::RawFd> {
+        self.connect_vsock_using(id, expected, |vmm| {
+            vmm.connect_vsock(port).map_err(EngineError::from)
+        })
+        .map(|(_, fd)| fd)
+    }
+
+    fn connect_vsock_using(
+        &self,
+        id: &VmId,
+        expected: &VmIncarnation,
+        connect: impl FnOnce(&Vmm) -> Result<std::os::fd::RawFd>,
+    ) -> Result<(arcbox_vmm::VmBackend, std::os::fd::RawFd)> {
+        self.with_expected_entry(id, expected, |entry| {
+            let vmm = entry.vmm.as_ref().expect("live incarnation has a VMM");
+            connect(vmm).map(|fd| (entry.config.backend, fd))
+        })?
+    }
+
     pub(crate) fn connect_agent_expected(
         &self,
         id: &VmId,
@@ -112,10 +136,7 @@ impl VmManager {
     ) -> Result<crate::agent_client::AgentClient> {
         use crate::agent_client::AgentClient;
 
-        let (backend, fd) = self.with_expected_entry(id, expected, |entry| {
-            let vmm = entry.vmm.as_ref().expect("live incarnation has a VMM");
-            connect(vmm).map(|fd| (entry.config.backend, fd))
-        })??;
+        let (backend, fd) = self.connect_vsock_using(id, expected, connect)?;
         if cfg!(target_os = "macos") && backend == arcbox_vmm::VmBackend::Hv {
             AgentClient::from_fd_blocking(cid, fd)
         } else {
