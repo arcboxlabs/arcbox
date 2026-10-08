@@ -35,6 +35,8 @@ Use `VsockTransport` for framed ArcBox RPC traffic. Use `VsockStream` when a
 caller already owns a connected fd and needs a transparent `AsyncRead +
 AsyncWrite` byte stream, such as HTTP proxying or bidirectional tunnels.
 
+Use `vsock::read_framed` when an RPC decoder owns an async stream. The shared reader returns the length prefix and payload, rejects frames above 16 MiB before allocation, and never reads beyond the declared frame.
+
 ```rust
 use arcbox_transport::vsock::{VsockShutdown, VsockStream};
 use std::os::fd::OwnedFd;

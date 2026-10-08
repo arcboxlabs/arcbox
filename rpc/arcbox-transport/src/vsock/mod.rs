@@ -59,7 +59,7 @@ pub use flow::Credit;
 pub use half_close::{HalfCloseStream, MAX_FRAME_PAYLOAD, WINDOW};
 pub use listener::VsockListener;
 pub use stream::{VsockShutdown, VsockStream};
-pub use transport::{VsockReceiver, VsockSender, VsockTransport};
+pub use transport::{VsockReceiver, VsockSender, VsockTransport, read_framed};
 
 #[cfg(test)]
 mod tests {

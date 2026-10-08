@@ -245,3 +245,7 @@ The Docker server now retains its reconciler task. Pending guest snapshot querie
 ## Verify resolver connection lifetime
 
 Real temporary Unix sockets now cover cancellation before the first lease acknowledgment, helper EOF, authority-watch updates, mirror cleanup before client closure, primary and cleanup errors together, and fresh-transport retries with one service nonce. The initial-failure fixture rejects any mirror start. Eleven resolver tests, strict all-target daemon Clippy, formatting, and diff checks passed. Native Keychain, resolver files, installed helper, and VM state were not changed.
+
+## Share the bounded guest RPC frame reader
+
+Guest decoding now uses the existing transport reader's 16 MiB allocation bound and validates the complete V2 header, trace length, and UTF-8 within one frame. Malformed lengths cannot consume the next frame; short-frame compatibility and silent trace replacement are removed. Host transport passed 26 tests and the final Linux musl guest passed 13 RPC tests in networkless Colima. Both strict all-target Clippy gates and formatting passed. Authority-channel dispatch and installed transport validation remain pending.

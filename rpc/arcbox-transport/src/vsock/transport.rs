@@ -20,8 +20,12 @@ const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 /// Reads one length-prefixed frame from `reader`.
 ///
 /// Returns the complete framed bytes (4-byte BE length prefix + payload).
-/// Rejects frames larger than [`MAX_FRAME_SIZE`] before allocating.
-async fn read_framed<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Bytes> {
+/// Rejects frames larger than 16 MiB before allocating.
+///
+/// # Errors
+///
+/// Returns an error if the frame exceeds 16 MiB or cannot be read completely.
+pub async fn read_framed<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Bytes> {
     // Read 4-byte big-endian length prefix.
     let mut len_buf = [0u8; 4];
     reader
