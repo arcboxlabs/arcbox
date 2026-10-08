@@ -67,7 +67,9 @@ impl GuestConnector for UnixSocketConnector {
 }
 
 /// A canned response served for an exact (method, version-stripped path)
-/// match. `path` excludes the query string.
+/// match. `path` excludes the query string. Duplicate routes return sequential
+/// responses; the final matching response remains available.
+#[derive(Clone, Copy)]
 pub struct MockRoute {
     pub method: &'static str,
     pub path: &'static str,
@@ -136,7 +138,7 @@ pub async fn start_with_routes(dir: &Path, routes: Vec<MockRoute>) -> MockGuest 
     let body_slot = Arc::clone(&last_upgrade_body);
     let last_request_uri: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let uri_slot = Arc::clone(&last_request_uri);
-    let routes = Arc::new(routes);
+    let routes = Arc::new(Mutex::new(routes));
 
     tokio::spawn(async move {
         loop {
@@ -205,7 +207,7 @@ async fn handle(
     mut req: Request<Incoming>,
     upgrade_body_slot: Arc<Mutex<Option<Bytes>>>,
     request_uri_slot: Arc<Mutex<Option<String>>>,
-    routes: Arc<Vec<MockRoute>>,
+    routes: Arc<Mutex<Vec<MockRoute>>>,
 ) -> std::result::Result<Response<http_body_util::Full<Bytes>>, hyper::Error> {
     // Recorded before anything else, and before version stripping, so a test
     // sees exactly what the proxy sent — including the query string, which
@@ -214,10 +216,19 @@ async fn handle(
 
     // Canned routes take precedence over echo behavior.
     let path = strip_version_prefix(req.uri().path()).to_owned();
-    if let Some(route) = routes
-        .iter()
-        .find(|r| r.method == req.method().as_str() && r.path == path)
-    {
+    let route = {
+        let mut routes = routes.lock().await;
+        let matches =
+            |route: &MockRoute| route.method == req.method().as_str() && route.path == path;
+        routes.iter().position(matches).map(|index| {
+            let route = routes[index];
+            if routes[index + 1..].iter().any(matches) {
+                routes.remove(index);
+            }
+            route
+        })
+    };
+    if let Some(route) = route {
         let resp = Response::builder()
             .status(StatusCode::from_u16(route.status).expect("valid mock status"))
             .header(hyper::header::CONTENT_TYPE, "application/json")

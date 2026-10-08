@@ -305,6 +305,12 @@ async fn network_refresh_is_idempotent_and_rename_replaces_the_old_alias() {
             method: "GET",
             path: "/containers/abc123/json",
             status: 200,
+            body: INSPECT_WEB,
+        },
+        MockRoute {
+            method: "GET",
+            path: "/containers/abc123/json",
+            status: 200,
             body: r#"{"Id":"abc123","Name":"/renamed","NetworkSettings":{"Networks":{"bridge":{"IPAddress":"172.17.0.2"}}}}"#,
         },
     ])
@@ -475,5 +481,91 @@ async fn invalid_identity_cannot_reach_a_guest_mutation() {
             guest.last_request_uri().await.as_deref(),
             Some("/containers/missing/json")
         );
+    }
+}
+
+#[tokio::test]
+async fn network_mutations_hold_the_canonical_lock_and_preserve_options() {
+    let (router, runtime, guest, _tmp) = router_with_mock_guest(lifecycle_routes()).await;
+    for operation in ["connect", "disconnect"] {
+        let body = r#"{"Container":"web","Force":true,"EndpointConfig":{"Aliases":["alias"],"IPAMConfig":{}},"Extra":[1,"two"]}"#;
+        let uri = format!("/networks/bridge/{operation}");
+        let request = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("Content-Length", body.len())
+            .body(Body::from(body))
+            .unwrap();
+        let guard = runtime.lock_container_lifecycle("abc123").await;
+        let mut response = tokio::spawn(router.clone().oneshot(request));
+        guest.wait_for_request_uri("/containers/web/json").await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut response)
+                .await
+                .is_err()
+        );
+        drop(guard);
+        let response = response.await.unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let echoed = response.into_body().collect().await.unwrap().to_bytes();
+        let mut expected: serde_json::Value = serde_json::from_str(body).unwrap();
+        expected["Container"] = "abc123".into();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&echoed).unwrap(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn only_forced_disconnect_can_remove_an_orphan_endpoint() {
+    for (operation, force, inspect_status, expected) in [
+        ("disconnect", true, 404, StatusCode::OK),
+        ("disconnect", false, 404, StatusCode::NOT_FOUND),
+        ("connect", true, 404, StatusCode::NOT_FOUND),
+        ("disconnect", true, 500, StatusCode::INTERNAL_SERVER_ERROR),
+    ] {
+        let (router, runtime, guest, _tmp) = router_with_mock_guest(vec![MockRoute {
+            method: "GET",
+            path: "/containers/orphan/json",
+            status: inspect_status,
+            body: r#"{"message":"absent"}"#,
+        }])
+        .await;
+        let metadata = arcbox_dns::container::ContainerMetadata::from_inspect(
+            &serde_json::from_str(INSPECT_WEB).unwrap(),
+        )
+        .unwrap();
+        runtime.register_container_dns(&metadata).await;
+        let previous = runtime.network_manager().local_dns_entries();
+        let body = format!("{{ \"Container\": \"orphan\", \"Force\": {force} }}");
+        let uri = format!("/networks/bridge/{operation}");
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&uri)
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        if expected == StatusCode::OK {
+            assert_eq!(
+                response.into_body().collect().await.unwrap().to_bytes(),
+                body
+            );
+            assert_eq!(
+                guest.last_request_uri().await.as_deref(),
+                Some(uri.as_str())
+            );
+        } else {
+            assert_eq!(
+                guest.last_request_uri().await.as_deref(),
+                Some("/containers/orphan/json")
+            );
+        }
+        assert_eq!(runtime.network_manager().local_dns_entries(), previous);
     }
 }

@@ -33,6 +33,8 @@ docker images
 
 Start, restart, stop, kill, remove, and rename resolve a canonical container ID before acquiring Runtime's per-container lock. ArcBox keeps that lock and an activity lease through the guest operation and host networking update. Names and short IDs use the same lock; the forwarded URI retains the original query.
 
+Network connect and disconnect use the same lock and preserve all request fields except the canonicalized `Container` value. A forced disconnect can remove an orphan endpoint after its container disappears; that request preserves Docker's behavior and leaves host container ownership unchanged.
+
 ### Container trust for local HTTPS
 
 On macOS, ArcBox adds its current public root CA after container creation and before a stopped container starts. ArcBox updates existing regular PEM system bundles through Docker's archive API. ArcBox preserves the image's original roots, file owner, permissions, and entrypoint. A later start replaces only the validated ArcBox section when the root certificate changes.

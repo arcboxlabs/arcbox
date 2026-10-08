@@ -7,7 +7,7 @@
 //! All other network operations proxy through the fallback untouched (host
 //! routing uses one static container-subnet route, not per-network state).
 
-use super::proxying::proxy_to_system_vm;
+use super::{container::lifecycle::Lifecycle, proxying::proxy_to_system_vm};
 use crate::api::AppState;
 use crate::error::{DockerError, Result};
 use axum::body::Body;
@@ -61,23 +61,39 @@ async fn proxy_then_refresh_dns(
     uri: &Uri,
     req: Request<Body>,
 ) -> Result<Response> {
-    let (parts, body) = req.into_parts();
+    let (mut parts, body) = req.into_parts();
     let body_bytes = http_body_util::BodyExt::collect(body)
         .await
         .map_err(|e| DockerError::Server(format!("failed to read body: {e}")))?
         .to_bytes();
-    let container = container_from_network_body(&body_bytes);
-
-    let req = Request::from_parts(parts, Body::from(body_bytes));
-    let response = proxy_to_system_vm(state, uri, req).await?;
+    let mut request = NetworkRequest::parse(&body_bytes)?;
+    let orphan_disconnect = uri.path().ends_with("/disconnect")
+        && request
+            .options
+            .get("Force")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+    let lifecycle = match Lifecycle::acquire(state, &request.container).await {
+        Ok(lifecycle) => Some(lifecycle),
+        // Docker can remove an orphan endpoint after its container disappears.
+        Err(DockerError::ContainerNotFound(_)) if orphan_disconnect => None,
+        Err(error) => return Err(error),
+    };
+    let body = if let Some(lifecycle) = &lifecycle {
+        request.container.clone_from(&lifecycle.id);
+        serde_json::to_vec(&request)
+            .map_err(|error| DockerError::Server(format!("encode network request: {error}")))?
+            .into()
+    } else {
+        body_bytes
+    };
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    let response =
+        proxy_to_system_vm(state, uri, Request::from_parts(parts, Body::from(body))).await?;
 
     if response.status().is_success() {
-        match container {
-            Some(token) => refresh_container_dns(state, &token).await?,
-            None => tracing::debug!(
-                uri = %uri,
-                "network operation body had no Container field; skipping DNS refresh"
-            ),
+        if let Some(lifecycle) = &lifecycle {
+            refresh_container_dns(state, &lifecycle.id).await?;
         }
     }
 
@@ -96,15 +112,26 @@ async fn refresh_container_dns(state: &AppState, token: &str) -> Result<()> {
     Ok(())
 }
 
-/// Extracts the `Container` field (name or ID) from a network
-/// connect/disconnect request body.
-fn container_from_network_body(body: &[u8]) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
-    value
-        .get("Container")?
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(String::from)
+#[derive(serde::Deserialize, serde::Serialize)]
+struct NetworkRequest {
+    #[serde(rename = "Container")]
+    container: String,
+    #[serde(flatten)]
+    options: serde_json::Map<String, serde_json::Value>,
+}
+
+impl NetworkRequest {
+    fn parse(body: &[u8]) -> Result<Self> {
+        let request: Self = serde_json::from_slice(body).map_err(|error| {
+            DockerError::InvalidParameter(format!("invalid network request: {error}"))
+        })?;
+        if request.container.is_empty() {
+            return Err(DockerError::InvalidParameter(
+                "Container must not be empty".into(),
+            ));
+        }
+        Ok(request)
+    }
 }
 
 #[cfg(test)]
@@ -112,21 +139,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn container_field_from_connect_body() {
-        let body = br#"{"Container":"web","EndpointConfig":{"IPAMConfig":{}}}"#;
-        assert_eq!(container_from_network_body(body).as_deref(), Some("web"));
-    }
-
-    #[test]
-    fn container_field_from_disconnect_body() {
-        let body = br#"{"Container":"abc123","Force":true}"#;
-        assert_eq!(container_from_network_body(body).as_deref(), Some("abc123"));
-    }
-
-    #[test]
-    fn missing_or_empty_container_field_is_none() {
-        assert_eq!(container_from_network_body(br#"{"Force":true}"#), None);
-        assert_eq!(container_from_network_body(br#"{"Container":""}"#), None);
-        assert_eq!(container_from_network_body(b"not json"), None);
+    fn network_body_requires_a_nonempty_container() {
+        for body in [
+            br#"{"Force":true}"#.as_slice(),
+            br#"{"Container":""}"#,
+            br#"{"Container":3}"#,
+            b"not json",
+        ] {
+            assert!(NetworkRequest::parse(body).is_err());
+        }
     }
 }

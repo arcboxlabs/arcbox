@@ -125,3 +125,9 @@ The event task validates the entire running-container list and every full-ID ins
 ## Fix DNS configuration at construction
 
 Runtime now supplies its validated suffix through NetConfig when constructing NetworkManager. The live domain setter and outer forwarder lock are removed, eliminating the forwarder write-lock path before Registry integration. Network tests passed 77 cases with four existing ignored tests; seven web-service tests and the configured machine-DNS test passed. Strict net/core/daemon all-target Clippy and formatting passed. Host Registry integration remains incomplete.
+
+## Serialize host network mutations
+
+Network connect and disconnect resolve the container before taking Runtime's full-ID lifecycle lock. The lock covers the guest mutation and host DNS refresh. Canonicalization replaces only the request's `Container` field. A forced disconnect after an explicit container 404 forwards the original payload to remove an orphan endpoint and skips host publication; other errors propagate.
+
+All 146 focused Docker tests passed: 124 library tests, 13 mock handler tests, five request-forwarding tests, and four routing tests. Strict all-target Docker Clippy, formatting, and diff checks passed. These results cover canonical lock ordering, request options and framing, orphan endpoint handling, and unchanged host ownership after failure. Global host commit ordering and installed VM validation remain pending.
