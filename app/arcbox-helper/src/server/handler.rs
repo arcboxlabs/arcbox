@@ -4,6 +4,8 @@
 //! Input validation (parse, don't validate) happens here at the RPC
 //! boundary — mutation functions only accept validated types.
 
+use std::sync::Arc;
+
 use arcbox_constants::dns::Domain;
 use arcbox_helper::HelperError;
 use arcbox_helper::HelperService;
@@ -16,11 +18,12 @@ use super::peer_auth::VerifiedPeer;
 #[derive(Clone)]
 pub(super) struct HelperServer {
     peer: VerifiedPeer,
+    resolvers: Arc<mutations::dns::ResolverStore>,
 }
 
 impl HelperServer {
-    pub(super) fn new(peer: VerifiedPeer) -> Self {
-        Self { peer }
+    pub(super) fn new(peer: VerifiedPeer, resolvers: Arc<mutations::dns::ResolverStore>) -> Self {
+        Self { peer, resolvers }
     }
 }
 
@@ -71,7 +74,7 @@ impl HelperService for HelperServer {
             domain = %domain,
             "resolver install requested"
         );
-        mutations::dns::install(&domain, port)
+        self.resolvers.install(&domain, port)
     }
 
     async fn dns_uninstall(
@@ -87,7 +90,7 @@ impl HelperService for HelperServer {
             domain = %domain,
             "resolver uninstall requested"
         );
-        mutations::dns::uninstall(&domain)
+        self.resolvers.uninstall(&domain)
     }
 
     async fn dns_status(
@@ -96,7 +99,7 @@ impl HelperService for HelperServer {
         domain: String,
     ) -> Result<bool, HelperError> {
         let domain: Domain = domain.parse().map_err(HelperError::validation)?;
-        mutations::dns::status(&domain)
+        self.resolvers.status(&domain)
     }
 
     async fn hosts_alias_install(self, _: tarpc::context::Context) -> Result<(), HelperError> {

@@ -7,9 +7,6 @@ use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
 use arcbox_helper::HelperError;
-use arcbox_helper::validate::DnsPort;
-
-use super::contents;
 
 pub(super) fn open_directory(path: &Path) -> Result<Option<File>, HelperError> {
     let directory = match OpenOptions::new()
@@ -77,7 +74,10 @@ fn has_acl(file: &File, path: &Path) -> Result<bool, HelperError> {
     }
 }
 
-pub(super) fn read_managed(path: &Path) -> Result<ManagedFile, HelperError> {
+pub(super) fn inspect(
+    path: &Path,
+    owns: impl FnOnce(&[u8]) -> bool,
+) -> Result<ManagedFile, HelperError> {
     let file = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -105,19 +105,7 @@ pub(super) fn read_managed(path: &Path) -> Result<ManagedFile, HelperError> {
     file.take(257)
         .read_to_end(&mut content)
         .map_err(|e| HelperError::io("read", path, e))?;
-    let owned = std::str::from_utf8(&content)
-        .ok()
-        .and_then(|text| {
-            let port = text
-                .lines()
-                .nth(2)?
-                .strip_prefix("port ")?
-                .parse::<u16>()
-                .ok()?;
-            DnsPort::try_from(port).ok()
-        })
-        .is_some_and(|port| content == contents(port).as_bytes());
-    Ok(if owned {
+    Ok(if owns(&content) {
         ManagedFile::Owned
     } else {
         ManagedFile::Foreign

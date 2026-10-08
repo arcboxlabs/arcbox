@@ -80,6 +80,9 @@ async fn accept_loop(
     shutdown: CancellationToken,
 ) {
     let codec = tarpc::tokio_util::codec::length_delimited::LengthDelimitedCodec::builder();
+    let resolvers = Arc::new(mutations::dns::ResolverStore::new(fs_root::resolve(
+        mutations::dns::RESOLVER_DIR,
+    )));
 
     loop {
         let conn = tokio::select! {
@@ -103,6 +106,7 @@ async fn accept_loop(
 
         tracker.connect();
         let tracker_clone = Arc::clone(&tracker);
+        let server = HelperServer::new(peer, Arc::clone(&resolvers));
 
         let transport = tarpc::serde_transport::new(codec.new_framed(conn), Bincode::default());
 
@@ -110,7 +114,7 @@ async fn accept_loop(
             let mut in_flight = JoinSet::new();
 
             BaseChannel::with_defaults(transport)
-                .execute(HelperServer::new(peer).serve())
+                .execute(server.serve())
                 .for_each(|resp| {
                     in_flight.spawn(resp);
                     futures::future::ready(())
