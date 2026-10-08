@@ -349,4 +349,41 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn terminal_ownership_results_do_not_reach_sandboxes_or_short_names() {
+        use arcbox_dns::claims::Boundary;
+
+        let mut server = GuestDnsServer::new(Domain::default(), CancellationToken::new());
+        server.sandboxes = Arc::default();
+        *server.containers.write().await = Registry::new(vec![
+            Boundary::ReservedName {
+                name: "reserved.local".parse().unwrap(),
+                authority: "host".into(),
+            },
+            Boundary::DelegatedTree {
+                root: "remote.local".parse().unwrap(),
+                instance: "other".into(),
+            },
+        ]);
+        let ip = Ipv4Addr::new(172, 17, 0, 2);
+        for name in ["reserved.local", "remote.local", "conflict.arcbox.local"] {
+            register(&server, name, name, ip).await;
+            server.register_sandbox(name, ip);
+        }
+        for id in ["first", "second"] {
+            register(&server, "conflict", id, ip).await;
+        }
+        for qtype in [1, 28, 64, 65, 65_280].map(DnsRecordType::from) {
+            for (name, code) in [
+                ("reserved.local", 3),
+                ("conflict.arcbox.local", 2),
+                ("conflict", 2),
+            ] {
+                let response = local_query(&server, name, qtype).await.unwrap();
+                assert_eq!(response[3] & 15, code, "{name}");
+                assert_eq!(&response[6..12], &[0; 6], "{name}");
+            }
+            assert!(local_query(&server, "remote.local", qtype).await.is_none());
+        }
+    }
 }
