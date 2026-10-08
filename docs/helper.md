@@ -53,6 +53,8 @@ bump the runtime (`0.4.x`) must **not** re-prompt.
 
 `arcbox-helper --check-resolvers [ROOT...]` reads only the selected resolver roots and prints each exact legacy root on its own line. The check requires root-owned files and directory metadata even when the caller is a login user. It does not start the service or change files. An empty root set does not inspect `/etc/resolver`.
 
+Before replacing the executable, the privileged installer runs the bundled helper's `--prepare-install` command. The command checks `launchctl bootout`, confirms the exact helper label is absent from `launchctl list`, and waits up to 50 seconds for root helper processes at the installed executable path to exit. The command excludes its own maintenance process and propagates inspection errors. Replacement never copies the installed executable onto itself.
+
 ## Threat model
 
 ### Socket mode `0666` / `SockPathMode` 438

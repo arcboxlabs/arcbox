@@ -134,18 +134,37 @@ fn install_helper(custom_path: Option<&std::path::Path>) -> Result<()> {
             helper_src.display()
         );
     }
+    let helper_src = helper_src.canonicalize().context("resolve helper source")?;
+    let destination_is_source = match dest.canonicalize() {
+        Ok(path) => path == helper_src,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error).context("resolve installed helper"),
+    };
+    let output = Command::new(&helper_src)
+        .arg("--prepare-install")
+        .output()
+        .context("failed to prepare helper installation")?;
+    if !output.status.success() {
+        bail!(
+            "helper installation preparation failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
 
     // Create target directory.
     std::fs::create_dir_all("/usr/local/libexec").context("failed to create /usr/local/libexec")?;
 
     // Copy binary.
-    std::fs::copy(&helper_src, &dest).with_context(|| {
-        format!(
-            "failed to copy {} -> {}",
-            helper_src.display(),
-            dest.display()
-        )
-    })?;
+    if !destination_is_source {
+        std::fs::copy(&helper_src, &dest).with_context(|| {
+            format!(
+                "failed to copy {} -> {}",
+                helper_src.display(),
+                dest.display()
+            )
+        })?;
+    }
 
     // Ensure root ownership (macOS copyfile preserves source ownership).
     let status = Command::new("chown")
@@ -162,11 +181,6 @@ fn install_helper(custom_path: Option<&std::path::Path>) -> Result<()> {
         include_bytes!("../../../../bundle/com.arcboxlabs.desktop.helper.plist"),
     )
     .with_context(|| format!("failed to write {}", privileged::HELPER_PLIST))?;
-
-    // Bootout existing service (ignore errors if not loaded).
-    let _ = Command::new("launchctl")
-        .args(["bootout", "system", privileged::HELPER_PLIST])
-        .output();
 
     // Bootstrap the service into the system domain.
     let status = Command::new("launchctl")
