@@ -1,7 +1,8 @@
-//! Installed web routes joined with the current DNS resolution.
+//! Installed web routes and Docker directory visibility joined with current DNS ownership.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use arcbox_connect::v1::{
@@ -97,9 +98,35 @@ pub struct WebServices {
     installed: Arc<RwLock<HashMap<String, Arc<Installed>>>>,
     dns: DnsRegistry,
     access: super::access::Access,
+    directory_available: Arc<AtomicBool>,
+}
+
+/// The single Docker watcher's current subscription and complete snapshot.
+pub struct DirectorySource {
+    available: Arc<AtomicBool>,
+}
+
+impl DirectorySource {
+    pub(crate) fn ready(&self) {
+        self.available.store(true, Ordering::Release);
+    }
+}
+
+impl Drop for DirectorySource {
+    fn drop(&mut self) {
+        self.available.store(false, Ordering::Release);
+    }
 }
 
 impl WebServices {
+    /// The Docker watcher holds this guard until its current subscription ends.
+    pub(crate) fn directory_source(&self) -> DirectorySource {
+        self.directory_available.store(false, Ordering::Release);
+        DirectorySource {
+            available: Arc::clone(&self.directory_available),
+        }
+    }
+
     pub(super) async fn observe_managed_tls(
         &self,
         name: &str,
@@ -198,13 +225,24 @@ impl WebServices {
 
     /// Returns typed installed endpoints selected by current DNS ownership.
     pub fn snapshot(&self, hostname: Option<&Domain>) -> Vec<GuestWebService> {
-        self.container_snapshot(hostname)
+        self.directory_snapshot(hostname)
+            .unwrap_or_default()
             .into_iter()
             .map(|container| GuestWebService {
                 route: container.into(),
                 ..Default::default()
             })
             .collect()
+    }
+
+    /// Distinguishes an unavailable Docker source from a current empty directory.
+    pub(super) fn directory_snapshot(
+        &self,
+        hostname: Option<&Domain>,
+    ) -> Option<Vec<ContainerWebService>> {
+        self.directory_available
+            .load(Ordering::Acquire)
+            .then(|| self.container_snapshot(hostname))
     }
 
     /// Shared Compose aliases belong only to the container DNS currently selects.
@@ -283,6 +321,28 @@ mod tests {
                 https: Some(super::super::HttpsBackend::Terminate(3000)),
             },
         );
+    }
+
+    #[test]
+    fn lost_directory_source_hides_links_without_removing_installed_routes() {
+        let services = WebServices::default();
+        let ip = "172.17.0.2".parse().unwrap();
+        let name = "web.arcbox.local";
+        register(&services, "a", &["web"], ip, "arcbox.local");
+        assert_eq!(services.directory_snapshot(None), None);
+        assert_eq!(services.snapshot(None), []);
+        let source = services.directory_source();
+        assert_eq!(services.directory_snapshot(None), None);
+        source.ready();
+        assert_eq!(services.snapshot(None).len(), 1);
+        drop(source);
+        assert_eq!(services.directory_snapshot(None), None);
+        assert_eq!(services.snapshot(Some(&name.parse().unwrap())), []);
+        assert!(services.tls_route(name, ip).is_some());
+        let source = services.directory_source();
+        services.remove("a");
+        source.ready();
+        assert_eq!(services.directory_snapshot(None), Some(Vec::new()));
     }
 
     #[test]

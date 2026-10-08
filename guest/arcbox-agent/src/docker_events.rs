@@ -5,7 +5,8 @@
 //! Buffered events keep the guest DNS registry in sync, mirror
 //! host-address-pinned port publishes for the inbound relay
 //! (`publish_mirror`), and serve each container's domain over HTTP and
-//! HTTPS without a port (`domains`).
+//! HTTPS without a port (`domains`). A subscription exposes directory links only
+//! after complete reconciliation and withdraws those links when the subscription ends.
 
 use std::collections::BTreeSet;
 use std::future::Future;
@@ -66,7 +67,7 @@ pub async fn reconcile_and_watch(mut sync: ContainerSync<'_>, cancel: Cancellati
             }
         }
 
-        match run_once(&mut sync, &cancel).await {
+        match run_once(&mut sync, &cancel, Path::new(DOCKER_SOCK)).await {
             Ok(()) => return, // cancelled
             Err(e) => {
                 tracing::warn!(error = %format!("{e:#}"), "docker event listener disconnected, retrying");
@@ -80,27 +81,35 @@ pub async fn reconcile_and_watch(mut sync: ContainerSync<'_>, cancel: Cancellati
 }
 
 /// Subscribes before reconciliation so changes during the listing stay buffered.
-async fn run_once(sync: &mut ContainerSync<'_>, cancel: &CancellationToken) -> anyhow::Result<()> {
-    let socket = Path::new(DOCKER_SOCK);
-    let Some(mut lines) =
-        subscribe_and_reconcile(socket, cancel, reconcile_existing(sync, socket)).await?
-    else {
-        return Ok(());
-    };
+async fn run_once(
+    sync: &mut ContainerSync<'_>,
+    cancel: &CancellationToken,
+    socket: &Path,
+) -> anyhow::Result<()> {
+    let directory = sync.domains.services().directory_source();
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => Ok(()),
+        result = async {
+            let Some(mut lines) =
+                subscribe_and_reconcile(socket, cancel, reconcile_existing(sync, socket)).await?
+            else {
+                return Ok(());
+            };
+            directory.ready();
+            loop {
+                let Some(line) = read_line_or_cancel(&mut lines, cancel).await? else {
+                    return Ok(());
+                };
 
-    // Process chunked event stream.
-    loop {
-        let Some(line) = read_line_or_cancel(&mut lines, cancel).await? else {
-            return Ok(());
-        };
-
-        // Docker chunked encoding: hex size line, then JSON line.
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
-            continue;
-        }
-
-        handle_event(sync, trimmed).await?;
+                // Docker chunked encoding: hex size line, then JSON line.
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+                    continue;
+                }
+                handle_event(sync, trimmed).await?;
+            }
+        } => result,
     }
 }
 

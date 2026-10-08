@@ -231,6 +231,7 @@ non-obvious invariants and failure signatures.
   Resolve conflicts as SERVFAIL. Short-name lookup requires an exact candidate; never append the suffix to match a wildcard.
   `ListGuestWebServices` reports installed routes, not raw listeners. The
   snapshot joins exact claims with the current DNS registry using both owner and address. A nonempty `hostname` resolves one concrete name through the Registry, including wildcard claims, and returns at most one installed route.
+  Keep the Docker directory unavailable until subscription and complete reconciliation succeed. The watcher owns directory availability for one subscription lifetime. Hide container directory entries after disconnect or cancellation. Retain installed forwarding routes independently of directory availability.
   Shared Compose claims select the smallest complete container ID; custom claims remain exclusive.
   The host must use this snapshot to build URLs instead of guessing from ports.
   The HTTPS proxy checks SNI against the same DNS registry before requesting a

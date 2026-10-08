@@ -833,6 +833,8 @@ mod tests {
             .replace("a".into(), claims, Some("172.17.0.2".parse().unwrap()))
             .unwrap();
         let services = WebServices::new(dns.registry());
+        let directory = services.directory_source();
+        directory.ready();
         for id in ["a", "b"] {
             let facts = ContainerFacts::from_inspect(
                 &serde_json::json!({

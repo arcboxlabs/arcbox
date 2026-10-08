@@ -125,13 +125,14 @@ impl DomainRoutes {
 
     #[cfg(test)]
     pub(crate) fn test_channel() -> (Self, mpsc::UnboundedReceiver<Command>) {
+        Self::test_channel_with_services(WebServices::default())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_channel_with_services(
+        services: WebServices,
+    ) -> (Self, mpsc::UnboundedReceiver<Command>) {
         let (commands, inbox) = mpsc::unbounded_channel();
-        (
-            Self {
-                commands,
-                services: WebServices::default(),
-            },
-            inbox,
-        )
+        (Self { commands, services }, inbox)
     }
 }

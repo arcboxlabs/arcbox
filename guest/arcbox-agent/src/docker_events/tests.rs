@@ -302,6 +302,100 @@ async fn subscription_precedes_snapshot_and_preserves_events_during_listing() {
 }
 
 #[tokio::test]
+async fn directory_links_follow_complete_subscription_lifetimes_and_replay() {
+    use crate::domains::{HttpsBackend, SelectedRoutes, WebServices};
+    use arcbox_connect::v1::guest_web_service::Route;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let socket = tmp.path().join("docker.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let dns = GuestDnsServer::new(Default::default(), CancellationToken::new()).unwrap();
+    let services = WebServices::new(dns.registry());
+    let (domains, mut commands) = DomainRoutes::test_channel_with_services(services.clone());
+    let mut sync = ContainerSync {
+        dns: &dns,
+        mirror: PublishMirror::new("eth0".into()),
+        domains,
+    };
+    for (name, ip, cancelled) in [("old", "172.17.0.2", false), ("fresh", "172.17.0.3", true)] {
+        let cancel = CancellationToken::new();
+        let server = async {
+            let (mut events, path) = request(&listener).await;
+            assert!(path.starts_with("GET /events?"));
+            events
+                .get_mut()
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .await
+                .unwrap();
+            let (mut listing, _) = request(&listener).await;
+            assert_eq!(services.snapshot(None), []);
+            reply(
+                &mut listing,
+                200,
+                &serde_json::json!([{ "Id": WEB_ID }]).to_string(),
+            )
+            .await;
+            let (mut inspection, path) = request(&listener).await;
+            assert_eq!(path, format!("GET /containers/{WEB_ID}/json HTTP/1.0\r\n"));
+            assert_eq!(services.snapshot(None), []);
+            reply(
+                &mut inspection,
+                200,
+                &inspect(WEB_ID, &format!("/{name}"), ip).to_string(),
+            )
+            .await;
+            let crate::domains::Command::Reconcile(facts, reply) = commands.recv().await.unwrap()
+            else {
+                panic!("subscription must replay the complete snapshot");
+            };
+            for facts in &facts {
+                services.publish(
+                    facts,
+                    SelectedRoutes {
+                        http: Some(3000),
+                        https: Some(HttpsBackend::Terminate(3000)),
+                    },
+                );
+            }
+            assert_eq!(services.snapshot(None), []);
+            reply.send(()).unwrap();
+            let mut snapshot = loop {
+                let snapshot = services.snapshot(None);
+                if !snapshot.is_empty() {
+                    break snapshot;
+                }
+                tokio::task::yield_now().await;
+            };
+            assert_eq!(snapshot.len(), 1);
+            let Some(Route::Container(service)) = snapshot.pop().unwrap().route else {
+                panic!("expected the replayed container route");
+            };
+            assert_eq!(service.hostnames, [format!("{name}.arcbox.local")]);
+            assert_eq!(service.ipv4_address, ip);
+            if cancelled {
+                cancel.cancel();
+            }
+        };
+        let (result, ()) = timeout(Duration::from_secs(2), async {
+            tokio::join!(run_once(&mut sync, &cancel, &socket), server)
+        })
+        .await
+        .unwrap();
+        if cancelled {
+            result.unwrap();
+        } else {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("event stream ended")
+            );
+        }
+        assert_eq!(services.snapshot(None), []);
+    }
+}
+
+#[tokio::test]
 async fn failed_listing_returns_while_the_event_stream_remains_open() {
     for (status, body) in [(500, "[]"), (200, "not json")] {
         let tmp = tempfile::TempDir::new().unwrap();
