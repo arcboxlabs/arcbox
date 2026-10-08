@@ -1,18 +1,21 @@
 //! A guest keeps its leaf key and sends only a signed certificate request.
 
+use std::sync::Arc;
+
 use rcgen::{CertificateParams, KeyPair};
 #[cfg(any(target_os = "macos", test))]
 use rcgen::{
     CertificateSigningRequestParams, ExtendedKeyUsagePurpose, Issuer, KeyUsagePurpose, SanType,
     SigningKey,
 };
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
+use rustls::client::{WebPkiServerVerifier, danger::ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 #[cfg(any(target_os = "macos", test))]
 use time::{Duration, OffsetDateTime};
 
 #[cfg(any(target_os = "macos", test))]
 use crate::CertificateValidity;
-use crate::{Error, LOCAL_DOMAIN};
+use crate::{Error, LOCAL_DOMAIN, PublicAuthority};
 
 /// Maximum DER request or response size accepted across the signing boundary.
 pub const MAX_CERTIFICATE_SIZE: usize = 8192;
@@ -21,18 +24,23 @@ pub const MAX_CERTIFICATE_SIZE: usize = 8192;
 pub struct CertificateRequest {
     key: KeyPair,
     der: Vec<u8>,
+    name: ServerName<'static>,
 }
 
 impl CertificateRequest {
     /// Creates a request for one ArcBox DNS name.
     pub fn new(name: &str) -> Result<Self, Error> {
-        validate_name(name)?;
+        let server_name = validate_name(name)?.to_owned();
         let key = KeyPair::generate()?;
         let der = CertificateParams::new(vec![name.to_ascii_lowercase()])?
             .serialize_request(&key)?
             .der()
             .to_vec();
-        Ok(Self { key, der })
+        Ok(Self {
+            key,
+            der,
+            name: server_name,
+        })
     }
 
     /// Returns the signed request, which contains no private key.
@@ -41,14 +49,32 @@ impl CertificateRequest {
         &self.der
     }
 
-    /// Pairs the host's certificate with the guest key and checks that they match.
-    pub fn complete(self, certificate: Vec<u8>) -> Result<rustls::ServerConfig, Error> {
-        let provider = rustls::crypto::ring::default_provider();
-        let mut config = rustls::ServerConfig::builder_with_provider(provider.into())
+    /// Verifies the leaf's name and current root before pairing it with the guest key.
+    pub fn complete(
+        self,
+        certificate: Vec<u8>,
+        authority: &PublicAuthority,
+    ) -> Result<rustls::ServerConfig, Error> {
+        if !authority
+            .validity()
+            .is_valid_at(std::time::SystemTime::now().into())
+        {
+            return Err(Error::InvalidAuthority(
+                "root certificate is outside its validity period",
+            ));
+        }
+        let certificate = CertificateDer::from(certificate);
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(CertificateDer::from(authority.der()))?;
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        WebPkiServerVerifier::builder_with_provider(Arc::new(roots), Arc::clone(&provider))
+            .build()?
+            .verify_server_cert(&certificate, &[], &self.name, &[], UnixTime::now())?;
+        let mut config = rustls::ServerConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()?
             .with_no_client_auth()
             .with_single_cert(
-                vec![CertificateDer::from(certificate)],
+                vec![certificate],
                 PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.key.serialize_der())),
             )?;
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
@@ -57,17 +83,18 @@ impl CertificateRequest {
 }
 
 /// Validates a DNS name at the signing boundary, including its label syntax.
-fn validate_name(name: &str) -> Result<(), Error> {
+fn validate_name(name: &str) -> Result<ServerName<'_>, Error> {
     let normalized = name.to_ascii_lowercase();
     let host = normalized
         .strip_suffix(LOCAL_DOMAIN)
         .and_then(|prefix| prefix.strip_suffix('.'));
-    if host.is_none_or(str::is_empty)
-        || !matches!(ServerName::try_from(name), Ok(ServerName::DnsName(_)))
-    {
+    if host.is_none_or(str::is_empty) {
         return Err(Error::ForeignName(name.to_owned()));
     }
-    Ok(())
+    match ServerName::try_from(name) {
+        Ok(name @ ServerName::DnsName(_)) => Ok(name),
+        _ => Err(Error::ForeignName(name.to_owned())),
+    }
 }
 
 /// Verifies the CSR signature and applies host-owned certificate policy.
@@ -111,10 +138,6 @@ pub fn sign_request(
 mod tests {
     use super::*;
     use rcgen::{BasicConstraints, IsCa};
-    use rustls::client::WebPkiServerVerifier;
-    use rustls::client::danger::ServerCertVerifier;
-    use rustls::pki_types::UnixTime;
-    use std::sync::Arc;
 
     #[test]
     fn csr_policy_keeps_the_guest_key_and_rejects_foreign_names() {
@@ -129,7 +152,12 @@ mod tests {
         *tampered.last_mut().unwrap() ^= 1;
         assert!(sign_request(&tampered, &issuer, validity, now).is_err());
         let certificate = sign_request(pending.der(), &issuer, validity, now).unwrap();
-        pending.complete(certificate.clone()).unwrap();
+        pending
+            .complete(
+                certificate.clone(),
+                &PublicAuthority::try_from(ca.der().to_vec()).unwrap(),
+            )
+            .unwrap();
         let mut roots = rustls::RootCertStore::empty();
         roots.add(ca.der().clone()).unwrap();
         let verifier = WebPkiServerVerifier::builder_with_provider(
@@ -174,6 +202,62 @@ mod tests {
             .unwrap();
         assert!(sign_request(request.der(), &issuer, validity, now).is_err());
         assert!(sign_request(&[0; MAX_CERTIFICATE_SIZE + 1], &issuer, validity, now).is_err());
+    }
+
+    #[test]
+    fn completion_rejects_a_different_root_or_name_even_when_the_leaf_key_matches() {
+        let root = rcgen::CertifiedIssuer::self_signed(
+            crate::authority::parameters(),
+            KeyPair::generate().unwrap(),
+        )
+        .unwrap();
+        let other = rcgen::CertifiedIssuer::self_signed(
+            crate::authority::parameters(),
+            KeyPair::generate().unwrap(),
+        )
+        .unwrap();
+        let public = PublicAuthority::try_from(root.der().to_vec()).unwrap();
+        for (issuer, name) in [(&other, "web.arcbox.local"), (&root, "other.arcbox.local")] {
+            let request = CertificateRequest::new("web.arcbox.local").unwrap();
+            let certificate = CertificateParams::new(vec![name.into()])
+                .unwrap()
+                .signed_by(&request.key, issuer)
+                .unwrap();
+            assert!(matches!(
+                request.complete(certificate.der().to_vec(), &public),
+                Err(Error::Tls(rustls::Error::InvalidCertificate(_)))
+            ));
+        }
+    }
+
+    #[test]
+    fn completion_rejects_expired_roots_and_leaves() {
+        let now = OffsetDateTime::now_utc();
+        for expired_root in [true, false] {
+            let mut root_params = crate::authority::parameters();
+            if expired_root {
+                root_params.not_after = now - Duration::hours(1);
+            }
+            let root =
+                rcgen::CertifiedIssuer::self_signed(root_params, KeyPair::generate().unwrap())
+                    .unwrap();
+            let public = PublicAuthority::try_from(root.der().to_vec()).unwrap();
+            let request = CertificateRequest::new("web.arcbox.local").unwrap();
+            let mut params = CertificateParams::new(vec!["web.arcbox.local".into()]).unwrap();
+            if !expired_root {
+                params.not_after = now - Duration::hours(1);
+            }
+            let certificate = params.signed_by(&request.key, &root).unwrap();
+            let result = request.complete(certificate.der().to_vec(), &public);
+            if expired_root {
+                assert!(matches!(result, Err(Error::InvalidAuthority(_))));
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(Error::Tls(rustls::Error::InvalidCertificate(_)))
+                ));
+            }
+        }
     }
 
     #[test]

@@ -245,7 +245,9 @@ mod tests {
             rustls::pki_types::UnixTime::now(),
         )
         .unwrap();
-        pending.complete(certificate).unwrap();
+        pending
+            .complete(certificate, &PublicAuthority::from_pem(&new).unwrap())
+            .unwrap();
         let other = tempfile::tempdir().unwrap();
         let _other_cleanup = Cleanup(other.path());
         let other_ca = KeychainAuthority::open(other.path()).unwrap();

@@ -116,6 +116,8 @@ distribution".
   Certificate publication must not mutate trust. Preserve a trusted previous
   root until an explicit login-session action revokes that exact certificate.
   Remove the exposed private key before sharing the profile with a guest.
+  Verify returned leaves against the requested DNS name and current public root
+  before pairing them with guest keys.
 
 - `translate()` (arcbox-conntrack) and `DnsQuery::parse` (arcbox-dns) consume
   arbitrary guest bytes on the VM datapath. The virt/AGENTS.md "Guest-controlled

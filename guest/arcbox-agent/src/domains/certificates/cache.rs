@@ -21,6 +21,7 @@ pub(super) struct Cached {
     config: Arc<ServerConfig>,
     validity: CertificateValidity,
     renew_at: SystemTime,
+    root: Vec<u8>,
 }
 
 impl Cached {
@@ -28,6 +29,7 @@ impl Cached {
         config: Arc<ServerConfig>,
         validity: CertificateValidity,
         now: SystemTime,
+        root: Vec<u8>,
     ) -> Result<Self> {
         ensure!(
             validity.is_valid_at(now.into()),
@@ -43,6 +45,7 @@ impl Cached {
             config,
             validity,
             renew_at,
+            root,
         })
     }
 
@@ -52,21 +55,27 @@ impl Cached {
 }
 
 impl Cache {
-    pub(super) async fn configuration(
+    pub(super) async fn configuration<F: Future<Output = Result<Vec<u8>>>>(
         &self,
         name: &str,
         issue: impl Future<Output = Result<Cached>>,
+        current_root: impl Fn() -> F,
     ) -> Result<Arc<ServerConfig>> {
         let slot = self.slot(name)?;
         let mut cached = slot.lock().await;
+        let root = current_root().await?;
         if let Some(leaf) = cached
             .as_ref()
-            .filter(|leaf| leaf.reusable_at(SystemTime::now()))
+            .filter(|leaf| leaf.root == root && leaf.reusable_at(SystemTime::now()))
         {
             return Ok(Arc::clone(&leaf.config));
         }
         *cached = None;
         let leaf = issue.await?;
+        ensure!(
+            leaf.root == current_root().await?,
+            "local HTTPS root changed while signing the leaf certificate"
+        );
         let config = Arc::clone(&leaf.config);
         *cached = Some(leaf);
         Ok(config)
@@ -117,8 +126,13 @@ mod tests {
                 not_after: (now + Duration::from_secs(3600)).into(),
             },
             now,
+            b"root".to_vec(),
         )
         .unwrap()
+    }
+
+    fn current_root() -> impl Future<Output = Result<Vec<u8>>> {
+        std::future::ready(Ok(b"root".to_vec()))
     }
 
     #[test]
@@ -127,12 +141,20 @@ mod tests {
             CertificateValidity::from_der(include_bytes!("../testdata/probe-cert.der")).unwrap();
         let expires: SystemTime = validity.not_after.into();
         let now = expires - Duration::from_secs(3600);
-        let leaf = Cached::new(config(), validity, now).unwrap();
+        let leaf = Cached::new(config(), validity, now, b"root".to_vec()).unwrap();
         assert!(leaf.reusable_at(now + Duration::from_secs(2699)));
         assert!(!leaf.reusable_at(now + Duration::from_secs(2700)));
         assert!(!leaf.reusable_at(expires));
         assert!(!leaf.reusable_at(SystemTime::from(validity.not_before) - Duration::from_secs(1)));
-        assert!(Cached::new(config(), validity, expires + Duration::from_secs(1)).is_err());
+        assert!(
+            Cached::new(
+                config(),
+                validity,
+                expires + Duration::from_secs(1),
+                b"root".to_vec(),
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]
@@ -145,8 +167,8 @@ mod tests {
             Ok(leaf(SystemTime::now()))
         };
         let (first, second) = tokio::join!(
-            cache.configuration("web.arcbox.local", issue()),
-            cache.configuration("web.arcbox.local", issue()),
+            cache.configuration("web.arcbox.local", issue(), current_root),
+            cache.configuration("web.arcbox.local", issue(), current_root),
         );
         assert!(Arc::ptr_eq(&first.unwrap(), &second.unwrap()));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -158,14 +180,22 @@ mod tests {
         let release = tokio::sync::Notify::new();
         let (first, second) = tokio::time::timeout(Duration::from_secs(1), async {
             tokio::join!(
-                cache.configuration("first.arcbox.local", async {
-                    release.notified().await;
-                    anyhow::bail!("signer unavailable")
-                }),
-                cache.configuration("second.arcbox.local", async {
-                    release.notify_one();
-                    Ok(leaf(SystemTime::now()))
-                }),
+                cache.configuration(
+                    "first.arcbox.local",
+                    async {
+                        release.notified().await;
+                        anyhow::bail!("signer unavailable")
+                    },
+                    current_root,
+                ),
+                cache.configuration(
+                    "second.arcbox.local",
+                    async {
+                        release.notify_one();
+                        Ok(leaf(SystemTime::now()))
+                    },
+                    current_root,
+                ),
             )
         })
         .await
@@ -174,10 +204,119 @@ mod tests {
         assert!(second.is_ok());
         assert!(
             cache
-                .configuration("first.arcbox.local", async { Ok(leaf(SystemTime::now())) })
+                .configuration(
+                    "first.arcbox.local",
+                    async { Ok(leaf(SystemTime::now())) },
+                    current_root,
+                )
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn replacement_root_renews_a_cached_name_and_then_reuses_the_new_leaf() {
+        let cache = Cache::default();
+        let first = cache
+            .configuration(
+                "web.arcbox.local",
+                async { Ok(leaf(SystemTime::now())) },
+                current_root,
+            )
+            .await
+            .unwrap();
+        let replacement_root = || std::future::ready(Ok(b"replacement".to_vec()));
+        let second = cache
+            .configuration(
+                "web.arcbox.local",
+                async {
+                    let mut leaf = leaf(SystemTime::now());
+                    leaf.root = b"replacement".to_vec();
+                    Ok(leaf)
+                },
+                replacement_root,
+            )
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first, &second));
+        let reused = cache
+            .configuration(
+                "web.arcbox.local",
+                async { anyhow::bail!("replacement leaf must be reused") },
+                replacement_root,
+            )
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&second, &reused));
+    }
+
+    #[tokio::test]
+    async fn a_late_leaf_from_the_previous_root_is_rejected_and_retry_succeeds() {
+        let cache = Cache::default();
+        let root = Mutex::new(b"root".to_vec());
+        let started = tokio::sync::Notify::new();
+        let release = tokio::sync::Notify::new();
+        let current = || std::future::ready(Ok(root.lock().unwrap().clone()));
+        let (result, ()) = tokio::join!(
+            cache.configuration(
+                "web.arcbox.local",
+                async {
+                    started.notify_one();
+                    release.notified().await;
+                    Ok(leaf(SystemTime::now()))
+                },
+                current,
+            ),
+            async {
+                started.notified().await;
+                *root.lock().unwrap() = b"replacement".to_vec();
+                release.notify_one();
+            },
+        );
+        assert!(result.unwrap_err().to_string().contains("root changed"));
+        assert!(
+            cache
+                .slot("web.arcbox.local")
+                .unwrap()
+                .lock()
+                .await
+                .is_none()
+        );
+        assert!(
+            cache
+                .configuration(
+                    "web.arcbox.local",
+                    async {
+                        let mut leaf = leaf(SystemTime::now());
+                        leaf.root = b"replacement".to_vec();
+                        Ok(leaf)
+                    },
+                    current,
+                )
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_publication_never_reuses_a_cached_leaf() {
+        let cache = Cache::default();
+        cache
+            .configuration(
+                "web.arcbox.local",
+                async { Ok(leaf(SystemTime::now())) },
+                current_root,
+            )
+            .await
+            .unwrap();
+        for error in ["root file is missing", "root certificate is invalid"] {
+            let result = cache
+                .configuration("web.arcbox.local", std::future::pending(), || {
+                    std::future::ready(Err(anyhow::anyhow!(error)))
+                })
+                .await;
+            assert_eq!(result.unwrap_err().to_string(), error);
+        }
     }
 
     #[test]

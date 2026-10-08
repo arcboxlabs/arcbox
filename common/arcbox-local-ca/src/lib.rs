@@ -32,7 +32,8 @@
 //!   CA. The daemon republishes the same public certificate on startup.
 //! - **Validity.** Root metadata remains readable after expiry for status and
 //!   revocation. Signing requires a valid root and caps the leaf's validity at
-//!   the root's bounds. The guest can inspect leaf expiry for renewal.
+//!   the root's bounds. The guest verifies each leaf against its requested name
+//!   and the published root before serving it. Root replacement invalidates cached leaves.
 
 #[cfg(any(target_os = "macos", test))]
 mod authority;
@@ -78,6 +79,9 @@ pub enum Error {
     /// rustls refused a minted key.
     #[error("tls: {0}")]
     Tls(#[from] rustls::Error),
+    /// The public root could not initialize TLS certificate verification.
+    #[error("certificate verifier: {0}")]
+    Verifier(#[from] rustls::client::VerifierBuilderError),
     /// A server name the CA does not sign for.
     #[error("{0:?} is not a name under {LOCAL_DOMAIN}")]
     ForeignName(String),

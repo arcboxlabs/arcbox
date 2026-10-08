@@ -2,11 +2,11 @@
 
 mod cache;
 
-use std::sync::Arc;
-use std::time::SystemTime;
+use std::{path::PathBuf, sync::Arc, time::SystemTime};
 
-use anyhow::{Context, Result};
-use arcbox_local_ca::{CertificateRequest, CertificateValidity};
+use anyhow::{Context, Result, ensure};
+use arcbox_constants::paths::guest::{MOUNT, TLS, TLS_CA_CERT};
+use arcbox_local_ca::{CertificateRequest, CertificateValidity, PublicAuthority};
 use tokio_rustls::rustls::ServerConfig;
 
 use self::cache::{Cache, Cached};
@@ -15,6 +15,7 @@ pub(super) struct Certificates {
     #[cfg(target_os = "linux")]
     listener: tokio::sync::Mutex<tokio_vsock::VsockListener>,
     cache: Cache,
+    root: PathBuf,
 }
 
 impl Certificates {
@@ -28,22 +29,42 @@ impl Certificates {
             #[cfg(target_os = "linux")]
             listener: tokio::sync::Mutex::new(listener),
             cache: Cache::default(),
+            root: PathBuf::from(MOUNT).join(TLS).join(TLS_CA_CERT),
         })
     }
 
     pub(super) async fn configuration(&self, name: &str) -> Result<Arc<ServerConfig>> {
         let name = name.to_ascii_lowercase();
-        self.cache.configuration(&name, self.issue(&name)).await
+        self.cache
+            .configuration(&name, self.issue(&name), || async {
+                Ok(self.authority().await?.der().to_vec())
+            })
+            .await
+    }
+
+    async fn authority(&self) -> Result<PublicAuthority> {
+        let pem = tokio::fs::read(&self.root)
+            .await
+            .with_context(|| format!("read published local HTTPS root {}", self.root.display()))?;
+        let authority = PublicAuthority::from_pem(&pem)
+            .with_context(|| format!("invalid local HTTPS root {}", self.root.display()))?;
+        ensure!(
+            authority.validity().is_valid_at(SystemTime::now().into()),
+            "published local HTTPS root is not currently valid"
+        );
+        Ok(authority)
     }
 
     async fn issue(&self, name: &str) -> Result<Cached> {
         let request = CertificateRequest::new(name)?;
         let certificate = self.sign(request.der()).await?;
+        let authority = self.authority().await?;
         let validity = CertificateValidity::from_der(&certificate)?;
         Cached::new(
-            Arc::new(request.complete(certificate)?),
+            Arc::new(request.complete(certificate, &authority)?),
             validity,
             SystemTime::now(),
+            authority.der().to_vec(),
         )
     }
 
