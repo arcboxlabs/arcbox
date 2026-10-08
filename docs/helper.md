@@ -30,16 +30,16 @@ Desktop and daemon parse that line with
 
 Keep the helper package and minimum version at `1.2.0` for this paired deployment. Ship the helper and its daemon/CLI consumers together when RPC or required behavior changes. Do not add compatibility decoders or automatically bump versions for protocol changes.
 
-A matching semver alone does not establish readiness. The installer requires the current JSON RPC transport, the same-major version floor and bundled-version policy, and an explicit selected-resolver check. release-please does not manage the helper version pins.
+A matching semver alone does not establish readiness. The installer requires identical bytes in the bundled helper and `/usr/local/libexec/arcbox-helper`, the current JSON RPC transport, the same-major version floor and bundled-version policy, and an explicit selected-resolver check. release-please does not manage the helper version pins.
 
 A regression test (`helper_version_pins_are_aligned` in
 `app/arcbox-helper/tests/connection_test.rs`) fails if the three pins drift.
 
 ### Admin password impact
 
-Installing or upgrading the helper requires admin authorization (the Desktop system prompt or `sudo abctl _install`). Desktop skips authorization only when the installed helper answers compatible JSON RPCs, meets the bundled same-major version requirement, and has no selected legacy resolver files to migrate. Runtime-only updates that satisfy these checks do not re-prompt.
+Installing or upgrading the helper requires admin authorization (the Desktop system prompt or `sudo abctl _install`). Desktop skips authorization only when the installed helper matches the bundled bytes, answers compatible JSON RPCs, meets the bundled same-major version requirement, and has no selected legacy resolver files to migrate. A different helper build requires installation even when its version remains `1.2.0`. Runtime-only updates that satisfy these checks do not re-prompt.
 
-`abctl _install --check --no-daemon --no-shell --helper-path PATH --user-uid UID --data-dir ABSOLUTE_PATH` prints exactly one JSON result, such as `{"helper_ready":true,"legacy_roots":[]}`. Missing or incompatible helper services report `helper_ready: false`; inspection errors return a nonzero exit status. Logs use stderr. The installer repeats the check after bootstrap and keeps the selected daemon stopped when the result is not ready.
+`abctl _install --check --no-daemon --no-shell --helper-path PATH --user-uid UID --data-dir ABSOLUTE_PATH` prints exactly one JSON result, such as `{"helper_ready":true,"legacy_roots":[]}`. Missing files, different helper bytes, and missing or incompatible helper services report `helper_ready: false`; other file-read and inspection errors return a nonzero exit status. Logs use stderr. The installer repeats the check after bootstrap and keeps the selected daemon stopped when the result is not ready.
 
 `arcbox-helper --check-resolvers [ROOT...]` reads only the selected resolver roots and prints each exact legacy root on its own line. The check requires root-owned files and directory metadata even when the caller is a login user. It does not start the service or change files. An empty root set does not inspect `/etc/resolver`.
 

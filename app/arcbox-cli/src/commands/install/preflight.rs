@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use arcbox_constants::helper::{helper_needs_reinstall, parse_helper_version};
+use arcbox_constants::paths::privileged;
 use arcbox_helper::client::{Client, ClientError};
 use serde::Serialize;
 use tokio::process::Command;
@@ -22,10 +23,21 @@ pub(super) struct Status {
 
 /// Inspects the supplied helper bundle and the canonical installed helper socket.
 pub(super) async fn inspect(helper: &Path, roots: &[String]) -> Result<Status> {
-    inspect_at(helper, roots, arcbox_helper::HELPER_SOCKET).await
+    inspect_at(
+        helper,
+        Path::new(privileged::HELPER_BINARY),
+        roots,
+        arcbox_helper::HELPER_SOCKET,
+    )
+    .await
 }
 
-async fn inspect_at(helper: &Path, roots: &[String], socket: &str) -> Result<Status> {
+async fn inspect_at(
+    helper: &Path,
+    installed: &Path,
+    roots: &[String],
+    socket: &str,
+) -> Result<Status> {
     let version = run(helper, "--version", &[]).await?;
     let bundled = parse_helper_version(&version)
         .with_context(|| format!("unrecognized bundled helper version: {version:?}"))?;
@@ -34,10 +46,26 @@ async fn inspect_at(helper: &Path, roots: &[String], socket: &str) -> Result<Sta
         .lines()
         .map(str::to_owned)
         .collect();
+    let binary_matches = same_binary(helper, installed)?;
+    let service_ready = helper_ready(socket, bundled).await?;
     Ok(Status {
-        helper_ready: helper_ready(socket, bundled).await?,
+        helper_ready: binary_matches && service_ready,
         legacy_roots,
     })
+}
+
+fn same_binary(helper: &Path, installed: &Path) -> Result<bool> {
+    let installed_bytes = match std::fs::read(installed) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read installed helper {}", installed.display()));
+        }
+    };
+    let bundled_bytes = std::fs::read(helper)
+        .with_context(|| format!("read bundled helper {}", helper.display()))?;
+    Ok(installed_bytes == bundled_bytes)
 }
 
 async fn run(helper: &Path, argument: &str, roots: &[String]) -> Result<String> {
@@ -159,12 +187,59 @@ mod tests {
         let socket = directory.path().join("helper.sock");
         let server = serve(&socket, vec!["arcbox-helper 1.2.0"; 2]);
         let roots = vec!["arcbox.local".into(), "other.local".into()];
-        let status = inspect_at(&helper, &roots, socket.to_str().unwrap())
+        let status = inspect_at(&helper, &helper, &roots, socket.to_str().unwrap())
             .await
             .unwrap();
         assert!(status.helper_ready);
         assert_eq!(status.legacy_roots, roots);
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn same_version_different_binary_needs_install_until_the_copy_matches() {
+        let directory = tempfile::tempdir().unwrap();
+        let helper = helper(directory.path(), VERSION, "printf '%s\\n' \"$@\"");
+        let installed = directory.path().join("installed-helper");
+        let mut different = std::fs::read(&helper).unwrap();
+        different.extend_from_slice(b"\n# Different build of version 1.2.0.\n");
+        std::fs::write(&installed, different).unwrap();
+        let roots = vec!["arcbox.local".into()];
+        for ready in [false, true] {
+            if ready {
+                std::fs::copy(&helper, &installed).unwrap();
+            }
+            let socket = directory.path().join(format!("helper-{ready}.sock"));
+            let server = serve(&socket, vec!["arcbox-helper 1.2.0"; 2]);
+            let status = inspect_at(&helper, &installed, &roots, socket.to_str().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(status.helper_ready, ready);
+            assert_eq!(status.legacy_roots, roots);
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_installed_binary_needs_install_and_read_errors_propagate() {
+        let directory = tempfile::tempdir().unwrap();
+        let helper = helper(directory.path(), VERSION, "exit 0");
+        let installed = directory.path().join("installed-helper");
+        let socket = directory.path().join("helper.sock");
+        assert!(
+            !inspect_at(&helper, &installed, &[], socket.to_str().unwrap())
+                .await
+                .unwrap()
+                .helper_ready
+        );
+        std::fs::create_dir(&installed).unwrap();
+        let error = inspect_at(&helper, &installed, &[], socket.to_str().unwrap())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("read installed helper"));
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            ErrorKind::IsADirectory
+        );
     }
 
     #[tokio::test]
@@ -183,14 +258,14 @@ mod tests {
             (VERSION, "printf '\\377'", "invalid UTF-8"),
         ] {
             let helper = helper(directory.path(), version, resolvers);
-            let error = inspect_at(&helper, &[], socket.to_str().unwrap())
+            let error = inspect_at(&helper, &helper, &[], socket.to_str().unwrap())
                 .await
                 .unwrap_err();
             assert!(error.to_string().contains(expected), "{error:#}");
         }
         let helper = helper(directory.path(), VERSION, "exit 0");
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let error = inspect_at(&helper, &[], socket.to_str().unwrap())
+        let error = inspect_at(&helper, &helper, &[], socket.to_str().unwrap())
             .await
             .unwrap_err();
         assert_eq!(
