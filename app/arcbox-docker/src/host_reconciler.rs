@@ -35,13 +35,13 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 /// dockerd is still starting — and restarting its containers — then.
 const RETURN_RETRY: Duration = Duration::from_secs(2);
 
-/// Spawns the reconciler, cancelled via `shutdown`.
+/// Runs the reconciler until `shutdown`; the server owns the task.
 ///
 /// Shares the router's [`ProxyState`] so queries go through the same pooled
 /// client, and observes the System VM restart generation before each listing
 /// so a query right after a backend switch dials the fresh VM instead of
 /// failing once on a stale pooled connection.
-pub fn spawn(runtime: Arc<Runtime>, proxy: Arc<ProxyState>, shutdown: CancellationToken) {
+pub async fn run(runtime: Arc<Runtime>, proxy: Arc<ProxyState>, shutdown: CancellationToken) {
     let vm = runtime.subscribe_system_vm_state();
     let guest = ProxyGuest {
         state: AppState {
@@ -49,9 +49,7 @@ pub fn spawn(runtime: Arc<Runtime>, proxy: Arc<ProxyState>, shutdown: Cancellati
             proxy,
         },
     };
-    drop(tokio::spawn(async move {
-        reconcile_loop(&runtime, &guest, vm, shutdown).await;
-    }));
+    reconcile_loop(&runtime, &guest, vm, shutdown).await;
 }
 
 /// The guest side of a reconcile; a seam so the loop is testable without
@@ -111,7 +109,15 @@ async fn reconcile_loop(
                 ready = now_ready;
             }
             () = tokio::time::sleep(delay), if ready => {
-                match reconcile(runtime, guest).await {
+                // Keep the loop's receiver unread so the next iteration handles the notification.
+                let mut query_vm = vm.clone();
+                let interrupted = async {
+                    tokio::select! {
+                        () = shutdown.cancelled() => {},
+                        _ = query_vm.changed() => {},
+                    }
+                };
+                match reconcile(runtime, guest, interrupted).await {
                     Ok(true) => returning = false,
                     Ok(false) => {},
                     // A failed guest query leaves the existing host state intact.
@@ -124,11 +130,19 @@ async fn reconcile_loop(
 
 /// Commits a complete guest query only while its captured generation remains current.
 /// Query failures preserve host state; concurrent mutations cause a skipped commit.
-async fn reconcile(runtime: &Runtime, guest: &impl Guest) -> Result<bool> {
+async fn reconcile(
+    runtime: &Runtime,
+    guest: &impl Guest,
+    interrupted: impl Future<Output = ()> + Send,
+) -> Result<bool> {
     let Some(snapshot) = runtime.capture_container_snapshot().await? else {
         return Ok(false);
     };
-    let containers = guest.snapshot().await?;
+    let containers = tokio::select! {
+        biased;
+        () = interrupted => return Ok(false),
+        containers = guest.snapshot() => containers?,
+    };
     snapshot.commit(&containers).await.map_err(Into::into)
 }
 
@@ -139,6 +153,7 @@ mod tests {
     use arcbox_core::runtime::{ContainerChange, NetworkFixture};
     use arcbox_core::{Config, Runtime, VmLifecycleConfig};
     use arcbox_dns::container::ContainerMetadata;
+    use std::future::pending;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
@@ -177,6 +192,8 @@ mod tests {
     struct FakeGuest {
         snapshot: std::result::Result<Vec<ContainerNetwork>, String>,
         queries: AtomicUsize,
+        active_queries: AtomicUsize,
+        query_finished: Notify,
         query_gate: Option<(Notify, Notify)>,
     }
 
@@ -185,6 +202,8 @@ mod tests {
             Self {
                 snapshot: Ok(ids.iter().map(|id| network(id, id, "172.17.0.2")).collect()),
                 queries: AtomicUsize::new(0),
+                active_queries: AtomicUsize::new(0),
+                query_finished: Notify::new(),
                 query_gate: None,
             }
         }
@@ -201,9 +220,20 @@ mod tests {
         }
     }
 
+    struct ActiveQuery<'a>(&'a FakeGuest);
+
+    impl Drop for ActiveQuery<'_> {
+        fn drop(&mut self) {
+            self.0.active_queries.fetch_sub(1, Ordering::Relaxed);
+            self.0.query_finished.notify_one();
+        }
+    }
+
     impl Guest for FakeGuest {
         async fn snapshot(&self) -> Result<Vec<ContainerNetwork>> {
             self.queries.fetch_add(1, Ordering::Relaxed);
+            self.active_queries.fetch_add(1, Ordering::Relaxed);
+            let _query = ActiveQuery(self);
             if let Some((entered, release)) = &self.query_gate {
                 entered.notify_one();
                 release.notified().await;
@@ -228,7 +258,7 @@ mod tests {
 
         // Only "alive" is running in the guest.
         let guest = FakeGuest::running(&["alive"]);
-        assert!(reconcile(&runtime, &guest).await.unwrap());
+        assert!(reconcile(&runtime, &guest, pending()).await.unwrap());
 
         let remaining = runtime.registered_container_ids().await;
         assert!(remaining.contains("alive"));
@@ -254,7 +284,11 @@ mod tests {
             "alias-only containers must be visible to the reconciler"
         );
 
-        assert!(reconcile(&runtime, &FakeGuest::running(&[])).await.unwrap());
+        assert!(
+            reconcile(&runtime, &FakeGuest::running(&[]), pending())
+                .await
+                .unwrap()
+        );
 
         assert!(runtime.registered_container_ids().await.is_empty());
         assert_eq!(
@@ -272,7 +306,7 @@ mod tests {
             .unwrap();
 
         let guest = FakeGuest::unreachable();
-        let result = reconcile(&runtime, &guest).await;
+        let result = reconcile(&runtime, &guest, pending()).await;
 
         assert!(result.is_err());
         // Nothing torn down, nothing set up, on a query failure.
@@ -294,7 +328,7 @@ mod tests {
 
         let mut guest = FakeGuest::running(&["known", "restarted"]);
         guest.snapshot.as_mut().unwrap()[0] = network("known", "renamed", "172.17.0.3");
-        assert!(reconcile(&runtime, &guest).await.unwrap());
+        assert!(reconcile(&runtime, &guest, pending()).await.unwrap());
 
         assert_eq!(runtime.resolve_registered_container("old").await, None);
         assert_eq!(
@@ -327,7 +361,7 @@ mod tests {
         });
         let task = tokio::spawn({
             let (runtime, guest) = (Arc::clone(&runtime), Arc::clone(&guest));
-            async move { reconcile(&runtime, guest.as_ref()).await }
+            async move { reconcile(&runtime, guest.as_ref(), pending()).await }
         });
         let (entered, release) = guest.query_gate.as_ref().unwrap();
         entered.notified().await;
@@ -336,7 +370,7 @@ mod tests {
             .await
             .unwrap();
         let skipped = FakeGuest::running(&[]);
-        assert!(!reconcile(&runtime, &skipped).await.unwrap());
+        assert!(!reconcile(&runtime, &skipped, pending()).await.unwrap());
         assert_eq!(skipped.queries(), 0);
         for container in [
             network("canonical", "current", "172.17.0.3"),
@@ -365,6 +399,70 @@ mod tests {
             assert_eq!(
                 runtime.container_dns_address(&format!("{name}.arcbox.local")),
                 Some(ip.parse().unwrap())
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_and_server_drop_cancel_a_pending_query_without_publication() {
+        for cancel_shutdown in [true, false] {
+            let (runtime, _tmp) = test_runtime();
+            let current = network("current", "current", "172.17.0.2");
+            let mutation = runtime
+                .begin_container_mutation(runtime.container_network_incarnation().unwrap())
+                .await
+                .unwrap();
+            mutation
+                .commit(ContainerChange::Publish(&current.metadata, &[]))
+                .await
+                .unwrap();
+            drop(mutation);
+            let guest = Arc::new(FakeGuest {
+                query_gate: Some((Notify::new(), Notify::new())),
+                ..FakeGuest::running(&["replacement"])
+            });
+            let (_vm_tx, vm) = watch::channel(VmLifecycleState::Running);
+            let shutdown = CancellationToken::new();
+            let mut tasks = tokio::task::JoinSet::new();
+            tasks.spawn({
+                let (runtime, guest, shutdown) =
+                    (Arc::clone(&runtime), Arc::clone(&guest), shutdown.clone());
+                async move { reconcile_loop(&runtime, guest.as_ref(), vm, shutdown).await }
+            });
+            let (entered, _) = guest.query_gate.as_ref().unwrap();
+            tokio::time::timeout(RETURN_RETRY * 2, entered.notified())
+                .await
+                .expect("the query starts");
+            assert_eq!(guest.active_queries.load(Ordering::Relaxed), 1);
+
+            if cancel_shutdown {
+                shutdown.cancel();
+                tokio::time::timeout(Duration::from_secs(1), tasks.join_next())
+                    .await
+                    .expect("shutdown joins without a guest response")
+                    .unwrap()
+                    .unwrap();
+            }
+            drop(tasks);
+            tokio::time::timeout(Duration::from_secs(1), guest.query_finished.notified())
+                .await
+                .expect("the pending query is dropped with its owner");
+            assert_eq!(guest.active_queries.load(Ordering::Relaxed), 0);
+            assert_eq!(guest.queries(), 1);
+            assert_eq!(
+                runtime
+                    .resolve_registered_container("current")
+                    .await
+                    .as_deref(),
+                Some("current")
+            );
+            assert_eq!(
+                runtime.container_dns_address("current.arcbox.local"),
+                Some("172.17.0.2".parse().unwrap())
+            );
+            assert_eq!(
+                runtime.resolve_registered_container("replacement").await,
+                None
             );
         }
     }

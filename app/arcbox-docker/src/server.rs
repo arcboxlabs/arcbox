@@ -134,11 +134,12 @@ impl DockerApiServer {
         // VM restart. It shares the router's ProxyState so its queries go
         // through the same pooled client — including the restart-generation
         // reset.
-        crate::host_reconciler::spawn(
+        let mut reconciler = JoinSet::new();
+        reconciler.spawn(crate::host_reconciler::run(
             Arc::clone(&self.runtime),
             Arc::clone(&proxy),
             shutdown.clone(),
-        );
+        ));
 
         // Wrap the Axum Router with a MapRequestLayer that strips API version
         // prefixes *before* route matching. `Router::layer` runs after routing
@@ -198,6 +199,11 @@ impl DockerApiServer {
             "Docker API server shutting down, closing idle connections and finishing in-flight requests"
         );
         graceful.shutdown().await;
+        if let Some(result) = reconciler.join_next().await {
+            result.map_err(|error| {
+                DockerError::Server(format!("host networking reconciler task failed: {error}"))
+            })?;
+        }
         tracing::info!("Docker API server drained");
 
         Ok(())
