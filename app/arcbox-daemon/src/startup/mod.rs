@@ -283,6 +283,8 @@ async fn init_runtime(ctx: &DaemonContext) -> Result<Arc<Runtime>> {
     crate::guest_trust::start(ctx, &runtime).await;
     #[cfg(target_os = "macos")]
     crate::machine_web::start(ctx, &runtime).await;
+    #[cfg(target_os = "macos")]
+    crate::https_access::start(ctx, &runtime).await;
     // Armed before `init` for the same reason `early_runtime` is published
     // here: the VM reaches its ready state partway through the call below, so
     // a mirror started after it returns would report the VM down across the

@@ -5,6 +5,7 @@ use arcbox_connect::v1::{
     Empty, LocalHttpsAccess, LocalHttpsStatus, SystemService,
     local_https_status::{CertificateState, TrustState},
 };
+use arcbox_core::{DEFAULT_MACHINE_NAME, VmLifecycleState};
 use connectrpc::{HasMessageView, RequestContext, ServiceRequest, ServiceStream};
 use tokio_stream::StreamExt;
 
@@ -135,6 +136,7 @@ async fn observes_only_with_a_ready_vm_and_client_then_disables_on_loss() {
         source.clone(),
         setup.https_access.clone(),
         vm,
+        VmLifecycleState::is_ready,
         shutdown.clone(),
     ));
     settle(POLL_INTERVAL).await;
@@ -192,6 +194,7 @@ async fn validates_dns_and_rejects_an_inflight_response_from_an_earlier_cycle() 
         source.clone(),
         setup.https_access.clone(),
         vm,
+        VmLifecycleState::is_ready,
         shutdown.clone(),
     ));
     settle(Duration::ZERO).await;
@@ -235,6 +238,7 @@ async fn a_stalled_rpc_times_out_and_shutdown_disables_the_lease() {
         source.clone(),
         setup.https_access.clone(),
         vm,
+        VmLifecycleState::is_ready,
         shutdown.clone(),
     ));
     settle(Duration::ZERO).await;
@@ -263,6 +267,7 @@ async fn captures_the_vm_before_collecting_host_addresses() {
         source.clone(),
         setup.https_access.clone(),
         vm,
+        VmLifecycleState::is_ready,
         shutdown.clone(),
     ));
     settle(Duration::ZERO).await;
@@ -292,6 +297,7 @@ async fn replacement_rejects_a_late_response_and_the_previous_disable_target() {
         source.clone(),
         setup.https_access.clone(),
         vm,
+        VmLifecycleState::is_ready,
         shutdown.clone(),
     ));
     settle(Duration::ZERO).await;
@@ -331,7 +337,14 @@ async fn shutdown_during_claim_validation_does_not_publish() {
     let (_vm_tx, vm) = watch::channel(VmLifecycleState::Running);
     let shutdown = CancellationToken::new();
     *source.cancel_on_claim.lock().unwrap() = Some(shutdown.clone());
-    observe(source.clone(), setup.https_access.clone(), vm, shutdown).await;
+    observe(
+        source.clone(),
+        setup.https_access.clone(),
+        vm,
+        VmLifecycleState::is_ready,
+        shutdown,
+    )
+    .await;
     assert_no_event(&mut client).await;
     assert!(!source.calls().last().unwrap().enabled);
 }
@@ -357,7 +370,7 @@ async fn runtime_source_publishes_only_current_system_claims() {
         .register_machine_dns("other", address)
         .await
         .unwrap();
-    let source = RuntimeSource(runtime);
+    let source = RuntimeSource(runtime, DEFAULT_MACHINE_NAME.into());
     let guest = source.incarnation().unwrap();
     assert_eq!(
         source

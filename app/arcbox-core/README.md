@@ -32,7 +32,7 @@ let cid = runtime.ensure_vm_ready().await?;
 println!("default machine CID: {cid}");
 ```
 
-Capture `Runtime::capture_web_guest` before collecting HTTPS observation addresses. Read the bridge through `web_guest_bridge_address` and pass the captured guest to `Arc<Runtime>::reconcile_https_access` for enable and disable requests. The call retains the expected VM through native connection and RPC cleanup. Cancel through the token and await completion before disabling the lease. Validate prompt ownership through `with_web_guest_claim`.
+Capture `Runtime::capture_web_guest` before collecting HTTPS observation addresses. Read the bridge through `web_guest_bridge_address` and pass the captured guest to `Arc<Runtime>::reconcile_https_access` for enable and disable requests. The call retains the expected VM through native connection and RPC cleanup. Cancel through the token and await completion before disabling the lease. Validate prompt ownership through `with_web_guest_claim`. The daemon starts independent System and distro machine observers before Runtime initialization, including when System VM autostart is disabled.
 
 Capture `Runtime::container_network_incarnation` before querying Kubernetes Services. Pass that identity and a cancellation token to `apply_kubernetes_load_balancers`; the runtime rejects old VM snapshots and withdraws interrupted publications before returning.
 

@@ -5,32 +5,17 @@ use std::{net::IpAddr, sync::Arc, time::Duration};
 use anyhow::{Result, bail, ensure};
 use arcbox_api::HttpsAccess;
 use arcbox_connect::v1::{ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse};
-use arcbox_core::{DEFAULT_MACHINE_NAME, Runtime, VmLifecycleState, runtime::CapturedWebGuest};
+use arcbox_core::{Runtime, runtime::CapturedWebGuest};
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
-use crate::context::DaemonContext;
+mod workers;
+pub use workers::start;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const RPC_TIMEOUT: Duration = Duration::from_millis(750);
-
-/// Starts observation without gating VM or Docker readiness on certificate trust.
-pub async fn start(ctx: &DaemonContext, runtime: &Arc<Runtime>) {
-    let observation = observe(
-        RuntimeSource(Arc::clone(runtime)),
-        ctx.setup_state.https_access.clone(),
-        runtime.subscribe_system_vm_state(),
-        ctx.shutdown.clone(),
-    );
-    ctx.https_access_service
-        .start(async move {
-            observation.await;
-            Ok(())
-        })
-        .await;
-}
 
 trait AccessSource {
     type Vm: Clone + Eq + Send + Sync;
@@ -50,13 +35,13 @@ trait AccessSource {
     ) -> Result<ReconcileHttpsAccessResponse>;
 }
 
-struct RuntimeSource(Arc<Runtime>);
+struct RuntimeSource(Arc<Runtime>, String);
 
 impl AccessSource for RuntimeSource {
     type Vm = CapturedWebGuest;
 
     fn incarnation(&self) -> Result<Self::Vm> {
-        Ok(self.0.capture_web_guest(DEFAULT_MACHINE_NAME)?)
+        Ok(self.0.capture_web_guest(&self.1)?)
     }
 
     fn with_claim<T>(
@@ -96,10 +81,11 @@ impl AccessSource for RuntimeSource {
     }
 }
 
-async fn observe(
+async fn observe<T: Send + Sync>(
     mut source: impl AccessSource,
     access: HttpsAccess,
-    mut vm: watch::Receiver<VmLifecycleState>,
+    mut vm: watch::Receiver<T>,
+    is_ready: fn(&T) -> bool,
     shutdown: CancellationToken,
 ) {
     let mut active = None;
@@ -112,7 +98,7 @@ async fn observe(
             changed = vm.changed() => if changed.is_err() { break; },
             _ = poll.tick() => {}
         }
-        let ready = vm.borrow_and_update().is_ready();
+        let ready = is_ready(&vm.borrow_and_update());
         let cycle = ready.then(|| access.observing_cycle()).flatten();
         let target = match cycle {
             Some(cycle) => match source.incarnation() {
@@ -154,7 +140,7 @@ async fn observe(
         .await;
         match response {
             Ok(response) if response.sequence > 0 => {
-                let ready = vm.borrow().is_ready();
+                let ready = is_ready(&vm.borrow());
                 if ready && !shutdown.is_cancelled() {
                     let recorded = source.with_claim(&expected, &response.hostname, |address| {
                         if !shutdown.is_cancelled()
@@ -177,12 +163,12 @@ async fn observe(
     disable(&mut source, active, &mut vm).await;
 }
 
-async fn reconcile<S: AccessSource>(
+async fn reconcile<S: AccessSource, T: Send + Sync>(
     source: &mut S,
     expected: &S::Vm,
     request: ReconcileHttpsAccessRequest,
     shutdown: &CancellationToken,
-    vm: &mut watch::Receiver<VmLifecycleState>,
+    vm: &mut watch::Receiver<T>,
 ) -> Result<ReconcileHttpsAccessResponse> {
     let cancelled = shutdown.child_token();
     let operation = async {
@@ -206,10 +192,10 @@ async fn reconcile<S: AccessSource>(
     bail!("HTTPS access observation cancelled")
 }
 
-async fn disable<S: AccessSource>(
+async fn disable<S: AccessSource, T: Send + Sync>(
     source: &mut S,
     active: Option<(String, S::Vm)>,
-    vm: &mut watch::Receiver<VmLifecycleState>,
+    vm: &mut watch::Receiver<T>,
 ) {
     let Some((observation_id, expected)) = active else {
         return;
