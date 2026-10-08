@@ -141,6 +141,8 @@ async fn acquire_lock(early: EarlyContext) -> Result<DaemonContext> {
         shared_runtime: early.shared_runtime,
         early_runtime: early.early_runtime,
         setup_state: early.setup_state,
+        #[cfg(target_os = "macos")]
+        local_ca: std::sync::OnceLock::new(),
         shutdown: early.shutdown,
         container_network_lease_slot: early.container_network_lease_slot,
         dns_domain: early.dns_domain,
@@ -247,21 +249,8 @@ async fn prepare_assets(ctx: &DaemonContext) -> Result<assets::PreparedAssets> {
 async fn init_runtime(ctx: &DaemonContext) -> Result<Arc<Runtime>> {
     let config = effective_config(ctx)?;
     #[cfg(target_os = "macos")]
-    if config.vm.autostart
-        && crate::recovery::owns_implicit_host_setup(
-            ctx.profile,
-            &ctx.layout.data_dir,
-            &HostLayout::resolve_for_profile_from_env(ctx.profile, None).data_dir,
-        )
-    {
-        crate::self_setup::tls::prepare(
-            &ctx.layout
-                .data_dir
-                .join(arcbox_constants::paths::guest::TLS),
-            &ctx.setup_state,
-        )
-        .await
-        .context("Failed to prepare local HTTPS trust")?;
+    if config.vm.autostart {
+        crate::self_setup::tls::prepare(ctx).await;
     }
     if config.vm.autostart
         && let Some(lease) = ContainerNetworkLease::acquire(config.container.cidr)?

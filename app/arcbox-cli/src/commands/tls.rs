@@ -4,6 +4,7 @@
 //! trust changes run in this process so macOS can request authorization.
 //! The daemon owns the private key. This process publishes public bytes after
 //! revoking a previous root. Explicit commands also work for development profiles.
+//! A supplied fingerprint pins the public certificate before any trust change.
 //! Native authorization cancellation exits with status 130; other failures exit with status 1.
 
 use std::path::Path;
@@ -19,7 +20,11 @@ use clap::Subcommand;
 #[derive(Debug, Subcommand)]
 pub enum TlsCommands {
     /// Authorize the profile's CA for system HTTPS through the macOS prompt
-    Trust,
+    Trust {
+        /// Authorize only the certificate with this SHA-256 fingerprint
+        #[arg(long)]
+        expected_fingerprint: Option<String>,
+    },
     /// Revoke CA trust without stopping containers
     Untrust,
     /// Check whether this profile's CA is ready for system HTTPS
@@ -65,6 +70,12 @@ pub async fn execute(cmd: TlsCommands) -> Result<()> {
     let der = KeychainAuthority::existing_certificate(&tls_dir)?
         .context("no Keychain CA for this profile: start the ArcBox daemon once to create it")?;
     let authority = PublicAuthority::try_from(der)?;
+    if let TlsCommands::Trust {
+        expected_fingerprint: Some(expected),
+    } = cmd
+    {
+        check_fingerprint(&authority.fingerprint_sha256(), &expected)?;
+    }
     ensure!(
         authority
             .validity()
@@ -93,6 +104,14 @@ pub async fn execute(cmd: TlsCommands) -> Result<()> {
     println!(
         "System HTTPS trust for *.{LOCAL_DOMAIN} ({}): installed.",
         tls_dir.display(),
+    );
+    Ok(())
+}
+
+fn check_fingerprint(actual: &str, expected: &str) -> Result<()> {
+    ensure!(
+        actual.eq_ignore_ascii_case(expected),
+        "the local CA changed since HTTPS was requested; refresh its status and try again"
     );
     Ok(())
 }
@@ -137,4 +156,19 @@ async fn revoke(client: &Client, authority: &PublicAuthority) -> Result<()> {
         .context("revoking legacy user HTTPS trust; approve the macOS prompt to continue")?;
     client.ca_remove(authority.der()).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stale_or_partial_fingerprint_cannot_authorize_the_current_root() {
+        let current = "AB:CD:".repeat(10) + "EF:01";
+        check_fingerprint(&current, &current.to_ascii_lowercase()).unwrap();
+        for expected in ["", "AB:CD", &("AB:CD:".repeat(10) + "EF:02")] {
+            let error = check_fingerprint(&current, expected).unwrap_err();
+            assert!(error.to_string().contains("refresh its status"));
+        }
+    }
 }

@@ -1153,11 +1153,13 @@ impl Runtime {
             // Retire shared private keys before exposing the data directory to the guest.
             tokio::task::spawn_blocking(move || {
                 std::fs::create_dir_all(&tls_dir)?;
-                arcbox_local_ca::KeychainAuthority::open(&tls_dir)?.publish(&tls_dir)?;
+                arcbox_local_ca::remove_shared_private_key(&tls_dir)?;
                 Ok::<_, CoreError>(())
             })
             .await
-            .map_err(|error| CoreError::Vm(format!("local CA setup task failed: {error}")))??;
+            .map_err(|error| {
+                CoreError::Vm(format!("shared CA key removal task failed: {error}"))
+            })??;
         }
 
         // Boot the VM through the lifecycle manager first so the agent

@@ -296,13 +296,14 @@ Most of ArcBox's performance-critical code is custom rather than vendored:
   `*.arcbox.local` name resolution: `http://<container>.arcbox.local` reaches
   whatever port the container serves (or its `dev.arcbox.http-port` label),
   and `https://` works on port 443 after macOS authorizes the local CA.
-  ArcBox presents native authorization during startup and reuses the trusted
+  Containers start without HTTPS trust. Enable local HTTPS in Desktop settings
+  or run `abctl tls trust` from your login session. ArcBox reuses the trusted
   CA on later launches. The helper stores the name-constrained public CA in
   the System Keychain. The private key stays in the user's Keychain;
   the host signs guest-generated certificate requests. Helper installation
   and certificate trust require separate administrator authorization.
-  Without Desktop, run `abctl tls trust` from your login session.
   Run `abctl tls status --json` to inspect trust, certificate validity, and the public CA fingerprint without changing trust.
+  Pass that fingerprint to `abctl tls trust --expected-fingerprint <SHA-256>` to reject a CA change between inspection and authorization.
   Guest DNS follows the Mac's resolvers as
   they change (Wi-Fi switch, VPN up or down), and guest egress follows the
   Mac's proxy settings by default; `proxy = "none"` or a proxy URL under

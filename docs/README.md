@@ -48,6 +48,7 @@ from memory. Every new file is added to the index below.
 ### Reference
 
 - [ArcBox Engine](../engine/arcbox-engine/README.md) — machine lifecycle, force-stop completion, and storage maintenance
+- [Local domains and HTTPS](local-https.md) — service contract, trust operations, and completion requirements
 - [Daemon lifecycle](daemon-lifecycle.md) — startup pipeline, lock/handoff, residual state
 - [Data directories](data-directories.md) — every path the daemon writes
 - [Boot assets](boot-assets.md) — the kernel/rootfs bundle and its pin
@@ -67,6 +68,7 @@ from memory. Every new file is added to the index below.
 
 ### Decisions
 
+- [0007 — Local HTTPS authorization is independent of startup](adr/0007-local-https-independent-of-startup.md) (2026-10-08)
 - [0006 — Authorize local CA trust in the login user's session](adr/0006-authorize-local-ca-in-user-session.md) (2026-10-08)
 - [0005 — The privileged helper manages local CA trust](adr/0005-helper-manages-local-ca-trust.md) (2026-10-08; trust mutation and authorization superseded by ADR 0006)
 - [0004 — The macOS Keychain owns the local CA key](adr/0004-local-ca-signs-in-macos-keychain.md) (2026-10-07)

@@ -122,6 +122,11 @@ fn main() -> Result<()> {
         .unwrap_or_else(ArcboxProfile::from_env_or_default);
     validate_docker_integration(profile, args.docker_integration)?;
 
+    // Native authorization belongs to the login-session CLI, never the daemon.
+    #[cfg(target_os = "macos")]
+    let _keychain_interaction =
+        security_framework::os::macos::keychain::SecKeychain::disable_user_interaction()?;
+
     let _sentry_guard = sentry::init(sentry::ClientOptions {
         dsn: sentry_dsn().and_then(|s| s.parse().ok()),
         release: Some(env!("CARGO_PKG_VERSION").into()),

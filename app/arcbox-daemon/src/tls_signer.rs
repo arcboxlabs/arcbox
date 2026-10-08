@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use arcbox_constants::{paths::guest, ports::TLS_SIGNING_PORT};
+use arcbox_constants::ports::TLS_SIGNING_PORT;
 use arcbox_core::{DEFAULT_MACHINE_NAME, Runtime};
 use arcbox_local_ca::{KeychainAuthority, MAX_CERTIFICATE_SIZE};
 use arcbox_transport::vsock::{VsockShutdown, VsockStream};
@@ -14,14 +14,14 @@ use tokio_util::{codec::LengthDelimitedCodec, sync::CancellationToken};
 
 use crate::context::DaemonContext;
 
-pub async fn spawn(ctx: &DaemonContext, runtime: &Arc<Runtime>) -> Result<()> {
-    let dir = runtime.config().data_dir.join(guest::TLS);
-    let authority =
-        Arc::new(tokio::task::spawn_blocking(move || KeychainAuthority::open(&dir)).await??);
+pub fn spawn(ctx: &DaemonContext, runtime: &Arc<Runtime>) {
+    let Some(authority) = ctx.local_ca.get().cloned() else {
+        // Preparation already published the HTTPS error without blocking Docker.
+        return;
+    };
     let runtime = Arc::clone(runtime);
     let shutdown = ctx.shutdown.clone();
     tokio::spawn(run(runtime, authority, shutdown));
-    Ok(())
 }
 
 async fn run(

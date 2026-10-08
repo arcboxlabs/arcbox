@@ -157,7 +157,7 @@ impl RuntimeBooted {
             recovery::run(&self.ctx, &self.runtime, handles.dns_port).await?;
             if linux_vm {
                 #[cfg(target_os = "macos")]
-                crate::tls_signer::spawn(&self.ctx, &self.runtime).await?;
+                crate::tls_signer::spawn(&self.ctx, &self.runtime);
                 services::enable_docker_integration(&self.ctx);
                 crate::kubernetes_lb::spawn(&self.ctx, &self.runtime);
                 crate::sandbox_cleanup::spawn(&self.ctx, &self.runtime);

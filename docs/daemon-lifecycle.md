@@ -30,9 +30,9 @@ prepare_assets           Seed/download boot assets               variable
     │                    ASSETS_READY.
     │
 boot_runtime             Construct Runtime, boot the System VM   variable
-    │                    Canonical production first verifies
-    │                    local HTTPS trust, waiting at
-    │                    AWAITING_HTTPS_TRUST if authorization is needed.
+    │                    Prepare the local CA without authorization.
+    │                    HTTPS trust has independent status;
+    │                    missing trust does not block VM boot.
     │                    Reported as VM_STARTING → VM_READY,
     │                    published from inside Runtime::init so
     │                    the span covers the guest boot alone.
@@ -60,7 +60,7 @@ When protected startup has no System VM record, recovery rebuilds that record fr
 ### Phase enum caveats
 
 - The observable progression is `INITIALIZING → [CLEANING_UP →
-  INITIALIZING] → [DOWNLOADING_ASSETS] → ASSETS_READY → [AWAITING_HTTPS_TRUST → ASSETS_READY] → [VM_STARTING →
+  INITIALIZING] → [DOWNLOADING_ASSETS] → ASSETS_READY → [VM_STARTING →
   VM_READY] → NETWORK_READY → READY` (or `FAILED`). Bracketed phases are
   conditional; the VM pair is skipped entirely by a `--no-linux-vm`
   daemon, which boots no guest. `DEGRADED` is reserved and never emitted.
@@ -86,7 +86,7 @@ When protected startup has no System VM record, recovery rebuilds that record fr
 - `--docker-integration` is production-only. Its global Docker context switch
   runs after startup-critical recovery, so a resolver failure cannot leave a
   dead ArcBox context selected.
-- Local HTTPS trust is required before the canonical production instance boots its Linux VM. The daemon creates the Keychain identity and uses helper 1.2.0 or later to inspect TLS-only Admin trust. Missing trust publishes `AWAITING_HTTPS_TRUST`; the daemon stays alive with no VM until Desktop or `abctl tls trust` authorizes the certificate. Desktop runs the bundled CLI in the login user's GUI session. A canceled prompt leaves a retryable startup step, without restarting the daemon or automatically repeating authorization. Correct existing trust skips the prompt. Isolated data directories, development profiles, and `--no-linux-vm` do not request automatic trust.
+- Local HTTPS trust is independent of startup. The daemon prepares its private Keychain identity without Keychain UI and reports trust through `SetupStatus.local_https`. A CA error leaves Docker startup available. Removing an exposed `tls/ca-key.pem` remains a required security barrier before sharing the data directory. Background publication preserves a trusted previous root. The login-session `abctl tls trust` command revokes the previous root, requests native authorization, and publishes the current public certificate. Cancellation and `abctl tls untrust` do not stop containers. The daemon refreshes read-only trust status every five seconds and publishes changes only. `AWAITING_HTTPS_TRUST` remains on the wire for older clients but is no longer emitted. See [ADR 0007](adr/0007-local-https-independent-of-startup.md).
 - Enum ordinal ≠ progression order (`DOWNLOADING_ASSETS = 8` occurs before
   `READY = 6`). Clients must match on the value, never compare ordinals.
   New phases are appended with the next free number regardless of where

@@ -596,6 +596,7 @@ dependencies = [
  "libproc",
  "macos-resolver",
  "nix 0.29.0",
+ "security-framework",
  "sentry",
  "serde_json",
  "tempfile",
