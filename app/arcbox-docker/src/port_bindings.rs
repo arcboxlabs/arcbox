@@ -9,6 +9,12 @@ pub struct PortBindingInfo {
     pub protocol: String,
 }
 
+impl From<PortBindingInfo> for (String, u16, u16, String) {
+    fn from(b: PortBindingInfo) -> Self {
+        (b.host_ip, b.host_port, b.container_port, b.protocol)
+    }
+}
+
 /// Parse port bindings from a Docker container inspect JSON response.
 ///
 /// Extracts `NetworkSettings.Ports` and `HostConfig.PortBindings` into a flat

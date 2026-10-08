@@ -1851,6 +1851,27 @@ impl MachineManager {
         self.vm_manager.network_incarnation(&machine.vm_id)
     }
 
+    /// Keeps the machine name and physical VM stable during synchronous publication.
+    ///
+    /// # Errors
+    /// Returns an error if the expected live VM is unavailable.
+    pub fn with_network_incarnation<T>(
+        &self,
+        name: &str,
+        expected: &VmIncarnation,
+        publish: impl FnOnce() -> T,
+    ) -> Result<T> {
+        let machines = self
+            .machines
+            .read()
+            .map_err(|_| EngineError::LockPoisoned)?;
+        let machine = machines
+            .get(name)
+            .ok_or_else(|| EngineError::not_found(name))?;
+        self.vm_manager
+            .with_network_incarnation(&machine.vm_id, expected, publish)
+    }
+
     /// Takes a manager only while the machine still names the expected live VM.
     ///
     /// # Errors

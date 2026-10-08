@@ -109,7 +109,7 @@ pub async fn start_container(
 
     // On success, inspect the container and set up port forwarding + DNS.
     if response.status().is_success() {
-        setup_container_networking(&state, &lifecycle.id).await?;
+        lifecycle.refresh_network(&state).await?;
     }
 
     Ok(response)
@@ -141,11 +141,7 @@ pub async fn stop_container(
     // Docker returns 204 on success and 304 when already stopped.
     let status = response.status().as_u16();
     if status == 204 || status == 304 {
-        state
-            .runtime
-            .stop_port_forwarding_by_id(&lifecycle.id)
-            .await;
-        state.runtime.deregister_dns_by_id(&lifecycle.id).await;
+        lifecycle.remove_network().await?;
     }
 
     Ok(response)
@@ -199,11 +195,7 @@ pub async fn kill_container(
     // Docker kill returns 204 for any delivered signal; only tear down when the
     // signal actually terminates the container (see `kill_terminates_container`).
     if response.status().as_u16() == 204 && terminates {
-        state
-            .runtime
-            .stop_port_forwarding_by_id(&lifecycle.id)
-            .await;
-        state.runtime.deregister_dns_by_id(&lifecycle.id).await;
+        lifecycle.remove_network().await?;
     }
 
     Ok(response)
@@ -232,16 +224,8 @@ pub async fn restart_container(
     let mut response = proxy_to_system_vm(&state, &uri, req).await?;
     ca_injection::report_warnings(&mut response, warnings);
 
-    // Docker restart returns 204 on success. Refresh DNS (container may get
-    // a new IP) with a single inspect call for both canonical ID and DNS info.
-    // Port forwarding targets the guest VM and survives container restarts.
     if response.status().as_u16() == 204 {
-        let inspect =
-            crate::guest_query::inspect_container(state.proxy.client(), &lifecycle.id).await?;
-        state
-            .runtime
-            .register_container_dns(&inspect.metadata)
-            .await;
+        lifecycle.refresh_network(&state).await?;
     }
 
     Ok(response)
@@ -271,11 +255,7 @@ pub async fn remove_container(
 
     // Only tear down networking after a successful remove.
     if response.status().is_success() {
-        state
-            .runtime
-            .stop_port_forwarding_by_id(&lifecycle.id)
-            .await;
-        state.runtime.deregister_dns_by_id(&lifecycle.id).await;
+        lifecycle.remove_network().await?;
     }
 
     Ok(response)
@@ -284,9 +264,7 @@ pub async fn remove_container(
 /// Inspect a started container and configure port forwarding + DNS registration.
 ///
 /// Sets up a running container's host networking from one inspect call: the
-/// name alias, port forwarding, and DNS. The `start` handler's post-start
-/// step, and what the host reconciler runs for a container it finds running
-/// without knowing it.
+/// name alias, port forwarding, and DNS. Used by host reconciliation.
 ///
 /// # Errors
 /// Returns an error when inspect fails or lacks a valid container identity.
@@ -322,17 +300,7 @@ async fn setup_port_forwarding_from_inspect(
         );
     }
 
-    let rules: Vec<_> = bindings
-        .iter()
-        .map(|b| {
-            (
-                b.host_ip.clone(),
-                b.host_port,
-                b.container_port,
-                b.protocol.clone(),
-            )
-        })
-        .collect();
+    let rules: Vec<_> = bindings.into_iter().map(Into::into).collect();
 
     let machine_name = state.runtime.default_machine_name();
     if let Err(e) = state
@@ -401,12 +369,7 @@ pub async fn rename_container(
 
     if response.status().is_success() {
         // Preserve previous host state if inspect fails after the guest rename.
-        let inspect =
-            crate::guest_query::inspect_container(state.proxy.client(), &lifecycle.id).await?;
-        state
-            .runtime
-            .register_container_dns(&inspect.metadata)
-            .await;
+        lifecycle.refresh_network(&state).await?;
     }
 
     Ok(response)

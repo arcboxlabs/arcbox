@@ -62,6 +62,26 @@ impl VmEntry {
 }
 
 impl VmManager {
+    /// Publishes synchronously while the expected physical VM cannot be replaced.
+    ///
+    /// # Errors
+    /// Returns an error if the expected live VM is unavailable.
+    pub fn with_network_incarnation<T>(
+        &self,
+        id: &VmId,
+        expected: &VmIncarnation,
+        publish: impl FnOnce() -> T,
+    ) -> Result<T> {
+        let vms = self.vms.read().map_err(|_| EngineError::LockPoisoned)?;
+        let entry = vms
+            .get(id)
+            .ok_or_else(|| EngineError::not_found(id.to_string()))?;
+        if entry.network_incarnation()? != *expected {
+            return Err(EngineError::invalid_state("VM network incarnation changed"));
+        }
+        Ok(publish())
+    }
+
     /// Captures the current live datapath identity.
     ///
     /// # Errors

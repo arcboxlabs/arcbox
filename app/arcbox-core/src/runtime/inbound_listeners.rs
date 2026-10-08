@@ -85,24 +85,26 @@ impl Runtime {
     ) -> Result<()> {
         let mut rules = self.inbound_rules.write().await;
         let mut slots = self.inbound_listeners.write().await;
-        if let Some((machine, incarnation)) = expected {
-            if !slots
-                .get(machine)
-                .is_some_and(|slot| slot.incarnation == *incarnation)
+        let Some((machine, installed)) = rules.get(container_id) else {
+            return Ok(());
+        };
+        if let Some((expected_machine, incarnation)) = expected {
+            if machine != expected_machine
+                || !slots
+                    .get(expected_machine)
+                    .is_some_and(|slot| slot.incarnation == *incarnation)
             {
                 return Err(CoreError::Machine(
                     "inbound listener incarnation changed".into(),
                 ));
             }
         }
-        if let Some((machine, installed)) = rules.get(container_id) {
-            if let Some(slot) = slots.get_mut(machine) {
-                for (ip, port, _, protocol) in installed {
-                    slot.current.remove_rule(*ip, *port, *protocol).await;
-                }
+        if let Some(slot) = slots.get_mut(machine) {
+            for (ip, port, _, protocol) in installed {
+                slot.current.remove_rule(*ip, *port, *protocol).await;
             }
-            rules.remove(container_id);
         }
+        rules.remove(container_id);
         Ok(())
     }
 }

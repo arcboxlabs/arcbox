@@ -19,9 +19,9 @@ mod web_services;
 #[cfg(test)]
 mod tests;
 
-pub use host_network::HostMutationLease;
 #[cfg(any(test, feature = "test-support"))]
 pub use host_network::NetworkFixture;
+pub use host_network::{ContainerChange, HostMutationLease};
 pub use machine_settings::MachineResources;
 pub use progress::InitProgress;
 
@@ -1433,14 +1433,26 @@ impl Runtime {
         bindings: &[(String, u16, u16, String)],
     ) -> Result<()> {
         let expected = self.machine_manager.network_incarnation(machine_name)?;
+        self.start_port_forwarding_with_incarnation(machine_name, container_id, bindings, &expected)
+            .await
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn start_port_forwarding_with_incarnation(
+        &self,
+        machine_name: &str,
+        container_id: &str,
+        bindings: &[(String, u16, u16, String)],
+        expected: &VmIncarnation,
+    ) -> Result<()> {
         self.adopt_inbound_listener_manager(machine_name, || {
             Ok(self
                 .machine_manager
-                .take_inbound_listener_manager(machine_name, &expected)?
+                .take_inbound_listener_manager(machine_name, expected)?
                 .map(|manager| (expected.clone(), manager)))
         })
         .await?;
-        self.start_port_forwarding_inbound(machine_name, container_id, bindings, &expected)
+        self.start_port_forwarding_inbound(machine_name, container_id, bindings, expected)
             .await
     }
 
@@ -1899,6 +1911,10 @@ impl Runtime {
     pub async fn register_container_dns(&self, container: &ContainerMetadata) {
         self.register_container_alias(&container.name, &container.id)
             .await;
+        self.replace_container_dns(container);
+    }
+
+    fn replace_container_dns(&self, container: &ContainerMetadata) {
         let claims = container.claims(&self.config.network.dns_domain, "container");
         for warning in claims.warnings {
             tracing::warn!(container_id = %container.id, %warning, "container DNS claim rejected");
@@ -1978,6 +1994,10 @@ impl Runtime {
             .write()
             .await
             .retain(|_, id| id != container_id);
+        self.remove_dns_registration(container_id);
+    }
+
+    fn remove_dns_registration(&self, container_id: &str) {
         let mut registry = self
             .dns_registry
             .write()

@@ -187,3 +187,7 @@ Two Core admission tests, nine Docker CA/lifecycle tests, and thirteen mock API 
 The shared Registry now resolves the longest inclusive instance root before resource claims. Current roots retain ordinary resource matching, including a current grandchild beneath a foreign child. Unavailable roots return SERVFAIL before sandbox or public fallback. Effective authority changes invalidate pinned DNS/TLS revisions; identical projections preserve them. Host Other results currently terminate with SERVFAIL until explicit loopback forwarding lands. Guest Other results use the existing host gateway.
 
 Common DNS passed 52 tests, net 115, Core web services 10, Linux guest DNS 6, and Linux guest service/TLS routes 7. Host and guest strict Clippy, formatting, and diff checks passed. The guest binaries ran in the existing networkless Colima environment. Daemon delivery, guest authority transport, mDNS grant consumption, and installed ArcBox validation remain pending.
+
+## Guard request-driven host publication
+
+Container and network mutations now publish ports, aliases, and DNS under the host commit lock. The final synchronous Engine guard prevents physical VM replacement while publishing aliases/DNS; stale cleanup only targets the expected listener slot. Failed cleanup retains the original operation error as well. Engine passed 6 tests, serial Runtime 77, Docker CA/lifecycle 9, and mock API handlers 13. Strict Engine/Core/Docker Clippy and formatting passed. Snapshot, shared-wrapper, retirement, and shutdown fencing remain pending.

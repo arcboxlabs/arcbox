@@ -1,5 +1,6 @@
 //! Keep container identity stable while serializing guest mutations and host publication.
 
+use arcbox_core::runtime::ContainerChange;
 use axum::http::Uri;
 use serde::Deserialize;
 
@@ -13,7 +14,7 @@ pub(in crate::handlers) struct Lifecycle<'a> {
     pub id: String,
     _guard: tokio::sync::OwnedMutexGuard<()>,
     _lease: Option<ActivityLease>,
-    _network: arcbox_core::runtime::HostMutationLease<'a>,
+    network: arcbox_core::runtime::HostMutationLease<'a>,
 }
 
 impl<'a> Lifecycle<'a> {
@@ -49,8 +50,32 @@ impl<'a> Lifecycle<'a> {
             id,
             _guard: guard,
             _lease: lease,
-            _network: network,
+            network,
         })
+    }
+
+    pub async fn refresh_network(self, state: &AppState) -> Result<()> {
+        let inspect = crate::guest_query::inspect_container(state.proxy.client(), &self.id).await?;
+        if inspect.metadata.id != self.id {
+            return Err(DockerError::Server(
+                "inspect returned a different container ID".into(),
+            ));
+        }
+        let bindings: Vec<_> = crate::port_bindings::parse_port_bindings(&inspect.body)
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        self.network
+            .commit(ContainerChange::Publish(&inspect.metadata, &bindings))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn remove_network(self) -> Result<()> {
+        self.network
+            .commit(ContainerChange::Remove(&self.id))
+            .await?;
+        Ok(())
     }
 
     pub fn uri(&self, uri: &Uri) -> Result<Uri> {

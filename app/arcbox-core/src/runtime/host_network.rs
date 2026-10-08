@@ -1,6 +1,7 @@
 //! Serializes host publication while guest mutations retain synchronous activity leases.
 
 use super::{CoreError, Result, Runtime};
+use arcbox_dns::container::ContainerMetadata;
 use arcbox_engine::vm::VmIncarnation;
 use std::sync::Mutex;
 use tokio::sync::Mutex as AsyncMutex;
@@ -45,6 +46,119 @@ impl Activity {
 /// Retains mutation activity until host publication or cancellation completes.
 pub struct HostMutationLease<'a> {
     runtime: &'a Runtime,
+    vm: VmIncarnation,
+}
+
+/// Desired host state from one validated Docker mutation.
+pub enum ContainerChange<'a> {
+    /// Refreshes DNS, aliases, and the parsed host port bindings.
+    Publish(&'a ContainerMetadata, &'a [(String, u16, u16, String)]),
+    /// Withdraws every host registration for the canonical container ID.
+    Remove(&'a str),
+}
+
+impl HostMutationLease<'_> {
+    /// Publishes host state without holding the commit lock during guest requests.
+    ///
+    /// # Errors
+    /// Returns an error if admission closes, the VM changes, or port binding fails.
+    pub async fn commit(&self, change: ContainerChange<'_>) -> Result<()> {
+        let runtime = self.runtime;
+        let _commit = runtime.host_network.commit.lock().await;
+        self.with_live_vm(|| ())?;
+        let id = match change {
+            ContainerChange::Publish(container, _) => container.id.as_str(),
+            ContainerChange::Remove(id) => id,
+        };
+        let result = async {
+            match change {
+                ContainerChange::Publish(_, bindings) if !bindings.is_empty() => {
+                    self.update_ports(id, bindings).await?;
+                }
+                _ => self.clear_ports(id).await?,
+            }
+            let mut aliases = runtime.container_aliases.write().await;
+            self.with_live_vm(|| {
+                aliases.retain(|_, owner| owner != id);
+                match change {
+                    ContainerChange::Publish(container, _) => {
+                        aliases.insert(container.name.clone(), container.id.clone());
+                        runtime.replace_container_dns(container);
+                    }
+                    ContainerChange::Remove(_) => runtime.remove_dns_registration(id),
+                }
+            })
+        }
+        .await;
+        if let Err(error) = result {
+            self.clear_ports(id).await.map_err(|cleanup| {
+                CoreError::invalid_state(format!("{error}; port cleanup failed: {cleanup}"))
+            })?;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn with_live_vm<T>(&self, publish: impl FnOnce() -> T) -> Result<T> {
+        self.runtime
+            .host_network
+            .activity
+            .lock()
+            .map_err(|_| CoreError::LockPoisoned)?
+            .check_open()?;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(fixture) = &self.runtime.host_network.fixture {
+            let current = fixture.0.read().map_err(|_| CoreError::LockPoisoned)?;
+            if current.as_ref() != Some(&self.vm) {
+                return Err(CoreError::invalid_state("fixture VM incarnation changed"));
+            }
+            return Ok(publish());
+        }
+        let state = self.runtime.vm_lifecycle.subscribe_state();
+        let state = state.borrow();
+        if !state.is_ready() {
+            return Err(CoreError::invalid_state("System VM is not ready"));
+        }
+        Ok(self.runtime.machine_manager.with_network_incarnation(
+            self.runtime.default_machine_name(),
+            &self.vm,
+            publish,
+        )?)
+    }
+
+    async fn update_ports(&self, id: &str, bindings: &[(String, u16, u16, String)]) -> Result<()> {
+        let runtime = self.runtime;
+        let machine = runtime.default_machine_name();
+        #[cfg(target_os = "macos")]
+        {
+            #[cfg(any(test, feature = "test-support"))]
+            if runtime.host_network.fixture.is_some() {
+                return runtime
+                    .start_port_forwarding_inbound(machine, id, bindings, &self.vm)
+                    .await;
+            }
+            runtime
+                .start_port_forwarding_with_incarnation(machine, id, bindings, &self.vm)
+                .await
+        }
+        #[cfg(not(target_os = "macos"))]
+        runtime
+            .start_port_forwarding_fallback(machine, id, bindings)
+            .await
+    }
+
+    async fn clear_ports(&self, id: &str) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        return self
+            .runtime
+            .stop_inbound_rules(id, Some((self.runtime.default_machine_name(), &self.vm)))
+            .await;
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.runtime.stop_port_forwarding_by_id(id).await;
+            Ok(())
+        }
+    }
 }
 
 impl Drop for HostMutationLease<'_> {
@@ -113,7 +227,7 @@ impl Runtime {
         activity.advance();
         activity.check_open()?;
         activity.active = active;
-        Ok(HostMutationLease { runtime: self })
+        Ok(HostMutationLease { runtime: self, vm })
     }
 }
 

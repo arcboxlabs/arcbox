@@ -122,6 +122,37 @@ fn replaced_or_dead_incarnations_cannot_take_the_next_manager() {
         entry.info.state = MachineState::Running;
     }
     let old = manager.network_incarnation(&id).unwrap();
+    std::thread::scope(|scope| {
+        let (begin, begun) = std::sync::mpsc::channel();
+        let (checked, check) = std::sync::mpsc::channel();
+        let manager = &manager;
+        let id = &id;
+        let transition = scope.spawn(move || {
+            begun.recv().unwrap();
+            assert!(manager.vms.try_write().is_err());
+            checked.send(()).unwrap();
+            manager
+                .vms
+                .write()
+                .unwrap()
+                .get_mut(id)
+                .unwrap()
+                .reboot_with(|_| Ok(()))
+                .unwrap();
+        });
+        manager
+            .with_network_incarnation(id, &old, || {
+                begin.send(()).unwrap();
+                check.recv().unwrap();
+            })
+            .unwrap();
+        transition.join().unwrap();
+    });
+    assert!(
+        manager
+            .with_network_incarnation(&id, &old, || panic!("stale publication"))
+            .is_err()
+    );
     {
         let mut vms = manager.vms.write().unwrap();
         let entry = vms.get_mut(&id).unwrap();

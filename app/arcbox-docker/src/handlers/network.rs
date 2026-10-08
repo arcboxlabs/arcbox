@@ -92,24 +92,12 @@ async fn proxy_then_refresh_dns(
         proxy_to_system_vm(state, uri, Request::from_parts(parts, Body::from(body))).await?;
 
     if response.status().is_success() {
-        if let Some(lifecycle) = &lifecycle {
-            refresh_container_dns(state, &lifecycle.id).await?;
+        if let Some(lifecycle) = lifecycle {
+            lifecycle.refresh_network(state).await?;
         }
     }
 
     Ok(response)
-}
-
-/// Re-derives a container's host DNS entry from a fresh inspect.
-///
-/// Runtime replacement withdraws the previous address when the last network disappears.
-async fn refresh_container_dns(state: &AppState, token: &str) -> Result<()> {
-    let inspect = crate::guest_query::inspect_container(state.proxy.client(), token).await?;
-    state
-        .runtime
-        .register_container_dns(&inspect.metadata)
-        .await;
-    Ok(())
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
