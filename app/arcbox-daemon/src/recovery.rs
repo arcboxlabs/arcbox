@@ -336,12 +336,12 @@ async fn recover_container_networking(runtime: &Arc<Runtime>) -> Result<()> {
     use arcbox_docker::proxy::{GuestHttpClient, VsockConnector};
 
     let client = GuestHttpClient::new(Arc::new(VsockConnector::new(Arc::clone(runtime))));
-    let running = guest_query::list_running_container_ids(&client).await?;
+    let running = guest_query::running_container_snapshot(&client).await?;
 
     let mut recovered_dns = 0u32;
     let mut recovered_ports = 0u32;
-    for id in &running {
-        let inspect = guest_query::inspect_container(&client, id).await?;
+    for inspect in &running {
+        let id = &inspect.metadata.id;
         runtime.register_container_dns(&inspect.metadata).await;
         if inspect.metadata.primary_ipv4().is_some() {
             recovered_dns += 1;

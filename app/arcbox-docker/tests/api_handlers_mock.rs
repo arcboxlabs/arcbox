@@ -136,6 +136,72 @@ async fn malformed_successful_listing_is_a_query_error() {
 }
 
 #[tokio::test]
+async fn complete_snapshot_rejects_failed_or_mismatched_inspects() {
+    const LIST: &str = r#"[{"Id":"zzz789"},{"Id":"abc123"}]"#;
+    const SECOND: &str = r#"{"Id":"zzz789","Name":"/second"}"#;
+    for (listing, status, body, expected) in [
+        (LIST, 500, SECOND, None),
+        (LIST, 200, "not json", None),
+        (LIST, 200, r#"{"Id":"zzz789"}"#, None),
+        (LIST, 200, INSPECT_WEB, None),
+        (LIST, 200, SECOND, Some(vec!["abc123", "zzz789"])),
+        ("[]", 200, SECOND, Some(vec![])),
+    ] {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let guest = mock_guest::start_with_routes(
+            tmp.path(),
+            vec![
+                MockRoute {
+                    method: "GET",
+                    path: "/containers/json",
+                    status: 200,
+                    body: listing,
+                },
+                MockRoute {
+                    method: "GET",
+                    path: "/containers/abc123/json",
+                    status: 200,
+                    body: INSPECT_WEB,
+                },
+                MockRoute {
+                    method: "GET",
+                    path: "/containers/zzz789/json",
+                    status,
+                    body,
+                },
+            ],
+        )
+        .await;
+        let client = arcbox_docker::proxy::GuestHttpClient::new(Arc::new(
+            mock_guest::UnixSocketConnector::new(guest.socket_path.clone()),
+        ));
+        let result = arcbox_docker::guest_query::running_container_snapshot(&client).await;
+        match expected {
+            Some(ids) => {
+                let snapshot = result.unwrap();
+                assert_eq!(
+                    snapshot
+                        .iter()
+                        .map(|entry| entry.metadata.id.as_str())
+                        .collect::<Vec<_>>(),
+                    ids
+                );
+            }
+            None => assert!(matches!(result, Err(arcbox_docker::DockerError::Server(_)))),
+        }
+        assert_eq!(
+            guest.last_request_uri().await.as_deref(),
+            Some(if listing == "[]" {
+                "/containers/json"
+            } else {
+                "/containers/zzz789/json"
+            })
+        );
+        guest.cancel.cancel();
+    }
+}
+
+#[tokio::test]
 async fn start_stop_cycle_manages_host_networking() {
     let (router, runtime, _guest, _tmp) = router_with_mock_guest(lifecycle_routes()).await;
 

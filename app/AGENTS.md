@@ -528,6 +528,7 @@ above). When editing either side, keep in lockstep:
 - Use `arcbox_dns::container::ContainerMetadata` for Docker inspect identity, default aliases, and IPv4 selection.
 - Register container DNS through `Runtime::register_container_dns`. Reject invalid inspect snapshots before changing host state. Preserve previous ownership if post-mutation inspect fails.
   The primary address is the first valid IPv4 address in network-name order; ignore the deprecated top-level `NetworkSettings.IPAddress`.
+- Cold-start recovery must obtain `guest_query::running_container_snapshot` before publishing DNS or listeners. A failed inspect or mismatched full ID rejects the complete snapshot.
 
 ## Host port forwarding & image pull (`arcbox-docker`)
 

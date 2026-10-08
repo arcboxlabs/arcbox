@@ -1,8 +1,7 @@
 //! Read-only guest dockerd queries shared by the container handlers, the
 //! host-networking reconciler, and daemon cold-start recovery.
 //!
-//! Each caller previously hand-rolled the same HTTP round-trip + JSON parse;
-//! this module owns that once, over the pooled guest client.
+//! Validate complete snapshots before callers change host networking state.
 
 use crate::error::{DockerError, Result};
 use crate::proxy::{GuestHttpClient, proxy_to_guest_pooled};
@@ -43,11 +42,31 @@ pub async fn inspect_container(client: &GuestHttpClient, token: &str) -> Result<
     Ok(ContainerInspect { metadata, body })
 }
 
+/// Reads every running container before returning a snapshot for host reconciliation.
+/// Failed or mismatched inspect responses reject the entire snapshot.
+pub async fn running_container_snapshot(client: &GuestHttpClient) -> Result<Vec<ContainerInspect>> {
+    let mut ids: Vec<_> = list_running_container_ids(client)
+        .await?
+        .into_iter()
+        .collect();
+    ids.sort_unstable();
+    let mut snapshot = Vec::with_capacity(ids.len());
+    for id in ids {
+        let inspect = inspect_container(client, &id).await?;
+        if inspect.metadata.id != id {
+            return Err(DockerError::Server(format!(
+                "guest inspect ID {} does not match requested {id}",
+                inspect.metadata.id
+            )));
+        }
+        snapshot.push(inspect);
+    }
+    Ok(snapshot)
+}
+
 /// Queries guest dockerd for the IDs of currently-running containers.
 ///
-/// Errors are surfaced (not swallowed) because callers treat "could not list"
-/// differently from "empty list" — the reconciler skips its cycle fail-safe,
-/// recovery skips marking the VM as running.
+/// Invalid responses return an error so callers cannot treat a partial list as complete.
 pub async fn list_running_container_ids(client: &GuestHttpClient) -> Result<HashSet<String>> {
     let response = proxy_to_guest_pooled(
         client,
