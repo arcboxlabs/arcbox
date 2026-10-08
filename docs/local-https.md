@@ -26,11 +26,17 @@ The daemon's `--dns-domain` option takes precedence over `ARCBOX_DNS_DOMAIN`; th
 
 The guest reports installed routes through `ListContainerWebServices`. The snapshot includes only names that resolve to the selected container address. The host validates route identities, addresses, names, and ports, then checks every name against its current Registry owner and address. Stale and conflicting names disappear from `SystemService.ListWebServices` and `WatchWebServices`. A managed backend produces separate directory entries for `.local` aliases with HTTPS and other aliases with HTTP only. Native TLS retains all currently owned aliases.
 
+Host DNS and both VMM datapaths share the live Registry and the configured suffix for exact relative aliases. Wildcard resolution uses the Registry directly. Concrete mDNS projections cannot override conflicts, reservations, or delegated names. This source wiring still requires installed VM validation.
+
+Runtime reserves `host`, `host.<configured suffix>`, `host.docker.internal`, `gateway.docker.internal`, and the configured index apex before resource registration. Exact reservations persist when their address is unavailable; containers cannot claim these names through exact or wildcard aliases. Descendants remain separate names. Guest reservations, resource-owned boundaries, and resolver leases remain unfinished.
+
 Guest reconnects validate the complete container list and every inspect response before changing DNS. Snapshot and event updates wait for the route task to invalidate previous service publications before replacing ownership. Failed rule cleanup retains an unavailable owner for retry. This ordering protects managed HTTPS publication; kernel NAT rules and DNS do not change atomically. Twelve event tests and two route tests cover these transitions, including a late scan and unchanged-address namespace replacement. Installed guest NAT validation remains pending.
 
 Host rename and network refresh replace Registry ownership without first deregistering the container. An unchanged refresh preserves the signing revision, and a rename removes the old display alias. Start, restart, stop, kill, remove, and rename share Runtime's lock for the full container ID through the guest mutation and host publication. Each request resolves its token before acquiring the lock and preserves the original query when forwarding the canonical ID. Network mutations and the periodic reconciler still need the shared commit ordering.
 
 Host port refresh preserves equivalent healthy listeners and removes listeners when bindings become empty. Equality includes the effective host address, host port, guest port, protocol, and machine. Canceled or exited listeners complete cleanup before recovery. Host socket tests cover refresh, conflicting destinations, TCP/UDP sharing, and cancellation; installed forwarding validation remains pending.
+
+The 70 Runtime tests pass with `--test-threads=1`. Two parallel runs exposed bind and post-teardown connection failures; the isolated teardown regression passes. Parallel port reuse remains under investigation, so the serial result does not establish concurrent socket-test stability.
 
 For a container attached to multiple networks, host DNS, guest DNS, service discovery, and published-port mirrors select the first valid IPv4 address in network-name order. They ignore the deprecated top-level `NetworkSettings.IPAddress`. Domain NAT retains all distinct container IPv4 addresses.
 

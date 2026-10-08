@@ -1,6 +1,7 @@
 //! `ArcBox` runtime.
 
 mod assets;
+mod dns_reservations;
 mod engine_config;
 mod kubeconfig;
 mod kubernetes_lb;
@@ -288,6 +289,8 @@ impl Runtime {
             ..Default::default()
         }));
         let dns_registry = network_manager.dns_registry();
+        *dns_registry.write().expect("DNS registry lock poisoned") =
+            dns_reservations::registry(&config.network.dns_domain)?;
 
         // Every VM's datapath is wired to the host the same way: the DNS
         // registry it shares with the host DnsService, and the operator's
