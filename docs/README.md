@@ -85,6 +85,7 @@ from memory. Every new file is added to the index below.
 
 ### Experiments
 
+- [2026-10-09 — Can a Linux CA bundle preserve macOS SSL trust?](experiments/2026-10-09-macos-trust-portability.md)
 - [2026-10-05 — Does HV observe guest poweroff before host teardown?](experiments/2026-10-05-hv-poweroff-completion.md)
 - [2026-10-05 — Does a real storage I/O failure reach the protection and recovery checks?](experiments/2026-10-05-storage-recovery-io-fault.md)
 - [2026-10-03 — Can a machine's root be served to the Mac by its agent, read-write, fast enough to work in?](experiments/2026-10-03-machine-root-export.md)
