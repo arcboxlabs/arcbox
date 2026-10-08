@@ -201,7 +201,7 @@ impl WebServices {
             .remove(id);
     }
 
-    pub(super) fn clear(&self) {
+    pub(crate) fn clear(&self) {
         self.installed
             .write()
             .expect("web services lock poisoned")

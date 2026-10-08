@@ -29,6 +29,9 @@ use arcbox_connect::v1::{
     WatchMemoryPressureRequest, WatchReadinessRequest, WatchStatsRequest,
     WatchStorageHealthRequest,
 };
+use arcbox_connect::v1::{
+    MachineWebAck, OpenMachineWebRequest, OpenMachineWebResponse, ReplaceMachineWebRequest,
+};
 pub use arcbox_constants::wire::MessageType;
 
 /// Agent version string.
@@ -83,6 +86,8 @@ pub enum RpcRequest {
     ReconcileGuestTrust(ReconcileGuestTrustRequest),
     OpenInstanceAuthority(OpenInstanceAuthorityRequest),
     ReplaceInstanceAuthority(ReplaceInstanceAuthorityRequest),
+    OpenMachineWeb(OpenMachineWebRequest),
+    ReplaceMachineWeb(ReplaceMachineWebRequest),
     EnsureRuntime(RuntimeEnsureRequest),
     RuntimeStatus(RuntimeStatusRequest),
     StartKubernetes(KubernetesStartRequest),
@@ -117,6 +122,8 @@ pub enum RpcResponse {
     ReconcileGuestTrust(ReconcileGuestTrustResponse),
     OpenInstanceAuthority(OpenInstanceAuthorityResponse),
     InstanceAuthorityAck(InstanceAuthorityAck),
+    OpenMachineWeb(OpenMachineWebResponse),
+    MachineWebAck(MachineWebAck),
     RuntimeEnsure(RuntimeEnsureResponse),
     RuntimeStatus(RuntimeStatusResponse),
     KubernetesStart(KubernetesStartResponse),
@@ -154,6 +161,8 @@ impl RpcResponse {
             Self::ReconcileGuestTrust(_) => MessageType::ReconcileGuestTrustResponse,
             Self::OpenInstanceAuthority(_) => MessageType::OpenInstanceAuthorityResponse,
             Self::InstanceAuthorityAck(_) => MessageType::InstanceAuthorityAck,
+            Self::OpenMachineWeb(_) => MessageType::OpenMachineWebResponse,
+            Self::MachineWebAck(_) => MessageType::MachineWebAck,
             Self::RuntimeEnsure(_) => MessageType::EnsureRuntimeResponse,
             Self::RuntimeStatus(_) => MessageType::RuntimeStatusResponse,
             Self::KubernetesStart(_) => MessageType::KubernetesStartResponse,
@@ -190,6 +199,8 @@ impl RpcResponse {
             Self::ReconcileGuestTrust(msg) => msg.encode_to_vec(),
             Self::OpenInstanceAuthority(msg) => msg.encode_to_vec(),
             Self::InstanceAuthorityAck(msg) => msg.encode_to_vec(),
+            Self::OpenMachineWeb(msg) => msg.encode_to_vec(),
+            Self::MachineWebAck(msg) => msg.encode_to_vec(),
             Self::RuntimeEnsure(msg) => msg.encode_to_vec(),
             Self::RuntimeStatus(msg) => msg.encode_to_vec(),
             Self::KubernetesStart(msg) => msg.encode_to_vec(),
@@ -303,6 +314,12 @@ pub async fn write_response<W: AsyncWrite + Unpin>(
 /// Parses an RPC request from message type and payload.
 pub fn parse_request(msg_type: MessageType, payload: &[u8]) -> Result<RpcRequest> {
     match msg_type {
+        MessageType::OpenMachineWebRequest => Ok(RpcRequest::OpenMachineWeb(
+            OpenMachineWebRequest::decode_from_slice(payload)?,
+        )),
+        MessageType::ReplaceMachineWebRequest => Ok(RpcRequest::ReplaceMachineWeb(
+            ReplaceMachineWebRequest::decode_from_slice(payload)?,
+        )),
         MessageType::OpenInstanceAuthorityRequest => Ok(RpcRequest::OpenInstanceAuthority(
             OpenInstanceAuthorityRequest::decode_from_slice(payload)?,
         )),

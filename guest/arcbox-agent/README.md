@@ -95,12 +95,14 @@ gives the machine the identity and network the distro cannot know on its own
   an address and nothing else, and is declared unmanaged to systemd-networkd
   and NetworkManager by MAC so the distro never routes out of it. The agent
   reports that address as `SystemInfo.bridge_ip_address`, and the daemon
-  publishes `<name>.arcbox.local` there while the machine runs.
+  publishes `<hostname>.machine.<configured suffix>` there while the machine runs.
 
 The agent in a machine then serves RPC and nothing else: none of the System
 VM services below run there.
 
-The trust RPC supports Debian, Ubuntu, and Alpine machines with an installed `update-ca-certificates` and a regular system PEM bundle. ArcBox owns only `/usr/local/share/ca-certificates/arcbox-local-ca.crt`. Unsupported distributions and missing prerequisites return an error. Updater failure leaves reconciliation pending until replay. Automatic host delivery remains pending.
+Machine web configuration uses `OpenMachineWebRequest` to fix the raw machine name, exact canonical hostname, and bridge IPv4 for one host connection. `ReplaceMachineWebRequest` replaces both policies with a positive, increasing source revision. The guest stores configuration and an exact private DNS claim until disconnect; acknowledgement does not advertise an installed route or activate listeners and NAT.
+
+The trust RPC supports Debian, Ubuntu, and Alpine machines with an installed `update-ca-certificates` and a regular system PEM bundle. ArcBox owns only `/usr/local/share/ca-certificates/arcbox-local-ca.crt`. Unsupported distributions and missing prerequisites return an error. Updater failure leaves reconciliation pending until replay. The daemon delivers its current public root to each running machine independently of System VM startup.
 
 The machine root export stores oversized Mac attributes in `.arcbox-xattrs` beside each target. Side-entry version 3 combines Linux file handles with filesystem IDs to distinguish recreated files and replaced mounts. Unsupported side-entry versions return an error and preserve the side entry and inline attributes. See the [identity investigation](../../docs/logs/2026-10-07-sidecar-inode-generation.md) for compatibility and validation.
 

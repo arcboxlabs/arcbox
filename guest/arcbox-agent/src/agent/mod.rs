@@ -15,6 +15,7 @@ mod exec_error;
 #[cfg(target_os = "linux")]
 mod guest_trust;
 mod instance_authority;
+mod machine_web;
 #[cfg(all(test, target_os = "linux"))]
 pub use linux::rpc::instance_authority_tests::AuthorityPeer;
 #[cfg(any(target_os = "linux", test))]
@@ -85,6 +86,7 @@ impl Guest {
 pub struct Services {
     web: crate::domains::WebServices,
     authority: Option<instance_authority::Receiver>,
+    machine_web: Option<machine_web::Receiver>,
     #[cfg(target_os = "linux")]
     trust: Option<guest_trust::Store>,
     dns: Option<std::sync::Arc<crate::dns_server::GuestDnsServer>>,
@@ -93,7 +95,11 @@ pub struct Services {
 impl Services {
     /// Creates machine RPC services without System VM DNS or Docker watchers.
     pub fn machine() -> Self {
+        let registry = crate::dns_server::DnsRegistry::default();
+        let web = crate::domains::WebServices::new(registry.clone());
         Self {
+            machine_web: Some(machine_web::Receiver::new(registry, web.clone())),
+            web,
             #[cfg(target_os = "linux")]
             trust: Some(guest_trust::Store::machine("/".into())),
             ..Self::default()
@@ -109,6 +115,7 @@ impl Services {
             web,
             authority: Some(instance_authority::Receiver::new(dns.registry())),
             dns: Some(dns),
+            machine_web: None,
             #[cfg(target_os = "linux")]
             trust: Some(guest_trust::Store::new(
                 "/etc/ssl/certs/ca-certificates.crt".into(),

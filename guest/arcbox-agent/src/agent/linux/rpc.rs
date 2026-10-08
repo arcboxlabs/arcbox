@@ -124,6 +124,24 @@ where
             continue;
         }
 
+        if matches!(
+            msg_type,
+            crate::rpc::MessageType::OpenMachineWebRequest
+                | crate::rpc::MessageType::ReplaceMachineWebRequest
+        ) && (guest != Guest::DistroMachine || peer_cid != tokio_vsock::VMADDR_CID_HOST)
+        {
+            write_response(
+                &mut stream,
+                &RpcResponse::Error(ErrorResponse::new(
+                    403,
+                    "machine web configuration requires the host and distro machine",
+                )),
+                &trace_id,
+            )
+            .await?;
+            continue;
+        }
+
         // Sandbox requests are handled separately — they bypass the normal
         // RPC request/response cycle because streaming operations hold the
         // connection open and write multiple frames.
@@ -182,6 +200,25 @@ where
                         "guest trust installation is unavailable for this guest",
                     )),
                 })
+            }
+            Ok(RpcRequest::OpenMachineWeb(request)) => {
+                if let Some(receiver) = &services.machine_web {
+                    return receiver
+                        .serve(
+                            &mut stream,
+                            &trace_id,
+                            request,
+                            super::system_info::bridge_ipv4(),
+                        )
+                        .await;
+                }
+                RequestResult::Single(RpcResponse::Error(ErrorResponse::new(
+                    503,
+                    "machine web services are unavailable",
+                )))
+            }
+            Ok(RpcRequest::ReplaceMachineWeb(_)) => {
+                anyhow::bail!("machine web replacement requires an open connection");
             }
             Ok(RpcRequest::OpenInstanceAuthority(_)) => {
                 if guest == Guest::SystemVm
@@ -270,6 +307,9 @@ async fn handle_request(
     web_services: &crate::domains::WebServices,
 ) -> RequestResult {
     match request {
+        RpcRequest::OpenMachineWeb(_) | RpcRequest::ReplaceMachineWeb(_) => {
+            unreachable!("machine web configuration owns the connection")
+        }
         RpcRequest::OpenInstanceAuthority(_) | RpcRequest::ReplaceInstanceAuthority(_) => {
             unreachable!("instance authority owns the connection")
         }
