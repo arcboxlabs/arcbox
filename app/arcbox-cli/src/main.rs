@@ -37,7 +37,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{}", crate::error::render(&error, debug));
-            ExitCode::FAILURE
+            crate::error::exit_code(&error)
         }
     }
 }

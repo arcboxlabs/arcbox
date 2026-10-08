@@ -1,9 +1,10 @@
-//! Manage the profile's public CA trust through the privileged helper.
+//! Authorize the profile's public CA through the current macOS user session.
 //!
-//! The daemon stores its private CA key in the user's Keychain. Canonical
-//! production startup installs SSL-only Admin trust automatically. Explicit
-//! trust commands also work for development profiles. No private key reaches
-//! the helper. Removing legacy User trust can require macOS authentication.
+//! The helper stores only the public certificate in System Keychain. Native
+//! trust changes run in this process so macOS can request authorization.
+//! The daemon owns the private key and publishes the certificate after trust
+//! is ready. Explicit commands also work for development profiles.
+//! Native authorization cancellation exits with status 130; other failures exit with status 1.
 
 use std::path::Path;
 
@@ -17,11 +18,11 @@ use clap::Subcommand;
 /// Local CA commands.
 #[derive(Debug, Subcommand)]
 pub enum TlsCommands {
-    /// Trust the profile's local CA for system HTTPS through the installed helper
+    /// Authorize the profile's CA for system HTTPS through the macOS prompt
     Trust,
-    /// Remove CA trust; canonical production startup installs trust again
+    /// Revoke CA trust; the next production start requires authorization
     Untrust,
-    /// Check whether the helper has installed system HTTPS trust for this CA
+    /// Check whether this profile's CA is ready for system HTTPS
     Status,
 }
 
@@ -35,7 +36,7 @@ pub async fn execute(cmd: TlsCommands) -> Result<()> {
     if matches!(cmd, TlsCommands::Untrust) {
         remove_trust(&tls_dir).await?;
         println!(
-            "Removed ArcBox CA trust for {}. Canonical production startup installs trust again.",
+            "Removed ArcBox CA trust for {}. The next production start requires authorization.",
             tls_dir.display()
         );
         return Ok(());
@@ -46,9 +47,20 @@ pub async fn execute(cmd: TlsCommands) -> Result<()> {
     let authority = PublicAuthority::try_from(der)?;
     let client = Client::connect().await?;
     if matches!(cmd, TlsCommands::Trust) {
+        if let Some(previous) = published_authority(&tls_dir)?
+            && previous.der() != authority.der()
+        {
+            revoke(&client, &previous).await?;
+        }
         client.ca_install(authority.der()).await?;
+        arcbox_local_ca::remove_user_trust_der(authority.der())
+            .context("revoking legacy user HTTPS trust; approve the macOS prompt to continue")?;
+        authority
+            .trust_admin()
+            .context("authorizing system HTTPS trust; approve the macOS prompt to continue")?;
     }
-    let trusted = client.ca_status(authority.der()).await?;
+    let legacy_user_trust = authority.has_user_trust()?;
+    let trusted = client.ca_status(authority.der()).await? && !legacy_user_trust;
     if matches!(cmd, TlsCommands::Trust) {
         ensure!(trusted, "system HTTPS trust was not installed");
     }
@@ -61,6 +73,9 @@ pub async fn execute(cmd: TlsCommands) -> Result<()> {
             "not installed"
         }
     );
+    if legacy_user_trust {
+        println!("Legacy user HTTPS trust remains. Run `abctl tls trust` to finish migration.");
+    }
     Ok(())
 }
 
@@ -72,26 +87,36 @@ pub(super) async fn remove_trust(tls_dir: &Path) -> Result<()> {
         .transpose()?
         .into_iter()
         .collect();
-    let path = tls_dir.join(guest::TLS_CA_CERT);
-    match std::fs::read(&path) {
-        Ok(pem) => {
-            let published = PublicAuthority::from_pem(&pem)?;
-            if !authorities.iter().any(|ca| ca.der() == published.der()) {
-                authorities.push(published);
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    if let Some(published) = published_authority(tls_dir)?
+        && !authorities.iter().any(|ca| ca.der() == published.der())
+    {
+        authorities.push(published);
     }
     if authorities.is_empty() {
         return Ok(());
     }
     let client = Client::connect().await?;
     for authority in &authorities {
-        client.ca_remove(authority.der()).await?;
+        revoke(&client, authority).await?;
     }
-    for authority in &authorities {
-        arcbox_local_ca::remove_user_trust_der(authority.der())?;
+    Ok(())
+}
+
+fn published_authority(tls_dir: &Path) -> Result<Option<PublicAuthority>> {
+    let path = tls_dir.join(guest::TLS_CA_CERT);
+    match std::fs::read(&path) {
+        Ok(pem) => Ok(Some(PublicAuthority::from_pem(&pem)?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
     }
+}
+
+async fn revoke(client: &Client, authority: &PublicAuthority) -> Result<()> {
+    authority
+        .remove_admin_trust()
+        .context("revoking system HTTPS trust; approve the macOS prompt to continue")?;
+    arcbox_local_ca::remove_user_trust_der(authority.der())
+        .context("revoking legacy user HTTPS trust; approve the macOS prompt to continue")?;
+    client.ca_remove(authority.der()).await?;
     Ok(())
 }

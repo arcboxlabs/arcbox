@@ -7,7 +7,8 @@
 //!
 //! Run as the user, not under `sudo`: the Docker context, shell profile,
 //! kubeconfig and login keychain are the user's. Privileged paths are
-//! removed through `sudo`, which asks once up front.
+//! removed through `sudo`, which authenticates up front. Native CA trust
+//! removal can require a separate macOS authorization prompt.
 
 mod host;
 mod inventory;
@@ -67,8 +68,8 @@ pub async fn execute(args: UninstallArgs) -> Result<()> {
 
     let host = Mac;
     if residue.needs_root() {
-        // One password prompt, up front, instead of one per privileged step.
-        // Inherits the terminal: sudo reads the password from it.
+        // Cache sudo credentials for privileged filesystem steps. Native CA
+        // trust authorization uses the macOS prompt separately.
         let status = std::process::Command::new("sudo")
             .arg("-v")
             .status()
@@ -80,11 +81,15 @@ pub async fn execute(args: UninstallArgs) -> Result<()> {
 
     let report = run(&host, &roots, &residue, &mut |step| println!("{step}")).await;
     println!();
-    if report.iter().any(Step::failed) {
-        bail!(
-            "{} step(s) failed; fix the cause and run `abctl uninstall` again",
-            report.iter().filter(|step| step.failed()).count()
-        );
+    let failed_steps = report.iter().filter(|step| step.failed()).count();
+    if failed_steps != 0 {
+        let error = report
+            .into_iter()
+            .find_map(|step| step.outcome.err())
+            .expect("failed_steps counts at least one error");
+        return Err(error).with_context(|| {
+            format!("{failed_steps} step(s) failed; fix the cause and run `abctl uninstall` again")
+        });
     }
     println!("ArcBox has been removed.");
     if args.keep_data {
@@ -110,7 +115,7 @@ fn print_plan(roots: &Roots, residue: &Residue) {
         println!("  • Remove the ArcBox line from /etc/hosts  [sudo]");
     }
     println!("  • Remove the Docker context, shell, kubectl and ssh integration");
-    println!("  • Remove trust in the ArcBox local CA, if granted");
+    println!("  • Remove trust in the ArcBox local CA, if granted (macOS authorization)");
     if residue.preferences {
         println!("  • Remove the Desktop app's preferences");
     }

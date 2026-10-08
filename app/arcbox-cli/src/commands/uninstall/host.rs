@@ -15,7 +15,7 @@ use anyhow::{Context, Result, bail};
 pub(super) trait Host: Sync {
     /// Runs `program args…` to completion. `Err` means it could not start.
     fn run(&self, program: &str, args: &[&OsStr]) -> Result<Output>;
-    /// Revokes Admin and User trust while the helper remains registered.
+    /// Revokes trust through native authorization before removing the helper's public copy.
     fn revoke_local_ca<'a>(
         &'a self,
         tls_dir: &'a Path,
