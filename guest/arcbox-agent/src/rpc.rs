@@ -21,10 +21,11 @@ use arcbox_connect::v1::{
     KubernetesStatusRequest, KubernetesStatusResponse, KubernetesStopRequest,
     KubernetesStopResponse, ListContainerWebServicesRequest, ListContainerWebServicesResponse,
     MemoryPressureEvent, MmapReadFileRequest, MmapReadFileResponse, PortBindingsChanged,
-    PortBindingsRemoved, ReadinessEvent, RuntimeEnsureRequest, RuntimeEnsureResponse,
-    RuntimeStatusRequest, RuntimeStatusResponse, ShutdownRequest, ShutdownResponse,
-    StorageCheckRequest, StorageCheckResponse, SystemInfo, WatchMemoryPressureRequest,
-    WatchReadinessRequest, WatchStatsRequest, WatchStorageHealthRequest,
+    PortBindingsRemoved, ReadinessEvent, ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse,
+    RuntimeEnsureRequest, RuntimeEnsureResponse, RuntimeStatusRequest, RuntimeStatusResponse,
+    ShutdownRequest, ShutdownResponse, StorageCheckRequest, StorageCheckResponse, SystemInfo,
+    WatchMemoryPressureRequest, WatchReadinessRequest, WatchStatsRequest,
+    WatchStorageHealthRequest,
 };
 pub use arcbox_constants::wire::MessageType;
 
@@ -76,6 +77,7 @@ pub enum RpcRequest {
     Ping(PingRequest),
     GetSystemInfo,
     ListContainerWebServices,
+    ReconcileHttpsAccess(ReconcileHttpsAccessRequest),
     EnsureRuntime(RuntimeEnsureRequest),
     RuntimeStatus(RuntimeStatusRequest),
     StartKubernetes(KubernetesStartRequest),
@@ -106,6 +108,7 @@ pub enum RpcResponse {
     Ping(PingResponse),
     SystemInfo(SystemInfo),
     ListContainerWebServices(ListContainerWebServicesResponse),
+    ReconcileHttpsAccess(ReconcileHttpsAccessResponse),
     RuntimeEnsure(RuntimeEnsureResponse),
     RuntimeStatus(RuntimeStatusResponse),
     KubernetesStart(KubernetesStartResponse),
@@ -139,6 +142,7 @@ impl RpcResponse {
             Self::Ping(_) => MessageType::PingResponse,
             Self::SystemInfo(_) => MessageType::GetSystemInfoResponse,
             Self::ListContainerWebServices(_) => MessageType::ListContainerWebServicesResponse,
+            Self::ReconcileHttpsAccess(_) => MessageType::ReconcileHttpsAccessResponse,
             Self::RuntimeEnsure(_) => MessageType::EnsureRuntimeResponse,
             Self::RuntimeStatus(_) => MessageType::RuntimeStatusResponse,
             Self::KubernetesStart(_) => MessageType::KubernetesStartResponse,
@@ -171,6 +175,7 @@ impl RpcResponse {
             Self::Ping(msg) => msg.encode_to_vec(),
             Self::SystemInfo(msg) => msg.encode_to_vec(),
             Self::ListContainerWebServices(msg) => msg.encode_to_vec(),
+            Self::ReconcileHttpsAccess(msg) => msg.encode_to_vec(),
             Self::RuntimeEnsure(msg) => msg.encode_to_vec(),
             Self::RuntimeStatus(msg) => msg.encode_to_vec(),
             Self::KubernetesStart(msg) => msg.encode_to_vec(),
@@ -335,6 +340,9 @@ pub fn parse_request(msg_type: MessageType, payload: &[u8]) -> Result<RpcRequest
             ListContainerWebServicesRequest::decode_from_slice(payload)?;
             Ok(RpcRequest::ListContainerWebServices)
         }
+        MessageType::ReconcileHttpsAccessRequest => Ok(RpcRequest::ReconcileHttpsAccess(
+            ReconcileHttpsAccessRequest::decode_from_slice(payload)?,
+        )),
         MessageType::EnsureRuntimeRequest => {
             let req = RuntimeEnsureRequest::decode_from_slice(payload)?;
             Ok(RpcRequest::EnsureRuntime(req))

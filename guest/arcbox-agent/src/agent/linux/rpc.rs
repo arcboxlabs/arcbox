@@ -42,6 +42,7 @@ pub(super) async fn handle_connection<S>(
     mut stream: S,
     guest: Guest,
     web_services: &crate::domains::WebServices,
+    peer_cid: u32,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -79,6 +80,21 @@ where
                 &RpcResponse::Error(ErrorResponse::new(
                     403,
                     "storage recovery mode only permits diagnostic control requests",
+                )),
+                &trace_id,
+            )
+            .await?;
+            continue;
+        }
+
+        if msg_type == crate::rpc::MessageType::ReconcileHttpsAccessRequest
+            && peer_cid != tokio_vsock::VMADDR_CID_HOST
+        {
+            write_response(
+                &mut stream,
+                &RpcResponse::Error(ErrorResponse::new(
+                    403,
+                    "HTTPS observation requires the host",
                 )),
                 &trace_id,
             )
@@ -209,6 +225,12 @@ async fn handle_request(
     match request {
         RpcRequest::Ping(req) => RequestResult::Single(handle_ping(req, guest)),
         RpcRequest::GetSystemInfo => RequestResult::Single(handle_get_system_info().await),
+        RpcRequest::ReconcileHttpsAccess(request) => {
+            RequestResult::Single(match web_services.reconcile_https_access(request) {
+                Ok(response) => RpcResponse::ReconcileHttpsAccess(response),
+                Err(error) => RpcResponse::Error(ErrorResponse::new(400, error.to_string())),
+            })
+        }
         RpcRequest::ListContainerWebServices => {
             RequestResult::Single(RpcResponse::ListContainerWebServices(
                 arcbox_connect::v1::ListContainerWebServicesResponse {
@@ -602,6 +624,7 @@ mod recovery_tests {
                 server,
                 Guest::StorageRecovery,
                 &crate::domains::WebServices::default(),
+                tokio_vsock::VMADDR_CID_HOST,
             )
             .await
         });
@@ -634,6 +657,7 @@ mod recovery_tests {
                 server,
                 Guest::StorageRecovery,
                 &crate::domains::WebServices::default(),
+                tokio_vsock::VMADDR_CID_HOST,
             )
             .await
         });
@@ -697,7 +721,13 @@ mod storage_check_tests {
         ] {
             let (mut client, server) = tokio::io::duplex(4096);
             let dispatcher = tokio::spawn(async move {
-                handle_connection(server, guest, &crate::domains::WebServices::default()).await
+                handle_connection(
+                    server,
+                    guest,
+                    &crate::domains::WebServices::default(),
+                    tokio_vsock::VMADDR_CID_HOST,
+                )
+                .await
             });
             tokio::time::timeout(Duration::from_secs(5), async {
                 let request = StorageCheckRequest {
@@ -731,6 +761,52 @@ mod tests {
     use crate::domains::{ContainerFacts, HttpsBackend, SelectedRoutes, WebServices};
 
     #[tokio::test]
+    async fn https_observation_requires_host_cid_and_valid_addresses_over_the_wire() {
+        use crate::rpc::MessageType;
+        use arcbox_connect::v1::{ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse};
+        for (cid, address, error_code) in [
+            (tokio_vsock::VMADDR_CID_HOST, "192.168.64.1", None),
+            (tokio_vsock::VMADDR_CID_HOST, "192.168.64.0/24", Some(400)),
+            (tokio_vsock::VMADDR_CID_HOST + 1, "192.168.64.1", Some(403)),
+        ] {
+            let (mut client, server) = tokio::io::duplex(4096);
+            let task = tokio::spawn(async move {
+                handle_connection(server, Guest::SystemVm, &WebServices::default(), cid).await
+            });
+            let request = ReconcileHttpsAccessRequest {
+                observation_id: "wire-test".into(),
+                host_addresses: vec![address.into()],
+                enabled: true,
+                ..Default::default()
+            };
+            write_message(
+                &mut client,
+                MessageType::ReconcileHttpsAccessRequest,
+                "access",
+                &request.encode_to_vec(),
+            )
+            .await
+            .unwrap();
+            let (kind, trace, payload) = read_message(&mut client).await.unwrap();
+            assert_eq!(trace, "access");
+            if let Some(code) = error_code {
+                assert_eq!(kind, MessageType::Error);
+                assert_eq!(ErrorResponse::decode(&payload).unwrap().code, code);
+            } else {
+                assert_eq!(kind, MessageType::ReconcileHttpsAccessResponse);
+                assert_eq!(
+                    ReconcileHttpsAccessResponse::decode_from_slice(&payload)
+                        .unwrap()
+                        .sequence,
+                    0
+                );
+            }
+            drop(client);
+            task.await.unwrap().unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn list_web_services_dispatches_a_framed_request_with_native_tls() {
         let dns =
             crate::dns_server::GuestDnsServer::new(tokio_util::sync::CancellationToken::new());
@@ -754,7 +830,13 @@ mod tests {
         );
         let (mut client, server) = tokio::io::duplex(4096);
         let task = tokio::spawn(async move {
-            handle_connection(server, Guest::SystemVm, &services).await
+            handle_connection(
+                server,
+                Guest::SystemVm,
+                &services,
+                tokio_vsock::VMADDR_CID_HOST,
+            )
+            .await
         });
         write_message(
             &mut client,

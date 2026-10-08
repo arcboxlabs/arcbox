@@ -41,7 +41,9 @@ impl Agent {
                     tracing::debug!("Accepted connection from {:?}", peer_addr);
                     let web_services = web_services.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, guest, &web_services).await {
+                        if let Err(e) =
+                            handle_connection(stream, guest, &web_services, peer_addr.cid()).await
+                        {
                             // A routine daemon-side teardown (host closes the
                             // socketpair while the agent is writing a response)
                             // surfaces as BrokenPipe / ConnectionReset /

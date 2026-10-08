@@ -301,6 +301,7 @@ mod tests {
                 server,
                 crate::agent::Guest::SystemVm,
                 &crate::domains::WebServices::default(),
+                tokio_vsock::VMADDR_CID_HOST,
             )
             .await
         });
