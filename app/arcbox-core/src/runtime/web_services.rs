@@ -81,14 +81,10 @@ impl Runtime {
             ..Default::default()
         };
         let expected = self.container_network_incarnation()?;
-        let mut agent = self.connect_system_agent_expected(expected.clone()).await?;
-        let response = if agent.is_blocking() {
-            tokio::task::spawn_blocking(move || agent.list_guest_web_services_blocking(request))
-                .await
-                .map_err(|error| CoreError::Vm(format!("web services task panicked: {error}")))??
-        } else {
-            agent.list_guest_web_services(request).await?
-        };
+        let agent = self.connect_system_agent_expected(expected.clone()).await?;
+        let response = agent
+            .list_guest_web_services(request, &CancellationToken::new())
+            .await?;
         self.with_host_network_incarnation(self.default_machine_name(), &expected, || {
             let registry = self
                 .dns_registry
