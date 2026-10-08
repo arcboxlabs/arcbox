@@ -268,12 +268,24 @@ mod tests {
         let facts = ContainerFacts::from_inspect(&inspect(), &Domain::default()).unwrap();
         let redirect = "-d 172.17.0.2 -p tcp --dport 443 -m comment --comment \
                         arcbox-domain:abc123 -j REDIRECT --to-ports 61443";
-        let served_on_80 =
-            specs(&facts.rules(SelectedRoutes::choose(Some(80), None, &BTreeSet::new())));
+        let served_on_80 = specs(&facts.rules(SelectedRoutes::choose(
+            Some(super::super::HttpBackend {
+                port: 80,
+                protocol: Some(super::super::HttpProtocol::Http1),
+            }),
+            None,
+            &BTreeSet::new(),
+        )));
         assert_eq!(served_on_80.len(), 2, "one redirect per address");
         assert_eq!(served_on_80[0], redirect);
-        let served_on_3000 =
-            specs(&facts.rules(SelectedRoutes::choose(Some(3000), None, &BTreeSet::new())));
+        let served_on_3000 = specs(&facts.rules(SelectedRoutes::choose(
+            Some(super::super::HttpBackend {
+                port: 3000,
+                protocol: Some(super::super::HttpProtocol::Http1),
+            }),
+            None,
+            &BTreeSet::new(),
+        )));
         assert_eq!(served_on_3000.len(), 4);
         assert!(served_on_3000.contains(&redirect.to_owned()));
         assert!(

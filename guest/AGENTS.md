@@ -212,6 +212,7 @@ non-obvious invariants and failure signatures.
   managed HTTPS routing. Native TLS preserves the application's certificate.
   Native discovery follows ALPN for HTTP/2 or HTTP/1.1 and requires a response. An explicit native port bypasses discovery for mTLS services.
   `domains/http_relay.rs` forwards managed HTTP/1.1 and owns both drivers through response draining and WebSocket upgrade. Replace forwarded scheme after removing hop-by-hop fields. Preserve streaming bodies and negotiated trailers; cancel and join connection tasks when the HTTPS listener stops.
+  `domains/http_tasks.rs` retains Hyper's internal tasks for each managed connection. Cancel the connection operation, then join its internal tasks before releasing the frontend owner.
   Listener scans continue every five seconds after startup backoff. Socket inode
   changes and failed proxy upstream connections invalidate successful probes.
   Failed discovery probes retry; unchanged successful probes do not repeat.

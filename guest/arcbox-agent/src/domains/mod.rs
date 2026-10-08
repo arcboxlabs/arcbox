@@ -35,6 +35,7 @@ mod certificates;
 mod facts;
 mod http_port;
 mod http_relay;
+mod http_tasks;
 mod https;
 mod index;
 mod listeners;
@@ -51,7 +52,7 @@ use tokio_util::sync::CancellationToken;
 
 pub use self::facts::ContainerFacts;
 use self::routes::Routes;
-pub use self::selection::{HttpsBackend, SelectedRoutes};
+pub use self::selection::{HttpBackend, HttpProtocol, HttpsBackend, SelectedRoutes};
 pub use self::services::WebServices;
 
 /// iptables `--comment` tag prefix; the suffix is the container's full ID.

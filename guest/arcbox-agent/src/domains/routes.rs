@@ -11,7 +11,7 @@ use super::http_port::HTTPS_PORT;
 use super::https::Https;
 use super::index::Publisher;
 use super::scans::Scans;
-use super::selection::ALT_HTTPS_PORT;
+use super::selection::{ALT_HTTPS_PORT, HttpBackend, HttpProtocol};
 use super::{
     Command, ContainerFacts, RULE_OWNER, SelectedRoutes, WebServices, http_port, listeners, probe,
 };
@@ -289,7 +289,11 @@ impl Routes {
                 }
                 candidates.remove(&port);
             };
-            let selected = SelectedRoutes::choose(http_port, tracked.facts.https_pin, &native)
+            let http = http_port.map(|port| HttpBackend {
+                port,
+                protocol: tracked.facts.pin.is_none().then_some(HttpProtocol::Http1),
+            });
+            let selected = SelectedRoutes::choose(http, tracked.facts.https_pin, &native)
                 .with_managed_https(self.https);
             let wanted = tracked.facts.rules(selected);
             if wanted != tracked.installed {
@@ -441,7 +445,14 @@ mod tests {
                     .unwrap()
                 })
                 .into();
-            let selected = SelectedRoutes::choose(Some(3000), None, &BTreeSet::new());
+            let selected = SelectedRoutes::choose(
+                Some(HttpBackend {
+                    port: 3000,
+                    protocol: Some(HttpProtocol::Http1),
+                }),
+                None,
+                &BTreeSet::new(),
+            );
             for facts in &old {
                 routes.track(facts.clone());
             }
@@ -499,7 +510,14 @@ mod tests {
     fn proxy_availability_controls_managed_routes() {
         let routes = Routes::new(WebServices::default());
         for (pin, native, expected) in [
-            (None, BTreeSet::new(), Some(HttpsBackend::Terminate(8080))),
+            (
+                None,
+                BTreeSet::new(),
+                Some(HttpsBackend::Terminate(HttpBackend {
+                    port: 8080,
+                    protocol: Some(HttpProtocol::Http1),
+                })),
+            ),
             (
                 None,
                 BTreeSet::from([8443]),
@@ -512,13 +530,27 @@ mod tests {
             ),
             (Some(Pin::Off), BTreeSet::from([443]), None),
         ] {
-            let selected =
-                SelectedRoutes::choose(Some(8080), pin, &native).with_managed_https(routes.https);
+            let selected = SelectedRoutes::choose(
+                Some(HttpBackend {
+                    port: 8080,
+                    protocol: Some(HttpProtocol::Http1),
+                }),
+                pin,
+                &native,
+            )
+            .with_managed_https(routes.https);
             assert_eq!(selected.http, Some(8080));
             assert_eq!(selected.https, expected);
         }
-        let unavailable =
-            SelectedRoutes::choose(Some(8080), None, &BTreeSet::new()).with_managed_https(false);
+        let unavailable = SelectedRoutes::choose(
+            Some(HttpBackend {
+                port: 8080,
+                protocol: Some(HttpProtocol::Http1),
+            }),
+            None,
+            &BTreeSet::new(),
+        )
+        .with_managed_https(false);
         assert_eq!(
             unavailable,
             SelectedRoutes {

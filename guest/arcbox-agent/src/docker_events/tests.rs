@@ -353,7 +353,10 @@ async fn directory_links_follow_complete_subscription_lifetimes_and_replay() {
                     facts,
                     SelectedRoutes {
                         http: Some(3000),
-                        https: Some(HttpsBackend::Terminate(3000)),
+                        https: Some(HttpsBackend::Terminate(crate::domains::HttpBackend {
+                            port: 3000,
+                            protocol: Some(crate::domains::HttpProtocol::Http1),
+                        })),
                     },
                 );
             }

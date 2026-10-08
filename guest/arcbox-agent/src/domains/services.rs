@@ -16,7 +16,7 @@ use arcbox_dns::{
     web_services::{HttpsMode, WebServiceUrls},
 };
 
-use super::{ContainerFacts, SelectedRoutes};
+use super::{ContainerFacts, HttpBackend, SelectedRoutes};
 use crate::dns_server::DnsRegistry;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,8 +34,8 @@ impl Installed {
             http_port: self.selected.http.map_or(0, u32::from),
             https_backend: self.selected.https.map(|backend| match backend {
                 super::HttpsBackend::Native(port) => HttpsBackend::NativeHttpsPort(u32::from(port)),
-                super::HttpsBackend::Terminate(port) => {
-                    HttpsBackend::TerminatedHttpPort(u32::from(port))
+                super::HttpsBackend::Terminate(backend) => {
+                    HttpsBackend::TerminatedHttpPort(u32::from(backend.port))
                 }
             }),
             ..Default::default()
@@ -61,7 +61,7 @@ pub(super) struct ContainerTlsRoute {
     owner: String,
     revision: u64,
     installed: Arc<Installed>,
-    pub(super) http_port: u16,
+    pub(super) backend: HttpBackend,
 }
 
 impl PartialEq for ContainerTlsRoute {
@@ -105,7 +105,7 @@ impl TlsRoute {
             owner: claim.owner().into(),
             revision,
             installed: Arc::clone(route),
-            http_port: route.selected.terminated_port()?,
+            backend: route.selected.terminated_backend()?,
         }))
     }
 }
@@ -416,7 +416,10 @@ mod tests {
             &facts,
             SelectedRoutes {
                 http: Some(3000),
-                https: Some(super::super::HttpsBackend::Terminate(3000)),
+                https: Some(super::super::HttpsBackend::Terminate(HttpBackend {
+                    port: 3000,
+                    protocol: Some(super::super::HttpProtocol::Http1),
+                })),
             },
         );
     }
@@ -668,7 +671,10 @@ mod tests {
                     Arc::make_mut(installed.get_mut("a").unwrap())
                         .selected
                         .https = Some(if change == "port" {
-                        super::super::HttpsBackend::Terminate(4000)
+                        super::super::HttpsBackend::Terminate(HttpBackend {
+                            port: 4000,
+                            protocol: Some(super::super::HttpProtocol::Http1),
+                        })
                     } else {
                         super::super::HttpsBackend::Native(3000)
                     });

@@ -88,16 +88,20 @@ impl Https {
             let services = services.clone();
             let cancel = cancel.clone();
             connections.spawn(async move {
-                let result = tokio::select! {
-                    () = cancel.cancelled() => return,
-                    result = relay(client, &certificates, &services) => result,
-                };
+                let result = super::http_tasks::run(&cancel, async |_executor| {
+                    relay(client, &certificates, &services).await
+                })
+                .await;
                 if let Err(e) = result {
                     tracing::debug!(%peer, error = %format!("{e:#}"), "container domain HTTPS connection ended");
                 }
             });
         }
-        connections.shutdown().await;
+        while let Some(result) = connections.join_next().await {
+            if let Err(error) = result {
+                tracing::warn!(%error, "container domain HTTPS task failed during shutdown");
+            }
+        }
     }
 }
 
@@ -164,7 +168,7 @@ async fn relay_to(
     .context("TLS handshake")?;
     services.verify_tls_route(&name, container, &route)?;
     let http_port = match &route {
-        super::services::TlsRoute::Container(route) => route.http_port,
+        super::services::TlsRoute::Container(route) => route.backend.port,
         super::services::TlsRoute::Index(route) => {
             return super::index::serve(tls, services.clone(), route.clone(), HTTPS_PORT).await;
         }

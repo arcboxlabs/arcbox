@@ -6,10 +6,12 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 use hyper::body::Incoming;
 use hyper::header::{self, HeaderMap, HeaderName, HeaderValue};
-use hyper::{Request, StatusCode};
+use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{Mutex, mpsc};
+
+use super::HttpProtocol;
 
 /// Owns both HTTP drivers and the optional upgraded tunnel until the client leaves.
 pub(super) async fn serve(
@@ -23,41 +25,12 @@ pub(super) async fn serve(
         let sender = Arc::clone(&sender);
         let upgrades = upgrades.clone();
         async move {
-            let trailers = request
-                .headers()
-                .get(header::TE)
-                .is_some_and(|value| value == "trailers");
-            let protocol = request.headers().get(header::UPGRADE).cloned();
-            let websocket = strip_hop_headers(request.headers_mut())?
-                && protocol.as_ref().is_some_and(is_websocket);
+            let websocket = prepare_request(&mut request, HttpProtocol::Http1)?;
             let client_upgrade = websocket.then(|| hyper::upgrade::on(&mut request));
-            if websocket {
-                set_upgrade(request.headers_mut());
-            }
-            if trailers {
-                // TE is negotiated per hop; retain only the client's trailer capability.
-                request
-                    .headers_mut()
-                    .insert(header::TE, HeaderValue::from_static("trailers"));
-                request
-                    .headers_mut()
-                    .append(header::CONNECTION, HeaderValue::from_static("te"));
-            }
-            request
-                .headers_mut()
-                .insert("x-forwarded-proto", HeaderValue::from_static("https"));
             let mut sender = sender.lock().await;
             sender.ready().await?;
             let mut response = sender.send_request(request).await?;
-            let protocol = response.headers().get(header::UPGRADE).cloned();
-            let switching = strip_hop_headers(response.headers_mut())?
-                && protocol.as_ref().is_some_and(is_websocket);
-            if response.status() == StatusCode::SWITCHING_PROTOCOLS {
-                ensure!(
-                    websocket && switching,
-                    "upstream returned an unsolicited upgrade"
-                );
-                set_upgrade(response.headers_mut());
+            if prepare_response(&mut response, websocket)? {
                 upgrades.send((
                     client_upgrade.context("WebSocket client upgrade missing")?,
                     hyper::upgrade::on(&mut response),
@@ -98,6 +71,49 @@ pub(super) async fn serve(
             .await?;
     }
     Ok(())
+}
+
+fn prepare_request<B>(request: &mut Request<B>, protocol: HttpProtocol) -> Result<bool> {
+    let trailers = request
+        .headers()
+        .get(header::TE)
+        .is_some_and(|value| value == "trailers");
+    let upgrade = request.headers().get(header::UPGRADE).cloned();
+    let websocket =
+        strip_hop_headers(request.headers_mut())? && upgrade.as_ref().is_some_and(is_websocket);
+    if websocket {
+        set_upgrade(request.headers_mut());
+    }
+    if trailers {
+        // TE is negotiated per hop; retain only the client's trailer capability.
+        request
+            .headers_mut()
+            .insert(header::TE, HeaderValue::from_static("trailers"));
+        if protocol == HttpProtocol::Http1 {
+            request
+                .headers_mut()
+                .append(header::CONNECTION, HeaderValue::from_static("te"));
+        }
+    }
+    request
+        .headers_mut()
+        .insert("x-forwarded-proto", HeaderValue::from_static("https"));
+    Ok(websocket)
+}
+
+fn prepare_response<B>(response: &mut Response<B>, websocket: bool) -> Result<bool> {
+    let protocol = response.headers().get(header::UPGRADE).cloned();
+    let switching =
+        strip_hop_headers(response.headers_mut())? && protocol.as_ref().is_some_and(is_websocket);
+    if response.status() == StatusCode::SWITCHING_PROTOCOLS {
+        ensure!(
+            websocket && switching,
+            "upstream returned an unsolicited upgrade"
+        );
+        set_upgrade(response.headers_mut());
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 fn is_websocket(value: &HeaderValue) -> bool {

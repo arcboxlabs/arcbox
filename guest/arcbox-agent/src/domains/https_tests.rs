@@ -229,7 +229,12 @@ fn publish(services: &WebServices, dns: &DnsRegistry, owner: &str, port: u16, do
         &super::super::ContainerFacts::from_inspect(&inspect, &domain).unwrap(),
         super::super::SelectedRoutes {
             http: Some(port),
-            https: Some(super::super::HttpsBackend::Terminate(port)),
+            https: Some(super::super::HttpsBackend::Terminate(
+                super::super::HttpBackend {
+                    port,
+                    protocol: Some(super::super::HttpProtocol::Http1),
+                },
+            )),
         },
     );
 }
