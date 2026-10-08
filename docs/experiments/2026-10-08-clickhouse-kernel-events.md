@@ -238,3 +238,32 @@ The reproduced ClickHouse commit already contains the thread-local Timer, `creat
 The task artifact `clickhouse-kernel-2026-10-08` preserves 42,727 files and nine symlinks, totaling 46,051,949,850 file bytes. Every copied file passes SHA256 comparison against its source, and every symlink target matches. The archive includes completed guest captures, failed attempts, the incomplete Instruments package, source snapshots, and repository files at `b1c1c595b028373b4c0fd2288272a554f3872c28`. Its `archive-verification.json` and `SHA256SUMS` retain the verification result and manifest.
 
 All 73 containers in the isolated guest are stopped. Both seed container/image/volume identities, three fixture configurations, the diagnostic kernel/configuration, and the daemon binary pass identity or hash checks. The last empty owned stack-case network is archived and removed. The owned daemon 91525 and helper 91560 remain available for the pending user-run root preflight. The archive substitutes a verified snapshot for their live daemon log and excludes `host-ktrace-root30.*`, which belongs to that separate pending capture. No production implementation or configuration is changed.
+
+## Raw host preflight retains a continuous scheduler stream
+
+The user-run root wrapper exits zero. Its 3,273,756,168-byte `host-ktrace-root30.ktrace` decodes successfully into exactly 50,956,610 events, matching the recorder count. Relative timestamps span 0–31.568085750 seconds. Tracing is disabled and the kernel buffer is uninitialized before and after the command. The reported background owner changes from the old tailspind process to a new tailspind process; the recorder and wrapper exit.
+
+The [host analyzer](../../tests/bench/signoz/analyze_host_ktrace.py) streams the supported `ktrace trace -R FILE --csv` output, preserves integer nanoseconds, and retains target records without writing the entire expanded stream. Both complete decoder runs agree on every shared measurement and produce byte-identical span files. Self-checks cover continuous self-switches, mismatched outgoing identities, and independent CPU histories. An independent reader reconstructs every target span from the retained CSV.
+
+| Integrity check | Result |
+|---|---:|
+| Host CPUs with scheduling records | 18 |
+| Scheduling records / self-switches / post-switch dispatches | 4,165,144 / 296,517 / 3,868,627 |
+| Per-CPU incoming-to-next-outgoing mismatches | 0 |
+| Lost, retrograde, or past-event markers | 0 |
+| Common interval bounded by each CPU's first and last switch | 31.533877125 s |
+| Maximum unanchored left / right CPU boundary | 9.339250 / 24.869375 ms |
+| Target closed scheduled-current spans | 4,545, including 40 self-switch splits |
+| Observed vCPU TIDs / cross-CPU overlapping spans | 17 / 0 |
+
+The prior mapping identifies 18 vCPU TIDs, 19047123–19047140. Seventeen appear under the same helper PID 91560; TID 19047134 has no current event or closed span. Its absence does not establish its state. A bounded text preview directly reconfirms six thread names, not all 18. The helper's start time and command remain unchanged. Closed target spans total 227.940448 ms. All 1,660 target interrupt pairs lie inside those spans, with a union of 1.665989 ms and no nested overlap. All global interrupt starts and ends pair without a TID mismatch or open boundary.
+
+The host-matching public XNU tag, `xnu-12377.101.15`, establishes the event fields. `MACH_SCHED` and `MACH_STKHANDOFF` record outgoing TID in the record and incoming TID in arg2. `MACH_DISPATCH` is a later event and must not count as another switch. The actual context operation follows the switch tracepoint. These intervals therefore approximate scheduled-current residency; even after subtracting captured interrupts, they include hypervisor and other host work rather than measuring guest instructions directly.
+
+The PID filter preserves the entire scheduler subclass, trace metadata, and records emitted in interrupt context. This capture is not strictly process-only. The decoder retains those global records to validate each CPU's state chain. Absence of a loss marker alone is insufficient; the verdict also depends on full duration, per-second coverage, matching event counts, uninterrupted state chains, and clean decoder diagnostics. Tracer overhead has not been measured.
+
+Text previews align the earliest event with Mach absolute tick 6798289505392 and displayed wall time `2026-10-08 18:07:10.709833 +08`. Machine-readable `timestampns` is already relative nanoseconds despite `-t`; applying the Mach timebase again would be incorrect. This preflight does not establish a simultaneous host/guest clock mapping.
+
+The separate task artifact `host-scheduler-preflight-2026-10-08` contains 31 verified files totaling 3,311,606,640 bytes. Source and copy SHA256 values match for every file. It contains the raw capture, logs, analysis sources and outputs, matching-version source excerpts, and decoder previews. The earlier frozen kernel archive is unchanged.
+
+This passes the idle host-capture preflight. No ClickHouse failure occurs in this recording. Attribution still requires a simultaneous real-workload capture with bounded clock alignment; the earlier guest lock wait cannot be assigned a host scheduling cause from this later idle trace.
