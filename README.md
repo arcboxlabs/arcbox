@@ -297,6 +297,7 @@ Most of ArcBox's performance-critical code is custom rather than vendored:
   whatever port the container serves (or its `dev.arcbox.http-port` label),
   and `https://` works on port 443 after macOS authorizes the local CA.
   Native HTTPS on 443 or 8443 keeps the application's certificate; discovery supports HTTP/1.1 and HTTP/2.
+  Managed HTTPS forwards HTTP/1.1 with `X-Forwarded-Proto: https`, including streaming responses and WebSocket upgrades.
   Containers start without HTTPS trust. Enable local HTTPS in Desktop settings
   or run `abctl tls trust` from your login session. ArcBox reuses the trusted
   CA on later launches. The helper stores the name-constrained public CA in

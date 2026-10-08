@@ -3,8 +3,8 @@
 //! Port 443 of each container with an HTTP port is REDIRECTed (nat
 //! PREROUTING) to [`PROXY_PORT`] in the VM's own namespace. The proxy reads
 //! the address the client dialled from conntrack (`SO_ORIGINAL_DST`),
-//! presents a certificate the local CA signs for the SNI name, and relays
-//! the plaintext to that container's HTTP port. Traffic from the Mac never
+//! presents a certificate the local CA signs for the SNI name, and forwards
+//! HTTP with `X-Forwarded-Proto: https` to the container. Traffic from the Mac never
 //! passes through the daemon, so the guest is the only place to terminate.
 //!
 //! [`PROXY_PORT`] is taken in the VM's namespace, so a container cannot
@@ -61,9 +61,16 @@ impl Https {
         services: WebServices,
         cancel: CancellationToken,
     ) {
+        let mut connections = tokio::task::JoinSet::new();
         loop {
             let (client, peer) = tokio::select! {
-                () = cancel.cancelled() => return,
+                () = cancel.cancelled() => break,
+                Some(result) = connections.join_next() => {
+                    if let Err(error) = result {
+                        tracing::warn!(%error, "container domain HTTPS task failed");
+                    }
+                    continue;
+                }
                 accepted = self.listener.accept() => match accepted {
                     Ok(accepted) => accepted,
                     Err(e) => {
@@ -78,12 +85,18 @@ impl Https {
             let certificates = Arc::clone(&self.certificates);
             let ports = ports.clone();
             let services = services.clone();
-            tokio::spawn(async move {
-                if let Err(e) = relay(client, &certificates, &ports, &services).await {
+            let cancel = cancel.clone();
+            connections.spawn(async move {
+                let result = tokio::select! {
+                    () = cancel.cancelled() => return,
+                    result = relay(client, &certificates, &ports, &services) => result,
+                };
+                if let Err(e) = result {
                     tracing::debug!(%peer, error = %format!("{e:#}"), "container domain HTTPS connection ended");
                 }
             });
         }
+        connections.shutdown().await;
     }
 }
 
@@ -122,7 +135,7 @@ async fn relay(
     services
         .observe_managed_tls(&name, container, source)
         .await?;
-    let mut tls = tokio::time::timeout(TIMEOUT, async {
+    let tls = tokio::time::timeout(TIMEOUT, async {
         let config = certificates.configuration(&name).await?;
         Ok::<_, anyhow::Error>(hello.into_stream(config).await?)
     })
@@ -139,15 +152,14 @@ async fn relay(
         .and_then(|result| {
             result.with_context(|| format!("connecting to {container}:{http_port}"))
         });
-    let mut upstream = match upstream {
+    let upstream = match upstream {
         Ok(upstream) => upstream,
         Err(error) => {
             ports.route(&[container], None);
             return Err(error);
         }
     };
-    tokio::io::copy_bidirectional(&mut tls, &mut upstream).await?;
-    Ok(())
+    super::http_relay::serve(tls, upstream).await
 }
 
 /// The destination the client dialled before a nat rule redirected it.

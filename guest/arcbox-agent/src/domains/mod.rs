@@ -34,6 +34,7 @@ mod access;
 mod certificates;
 mod facts;
 mod http_port;
+mod http_relay;
 mod https;
 mod listeners;
 mod probe;

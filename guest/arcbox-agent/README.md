@@ -141,6 +141,8 @@ channel, then relays HTTP/1.1. The CA private key stays in the macOS Keychain;
 only the public root is shared in `/arcbox/tls/`. Port 61443 is reserved for
 the proxy and cannot be published by a container.
 
+Managed HTTP/1.1 forwarding replaces `X-Forwarded-Proto` with `https` on every request. The relay preserves Host, redirects, repeated cookies, streaming bodies, negotiated trailers, and WebSocket upgrades. The relay removes hop-by-hop headers and owns both connection drivers until the session ends. Native TLS remains passthrough; managed HTTP/2 and gRPC translation are not implemented.
+
 Listeners are read from `/proc/<pid>/net/tcp{,6}` with startup backoff, then
 on a five-second schedule while the container runs. Socket identity changes
 invalidate successful protocol probes, including replacement listeners on

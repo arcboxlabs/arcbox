@@ -20,6 +20,8 @@ Clients use the supplied URLs. Upstream port fields describe the application lis
 
 The host verifies each CSR's signature and single DNS name before signing. The name must belong to a current host container DNS registration and resolve to that registration's address. The host rechecks the registration after signing, so deletion, ownership transfer, or registration replacement discards an in-flight result. The guest separately checks the connection's original destination against its current DNS ownership.
 
+Managed HTTPS replaces `X-Forwarded-Proto` with `https` on every HTTP/1.1 request. The relay preserves Host, path/query, Location, and repeated Set-Cookie values. Bodies remain streaming; trailer capability is negotiated per hop. WebSocket upgrades preserve bytes already read with the handshake. Native TLS passes through unchanged. Managed HTTP/2 and gRPC translation are not implemented.
+
 ## Completion requirements
 
 The feature objective includes the complete local-domain experience across Docker, Compose, machines, and Kubernetes. A unit test or a published protocol field does not establish product completion. Each row needs evidence at its stated scope.
@@ -41,7 +43,7 @@ The feature objective includes the complete local-domain experience across Docke
 | Domain ownership | Reject a TLS SNI name that does not belong to the actual destination; validate the same ownership at signing and routing boundaries. | Guest routing checks SNI ownership before and after authorization. The host signer independently verifies current container DNS ownership before and after signing. Real wrong-SNI rejection remains pending. |
 | Private-key boundary | Verify signed creator access and rejection of unrelated identities; confirm no private root bytes reach disk exports, helper, or guest. | Native baseline exists; complete identity-negative matrix missing. |
 | Root and leaf lifecycle | Verify actual leaf expiry, concurrent issuance, root renewal, rotation, repair, revocation, migration, and uninstall without removing unrelated roots. | Leaves are verified against the published root and cached with its DER. CA preparation retries after failure; the signer follows the current published identity. Explicit publication repair preserves different roots. Root renewal, rotation, and native lifecycle evidence remain pending. |
-| Application protocols | Verify forwarded scheme, redirects, secure cookies, WebSocket, SSE, HTTP/2, and gRPC on supported modes. | Managed TLS currently advertises HTTP/1.1 only; protocol matrix missing. |
+| Application protocols | Verify forwarded scheme, redirects, secure cookies, WebSocket, SSE, HTTP/2, and gRPC on supported modes. | Five real TCP tests pass for managed HTTP/1.1 scheme, headers, streaming/trailers, keep-alive, early responses, WebSocket read-ahead, and disconnect/cancellation. Native HTTP/2 discovery passes. Installed protocol and gRPC evidence remain pending. |
 | Diagnostics and recovery | Distinguish DNS, route, upstream, proxy, and trust failures; recover after daemon/guest restart and event-stream gaps. | CA metadata exists; combined diagnostics and recovery evidence missing. |
 | Performance | Measure first request, cached requests, concurrent handshakes, route changes, and idle cost at increasing service counts. | No comparable HTTPS measurements. |
 | Release integration | Validate the paired signed app/runtime, then publish the runtime before changing the Desktop release pin. | Development branches only; release not authorized by this document. |
@@ -52,6 +54,7 @@ The comparison uses public product behavior. Do not infer undocumented implement
 
 - [Container domains](https://docs.orbstack.dev/docker/domains): naming, custom domains, wildcards, index, and protocol discovery.
 - [HTTPS](https://docs.orbstack.dev/features/https): first-use installation, container CA injection, private-key protection, and native HTTPS forwarding.
+- [Forwarded scheme clarification](https://github.com/orbstack/orbstack/issues/1895#issuecomment-2803371612): OrbStack sets `X-Forwarded-Proto` for proxied HTTPS; direct HTTP does not receive that header.
 - [Linux networking](https://docs.orbstack.dev/machines/network): machine names, port configuration, and macOS trust integration.
 - [Kubernetes](https://docs.orbstack.dev/kubernetes/): Service addresses, `cluster.local`, and LoadBalancer/Ingress domains.
 - [Menu bar](https://docs.orbstack.dev/menu-bar): service discovery and opening.
