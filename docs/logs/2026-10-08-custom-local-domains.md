@@ -231,3 +231,5 @@ The mDNS projection contains only selected exact `.local` names with Current ins
 ## Admit shared DNS and port writers
 
 Shared DNS and port writers now advance the host generation under the same commit lock. DNS publication returns admission failures through SandboxHost, API, and daemon callers. Cleanup remains available after admission closes. Serial Runtime passed 81 tests and daemon machine-DNS passed two; strict Core/computer/API/Docker/daemon all-target Clippy passed. The regression holds the commit lock and verifies stale-snapshot rejection and explicit closed-admission errors. Shutdown closure and physical-generation retirement remain pending.
+
+Resolver snapshot regressions reject mismatched ports, revisions, and roots before publication. They also cover metadata-only updates, external authority withdrawal, late acknowledgment, and retention of known, attempted, and current roots after failure. Eight resolver tests and strict daemon Clippy passed. The disconnected legacy DNS installer module is removed; no runtime fallback remains. Real-socket lifetime tests and installed cutover remain pending.
