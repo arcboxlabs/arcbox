@@ -74,6 +74,8 @@ manually started helper. **Never** ship a release helper with auth disabled.
 Rejected peers are dropped before any tarpc dispatch; logs include
 `source` (`audit_token` / `pid` / `none`) and `stage`.
 
+Each accepted connection retains its kernel UID, matched signing identifier, and audit-token evidence in the handler. `VerifiedPeer::resolver_profile` returns a profile only for an audit-token-verified daemon signature. PID verification, CLI and Desktop signatures, and the debug bypass do not establish a resolver identity. Existing RPCs use connection-wide authorization.
+
 ### Mutation ownership rules
 
 | Mutation | Create / replace | Delete |
@@ -136,6 +138,8 @@ human-readable for logs.
 Release builds use the `security-framework` crate
 (`GuestAttributes` + `SecCode` + `SecRequirement`) rather than hand-rolled
 Security.framework FFI. Debug builds skip signature checks.
+
+The peer-authentication tests verify daemon profile selection and reject PID-only, CLI, Desktop, and unsigned resolver identities. Release Clippy must also pass because debug builds do not compile the release signature-verification branch: `cargo clippy --release -p arcbox-helper --bin arcbox-helper -- -D warnings`.
 
 ## Non-goals (not 1.0.0 blockers)
 

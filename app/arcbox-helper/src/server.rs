@@ -97,9 +97,9 @@ async fn accept_loop(
             }
         };
 
-        if !peer_auth::verify(&conn) {
+        let Some(peer) = peer_auth::verify(&conn) else {
             continue;
-        }
+        };
 
         tracker.connect();
         let tracker_clone = Arc::clone(&tracker);
@@ -110,7 +110,7 @@ async fn accept_loop(
             let mut in_flight = JoinSet::new();
 
             BaseChannel::with_defaults(transport)
-                .execute(HelperServer.serve())
+                .execute(HelperServer::new(peer).serve())
                 .for_each(|resp| {
                     in_flight.spawn(resp);
                     futures::future::ready(())

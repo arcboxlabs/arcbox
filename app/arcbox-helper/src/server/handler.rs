@@ -11,9 +11,18 @@ use arcbox_helper::validate::{BridgeIface, CliName, CliTarget, DnsPort, SocketTa
 use arcbox_local_ca::PublicAuthority;
 
 use super::mutations;
+use super::peer_auth::VerifiedPeer;
 
 #[derive(Clone)]
-pub struct HelperServer;
+pub(super) struct HelperServer {
+    peer: VerifiedPeer,
+}
+
+impl HelperServer {
+    pub(super) fn new(peer: VerifiedPeer) -> Self {
+        Self { peer }
+    }
+}
 
 impl HelperService for HelperServer {
     async fn route_add(
@@ -55,6 +64,13 @@ impl HelperService for HelperServer {
     ) -> Result<(), HelperError> {
         let domain: Domain = domain.parse().map_err(HelperError::validation)?;
         let port = DnsPort::try_from(port).map_err(HelperError::validation)?;
+        tracing::debug!(
+            peer_uid = self.peer.uid(),
+            peer_identifier = self.peer.identifier(),
+            resolver_profile = ?self.peer.resolver_profile(),
+            domain = %domain,
+            "resolver install requested"
+        );
         mutations::dns::install(&domain, port)
     }
 
@@ -64,6 +80,13 @@ impl HelperService for HelperServer {
         domain: String,
     ) -> Result<(), HelperError> {
         let domain: Domain = domain.parse().map_err(HelperError::validation)?;
+        tracing::debug!(
+            peer_uid = self.peer.uid(),
+            peer_identifier = self.peer.identifier(),
+            resolver_profile = ?self.peer.resolver_profile(),
+            domain = %domain,
+            "resolver uninstall requested"
+        );
         mutations::dns::uninstall(&domain)
     }
 
