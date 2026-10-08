@@ -1,5 +1,9 @@
 //! Replace or remove only the validated ArcBox section of a PEM trust bundle.
 
+mod file;
+
+pub use file::install_trust_bundle;
+
 use crate::{Error, PublicAuthority};
 
 const BEGIN: &str = "\n# BEGIN ARCBOX LOCAL CA\n";
