@@ -118,9 +118,7 @@ current DNS names. Each shared Compose alias appears only on the container
 selected by guest DNS. The host uses this snapshot for service URLs; explicit
 port labels describe configured routes and do not guarantee application health.
 
-The HTTPS proxy accepts a TLS SNI name only when guest DNS currently resolves
-that name to the container address the client dialled. Unknown names and names
-owned by a different container fail before the agent requests a certificate.
+The HTTPS proxy accepts a TLS SNI name only when the selected DNS owner has an installed managed route at the container address the client dialled. The proxy pins that owner's registration revision and installed route identity. A change during authorization, certificate configuration, TLS handshake, or upstream connection rejects the request before application bytes are forwarded, including replacement at the same address and port. Identical registration and route publication preserve the handshake. A failed connection cannot remove a newer installed route.
 
 Leaf certificates renew after three quarters of their actual remaining validity.
 Concurrent requests for the same domain share one signing operation. The cache

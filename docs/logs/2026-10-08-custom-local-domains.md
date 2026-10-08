@@ -107,3 +107,9 @@ All eight Docker event tests passed, including failed cleanup acknowledgment and
 ## Project exact host records from the registry
 
 NetworkManager now provides a Registry projection that preserves canonical exact names, omits wildcards and conflicts, and withdraws unavailable owners. Three focused projection tests, strict all-target Clippy, and formatting passed. Runtime does not call this API yet; the host ownership migration remains incomplete. mDNS announcements still cover only the configured suffix.
+
+## Pin guest TLS ownership across asynchronous work
+
+The guest captures the selected owner, registration revision, and installed route identity before observing HTTPS access. The proxy rechecks that route after authorization, certificate configuration, TLS handshake, and upstream connection. A different owner at the same IP, removal and reinsertion of the same owner or route, a changed upstream port, or replacement by native TLS rejects the request. Identical registration and publication keep an active handshake valid. Failed upstream connections invalidate only the pinned route under the DNS and installed-route locks. The redundant IP-to-port map is removed.
+
+Service regressions passed on the host for authorization waits, ownership changes, route replacement, and stale failure invalidation. Strict Linux musl all-target Clippy and formatting passed. VM and browser acceptance remain unverified.

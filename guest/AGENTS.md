@@ -234,12 +234,13 @@ non-obvious invariants and failure signatures.
   Shared Compose claims select the smallest complete container ID; custom claims remain exclusive.
   The host must use this snapshot to build URLs instead of guessing from ports.
   The HTTPS proxy checks SNI against the same DNS registry before requesting a
-  certificate. A name must resolve to the connection's original destination IP.
+  certificate. The selected owner must have an installed managed route at the connection's original destination IP.
+  Pin the owner, registration revision, and installed route identity across authorization, certificate configuration, TLS handshake, and upstream connection. Remove a failed upstream route only while its pinned identity still matches. Identical route publication preserves identity; removal and reinstallation replace it.
   `domains/certificates/cache.rs` bounds leaf reuse by the certificate's actual
   validity and serializes signing per name. Never evict an active signing slot.
   Read `/arcbox/tls/ca.pem` before cache reuse. Bind each leaf to its verified
   root DER and reject a signing result if the public root changes before caching.
-  `ReconcileHttpsAccess` leases observation for three seconds and requires the host CID. The host renews the lease only while Desktop can offer trust authorization. Only exact host source addresses report access or wait; siblings and unobserved handshakes proceed immediately. Record access after SNI ownership validation and before certificate cache lookup. Authorization waiting ends after 30 seconds, observer disable, or lease expiry. Recheck DNS ownership after waiting. Lease renewal must not wake every waiting handshake or replace the first access in an observation.
+  `ReconcileHttpsAccess` leases observation for three seconds and requires the host CID. The host renews the lease only while Desktop can offer trust authorization. Only exact host source addresses report access or wait; siblings and unobserved handshakes proceed immediately. Record access after SNI ownership validation and before certificate cache lookup. Authorization waiting ends after 30 seconds, observer disable, or lease expiry. Recheck the pinned TLS route after waiting. Lease renewal must not wake every waiting handshake or replace the first access in an observation.
   Regression signature: siblings get RST on `<name>.arcbox.local:80` while the Mac works — check
   `iptables -t nat -S PREROUTING | grep arcbox-domain` and
   `/proc/sys/net/bridge/bridge-nf-call-iptables`.

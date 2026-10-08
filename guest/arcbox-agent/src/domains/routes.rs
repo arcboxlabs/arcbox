@@ -12,8 +12,7 @@ use super::https::Https;
 use super::scans::Scans;
 use super::selection::ALT_HTTPS_PORT;
 use super::{
-    Command, ContainerFacts, HttpPorts, RULE_OWNER, SelectedRoutes, WebServices, http_port,
-    listeners, probe,
+    Command, ContainerFacts, RULE_OWNER, SelectedRoutes, WebServices, http_port, listeners, probe,
 };
 use crate::iptables::{self, NatRule, TaggedRules};
 
@@ -24,8 +23,6 @@ const BRIDGE_NF_CALL_IPTABLES: &str = "/proc/sys/net/bridge/bridge-nf-call-iptab
 pub(super) struct Routes {
     rules: TaggedRules,
     containers: HashMap<String, Tracked>,
-    /// The HTTP port behind each address, for the HTTPS proxy.
-    ports: HttpPorts,
     /// Whether the domain permits managed HTTPS and proxy binding has not failed.
     https: bool,
     services: WebServices,
@@ -47,7 +44,6 @@ impl Routes {
         Self {
             rules: TaggedRules::new(RULE_OWNER),
             containers: HashMap::new(),
-            ports: HttpPorts::default(),
             https,
             services,
         }
@@ -72,11 +68,9 @@ impl Routes {
         }
         warn_unless_bridged_traffic_is_filtered();
         let proxy = match Https::bind().await {
-            Ok(https) => Some(tokio::spawn(https.serve(
-                self.ports.clone(),
-                self.services.clone(),
-                cancel.clone(),
-            ))),
+            Ok(https) => Some(tokio::spawn(
+                https.serve(self.services.clone(), cancel.clone()),
+            )),
             Err(e) => {
                 self.https = false;
                 tracing::warn!(error = %format!("{e:#}"), "container domains serve no HTTPS");
@@ -104,15 +98,8 @@ impl Routes {
     }
 
     fn track(&mut self, facts: ContainerFacts) {
+        self.services.remove(&facts.id);
         let installed = if let Some(known) = self.containers.remove(&facts.id) {
-            let gone: Vec<_> = known
-                .facts
-                .ips()
-                .iter()
-                .filter(|ip| !facts.ips().contains(ip))
-                .copied()
-                .collect();
-            self.ports.route(&gone, None);
             known.installed
         } else {
             Vec::new()
@@ -128,9 +115,8 @@ impl Routes {
     }
 
     async fn forget(&mut self, container_id: &str) -> anyhow::Result<()> {
-        if let Some(tracked) = self.containers.remove(container_id) {
-            self.ports.route(tracked.facts.ips(), None);
-        }
+        self.containers.remove(container_id);
+        self.services.remove(container_id);
         self.rules.remove(container_id).await
     }
 
@@ -154,14 +140,8 @@ impl Routes {
                 }
             };
             tracked.probes.observe(&snapshot);
-            if let Some(port) = tracked.selected.terminated_port()
-                && tracked
-                    .facts
-                    .ips()
-                    .iter()
-                    .any(|ip| self.ports.get(*ip) != Some(port))
-            {
-                // The proxy removes its mapping when the upstream connect fails.
+            if tracked.selected.terminated_port().is_some() && !self.services.contains(id) {
+                // A failed upstream connection removes the installed route.
                 tracked.probes.invalidate();
             }
             let listening = snapshot.ports();
@@ -224,8 +204,6 @@ impl Routes {
                     }
                 }
             }
-            self.ports
-                .route(tracked.facts.ips(), selected.terminated_port());
             tracked.selected = selected;
             self.services.publish(&tracked.facts, selected);
         }

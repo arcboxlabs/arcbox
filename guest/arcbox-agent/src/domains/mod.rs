@@ -43,10 +43,6 @@ mod scans;
 mod selection;
 mod services;
 
-use std::collections::HashMap;
-use std::net::Ipv4Addr;
-use std::sync::{Arc, RwLock};
-
 use anyhow::Context;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -59,29 +55,6 @@ pub use self::services::WebServices;
 
 /// iptables `--comment` tag prefix; the suffix is the container's full ID.
 const RULE_OWNER: &str = "arcbox-domain:";
-
-/// The HTTP port behind each container address: the rules task writes it,
-/// the HTTPS proxy reads it.
-#[derive(Clone, Default)]
-struct HttpPorts(Arc<RwLock<HashMap<Ipv4Addr, u16>>>);
-
-impl HttpPorts {
-    /// Points each of `ips` at `port`, or forgets them.
-    fn route(&self, ips: &[Ipv4Addr], port: Option<u16>) {
-        let mut ports = self.0.write().expect("HTTP port table lock poisoned");
-        for ip in ips {
-            match port {
-                Some(port) => ports.insert(*ip, port),
-                None => ports.remove(ip),
-            };
-        }
-    }
-
-    fn get(&self, ip: Ipv4Addr) -> Option<u16> {
-        let ports = self.0.read().expect("HTTP port table lock poisoned");
-        ports.get(&ip).copied()
-    }
-}
 
 /// Handle to the task that owns the container-domain rules.
 pub struct DomainRoutes {

@@ -74,11 +74,6 @@ impl ContainerFacts {
         })
     }
 
-    /// The container's IPv4 addresses.
-    pub(super) fn ips(&self) -> &[Ipv4Addr] {
-        &self.ips
-    }
-
     /// Native HTTPS keeps the application's TLS; terminated HTTPS reaches the proxy.
     pub(super) fn rules(&self, selected: SelectedRoutes) -> Vec<NatRule> {
         let native = match selected.https {

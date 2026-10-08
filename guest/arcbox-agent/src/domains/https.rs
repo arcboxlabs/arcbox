@@ -22,9 +22,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{LazyConfigAcceptor, rustls};
 use tokio_util::sync::CancellationToken;
 
+use super::WebServices;
 use super::certificates::Certificates;
 use super::http_port::HTTPS_PORT;
-use super::{HttpPorts, WebServices};
 
 /// Where the 443 rules redirect to, in the VM's own namespace.
 pub(super) const PROXY_PORT: u16 = 61443;
@@ -55,12 +55,7 @@ impl Https {
     }
 
     /// Serves connections until `cancel`, one task each.
-    pub(super) async fn serve(
-        self,
-        ports: HttpPorts,
-        services: WebServices,
-        cancel: CancellationToken,
-    ) {
+    pub(super) async fn serve(self, services: WebServices, cancel: CancellationToken) {
         let mut connections = tokio::task::JoinSet::new();
         loop {
             let (client, peer) = tokio::select! {
@@ -83,13 +78,12 @@ impl Https {
                 },
             };
             let certificates = Arc::clone(&self.certificates);
-            let ports = ports.clone();
             let services = services.clone();
             let cancel = cancel.clone();
             connections.spawn(async move {
                 let result = tokio::select! {
                     () = cancel.cancelled() => return,
-                    result = relay(client, &certificates, &ports, &services) => result,
+                    result = relay(client, &certificates, &services) => result,
                 };
                 if let Err(e) = result {
                     tracing::debug!(%peer, error = %format!("{e:#}"), "container domain HTTPS connection ended");
@@ -104,23 +98,35 @@ impl Https {
 async fn relay(
     client: TcpStream,
     certificates: &Certificates,
-    ports: &HttpPorts,
     services: &WebServices,
 ) -> Result<()> {
     let dialled = original_destination(&client).context("reading the dialled address")?;
-    let source = client
-        .peer_addr()
-        .context("reading the TLS client address")?
-        .ip();
     // Anything but a redirected container 443 reached the port directly.
     ensure!(
         dialled.port() == HTTPS_PORT,
         "{dialled} is no container's HTTPS port"
     );
-    let container = *dialled.ip();
-    ports
-        .get(container)
-        .with_context(|| format!("{container} serves no HTTP port"))?;
+    relay_to(
+        client,
+        *dialled.ip(),
+        services,
+        async |name| certificates.configuration(name).await,
+        async |address| TcpStream::connect(address).await,
+    )
+    .await
+}
+
+async fn relay_to(
+    client: TcpStream,
+    container: Ipv4Addr,
+    services: &WebServices,
+    configuration: impl AsyncFnOnce(&str) -> Result<Arc<rustls::ServerConfig>>,
+    connect: impl AsyncFnOnce((Ipv4Addr, u16)) -> io::Result<TcpStream>,
+) -> Result<()> {
+    let source = client
+        .peer_addr()
+        .context("reading the TLS client address")?
+        .ip();
     let hello = tokio::time::timeout(
         TIMEOUT,
         LazyConfigAcceptor::new(rustls::server::Acceptor::default(), client),
@@ -132,30 +138,32 @@ async fn relay(
         .server_name()
         .context("TLS client omitted SNI")?
         .to_owned();
-    services
+    let route = services
         .observe_managed_tls(&name, container, source)
         .await?;
     let tls = tokio::time::timeout(TIMEOUT, async {
-        let config = certificates.configuration(&name).await?;
+        let config = configuration(&name).await?;
+        services.verify_tls_route(&name, container, &route).await?;
         Ok::<_, anyhow::Error>(hello.into_stream(config).await?)
     })
     .await
     .context("TLS handshake timed out")?
     .context("TLS handshake")?;
-    // The service can move its listener while the host authorizes certificate trust.
-    let http_port = ports
-        .get(container)
-        .with_context(|| format!("{container} serves no HTTP port"))?;
-    let upstream = tokio::time::timeout(TIMEOUT, TcpStream::connect((container, http_port)))
+    services.verify_tls_route(&name, container, &route).await?;
+    let http_port = route.http_port;
+    let upstream = tokio::time::timeout(TIMEOUT, connect((container, http_port)))
         .await
         .context("connecting to the container timed out")
         .and_then(|result| {
             result.with_context(|| format!("connecting to {container}:{http_port}"))
         });
+    services.verify_tls_route(&name, container, &route).await?;
     let upstream = match upstream {
         Ok(upstream) => upstream,
         Err(error) => {
-            ports.route(&[container], None);
+            services
+                .invalidate_tls_route(&name, container, &route)
+                .await;
             return Err(error);
         }
     };

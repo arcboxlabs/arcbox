@@ -9,21 +9,71 @@ use arcbox_connect::v1::{
     container_web_service::HttpsBackend,
 };
 use arcbox_constants::dns::Domain;
-use arcbox_dns::{NamePattern, registry::Lookup};
+use arcbox_dns::{
+    NamePattern,
+    registry::{Lookup, Registry},
+};
 
 use super::{ContainerFacts, SelectedRoutes};
 use crate::dns_server::ContainerRegistry;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Installed {
     ip: Ipv4Addr,
     selected: SelectedRoutes,
+}
+
+/// Pins one handshake to the current owner, registration, and installed upstream.
+#[derive(Debug, Eq)]
+pub(super) struct TlsRoute {
+    owner: String,
+    revision: u64,
+    installed: Arc<Installed>,
+    pub(super) http_port: u16,
+}
+
+impl PartialEq for TlsRoute {
+    fn eq(&self, other: &Self) -> bool {
+        self.owner == other.owner
+            && self.revision == other.revision
+            && Arc::ptr_eq(&self.installed, &other.installed)
+    }
+}
+
+impl TlsRoute {
+    fn resolve(
+        name: &str,
+        destination: Ipv4Addr,
+        dns: &Registry,
+        installed: &HashMap<String, Arc<Installed>>,
+    ) -> Option<Self> {
+        let name = name.to_ascii_lowercase().parse::<Domain>().ok()?;
+        let Lookup::Matched {
+            claim,
+            address,
+            revision,
+        } = dns.resolve(&name)
+        else {
+            return None;
+        };
+        let route = installed.get(claim.owner())?;
+        if address != IpAddr::V4(destination) || route.ip != destination {
+            return None;
+        }
+        Some(Self {
+            owner: claim.owner().into(),
+            revision,
+            installed: Arc::clone(route),
+            http_port: route.selected.terminated_port()?,
+        })
+    }
 }
 
 /// Installed routes and HTTPS access observation shared with the RPC connections.
 #[derive(Clone, Default)]
 pub struct WebServices {
     pub(super) domain: Domain,
-    installed: Arc<RwLock<HashMap<String, Installed>>>,
+    installed: Arc<RwLock<HashMap<String, Arc<Installed>>>>,
     dns: ContainerRegistry,
     access: super::access::Access,
 }
@@ -34,18 +84,13 @@ impl WebServices {
         name: &str,
         destination: Ipv4Addr,
         source: IpAddr,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.resolves_to(name, destination).await,
-            "TLS name {name:?} does not resolve to {destination}"
-        );
+    ) -> anyhow::Result<TlsRoute> {
+        let route = self.tls_route(name, destination).await.ok_or_else(|| {
+            anyhow::anyhow!("TLS name {name:?} has no managed route to {destination}")
+        })?;
         self.access.observe(name, destination, source).await;
-        // DNS ownership can change while the Mac authorizes certificate trust.
-        anyhow::ensure!(
-            self.resolves_to(name, destination).await,
-            "TLS name {name:?} no longer resolves to {destination}"
-        );
-        Ok(())
+        self.verify_tls_route(name, destination, &route).await?;
+        Ok(route)
     }
 
     /// Renews host observation and returns the first managed access in that observation.
@@ -70,13 +115,17 @@ impl WebServices {
         if selected == SelectedRoutes::default() {
             installed.remove(&facts.id);
         } else {
-            installed.insert(
-                facts.id.clone(),
-                Installed {
-                    ip: facts.primary_ip,
-                    selected,
-                },
-            );
+            let route = Installed {
+                ip: facts.primary_ip,
+                selected,
+            };
+            if installed
+                .get(&facts.id)
+                .is_some_and(|current| **current == route)
+            {
+                return;
+            }
+            installed.insert(facts.id.clone(), Arc::new(route));
         }
     }
 
@@ -87,12 +136,44 @@ impl WebServices {
             .remove(id);
     }
 
-    /// A TLS name must resolve to the address the client actually dialled.
-    pub(super) async fn resolves_to(&self, name: &str, address: Ipv4Addr) -> bool {
-        let Ok(name) = name.to_ascii_lowercase().parse::<Domain>() else {
-            return false;
-        };
-        matches!(self.dns.read().await.resolve(&name), Lookup::Matched { address: current, .. } if current == IpAddr::V4(address))
+    pub(super) fn contains(&self, id: &str) -> bool {
+        self.installed
+            .read()
+            .expect("web services lock poisoned")
+            .contains_key(id)
+    }
+
+    async fn tls_route(&self, name: &str, destination: Ipv4Addr) -> Option<TlsRoute> {
+        let dns = self.dns.read().await;
+        let installed = self.installed.read().expect("web services lock poisoned");
+        TlsRoute::resolve(name, destination, &dns, &installed)
+    }
+
+    pub(super) async fn invalidate_tls_route(
+        &self,
+        name: &str,
+        destination: Ipv4Addr,
+        expected: &TlsRoute,
+    ) {
+        let dns = self.dns.read().await;
+        let mut installed = self.installed.write().expect("web services lock poisoned");
+        if TlsRoute::resolve(name, destination, &dns, &installed).as_ref() == Some(expected) {
+            installed.remove(&expected.owner);
+        }
+    }
+
+    /// Recheck after each asynchronous handshake stage before forwarding application bytes.
+    pub(super) async fn verify_tls_route(
+        &self,
+        name: &str,
+        destination: Ipv4Addr,
+        expected: &TlsRoute,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.tls_route(name, destination).await.as_ref() == Some(expected),
+            "managed TLS route for {name:?} at {destination} changed during the handshake"
+        );
+        Ok(())
     }
 
     /// Shared Compose aliases belong only to the container DNS currently selects.
@@ -155,6 +236,24 @@ mod tests {
         registry
             .replace(id.into(), claims, Some(ip.into()))
             .unwrap();
+        let facts = ContainerFacts::from_inspect(
+            &serde_json::json!({
+                "Id": id, "Name": "/web", "State": { "Pid": 1 },
+                "NetworkSettings": {
+                    "SandboxKey": "/var/run/docker/netns/web",
+                    "Networks": { "bridge": { "IPAddress": ip.to_string() } }
+                },
+            }),
+            &services.domain,
+        )
+        .unwrap();
+        services.publish(
+            &facts,
+            SelectedRoutes {
+                http: Some(3000),
+                https: Some(super::super::HttpsBackend::Terminate(3000)),
+            },
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -202,6 +301,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handshake_route_checks_registration_and_installed_backend() {
+        let ip = Ipv4Addr::new(172, 17, 0, 2);
+        let name = "web.arcbox.local";
+        for change in [
+            "idempotent",
+            "recreate",
+            "transfer",
+            "port",
+            "native",
+            "removed",
+            "foreign",
+            "republish",
+        ] {
+            let services = WebServices::new(Domain::default(), Arc::default());
+            register(&services, "a", &["web"], ip).await;
+            let route = services
+                .observe_managed_tls(name, ip, ip.into())
+                .await
+                .unwrap();
+            match change {
+                "idempotent" => register(&services, "a", &["web"], ip).await,
+                "recreate" | "transfer" => {
+                    services.dns.write().await.remove("a");
+                    let owner = if change == "recreate" { "a" } else { "b" };
+                    register(&services, owner, &["web"], ip).await;
+                }
+                "port" | "native" => {
+                    let mut installed = services.installed.write().unwrap();
+                    Arc::make_mut(installed.get_mut("a").unwrap())
+                        .selected
+                        .https = Some(if change == "port" {
+                        super::super::HttpsBackend::Terminate(4000)
+                    } else {
+                        super::super::HttpsBackend::Native(3000)
+                    });
+                }
+                "removed" => services.remove("a"),
+                "foreign" => {
+                    register(&services, "b", &["web"], ip).await;
+                    services.remove("a");
+                }
+                "republish" => {
+                    services.remove("a");
+                    register(&services, "a", &["web"], ip).await;
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                services.verify_tls_route(name, ip, &route).await.is_ok(),
+                change == "idempotent",
+                "{change}"
+            );
+            let before = services.snapshot().await;
+            services.invalidate_tls_route(name, ip, &route).await;
+            if change == "idempotent" {
+                assert!(!services.contains("a"));
+            } else {
+                assert_eq!(services.snapshot().await, before, "{change}");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn tls_names_follow_live_dns_ownership() {
         let first = Ipv4Addr::new(172, 17, 0, 2);
         let second = Ipv4Addr::new(172, 17, 0, 3);
@@ -210,8 +372,9 @@ mod tests {
         register(&services, "b", &["db.demo"], second).await;
         assert!(
             services
-                .resolves_to("WEB.demo.one.dev.arcbox.local", first)
+                .tls_route("WEB.demo.one.dev.arcbox.local", first)
                 .await
+                .is_some()
         );
         for name in [
             "db.demo.one.dev.arcbox.local",
@@ -222,18 +385,20 @@ mod tests {
             "web.demo.other.dev.arcbox.local",
             "web.demo.containers.test",
         ] {
-            assert!(!services.resolves_to(name, first).await, "{name}");
+            assert!(services.tls_route(name, first).await.is_none(), "{name}");
         }
         register(&services, "a", &["web.demo"], second).await;
         assert!(
-            !services
-                .resolves_to("web.demo.one.dev.arcbox.local", first)
+            services
+                .tls_route("web.demo.one.dev.arcbox.local", first)
                 .await
+                .is_none()
         );
         assert!(
             services
-                .resolves_to("web.demo.one.dev.arcbox.local", second)
+                .tls_route("web.demo.one.dev.arcbox.local", second)
                 .await
+                .is_some()
         );
     }
 
@@ -253,16 +418,6 @@ mod tests {
             ),
         ] {
             register(&services, id, &aliases, ip).await;
-            services.installed.write().unwrap().insert(
-                id.into(),
-                Installed {
-                    ip,
-                    selected: SelectedRoutes {
-                        http: Some(3000),
-                        https: Some(super::super::HttpsBackend::Terminate(3000)),
-                    },
-                },
-            );
         }
         let snapshot = services.snapshot().await;
         assert_eq!(snapshot[1].hostnames, ["demo-web-2.one.dev.arcbox.local"]);
