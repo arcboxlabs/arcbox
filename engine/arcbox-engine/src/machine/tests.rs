@@ -250,7 +250,7 @@ fn a_force_stop_waits_for_the_host_to_release_the_machine() {
     });
 
     let started = std::time::Instant::now();
-    let _ = manager.stop("held");
+    let _ = manager.stop("held", None);
     let waited = started.elapsed();
     assert!(waited >= release_after, "stop returned after {waited:?}");
     assert!(
@@ -1136,4 +1136,35 @@ async fn resize_applies_to_the_next_start_and_says_when_a_restart_is_needed() {
         .state = MachineState::Stopping;
     let err = manager.set_resources("dev", Some(1), None).unwrap_err();
     assert!(err.to_string().contains("Stopping"), "{err}");
+}
+
+#[test]
+fn a_force_fallback_cannot_stop_a_replacement_with_the_same_name() {
+    use crate::event::EventBus;
+    let dir = tempdir().unwrap();
+    let bus = EventBus::new();
+    let mut events = bus.subscribe();
+    let manager = test_machine_manager_with_bus(dir.path(), bus);
+    manager.register_mock_machine("replaced", 7).unwrap();
+    let old = manager.vm_manager.create(VmConfig::default()).unwrap();
+    let expected = manager.vm_manager.run_incarnation(&old).unwrap();
+    let replacement = manager.vm_manager.create(VmConfig::default()).unwrap();
+    manager
+        .machines
+        .write()
+        .unwrap()
+        .get_mut("replaced")
+        .unwrap()
+        .vm_id = replacement.clone();
+    let error = manager
+        .force_stop_expected("replaced", &expected)
+        .unwrap_err();
+    assert!(error.to_string().contains("incarnation changed"));
+    assert!(
+        events.try_recv().is_err(),
+        "stale fallback must not withdraw replacement resources"
+    );
+    let machine = manager.get("replaced").unwrap();
+    assert_eq!(machine.vm_id, replacement);
+    assert_eq!(machine.state, MachineState::Running);
 }

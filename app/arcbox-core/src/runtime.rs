@@ -1312,33 +1312,12 @@ impl Runtime {
         for machine in machines {
             if machine.state == MachineState::Running && machine.name != DEFAULT_MACHINE_NAME {
                 tracing::debug!("Stopping machine {}", machine.name);
-                let stopped_gracefully = match self.machine_manager.graceful_stop(
+                let stop_result = self.machine_manager.stop(
                     &machine.name,
-                    Duration::from_secs(arcbox_constants::timeouts::HOST_SHUTDOWN_TIMEOUT_SECS),
-                ) {
-                    Ok(true) => true,
-                    Ok(false) => {
-                        tracing::warn!(
-                            "Graceful stop timed out for machine {}, forcing stop",
-                            machine.name
-                        );
-                        false
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Graceful stop failed for machine {}: {}, forcing stop",
-                            machine.name,
-                            e
-                        );
-                        false
-                    }
-                };
-
-                let stop_result = if stopped_gracefully {
-                    Ok(())
-                } else {
-                    self.machine_manager.stop(&machine.name)
-                };
+                    Some(Duration::from_secs(
+                        arcbox_constants::timeouts::HOST_SHUTDOWN_TIMEOUT_SECS,
+                    )),
+                );
 
                 match stop_result {
                     Ok(()) => {
@@ -1388,7 +1367,7 @@ impl Runtime {
         for machine in machines {
             if machine.state == MachineState::Running && machine.name != DEFAULT_MACHINE_NAME {
                 tracing::debug!("Force stopping machine {}", machine.name);
-                let _ = self.machine_manager.stop(&machine.name);
+                let _ = self.machine_manager.stop(&machine.name, None);
             }
         }
 

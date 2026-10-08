@@ -1435,21 +1435,45 @@ impl MachineManager {
         self.vm_manager.debug_snapshot(&machine.vm_id)
     }
 
-    /// Stops a machine (force).
+    /// Stops one machine run, with an optional graceful shutdown deadline.
     ///
-    /// Accepts `Stopping` as well as `Running` so a force stop can preempt
-    /// an in-flight graceful stop instead of erroring for up to the whole
-    /// graceful-shutdown window. The VM dies the moment it is stopped, so
-    /// `MachineStopping` goes out first and the host gets
-    /// [`HOST_RELEASE_TIMEOUT`] to release what it holds of the machine.
+    /// A timeout forces the same run. `None` skips graceful shutdown.
+    ///
+    /// Force admission accepts `Running` or `Stopping`. A graceful shutdown
+    /// that owns the VMM can temporarily prevent forced teardown.
+    /// `MachineStopping` is published while the run identity is locked.
+    /// The host then gets [`HOST_RELEASE_TIMEOUT`] to release its holds.
     ///
     /// # Errors
     ///
     /// Returns an error if the machine cannot be stopped.
-    pub fn stop(&self, name: &str) -> Result<()> {
+    pub fn stop(&self, name: &str, graceful_timeout: Option<Duration>) -> Result<()> {
+        let expected = {
+            let machines = self
+                .machines
+                .read()
+                .map_err(|_| EngineError::LockPoisoned)?;
+            let machine = machines
+                .get(name)
+                .ok_or_else(|| EngineError::not_found(name))?;
+            self.vm_manager.run_incarnation(&machine.vm_id)?
+        };
+        if let Some(timeout) = graceful_timeout {
+            if self.graceful_stop_expected(name, &expected, timeout)? {
+                return Ok(());
+            }
+            tracing::warn!(
+                machine = name,
+                "Graceful shutdown unavailable or timed out; force stopping the same run"
+            );
+        }
+        self.force_stop_expected(name, &expected)
+    }
+
+    fn force_stop_expected(&self, name: &str, expected: &VmIncarnation) -> Result<()> {
         let stoppable =
             |state: MachineState| matches!(state, MachineState::Running | MachineState::Stopping);
-        let expected = {
+        {
             let machines = self
                 .machines
                 .read()
@@ -1462,15 +1486,17 @@ impl MachineManager {
                     "machine '{name}' is not running"
                 )));
             }
-            self.vm_manager.run_incarnation(&machine.vm_id)?
-        };
+            self.vm_manager
+                .with_run_incarnation(&machine.vm_id, expected, || {
+                    self.publish_event(
+                        name,
+                        crate::event::Event::MachineStopping {
+                            name: name.to_string(),
+                        },
+                    );
+                })?;
+        }
 
-        self.publish_event(
-            name,
-            crate::event::Event::MachineStopping {
-                name: name.to_string(),
-            },
-        );
         // Not under the registry lock: the holders read the registry too.
         self.await_host_release(name);
 
@@ -1491,9 +1517,9 @@ impl MachineManager {
         // Stop underlying VM
         #[cfg(target_os = "macos")]
         self.vm_manager
-            .force_stop_without_hypervisor(&machine.vm_id, &expected)?;
+            .force_stop_without_hypervisor(&machine.vm_id, expected)?;
         #[cfg(not(target_os = "macos"))]
-        self.vm_manager.stop(&machine.vm_id, &expected)?;
+        self.vm_manager.stop(&machine.vm_id, expected)?;
 
         machine.state = MachineState::Stopped;
         machine.cid = None;
@@ -1683,8 +1709,13 @@ impl MachineManager {
     ///
     /// Returns `Ok(true)` if the machine stopped, `Ok(false)` if graceful
     /// shutdown timed out or is unavailable.
-    pub fn graceful_stop(&self, name: &str, timeout: Duration) -> Result<bool> {
-        let (vm_id, expected) = {
+    fn graceful_stop_expected(
+        &self,
+        name: &str,
+        expected: &VmIncarnation,
+        timeout: Duration,
+    ) -> Result<bool> {
+        let vm_id = {
             let mut machines = self
                 .machines
                 .write()
@@ -1700,22 +1731,24 @@ impl MachineManager {
                 )));
             }
 
-            let expected = self.vm_manager.run_incarnation(&machine.vm_id)?;
-            machine.state = MachineState::Stopping;
-            (machine.vm_id.clone(), expected)
+            let vm_id = machine.vm_id.clone();
+            self.vm_manager.with_run_incarnation(&vm_id, expected, || {
+                machine.state = MachineState::Stopping;
+                self.publish_event(
+                    name,
+                    crate::event::Event::MachineStopping {
+                        name: name.to_string(),
+                    },
+                );
+            })?;
+            vm_id
         };
-        self.publish_event(
-            name,
-            crate::event::Event::MachineStopping {
-                name: name.to_string(),
-            },
-        );
         // The guest's shutdown kills the machine's export within moments
         // of the RPC below — before the unmount it races has finished
         // (alpine, 2026-10-04) — so the host's release goes first here too.
         self.await_host_release(name);
 
-        match self.vm_manager.graceful_stop(&vm_id, &expected, timeout) {
+        match self.vm_manager.graceful_stop(&vm_id, expected, timeout) {
             Ok(true) => {
                 let mut machines = self
                     .machines
@@ -1727,7 +1760,7 @@ impl MachineManager {
                     .ok_or_else(|| EngineError::not_found(name.to_string()))?;
                 let current_id = machine.vm_id.clone();
                 self.vm_manager
-                    .with_run_incarnation(&current_id, &expected, || {
+                    .with_run_incarnation(&current_id, expected, || {
                         machine.state = MachineState::Stopped;
                         machine.cid = None;
                         machine.bridge_ip_address = None;
@@ -1750,11 +1783,11 @@ impl MachineManager {
                 Ok(true)
             }
             Ok(false) => {
-                self.rollback_stopping(name, &expected);
+                self.rollback_stopping(name, expected);
                 Ok(false)
             }
             Err(e) => {
-                self.rollback_stopping(name, &expected);
+                self.rollback_stopping(name, expected);
                 Err(e)
             }
         }

@@ -147,30 +147,14 @@ impl LifecycleShared {
 
         let mm = Arc::clone(&self.machine_manager);
         let name = self.machine_name.clone();
-        // `graceful_stop` and `stop` are synchronous VM calls that can block up
-        // to the host shutdown timeout; keep them off the async workers.
+        // Shutdown waits for host release and guest teardown; keep the wait off async workers.
         let stop_result = tokio::task::spawn_blocking(move || {
-            match mm.graceful_stop(
+            mm.stop(
                 &name,
-                Duration::from_secs(arcbox_constants::timeouts::HOST_SHUTDOWN_TIMEOUT_SECS),
-            ) {
-                Ok(true) => Ok(()),
-                Ok(false) => {
-                    tracing::warn!(
-                        "Graceful stop timed out for '{}', falling back to force stop",
-                        name
-                    );
-                    mm.stop(&name)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Graceful stop failed for '{}': {}, falling back to force stop",
-                        name,
-                        e
-                    );
-                    mm.stop(&name)
-                }
-            }
+                Some(Duration::from_secs(
+                    arcbox_constants::timeouts::HOST_SHUTDOWN_TIMEOUT_SECS,
+                )),
+            )
         })
         .await
         .map_err(|e| EngineError::Vm(format!("stop task panicked: {e}")))

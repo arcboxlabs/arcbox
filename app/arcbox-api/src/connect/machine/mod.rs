@@ -175,22 +175,14 @@ impl pb::MachineService for MachineServiceImpl {
         let force = req.force;
         let id = req.id;
         tokio::task::spawn_blocking(move || {
-            if force {
-                return manager.stop(&id);
-            }
-            match manager.graceful_stop(
+            manager.stop(
                 &id,
-                std::time::Duration::from_secs(
-                    arcbox_constants::timeouts::HOST_SHUTDOWN_TIMEOUT_SECS,
-                ),
-            ) {
-                Ok(true) => Ok(()),
-                Ok(false) => {
-                    tracing::warn!(machine = %id, "graceful stop timed out; force stopping");
-                    manager.stop(&id)
-                }
-                Err(e) => Err(e),
-            }
+                (!force).then(|| {
+                    std::time::Duration::from_secs(
+                        arcbox_constants::timeouts::HOST_SHUTDOWN_TIMEOUT_SECS,
+                    )
+                }),
+            )
         })
         .await
         .map_err(|e| ConnectError::internal(format!("stop task panicked: {e}")))?

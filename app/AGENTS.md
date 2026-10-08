@@ -255,8 +255,8 @@ Covers `arcbox-daemon` (startup/shutdown), `arcbox-core` (`vm_lifecycle`),
   `unmount_machine` are the only entry points and both are idempotent; the
   loop follows the event bus the way `machine_dns` does and re-derives the
   mount set from the machine records, so one pass repairs a lagged receiver.
-- `Event::MachineStopping { name }` is internal: `stop`, `graceful_stop`
-  and `remove` publish it before the VM goes down so the unmount still
+- `Event::MachineStopping { name }` is internal: `stop` and `remove`
+  publish it before the VM goes down so the unmount still
   reaches a live server, and it is not mapped onto the public event stream.
   Daemon shutdown unmounts everything before it stops the machines for the
   same reason. A release can fail (the client still has requests in flight,
