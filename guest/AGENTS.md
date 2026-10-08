@@ -223,6 +223,8 @@ non-obvious invariants and failure signatures.
   Network connect/disconnect events trigger a fresh container inspect. DNS and
   discovery use the same first valid network IPv4 address. Disconnecting the
   last addressed network removes that container's DNS ownership and routes.
+  Confirm the Docker event subscription before listing running containers so snapshot-time changes remain buffered.
+  A failed listing or rejected subscription must enter the existing reconnect path.
   `ListContainerWebServices` reports installed routes, not raw listeners. The
   snapshot joins candidate aliases with the current DNS registry: a shared
   Compose alias belongs only to the container whose selected IP DNS returns.

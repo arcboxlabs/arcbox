@@ -1,14 +1,16 @@
 //! Docker container lifecycle event listener.
 //!
-//! Connects to `/var/run/docker.sock`, performs initial reconciliation of
-//! running containers, then subscribes to container lifecycle and network
-//! connect/disconnect events to keep the guest DNS server registry in sync, to
-//! mirror host-address-pinned port publishes for the inbound relay
-//! (`publish_mirror`), and to serve each container's domain over HTTP and
+//! Subscribes to container lifecycle and network connect/disconnect events
+//! through `/var/run/docker.sock` before reconciling running containers.
+//! Buffered events keep the guest DNS registry in sync, mirror
+//! host-address-pinned port publishes for the inbound relay
+//! (`publish_mirror`), and serve each container's domain over HTTP and
 //! HTTPS without a port (`domains`).
 
+use std::future::Future;
 use std::path::Path;
 
+use anyhow::Context;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio_util::sync::CancellationToken;
@@ -27,7 +29,7 @@ pub struct ContainerSync<'a> {
     pub domains: DomainRoutes,
 }
 
-/// Runs initial reconciliation then watches Docker events indefinitely.
+/// Subscribes before reconciliation, then watches Docker events indefinitely.
 ///
 /// Retries connection with backoff until the Docker socket appears.
 /// Blocks until `cancel` is triggered.
@@ -44,7 +46,7 @@ pub async fn reconcile_and_watch(mut sync: ContainerSync<'_>, cancel: Cancellati
         match run_once(&mut sync, &cancel).await {
             Ok(()) => return, // cancelled
             Err(e) => {
-                tracing::warn!(error = %e, "docker event listener disconnected, retrying");
+                tracing::warn!(error = %format!("{e:#}"), "docker event listener disconnected, retrying");
                 tokio::select! {
                     () = cancel.cancelled() => return,
                     () = tokio::time::sleep(RETRY_DELAY) => {}
@@ -54,33 +56,13 @@ pub async fn reconcile_and_watch(mut sync: ContainerSync<'_>, cancel: Cancellati
     }
 }
 
-/// Single connection lifecycle: reconcile + event stream.
+/// Subscribes before reconciliation so changes during the listing stay buffered.
 async fn run_once(sync: &mut ContainerSync<'_>, cancel: &CancellationToken) -> anyhow::Result<()> {
-    // Phase 1: list all running containers and register them.
-    if let Err(e) = reconcile_existing(sync).await {
-        tracing::warn!(error = %e, "initial container reconciliation failed");
-    }
-
-    // Network events carry container IDs in Actor.Attributes, not Actor.ID.
-    let stream = UnixStream::connect(DOCKER_SOCK).await?;
-    let (reader, mut writer) = tokio::io::split(stream);
-
-    let request = "GET /events?filters=%7B%22type%22%3A%5B%22container%22%2C%22network%22%5D%7D HTTP/1.1\r\n\
-                   Host: localhost\r\n\
-                   Connection: keep-alive\r\n\r\n";
-    writer.write_all(request.as_bytes()).await?;
-
-    let mut lines = BufReader::new(reader).lines();
-
-    // Skip HTTP response headers.
-    loop {
-        let Some(line) = read_line_or_cancel(&mut lines, cancel).await? else {
-            return Ok(());
-        };
-        if line.is_empty() {
-            break; // end of headers
-        }
-    }
+    let Some(mut lines) =
+        subscribe_and_reconcile(Path::new(DOCKER_SOCK), cancel, reconcile_existing(sync)).await?
+    else {
+        return Ok(());
+    };
 
     // Process chunked event stream.
     loop {
@@ -98,6 +80,41 @@ async fn run_once(sync: &mut ContainerSync<'_>, cancel: &CancellationToken) -> a
             tracing::debug!(error = %e, "failed to process docker event");
         }
     }
+}
+
+async fn subscribe_and_reconcile(
+    socket: &Path,
+    cancel: &CancellationToken,
+    reconcile: impl Future<Output = anyhow::Result<()>>,
+) -> anyhow::Result<Option<tokio::io::Lines<BufReader<tokio::io::ReadHalf<UnixStream>>>>> {
+    // Network events carry container IDs in Actor.Attributes, not Actor.ID.
+    let stream = UnixStream::connect(socket).await?;
+    let (reader, mut writer) = tokio::io::split(stream);
+
+    let request = "GET /events?filters=%7B%22type%22%3A%5B%22container%22%2C%22network%22%5D%7D HTTP/1.1\r\n\
+                   Host: localhost\r\n\
+                   Connection: keep-alive\r\n\r\n";
+    writer.write_all(request.as_bytes()).await?;
+
+    let mut lines = BufReader::new(reader).lines();
+
+    let Some(status) = read_line_or_cancel(&mut lines, cancel).await? else {
+        return Ok(None);
+    };
+    require_success(&status).context("subscribe to Docker events")?;
+
+    // Docker confirms the subscription before the snapshot request starts.
+    loop {
+        let Some(line) = read_line_or_cancel(&mut lines, cancel).await? else {
+            return Ok(None);
+        };
+        if line.is_empty() {
+            break; // end of headers
+        }
+    }
+
+    reconcile.await?;
+    Ok(Some(lines))
 }
 
 /// Reads one line, returning `None` if cancelled.
@@ -258,7 +275,11 @@ async fn sync_dns(dns: &GuestDnsServer, info: &serde_json::Value) {
 
 /// Performs a GET request to the Docker Engine API via Unix socket.
 pub async fn docker_get(path: &str) -> anyhow::Result<serde_json::Value> {
-    let stream = UnixStream::connect(DOCKER_SOCK).await?;
+    docker_get_at(Path::new(DOCKER_SOCK), path).await
+}
+
+async fn docker_get_at(socket: &Path, path: &str) -> anyhow::Result<serde_json::Value> {
+    let stream = UnixStream::connect(socket).await?;
     let (reader, mut writer) = tokio::io::split(stream);
 
     let request = format!("GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n");
@@ -272,51 +293,31 @@ pub async fn docker_get(path: &str) -> anyhow::Result<serde_json::Value> {
     let body_start = buf
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
-        .map_or(0, |p| p + 4);
-    let body = &buf[body_start..];
+        .ok_or_else(|| anyhow::anyhow!("incomplete Docker HTTP response"))?
+        + 4;
+    let (headers, body) = buf.split_at(body_start);
+    let status = headers
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or_default();
+    require_success(std::str::from_utf8(status)?).with_context(|| format!("GET {path}"))?;
 
-    Ok(serde_json::from_slice(body)?)
+    serde_json::from_slice(body).with_context(|| format!("parse GET {path} response body"))
+}
+
+fn require_success(line: &str) -> anyhow::Result<()> {
+    let mut words = line.split_ascii_whitespace();
+    anyhow::ensure!(
+        matches!(words.next(), Some("HTTP/1.0" | "HTTP/1.1")),
+        "invalid Docker HTTP response: {line}"
+    );
+    let status: hyper::StatusCode = words
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing Docker HTTP status"))?
+        .parse()?;
+    anyhow::ensure!(status.is_success(), "Docker API returned {status}");
+    Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn network_changes_reinspect_the_container_instead_of_the_network() {
-        for action in ["connect", "disconnect"] {
-            let mut event = serde_json::json!({
-                "Type": "network", "Action": action,
-                "Actor": { "ID": "network-id", "Attributes": { "container": "container-id" } }
-            });
-            assert_eq!(network_container_id(&event), Some("container-id"));
-            event["Action"] = "destroy".into();
-            assert_eq!(network_container_id(&event), None);
-            event["Action"] = action.into();
-            event["Actor"]["Attributes"]["container"] = "".into();
-            assert_eq!(network_container_id(&event), None);
-        }
-    }
-
-    #[tokio::test]
-    async fn disconnecting_the_last_network_removes_only_that_containers_dns_ownership() {
-        let dns = GuestDnsServer::new(Default::default(), CancellationToken::new());
-        let mut inspect = serde_json::json!({
-            "Name": "/web-1",
-            "Config": { "Labels": { "com.docker.compose.project": "demo", "com.docker.compose.service": "web" } },
-            "NetworkSettings": { "Networks": { "app": { "IPAddress": "172.18.0.2" } } }
-        });
-        sync_dns(&dns, &inspect).await;
-        dns.register_container("web.demo", "web-2", "172.18.0.3".parse().unwrap())
-            .await;
-        inspect["NetworkSettings"]["Networks"] = serde_json::json!({});
-        sync_dns(&dns, &inspect).await;
-        let entries = dns.containers();
-        let entries = entries.read().await;
-        assert!(!entries.contains_key("web-1"));
-        assert_eq!(
-            entries.get("web.demo"),
-            Some(&"172.18.0.3".parse().unwrap())
-        );
-    }
-}
+mod tests;
