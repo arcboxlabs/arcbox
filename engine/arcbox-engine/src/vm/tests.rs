@@ -95,4 +95,86 @@ fn test_start_failure_rolls_back_to_created() {
     let _ = manager.start(&vm_id, HostNetwork::default());
     let info = manager.get(&vm_id).expect("vm should still exist");
     assert_eq!(info.state, MachineState::Created);
+    assert_eq!(manager.vms.read().unwrap()[&vm_id].run_sequence, 1);
+    assert!(manager.network_incarnation(&vm_id).is_err());
+    assert!(manager.start(&vm_id, HostNetwork::default()).is_err());
+    assert_eq!(manager.vms.read().unwrap()[&vm_id].run_sequence, 2);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn replaced_or_dead_incarnations_cannot_take_the_next_manager() {
+    use std::sync::atomic::Ordering;
+    let (manager, _dir) = test_vm_manager();
+    let id = manager
+        .create(VmConfig {
+            vsock: false,
+            ..Default::default()
+        })
+        .unwrap();
+    {
+        let mut vms = manager.vms.write().unwrap();
+        let entry = vms.get_mut(&id).unwrap();
+        entry.begin_run().unwrap();
+        let vmm = Vmm::new(VmManager::build_vmm_config(entry)).unwrap();
+        vmm.running_flag().store(true, Ordering::SeqCst);
+        entry.vmm = Some(vmm);
+        entry.info.state = MachineState::Running;
+    }
+    let old = manager.network_incarnation(&id).unwrap();
+    {
+        let mut vms = manager.vms.write().unwrap();
+        let entry = vms.get_mut(&id).unwrap();
+        assert!(
+            entry
+                .reboot_with(|_| Err(EngineError::invalid_state("injected reboot failure")))
+                .is_err()
+        );
+        assert_eq!(entry.info.state, MachineState::Stopping);
+    }
+    assert!(manager.network_incarnation(&id).is_err());
+    manager
+        .vms
+        .write()
+        .unwrap()
+        .get_mut(&id)
+        .unwrap()
+        .reboot_with(|_| Ok(()))
+        .unwrap();
+    let current = manager.network_incarnation(&id).unwrap();
+    assert_ne!(old, current);
+    let mut source = Some("replacement manager");
+    assert!(
+        manager
+            .with_expected_vmm(&id, &old, |_| source.take())
+            .is_err()
+    );
+    assert!(source.is_some());
+    assert_eq!(
+        manager
+            .with_expected_vmm(&id, &current, |_| source.take())
+            .unwrap(),
+        Some("replacement manager")
+    );
+    let flag = manager.vms.read().unwrap()[&id]
+        .vmm
+        .as_ref()
+        .unwrap()
+        .running_flag();
+    flag.store(false, Ordering::SeqCst);
+    assert!(
+        manager
+            .take_inbound_listener_manager(&id, &current)
+            .is_err()
+    );
+    manager
+        .vms
+        .write()
+        .unwrap()
+        .get_mut(&id)
+        .unwrap()
+        .info
+        .state = MachineState::Stopped;
+    manager.remove(&id).unwrap();
+    assert!(manager.network_incarnation(&id).is_err());
 }

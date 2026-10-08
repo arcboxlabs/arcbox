@@ -17,7 +17,7 @@ fn runtime() -> (Runtime, tempfile::TempDir) {
     (runtime, dir)
 }
 
-async fn cancel_pending(future: impl Future<Output = ()>) {
+async fn cancel_pending<T>(future: impl Future<Output = T>) {
     let mut future = std::pin::pin!(future);
     assert!(
         poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx)))
@@ -32,8 +32,11 @@ impl Runtime {
         name: &str,
         manager: InboundListenerManager,
     ) {
-        self.adopt_inbound_listener_manager(name, || Some(manager))
-            .await;
+        self.adopt_inbound_listener_manager(name, || {
+            Ok(Some((VmIncarnation::for_test(), manager)))
+        })
+        .await
+        .unwrap();
     }
 
     pub(in super::super) async fn start_test_port_forwarding(
@@ -42,7 +45,10 @@ impl Runtime {
         owner: &str,
         bindings: &[(String, u16, u16, String)],
     ) -> crate::Result<()> {
-        self.start_port_forwarding_inbound(name, owner, bindings)
+        let incarnation = self.inbound_listeners.read().await[name]
+            .incarnation
+            .clone();
+        self.start_port_forwarding_inbound(name, owner, bindings, &incarnation)
             .await
     }
 }
@@ -73,7 +79,12 @@ async fn canceled_adoption_retains_both_managers_and_defers_the_next_transfer() 
     let (fresh_tx, mut fresh_rx) = mpsc::channel(4);
     let mut source = Some(InboundListenerManager::new(fresh_tx));
     let blocked = runtime.inbound_listeners.write().await;
-    cancel_pending(runtime.adopt_inbound_listener_manager("test", || source.take())).await;
+    cancel_pending(runtime.adopt_inbound_listener_manager("test", || {
+        Ok(source
+            .take()
+            .map(|manager| (VmIncarnation::for_test(), manager)))
+    }))
+    .await;
     assert!(
         source.is_some(),
         "the source retains its manager while Runtime waits for locks"
@@ -81,7 +92,12 @@ async fn canceled_adoption_retains_both_managers_and_defers_the_next_transfer() 
     drop(blocked);
 
     // Current-thread execution cannot finish an aborted task before the first pending poll.
-    cancel_pending(runtime.adopt_inbound_listener_manager("test", || source.take())).await;
+    cancel_pending(runtime.adopt_inbound_listener_manager("test", || {
+        Ok(source
+            .take()
+            .map(|manager| (VmIncarnation::for_test(), manager)))
+    }))
+    .await;
     assert!(source.is_none());
     assert!(
         !fresh_rx.is_closed(),
@@ -99,14 +115,20 @@ async fn canceled_adoption_retains_both_managers_and_defers_the_next_transfer() 
 
     let (next_tx, _next_rx) = mpsc::channel(4);
     let mut next = Some(InboundListenerManager::new(next_tx));
-    cancel_pending(runtime.adopt_inbound_listener_manager("test", || next.take())).await;
+    cancel_pending(runtime.adopt_inbound_listener_manager("test", || {
+        Ok(next
+            .take()
+            .map(|manager| (VmIncarnation::for_test(), manager)))
+    }))
+    .await;
     assert!(
         next.is_some(),
         "retirement must finish before another source transfer"
     );
     runtime
-        .adopt_inbound_listener_manager("test", || None)
-        .await;
+        .adopt_inbound_listener_manager("test", || Ok(None))
+        .await
+        .unwrap();
     assert!(
         stale_rx.is_closed(),
         "all stale listener tasks and their manager must be gone"
@@ -156,6 +178,7 @@ async fn canceled_retirement_and_shutdown_keep_cleanup_owners() {
             DEFAULT_MACHINE_NAME.into(),
             Slot {
                 current,
+                incarnation: VmIncarnation::for_test(),
                 retiring: Some(stale),
             },
         );

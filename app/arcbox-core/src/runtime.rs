@@ -39,6 +39,8 @@ use arcbox_connect::v1::{
     KubernetesStartResponse, KubernetesStatusResponse, KubernetesStopResponse, ServiceStatus,
 };
 use arcbox_dns::{NamePattern, claims::Claim, container::ContainerMetadata, registry::Registry};
+#[cfg(target_os = "macos")]
+use arcbox_engine::vm::VmIncarnation;
 use arcbox_net::NetworkManager;
 #[cfg(target_os = "macos")]
 use arcbox_net::darwin::inbound_relay::InboundProtocol;
@@ -1424,25 +1426,15 @@ impl Runtime {
         container_id: &str,
         bindings: &[(String, u16, u16, String)],
     ) -> Result<()> {
-        // A manager the VMM still holds belongs to a VM booted since the
-        // last publish: adopt it, retiring the previous incarnation's.
+        let expected = self.machine_manager.network_incarnation(machine_name)?;
         self.adopt_inbound_listener_manager(machine_name, || {
-            self.machine_manager
-                .take_inbound_listener_manager(machine_name)
+            Ok(self
+                .machine_manager
+                .take_inbound_listener_manager(machine_name, &expected)?
+                .map(|manager| (expected.clone(), manager)))
         })
-        .await;
-        if !self
-            .inbound_listeners
-            .read()
-            .await
-            .contains_key(machine_name)
-        {
-            return Err(CoreError::Machine(format!(
-                "inbound listener manager not available for machine '{machine_name}'",
-            )));
-        }
-
-        self.start_port_forwarding_inbound(machine_name, container_id, bindings)
+        .await?;
+        self.start_port_forwarding_inbound(machine_name, container_id, bindings, &expected)
             .await
     }
 
@@ -1452,6 +1444,7 @@ impl Runtime {
         machine_name: &str,
         container_id: &str,
         bindings: &[(String, u16, u16, String)],
+        expected: &VmIncarnation,
     ) -> Result<()> {
         let unspecified = self.config.docker.default_publish_address();
         let mut planned_rules = Vec::new();
@@ -1482,9 +1475,10 @@ impl Runtime {
                     && installed.len() == planned_rules.len()
                     && planned_rules.iter().all(|rule| installed.contains(rule))
                     && listeners.get(machine_name).is_some_and(|slot| {
-                        installed.iter().all(|(ip, port, _, protocol)| {
-                            slot.current.has_rule(*ip, *port, *protocol)
-                        })
+                        slot.incarnation == *expected
+                            && installed.iter().all(|(ip, port, _, protocol)| {
+                                slot.current.has_rule(*ip, *port, *protocol)
+                            })
                     })
             }) {
                 return Ok(());
@@ -1505,6 +1499,11 @@ impl Runtime {
                     "inbound listener manager not available for machine '{machine_name}'",
                 ))
             })?;
+            if slot.incarnation != *expected {
+                return Err(CoreError::Machine(
+                    "inbound listener incarnation changed".into(),
+                ));
+            }
             slot.finish_retiring().await;
             if let Err(e) = slot
                 .current

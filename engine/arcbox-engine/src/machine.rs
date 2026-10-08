@@ -5,7 +5,7 @@
 
 use crate::error::{EngineError, Result};
 use crate::persistence::MachinePersistence;
-use crate::vm::{HostNetwork, SharedDirConfig, VmConfig, VmId, VmManager};
+use crate::vm::{HostNetwork, SharedDirConfig, VmConfig, VmId, VmIncarnation, VmManager};
 use arcbox_connect::v1::{EnsureMachineExportRequest, EnsureMachineExportResponse};
 // Only the macOS `connect_agent` dials the agent port — the vsock helper it
 // rides is macOS-only.
@@ -1836,24 +1836,40 @@ impl MachineManager {
         Ok(true)
     }
 
-    /// Takes the inbound listener manager from a running machine's VM (Darwin only).
+    /// Captures a machine's current live datapath identity.
     ///
-    /// Returns `None` if the machine is not found, not running, or the manager
-    /// has already been taken.
+    /// # Errors
+    /// Returns an error if the machine or its live VM is unavailable.
+    pub fn network_incarnation(&self, name: &str) -> Result<VmIncarnation> {
+        let machines = self
+            .machines
+            .read()
+            .map_err(|_| EngineError::LockPoisoned)?;
+        let machine = machines
+            .get(name)
+            .ok_or_else(|| EngineError::not_found(name))?;
+        self.vm_manager.network_incarnation(&machine.vm_id)
+    }
+
+    /// Takes a manager only while the machine still names the expected live VM.
+    ///
+    /// # Errors
+    /// Returns an error for an unavailable or replaced VM. `None` means already taken.
     #[cfg(target_os = "macos")]
     pub fn take_inbound_listener_manager(
         &self,
         name: &str,
-    ) -> Option<arcbox_net::darwin::inbound_relay::InboundListenerManager> {
-        let vm_id = {
-            let machines = self.machines.read().ok()?;
-            let machine = machines.get(name)?;
-            if machine.state != MachineState::Running {
-                return None;
-            }
-            machine.vm_id.clone()
-        };
-        self.vm_manager.take_inbound_listener_manager(&vm_id)
+        expected: &VmIncarnation,
+    ) -> Result<Option<arcbox_net::darwin::inbound_relay::InboundListenerManager>> {
+        let machines = self
+            .machines
+            .read()
+            .map_err(|_| EngineError::LockPoisoned)?;
+        let machine = machines
+            .get(name)
+            .ok_or_else(|| EngineError::not_found(name))?;
+        self.vm_manager
+            .take_inbound_listener_manager(&machine.vm_id, expected)
     }
 
     /// Registers a mock machine for testing purposes.

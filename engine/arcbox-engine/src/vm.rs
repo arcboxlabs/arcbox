@@ -1,5 +1,6 @@
 //! Virtual machine management.
 
+mod incarnation;
 mod types;
 
 use crate::error::{EngineError, Result};
@@ -10,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::Duration;
 
+pub use incarnation::VmIncarnation;
 pub use types::{
     BlockDeviceConfig, HostNetwork, SharedDirConfig, VmConfig, VmId, VmInfo,
     bridge_nic_mac_for_vm_id,
@@ -25,6 +27,7 @@ struct VmEntry {
     info: VmInfo,
     config: VmConfig,
     vmm: Option<Vmm>,
+    run_sequence: u64,
 }
 
 /// VM manager.
@@ -61,6 +64,7 @@ impl VmManager {
             info,
             config,
             vmm: None,
+            run_sequence: 0,
         };
 
         self.vms
@@ -244,7 +248,7 @@ impl VmManager {
             )));
         }
 
-        entry.info.state = MachineState::Starting;
+        entry.begin_run()?;
 
         let vmm_config = Self::build_vmm_config(entry);
 
@@ -349,12 +353,7 @@ impl VmManager {
         let entry = vms
             .get_mut(id)
             .ok_or_else(|| EngineError::not_found(id.to_string()))?;
-        let vmm = entry
-            .vmm
-            .as_mut()
-            .ok_or_else(|| EngineError::invalid_state(format!("VM {id} has no VMM to reboot")))?;
-        vmm.reboot()?;
-        entry.info.state = MachineState::Running;
+        entry.reboot_with(|vmm| vmm.reboot().map_err(Into::into))?;
         tracing::info!("Rebooted VM {}", id);
         Ok(())
     }
@@ -1011,21 +1010,6 @@ impl VmManager {
             .ok_or_else(|| EngineError::invalid_state("VMM not initialized"))?;
 
         Ok(vmm.debug_snapshot())
-    }
-
-    /// Takes the inbound listener manager from a running VM (Darwin only).
-    ///
-    /// The manager is created during VM start when the network device is set up.
-    /// After this call the VMM no longer owns the manager; the caller must call
-    /// `stop_all()` on shutdown.
-    #[cfg(target_os = "macos")]
-    pub fn take_inbound_listener_manager(
-        &self,
-        id: &VmId,
-    ) -> Option<arcbox_net::darwin::inbound_relay::InboundListenerManager> {
-        let mut vms = self.vms.write().ok()?;
-        let entry = vms.get_mut(id)?;
-        entry.vmm.as_mut()?.take_inbound_listener_manager()
     }
 
     /// Returns the formatted MAC of the vmnet shared interface for a

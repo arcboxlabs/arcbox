@@ -58,6 +58,7 @@ arcbox-vz.workspace = true
 ifbridge = { workspace = true }
 
 [dev-dependencies]
+arcbox-engine = { workspace = true, features = ["test-support"] }
 figment = { workspace = true, features = ["test"] }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber.workspace = true

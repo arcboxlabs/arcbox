@@ -87,6 +87,8 @@ The restructure plan and its locked decisions live in
 
 ## Durable writes
 
+- VM listener transfer requires the expected `VmIncarnation`. Capture and validate the physical run under `VmManager.vms`; stopped or replaced runs must fail. The non-default `arcbox-engine/test-support` feature provides identity-only listener fixtures and never creates a live VM.
+
 New code that atomically replaces a **file** uses
 `common/arcbox-atomic-file` rather than hand-rolling temp-then-rename. It
 is **not** the same primitive as `arcbox-engine`'s private

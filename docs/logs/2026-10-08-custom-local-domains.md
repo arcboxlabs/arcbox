@@ -153,3 +153,9 @@ All helper connections now share one `ResolverStore` containing the resolver dir
 ## Resolve concrete wildcard names before opening
 
 List RPCs now accept a concrete hostname and return at most one current installed route. Desktop commit `888a3fd` uses this query before opening and after authorization, with stale-reply fencing across reconnects. Runtime checks passed: 10 host directory tests, 36 API tests, five daemon control-plane tests, six guest service tests, and one framed guest RPC test covering 11 request states. Guest tests ran in Colima; they are not installed ArcBox evidence. Desktop passed 25 focused tests and strict lint. Host/guest strict Clippy and workspace formatting passed. Protocol remains 7/7; no compatibility alias was added. Resource-boundary retention and installed browser validation remain pending.
+
+## Pin listener transfer to a physical VM run
+
+Engine now advances an opaque `VmIncarnation` on each start or reboot. Capture and manager transfer check the current physical run and VMM liveness under the VM registry lock. A failed reboot cannot restore the previous identity. Runtime stores the identity with its listener manager and rejects reuse or binding through a replacement slot. Socket fixtures use an internal forwarding seam; production rejects absent or stopped VMs.
+
+Six Engine VM tests and 73 serial Runtime tests passed, including stale transfer, failed reboot, and canceled manager retirement. Strict all-target Engine/Core Clippy and formatting passed for both intermediate commits. This change establishes manager provenance; final checks after listener awaits, snapshot publication, retirement ordering, and installed VM acceptance remain unfinished.
