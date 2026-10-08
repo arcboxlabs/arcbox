@@ -235,3 +235,41 @@ async fn source_invalidation_and_shutdown_close_pending_rpc_before_returning() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn service_failure_and_panic_join_the_other_service_before_returning() {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        for panics in [false, true] {
+            let shutdown = CancellationToken::new();
+            let cancelled = shutdown.clone();
+            let (began, ready) = oneshot::channel();
+            let (closed, closing) = oneshot::channel();
+            let (finish, finished) = oneshot::channel();
+            let mut tasks = JoinSet::new();
+            tasks.spawn(async move {
+                began.send(()).unwrap();
+                cancelled.cancelled().await;
+                closed.send(()).unwrap();
+                finished.await?;
+                Ok(())
+            });
+            tasks.spawn(async move {
+                ready.await?;
+                assert!(!panics, "injected service panic");
+                anyhow::bail!("injected service failure")
+            });
+            let service = tokio::spawn(supervise(tasks, shutdown));
+            closing.await.unwrap();
+            assert!(!service.is_finished(), "service cleanup was abandoned");
+            finish.send(()).unwrap();
+            let error = format!("{:#}", service.await.unwrap().unwrap_err());
+            assert!(error.contains(if panics {
+                "injected service panic"
+            } else {
+                "injected service failure"
+            }));
+        }
+    })
+    .await
+    .unwrap();
+}

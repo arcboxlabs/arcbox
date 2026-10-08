@@ -278,9 +278,7 @@ async fn init_runtime(ctx: &DaemonContext) -> Result<Arc<Runtime>> {
         .set(Arc::clone(&runtime))
         .map_err(|_| anyhow::anyhow!("init_runtime called twice"))?;
     #[cfg(target_os = "macos")]
-    if runtime.config().vm.autostart {
-        crate::guest_trust::start(ctx, &runtime).await;
-    }
+    crate::guest_trust::start(ctx, &runtime).await;
     // Armed before `init` for the same reason `early_runtime` is published
     // here: the VM reaches its ready state partway through the call below, so
     // a mirror started after it returns would report the VM down across the
