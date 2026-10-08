@@ -53,6 +53,7 @@ nfs3_server = "0.11.0"
 xattr = "1.6.1"
 arcbox-storage.workspace = true
 hyper-util = { version = "0.1.20", features = ["tokio"] }
+h2 = "0.4.20"
 
 # vsock, the sandbox runtime, the VM-driver port it speaks, and the two
 # adapters this crate composes it over (the Firecracker driver and the TAP
