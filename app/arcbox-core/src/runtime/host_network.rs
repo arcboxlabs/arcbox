@@ -11,7 +11,7 @@ mod tests;
 
 #[derive(Default)]
 pub(super) struct HostNetwork {
-    commit: AsyncMutex<()>,
+    pub(super) commit: AsyncMutex<()>,
     activity: Mutex<Activity>,
     #[cfg(any(test, feature = "test-support"))]
     fixture: Option<NetworkFixture>,
@@ -100,50 +100,23 @@ impl HostMutationLease<'_> {
     }
 
     fn with_live_vm<T>(&self, publish: impl FnOnce() -> T) -> Result<T> {
-        self.runtime
-            .host_network
-            .activity
-            .lock()
-            .map_err(|_| CoreError::LockPoisoned)?
-            .check_open()?;
-        #[cfg(any(test, feature = "test-support"))]
-        if let Some(fixture) = &self.runtime.host_network.fixture {
-            let current = fixture.0.read().map_err(|_| CoreError::LockPoisoned)?;
-            if current.as_ref() != Some(&self.vm) {
-                return Err(CoreError::invalid_state("fixture VM incarnation changed"));
-            }
-            return Ok(publish());
-        }
-        let state = self.runtime.vm_lifecycle.subscribe_state();
-        let state = state.borrow();
-        if !state.is_ready() {
-            return Err(CoreError::invalid_state("System VM is not ready"));
-        }
-        Ok(self.runtime.machine_manager.with_network_incarnation(
+        self.runtime.with_host_network_incarnation(
             self.runtime.default_machine_name(),
             &self.vm,
             publish,
-        )?)
+        )
     }
 
     async fn update_ports(&self, id: &str, bindings: &[(String, u16, u16, String)]) -> Result<()> {
         let runtime = self.runtime;
         let machine = runtime.default_machine_name();
         #[cfg(target_os = "macos")]
-        {
-            #[cfg(any(test, feature = "test-support"))]
-            if runtime.host_network.fixture.is_some() {
-                return runtime
-                    .start_port_forwarding_inbound(machine, id, bindings, &self.vm)
-                    .await;
-            }
-            runtime
-                .start_port_forwarding_with_incarnation(machine, id, bindings, &self.vm)
-                .await
-        }
+        return runtime
+            .start_port_forwarding_with_incarnation(machine, id, bindings, &self.vm)
+            .await;
         #[cfg(not(target_os = "macos"))]
         runtime
-            .start_port_forwarding_fallback(machine, id, bindings)
+            .start_port_forwarding_fallback(machine, id, bindings, &self.vm)
             .await
     }
 
@@ -155,9 +128,55 @@ impl HostMutationLease<'_> {
             .await;
         #[cfg(not(target_os = "macos"))]
         {
-            self.runtime.stop_port_forwarding_by_id(id).await;
+            self.runtime.stop_port_forwarding_raw(id).await;
             Ok(())
         }
+    }
+}
+
+impl Runtime {
+    pub(super) fn with_host_network_incarnation<T>(
+        &self,
+        machine: &str,
+        expected: &VmIncarnation,
+        publish: impl FnOnce() -> T,
+    ) -> Result<T> {
+        self.host_network
+            .activity
+            .lock()
+            .map_err(|_| CoreError::LockPoisoned)?
+            .check_open()?;
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(fixture) = &self.host_network.fixture {
+            let current = fixture.0.read().map_err(|_| CoreError::LockPoisoned)?;
+            if current.as_ref() != Some(expected) {
+                return Err(CoreError::invalid_state("fixture VM incarnation changed"));
+            }
+            return Ok(publish());
+        }
+        let state = self.vm_lifecycle.subscribe_state();
+        let state = state.borrow();
+        if machine == self.default_machine_name() && !state.is_ready() {
+            return Err(CoreError::invalid_state("System VM is not ready"));
+        }
+        Ok(self
+            .machine_manager
+            .with_network_incarnation(machine, expected, publish)?)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn has_network_fixture(&self) -> bool {
+        self.host_network.fixture.is_some()
+    }
+
+    #[cfg(test)]
+    pub(super) fn restart_network_fixture(&self) -> VmIncarnation {
+        self.host_network
+            .fixture
+            .as_ref()
+            .expect("explicit network fixture")
+            .restart();
+        self.container_network_incarnation().unwrap()
     }
 }
 

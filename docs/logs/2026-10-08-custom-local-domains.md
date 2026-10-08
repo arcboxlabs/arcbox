@@ -205,3 +205,7 @@ Host and VMM DNS now use the selected instance's explicit loopback port. This pa
 ## Retain resolver cleanup through startup cancellation
 
 The daemon now retains the resolver publication task in a shared slot across startup and shutdown. A cancelled waiter leaves the task owned, and the next waiter receives cleanup errors. Normal shutdown, interrupted startup, and failed startup join publication before stopping Runtime. Recovery separates container snapshot replay from Docker tool installation without changing startup order. The cancellation regression, seven mDNS tests, four shutdown tests, strict daemon Clippy, and formatting passed. The task currently owns Bonjour only; helper lease integration and native teardown validation remain pending.
+
+## Serialize shared port writers
+
+Container, sandbox, and shared listener cleanup now enter the host commit boundary. Listener work rechecks physical VM identity after asynchronous operations and cleans only the expected slot on failure. A held listener-stop regression replaces the VM before binding and proves shared cleanup waits for the commit boundary. Serial Runtime passed 78 tests, the focused inbound suite passed four, and strict Core/Docker Clippy and formatting passed. Linux fallback source was updated but not compiled in this slice. Complete snapshots, retirement identity, and shutdown admission remain pending.

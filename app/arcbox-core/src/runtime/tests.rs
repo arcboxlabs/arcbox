@@ -122,7 +122,9 @@ fn networking_test_runtime() -> (Runtime, tempfile::TempDir) {
         data_dir: temp_dir.path().to_path_buf(),
         ..Default::default()
     };
-    let runtime = Runtime::new(config).expect("runtime init should succeed");
+    let runtime = Runtime::new(config)
+        .expect("runtime init should succeed")
+        .with_network_fixture(super::NetworkFixture::default());
     (runtime, temp_dir)
 }
 
@@ -583,10 +585,9 @@ async fn conflicting_sandbox_cleanup_does_not_remove_the_existing_listener() {
     drop(reservation);
 
     let (command_tx, mut command_rx) = tokio::sync::mpsc::channel(4);
-    runtime.inbound_listeners.write().await.insert(
-        "test-machine".into(),
-        InboundListenerManager::new(command_tx).into(),
-    );
+    runtime
+        .adopt_test_manager("test-machine", InboundListenerManager::new(command_tx))
+        .await;
     let first = [("127.0.0.1".to_owned(), host_port, 80, "tcp".to_owned())];
     runtime
         .start_test_port_forwarding("test-machine", "sandbox:first", &first)

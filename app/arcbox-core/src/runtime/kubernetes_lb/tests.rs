@@ -89,12 +89,16 @@ mod listeners {
             ..Default::default()
         };
         config.docker.expose_ports_to_lan = false;
-        let runtime = Runtime::new(config).unwrap();
+        let runtime = Runtime::new(config)
+            .unwrap()
+            .with_network_fixture(crate::runtime::NetworkFixture::default());
         let (commands_tx, commands) = mpsc::channel(16);
-        runtime.inbound_listeners.write().await.insert(
-            DEFAULT_MACHINE_NAME.into(),
-            InboundListenerManager::new(commands_tx).into(),
-        );
+        runtime
+            .adopt_test_manager(
+                DEFAULT_MACHINE_NAME,
+                InboundListenerManager::new(commands_tx),
+            )
+            .await;
         runtime.vm_lifecycle().set_kubernetes_hold(true).await;
         (runtime, commands, dir)
     }

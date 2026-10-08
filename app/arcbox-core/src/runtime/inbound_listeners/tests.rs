@@ -13,7 +13,8 @@ fn runtime() -> (Runtime, tempfile::TempDir) {
         data_dir: dir.path().to_path_buf(),
         ..Default::default()
     })
-    .unwrap();
+    .unwrap()
+    .with_network_fixture(super::super::NetworkFixture::default());
     (runtime, dir)
 }
 
@@ -32,11 +33,10 @@ impl Runtime {
         name: &str,
         manager: InboundListenerManager,
     ) {
-        self.adopt_inbound_listener_manager(name, || {
-            Ok(Some((VmIncarnation::for_test(), manager)))
-        })
-        .await
-        .unwrap();
+        let incarnation = self.restart_network_fixture();
+        self.adopt_inbound_listener_manager(name, || Ok(Some((incarnation, manager))))
+            .await
+            .unwrap();
     }
 
     pub(in super::super) async fn start_test_port_forwarding(
@@ -48,7 +48,8 @@ impl Runtime {
         let incarnation = self.inbound_listeners.read().await[name]
             .incarnation
             .clone();
-        self.start_port_forwarding_inbound(name, owner, bindings, &incarnation)
+        let _commit = self.host_network.commit.lock().await;
+        self.start_port_forwarding_with_incarnation(name, owner, bindings, &incarnation)
             .await
     }
 }
@@ -248,4 +249,55 @@ async fn stale_forwarding_cannot_remove_or_bind_through_a_replacement_slot() {
         })
     ));
     runtime.stop_port_forwarding_all().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn replacement_during_port_stop_rejects_binding_and_shared_cleanup_waits() {
+    let (runtime, _dir) = runtime();
+    let (old_tx, old_rx) = mpsc::channel(4);
+    let mut old = InboundListenerManager::new(old_tx);
+    let port = old
+        .add_rule(Ipv4Addr::LOCALHOST, 0, 80, InboundProtocol::Tcp)
+        .await
+        .unwrap();
+    runtime.adopt_test_manager("test", old).await;
+    runtime.inbound_rules.write().await.insert(
+        "web".into(),
+        (
+            "test".into(),
+            vec![(Ipv4Addr::LOCALHOST, 0, 80, InboundProtocol::Tcp)],
+        ),
+    );
+    let bindings = [("127.0.0.1".into(), 0, 81, "tcp".into())];
+    let mut refresh = std::pin::pin!(runtime.start_test_port_forwarding("test", "web", &bindings));
+    assert!(
+        poll_fn(|cx| Poll::Ready(refresh.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    runtime.restart_network_fixture();
+    assert!(refresh.await.is_err());
+    assert!(!runtime.inbound_rules.read().await.contains_key("web"));
+    assert!(
+        runtime.inbound_listeners.read().await["test"]
+            .current
+            .is_empty()
+    );
+    assert!(
+        tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .is_err()
+    );
+    let commit = runtime.host_network.commit.lock().await;
+    let mut cleanup = std::pin::pin!(runtime.stop_port_forwarding_all());
+    assert!(
+        poll_fn(|cx| Poll::Ready(cleanup.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    assert!(!old_rx.is_closed());
+    assert!(runtime.inbound_listeners.read().await.contains_key("test"));
+    drop(commit);
+    cleanup.await;
+    assert!(old_rx.is_closed());
 }

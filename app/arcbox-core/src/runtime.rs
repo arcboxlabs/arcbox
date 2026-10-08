@@ -43,7 +43,6 @@ use arcbox_connect::v1::{
     KubernetesStartResponse, KubernetesStatusResponse, KubernetesStopResponse, ServiceStatus,
 };
 use arcbox_dns::{NamePattern, claims::Claim, container::ContainerMetadata, registry::Registry};
-#[cfg(target_os = "macos")]
 use arcbox_engine::vm::VmIncarnation;
 use arcbox_net::NetworkManager;
 #[cfg(target_os = "macos")]
@@ -1406,8 +1405,19 @@ impl Runtime {
         container_id: &str,
         bindings: &[(String, u16, u16, String)], // (host_ip, host_port, container_port, protocol)
     ) -> Result<()> {
+        let _commit = self.host_network.commit.lock().await;
+        self.start_port_forwarding_raw(machine_name, container_id, bindings)
+            .await
+    }
+
+    async fn start_port_forwarding_raw(
+        &self,
+        machine_name: &str,
+        container_id: &str,
+        bindings: &[(String, u16, u16, String)],
+    ) -> Result<()> {
         if bindings.is_empty() {
-            self.stop_port_forwarding_by_id(container_id).await;
+            self.stop_port_forwarding_raw(container_id).await;
             return Ok(());
         }
 
@@ -1419,7 +1429,8 @@ impl Runtime {
 
         #[cfg(not(target_os = "macos"))]
         {
-            self.start_port_forwarding_fallback(machine_name, container_id, bindings)
+            let expected = self.machine_manager.network_incarnation(machine_name)?;
+            self.start_port_forwarding_fallback(machine_name, container_id, bindings, &expected)
                 .await
         }
     }
@@ -1446,14 +1457,29 @@ impl Runtime {
         expected: &VmIncarnation,
     ) -> Result<()> {
         self.adopt_inbound_listener_manager(machine_name, || {
+            self.with_host_network_incarnation(machine_name, expected, || ())?;
+            #[cfg(any(test, feature = "test-support"))]
+            if self.has_network_fixture() {
+                return Ok(None);
+            }
             Ok(self
                 .machine_manager
                 .take_inbound_listener_manager(machine_name, expected)?
                 .map(|manager| (expected.clone(), manager)))
         })
         .await?;
-        self.start_port_forwarding_inbound(machine_name, container_id, bindings, expected)
-            .await
+        let result = self
+            .start_port_forwarding_inbound(machine_name, container_id, bindings, expected)
+            .await;
+        if let Err(error) = result {
+            self.stop_inbound_rules(container_id, Some((machine_name, expected)))
+                .await
+                .map_err(|cleanup| {
+                    CoreError::invalid_state(format!("{error}; port cleanup failed: {cleanup}"))
+                })?;
+            return Err(error);
+        }
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]
@@ -1488,6 +1514,7 @@ impl Runtime {
         {
             let rules = self.inbound_rules.read().await;
             let listeners = self.inbound_listeners.read().await;
+            self.with_host_network_incarnation(machine_name, expected, || ())?;
             if rules.get(container_id).is_some_and(|(machine, installed)| {
                 machine == machine_name
                     && installed.len() == planned_rules.len()
@@ -1504,6 +1531,7 @@ impl Runtime {
         }
         self.stop_inbound_rules(container_id, Some((machine_name, expected)))
             .await?;
+        self.with_host_network_incarnation(machine_name, expected, || ())?;
 
         let mut added_count = 0usize;
         let mut bind_errors: Vec<String> = Vec::new();
@@ -1513,6 +1541,7 @@ impl Runtime {
             // cancellation cannot leave a live listener undiscoverable.
             let mut rules_guard = self.inbound_rules.write().await;
             let mut listeners_guard = self.inbound_listeners.write().await;
+            self.with_host_network_incarnation(machine_name, expected, || ())?;
             let slot = listeners_guard.get_mut(machine_name).ok_or_else(|| {
                 CoreError::Machine(format!(
                     "inbound listener manager not available for machine '{machine_name}'",
@@ -1524,11 +1553,13 @@ impl Runtime {
                 ));
             }
             slot.finish_retiring().await;
+            self.with_host_network_incarnation(machine_name, expected, || ())?;
             if let Err(e) = slot
                 .current
                 .add_rule(host_ip, host_port, container_port, protocol)
                 .await
             {
+                self.with_host_network_incarnation(machine_name, expected, || ())?;
                 tracing::warn!(
                     "Failed to bind inbound port {}:{}:{:?}: {}",
                     host_ip,
@@ -1546,6 +1577,7 @@ impl Runtime {
             authority
                 .1
                 .push((host_ip, host_port, container_port, protocol));
+            self.with_host_network_incarnation(machine_name, expected, || ())?;
             added_count += 1;
         }
 
@@ -1572,6 +1604,7 @@ impl Runtime {
         machine_name: &str,
         container_id: &str,
         bindings: &[(String, u16, u16, String)],
+        expected: &VmIncarnation,
     ) -> Result<()> {
         let guest_ip = self.guest_ip_for_machine(machine_name);
         let unspecified = self.config.docker.default_publish_address();
@@ -1606,6 +1639,7 @@ impl Runtime {
         }
 
         let mut forwarders = self.port_forwarders.write().await;
+        self.with_host_network_incarnation(machine_name, expected, || ())?;
         let unchanged = forwarders.get(container_id).is_some_and(|installed| {
             installed.rules().len() == forwarder.rules().len()
                 && forwarder
@@ -1616,6 +1650,7 @@ impl Runtime {
         if !unchanged {
             if let Some(installed) = forwarders.get_mut(container_id) {
                 installed.stop().await;
+                self.with_host_network_incarnation(machine_name, expected, || ())?;
             }
             forwarders.insert(container_id.to_string(), forwarder);
         }
@@ -1623,13 +1658,15 @@ impl Runtime {
             .get_mut(container_id)
             .expect("forwarder retained or inserted")
             .start()
-            .await;
+            .await
+            .map_err(CoreError::from)
+            .and_then(|()| self.with_host_network_incarnation(machine_name, expected, || ()));
         if let Err(error) = result {
             if let Some(forwarder) = forwarders.get_mut(container_id) {
                 forwarder.stop().await;
             }
             forwarders.remove(container_id);
-            return Err(error.into());
+            return Err(error);
         }
 
         Ok(())
@@ -1637,6 +1674,11 @@ impl Runtime {
 
     /// Stops port forwarding for a container by its string ID.
     pub async fn stop_port_forwarding_by_id(&self, container_id: &str) {
+        let _commit = self.host_network.commit.lock().await;
+        self.stop_port_forwarding_raw(container_id).await;
+    }
+
+    async fn stop_port_forwarding_raw(&self, container_id: &str) {
         #[cfg(target_os = "macos")]
         {
             self.stop_inbound_rules(container_id, None)
@@ -1668,6 +1710,7 @@ impl Runtime {
         machine_name: &str,
         exposure: &SandboxPortExposure,
     ) -> Result<()> {
+        let _commit = self.host_network.commit.lock().await;
         let key = Self::sandbox_port_key(
             &exposure.sandbox_id,
             exposure.sandbox_port,
@@ -1677,7 +1720,7 @@ impl Runtime {
         // code; unlike published container ports (which intentionally bind all
         // interfaces), a sandbox port must not be reachable from the LAN. The
         // proto/docs/CLI all promise "localhost".
-        self.start_port_forwarding_for(
+        self.start_port_forwarding_raw(
             machine_name,
             &key,
             &[(
@@ -1699,8 +1742,9 @@ impl Runtime {
 
     /// Removes the host listener of one sandbox port exposure.
     pub async fn unexpose_sandbox_port(&self, sandbox_id: &str, sandbox_port: u16, protocol: &str) {
+        let _commit = self.host_network.commit.lock().await;
         let key = Self::sandbox_port_key(sandbox_id, sandbox_port, protocol);
-        self.stop_port_forwarding_by_id(&key).await;
+        self.stop_port_forwarding_raw(&key).await;
         if let Some(keys) = self.sandbox_port_keys.write().await.get_mut(sandbox_id) {
             keys.retain(|k| k != &key);
         }
@@ -1767,6 +1811,7 @@ impl Runtime {
 
     /// Removes every host listener a sandbox owns (Stop/Remove teardown).
     pub async fn remove_sandbox_ports(&self, sandbox_id: &str) {
+        let _commit = self.host_network.commit.lock().await;
         let mut keys: HashSet<String> = self
             .sandbox_port_keys
             .read()
@@ -1778,7 +1823,7 @@ impl Runtime {
             .collect();
         keys.extend(self.sandbox_authority_keys(sandbox_id).await);
         for key in keys {
-            self.stop_port_forwarding_by_id(&key).await;
+            self.stop_port_forwarding_raw(&key).await;
         }
         self.sandbox_port_keys.write().await.remove(sandbox_id);
     }
@@ -1816,6 +1861,7 @@ impl Runtime {
     /// Called during the agent startup handshake before the guest relay
     /// allocator is allowed to serve new exposures.
     pub async fn clear_sandbox_host_state(&self) {
+        let _commit = self.host_network.commit.lock().await;
         let mut port_keys = self.all_sandbox_authority_keys().await;
         port_keys.extend(
             self.sandbox_port_keys
@@ -1826,7 +1872,7 @@ impl Runtime {
                 .cloned(),
         );
         for key in port_keys {
-            self.stop_port_forwarding_by_id(&key).await;
+            self.stop_port_forwarding_raw(&key).await;
         }
 
         let dns_owners: Vec<_> = self
@@ -2064,9 +2110,10 @@ impl Runtime {
     /// injecting into a datapath that no longer exists. The Docker layer's
     /// reconciler rebuilds the state from the guest once it is back.
     pub async fn retire_system_vm_container_networking(&self) {
+        let _commit = self.host_network.commit.lock().await;
         let containers = self.registered_container_ids().await;
         for id in &containers {
-            self.stop_port_forwarding_by_id(id).await;
+            self.stop_port_forwarding_raw(id).await;
             self.deregister_dns_by_id(id).await;
         }
         if !containers.is_empty() {
@@ -2091,6 +2138,11 @@ impl Runtime {
 
     /// Stops all active port forwarders across every machine.
     pub async fn stop_port_forwarding_all(&self) {
+        let _commit = self.host_network.commit.lock().await;
+        self.stop_port_forwarding_all_raw().await;
+    }
+
+    async fn stop_port_forwarding_all_raw(&self) {
         #[cfg(target_os = "macos")]
         {
             let mut rules = self.inbound_rules.write().await;
