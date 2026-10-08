@@ -270,6 +270,84 @@ async fn successful_rename_with_invalid_inspect_preserves_previous_host_ownershi
 }
 
 #[tokio::test]
+async fn network_refresh_is_idempotent_and_rename_replaces_the_old_alias() {
+    let (router, runtime, _guest, _tmp) = router_with_mock_guest(vec![
+        MockRoute {
+            method: "POST",
+            path: "/networks/bridge/connect",
+            status: 200,
+            body: "",
+        },
+        MockRoute {
+            method: "GET",
+            path: "/containers/web/json",
+            status: 200,
+            body: INSPECT_WEB,
+        },
+        MockRoute {
+            method: "POST",
+            path: "/containers/web/rename",
+            status: 204,
+            body: "",
+        },
+        MockRoute {
+            method: "GET",
+            path: "/containers/abc123/json",
+            status: 200,
+            body: r#"{"Id":"abc123","Name":"/renamed","NetworkSettings":{"Networks":{"bridge":{"IPAddress":"172.17.0.2"}}}}"#,
+        },
+    ])
+    .await;
+    let metadata = arcbox_dns::container::ContainerMetadata::from_inspect(
+        &serde_json::from_str(INSPECT_WEB).unwrap(),
+    )
+    .unwrap();
+    runtime.register_container_dns(&metadata).await;
+    let revision = runtime
+        .https_signing_revision("web.arcbox.local")
+        .await
+        .unwrap();
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/networks/bridge/connect")
+                .body(Body::from(r#"{"Container":"web"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        runtime.https_signing_revision("web.arcbox.local").await,
+        Some(revision)
+    );
+
+    let (status, _) = send(&router, "POST", "/containers/web/rename?name=renamed").await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(runtime.resolve_registered_container("web").await, None);
+    assert_eq!(
+        runtime
+            .resolve_registered_container("renamed")
+            .await
+            .as_deref(),
+        Some("abc123")
+    );
+    assert_eq!(
+        runtime.https_signing_revision("web.arcbox.local").await,
+        None
+    );
+    assert_ne!(
+        runtime
+            .https_signing_revision("renamed.arcbox.local")
+            .await
+            .unwrap(),
+        revision
+    );
+}
+
+#[tokio::test]
 async fn versioned_remove_by_name_runs_local_teardown() {
     let (router, runtime, _guest, _tmp) = router_with_mock_guest(lifecycle_routes()).await;
 

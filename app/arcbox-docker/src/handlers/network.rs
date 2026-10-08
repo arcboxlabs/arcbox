@@ -86,15 +86,9 @@ async fn proxy_then_refresh_dns(
 
 /// Re-derives a container's host DNS entry from a fresh inspect.
 ///
-/// The old entry is removed first: after a disconnect the container may have
-/// no IP left at all, in which case nothing is re-registered (a stale address
-/// would otherwise linger).
+/// Runtime replacement withdraws the previous address when the last network disappears.
 async fn refresh_container_dns(state: &AppState, token: &str) -> Result<()> {
     let inspect = crate::guest_query::inspect_container(state.proxy.client(), token).await?;
-    state
-        .runtime
-        .deregister_dns_by_id(&inspect.metadata.id)
-        .await;
     state
         .runtime
         .register_container_dns(&inspect.metadata)

@@ -30,7 +30,7 @@ impl Start {
         )?;
         let Identity { id } = serde_json::from_slice(&body)
             .map_err(|e| DockerError::Server(format!("invalid container identity: {e}")))?;
-        let guard = state.proxy.lock_container_start(&id).await;
+        let guard = state.runtime.lock_container_lifecycle(&id).await;
         Ok(Self {
             id,
             _guard: guard,

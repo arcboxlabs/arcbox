@@ -435,7 +435,6 @@ pub async fn rename_container(
             // Preserve the previous host state until an authoritative snapshot arrives.
             let inspect =
                 crate::guest_query::inspect_container(state.proxy.client(), canonical).await?;
-            state.runtime.deregister_dns_by_id(canonical).await;
             state
                 .runtime
                 .register_container_dns(&inspect.metadata)

@@ -6,11 +6,9 @@ use crate::error::{DockerError, Result};
 use axum::http::{HeaderMap, Method, StatusCode};
 use bytes::Bytes;
 use http_body_util::BodyExt;
-use std::collections::HashMap;
 use std::future::Future;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
 /// Opaque RAII lease holding the System VM out of idle while a proxied
@@ -34,7 +32,6 @@ pub struct ProxyState {
     guest_http_client: GuestHttpClient,
     endpoint_readiness: EndpointReadiness,
     activity_hook: Option<ActivityHook>,
-    container_starts: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
 }
 
 impl ProxyState {
@@ -44,7 +41,6 @@ impl ProxyState {
             connector,
             endpoint_readiness: EndpointReadiness::new(),
             activity_hook: None,
-            container_starts: Mutex::new(HashMap::new()),
         }
     }
 
@@ -67,25 +63,6 @@ impl ProxyState {
 
     pub(crate) fn client(&self) -> &GuestHttpClient {
         &self.guest_http_client
-    }
-
-    /// Serialize CA writes and start/restart requests for one canonical container ID.
-    pub(crate) async fn lock_container_start(&self, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
-        let lock = {
-            let mut locks = self
-                .container_starts
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            locks.retain(|_, lock| lock.strong_count() > 0);
-            if let Some(lock) = locks.get(id).and_then(Weak::upgrade) {
-                lock
-            } else {
-                let lock = Arc::new(tokio::sync::Mutex::new(()));
-                locks.insert(id.to_owned(), Arc::downgrade(&lock));
-                lock
-            }
-        };
-        lock.lock_owned().await
     }
 
     /// Ensures guest dockerd is reachable at the Docker HTTP layer.
@@ -536,29 +513,6 @@ mod tests {
 
     fn stub_proxy_state() -> ProxyState {
         ProxyState::new(Arc::new(StubConnector))
-    }
-
-    #[tokio::test]
-    async fn container_starts_serialize_per_id_and_release_unused_locks() {
-        let state = stub_proxy_state();
-        let first = state.lock_container_start("first").await;
-        let second = state.lock_container_start("first");
-        tokio::pin!(second);
-        assert!(
-            std::future::poll_fn(|cx| {
-                std::task::Poll::Ready(second.as_mut().poll(cx).is_pending())
-            })
-            .await
-        );
-        let unrelated = state.lock_container_start("unrelated").await;
-        drop(first);
-        let second = second.await;
-        drop(second);
-        drop(unrelated);
-        let _next = state.lock_container_start("next").await;
-        let locks = state.container_starts.lock().unwrap();
-        assert_eq!(locks.len(), 1);
-        assert!(locks.contains_key("next"));
     }
 
     async fn mark_verified(state: &ProxyState) {

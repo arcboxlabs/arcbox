@@ -47,7 +47,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 #[cfg(not(target_os = "macos"))]
 use std::net::{SocketAddr, SocketAddrV4};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard, RwLock as TokioRwLock};
@@ -208,6 +208,8 @@ pub struct Runtime {
     sandbox_host_state: TokioMutex<u64>,
     /// Authoritative resource claims, addresses, and revisions shared with DNS consumers.
     dns_registry: Arc<RwLock<Registry>>,
+    /// Lifecycle operations for one canonical container ID share the same lock.
+    container_lifecycle: Mutex<HashMap<String, Weak<TokioMutex<()>>>>,
     /// Maps a container's unique name to its canonical ID, so teardown can
     /// resolve the name/short-ID a client used without a guest inspect
     /// round-trip. Populated at registration, updated on rename, cleared with
@@ -373,6 +375,7 @@ impl Runtime {
             sandbox_dns_ids: Arc::new(TokioRwLock::new(HashSet::new())),
             sandbox_host_state: TokioMutex::new(0),
             dns_registry: Arc::default(),
+            container_lifecycle: Mutex::default(),
             container_aliases: Arc::new(TokioRwLock::new(HashMap::new())),
             stats_hub,
             machine_stats_hubs: Arc::new(TokioRwLock::new(HashMap::new())),
@@ -387,6 +390,25 @@ impl Runtime {
     /// Fence a cleanup or host-side sandbox state mutation.
     pub async fn lock_sandbox_host_state(&self) -> TokioMutexGuard<'_, u64> {
         self.sandbox_host_state.lock().await
+    }
+
+    /// Serializes lifecycle operations for one complete Docker container ID.
+    pub async fn lock_container_lifecycle(&self, id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self
+                .container_lifecycle
+                .lock()
+                .expect("container lifecycle locks poisoned");
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks.get(id).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(TokioMutex::new(()));
+                locks.insert(id.to_owned(), Arc::downgrade(&lock));
+                lock
+            }
+        };
+        lock.lock_owned().await
     }
 
     /// Subscribes to live System VM machine stats (see
@@ -1916,33 +1938,21 @@ impl Runtime {
         self.network_manager.replace_dns_projection(&registry);
     }
 
-    /// Maps canonical container ID → display name, inverting the registered
-    /// name aliases. Used to enrich per-container stats so a monitor can
-    /// show names instead of bare IDs. When a container has several
-    /// registered names, the shortest wins (the primary Docker name is
-    /// shorter than the alias set it accretes).
+    /// Maps canonical container IDs to their current display names for per-container stats.
     pub async fn container_names(&self) -> HashMap<String, String> {
-        let mut names: HashMap<String, String> = HashMap::new();
-        for (name, id) in self.container_aliases.read().await.iter() {
-            names
-                .entry(id.clone())
-                .and_modify(|existing| {
-                    if name.len() < existing.len() {
-                        existing.clone_from(name);
-                    }
-                })
-                .or_insert_with(|| name.clone());
-        }
-        names
+        self.container_aliases
+            .read()
+            .await
+            .iter()
+            .map(|(name, id)| (id.clone(), name.clone()))
+            .collect()
     }
 
-    /// Records a container's unique name so later lifecycle calls can resolve
-    /// it to the canonical ID without a guest round-trip.
+    /// Replaces a container's unique name so lifecycle calls cannot use its old alias.
     pub async fn register_container_alias(&self, name: &str, container_id: &str) {
-        self.container_aliases
-            .write()
-            .await
-            .insert(name.to_string(), container_id.to_string());
+        let mut aliases = self.container_aliases.write().await;
+        aliases.retain(|_, id| id != container_id);
+        aliases.insert(name.to_owned(), container_id.to_owned());
     }
 
     /// Removes DNS entries for a container by its canonical ID.

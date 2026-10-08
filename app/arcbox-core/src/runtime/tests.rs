@@ -207,10 +207,10 @@ async fn resolve_registered_container_rejects_ambiguous_prefix() {
 }
 
 #[tokio::test]
-async fn container_names_invert_aliases_and_prefer_the_shortest() {
+async fn container_names_replace_old_aliases_without_changing_other_containers() {
     let (runtime, _tmp) = networking_test_runtime();
     let id = "0a1b2c3d4e5f00112233445566778899";
-    // A container accreting two names: the short primary and a longer alias.
+    // A rename withdraws the previous name even when the new name is longer.
     runtime.register_container_alias("db", id).await;
     runtime
         .register_container_alias("arcbox-postgres-1", id)
@@ -219,10 +219,43 @@ async fn container_names_invert_aliases_and_prefer_the_shortest() {
     runtime.register_container_alias("cache", "beef5678").await;
 
     let names = runtime.container_names().await;
-    assert_eq!(names.get(id).map(String::as_str), Some("db"));
+    assert_eq!(names.get(id).map(String::as_str), Some("arcbox-postgres-1"));
     assert_eq!(names.get("beef5678").map(String::as_str), Some("cache"));
+    assert_eq!(runtime.resolve_registered_container("db").await, None);
+    assert_eq!(
+        runtime
+            .resolve_registered_container("arcbox-postgres-1")
+            .await
+            .as_deref(),
+        Some(id)
+    );
     // Unknown IDs have no name (the consumer falls back to the short ID).
     assert!(!names.contains_key("unknown"));
+}
+
+#[tokio::test]
+async fn container_lifecycles_serialize_per_id_and_release_unused_locks() {
+    use std::future::Future as _;
+
+    let (runtime, _tmp) = networking_test_runtime();
+    let first = runtime.lock_container_lifecycle("first").await;
+    let second = runtime.lock_container_lifecycle("first");
+    tokio::pin!(second);
+    assert!(
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(second.as_mut().poll(cx).is_pending())
+        })
+        .await
+    );
+    let unrelated = runtime.lock_container_lifecycle("unrelated").await;
+    drop(first);
+    let second = second.await;
+    drop(second);
+    drop(unrelated);
+    let _next = runtime.lock_container_lifecycle("next").await;
+    let locks = runtime.container_lifecycle.lock().unwrap();
+    assert_eq!(locks.len(), 1);
+    assert!(locks.contains_key("next"));
 }
 
 #[tokio::test]
