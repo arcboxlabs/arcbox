@@ -218,10 +218,12 @@ mod tests {
         let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
         runtime
             .register_dns("alive", &["alive.local".into()], ip)
-            .await;
+            .await
+            .unwrap();
         runtime
             .register_dns("dead", &["dead.local".into()], ip)
-            .await;
+            .await
+            .unwrap();
         assert_eq!(runtime.registered_container_ids().await.len(), 2);
 
         // Only "alive" is running in the guest.
@@ -242,7 +244,8 @@ mod tests {
         // would leak one alias for the life of the daemon.
         runtime
             .register_container_alias("ephemeral", "cafe1234")
-            .await;
+            .await
+            .unwrap();
         assert!(
             runtime
                 .registered_container_ids()
@@ -265,7 +268,8 @@ mod tests {
         let (runtime, _tmp) = test_runtime();
         runtime
             .register_dns("c", &["c.local".into()], IpAddr::V4(Ipv4Addr::LOCALHOST))
-            .await;
+            .await
+            .unwrap();
 
         let guest = FakeGuest::unreachable();
         let result = reconcile(&runtime, &guest).await;
@@ -285,7 +289,8 @@ mod tests {
         let (runtime, _tmp) = test_runtime();
         runtime
             .register_container_dns(&network("known", "old", "172.17.0.2").metadata)
-            .await;
+            .await
+            .unwrap();
 
         let mut guest = FakeGuest::running(&["known", "restarted"]);
         guest.snapshot.as_mut().unwrap()[0] = network("known", "renamed", "172.17.0.3");
@@ -384,7 +389,8 @@ mod tests {
                 &["web.local".into()],
                 IpAddr::V4(Ipv4Addr::LOCALHOST),
             )
-            .await;
+            .await
+            .unwrap();
         let (vm_tx, vm) = watch::channel(VmLifecycleState::Running);
         let shutdown = CancellationToken::new();
         let mutation = runtime

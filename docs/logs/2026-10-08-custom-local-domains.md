@@ -227,3 +227,7 @@ Periodic reconciliation now uses the same complete snapshot boundary and refresh
 ## Publish only granted Bonjour records
 
 The mDNS projection contains only selected exact `.local` names with Current instance authority, including custom roots and apexes outside the configured suffix. Wildcards do not synthesize concrete records. The mirror reads the latest complete projection from the Registry watch instead of replaying stale record deltas. The net suite passed 118 tests with five existing ignored cases; six mDNS tests and strict net/Core/daemon Clippy passed. Core snapshot tests retain their address assertions against the Registry. Native custom-domain resolution and paired installation remain unverified.
+
+## Admit shared DNS and port writers
+
+Shared DNS and port writers now advance the host generation under the same commit lock. DNS publication returns admission failures through SandboxHost, API, and daemon callers. Cleanup remains available after admission closes. Serial Runtime passed 81 tests and daemon machine-DNS passed two; strict Core/computer/API/Docker/daemon all-target Clippy passed. The regression holds the commit lock and verifies stale-snapshot rejection and explicit closed-admission errors. Shutdown closure and physical-generation retirement remain pending.

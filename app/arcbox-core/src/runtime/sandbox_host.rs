@@ -27,8 +27,14 @@ impl SandboxHost for Runtime {
         self.deregister_sandbox_dns(sandbox_id).await;
     }
 
-    async fn register_dns(&self, sandbox_id: &str, ip: std::net::IpAddr) {
-        self.register_sandbox_dns(sandbox_id, ip).await;
+    async fn register_dns(
+        &self,
+        sandbox_id: &str,
+        ip: std::net::IpAddr,
+    ) -> arcbox_engine::Result<()> {
+        self.register_sandbox_dns(sandbox_id, ip)
+            .await
+            .map_err(|error| arcbox_engine::EngineError::Machine(error.to_string()))
     }
 
     async fn host_state_generation(&self) -> u64 {

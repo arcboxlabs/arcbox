@@ -172,8 +172,11 @@ async fn resolve_registered_container_by_id_alias_and_prefix() {
     let (runtime, _tmp) = networking_test_runtime();
     let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
     let id = "0a1b2c3d4e5f00112233445566778899";
-    runtime.register_dns(id, &["web.local".into()], ip).await;
-    runtime.register_container_alias("web", id).await;
+    runtime
+        .register_dns(id, &["web.local".into()], ip)
+        .await
+        .unwrap();
+    runtime.register_container_alias("web", id).await.unwrap();
 
     // Exact canonical ID.
     assert_eq!(
@@ -203,10 +206,12 @@ async fn resolve_registered_container_rejects_ambiguous_prefix() {
     let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
     runtime
         .register_dns("abcd1111", &["a.local".into()], ip)
-        .await;
+        .await
+        .unwrap();
     runtime
         .register_dns("abcd2222", &["b.local".into()], ip)
-        .await;
+        .await
+        .unwrap();
 
     // Prefix matching two registered IDs must not guess.
     assert_eq!(runtime.resolve_registered_container("abcd").await, None);
@@ -225,12 +230,16 @@ async fn container_names_replace_old_aliases_without_changing_other_containers()
     let (runtime, _tmp) = networking_test_runtime();
     let id = "0a1b2c3d4e5f00112233445566778899";
     // A rename withdraws the previous name even when the new name is longer.
-    runtime.register_container_alias("db", id).await;
+    runtime.register_container_alias("db", id).await.unwrap();
     runtime
         .register_container_alias("arcbox-postgres-1", id)
-        .await;
+        .await
+        .unwrap();
     // A second container with a single name.
-    runtime.register_container_alias("cache", "beef5678").await;
+    runtime
+        .register_container_alias("cache", "beef5678")
+        .await
+        .unwrap();
 
     let names = runtime.container_names().await;
     assert_eq!(names.get(id).map(String::as_str), Some("arcbox-postgres-1"));
@@ -278,7 +287,8 @@ async fn deregister_dns_clears_aliases_even_without_dns_entry() {
     // Alias registered without any DNS entry (e.g. port forwarding only).
     runtime
         .register_container_alias("ports-only", "feed1234")
-        .await;
+        .await
+        .unwrap();
     assert_eq!(
         runtime
             .resolve_registered_container("ports-only")
@@ -301,8 +311,12 @@ async fn sandbox_dns_cleanup_restores_same_named_container() {
     let sandbox_ip = "172.31.0.2".parse().unwrap();
     runtime
         .register_dns("container", &["same".into()], container_ip)
-        .await;
-    runtime.register_sandbox_dns("SAME", sandbox_ip).await;
+        .await
+        .unwrap();
+    runtime
+        .register_sandbox_dns("SAME", sandbox_ip)
+        .await
+        .unwrap();
 
     {
         let entries = runtime.dns_registry.read().unwrap();
@@ -334,8 +348,14 @@ async fn sandbox_dns_cleanup_restores_host_alias() {
     let (runtime, _tmp) = networking_test_runtime();
     let host_ip = "10.0.2.1".parse().unwrap();
     let sandbox_ip = "172.31.0.2".parse().unwrap();
-    runtime.register_host_dns(&["host".into()], host_ip).await;
-    runtime.register_sandbox_dns("host", sandbox_ip).await;
+    runtime
+        .register_host_dns(&["host".into()], host_ip)
+        .await
+        .unwrap();
+    runtime
+        .register_sandbox_dns("host", sandbox_ip)
+        .await
+        .unwrap();
 
     assert!(runtime.registered_container_ids().await.is_empty());
     runtime.deregister_sandbox_dns("host").await;
@@ -351,13 +371,16 @@ async fn conflicting_dns_restores_the_only_live_owner_and_drops_old_aliases() {
     let latest_ip = "172.17.0.4".parse().unwrap();
     runtime
         .register_dns("first", &["shared".into(), "old".into()], first_ip)
-        .await;
+        .await
+        .unwrap();
     runtime
         .register_dns("second", &["shared".into()], second_ip)
-        .await;
+        .await
+        .unwrap();
     runtime
         .register_dns("latest", &["shared".into()], latest_ip)
-        .await;
+        .await
+        .unwrap();
     runtime.deregister_dns_by_id("first").await;
     assert_eq!(dns_address(&runtime, "shared"), None);
     assert_eq!(dns_address(&runtime, "old"), None);
@@ -367,7 +390,8 @@ async fn conflicting_dns_restores_the_only_live_owner_and_drops_old_aliases() {
 
     runtime
         .register_dns("second", &["replacement".into()], second_ip)
-        .await;
+        .await
+        .unwrap();
     assert_eq!(dns_address(&runtime, "shared"), None);
     assert_eq!(dns_address(&runtime, "replacement"), Some(second_ip));
 }
@@ -395,7 +419,8 @@ async fn sandbox_cleanup_discovers_authority_without_secondary_indexes() {
             &["orphan".into()],
             std::net::Ipv4Addr::LOCALHOST.into(),
         )
-        .await;
+        .await
+        .unwrap();
 
     runtime.clear_sandbox_host_state().await;
 
@@ -803,8 +828,12 @@ async fn retiring_system_vm_container_networking_drops_every_trace_of_its_contai
     );
     runtime
         .register_dns("web", &["web.local".to_owned()], localhost.into())
-        .await;
-    runtime.register_container_alias("web-name", "web").await;
+        .await
+        .unwrap();
+    runtime
+        .register_container_alias("web-name", "web")
+        .await
+        .unwrap();
     assert!(accepting(host_port).await);
 
     runtime.retire_system_vm_container_networking().await;
@@ -900,7 +929,7 @@ fn resolve_bind_ip_defaults_and_loopback() {
 async fn machine_dns_is_published_under_the_local_domain_and_owned_apart_from_containers() {
     let (runtime, _tmp) = networking_test_runtime();
     let ip: std::net::IpAddr = "192.168.64.5".parse().unwrap();
-    runtime.register_machine_dns("dev", ip).await;
+    runtime.register_machine_dns("dev", ip).await.unwrap();
 
     assert_eq!(dns_address(&runtime, "dev"), Some(ip));
     assert_eq!(dns_address(&runtime, "dev.arcbox.local"), Some(ip));
@@ -944,7 +973,7 @@ async fn machine_dns_name_follows_the_configured_domain_and_the_hostname() {
     );
 
     let ip: std::net::IpAddr = "192.168.64.5".parse().unwrap();
-    runtime.register_machine_dns("my_box.v2", ip).await;
+    runtime.register_machine_dns("my_box.v2", ip).await.unwrap();
     assert_eq!(dns_address(&runtime, "my-box-v2.test.local"), Some(ip));
     assert_eq!(
         runtime.registered_machine_dns_names().await,
@@ -960,8 +989,11 @@ async fn machine_dns_name_follows_the_configured_domain_and_the_hostname() {
 async fn a_machine_sharing_a_hostname_with_another_machine_is_detected() {
     let (runtime, _tmp) = networking_test_runtime();
     let ip: std::net::IpAddr = "192.168.64.5".parse().unwrap();
-    runtime.register_machine_dns("my_box", ip).await;
-    runtime.register_dns("c0ffee", &["my-box".into()], ip).await;
+    runtime.register_machine_dns("my_box", ip).await.unwrap();
+    runtime
+        .register_dns("c0ffee", &["my-box".into()], ip)
+        .await
+        .unwrap();
 
     assert_eq!(
         runtime.machine_holding_hostname("my-box", "my-box").await,

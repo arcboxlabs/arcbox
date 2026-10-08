@@ -107,7 +107,7 @@ pub async fn resume<H: SandboxHost>(
         }
     };
 
-    cleanup::register_live_sandbox_dns(host, machine, sandbox_id, &resumed.ip_address).await;
+    cleanup::register_live_sandbox_dns(host, machine, sandbox_id, &resumed.ip_address).await?;
     Ok(())
 }
 

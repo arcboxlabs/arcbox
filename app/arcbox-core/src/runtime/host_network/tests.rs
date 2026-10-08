@@ -156,7 +156,8 @@ async fn snapshots_skip_active_mutations_and_reject_changed_generations_or_vms()
 
     runtime
         .register_host_dns(&["host".into()], "10.0.2.1".parse().unwrap())
-        .await;
+        .await
+        .unwrap();
     metadata.name = "refreshed".into();
     let snapshot = runtime.capture_container_snapshot().await.unwrap().unwrap();
     assert!(

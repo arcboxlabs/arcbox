@@ -1406,6 +1406,7 @@ impl Runtime {
         bindings: &[(String, u16, u16, String)], // (host_ip, host_port, container_port, protocol)
     ) -> Result<()> {
         let _commit = self.host_network.commit.lock().await;
+        self.begin_host_network_write()?;
         self.start_port_forwarding_raw(machine_name, container_id, bindings)
             .await
     }
@@ -1675,6 +1676,7 @@ impl Runtime {
     /// Stops port forwarding for a container by its string ID.
     pub async fn stop_port_forwarding_by_id(&self, container_id: &str) {
         let _commit = self.host_network.commit.lock().await;
+        self.invalidate_host_network_snapshot();
         self.stop_port_forwarding_raw(container_id).await;
     }
 
@@ -1711,6 +1713,7 @@ impl Runtime {
         exposure: &SandboxPortExposure,
     ) -> Result<()> {
         let _commit = self.host_network.commit.lock().await;
+        self.begin_host_network_write()?;
         let key = Self::sandbox_port_key(
             &exposure.sandbox_id,
             exposure.sandbox_port,
@@ -1743,6 +1746,7 @@ impl Runtime {
     /// Removes the host listener of one sandbox port exposure.
     pub async fn unexpose_sandbox_port(&self, sandbox_id: &str, sandbox_port: u16, protocol: &str) {
         let _commit = self.host_network.commit.lock().await;
+        self.invalidate_host_network_snapshot();
         let key = Self::sandbox_port_key(sandbox_id, sandbox_port, protocol);
         self.stop_port_forwarding_raw(&key).await;
         if let Some(keys) = self.sandbox_port_keys.write().await.get_mut(sandbox_id) {
@@ -1812,6 +1816,7 @@ impl Runtime {
     /// Removes every host listener a sandbox owns (Stop/Remove teardown).
     pub async fn remove_sandbox_ports(&self, sandbox_id: &str) {
         let _commit = self.host_network.commit.lock().await;
+        self.invalidate_host_network_snapshot();
         let mut keys: HashSet<String> = self
             .sandbox_port_keys
             .read()
@@ -1830,28 +1835,38 @@ impl Runtime {
 
     /// Register a sandbox hostname and remember its ownership independently
     /// from Docker container DNS state.
-    pub async fn register_sandbox_dns(&self, sandbox_id: &str, ip: IpAddr) {
-        self.register_dns(
+    ///
+    /// # Errors
+    /// Returns an error when host networking admission is closed.
+    pub async fn register_sandbox_dns(&self, sandbox_id: &str, ip: IpAddr) -> Result<()> {
+        let _commit = self.host_network.commit.lock().await;
+        self.begin_host_network_write()?;
+        self.register_dns_raw(
             &Self::sandbox_dns_owner(sandbox_id),
             &[sandbox_id.to_owned()],
             ip,
-        )
-        .await;
+        );
         self.sandbox_dns_ids
             .write()
             .await
             .insert(sandbox_id.to_owned());
+        Ok(())
     }
 
     /// Register stable host aliases through the same ownership table as
     /// containers and sandboxes.
-    pub async fn register_host_dns(&self, hostnames: &[String], ip: IpAddr) {
-        self.register_dns(HOST_DNS_OWNER, hostnames, ip).await;
+    ///
+    /// # Errors
+    /// Returns an error when host networking admission is closed.
+    pub async fn register_host_dns(&self, hostnames: &[String], ip: IpAddr) -> Result<()> {
+        self.register_dns(HOST_DNS_OWNER, hostnames, ip).await
     }
 
     /// Remove one sandbox's host DNS state.
     pub async fn deregister_sandbox_dns(&self, sandbox_id: &str) {
-        self.deregister_dns_by_id(&Self::sandbox_dns_owner(sandbox_id))
+        let _commit = self.host_network.commit.lock().await;
+        self.invalidate_host_network_snapshot();
+        self.deregister_dns_by_id_raw(&Self::sandbox_dns_owner(sandbox_id))
             .await;
         self.sandbox_dns_ids.write().await.remove(sandbox_id);
     }
@@ -1862,6 +1877,7 @@ impl Runtime {
     /// allocator is allowed to serve new exposures.
     pub async fn clear_sandbox_host_state(&self) {
         let _commit = self.host_network.commit.lock().await;
+        self.invalidate_host_network_snapshot();
         let mut port_keys = self.all_sandbox_authority_keys().await;
         port_keys.extend(
             self.sandbox_port_keys
@@ -1884,7 +1900,7 @@ impl Runtime {
             .map(str::to_owned)
             .collect();
         for owner in dns_owners {
-            self.deregister_dns_by_id(&owner).await;
+            self.deregister_dns_by_id_raw(&owner).await;
         }
         self.sandbox_port_keys.write().await.clear();
         self.sandbox_dns_ids.write().await.clear();
@@ -1954,10 +1970,16 @@ impl Runtime {
     }
 
     /// Replaces a container's claims from one validated inspect, including address loss.
-    pub async fn register_container_dns(&self, container: &ContainerMetadata) {
-        self.register_container_alias(&container.name, &container.id)
-            .await;
+    ///
+    /// # Errors
+    /// Returns an error when host networking admission is closed.
+    pub async fn register_container_dns(&self, container: &ContainerMetadata) -> Result<()> {
+        let _commit = self.host_network.commit.lock().await;
+        self.begin_host_network_write()?;
+        self.register_container_alias_raw(&container.name, &container.id)
+            .await?;
         self.replace_container_dns(container);
+        Ok(())
     }
 
     fn replace_container_dns(&self, container: &ContainerMetadata) {
@@ -1978,7 +2000,22 @@ impl Runtime {
 
     /// Registers exact resource names; bare labels also receive the configured domain suffix.
     /// Invalid names are reported individually without discarding other valid claims.
-    pub async fn register_dns(&self, container_id: &str, hostnames: &[String], ip: IpAddr) {
+    ///
+    /// # Errors
+    /// Returns an error when host networking admission is closed.
+    pub async fn register_dns(
+        &self,
+        container_id: &str,
+        hostnames: &[String],
+        ip: IpAddr,
+    ) -> Result<()> {
+        let _commit = self.host_network.commit.lock().await;
+        self.begin_host_network_write()?;
+        self.register_dns_raw(container_id, hostnames, ip);
+        Ok(())
+    }
+
+    fn register_dns_raw(&self, container_id: &str, hostnames: &[String], ip: IpAddr) {
         let authority = container_id
             .split_once(':')
             .map_or("container", |(kind, _)| kind);
@@ -2025,10 +2062,21 @@ impl Runtime {
     }
 
     /// Replaces a container's unique name so lifecycle calls cannot use its old alias.
-    pub async fn register_container_alias(&self, name: &str, container_id: &str) {
+    ///
+    /// # Errors
+    /// Returns an error when host networking admission is closed.
+    pub async fn register_container_alias(&self, name: &str, container_id: &str) -> Result<()> {
+        let _commit = self.host_network.commit.lock().await;
+        self.begin_host_network_write()?;
+        self.register_container_alias_raw(name, container_id).await
+    }
+
+    async fn register_container_alias_raw(&self, name: &str, container_id: &str) -> Result<()> {
         let mut aliases = self.container_aliases.write().await;
+        self.ensure_host_network_open()?;
         aliases.retain(|_, id| id != container_id);
         aliases.insert(name.to_owned(), container_id.to_owned());
+        Ok(())
     }
 
     /// Removes DNS entries for a container by its canonical ID.
@@ -2040,6 +2088,12 @@ impl Runtime {
     /// Shared DNS hostnames (e.g. compose service-level names used by multiple
     /// replicas) are restored to another owner's IP when one owner leaves.
     pub async fn deregister_dns_by_id(&self, container_id: &str) {
+        let _commit = self.host_network.commit.lock().await;
+        self.invalidate_host_network_snapshot();
+        self.deregister_dns_by_id_raw(container_id).await;
+    }
+
+    async fn deregister_dns_by_id_raw(&self, container_id: &str) {
         self.container_aliases
             .write()
             .await
@@ -2115,10 +2169,11 @@ impl Runtime {
     /// reconciler rebuilds the state from the guest once it is back.
     pub async fn retire_system_vm_container_networking(&self) {
         let _commit = self.host_network.commit.lock().await;
+        self.invalidate_host_network_snapshot();
         let containers = self.registered_container_ids().await;
         for id in &containers {
             self.stop_port_forwarding_raw(id).await;
-            self.deregister_dns_by_id(id).await;
+            self.deregister_dns_by_id_raw(id).await;
         }
         if !containers.is_empty() {
             tracing::info!(
@@ -2143,6 +2198,7 @@ impl Runtime {
     /// Stops all active port forwarders across every machine.
     pub async fn stop_port_forwarding_all(&self) {
         let _commit = self.host_network.commit.lock().await;
+        self.invalidate_host_network_snapshot();
         self.stop_port_forwarding_all_raw().await;
     }
 

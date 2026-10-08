@@ -260,7 +260,7 @@ async fn successful_rename_with_invalid_inspect_preserves_previous_host_ownershi
             &serde_json::from_str(INSPECT_WEB).unwrap(),
         )
         .unwrap();
-        runtime.register_container_dns(&metadata).await;
+        runtime.register_container_dns(&metadata).await.unwrap();
         let previous = runtime.network_manager().local_dns_entries();
 
         let (status, error) = send(&router, "POST", "/containers/web/rename?name=renamed").await;
@@ -319,7 +319,7 @@ async fn network_refresh_is_idempotent_and_rename_replaces_the_old_alias() {
         &serde_json::from_str(INSPECT_WEB).unwrap(),
     )
     .unwrap();
-    runtime.register_container_dns(&metadata).await;
+    runtime.register_container_dns(&metadata).await.unwrap();
     let revision = runtime
         .https_signing_revision("web.arcbox.local")
         .await
@@ -536,7 +536,7 @@ async fn only_forced_disconnect_can_remove_an_orphan_endpoint() {
             &serde_json::from_str(INSPECT_WEB).unwrap(),
         )
         .unwrap();
-        runtime.register_container_dns(&metadata).await;
+        runtime.register_container_dns(&metadata).await.unwrap();
         let previous = runtime.network_manager().local_dns_entries();
         let body = format!("{{ \"Container\": \"orphan\", \"Force\": {force} }}");
         let uri = format!("/networks/bridge/{operation}");

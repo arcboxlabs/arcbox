@@ -30,7 +30,9 @@ pub fn spawn(ctx: &DaemonContext, runtime: &Arc<Runtime>) {
     let shutdown = ctx.shutdown.clone();
     let runtime = Arc::clone(runtime);
     drop(tokio::spawn(async move {
-        run(&runtime, events, shutdown).await;
+        if let Err(error) = run(&runtime, events, shutdown).await {
+            tracing::error!(%error, "machine DNS publication stopped");
+        }
     }));
 }
 
@@ -38,8 +40,8 @@ async fn run(
     runtime: &Runtime,
     mut events: broadcast::Receiver<Event>,
     shutdown: CancellationToken,
-) {
-    sync_all(runtime).await;
+) -> arcbox_core::Result<()> {
+    sync_all(runtime).await?;
     loop {
         tokio::select! {
             () = shutdown.cancelled() => break,
@@ -48,30 +50,34 @@ async fn run(
                     Event::MachineStarted { name }
                     | Event::MachineStopped { name }
                     | Event::MachineRemoved { name },
-                ) => sync(runtime, &name).await,
+                ) => sync(runtime, &name).await?,
                 Ok(_) => {}
-                Err(RecvError::Lagged(_)) => sync_all(runtime).await,
+                Err(RecvError::Lagged(_)) => sync_all(runtime).await?,
                 Err(RecvError::Closed) => break,
             },
         }
     }
+    Ok(())
 }
 
 /// Brings `name`'s DNS entry in line with its machine record.
-async fn sync(runtime: &Runtime, name: &str) {
+async fn sync(runtime: &Runtime, name: &str) -> arcbox_core::Result<()> {
     let machine = runtime.machine_manager().get(name);
     let target = machine
         .as_ref()
         .and_then(|machine| published_address(machine.state, machine.bridge_ip_address.as_deref()));
     match target {
         Some(ip) => runtime.register_machine_dns(name, ip).await,
-        None => runtime.deregister_machine_dns(name).await,
+        None => {
+            runtime.deregister_machine_dns(name).await;
+            Ok(())
+        }
     }
 }
 
 /// Every machine the daemon knows or still publishes, for the lagged case:
 /// a machine removed during the lag is only in the second set.
-async fn sync_all(runtime: &Runtime) {
+async fn sync_all(runtime: &Runtime) -> arcbox_core::Result<()> {
     let mut names: Vec<String> = runtime
         .machine_manager()
         .list()
@@ -82,8 +88,9 @@ async fn sync_all(runtime: &Runtime) {
     names.sort_unstable();
     names.dedup();
     for name in names {
-        sync(runtime, &name).await;
+        sync(runtime, &name).await?;
     }
+    Ok(())
 }
 
 /// The address a machine in `state` is published at: its bridge address
@@ -150,7 +157,8 @@ mod tests {
         let bus: &EventBus = runtime.event_bus();
         runtime
             .register_machine_dns("gone", "192.168.64.9".parse().unwrap())
-            .await;
+            .await
+            .unwrap();
         let shutdown = CancellationToken::new();
         let task = {
             let runtime = Arc::clone(&runtime);
@@ -180,6 +188,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), task)
             .await
             .expect("loop exits on shutdown")
-            .expect("loop task panicked");
+            .expect("loop task panicked")
+            .expect("machine DNS publication failed");
     }
 }

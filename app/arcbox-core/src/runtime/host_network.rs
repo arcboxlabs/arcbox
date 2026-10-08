@@ -116,6 +116,33 @@ impl HostMutationLease<'_> {
 }
 
 impl Runtime {
+    pub(super) fn begin_host_network_write(&self) -> Result<()> {
+        let mut activity = self
+            .host_network
+            .activity
+            .lock()
+            .map_err(|_| CoreError::LockPoisoned)?;
+        activity.check_open()?;
+        activity.advance();
+        activity.check_open()
+    }
+
+    pub(super) fn invalidate_host_network_snapshot(&self) {
+        self.host_network
+            .activity
+            .lock()
+            .expect("host activity lock poisoned")
+            .advance();
+    }
+
+    pub(super) fn ensure_host_network_open(&self) -> Result<()> {
+        self.host_network
+            .activity
+            .lock()
+            .map_err(|_| CoreError::LockPoisoned)?
+            .check_open()
+    }
+
     async fn update_container_ports(
         &self,
         vm: &VmIncarnation,
@@ -150,11 +177,7 @@ impl Runtime {
         expected: &VmIncarnation,
         publish: impl FnOnce() -> T,
     ) -> Result<T> {
-        self.host_network
-            .activity
-            .lock()
-            .map_err(|_| CoreError::LockPoisoned)?
-            .check_open()?;
+        self.ensure_host_network_open()?;
         #[cfg(any(test, feature = "test-support"))]
         if let Some(fixture) = &self.host_network.fixture {
             let current = fixture.0.read().map_err(|_| CoreError::LockPoisoned)?;

@@ -223,7 +223,7 @@ mod tests {
                 target: arcbox_dns::registry::InstanceTarget::Current,
             }]);
         let metadata = arcbox_dns::container::ContainerMetadata::from_inspect(&inspect).unwrap();
-        runtime.register_container_dns(&metadata).await;
+        runtime.register_container_dns(&metadata).await.unwrap();
         let revision = runtime
             .https_signing_revision("custom.local")
             .await
@@ -247,7 +247,7 @@ mod tests {
                 .unwrap()
                 .contains_key("custom.local.arcbox.local")
         );
-        runtime.register_container_dns(&metadata).await;
+        runtime.register_container_dns(&metadata).await.unwrap();
         assert_eq!(
             runtime.https_signing_revision("custom.local").await,
             Some(revision)
@@ -255,7 +255,7 @@ mod tests {
 
         inspect["NetworkSettings"]["Networks"] = serde_json::json!({});
         let metadata = arcbox_dns::container::ContainerMetadata::from_inspect(&inspect).unwrap();
-        runtime.register_container_dns(&metadata).await;
+        runtime.register_container_dns(&metadata).await.unwrap();
         runtime.container_aliases.write().await.clear();
         assert!(
             runtime
@@ -286,7 +286,7 @@ mod tests {
             "web.demo.arcbox.local".into(),
             "absolute.arcbox.local".into(),
         ];
-        runtime.register_dns("first", &aliases, ip).await;
+        runtime.register_dns("first", &aliases, ip).await.unwrap();
         let first = runtime.https_signing_revision(name).await.unwrap();
         for alias in [name, "web.demo.arcbox.local", "absolute.arcbox.local"] {
             assert_eq!(runtime.https_signing_revision(alias).await, Some(first));
@@ -296,14 +296,20 @@ mod tests {
             None
         );
 
-        runtime.register_dns("first", &aliases, ip).await;
+        runtime.register_dns("first", &aliases, ip).await.unwrap();
         let renewed = runtime.https_signing_revision(name).await.unwrap();
         assert_eq!(renewed, first);
-        runtime.register_dns("second", &["web".into()], ip).await;
+        runtime
+            .register_dns("second", &["web".into()], ip)
+            .await
+            .unwrap();
         assert_eq!(runtime.https_signing_revision(name).await, None);
         runtime.deregister_dns_by_id("second").await;
         for owner in ["sandbox:other", "machine:other", "system:host"] {
-            runtime.register_dns(owner, &["web".into()], ip).await;
+            runtime
+                .register_dns(owner, &["web".into()], ip)
+                .await
+                .unwrap();
             assert_eq!(runtime.https_signing_revision(name).await, None, "{owner}");
             runtime.deregister_dns_by_id(owner).await;
             assert_eq!(runtime.https_signing_revision(name).await, Some(first));
@@ -440,7 +446,8 @@ mod tests {
         );
         runtime
             .register_dns("container", &["web".into()], "10.0.2.3".parse().unwrap())
-            .await;
+            .await
+            .unwrap();
         let name = "web.one.dev.arcbox.local";
         let first = runtime.https_signing_revision(name).await.unwrap();
         for name in [
@@ -452,7 +459,8 @@ mod tests {
         }
         runtime
             .register_dns("container", &["web".into()], "10.0.2.3".parse().unwrap())
-            .await;
+            .await
+            .unwrap();
         let renewed = runtime.https_signing_revision(name).await.unwrap();
         assert_eq!(renewed, first);
         runtime.deregister_dns_by_id("container").await;

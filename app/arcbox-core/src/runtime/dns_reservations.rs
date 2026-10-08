@@ -43,7 +43,8 @@ mod tests {
             ["host", "host.docker.internal", "gateway.docker.internal"].map(str::to_owned);
         runtime
             .register_dns("container", &host_names, container_ip)
-            .await;
+            .await
+            .unwrap();
         {
             let mut claims = runtime
                 .dns_registry
@@ -88,7 +89,10 @@ mod tests {
             Some(container_ip)
         );
 
-        runtime.register_host_dns(&host_names, host_ip).await;
+        runtime
+            .register_host_dns(&host_names, host_ip)
+            .await
+            .unwrap();
         for name in [
             "host",
             "host.dev.arcbox.local",

@@ -25,17 +25,12 @@ use super::Runtime;
 pub(super) const MACHINE_DNS_OWNER_PREFIX: &str = "machine:";
 
 impl Runtime {
-    /// Publishes `machine` at `ip`, replacing any earlier address. A name
-    /// that cannot be a hostname (impossible for a created machine, which
-    /// `create` already refused) is logged and not published.
-    pub async fn register_machine_dns(&self, machine: &str, ip: IpAddr) {
-        let hostname = match machine_hostname(machine) {
-            Ok(hostname) => hostname,
-            Err(e) => {
-                tracing::warn!(machine, error = %e, "machine has no publishable hostname");
-                return;
-            }
-        };
+    /// Publishes `machine` at `ip`, replacing any earlier address.
+    ///
+    /// # Errors
+    /// Returns an error if the hostname is invalid or host networking admission is closed.
+    pub async fn register_machine_dns(&self, machine: &str, ip: IpAddr) -> super::Result<()> {
+        let hostname = machine_hostname(machine)?;
         if let Some(other) = self.machine_holding_hostname(machine, &hostname).await {
             tracing::warn!(
                 machine,
@@ -45,7 +40,7 @@ impl Runtime {
             );
         }
         self.register_dns(&Self::machine_dns_owner(machine), &[hostname], ip)
-            .await;
+            .await
     }
 
     /// The machine other than `machine` whose published hostname is

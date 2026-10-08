@@ -133,7 +133,8 @@ mod tests {
         );
         runtime
             .register_dns("container", &["web".into()], "10.0.2.3".parse().unwrap())
-            .await;
+            .await
+            .unwrap();
         (runtime, directory)
     }
 
@@ -194,7 +195,8 @@ mod tests {
             if let Some(owner) = owner {
                 runtime
                     .register_dns(owner, &["web".into()], address.parse().unwrap())
-                    .await;
+                    .await
+                    .unwrap();
             }
             finish.send(()).unwrap();
             let result = task.await.unwrap();

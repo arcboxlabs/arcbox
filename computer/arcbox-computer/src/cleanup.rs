@@ -64,18 +64,22 @@ pub async fn live_sandbox_matches<H: SandboxHost>(
 /// The shared DNS discipline of Create, Restore, and Resume: replays
 /// retain the original result even after Stop, so the liveness of the
 /// exact (sandbox, IP) pair is always re-confirmed before registering.
+///
+/// # Errors
+/// Returns an error when the host rejects DNS publication.
 pub async fn register_live_sandbox_dns<H: SandboxHost>(
     host: &H,
     machine: &str,
     sandbox_id: &str,
     ip_address: &str,
-) {
+) -> arcbox_engine::Result<()> {
     let _host_state = host.lock_host_state().await;
     if let Ok(ip) = ip_address.parse()
         && live_sandbox_matches(host, machine, sandbox_id, ip).await
     {
-        host.register_dns(sandbox_id, ip).await;
+        host.register_dns(sandbox_id, ip).await?;
     }
+    Ok(())
 }
 
 fn live_sandbox_info_matches(info: &SandboxInfo, ip: std::net::IpAddr) -> bool {

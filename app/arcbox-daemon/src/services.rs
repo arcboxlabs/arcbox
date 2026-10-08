@@ -161,7 +161,7 @@ pub async fn start_services(
         .set(Arc::clone(runtime))
         .map_err(|_| anyhow::anyhow!("start_services called twice"))?;
 
-    register_host_dns(runtime).await;
+    register_host_dns(runtime).await?;
 
     let dns_shutdown = ctx.shutdown.clone();
     let network_manager = Arc::clone(runtime.network_manager());
@@ -776,7 +776,7 @@ fn should_log_route_failure(consecutive_failures: u32) -> bool {
     consecutive_failures == 1 || consecutive_failures.is_multiple_of(30)
 }
 
-async fn register_host_dns(runtime: &Arc<Runtime>) {
+async fn register_host_dns(runtime: &Arc<Runtime>) -> arcbox_core::Result<()> {
     let network_cfg = &runtime.config().network;
     let gateway_ip = network_cfg
         .gateway
@@ -794,7 +794,7 @@ async fn register_host_dns(runtime: &Arc<Runtime>) {
             ],
             ip,
         )
-        .await;
+        .await
 }
 
 fn first_address_in_subnet(subnet: &str) -> Option<Ipv4Addr> {

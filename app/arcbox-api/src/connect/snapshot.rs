@@ -84,7 +84,8 @@ impl pb::SandboxSnapshotService for SandboxSnapshotServiceImpl {
         // Register restored sandbox DNS (shared live-match discipline;
         // see register_live_sandbox_dns).
         sandbox_cleanup::register_live_sandbox_dns(runtime, &machine, &resp.id, &resp.ip_address)
-            .await;
+            .await
+            .map_err(ApiError::from)?;
 
         Response::ok(resp)
     }

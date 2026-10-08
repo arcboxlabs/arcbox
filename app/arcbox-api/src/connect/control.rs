@@ -77,7 +77,8 @@ impl pb::SandboxService for SandboxServiceImpl {
         // Register sandbox DNS so the host can resolve sandbox-id.arcbox.local
         // (shared live-match discipline; see register_live_sandbox_dns).
         sandbox_cleanup::register_live_sandbox_dns(runtime, &machine, &resp.id, &resp.ip_address)
-            .await;
+            .await
+            .map_err(ApiError::from)?;
 
         Response::ok(resp)
     }
