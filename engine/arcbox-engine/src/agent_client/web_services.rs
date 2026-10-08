@@ -54,10 +54,11 @@ impl AgentClient {
     /// Returns an error if the agent request fails.
     pub async fn list_container_web_services(
         &mut self,
+        request: ListContainerWebServicesRequest,
     ) -> Result<ListContainerWebServicesResponse> {
         self.unary_rpc(
             MessageType::ListContainerWebServicesRequest,
-            &ListContainerWebServicesRequest::default().encode_to_vec(),
+            &request.encode_to_vec(),
             MessageType::ListContainerWebServicesResponse,
         )
         .await
@@ -70,10 +71,11 @@ impl AgentClient {
     /// Returns an error if the agent request fails.
     pub fn list_container_web_services_blocking(
         &mut self,
+        request: ListContainerWebServicesRequest,
     ) -> Result<ListContainerWebServicesResponse> {
         self.unary_rpc_blocking(
             MessageType::ListContainerWebServicesRequest,
-            &ListContainerWebServicesRequest::default().encode_to_vec(),
+            &request.encode_to_vec(),
             MessageType::ListContainerWebServicesResponse,
         )
     }

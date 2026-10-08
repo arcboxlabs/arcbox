@@ -361,6 +361,24 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn web_service_queries_validate_hostname_before_runtime_access() {
+        let (_dir, socket, shutdown) = spawn_control_plane().await;
+        for (body, code) in [
+            ("{}", "unavailable"),
+            (r#"{"hostname":"API.LOCAL"}"#, "unavailable"),
+            (r#"{"hostname":"*.api.local"}"#, "invalid_argument"),
+            (r#"{"hostname":"https://api.local"}"#, "invalid_argument"),
+        ] {
+            let response = http1_request(&socket, &format!(
+                "POST /arcbox.v1.SystemService/ListWebServices HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()
+            )).await;
+            let response: serde_json::Value = serde_json::from_str(&dechunk(&response)).unwrap();
+            assert_eq!(response["code"], code, "{body}");
+        }
+        shutdown.cancel();
+    }
+
     /// Reflection has to keep answering through the real router, or
     /// `grpcurl` and `buf curl` lose the ability to discover the API without
     /// vendoring the protos.

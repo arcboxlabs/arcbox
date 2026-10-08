@@ -449,12 +449,18 @@ impl pb::SystemService for SystemServiceImpl {
     async fn list_web_services(
         &self,
         _ctx: RequestContext,
-        _request: ServiceRequest<'_, pb::Empty>,
+        request: ServiceRequest<'_, pb::ListWebServicesRequest>,
     ) -> ServiceResult<pb::ListWebServicesResponse> {
+        let hostname = request.hostname.to_ascii_lowercase();
+        let hostname = if hostname.is_empty() {
+            None
+        } else {
+            Some(hostname.parse().map_err(ConnectError::invalid_argument)?)
+        };
         let services = self
             .runtime
             .ready()?
-            .list_web_services()
+            .list_web_services(hostname)
             .await
             .map_err(crate::ApiError::from)?;
         Response::ok(pb::ListWebServicesResponse {
@@ -473,7 +479,7 @@ impl pb::SystemService for SystemServiceImpl {
             let runtime = Arc::clone(&runtime);
             async move {
                 let services = runtime
-                    .list_web_services()
+                    .list_web_services(None)
                     .await
                     .map_err(crate::ApiError::from)?;
                 Ok(pb::ListWebServicesResponse {

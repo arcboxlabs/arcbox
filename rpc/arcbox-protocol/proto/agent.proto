@@ -88,7 +88,10 @@ message AgentPingResponse {
     uint32 protocol_version = 3;
 }
 
-message ListContainerWebServicesRequest {}
+message ListContainerWebServicesRequest {
+    // Empty lists exact aliases. A concrete name resolves its current installed route.
+    string hostname = 1;
+}
 
 message ListContainerWebServicesResponse {
     repeated ContainerWebService services = 1;

@@ -1,8 +1,9 @@
 //! Host-owned signing names and public URLs derived from installed guest web routes.
 
 use arcbox_connect::v1::{
-    ContainerWebService, ReconcileHttpsAccessRequest, ReconcileHttpsAccessResponse, WebService,
-    container_web_service::HttpsBackend, web_service::HttpsMode,
+    ContainerWebService, ListContainerWebServicesRequest, ReconcileHttpsAccessRequest,
+    ReconcileHttpsAccessResponse, WebService, container_web_service::HttpsBackend,
+    web_service::HttpsMode,
 };
 use arcbox_constants::dns::{Domain, LOCAL_CA_DNS_SUBTREE};
 use arcbox_dns::registry::{Lookup, Registry};
@@ -68,27 +69,51 @@ impl Runtime {
     /// # Errors
     ///
     /// Returns an error if the guest cannot be reached or reports an invalid route.
-    pub async fn list_web_services(&self) -> Result<Vec<WebService>> {
+    pub async fn list_web_services(&self, hostname: Option<Domain>) -> Result<Vec<WebService>> {
+        let request = ListContainerWebServicesRequest {
+            hostname: hostname
+                .as_ref()
+                .map_or_else(String::new, ToString::to_string),
+            ..Default::default()
+        };
         let mut agent = self.connect_system_agent().await?;
         let response = if agent.is_blocking() {
-            tokio::task::spawn_blocking(move || agent.list_container_web_services_blocking())
+            tokio::task::spawn_blocking(move || agent.list_container_web_services_blocking(request))
                 .await
                 .map_err(|error| CoreError::Vm(format!("web services task panicked: {error}")))??
         } else {
-            agent.list_container_web_services().await?
+            agent.list_container_web_services(request).await?
         };
         let registry = self
             .dns_registry
             .read()
             .expect("DNS registry lock poisoned");
-        response
-            .services
-            .into_iter()
-            .try_fold(Vec::new(), |mut services, route| {
-                services.extend(container_services(route, &registry)?);
-                Ok(services)
-            })
+        selected_services(response.services, hostname.as_ref(), &registry)
     }
+}
+
+fn selected_services(
+    routes: Vec<ContainerWebService>,
+    hostname: Option<&Domain>,
+    registry: &Registry,
+) -> Result<Vec<WebService>> {
+    if let Some(name) = hostname {
+        if routes.len() > 1
+            || routes
+                .iter()
+                .any(|route| route.hostnames != [name.as_str()])
+        {
+            return Err(CoreError::Vm(
+                "guest web route does not match the requested hostname".into(),
+            ));
+        }
+    }
+    routes
+        .into_iter()
+        .try_fold(Vec::new(), |mut services, route| {
+            services.extend(container_services(route, registry)?);
+            Ok(services)
+        })
 }
 
 fn container_services(route: ContainerWebService, registry: &Registry) -> Result<Vec<WebService>> {
@@ -496,5 +521,49 @@ mod tests {
         assert_eq!(services[0].domains, ["demo-web-1.arcbox.local"]);
         registry.remove("abc123");
         assert_eq!(container_services(route(), &registry).unwrap(), []);
+    }
+
+    #[test]
+    fn hostname_queries_validate_the_guest_selection_before_publishing_urls() {
+        let name: Domain = "first.api.local".parse().unwrap();
+        let mut registry = Registry::default();
+        registry
+            .replace(
+                "abc123".into(),
+                vec![arcbox_dns::claims::Claim::exclusive(
+                    arcbox_dns::NamePattern::parse_custom("*.api.local").unwrap(),
+                    "abc123".into(),
+                    "container".into(),
+                )],
+                Some("10.0.2.3".parse().unwrap()),
+            )
+            .unwrap();
+        let mut route = route();
+        route.hostnames = vec![name.to_string()];
+        let services = selected_services(vec![route.clone()], Some(&name), &registry).unwrap();
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].https_url, "https://first.api.local");
+        assert_eq!(services[0].https_mode, HttpsMode::Managed);
+        assert!(
+            selected_services(vec![route.clone(), route.clone()], Some(&name), &registry).is_err()
+        );
+        for hostnames in [
+            vec![],
+            vec!["other.api.local".into()],
+            vec![name.to_string(), "other.api.local".into()],
+        ] {
+            let mut tampered = route.clone();
+            tampered.hostnames = hostnames;
+            assert!(selected_services(vec![tampered], Some(&name), &registry).is_err());
+        }
+        for (owner, address) in [("other", "10.0.2.3"), ("abc123", "10.0.2.4")] {
+            let mut stale = route.clone();
+            stale.container_id = owner.into();
+            stale.ipv4_address = address.into();
+            assert_eq!(
+                selected_services(vec![stale], Some(&name), &registry).unwrap(),
+                []
+            );
+        }
     }
 }

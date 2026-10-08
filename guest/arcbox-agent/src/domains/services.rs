@@ -23,6 +23,24 @@ struct Installed {
     selected: SelectedRoutes,
 }
 
+impl Installed {
+    fn service(&self, owner: &str, hostnames: Vec<String>) -> ContainerWebService {
+        ContainerWebService {
+            container_id: owner.into(),
+            hostnames,
+            ipv4_address: self.ip.to_string(),
+            http_port: self.selected.http.map_or(0, u32::from),
+            https_backend: self.selected.https.map(|backend| match backend {
+                super::HttpsBackend::Native(port) => HttpsBackend::NativeHttpsPort(u32::from(port)),
+                super::HttpsBackend::Terminate(port) => {
+                    HttpsBackend::TerminatedHttpPort(u32::from(port))
+                }
+            }),
+            ..Default::default()
+        }
+    }
+}
+
 /// Pins one handshake to the current owner, registration, and installed upstream.
 #[derive(Debug, Eq)]
 pub(super) struct TlsRoute {
@@ -178,9 +196,20 @@ impl WebServices {
     }
 
     /// Shared Compose aliases belong only to the container DNS currently selects.
-    pub async fn snapshot(&self) -> Vec<ContainerWebService> {
+    pub async fn snapshot(&self, hostname: Option<&Domain>) -> Vec<ContainerWebService> {
         let dns = self.dns.read().await;
         let installed = self.installed.read().expect("web services lock poisoned");
+        if let Some(name) = hostname {
+            let Lookup::Matched { claim, address, .. } = dns.resolve(name) else {
+                return Vec::new();
+            };
+            return installed
+                .get(claim.owner())
+                .filter(|route| address == IpAddr::V4(route.ip))
+                .map(|route| route.service(claim.owner(), vec![name.to_string()]))
+                .into_iter()
+                .collect();
+        }
         let mut services: Vec<_> = installed
             .iter()
             .filter_map(|(id, route)| {
@@ -195,21 +224,7 @@ impl WebServices {
                 if hostnames.is_empty() {
                     return None;
                 }
-                Some(ContainerWebService {
-                    container_id: id.clone(),
-                    hostnames,
-                    ipv4_address: route.ip.to_string(),
-                    http_port: route.selected.http.map_or(0, u32::from),
-                    https_backend: route.selected.https.map(|backend| match backend {
-                        super::HttpsBackend::Native(port) => {
-                            HttpsBackend::NativeHttpsPort(u32::from(port))
-                        }
-                        super::HttpsBackend::Terminate(port) => {
-                            HttpsBackend::TerminatedHttpPort(u32::from(port))
-                        }
-                    }),
-                    ..Default::default()
-                })
+                Some(route.service(id, hostnames))
             })
             .collect();
         services.sort_by(|a, b| a.container_id.cmp(&b.container_id));
@@ -315,7 +330,7 @@ mod tests {
         ] {
             assert!(services.tls_route(name, ip).await.is_none(), "{name}");
         }
-        let snapshot = services.snapshot().await;
+        let snapshot = services.snapshot(None).await;
         assert!(
             snapshot[0]
                 .hostnames
@@ -326,7 +341,7 @@ mod tests {
         Arc::make_mut(services.installed.write().unwrap().get_mut("a").unwrap())
             .selected
             .https = Some(super::super::HttpsBackend::Native(8443));
-        let snapshot = services.snapshot().await;
+        let snapshot = services.snapshot(None).await;
         assert!(
             snapshot[0]
                 .hostnames
@@ -487,12 +502,12 @@ mod tests {
                 change == "idempotent",
                 "{change}"
             );
-            let before = services.snapshot().await;
+            let before = services.snapshot(None).await;
             services.invalidate_tls_route(name, ip, &route).await;
             if change == "idempotent" {
                 assert!(!services.contains("a"));
             } else {
-                assert_eq!(services.snapshot().await, before, "{change}");
+                assert_eq!(services.snapshot(None).await, before, "{change}");
             }
         }
     }
@@ -560,7 +575,7 @@ mod tests {
         ] {
             register(&services, id, &aliases, ip, "one.dev.arcbox.local").await;
         }
-        let snapshot = services.snapshot().await;
+        let snapshot = services.snapshot(None).await;
         assert_eq!(snapshot[1].hostnames, ["demo-web-2.one.dev.arcbox.local"]);
         assert_eq!(
             snapshot[0].hostnames,
@@ -575,7 +590,7 @@ mod tests {
         );
 
         services.dns.write().await.remove("a");
-        let snapshot = services.snapshot().await;
+        let snapshot = services.snapshot(None).await;
         assert_eq!(
             snapshot[0].hostnames,
             [
@@ -586,6 +601,9 @@ mod tests {
         assert_eq!(snapshot.len(), 1);
 
         services.remove("b");
-        assert_eq!(services.snapshot().await, Vec::<ContainerWebService>::new());
+        assert_eq!(
+            services.snapshot(None).await,
+            Vec::<ContainerWebService>::new()
+        );
     }
 }

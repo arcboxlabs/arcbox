@@ -231,7 +231,7 @@ non-obvious invariants and failure signatures.
   Preserve unknown DNS query types through local lookup. Missing names under the configured suffix remain local for every query type.
   Resolve conflicts as SERVFAIL. Short-name lookup requires an exact candidate; never append the suffix to match a wildcard.
   `ListContainerWebServices` reports installed routes, not raw listeners. The
-  snapshot joins exact claims with the current DNS registry using both owner and address.
+  snapshot joins exact claims with the current DNS registry using both owner and address. A nonempty `hostname` resolves one concrete name through the Registry, including wildcard claims, and returns at most one installed route.
   Shared Compose claims select the smallest complete container ID; custom claims remain exclusive.
   The host must use this snapshot to build URLs instead of guessing from ports.
   The HTTPS proxy checks SNI against the same DNS registry before requesting a

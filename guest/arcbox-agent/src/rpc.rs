@@ -76,7 +76,7 @@ impl ErrorResponse {
 pub enum RpcRequest {
     Ping(PingRequest),
     GetSystemInfo,
-    ListContainerWebServices,
+    ListContainerWebServices(ListContainerWebServicesRequest),
     ReconcileHttpsAccess(ReconcileHttpsAccessRequest),
     EnsureRuntime(RuntimeEnsureRequest),
     RuntimeStatus(RuntimeStatusRequest),
@@ -337,8 +337,8 @@ pub fn parse_request(msg_type: MessageType, payload: &[u8]) -> Result<RpcRequest
         }
         MessageType::GetSystemInfoRequest => Ok(RpcRequest::GetSystemInfo),
         MessageType::ListContainerWebServicesRequest => {
-            ListContainerWebServicesRequest::decode_from_slice(payload)?;
-            Ok(RpcRequest::ListContainerWebServices)
+            let request = ListContainerWebServicesRequest::decode_from_slice(payload)?;
+            Ok(RpcRequest::ListContainerWebServices(request))
         }
         MessageType::ReconcileHttpsAccessRequest => Ok(RpcRequest::ReconcileHttpsAccess(
             ReconcileHttpsAccessRequest::decode_from_slice(payload)?,

@@ -1582,7 +1582,13 @@ pub mod storage_recovery_progress {
         }
     }
 }
-/// Public CA metadata and native trust. This does not assert network reachability.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListWebServicesRequest {
+    /// Empty lists exact aliases. A concrete name returns at most one current service.
+    #[prost(string, tag = "1")]
+    pub hostname: ::prost::alloc::string::String,
+}
+/// Installed routes validated against current DNS ownership.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListWebServicesResponse {
     #[prost(message, repeated, tag = "1")]
@@ -3588,8 +3594,12 @@ pub struct AgentPingResponse {
     #[prost(uint32, tag = "3")]
     pub protocol_version: u32,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ListContainerWebServicesRequest {}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListContainerWebServicesRequest {
+    /// Empty lists exact aliases. A concrete name resolves its current installed route.
+    #[prost(string, tag = "1")]
+    pub hostname: ::prost::alloc::string::String,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListContainerWebServicesResponse {
     #[prost(message, repeated, tag = "1")]

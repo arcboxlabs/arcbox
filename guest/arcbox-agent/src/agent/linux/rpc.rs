@@ -231,10 +231,22 @@ async fn handle_request(
                 Err(error) => RpcResponse::Error(ErrorResponse::new(400, error.to_string())),
             })
         }
-        RpcRequest::ListContainerWebServices => {
+        RpcRequest::ListContainerWebServices(request) => {
+            let hostname = if request.hostname.is_empty() {
+                None
+            } else {
+                match request.hostname.to_ascii_lowercase().parse() {
+                    Ok(name) => Some(name),
+                    Err(error) => {
+                        return RequestResult::Single(RpcResponse::Error(ErrorResponse::new(
+                            400, error,
+                        )));
+                    }
+                }
+            };
             RequestResult::Single(RpcResponse::ListContainerWebServices(
                 arcbox_connect::v1::ListContainerWebServicesResponse {
-                    services: web_services.snapshot().await,
+                    services: web_services.snapshot(hostname.as_ref()).await,
                     ..Default::default()
                 },
             ))
@@ -812,39 +824,43 @@ mod tests {
             Default::default(),
             tokio_util::sync::CancellationToken::new(),
         );
-        let claims = arcbox_dns::claims::Claim::generated(
+        let mut claims = arcbox_dns::claims::Claim::generated(
             "api.arcbox.local".parse().unwrap(),
             "a".into(),
             "container".into(),
-        );
+        )
+        .to_vec();
+        claims.push(arcbox_dns::claims::Claim::exclusive(
+            arcbox_dns::NamePattern::parse_custom("*.svc.local").unwrap(),
+            "a".into(),
+            "container".into(),
+        ));
         dns.containers()
             .write()
             .await
-            .replace(
-                "a".into(),
-                claims.into(),
-                Some("172.17.0.2".parse().unwrap()),
-            )
+            .replace("a".into(), claims, Some("172.17.0.2".parse().unwrap()))
             .unwrap();
         let services = WebServices::new(dns.containers());
-        let facts = ContainerFacts::from_inspect(
-            &serde_json::json!({
-                "Id": "a", "Name": "/api", "State": { "Pid": 1 },
-                "NetworkSettings": {
-                    "SandboxKey": "/var/run/docker/netns/api",
-                    "Networks": { "bridge": { "IPAddress": "172.17.0.2" } }
-                }
-            }),
-            dns.domain(),
-        )
-        .unwrap();
-        services.publish(
-            &facts,
-            SelectedRoutes {
-                http: None,
-                https: Some(HttpsBackend::Native(8443)),
-            },
-        );
+        for id in ["a", "b"] {
+            let facts = ContainerFacts::from_inspect(
+                &serde_json::json!({
+                    "Id": id, "Name": "/api", "State": { "Pid": 1 },
+                    "NetworkSettings": {
+                        "SandboxKey": "/var/run/docker/netns/api",
+                        "Networks": { "bridge": { "IPAddress": "172.17.0.2" } }
+                    }
+                }),
+                dns.domain(),
+            )
+            .unwrap();
+            services.publish(
+                &facts,
+                SelectedRoutes {
+                    http: None,
+                    https: Some(HttpsBackend::Native(8443)),
+                },
+            );
+        }
         let (mut client, server) = tokio::io::duplex(4096);
         let task = tokio::spawn(async move {
             handle_connection(
@@ -882,6 +898,94 @@ mod tests {
             service.https_backend,
             Some(arcbox_connect::v1::container_web_service::HttpsBackend::NativeHttpsPort(8443))
         );
+        let exact = |owner: &str| {
+            arcbox_dns::claims::Claim::exclusive(
+                arcbox_dns::NamePattern::Exact("api.svc.local".parse().unwrap()),
+                owner.into(),
+                "container".into(),
+            )
+        };
+        for (change, hostname, owner) in [
+            ("wildcard", "API.SVC.LOCAL", Some("a")),
+            ("nested", "v1.api.svc.local", Some("a")),
+            ("apex", "svc.local", None),
+            ("invalid", "*.svc.local", None),
+            ("exact", "api.svc.local", Some("b")),
+            ("conflict", "api.svc.local", None),
+            ("exact-unavailable", "api.svc.local", Some("a")),
+            ("recovered", "api.svc.local", Some("a")),
+            ("addressless", "api.svc.local", None),
+            ("stale", "api.svc.local", None),
+        ] {
+            {
+                let registry = dns.containers();
+                let mut registry = registry.write().await;
+                match change {
+                    "exact" | "conflict" => {
+                        let id = if change == "exact" { "b" } else { "c" };
+                        registry
+                            .replace(
+                                id.into(),
+                                vec![exact(id)],
+                                Some("172.17.0.2".parse().unwrap()),
+                            )
+                            .unwrap();
+                    }
+                    "exact-unavailable" => {
+                        registry.remove("c");
+                        registry
+                            .replace("b".into(), vec![exact("b")], None)
+                            .unwrap();
+                    }
+                    "recovered" => {
+                        registry.remove("b");
+                    }
+                    "addressless" | "stale" => {
+                        let claims = registry.get("a").unwrap().claims.clone();
+                        let address = (change == "stale").then(|| "172.17.0.3".parse().unwrap());
+                        registry.replace("a".into(), claims, address).unwrap();
+                    }
+                    _ => {}
+                }
+            }
+            let request = arcbox_connect::v1::ListContainerWebServicesRequest {
+                hostname: hostname.into(),
+                ..Default::default()
+            };
+            write_message(
+                &mut client,
+                crate::rpc::MessageType::ListContainerWebServicesRequest,
+                change,
+                &request.encode_to_vec(),
+            )
+            .await
+            .unwrap();
+            let (kind, trace, payload) = read_message(&mut client).await.unwrap();
+            assert_eq!(trace, change);
+            if change == "invalid" {
+                assert_eq!(kind, crate::rpc::MessageType::Error);
+                assert_eq!(ErrorResponse::decode(&payload).unwrap().code, 400);
+                continue;
+            }
+            assert_eq!(
+                kind,
+                crate::rpc::MessageType::ListContainerWebServicesResponse
+            );
+            let response =
+                arcbox_connect::v1::ListContainerWebServicesResponse::decode_from_slice(&payload)
+                    .unwrap();
+            assert_eq!(
+                response.services.len(),
+                usize::from(owner.is_some()),
+                "{change}"
+            );
+            if let Some(owner) = owner {
+                let route = &response.services[0];
+                assert_eq!(route.container_id, owner);
+                assert_eq!(route.hostnames, [hostname.to_ascii_lowercase()]);
+                assert_eq!(route.https_backend, service.https_backend);
+            }
+        }
         drop(client);
         task.await.unwrap().unwrap();
     }

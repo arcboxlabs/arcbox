@@ -197,7 +197,7 @@ service SystemService {
     rpc RecoverStorage(RecoverStorageRequest) returns (stream StorageRecoveryProgress);
 
     // Lists installed web routes. URLs describe routing, not a health probe.
-    rpc ListWebServices(Empty) returns (ListWebServicesResponse);
+    rpc ListWebServices(ListWebServicesRequest) returns (ListWebServicesResponse);
 
     // Streams complete route snapshots and fails when the guest is unavailable.
     rpc WatchWebServices(Empty) returns (stream ListWebServicesResponse);
@@ -1198,7 +1198,12 @@ message StorageRecoveryProgress {
     bool storage_protected = 5;
 }
 
-// Public CA metadata and native trust. This does not assert network reachability.
+message ListWebServicesRequest {
+    // Empty lists exact aliases. A concrete name returns at most one current service.
+    string hostname = 1;
+}
+
+// Installed routes validated against current DNS ownership.
 message ListWebServicesResponse {
     repeated WebService services = 1;
 }

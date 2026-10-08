@@ -156,10 +156,10 @@ pub mod api {
     pub use super::v1::{
         AcknowledgeHttpsAccessRequest, CommitLocalCaRotationRequest, Event, EventActor,
         EventsRequest, GetInfoRequest, GetInfoResponse, GetVersionRequest, GetVersionResponse,
-        ListWebServicesResponse, LocalCaRotation, LocalHttpsAccess, LocalHttpsStatus,
-        PrepareLocalCaRotationRequest, PruneRequest, PruneResponse, ResolveContainerFsRequest,
-        ResolveContainerFsResponse, ResolveImageFsRequest, ResolveImageFsResponse,
-        SystemPingRequest, SystemPingResponse, WebService,
+        ListWebServicesRequest, ListWebServicesResponse, LocalCaRotation, LocalHttpsAccess,
+        LocalHttpsStatus, PrepareLocalCaRotationRequest, PruneRequest, PruneResponse,
+        ResolveContainerFsRequest, ResolveContainerFsResponse, ResolveImageFsRequest,
+        ResolveImageFsResponse, SystemPingRequest, SystemPingResponse, WebService,
     };
 
     // Volume service types
@@ -242,7 +242,7 @@ pub use v1::{
 // API types - System
 pub use v1::{
     AcknowledgeHttpsAccessRequest, CommitLocalCaRotationRequest, Event, EventActor, EventsRequest,
-    GetInfoRequest, GetInfoResponse, GetVersionRequest, GetVersionResponse,
+    GetInfoRequest, GetInfoResponse, GetVersionRequest, GetVersionResponse, ListWebServicesRequest,
     ListWebServicesResponse, LocalCaRotation, LocalHttpsAccess, LocalHttpsStatus,
     PrepareLocalCaRotationRequest, PruneRequest, PruneResponse, ResolveContainerFsRequest,
     ResolveContainerFsResponse, ResolveImageFsRequest, ResolveImageFsResponse, SystemPingRequest,
