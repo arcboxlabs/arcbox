@@ -1442,6 +1442,17 @@ impl Runtime {
             )));
         }
 
+        self.start_port_forwarding_inbound(machine_name, container_id, bindings)
+            .await
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn start_port_forwarding_inbound(
+        &self,
+        machine_name: &str,
+        container_id: &str,
+        bindings: &[(String, u16, u16, String)],
+    ) -> Result<()> {
         let unspecified = self.config.docker.default_publish_address();
         let mut planned_rules = Vec::new();
         for (host_ip_str, host_port, container_port, protocol) in bindings {

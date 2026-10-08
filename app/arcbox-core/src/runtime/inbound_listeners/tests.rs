@@ -26,6 +26,27 @@ async fn cancel_pending(future: impl Future<Output = ()>) {
     );
 }
 
+impl Runtime {
+    pub(in super::super) async fn adopt_test_manager(
+        &self,
+        name: &str,
+        manager: InboundListenerManager,
+    ) {
+        self.adopt_inbound_listener_manager(name, || Some(manager))
+            .await;
+    }
+
+    pub(in super::super) async fn start_test_port_forwarding(
+        &self,
+        name: &str,
+        owner: &str,
+        bindings: &[(String, u16, u16, String)],
+    ) -> crate::Result<()> {
+        self.start_port_forwarding_inbound(name, owner, bindings)
+            .await
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn canceled_adoption_retains_both_managers_and_defers_the_next_transfer() {
     let (runtime, _dir) = runtime();

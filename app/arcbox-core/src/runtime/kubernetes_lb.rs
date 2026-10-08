@@ -15,6 +15,7 @@
 //! or the VM goes away.
 
 use std::collections::{BTreeMap, HashSet};
+use std::future::Future;
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
@@ -35,6 +36,7 @@ const OWNER_PREFIX: &str = "k8s:";
 /// How long a port whose listener failed to bind waits before another try.
 /// Each try logs a warning, so this also paces the log while a conflict lasts.
 const BIND_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+type Binding = (String, u16, u16, String);
 
 /// Whether `key` names a Kubernetes LoadBalancer listener.
 pub(super) fn is_owner_key(key: &str) -> bool {
@@ -178,6 +180,18 @@ impl Runtime {
     /// Does nothing once the Kubernetes hold is released: a stop or delete
     /// that raced the listing has closed the listeners and must stay closed.
     pub async fn apply_kubernetes_load_balancers(&self, listing: &KubernetesLoadBalancersResponse) {
+        self.apply_load_balancers_with(listing, |owner, binding| async move {
+            self.start_port_forwarding_for(DEFAULT_MACHINE_NAME, &owner, &[binding])
+                .await
+        })
+        .await;
+    }
+
+    async fn apply_load_balancers_with<F: Future<Output = crate::Result<()>> + Send>(
+        &self,
+        listing: &KubernetesLoadBalancersResponse,
+        forward: impl Fn(String, Binding) -> F + Send + Sync,
+    ) {
         let mut ports = self.kubernetes_lb_ports.lock().await;
         if !self.vm_lifecycle.kubernetes_hold() {
             return;
@@ -200,7 +214,8 @@ impl Runtime {
         for (key, published) in requested {
             let previous = ports.0.remove(&key);
             let outcome = if published {
-                self.forward_port(&key, bind_ip, previous.as_ref()).await
+                self.forward_port(&key, bind_ip, previous.as_ref(), &forward)
+                    .await
             } else {
                 Outcome::Pending
             };
@@ -216,11 +231,12 @@ impl Runtime {
     }
 
     /// Keeps, retries, or opens the listener of one published port.
-    async fn forward_port(
+    async fn forward_port<F: Future<Output = crate::Result<()>> + Send>(
         &self,
         key: &PortKey,
         bind_ip: Ipv4Addr,
         previous: Option<&Outcome>,
+        forward: &(impl Fn(String, Binding) -> F + Sync),
     ) -> Outcome {
         let owner = key.owner();
         match previous {
@@ -243,10 +259,7 @@ impl Runtime {
             return Outcome::Skipped(reason);
         }
         let binding = (bind_ip.to_string(), key.port, key.port, protocol.to_owned());
-        match self
-            .start_port_forwarding_for(DEFAULT_MACHINE_NAME, &owner, &[binding])
-            .await
-        {
+        match forward(owner, binding).await {
             Ok(()) => Outcome::Forwarded,
             Err(e) => Outcome::Failed {
                 error: e.to_string(),

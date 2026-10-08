@@ -69,6 +69,16 @@ mod listeners {
 
     use super::*;
 
+    impl Runtime {
+        async fn apply_test_load_balancers(&self, listing: &KubernetesLoadBalancersResponse) {
+            self.apply_load_balancers_with(listing, |owner, binding| async move {
+                self.start_test_port_forwarding(DEFAULT_MACHINE_NAME, &owner, &[binding])
+                    .await
+            })
+            .await;
+        }
+    }
+
     /// A runtime whose LoadBalancer listeners bind loopback, with a listener
     /// manager standing in for the System VM's relay and the Kubernetes hold
     /// taken, as after a successful start.
@@ -116,7 +126,7 @@ mod listeners {
         let (web, api) = (u32::from(free_port()), u32::from(free_port()));
 
         runtime
-            .apply_kubernetes_load_balancers(&listing(vec![
+            .apply_test_load_balancers(&listing(vec![
                 load_balancer("web", &[("TCP", web)], true),
                 load_balancer("api", &[("TCP", api)], false),
             ]))
@@ -137,7 +147,7 @@ mod listeners {
 
         let moved = u32::from(free_port());
         runtime
-            .apply_kubernetes_load_balancers(&listing(vec![
+            .apply_test_load_balancers(&listing(vec![
                 load_balancer("web", &[("TCP", moved)], true),
                 load_balancer("api", &[("TCP", api)], false),
             ]))
@@ -149,11 +159,7 @@ mod listeners {
         assert!(accepts(moved).await);
 
         runtime
-            .apply_kubernetes_load_balancers(&listing(vec![load_balancer(
-                "api",
-                &[("TCP", api)],
-                false,
-            )]))
+            .apply_test_load_balancers(&listing(vec![load_balancer("api", &[("TCP", api)], false)]))
             .await;
         assert!(!accepts(moved).await, "a deleted Service's port closes");
         assert_eq!(
@@ -162,11 +168,7 @@ mod listeners {
         );
 
         runtime
-            .apply_kubernetes_load_balancers(&listing(vec![load_balancer(
-                "web",
-                &[("TCP", web)],
-                true,
-            )]))
+            .apply_test_load_balancers(&listing(vec![load_balancer("web", &[("TCP", web)], true)]))
             .await;
         runtime.close_kubernetes_load_balancers().await;
         assert!(!accepts(web).await, "closing removes every listener");
@@ -180,11 +182,7 @@ mod listeners {
         runtime.release_kubernetes().await;
 
         runtime
-            .apply_kubernetes_load_balancers(&listing(vec![load_balancer(
-                "web",
-                &[("TCP", port)],
-                true,
-            )]))
+            .apply_test_load_balancers(&listing(vec![load_balancer("web", &[("TCP", port)], true)]))
             .await;
 
         assert!(!accepts(port).await);
@@ -203,7 +201,7 @@ mod listeners {
             true,
         )]);
 
-        runtime.apply_kubernetes_load_balancers(&web).await;
+        runtime.apply_test_load_balancers(&web).await;
         let ports = runtime.kubernetes_host_ports().await;
         let state = |port: u32, protocol: &str| {
             let found = ports
@@ -225,7 +223,7 @@ mod listeners {
 
         // Freed, the port is not retried before the interval is up.
         drop(taken);
-        runtime.apply_kubernetes_load_balancers(&web).await;
+        runtime.apply_test_load_balancers(&web).await;
         assert!(!accepts(busy).await);
 
         {
@@ -236,7 +234,7 @@ mod listeners {
                 }
             }
         }
-        runtime.apply_kubernetes_load_balancers(&web).await;
+        runtime.apply_test_load_balancers(&web).await;
         assert!(
             accepts(busy).await,
             "a failed bind is retried once the interval is up"

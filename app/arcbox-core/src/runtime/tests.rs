@@ -589,13 +589,13 @@ async fn conflicting_sandbox_cleanup_does_not_remove_the_existing_listener() {
     );
     let first = [("127.0.0.1".to_owned(), host_port, 80, "tcp".to_owned())];
     runtime
-        .start_port_forwarding_for("test-machine", "sandbox:first", &first)
+        .start_test_port_forwarding("test-machine", "sandbox:first", &first)
         .await
         .unwrap();
 
     let conflicting = [("127.0.0.1".to_owned(), host_port, 81, "tcp".to_owned())];
     runtime
-        .start_port_forwarding_for("test-machine", "sandbox:second", &conflicting)
+        .start_test_port_forwarding("test-machine", "sandbox:second", &conflicting)
         .await
         .expect_err("a second owner must not reuse the first owner's listener");
     runtime.stop_port_forwarding_by_id("sandbox:second").await;
@@ -646,9 +646,7 @@ async fn forwarding_refresh_preserves_equivalent_listeners_and_clears_empty_bind
         .add_rule(localhost, 0, 53, InboundProtocol::Udp)
         .await
         .unwrap();
-    runtime
-        .adopt_inbound_listener_manager("test-machine", || Some(manager))
-        .await;
+    runtime.adopt_test_manager("test-machine", manager).await;
     runtime.inbound_rules.write().await.insert(
         "web".into(),
         (
@@ -666,7 +664,7 @@ async fn forwarding_refresh_preserves_equivalent_listeners_and_clears_empty_bind
         ("127.0.0.1".into(), 0, 80, "tcp".into()),
     ];
     runtime
-        .start_port_forwarding_for("test-machine", "web", &equivalent)
+        .start_test_port_forwarding("test-machine", "web", &equivalent)
         .await
         .unwrap();
     assert!(
@@ -675,7 +673,7 @@ async fn forwarding_refresh_preserves_equivalent_listeners_and_clears_empty_bind
     );
 
     runtime
-        .start_port_forwarding_for("test-machine", "web", &[])
+        .start_test_port_forwarding("test-machine", "web", &[])
         .await
         .unwrap();
     assert!(!accepting(host_port).await);
@@ -698,9 +696,7 @@ async fn forwarding_refresh_does_not_trust_ownership_without_a_listener() {
     let host_port = blocker.local_addr().unwrap().port();
     let (command_tx, _command_rx) = tokio::sync::mpsc::channel(4);
     runtime
-        .adopt_inbound_listener_manager("test-machine", || {
-            Some(InboundListenerManager::new(command_tx))
-        })
+        .adopt_test_manager("test-machine", InboundListenerManager::new(command_tx))
         .await;
     runtime.inbound_rules.write().await.insert(
         "web".into(),
@@ -712,7 +708,7 @@ async fn forwarding_refresh_does_not_trust_ownership_without_a_listener() {
 
     let bindings = [(localhost.to_string(), host_port, 80, "tcp".into())];
     runtime
-        .start_port_forwarding_for("test-machine", "web", &bindings)
+        .start_test_port_forwarding("test-machine", "web", &bindings)
         .await
         .expect_err("a stale ownership record must not hide the occupied port");
     assert!(!runtime.inbound_rules.read().await.contains_key("web"));
@@ -736,9 +732,7 @@ async fn a_fresh_listener_manager_retires_the_previous_incarnations_listeners() 
         .add_rule(localhost, 0, 80, InboundProtocol::Tcp)
         .await
         .unwrap();
-    runtime
-        .adopt_inbound_listener_manager("test-machine", || Some(previous))
-        .await;
+    runtime.adopt_test_manager("test-machine", previous).await;
     runtime.inbound_rules.write().await.insert(
         "web".to_owned(),
         (
@@ -751,9 +745,7 @@ async fn a_fresh_listener_manager_retires_the_previous_incarnations_listeners() 
     // The VM comes back: its new VMM hands over a manager of its own.
     let (fresh_tx, _fresh_rx) = tokio::sync::mpsc::channel(4);
     runtime
-        .adopt_inbound_listener_manager("test-machine", || {
-            Some(InboundListenerManager::new(fresh_tx))
-        })
+        .adopt_test_manager("test-machine", InboundListenerManager::new(fresh_tx))
         .await;
 
     assert!(
@@ -768,7 +760,7 @@ async fn a_fresh_listener_manager_retires_the_previous_incarnations_listeners() 
     // And publishing binds again, on the new VM.
     let publish = [("127.0.0.1".to_owned(), 0u16, 80, "tcp".to_owned())];
     runtime
-        .start_port_forwarding_for("test-machine", "web", &publish)
+        .start_test_port_forwarding("test-machine", "web", &publish)
         .await
         .expect("a publish binds on the new incarnation");
     runtime.stop_port_forwarding_by_id("web").await;
@@ -791,7 +783,7 @@ async fn retiring_system_vm_container_networking_drops_every_trace_of_its_contai
         .await
         .unwrap();
     runtime
-        .adopt_inbound_listener_manager(super::DEFAULT_MACHINE_NAME, || Some(manager))
+        .adopt_test_manager(super::DEFAULT_MACHINE_NAME, manager)
         .await;
     runtime.inbound_rules.write().await.insert(
         "web".to_owned(),
