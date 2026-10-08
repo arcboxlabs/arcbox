@@ -142,7 +142,7 @@ the handshake; the next connection can retry after publication recovers.
 The host can observe managed HTTPS access through the unary `ReconcileHttpsAccess` RPC on either backend. The observer supplies exact Mac source addresses and renews a three-second lease. The guest reports the first valid ClientHello in that observation, including when the leaf is cached. A matching Mac connection waits at most 30 seconds for authorization before continuing TLS. Disabling observation or losing the lease releases waiting connections. Container clients and clients without an active observer proceed immediately. Native HTTPS bypasses observation. The proxy checks DNS ownership again after waiting.
 The agent tries port 80, then exposed listeners, then other listeners in
 ascending order. Port 443 is reserved for HTTPS. Set `dev.arcbox.http-port`
-to a port number to override discovery, or `off` to disable managed HTTP.
+to a port number to override discovery, or `off` to disable managed HTTP. Cleartext discovery prefers HTTP/2 and probes HTTP/1.1 on a separate socket. An explicit port stays published when probes fail. Managed HTTPS resolves an unknown pinned protocol before sending application requests.
 
 Native HTTPS on 443 or 8443 takes precedence over automatic TLS termination.
 Set `dev.arcbox.https-port` to another native TLS port, or `off` to disable
@@ -150,11 +150,13 @@ managed HTTPS. Native HTTPS preserves the application's certificate. Otherwise,
 a selected HTTP service receives HTTPS through the guest proxy on port 61443.
 Native discovery negotiates HTTP/2 or HTTP/1.1 with ALPN and requires an HTTP response. Use an explicit native port for a service that requires a client certificate.
 The proxy obtains a certificate for the client's SNI through the host signing
-channel, then relays HTTP/1.1. The CA private key stays in the macOS Keychain;
+channel, then negotiates HTTP/2 or HTTP/1.1 with ALPN. The CA private key stays in the macOS Keychain;
 only the public root is shared in `/arcbox/tls/`. Port 61443 is reserved for
 the proxy and cannot be published by a container.
 
-Managed HTTP/1.1 forwarding replaces `X-Forwarded-Proto` with `https` on every request. The relay preserves Host, redirects, repeated cookies, streaming bodies, negotiated trailers, and WebSocket upgrades. The relay removes hop-by-hop headers and owns both connection drivers until the session ends. Native TLS remains passthrough; managed HTTP/2 and gRPC translation are not implemented.
+Managed forwarding supports HTTP/1.1 and HTTP/2 in either direction and replaces `X-Forwarded-Proto` with `https`. The relay preserves authority, redirects, repeated cookies, and streaming bodies. With HTTP/2 on both sides, native gRPC supports unary, client streaming, server streaming, and bidirectional streaming calls without decoding message data or compression. HTTP/2 streams share the HTTP/2 upstream connection and use separate connections to an HTTP/1 backend. Cancellation remains observable after response completion while a request upload is active. An HTTP/1 WebSocket upgrade uses an HTTP/1 connection even when discovery selected HTTP/2. Listener shutdown cancels and joins every internal connection and stream task. Native TLS remains passthrough.
+
+When converting an HTTP/2 body to HTTP/1.1, the relay uses chunked framing and requires trailer names in the initial `Trailer` header. HTTP/1.1 clients must send `TE: trailers` to receive response trailers. Declared, supported trailer fields retain repeated values. Undeclared, forbidden, or unaccepted trailers fail the HTTP/1.1 message. Arbitrary HTTP/2 trailer sets are not supported across the HTTP/1.1 boundary.
 
 Listeners are read from `/proc/<pid>/net/tcp{,6}` with startup backoff, then
 on a five-second schedule while the container runs. Socket identity changes

@@ -207,13 +207,15 @@ non-obvious invariants and failure signatures.
   probe with the container domain in `Host`. An exposed or listening TCP port
   alone does not identify HTTP. The `dev.arcbox.http-port` label overrides discovery.
   Prefer cleartext HTTP/2 on a separate bounded connection, then probe HTTP/1.1. Retain the verified protocol with the selected port. An explicit unverified port remains selected with an unknown protocol; failed discovery must not invent HTTP/1.1 support.
+  Resolve an unknown pinned protocol before forwarding application requests. Never replay an application request to discover a protocol.
   Read the System VM suffix from `arcbox.dns_domain=` once at startup. Use the shared `Domain` for DNS, probe Host/SNI, service URLs, and TLS ownership. Store canonical claims in `arcbox_dns::registry::Registry`, keyed by complete container ID. Check the actual SNI name against the `.local` CA namespace before observation and certificate generation. The configured suffix must not disable a custom `.local` claim; foreign names retain HTTP and native TLS only.
   Native HTTPS discovery checks 443 then 8443 and takes precedence over the
   TLS proxy. `dev.arcbox.https-port` selects a native port; `off` disables
   managed HTTPS routing. Native TLS preserves the application's certificate.
   Native discovery follows ALPN for HTTP/2 or HTTP/1.1 and requires a response. An explicit native port bypasses discovery for mTLS services.
-  `domains/http_relay.rs` forwards managed HTTP/1.1 and owns both drivers through response draining and WebSocket upgrade. Replace forwarded scheme after removing hop-by-hop fields. Preserve streaming bodies and negotiated trailers; cancel and join connection tasks when the HTTPS listener stops.
-  `domains/http_tasks.rs` retains Hyper's internal tasks for each managed connection. Cancel the connection operation, then join its internal tasks before releasing the frontend owner.
+  `domains/http_relay.rs` forwards managed HTTP/1.1 and HTTP/2. Use Hyper for HTTP/1 and direct `h2` stream ownership for both HTTP/2 endpoints. Share the HTTP/2 upstream connection. Use one HTTP/1 upstream connection per HTTP/2 stream. Recheck the pinned route before and after each additional connection and after HTTP/2 sender readiness. Preserve native gRPC DATA, metadata, compression, and trailers without buffering complete bodies. Retain reset ownership after response EOS until the request upload completes. Preserve HTTP/1 WebSocket upgrades when discovery selected HTTP/2. Replace forwarded scheme after removing hop-by-hop fields.
+  When converting an HTTP/2 body to HTTP/1.1, use chunked framing and require trailer names in the initial `Trailer` header. HTTP/1 clients must send `TE: trailers` to receive response trailers. Fail the HTTP/1 message on undeclared, forbidden, or unaccepted trailers. Arbitrary HTTP/2 trailer sets are not supported across the HTTP/1 boundary.
+  `domains/http_tasks.rs` retains connection and stream tasks for each managed connection, including Hyper's internal tasks. Cancel the connection operation, then join its internal tasks before releasing the frontend owner. Child task scopes are limited to bounded discovery before application forwarding.
   Listener scans continue every five seconds after startup backoff. Socket inode
   changes and failed proxy upstream connections invalidate successful probes.
   Failed discovery probes retry; unchanged successful probes do not repeat.

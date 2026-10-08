@@ -16,11 +16,15 @@ use arcbox_dns::{
 };
 use bytes::Bytes;
 use http_body_util::Full;
-use hyper::{Method, Request, Response, StatusCode, header};
+use hyper::{Method, Request, Response, StatusCode, Version, header};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpStream;
+use tokio_rustls::server::TlsStream;
 
 use super::WebServices;
+use super::http_port::HTTPS_PORT;
+use super::http_tasks::Executor;
 
 /// A snapshot of the trusted publisher's unique apex and gateway registration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +86,50 @@ pub(super) async fn serve(
     Ok(())
 }
 
+pub(super) async fn serve_tls(
+    client: TlsStream<TcpStream>,
+    services: WebServices,
+    route: Route,
+    executor: Executor,
+) -> anyhow::Result<()> {
+    if client.get_ref().1.alpn_protocol() != Some(b"h2") {
+        return serve(client, services, route, HTTPS_PORT).await;
+    }
+    let service = hyper::service::service_fn(move |request| {
+        std::future::ready(Ok::<_, Infallible>(response(
+            request, &services, &route, HTTPS_PORT,
+        )))
+    });
+    hyper::server::conn::http2::Builder::new(executor)
+        .serve_connection(TokioIo::new(client), service)
+        .await?;
+    Ok(())
+}
+
+fn accepts_authority<B>(request: &Request<B>, route: &Route, port: u16) -> bool {
+    let matches = |value: &str| {
+        value.eq_ignore_ascii_case(route.name.as_str())
+            || value.rsplit_once(':').is_some_and(|(name, value)| {
+                name.eq_ignore_ascii_case(route.name.as_str()) && value.parse::<u16>() == Ok(port)
+            })
+    };
+    let mut hosts = request.headers().get_all(header::HOST).iter();
+    let host = hosts.next();
+    if hosts.next().is_some() {
+        return false;
+    }
+    let matches_host = |host: &header::HeaderValue| host.to_str().is_ok_and(matches);
+    if request.version() == Version::HTTP_2 {
+        request
+            .uri()
+            .authority()
+            .is_some_and(|authority| matches(authority.as_str()))
+            && host.is_none_or(matches_host)
+    } else {
+        host.is_some_and(matches_host)
+    }
+}
+
 fn response<B>(
     request: Request<B>,
     services: &WebServices,
@@ -91,19 +139,7 @@ fn response<B>(
     let directory = services.directory_urls(route);
     let status = if directory.is_err() {
         StatusCode::SERVICE_UNAVAILABLE
-    } else if request.headers().get_all(header::HOST).iter().count() != 1
-        || !request
-            .headers()
-            .get(header::HOST)
-            .and_then(|host| host.to_str().ok())
-            .is_some_and(|host| {
-                host.eq_ignore_ascii_case(route.name.as_str())
-                    || host.rsplit_once(':').is_some_and(|(name, value)| {
-                        name.eq_ignore_ascii_case(route.name.as_str())
-                            && value.parse::<u16>() == Ok(port)
-                    })
-            })
-    {
+    } else if !accepts_authority(&request, route, port) {
         StatusCode::MISDIRECTED_REQUEST
     } else if request.uri().path() != "/" {
         StatusCode::NOT_FOUND
@@ -133,6 +169,9 @@ fn response<B>(
         }))
         .unwrap()
 }
+
+#[cfg(test)]
+mod tests_tls;
 
 #[cfg(test)]
 mod tests {

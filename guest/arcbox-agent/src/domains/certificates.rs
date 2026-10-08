@@ -60,8 +60,10 @@ impl Certificates {
         let certificate = self.sign(request.der()).await?;
         let authority = self.authority().await?;
         let validity = CertificateValidity::from_der(&certificate)?;
+        let mut configuration = request.complete(certificate, &authority)?;
+        configuration.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         Cached::new(
-            Arc::new(request.complete(certificate, &authority)?),
+            Arc::new(configuration),
             validity,
             SystemTime::now(),
             authority.der().to_vec(),
